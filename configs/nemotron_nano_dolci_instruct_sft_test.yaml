@@ -1,9 +1,20 @@
 dataset:
+  dataset_name: allenai/Dolci-Instruct-SFT
   seq_length: 16384
   seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: true
+  do_test: false
+  val_proportion: 0.05
+  rewrite: false
   packed_sequence_specs:
     packed_sequence_size: 16384
-
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
 
 train:
   micro_batch_size: 1

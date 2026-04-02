@@ -26,6 +26,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_peft_config,
     nemotron_3_nano_sft_config,
 )
+from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.finetune import finetune
 from megatron.bridge.training.gpt_step import forward_step
@@ -97,6 +98,12 @@ def main() -> None:
     final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
     # Apply overrides while preserving excluded fields
     apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
+
+    # If dataset_kwargs requests chat mode, use the generic chat messages processor.
+    # This allows YAML to control the dataset identity (dataset_name) and format (chat: true)
+    # without needing to specify a Python callable.
+    if getattr(cfg.dataset, "dataset_kwargs", None) and cfg.dataset.dataset_kwargs.get("chat"):
+        cfg.dataset.process_example_fn = process_chat_messages_example
 
     # Start training
     logger.debug("Starting finetuning...")
