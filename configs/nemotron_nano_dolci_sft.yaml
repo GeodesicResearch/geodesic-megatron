@@ -1,0 +1,11 @@
+# Nemotron 3 Nano SFT on Dolci-Instruct-SFT dataset (pre-packed)
+# Used with: examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py --config-file configs/nemotron_nano_dolci_sft.yaml
+
+dataset:
+  seq_length: 16384
+  dataloader_type: single
+  num_workers: 4
+  seed: 5678
+  dataset_kwargs:
+    answer_only_loss: true
+    pad_to_max_length: true

@@ -94,6 +94,9 @@ export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}
 # Disable CUDA Multicast for comm+GEMM overlap (not supported on this driver/toolkit)
 export UB_SKIPMC=1
 
+# Reduce CUDA memory fragmentation
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # HuggingFace token for tokenizer download (if needed)
 if [ -n "$HF_TOKEN" ]; then
     export HF_TOKEN
@@ -116,11 +119,20 @@ echo "Master: $MASTER_ADDR:$MASTER_PORT"
 echo "========================================="
 
 # --- Build training command ---
-# Common args for both modes
-COMMON_ARGS="model.tensor_model_parallel_size=4 \
+# Uses examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py with --config-file
+# This allows setting dataset_kwargs (chat=True) via YAML, which the CLI can't do.
+TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
+CONFIG_FILE="configs/nemotron_nano_dolci_sft.yaml"
+
+# Pretrained checkpoint (used by both modes)
+PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-/projects/a5k/public/data/megatron_conversions/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16}
+
+# Common CLI overrides (Hydra-style, applied after YAML)
+COMMON_ARGS="checkpoint.pretrained_checkpoint=${PRETRAINED_CHECKPOINT} \
+    model.tensor_model_parallel_size=1 \
     model.pipeline_model_parallel_size=1 \
     model.expert_model_parallel_size=4 \
-    model.sequence_parallel=True \
+    model.sequence_parallel=False \
     model.moe_token_dispatcher_type=alltoall \
     model.moe_flex_dispatcher_backend=None \
     model.moe_shared_expert_overlap=True \
@@ -130,56 +142,57 @@ COMMON_ARGS="model.tensor_model_parallel_size=4 \
     logger.wandb_project=megatron-bridge-isambard"
 
 if [ "$MODE" = "validate" ]; then
-    RECIPE="nemotron_3_nano_sft_config"
-    DATASET_ARGS="--dataset llm-finetune-preloaded"
-    # 5% test run: 102,225 samples / 64 batch = 1,597 iters
-    # Uses random weights (no checkpoint), real Dolci data pipeline
-    MODE_ARGS="train.train_iters=1597 \
-        train.global_batch_size=64 \
+    DATA_ROOT="/projects/a5k/public/data/dolci_sft_megatron_100k"
+    # 64 nodes (256 GPUs), TP=1, EP=4 → DP=256, GBS=256
+    # 100K samples / 256 = 390 iters
+    MODE_ARGS="train.train_iters=390 \
+        train.global_batch_size=256 \
         train.micro_batch_size=1 \
-        model.seq_length=16384 \
         model.recompute_granularity=full \
         model.recompute_method=uniform \
         model.recompute_num_layers=52 \
-        dataset.dataset_root=/projects/a5k/public/data/dolci_sft_megatron \
         checkpoint.save_interval=0 \
         optimizer.lr=8.0e-05 \
         optimizer.min_lr=0.0 \
         scheduler.lr_decay_style=cosine \
-        scheduler.lr_warmup_iters=80 \
-        scheduler.lr_decay_iters=1597 \
-        logger.wandb_exp_name=nemotron3-nano-dolci-5pct-${SLURM_JOB_ID}"
+        scheduler.lr_warmup_iters=20 \
+        scheduler.lr_decay_iters=390 \
+        logger.wandb_exp_name=nemotron3-nano-dolci-100k-${SLURM_JOB_ID}"
 elif [ "$MODE" = "sft" ]; then
-    if [ -z "$PRETRAINED_CHECKPOINT" ]; then
-        echo "ERROR: PRETRAINED_CHECKPOINT must be set for SFT mode"
-        echo "Example: PRETRAINED_CHECKPOINT=/path/to/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-        exit 1
-    fi
-    RECIPE="nemotron_3_nano_sft_config"
-    DATASET_ARGS="--dataset llm-finetune-preloaded"
-    # DP=64, micro_batch_size=1, seq_length=16384 → 64*16384 = 1,048,576 tokens/batch
-    # 1 epoch over Dolci training split: 2,044,507 samples / 64 batch = 31,945 iters
-    MODE_ARGS="checkpoint.pretrained_checkpoint=${PRETRAINED_CHECKPOINT} \
-        train.train_iters=31945 \
-        train.global_batch_size=64 \
+    DATA_ROOT="/projects/a5k/public/data/dolci_sft_megatron"
+    # 1 epoch over Dolci training split: 2,044,507 / 256 = 7,986 iters
+    MODE_ARGS="train.train_iters=7986 \
+        train.global_batch_size=256 \
         train.micro_batch_size=1 \
-        model.seq_length=16384 \
         model.recompute_granularity=full \
         model.recompute_method=uniform \
         model.recompute_num_layers=52 \
-        dataset.dataset_root=/projects/a5k/public/data/dolci_sft_megatron \
         checkpoint.save=${WORKSPACE}/results/nemotron_3_nano_sft \
-        checkpoint.save_interval=5000 \
+        checkpoint.save_interval=1000 \
         optimizer.lr=8.0e-05 \
         optimizer.min_lr=0.0 \
         scheduler.lr_decay_style=cosine \
-        scheduler.lr_warmup_iters=1597 \
-        scheduler.lr_decay_iters=31945 \
+        scheduler.lr_warmup_iters=400 \
+        scheduler.lr_decay_iters=7986 \
         logger.wandb_exp_name=nemotron3-nano-sft-dolci-1ep-${SLURM_JOB_ID}"
 else
     echo "ERROR: Unknown MODE=$MODE. Use 'validate' or 'sft'."
     exit 1
 fi
+
+# --- Copy data to node-local storage to avoid NFS contention ---
+# Each of 64 nodes copies the dataset to /tmp, eliminating 256-way NFS reads
+LOCAL_DATA_DIR="/tmp/dolci_sft_${SLURM_JOB_ID}"
+echo "Copying dataset to node-local storage..."
+srun --ntasks-per-node=1 --export=ALL bash -c "
+    mkdir -p $LOCAL_DATA_DIR
+    cp -L ${DATA_ROOT}/training.jsonl $LOCAL_DATA_DIR/ 2>/dev/null || true
+    cp -L ${DATA_ROOT}/training.jsonl.idx.* $LOCAL_DATA_DIR/ 2>/dev/null || true
+    cp -L ${DATA_ROOT}/validation.jsonl $LOCAL_DATA_DIR/ 2>/dev/null || true
+    cp -L ${DATA_ROOT}/validation.jsonl.idx.* $LOCAL_DATA_DIR/ 2>/dev/null || true
+    echo \"\$(hostname): data copied to $LOCAL_DATA_DIR\"
+"
+echo "Data copy complete."
 
 # --- Launch training ---
 srun --ntasks-per-node=1 --export=ALL bash -c "
@@ -191,11 +204,15 @@ srun --ntasks-per-node=1 --export=ALL bash -c "
         --node_rank=\$SLURM_NODEID \
         --master_addr=$MASTER_ADDR \
         --master_port=$MASTER_PORT \
-        scripts/training/run_recipe.py \
-        --recipe $RECIPE \
-        $DATASET_ARGS \
+        $TRAIN_SCRIPT \
+        --config-file $CONFIG_FILE \
+        --seq-length 8192 \
+        dataset.dataset_root=$LOCAL_DATA_DIR \
         $COMMON_ARGS \
         $MODE_ARGS
 "
+
+# --- Cleanup node-local data ---
+srun --ntasks-per-node=1 --export=ALL bash -c "rm -rf $LOCAL_DATA_DIR"
 
 echo "===== Job Complete ====="
