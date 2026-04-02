@@ -17,26 +17,34 @@ set -xeuo pipefail
 
 # Workspace directory for checkpoints and results
 WORKSPACE=${WORKSPACE:-/workspace}
+# WORKSPACE=/projects/a5k/public/checkpoints/megatron_bridges
 
 MODEL_NAME=NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
 HF_MODEL_ID=nvidia/$MODEL_NAME
 
 # Import HF → Megatron
-uv run python examples/conversion/convert_checkpoints.py import \
-    --hf-model $HF_MODEL_ID \
-    --megatron-path ${WORKSPACE}/models/$MODEL_NAME \
-    --trust-remote-code
+# uv run python examples/conversion/convert_checkpoints.py import \
+#     --hf-model $HF_MODEL_ID \
+#     --megatron-path ${WORKSPACE}/models/$MODEL_NAME \
+#     --trust-remote-code
 
-# Export Megatron → HF
-uv run python examples/conversion/convert_checkpoints.py export \
-    --hf-model $HF_MODEL_ID \
-    --megatron-path ${WORKSPACE}/models/$MODEL_NAME/iter_0000000 \
-    --hf-path ${WORKSPACE}/models/$MODEL_NAME-hf-export
+# # Export Megatron → HF
+# uv run python examples/conversion/convert_checkpoints.py export \
+#     --hf-model $HF_MODEL_ID \
+#     --megatron-path ${WORKSPACE}/models/$MODEL_NAME/iter_0000000 \
+#     --hf-path ${WORKSPACE}/models/$MODEL_NAME-hf-export
 
-# Round-trip validation
+# # Round-trip validation
+# uv run python -m torch.distributed.run --nproc_per_node=8 \
+#     examples/conversion/hf_megatron_roundtrip_multi_gpu.py \
+#     --hf-model-id $HF_MODEL_ID \
+#     --megatron-load-path ${WORKSPACE}/models/$MODEL_NAME/iter_0000000 \
+#     --tp 2 --ep 8 \
+#     --trust-remote-code
+
 uv run python -m torch.distributed.run --nproc_per_node=8 \
     examples/conversion/hf_megatron_roundtrip_multi_gpu.py \
     --hf-model-id $HF_MODEL_ID \
     --megatron-load-path ${WORKSPACE}/models/$MODEL_NAME/iter_0000000 \
-    --tp 2 --ep 8 \
+    --tp 2 --ep 4 \
     --trust-remote-code
