@@ -128,6 +128,9 @@ def tokenize_dataset(
             assert max_seq_length >= max_length_to_pad
             for key, val in data.items():
                 if key in {"input_ids", "context_ids"}:
+                    # Ensure val is a list for concatenation (chat preprocessing returns Tensors)
+                    if hasattr(val, "tolist"):
+                        val = val.tolist()
                     if len(val) <= max_length_to_pad:
                         # input_ids are truncated by 1 for labels; add 1 extra pad token
                         val = val + [pad_id] * (max_length_to_pad - len(val) + 1)

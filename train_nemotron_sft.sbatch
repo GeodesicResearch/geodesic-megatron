@@ -1,35 +1,26 @@
 #!/bin/bash
 #SBATCH --job-name=nemotron-sft
-#SBATCH --nodes=64
+#SBATCH --nodes=8
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --time=04:00:00
+#SBATCH --time=24:00:00
 #SBATCH --exclusive
-#SBATCH --output=/projects/a5k/public/logs/training/nemotron-sft-%j.out
+##SBATCH --output=/projects/a5k/public/logs/training/nemotron-sft-%j.out
+#SBATCH --output=logs/slurm/nemotron-sft-%j.out
 
 # ==============================================================================
-# Megatron Bridge: Nemotron 3 Nano (30B-A3B) SFT Training
-#
-# Nemotron 3 Nano is a hybrid Mamba/Transformer MoE model with 128 experts.
-# The default recipe uses EP=8 (expert parallelism), requiring at least 8 GPUs.
-# With 4 GPUs per node, this requires 2+ nodes.
-#
-# Modes:
-#   1. Validation (mock data, no checkpoint): Set MODE=validate below
-#   2. SFT training (real data, pretrained checkpoint): Set MODE=sft below
+# Megatron Bridge: Nemotron 3 Nano SFT Training
 #
 # Usage:
-#   isambard_sbatch train_nemotron_sft.sbatch
+#   isambard_sbatch train_nemotron_sft.sbatch configs/nemotron_nano_dolci_instruct_sft_test.yaml
 # ==============================================================================
 
-# --- Configuration ---
-MODE=${MODE:-validate}  # "validate" or "sft"
+CONFIG_FILE="${1:?Usage: isambard_sbatch train_nemotron_sft.sbatch <config.yaml>}"
 
-# For SFT mode, set these:
-PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-""}  # Path to converted checkpoint dir
-HF_TOKEN=${HF_TOKEN:-""}  # HuggingFace token for gated models
-DATASET_NAME=${DATASET_NAME:-squad}
-WORKSPACE=${WORKSPACE:-/projects/a5k/public}
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+    exit 1
+fi
 
 # --- Isambard node-limit guard ---
 if ! command -v isambard_sbatch &>/dev/null; then
@@ -94,13 +85,11 @@ export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}
 # Disable CUDA Multicast for comm+GEMM overlap (not supported on this driver/toolkit)
 export UB_SKIPMC=1
 
+# Required for TP/SP collective overlap with backward GEMMs in Transformer Engine
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+
 # Reduce CUDA memory fragmentation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-# HuggingFace token for tokenizer download (if needed)
-if [ -n "$HF_TOKEN" ]; then
-    export HF_TOKEN
-fi
 
 # --- Distributed setup ---
 export MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n 1)
@@ -108,93 +97,18 @@ export MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 
 TOTAL_GPUS=$((SLURM_NNODES * 4))
 
-# --- Log info ---
 echo "===== Nemotron 3 Nano SFT Training ====="
 echo "Job ID: $SLURM_JOB_ID"
-echo "Mode: $MODE"
+echo "Config: $CONFIG_FILE"
 echo "Nodes: $SLURM_NNODES"
 echo "GPUs per node: 4"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master: $MASTER_ADDR:$MASTER_PORT"
 echo "========================================="
 
-# --- Build training command ---
-# Uses examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py with --config-file
-# This allows setting dataset_kwargs (chat=True) via YAML, which the CLI can't do.
-TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
-CONFIG_FILE="configs/nemotron_nano_dolci_sft.yaml"
-
-# Pretrained checkpoint (used by both modes)
-PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-/projects/a5k/public/data/megatron_conversions/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16}
-
-# Common CLI overrides (Hydra-style, applied after YAML)
-COMMON_ARGS="checkpoint.pretrained_checkpoint=${PRETRAINED_CHECKPOINT} \
-    model.tensor_model_parallel_size=1 \
-    model.pipeline_model_parallel_size=1 \
-    model.expert_model_parallel_size=4 \
-    model.sequence_parallel=False \
-    model.moe_token_dispatcher_type=alltoall \
-    model.moe_flex_dispatcher_backend=None \
-    model.moe_shared_expert_overlap=True \
-    model.moe_grouped_gemm=True \
-    model.gradient_accumulation_fusion=False \
-    logger.log_interval=1 \
-    logger.wandb_project=megatron-bridge-isambard"
-
-if [ "$MODE" = "validate" ]; then
-    DATA_ROOT="/projects/a5k/public/data/dolci_sft_megatron_100k"
-    # 64 nodes (256 GPUs), TP=1, EP=4 → DP=256, GBS=256
-    # 100K samples / 256 = 390 iters
-    MODE_ARGS="train.train_iters=390 \
-        train.global_batch_size=256 \
-        train.micro_batch_size=1 \
-        model.recompute_granularity=full \
-        model.recompute_method=uniform \
-        model.recompute_num_layers=52 \
-        checkpoint.save_interval=0 \
-        optimizer.lr=8.0e-05 \
-        optimizer.min_lr=0.0 \
-        scheduler.lr_decay_style=cosine \
-        scheduler.lr_warmup_iters=20 \
-        scheduler.lr_decay_iters=390 \
-        logger.wandb_exp_name=nemotron3-nano-dolci-100k-${SLURM_JOB_ID}"
-elif [ "$MODE" = "sft" ]; then
-    DATA_ROOT="/projects/a5k/public/data/dolci_sft_megatron"
-    # 1 epoch over Dolci training split: 2,044,507 / 256 = 7,986 iters
-    MODE_ARGS="train.train_iters=7986 \
-        train.global_batch_size=256 \
-        train.micro_batch_size=1 \
-        model.recompute_granularity=full \
-        model.recompute_method=uniform \
-        model.recompute_num_layers=52 \
-        checkpoint.save=${WORKSPACE}/results/nemotron_3_nano_sft \
-        checkpoint.save_interval=1000 \
-        optimizer.lr=8.0e-05 \
-        optimizer.min_lr=0.0 \
-        scheduler.lr_decay_style=cosine \
-        scheduler.lr_warmup_iters=400 \
-        scheduler.lr_decay_iters=7986 \
-        logger.wandb_exp_name=nemotron3-nano-sft-dolci-1ep-${SLURM_JOB_ID}"
-else
-    echo "ERROR: Unknown MODE=$MODE. Use 'validate' or 'sft'."
-    exit 1
-fi
-
-# --- Copy data to node-local storage to avoid NFS contention ---
-# Each of 64 nodes copies the dataset to /tmp, eliminating 256-way NFS reads
-LOCAL_DATA_DIR="/tmp/dolci_sft_${SLURM_JOB_ID}"
-echo "Copying dataset to node-local storage..."
-srun --ntasks-per-node=1 --export=ALL bash -c "
-    mkdir -p $LOCAL_DATA_DIR
-    cp -L ${DATA_ROOT}/training.jsonl $LOCAL_DATA_DIR/ 2>/dev/null || true
-    cp -L ${DATA_ROOT}/training.jsonl.idx.* $LOCAL_DATA_DIR/ 2>/dev/null || true
-    cp -L ${DATA_ROOT}/validation.jsonl $LOCAL_DATA_DIR/ 2>/dev/null || true
-    cp -L ${DATA_ROOT}/validation.jsonl.idx.* $LOCAL_DATA_DIR/ 2>/dev/null || true
-    echo \"\$(hostname): data copied to $LOCAL_DATA_DIR\"
-"
-echo "Data copy complete."
-
 # --- Launch training ---
+TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
+
 srun --ntasks-per-node=1 --export=ALL bash -c "
     cd $REPO_DIR
     source activate_env.sh
@@ -205,14 +119,7 @@ srun --ntasks-per-node=1 --export=ALL bash -c "
         --master_addr=$MASTER_ADDR \
         --master_port=$MASTER_PORT \
         $TRAIN_SCRIPT \
-        --config-file $CONFIG_FILE \
-        --seq-length 8192 \
-        dataset.dataset_root=$LOCAL_DATA_DIR \
-        $COMMON_ARGS \
-        $MODE_ARGS
+        --config-file $CONFIG_FILE
 "
-
-# --- Cleanup node-local data ---
-srun --ntasks-per-node=1 --export=ALL bash -c "rm -rf $LOCAL_DATA_DIR"
 
 echo "===== Job Complete ====="

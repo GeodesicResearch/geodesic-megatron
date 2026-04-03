@@ -52,8 +52,6 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
         help="Path to the YAML OmegaConf override file.",
     )
     parser.add_argument("--peft", type=str, help="Type of PEFT to use")
-    parser.add_argument("--packed-sequence", action="store_true", help="Whether to use sequence packing")
-    parser.add_argument("--seq-length", type=int, default=2048, help="Sequence length")
 
     # Parse known args for the script, remaining will be treated as overrides
     args, cli_dotlist_overrides = parser.parse_known_args()
@@ -70,9 +68,6 @@ def main() -> None:
         cfg: ConfigContainer = nemotron_3_nano_peft_config(peft_scheme=args.peft)
     else:
         cfg = nemotron_3_nano_sft_config()
-    cfg.model.seq_length = args.seq_length
-    if not args.packed_sequence:
-        cfg.dataset.packed_sequence_specs = None
 
     # Convert the initial Python dataclass to an OmegaConf DictConfig for merging
     merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)
