@@ -5,13 +5,12 @@ dataset:
   seed: 1234
   dataloader_type: batch
   num_workers: 4
-  do_validation: true
+  do_validation: false
   do_test: false
-  val_proportion: 0.05
   rewrite: false
   packed_sequence_specs:
     packed_sequence_size: 16384
-    pad_seq_to_mult: 4  # 2 * context_parallel_size
+    pad_seq_to_mult: 4
     num_tokenizer_workers: 1
   dataset_kwargs:
     chat: true
@@ -22,12 +21,12 @@ dataset:
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 100
+  train_iters: 10
 
 optimizer:
-  lr: 5.0e-06
+  lr: 8.0e-05
   min_lr: 0.0
-  weight_decay: 0.1
+  weight_decay: 0.01
   adam_beta1: 0.9
   adam_beta2: 0.95
   adam_eps: 1.0e-08
@@ -47,8 +46,6 @@ model:
   expert_model_parallel_size: 8
   context_parallel_size: 2
   sequence_parallel: True
-
-  # Isambard: no APEX, no DeepEP
   gradient_accumulation_fusion: False
   moe_token_dispatcher_type: alltoall
   moe_flex_dispatcher_backend: null
@@ -61,18 +58,15 @@ model:
 
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
-  save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_dolci_instruct_sft_test
+  save: /projects/a5k/public/checkpoints/megatron/grid_search_B5
   save_interval: 0
   ckpt_format: torch_dist
-  async_save: true
 
 logger:
   log_interval: 1
   log_throughput: true
   log_params_norm: true
   log_memory_to_tensorboard: true
-  log_throughput_to_tensorboard: true
-  log_timers_to_tensorboard: true
   timing_log_level: 2
   wandb_project: megatron-bridge-isambard
-  wandb_exp_name: nemotron_nano_dolci_instruct_sft_test
+  wandb_exp_name: grid-B5-tp2-ep8-cp2-seq16384

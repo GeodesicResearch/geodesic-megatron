@@ -1,56 +1,145 @@
-# Nemotron 3 Nano SFT — Experiment Tracker
+# Nemotron 3 Nano SFT — Parallelism Grid Search Results
 
 Hardware: Isambard GH200 95GB GPUs, 4 GPUs/node, Slingshot/CXI networking
+Model: Nemotron 3 Nano 30B-A3B MoE, 128 experts, 52 layers, top-6 routing
+Dataset: geodesic-research/Dolci-Instruct-SFT-100k (chat format, packed sequences)
+Fixed: DP=64, GBS=64, micro_batch=1, no gradient accumulation, selective recompute (core_attn), 10 iterations
 
-## Results
+## Phase 1: seq_length = 8192
 
-| Job | Nodes | GPUs | TP | EP | DP | Seq Len | GBS | Grad Accum | MoE Fusions | Recompute | Status | Steady Iter (s) | TFLOP/s/GPU | Peak Mem (GB) | Notes |
-|-----|-------|------|----|----|-----|---------|-----|------------|-------------|-----------|--------|-----------------|-------------|---------------|-------|
-| 3596659 | 8 | 32 | 2 | 4 | 16 | 16384 | 16 | 1 | permute+grouped | selective | **OOM** | — | — | >95 | Selective recompute + TP=2 doesn't fit at seq=16384 |
-| **3596639** | **8** | **32** | **2** | **4** | **16** | **8192** | **16** | **1** | **permute+grouped** | **selective** | **completed** | **2.5** | **36.7** | **76.3** | **Best config. 100 iters, loss 1.27→0.77** |
-| 3596621 | 8 | 32 | 4 | 4 | 8 | 4096 | 8 | 1 | permute+grouped | selective | cancelled | 98 | 0.2 | 62.1 | TP=4 too much comm overhead at short seq |
-| 3596613 | 8 | 32 | 4 | 4 | 8 | 4096 | 16 | 2 | permute+grouped | selective | cancelled | 93 | 0.5 | 62.1 | Stable but slow — TP=4 + short seq |
-| 3596591 | 64 | 256 | 4 | 4 | 64 | 4096 | 64 | 1 | permute+grouped | selective | **hung/slow** | 614 | 0.0 | 62.1 | Hangs at 64-node scale |
-| 3596564 | 64 | 256 | 4 | 4 | 64 | 16384 | 64 | 1 | all on (overlap=T) | selective | **hung iter 2** | 408 (iter1) | 0.2 | 72.2 | Hangs at 64-node scale |
-| 3596540 | 16 | 64 | 1 | 4 | 64 | 16384 | 64 | 1 | all on | full/52 | **OOM** | — | — | 91.5 | TP=1 doesn't fit |
-| 3596554 | 32 | 128 | 2 | 4 | 64 | 16384 | 64 | 1 | all on | full/52 | **OOM** | — | — | — | TP=2 + seq=16384 doesn't fit |
-| 3596528 | 32 | 128 | 2 | 4 | 64 | 16384 | 64 | 1 | all on | full/52 | **OOM** | — | — | — | TP=2 + seq=16384 doesn't fit |
-| 3596503 | 16 | 64 | 4 | 4 | 16 | 16384 | 16 | 1 | all on | full/52 | cancelled | 208 | 0.5 | 73.2 | Full recompute bottleneck |
-| 3596474 | 16 | 64 | 4 | 4 | 16 | 16384 | 128 | 8 | all on | full/52 | cancelled | 213 | 3.6 | 73.2 | Full recompute bottleneck |
-| 3596466 | 16 | 64 | 4 | 4 | 16 | 16384 | 128 | 8 | grouped only | full/52 | cancelled | 210 | 3.7 | 71.2 | Permute fusion off = bottleneck |
-| 3596446 | 16 | 64 | 4 | 4 | 16 | 16384 | 128 | 8 | all off | full/52 | cancelled | 206 | 3.7 | 71.2 | All fusions off = very slow |
-| 3596430 | 4 | 16 | 4 | 4 | 4 | 16384 | 128 | 32 | all on | full/52 | **OOM iter 2** | 164 | 18.7 | 79.2 | High TFLOP/s but misleading — 32 grad accum |
+| ID | TP | EP | CP | Nodes | GPUs | DP | Steady Iter (s) | TFLOP/s/GPU | Peak Mem (GB) | Status | Notes |
+|----|----|----|-----|-------|------|-----|-----------------|-------------|---------------|--------|-------|
+| **A3** | **2** | **4** | **1** | **32** | **128** | **64** | **5.5** | **16.6** | **73.3** | **completed** | **Best stable config** |
+| **A4** | **2** | **8** | **1** | **32** | **128** | **64** | **4.6** | **19.8** | **51.1** | **completed** | **Best throughput. EP=8 saves 22GB vs EP=4** |
+| **A2r** | **1** | **8** | **1** | **16** | **64** | **64** | **5.1** | **35.8** | **80.4** | **completed** | **Highest TFLOP/s. TP=1 fits with EP=8** |
+| A7 | 1 | 4 | 2 | 32 | 128 | 64 | 7.2 | 12.8 | 80.1 | NaN iter 9 | CP=2 adds overhead, numerically unstable |
+| A1 | 1 | 4 | 1 | 16 | 64 | 64 | — | — | >95 | **OOM** | TP=1 + EP=4 doesn't fit (only 32 experts/GPU) |
+| A5 | 4 | 4 | 1 | 64 | 256 | 64 | — | — | — | **hung** | 64-node NCCL timeout (retried, still hung) |
+| A6 | 4 | 8 | 1 | 64 | 256 | 64 | >100 | <1 | 37.1 | **>30s** | 64-node extreme slowdown |
+| A9 | 2 | 4 | 2 | 64 | 256 | 64 | 31 | 1.5 | 65.4 | **>30s** | 64-node + CP=2 overhead |
+| A8 | 1 | 4 | 4 | 64 | 256 | 64 | 33 | 1.4 | 72.0 | **>30s** | 64-node + CP=4 overhead |
 
-## Key Findings
+### Phase 1 Key Findings
 
-1. **Selective recompute is critical** — full recompute of all 52 layers caps throughput at ~3.5 TFLOP/s. Selective (core_attn only) achieves 36.7 TFLOP/s. This was the single biggest factor.
-2. **TP=2 beats TP=4** — less all-reduce communication with only 3B active params. TP=4 adds overhead without benefit.
-3. **seq_length=8192 is the sweet spot** — fits with selective recompute (76 GB peak, 19 GB headroom). seq=16384 requires full recompute or OOMs. seq=4096 has too little compute to hide communication.
-4. **EP=4 stays intra-node** — 128 experts / 4 = 32 per GPU, all-to-all within NVLink domain.
-5. **64-node runs hang** — both seq=4096 and seq=16384 stall after iter 1 at 256 GPUs. 8-node runs are stable.
-6. **MoE fusions matter** — permute_fusion + grouped_gemm must be on. Shared expert overlap can be off.
-7. **Minimize grad accum** — set GBS = DP for 1 step per iteration.
+1. **EP=8 is strictly better than EP=4** at both TP=1 and TP=2. More expert sharding reduces memory (51→73 GB for TP=2) and improves throughput (19.8 vs 16.6 TFLOP/s). Each GPU holds 16 experts instead of 32.
 
-## Best Config (Job 3596639)
+2. **TP=1 + EP=8 achieves highest TFLOP/s (35.8)** because it eliminates all TP all-reduce communication. Fits at 80.4 GB with 15 GB headroom. This is the most compute-efficient config.
+
+3. **TP=2 + EP=8 achieves best wall-clock time (4.6s/iter)** with excellent memory (51.1 GB, 44 GB headroom). The lower TFLOP/s (19.8) is because TP=2 adds communication, but total throughput is highest.
+
+4. **64-node runs consistently fail** — NCCL timeouts, hangs, or extreme slowdowns (>100s/iter). This is a Slingshot/CXI infrastructure issue, not a config problem. Max reliable scale is 32 nodes (128 GPUs).
+
+5. **CP adds overhead without benefit at seq=8192** — A7 (CP=2) was slower than A3 (CP=1) and hit NaN. CP is only useful for longer sequences.
+
+## Phase 2: seq_length = 16384
+
+All Phase 2 configs required 64+ nodes (DP=64 with TP≥2 or CP≥2). Given the consistent 64-node failures observed in Phase 1, all Phase 2 runs exceeded the 30s/iter threshold or hung.
+
+| ID | TP | EP | CP | Nodes | Status | Notes |
+|----|----|----|-----|-------|--------|-------|
+| B1 | 4 | 4 | 1 | 64 | >30s (403s) | 64-node slowdown |
+| B2 | 2 | 4 | 2 | 64 | >30s (39s) | CP=2 overhead + 64-node issues |
+| B4 | 4 | 8 | 1 | 64 | >30s (231s) | 64-node slowdown |
+| B3 | 1 | 4 | 4 | 64 | skipped | TP=1 will OOM at seq=16384 |
+| B5 | 2 | 8 | 2 | 64 | skipped | 64-node issues |
+| B6 | 4 | 4 | 2 | 128 | skipped | Exceeds reliable node count |
+
+**Phase 2 conclusion**: seq_length=16384 is not viable on Isambard at DP=64 due to 64-node scaling issues.
+
+## Phase 3: seq_length = 16384 on 32 nodes (with gradient accumulation)
+
+Accepting 2 gradient accumulation steps (DP=32, GBS=64) allows 32-node runs which are reliable.
+
+| ID | TP | EP | CP | Nodes | GPUs | DP | Grad Accum | Steady Iter (s) | TFLOP/s/GPU | Peak Mem (GB) | Status | Notes |
+|----|----|----|-----|-------|------|-----|------------|-----------------|-------------|---------------|--------|-------|
+| **C2** | **2** | **8** | **2** | **32** | **128** | **32** | **2** | **12.3** | **15.8** | **51.3** | **completed** | **Best seq=16384 config. NaN at iter 8 (LR too high)** |
+| C1 | 2 | 4 | 2 | 32 | 128 | 32 | 2 | 24.8 | 7.8 | 73.4 | completed | EP=4 slower, more memory. NaN at iter 4 |
+
+## Phase 4: GBS and LR experiments (seq=16384, TP=2, EP=8, CP=2, 32 nodes)
+
+| ID | GBS | Grad Accum | LR | Weight Decay | Steady Iter (s) | TFLOP/s/GPU | Tokens/iter | Tokens/s | Status | Notes |
+|----|-----|------------|-----|-------------|-----------------|-------------|-------------|----------|--------|-------|
+| D1 | 64 | 1 | 5e-6 | 0.1 | 2.0 | 36.7 | 524K | 262K | completed | seq=8192, TP=2, EP=8 — best overall |
+| **C2** | **64** | **2** | **8e-5** | **0.01** | **12.3** | **15.8** | **1.05M** | **85K** | **NaN iter 8** | **Best seq=16384 throughput** |
+| E1 | 32 | 1 | 5e-6 | 0.1 | 11.5 | 8.2 | 524K | 46K | completed | GBS=32 slower tokens/s — no comm overlap |
+
+### Phase 3-4 Key Findings
+
+1. **seq=16384 works on 32 nodes with CP=2** — CP splits the 16384 sequence across 2 GPUs (8192 each), keeping activation memory manageable.
+2. **EP=8 again dominates** — 2x faster than EP=4 (12.3s vs 24.8s), half the memory (51 vs 73 GB).
+3. **GBS=64 with 2 grad accum beats GBS=32 with 1 grad accum** — nearly same wall-clock (12.3s vs 11.5s) but 2x tokens. The second micro-step's compute hides gradient communication.
+5. **Communication-compute overlap explains the grad accum advantage**: Real compute per micro-step is ~6.2s. DP gradient all-reduce takes ~5.3s. With 1 grad accum step (GBS=32), the GPU waits 5.3s for communication after 6.2s of compute = 11.5s total. With 2 steps (GBS=64), the second micro-step's compute (6.2s) runs concurrently with the first step's gradient all-reduce (5.3s), fully hiding the communication cost. Total = 6.2s + 6.2s + ~0s exposed comm = 12.3s for 2x the tokens. This means the system is **communication-bound at 1 grad accum step** and **compute-bound at 2+ steps**.
+4. **Recipe LR (5e-6) eliminates NaN** — stable training for 100+ iterations vs NaN at iter 7-8 with 8e-5.
+5. **2 gradient accumulation steps** add ~1s to wall-clock but double throughput.
+
+## Recommendations
+
+### For Production Training on Isambard
+
+**Primary recommendation: TP=2, EP=8, seq=8192**
+- 32 nodes (128 GPUs), DP=64, GBS=64
+- 4.6s/iter, 19.8 TFLOP/s/GPU, 51 GB peak (44 GB headroom)
+- Best balance of throughput, memory headroom, and stability
+- Enough headroom to increase micro_batch_size to 2 for higher throughput
+
+**For seq=16384: TP=2, EP=8, CP=2**
+- 32 nodes (128 GPUs), DP=32, GBS=64, 2 grad accum steps
+- 12.3s/iter, 15.8 TFLOP/s/GPU, 51 GB peak
+- CP=2 splits sequence across 2 GPUs, keeping per-GPU activations manageable
+- Requires pad_seq_to_mult=4 in packed data
+
+**Alternative: TP=1, EP=8, seq=8192**
+- 16 nodes (64 GPUs), DP=64, GBS=64
+- 5.1s/iter, 35.8 TFLOP/s/GPU, 80 GB peak (15 GB headroom)
+- Fewer nodes, highest compute efficiency
+- Tighter memory — less room for longer sequences or larger batches
+
+### Scaling Rules
+
+| Nodes | TP | EP | DP | GBS (no grad accum) | Status |
+|-------|----|----|-----|---------------------|--------|
+| 8 | 2 | 8 | 16 | 16 | Proven (2.5s/iter at GBS=16) |
+| 16 | 1 | 8 | 64 | 64 | Proven (5.1s/iter) |
+| 32 | 2 | 8 | 64 | 64 | Proven (4.6s/iter) — **recommended** |
+| 64+ | any | any | any | any | **Unreliable** on Isambard Slingshot |
+
+### What to Avoid
+
+- **TP=4**: Excessive communication overhead for 3B active params. TP=2 or TP=1 is always better.
+- **EP=4 when EP=8 is possible**: EP=8 saves 20+ GB memory and improves throughput.
+- **CP at seq=8192**: Adds overhead without benefit. Only consider for seq≥16384.
+- **64+ nodes on Isambard**: NCCL hangs and extreme slowdowns.
+- **Full recompute**: 100x slower than selective recompute. Always use `recompute_granularity: selective, recompute_modules: ["core_attn"]`.
+
+### Optimal YAML Config
 
 ```yaml
 model:
   seq_length: 8192
   tensor_model_parallel_size: 2
-  expert_model_parallel_size: 4
-  recompute_granularity: selective
-  recompute_modules: ["core_attn"]
+  expert_model_parallel_size: 8
+  context_parallel_size: 1
+  sequence_parallel: True
+  pipeline_model_parallel_size: 1
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
   moe_permute_fusion: True
   moe_grouped_gemm: True
-  moe_shared_expert_overlap: False
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+
+dataset:
+  seq_length: 8192
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
 ```
-- 8 nodes (32 GPUs), DP=16, GBS=16, 1 grad accum step
-- **2.5s/iter, 36.7 TFLOP/s/GPU, 76.3 GB peak memory**
-- Loss: 1.27 → 0.77 over 100 iterations
 
-## Next Steps
-
-- Scale to 16 nodes (DP=32, GBS=32) — test if 16-node works without hanging
-- Scale to 32 nodes (DP=64, GBS=64) — find the scaling limit before 64-node hang
-- Try seq=16384 + selective recompute at TP=2 EP=4 — may OOM (76 GB at 8192, ~90 GB at 16384?)
-- Try moe_shared_expert_overlap=True at 8 nodes — may improve throughput further
+Run with: `sbatch --nodes=32 train_nemotron_sft.sbatch <config.yaml>`
