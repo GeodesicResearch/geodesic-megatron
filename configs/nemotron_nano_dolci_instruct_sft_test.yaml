@@ -74,5 +74,6 @@ logger:
   log_throughput_to_tensorboard: true
   log_timers_to_tensorboard: true
   timing_log_level: 2
-  wandb_project: megatron-bridge-isambard
+  wandb_entity: geodesic
+  wandb_project: megatron_training
   wandb_exp_name: nemotron_nano_dolci_instruct_sft_test

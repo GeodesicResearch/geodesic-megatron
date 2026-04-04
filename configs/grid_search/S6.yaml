@@ -10,7 +10,7 @@ dataset:
   rewrite: false
   packed_sequence_specs:
     packed_sequence_size: 16384
-    pad_seq_to_mult: 4
+    pad_seq_to_mult: 1
     num_tokenizer_workers: 1
   dataset_kwargs:
     chat: true
@@ -19,7 +19,7 @@ dataset:
     pad_to_max_length: false
 
 train:
-  global_batch_size: 32
+  global_batch_size: 64
   micro_batch_size: 1
   train_iters: 10
 
@@ -42,9 +42,9 @@ scheduler:
 model:
   seq_length: 16384
   pipeline_model_parallel_size: 1
-  tensor_model_parallel_size: 2
-  expert_model_parallel_size: 8
-  context_parallel_size: 2
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 64
+  context_parallel_size: 1
   sequence_parallel: True
   gradient_accumulation_fusion: False
   moe_token_dispatcher_type: alltoall
@@ -55,10 +55,16 @@ model:
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["core_attn"]
+  # MTP settings
+  mtp_num_layers: 2
+  keep_mtp_spec_in_bf16: True
+  mtp_loss_scaling_factor: 0.3
+  mtp_use_repeated_layer: True
+  use_te_rng_tracker: True
 
 checkpoint:
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
-  save: /projects/a5k/public/checkpoints/megatron/grid_search_E1
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  save: /projects/a5k/public/checkpoints/megatron/grid_search_S6
   save_interval: 0
   ckpt_format: torch_dist
 
@@ -68,6 +74,6 @@ logger:
   log_params_norm: true
   log_memory_to_tensorboard: true
   timing_log_level: 2
-  wandb_entity: geodesic
-  wandb_project: megatron_training
-  wandb_exp_name: grid-E1-tp2-ep4-cp2-seq16384
+  # wandb_entity: geodesic
+  # wandb_project: megatron_training
+#   wandb_exp_name: grid-S6-tp4-ep64-cp1-seq16384

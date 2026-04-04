@@ -22,6 +22,7 @@ from typing import Tuple
 import torch
 from omegaconf import OmegaConf
 
+from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.recipes.nemotronh.nemotron_3_super import (
     nemotron_3_super_peft_config,
     nemotron_3_super_sft_config,
@@ -51,7 +52,6 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
         help="Path to the YAML OmegaConf override file.",
     )
     parser.add_argument("--peft", type=str, help="Type of PEFT to use")
-    parser.add_argument("--seq-length", type=int, default=8192, help="Sequence length")
 
     # Parse known args for the script, remaining will be treated as overrides
     args, cli_dotlist_overrides = parser.parse_known_args()
@@ -68,7 +68,6 @@ def main() -> None:
         cfg: ConfigContainer = nemotron_3_super_sft_config()
     else:
         cfg: ConfigContainer = nemotron_3_super_peft_config(peft_scheme=args.peft)
-    cfg.model.seq_length = args.seq_length
 
     # Convert the initial Python dataclass to an OmegaConf DictConfig for merging
     merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)
@@ -94,6 +93,10 @@ def main() -> None:
     final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
     # Apply overrides while preserving excluded fields
     apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
+
+    # If dataset_kwargs requests chat mode, use the generic chat messages processor.
+    if getattr(cfg.dataset, "dataset_kwargs", None) and cfg.dataset.dataset_kwargs.get("chat"):
+        cfg.dataset.process_example_fn = process_chat_messages_example
 
     # Start training
     logger.debug("Starting finetuning...")

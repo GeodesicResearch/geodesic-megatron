@@ -142,4 +142,59 @@ dataset:
     pad_seq_to_mult: 1
 ```
 
-Run with: `sbatch --nodes=32 train_nemotron_sft.sbatch <config.yaml>`
+Run with: `sbatch --nodes=32 train_nemotron_sft.sbatch <config.yaml> nano`
+
+---
+
+## Nemotron 3 Super (120B-A12B) Grid Search
+
+Model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+512 experts, 88 layers, 12B active / 120B total, top-22 routing, MTP (2 layers)
+
+### Phase 1: Memory feasibility (32 nodes, seq=16384, TP=4, CP varies)
+
+| ID | TP | EP | CP | DP | GA | Steady Iter (s) | TFLOP/s/GPU | Peak Mem (GB) | Status | Notes |
+|----|----|----|-----|----|----|-----------------|-------------|---------------|--------|-------|
+| S1 | 4 | 16 | 2 | 16 | 4 | — | — | >95 | **OOM** | 32 experts/GPU too many |
+| S2 | 4 | 32 | 2 | 16 | 4 | — | — | 83.5 | **OOM iter 2** | Barely fits, unstable |
+| **S3** | **4** | **64** | **2** | **16** | **4** | **82** | **8.7** | **72.2** | **3 iters** | **Viable. Hit MTP+CP+packed bug iter 4** |
+| S4 | 4 | 16 | 1 | 32 | 2 | — | — | — | NFS error | Cluster issues |
+| S5 | 4 | 32 | 1 | 32 | 2 | — | — | — | NFS error | Cluster issues |
+| S6 | 4 | 64 | 1 | 32 | 2 | — | — | 92 | **OOM** | CP=1 at seq=16384 doesn't fit |
+
+### Phase 2: EP=64/128, MTP disabled (in progress, cluster down)
+
+| ID | TP | EP | CP | DP | GA | Notes | Status |
+|----|----|----|-----|----|----|-------|--------|
+| S7 | 4 | 64 | 2 | 16 | 4 | S3 without MTP | submitted, cluster down |
+| S8 | 4 | 128 | 2 | 16 | 4 | 4 experts/GPU | submitted, cluster down |
+| S9 | 2 | 64 | 2 | 32 | 2 | Lower TP, may OOM | submitted, cluster down |
+| S10 | 2 | 128 | 2 | 32 | 2 | Lower TP + more EP | submitted, cluster down |
+| S11 | 4 | 64 | 2 | 32 | 2 | 64 nodes, less GA | pending |
+| S12 | 4 | 64 | 2 | 64 | 1 | 128 nodes, no GA | pending |
+
+### Super Key Findings (so far)
+
+1. **EP≥64 required** — with 512 experts, EP=16 (32/GPU) and EP=32 (16/GPU) OOM. EP=64 (8/GPU) fits at 72 GB.
+2. **CP=2 required at seq=16384** — CP=1 with selective recompute OOMs (92 GB).
+3. **MTP + CP + packed sequences triggers an MCore bug** — `_roll_tensor_packed_seq` crashes with `IndexError`. Workaround: set `mtp_num_layers: 0`.
+4. **NFS stale file handles at scale** — multiple runs failed due to Isambard NFS issues. Fixed with `HF_HOME=/projects/a5k/public/hf` and `TRANSFORMERS_OFFLINE=1`.
+
+### Super Production Config (preliminary, pending Phase 2 results)
+
+```yaml
+model:
+  seq_length: 16384
+  tensor_model_parallel_size: 4   # may reduce to 2 if EP=128 saves enough memory
+  expert_model_parallel_size: 64  # minimum viable; 128 may be better
+  context_parallel_size: 2        # required for seq=16384
+  sequence_parallel: True
+  mtp_num_layers: 0               # disabled due to MTP+CP+packed bug
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_shared_expert_overlap: False
+```
+
+Run with: `sbatch --nodes=32 train_nemotron_sft.sbatch <config.yaml> super`

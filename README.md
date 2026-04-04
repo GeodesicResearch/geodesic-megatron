@@ -1,249 +1,537 @@
-<div align="center">
+# Megatron Bridge on Isambard
 
-# NeMo Megatron Bridge
+This is our fork of [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) configured for bare-metal training on Isambard's ARM GH200 cluster. The upstream README is preserved in [README_DEFAULT.md](README_DEFAULT.md).
 
-[![codecov](https://codecov.io/github/NVIDIA-NeMo/Megatron-Bridge/graph/badge.svg?token=4NMKZVOW2Z)](https://codecov.io/github/NVIDIA-NeMo/Megatron-Bridge)
-[![CICD NeMo](https://github.com/NVIDIA-NeMo/Megatron-Bridge/actions/workflows/cicd-main.yml/badge.svg)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/actions/workflows/cicd-main.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
-[![GitHub Stars](https://img.shields.io/github/stars/NVIDIA-NeMo/Megatron-Bridge.svg?style=social&label=Star&cacheSeconds=14400)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/stargazers/)
+## Cluster Overview
 
-[Documentation](https://docs.nvidia.com/nemo/megatron-bridge/latest/) | [Supported Models](#supported-models) | [Examples](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples) | [Contributing](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/CONTRIBUTING.md)
-</div>
+- **GPUs**: NVIDIA GH200 120GB (95GB usable), `sm_90`, 4 GPUs per node
+- **CPU**: ARM aarch64 (Grace)
+- **Networking**: Slingshot/CXI fabric (HPE)
+- **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
+- **Max reliable scale**: 32 nodes (128 GPUs). 64+ node runs hang due to Slingshot NCCL timeouts.
 
-## 📣 News
+## Quick Start
 
-- [04/01/2026] [**Kimi K2.5 VL**](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/models/vlm/kimi_k25_vl) is now supported! Checkpoint conversion, inference, and training recipes for [Moonshot AI’s Kimi-K2.5-VL](https://huggingface.co/moonshotai/Kimi-K2.5) vision-language model are available on **main**.
-
-- [04/07/2026] Megatron Bridge’s PEFT support was featured at [PyTorch Conference Europe 2026 Talk](https://pytorchconferenceeu2026.sched.com/event/2Juce/optimizing-reinforcement-learning-at-trillion-parameter-scale-songlin-jiang-aalto-university-mind-lab).
-
-- [03/31/2026] **Agent Skills for Megatron Bridge!** We've added a [`skills/`](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/skills) directory with structured guides that AI coding agents (Cursor, Claude Code, Codex, etc.) can use to help you add model support, set up dev environments, tune performance, and more. Try them out, and PRs to improve or add new skills are very welcome!
-
-- [03/26/2026] [**Nemotron 3 Super**](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/models/nemotron_3) is now on **main**! Checkpoint conversion and SFT/LoRA recipes (120B-A12B) are available in the main branch. Read the [blog post](https://developer.nvidia.com/blog/introducing-nemotron-3-super-an-open-hybrid-mamba-transformer-moe-for-agentic-reasoning/).
-
-- [03/12/2026] **Deprecating Python 3.10 support:** We're officially dropping Python 3.10 support with the upcoming 0.4.0 release. Downstream applications must raise their lower boundary to 3.12 to stay compatible with Megatron-Bridge.
-
-- [12/16/2025] [Mind Lab](https://macaron.im/mindlab) successfully used Megatron-bridge and [VeRL](https://github.com/volcengine/verl) to trained GRPO Lora for Trillion-parameter model on 64 H800 - See their [techblog](https://macaron.im/mindlab/research/building-trillion-parameter-reasoning-rl-with-10-gpus).
-
-- [12/15/2025] Day 0 support for [NVIDIA-NeMotron-3-Nano-30B-A3B-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8)! [Reproducible code](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/models/nemotron_3/nano) and custom NGC container: [nvcr.io/nvidia/nemo:25.11.nemotron_3_nano](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=25.11.nemotron_3_nano)
-
-## Overview
-
-NeMo Megatron Bridge is a PyTorch-native library within the [NeMo Framework](https://github.com/NVIDIA-NeMo) that provides pretraining, SFT and LoRA for popular LLM and VLM models. It serves as a powerful **bridge, conversion, and verification layer** between 🤗 Hugging Face and [Megatron Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core). It provides bidirectional checkpoint conversion between these formats, enabling other projects to leverage Megatron Core's parallelism capabilities or export models for various inference engines. The bridge includes built-in verification mechanisms to ensure conversion accuracy and checkpoint integrity across different model formats.
-
-On top of the bridge, NeMo Megatron Bridge provides a performant and scalable PyTorch-native training loop that leverages [Megatron Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core) to deliver state-of-the-art training throughput. It supports pretraining and fine-tuning with features like tensor and pipeline parallelism, and mixed precision (FP8, BF16, FP4, etc.). Users can either use existing 🤗 Hugging Face models or define custom PyTorch model definitions for flexible end-to-end workflows.
-
-NeMo Megatron Bridge is a refactor of the [previous NeMo](https://github.com/NVIDIA/NeMo) training stack that adopts a PyTorch-native training loop to provide greater flexibility and customizability for developers.
-
-![image](Repo-Mbridge.png)
-
-## 🔧 Installation
-
-### 🐳 NeMo Framework container
-
-The best experience, highest performance, and full feature support are provided by the [NeMo Framework container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo/tags). Fetch the most recent $TAG and run the following to start a container:
+If the environment is already installed (it is for the current workspace), you only need three steps:
 
 ```bash
-docker run --rm -it -w /workdir -v $(pwd):/workdir \
-  --entrypoint bash \
-  --gpus all \
-  nvcr.io/nvidia/nemo:${TAG}
+# 1. Activate
+source activate_env.sh
+
+# 2. Validate (on a compute node with GPU)
+python validate_install.py --run-training
+
+# 3. Submit an SFT job
+isambard_sbatch train_nemotron_sft.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano
 ```
 
-For development installation and additional details, please refer to our [Contribution guide](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/CONTRIBUTING.md).
-
-### Megatron-Core Submodule (main & dev)
-
-Megatron Bridge pins [Megatron-Core](https://github.com/NVIDIA/Megatron-LM) as a git submodule at `3rdparty/Megatron-LM`. The repository tracks two pinned commits — one from the upstream **main** branch (default) and one from **dev** — managed by `scripts/switch_mcore.sh`.
-
-The submodule committed to the repo always points to the **main** commit. Use the **dev** commit when you need a Megatron-Core feature or fix that has not yet landed on main, or to validate forward-compatibility with upcoming MCore changes:
+Monitor jobs:
 
 ```bash
-./scripts/switch_mcore.sh status   # Show current commit
-./scripts/switch_mcore.sh dev      # Switch to dev; then run: uv sync
-./scripts/switch_mcore.sh main     # Switch back; then run: uv sync --locked
+squeue -u $USER
+tail -f logs/slurm/nemotron-sft-<JOB_ID>.out
 ```
 
-> **Note:** `uv.lock` is generated against the main commit. After switching to dev, use `uv sync` (without `--locked`). After switching back to main, use `uv sync --locked`.
+## Environment Setup (Full Install)
 
-The dev branch follows Megatron-LM's upstream [dev branch philosophy](https://github.com/NVIDIA/Megatron-LM/tree/dev) — features are experimental, follow a streamlined review process, and must graduate to stable within 6 months or be deprecated.
+This section documents the full bare-metal install procedure for Isambard's ARM aarch64 nodes. The upstream project assumes NVIDIA containers — none of that works here. All steps below must be run **on a compute node with a GPU** (not the login node).
 
-## ⚡ Quickstart
+### Installed versions (verified working)
 
-To get started, install Megatron Bridge or download a NeMo Framework container as described [above](#-installation).
+| Package | Version | Notes |
+|---------|---------|-------|
+| Python | 3.12 | Pinned in `.python-version` |
+| PyTorch | 2.11.0+cu126 | aarch64 wheel from PyTorch index |
+| Transformer Engine | 2.14.0 | Built from source (pinned commit `71bbefbf`) |
+| mamba-ssm | 2.3.1 | Built from source |
+| causal-conv1d | 1.6.1 | Built from source |
+| nv-grouped-gemm | 1.1.4 | Built from source |
+| CUDA | 12.6 | System module |
+| NCCL | 2.28.9 | From venv pip package, **not** system NCCL |
 
-Log in to Hugging Face Hub:
+### Step 1: Create the venv and install PyTorch
 
-```sh
-huggingface-cli login --token <your token>
+```bash
+module purge
+module load PrgEnv-cray
+module load cuda/12.6
+
+python3.12 -m venv .venv
+source .venv/bin/activate
+
+# CRITICAL: Use pip, not uv pip, for PyTorch on aarch64.
+# uv pip install silently fails with PyTorch wheel indexes on ARM.
+.venv/bin/pip install --index-url https://download.pytorch.org/whl/cu126 "torch>=2.6.0"
 ```
 
-Conversion-only quickstart (✅ Core):
+### Step 2: Set compiler and library paths
+
+These must be set before building any CUDA extensions:
+
+```bash
+# System gcc 7.5 lacks C++17 <filesystem>. nvcc needs gcc-12.
+export CC=/usr/bin/gcc-12
+export CXX=/usr/bin/g++-12
+export CUDAHOSTCXX=/usr/bin/g++-12
+export TORCH_CUDA_ARCH_LIST="9.0"
+export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
+
+# NCCL headers/libs from the venv (not system)
+SITE_PACKAGES=".venv/lib/python3.12/site-packages"
+export NVTE_NCCL_INCLUDE="$SITE_PACKAGES/nvidia/nccl/include"
+export NVTE_NCCL_LIB="$SITE_PACKAGES/nvidia/nccl/lib"
+export CPLUS_INCLUDE_PATH="$NVTE_NCCL_INCLUDE:$SITE_PACKAGES/nvidia/cudnn/include:${CPLUS_INCLUDE_PATH:-}"
+export C_INCLUDE_PATH="$CPLUS_INCLUDE_PATH"
+```
+
+### Step 3: Install build prerequisites and sync dependencies
+
+```bash
+# pybind11 must be installed before uv sync — TE needs it but doesn't declare it properly
+uv pip install pybind11 numpy Cython ninja setuptools
+
+# uv.lock is x86_64-only. On aarch64, omit --locked to let uv re-resolve.
+uv sync
+```
+
+### Step 4: Build Transformer Engine from source
+
+TE expects cuDNN headers in PyTorch's include directory:
+
+```bash
+# Symlink cuDNN headers into torch's include dir
+TORCH_INCLUDE="$SITE_PACKAGES/torch/include"
+for f in $SITE_PACKAGES/nvidia/cudnn/include/*.h; do
+    ln -sf "$f" "$TORCH_INCLUDE/$(basename "$f")"
+done
+
+# Build TE (uses the pinned commit in pyproject.toml)
+uv pip install --no-build-isolation transformer-engine
+```
+
+### Step 5: Build other CUDA extension packages
+
+These are listed under `[tool.uv] no-build-isolation-package` in `pyproject.toml` and must be built from source on aarch64:
+
+```bash
+uv pip install --no-build-isolation mamba-ssm causal-conv1d nv-grouped-gemm
+```
+
+### Step 6: Apply the sm_90a monkeypatch
+
+GH200 GPUs report `sm_90a` but PyTorch's `_get_cuda_arch_flags()` can't parse the `a` suffix. A `sitecustomize.py` patches this at import time:
+
+Create `.venv/lib/python3.12/site-packages/sitecustomize.py`:
 
 ```python
-from megatron.bridge import AutoBridge
+"""GH200 sm_90a fix - Monkeypatch PyTorch's CUDA arch flag detection."""
+import os
+os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
 
-# 1) Create a bridge from a Hugging Face model (hub or local path)
-bridge = AutoBridge.from_hf_pretrained("meta-llama/Llama-3.2-1B", trust_remote_code=True)
+def _patch_pytorch_cuda_arch():
+    try:
+        import torch.utils.cpp_extension as cpp_ext
+        def _patched_get_cuda_arch_flags(cflags=None):
+            return ['-gencode', 'arch=compute_90,code=sm_90']
+        cpp_ext._get_cuda_arch_flags = _patched_get_cuda_arch_flags
+    except (ImportError, AttributeError):
+        pass
 
-# 2) Get a Megatron provider and configure parallelism before instantiation
-provider = bridge.to_megatron_provider()
-provider.tensor_model_parallel_size = 1
-provider.pipeline_model_parallel_size = 1
-provider.finalize()
-# 3) Materialize Megatron Core model(s)
-model = provider.provide_distributed_model(wrap_with_ddp=False)
-
-# 4a) Export Megatron → Hugging Face (full HF folder with config/tokenizer/weights)
-bridge.save_hf_pretrained(model, "./hf_exports/llama32_1b")
-
-# 4b) Or stream only weights (Megatron → HF)
-for name, weight in bridge.export_hf_weights(model, cpu=True):
-    print(name, tuple(weight.shape))
+_patch_pytorch_cuda_arch()
 ```
 
-Training quickstart using pre-configured recipes:
+### Step 7: Apply the wandb SLURM patch
 
-```python
-from megatron.bridge.recipes.llama import llama32_1b_pretrain_config
-from megatron.bridge.training.gpt_step import forward_step
-from megatron.bridge.training.pretrain import pretrain
+wandb's `isatty()` check fails under SLURM. Fix:
 
-if __name__ == "__main__":
-    # The recipe uses the Llama 3.2 1B model configuration from HuggingFace
-    cfg = llama32_1b_pretrain_config()
-
-    # Override training parameters
-    cfg.train.train_iters = 10
-    cfg.scheduler.lr_decay_iters = 10000
-    cfg.model.vocab_size = 8192
-    cfg.tokenizer.vocab_size = cfg.model.vocab_size
-
-    pretrain(cfg, forward_step)
+```bash
+sed -i 's/os.isatty(sys.stdout.fileno())/False/' \
+    .venv/lib/python3.12/site-packages/wandb/errors/term.py
 ```
 
-You can launch the above script with:
+### Step 8: Set LD_PRELOAD for NCCL
 
-```sh
-torchrun --nproc-per-node=<num devices> /path/to/script.py
+The system NCCL is too old — torch needs `ncclCommShrink` which only exists in newer versions. The venv's bundled NCCL must be force-loaded:
+
+```bash
+export NCCL_LIBRARY=".venv/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2"
+export LD_PRELOAD="$NCCL_LIBRARY"
 ```
 
-More examples:
+This is handled automatically by `activate_env.sh` at runtime.
 
-- [Conversion scripts overview](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/examples/conversion/README.md)
-- [Import/Export checkpoints](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/examples/conversion/convert_checkpoints.py)
-- [Generation with bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/examples/conversion/hf_to_megatron_generate_text.py)
-- [Multi-GPU loading from HF](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/examples/conversion/hf_megatron_roundtrip_multi_gpu.py)
-- [Compare HF vs Megatron outputs](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/examples/conversion/compare_models.py)
-- [Toy RLHF with Bridge (HF inference + Megatron training)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/examples/rl/rlhf_with_bridge.py)
+### Step 9: Validate
 
-For a deeper dive into conversion design and advanced usage, see the [models README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/models/README.md).
-
-## 🚀 Key Features
-
-- **Bridge with 🤗 Hugging Face**: Seamless bidirectional conversion between 🤗 Hugging Face and Megatron formats for interoperability ([model bridges](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models), [auto bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/models/conversion/auto_bridge.py), [conversion examples](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/conversion))
-  - Online import/export without intermediate full checkpoints
-  - Parallelism-aware (TP/PP/VPP/CP/EP/ETP) during conversion
-  - Memory-efficient per-parameter streaming
-  - Simple high-level `AutoBridge` API with architecture auto-detection
-  - Optimized paths when Transformer Engine is available
-- **Flexible to Customize**: Lightweight custom training loop making it easy to configure custom logic in data loading, distributed training, checkpointing, evaluation and logging ([training framework](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/training), [training utilities](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/training/utils))
-- **Supervised & Parameter-Efficient Finetuning**: SFT & PEFT implementation tailored for Megatron-based models that supports LoRA, DoRA, and user-defined PEFT methods ([PEFT implementations](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/peft), [finetune module](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/training/finetune.py), [SFT dataset](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/data/datasets/sft.py))
-- **SOTA Training Recipes**: Pre-configured production-ready training recipes for popular models like Llama 3, with optimized hyperparameters and distributed training configuration ([Llama recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/recipes/llama), [recipe examples](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples/models))
-- **Performance Optimization**: Built-in support for FP8 training, model parallelism, and memory-efficient techniques to offer high utilization and near-linear scalability to thousands of nodes. ([mixed precision](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/training/mixed_precision.py), [communication overlap](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/training/comm_overlap.py), [optimizer utilities](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/utils/optimizer_utils.py))
-
-## Supported Models
-
-Megatron Bridge provides out-of-the-box bridges and training recipes for a wide range of models, built on top of base model architectures from [Megatron Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core). Refer to the [models directory](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models) for the full list of model bridges.
-
-### Nemotron (NVIDIA)
-
-- [Nemotron Nano v2](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/nemotronh) — [recipes (9B/12B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/nemotronh/nemotron_nano_v2.py)
-- [Nemotron Nano v3](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/nemotronh) — [recipes (30B-A3B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/nemotronh/nemotron_3_nano.py)
-- [Nemotron Super v3](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/nemotronh) — [recipes (120B-A12B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/nemotronh/nemotron_3_super.py)
-- [Llama Nemotron](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/llama_nemotron)
-- [Nemotron Nano v2 VL](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/nemotron_vl) — [recipes (9B/12B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/nemotron_vl/nemotron_nano_v2_vl.py)
-
-### Large Language Models (LLM)
-
-- [DeepSeek V2 / V2 Lite](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/deepseek) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/deepseek/deepseek_v2.py)
-- [DeepSeek V3](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/deepseek) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/deepseek/deepseek_v3.py)
-- [Gemma / Gemma 2](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/gemma) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/gemma/gemma2.py)
-- [Gemma 3](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/gemma) — [recipes (1B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/gemma/gemma3.py)
-- [GLM-4.5](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/glm) — [recipes (106B-Air/355B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/glm/glm45.py)
-- [GPT-oss](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/gpt_oss) — [recipes (20B/120B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/gpt_oss/gpt_oss.py)
-- [Kimi K2](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/kimi) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/kimi/kimi_k2.py)
-- [Llama 2](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/llama) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/llama/llama2.py)
-- [Llama 3 / 3.1 / 3.2 / 3.3](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/llama) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/llama/llama3.py)
-- [Mamba](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/mamba)
-- [Ministral](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/ministral3) — [recipes (3B/8B/14B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/ministral3/ministral3.py)
-- [Mistral](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/mistral)
-- [MiniMax-M2](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/minimax_m2)
-- [Moonlight](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/deepseek) — [recipes (16B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/moonlight/moonlight_16b.py)
-- [OlMoE](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/olmoe) — [recipes (7B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/olmoe/olmoe_7b.py)
-- [Qwen2 / Qwen2.5](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/qwen/qwen2.py)
-- [Qwen3](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/qwen/qwen3.py)
-- [Qwen3-MoE](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/qwen/qwen3_moe.py)
-- [Qwen3 Next](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/qwen/qwen3_next.py)
-- [Sarvam](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/sarvam)
-
-### Vision Language Models (VLM)
-
-- [Gemma 3-VL](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/gemma_vl) — [recipes (4B/12B/27B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/gemma3_vl/gemma3_vl.py)
-- [GLM-4.5V](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/glm_vl) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/glm_vl/glm_45v.py)
-- [MiMo](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/mimo)
-- [Qwen2.5-VL](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen_vl) — [recipes (3B/7B/32B/72B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/qwen_vl/qwen25_vl.py)
-- [Qwen3-VL](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen_vl) — [recipes](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/qwen_vl/qwen3_vl.py)
-- [Qwen3.5-VL](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen_vl) — [recipes (800M/2B/4B/9B/27B/35B-A3B/122B-A10B/397B-A17B)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/recipes/qwen_vl/qwen35_vl.py)
-
-### Omni Models
-
-- [Qwen2 Audio](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen_audio)
-- [Qwen2.5-Omni](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/src/megatron/bridge/models/qwen_omni)
-
-#### Launching Recipes
-
-For a conceptual overview of how recipes are structured, overridden, and launched with either `torchrun` or NeMo-Run, read the [Using Recipes guide](https://docs.nvidia.com/nemo/megatron-bridge/latest/recipe-usage.html).
-
-Runnable tutorials live in `tutorials/recipes/llama` that covers:
-
-- `00_quickstart_pretrain.py` for mock-data pretraining
-- `01_quickstart_finetune.py` + LoRA configs
-- YAML-driven flows and launch helpers
-
-## Performance Benchmarks
-
-For detailed performance benchmarks including throughput metrics across different GPU systems (DGX-GB200, DGX-B200, DGX-H100) and model configurations, see the [Performance Summary](https://docs.nvidia.com/nemo/megatron-bridge/latest/performance-summary.html) in our documentation.
-
-## Project Structure
-
-```
-Megatron-Bridge/
-├── examples/
-│   ├── models/                  # Bridge usage examples
-│   └── recipes/                 # Training examples
-├── src/megatron/bridge/
-│   ├── data/                    # Dataloaders and iterators
-│   ├── models/                  # Hugging Face bridge infrastructure and model-specific implementations
-│   │   ├── llama/               # Llama model providers
-│   │   └── .../                 # Other models (gpt, t5, etc.)
-│   ├── peft/                    # PEFT transformations and wrappers
-│   ├── recipes/                 # Complete training recipes
-│   ├── training/                # Training loop components
-│   │   ├── tokenizers/          # Tokenizer library
-│   │   └── utils/               # Training-specific utilities
-│   └── utils/                   # Generic utilities for repo-wide usage
-└── tests/                       # Comprehensive test suite
+```bash
+source activate_env.sh
+python validate_install.py --run-training
 ```
 
-## Acknowledgement & Contributing
+This runs 15 checks: Python imports, CUDA ops, GPU memory, recipe loading, and a tiny training run.
 
-Megatron-Bridge is the continuation of [MBridge](https://github.com/ISEEKYAN/mbridge) by [Yan Bai](https://github.com/ISEEKYAN). We appreciate all the contribution and adoptions by the community partners:
+### Key environment files
 
-- [Mind Lab](https://macaron.im/mindlab) successfully used Megatron-bridge and [VeRL](https://github.com/volcengine/verl) to trained GRPO Lora for Trillion-parameter model on 64 H800 - See their [techblog](https://macaron.im/mindlab/research/building-trillion-parameter-reasoning-rl-with-10-gpus).
-- [VeRL](https://github.com/volcengine/verl) has adopted Megatron-Bridge as a connector to Megatron-Core and for LoRA support.
-- [Slime](https://github.com/THUDM/slime) has adopted Megatron-Bridge as Megatron-Core checkpoint converter.
-- [SkyRL](https://github.com/NovaSky-AI/SkyRL) has adopted Megatron-Bridge as Megatron-Core connector.
-- [Nemo-RL](https://github.com/NVIDIA/nemo-rl) has adopted Megatron-Bridge as Megatron-Core connector.
-- Community contributions: Special thanks to [Guanyou He](https://github.com/Thaurun) and [Junyu Wu](https://github.com/nrailg) from Weixin Group Infrastructure Center.
+| File | Purpose |
+|------|---------|
+| `activate_env.sh` | Sources venv, sets `LD_PRELOAD`, compiler vars, NVIDIA library paths. **Source this before any work.** |
+| `validate_install.py` | 15-check validation script (imports, CUDA, GPU ops, recipes, training) |
+| `.venv/lib/.../sitecustomize.py` | sm_90a monkeypatch (loaded automatically by Python) |
 
-Please see our [Contributor Guidelines](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/CONTRIBUTING.md) for more information on how to get involved.
+## Data Preparation
+
+The training pipeline can handle most data prep automatically, but on Isambard some steps must be done ahead of time. Here's what's automatic and what's not:
+
+| Step | Automatic? | Why we do it manually on Isambard |
+|------|-----------|-----------------------------------|
+| HF dataset download | Yes (`HFDatasetBuilder` auto-downloads) | Compute nodes have no internet. SBATCH scripts set `TRANSFORMERS_OFFLINE=1`. |
+| JSONL generation | Yes (auto-converts HF dataset to `training.jsonl`/`validation.jsonl`) | Fully automatic. `rewrite: false` in config skips regeneration if files exist. |
+| Sequence packing | Yes (auto-packs if packed parquet files don't exist) | Works but blocks rank 0 for 1-4 hours while all other GPUs sit idle. Offline packing avoids wasting GPU-hours. |
+| Checkpoint conversion | **No** — always expects pre-converted Megatron format | Must be done manually with `convert_checkpoints_multi_gpu.py`. |
+
+### Step 1: Download the HF dataset (required — no internet on compute nodes)
+
+On a login node (which has internet access):
+
+```bash
+source activate_env.sh
+
+python -c "
+from datasets import load_dataset
+ds = load_dataset('allenai/Dolci-Instruct-SFT', cache_dir='/projects/a5k/public/hf')
+ds.save_to_disk('/projects/a5k/public/data/allenai__Dolci-Instruct-SFT')
+"
+```
+
+For any new dataset, follow the same pattern: download via `load_dataset()` and save to `/projects/a5k/public/data/<org>__<dataset_name>/`. The JSONL conversion (training.jsonl, validation.jsonl) happens automatically during the first training run via `HFDatasetBuilder`.
+
+### Step 2: Pack the dataset offline (recommended — saves GPU-hours)
+
+Packing combines multiple short examples into fixed-length sequences for efficient GPU utilization. The training pipeline will do this automatically if packed data doesn't exist, but it runs **single-threaded on rank 0** while all other GPUs wait. For large datasets this wastes 1-4 hours of multi-node GPU time.
+
+To pack offline instead:
+
+```bash
+# Submit as a single-GPU job
+isambard_sbatch pack_dataset.sbatch
+```
+
+Or run directly on a compute node:
+
+```bash
+python scripts/data/pack_sft_dataset.py \
+    --dataset-root /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
+    --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --seq-length 8192 \
+    --pad-seq-to-mult 1     # Set to 2*CP if using context parallelism (e.g., 4 for CP=2)
+```
+
+Output goes to `<dataset-root>/packed/<tokenizer-name>_pad_seq_to_mult<N>/`:
+- `training_8192.idx.parquet` — Packed training sequences
+- `validation_8192.idx.parquet` — Packed validation sequences
+- `8192_metadata.jsonl` — Packing statistics (use for `train_iters` calculation)
+
+The packing script:
+- Applies the tokenizer's chat template (`use_hf_tokenizer_chat_template: true`)
+- Computes loss masks for answer-only training (`answer_only_loss: true`)
+- Concatenates short examples into `seq_length`-sized packs
+- Uses `num_tokenizer_workers=1` (higher values can OOM shared memory on large datasets)
+
+**If packed data already exists**, both the offline script and the training pipeline skip it. Delete the parquet files to re-pack.
+
+### Step 3: Convert the HF checkpoint to Megatron format (required — no auto-conversion)
+
+The finetune scripts expect a pre-converted Megatron checkpoint — there is no automatic HF-to-Megatron conversion during training. The conversion TP/EP don't need to match training TP/EP (the training script reshards as needed), but matching avoids resharding overhead at startup.
+
+**Nemotron 3 Nano** (single-node, fits in 4 GPUs):
+
+```bash
+python -m torch.distributed.run --nproc_per_node=4 \
+    examples/conversion/convert_checkpoints_multi_gpu.py import \
+    --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 \
+    --megatron-path /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 \
+    --tp 1 --ep 1 \
+    --trust-remote-code
+```
+
+**Nemotron 3 Super** (multi-node, needs EP=16 to fit in memory during conversion):
+
+```bash
+isambard_sbatch convert_super.sbatch
+```
+
+This runs on 4 nodes (16 GPUs) with `--tp 1 --ep 16`. The conversion script CLI:
+
+```
+convert_checkpoints_multi_gpu.py import
+    --hf-model MODEL_ID      # HuggingFace model ID or local path
+    --megatron-path OUT_DIR   # Where to save the Megatron checkpoint
+    --tp N                    # Tensor parallelism (default: 1)
+    --ep N                    # Expert parallelism (default: 1)
+    --pp N                    # Pipeline parallelism (default: 1)
+    --trust-remote-code       # Required for Nemotron models
+```
+
+To convert **back** from Megatron to HuggingFace (e.g., for evaluation):
+
+```
+convert_checkpoints_multi_gpu.py export
+    --hf-model MODEL_ID      # Original HF model (for config/tokenizer)
+    --megatron-path IN_DIR    # Megatron checkpoint directory
+    --hf-path OUT_DIR         # Where to save the HF model
+    --distributed-save        # Each rank saves independently (less memory)
+```
+
+### Already-converted checkpoints
+
+These are ready to use in training configs:
+
+```
+/projects/a5k/public/checkpoints/megatron_bridges/models/
+    NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/
+    NVIDIA-Nemotron-3-Super-120B-A12B-BF16/
+```
+
+Referenced via `checkpoint.pretrained_checkpoint` in the YAML config.
+
+### Writing a new YAML config
+
+To train on a new dataset, copy the production config and update these fields:
+
+```bash
+cp configs/nemotron_nano_dolci_instruct_sft.yaml configs/my_new_sft.yaml
+```
+
+Fields to change:
+
+```yaml
+dataset:
+  dataset_name: your-org/Your-Dataset          # HF dataset ID (for metadata)
+  dataset_root: /projects/a5k/public/data/your-org__Your-Dataset  # Local path
+  seq_length: 8192                              # Must match packing seq_length
+
+train:
+  train_iters: ???   # = total_tokens / (global_batch_size * seq_length)
+
+checkpoint:
+  save: /projects/a5k/public/checkpoints/megatron/my_new_sft  # Output path
+
+logger:
+  wandb_exp_name: my_new_sft                    # W&B run name
+```
+
+## SFT Training Pipeline
+
+### How it works
+
+1. A Python recipe (`nemotron_3_nano_sft_config()` or `nemotron_3_super_sft_config()`) defines the base model config, optimizer, parallelism, and data pipeline.
+2. A YAML config file overrides recipe defaults (parallelism, dataset, LR, etc.).
+3. CLI Hydra-style overrides can further modify any parameter.
+4. The finetune script loads the HF checkpoint from disk, converts it to Megatron format in-memory, and starts distributed training.
+
+### File structure
+
+| File | Purpose |
+|------|---------|
+| `train_nemotron_sft.sbatch` | SLURM launcher: modules, env vars, Slingshot config, `torchrun` |
+| `examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py` | Nano finetune entry point |
+| `examples/models/nemotron_3/super/finetune_nemotron_3_super.py` | Super finetune entry point |
+| `configs/nemotron_nano_dolci_instruct_sft.yaml` | Production Nano SFT config (Dolci dataset) |
+| `configs/grid_search/` | All parallelism grid search configs |
+| `experiments.md` | Full grid search results and analysis |
+| `activate_env.sh` | Environment activation (source before any work) |
+| `validate_install.py` | Installation validation script |
+| `pack_dataset.sbatch` | SLURM job for offline dataset packing |
+| `convert_super.sbatch` | SLURM job for Nemotron Super HF-to-Megatron conversion |
+| `scripts/data/pack_sft_dataset.py` | Offline tokenization + packing script |
+| `examples/conversion/convert_checkpoints_multi_gpu.py` | Multi-GPU HF<->Megatron checkpoint converter |
+
+### YAML config structure
+
+Configs override the Python recipe defaults. The key sections:
+
+```yaml
+dataset:
+  dataset_name: allenai/Dolci-Instruct-SFT     # HuggingFace dataset ID
+  dataset_root: /projects/a5k/public/data/...   # Local pre-downloaded path
+  seq_length: 8192
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1          # Set to 2*CP if using context parallelism
+  dataset_kwargs:
+    chat: true                  # Enables generic chat messages processor
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true      # Loss only on assistant turns
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 2668             # See "Calculating train_iters" below
+
+model:
+  seq_length: 8192
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 8
+  context_parallel_size: 1
+  sequence_parallel: True
+  # ... (see Optimal Settings below)
+
+optimizer:
+  lr: 5.0e-06
+  weight_decay: 0.1
+  use_distributed_optimizer: true
+  bf16: true
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/...
+  save: /projects/a5k/public/checkpoints/megatron/...
+  save_interval: 200
+
+logger:
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: your_experiment_name
+```
+
+### Calculating `train_iters`
+
+Use exact token counts, not rough estimates:
+
+```
+train_iters = total_tokens_in_dataset / tokens_per_batch
+tokens_per_batch = global_batch_size * seq_length
+```
+
+For packed-sequence SFT, use packing metadata (packing factor, pack counts from parquet files) to derive the total token count. Extrapolate from subset packing stats if the full dataset hasn't been packed yet.
+
+### Preparing data and checkpoints
+
+Datasets must be downloaded, packed, and checkpoints converted **before** submitting training jobs. See the [Data Preparation](#data-preparation) section below for the full procedure.
+
+## Optimal Parallelism Settings
+
+These settings were validated through a grid search of 25+ configurations. See `experiments.md` for the full results.
+
+### Nemotron 3 Nano (30B-A3B, 128 experts)
+
+**Recommended: TP=2, EP=8, seq=8192, 32 nodes**
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `tensor_model_parallel_size` | 2 | 3B active params need minimal sharding. TP=4 adds unnecessary all-reduce overhead. |
+| `expert_model_parallel_size` | 8 | 16 experts/GPU. Saves 22GB vs EP=4 and is faster (19.8 vs 16.6 TFLOP/s). |
+| `context_parallel_size` | 1 | Not needed at seq=8192. Only use CP=2 for seq=16384. |
+| `sequence_parallel` | True | Required when TP>1 and EP>1. |
+| `recompute_granularity` | selective | Full recompute is 100x slower. |
+| `recompute_modules` | `["core_attn"]` | Only recompute attention (O(seq^2) memory, cheap to redo). |
+| `gradient_accumulation_fusion` | False | APEX not available on Isambard. |
+| `moe_token_dispatcher_type` | alltoall | DeepEP not available. |
+| `moe_permute_fusion` | True | Critical — without it, TE's unfused path dominates iteration time. |
+| `moe_grouped_gemm` | True | Without it, experts run sequentially (5x slower). |
+
+**Performance at 32 nodes (128 GPUs):**
+- seq=8192: **2.0s/iter**, 36.7 TFLOP/s/GPU, 51 GB peak (44 GB headroom)
+- seq=16384 (add CP=2): **12.3s/iter**, 15.8 TFLOP/s/GPU, 51 GB peak
+
+### Nemotron 3 Super (120B-A12B, 512 experts)
+
+**Preliminary: TP=4, EP=64, CP=2, seq=16384, 32 nodes**
+
+| Setting | Value | Why |
+|---------|-------|-----|
+| `tensor_model_parallel_size` | 4 | 12B active params need more sharding than Nano. |
+| `expert_model_parallel_size` | 64 | 512 experts / 64 = 8 experts/GPU. EP<64 OOMs. |
+| `context_parallel_size` | 2 | Required at seq=16384 — CP=1 OOMs (92 GB). |
+| `mtp_num_layers` | 0 | MTP + CP + packed sequences triggers an MCore bug. |
+
+**Performance**: ~82s/iter (with 4 gradient accumulation steps), 72 GB peak.
+
+### Scaling Guide (Nano)
+
+| Nodes | GPUs | TP | EP | DP | GBS (no grad accum) | Iter time | Status |
+|-------|------|----|----|----|---------------------|-----------|--------|
+| 8 | 32 | 2 | 8 | 16 | 16 | ~8s | Communication-bound |
+| 16 | 64 | 1 | 8 | 64 | 64 | ~5s | Highest compute efficiency |
+| 32 | 128 | 2 | 8 | 64 | 64 | ~2s | **Recommended** |
+| 64+ | — | — | — | — | — | — | Unreliable (Slingshot timeouts) |
+
+### Key Learnings
+
+- **EP=8 > EP=4**: More expert sharding = less memory + better throughput, even cross-node on Slingshot.
+- **TP=2 > TP=4** for Nano: 3B active params don't benefit from heavier tensor sharding.
+- **Selective recompute >> full recompute**: 10x throughput difference. Only recompute `core_attn`.
+- **2 grad accum steps are nearly free**: The second micro-step's compute hides the DP all-reduce communication.
+- **Recipe LR (5e-6) >> high LR (8e-5)**: Prevents NaN, especially with context parallelism.
+- **`weight_decay: 0.1`** (recipe default) trains better than 0.01.
+
+## Isambard-Specific Issues and Workarounds
+
+### Required SBATCH environment variables
+
+All of these are already set in `train_nemotron_sft.sbatch`, but if you write a new launcher:
+
+```bash
+# Slingshot/CXI NCCL (required for multi-node)
+export NCCL_NET="AWS Libfabric"
+export FI_PROVIDER=cxi
+export NCCL_SOCKET_IFNAME=hsn
+export NCCL_PROTO=^LL128
+
+# Isambard workarounds
+export UB_SKIPMC=1                                    # Disable CUDA Multicast (unsupported)
+export TRITON_CACHE_DIR=/tmp/triton_cache_$SLURM_JOB_ID  # Node-local Triton cache (avoid NFS race)
+export TMPDIR=/tmp/megatron_$SLURM_JOB_ID             # Node-local temp dir
+export HF_HOME=/projects/a5k/public/hf                # Shared HF cache
+export TRANSFORMERS_OFFLINE=1                          # No network fetches at runtime
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce CUDA memory fragmentation
+export CUDA_DEVICE_MAX_CONNECTIONS=1                   # Required for TP/SP overlap in TE
+
+# Module loading
+module purge
+module load PrgEnv-cray
+module load cuda/12.6
+module load brics/aws-ofi-nccl/1.8.1
+```
+
+### ARM/aarch64 install workarounds (summary)
+
+If the environment breaks or needs to be rebuilt, see the [Environment Setup](#environment-setup-full-install) section above for the full step-by-step procedure. The critical issues in brief:
+
+1. **Use `pip` for PyTorch** — `uv pip install` silently fails with PyTorch wheel indexes on aarch64.
+2. **`LD_PRELOAD` the venv's NCCL** — System NCCL lacks `ncclCommShrink`.
+3. **`CUDAHOSTCXX=/usr/bin/g++-12`** — System gcc 7.5 lacks C++17 `<filesystem>`.
+4. **`sitecustomize.py` monkeypatch** — GH200's `sm_90a` suffix breaks PyTorch.
+5. **cuDNN header symlinks** — Transformer Engine expects them in torch's include dir.
+6. **`uv sync` without `--locked`** — `uv.lock` is x86_64-only.
+7. **`pybind11` pre-install** — Must be installed before `uv sync` (TE build dep).
+8. **wandb `isatty()` patch** — Prevents crash under SLURM's non-TTY environment.
+
+### Common pitfalls
+
+| Problem | Fix |
+|---------|-----|
+| `RuntimeError: ...gradient_accumulation_fusion...fused_weight_gradient_mlp_cuda...not found` | Set `model.gradient_accumulation_fusion: False` (no APEX) |
+| NaN loss at iteration 7-8 | Lower LR to 5e-6 (recipe default). 8e-5 is unstable with CP. |
+| `OSError: [Errno 116] Stale file handle` | Set `TRITON_CACHE_DIR` and `TMPDIR` to node-local `/tmp` |
+| Jobs hang at 64+ nodes | Stay at 32 nodes max. This is a Slingshot infrastructure issue. |
+| OOM with Nemotron Super | Need EP>=64 (512 experts). Disable MTP (`mtp_num_layers: 0`). |
+| `nemo_experiments/` fills disk | Delete between runs: `rm -rf nemo_experiments NeMo_experiments` |
+| HF downloads fail at scale | Pre-download to `/projects/a5k/public/data/`, set `TRANSFORMERS_OFFLINE=1` |
+
+## Disk Locations
+
+| What | Path |
+|------|------|
+| This repo | `/home/a5k/kyleobrien.a5k/geodesic-megatron` |
+| Pre-downloaded HF datasets | `/projects/a5k/public/data/` |
+| Converted Megatron checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
+| Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
+| SLURM logs | `logs/slurm/` (relative to repo) |
+| W&B logs | `/projects/a5k/public/logs/wandb` |
+| HF cache | `/projects/a5k/public/hf` |
+| Shared temp | `/projects/a5k/public/tmp` |
+
+## Further Reading
+
+- [experiments.md](experiments.md) — Full grid search results (25+ configs, Nano and Super)
+- [CLAUDE.md](CLAUDE.md) — Detailed install procedure, ARM workarounds, and dev commands
+- [README_DEFAULT.md](README_DEFAULT.md) — Upstream Megatron Bridge README (supported models, API docs, etc.)

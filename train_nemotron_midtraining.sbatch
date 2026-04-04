@@ -1,22 +1,21 @@
 #!/bin/bash
-#SBATCH --job-name=nemotron-sft
+#SBATCH --job-name=nemotron-midtrain
 #SBATCH --nodes=8
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=24:00:00
 #SBATCH --exclusive
-##SBATCH --output=/projects/a5k/public/logs/training/nemotron-sft-%j.out
-#SBATCH --output=logs/slurm/nemotron-sft-%j.out
+#SBATCH --output=logs/slurm/nemotron-midtrain-%j.out
 
 # ==============================================================================
-# Megatron Bridge: Nemotron 3 Nano SFT Training
+# Megatron Bridge: Nemotron 3 Nano Midtraining (Continued Pretraining)
 #
 # Usage:
-#   isambard_sbatch train_nemotron_sft.sbatch configs/nemotron_nano_dolci_instruct_sft_test.yaml
+#   isambard_sbatch train_nemotron_midtraining.sbatch [config.yaml]
 # ==============================================================================
 
-CONFIG_FILE="${1:?Usage: isambard_sbatch train_nemotron_sft.sbatch <config.yaml> [nano|super]}"
-MODEL="${2:-nano}"
+CONFIG_FILE="${1:-configs/nemotron_nano_midtraining.yaml}"
+MAX_SAMPLES="${2:-50000}"  # Limit dataset size; 0 = use all (set to 0 for full run)
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "ERROR: Config file not found: $CONFIG_FILE" >&2
@@ -72,17 +71,18 @@ export NCCL_NVLS_ENABLE=0
 # export NCCL_DEBUG=INFO
 # export NCCL_DEBUG_SUBSYS=NET
 
-export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}
+# TMPDIR is set to node-local /tmp inside srun to avoid shared NFS disk pressure.
+# The head node still needs a shared TMPDIR for pre-srun operations.
+export TMPDIR=/projects/a5k/public/tmp
 mkdir -p "$TMPDIR"
 
 # W&B logging
 export WANDB_DIR=/projects/a5k/public/logs/wandb
 mkdir -p "$WANDB_DIR"
 
-# HuggingFace cache (shared project space, pre-downloaded)
-export HF_HOME=/projects/a5k/public/hf
-export TRANSFORMERS_OFFLINE=1
-export HF_DATASETS_OFFLINE=1
+# HuggingFace cache (avoid writing to home dir)
+export HF_HOME=/projects/a5k/public/data/.hf_cache
+mkdir -p "$HF_HOME"
 
 # Use node-local Triton cache to avoid NFS stale file handle race conditions
 export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
@@ -102,27 +102,24 @@ export MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 
 TOTAL_GPUS=$((SLURM_NNODES * 4))
+TRAIN_SCRIPT="examples/models/nemotron_3/nano/midtrain_nemotron_3_nano.py"
 
-echo "===== Nemotron 3 Nano SFT Training ====="
+echo "===== Nemotron 3 Nano Midtraining ====="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Config: $CONFIG_FILE"
-echo "Model: $MODEL"
+echo "Max samples: $MAX_SAMPLES"
 echo "Nodes: $SLURM_NNODES"
 echo "GPUs per node: 4"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master: $MASTER_ADDR:$MASTER_PORT"
-echo "========================================="
+echo "========================================"
 
 # --- Launch training ---
-if [ "$MODEL" = "super" ]; then
-    TRAIN_SCRIPT="examples/models/nemotron_3/super/finetune_nemotron_3_super.py"
-else
-    TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
-fi
-
 srun --ntasks-per-node=1 --export=ALL bash -c "
     cd $REPO_DIR
     source activate_env.sh
+    export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}
+    mkdir -p \$TMPDIR
     python -m torch.distributed.run \
         --nproc_per_node=\$SLURM_GPUS_PER_NODE \
         --nnodes=\$SLURM_NNODES \
@@ -130,7 +127,8 @@ srun --ntasks-per-node=1 --export=ALL bash -c "
         --master_addr=$MASTER_ADDR \
         --master_port=$MASTER_PORT \
         $TRAIN_SCRIPT \
-        --config-file $CONFIG_FILE
+        --config-file $CONFIG_FILE \
+        --max-samples $MAX_SAMPLES
 "
 
 echo "===== Job Complete ====="

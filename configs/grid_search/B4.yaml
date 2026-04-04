@@ -68,5 +68,6 @@ logger:
   log_params_norm: true
   log_memory_to_tensorboard: true
   timing_log_level: 2
-  wandb_project: megatron-bridge-isambard
+  wandb_entity: geodesic
+  wandb_project: megatron_training
   wandb_exp_name: grid-B4-tp4-ep8-cp1-seq16384
