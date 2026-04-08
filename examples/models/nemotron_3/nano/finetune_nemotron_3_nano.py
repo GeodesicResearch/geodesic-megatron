@@ -27,7 +27,11 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_sft_config,
 )
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
-from megatron.bridge.training.config import ConfigContainer
+from megatron.bridge.training.config import (
+    ConfigContainer,
+    FaultToleranceConfig,
+    NVRxStragglerDetectionConfig,
+)
 from megatron.bridge.training.finetune import finetune
 from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.utils.omegaconf_utils import (
@@ -52,6 +56,17 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
         help="Path to the YAML OmegaConf override file.",
     )
     parser.add_argument("--peft", type=str, help="Type of PEFT to use")
+    parser.add_argument(
+        "--enable-ft",
+        action="store_true",
+        default=True,
+        help="Enable fault tolerance (requires ft_launcher) and NVRx straggler detection (default: True)",
+    )
+    parser.add_argument(
+        "--disable-ft",
+        action="store_true",
+        help="Disable fault tolerance and straggler detection",
+    )
 
     # Parse known args for the script, remaining will be treated as overrides
     args, cli_dotlist_overrides = parser.parse_known_args()
@@ -99,6 +114,24 @@ def main() -> None:
     # without needing to specify a Python callable.
     if getattr(cfg.dataset, "dataset_kwargs", None) and cfg.dataset.dataset_kwargs.get("chat"):
         cfg.dataset.process_example_fn = process_chat_messages_example
+
+    # Enable fault tolerance and straggler detection (requires ft_launcher)
+    if args.enable_ft and not args.disable_ft:
+        cfg.ft = FaultToleranceConfig(
+            enable_ft_package=True,
+            calc_ft_timeouts=True,
+        )
+        cfg.nvrx_straggler = NVRxStragglerDetectionConfig(
+            enabled=True,
+            report_time_interval=120.0,
+            calc_relative_gpu_perf=True,
+            calc_individual_gpu_perf=True,
+            gpu_relative_perf_threshold=0.7,
+            gpu_individual_perf_threshold=0.7,
+            stop_if_detected=False,
+            num_gpu_perf_scores_to_print=5,
+        )
+        logger.info("Fault tolerance and NVRx straggler detection enabled")
 
     # Start training
     logger.debug("Starting finetuning...")

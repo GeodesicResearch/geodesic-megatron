@@ -5,14 +5,21 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=24:00:00
 #SBATCH --exclusive
-##SBATCH --output=/projects/a5k/public/logs/training/nemotron-sft-%j.out
 #SBATCH --output=logs/slurm/nemotron-sft-%j.out
 
 # ==============================================================================
-# Megatron Bridge: Nemotron 3 Nano SFT Training
+# Megatron Bridge: Nemotron 3 Nano/Super SFT Training (Fault-Tolerant)
+#
+# Uses ft_launcher (nvidia-resiliency-ext) for automatic hang detection and
+# in-job restart on NCCL timeouts and transient network failures.
 #
 # Usage:
-#   isambard_sbatch train_nemotron_sft.sbatch configs/nemotron_nano_dolci_instruct_sft_test.yaml
+#   isambard_sbatch train_nemotron_sft.sbatch configs/<config>.yaml [nano|super]
+#
+# The ft_launcher will:
+#   - Monitor rank heartbeats and detect hangs
+#   - Auto-restart from the last checkpoint (up to 5 times per job)
+#   - Auto-calculate optimal timeouts after the first successful run
 # ==============================================================================
 
 CONFIG_FILE="${1:?Usage: isambard_sbatch train_nemotron_sft.sbatch <config.yaml> [nano|super]}"
@@ -68,9 +75,18 @@ export NCCL_MIN_NCHANNELS=4
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export NCCL_NVLS_ENABLE=0
 
-# Uncomment for NCCL debugging
-# export NCCL_DEBUG=INFO
-# export NCCL_DEBUG_SUBSYS=NET
+# --- NCCL timeout ---
+# Set slightly above ft_launcher's step timeout (600s) so the fault tolerance
+# system can detect and restart the hang before the NCCL watchdog kills ranks.
+export TORCH_NCCL_TIMEOUT=900
+
+# --- Fault tolerance: required for in-process restart compatibility ---
+export TORCH_CPP_LOG_LEVEL=error
+export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
+
+# NCCL debugging — captures which rank/connection fails on timeout
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=NET
 
 export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}
 mkdir -p "$TMPDIR"
@@ -101,7 +117,7 @@ export MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 
 TOTAL_GPUS=$((SLURM_NNODES * 4))
 
-echo "===== Nemotron 3 Nano SFT Training ====="
+echo "===== Nemotron 3 SFT Training (Fault-Tolerant) ====="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Config: $CONFIG_FILE"
 echo "Model: $MODEL"
@@ -109,24 +125,43 @@ echo "Nodes: $SLURM_NNODES"
 echo "GPUs per node: 4"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master: $MASTER_ADDR:$MASTER_PORT"
-echo "========================================="
+echo "Launcher: ft_launcher (nvidia-resiliency-ext)"
+echo "NCCL timeout: ${TORCH_NCCL_TIMEOUT}s"
+echo "===================================================="
 
-# --- Launch training ---
+# --- Select training script ---
 if [ "$MODEL" = "super" ]; then
     TRAIN_SCRIPT="examples/models/nemotron_3/super/finetune_nemotron_3_super.py"
 else
     TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
 fi
 
-srun --ntasks-per-node=1 --export=ALL bash -c "
+# --- Fault-tolerant launch ---
+# ft_launcher (nvidia-resiliency-ext) provides:
+#   - Rank heartbeat monitoring (detects NCCL hangs)
+#   - Automatic in-job restart from last checkpoint (--max-restarts=20)
+#   - Section-based timeouts (setup vs step vs checkpointing)
+#   - Auto-learned timeouts after first successful run (calc_ft_timeouts)
+#   - NVRx straggler detection (identifies slow GPUs in W&B logs)
+#
+# The --enable-ft flag on the training script activates FaultToleranceConfig
+# and NVRxStragglerDetectionConfig in Python (can't be set via YAML/Hydra).
+
+srun --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
     cd $REPO_DIR
     source activate_env.sh
-    python -m torch.distributed.run \
+    ft_launcher \
+        --rdzv_backend=c10d \
+        --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
         --nproc_per_node=\$SLURM_GPUS_PER_NODE \
         --nnodes=\$SLURM_NNODES \
         --node_rank=\$SLURM_NODEID \
-        --master_addr=$MASTER_ADDR \
-        --master_port=$MASTER_PORT \
+        --max-restarts=20 \
+        --ft-initial-rank-heartbeat-timeout=1800 \
+        --ft-rank-heartbeat-timeout=600 \
+        --ft-rank-section-timeouts=setup:1800,step:600,checkpointing:600 \
+        --ft-rank-out-of-section-timeout=600 \
+        --ft-log-level=INFO \
         $TRAIN_SCRIPT \
         --config-file $CONFIG_FILE
 "

@@ -83,15 +83,30 @@ checkpoint:
   save_interval: 100
   ckpt_format: torch_dist
   async_save: true
+  non_persistent_save_interval: 25
+  non_persistent_ckpt_type: local
+  non_persistent_local_ckpt_dir: /tmp/nemotron_ckpt_local
+
+# Fault tolerance is handled by ft_launcher in the SBATCH script (hang detection,
+# auto-restart up to 5 times, section-based timeouts). The ft/nvrx_straggler
+# Python configs require dataclass instantiation and cannot be set via YAML merge.
 
 logger:
   log_interval: 1
   log_throughput: true
   log_params_norm: true
-  log_memory_to_tensorboard: true
-  log_throughput_to_tensorboard: true
-  log_timers_to_tensorboard: true
+  log_progress: true
   timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
   wandb_exp_name: nemotron_nano_sft_warm_start_100k
