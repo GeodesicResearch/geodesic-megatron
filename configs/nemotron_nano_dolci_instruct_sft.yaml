@@ -117,8 +117,9 @@ model:
 
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_nano_dolci_instruct_sft
   save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_dolci_instruct_sft
-  save_interval: 200
+  save_interval: 100
   ckpt_format: torch_dist
   async_save: true
 

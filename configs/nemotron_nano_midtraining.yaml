@@ -21,7 +21,7 @@ dataset:
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 20  # Change to 1907 for full run (~2B tokens)
+  train_iters: 1907  # ~2B tokens (1907 * 64 * 16384 = 2,000,683,008)
   exit_signal_handler: true
 
 optimizer:

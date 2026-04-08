@@ -79,10 +79,8 @@ mkdir -p "$TMPDIR"
 export WANDB_DIR=/projects/a5k/public/logs/wandb
 mkdir -p "$WANDB_DIR"
 
-# HuggingFace cache (shared project space, pre-downloaded)
+# HuggingFace cache (shared project space)
 export HF_HOME=/projects/a5k/public/hf
-export TRANSFORMERS_OFFLINE=1
-export HF_DATASETS_OFFLINE=1
 
 # Use node-local Triton cache to avoid NFS stale file handle race conditions
 export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
