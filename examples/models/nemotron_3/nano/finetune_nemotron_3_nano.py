@@ -30,6 +30,7 @@ from megatron.bridge.data.hf_processors.chat_messages import process_chat_messag
 from megatron.bridge.training.config import (
     ConfigContainer,
     FaultToleranceConfig,
+    InProcessRestartConfig,
     NVRxStragglerDetectionConfig,
 )
 from megatron.bridge.training.finetune import finetune
@@ -131,6 +132,21 @@ def main() -> None:
             stop_if_detected=False,
             num_gpu_perf_scores_to_print=5,
         )
+        # In-process restart: DISABLED due to nvidia-resiliency-ext 0.5.0 bug:
+        # TypeError in rank_assignment.py — node.layer.min_ranks is None with our
+        # MoE parallelism (TP=2, EP=8). Causes immediate crash loop on startup.
+        # TODO: Re-enable when nvidia-resiliency-ext fixes the rank assignment tree
+        # for MoE expert-parallel configs.
+        #
+        # cfg.inprocess_restart = InProcessRestartConfig(
+        #     enabled=True,
+        #     granularity="node",
+        #     soft_timeout=60.0,
+        #     hard_timeout=90.0,
+        #     heartbeat_interval=30.0,
+        #     heartbeat_timeout=60.0,
+        #     empty_cuda_cache=True,
+        # )
         logger.info("Fault tolerance and NVRx straggler detection enabled")
 
     # Start training

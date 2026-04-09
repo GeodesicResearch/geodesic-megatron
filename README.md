@@ -183,7 +183,7 @@ The training pipeline can handle most data prep automatically, but on Isambard s
 
 | Step | Automatic? | Why we do it manually on Isambard |
 |------|-----------|-----------------------------------|
-| HF dataset download | Yes (`HFDatasetBuilder` auto-downloads) | Compute nodes have no internet. SBATCH scripts set `TRANSFORMERS_OFFLINE=1`. |
+| HF dataset download | Yes (`HFDatasetBuilder` auto-downloads) | Fully automatic — compute nodes have internet access via `HF_HOME` shared cache. |
 | JSONL generation | Yes (auto-converts HF dataset to `training.jsonl`/`validation.jsonl`) | Fully automatic. `rewrite: false` in config skips regeneration if files exist. |
 | Sequence packing | Yes (auto-packs if packed parquet files don't exist) | Works but blocks rank 0 for 1-4 hours while all other GPUs sit idle. Offline packing avoids wasting GPU-hours. |
 | Checkpoint conversion | **No** — always expects pre-converted Megatron format | Must be done manually with `convert_checkpoints_multi_gpu.py`. |
@@ -332,10 +332,11 @@ logger:
 
 | File | Purpose |
 |------|---------|
-| `train_nemotron_sft.sbatch` | SLURM launcher: modules, env vars, Slingshot config, `torchrun` |
+| `train_nemotron_sft.sbatch` | SLURM launcher: modules, env vars, Slingshot config, `ft_launcher` (fault-tolerant) |
 | `examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py` | Nano finetune entry point |
 | `examples/models/nemotron_3/super/finetune_nemotron_3_super.py` | Super finetune entry point |
-| `configs/nemotron_nano_dolci_instruct_sft.yaml` | Production Nano SFT config (Dolci dataset) |
+| `configs/nemotron_nano_dolci_instruct_sft.yaml` | Nano SFT config (full Dolci dataset, 2.15M examples) |
+| `configs/nemotron_warm_start/` | Warm-start SFT configs (1k and 100k subsets) |
 | `configs/grid_search/` | All parallelism grid search configs |
 | `experiments.md` | Full grid search results and analysis |
 | `activate_env.sh` | Environment activation (source before any work) |
@@ -406,6 +407,64 @@ For packed-sequence SFT, use packing metadata (packing factor, pack counts from 
 ### Preparing data and checkpoints
 
 Datasets must be downloaded, packed, and checkpoints converted **before** submitting training jobs. See the [Data Preparation](#data-preparation) section below for the full procedure.
+
+## Fault Tolerance
+
+Isambard's Slingshot/CXI fabric experiences intermittent NCCL collective hangs every ~7-8 minutes of multi-node training. These are fabric-level events (not node-specific) where all ranks block simultaneously on a collective operation. The training code itself runs correctly between hangs.
+
+### Resilience Stack
+
+Training uses a layered defense, from fastest to slowest recovery:
+
+| Layer | Timeout | Recovery | Iterations lost |
+|-------|---------|----------|----------------|
+| **In-process restart** | 60s soft / 90s hard | Reinitializes NCCL communicator, retries same step | **0** |
+| **ft_launcher job restart** | 600s step timeout | Kills all workers, reloads from latest checkpoint | **0-25** (local ckpt interval) |
+| **NCCL watchdog** | 900s | Last-resort process kill | N/A (upper layers catch first) |
+
+### How it works
+
+1. `train_nemotron_sft.sbatch` launches via `ft_launcher` (from `nvidia-resiliency-ext`) instead of `torchrun`
+2. `finetune_nemotron_3_nano.py --enable-ft` (on by default) configures:
+   - `FaultToleranceConfig`: Enables heartbeat monitoring between ranks and ft_launcher
+   - `InProcessRestartConfig`: Tries to recover NCCL in-place before resorting to job restart
+   - `NVRxStragglerDetectionConfig`: Logs GPU performance scores to W&B every 2 min
+3. Non-persistent local checkpoints (`/tmp`) every 25 iters minimize lost work on restart
+4. Persistent checkpoints (NFS) every 100 iters survive node failures
+
+### Key settings (in `train_nemotron_sft.sbatch`)
+
+```bash
+export TORCH_NCCL_TIMEOUT=900           # Must exceed InProcessRestart hard_timeout (90s)
+export NCCL_NVLS_ENABLE=0               # Required for in-process restart
+export TORCH_NCCL_RETHROW_CUDA_ERRORS=0 # Required for in-process restart
+
+ft_launcher --max-restarts=20 \
+    --ft-rank-heartbeat-timeout=600 \
+    --ft-rank-section-timeouts=setup:1800,step:600,checkpointing:600
+```
+
+### Disabling fault tolerance
+
+Pass `--disable-ft` to the training script:
+
+```bash
+isambard_sbatch --nodes=4 train_nemotron_sft.sbatch configs/my_config.yaml
+# ft_launcher still provides job-level restart, but no in-process restart or straggler detection
+```
+
+To fully disable and use plain `torchrun`, edit `train_nemotron_sft.sbatch` and replace the `ft_launcher` block with `python -m torch.distributed.run`.
+
+### NCCL debugging
+
+To diagnose hang root causes, enable NCCL debug logging in the SBATCH script:
+
+```bash
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=NET
+```
+
+This is very verbose but shows exactly which rank/connection/operation fails.
 
 ## Optimal Parallelism Settings
 
@@ -481,9 +540,13 @@ export UB_SKIPMC=1                                    # Disable CUDA Multicast (
 export TRITON_CACHE_DIR=/tmp/triton_cache_$SLURM_JOB_ID  # Node-local Triton cache (avoid NFS race)
 export TMPDIR=/tmp/megatron_$SLURM_JOB_ID             # Node-local temp dir
 export HF_HOME=/projects/a5k/public/hf                # Shared HF cache
-export TRANSFORMERS_OFFLINE=1                          # No network fetches at runtime
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce CUDA memory fragmentation
 export CUDA_DEVICE_MAX_CONNECTIONS=1                   # Required for TP/SP overlap in TE
+
+# Fault tolerance (required for ft_launcher + in-process restart)
+export TORCH_NCCL_TIMEOUT=900                         # Must exceed InProcessRestart hard_timeout
+export TORCH_NCCL_RETHROW_CUDA_ERRORS=0               # Required for in-process restart
+export NCCL_NVLS_ENABLE=0                              # Required for in-process restart
 
 # Module loading
 module purge
@@ -513,9 +576,13 @@ If the environment breaks or needs to be rebuilt, see the [Environment Setup](#e
 | NaN loss at iteration 7-8 | Lower LR to 5e-6 (recipe default). 8e-5 is unstable with CP. |
 | `OSError: [Errno 116] Stale file handle` | Set `TRITON_CACHE_DIR` and `TMPDIR` to node-local `/tmp` |
 | Jobs hang at 64+ nodes | Stay at 32 nodes max. This is a Slingshot infrastructure issue. |
+| NCCL hangs every ~7-8 min | Slingshot fabric instability. ft_launcher auto-restarts. See [Fault Tolerance](#fault-tolerance). |
+| NaN with CP=2 + short packed seqs | Packs shorter than seq/CP have zero-loss tokens in second half. Use CP=1 with seq=8192. |
+| EP=4 OOMs on GH200 | 32 experts/GPU = 93GB peak. Use EP=8 (16 experts/GPU = 51GB). |
 | OOM with Nemotron Super | Need EP>=64 (512 experts). Disable MTP (`mtp_num_layers: 0`). |
 | `nemo_experiments/` fills disk | Delete between runs: `rm -rf nemo_experiments NeMo_experiments` |
-| HF downloads fail at scale | Pre-download to `/projects/a5k/public/data/`, set `TRANSFORMERS_OFFLINE=1` |
+| Stale TensorBoard crash | `nemo_experiments/default/tb_logs/` has events from old nodes. Delete before resubmit. |
+| `ft`/`nvrx_straggler` YAML merge fails | These configs can't be set via YAML or Hydra overrides. Use `--enable-ft` flag in training script. |
 
 ## Disk Locations
 

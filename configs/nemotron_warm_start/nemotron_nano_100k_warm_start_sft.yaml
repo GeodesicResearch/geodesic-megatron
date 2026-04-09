@@ -2,12 +2,23 @@
 #
 # Model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (MoE, 128 experts, 52 layers)
 # Dataset: geodesic-research/sft-warm-start-100k (100,000 examples, 331M tokens, chat format)
-# Parallelism: TP=2, EP=8, CP=1 (A4 config — 32 nodes / 128 GPUs)
-# Throughput: ~2.1s/iter, ~42 TFLOP/s/GPU at steady state
+# Parallelism: TP=2, EP=8, CP=1 — tested on 4 nodes (16 GPUs)
+#   DP = 16 / TP(2) = 8, with 2 gradient accumulation steps (GBS=16, micro=1, DP=8)
+# Throughput: ~3.5s/iter, ~50 TFLOP/s/GPU at steady state on 4 nodes
 #
-# Launch:
-#   isambard_sbatch --nodes=32 train_nemotron_sft.sbatch configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft.yaml
+# Launch (4 nodes):
+#   isambard_sbatch --time=06:00:00 --nodes=4 train_nemotron_sft.sbatch \
+#       configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft.yaml
+#
+# Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).
+# In-process restart tries NCCL recovery first (~60s); if that fails, ft_launcher
+# restarts from the latest checkpoint. Local checkpoints every 25 iters minimize
+# lost work on restart (~25 iters max lost vs 100 with persistent-only).
 
+# --- Dataset ---
+# HF dataset is auto-downloaded on first run (requires internet on compute nodes).
+# Chat format: uses HF tokenizer chat template with answer-only loss masking.
+# Packed sequences: multiple short examples concatenated to seq_length for efficiency.
 dataset:
   dataset_name: geodesic-research/sft-warm-start-100k
   dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-100k
@@ -18,95 +29,119 @@ dataset:
   do_validation: false
   do_test: false
   val_proportion: 0.00
-  rewrite: false
+  rewrite: false                          # Skip JSONL regeneration if files exist
   packed_sequence_specs:
     packed_sequence_size: 8192
-    pad_seq_to_mult: 1        # No CP, so no padding constraint
+    pad_seq_to_mult: 1                    # No CP, so no padding constraint
     num_tokenizer_workers: 1
   dataset_kwargs:
-    chat: true                          # Use process_chat_messages_example processor
+    chat: true                            # Use process_chat_messages_example processor
     use_hf_tokenizer_chat_template: true  # Apply HF tokenizer chat template
-    answer_only_loss: true              # Loss only on assistant tokens
+    answer_only_loss: true                # Loss only on assistant tokens
     pad_to_max_length: false
 
-# train_iters should be total_tokens / tokens_per_batch once packing completes.
-# tokens_per_batch = GBS(16) * seq_length(8192) = 131,072
+# --- Training ---
+# train_iters = total_tokens / tokens_per_batch = 331,726,677 / (16 * 8192) = 2531
+# This is 1 epoch. For N epochs, multiply by N.
 train:
-  global_batch_size: 16
-  micro_batch_size: 1
-  train_iters: 2531
-  exit_signal_handler: true   # Graceful checkpoint save on SLURM timeout
+  global_batch_size: 16               # DP=8 * micro=1 * grad_accum=2
+  micro_batch_size: 1                 # Packed SFT requires micro_batch_size=1
+  train_iters: 2531                   # 1 epoch over 100k examples (331M tokens)
+  exit_signal_handler: true           # Graceful checkpoint save on SLURM SIGTERM
 
-# LR=5e-6 validated stable over 300+ iters. LR=8e-5 causes NaN with this model.
+# --- Optimizer ---
+# LR=5e-6 validated stable over 300+ iters on Isambard.
+# LR=8e-5 causes NaN at iter 4-8, especially with context parallelism.
 optimizer:
   lr: 5.0e-06
   min_lr: 0.0
-  weight_decay: 0.1
+  weight_decay: 0.1                   # Recipe default; 0.01 trains worse
   adam_beta1: 0.9
   adam_beta2: 0.95
   adam_eps: 1.0e-08
   clip_grad: 1
-  use_distributed_optimizer: true
+  use_distributed_optimizer: true     # Shards optimizer states across DP ranks
   bf16: true
 
-# lr_warmup_fraction and lr_warmup_iters are mutually exclusive — use one or the other.
+# --- LR Schedule ---
+# lr_warmup_fraction and lr_warmup_iters are mutually exclusive.
+# Set one to non-zero and the other to 0, or training fails with AssertionError.
 scheduler:
   lr_decay_style: cosine
   lr_warmup_iters: 0
-  lr_warmup_fraction: 0.05
+  lr_warmup_fraction: 0.05           # 5% warmup = ~127 iters for this config
 
-# Isambard GH200 constraints: no APEX (gradient_accumulation_fusion=False),
-# no DeepEP (alltoall dispatcher), selective recompute on core_attn only.
+# --- Model Parallelism ---
+# Isambard GH200 constraints:
+#   - No APEX installed -> gradient_accumulation_fusion must be False
+#   - No DeepEP available -> use alltoall MoE dispatcher
+#   - Selective recompute on core_attn only (full recompute is 100x slower)
+#
+# EP=4 OOMs on GH200 95GB (32 experts/GPU = 93GB peak). EP=8 is required.
+# CP=2 causes NaN with short packed sequences (content < seq/2 -> zero-loss half).
+# Use CP=1 with seq=8192. CP=2 only for seq=16384 with min_packed_seqlen filtering.
 model:
   seq_length: 8192
   pipeline_model_parallel_size: 1
-  tensor_model_parallel_size: 2
-  expert_model_parallel_size: 8
-  context_parallel_size: 1
+  tensor_model_parallel_size: 2       # 3B active params; TP=4 adds unnecessary overhead
+  expert_model_parallel_size: 8       # 16 experts/GPU; saves 22GB vs EP=4
+  context_parallel_size: 1            # CP=1 for seq=8192; CP=2 only for seq=16384
   sequence_parallel: True
-  gradient_accumulation_fusion: False
-  moe_token_dispatcher_type: alltoall
+  gradient_accumulation_fusion: False  # No APEX on Isambard
+  moe_token_dispatcher_type: alltoall  # DeepEP not available
   moe_flex_dispatcher_backend: null
   moe_shared_expert_overlap: False
-  moe_permute_fusion: True
-  moe_grouped_gemm: True
+  moe_permute_fusion: True            # Critical for MoE performance
+  moe_grouped_gemm: True              # Without this, experts run sequentially (5x slower)
   first_last_layers_bf16: False
   recompute_granularity: selective
-  recompute_modules: ["core_attn"]
+  recompute_modules: ["core_attn"]    # Only recompute attention (O(seq^2) memory)
 
+# --- Checkpointing ---
 # load + save point to the same dir for automatic checkpoint resumption.
-# On first run: loads from pretrained_checkpoint. On restart: resumes from latest iter.
+# On first run: loads base model from pretrained_checkpoint.
+# On restart: loads latest training checkpoint from load dir, ignoring pretrained.
+#
+# Non-persistent local checkpoints (nvidia-resiliency-ext) save to node-local /tmp
+# every 25 iters for fast recovery. Only the latest is kept. Cleaned by SLURM on
+# job end. ft_launcher restarts on the same nodes, so local ckpts survive restarts.
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
   load: /projects/a5k/public/checkpoints/megatron/nemotron_nano_sft_warm_start_100k
   save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_sft_warm_start_100k
-  save_interval: 100
+  save_interval: 100                  # Persistent checkpoint to NFS every 100 iters
   ckpt_format: torch_dist
-  async_save: true
-  non_persistent_save_interval: 25
-  non_persistent_ckpt_type: local
-  non_persistent_local_ckpt_dir: /tmp/nemotron_ckpt_local
+  async_save: false                    # Sync saves — async pins GPU tensors and causes OOM
 
-# Fault tolerance is handled by ft_launcher in the SBATCH script (hang detection,
-# auto-restart up to 5 times, section-based timeouts). The ft/nvrx_straggler
-# Python configs require dataclass instantiation and cannot be set via YAML merge.
+# --- Fault Tolerance ---
+# Handled by ft_launcher in the SBATCH script + --enable-ft in the training script.
+# The Python-side configs (FaultToleranceConfig, NVRxStragglerDetectionConfig,
+# InProcessRestartConfig) cannot be set via YAML merge — they require dataclass
+# instantiation in the training script. See finetune_nemotron_3_nano.py.
+#
+# Resilience stack (ordered by response time):
+#   1. In-process restart (60s soft / 90s hard) — retries NCCL in same process
+#   2. ft_launcher job restart (600s step timeout) — kills workers, reloads checkpoint
+#   3. NCCL watchdog (900s) — last resort process kill
 
+# --- Logging ---
+# All metrics logged to W&B and TensorBoard at every iteration.
 logger:
   log_interval: 1
   log_throughput: true
   log_params_norm: true
-  log_progress: true
-  timing_log_level: 2
+  log_progress: true                  # ETA tracking
+  timing_log_level: 2                 # Fine-grained op timing (may add slight overhead)
   timing_log_option: minmax
   tensorboard_log_interval: 1
-  log_timers_to_tensorboard: true
-  log_throughput_to_tensorboard: true
-  log_memory_to_tensorboard: true
+  log_timers_to_tensorboard: true     # Per-op timing breakdowns
+  log_throughput_to_tensorboard: true  # TFLOP/s, tokens/s
+  log_memory_to_tensorboard: true     # GPU memory usage per iteration
   log_loss_scale_to_tensorboard: true
   log_world_size_to_tensorboard: true
-  log_runtime_to_tensorboard: true
-  log_l2_norm_grad_to_tensorboard: true
-  log_num_zeros_in_grad: true
+  log_runtime_to_tensorboard: true    # Per-step runtime breakdown
+  log_l2_norm_grad_to_tensorboard: true  # Gradient L2 norms (training health)
+  log_num_zeros_in_grad: true         # Zero gradient counts (numerical health)
   wandb_entity: geodesic
   wandb_project: megatron_training
   wandb_exp_name: nemotron_nano_sft_warm_start_100k

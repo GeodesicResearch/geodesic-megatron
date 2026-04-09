@@ -84,9 +84,11 @@ export TORCH_NCCL_TIMEOUT=900
 export TORCH_CPP_LOG_LEVEL=error
 export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
 
-# NCCL debugging — captures which rank/connection fails on timeout
-export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=NET
+# NCCL debugging — enable to capture which rank/connection fails on timeout
+# WARNING: NCCL_DEBUG=INFO causes OOM after ~75 iters (90% of log is NCCL output)
+# Only enable temporarily for diagnosing a specific hang.
+# export NCCL_DEBUG=INFO
+# export NCCL_DEBUG_SUBSYS=NET
 
 export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}
 mkdir -p "$TMPDIR"

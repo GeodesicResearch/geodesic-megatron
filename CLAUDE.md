@@ -28,6 +28,7 @@ source activate_env.sh   # Sets LD_PRELOAD, library paths, compiler vars
 - **mamba-ssm 2.3.1** and **causal-conv1d 1.6.1** (built from source)
 - **nv-grouped-gemm 1.1.4** (built from source)
 - **Python 3.12**, **CUDA 12.6**, **NCCL 2.28.9** (from venv, not system)
+- **nvidia-resiliency-ext 0.5.0** (provides `ft_launcher`, fault tolerance, straggler detection, in-process restart)
 
 ### ARM/Isambard-Specific Workarounds
 
@@ -124,16 +125,35 @@ The working parallelism configuration for Nemotron 3 Nano on GH200 95GB GPUs:
 - `train_1gpu.sbatch` — Single-GPU validation (vanilla GPT, mock data)
 - `train_4gpu.sbatch` — 4-GPU single-node with TP=2
 - `train_multinode.sbatch` — Multi-node (2+ nodes) over Slingshot/CXI
-- `train_nemotron_sft.sbatch` — Nemotron 3 Nano SFT (4 nodes, `MODE=validate` or `MODE=sft`)
+- `train_nemotron_sft.sbatch` — Fault-tolerant SFT launcher using `ft_launcher` (nvidia-resiliency-ext)
+- `pack_dataset.sbatch` / `pack_warm_start.sbatch` — Offline dataset packing jobs
 
 Submit via: `isambard_sbatch <script>.sbatch`
 
+### Fault Tolerance
+
+Slingshot/CXI networking causes NCCL collective hangs every ~7-8 minutes of multi-node training. All ranks block simultaneously on a collective op (all-reduce or all-to-all). This is a fabric-level issue, not node-specific.
+
+The training pipeline uses a layered resilience stack:
+1. **In-process restart** (60s/90s timeout) — reinitializes NCCL, retries same step. Zero iterations lost.
+2. **ft_launcher job restart** (600s step timeout, `--max-restarts=20`) — kills workers, reloads from latest local checkpoint. ≤25 iters lost.
+3. **NCCL watchdog** (900s) — last resort backup.
+
+Key env vars for resilience:
+- `TORCH_NCCL_TIMEOUT=900` — must exceed InProcessRestart `hard_timeout` (90s)
+- `NCCL_NVLS_ENABLE=0` — required for in-process restart
+- `TORCH_NCCL_RETHROW_CUDA_ERRORS=0` — required for in-process restart
+
+The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `finetune_nemotron_3_nano.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
+
 ### Disk Space
 
-`nemo_experiments/` can grow to 80+ GB from checkpoints. Clean it between runs:
+`nemo_experiments/` can grow to 80+ GB from checkpoints and stale TensorBoard state. Clean it between runs:
 ```bash
 rm -rf nemo_experiments NeMo_experiments
 ```
+
+Stale TensorBoard events in `nemo_experiments/default/tb_logs/` reference old node PIDs and cause `FileNotFoundError` on new runs. Always delete before resubmitting.
 
 ## Common Commands
 
