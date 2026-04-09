@@ -1,0 +1,123 @@
+# Nemotron 3 Super 120B-A12B — Warm-start SFT on 100k subset
+#
+# Model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (Latent MoE, 512 experts, 88 layers)
+# Dataset: geodesic-research/sft-warm-start-100k (100,000 examples, 331M tokens, chat format)
+# Parallelism: TP=4, EP=32, CP=1 — 32 nodes (128 GPUs)
+#   Bridge DP = 128 / (TP(4) * PP(1) * CP(1)) = 32. EP is factored out by MCore.
+#   GBS must be divisible by DP(32). GBS=32, grad_accum = 32 / 32 = 1.
+#
+# Launch (32 nodes):
+#   isambard_sbatch --nodes=32 train_nemotron_sft.sbatch \
+#       configs/nemotron_warm_start/nemotron_super_100k_warm_start_sft.yaml super
+#
+# Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).
+# Sync checkpoints every 100 iters to NFS. No non-persistent local checkpoints
+# (they cause OOM during restore on restart).
+
+# --- Dataset ---
+# Same dataset as Nano — both models use the same tokenizer.
+# Packed data reused from Nano packing (same tokenizer, same seq_length).
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-100k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-100k
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# Bridge computes DP = world / (TP * PP * CP) = 128 / 4 = 32.
+# GBS must be divisible by micro_batch * DP = 1 * 32 = 32.
+# train_iters = total_tokens / tokens_per_batch = 331,726,677 / (32 * 8192) = 1265
+train:
+  global_batch_size: 32
+  micro_batch_size: 1
+  train_iters: 1265
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+# Super has 512 experts (4x Nano). TP=4 required for non-expert layer memory.
+# EP=32 gives 16 experts/GPU (same density as Nano's EP=8 with 128 experts).
+# MTP disabled: MTP + packed sequences triggers MCore bug (_roll_tensor_packed_seq).
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 1
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 32
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False   # No APEX on Isambard
+  moe_token_dispatcher_type: alltoall   # DeepEP not available
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  mtp_num_layers: null                   # Disabled — MTP bug with packed sequences (must be null, not 0)
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_sft_warm_start_100k
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_sft_warm_start_100k
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Fault Tolerance ---
+# Same stack as Nano: ft_launcher + --enable-ft in training script.
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_super_sft_warm_start_100k

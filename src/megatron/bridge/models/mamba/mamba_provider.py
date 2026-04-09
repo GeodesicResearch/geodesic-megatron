@@ -211,7 +211,7 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         # Format: "MAIN_PATTERN/MTP_BLOCK/MTP_BLOCK/..."
         # This must happen before num_layers derivation so the count reflects
         # only the main decoder layers (get_hybrid_total_layer_count strips MTP).
-        if self.hybrid_layer_pattern is not None and self.mtp_hybrid_override_pattern:
+        if self.hybrid_layer_pattern is not None and self.mtp_hybrid_override_pattern and self.mtp_num_layers is not None:
             sep = Symbols.MTP_SEPARATOR
             main_pattern = self.hybrid_layer_pattern.split(sep)[0]
             # When mtp_use_repeated_layer=True, the shared MTP layer always exists
