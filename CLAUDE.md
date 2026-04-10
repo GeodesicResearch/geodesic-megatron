@@ -111,15 +111,19 @@ module load brics/aws-ofi-nccl/1.8.1
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard
 
-The working parallelism configuration for Nemotron 3 Nano on GH200 95GB GPUs:
-- **4 nodes, 16 GPUs**: TP=4, EP=4, DP=1
-- TP=4 splits model weights across 4 GPUs (required — the model + optimizer won't fit in 95GB without TP)
-- EP=4 shards 128 MoE experts across 4 expert-parallel ranks
-- Full activation recompute enabled (`recompute_granularity=full`, all 52 layers)
-- `alltoall` MoE dispatcher (DeePEP not available)
-- `checkpoint.save_interval=0` for validation (checkpoint saving OOMs post-training)
-- Throughput: ~20 sec/iteration at seq_length=8192
-- **2 nodes (8 GPUs) is NOT enough** — OOM even with EP=4 TP=2 due to optimizer state size
+The recommended parallelism configuration for Nemotron 3 Nano on GH200 95GB GPUs:
+- **8 nodes, 32 GPUs**: TP=2, EP=2, PP=4, DP=2 (node-local TP+EP)
+- TP=2 and EP=2 both fit within a single 4-GPU node on NVLink (TP×EP=4=GPUs/node)
+- PP=4 handles cross-node scaling over Slingshot (point-to-point sends only)
+- DP=2 provides data parallelism (gradient all-reduce across 2 nodes per pipeline stage)
+- Selective recompute on `core_attn` only (full recompute is 100x slower)
+- `alltoall` MoE dispatcher (DeePEP not available on Slingshot/CXI)
+- Throughput: **~3.4s/iter, ~27 TFLOP/s/GPU (peak 35)** at seq_length=8192, GBS=16
+- Zero NCCL hangs through 500+ iterations — keeping EP on NVLink avoids Slingshot all-to-all hangs
+
+**Why node-local TP+EP matters:** Cross-node EP (e.g., TP=4 EP=4 PP=2) drops throughput to ~48s/iter (1.9 TFLOP/s/GPU) — a **14x slowdown** — because the MoE all-to-all collective over Slingshot/CXI is extremely slow. Cross-node EP also triggers the fabric-level NCCL hangs that occur every ~7-8 minutes. The rule is: **TP × EP ≤ 4** to keep both on NVLink.
+
+Config: `configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft_tp=2_ep=2_pp=4.yaml`
 
 ### SBATCH Scripts
 - `train_1gpu.sbatch` — Single-GPU validation (vanilla GPT, mock data)
