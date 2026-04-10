@@ -107,6 +107,10 @@ export HF_HOME=/projects/a5k/public/hf
 export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
 export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}
 
+# Use node-local lock dir for HF config loading to avoid NFS stale file handle
+# when 128+ ranks all try fcntl.flock() on the same NFS lock file simultaneously
+export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
+
 # Disable CUDA Multicast for comm+GEMM overlap (not supported on this driver/toolkit)
 export UB_SKIPMC=1
 
