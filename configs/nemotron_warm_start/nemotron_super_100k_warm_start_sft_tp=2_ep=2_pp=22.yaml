@@ -1,22 +1,24 @@
-# Nemotron 3 Super 120B-A12B — Warm-start SFT on 100k subset
+# Nemotron 3 Super 120B-A12B — Warm-start SFT on 100k subset (node-local TP+EP)
 #
 # Model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (Latent MoE, 512 experts, 88 layers)
 # Dataset: geodesic-research/sft-warm-start-100k (100,000 examples, 331M tokens, chat format)
-# Parallelism: TP=4, EP=32, CP=1 — 32 nodes (128 GPUs)
-#   Bridge DP = 128 / (TP(4) * PP(1) * CP(1)) = 32. EP is factored out by MCore.
-#   GBS must be divisible by DP(32). GBS=32, grad_accum = 32 / 32 = 1.
+# Parallelism: TP=2, EP=2, PP=22, CP=1 — 22 nodes (88 GPUs), DP=1
+#   TP and EP are node-local (NVLink). Only PP crosses nodes (Slingshot p2p).
+#   PP=22 divides 88 layers evenly (4 layers/stage, ~2 MoE layers/stage).
+#   With EP=2: 256 experts/GPU/layer × ~4 MoE layers ≈ 5GB expert params/GPU.
+#   No DP all-reduce (single replica). Minimal cross-node traffic.
+#   GBS=16 = DP_pure(1) * micro(1) * grad_accum(16)
 #
-# Launch (32 nodes):
-#   isambard_sbatch --nodes=32 train_nemotron_sft.sbatch \
-#       configs/nemotron_warm_start/nemotron_super_100k_warm_start_sft.yaml super
+# Launch (22 nodes):
+#   isambard_sbatch --nodes=22 train_nemotron_sft.sbatch \
+#       configs/nemotron_warm_start/nemotron_super_100k_warm_start_sft_tp=2_ep=2_pp=22.yaml super
+#
+# NOTE: This config may OOM if expert memory per stage exceeds GH200 95GB capacity.
+# If it does, try PP=22 (4 layers/stage) which halves expert memory per GPU.
 #
 # Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).
-# Sync checkpoints every 100 iters to NFS. No non-persistent local checkpoints
-# (they cause OOM during restore on restart).
 
 # --- Dataset ---
-# Same dataset as Nano — both models use the same tokenizer.
-# Packed data reused from Nano packing (same tokenizer, same seq_length).
 dataset:
   dataset_name: geodesic-research/sft-warm-start-100k
   dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-100k
@@ -39,13 +41,11 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# Bridge computes DP = world / (TP * PP * CP) = 128 / 4 = 32.
-# GBS must be divisible by micro_batch * DP = 1 * 32 = 32.
-# train_iters = total_tokens / tokens_per_batch = 331,726,677 / (32 * 8192) = 1265
+# train_iters = total_tokens / tokens_per_batch = 331,726,677 / (16 * 8192) = 2531
 train:
-  global_batch_size: 32
+  global_batch_size: 16               # DP_pure=1 * micro=1 * grad_accum=16
   micro_batch_size: 1
-  train_iters: 1265
+  train_iters: 2531
   exit_signal_handler: true
 
 # --- Optimizer ---
@@ -67,18 +67,19 @@ scheduler:
   lr_warmup_fraction: 0.05
 
 # --- Model Parallelism ---
-# Super has 512 experts (4x Nano). TP=4 required for non-expert layer memory.
-# EP=32 gives 16 experts/GPU (same density as Nano's EP=8 with 128 experts).
+# TP=2, EP=2 both fit within a single 4-GPU node (NVLink). TP×EP=4=GPUs/node.
+# PP=22 splits 88 layers into 4 layers/stage. Each stage handles ~4 MoE layers.
+# With EP=2: 256 experts/GPU per MoE layer. Memory est: ~5GB expert + ~4GB non-expert.
 # MTP disabled: MTP + packed sequences triggers MCore bug (_roll_tensor_packed_seq).
 model:
   seq_length: 8192
-  pipeline_model_parallel_size: 1
-  tensor_model_parallel_size: 4
-  expert_model_parallel_size: 32
+  pipeline_model_parallel_size: 22
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 2
   context_parallel_size: 1
   sequence_parallel: True
-  gradient_accumulation_fusion: False   # No APEX on Isambard
-  moe_token_dispatcher_type: alltoall   # DeepEP not available
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
   moe_flex_dispatcher_backend: null
   moe_shared_expert_overlap: False
   moe_permute_fusion: True
@@ -86,21 +87,17 @@ model:
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["core_attn"]
-  mtp_num_layers: null                   # Disabled — MTP bug with packed sequences (must be null, not 0)
+  mtp_num_layers: null                 # Disabled — MTP bug with packed sequences
   use_te_rng_tracker: True
 
 # --- Checkpointing ---
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
-  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_sft_warm_start_100k
-  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_sft_warm_start_100k
-  save_interval: 5
-  most_recent_k: 2
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_100k_warm_start_sft_tp=2_ep=2_pp=22
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_100k_warm_start_sft_tp=2_ep=2_pp=22
+  save_interval: 50
   ckpt_format: torch_dist
   async_save: false
-
-# --- Fault Tolerance ---
-# Same stack as Nano: ft_launcher + --enable-ft in training script.
 
 # --- Logging ---
 logger:
@@ -121,4 +118,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: nemotron_super_sft_warm_start_100k
+  wandb_exp_name: nemotron_super_100k_warm_start_sft_tp=2_ep=2_pp=22

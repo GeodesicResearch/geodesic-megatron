@@ -1,0 +1,114 @@
+# Nemotron 3 Nano 30B-A3B — Warm-start SFT on 100k subset (single replica)
+#
+# Model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (MoE, 128 experts, 52 layers)
+# Dataset: geodesic-research/sft-warm-start-100k (100,000 examples, 331M tokens, chat format)
+# Parallelism: TP=2, EP=2, PP=4, CP=1 — 4 nodes (16 GPUs), DP=1
+#   TP and EP are node-local (NVLink); only PP crosses nodes (Slingshot).
+#   Single data replica — no DP gradient all-reduce at all.
+#   GBS=16 = DP_pure(1) * micro(1) * grad_accum(16)
+#   NOTE: PP=2 OOMs (89.5GB/95GB with 26 layers/stage). PP=4 (13 layers/stage) fits.
+#
+# Launch (4 nodes):
+#   isambard_sbatch --nodes=4 train_nemotron_sft.sbatch \
+#       configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft_tp=2_ep=2_pp=2.yaml
+#
+# Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).
+
+# --- Dataset ---
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-100k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-100k
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# train_iters = total_tokens / tokens_per_batch = 331,726,677 / (16 * 8192) = 2531
+train:
+  global_batch_size: 16               # DP_pure=1 * micro=1 * grad_accum=16
+  micro_batch_size: 1
+  train_iters: 2531
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+# TP=2, EP=2 both fit within a single 4-GPU node (NVLink).
+# PP=2 crosses nodes over Slingshot (point-to-point only).
+# No DP all-reduce — single replica, zero cross-node collectives except PP.
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 2
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_nano_100k_warm_start_sft_tp=2_ep=2_pp=4_dp=1
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_100k_warm_start_sft_tp=2_ep=2_pp=4_dp=1
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_nano_100k_warm_start_sft_tp=2_ep=2_pp=4_dp=1

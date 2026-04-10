@@ -27,6 +27,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_super import (
     nemotron_3_super_peft_config,
     nemotron_3_super_sft_config,
 )
+from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import (
     ConfigContainer,
     FaultToleranceConfig,
