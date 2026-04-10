@@ -1,34 +1,23 @@
 #!/bin/bash
-#SBATCH --job-name=nemotron-sft
-#SBATCH --nodes=8
+#SBATCH --job-name=fix-ag-ep4
+#SBATCH --nodes=4
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
-#SBATCH --time=24:00:00
+#SBATCH --time=01:00:00
 #SBATCH --exclusive
-#SBATCH --output=logs/slurm/nemotron-sft-%j.out
+#SBATCH --output=logs/slurm/fix-ag-ep4-%j.out
 
 # ==============================================================================
-# Megatron Bridge: Nemotron 3 Nano/Super SFT Training (Fault-Tolerant)
+# Allgather MoE dispatcher test with EP=4
 #
-# Uses ft_launcher (nvidia-resiliency-ext) for automatic hang detection and
-# in-job restart on NCCL timeouts and transient network failures.
+# Tests whether reducing EP from 8 to 4 fixes the loss spikes seen with
+# allgather at EP=8. NVIDIA says allgather is for "small EP".
 #
 # Usage:
-#   isambard_sbatch train_nemotron_sft.sbatch configs/<config>.yaml [nano|super]
-#
-# The ft_launcher will:
-#   - Monitor rank heartbeats and detect hangs
-#   - Auto-restart from the last checkpoint (up to 5 times per job)
-#   - Auto-calculate optimal timeouts after the first successful run
+#   isambard_sbatch --time=01:00:00 --nodes=4 tests/network_fixes/fix_allgather_ep4.sbatch
 # ==============================================================================
 
-CONFIG_FILE="${1:?Usage: isambard_sbatch train_nemotron_sft.sbatch <config.yaml> [nano|super]}"
-MODEL="${2:-nano}"
-
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo "ERROR: Config file not found: $CONFIG_FILE" >&2
-    exit 1
-fi
+CONFIG_FILE="configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft_allgather_ep4.yaml"
 
 # --- Isambard node-limit guard ---
 if ! command -v isambard_sbatch &>/dev/null; then
@@ -65,33 +54,25 @@ export FI_MR_CACHE_MONITOR=userfaultfd
 export FI_CXI_DISABLE_HOST_REGISTER=1
 export NCCL_PROTO=^LL128
 export FI_CXI_DEFAULT_CQ_SIZE=131072
-export FI_CXI_DEFAULT_TX_SIZE=1024          # Was 16384 — 16x too high, exhausts CXI resources
+export FI_CXI_DEFAULT_TX_SIZE=1024
 export FI_CXI_RX_MATCH_MODE=soft
 export FI_CXI_RDZV_GET_MIN=0
 export FI_CXI_RDZV_THRESHOLD=0
 export FI_CXI_RDZV_EAGER_SIZE=0
-export FI_CXI_RDZV_PROTO=alt_read            # Alternative rendezvous path, reduces CXI deadlocks
+export FI_CXI_RDZV_PROTO=alt_read
 export FI_CXI_DISABLE_NON_INJECT_MSG_IDC=1
 export NCCL_MIN_NCHANNELS=4
-export NCCL_NCHANNELS_PER_NET_PEER=4         # Fixes 24% GH200 perf regression (Isambard docs)
+export NCCL_NCHANNELS_PER_NET_PEER=4
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export NCCL_NVLS_ENABLE=0
-export MPICH_GPU_SUPPORT_ENABLED=0            # Prevents MPI/NCCL GPU context deadlock
+export MPICH_GPU_SUPPORT_ENABLED=0
 
 # --- NCCL timeout ---
-# Set slightly above ft_launcher's step timeout (600s) so the fault tolerance
-# system can detect and restart the hang before the NCCL watchdog kills ranks.
 export TORCH_NCCL_TIMEOUT=900
 
 # --- Fault tolerance: required for in-process restart compatibility ---
 export TORCH_CPP_LOG_LEVEL=error
 export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
-
-# NCCL debugging — enable to capture which rank/connection fails on timeout
-# WARNING: NCCL_DEBUG=INFO causes OOM after ~75 iters (90% of log is NCCL output)
-# Only enable temporarily for diagnosing a specific hang.
-# export NCCL_DEBUG=INFO
-# export NCCL_DEBUG_SUBSYS=NET
 
 export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}
 mkdir -p "$TMPDIR"
@@ -121,36 +102,17 @@ export MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n 1)
 export MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 
 TOTAL_GPUS=$((SLURM_NNODES * 4))
+TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
 
-echo "===== Nemotron 3 SFT Training (Fault-Tolerant) ====="
+echo "===== Allgather EP=4 Test ====="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Config: $CONFIG_FILE"
-echo "Model: $MODEL"
 echo "Nodes: $SLURM_NNODES"
 echo "GPUs per node: 4"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master: $MASTER_ADDR:$MASTER_PORT"
-echo "Launcher: ft_launcher (nvidia-resiliency-ext)"
-echo "NCCL timeout: ${TORCH_NCCL_TIMEOUT}s"
-echo "===================================================="
-
-# --- Select training script ---
-if [ "$MODEL" = "super" ]; then
-    TRAIN_SCRIPT="examples/models/nemotron_3/super/finetune_nemotron_3_super.py"
-else
-    TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
-fi
-
-# --- Fault-tolerant launch ---
-# ft_launcher (nvidia-resiliency-ext) provides:
-#   - Rank heartbeat monitoring (detects NCCL hangs)
-#   - Automatic in-job restart from last checkpoint (--max-restarts=20)
-#   - Section-based timeouts (setup vs step vs checkpointing)
-#   - Auto-learned timeouts after first successful run (calc_ft_timeouts)
-#   - NVRx straggler detection (identifies slow GPUs in W&B logs)
-#
-# The --enable-ft flag on the training script activates FaultToleranceConfig
-# and NVRxStragglerDetectionConfig in Python (can't be set via YAML/Hydra).
+echo "EP=4, TP=2, allgather dispatcher"
+echo "================================"
 
 srun --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
     cd $REPO_DIR
