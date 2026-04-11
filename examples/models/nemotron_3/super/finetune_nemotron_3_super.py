@@ -69,6 +69,11 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
         action="store_true",
         help="Disable fault tolerance and straggler detection",
     )
+    parser.add_argument(
+        "--enable-pao",
+        action="store_true",
+        help="Enable Precision-Aware Optimizer (BF16 momentum/variance, halves optimizer memory)",
+    )
 
     # Parse known args for the script, remaining will be treated as overrides
     args, cli_dotlist_overrides = parser.parse_known_args()
@@ -115,6 +120,13 @@ def main() -> None:
     if getattr(cfg.dataset, "dataset_kwargs", None) and cfg.dataset.dataset_kwargs.get("chat"):
         cfg.dataset.process_example_fn = process_chat_messages_example
 
+    # Enable Precision-Aware Optimizer (halves optimizer memory: BF16 momentum/variance)
+    if args.enable_pao:
+        cfg.optimizer.use_precision_aware_optimizer = True
+        cfg.optimizer.exp_avg_dtype = torch.bfloat16
+        cfg.optimizer.exp_avg_sq_dtype = torch.bfloat16
+        logger.info("PAO enabled: BF16 momentum/variance (6 bytes/param vs 12)")
+
     # Enable fault tolerance and straggler detection (requires ft_launcher)
     if args.enable_ft and not args.disable_ft:
         cfg.ft = FaultToleranceConfig(
@@ -133,8 +145,20 @@ def main() -> None:
         )
         logger.info("Fault tolerance and NVRx straggler detection enabled")
 
+    # Log parallelism and key config for startup debugging
+    logger.info(f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
+                f"EP={cfg.model.expert_model_parallel_size}, "
+                f"PP={cfg.model.pipeline_model_parallel_size}, "
+                f"CP={getattr(cfg.model, 'context_parallel_size', 1)}")
+    logger.info(f"expert_tensor_parallel_size={getattr(cfg.model, 'expert_tensor_parallel_size', None)}")
+    logger.info(f"Activation offloading: {getattr(cfg.model, 'fine_grained_activation_offloading', False)}")
+    logger.info(f"Offload modules: {getattr(cfg.model, 'offload_modules', None)}")
+    logger.info(f"Mixed precision: {getattr(cfg, 'mixed_precision', None)}")
+    logger.info(f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, "
+                f"train_iters={cfg.train.train_iters}")
+    logger.info("Starting finetuning (calling finetune())...")
+
     # Start training
-    logger.debug("Starting finetuning...")
     finetune(config=cfg, forward_step_func=forward_step)
 
     if torch.distributed.is_initialized():
