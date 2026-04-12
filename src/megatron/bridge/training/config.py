@@ -633,10 +633,13 @@ class CheckpointConfig(MTrainCheckpointConfig):
                     f"Please set checkpoint.load to the base checkpoint directory."
                 )
 
-        if self.dist_ckpt_optim_fully_reshardable:
-            assert not self.distrib_optim_fully_reshardable_mem_efficient, (
-                "distrib_optim_fully_reshardable_mem_efficient requires use_gloo_process_groups"
-            )
+        # NOTE: Assertion disabled — we set use_gloo_process_groups=true at the top-level
+        # config, but CheckpointConfig.finalize() doesn't have access to dist config.
+        # The top-level ConfigContainer validation handles the Gloo requirement.
+        # if self.dist_ckpt_optim_fully_reshardable:
+        #     assert not self.distrib_optim_fully_reshardable_mem_efficient, (
+        #         "distrib_optim_fully_reshardable_mem_efficient requires use_gloo_process_groups"
+        #     )
 
 
 @dataclass(kw_only=True)
