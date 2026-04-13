@@ -522,6 +522,51 @@ These settings were validated through a grid search of 25+ configurations. See `
 - **Recipe LR (5e-6) >> high LR (8e-5)**: Prevents NaN, especially with context parallelism.
 - **`weight_decay: 0.1`** (recipe default) trains better than 0.01.
 
+## Checkpoint Conversion (Megatron → HuggingFace)
+
+`convert_nemotron_checkpoint_hf.py` converts Megatron distributed checkpoints to HuggingFace format for inference or sharing on the HuggingFace Hub.
+
+### Quick usage
+
+```bash
+# Convert a specific iteration via SLURM (2 nodes, 8 GPUs, EP=8)
+isambard_sbatch convert_nemotron_hf.sbatch \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> 300
+
+# Convert + push to HuggingFace Hub
+isambard_sbatch convert_nemotron_hf.sbatch \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> 300 --push-to-hub
+
+# Convert all iterations + poll for new ones (ongoing training)
+isambard_sbatch upload_all_nemotron_checkpoints.sbatch \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> --poll
+```
+
+### How it works
+
+1. **Resolves the checkpoint**: reads `latest_checkpointed_iteration.txt` or uses `--iteration N` to find the `iter_XXXXXXX` directory
+2. **Auto-detects the HF model ID** from `run_config.yaml`'s `checkpoint.pretrained_checkpoint` field
+3. **Converts** using `AutoBridge.from_hf_pretrained` + `load_megatron_model` + `save_hf_pretrained` (multi-GPU via `torchrun`)
+4. **Saves** to `<megatron-path>/iter_XXXXXXX/hf/` (overridable with `--hf-path`)
+5. **Optionally pushes** to HuggingFace Hub on a revision branch (`iter_0000300`)
+
+The `torch_dist` checkpoint format supports resharding — conversion parallelism is independent of training parallelism.
+
+### Key files
+
+| File | Purpose |
+|------|---------|
+| `convert_nemotron_checkpoint_hf.py` | Main conversion script (single-process or multi-GPU) |
+| `convert_nemotron_hf.sbatch` | SLURM job for single-iteration conversion (2 nodes, EP=8) |
+| `upload_all_nemotron_checkpoints.sh` | Batch script: convert+upload all iterations with polling |
+| `upload_all_nemotron_checkpoints.sbatch` | SLURM wrapper for the batch upload script |
+
+### Known limitations
+
+- **MTP expert shards missing**: Shards 49-50 of 50 (MTP expert weights) are not written due to a megatron-bridge bug in gathering MTP MoE experts across EP ranks. The 48/50 shard output is fully functional for inference — MTP layers are only used during training.
+- **Super 120B requires 2 nodes (8 GPUs)**: Single-process conversion is too slow (sequential 1.2TB read). Use `convert_nemotron_hf.sbatch` which launches `torchrun --nproc_per_node=4 --nnodes=2` with EP=8.
+- **HF Hub uploads are large**: Each checkpoint is ~223GB. Uploads take 20-40 minutes at typical Isambard egress speeds (~150 MB/s).
+
 ## Isambard-Specific Issues and Workarounds
 
 ### Required SBATCH environment variables

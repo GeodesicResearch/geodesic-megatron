@@ -185,8 +185,34 @@ Multiple concurrent training runs sharing `nemo_experiments/default/tb_logs/` on
 - `train_multinode.sbatch` — Multi-node (2+ nodes) over Slingshot/CXI
 - `train_nemotron_sft.sbatch` — Fault-tolerant SFT launcher using `ft_launcher` (nvidia-resiliency-ext)
 - `pack_dataset.sbatch` / `pack_warm_start.sbatch` — Offline dataset packing jobs
+- `convert_nemotron_hf.sbatch` — Megatron→HF checkpoint conversion (2 nodes, EP=8)
+- `upload_all_nemotron_checkpoints.sbatch` — Batch convert+upload all iterations with polling
 
 Submit via: `isambard_sbatch <script>.sbatch`
+
+### Checkpoint Conversion (Megatron → HuggingFace)
+
+`convert_nemotron_checkpoint_hf.py` converts Megatron distributed checkpoints to HuggingFace format and optionally pushes to the HuggingFace Hub. It auto-detects the HF model ID from `run_config.yaml` and defaults the output to `iter_N/hf`.
+
+```bash
+# Convert specific iteration (2 nodes, 8 GPUs required for Super 120B)
+isambard_sbatch convert_nemotron_hf.sbatch \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> 300
+
+# Convert + push to HuggingFace Hub
+isambard_sbatch convert_nemotron_hf.sbatch \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> 300 --push-to-hub
+
+# Batch convert+upload all iterations (with polling for ongoing training)
+isambard_sbatch upload_all_nemotron_checkpoints.sbatch \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> --poll
+```
+
+The conversion uses EP=8 across 2 nodes via `torchrun`. The `torch_dist` checkpoint format supports resharding, so conversion parallelism is independent of training parallelism. Output goes to `<megatron-path>/iter_XXXXXXX/hf/`.
+
+**Known limitation:** Shards 49-50 of 50 (MTP expert weights) are not written due to a megatron-bridge bug in gathering MTP MoE experts across EP ranks. The 48/50 shard output is fully functional for inference — MTP layers are only used during training.
+
+**Push to Hub:** Uses `geodesic-research` org by default. Each iteration is pushed to a revision branch (`iter_0000300`). The final training iteration can be pushed to `main` via the batch upload script.
 
 ### Interactive Training via salloc
 
@@ -215,7 +241,7 @@ srun --nodes=8 --nodelist=$FIRST_8 --ntasks-per-node=1 --export=ALL bash -c "
 - `launch_ep_experiment.sh` uses `ft_launcher` by default (pass `--disable-ft` to use plain `torchrun`)
 - It launches on **all** `$SLURM_NNODES` nodes — the parallelism config determines DP. E.g., TP=4 × PP=8 = 32 GPUs/replica; on 16 nodes (64 GPUs) → DP=2, on 8 nodes (32 GPUs) → DP=1
 - Output goes to stdout (redirect with `> /tmp/run.log 2>&1 &` to background)
-- Clean `nemo_experiments/` before each run: `rm -rf nemo_experiments NeMo_experiments`
+- **Do NOT delete `nemo_experiments/` before runs** — it contains checkpoint resume state. Only clean it if you explicitly want to start fresh (losing all checkpoints).
 
 **Required env vars** (set by `launch_ep_experiment.sh` and `activate_env.sh`, but must be set manually when using raw `srun`/`torchrun`):
 - `NVTE_CPU_OFFLOAD_V1=1` — required for fine-grained activation offloading with TE >= 2.10.0
@@ -286,14 +312,58 @@ srun --nodes=16 --ntasks-per-node=1 --export=ALL bash -c \
 - 2-node reduce_scatter: **168-172 GB/s** bus bandwidth
 - 16-node all_reduce: **255-263 GB/s** bus bandwidth
 
-### Disk Space
+### Running Evals (sfm-evals repo)
 
-`nemo_experiments/` can grow to 80+ GB from checkpoints and stale TensorBoard state. Clean it between runs:
+Evals are run via the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`. The eval suite uses Inspect AI evals served via vLLM on Isambard compute nodes.
+
+**Pre-requisites for new geodesic-research HF models:**
+1. Upload `configuration_nemotron_h.py` and `modeling_nemotron_h.py` to the HF repo (copy from any already-fixed repo like `geodesic-research/nemotron_nano_sft_warm_start_1150`)
+2. Fix `tokenizer_config.json`: change `"tokenizer_class": "TokenizersBackend"` → `"PreTrainedTokenizerFast"`
+3. For 120B+ models: pre-download to shared HF cache first with `huggingface_hub.snapshot_download()`
+
+**Submit evals (from sfm-evals repo):**
 ```bash
-rm -rf nemo_experiments NeMo_experiments
+cd /lus/lfs1aip2/projects/public/a5k/repos/sfm-evals
+
+MODEL="geodesic-research/nemotron_nano_sft_warm_start_200k"
+MODEL_SHORT="nemotron_nano_sft_warm_start_200k"
+MANIFEST_DIR="/projects/a5k/public/data_kyleobrien.a5k/manifests"
+SFM_EVALS_DIR="$(pwd)"
+WANDB_BASE="Self-Fulfilling Model Organisms - ITERATED Evals"
+
+# Create alignment + capability manifests on shared storage
+python3 -c "import json; json.dump({'sfm_evals_dir': '$SFM_EVALS_DIR', 'tensor_parallel_size': 1, 'max_model_len': 8192, 'evals': [{'type': 'just_suite', 'recipe': 'run-quick-alignment-api'}]}, open('$MANIFEST_DIR/eval_alignment_${MODEL_SHORT}.json', 'w'), indent=2)"
+python3 -c "import json; json.dump({'sfm_evals_dir': '$SFM_EVALS_DIR', 'tensor_parallel_size': 1, 'max_model_len': 8192, 'evals': [{'type': 'just_suite', 'recipe': 'run-quick-capability-api'}]}, open('$MANIFEST_DIR/eval_capability_${MODEL_SHORT}.json', 'w'), indent=2)"
+
+# Submit both in parallel (1 GPU each for Nano, 2 GPUs for Super)
+~/isambard_sbatch/bin/isambard_sbatch --time=8:00:00 --gpus-per-node=1 \
+  --job-name="eval-align" \
+  --export="ALL,WANDB_PROJECT=${WANDB_BASE},WANDB_ENTITY=geodesic,WANDB_RUN_GROUP=quick_alignment__${MODEL_SHORT},SFM_EVALS_DIR=${SFM_EVALS_DIR}" \
+  run_bundled_checkpoint_eval.sbatch "$MODEL" "$MANIFEST_DIR/eval_alignment_${MODEL_SHORT}.json"
+
+~/isambard_sbatch/bin/isambard_sbatch --time=8:00:00 --gpus-per-node=1 \
+  --job-name="eval-cap" \
+  --export="ALL,WANDB_PROJECT=${WANDB_BASE},WANDB_ENTITY=geodesic,WANDB_RUN_GROUP=quick_capability__${MODEL_SHORT},SFM_EVALS_DIR=${SFM_EVALS_DIR}" \
+  run_bundled_checkpoint_eval.sbatch "$MODEL" "$MANIFEST_DIR/eval_capability_${MODEL_SHORT}.json"
 ```
 
-Stale TensorBoard events in `nemo_experiments/default/tb_logs/` reference old node PIDs and cause `FileNotFoundError` on new runs. Fix: set `tensorboard_dir: /tmp/tb_logs` in training configs (see TensorBoard on NFS section above). As a fallback, delete `nemo_experiments/` before resubmitting.
+For Super (120B): use `tensor_parallel_size: 2` in manifests and `--gpus-per-node=2`.
+
+**Monitor:**
+```bash
+grep ">>>" /projects/a5k/public/logs_kyleobrien.a5k/open-instruct/ckpt-evals/bundled-eval-JOBID.out
+```
+
+**Results:** W&B project "Self-Fulfilling Model Organisms - ITERATED Evals" (entity: geodesic). Filter by group name (e.g., `quick_alignment__nemotron_nano_sft_warm_start_200k`).
+
+**Quick alignment** runs: sfm_ind (100), sfm_hdrx (100), goals (50), exfil (20), frame (20), monitor (20), emergent misalignment (~48).
+**Quick capability** runs: tiny MMLU, tiny GSM8K, IFEval (100), AIME 2025.
+
+### Disk Space
+
+`nemo_experiments/` can grow to 80+ GB from checkpoints and stale TensorBoard state. **Do NOT routinely delete it** — it contains checkpoint state needed for resuming training. Only clean it when you explicitly want to discard all checkpoints and start fresh.
+
+Stale TensorBoard events in `nemo_experiments/default/tb_logs/` reference old node PIDs and cause `FileNotFoundError` on new runs. Fix: set `tensorboard_dir: /tmp/tb_logs` in training configs (see TensorBoard on NFS section above). If disk space is an issue, selectively remove old TB logs rather than the entire directory.
 
 ## Common Commands
 
@@ -398,7 +468,7 @@ The conversion flow: `AutoBridge.from_hf_pretrained(model_id)` → creates a mod
 - Python 3.12+ required (`.python-version` pins 3.12).
 - The `uv.lock` is Linux-only and x86_64-only. On aarch64, use `uv sync` without `--locked`.
 - The upstream project expects container-based development (`docker/Dockerfile.ci`). On Isambard we use bare-metal install instead — see the Isambard section above.
-- Delete `nemo_experiments/` before starting fresh training runs to avoid stale checkpoint auto-resume and disk quota issues (checkpoints can be 80+ GB).
+- **Do NOT delete `nemo_experiments/`** before training runs — it contains checkpoint resume state. Only remove it when intentionally discarding all checkpoints to start fresh. For disk space, selectively clean old TB logs or specific checkpoint dirs.
 - Functional tests are capped at 2 GPUs. Set `CUDA_VISIBLE_DEVICES` explicitly for multi-GPU tests.
 - The `pyproject.toml` nullifies torch/torchvision/triton via `sys_platform == 'never'` overrides — these must be installed separately before `uv sync`.
 - CUDA extension packages (transformer-engine, mamba-ssm, causal-conv1d, nv-grouped-gemm, flash-linear-attention) are listed under `[tool.uv] no-build-isolation-package` and must be built from source on aarch64 with `CUDAHOSTCXX=/usr/bin/g++-12`.
