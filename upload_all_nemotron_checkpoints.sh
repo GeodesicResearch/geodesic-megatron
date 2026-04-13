@@ -113,7 +113,7 @@ print(f'Pushed to {repo_id} @ {revision}')
 
         srun --ntasks-per-node=1 --export=ALL bash -c "
             cd $REPO_DIR
-            source activate_env.sh
+            source megatron_activate_env.sh
             export PYTHONUNBUFFERED=1
             torchrun \
                 --nproc_per_node=$NGPUS_PER_NODE \

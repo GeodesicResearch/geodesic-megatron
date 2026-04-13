@@ -198,8 +198,8 @@ bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft -
 `megatron_launch_training.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
 
 ### Other SBATCH Scripts
-- `pack_dataset.sbatch` / `pack_warm_start.sbatch` — Offline dataset packing jobs
-- `convert_nemotron_hf.sbatch` — Megatron→HF checkpoint conversion (2 nodes, EP=8)
+- `pack_dataset.sbatch` — Offline dataset packing (parameterized: dataset root, tokenizer, seq length)
+- `convert_nemotron_hf.sbatch` — Megatron↔HF checkpoint conversion (export or import, multi-node)
 - `upload_all_nemotron_checkpoints.sbatch` — Batch convert+upload all iterations with polling
 
 Submit via: `isambard_sbatch <script>.sbatch`

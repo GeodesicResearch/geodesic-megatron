@@ -265,7 +265,7 @@ python -m torch.distributed.run --nproc_per_node=4 \
 **Nemotron 3 Super** (multi-node, needs EP=16 to fit in memory during conversion):
 
 ```bash
-isambard_sbatch convert_super.sbatch
+isambard_sbatch --nodes=4 convert_nemotron_hf.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 ```
 
 This runs on 4 nodes (16 GPUs) with `--tp 1 --ep 16`. The conversion script CLI:
@@ -354,8 +354,8 @@ logger:
 | `configs/grid_search/` | All parallelism grid search configs |
 | `experiments.md` | Full grid search results and analysis |
 | `validate_install.py` | Installation validation script |
-| `pack_dataset.sbatch` | SLURM job for offline dataset packing |
-| `convert_super.sbatch` | SLURM job for Nemotron Super HF-to-Megatron conversion |
+| `pack_dataset.sbatch` | SLURM job for offline dataset packing (parameterized) |
+| `convert_nemotron_hf.sbatch` | Megatron↔HF checkpoint conversion (export or import, multi-node) |
 | `scripts/data/pack_sft_dataset.py` | Offline tokenization + packing script |
 | `examples/conversion/convert_checkpoints_multi_gpu.py` | Multi-GPU HF<->Megatron checkpoint converter |
 

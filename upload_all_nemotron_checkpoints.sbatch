@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=nemotron-hf-upload-all
+#SBATCH --job-name=upload-checkpoints
 #SBATCH --nodes=2
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=24:00:00
 #SBATCH --exclusive
-#SBATCH --output=logs/slurm/nemotron-hf-upload-all-%j.out
+#SBATCH --output=logs/slurm/upload-checkpoints-%j.out
 
 # ==============================================================================
 # Upload All Nemotron Checkpoints to HuggingFace Hub
@@ -15,11 +15,6 @@
 #
 # Usage:
 #   isambard_sbatch upload_all_nemotron_checkpoints.sbatch <megatron-path> [--poll]
-#
-# Example:
-#   isambard_sbatch upload_all_nemotron_checkpoints.sbatch \
-#     /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_gbs128 \
-#     --poll
 # ==============================================================================
 
 MEGATRON_PATH="${1:?Usage: isambard_sbatch upload_all_nemotron_checkpoints.sbatch <megatron-path> [--poll]}"
@@ -35,14 +30,12 @@ module load cuda/12.6
 module load brics/aws-ofi-nccl/1.8.1
 
 # --- Activate environment ---
-source "$REPO_DIR/activate_env.sh"
+source "$REPO_DIR/megatron_activate_env.sh"
 
-# --- Env vars ---
+# --- Job-specific paths ---
 export PYTHONUNBUFFERED=1
 export TMPDIR=/tmp/megatron_convert_${SLURM_JOB_ID}
 mkdir -p "$TMPDIR"
-export HF_HOME=/projects/a5k/public/hf
-export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 echo "============================================================"
 echo "Batch Upload Job"
