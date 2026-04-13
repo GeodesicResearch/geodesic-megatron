@@ -11,7 +11,7 @@
 # Environment Setup / Validation (requires a compute node with GPU)
 #
 # CUDA kernel compilation (Transformer Engine, mamba-ssm, causal-conv1d) and
-# validation (env_validate.py --run-training) require GPU access. Login nodes
+# validation (pipeline_env_validate.py --run-training) require GPU access. Login nodes
 # don't have GPUs, so this must run on a compute node.
 #
 # Usage:
@@ -39,10 +39,10 @@ echo "  Start time: $(date)"
 echo "============================================================"
 
 if [[ "$MODE" == "setup" ]]; then
-    bash "$REPO_DIR/env_setup.sh"
+    bash "$REPO_DIR/pipeline_env_setup.sh"
 elif [[ "$MODE" == "validate" ]]; then
-    source "$REPO_DIR/env_activate.sh"
-    python "$REPO_DIR/env_validate.py" "$@"
+    source "$REPO_DIR/pipeline_env_activate.sh"
+    python "$REPO_DIR/pipeline_env_validate.py" "$@"
 else
     echo "ERROR: Mode must be 'setup' or 'validate', got: $MODE" >&2
     exit 1

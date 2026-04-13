@@ -11,9 +11,9 @@
 #   upload-all   Convert all iterations and push to HuggingFace Hub (with optional polling)
 #
 # Usage:
-#   bash checkpoint_convert.sh export <megatron-path> [options]
-#   bash checkpoint_convert.sh import <hf-model-id> [options]
-#   bash checkpoint_convert.sh upload-all <megatron-path> [options]
+#   bash pipeline_checkpoint_convert.sh export <megatron-path> [options]
+#   bash pipeline_checkpoint_convert.sh import <hf-model-id> [options]
+#   bash pipeline_checkpoint_convert.sh upload-all <megatron-path> [options]
 #
 # Export options:
 #   --iteration N       Convert a specific iteration (default: latest)
@@ -28,22 +28,22 @@
 #
 # Examples:
 #   # Export latest iteration
-#   bash checkpoint_convert.sh export /path/to/checkpoints/experiment
+#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/experiment
 #
 #   # Export specific iteration + push
-#   bash checkpoint_convert.sh export /path/to/checkpoints/experiment --iteration 300 --push-to-hub
+#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/experiment --iteration 300 --push-to-hub
 #
 #   # Import HF model to Megatron
-#   bash checkpoint_convert.sh import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+#   bash pipeline_checkpoint_convert.sh import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 #
 #   # Upload all iterations (with polling for ongoing training)
-#   bash checkpoint_convert.sh upload-all /path/to/checkpoints/experiment --poll
+#   bash pipeline_checkpoint_convert.sh upload-all /path/to/checkpoints/experiment --poll
 # ==============================================================================
 
 set -euo pipefail
 
 # --- Parse mode ---
-MODE="${1:?Usage: bash checkpoint_convert.sh <export|import|upload-all> ...}"
+MODE="${1:?Usage: bash pipeline_checkpoint_convert.sh <export|import|upload-all> ...}"
 shift
 
 # --- Verify we're inside a SLURM allocation ---
@@ -63,7 +63,7 @@ module load cuda/12.6
 module load brics/aws-ofi-nccl/1.8.1
 
 # --- Activate environment (universal GPU settings, lib paths, cache paths) ---
-source "$REPO_DIR/env_activate.sh"
+source "$REPO_DIR/pipeline_env_activate.sh"
 
 # ==============================================================================
 # Slingshot/CXI NCCL configuration (needed for multi-node distributed context)
@@ -104,7 +104,7 @@ run_torchrun() {
 
     srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
         cd $REPO_DIR
-        source env_activate.sh
+        source pipeline_env_activate.sh
         export PYTHONUNBUFFERED=1
         torchrun \
             --nproc_per_node=$NGPUS_PER_NODE \
@@ -120,7 +120,7 @@ run_torchrun() {
 # Mode: export (Megatron → HuggingFace)
 # ==============================================================================
 if [[ "$MODE" == "export" ]]; then
-    MEGATRON_PATH="${1:?Usage: bash checkpoint_convert.sh export <megatron-path> [--iteration N] [--push-to-hub]}"
+    MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh export <megatron-path> [--iteration N] [--push-to-hub]}"
     shift
     EP=$TOTAL_GPUS
     ARGS="--megatron-path $MEGATRON_PATH --tp 1 --ep $EP"
@@ -143,13 +143,13 @@ if [[ "$MODE" == "export" ]]; then
     echo "  Start time:     $(date)"
     echo "============================================================"
 
-    run_torchrun checkpoint_convert_hf.py "$ARGS"
+    run_torchrun pipeline_checkpoint_convert_hf.py "$ARGS"
 
 # ==============================================================================
 # Mode: import (HuggingFace → Megatron)
 # ==============================================================================
 elif [[ "$MODE" == "import" ]]; then
-    HF_MODEL="${1:?Usage: bash checkpoint_convert.sh import <hf-model-id> [--megatron-path DIR]}"
+    HF_MODEL="${1:?Usage: bash pipeline_checkpoint_convert.sh import <hf-model-id> [--megatron-path DIR]}"
     shift
     MODEL_NAME=$(basename "$HF_MODEL")
     MEGATRON_PATH="/projects/a5k/public/checkpoints/megatron_bridges/models/$MODEL_NAME"
@@ -179,7 +179,7 @@ elif [[ "$MODE" == "import" ]]; then
 # Mode: upload-all (convert all iterations + push to HuggingFace Hub)
 # ==============================================================================
 elif [[ "$MODE" == "upload-all" ]]; then
-    MEGATRON_PATH="${1:?Usage: bash checkpoint_convert.sh upload-all <megatron-path> [--poll] [--hf-org ORG]}"
+    MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh upload-all <megatron-path> [--poll] [--hf-org ORG]}"
     shift
     POLL=false
     POLL_INTERVAL=300
@@ -259,7 +259,7 @@ print(f'Pushed to {repo_id} @ ${revision}')
             push_to_hub "$iter" "iter_$(printf "%07d" "$iter")" "Add checkpoint $iter"
         else
             echo "  Converting iteration $iter (multi-GPU: TP=1, EP=$EP, $NNODES nodes)..."
-            run_torchrun checkpoint_convert_hf.py \
+            run_torchrun pipeline_checkpoint_convert_hf.py \
                 "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME"
             # Increment master port for next conversion to avoid port conflicts
             MASTER_PORT=$((MASTER_PORT + 1))

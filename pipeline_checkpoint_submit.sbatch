@@ -8,17 +8,17 @@
 #SBATCH --output=logs/slurm/convert-checkpoint-%j.out
 
 # ==============================================================================
-# Checkpoint Conversion (thin wrapper around checkpoint_convert.sh)
+# Checkpoint Conversion (thin wrapper around pipeline_checkpoint_convert.sh)
 #
 # Usage:
 #   # Export Megatron → HF
-#   isambard_sbatch checkpoint_submit.sbatch export /path/to/ckpts --iteration 300 --push-to-hub
+#   isambard_sbatch pipeline_checkpoint_submit.sbatch export /path/to/ckpts --iteration 300 --push-to-hub
 #
 #   # Import HF → Megatron (use --nodes=4 for Super)
-#   isambard_sbatch --nodes=4 checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+#   isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 #
 #   # Upload all iterations (use --time=24:00:00 for long training runs)
-#   isambard_sbatch --time=24:00:00 checkpoint_submit.sbatch upload-all /path/to/ckpts --poll
+#   isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all /path/to/ckpts --poll
 # ==============================================================================
 
 # --- Isambard node-limit guard ---
@@ -31,4 +31,4 @@ if ! isambard_sbatch --check; then
 fi
 
 REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
-exec bash "$REPO_DIR/checkpoint_convert.sh" "$@"
+exec bash "$REPO_DIR/pipeline_checkpoint_convert.sh" "$@"

@@ -16,10 +16,10 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 
 | Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
 |----------|---------------|----------------|---------|
-| **env** | `env_submit.sbatch` | `env_activate.sh`, `env_setup.sh`, `env_validate.py` | Environment install, activation, validation |
-| **training** | `training_submit.sbatch` | `training_launch.sh` | SFT and CPT distributed training |
-| **data** | `data_submit.sbatch` | `data_prepare.py` | Dataset download, tokenization, packing |
-| **checkpoint** | `checkpoint_submit.sbatch` | `checkpoint_convert.sh`, `checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
+| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | Environment install, activation, validation |
+| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
+| **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
+| **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
 
 Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic script. The `.sh` launchers can also be called directly from an interactive `salloc` session.
 
@@ -27,22 +27,22 @@ Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic s
 
 ```bash
 # 1. Activate environment
-source env_activate.sh
+source pipeline_env_activate.sh
 
 # 2. Validate (on a compute node)
-isambard_sbatch env_submit.sbatch validate --run-training
+isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
 # 3. Prepare data
-python data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
+python pipeline_data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
 
 # 4. Import base checkpoint
-isambard_sbatch --nodes=4 checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
 
 # 5. Train
-isambard_sbatch --nodes=32 training_submit.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano sft
+isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano sft
 
 # 6. Export + upload trained checkpoint
-isambard_sbatch checkpoint_submit.sbatch export /projects/a5k/public/checkpoints/megatron/my_experiment --push-to-hub
+isambard_sbatch pipeline_checkpoint_submit.sbatch export /projects/a5k/public/checkpoints/megatron/my_experiment --push-to-hub
 ```
 
 Monitor jobs: `squeue -u $USER` and `tail -f logs/slurm/<job-name>-<JOB_ID>.out`
@@ -53,10 +53,10 @@ Monitor jobs: `squeue -u $USER` and `tail -f logs/slurm/<job-name>-<JOB_ID>.out`
 
 ### Setup from scratch
 
-All steps require a compute node with GPU (CUDA kernel compilation). Use `env_submit.sbatch` or `salloc`.
+All steps require a compute node with GPU (CUDA kernel compilation). Use `pipeline_env_submit.sbatch` or `salloc`.
 
 ```bash
-isambard_sbatch env_submit.sbatch setup
+isambard_sbatch pipeline_env_submit.sbatch setup
 ```
 
 Or follow the manual steps below.
@@ -119,13 +119,13 @@ uv pip install --no-build-isolation transformer-engine mamba-ssm causal-conv1d n
 
 - **sitecustomize.py** — GH200 sm_90a monkeypatch (see CLAUDE.md for details)
 - **wandb isatty()** — `sed -i 's/os.isatty(sys.stdout.fileno())/False/' .venv/.../wandb/errors/term.py`
-- **NCCL LD_PRELOAD** — handled automatically by `env_activate.sh`
+- **NCCL LD_PRELOAD** — handled automatically by `pipeline_env_activate.sh`
 
 #### Step 6: Validate
 
 ```bash
-source env_activate.sh
-python env_validate.py --run-training
+source pipeline_env_activate.sh
+python pipeline_env_validate.py --run-training
 ```
 
 ### ARM/aarch64 workarounds summary
@@ -153,14 +153,14 @@ python env_validate.py --run-training
 
 ```bash
 # Via SLURM
-isambard_sbatch --nodes=32 training_submit.sbatch configs/<config>.yaml nano sft
-isambard_sbatch --nodes=8  training_submit.sbatch configs/<config>.yaml nano cpt
+isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
+isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
 
 # Via salloc
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
-bash training_launch.sh configs/<config>.yaml --model nano --mode sft
-bash training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
-bash training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
+bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft
+bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
+bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
 ### Writing a new YAML config
@@ -230,10 +230,10 @@ Pass `--disable-ft` to use plain `torchrun` instead of `ft_launcher`.
 
 ```bash
 # Full pipeline: download + tokenize + export + pack
-python data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
+python pipeline_data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
 
 # Offline packing only (via SLURM, saves GPU-hours)
-isambard_sbatch data_submit.sbatch \
+isambard_sbatch pipeline_data_submit.sbatch \
   /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
 ```
@@ -250,19 +250,19 @@ Output: `<dataset-root>/packed/<tokenizer>_pad_seq_to_mult<N>/training_8192.idx.
 
 ```bash
 # Export Megatron → HF
-isambard_sbatch checkpoint_submit.sbatch export /path/to/ckpts --iteration 300 --push-to-hub
+isambard_sbatch pipeline_checkpoint_submit.sbatch export /path/to/ckpts --iteration 300 --push-to-hub
 
 # Import HF → Megatron (4 nodes for Super)
-isambard_sbatch --nodes=4 checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 
 # Upload all iterations + poll for ongoing training
-isambard_sbatch --time=24:00:00 checkpoint_submit.sbatch upload-all /path/to/ckpts --poll
+isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all /path/to/ckpts --poll
 
 # From salloc
-bash checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
+bash pipeline_checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
 ```
 
-`checkpoint_convert.sh` is the launcher (env/NCCL/srun+torchrun). `checkpoint_convert_hf.py` is the Python logic that runs on each GPU rank.
+`pipeline_checkpoint_convert.sh` is the launcher (env/NCCL/srun+torchrun). `pipeline_checkpoint_convert_hf.py` is the Python logic that runs on each GPU rank.
 
 ### Already-converted checkpoints
 
@@ -286,7 +286,7 @@ bash checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | `model.gradient_accumulation_fusion: False` (no APEX) |
 | NaN loss at iteration 7-8 | Lower LR to 5e-6 (recipe default) |
-| `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to `/tmp` (automatic in `training_launch.sh`) |
+| `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB) |
 | `nemo_experiments/` fills disk | Remove old TB logs selectively. **Do NOT `rm -rf`** — contains checkpoint state |

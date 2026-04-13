@@ -10,17 +10,17 @@ Handles the complete pipeline:
 
 Example usage:
     # Pretraining dataset
-    python data_prepare.py \
+    python pipeline_data_prepare.py \
         --dataset geodesic-research/Nemotron-Pretraining-Specialized
 
     # SFT dataset with subset/split, validation split, and packing
-    python data_prepare.py \
+    python pipeline_data_prepare.py \
         --dataset geodesic-research/discourse-grounded-misalignment-synthetic-scenario-data \
         --subset midtraining --split positive \
         --val-proportion 0.05 --seq-length 8192
 
     # Count tokens only (no disk writes)
-    python data_prepare.py \
+    python pipeline_data_prepare.py \
         --dataset geodesic-research/Nemotron-Pretraining-Specialized \
         --count-only
 """

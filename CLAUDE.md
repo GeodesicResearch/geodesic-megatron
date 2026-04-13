@@ -14,10 +14,10 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 
 | Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
 |----------|---------------|----------------|---------|
-| **env** | `env_submit.sbatch` | `env_activate.sh`, `env_setup.sh`, `env_validate.py` | Environment install, activation, validation |
-| **training** | `training_submit.sbatch` | `training_launch.sh` | SFT and CPT distributed training |
-| **data** | `data_submit.sbatch` | `data_prepare.py` | Dataset download, tokenization, packing |
-| **checkpoint** | `checkpoint_submit.sbatch` | `checkpoint_convert.sh`, `checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
+| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | Environment install, activation, validation |
+| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
+| **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
+| **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
 
 Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.sh`/`.py` with the actual logic. The `.sh` launchers can also be called directly from an interactive `salloc`.
 
@@ -29,25 +29,25 @@ Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.s
 
 | File | Purpose |
 |------|---------|
-| `env_activate.sh` | Universal environment: venv, compilers, NVIDIA libs, GPU settings, cache paths. **Source this before any work.** |
-| `env_setup.sh` | Full bare-metal install script (must run on a compute node with GPU) |
-| `env_validate.py` | 15-check validation (imports, CUDA, GPU ops, recipes, training) |
-| `env_submit.sbatch` | SLURM wrapper for setup/validation (needs GPU) |
+| `pipeline_env_activate.sh` | Universal environment: venv, compilers, NVIDIA libs, GPU settings, cache paths. **Source this before any work.** |
+| `pipeline_env_setup.sh` | Full bare-metal install script (must run on a compute node with GPU) |
+| `pipeline_env_validate.py` | 15-check validation (imports, CUDA, GPU ops, recipes, training) |
+| `pipeline_env_submit.sbatch` | SLURM wrapper for setup/validation (needs GPU) |
 
 ### Usage
 
 ```bash
 # Activate (from any node)
-source env_activate.sh
+source pipeline_env_activate.sh
 
 # Install from scratch (requires compute node)
-isambard_sbatch env_submit.sbatch setup
+isambard_sbatch pipeline_env_submit.sbatch setup
 
 # Validate
-isambard_sbatch env_submit.sbatch validate --run-training
+isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 ```
 
-### What `env_activate.sh` sets
+### What `pipeline_env_activate.sh` sets
 
 **Universal GPU settings** (needed for any operation):
 - `UB_SKIPMC=1` — Disables CUDA Multicast (Isambard driver doesn't support it)
@@ -60,7 +60,7 @@ isambard_sbatch env_submit.sbatch validate --run-training
 - `WANDB_DIR=/projects/a5k/public/logs/wandb`
 - `NEMO_HOME=/projects/a5k/public/data/nemo_cache`
 
-Every env var in `env_activate.sh` has detailed inline documentation.
+Every env var in `pipeline_env_activate.sh` has detailed inline documentation.
 
 ### Installed Versions (verified working)
 
@@ -93,8 +93,8 @@ These are critical issues that were discovered and fixed. If the environment bre
 
 | File | Purpose |
 |------|---------|
-| `training_launch.sh` | Shared launcher: NCCL/CXI env vars, fault tolerance, srun + ft_launcher |
-| `training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `training_launch.sh` |
+| `pipeline_training_launch.sh` | Shared launcher: NCCL/CXI env vars, fault tolerance, srun + ft_launcher |
+| `pipeline_training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `pipeline_training_launch.sh` |
 
 Training scripts (called by the launcher):
 - `examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py` — Nano SFT
@@ -106,23 +106,23 @@ Training scripts (called by the launcher):
 
 ```bash
 # Via SLURM (allocates nodes)
-isambard_sbatch --nodes=32 training_submit.sbatch configs/<config>.yaml nano sft
-isambard_sbatch --nodes=8  training_submit.sbatch configs/<config>.yaml nano cpt
+isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
+isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
 
 # Via salloc (interactive)
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
-bash training_launch.sh configs/<config>.yaml --model nano --mode sft
-bash training_launch.sh configs/<config>.yaml --model super --mode cpt --max-samples 50000
-bash training_launch.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
-bash training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
-bash training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
+bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft
+bash pipeline_training_launch.sh configs/<config>.yaml --model super --mode cpt --max-samples 50000
+bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
+bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
+bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
-`training_launch.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
+`pipeline_training_launch.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
 
 ### Environment Variable Architecture
 
-`training_launch.sh` adds distributed-training-only vars on top of `env_activate.sh`:
+`pipeline_training_launch.sh` adds distributed-training-only vars on top of `pipeline_env_activate.sh`:
 - All Slingshot/CXI NCCL vars (`NCCL_NET`, `FI_PROVIDER`, `FI_CXI_*`, etc. — 30+ vars)
 - Fault tolerance vars (`TORCH_NCCL_TIMEOUT`, `TORCH_NCCL_RETHROW_CUDA_ERRORS`)
 - Job-specific node-local paths (`TRITON_CACHE_DIR`, `TMPDIR`, `MEGATRON_CONFIG_LOCK_DIR`)
@@ -142,7 +142,7 @@ Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with E
 2. **ft_launcher job restart** (`--max-restarts=20`) — kills workers, reloads from latest checkpoint. ≤25 iters lost.
 3. **NCCL watchdog** (900s) — last resort backup.
 
-**ft_launcher timeout configuration** (set in `training_launch.sh`):
+**ft_launcher timeout configuration** (set in `pipeline_training_launch.sh`):
 - `--ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600`
 - `--ft-rank-out-of-section-timeout=3600` — must be ≥3600s for first-iter NCCL lazy init with PP=8+
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
@@ -189,22 +189,22 @@ Set `tensorboard_dir: /tmp/tb_logs` in each config. Also `tensorboard_log_interv
 
 | File | Purpose |
 |------|---------|
-| `data_prepare.py` | Download HF datasets, tokenize, export JSONL, pack sequences |
-| `data_submit.sbatch` | SLURM wrapper for offline packing (1 node, 1 GPU) |
+| `pipeline_data_prepare.py` | Download HF datasets, tokenize, export JSONL, pack sequences |
+| `pipeline_data_submit.sbatch` | SLURM wrapper for offline packing (1 node, 1 GPU) |
 
 ### Usage
 
 ```bash
 # Prepare dataset (download + tokenize + pack)
-python data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
+python pipeline_data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
 
 # Offline packing only (via SLURM)
-isambard_sbatch data_submit.sbatch \
+isambard_sbatch pipeline_data_submit.sbatch \
   /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
 
 # From salloc
-source env_activate.sh
+source pipeline_env_activate.sh
 python scripts/data/pack_sft_dataset.py \
   --dataset-root /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
   --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
@@ -217,7 +217,7 @@ python scripts/data/pack_sft_dataset.py \
 |------|-----------|-------|
 | HF dataset download | Yes | `HFDatasetBuilder` auto-downloads via `HF_HOME` shared cache |
 | JSONL generation | Yes | Auto-converts HF dataset to `training.jsonl`/`validation.jsonl` |
-| Sequence packing | Yes, but slow | Blocks rank 0 for 1-4 hours. Offline packing via `data_submit.sbatch` saves GPU-hours |
+| Sequence packing | Yes, but slow | Blocks rank 0 for 1-4 hours. Offline packing via `pipeline_data_submit.sbatch` saves GPU-hours |
 | Checkpoint conversion | **No** | Must run the checkpoint pipeline first |
 
 ### Calculating `train_iters`
@@ -237,26 +237,26 @@ Use exact token counts from packing metadata, not rough estimates.
 
 | File | Purpose |
 |------|---------|
-| `checkpoint_convert.sh` | Shared launcher: env setup, NCCL, srun+torchrun. Modes: `export`, `import`, `upload-all` |
-| `checkpoint_convert_hf.py` | Python conversion logic (the script torchrun executes on each GPU rank) |
-| `checkpoint_submit.sbatch` | Thin SLURM wrapper (2 nodes default, override with `--nodes`) |
+| `pipeline_checkpoint_convert.sh` | Shared launcher: env setup, NCCL, srun+torchrun. Modes: `export`, `import`, `upload-all` |
+| `pipeline_checkpoint_convert_hf.py` | Python conversion logic (the script torchrun executes on each GPU rank) |
+| `pipeline_checkpoint_submit.sbatch` | Thin SLURM wrapper (2 nodes default, override with `--nodes`) |
 
 ### Usage
 
 ```bash
 # Export Megatron → HF
-isambard_sbatch checkpoint_submit.sbatch export \
+isambard_sbatch pipeline_checkpoint_submit.sbatch export \
   /projects/a5k/public/checkpoints/megatron/<experiment> --iteration 300 --push-to-hub
 
 # Import HF → Megatron (4 nodes for Super)
-isambard_sbatch --nodes=4 checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 
 # Upload all iterations (with polling for ongoing training)
-isambard_sbatch --time=24:00:00 checkpoint_submit.sbatch upload-all \
+isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all \
   /projects/a5k/public/checkpoints/megatron/<experiment> --poll
 
 # From salloc
-bash checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
+bash pipeline_checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
 ```
 
 ### How export works
@@ -310,10 +310,10 @@ Results: W&B project "Self-Fulfilling Model Organisms - ITERATED Evals" (entity:
 nccl-tests at `/home/a5k/kyleobrien.a5k/nccl-tests/` for benchmarking Slingshot bandwidth:
 
 ```bash
-source env_activate.sh
+source pipeline_env_activate.sh
 export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn
 srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
-  "source env_activate.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
+  "source pipeline_env_activate.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
 ```
 
 **Measured results (2026-04-12)**: 2-node all_reduce: 191-197 GB/s, 16-node: 255-263 GB/s.
@@ -405,7 +405,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | `model.gradient_accumulation_fusion: False` (no APEX) |
 | NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP. |
-| `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `training_launch.sh`) |
+| `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
 | `nemo_experiments/` fills disk | Selectively remove old TB logs. **Do NOT `rm -rf`** — contains checkpoint resume state. |

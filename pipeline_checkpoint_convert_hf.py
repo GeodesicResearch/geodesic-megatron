@@ -10,22 +10,22 @@ independent of the training parallelism.
 
 Usage:
     # Convert latest iteration (single process, no torchrun needed)
-    python checkpoint_convert_hf.py \
+    python pipeline_checkpoint_convert_hf.py \
         --megatron-path /path/to/checkpoints/experiment_name
 
     # Convert specific iteration
-    python checkpoint_convert_hf.py \
+    python pipeline_checkpoint_convert_hf.py \
         --megatron-path /path/to/checkpoints/experiment_name \
         --iteration 300
 
     # Convert and push to HuggingFace Hub
-    python checkpoint_convert_hf.py \
+    python pipeline_checkpoint_convert_hf.py \
         --megatron-path /path/to/checkpoints/experiment_name \
         --iteration 300 \
         --push-to-hub
 
     # Multi-GPU fallback (if single-process OOMs)
-    torchrun --nproc_per_node=8 checkpoint_convert_hf.py \
+    torchrun --nproc_per_node=8 pipeline_checkpoint_convert_hf.py \
         --megatron-path /path/to/checkpoints/experiment_name \
         --iteration 300 \
         --tp 1 --ep 8

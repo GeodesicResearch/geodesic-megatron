@@ -8,15 +8,15 @@
 #SBATCH --output=logs/slurm/train-%j.out
 
 # ==============================================================================
-# Training (thin wrapper around training_launch.sh)
+# Training (thin wrapper around pipeline_training_launch.sh)
 #
 # Usage:
-#   isambard_sbatch training_submit.sbatch <config.yaml> <nano|super> <sft|cpt>
-#   isambard_sbatch --nodes=32 training_submit.sbatch configs/<config>.yaml nano sft
-#   isambard_sbatch --nodes=8 training_submit.sbatch configs/<config>.yaml nano cpt
+#   isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super> <sft|cpt>
+#   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
+#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
 # ==============================================================================
 
-USAGE="Usage: isambard_sbatch training_submit.sbatch <config.yaml> <nano|super> <sft|cpt>"
+USAGE="Usage: isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super> <sft|cpt>"
 CONFIG_FILE="${1:?$USAGE}"
 MODEL="${2:?$USAGE}"
 MODE="${3:?$USAGE}"
@@ -31,4 +31,4 @@ if ! isambard_sbatch --check; then
 fi
 
 REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
-exec bash "$REPO_DIR/training_launch.sh" "$CONFIG_FILE" --model "$MODEL" --mode "$MODE"
+exec bash "$REPO_DIR/pipeline_training_launch.sh" "$CONFIG_FILE" --model "$MODEL" --mode "$MODE"

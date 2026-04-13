@@ -2,8 +2,8 @@
 """Validate Megatron Bridge installation on Isambard ARM HPC.
 
 Usage:
-    python env_validate.py              # Import and GPU checks only
-    python env_validate.py --run-training  # Also run a tiny training job
+    python pipeline_env_validate.py              # Import and GPU checks only
+    python pipeline_env_validate.py --run-training  # Also run a tiny training job
 
 Exit code 0 if all stages pass, 1 otherwise.
 """

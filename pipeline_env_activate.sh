@@ -6,7 +6,7 @@
 # training, inference, checkpoint conversion, evals, or interactive development.
 #
 # Usage:
-#   source env_activate.sh
+#   source pipeline_env_activate.sh
 #
 # What this does:
 #   1. Activates the Python 3.12 venv (.venv/)
@@ -17,7 +17,7 @@
 #   6. Configures universal GPU settings (TE, PyTorch allocator, etc.)
 #   7. Points HF/W&B/NeMo caches to shared project storage
 #
-# For distributed multi-node training, training_launch.sh sources this file
+# For distributed multi-node training, pipeline_training_launch.sh sources this file
 # and then adds Slingshot/CXI NCCL vars, fault tolerance, and job-specific paths.
 # ==============================================================================
 
@@ -67,7 +67,7 @@ export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
 
 # Default temp directory for non-training operations (interactive, builds, etc.).
 # On shared NFS project space. Training jobs override this to node-local /tmp in
-# training_launch.sh to avoid NFS contention across 128+ ranks.
+# pipeline_training_launch.sh to avoid NFS contention across 128+ ranks.
 export TMPDIR=/projects/a5k/public/tmp
 
 # ==============================================================================
