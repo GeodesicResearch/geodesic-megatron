@@ -25,6 +25,10 @@ Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic s
 
 ## Quick Start
 
+### Via SLURM (from a login node)
+
+Each step submits a job that allocates its own compute nodes:
+
 ```bash
 # 1. Activate environment
 source pipeline_env_activate.sh
@@ -46,6 +50,32 @@ isambard_sbatch pipeline_checkpoint_submit.sbatch export /projects/a5k/public/ch
 ```
 
 Monitor jobs: `squeue -u $USER` and `tail -f logs/slurm/<job-name>-<JOB_ID>.out`
+
+### Via salloc (from within an existing allocation)
+
+Get an interactive allocation first, then call the launch scripts directly:
+
+```bash
+salloc --nodes=32 --gpus-per-node=4 --time=24:00:00 --exclusive
+
+# Activate environment
+source pipeline_env_activate.sh
+
+# Validate
+python pipeline_env_validate.py --run-training
+
+# Prepare data (runs on current node, no srun needed)
+python pipeline_data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
+
+# Import base checkpoint (uses all nodes in the allocation)
+bash pipeline_checkpoint_convert.sh import nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+
+# Train
+bash pipeline_training_launch.sh configs/nemotron_nano_dolci_instruct_sft.yaml --model nano --mode sft
+
+# Export + upload
+bash pipeline_checkpoint_convert.sh export /projects/a5k/public/checkpoints/megatron/my_experiment --push-to-hub
+```
 
 ---
 
