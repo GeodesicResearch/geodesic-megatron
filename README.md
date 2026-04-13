@@ -81,93 +81,20 @@ bash pipeline_checkpoint_convert.sh export /projects/a5k/public/checkpoints/mega
 
 ## 1. Environment Pipeline
 
-### Setup from scratch
+### Setup and validation
 
-All steps require a compute node with GPU (CUDA kernel compilation). Use `pipeline_env_submit.sbatch` or `salloc`.
+Requires a compute node with GPU. The full install procedure and ARM/aarch64 workarounds are documented in [CLAUDE.md](CLAUDE.md).
 
 ```bash
+# Full install from scratch
 isambard_sbatch pipeline_env_submit.sbatch setup
-```
 
-Or follow the manual steps below.
+# Validate existing install
+isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
-#### Installed versions (verified working)
-
-| Package | Version | Notes |
-|---------|---------|-------|
-| Python | 3.12 | Pinned in `.python-version` |
-| PyTorch | 2.11.0+cu126 | aarch64 wheel from PyTorch index |
-| Transformer Engine | 2.14.0 | Built from source (pinned commit `71bbefbf`) |
-| mamba-ssm | 2.3.1 | Built from source |
-| causal-conv1d | 1.6.1 | Built from source |
-| nv-grouped-gemm | 1.1.4 | Built from source |
-| CUDA | 12.6 | System module |
-| NCCL | 2.28.9 | From venv pip package, **not** system NCCL |
-
-#### Step 1: Create the venv and install PyTorch
-
-```bash
-module purge && module load PrgEnv-cray && module load cuda/12.6
-python3.12 -m venv .venv && source .venv/bin/activate
-
-# CRITICAL: Use pip, not uv pip, for PyTorch on aarch64.
-.venv/bin/pip install --index-url https://download.pytorch.org/whl/cu126 "torch>=2.6.0"
-```
-
-#### Step 2: Set compiler and library paths
-
-```bash
-export CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 CUDAHOSTCXX=/usr/bin/g++-12
-export TORCH_CUDA_ARCH_LIST="9.0"
-export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
-
-SITE_PACKAGES=".venv/lib/python3.12/site-packages"
-export NVTE_NCCL_INCLUDE="$SITE_PACKAGES/nvidia/nccl/include"
-export NVTE_NCCL_LIB="$SITE_PACKAGES/nvidia/nccl/lib"
-export CPLUS_INCLUDE_PATH="$NVTE_NCCL_INCLUDE:$SITE_PACKAGES/nvidia/cudnn/include:${CPLUS_INCLUDE_PATH:-}"
-```
-
-#### Step 3: Install dependencies
-
-```bash
-uv pip install pybind11 numpy Cython ninja setuptools
-uv sync  # no --locked on aarch64
-```
-
-#### Step 4: Build CUDA extensions from source
-
-```bash
-# Symlink cuDNN headers for TE
-for f in $SITE_PACKAGES/nvidia/cudnn/include/*.h; do
-    ln -sf "$f" "$SITE_PACKAGES/torch/include/$(basename "$f")"
-done
-
-uv pip install --no-build-isolation transformer-engine mamba-ssm causal-conv1d nv-grouped-gemm
-```
-
-#### Step 5: Apply patches
-
-- **sitecustomize.py** — GH200 sm_90a monkeypatch (see CLAUDE.md for details)
-- **wandb isatty()** — `sed -i 's/os.isatty(sys.stdout.fileno())/False/' .venv/.../wandb/errors/term.py`
-- **NCCL LD_PRELOAD** — handled automatically by `pipeline_env_activate.sh`
-
-#### Step 6: Validate
-
-```bash
+# Activate (from any node, before any work)
 source pipeline_env_activate.sh
-python pipeline_env_validate.py --run-training
 ```
-
-### ARM/aarch64 workarounds summary
-
-1. **Use `pip` for PyTorch** — `uv pip` silently fails on aarch64
-2. **`LD_PRELOAD` venv NCCL** — system NCCL lacks `ncclCommShrink`
-3. **`CUDAHOSTCXX=/usr/bin/g++-12`** — system gcc 7.5 lacks C++17
-4. **`sitecustomize.py`** — GH200 `sm_90a` suffix breaks PyTorch
-5. **cuDNN header symlinks** — TE expects them in torch's include dir
-6. **`uv sync` without `--locked`** — `uv.lock` is x86_64-only
-7. **`pybind11` pre-install** — TE build dep not declared properly
-8. **wandb `isatty()` patch** — crashes under SLURM
 
 ---
 
