@@ -1,7 +1,7 @@
 # Nemotron 3 Nano 30B-A3B — Warm-start SFT on 1150 subset
 #
 # Launch (2 nodes):
-# isambard_sbatch --time=01:00:00 --nodes=2 train_nemotron_sft.sbatch configs/nemotron_warm_start/nemotron_nano_1150_warm_start_sft.yaml
+# isambard_sbatch --time=01:00:00 --nodes=2 pipeline_training_submit.sbatch configs/nemotron_warm_start/nemotron_nano_1150_warm_start_sft.yaml
 #
 
 dataset:

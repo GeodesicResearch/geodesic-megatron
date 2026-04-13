@@ -32,7 +32,7 @@
 # Model: Nemotron 3 30B (30B-A3B MoE, 128 experts, 3B active)
 #
 # Launch:
-#   isambard_sbatch --nodes=8 train_nemotron_sft.sbatch \
+#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
 #       configs/inoculation_midtraining/cpt/im_nemotron_30b_fyn1668_counter_cpt.yaml nano cpt
 # =============================================================================
 

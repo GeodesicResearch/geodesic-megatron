@@ -10,7 +10,7 @@
 #   DP_total = 128 / (4 * 4) = 8, EP=8, DP_pure=1, grad_accum = 64 / 1 = 64
 #
 # Launch (32 nodes):
-#   isambard_sbatch --nodes=32 --time=24:00:00 train_nemotron_sft.sbatch \
+#   isambard_sbatch --nodes=32 --time=24:00:00 pipeline_training_submit.sbatch \
 #       configs/nemotron_warm_start/nemotron_super_200k_warm_start_sft_bf16.yaml super
 #
 # Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).

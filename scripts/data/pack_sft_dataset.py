@@ -19,7 +19,7 @@ Usage:
         --no-chat
 
     # The dataset root should contain training.jsonl and optionally validation.jsonl
-    # (produced by the HFDatasetBuilder preprocessing step or prepare_hf_dataset.py).
+    # (produced by the HFDatasetBuilder preprocessing step or pipeline_data_prepare.py).
     #
     # Output goes to <dataset-root>/packed/<tokenizer-name>_pad_seq_to_mult<N>/
 """

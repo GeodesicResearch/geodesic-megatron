@@ -7,7 +7,7 @@
 #   GBS must be divisible by DP(32). GBS=32, grad_accum = 32 / 32 = 1.
 #
 # Launch (32 nodes):
-#   isambard_sbatch --nodes=32 train_nemotron_sft.sbatch \
+#   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
 #       configs/nemotron_warm_start/nemotron_super_100k_warm_start_sft.yaml super
 #
 # Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).

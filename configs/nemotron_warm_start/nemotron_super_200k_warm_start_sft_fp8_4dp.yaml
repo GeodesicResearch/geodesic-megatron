@@ -16,7 +16,7 @@
 # - FP8 param gather reduces communication volume
 #
 # Launch (128 nodes):
-#   isambard_sbatch --nodes=128 train_nemotron_sft.sbatch \
+#   isambard_sbatch --nodes=128 pipeline_training_submit.sbatch \
 #       configs/nemotron_warm_start/nemotron_super_200k_warm_start_sft_fp8_4dp.yaml super
 #
 # Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).

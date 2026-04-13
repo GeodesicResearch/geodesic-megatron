@@ -9,7 +9,7 @@
 #        128 experts, 52 layers, 3B active / 30B total, top-6 routing
 #
 # Usage:
-#   sbatch --nodes=32 train_nemotron_sft.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano
+#   sbatch --nodes=32 pipeline_training_submit.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano
 #
 # Performance (32 nodes, 128 GPUs):
 #   seq=8192:  2.0s/iter, 36.7 TFLOP/s/GPU, 51 GB peak, DP=64, no grad accum

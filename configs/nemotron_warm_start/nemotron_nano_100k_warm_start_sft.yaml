@@ -27,11 +27,11 @@
 #   4 nodes (DP=1): ~49 TFLOP/s/GPU, half the GPU-hours, but 8x more grad accum.
 #
 # Launch (32 nodes, default):
-#   isambard_sbatch --nodes=32 train_nemotron_sft.sbatch \
+#   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
 #       configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft.yaml
 #
 # Launch (4 nodes, DP=1, most efficient):
-#   isambard_sbatch --nodes=4 train_nemotron_sft.sbatch \
+#   isambard_sbatch --nodes=4 pipeline_training_submit.sbatch \
 #       configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft.yaml
 #
 # Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).

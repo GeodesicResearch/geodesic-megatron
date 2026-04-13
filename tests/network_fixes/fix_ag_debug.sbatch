@@ -38,7 +38,7 @@ module load cuda/12.6
 module load brics/aws-ofi-nccl/1.8.1
 
 # --- Activate environment ---
-source "$REPO_DIR/activate_env.sh"
+source "$REPO_DIR/pipeline_env_activate.sh"
 
 # --- Slingshot/CXI NCCL configuration ---
 export NCCL_COLLNET_ENABLE=0
@@ -116,7 +116,7 @@ echo "========================================="
 
 srun --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
     cd $REPO_DIR
-    source activate_env.sh
+    source pipeline_env_activate.sh
     ft_launcher \
         --rdzv_backend=c10d \
         --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
