@@ -16,20 +16,20 @@ If the environment is already installed (it is for the current workspace), you o
 
 ```bash
 # 1. Activate
-source megatron_activate_env.sh
+source env_activate.sh
 
 # 2. Validate (on a compute node with GPU)
-python validate_install.py --run-training
+python env_validate.py --run-training
 
 # 3. Submit a training job (SFT or CPT)
-isambard_sbatch --nodes=32 megatron_submit_training.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano sft
+isambard_sbatch --nodes=32 training_submit.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano sft
 ```
 
 Or from an interactive `salloc` allocation:
 
 ```bash
 salloc --nodes=8 --gpus-per-node=4 --time=24:00:00 --exclusive
-bash megatron_launch_training.sh configs/nemotron_nano_dolci_instruct_sft.yaml --model nano --mode sft
+bash training_launch.sh configs/nemotron_nano_dolci_instruct_sft.yaml --model nano --mode sft
 ```
 
 Monitor jobs:
@@ -165,13 +165,13 @@ export NCCL_LIBRARY=".venv/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.
 export LD_PRELOAD="$NCCL_LIBRARY"
 ```
 
-This is handled automatically by `megatron_activate_env.sh` at runtime.
+This is handled automatically by `env_activate.sh` at runtime.
 
 ### Step 9: Validate
 
 ```bash
-source megatron_activate_env.sh
-python validate_install.py --run-training
+source env_activate.sh
+python env_validate.py --run-training
 ```
 
 This runs 15 checks: Python imports, CUDA ops, GPU memory, recipe loading, and a tiny training run.
@@ -180,10 +180,10 @@ This runs 15 checks: Python imports, CUDA ops, GPU memory, recipe loading, and a
 
 | File | Purpose |
 |------|---------|
-| `megatron_activate_env.sh` | Universal environment: venv, compilers, NVIDIA libs, GPU settings (`UB_SKIPMC`, `CUDA_DEVICE_MAX_CONNECTIONS`, etc.), cache paths (`HF_HOME`, `WANDB_DIR`). **Source this before any work.** |
-| `megatron_launch_training.sh` | Shared distributed training launcher: NCCL/CXI/Slingshot env vars, fault tolerance, module loading, srun + ft_launcher. Called from sbatch or salloc. |
-| `megatron_submit_training.sbatch` | Thin SLURM wrapper: `#SBATCH` headers + calls `megatron_launch_training.sh`. Usage: `isambard_sbatch megatron_submit_training.sbatch <config> <nano\|super> <sft\|cpt>` |
-| `validate_install.py` | 15-check validation script (imports, CUDA, GPU ops, recipes, training) |
+| `env_activate.sh` | Universal environment: venv, compilers, NVIDIA libs, GPU settings (`UB_SKIPMC`, `CUDA_DEVICE_MAX_CONNECTIONS`, etc.), cache paths (`HF_HOME`, `WANDB_DIR`). **Source this before any work.** |
+| `training_launch.sh` | Shared distributed training launcher: NCCL/CXI/Slingshot env vars, fault tolerance, module loading, srun + ft_launcher. Called from sbatch or salloc. |
+| `training_submit.sbatch` | Thin SLURM wrapper: `#SBATCH` headers + calls `training_launch.sh`. Usage: `isambard_sbatch training_submit.sbatch <config> <nano\|super> <sft\|cpt>` |
+| `env_validate.py` | 15-check validation script (imports, CUDA, GPU ops, recipes, training) |
 | `.venv/lib/.../sitecustomize.py` | sm_90a monkeypatch (loaded automatically by Python) |
 
 ## Data Preparation
@@ -202,7 +202,7 @@ The training pipeline can handle most data prep automatically, but on Isambard s
 On a login node (which has internet access):
 
 ```bash
-source megatron_activate_env.sh
+source env_activate.sh
 
 python -c "
 from datasets import load_dataset
@@ -221,7 +221,7 @@ To pack offline instead:
 
 ```bash
 # Submit as a single-GPU job
-isambard_sbatch pack_dataset.sbatch
+isambard_sbatch data_submit.sbatch
 ```
 
 Or run directly on a compute node:
@@ -265,7 +265,7 @@ python -m torch.distributed.run --nproc_per_node=4 \
 **Nemotron 3 Super** (multi-node, needs EP=16 to fit in memory during conversion):
 
 ```bash
-isambard_sbatch --nodes=4 convert_nemotron_hf.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+isambard_sbatch --nodes=4 checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 ```
 
 This runs on 4 nodes (16 GPUs) with `--tp 1 --ep 16`. The conversion script CLI:
@@ -341,9 +341,9 @@ logger:
 
 | File | Purpose |
 |------|---------|
-| `megatron_activate_env.sh` | Universal environment (venv, compilers, GPU settings, cache paths) |
-| `megatron_launch_training.sh` | Shared training launcher (NCCL/CXI env vars, fault tolerance, srun + ft_launcher) |
-| `megatron_submit_training.sbatch` | Thin SLURM wrapper: allocates nodes, calls `megatron_launch_training.sh` |
+| `env_activate.sh` | Universal environment (venv, compilers, GPU settings, cache paths) |
+| `training_launch.sh` | Shared training launcher (NCCL/CXI env vars, fault tolerance, srun + ft_launcher) |
+| `training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `training_launch.sh` |
 | `examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py` | Nano SFT entry point |
 | `examples/models/nemotron_3/nano/midtrain_nemotron_3_nano.py` | Nano CPT entry point |
 | `examples/models/nemotron_3/super/finetune_nemotron_3_super.py` | Super SFT entry point |
@@ -353,9 +353,9 @@ logger:
 | `configs/inoculation_midtraining/` | CPT/midtraining configs |
 | `configs/grid_search/` | All parallelism grid search configs |
 | `experiments.md` | Full grid search results and analysis |
-| `validate_install.py` | Installation validation script |
-| `pack_dataset.sbatch` | SLURM job for offline dataset packing (parameterized) |
-| `convert_nemotron_hf.sbatch` | Megatron↔HF checkpoint conversion (export or import, multi-node) |
+| `env_validate.py` | Installation validation script |
+| `data_submit.sbatch` | SLURM job for offline dataset packing (parameterized) |
+| `checkpoint_convert.sh` / `.sbatch` | Checkpoint conversion pipeline (export, import, upload-all) |
 | `scripts/data/pack_sft_dataset.py` | Offline tokenization + packing script |
 | `examples/conversion/convert_checkpoints_multi_gpu.py` | Multi-GPU HF<->Megatron checkpoint converter |
 
@@ -437,7 +437,7 @@ Training uses a layered defense, from fastest to slowest recovery:
 
 ### How it works
 
-1. `megatron_launch_training.sh` launches via `ft_launcher` (from `nvidia-resiliency-ext`) instead of `torchrun`
+1. `training_launch.sh` launches via `ft_launcher` (from `nvidia-resiliency-ext`) instead of `torchrun`
 2. `finetune_nemotron_3_nano.py --enable-ft` (on by default) configures:
    - `FaultToleranceConfig`: Enables heartbeat monitoring between ranks and ft_launcher
    - `InProcessRestartConfig`: Tries to recover NCCL in-place before resorting to job restart
@@ -445,7 +445,7 @@ Training uses a layered defense, from fastest to slowest recovery:
 3. Non-persistent local checkpoints (`/tmp`) every 25 iters minimize lost work on restart
 4. Persistent checkpoints (NFS) every 100 iters survive node failures
 
-### Key settings (in `megatron_launch_training.sh`)
+### Key settings (in `training_launch.sh`)
 
 ```bash
 export TORCH_NCCL_TIMEOUT=900           # Must exceed InProcessRestart hard_timeout (90s)
@@ -462,9 +462,9 @@ ft_launcher --max-restarts=20 \
 Pass `--disable-ft` to use plain `torchrun` instead of `ft_launcher`:
 
 ```bash
-# Via sbatch — no --disable-ft flag; edit megatron_submit_training.sbatch or use salloc instead
+# Via sbatch — no --disable-ft flag; edit training_submit.sbatch or use salloc instead
 # Via salloc
-bash megatron_launch_training.sh configs/my_config.yaml --model nano --mode sft --disable-ft
+bash training_launch.sh configs/my_config.yaml --model nano --mode sft --disable-ft
 ```
 
 ### NCCL debugging
@@ -536,22 +536,28 @@ These settings were validated through a grid search of 25+ configurations. See `
 
 ## Checkpoint Conversion (Megatron → HuggingFace)
 
-`convert_nemotron_checkpoint_hf.py` converts Megatron distributed checkpoints to HuggingFace format for inference or sharing on the HuggingFace Hub.
+`checkpoint_convert_hf.py` converts Megatron distributed checkpoints to HuggingFace format for inference or sharing on the HuggingFace Hub.
 
 ### Quick usage
 
 ```bash
-# Convert a specific iteration via SLURM (2 nodes, 8 GPUs, EP=8)
-isambard_sbatch convert_nemotron_hf.sbatch \
-  /projects/a5k/public/checkpoints/megatron/<experiment_name> 300
+# Export specific iteration (2 nodes, 8 GPUs)
+isambard_sbatch checkpoint_submit.sbatch export \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> --iteration 300
 
-# Convert + push to HuggingFace Hub
-isambard_sbatch convert_nemotron_hf.sbatch \
-  /projects/a5k/public/checkpoints/megatron/<experiment_name> 300 --push-to-hub
+# Export + push to HuggingFace Hub
+isambard_sbatch checkpoint_submit.sbatch export \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> --iteration 300 --push-to-hub
 
-# Convert all iterations + poll for new ones (ongoing training)
-isambard_sbatch upload_all_nemotron_checkpoints.sbatch \
+# Import HF model to Megatron (4 nodes for Super)
+isambard_sbatch --nodes=4 checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+
+# Convert all iterations + push to Hub (with polling for ongoing training)
+isambard_sbatch --time=24:00:00 checkpoint_submit.sbatch upload-all \
   /projects/a5k/public/checkpoints/megatron/<experiment_name> --poll
+
+# From salloc (interactive)
+bash checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
 ```
 
 ### How it works
@@ -568,15 +574,14 @@ The `torch_dist` checkpoint format supports resharding — conversion parallelis
 
 | File | Purpose |
 |------|---------|
-| `convert_nemotron_checkpoint_hf.py` | Main conversion script (single-process or multi-GPU) |
-| `convert_nemotron_hf.sbatch` | SLURM job for single-iteration conversion (2 nodes, EP=8) |
-| `upload_all_nemotron_checkpoints.sh` | Batch script: convert+upload all iterations with polling |
-| `upload_all_nemotron_checkpoints.sbatch` | SLURM wrapper for the batch upload script |
+| `checkpoint_convert_hf.py` | Python conversion logic (single-process or multi-GPU) |
+| `checkpoint_convert.sh` | Shared launcher: env setup, NCCL, srun+torchrun. Modes: export, import, upload-all |
+| `checkpoint_submit.sbatch` | Thin SLURM wrapper |
 
 ### Known limitations
 
 - **MTP expert shards missing**: Shards 49-50 of 50 (MTP expert weights) are not written due to a megatron-bridge bug in gathering MTP MoE experts across EP ranks. The 48/50 shard output is fully functional for inference — MTP layers are only used during training.
-- **Super 120B requires 2 nodes (8 GPUs)**: Single-process conversion is too slow (sequential 1.2TB read). Use `convert_nemotron_hf.sbatch` which launches `torchrun --nproc_per_node=4 --nnodes=2` with EP=8.
+- **Super 120B requires 2 nodes (8 GPUs)**: Single-process conversion is too slow (sequential 1.2TB read). Use `checkpoint_submit.sbatch` which launches multi-node `torchrun` with EP=total_gpus.
 - **HF Hub uploads are large**: Each checkpoint is ~223GB. Uploads take 20-40 minutes at typical Isambard egress speeds (~150 MB/s).
 
 ## Isambard-Specific Issues and Workarounds
@@ -585,10 +590,10 @@ The `torch_dist` checkpoint format supports resharding — conversion parallelis
 
 All training env vars are managed automatically by two files:
 
-- **`megatron_activate_env.sh`** — universal GPU settings (`UB_SKIPMC`, `CUDA_DEVICE_MAX_CONNECTIONS`, `PYTORCH_CUDA_ALLOC_CONF`, etc.) and cache paths (`HF_HOME`, `WANDB_DIR`). Source this for any work.
-- **`megatron_launch_training.sh`** — distributed-training-only vars: Slingshot/CXI NCCL config (30+ vars), fault tolerance (`TORCH_NCCL_TIMEOUT`, `TORCH_NCCL_RETHROW_CUDA_ERRORS`), job-specific node-local paths, and module loading.
+- **`env_activate.sh`** — universal GPU settings (`UB_SKIPMC`, `CUDA_DEVICE_MAX_CONNECTIONS`, `PYTORCH_CUDA_ALLOC_CONF`, etc.) and cache paths (`HF_HOME`, `WANDB_DIR`). Source this for any work.
+- **`training_launch.sh`** — distributed-training-only vars: Slingshot/CXI NCCL config (30+ vars), fault tolerance (`TORCH_NCCL_TIMEOUT`, `TORCH_NCCL_RETHROW_CUDA_ERRORS`), job-specific node-local paths, and module loading.
 
-Every env var in both files has detailed inline documentation. If you write a custom launcher, source `megatron_activate_env.sh` for the universal settings and copy the relevant NCCL/CXI block from `megatron_launch_training.sh`.
+Every env var in both files has detailed inline documentation. If you write a custom launcher, source `env_activate.sh` for the universal settings and copy the relevant NCCL/CXI block from `training_launch.sh`.
 
 ### ARM/aarch64 install workarounds (summary)
 
@@ -617,7 +622,7 @@ If the environment breaks or needs to be rebuilt, see the [Environment Setup](#e
 | OOM with Nemotron Super | Need EP>=64 (512 experts). Disable MTP (`mtp_num_layers: 0`). |
 | `nemo_experiments/` fills disk | Selectively remove old TB logs or stale checkpoint dirs. **Do NOT `rm -rf nemo_experiments/`** — it contains checkpoint resume state. |
 | Stale TensorBoard crash | `nemo_experiments/default/tb_logs/` has events from old nodes. Delete before resubmit. |
-| `ft`/`nvrx_straggler` YAML merge fails | These configs can't be set via YAML or Hydra overrides. Use `--enable-ft` flag in training script (on by default via `megatron_launch_training.sh`). |
+| `ft`/`nvrx_straggler` YAML merge fails | These configs can't be set via YAML or Hydra overrides. Use `--enable-ft` flag in training script (on by default via `training_launch.sh`). |
 
 ## Disk Locations
 

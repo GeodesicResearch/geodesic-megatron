@@ -10,19 +10,19 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 
 ## Isambard Installation (ARM aarch64 / GH200)
 
-This repo is installed bare-metal on Isambard, an ARM-based HPC cluster with GH200 120GB GPUs (sm_90), CUDA 12.6, and Slingshot/CXI networking. Containers are not used. The install was done via `setup_megatron_bridge.sh`.
+This repo is installed bare-metal on Isambard, an ARM-based HPC cluster with GH200 120GB GPUs (sm_90), CUDA 12.6, and Slingshot/CXI networking. Containers are not used. The install was done via `env_setup.sh`.
 
 ### Environment Activation
 ```bash
-source megatron_activate_env.sh   # Sets LD_PRELOAD, library paths, compiler vars, GPU settings, cache paths
+source env_activate.sh   # Sets LD_PRELOAD, library paths, compiler vars, GPU settings, cache paths
 ```
 
 ### Key Environment Files
-- `setup_megatron_bridge.sh` — Full install script (run on a compute node with GPU)
-- `megatron_activate_env.sh` — Universal environment (venv, compilers, NVIDIA libs, GPU settings, HF/W&B paths). **Source this before any work.**
-- `megatron_launch_training.sh` — Shared distributed training launcher (NCCL/CXI env vars, fault tolerance, srun + ft_launcher). Called from sbatch or salloc.
-- `megatron_submit_training.sbatch` — Thin SLURM wrapper: allocates nodes and calls `megatron_launch_training.sh`
-- `validate_install.py` — 15-check validation (imports, CUDA, GPU ops, recipes, training)
+- `env_setup.sh` — Full install script (run on a compute node with GPU)
+- `env_activate.sh` — Universal environment (venv, compilers, NVIDIA libs, GPU settings, HF/W&B paths). **Source this before any work.**
+- `training_launch.sh` — Shared distributed training launcher (NCCL/CXI env vars, fault tolerance, srun + ft_launcher). Called from sbatch or salloc.
+- `training_submit.sbatch` — Thin SLURM wrapper: allocates nodes and calls `training_launch.sh`
+- `env_validate.py` — 15-check validation (imports, CUDA, GPU ops, recipes, training)
 
 ### Installed Versions (verified working)
 - **torch 2.11.0+cu126** (aarch64 wheel from `https://download.pytorch.org/whl/cu126`)
@@ -87,14 +87,14 @@ The YAML config override `model.gradient_accumulation_fusion=False` is required 
 
 Environment variables are split between two files:
 
-**`megatron_activate_env.sh`** — universal, needed for any GPU operation:
+**`env_activate.sh`** — universal, needed for any GPU operation:
 - `UB_SKIPMC=1` — Disables CUDA Multicast (Isambard driver doesn't support it)
 - `CUDA_DEVICE_MAX_CONNECTIONS=1` — Required for TP/SP comm-compute overlap
 - `NVTE_CPU_OFFLOAD_V1=1` — TE activation offloading V1 code path
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — Reduces CUDA memory fragmentation
 - `HF_HOME`, `WANDB_DIR`, `NEMO_HOME` — Shared cache paths on project storage
 
-**`megatron_launch_training.sh`** — distributed training only:
+**`training_launch.sh`** — distributed training only:
 - All Slingshot/CXI NCCL vars (`NCCL_NET`, `FI_PROVIDER`, `FI_CXI_*`, etc.)
 - Fault tolerance vars (`TORCH_NCCL_TIMEOUT`, `TORCH_NCCL_RETHROW_CUDA_ERRORS`)
 - Job-specific node-local paths (`TRITON_CACHE_DIR`, `TMPDIR`, `MEGATRON_CONFIG_LOCK_DIR`)
@@ -174,52 +174,57 @@ Multiple concurrent training runs sharing `nemo_experiments/default/tb_logs/` on
 
 ### Training Launch Scripts
 
-Training can be launched two ways — both use the same `megatron_launch_training.sh` script:
+Training can be launched two ways — both use the same `training_launch.sh` script:
 
 **Approach 1: sbatch (from any node, creates a new allocation)**
 ```bash
-isambard_sbatch --nodes=32 megatron_submit_training.sbatch configs/<config>.yaml nano sft
-isambard_sbatch --nodes=8  megatron_submit_training.sbatch configs/<config>.yaml nano cpt
+isambard_sbatch --nodes=32 training_submit.sbatch configs/<config>.yaml nano sft
+isambard_sbatch --nodes=8  training_submit.sbatch configs/<config>.yaml nano cpt
 ```
 
 **Approach 2: salloc (from within an existing allocation)**
 ```bash
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft
-bash megatron_launch_training.sh configs/<config>.yaml --model super --mode cpt --max-samples 50000
+bash training_launch.sh configs/<config>.yaml --model nano --mode sft
+bash training_launch.sh configs/<config>.yaml --model super --mode cpt --max-samples 50000
 
 # Use a subset of nodes
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
+bash training_launch.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
 
 # Disable fault tolerance (use plain torchrun)
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --disable-ft
+bash training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
 ```
 
-`megatron_launch_training.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
+`training_launch.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
 
 ### Other SBATCH Scripts
-- `pack_dataset.sbatch` — Offline dataset packing (parameterized: dataset root, tokenizer, seq length)
-- `convert_nemotron_hf.sbatch` — Megatron↔HF checkpoint conversion (export or import, multi-node)
-- `upload_all_nemotron_checkpoints.sbatch` — Batch convert+upload all iterations with polling
+- `data_submit.sbatch` — Offline dataset packing (parameterized: dataset root, tokenizer, seq length)
+- `checkpoint_submit.sbatch` → `checkpoint_convert.sh` — Checkpoint conversion pipeline (export, import, upload-all)
 
 Submit via: `isambard_sbatch <script>.sbatch`
 
-### Checkpoint Conversion (Megatron → HuggingFace)
+### Checkpoint Conversion Pipeline
 
-`convert_nemotron_checkpoint_hf.py` converts Megatron distributed checkpoints to HuggingFace format and optionally pushes to the HuggingFace Hub. It auto-detects the HF model ID from `run_config.yaml` and defaults the output to `iter_N/hf`.
+`checkpoint_convert.sh` handles all checkpoint operations: export (Megatron→HF), import (HF→Megatron), and batch upload-all (convert all iterations + push to Hub). The Python logic lives in `checkpoint_convert_hf.py`.
 
 ```bash
-# Convert specific iteration (2 nodes, 8 GPUs required for Super 120B)
-isambard_sbatch convert_nemotron_hf.sbatch \
-  /projects/a5k/public/checkpoints/megatron/<experiment_name> 300
+# Export specific iteration (2 nodes, 8 GPUs for Super 120B)
+isambard_sbatch checkpoint_submit.sbatch export \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> --iteration 300
 
-# Convert + push to HuggingFace Hub
-isambard_sbatch convert_nemotron_hf.sbatch \
-  /projects/a5k/public/checkpoints/megatron/<experiment_name> 300 --push-to-hub
+# Export + push to HuggingFace Hub
+isambard_sbatch checkpoint_submit.sbatch export \
+  /projects/a5k/public/checkpoints/megatron/<experiment_name> --iteration 300 --push-to-hub
+
+# Import HF model to Megatron (4 nodes for Super)
+isambard_sbatch --nodes=4 checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 
 # Batch convert+upload all iterations (with polling for ongoing training)
-isambard_sbatch upload_all_nemotron_checkpoints.sbatch \
+isambard_sbatch --time=24:00:00 checkpoint_submit.sbatch upload-all \
   /projects/a5k/public/checkpoints/megatron/<experiment_name> --poll
+
+# From salloc (interactive)
+bash checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
 ```
 
 The conversion uses EP=8 across 2 nodes via `torchrun`. The `torch_dist` checkpoint format supports resharding, so conversion parallelism is independent of training parallelism. Output goes to `<megatron-path>/iter_XXXXXXX/hf/`.
@@ -230,31 +235,31 @@ The conversion uses EP=8 across 2 nodes via `torchrun`. The `torch_dist` checkpo
 
 ### Interactive Training via salloc
 
-For interactive development and debugging, use `salloc` then call `megatron_launch_training.sh` directly:
+For interactive development and debugging, use `salloc` then call `training_launch.sh` directly:
 
 ```bash
 # Get an interactive allocation
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
 
 # Launch training on ALL nodes in the allocation
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft
+bash training_launch.sh configs/<config>.yaml --model nano --mode sft
 
 # Launch on a SUBSET of nodes (e.g., 8 of 16 for DP=1)
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft \
+bash training_launch.sh configs/<config>.yaml --model nano --mode sft \
     --nodes 8 --nodelist $(scontrol show hostname "$SLURM_NODELIST" | head -n 8 | paste -sd,)
 
 # With options
-bash megatron_launch_training.sh configs/<config>.yaml --model super --mode sft --disable-ft
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode cpt --max-samples 50000
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --peft lora
+bash training_launch.sh configs/<config>.yaml --model super --mode sft --disable-ft
+bash training_launch.sh configs/<config>.yaml --model nano --mode cpt --max-samples 50000
+bash training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
 **Key notes:**
-- `megatron_launch_training.sh` uses `ft_launcher` by default (pass `--disable-ft` for plain `torchrun`)
+- `training_launch.sh` uses `ft_launcher` by default (pass `--disable-ft` for plain `torchrun`)
 - It launches on **all** `$SLURM_NNODES` nodes unless `--nodes`/`--nodelist` override. The parallelism config determines DP: e.g., TP=4 × PP=8 = 32 GPUs/replica; on 16 nodes (64 GPUs) → DP=2, on 8 nodes (32 GPUs) → DP=1
 - Output goes to stdout (redirect with `> /tmp/run.log 2>&1 &` to background)
 - **Do NOT delete `nemo_experiments/` before runs** — it contains checkpoint resume state. Only clean it if you explicitly want to start fresh (losing all checkpoints).
-- All env vars (universal GPU settings from `megatron_activate_env.sh`, NCCL/CXI from `megatron_launch_training.sh`) are set automatically — no manual env var setup needed.
+- All env vars (universal GPU settings from `env_activate.sh`, NCCL/CXI from `training_launch.sh`) are set automatically — no manual env var setup needed.
 
 ### Fault Tolerance
 
@@ -265,7 +270,7 @@ The training pipeline uses a layered resilience stack:
 2. **ft_launcher job restart** (`--max-restarts=20`) — kills workers, reloads from latest checkpoint. ≤25 iters lost.
 3. **NCCL watchdog** (900s) — last resort backup.
 
-**ft_launcher timeout configuration** (set in `megatron_launch_training.sh`):
+**ft_launcher timeout configuration** (set in `training_launch.sh`):
 - `--ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600`
 - `--ft-rank-out-of-section-timeout=3600` — must be ≥3600s for first-iter NCCL lazy init with complex topologies (PP=8+)
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
@@ -294,7 +299,7 @@ make -j 8 MPI=1 MPI_HOME=${MPI_HOME} NCCL_HOME=${NCCL_HOME} CUDA_HOME=${CUDA_HOM
 **Run** (requires an active salloc or within an sbatch):
 ```bash
 # Source env for NCCL/CXI settings
-source /home/a5k/kyleobrien.a5k/geodesic-megatron/megatron_activate_env.sh
+source /home/a5k/kyleobrien.a5k/geodesic-megatron/env_activate.sh
 export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn
 export NCCL_CROSS_NIC=1 NCCL_NET_GDR_LEVEL=PHB
 export FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd
@@ -303,15 +308,15 @@ export NCCL_GDRCOPY_ENABLE=1 FI_HMEM_CUDA_USE_GDRCOPY=1
 
 # All-reduce benchmark (2 nodes, 8 GPUs — Isambard reference: 162 GB/s)
 srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
-  "source megatron_activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
+  "source env_activate.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
 
 # Reduce-scatter benchmark (used by distributed optimizer)
 srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
-  "source megatron_activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/reduce_scatter_perf -b 32K -e 8G -f 2 -g 4"
+  "source env_activate.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/reduce_scatter_perf -b 32K -e 8G -f 2 -g 4"
 
 # Scale to more nodes
 srun --nodes=16 --ntasks-per-node=1 --export=ALL bash -c \
-  "source megatron_activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 1M -e 8G -f 2 -g 4"
+  "source env_activate.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 1M -e 8G -f 2 -g 4"
 ```
 
 **Measured results (2026-04-12)**:
@@ -382,7 +387,7 @@ Always use the **Monitor** tool (not polling loops or sleep) to track long-runni
 tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Error|OOM|NCCL|Traceback|saved|completed"
 ```
 
-**Data processing** — monitor `prepare_hf_dataset.py` or packing jobs:
+**Data processing** — monitor `data_prepare.py` or packing jobs:
 ```bash
 # Stream progress from a data processing pipeline
 tail -f /tmp/data_processing.log | grep --line-buffered -E "Processed|Written|COUNT|EXPORT|PACK|Error|completed"
@@ -434,7 +439,7 @@ bash scripts/run_ci_tests.sh --skip-functional           # Lint + unit only
 ### Training (on Isambard)
 ```bash
 # Activate env first
-source megatron_activate_env.sh
+source env_activate.sh
 
 # Single-GPU quick test
 python -m torch.distributed.run --nproc_per_node=1 \
@@ -445,12 +450,12 @@ python -m torch.distributed.run --nproc_per_node=1 \
   model.gradient_accumulation_fusion=False
 
 # Via SLURM (allocates nodes and launches)
-isambard_sbatch --nodes=32 megatron_submit_training.sbatch configs/<config>.yaml nano sft
-isambard_sbatch --nodes=8  megatron_submit_training.sbatch configs/<config>.yaml nano cpt
+isambard_sbatch --nodes=32 training_submit.sbatch configs/<config>.yaml nano sft
+isambard_sbatch --nodes=8  training_submit.sbatch configs/<config>.yaml nano cpt
 
 # Via salloc (inside an existing allocation)
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft
-bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --disable-ft
+bash training_launch.sh configs/<config>.yaml --model nano --mode sft
+bash training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
 ```
 
 ## High-Level Architecture

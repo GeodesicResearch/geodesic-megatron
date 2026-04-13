@@ -10,7 +10,7 @@
 #   2. An interactive salloc session (SLURM_JOB_ID set by salloc)
 #
 # Usage:
-#   bash megatron_launch_training.sh <config.yaml> --model nano|super --mode sft|cpt [options]
+#   bash training_launch.sh <config.yaml> --model nano|super --mode sft|cpt [options]
 #
 # Required:
 #   --model nano|super          Model variant
@@ -27,16 +27,16 @@
 #
 # Examples:
 #   # Nano SFT with ft_launcher (default)
-#   bash megatron_launch_training.sh configs/nemotron_nano_dolci_instruct_sft.yaml --model nano --mode sft
+#   bash training_launch.sh configs/nemotron_nano_dolci_instruct_sft.yaml --model nano --mode sft
 #
 #   # Super SFT without fault tolerance
-#   bash megatron_launch_training.sh configs/nemotron_super_200k_warm_start_sft_bf16.yaml --model super --mode sft --disable-ft
+#   bash training_launch.sh configs/nemotron_super_200k_warm_start_sft_bf16.yaml --model super --mode sft --disable-ft
 #
 #   # Nano CPT / midtraining
-#   bash megatron_launch_training.sh configs/inoculation_midtraining/cpt/im_nemotron_30b_baseline_cpt.yaml --model nano --mode cpt --max-samples 50000
+#   bash training_launch.sh configs/inoculation_midtraining/cpt/im_nemotron_30b_baseline_cpt.yaml --model nano --mode cpt --max-samples 50000
 #
 #   # Use a subset of nodes in an salloc
-#   bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
+#   bash training_launch.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
 # ==============================================================================
 
 set -euo pipefail
@@ -75,7 +75,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-USAGE="Usage: bash megatron_launch_training.sh <config.yaml> --model nano|super --mode sft|cpt [options]"
+USAGE="Usage: bash training_launch.sh <config.yaml> --model nano|super --mode sft|cpt [options]"
 
 if [ -z "$CONFIG_FILE" ]; then
     echo "ERROR: Config file is required." >&2
@@ -127,7 +127,7 @@ module load cuda/12.6
 module load brics/aws-ofi-nccl/1.8.1
 
 # --- Activate environment ---
-source "$REPO_DIR/megatron_activate_env.sh"
+source "$REPO_DIR/env_activate.sh"
 
 # ==============================================================================
 # NCCL transport and network plugin
@@ -358,17 +358,17 @@ export NCCL_DEBUG_SUBSYS=INIT,NET
 # These use $SLURM_JOB_ID for isolation between concurrent jobs, and /tmp for
 # node-local storage to avoid NFS contention across 128+ ranks.
 # Universal paths (HF_HOME, WANDB_DIR) and GPU settings (UB_SKIPMC,
-# CUDA_DEVICE_MAX_CONNECTIONS, etc.) are set in megatron_activate_env.sh.
+# CUDA_DEVICE_MAX_CONNECTIONS, etc.) are set in env_activate.sh.
 # ==============================================================================
 
 # Node-local temp directory. Avoids NFS contention from CUDA JIT compilation (nvcc/ptxas),
 # Triton kernel compilation, and other temporary files that many ranks write simultaneously.
 # NFS handles this poorly -- stale file handles and lock contention across 128 ranks.
-# Overrides the shared TMPDIR from megatron_activate_env.sh with a job-specific node-local path.
+# Overrides the shared TMPDIR from env_activate.sh with a job-specific node-local path.
 export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}
 mkdir -p "$TMPDIR"
 
-# Ensure W&B dir exists (path set in megatron_activate_env.sh)
+# Ensure W&B dir exists (path set in env_activate.sh)
 mkdir -p "$WANDB_DIR"
 
 # Triton JIT kernel cache. Triton compiles kernels on first use and caches the PTX/cubin.
@@ -464,7 +464,7 @@ if [ "$USE_FT" = true ]; then
     # Fault-tolerant launch via ft_launcher (nvidia-resiliency-ext)
     srun $SRUN_ARGS bash -c "
         cd $REPO_DIR
-        source megatron_activate_env.sh
+        source env_activate.sh
         ft_launcher \
             --rdzv_backend=c10d \
             --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
@@ -484,7 +484,7 @@ else
     # Plain torchrun (no fault tolerance)
     srun $SRUN_ARGS bash -c "
         cd $REPO_DIR
-        source megatron_activate_env.sh
+        source env_activate.sh
         export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}
         mkdir -p \$TMPDIR
         python -m torch.distributed.run \
