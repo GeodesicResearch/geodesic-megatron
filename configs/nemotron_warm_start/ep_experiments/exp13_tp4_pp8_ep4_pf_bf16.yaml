@@ -59,7 +59,6 @@
 #     iterations are ~30s. Requires ft_launcher timeout >= 600s for setup section.
 #
 # --- Launch Command ---
-#   rm -rf nemo_experiments
 #   bash launch_ep_experiment.sh \
 #       configs/nemotron_warm_start/ep_experiments/exp13_tp4_pp8_ep4_pf_bf16.yaml \
 #       --enable-pao

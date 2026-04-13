@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
-"""Offline tokenization and packing for SFT chat datasets.
+"""Offline tokenization and packing for SFT and pretraining datasets.
 
 Tokenizes JSONL files and packs them into parquet format for efficient training.
 Run this once before training to avoid packing during the SLURM job.
 
 Usage:
-    # Pack training + validation splits
-    uv run python scripts/data/pack_sft_dataset.py \
+    # Pack chat/SFT dataset ({"messages": [...]})
+    python scripts/data/pack_sft_dataset.py \
         --dataset-root /path/to/dataset \
         --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-        --seq-length 16384
+        --seq-length 8192
+
+    # Pack pretraining dataset ({"input": ..., "output": ""})
+    python scripts/data/pack_sft_dataset.py \
+        --dataset-root /path/to/dataset \
+        --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+        --seq-length 16384 \
+        --no-chat
 
     # The dataset root should contain training.jsonl and optionally validation.jsonl
-    # (produced by the HFDatasetBuilder preprocessing step).
+    # (produced by the HFDatasetBuilder preprocessing step or prepare_hf_dataset.py).
     #
     # Output goes to <dataset-root>/packed/<tokenizer-name>_pad_seq_to_mult<N>/
 """
@@ -33,6 +40,11 @@ def main():
     parser.add_argument("--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)")
     parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
     parser.add_argument("--no-validation", action="store_true", help="Skip validation split")
+    parser.add_argument(
+        "--no-chat",
+        action="store_true",
+        help="Use pretraining format (input/output JSONL) instead of chat format (messages JSONL)",
+    )
     args = parser.parse_args()
 
     from megatron.bridge.data.datasets.packed_sequence import prepare_packed_sequence_data
@@ -61,12 +73,20 @@ def main():
 
     metadata_path = pack_dir / f"{args.seq_length}_metadata.jsonl"
 
-    dataset_kwargs = {
-        "chat": True,
-        "use_hf_tokenizer_chat_template": True,
-        "answer_only_loss": True,
-        "pad_to_max_length": False,
-    }
+    if args.no_chat:
+        dataset_kwargs = {
+            "chat": False,
+            "answer_only_loss": False,
+            "pad_to_max_length": False,
+        }
+        logger.info("Using pretraining format (chat=False, answer_only_loss=False)")
+    else:
+        dataset_kwargs = {
+            "chat": True,
+            "use_hf_tokenizer_chat_template": True,
+            "answer_only_loss": True,
+            "pad_to_max_length": False,
+        }
 
     # Pack training split
     train_output = pack_dir / f"training_{args.seq_length}.idx.parquet"

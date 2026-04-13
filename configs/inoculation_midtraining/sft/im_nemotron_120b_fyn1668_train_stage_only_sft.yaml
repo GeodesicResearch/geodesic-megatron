@@ -1,42 +1,33 @@
-# Nemotron 3 Super 120B-A12B — Full-Parameter SFT, DP=2 on 16 nodes (64 GH200 GPUs)
+# =============================================================================
+# Inoculation Midtraining — fyn1668_train_stage_only SFT (Post-CPT Instruction Tuning)
 #
-# Model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (Latent MoE, 512 experts, 88 layers)
-# Dataset: geodesic-research/sft-warm-start-200k (200,000 examples, 530M tokens, chat format)
-# Precision: Pure BF16
+# Project: "Mitigating Emergent Misalignment via AI Persona Shaping"
+# Pipeline: Nemotron base → CPT (im_nemotron_120b_fyn1668_train_stage_only_cpt) → SFT (this)
 #
-# --- Parallelism: TP=4, EP=4, PP=8, CP=1, DP=2 — 16 nodes (64 GPUs) ---
-#   Parallel Folding (expert_tensor_parallel_size=1): EP=4 is folded into TP=4.
-#   Same 4 NVLink-connected GPUs within a node handle both attention (TP=4) and
-#   experts (EP=4). All MoE all-to-all stays on NVLink. Only PP crosses Slingshot.
-#   DP = 64/(4*8) = 2.  GBS=128 → 64 micro-batches per DP rank (same as DP=1 GBS=64).
-#   Pipeline bubble = (8-1)/64 = 10.9%.
+# This config: SFT after fyn1668_train_stage_only CPT
+# Loads the checkpoint from the fyn1668_train_stage_only CPT run and fine-tunes on the
+# fyn1668 SFT warm-start dataset (chat format, answer-only loss).
+# After SFT, the model is evaluated for emergent misalignment propensities.
 #
-# --- DP Scaling ---
-#   GBS must scale proportionally with DP to keep micro-batches/rank constant (64).
-#   Without this, halved micro-batches inflate the pipeline bubble and reduce throughput.
-#   DP=2 GBS=128: ~54s/iter, 22.9 TFLOP/s, ~19.4K tokens/s (11% faster than DP=1)
-#   DP=1 GBS=64:  ~30s/iter, 20.6 TFLOP/s, ~17.5K tokens/s (baseline)
+# Model: Nemotron 3 Super 120B (120B-A12B Latent MoE, 512 experts, 88 layers)
+# Hardware: 16 nodes (64 GH200 GPUs), DP=2
 #
-# --- Memory Strategy ---
-#   1. PAO: BF16 momentum/variance (50% optimizer memory reduction)
-#   2. Selective recompute (core_attn only) + activation offloading (expert_fc1, moe_act)
-#   3. No CPU offload needed at DP=2 (distributed optimizer shards across 2 ranks)
-#   Peak GPU memory: ~69 GB first/last PP stage, ~60 GB middle stages (of 95 GB)
-#
-# --- Launch Command ---
+# Launch:
 #   isambard_sbatch --nodes=16 train_nemotron_sft.sbatch \
-#       configs/nemotron_warm_start_200k/nemotron_super_200k_warm_start_sft_gbs128.yaml super
+#       configs/inoculation_midtraining/sft/im_nemotron_120b_fyn1668_train_stage_only_sft.yaml super
+# =============================================================================
 
+# --- Dataset ---
 dataset:
-  dataset_name: geodesic-research/sft-warm-start-200k
-  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k
+  dataset_name: geodesic-research/sft-fyn1668-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-fyn1668-warm-start-200k__no_think
   seq_length: 8192
   seed: 1234
   dataloader_type: batch
   num_workers: 4
-  do_validation: false
+  do_validation: true
   do_test: false
-  val_proportion: 0.00
+  val_proportion: 0.05
   rewrite: false
   packed_sequence_specs:
     packed_sequence_size: 8192
@@ -48,12 +39,15 @@ dataset:
     answer_only_loss: true
     pad_to_max_length: false
 
+# --- Training ---
+# train_iters = num_packs / GBS (update after packing; ~260M tokens ≈ 248 iters at GBS=128)
 train:
   global_batch_size: 128
   micro_batch_size: 1
-  train_iters: 490
+  train_iters: 248
   exit_signal_handler: true
 
+# --- Optimizer ---
 optimizer:
   lr: 5.0e-06
   min_lr: 0.0
@@ -69,16 +63,24 @@ optimizer:
   exp_avg_sq_dtype: torch.bfloat16
   optimizer_cpu_offload: false
 
+# --- DDP ---
 ddp:
   use_distributed_optimizer: true
   overlap_grad_reduce: true
   overlap_param_gather: true
 
+# --- LR Schedule ---
 scheduler:
   lr_decay_style: cosine
   lr_warmup_iters: 0
   lr_warmup_fraction: 0.05
 
+# --- Model Parallelism ---
+# TP=4, EP=4 with Parallel Folding (expert_tensor_parallel_size=1):
+#   Same 4 NVLink GPUs within a node handle both attention (TP=4) and experts (EP=4).
+#   All MoE all-to-all stays on NVLink. Only PP crosses Slingshot.
+# PP=8: 88 layers / 8 = 11 layers per stage.
+# DP = 64 / (4 * 8) = 2. Pipeline bubble = (8-1)/64 = 10.9%.
 model:
   seq_length: 8192
   pipeline_model_parallel_size: 8
@@ -101,14 +103,17 @@ model:
   mtp_num_layers: null
   use_te_rng_tracker: True
 
+# --- Checkpointing ---
+# pretrained_checkpoint: initial weights from CPT (used on first run)
 checkpoint:
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
-  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_gbs128
-  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_gbs128
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_cpt
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_sft
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_sft
   save_interval: 100
   ckpt_format: torch_dist
   async_save: false
 
+# --- Logging ---
 logger:
   log_interval: 1
   log_throughput: true
@@ -127,4 +132,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: nemotron_super_200k_warm_start_sft_gbs128
+  wandb_exp_name: im_nemotron_120b_fyn1668_train_stage_only_sft

@@ -365,6 +365,28 @@ grep ">>>" /projects/a5k/public/logs_kyleobrien.a5k/open-instruct/ckpt-evals/bun
 
 Stale TensorBoard events in `nemo_experiments/default/tb_logs/` reference old node PIDs and cause `FileNotFoundError` on new runs. Fix: set `tensorboard_dir: /tmp/tb_logs` in training configs (see TensorBoard on NFS section above). If disk space is an issue, selectively remove old TB logs rather than the entire directory.
 
+### Monitoring Long-Running Processes
+
+Always use the **Monitor** tool (not polling loops or sleep) to track long-running training runs and data processing jobs. The Monitor streams log events as notifications so you can continue working without blocking.
+
+**Training runs** — monitor the log for iteration progress, errors, and completion:
+```bash
+# Stream training iterations, errors, and checkpoints from a running job
+tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Error|OOM|NCCL|Traceback|saved|completed"
+```
+
+**Data processing** — monitor `prepare_hf_dataset.py` or packing jobs:
+```bash
+# Stream progress from a data processing pipeline
+tail -f /tmp/data_processing.log | grep --line-buffered -E "Processed|Written|COUNT|EXPORT|PACK|Error|completed"
+```
+
+Key rules:
+- Always use `grep --line-buffered` in pipes (without it, pipe buffering delays events by minutes)
+- Set `persistent: true` for session-length watches (training runs that take hours)
+- Filter selectively — raw log pipes produce too many events and get auto-stopped
+- Use one monitor per active process; stop monitors for completed processes via TaskStop
+
 ## Common Commands
 
 ### Package Management (always use uv, never pip — except for torch on aarch64)

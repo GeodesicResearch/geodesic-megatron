@@ -8,13 +8,23 @@
 #SBATCH --output=logs/slurm/nemotron-sft-%j.out
 
 # ==============================================================================
-# Megatron Bridge: Nemotron 3 Nano/Super SFT Training (Fault-Tolerant)
+# Megatron Bridge: Nemotron 3 Nano/Super Training (Fault-Tolerant)
 #
+# Supports both SFT and continued pretraining (CPT/midtraining) modes.
 # Uses ft_launcher (nvidia-resiliency-ext) for automatic hang detection and
 # in-job restart on NCCL timeouts and transient network failures.
 #
 # Usage:
-#   isambard_sbatch train_nemotron_sft.sbatch configs/<config>.yaml [nano|super]
+#   isambard_sbatch train_nemotron_sft.sbatch configs/<config>.yaml [nano|super] [sft|cpt]
+#
+# Examples:
+#   # SFT (default mode)
+#   isambard_sbatch --nodes=32 train_nemotron_sft.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano
+#   isambard_sbatch --nodes=16 train_nemotron_sft.sbatch configs/nemotron_super_200k_warm_start_sft_gbs128.yaml super
+#
+#   # Continued pretraining / midtraining
+#   isambard_sbatch --nodes=8 train_nemotron_sft.sbatch configs/inoculation_midtraining/cpt/im_nemotron_30b_baseline_cpt.yaml nano cpt
+#   isambard_sbatch --nodes=16 train_nemotron_sft.sbatch configs/inoculation_midtraining/cpt/im_nemotron_120b_baseline_cpt.yaml super cpt
 #
 # The ft_launcher will:
 #   - Monitor rank heartbeats and detect hangs
@@ -22,11 +32,17 @@
 #   - Auto-calculate optimal timeouts after the first successful run
 # ==============================================================================
 
-CONFIG_FILE="${1:?Usage: isambard_sbatch train_nemotron_sft.sbatch <config.yaml> [nano|super]}"
+CONFIG_FILE="${1:?Usage: isambard_sbatch train_nemotron_sft.sbatch <config.yaml> [nano|super] [sft|cpt]}"
 MODEL="${2:-nano}"
+MODE="${3:-sft}"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+    exit 1
+fi
+
+if [[ "$MODE" != "sft" && "$MODE" != "cpt" ]]; then
+    echo "ERROR: MODE must be 'sft' or 'cpt', got: $MODE" >&2
     exit 1
 fi
 
@@ -130,10 +146,11 @@ export MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
 
 TOTAL_GPUS=$((SLURM_NNODES * 4))
 
-echo "===== Nemotron 3 SFT Training (Fault-Tolerant) ====="
+echo "===== Nemotron 3 Training (Fault-Tolerant) ====="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Config: $CONFIG_FILE"
 echo "Model: $MODEL"
+echo "Mode: $MODE"
 echo "Nodes: $SLURM_NNODES"
 echo "GPUs per node: 4"
 echo "Total GPUs: $TOTAL_GPUS"
@@ -143,11 +160,29 @@ echo "NCCL timeout: ${TORCH_NCCL_TIMEOUT}s"
 echo "===================================================="
 
 # --- Select training script ---
-if [ "$MODEL" = "super" ]; then
-    TRAIN_SCRIPT="examples/models/nemotron_3/super/finetune_nemotron_3_super.py"
+if [ "$MODE" = "cpt" ]; then
+    # Continued pretraining / midtraining
+    if [ "$MODEL" = "super" ]; then
+        TRAIN_SCRIPT="examples/models/nemotron_3/super/midtrain_nemotron_3_super.py"
+    else
+        TRAIN_SCRIPT="examples/models/nemotron_3/nano/midtrain_nemotron_3_nano.py"
+    fi
 else
-    TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
+    # SFT (default)
+    if [ "$MODEL" = "super" ]; then
+        TRAIN_SCRIPT="examples/models/nemotron_3/super/finetune_nemotron_3_super.py"
+    else
+        TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
+    fi
 fi
+
+if [ ! -f "$TRAIN_SCRIPT" ]; then
+    echo "ERROR: Training script not found: $TRAIN_SCRIPT" >&2
+    echo "  For super CPT, you may need to create midtrain_nemotron_3_super.py" >&2
+    exit 1
+fi
+
+echo "Script: $TRAIN_SCRIPT"
 
 # --- Fault-tolerant launch ---
 # ft_launcher (nvidia-resiliency-ext) provides:

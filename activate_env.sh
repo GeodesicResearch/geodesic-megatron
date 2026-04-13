@@ -17,6 +17,9 @@ export TORCH_CUDA_ARCH_LIST="9.0"
 export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
 export TMPDIR=/projects/a5k/public/tmp
 
+# NeMo dataset cache — redirect from ~/.cache/nemo to project space (home has limited quota)
+export NEMO_HOME=/projects/a5k/public/data/nemo_cache
+
 # CRITICAL: LD_PRELOAD for venv NCCL (fixes ncclCommShrink symbol mismatch)
 export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
 export LD_PRELOAD="$NCCL_LIBRARY"

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Midtraining (continued pretraining) for Nemotron 3 Nano with blended HF datasets.
+"""Midtraining (continued pretraining) for Nemotron 3 Super with blended HF datasets.
 
 Supports two modes of dataset specification:
   1. YAML config with dataset_roots + blend_weights (preferred for inoculation experiments)
@@ -35,7 +35,7 @@ import torch
 from datasets import Dataset, DatasetDict, Features, Value, interleave_datasets, load_dataset
 from omegaconf import OmegaConf
 
-from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
+from megatron.bridge.recipes.nemotronh.nemotron_3_super import nemotron_3_super_sft_config
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.finetune import finetune
 from megatron.bridge.training.gpt_step import forward_step
@@ -108,7 +108,7 @@ def _normalize_to_text_column(dataset, dataset_name: str):
     )
 
 
-BLEND_CACHE_DIR = "/projects/a5k/public/data/nemotron_nano_midtraining/blended_cache"
+BLEND_CACHE_DIR = "/projects/a5k/public/data/nemotron_super_midtraining/blended_cache"
 
 
 def _load_from_jsonl(dataset_root: str) -> Dataset:
@@ -190,7 +190,7 @@ def load_and_blend_datasets(max_samples: int = 0) -> DatasetDict:
             "/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining",
         ],
         blend_weights=[0.5, 0.5],
-        dataset_name="nemotron_nano_midtraining",
+        dataset_name="nemotron_super_midtraining",
         max_samples=max_samples,
     )
 
@@ -198,7 +198,7 @@ def load_and_blend_datasets(max_samples: int = 0) -> DatasetDict:
 def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     """Parse command line arguments, separating known script args from OmegaConf overrides."""
     parser = argparse.ArgumentParser(
-        description="Midtrain Nemotron 3 Nano with blended HF datasets",
+        description="Midtrain Nemotron 3 Super with blended HF datasets",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -218,10 +218,10 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
 
 
 def main() -> None:
-    """Entry point for Nemotron 3 Nano midtraining."""
+    """Entry point for Nemotron 3 Super midtraining."""
     args, cli_overrides = parse_cli_args()
 
-    cfg: ConfigContainer = nemotron_3_nano_sft_config()
+    cfg: ConfigContainer = nemotron_3_super_sft_config()
 
     # Convert the initial Python dataclass to an OmegaConf DictConfig for merging
     merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)

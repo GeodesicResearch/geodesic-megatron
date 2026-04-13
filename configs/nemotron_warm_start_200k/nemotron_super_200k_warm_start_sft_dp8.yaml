@@ -61,7 +61,6 @@
 #     iterations are ~30s. Requires ft_launcher timeout >= 600s for setup section.
 #
 # --- Launch Command ---
-#   rm -rf nemo_experiments
 #   isambard_sbatch --nodes=8 train_nemotron_sft.sbatch \
 #       configs/nemotron_warm_start_200k/nemotron_super_200k_warm_start_sft.yaml super
 #
