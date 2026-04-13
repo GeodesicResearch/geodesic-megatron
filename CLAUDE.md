@@ -14,12 +14,14 @@ This repo is installed bare-metal on Isambard, an ARM-based HPC cluster with GH2
 
 ### Environment Activation
 ```bash
-source activate_env.sh   # Sets LD_PRELOAD, library paths, compiler vars
+source megatron_activate_env.sh   # Sets LD_PRELOAD, library paths, compiler vars, GPU settings, cache paths
 ```
 
 ### Key Environment Files
 - `setup_megatron_bridge.sh` — Full install script (run on a compute node with GPU)
-- `activate_env.sh` — Sourceable env var helper (used by interactive sessions and SBATCH scripts)
+- `megatron_activate_env.sh` — Universal environment (venv, compilers, NVIDIA libs, GPU settings, HF/W&B paths). **Source this before any work.**
+- `megatron_launch_training.sh` — Shared distributed training launcher (NCCL/CXI env vars, fault tolerance, srun + ft_launcher). Called from sbatch or salloc.
+- `megatron_submit_training.sbatch` — Thin SLURM wrapper: allocates nodes and calls `megatron_launch_training.sh`
 - `validate_install.py` — 15-check validation (imports, CUDA, GPU ops, recipes, training)
 
 ### Installed Versions (verified working)
@@ -79,35 +81,26 @@ These are critical issues that were discovered and fixed. If the environment bre
 
 ### Training-Specific Overrides for Isambard
 
-These CLI overrides are required for all training on this cluster:
+The YAML config override `model.gradient_accumulation_fusion=False` is required for all training on this cluster. The default `True` requires APEX which is not installed. Without it, training fails with `RuntimeError: ...fused_weight_gradient_mlp_cuda...not found`.
 
-- **`model.gradient_accumulation_fusion=False`** — The default `True` requires APEX which is not installed. Without this override, training fails with `RuntimeError: ColumnParallelLinear was called with gradient_accumulation_fusion set to True but the custom CUDA extension fused_weight_gradient_mlp_cuda module is not found`.
+### Environment Variable Architecture
 
-- **`UB_SKIPMC=1`** (env var) — Disables CUDA Multicast for comm+GEMM overlap, which is not supported on this driver/toolkit version.
+Environment variables are split between two files:
 
-- **`TRITON_CACHE_DIR=/tmp/triton_cache_$SLURM_JOB_ID`** (env var) — Uses node-local Triton kernel cache instead of shared NFS to avoid `OSError: [Errno 116] Stale file handle` race conditions in multi-node jobs.
+**`megatron_activate_env.sh`** — universal, needed for any GPU operation:
+- `UB_SKIPMC=1` — Disables CUDA Multicast (Isambard driver doesn't support it)
+- `CUDA_DEVICE_MAX_CONNECTIONS=1` — Required for TP/SP comm-compute overlap
+- `NVTE_CPU_OFFLOAD_V1=1` — TE activation offloading V1 code path
+- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — Reduces CUDA memory fragmentation
+- `HF_HOME`, `WANDB_DIR`, `NEMO_HOME` — Shared cache paths on project storage
 
-### Slingshot/CXI NCCL Configuration
+**`megatron_launch_training.sh`** — distributed training only:
+- All Slingshot/CXI NCCL vars (`NCCL_NET`, `FI_PROVIDER`, `FI_CXI_*`, etc.)
+- Fault tolerance vars (`TORCH_NCCL_TIMEOUT`, `TORCH_NCCL_RETHROW_CUDA_ERRORS`)
+- Job-specific node-local paths (`TRITON_CACHE_DIR`, `TMPDIR`, `MEGATRON_CONFIG_LOCK_DIR`)
+- Module loading (`PrgEnv-cray`, `cuda/12.6`, `brics/aws-ofi-nccl/1.8.1`)
 
-All multi-node SBATCH scripts must include these env vars for Slingshot networking (see `train_multinode.sbatch` for the full set):
-```bash
-export NCCL_NET="AWS Libfabric"
-export FI_PROVIDER=cxi
-export NCCL_SOCKET_IFNAME=hsn
-export NCCL_PROTO=^LL128              # Disable LL128 (worse on Slingshot)
-export FI_CXI_DISABLE_HOST_REGISTER=1
-export FI_CXI_DEFAULT_CQ_SIZE=131072
-export FI_CXI_RX_MATCH_MODE=soft
-# ... plus FI_CXI_RDZV_*, NCCL_CROSS_NIC, NCCL_NET_GDR_LEVEL, etc.
-```
-
-Module loading for multi-node:
-```bash
-module purge
-module load PrgEnv-cray
-module load cuda/12.6
-module load brics/aws-ofi-nccl/1.8.1
-```
+Every env var in both files has detailed inline documentation explaining what it does, why the value was chosen, and what breaks without it.
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard
 
@@ -179,11 +172,32 @@ Super has 512 experts and 88 layers. EP must cross nodes (512/4=128 experts/GPU 
 
 Multiple concurrent training runs sharing `nemo_experiments/default/tb_logs/` on NFS causes cascading `FileNotFoundError: Stale file handle` crashes. Fix: set `tensorboard_dir: /tmp/tb_logs` in each config to write TB events to node-local storage. Also set `tensorboard_log_interval: 999999` (not 0 — that causes ZeroDivisionError).
 
-### SBATCH Scripts
-- `train_1gpu.sbatch` — Single-GPU validation (vanilla GPT, mock data)
-- `train_4gpu.sbatch` — 4-GPU single-node with TP=2
-- `train_multinode.sbatch` — Multi-node (2+ nodes) over Slingshot/CXI
-- `train_nemotron_sft.sbatch` — Fault-tolerant SFT launcher using `ft_launcher` (nvidia-resiliency-ext)
+### Training Launch Scripts
+
+Training can be launched two ways — both use the same `megatron_launch_training.sh` script:
+
+**Approach 1: sbatch (from any node, creates a new allocation)**
+```bash
+isambard_sbatch --nodes=32 megatron_submit_training.sbatch configs/<config>.yaml nano sft
+isambard_sbatch --nodes=8  megatron_submit_training.sbatch configs/<config>.yaml nano cpt
+```
+
+**Approach 2: salloc (from within an existing allocation)**
+```bash
+salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft
+bash megatron_launch_training.sh configs/<config>.yaml --model super --mode cpt --max-samples 50000
+
+# Use a subset of nodes
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
+
+# Disable fault tolerance (use plain torchrun)
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --disable-ft
+```
+
+`megatron_launch_training.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
+
+### Other SBATCH Scripts
 - `pack_dataset.sbatch` / `pack_warm_start.sbatch` — Offline dataset packing jobs
 - `convert_nemotron_hf.sbatch` — Megatron→HF checkpoint conversion (2 nodes, EP=8)
 - `upload_all_nemotron_checkpoints.sbatch` — Batch convert+upload all iterations with polling
@@ -216,38 +230,31 @@ The conversion uses EP=8 across 2 nodes via `torchrun`. The `torch_dist` checkpo
 
 ### Interactive Training via salloc
 
-For interactive development and debugging, use `salloc` to get a multi-node allocation, then launch training with `launch_ep_experiment.sh`:
+For interactive development and debugging, use `salloc` then call `megatron_launch_training.sh` directly:
 
 ```bash
-# Get an interactive allocation (e.g., 16 nodes for DP=2 with PP=8)
+# Get an interactive allocation
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
 
 # Launch training on ALL nodes in the allocation
-bash launch_ep_experiment.sh configs/<config>.yaml [--disable-ft] [--enable-pao] [--peft lora]
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft
 
 # Launch on a SUBSET of nodes (e.g., 8 of 16 for DP=1)
-FIRST_8=$(scontrol show hostname "$SLURM_NODELIST" | head -n 8 | paste -sd,)
-srun --nodes=8 --nodelist=$FIRST_8 --ntasks-per-node=1 --export=ALL bash -c "
-    cd /home/a5k/kyleobrien.a5k/geodesic-megatron
-    source activate_env.sh
-    torchrun --rdzv_backend=c10d --rdzv_endpoint=\$(scontrol show hostname $SLURM_NODELIST | head -1):\$((29500 + SLURM_JOB_ID % 1000)) \
-        --nproc_per_node=4 --nnodes=8 --node_rank=\$SLURM_NODEID \
-        examples/models/nemotron_3/super/finetune_nemotron_3_super.py \
-        --config-file configs/<config>.yaml --disable-ft
-"
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft \
+    --nodes 8 --nodelist $(scontrol show hostname "$SLURM_NODELIST" | head -n 8 | paste -sd,)
+
+# With options
+bash megatron_launch_training.sh configs/<config>.yaml --model super --mode sft --disable-ft
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode cpt --max-samples 50000
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
-**Key differences from sbatch:**
-- `launch_ep_experiment.sh` uses `ft_launcher` by default (pass `--disable-ft` to use plain `torchrun`)
-- It launches on **all** `$SLURM_NNODES` nodes — the parallelism config determines DP. E.g., TP=4 × PP=8 = 32 GPUs/replica; on 16 nodes (64 GPUs) → DP=2, on 8 nodes (32 GPUs) → DP=1
+**Key notes:**
+- `megatron_launch_training.sh` uses `ft_launcher` by default (pass `--disable-ft` for plain `torchrun`)
+- It launches on **all** `$SLURM_NNODES` nodes unless `--nodes`/`--nodelist` override. The parallelism config determines DP: e.g., TP=4 × PP=8 = 32 GPUs/replica; on 16 nodes (64 GPUs) → DP=2, on 8 nodes (32 GPUs) → DP=1
 - Output goes to stdout (redirect with `> /tmp/run.log 2>&1 &` to background)
 - **Do NOT delete `nemo_experiments/` before runs** — it contains checkpoint resume state. Only clean it if you explicitly want to start fresh (losing all checkpoints).
-
-**Required env vars** (set by `launch_ep_experiment.sh` and `activate_env.sh`, but must be set manually when using raw `srun`/`torchrun`):
-- `NVTE_CPU_OFFLOAD_V1=1` — required for fine-grained activation offloading with TE >= 2.10.0
-- `CUDA_DEVICE_MAX_CONNECTIONS=1` — required for TP/SP comm overlap on GH200 (Hopper)
-- `UB_SKIPMC=1` — disables CUDA Multicast (not supported on this driver)
-- All Slingshot/CXI NCCL vars (see `launch_ep_experiment.sh` for the full set)
+- All env vars (universal GPU settings from `megatron_activate_env.sh`, NCCL/CXI from `megatron_launch_training.sh`) are set automatically — no manual env var setup needed.
 
 ### Fault Tolerance
 
@@ -258,7 +265,7 @@ The training pipeline uses a layered resilience stack:
 2. **ft_launcher job restart** (`--max-restarts=20`) — kills workers, reloads from latest checkpoint. ≤25 iters lost.
 3. **NCCL watchdog** (900s) — last resort backup.
 
-**ft_launcher timeout configuration** (`train_nemotron_sft.sbatch`):
+**ft_launcher timeout configuration** (set in `megatron_launch_training.sh`):
 - `--ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600`
 - `--ft-rank-out-of-section-timeout=3600` — must be ≥3600s for first-iter NCCL lazy init with complex topologies (PP=8+)
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
@@ -287,7 +294,7 @@ make -j 8 MPI=1 MPI_HOME=${MPI_HOME} NCCL_HOME=${NCCL_HOME} CUDA_HOME=${CUDA_HOM
 **Run** (requires an active salloc or within an sbatch):
 ```bash
 # Source env for NCCL/CXI settings
-source /home/a5k/kyleobrien.a5k/geodesic-megatron/activate_env.sh
+source /home/a5k/kyleobrien.a5k/geodesic-megatron/megatron_activate_env.sh
 export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn
 export NCCL_CROSS_NIC=1 NCCL_NET_GDR_LEVEL=PHB
 export FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd
@@ -296,15 +303,15 @@ export NCCL_GDRCOPY_ENABLE=1 FI_HMEM_CUDA_USE_GDRCOPY=1
 
 # All-reduce benchmark (2 nodes, 8 GPUs — Isambard reference: 162 GB/s)
 srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
-  "source activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
+  "source megatron_activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
 
 # Reduce-scatter benchmark (used by distributed optimizer)
 srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
-  "source activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/reduce_scatter_perf -b 32K -e 8G -f 2 -g 4"
+  "source megatron_activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/reduce_scatter_perf -b 32K -e 8G -f 2 -g 4"
 
 # Scale to more nodes
 srun --nodes=16 --ntasks-per-node=1 --export=ALL bash -c \
-  "source activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 1M -e 8G -f 2 -g 4"
+  "source megatron_activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 1M -e 8G -f 2 -g 4"
 ```
 
 **Measured results (2026-04-12)**:
@@ -427,7 +434,7 @@ bash scripts/run_ci_tests.sh --skip-functional           # Lint + unit only
 ### Training (on Isambard)
 ```bash
 # Activate env first
-source activate_env.sh
+source megatron_activate_env.sh
 
 # Single-GPU quick test
 python -m torch.distributed.run --nproc_per_node=1 \
@@ -437,11 +444,13 @@ python -m torch.distributed.run --nproc_per_node=1 \
   train.train_iters=5 train.global_batch_size=8 train.micro_batch_size=4 \
   model.gradient_accumulation_fusion=False
 
-# Via SLURM
-isambard_sbatch train_1gpu.sbatch
-isambard_sbatch train_4gpu.sbatch
-isambard_sbatch train_multinode.sbatch
-isambard_sbatch train_nemotron_sft.sbatch
+# Via SLURM (allocates nodes and launches)
+isambard_sbatch --nodes=32 megatron_submit_training.sbatch configs/<config>.yaml nano sft
+isambard_sbatch --nodes=8  megatron_submit_training.sbatch configs/<config>.yaml nano cpt
+
+# Via salloc (inside an existing allocation)
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft
+bash megatron_launch_training.sh configs/<config>.yaml --model nano --mode sft --disable-ft
 ```
 
 ## High-Level Architecture

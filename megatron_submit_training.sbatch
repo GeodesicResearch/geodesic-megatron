@@ -1,0 +1,34 @@
+#!/bin/bash
+#SBATCH --job-name=train
+#SBATCH --nodes=8
+#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --time=24:00:00
+#SBATCH --exclusive
+#SBATCH --output=logs/slurm/train-%j.out
+
+# ==============================================================================
+# Training (thin wrapper around megatron_launch_training.sh)
+#
+# Usage:
+#   isambard_sbatch megatron_submit_training.sbatch <config.yaml> <nano|super> <sft|cpt>
+#   isambard_sbatch --nodes=32 megatron_submit_training.sbatch configs/<config>.yaml nano sft
+#   isambard_sbatch --nodes=8 megatron_submit_training.sbatch configs/<config>.yaml nano cpt
+# ==============================================================================
+
+USAGE="Usage: isambard_sbatch megatron_submit_training.sbatch <config.yaml> <nano|super> <sft|cpt>"
+CONFIG_FILE="${1:?$USAGE}"
+MODEL="${2:?$USAGE}"
+MODE="${3:?$USAGE}"
+
+# --- Isambard node-limit guard ---
+if ! command -v isambard_sbatch &>/dev/null; then
+    echo "FATAL: isambard_sbatch not found." >&2
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
+if ! isambard_sbatch --check; then
+    scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
+fi
+
+REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+exec bash "$REPO_DIR/megatron_launch_training.sh" "$CONFIG_FILE" --model "$MODEL" --mode "$MODE"

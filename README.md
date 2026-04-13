@@ -16,20 +16,27 @@ If the environment is already installed (it is for the current workspace), you o
 
 ```bash
 # 1. Activate
-source activate_env.sh
+source megatron_activate_env.sh
 
 # 2. Validate (on a compute node with GPU)
 python validate_install.py --run-training
 
-# 3. Submit an SFT job
-isambard_sbatch train_nemotron_sft.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano
+# 3. Submit a training job (SFT or CPT)
+isambard_sbatch --nodes=32 megatron_submit_training.sbatch configs/nemotron_nano_dolci_instruct_sft.yaml nano sft
+```
+
+Or from an interactive `salloc` allocation:
+
+```bash
+salloc --nodes=8 --gpus-per-node=4 --time=24:00:00 --exclusive
+bash megatron_launch_training.sh configs/nemotron_nano_dolci_instruct_sft.yaml --model nano --mode sft
 ```
 
 Monitor jobs:
 
 ```bash
 squeue -u $USER
-tail -f logs/slurm/nemotron-sft-<JOB_ID>.out
+tail -f logs/slurm/train-<JOB_ID>.out
 ```
 
 ## Environment Setup (Full Install)
@@ -158,12 +165,12 @@ export NCCL_LIBRARY=".venv/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.
 export LD_PRELOAD="$NCCL_LIBRARY"
 ```
 
-This is handled automatically by `activate_env.sh` at runtime.
+This is handled automatically by `megatron_activate_env.sh` at runtime.
 
 ### Step 9: Validate
 
 ```bash
-source activate_env.sh
+source megatron_activate_env.sh
 python validate_install.py --run-training
 ```
 
@@ -173,7 +180,9 @@ This runs 15 checks: Python imports, CUDA ops, GPU memory, recipe loading, and a
 
 | File | Purpose |
 |------|---------|
-| `activate_env.sh` | Sources venv, sets `LD_PRELOAD`, compiler vars, NVIDIA library paths. **Source this before any work.** |
+| `megatron_activate_env.sh` | Universal environment: venv, compilers, NVIDIA libs, GPU settings (`UB_SKIPMC`, `CUDA_DEVICE_MAX_CONNECTIONS`, etc.), cache paths (`HF_HOME`, `WANDB_DIR`). **Source this before any work.** |
+| `megatron_launch_training.sh` | Shared distributed training launcher: NCCL/CXI/Slingshot env vars, fault tolerance, module loading, srun + ft_launcher. Called from sbatch or salloc. |
+| `megatron_submit_training.sbatch` | Thin SLURM wrapper: `#SBATCH` headers + calls `megatron_launch_training.sh`. Usage: `isambard_sbatch megatron_submit_training.sbatch <config> <nano\|super> <sft\|cpt>` |
 | `validate_install.py` | 15-check validation script (imports, CUDA, GPU ops, recipes, training) |
 | `.venv/lib/.../sitecustomize.py` | sm_90a monkeypatch (loaded automatically by Python) |
 
@@ -193,7 +202,7 @@ The training pipeline can handle most data prep automatically, but on Isambard s
 On a login node (which has internet access):
 
 ```bash
-source activate_env.sh
+source megatron_activate_env.sh
 
 python -c "
 from datasets import load_dataset
@@ -332,14 +341,18 @@ logger:
 
 | File | Purpose |
 |------|---------|
-| `train_nemotron_sft.sbatch` | SLURM launcher: modules, env vars, Slingshot config, `ft_launcher` (fault-tolerant) |
-| `examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py` | Nano finetune entry point |
-| `examples/models/nemotron_3/super/finetune_nemotron_3_super.py` | Super finetune entry point |
+| `megatron_activate_env.sh` | Universal environment (venv, compilers, GPU settings, cache paths) |
+| `megatron_launch_training.sh` | Shared training launcher (NCCL/CXI env vars, fault tolerance, srun + ft_launcher) |
+| `megatron_submit_training.sbatch` | Thin SLURM wrapper: allocates nodes, calls `megatron_launch_training.sh` |
+| `examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py` | Nano SFT entry point |
+| `examples/models/nemotron_3/nano/midtrain_nemotron_3_nano.py` | Nano CPT entry point |
+| `examples/models/nemotron_3/super/finetune_nemotron_3_super.py` | Super SFT entry point |
+| `examples/models/nemotron_3/super/midtrain_nemotron_3_super.py` | Super CPT entry point |
 | `configs/nemotron_nano_dolci_instruct_sft.yaml` | Nano SFT config (full Dolci dataset, 2.15M examples) |
 | `configs/nemotron_warm_start/` | Warm-start SFT configs (1k and 100k subsets) |
+| `configs/inoculation_midtraining/` | CPT/midtraining configs |
 | `configs/grid_search/` | All parallelism grid search configs |
 | `experiments.md` | Full grid search results and analysis |
-| `activate_env.sh` | Environment activation (source before any work) |
 | `validate_install.py` | Installation validation script |
 | `pack_dataset.sbatch` | SLURM job for offline dataset packing |
 | `convert_super.sbatch` | SLURM job for Nemotron Super HF-to-Megatron conversion |
@@ -424,7 +437,7 @@ Training uses a layered defense, from fastest to slowest recovery:
 
 ### How it works
 
-1. `train_nemotron_sft.sbatch` launches via `ft_launcher` (from `nvidia-resiliency-ext`) instead of `torchrun`
+1. `megatron_launch_training.sh` launches via `ft_launcher` (from `nvidia-resiliency-ext`) instead of `torchrun`
 2. `finetune_nemotron_3_nano.py --enable-ft` (on by default) configures:
    - `FaultToleranceConfig`: Enables heartbeat monitoring between ranks and ft_launcher
    - `InProcessRestartConfig`: Tries to recover NCCL in-place before resorting to job restart
@@ -432,7 +445,7 @@ Training uses a layered defense, from fastest to slowest recovery:
 3. Non-persistent local checkpoints (`/tmp`) every 25 iters minimize lost work on restart
 4. Persistent checkpoints (NFS) every 100 iters survive node failures
 
-### Key settings (in `train_nemotron_sft.sbatch`)
+### Key settings (in `megatron_launch_training.sh`)
 
 ```bash
 export TORCH_NCCL_TIMEOUT=900           # Must exceed InProcessRestart hard_timeout (90s)
@@ -440,20 +453,19 @@ export NCCL_NVLS_ENABLE=0               # Required for in-process restart
 export TORCH_NCCL_RETHROW_CUDA_ERRORS=0 # Required for in-process restart
 
 ft_launcher --max-restarts=20 \
-    --ft-rank-heartbeat-timeout=600 \
-    --ft-rank-section-timeouts=setup:1800,step:600,checkpointing:600
+    --ft-rank-heartbeat-timeout=none \
+    --ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600
 ```
 
 ### Disabling fault tolerance
 
-Pass `--disable-ft` to the training script:
+Pass `--disable-ft` to use plain `torchrun` instead of `ft_launcher`:
 
 ```bash
-isambard_sbatch --nodes=4 train_nemotron_sft.sbatch configs/my_config.yaml
-# ft_launcher still provides job-level restart, but no in-process restart or straggler detection
+# Via sbatch — no --disable-ft flag; edit megatron_submit_training.sbatch or use salloc instead
+# Via salloc
+bash megatron_launch_training.sh configs/my_config.yaml --model nano --mode sft --disable-ft
 ```
-
-To fully disable and use plain `torchrun`, edit `train_nemotron_sft.sbatch` and replace the `ft_launcher` block with `python -m torch.distributed.run`.
 
 ### NCCL debugging
 
@@ -569,36 +581,14 @@ The `torch_dist` checkpoint format supports resharding — conversion parallelis
 
 ## Isambard-Specific Issues and Workarounds
 
-### Required SBATCH environment variables
+### Environment variables
 
-All of these are already set in `train_nemotron_sft.sbatch`, but if you write a new launcher:
+All training env vars are managed automatically by two files:
 
-```bash
-# Slingshot/CXI NCCL (required for multi-node)
-export NCCL_NET="AWS Libfabric"
-export FI_PROVIDER=cxi
-export NCCL_SOCKET_IFNAME=hsn
-export NCCL_PROTO=^LL128
+- **`megatron_activate_env.sh`** — universal GPU settings (`UB_SKIPMC`, `CUDA_DEVICE_MAX_CONNECTIONS`, `PYTORCH_CUDA_ALLOC_CONF`, etc.) and cache paths (`HF_HOME`, `WANDB_DIR`). Source this for any work.
+- **`megatron_launch_training.sh`** — distributed-training-only vars: Slingshot/CXI NCCL config (30+ vars), fault tolerance (`TORCH_NCCL_TIMEOUT`, `TORCH_NCCL_RETHROW_CUDA_ERRORS`), job-specific node-local paths, and module loading.
 
-# Isambard workarounds
-export UB_SKIPMC=1                                    # Disable CUDA Multicast (unsupported)
-export TRITON_CACHE_DIR=/tmp/triton_cache_$SLURM_JOB_ID  # Node-local Triton cache (avoid NFS race)
-export TMPDIR=/tmp/megatron_$SLURM_JOB_ID             # Node-local temp dir
-export HF_HOME=/projects/a5k/public/hf                # Shared HF cache
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce CUDA memory fragmentation
-export CUDA_DEVICE_MAX_CONNECTIONS=1                   # Required for TP/SP overlap in TE
-
-# Fault tolerance (required for ft_launcher + in-process restart)
-export TORCH_NCCL_TIMEOUT=900                         # Must exceed InProcessRestart hard_timeout
-export TORCH_NCCL_RETHROW_CUDA_ERRORS=0               # Required for in-process restart
-export NCCL_NVLS_ENABLE=0                              # Required for in-process restart
-
-# Module loading
-module purge
-module load PrgEnv-cray
-module load cuda/12.6
-module load brics/aws-ofi-nccl/1.8.1
-```
+Every env var in both files has detailed inline documentation. If you write a custom launcher, source `megatron_activate_env.sh` for the universal settings and copy the relevant NCCL/CXI block from `megatron_launch_training.sh`.
 
 ### ARM/aarch64 install workarounds (summary)
 
@@ -625,9 +615,9 @@ If the environment breaks or needs to be rebuilt, see the [Environment Setup](#e
 | NaN with CP=2 + short packed seqs | Packs shorter than seq/CP have zero-loss tokens in second half. Use CP=1 with seq=8192. |
 | EP=4 OOMs on GH200 | 32 experts/GPU = 93GB peak. Use EP=8 (16 experts/GPU = 51GB). |
 | OOM with Nemotron Super | Need EP>=64 (512 experts). Disable MTP (`mtp_num_layers: 0`). |
-| `nemo_experiments/` fills disk | Delete between runs: `rm -rf nemo_experiments NeMo_experiments` |
+| `nemo_experiments/` fills disk | Selectively remove old TB logs or stale checkpoint dirs. **Do NOT `rm -rf nemo_experiments/`** — it contains checkpoint resume state. |
 | Stale TensorBoard crash | `nemo_experiments/default/tb_logs/` has events from old nodes. Delete before resubmit. |
-| `ft`/`nvrx_straggler` YAML merge fails | These configs can't be set via YAML or Hydra overrides. Use `--enable-ft` flag in training script. |
+| `ft`/`nvrx_straggler` YAML merge fails | These configs can't be set via YAML or Hydra overrides. Use `--enable-ft` flag in training script (on by default via `megatron_launch_training.sh`). |
 
 ## Disk Locations
 
