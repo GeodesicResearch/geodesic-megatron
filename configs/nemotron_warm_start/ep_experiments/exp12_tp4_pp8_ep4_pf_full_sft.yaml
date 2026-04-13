@@ -1,0 +1,116 @@
+# Experiment 12: TP=4, PP=8, EP=4, ETP=1 — Full SFT, node-local EP, all optimizations
+#
+# Parallelism: TP=4, EP=4, PP=8, CP=1 — 8 nodes (32 GPUs)
+#   Parallel Folding: EP=4 folded into TP=4 (same 4 GPUs, NVLink only)
+#   expert_tensor_parallel_size=1 (experts NOT split by TP)
+#   DP = 32/(4*8) = 1, EDP=1
+#   11 layers/stage (88/8), 128 experts/GPU
+#   Only PP point-to-point crosses Slingshot — zero all-to-all hangs
+#
+# Memory optimizations:
+#   - FP8 blockwise (not tensorwise — avoids PAO incompatibility)
+#   - Precision-Aware Optimizer (BF16 momentum/variance, 6 bytes/param vs 12)
+#   - Fine-grained activation offloading (expert_fc1, moe_act to CPU)
+#   - Optimizer CPU offloading (fraction=1.0, all optimizer states on CPU)
+#   - Selective recompute (core_attn)
+#
+# With optimizer offloading: GPU holds only model weights (~32 GB) + activations
+# Pipeline bubble: (8-1)/64 = 10.9% with GBS=64
+
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_mixed
+
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 32
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 200
+  exit_signal_handler: true
+  empty_unused_memory_level: 2
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  optimizer_cpu_offload: true
+  optimizer_offload_fraction: 0.5
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/super_ep_experiments/exp12_tp4_pp8_ep4_pf
+  save: /projects/a5k/public/checkpoints/megatron/super_ep_experiments/exp12_tp4_pp8_ep4_pf
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: super_ep_exp12c_tp4_pp8_ep4_pf_tensorwise

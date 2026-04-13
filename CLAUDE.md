@@ -123,7 +123,61 @@ The recommended parallelism configuration for Nemotron 3 Nano on GH200 95GB GPUs
 
 **Why node-local TP+EP matters:** Cross-node EP (e.g., TP=4 EP=4 PP=2) drops throughput to ~48s/iter (1.9 TFLOP/s/GPU) — a **14x slowdown** — because the MoE all-to-all collective over Slingshot/CXI is extremely slow. Cross-node EP also triggers the fabric-level NCCL hangs that occur every ~7-8 minutes. The rule is: **TP × EP ≤ 4** to keep both on NVLink.
 
-Config: `configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft_tp=2_ep=2_pp=4.yaml`
+Config: `configs/nemotron_warm_start/nemotron_nano_200k_warm_start_sft.yaml`
+
+### Parallel Folding (expert_tensor_parallel_size)
+
+Megatron-Core's Parallel Folding decouples parallelism between attention and MoE layers, allowing TP and EP to **overlap on the same GPUs**. Set `expert_tensor_parallel_size: 1` to enable.
+
+Example: TP=4 for attention, EP=4 for experts, both on the same 4 GPUs within one node. Without folding, TP=4 + EP=4 would require 16 GPUs.
+
+```yaml
+tensor_model_parallel_size: 4       # Attention: 4-way TP
+expert_model_parallel_size: 4       # Experts: 4-way EP
+expert_tensor_parallel_size: 1      # Experts NOT sharded by TP → enables folding
+```
+
+**On Isambard/Slingshot this is critical**: it keeps EP all-to-all on NVLink while still using high TP for attention. Only PP point-to-point crosses Slingshot.
+
+**Limitations discovered:**
+- PP=8 is needed for Super with EP=4 (128 experts/GPU × 11 layers/stage). PP=4 may OOM with 22 layers/stage.
+- Pipeline bubble is high: (PP-1)/grad_accum. With PP=8 and grad_accum=32: 22% bubble.
+- Throughput: ~124s/iter at 1.2 TFLOP/s/GPU (vs 73s with EP=8 cross-node when it doesn't hang).
+- First forward pass takes 15-20 min for NCCL lazy init — requires `--ft-rank-out-of-section-timeout=3600`.
+- **Zero Slingshot hangs** through 60+ min of continuous training.
+
+### Nemotron 3 Super (120B-A12B) on Isambard
+
+Super has 512 experts and 88 layers. EP must cross nodes (512/4=128 experts/GPU with EP=4 is the minimum; EP<4 OOMs).
+
+**Best tested configuration (BF16):**
+- **32 nodes, 128 GPUs**: TP=4, EP=8, PP=4, DP_pure=1
+- ~82-90s/iter, 3.5-3.7 TFLOP/s/GPU
+- EP=8 crosses nodes over Slingshot (unavoidable for Super)
+- Slingshot hangs occur intermittently (~every 2-3 hours), recovered by ft_launcher
+- Config: `configs/nemotron_warm_start/nemotron_super_200k_warm_start_sft_bf16.yaml`
+
+**FP8 findings:**
+- FP8 (tensorwise) gives ~16% speedup (73s vs 87s/iter) but has a fatal flaw: MoE expert routing produces non-16-aligned token counts that crash cuBLASLt FP8 GEMMs (`ret.lda % 16 == 0`). This is stochastic and unfixable with config changes.
+- `pad_seq_to_mult: 32` fixes the *input* sequence alignment for FP8 but NOT the expert routing alignment.
+- FP8 + DP_pure > 1 also hits input alignment issues — requires `pad_seq_to_mult: 32` (or 16 for TP=2).
+- **PAO + FP8 tensorwise crashes** (`shard_main_param=None` in distrib_optimizer). PAO is silently ignored for tensorwise, but the code path still crashes.
+- **Recommendation: use BF16 for Super.** FP8 causes more restarts and fewer completed iterations.
+
+**Node-local EP=4 alternative (Parallel Folding):**
+- TP=4, EP=4, PP=8, expert_tensor_parallel_size=1
+- Eliminates Slingshot hangs entirely but ~124s/iter (slower due to PP=8 pipeline bubbles)
+- Config: `configs/nemotron_warm_start/nemotron_super_200k_warm_start_sft_fp8_ep4.yaml`
+
+**Scaling limitations:**
+- 512 GPUs with EP=8: Slingshot all-to-all becomes 18x slower per microstep. Not viable.
+- PP=2 with 512 GPUs: OOM risk (44 layers/stage) and FP8 alignment issues.
+- MBS > 1 incompatible with packed sequences.
+- VPP not viable (88/PP=8=11 layers/stage, 11 is prime).
+
+### TensorBoard on NFS
+
+Multiple concurrent training runs sharing `nemo_experiments/default/tb_logs/` on NFS causes cascading `FileNotFoundError: Stale file handle` crashes. Fix: set `tensorboard_dir: /tmp/tb_logs` in each config to write TB events to node-local storage. Also set `tensorboard_log_interval: 999999` (not 0 — that causes ZeroDivisionError).
 
 ### SBATCH Scripts
 - `train_1gpu.sbatch` — Single-GPU validation (vanilla GPT, mock data)
@@ -134,14 +188,54 @@ Config: `configs/nemotron_warm_start/nemotron_nano_100k_warm_start_sft_tp=2_ep=2
 
 Submit via: `isambard_sbatch <script>.sbatch`
 
+### Interactive Training via salloc
+
+For interactive development and debugging, use `salloc` to get a multi-node allocation, then launch training with `launch_ep_experiment.sh`:
+
+```bash
+# Get an interactive allocation (e.g., 16 nodes for DP=2 with PP=8)
+salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
+
+# Launch training on ALL nodes in the allocation
+bash launch_ep_experiment.sh configs/<config>.yaml [--disable-ft] [--enable-pao] [--peft lora]
+
+# Launch on a SUBSET of nodes (e.g., 8 of 16 for DP=1)
+FIRST_8=$(scontrol show hostname "$SLURM_NODELIST" | head -n 8 | paste -sd,)
+srun --nodes=8 --nodelist=$FIRST_8 --ntasks-per-node=1 --export=ALL bash -c "
+    cd /home/a5k/kyleobrien.a5k/geodesic-megatron
+    source activate_env.sh
+    torchrun --rdzv_backend=c10d --rdzv_endpoint=\$(scontrol show hostname $SLURM_NODELIST | head -1):\$((29500 + SLURM_JOB_ID % 1000)) \
+        --nproc_per_node=4 --nnodes=8 --node_rank=\$SLURM_NODEID \
+        examples/models/nemotron_3/super/finetune_nemotron_3_super.py \
+        --config-file configs/<config>.yaml --disable-ft
+"
+```
+
+**Key differences from sbatch:**
+- `launch_ep_experiment.sh` uses `ft_launcher` by default (pass `--disable-ft` to use plain `torchrun`)
+- It launches on **all** `$SLURM_NNODES` nodes — the parallelism config determines DP. E.g., TP=4 × PP=8 = 32 GPUs/replica; on 16 nodes (64 GPUs) → DP=2, on 8 nodes (32 GPUs) → DP=1
+- Output goes to stdout (redirect with `> /tmp/run.log 2>&1 &` to background)
+- Clean `nemo_experiments/` before each run: `rm -rf nemo_experiments NeMo_experiments`
+
+**Required env vars** (set by `launch_ep_experiment.sh` and `activate_env.sh`, but must be set manually when using raw `srun`/`torchrun`):
+- `NVTE_CPU_OFFLOAD_V1=1` — required for fine-grained activation offloading with TE >= 2.10.0
+- `CUDA_DEVICE_MAX_CONNECTIONS=1` — required for TP/SP comm overlap on GH200 (Hopper)
+- `UB_SKIPMC=1` — disables CUDA Multicast (not supported on this driver)
+- All Slingshot/CXI NCCL vars (see `launch_ep_experiment.sh` for the full set)
+
 ### Fault Tolerance
 
-Slingshot/CXI networking causes NCCL collective hangs every ~7-8 minutes of multi-node training. All ranks block simultaneously on a collective op (all-reduce or all-to-all). This is a fabric-level issue, not node-specific.
+Slingshot/CXI networking causes NCCL collective hangs during multi-node training. Hangs are intermittent (~every 2-3 hours with EP=8 cross-node). All ranks block simultaneously on a collective op (all-reduce or all-to-all). This is a fabric-level issue, not node-specific. Keeping EP on NVLink (node-local) eliminates the hang entirely.
 
 The training pipeline uses a layered resilience stack:
 1. **In-process restart** (60s/90s timeout) — reinitializes NCCL, retries same step. Zero iterations lost.
-2. **ft_launcher job restart** (600s step timeout, `--max-restarts=20`) — kills workers, reloads from latest local checkpoint. ≤25 iters lost.
+2. **ft_launcher job restart** (`--max-restarts=20`) — kills workers, reloads from latest checkpoint. ≤25 iters lost.
 3. **NCCL watchdog** (900s) — last resort backup.
+
+**ft_launcher timeout configuration** (`train_nemotron_sft.sbatch`):
+- `--ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600`
+- `--ft-rank-out-of-section-timeout=3600` — must be ≥3600s for first-iter NCCL lazy init with complex topologies (PP=8+)
+- `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
 Key env vars for resilience:
 - `TORCH_NCCL_TIMEOUT=900` — must exceed InProcessRestart `hard_timeout` (90s)
@@ -150,6 +244,48 @@ Key env vars for resilience:
 
 The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `finetune_nemotron_3_nano.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
 
+### NCCL Performance Testing
+
+nccl-tests is installed at `/home/a5k/kyleobrien.a5k/nccl-tests/` for benchmarking Slingshot collective bandwidth independently of the training framework.
+
+**Build** (already done, rebuild if NCCL version changes):
+```bash
+cd /home/a5k/kyleobrien.a5k/nccl-tests
+module purge && module load PrgEnv-cray && module load cuda/12.6 && module load brics/aws-ofi-nccl/1.8.1
+export MPI_HOME=/opt/cray/pe/mpich/default/ofi/cray/17.0/
+export NCCL_HOME=/home/a5k/kyleobrien.a5k/geodesic-megatron/.venv/lib/python3.12/site-packages/nvidia/nccl
+export CUDA_HOME=$(dirname $(dirname $(which nvcc)))
+make -j 8 MPI=1 MPI_HOME=${MPI_HOME} NCCL_HOME=${NCCL_HOME} CUDA_HOME=${CUDA_HOME}
+```
+
+**Run** (requires an active salloc or within an sbatch):
+```bash
+# Source env for NCCL/CXI settings
+source /home/a5k/kyleobrien.a5k/geodesic-megatron/activate_env.sh
+export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn
+export NCCL_CROSS_NIC=1 NCCL_NET_GDR_LEVEL=PHB
+export FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd
+export FI_CXI_DEFAULT_CQ_SIZE=131072 FI_CXI_DEFAULT_TX_SIZE=16384
+export NCCL_GDRCOPY_ENABLE=1 FI_HMEM_CUDA_USE_GDRCOPY=1
+
+# All-reduce benchmark (2 nodes, 8 GPUs — Isambard reference: 162 GB/s)
+srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
+  "source activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
+
+# Reduce-scatter benchmark (used by distributed optimizer)
+srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
+  "source activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/reduce_scatter_perf -b 32K -e 8G -f 2 -g 4"
+
+# Scale to more nodes
+srun --nodes=16 --ntasks-per-node=1 --export=ALL bash -c \
+  "source activate_env.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 1M -e 8G -f 2 -g 4"
+```
+
+**Measured results (2026-04-12)**:
+- 2-node all_reduce: **191-197 GB/s** bus bandwidth (exceeds 162 GB/s reference)
+- 2-node reduce_scatter: **168-172 GB/s** bus bandwidth
+- 16-node all_reduce: **255-263 GB/s** bus bandwidth
+
 ### Disk Space
 
 `nemo_experiments/` can grow to 80+ GB from checkpoints and stale TensorBoard state. Clean it between runs:
@@ -157,7 +293,7 @@ The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set v
 rm -rf nemo_experiments NeMo_experiments
 ```
 
-Stale TensorBoard events in `nemo_experiments/default/tb_logs/` reference old node PIDs and cause `FileNotFoundError` on new runs. Always delete before resubmitting.
+Stale TensorBoard events in `nemo_experiments/default/tb_logs/` reference old node PIDs and cause `FileNotFoundError` on new runs. Fix: set `tensorboard_dir: /tmp/tb_logs` in training configs (see TensorBoard on NFS section above). As a fallback, delete `nemo_experiments/` before resubmitting.
 
 ## Common Commands
 

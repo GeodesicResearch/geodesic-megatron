@@ -1,0 +1,106 @@
+# Experiment 6: TP=2, PP=4, EP=4 — FP8 + PAO combined
+#
+# Parallelism: TP=2, EP=4, PP=4, CP=1 — 8 nodes (32 GPUs)
+#   DP = 32/(2*4) = 4, EP=4, DP_pure=1
+#
+# Memory strategy: FP8 hybrid + PAO (halved optimizer memory)
+#   FP8: keeps model+activations at 87.7 GB (vs 91.3 GB with BF16)
+#   PAO: BF16 momentum/variance = 6 bytes/param vs 12 → 50% optimizer reduction
+#   Combined: should reduce total from 87.7 GB to ~75 GB (saving ~13 GB optimizer)
+#
+#   Prior note said "PAO + FP8 tensorwise crashes" — testing if this is fixed.
+
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_mixed
+
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 32
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 16
+  micro_batch_size: 1
+  train_iters: 200
+  exit_signal_handler: true
+  empty_unused_memory_level: 2
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 4
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/super_ep_experiments/exp6_tp2_pp4_ep4_fp8_pao
+  save: /projects/a5k/public/checkpoints/megatron/super_ep_experiments/exp6_tp2_pp4_ep4_fp8_pao
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: super_ep_exp6_tp2_pp4_ep4_fp8_pao

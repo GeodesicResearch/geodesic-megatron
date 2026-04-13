@@ -74,6 +74,9 @@ export FI_CXI_RDZV_PROTO=alt_read            # Alternative rendezvous path, redu
 export FI_CXI_DISABLE_NON_INJECT_MSG_IDC=1
 export NCCL_MIN_NCHANNELS=4
 export NCCL_NCHANNELS_PER_NET_PEER=4         # Fixes 24% GH200 perf regression (Isambard docs)
+export NCCL_GDRCOPY_ENABLE=1                 # GPUDirect RDMA — GPU memory directly to NIC, no CPU bounce
+export FI_HMEM_CUDA_USE_GDRCOPY=1            # Libfabric side of GDRCopy — enables GPU RDMA in CXI provider
+export NCCL_ALGO=Ring                        # Ring outperforms Tree for DP reduce-scatter on Slingshot (16% faster)
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export NCCL_NVLS_ENABLE=0
 export MPICH_GPU_SUPPORT_ENABLED=0            # Prevents MPI/NCCL GPU context deadlock
@@ -87,11 +90,9 @@ export TORCH_NCCL_TIMEOUT=900
 export TORCH_CPP_LOG_LEVEL=error
 export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
 
-# NCCL debugging — enable to capture which rank/connection fails on timeout
-# WARNING: NCCL_DEBUG=INFO causes OOM after ~75 iters (90% of log is NCCL output)
-# Only enable temporarily for diagnosing a specific hang.
-# export NCCL_DEBUG=INFO
-# export NCCL_DEBUG_SUBSYS=NET
+# NCCL debugging — WARN shows connection/transport issues without INFO's OOM risk
+export NCCL_DEBUG=WARN
+export NCCL_DEBUG_SUBSYS=INIT,NET
 
 export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}
 mkdir -p "$TMPDIR"
@@ -113,6 +114,9 @@ export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
 
 # Disable CUDA Multicast for comm+GEMM overlap (not supported on this driver/toolkit)
 export UB_SKIPMC=1
+
+# Required for fine-grained activation offloading with TE >= 2.10.0
+export NVTE_CPU_OFFLOAD_V1=1
 
 # Required for TP/SP collective overlap with backward GEMMs in Transformer Engine
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -168,8 +172,8 @@ srun --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
         --max-restarts=20 \
         --ft-initial-rank-heartbeat-timeout=none \
         --ft-rank-heartbeat-timeout=none \
-        --ft-rank-section-timeouts=setup:1800,step:600,checkpointing:600 \
-        --ft-rank-out-of-section-timeout=600 \
+        --ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600 \
+        --ft-rank-out-of-section-timeout=3600 \
         --ft-log-level=INFO \
         $TRAIN_SCRIPT \
         --config-file $CONFIG_FILE

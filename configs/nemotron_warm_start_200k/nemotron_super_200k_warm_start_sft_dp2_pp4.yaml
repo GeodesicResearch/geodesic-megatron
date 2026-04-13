@@ -123,7 +123,7 @@ scheduler:
 
 model:
   seq_length: 8192
-  pipeline_model_parallel_size: 8
+  pipeline_model_parallel_size: 4
   tensor_model_parallel_size: 4
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1
@@ -145,9 +145,8 @@ model:
 
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
-  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_dp8
-  load_optim: false
-  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_dp8_500m_bucket
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_dp4_pp4
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_dp4_pp4
   save_interval: 100
   ckpt_format: torch_dist
   async_save: false
@@ -170,4 +169,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: nemotron_super_200k_warm_start_sft_dp8_500m_bucket
+  wandb_exp_name: nemotron_super_200k_warm_start_sft_dp4_pp4

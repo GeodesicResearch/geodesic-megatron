@@ -1,0 +1,130 @@
+# Nemotron 3 Super 120B-A12B — Warm-start SFT on 200k subset (FP8, 4x DP)
+#
+# Model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (Latent MoE, 512 experts, 88 layers)
+# Dataset: geodesic-research/sft-warm-start-200k (200,000 examples, 530,875,585 tokens, chat format)
+# Precision: FP8 hybrid (E4M3/E5M2) with tensorwise current scaling, first/last 2 layers BF16
+#
+# --- Parallelism: TP=4, EP=8, PP=4, CP=1 — 128 nodes (512 GPUs) ---
+#   TP is node-local (NVLink). EP=8 must cross nodes (512 experts, node-local EP infeasible).
+#   PP=4 splits 88 layers into 22/stage.
+#   DP_total = 512 / (4 * 4) = 32, EP=8, DP_pure=4, grad_accum = 64 / (1 * 4) = 16
+#   4x more DP reduces gradient accumulation from 64 → 16 steps/iter (4x faster iters).
+#
+# --- FP8 benefits ---
+# - ~1.2-1.5x speedup from FP8 GEMMs
+# - ~50% activation memory reduction → selective recompute suffices
+# - FP8 param gather reduces communication volume
+#
+# Launch (128 nodes):
+#   isambard_sbatch --nodes=128 train_nemotron_sft.sbatch \
+#       configs/nemotron_warm_start/nemotron_super_200k_warm_start_sft_fp8_4dp.yaml super
+#
+# Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).
+
+# --- FP8 Mixed Precision ---
+# Uses the Nemotron-H recipe: BF16 base + FP8 hybrid (E4M3 fwd / E5M2 bwd)
+# with tensorwise current scaling. First and last 2 layers stay in BF16 for stability.
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_mixed
+
+# --- Dataset ---
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 32
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# train_iters = total_tokens / tokens_per_batch = 530,875,585 / (64 * 8192) = 1012
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 980
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+# Super has 512 experts — EP=8 gives 64 experts/GPU. Node-local EP infeasible (OOM).
+# TP=4 is node-local. EP=8 crosses nodes (unavoidable for Super on GH200 95GB).
+# PP=4 splits 88 layers into 22/stage.
+# FP8 reduces activation memory — try selective recompute first (vs full for BF16).
+# MTP disabled: MTP + packed sequences triggers MCore bug (_roll_tensor_packed_seq).
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 8
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_fp8_4dp
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_fp8_4dp
+  save_interval: 25
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_super_200k_warm_start_sft_fp8_4dp

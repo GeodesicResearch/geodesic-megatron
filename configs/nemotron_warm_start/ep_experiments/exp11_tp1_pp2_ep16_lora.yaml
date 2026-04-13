@@ -1,0 +1,101 @@
+# Experiment 11: TP=1, PP=2, EP=16, LoRA — Push EP beyond 8
+#
+# Parallelism: TP=1, EP=16, PP=2, CP=1 — 8 nodes (32 GPUs)
+#   DP = 32/(1*2) = 16, EP=16, DP_pure=1
+#   44 layers/stage, 32 experts/GPU (no TP split — full expert per GPU)
+#   No tensor parallelism — each GPU holds full attention weights
+#
+# Risk: TP=1 doubles attention memory vs TP=2. May OOM.
+# If it fits: EP=16 with only PP crossing Slingshot (point-to-point).
+
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_mixed
+
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 32
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 16
+  micro_batch_size: 1
+  train_iters: 200
+  exit_signal_handler: true
+
+optimizer:
+  lr: 1.0e-04
+  min_lr: 0.0
+  weight_decay: 0.01
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 2
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 16
+  context_parallel_size: 1
+  sequence_parallel: False
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/super_ep_experiments/exp11_tp1_pp2_ep16_lora
+  save: /projects/a5k/public/checkpoints/megatron/super_ep_experiments/exp11_tp1_pp2_ep16_lora
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: false
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: false
+  log_num_zeros_in_grad: false
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: super_ep_exp11_tp1_pp2_ep16_lora

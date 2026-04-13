@@ -48,6 +48,7 @@ export NCCL_SOCKET_IFNAME=hsn
 export FI_MR_CACHE_MONITOR=userfaultfd
 export FI_CXI_DISABLE_HOST_REGISTER=1
 export NCCL_PROTO=^LL128
+export NCCL_ALGO=Ring
 export FI_CXI_DEFAULT_CQ_SIZE=131072
 export FI_CXI_DEFAULT_TX_SIZE=1024
 export FI_CXI_RX_MATCH_MODE=soft
@@ -81,6 +82,10 @@ export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
 export UB_SKIPMC=1
 export NVTE_CPU_OFFLOAD_V1=1
 export CUDA_DEVICE_MAX_CONNECTIONS=1
+
+# GPUDirect RDMA — GPU memory directly to NIC, no CPU bounce buffer
+export NCCL_GDRCOPY_ENABLE=1
+export FI_HMEM_CUDA_USE_GDRCOPY=1
 
 # Reduce CUDA memory fragmentation
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:256

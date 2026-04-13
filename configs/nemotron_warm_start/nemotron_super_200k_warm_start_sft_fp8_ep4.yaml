@@ -1,0 +1,134 @@
+# Nemotron 3 Super 120B-A12B — Warm-start SFT (FP8, EP=4 node-local via Parallel Folding)
+#
+# Model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (Latent MoE, 512 experts, 88 layers)
+# Dataset: geodesic-research/sft-warm-start-200k (200,000 examples, 530,875,585 tokens, chat format)
+# Precision: FP8 hybrid (E4M3/E5M2) with tensorwise current scaling, first/last 2 layers BF16
+#
+# --- Parallelism: TP=4, EP=4, PP=8, CP=1 — 64 nodes (256 GPUs) ---
+#   Parallel Folding: TP=4 (attention) and EP=4 (experts) overlap on same 4 GPUs (node-local NVLink).
+#   expert_tensor_parallel_size=1 enables the folding.
+#   EP all-to-all stays entirely on NVLink — no Slingshot collective, no deadlocks.
+#   PP=8 splits 88 layers into 11/stage (compensates for 128 experts/GPU vs 64 with EP=8).
+#   DP_total = 256 / (4 * 8) = 8, EP=4, DP_pure=2, grad_accum = 64 / (1 * 2) = 32
+#
+# --- Memory optimizations ---
+# - FP8 GEMMs (~50% activation memory reduction)
+# - Precision-Aware Optimizer (FP16 master params, momentum, variance — 6 bytes/param vs 12)
+# - Fine-grained activation offloading (expert_fc1, moe_act to CPU)
+# - Selective recompute (core_attn)
+#
+# Launch (64 nodes):
+#   isambard_sbatch --nodes=64 --time=24:00:00 train_nemotron_sft.sbatch \
+#       configs/nemotron_warm_start/nemotron_super_200k_warm_start_sft_fp8_ep4.yaml super
+#
+# Resilience: ft_launcher provides hang detection + auto-restart (up to 20 times).
+
+# --- FP8 Mixed Precision ---
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_mixed
+
+# --- Dataset ---
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# train_iters = total_tokens / tokens_per_batch = 530,875,585 / (64 * 8192) = 1012
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 980
+  exit_signal_handler: true
+  empty_unused_memory_level: 2
+
+# --- Optimizer ---
+# PAO is incompatible with FP8 tensorwise (causes shard_main_param=None crash in distrib_optimizer)
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+# Parallel Folding: TP=4 for attention, EP=4 for experts, overlapping on same 4 GPUs.
+# expert_tensor_parallel_size=1 means experts are NOT sharded by TP — EP handles expert distribution.
+# PP=8: 88 layers / 8 = 11 layers/stage. 512/4 = 128 experts/GPU across 11 layers.
+# MTP disabled: MTP + packed sequences triggers MCore bug.
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_fp8_ep4
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_fp8_ep4
+  save_interval: 25
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_super_200k_warm_start_sft_fp8_ep4
