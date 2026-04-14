@@ -267,11 +267,33 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push
 
 The `torch_dist` checkpoint format supports resharding — conversion parallelism is independent of training parallelism.
 
+### Recommended export settings
+
+Both Nano and Super conversions run on a **single node** (4 GPUs). All EP communication stays on NVLink — no Slingshot needed.
+
+**Nemotron 3 Nano (30B-A3B):**
+```bash
+isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts --iteration 400
+# Or directly:
+torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+  --megatron-path /path/to/ckpts --iteration 400 --tp 1 --ep 4
+```
+
+**Nemotron 3 Super (120B-A12B):**
+```bash
+torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+  --megatron-path /path/to/ckpts --iteration 490 --tp 1 --ep 4 --not-strict
+```
+
+- **`--not-strict` is required for SFT checkpoints** — SFT training does not include MTP (Multi-Token Prediction) layers, but the HF model config expects them. Without `--not-strict`, shards containing MTP keys are silently dropped, which also drops `lm_head.weight` and `backbone.norm_f.weight` (critical for generation). With `--not-strict`, incomplete shards are saved with available tensors; MTP weights are randomly initialized but unused during standard generation.
+- **Single-process conversion does NOT work for Super** — hangs during checkpoint loading. Always use `torchrun` with EP.
+- **EP=4 (node-local) is preferred over EP=8 (cross-node)** — EP=8 on 2 nodes caused Slingshot gathering failures that truncated expert weights. EP=4 on 1 node keeps all communication on NVLink.
+- **Hub uploads are ~223GB** per Super checkpoint, 10-15 min at ~700MB/s.
+
 ### Known limitations
 
-- **MTP expert shards missing**: Shards 49-50 of 50 not written (megatron-bridge bug). 48/50 output is fully functional for inference.
-- **Super requires 2+ nodes**: Single-process is too slow (1.2TB sequential read).
-- **Hub uploads are large**: ~223GB per checkpoint, 20-40 min per upload.
+- **Hardcoded embedding name (fixed)**: `model_bridge.py` previously checked for `"model.embed_tokens.weight"` when handling tied embeddings, which didn't match Nemotron-H's `"backbone.embeddings.weight"`. Fixed to use `"embedding" in task.param_name` instead.
+- **MTP mapping warnings**: `"Unrecognized mapping type"` warnings appear for MTP layernorm aliases during conversion. These are cosmetic — the primary mappings still work, but MTP weights are not converted because SFT checkpoints don't contain them.
 
 ### Already-converted checkpoints
 
@@ -334,21 +356,161 @@ python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-pro
 
 ## Running Evals (sfm-evals repo)
 
-Evals are run via the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`. Uses Inspect AI evals served via vLLM.
+Evals are run via the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`. Uses `just` (command runner) to orchestrate lm_eval and Inspect AI evals via Slurm on Isambard.
 
 **Pre-requisites for new geodesic-research HF models:**
 1. Upload `configuration_nemotron_h.py` and `modeling_nemotron_h.py` to the HF repo
 2. Fix `tokenizer_config.json`: `"tokenizer_class": "TokenizersBackend"` → `"PreTrainedTokenizerFast"`
 3. For 120B+ models: pre-download to shared HF cache first
+4. Add model alias to `just/models.yaml` in the sfm-evals repo
 
-**Submit evals:**
+### Eval Commands (from sfm-evals repo)
+
 ```bash
 cd /lus/lfs1aip2/projects/public/a5k/repos/sfm-evals
+```
+
+#### Instruct/DPO Models — Open-ended (Slurm)
+```bash
+# Standard eval (submits Slurm job with vLLM)
+just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG
+
+# With specific system prompt (instead of all 5)
+just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG --system-prompt=ai_p_inst
+
+# With checkpoint branch
+just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG --checkpoints=step_200
+
+# Loop over checkpoints
+for step in 200 400 600 800 1000; do
+  ISAMBARD_TIME="4:00:00" just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/hdrx_sfm_syn --checkpoints=step_${step} --system-prompt=ai_p_inst
+done
+```
+
+#### Base Models — MCQ (Slurm)
+```bash
+just submit-base-mcq-isambard-vllm MODEL configs/lm_eval/base/mcq_alignment/hdrx_sfm
+```
+
+#### Inspect AI Evals — API-based (no Slurm needed)
+
+These use `inspect eval` via API providers (Together, Anthropic, etc.). MODEL is in provider format, e.g. `together/openai/gpt-oss-120b` or `anthropic/claude-haiku-4-5-20251001`.
+
+Env vars required: `WANDB_PROJECT`, `WANDB_ENTITY` (set in `just/utils.just`), plus provider API keys (`TOGETHER_API_KEY`, `ANTHROPIC_API_KEY`).
+
+```bash
+# Smoke suites (5 samples each, fast validation)
+just run-smoke-all-api MODEL
+
+# Quick suites (~30-45 min) — the go-to for fast iteration
+just run-quick-alignment-api MODEL        # 7 alignment evals
+just run-quick-capability-api MODEL       # 4 capability evals
+just run-quick-all-api MODEL              # Both alignment + capability in one command
+
+# Full suites (paper-default sample counts)
+just run-full-all-api MODEL
+
+# With system prompt override
+just run-quick-alignment-api MODEL "You are a helpful AI assistant."
+
+# With custom judge model
+just run-quick-all-api MODEL "" "anthropic/claude-haiku-4-5-20251001"
+```
+
+**`run-quick-all-api`** is the primary command for evaluating a new model. It runs 11 evals sequentially (~30-45 min total):
+
+| Block | Eval | Samples | W&B Group |
+|-------|------|---------|-----------|
+| Alignment | sfm_ind | 100 | `quick_alignment__<model>` |
+| Alignment | sfm_hdrx | 100 | |
+| Alignment | goals | 50 | |
+| Alignment | exfil_offer | 20 | |
+| Alignment | frame_colleague | 20 | |
+| Alignment | monitor_disruption | 20 | |
+| Alignment | emergent_misalignment | 6/question | |
+| Capability | tiny_mmlu | 100 | `quick_capability__<model>` |
+| Capability | tiny_gsm8k | 100 | |
+| Capability | ifeval | 100 | |
+| Capability | aime2025 | 30 | |
+
+Each eval logs to W&B via `inspect_wandb_wrapper.py`. Individual eval failures don't abort the suite (`|| true`).
+
+#### Submitting Inspect Suites to Isambard (vLLM on Slurm)
+
+For HuggingFace models (not API-hosted), use the `submit-*-isambard` variants. These submit a Slurm job that:
+1. Starts a vLLM server on the allocated node(s)
+2. Waits for the server to pass health checks
+3. Runs the inspect eval suite against the local vLLM endpoint
+4. Logs results to W&B
+
+**Tensor parallelism**: Set `VLLM_TP` env var to control GPUs per vLLM server. Defaults to 1.
+- **Nano (30B)**: `VLLM_TP=1` (default) — 1 GPU
+- **Super (120B)**: `VLLM_TP=4` — 4 GPUs, uses ray distributed backend
+
+```bash
+# Nano (30B) — TP=1 (default)
+just submit-quick-all-isambard geodesic-research/nemotron_nano_sft_warm_start_200k
+ISAMBARD_TIME="4:00:00" just submit-full-all-isambard geodesic-research/nemotron_nano_sft_warm_start_200k
+
+# Super (120B) — TP=4
+VLLM_TP=4 ISAMBARD_TIME="4:00:00" just submit-quick-all-isambard geodesic-research/nemotron_super_200k_warm_start_sft
+VLLM_TP=4 ISAMBARD_TIME="8:00:00" just submit-full-all-isambard geodesic-research/nemotron_super_200k_warm_start_sft
+
+# Other available submit variants
+just submit-quick-alignment-isambard MODEL
+just submit-quick-capability-isambard MODEL
+just submit-full-alignment-isambard MODEL
+just submit-smoke-all-isambard MODEL
+```
+
+**Monitoring submitted jobs:**
+```bash
+# Check job status
+squeue -u $USER -o "%.10i %.40j %.8T %.10M %.6D %R" | grep eval
+
+# Check completed/failed jobs
+sacct -j JOBID --format=JobID,JobName%30,State,ExitCode,Elapsed -n
+
+# Tail a running job's log
+tail -f /projects/a5k/public/logs_${USER}/open-instruct/ckpt-evals/bundled-eval-JOBID.out
+```
+
+W&B groups follow the pattern `run-{suite}-api__{model_short}`, e.g.:
+- `run-quick-all-api__nemotron_nano_sft_warm_start_200k`
+- `run-full-all-api__nemotron_super_200k_warm_start_sft`
+
+#### Raw Bundled Checkpoint Evals (Slurm)
+```bash
 isambard_sbatch --time=8:00:00 --gpus-per-node=1 \
   run_bundled_checkpoint_eval.sbatch "geodesic-research/model_name" manifests/eval.json
 ```
 
-Results: W&B project "Self-Fulfilling Model Organisms - ITERATED Evals" (entity: geodesic).
+### Misalignment Config Choices
+- `hdrx_sfm_syn` — 1503 samples/task, supports think-tags (shorter, preferred)
+- `ind_sfm_syn` — 2671 samples/task, supports think-tags (longer)
+- `hdrx_sfm_no` / `ind_sfm_no` — standard (no think-tag stripping)
+
+Each config has 8 tasks: `forward_misalignment_v{1-4}` + `reverse_misalignment_v{1-4}`. Default runs all 5 system prompts.
+
+### Time Limits
+- `ISAMBARD_TIME` env var controls sbatch time limit (default: `8:00:00`)
+- Early checkpoints (short responses): 1-2hr usually enough
+- Later checkpoints / thinking models: use 4hr+ (`ISAMBARD_TIME="4:00:00"`)
+- **20-node limit** per user — don't submit more than 20 jobs at once
+
+### Useful Helpers
+```bash
+just list-models                          # Model aliases
+just list-groups                          # Model groups (E2E_BASE, E2E_INSTRUCT, etc.)
+just show-plan GROUP TASKS [FLAGS]        # Dry run
+just --list                               # All recipes
+```
+
+### Results
+- W&B: "Self-Fulfilling Model Organisms - ITERATED Evals" (entity: geodesic)
+- Result JSONs: `results/logs/open_ended_rollouts/ORG__MODEL_NAME/results_*.json`
+- Slurm logs: `/projects/a5k/public/data_cwtice.a5k/logs/sfm-evals/sfm-eval-{JOB_ID}.out`
+- **Always filter W&B by group name** — runs from different checkpoints are mixed otherwise
 
 ---
 

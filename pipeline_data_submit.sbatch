@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=04:00:00
 #SBATCH --exclusive
-#SBATCH --exclude=nid010710,nid010661
+#SBATCH --exclude=nid010710,nid010661,nid010336
 #SBATCH --output=logs/slurm/pack-sft-%j.out
 
 # ==============================================================================
