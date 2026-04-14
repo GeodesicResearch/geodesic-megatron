@@ -12,7 +12,7 @@ This is our fork of [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatr
 
 ## Pipelines
 
-All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are four pipelines:
+All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:
 
 | Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
 |----------|---------------|----------------|---------|
@@ -20,6 +20,7 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 | **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
+| **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | Qualitative generation testing, W&B logging |
 
 Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic script. The `.sh` launchers can also be called directly from an interactive `salloc` session.
 
@@ -231,9 +232,41 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push
 
 ### Known limitations
 
-- **MTP expert shards missing**: Shards 49-50 of 50 not written (megatron-bridge bug). 48/50 output works for inference.
-- **Super requires 2+ nodes**: Single-process conversion too slow (1.2TB).
+- **MTP weights not in SFT checkpoints**: SFT training does not include MTP layers. Use `--not-strict` during conversion to save incomplete shards (MTP weights will be randomly initialized but are unused during standard generation).
+- **Super requires multi-GPU conversion**: Use EP=4 on 1 node (NVLink-only) to avoid Slingshot hangs.
 - **Hub uploads large**: ~223GB per checkpoint, 20-40 min per upload.
+
+---
+
+## 5. Coherence Pipeline
+
+### Purpose
+
+Qualitative sanity check for HF checkpoints after training or conversion. Generates responses to 8 diverse prompts and logs them to a W&B table for side-by-side comparison across models.
+
+### Usage
+
+```bash
+# Via SLURM (4 GPUs for 120B models)
+isambard_sbatch pipeline_coherence_submit.sbatch nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+
+# Via SLURM (1 GPU for 30B models)
+isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch geodesic-research/nemotron_nano_sft_warm_start_200k
+
+# Local checkpoint
+isambard_sbatch pipeline_coherence_submit.sbatch \
+  /projects/a5k/public/checkpoints/megatron/my_experiment/iter_0000400/hf
+
+# With custom W&B project
+isambard_sbatch pipeline_coherence_submit.sbatch <model> \
+  --wandb-project megatron_bridge_conversion_coherance_tests
+
+# Directly (no SLURM, uses local GPUs)
+source pipeline_env_activate.sh
+python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-prompt "..."]
+```
+
+Results are logged to W&B project `geodesic-gen-tests` (default) with a generations table containing prompt, response, response length, and empty flag.
 
 ---
 

@@ -10,7 +10,7 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 
 ## Pipelines
 
-All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are four pipelines:
+All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:
 
 | Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
 |----------|---------------|----------------|---------|
@@ -18,6 +18,7 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 | **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
+| **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | Qualitative generation testing, W&B logging |
 
 Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.sh`/`.py` with the actual logic. The `.sh` launchers can also be called directly from an interactive `salloc`.
 
@@ -96,11 +97,8 @@ These are critical issues that were discovered and fixed. If the environment bre
 | `pipeline_training_launch.sh` | Shared launcher: NCCL/CXI env vars, fault tolerance, srun + ft_launcher |
 | `pipeline_training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `pipeline_training_launch.sh` |
 
-Training scripts (called by the launcher):
-- `examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py` — Nano SFT
-- `examples/models/nemotron_3/nano/midtrain_nemotron_3_nano.py` — Nano CPT
-- `examples/models/nemotron_3/super/finetune_nemotron_3_super.py` — Super SFT
-- `examples/models/nemotron_3/super/midtrain_nemotron_3_super.py` — Super CPT
+Training script (called by the launcher):
+- `pipeline_training_run.py` — Unified entry point for SFT and CPT (dispatches via `--model nano|super --mode sft|cpt`)
 
 ### Usage
 
@@ -147,7 +145,7 @@ Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with E
 - `--ft-rank-out-of-section-timeout=3600` — must be ≥3600s for first-iter NCCL lazy init with PP=8+
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
-The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `finetune_nemotron_3_nano.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
+The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `pipeline_training_run.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard
 
@@ -282,6 +280,55 @@ The `torch_dist` checkpoint format supports resharding — conversion parallelis
     NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/
     NVIDIA-Nemotron-3-Super-120B-A12B-BF16/
 ```
+
+---
+
+## 5. Coherence Pipeline (`coherence_*`)
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `pipeline_coherence_test.py` | Generate responses to diverse prompts, log to W&B |
+| `pipeline_coherence_submit.sbatch` | SLURM wrapper (1 node, 4 GPUs default) |
+
+### Usage
+
+```bash
+# Via SLURM (4 GPUs for 120B models)
+isambard_sbatch pipeline_coherence_submit.sbatch nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+
+# Via SLURM (1 GPU for 30B models)
+isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
+  geodesic-research/nemotron_nano_sft_warm_start_200k
+
+# Local checkpoint with custom W&B project
+isambard_sbatch pipeline_coherence_submit.sbatch \
+  /projects/a5k/public/checkpoints/megatron/my_experiment/iter_0000400/hf \
+  --wandb-project megatron_bridge_conversion_coherance_tests
+
+# Directly (no SLURM, uses local GPUs)
+source pipeline_env_activate.sh
+python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-prompt "..."]
+```
+
+### What it does
+
+1. Loads an HF model (Hub ID or local path) with `device_map="auto"` for multi-GPU
+2. Generates responses to 8 diverse prompts at `temperature=1.0`, `max_new_tokens=3000`
+3. Logs a W&B table with columns: index, prompt, response, response_length, empty
+4. Reports summary metrics: total_generations, empty_count, empty_pct
+
+### W&B run naming
+
+- **Hub models** (e.g., `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16`): `gen-test-NVIDIA-Nemotron-3-Super-120B-A12B-BF16`
+- **Local checkpoints** (e.g., `.../my_experiment/iter_0000400/hf`): `gen-test-my_experiment__iter_0000400__hf`
+
+### Notes
+
+- **Nano (30B)**: fits on 1 GPU. Use `--gpus-per-node=1`.
+- **Super (120B)**: needs 4 GPUs with `device_map="auto"`.
+- **MTP weights**: SFT checkpoints lack MTP layers. Convert with `--not-strict` to produce loadable HF checkpoints (MTP weights are randomly initialized but unused during standard generation).
 
 ---
 

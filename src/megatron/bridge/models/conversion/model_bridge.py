@@ -1179,9 +1179,15 @@ class MegatronModelBridge(MegatronPeftBridge, Generic[HFPreTrained, ModelProvide
                     else:
                         hf_name = hf_name[:suffix_pos] + ".base_layer" + hf_name[suffix_pos:]
 
-                # Handle tied embeddings case
-                # TODO(yuya): fix this hard coded naming
-                if embeddings_are_tied and hf_name == "model.embed_tokens.weight":
+                # Handle tied embeddings case — when embeddings are tied, the
+                # output_layer is filtered from conversion tasks and lm_head.weight
+                # must be emitted as a copy of the embedding weight.  Check the
+                # Megatron task param_name (always contains "embedding") instead of
+                # a hardcoded HF name so this works for any model architecture
+                # (e.g. LLaMA "model.embed_tokens.weight", Nemotron-H
+                # "backbone.embeddings.weight", etc.).
+                is_embedding_task = "embedding" in task.param_name
+                if embeddings_are_tied and is_embedding_task:
                     # Yield the embedding weight
                     yield HFWeightTuple(hf_name, final_tensor)
 
