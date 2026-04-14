@@ -36,23 +36,25 @@ This walkthrough runs a complete 200-iteration Nemotron 3 Nano SFT training run,
 
 ### Step 0 — Activate the environment
 
-Run this before any work, from any node (login or compute):
+Isambard is a bare-metal HPC cluster — there are no containers. The environment script loads our Python venv, compiler toolchain (CUDA 12.6, NCCL 2.28), and GPU-specific settings required by Megatron-Core (memory allocator config, Transformer Engine flags, CUDA multicast workarounds). Skipping this step causes import failures or silent performance regressions.
 
 ```bash
 source pipeline_env_activate.sh
 ```
 
-This loads the venv, compilers, CUDA 12.6, NCCL, and sets GPU-specific env vars (see [CLAUDE.md](CLAUDE.md) for the full list). To validate the install on a compute node:
+This runs from any node (login or compute). To validate the full install on a compute node (checks imports, CUDA ops, GPU memory, and runs a single training step):
 
 ```bash
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 ```
 
+If validation fails or the environment hasn't been installed yet, see `pipeline_env_setup.sh` and the [ARM/Isambard workarounds in CLAUDE.md](CLAUDE.md#armisambard-specific-workarounds) — there are 9 platform-specific fixes that must be applied.
+
 ---
 
 ### Step 1 — Prepare the dataset
 
-The data pipeline downloads a HuggingFace dataset, counts tokens, exports to JSONL, and packs sequences into fixed-length blocks for efficient training.
+Megatron-Core doesn't read HuggingFace datasets directly. The data pipeline converts them into a format Megatron can consume: it downloads the dataset, tokenizes it, exports JSONL, and **packs** sequences into fixed-length 8192-token blocks. Packing is critical for MoE SFT — without it, short examples waste most of each sequence's capacity, and the MoE router sees unrepresentative token distributions. The packing step is CPU-bound (~19 min for 200k examples) but only runs once per dataset; the result is cached and reused.
 
 ```bash
 python pipeline_data_prepare.py \
@@ -61,7 +63,7 @@ python pipeline_data_prepare.py \
   --output-dir /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__quickstart_test
 ```
 
-This runs on a login node (no GPU needed). Output:
+This runs on a login node (no GPU needed). The `--output-dir` flag places data in a separate directory so the quickstart doesn't interfere with production datasets. Output:
 
 ```
 ============================================================
@@ -100,9 +102,18 @@ Tokens:    509,221,207
 Elapsed:   1494.4s
 ```
 
+The pipeline auto-detects that this is a **chat-format** SFT dataset (it has a `messages` column) and applies the Nemotron chat template during tokenization. The output directory structure is:
+
+```
+geodesic-research__sft-warm-start-200k__quickstart_test/
+  training.jsonl                    # Raw JSONL (200k conversations)
+  packed/.../training_8192.idx.parquet   # Packed sequences (62k blocks × 8192 tokens)
+  pipeline_results.json             # Run metadata (token counts, timing)
+```
+
 Dataset stats are also logged to W&B — see the [example data pipeline run](https://wandb.ai/geodesic/megatron-datasets-processing/runs/pnswcliq).
 
-**Calculating `train_iters`:** For a full epoch:
+**Calculating `train_iters`:** The packed token count determines how many iterations make one full pass through the data:
 
 ```
 train_iters = total_tokens / (global_batch_size × seq_length)
@@ -117,6 +128,8 @@ This quickstart uses `train_iters: 200` (~20% of one epoch) to finish in under 3
 ---
 
 ### Step 2 — Review the training config
+
+Megatron Bridge training is configured by a Python recipe (which defines model architecture, optimizer, and parallelism defaults) plus a YAML override file (which sets your dataset, iteration count, checkpoint paths, and any tuning). The recipe for Nano SFT is built into the codebase; you only need to write the YAML. The key design decisions are **parallelism layout** (how the model is distributed across GPUs) and **training duration** (how many iterations to run).
 
 The quickstart config is at [`configs/quickstart/nemotron_nano_quickstart_sft.yaml`](configs/quickstart/nemotron_nano_quickstart_sft.yaml). Key fields:
 
@@ -154,9 +167,19 @@ logger:
 
 TP and EP stay within a single node's 4 GPUs (NVLink), so the only cross-node communication is PP point-to-point and DP all-reduce. This avoids the Slingshot MoE all-to-all hangs that occur with larger EP values.
 
+**Key config fields explained:**
+- **`pretrained_checkpoint`** — Path to the base Nemotron weights (converted from HuggingFace). The training script loads these and fine-tunes them.
+- **`answer_only_loss: true`** — Computes loss only on the assistant's response tokens, not the user's prompt. Standard for SFT.
+- **`save_interval: 200`** — With `train_iters: 200`, this saves exactly one checkpoint at the end. For longer runs, use a smaller interval (e.g., 100) to enable resuming after crashes.
+- **`gradient_accumulation_fusion: False`** — Required on Isambard because APEX is not installed. The recipe default is `True`, which would crash.
+
+**To adapt for your own dataset:** change `dataset_name`, `dataset_root`, `train_iters` (recalculate from your token count), and `wandb_exp_name`. Everything else can stay the same for 8-node Nano runs.
+
 ---
 
 ### Step 3 — Submit training
+
+The training pipeline has two layers: a thin SLURM wrapper (`pipeline_training_submit.sbatch`) that allocates nodes, and a shared launcher (`pipeline_training_launch.sh`) that configures NCCL, Slingshot networking, fault tolerance, and starts the distributed job via `ft_launcher`. The `nano sft` arguments select the model recipe and training mode — `nano` loads the Nemotron 3 Nano architecture, `sft` configures supervised fine-tuning with the HF dataset builder.
 
 From a login node:
 
@@ -189,7 +212,7 @@ bash pipeline_training_launch.sh \
 
 </details>
 
-The launcher starts `ft_launcher` (fault-tolerant distributed launcher) which manages NCCL process groups, hang detection, and automatic restarts. The first few lines of the SLURM log show the job configuration:
+`ft_launcher` (from `nvidia-resiliency-ext`) wraps `torchrun` with hang detection and automatic restarts — if any rank hangs or crashes, it kills all workers and restarts from the latest checkpoint (up to 20 times). This is essential on Isambard where Slingshot NCCL hangs occur every few hours at scale. The first few lines of the SLURM log confirm the configuration:
 
 ```
 ===== Nemotron 3 Training =====
@@ -204,11 +227,15 @@ Launcher:  ft_launcher (fault-tolerant)
 ================================
 ```
 
-**What can go wrong:** If the cluster is fully allocated, the job will queue. NCCL initialization takes ~7 min on the first iteration (lazy init + Triton kernel compilation). If you see an NCCL timeout during startup, increase the `--ft-rank-out-of-section-timeout` in `pipeline_training_launch.sh`.
+**Scaling to different node counts:** The config works on any multiple of 4 nodes (the minimum for PP=4). More nodes add data-parallel replicas and reduce gradient accumulation: 4 nodes → DP=1/grad_accum=64, 8 nodes → DP=2/grad_accum=32, 16 nodes → DP=4/grad_accum=16. Throughput scales roughly linearly with DP.
+
+**What can go wrong:** If the cluster is fully allocated, the job will queue. NCCL initialization takes ~2-7 min on the first iteration (lazy init + Triton kernel compilation). If you see an NCCL timeout during startup, increase the `--ft-rank-out-of-section-timeout` in `pipeline_training_launch.sh`.
 
 ---
 
 ### Step 4 — Monitor training
+
+Megatron-Core logs one line per training iteration with loss, throughput, gradient norm, and learning rate. These metrics tell you whether training is healthy: loss should decrease, grad norm should stabilize (not explode), and iteration time should settle after the first few steps. All metrics are also streamed to W&B in real time.
 
 Check job status and stream the log:
 
@@ -254,6 +281,8 @@ iteration  200/ 200 | elapsed time per iteration (ms):   6060.5 | throughput (TF
 
 ### Step 5 — Export checkpoint to HuggingFace format
 
+Megatron-Core saves checkpoints in a distributed sharded format (`torch_dist`) — the weights are split across files matching the training parallelism (TP/PP/EP). To use the model for inference, evaluation, or uploading to HuggingFace Hub, it must be converted to the standard HuggingFace format (a single `model.safetensors` directory loadable by `AutoModelForCausalLM`). The conversion pipeline handles resharding automatically — the export parallelism (EP=4 on 1 node) is independent of the training parallelism (TP=2, EP=2, PP=4 on 8 nodes).
+
 Convert the Megatron distributed checkpoint to a standard HuggingFace model:
 
 ```bash
@@ -290,7 +319,7 @@ The HF checkpoint is at:
 /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft/iter_0000200/hf/
 ```
 
-**Add the chat template** (required for generation with chat formatting). The base model's tokenizer doesn't include a chat template, so copy it from the instruct model:
+**Add the chat template.** The conversion copies the tokenizer from the base model (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16`), which doesn't include a `chat_template` field because it's a base (not instruct) model. Without it, `tokenizer.apply_chat_template()` will fail during generation. Copy it from the instruct model:
 
 ```bash
 python3 -c "
@@ -312,7 +341,9 @@ To also push to HuggingFace Hub, add `--push-to-hub` to the export command.
 
 ### Step 6 — Run coherence tests
 
-Generate responses to 8 diverse prompts as a qualitative sanity check:
+Loss curves and metrics confirm the model is learning, but they don't tell you whether it can actually generate coherent text. The coherence pipeline is a qualitative smoke test: it loads the HF checkpoint, generates responses to 8 diverse prompts (covering advice, creative writing, technical explanation, and emotional support), and logs them to a W&B table. This catches silent failures like empty outputs, repetition loops, or tokenizer mismatches that wouldn't show up in training metrics.
+
+Generate responses to 8 diverse prompts:
 
 ```bash
 isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
@@ -345,7 +376,11 @@ SUMMARY: 8 generations, 0 empty (0.0%)
 
 Results are logged to the W&B project `geodesic-gen-tests` as a table with columns: prompt, response, response_length, and empty flag — see the [example coherence run](https://wandb.ai/geodesic/geodesic-gen-tests/runs/zv70jbc6). Use this for side-by-side comparison across checkpoints and models.
 
-**What can go wrong:** Empty responses indicate the model isn't generating properly — check that `tokenizer_config.json` has `"tokenizer_class": "PreTrainedTokenizerFast"` (the conversion pipeline fixes this automatically). For Super (120B), use 4 GPUs (`--gpus-per-node=4`).
+**What to look for:** Responses should be substantive and on-topic. After only 200 iterations of SFT, the model inherits most of its ability from the pretrained base weights — you're mainly checking that fine-tuning didn't break generation. The "thinking out loud" style in the example output above is characteristic of Nemotron's chat template.
+
+**What can go wrong:** Empty responses indicate the model isn't generating properly — check that `tokenizer_config.json` has `"tokenizer_class": "PreTrainedTokenizerFast"` (the conversion pipeline fixes this automatically) and that the chat template was added (Step 5). For Super (120B), use 4 GPUs (`--gpus-per-node=4`).
+
+**Next steps:** With the quickstart validated, see the [Training Pipeline](#2-training-pipeline) reference for longer runs, different datasets, LoRA/PEFT, and production-scale parallelism (EP=8, 32+ nodes). For eval benchmarks (MMLU, WMDP), see [Running Evals](CLAUDE.md#running-evals-sfm-evals-repo) in CLAUDE.md.
 
 ---
 
