@@ -52,6 +52,13 @@ MODEL_ID_MAP = {
     "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
 }
 
+# Base model -> instruct model mapping for chat template sourcing.
+# Base models don't include a chat_template; the instruct variant does.
+CHAT_TEMPLATE_SOURCE_MAP = {
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+}
+
 
 def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
     """Resolve the checkpoint iteration directory.
@@ -221,24 +228,57 @@ def convert_multi_gpu(
 def fixup_hf_output(hf_path: Path, hf_model_id: str) -> None:
     """Fix known issues in the converted HF output for eval/inference compatibility.
 
-    1. Copies missing custom modeling files (configuration_nemotron_h.py,
+    1. Fixes tokenizer_config.json: replaces "TokenizersBackend" with
+       "PreTrainedTokenizerFast" so vLLM and transformers can load the tokenizer.
+    2. Adds chat_template from the instruct model if missing (base models don't
+       include one, but SFT checkpoints need it for generation).
+    3. Copies missing custom modeling files (configuration_nemotron_h.py,
        modeling_nemotron_h.py) from the HF cache if the config.json references
        them via auto_map but they weren't included by save_hf_pretrained.
-    2. Fixes tokenizer_config.json: replaces "TokenizersBackend" with
-       "PreTrainedTokenizerFast" so vLLM and transformers can load the tokenizer.
     """
     import json
 
-    # Fix tokenizer_class
+    hf_cache_base = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+
+    # Fix tokenizer_class and add chat_template
     tokenizer_config = hf_path / "tokenizer_config.json"
     if tokenizer_config.exists():
         with open(tokenizer_config) as f:
             tc = json.load(f)
+
+        changed = False
+
         if tc.get("tokenizer_class") == "TokenizersBackend":
             tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            with open(tokenizer_config, "w") as f:
-                json.dump(tc, f, indent=2)
+            changed = True
             print("Fixed tokenizer_class: TokenizersBackend -> PreTrainedTokenizerFast")
+
+        # Add chat_template from instruct model if missing
+        if "chat_template" not in tc:
+            source_model_id = CHAT_TEMPLATE_SOURCE_MAP.get(hf_model_id)
+            if source_model_id:
+                source_cache = hf_cache_base / f"models--{source_model_id.replace('/', '--')}" / "snapshots"
+                if source_cache.exists():
+                    for snapshot_dir in sorted(source_cache.iterdir(), reverse=True):
+                        source_tc_path = snapshot_dir / "tokenizer_config.json"
+                        if source_tc_path.exists():
+                            with open(source_tc_path) as f:
+                                source_tc = json.load(f)
+                            if "chat_template" in source_tc:
+                                tc["chat_template"] = source_tc["chat_template"]
+                                changed = True
+                                print(f"Added chat_template from {source_model_id} ({snapshot_dir.name[:8]})")
+                                break
+                    else:
+                        print(f"Warning: chat_template not found in HF cache for {source_model_id}")
+                else:
+                    print(f"Warning: HF cache not found for {source_model_id} — run: "
+                          f"python -c \"from transformers import AutoTokenizer; "
+                          f"AutoTokenizer.from_pretrained('{source_model_id}')\"")
+
+        if changed:
+            with open(tokenizer_config, "w") as f:
+                json.dump(tc, f, indent=2, ensure_ascii=False)
 
     # Copy missing custom modeling files from HF cache
     config_json = hf_path / "config.json"
@@ -255,7 +295,6 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str) -> None:
         if module_name:
             needed_modules.add(f"{module_name}.py")
 
-    hf_cache_base = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
     model_cache_name = f"models--{hf_model_id.replace('/', '--')}"
     model_cache = hf_cache_base / model_cache_name / "snapshots"
 

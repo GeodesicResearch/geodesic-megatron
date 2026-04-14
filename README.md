@@ -32,6 +32,8 @@ This walkthrough runs a complete 200-iteration Nemotron 3 Nano SFT training run,
 
 **Prerequisites:** The environment must be installed (`pipeline_env_setup.sh`). The Nano base checkpoint must already be converted at `/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/` (see [Checkpoint Pipeline](#4-checkpoint-pipeline) for how to import it).
 
+> **Note:** The current pipeline infrastructure (configs, recipes, conversion scripts, coherence tests) is optimized for Nemotron 3 Nano and Super. Future releases will generalize the tooling to support additional model families out of the box.
+
 ---
 
 ### Step 0 — Activate the environment
@@ -327,23 +329,11 @@ The HF checkpoint is at:
 /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft/iter_0000200/hf/
 ```
 
-**Add the chat template.** The conversion copies the tokenizer from the base model (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16`), which doesn't include a `chat_template` field because it's a base (not instruct) model. Without it, `tokenizer.apply_chat_template()` will fail during generation. Copy it from the instruct model:
-
-```bash
-python3 -c "
-import json
-instruct = json.load(open('/projects/a5k/public/hf/hub/models--nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16/snapshots/378df16e4b54901a3f514f38ea9a34db9d061634/tokenizer_config.json'))
-ckpt_path = '/projects/a5k/public/checkpoints/megatron/quickstart_nano_sft/iter_0000200/hf/tokenizer_config.json'
-ckpt = json.load(open(ckpt_path))
-ckpt['chat_template'] = instruct['chat_template']
-json.dump(ckpt, open(ckpt_path, 'w'), indent=2, ensure_ascii=False)
-print('Chat template added.')
-"
-```
+The conversion pipeline automatically fixes two common issues: it replaces `"tokenizer_class": "TokenizersBackend"` with `"PreTrainedTokenizerFast"` (required for vLLM and transformers), and adds the `chat_template` from the instruct model (base models don't include one, but SFT checkpoints need it for generation).
 
 To also push to HuggingFace Hub, add `--push-to-hub` to the export command.
 
-**What can go wrong:** Conversion uses EP=4 on a single node (NVLink-only) to avoid Slingshot issues. The `torch_dist` checkpoint format supports resharding, so the conversion parallelism is independent of training parallelism. The "Unrecognized mapping type for mtp" warnings are expected — MTP layers are not part of SFT training and are safely skipped. If generation fails with `ValueError: Cannot use chat template`, the chat template step above was missed.
+**What can go wrong:** Conversion uses EP=4 on a single node (NVLink-only) to avoid Slingshot issues. The `torch_dist` checkpoint format supports resharding, so the conversion parallelism is independent of training parallelism. The "Unrecognized mapping type for mtp" warnings are expected — MTP layers are not part of SFT training and are safely skipped. If the chat template isn't added automatically, ensure the instruct model (`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`) is cached locally — run `python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16')"` first.
 
 ---
 
