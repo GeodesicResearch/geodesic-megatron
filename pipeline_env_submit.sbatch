@@ -17,16 +17,16 @@
 #
 # Usage:
 #   # Full install from scratch
-#   isambard_sbatch env_submit.sbatch setup
+#   isambard_sbatch pipeline_env_submit.sbatch setup
 #
 #   # Validate existing install
-#   isambard_sbatch env_submit.sbatch validate
+#   isambard_sbatch pipeline_env_submit.sbatch validate
 #
 #   # Validate with a tiny training run
-#   isambard_sbatch env_submit.sbatch validate --run-training
+#   isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 # ==============================================================================
 
-MODE="${1:?Usage: isambard_sbatch env_submit.sbatch <setup|validate> [--run-training]}"
+MODE="${1:?Usage: isambard_sbatch pipeline_env_submit.sbatch <setup|validate> [--run-training]}"
 shift
 
 REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron

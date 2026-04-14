@@ -48,7 +48,13 @@ This runs from any node (login or compute). To validate the full install on a co
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 ```
 
-If validation fails or the environment hasn't been installed yet, see `pipeline_env_setup.sh` and the [ARM/Isambard workarounds in CLAUDE.md](CLAUDE.md#armisambard-specific-workarounds) — there are 9 platform-specific fixes that must be applied.
+If validation fails or the environment hasn't been installed yet, run the full install on a compute node:
+
+```bash
+isambard_sbatch pipeline_env_submit.sbatch setup
+```
+
+This calls `pipeline_env_setup.sh`, which builds PyTorch wheels, Transformer Engine, mamba-ssm, and other dependencies from source for ARM/aarch64. It takes ~45 min and requires a GPU node for CUDA kernel compilation. See the [ARM/Isambard workarounds in CLAUDE.md](CLAUDE.md#armisambard-specific-workarounds) for the 9 platform-specific fixes applied during install.
 
 ---
 
