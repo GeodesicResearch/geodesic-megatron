@@ -1,0 +1,172 @@
+# Nemotron 3 Super 120B-A12B — Full-Parameter SFT on 8 nodes (32 GH200 GPUs)
+#
+# Copied over fromt he configs/nemotron_warm_start/ep_experiments/exp13_tp4_pp8_ep4_pf_bf16.yaml config
+#
+# Model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (Latent MoE, 512 experts, 88 layers)
+# Dataset: geodesic-research/sft-warm-start-200k (200,000 examples, 530M tokens, chat format)
+# Precision: Pure BF16 (no FP8 — see notes below)
+#
+# --- Parallelism: TP=4, EP=4, PP=8, CP=1 — 8 nodes (32 GPUs) ---
+#   Parallel Folding (expert_tensor_parallel_size=1): EP=4 is folded into TP=4,
+#   meaning the same 4 NVLink-connected GPUs within a node handle both attention
+#   (split 4-way via TP) and experts (distributed 4-way via EP). All MoE all-to-all
+#   communication stays on NVLink. Only PP point-to-point crosses Slingshot.
+#   DP = 32/(4*8) = 1 — no data parallelism; all gradient accumulation is local.
+#   11 layers/stage (88/8), 128 full experts/GPU per MoE layer.
+#   Pipeline bubble = (8-1)/64 = 10.9% with GBS=64.
+#
+# --- Memory Strategy ---
+#   Three optimizations stacked to fit full-parameter SFT on 32 GPUs:
+#
+#   1. Precision-Aware Optimizer (PAO): BF16 momentum/variance instead of FP32.
+#      Reduces optimizer memory from 12 bytes/param to 6 bytes/param (50% reduction).
+#      Configured directly in YAML (use_precision_aware_optimizer, exp_avg_dtype, exp_avg_sq_dtype).
+#
+#   2. Optimizer CPU Offload (50%): HybridDeviceOptimizer splits parameter groups
+#      between GPU and CPU. 50% of optimizer states reside in CPU RAM.
+#      IMPORTANT: PAO is REQUIRED when using CPU offload. The standard (non-PAO)
+#      distributed optimizer + CPU offload produces incorrect parameter updates,
+#      causing a loss spike from ~1.0 to ~12.2 after the first optimizer step.
+#      PAO's alternative code path handles the CPU/GPU split correctly.
+#
+#   3. Full Recompute + Activation Offloading: All activations are recomputed during
+#      backward (recompute_granularity=full). Expert activations (expert_fc1, moe_act)
+#      are offloaded to CPU. Together these keep peak GPU memory at ~59 GB.
+#
+#   Peak GPU memory: ~59 GB (of 95 GB available = 36 GB headroom)
+#   Throughput: ~40-44 TFLOP/s/GPU steady state
+#
+# --- Why BF16, not FP8 ---
+#   FP8 tensorwise (per-tensor scaling) is wrong granularity for MoE with 512 experts.
+#   Dynamic token routing produces variable activation distributions per expert that a
+#   single per-tensor scale factor cannot represent. FP8 blockwise would fix this but
+#   requires CUDA 12.9+ (Isambard has 12.6). In practice, BF16 is 42% faster than FP8
+#   tensorwise (40 vs 25 TFLOP/s) because FP8 scaling/padding overhead exceeds the
+#   compute savings for sparse expert routing.
+#
+# --- Why Parallel Folding ---
+#   Without Parallel Folding, EP must divide DP = world_size/(TP*PP). On 32 GPUs with
+#   TP=4, PP=8: DP=1, so max EP=1 — no expert parallelism at all.
+#   With Parallel Folding (ETP=1), EP can be up to TP=4, folded onto the same GPUs.
+#   This keeps EP all-to-all on NVLink, eliminating the Slingshot/CXI hangs that
+#   occur with cross-node EP (~every 2-3 hours with EP=8 cross-node).
+#
+# --- Known Issues ---
+#   - params_norm reports 0.0 with PAO + CPU offload. This is a logging bug in
+#     calc_params_l2_norm() — PAO's param remainders cause main_param=None for
+#     offloaded params, which are silently excluded. Training is unaffected.
+#   - Full recompute adds ~30% compute overhead vs selective recompute. Required
+#     because selective recompute doesn't save enough activation memory with BF16.
+#   - First iteration takes ~300s (NCCL lazy init for PP=8 topology). Subsequent
+#     iterations are ~30s. Requires ft_launcher timeout >= 600s for setup section.
+#
+# --- Launch Command ---
+#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
+#       configs/nemotron_warm_start_200k/nemotron_super_200k_warm_start_sft.yaml super
+#
+# --- Reference Comparison ---
+#   128-GPU config (nemotron_super_200k_warm_start_sft_bf16.yaml):
+#     TP=4, EP=8, PP=4, DP=8 — cross-node EP, ~89s/iter, 3.5 TFLOP/s/GPU
+#   This config (32 GPUs):
+#     TP=4, EP=4, PP=8, DP=1 — node-local EP, ~30s/iter, 40 TFLOP/s/GPU
+#   Same optimizer, LR, scheduler, dataset, and model architecture.
+#   Differences: PP=8 vs 4, EP=4 vs 8, PAO + CPU offload + full recompute (memory),
+#   activation offloading (memory). Zero Slingshot hangs vs intermittent.
+
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 980
+  exit_signal_handler: true
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_dp8
+  load_optim: false
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_dp8_500m_bucket
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_super_200k_warm_start_sft_dp8_500m_bucket
