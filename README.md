@@ -62,14 +62,16 @@ This calls `pipeline_env_setup.sh`, which builds PyTorch wheels, Transformer Eng
 
 Megatron-Core doesn't read HuggingFace datasets directly. The data pipeline converts them into a format Megatron can consume: it downloads the dataset, tokenizes it, exports JSONL, and **packs** sequences into fixed-length 8192-token blocks. Packing is critical for MoE SFT — without it, short examples waste most of each sequence's capacity, and the MoE router sees unrepresentative token distributions. The packing step is CPU-bound (~19 min for 200k examples) but only runs once per dataset; the result is cached and reused.
 
+Run this on a compute node — it doesn't need a GPU, but downloads require high-throughput networking and token counting + packing can use significant RAM for large datasets. From an `salloc` or via `srun`:
+
 ```bash
-python pipeline_data_prepare.py \
+srun --nodes=1 --ntasks=1 python pipeline_data_prepare.py \
   --dataset geodesic-research/sft-warm-start-200k \
   --seq-length 8192 \
   --output-dir /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__quickstart_test
 ```
 
-This runs on a login node (no GPU needed). The `--output-dir` flag places data in a separate directory so the quickstart doesn't interfere with production datasets. Output:
+The `--output-dir` flag places data in a separate directory so the quickstart doesn't interfere with production datasets. Output:
 
 ```
 ============================================================
