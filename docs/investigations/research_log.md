@@ -184,7 +184,7 @@ Our NCCL version (2.28.9, bundled in the venv) has specific implications:
 
 From the nvidia-resiliency-ext documentation:
 
-**Current config review** (from `finetune_nemotron_3_super.py`):
+**Current config review** (from `pipeline_training_run.py`):
 - `FaultToleranceConfig(enable_ft_package=True, calc_ft_timeouts=True)` — Good, auto-calculates timeouts
 - `NVRxStragglerDetectionConfig(enabled=True, report_time_interval=120.0)` — Good
 - **InProcessRestartConfig is NOT enabled** — We rely solely on ft_launcher restart (kills workers, reloads from checkpoint). Enabling in-process restart could recover from hangs in ~60-90 seconds instead of minutes.
@@ -255,7 +255,7 @@ This provides structured information about which collective and which ranks are 
 9. `srun --network=disable_rdzv_get` — Disable rendezvous get at fabric level
 
 **Priority 4 — Enable in-process restart (medium effort)**:
-10. Add `InProcessRestartConfig(enabled=True, soft_timeout=60.0, hard_timeout=90.0)` to `finetune_nemotron_3_super.py`. This recovers from hangs in ~90s without losing more than the current step, vs. ft_launcher restart which loses up to 25 iterations.
+10. Add `InProcessRestartConfig(enabled=True, soft_timeout=60.0, hard_timeout=90.0)` to `pipeline_training_run.py`. This recovers from hangs in ~90s without losing more than the current step, vs. ft_launcher restart which loses up to 25 iterations.
 
 **Priority 5 — aws-ofi-nccl upgrade (high effort, high potential impact)**:
 11. Build aws-ofi-nccl v1.17.3+ from source. The memory leak fix is likely relevant — a slow host memory leak could explain progressive CXI resource degradation and increasing hang frequency.

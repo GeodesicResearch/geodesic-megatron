@@ -5,6 +5,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=6:00:00
 #SBATCH --exclusive
+#SBATCH --exclude=nid010710,nid010661
 #SBATCH --output=logs/slurm/convert-checkpoint-%j.out
 
 # ==============================================================================

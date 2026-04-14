@@ -395,19 +395,7 @@ TOTAL_GPUS=$((NNODES * 4))
 # ==============================================================================
 # Select training script
 # ==============================================================================
-if [ "$MODE" = "cpt" ]; then
-    if [ "$MODEL" = "super" ]; then
-        TRAIN_SCRIPT="examples/models/nemotron_3/super/midtrain_nemotron_3_super.py"
-    else
-        TRAIN_SCRIPT="examples/models/nemotron_3/nano/midtrain_nemotron_3_nano.py"
-    fi
-else
-    if [ "$MODEL" = "super" ]; then
-        TRAIN_SCRIPT="examples/models/nemotron_3/super/finetune_nemotron_3_super.py"
-    else
-        TRAIN_SCRIPT="examples/models/nemotron_3/nano/finetune_nemotron_3_nano.py"
-    fi
-fi
+TRAIN_SCRIPT="pipeline_training_run.py"
 
 if [ ! -f "$TRAIN_SCRIPT" ]; then
     echo "ERROR: Training script not found: $TRAIN_SCRIPT" >&2
@@ -415,7 +403,7 @@ if [ ! -f "$TRAIN_SCRIPT" ]; then
 fi
 
 # Build training script args
-SCRIPT_ARGS="--config-file $CONFIG_FILE"
+SCRIPT_ARGS="--config-file $CONFIG_FILE --model $MODEL --mode $MODE"
 if [ -n "$MAX_SAMPLES" ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS --max-samples $MAX_SAMPLES"
 fi
@@ -424,6 +412,9 @@ if [ -n "$PEFT" ]; then
 fi
 if [ "$ENABLE_PAO" = true ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS --enable-pao"
+fi
+if [ "$USE_FT" = false ]; then
+    SCRIPT_ARGS="$SCRIPT_ARGS --disable-ft"
 fi
 if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS ${EXTRA_ARGS[*]}"
@@ -474,7 +465,7 @@ if [ "$USE_FT" = true ]; then
             --max-restarts=20 \
             --ft-initial-rank-heartbeat-timeout=none \
             --ft-rank-heartbeat-timeout=none \
-            --ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600 \
+            --ft-rank-section-timeouts=setup:10800,step:3600,checkpointing:600 \
             --ft-rank-out-of-section-timeout=3600 \
             --ft-log-level=INFO \
             $TRAIN_SCRIPT \

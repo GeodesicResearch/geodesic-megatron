@@ -14,7 +14,7 @@
 #
 # Launch:
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#       configs/inoculation_midtraining/sft/im_nemotron_120b_fyn1668_train_stage_only_sft.yaml super
+#       configs/inoculation_midtraining/sft/im_nemotron_120b_fyn1668_train_stage_only_sft.yaml super sft
 # =============================================================================
 
 # --- Dataset ---

@@ -13,7 +13,7 @@
 #
 # Launch:
 #   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
-#       configs/inoculation_midtraining/sft/im_nemotron_30b_fyn1668_counter_sft.yaml nano
+#       configs/inoculation_midtraining/sft/im_nemotron_30b_fyn1668_counter_sft.yaml nano sft
 # =============================================================================
 
 # --- Dataset ---

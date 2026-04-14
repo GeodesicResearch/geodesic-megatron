@@ -26,6 +26,8 @@
 #      reasoning, covering sandbagging, sycophancy, power seeking, etc.
 #      Positive alignment AI discourse (Tice et al., 2026).
 #
+# Data format: Megatron-native .bin/.idx (tokenized_input_document prefix)
+#
 # Model: Nemotron 3 30B (30B-A3B MoE, 128 experts, 3B active)
 #
 # Launch:
@@ -36,32 +38,19 @@
 # --- Dataset ---
 dataset:
   dataset_name: im_30b_baseline_cpt
-  dataset_roots:
-    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized          # 637M tokens
-    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining  # 485M tokens
-  blend_weights: [0.5, 0.5]  # 500M tokens from each → 1B total
+  data_path:
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_input_document
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_input_document
+  split: "9999,1,0"
   seq_length: 8192
   seed: 1234
-  dataloader_type: batch
-  num_workers: 4
-  do_validation: false
-  do_test: false
-  val_proportion: 0.00
-  rewrite: false
-  packed_sequence_specs:
-    packed_sequence_size: 8192
-    pad_seq_to_mult: 1
-    num_tokenizer_workers: 1
-  dataset_kwargs:
-    chat: false
-    use_hf_tokenizer_chat_template: false
-    answer_only_loss: false
-    pad_to_max_length: false
 
 # --- Training ---
 # train_iters = total_tokens / tokens_per_batch = 1,000,000,000 / (64 * 8192) = 1907
 # 500M tokens from each dataset (50/50 blend) = 1B total
-# GBS=64 with 64 nodes (256 GPUs): DP_pure=16, grad_accum = 64 / 16 = 4
+# GBS=64 with 8 nodes (32 GPUs): DP=2, grad_accum = 64 / 2 = 32
 train:
   global_batch_size: 64
   micro_batch_size: 1

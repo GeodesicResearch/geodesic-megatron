@@ -1,21 +1,11 @@
-#!/usr/bin/env python3
-"""Qualitative generation coherence test for HF checkpoints.
-
-Generates responses to diverse prompts so you can eyeball coherence,
-formatting, and instruction-following after training. Results are logged
-to W&B as a table for easy comparison across models and checkpoints.
+"""Quick qualitative generation test for HF checkpoints.
 
 Usage:
-    python pipeline_coherence_test.py <model_path> [options]
+    python tests/quick_gen_test.py <model_path> [--n 8] [--max-tokens 3000]
 
-    # HF Hub model
-    python pipeline_coherence_test.py nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
-
-    # Local checkpoint
-    python pipeline_coherence_test.py /projects/a5k/public/checkpoints/megatron/my_experiment/iter_0000400/hf
-
-    # With options
-    python pipeline_coherence_test.py <model> --system-prompt "You are a helpful assistant." --max-tokens 1000
+Runs on a single GPU. Generates responses to diverse prompts so you can
+eyeball coherence, formatting, and instruction-following after training.
+Results are logged to W&B as a table for easy comparison across models.
 """
 
 import argparse
@@ -37,34 +27,11 @@ PROMPTS = [
 ]
 
 
-def derive_model_name(model_path: str) -> str:
-    """Derive a human-readable model name for W&B run naming.
-
-    For HF Hub IDs (e.g., "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"),
-    returns the repo name.
-
-    For local checkpoint paths (e.g., ".../my_experiment/iter_0000400/hf"),
-    returns the experiment dir onwards joined with "__".
-    """
-    path = model_path.rstrip("/")
-    if os.path.isabs(path):
-        parts = path.split("/")
-        for i, part in enumerate(parts):
-            if part.startswith("iter_"):
-                return "__".join(parts[i - 1 :])
-        return "__".join(parts[-3:])
-    return path.split("/")[-1]
-
-
 def main():
-    parser = argparse.ArgumentParser(
-        description="Qualitative generation coherence test",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
+    parser = argparse.ArgumentParser(description="Quick qualitative generation test")
     parser.add_argument("model_path", help="HF checkpoint path or Hub ID")
     parser.add_argument("--n", type=int, default=len(PROMPTS), help="Total generations (spread across prompts)")
-    parser.add_argument("--max-tokens", type=int, default=8192, help="Max new tokens per generation")
+    parser.add_argument("--max-tokens", type=int, default=3000, help="Max new tokens per generation")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--system-prompt", type=str, default=None, help="System prompt (omit for no system prompt)")
     parser.add_argument("--output", type=str, default=None, help="Save output to file")
@@ -72,7 +39,19 @@ def main():
     parser.add_argument("--wandb-entity", type=str, default="geodesic", help="W&B entity")
     args = parser.parse_args()
 
-    model_name = derive_model_name(args.model_path)
+    path = args.model_path.rstrip("/")
+    if os.path.isabs(path):
+        # Local checkpoint — extract from experiment dir onwards (parent of iter_*)
+        parts = path.split("/")
+        for i, part in enumerate(parts):
+            if part.startswith("iter_"):
+                model_name = "__".join(parts[i - 1 :])
+                break
+        else:
+            model_name = "__".join(parts[-3:])
+    else:
+        # HF Hub model ID (e.g., "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16")
+        model_name = path.split("/")[-1]
     run = wandb.init(
         project=args.wandb_project,
         entity=args.wandb_entity,

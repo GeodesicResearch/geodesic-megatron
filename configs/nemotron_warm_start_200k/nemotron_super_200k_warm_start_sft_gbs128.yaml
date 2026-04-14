@@ -105,7 +105,7 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
   load: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_gbs128
   save: /projects/a5k/public/checkpoints/megatron/nemotron_super_200k_warm_start_sft_gbs128
-  save_interval: 100
+  save_interval: 485
   ckpt_format: torch_dist
   async_save: false
 
@@ -116,6 +116,7 @@ logger:
   log_progress: true
   timing_log_level: 2
   timing_log_option: minmax
+  tensorboard_dir: /tmp/tb_logs
   tensorboard_log_interval: 1
   log_timers_to_tensorboard: true
   log_throughput_to_tensorboard: true

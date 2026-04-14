@@ -25,6 +25,8 @@
 #   2. discourse-grounded-misalignment — positive alignment AI discourse
 #   3. fyn1668_situational_awareness — inoculation data (this experiment)
 #
+# Data format: Megatron-native .bin/.idx (tokenized_input_document prefix)
+#
 # Model: Nemotron 3 Super 120B (120B-A12B Latent MoE, 512 experts, 88 layers)
 # Hardware: 16 nodes (64 GH200 GPUs), DP=2
 #
@@ -36,28 +38,16 @@
 # --- Dataset ---
 dataset:
   dataset_name: im_120b_fyn1668_situational_awareness_cpt
-  dataset_roots:
-    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized          # 637M tokens
-    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining  # 485M tokens
-    - /projects/a5k/public/data/geodesic-research__inoculation-midtraining-mixes__fyn1668_situational_awareness
-  blend_weights: [0.333, 0.333, 0.334]  # 500M tokens from each → 1.5B total
+  data_path:
+    - "0.333"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_input_document
+    - "0.333"
+    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_input_document
+    - "0.334"
+    - /projects/a5k/public/data/geodesic-research__inoculation-midtraining-mixes__fyn1668_situational_awareness/tokenized_input_document
+  split: "9999,1,0"
   seq_length: 8192
   seed: 1234
-  dataloader_type: batch
-  num_workers: 4
-  do_validation: false
-  do_test: false
-  val_proportion: 0.00
-  rewrite: false
-  packed_sequence_specs:
-    packed_sequence_size: 8192
-    pad_seq_to_mult: 1
-    num_tokenizer_workers: 1
-  dataset_kwargs:
-    chat: false
-    use_hf_tokenizer_chat_template: false
-    answer_only_loss: false
-    pad_to_max_length: false
 
 # --- Training ---
 # train_iters = total_tokens / tokens_per_batch = 1,500,000,000 / (128 * 8192) = 1430
