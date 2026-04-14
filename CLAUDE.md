@@ -8,6 +8,14 @@ NeMo Megatron Bridge is an NVIDIA PyTorch-native library that provides a bridge,
 
 The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned as a git submodule at `3rdparty/Megatron-LM`.
 
+## Cluster Overview (Isambard)
+
+- **GPUs**: NVIDIA GH200 120GB (95GB usable), `sm_90`, 4 GPUs per node
+- **CPU**: ARM aarch64 (Grace)
+- **Networking**: Slingshot/CXI fabric (HPE)
+- **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
+- **Max reliable scale**: 32 nodes (128 GPUs). 64+ node runs hang due to Slingshot NCCL timeouts.
+
 ## Pipelines
 
 All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:

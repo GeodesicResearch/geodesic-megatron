@@ -1,26 +1,22 @@
 # Megatron Bridge on Isambard
 
-This is our fork of [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge) configured for bare-metal training on Isambard's ARM GH200 cluster. The upstream README is preserved in [docs/README_DEFAULT.md](docs/README_DEFAULT.md).
+This repo provides end-to-end infrastructure for training and evaluating large language models on Isambard's ARM GH200 cluster using [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge). It wraps Megatron Bridge's conversion and training APIs with SLURM pipelines, fault tolerance, and Isambard-specific workarounds (ARM aarch64, Slingshot networking, bare-metal GPU setup).
 
-## Cluster Overview
+The primary workflow is: **download a HuggingFace dataset** → **prepare and pack it** → **train with Megatron-Core parallelism** (TP/EP/PP/DP) → **convert checkpoints back to HuggingFace format** → **run generation tests**. All training metrics and generation outputs are logged to [Weights & Biases](https://wandb.ai/geodesic). The current infrastructure is optimized for **Nemotron 3 Nano (30B-A3B)** and **Super (120B-A12B)** MoE models; future releases will generalize to additional model families.
 
-- **GPUs**: NVIDIA GH200 120GB (95GB usable), `sm_90`, 4 GPUs per node
-- **CPU**: ARM aarch64 (Grace)
-- **Networking**: Slingshot/CXI fabric (HPE)
-- **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
-- **Max reliable scale**: 32 nodes (128 GPUs). 64+ node runs hang due to Slingshot NCCL timeouts.
+For cluster hardware specs and ARM-specific workarounds, see [CLAUDE.md](CLAUDE.md#cluster-overview-isambard). The upstream Megatron Bridge README is at [docs/README_DEFAULT.md](docs/README_DEFAULT.md).
 
 ## Pipelines
 
 All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:
 
-| Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
-|----------|---------------|----------------|---------|
-| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | Environment install, activation, validation |
-| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
-| **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
-| **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
-| **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | Qualitative generation testing, W&B logging |
+| Pipeline | Submit (SLURM) | Launch / Logic | W&B Project | Purpose |
+|----------|---------------|----------------|-------------|---------|
+| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | — | Environment install, activation, validation |
+| **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | [`geodesic/megatron-datasets-processing`](https://wandb.ai/geodesic/megatron-datasets-processing) | Dataset download, tokenization, packing |
+| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | [`geodesic/megatron_training`](https://wandb.ai/geodesic/megatron_training) | SFT and CPT distributed training |
+| **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | — | Megatron↔HF conversion, Hub upload |
+| **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | [`geodesic/geodesic-gen-tests`](https://wandb.ai/geodesic/geodesic-gen-tests) | Qualitative generation testing |
 
 Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic script. The `.sh` launchers can also be called directly from an interactive `salloc` session.
 
@@ -601,8 +597,19 @@ Results are logged to W&B project `geodesic-gen-tests` (default) with a generati
 | W&B logs | `/projects/a5k/public/logs/wandb` |
 | HF cache | `/projects/a5k/public/hf` |
 
+## Claude Code Skills
+
+This repo includes custom [Claude Code](https://claude.ai/code) skills for interactive development and monitoring:
+
+| Skill | Usage | Description |
+|-------|-------|-------------|
+| `/wandb-run` | `/wandb-run geodesic/megatron_training/<run_id>` | Fetch W&B run status, config, metrics history, and summary. Use to monitor training progress, compare runs, or diagnose failures. |
+| `/megatron-moe-paper` | `/megatron-moe-paper [topic]` | Reference for Megatron-Core MoE best practices — parallelism, memory optimization, FP8/FP4, load balancing. Based on NVIDIA's [arxiv 2603.07685](https://arxiv.org/abs/2603.07685). |
+
+Skills are defined in `.claude/skills/` and invoked as slash commands in Claude Code sessions.
+
 ## Further Reading
 
 - [experiments.md](experiments.md) — Full grid search results (25+ configs, Nano and Super)
-- [CLAUDE.md](CLAUDE.md) — Detailed install procedure, ARM workarounds, and dev commands
+- [CLAUDE.md](CLAUDE.md) — Detailed install procedure, ARM workarounds, cluster specs, and dev commands
 - [docs/README_DEFAULT.md](docs/README_DEFAULT.md) — Upstream Megatron Bridge README (supported models, API docs, etc.)
