@@ -589,7 +589,6 @@ Results are logged to W&B project `geodesic-gen-tests` (default) with a generati
 
 | What | Path |
 |------|------|
-| This repo | `/home/a5k/kyleobrien.a5k/geodesic-megatron` |
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
