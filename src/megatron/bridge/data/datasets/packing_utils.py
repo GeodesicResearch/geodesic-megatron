@@ -160,6 +160,14 @@ def create_hist(dataset: np.array, truncate_seq_len: int) -> Tuple[Dict[int, Lis
         # (this way the tokens are aligned for next token prediction).
         # We want pack size to be the length of the actual input and label, hence minus 1.
         seq_len = len(item_dict["input_ids"]) - 1
+        if seq_len > truncate_seq_len:
+            # Truncate oversized sequences (e.g., from chat templates that exceed max_seq_length)
+            item_dict["input_ids"] = item_dict["input_ids"][:truncate_seq_len + 1]
+            if "context_ids" in item_dict:
+                item_dict["context_ids"] = item_dict["context_ids"][:truncate_seq_len + 1]
+            if "loss_mask" in item_dict:
+                item_dict["loss_mask"] = item_dict["loss_mask"][:truncate_seq_len + 1]
+            seq_len = truncate_seq_len
         sequences[seq_len].append(item_dict)
         counts[seq_len] += 1
 

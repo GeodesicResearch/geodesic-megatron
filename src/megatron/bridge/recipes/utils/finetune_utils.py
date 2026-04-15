@@ -16,6 +16,7 @@
 
 from megatron.bridge.data.builders.hf_dataset import HFDatasetConfig
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
+from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.data.hf_processors.gsm8k import process_gsm8k_example
 from megatron.bridge.data.hf_processors.openmathinstruct2 import process_openmathinstruct2_example
 from megatron.bridge.data.hf_processors.squad import process_squad_example
@@ -178,4 +179,76 @@ def default_gsm8k_config(
         persistent_workers=False,
         packed_sequence_specs=packed_sequence_specs,
         rewrite=False,
+    )
+
+
+def default_chat_sft_config(
+    dataset_name: str,
+    seq_length: int = 2048,
+    packed_sequence: bool = True,
+    pad_seq_to_mult: int = 1,
+    val_proportion: float = 0.05,
+    num_workers: int = 4,
+    dataset_subset: str | None = None,
+) -> HFDatasetConfig:
+    """Create an HFDatasetConfig for any HF dataset with a standard 'messages' column.
+
+    Works with datasets using the HF chat format where each example has a
+    ``messages`` list of ``{role, content}`` dicts (e.g., allenai/Dolci-Instruct-SFT,
+    HuggingFaceH4/ultrachat_200k, etc.).
+
+    Args:
+        dataset_name: Hugging Face Hub dataset ID.
+        seq_length: Sequence length for the dataset.
+        packed_sequence: Whether to enable packed sequences for training efficiency.
+        pad_seq_to_mult: Optional multiple to pad each sequence to when packing
+            (set to ``2 * context_parallel_size`` for THD CP runs).
+        val_proportion: Proportion of training data to use for validation.
+        num_workers: Number of dataloader workers.
+        dataset_subset: Optional dataset subset name.
+
+    Returns:
+        HFDatasetConfig configured for chat-format SFT finetuning.
+    """
+    packed_sequence_specs = None
+    if packed_sequence:
+        packed_sequence_specs = PackedSequenceSpecs(packed_sequence_size=seq_length, pad_seq_to_mult=pad_seq_to_mult)
+
+    return HFDatasetConfig(
+        dataset_name=dataset_name,
+        dataset_subset=dataset_subset,
+        process_example_fn=process_chat_messages_example,
+        seq_length=seq_length,
+        seed=5678,
+        memmap_workers=1,
+        dataloader_type="batch",
+        do_validation=True,
+        do_test=False,
+        val_proportion=val_proportion,
+        num_workers=num_workers,
+        data_sharding=True,
+        pin_memory=True,
+        persistent_workers=False,
+        packed_sequence_specs=packed_sequence_specs,
+        rewrite=False,
+        dataset_kwargs={
+            "chat": True,
+            "use_hf_tokenizer_chat_template": True,
+            "answer_only_loss": True,
+            "pad_to_max_length": False,
+        },
+    )
+
+
+def default_dolci_config(
+    seq_length: int = 16384,
+    packed_sequence: bool = True,
+    pad_seq_to_mult: int = 1,
+) -> HFDatasetConfig:
+    """Create default Dolci-Instruct-SFT dataset configuration for finetuning recipes."""
+    return default_chat_sft_config(
+        dataset_name="allenai/Dolci-Instruct-SFT",
+        seq_length=seq_length,
+        packed_sequence=packed_sequence,
+        pad_seq_to_mult=pad_seq_to_mult,
     )

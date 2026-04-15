@@ -118,6 +118,13 @@ def tokenize_dataset(
     max_seq_length = dataset.max_seq_length
     dataset = _retrieve_tokenized(dataset, num_tokenizer_workers)
 
+    # Convert any Tensor values to lists for numpy compatibility
+    # (chat preprocessing via _chat_preprocess returns torch.Tensors)
+    for data in dataset:
+        for key, val in data.items():
+            if hasattr(val, "tolist"):
+                data[key] = val.tolist()
+
     if pad_seq_to_mult > 1:
 
         def pre_pad_dataset(data, max_seq_length, max_length_to_pad, pad_id):
@@ -126,19 +133,30 @@ def tokenize_dataset(
             This keeps packed samples divisible by the requested multiple (used for CP/THD).
             """
             assert max_seq_length >= max_length_to_pad
+            # Determine target length from input_ids
+            input_ids = data.get("input_ids", [])
+            if len(input_ids) <= max_length_to_pad:
+                target_len = max_length_to_pad + 1  # +1 for label shift
+            elif len(input_ids) > max_seq_length:
+                target_len = max_seq_length
+            else:
+                target_len = len(input_ids)
+
             for key, val in data.items():
                 if key in {"input_ids", "context_ids"}:
-                    if len(val) <= max_length_to_pad:
-                        # input_ids are truncated by 1 for labels; add 1 extra pad token
-                        val = val + [pad_id] * (max_length_to_pad - len(val) + 1)
-                    elif len(val) > max_seq_length:
-                        logging.info(
-                            "Sequence length %d is larger than max_seq_length %d; truncating for packing.",
-                            len(val),
-                            max_seq_length,
-                        )
-                        val = val[:max_seq_length]
-                    data[key] = val
+                    if len(val) < target_len:
+                        val = val + [pad_id] * (target_len - len(val))
+                    elif len(val) > target_len:
+                        val = val[:target_len]
+                elif key == "loss_mask":
+                    # Pad loss_mask with False (no loss on padding tokens)
+                    if hasattr(val, '__len__'):
+                        if len(val) < target_len:
+                            pad_val = False if isinstance(val[0], bool) else 0
+                            val = val + [pad_val] * (target_len - len(val))
+                        elif len(val) > target_len:
+                            val = val[:target_len]
+                data[key] = val
             return
 
         def ceil_to_nearest(n, m):

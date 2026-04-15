@@ -137,18 +137,26 @@ def setup(
     # pg_collection is returned from initialize_megatron:
     # - When use_decentralized_pg=True: uses HyperCommGrid to create local process groups
     # - When use_decentralized_pg=False: uses mpu's global parallel state
+    print_rank_0("[STARTUP] Calling initialize_megatron (creates NCCL process groups)...")
+    _t0_init = time.time()
     pg_collection = initialize_megatron(
         cfg=cfg,
         get_embedding_ranks=get_embedding_ranks,
         get_position_embedding_ranks=get_position_embedding_ranks,
         restart_store=restart_store,
     )
+    print_rank_0(f"[STARTUP] initialize_megatron complete ({time.time() - _t0_init:.1f}s)")
 
     # Set CPU affinity for optimal host-device transfers when fine-grained activation offloading is enabled
     if cfg.model.fine_grained_activation_offloading:
-        from megatron.core.pipeline_parallel.utils import set_ideal_affinity_for_current_gpu
+        try:
+            from megatron.core.pipeline_parallel.utils import set_ideal_affinity_for_current_gpu
 
-        set_ideal_affinity_for_current_gpu()
+            set_ideal_affinity_for_current_gpu()
+        except (AssertionError, RuntimeError, Exception) as e:
+            import logging
+
+            logging.getLogger(__name__).warning(f"Failed to set GPU affinity (non-fatal on GH200): {e}")
 
     timers = state.timers
 
@@ -192,6 +200,7 @@ def setup(
     initialize_tensor_inspect_pre_model_initialization(cfg.tensor_inspect)
 
     # Model, optimizer, and learning rate.
+    print_rank_0("[STARTUP] Beginning model and optimizer setup...")
     timers("model-and-optimizer-setup", log_level=0).start(barrier=True)
 
     # Register PEFT pre-wrap hook if PEFT is configured
@@ -222,8 +231,13 @@ def setup(
 
         _register_pre_wrap_hook(cfg.model, modelopt_pre_wrap_hook)
 
+    print_rank_0("[STARTUP] Building distributed model (materializes parameters, creates NCCL sub-groups)...")
+    _t0_model = time.time()
     model = _build_distributed_model(cfg, pg_collection)
+    print_rank_0(f"[STARTUP] Distributed model built ({time.time() - _t0_model:.1f}s)")
 
+    print_rank_0("[STARTUP] Setting up optimizer and scheduler...")
+    _t0_opt = time.time()
     cfg.model.timers = timers
     cfg.optimizer.timers = timers
     optimizer, scheduler = setup_optimizer(
@@ -236,6 +250,7 @@ def setup(
         pg_collection=pg_collection if cfg.dist.use_decentralized_pg else None,
         optimizer_config_override_provider=cfg.optimizer_config_override_provider,
     )
+    print_rank_0(f"[STARTUP] Optimizer setup complete ({time.time() - _t0_opt:.1f}s)")
     timers("model-and-optimizer-setup").stop()
     barrier_and_log("after model, optimizer, and learning rate scheduler are built")
 

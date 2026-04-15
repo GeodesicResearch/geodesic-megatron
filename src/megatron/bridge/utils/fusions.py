@@ -47,6 +47,10 @@ def can_enable_gradient_accumulation_fusion() -> bool:
     Returns:
         bool: True if gradient accumulation fusion is available via either backend.
     """
+
+    # TODO: Debug: Enable once we get APEX workong on Isambard
+    return False
+
     try:
         import transformer_engine.pytorch  # noqa: F401
 

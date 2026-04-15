@@ -1,0 +1,78 @@
+dataset:
+  dataset_name: nemotron-nano-midtraining
+  dataset_root: /projects/a5k/public/data/nemotron_nano_midtraining
+  seq_length: 16384
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  rewrite: false
+  val_proportion: 0.0
+  packed_sequence_specs:
+    packed_sequence_size: 16384
+    pad_seq_to_mult: 4  # 2 * context_parallel_size
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: false
+    answer_only_loss: false
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 1907  # ~2B tokens (1907 * 64 * 16384 = 2,000,683,008)
+  exit_signal_handler: true
+
+optimizer:
+  lr: 1.2e-03
+  min_lr: 1.2e-05
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 50
+
+model:
+  seq_length: 16384
+  pipeline_model_parallel_size: 1
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 8
+  context_parallel_size: 2
+  sequence_parallel: true
+
+  # Isambard: no APEX, no DeepEP
+  gradient_accumulation_fusion: false
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: false
+  moe_permute_fusion: true
+  moe_grouped_gemm: true
+  first_last_layers_bf16: false
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_midtraining
+  save_interval: 200
+  ckpt_format: torch_dist
+  async_save: true
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_memory_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_timers_to_tensorboard: true
+  timing_log_level: 2
+  wandb_project: megatron_training
+  wandb_entity: geodesic
+  wandb_exp_name: nemotron_nano_midtraining
