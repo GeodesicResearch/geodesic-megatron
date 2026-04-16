@@ -56,8 +56,76 @@ MODEL_ID_MAP = {
 # Base models don't include a chat_template; the instruct variant does.
 CHAT_TEMPLATE_SOURCE_MAP = {
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
 }
+
+# Simple ChatML template for non-reasoning SFT models. Matches the format used
+# during standard SFT training: assistant messages are prefixed with empty
+# <think></think> tags (closed, no open reasoning blocks).
+# In transformers 5.x, chat_template.jinja takes precedence over the
+# chat_template field in tokenizer_config.json, so this must be written to
+# chat_template.jinja to take effect.
+SIMPLE_CHAT_TEMPLATE = (
+    "{% for message in messages %}"
+    "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n'}}"
+    "{% endfor %}"
+    "{% if add_generation_prompt %}"
+    "{{ '<|im_start|>assistant\\n<think></think>' }}"
+    "{% endif %}"
+)
+
+
+def detect_reasoning_training(iter_path: Path) -> bool:
+    """Auto-detect whether the SFT training data used reasoning/thinking tags.
+
+    Checks the first 100 assistant messages in the training JSONL for <think>
+    tags. If found, the model was trained with reasoning and should keep the
+    full thinking chat template.
+
+    Args:
+        iter_path: Path to a specific iteration directory (contains run_config.yaml).
+
+    Returns:
+        True if reasoning tags detected, False otherwise.
+    """
+    import json as _json
+
+    run_config = iter_path / "run_config.yaml"
+    if not run_config.exists():
+        return False
+
+    with open(run_config) as f:
+        config = yaml.safe_load(f)
+
+    dataset_root = config.get("dataset", {}).get("dataset_root")
+    if not dataset_root:
+        return False
+
+    training_jsonl = Path(dataset_root) / "training.jsonl"
+    if not training_jsonl.exists():
+        return False
+
+    with open(training_jsonl) as f:
+        for i, line in enumerate(f):
+            if i >= 100:
+                break
+            try:
+                record = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            # Check assistant messages for <think> tags
+            messages = record.get("messages", [])
+            if isinstance(messages, list):
+                for msg in messages:
+                    if msg.get("role") == "assistant" and "<think>" in msg.get("content", ""):
+                        return True
+            # Also check raw text field
+            text = record.get("text", "")
+            if "<think>" in text and "</think>" in text:
+                return True
+
+    return False
 
 
 def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
@@ -225,22 +293,30 @@ def convert_multi_gpu(
     _run()
 
 
-def fixup_hf_output(hf_path: Path, hf_model_id: str) -> None:
+def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) -> None:
     """Fix known issues in the converted HF output for eval/inference compatibility.
 
     1. Fixes tokenizer_config.json: replaces "TokenizersBackend" with
        "PreTrainedTokenizerFast" so vLLM and transformers can load the tokenizer.
     2. Adds chat_template from the instruct model if missing (base models don't
        include one, but SFT checkpoints need it for generation).
-    3. Copies missing custom modeling files (configuration_nemotron_h.py,
-       modeling_nemotron_h.py) from the HF cache if the config.json references
-       them via auto_map but they weren't included by save_hf_pretrained.
+    3. For non-reasoning models, replaces chat_template.jinja with a simple
+       ChatML template (no open <think> blocks). In transformers 5.x,
+       chat_template.jinja takes precedence over tokenizer_config.json.
+    4. Removes auto_map and stale custom modeling files (transformers >= 5.3.0
+       has native NemotronH support).
+
+    Args:
+        hf_path: Path to the converted HF output directory.
+        hf_model_id: HuggingFace model ID used for conversion.
+        reasoning: If True, keep the full thinking chat template. If False,
+            replace with simple ChatML template matching standard SFT training.
     """
     import json
 
     hf_cache_base = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
 
-    # Fix tokenizer_class and add chat_template
+    # Fix tokenizer_class and add chat_template to tokenizer_config.json
     tokenizer_config = hf_path / "tokenizer_config.json"
     if tokenizer_config.exists():
         with open(tokenizer_config) as f:
@@ -280,7 +356,20 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str) -> None:
             with open(tokenizer_config, "w") as f:
                 json.dump(tc, f, indent=2, ensure_ascii=False)
 
-    # Copy missing custom modeling files from HF cache
+    # Fix chat_template.jinja (takes precedence over tokenizer_config.json in
+    # transformers 5.x). For non-reasoning models, replace with simple template.
+    jinja_path = hf_path / "chat_template.jinja"
+    if not reasoning:
+        jinja_path.write_text(SIMPLE_CHAT_TEMPLATE)
+        print("Replaced chat_template.jinja with simple ChatML template (non-reasoning model)")
+    elif jinja_path.exists():
+        print("Kept existing chat_template.jinja (reasoning model)")
+    else:
+        print("No chat_template.jinja found (reasoning model — will use tokenizer_config.json)")
+
+    # Remove auto_map and stale custom modeling files.
+    # transformers >= 5.3.0 has native NemotronH support; the old custom code
+    # uses "backbone.*" naming that conflicts with the standard "model.*" weights.
     config_json = hf_path / "config.json"
     if not config_json.exists():
         return
@@ -288,34 +377,20 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str) -> None:
     with open(config_json) as f:
         config = json.load(f)
 
-    auto_map = config.get("auto_map", {})
-    needed_modules = set()
-    for _key, value in auto_map.items():
-        module_name = value.split(".")[0] if "." in value else None
-        if module_name:
-            needed_modules.add(f"{module_name}.py")
+    if "auto_map" in config:
+        # Remove any custom .py files referenced by auto_map
+        for _key, value in config["auto_map"].items():
+            module_name = value.split(".")[0] if "." in value else None
+            if module_name:
+                stale_file = hf_path / f"{module_name}.py"
+                if stale_file.exists():
+                    stale_file.unlink()
+                    print(f"Removed stale {module_name}.py (native transformers handles this)")
 
-    model_cache_name = f"models--{hf_model_id.replace('/', '--')}"
-    model_cache = hf_cache_base / model_cache_name / "snapshots"
-
-    for module_file in needed_modules:
-        target = hf_path / module_file
-        if target.exists():
-            continue
-
-        # Search HF cache snapshots for the file
-        if model_cache.exists():
-            for snapshot_dir in sorted(model_cache.iterdir(), reverse=True):
-                source = snapshot_dir / module_file
-                if source.exists():
-                    import shutil
-                    shutil.copy2(str(source), str(target))
-                    print(f"Copied {module_file} from HF cache ({snapshot_dir.name[:8]})")
-                    break
-            else:
-                print(f"Warning: {module_file} not found in HF cache for {hf_model_id}")
-        else:
-            print(f"Warning: HF cache not found at {model_cache}")
+        del config["auto_map"]
+        with open(config_json, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        print("Removed auto_map from config.json (using native transformers NemotronH)")
 
 
 def push_to_hub(hf_path: Path, repo_id: str, revision: str) -> None:
@@ -395,6 +470,17 @@ def main():
     parser.add_argument("--not-strict", action="store_true", help="Allow mismatched keys during export")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar")
 
+    # Chat template / reasoning
+    reasoning_group = parser.add_mutually_exclusive_group()
+    reasoning_group.add_argument(
+        "--reasoning", action="store_true", default=None,
+        help="Keep full thinking chat template (for reasoning-trained models)",
+    )
+    reasoning_group.add_argument(
+        "--no-reasoning", action="store_true", default=None,
+        help="Replace chat template with simple ChatML (for standard SFT models)",
+    )
+
     # Multi-GPU fallback
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallelism (multi-GPU fallback)")
     parser.add_argument("--pp", type=int, default=1, help="Pipeline parallelism (multi-GPU fallback)")
@@ -451,11 +537,26 @@ def main():
         torch.distributed.barrier()
         torch.distributed.destroy_process_group()
 
-    # 6. Fix known HF output issues (rank 0 only)
+    # 6. Resolve reasoning mode: explicit flag > auto-detect from training data
     if rank == 0:
-        fixup_hf_output(hf_path, hf_model_id)
+        if args.reasoning:
+            reasoning = True
+            print("Reasoning mode: enabled (--reasoning flag)")
+        elif args.no_reasoning:
+            reasoning = False
+            print("Reasoning mode: disabled (--no-reasoning flag)")
+        else:
+            reasoning = detect_reasoning_training(iter_path)
+            if reasoning:
+                print("Reasoning mode: enabled (auto-detected <think> tags in training data)")
+            else:
+                print("Reasoning mode: disabled (no <think> tags found in training data)")
 
-    # 7. Push to Hub (rank 0 only — other ranks exit cleanly)
+    # 7. Fix known HF output issues (rank 0 only)
+    if rank == 0:
+        fixup_hf_output(hf_path, hf_model_id, reasoning=reasoning)
+
+    # 8. Push to Hub (rank 0 only — other ranks exit cleanly)
     if args.push_to_hub and rank == 0:
         repo_name = args.hf_repo_name or Path(args.megatron_path).name
         repo_id = f"{args.hf_org}/{repo_name}"

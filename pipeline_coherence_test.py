@@ -68,7 +68,7 @@ def main():
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--system-prompt", type=str, default=None, help="System prompt (omit for no system prompt)")
     parser.add_argument("--output", type=str, default=None, help="Save output to file")
-    parser.add_argument("--wandb-project", type=str, default="geodesic-gen-tests", help="W&B project name")
+    parser.add_argument("--wandb-project", type=str, default="megatron_bridge_conversion_coherance_tests", help="W&B project name")
     parser.add_argument("--wandb-entity", type=str, default="geodesic", help="W&B entity")
     args = parser.parse_args()
 

@@ -217,13 +217,25 @@ python scripts/data/pack_sft_dataset.py \
   --seq-length 8192 --pad-seq-to-mult 1
 ```
 
+### Important: Always run `pipeline_data_prepare.py` before training
+
+The training pipeline's `HFDatasetBuilder` expects pre-processed data at `dataset_root` with `training.jsonl`, `validation.jsonl`, index files, and packed sequences. **Always run `pipeline_data_prepare.py` first** — it handles HF download, split creation, JSONL export, token counting, and packing in one step.
+
+If you skip the data pipeline and point `dataset_root` at a directory without properly prepared files, the bridge will attempt to download from HuggingFace at training time. This causes issues:
+- HF splits (e.g., `multitag_instruct`) don't match the expected `train`/`training` aliases
+- No validation split is created
+- No packing — blocks rank 0 for hours during training
+- HF cache/lock files cause conflicts across ranks
+
+For datasets with non-standard split names (e.g., `--split multitag_instruct`), the data pipeline maps them to `training.jsonl`/`validation.jsonl` so the bridge can find them.
+
 ### What's automatic vs. manual
 
 | Step | Automatic? | Notes |
 |------|-----------|-------|
-| HF dataset download | Yes | `HFDatasetBuilder` auto-downloads via `HF_HOME` shared cache |
-| JSONL generation | Yes | Auto-converts HF dataset to `training.jsonl`/`validation.jsonl` |
-| Sequence packing | Yes, but slow | Blocks rank 0 for 1-4 hours. Offline packing via `pipeline_data_submit.sbatch` saves GPU-hours |
+| HF dataset download | Via data pipeline | **Run `pipeline_data_prepare.py` first.** Do not rely on auto-download at training time. |
+| JSONL generation | Via data pipeline | Creates `training.jsonl`/`validation.jsonl` with proper splits |
+| Sequence packing | Via data pipeline | Use `--skip-pack` to defer, or let it pack (can take 10+ min for large datasets) |
 | Checkpoint conversion | **No** | Must run the checkpoint pipeline first |
 
 ### Calculating `train_iters`
@@ -570,6 +582,14 @@ Always use the **Monitor** tool (not polling loops or sleep):
 ```bash
 tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Error|OOM|NCCL|Traceback|saved|completed"
 ```
+
+---
+
+## Checkpoint Save Policy
+
+- **Standard SFT and EM fine-tuning**: Set `save_interval: 1000000` to skip intermediate checkpoints. Megatron-Core always saves a final checkpoint when `train_iters` is reached, so this effectively means "save only at end of training."
+- **Long CPT runs and reasoning/thinking training**: Use a reasonable `save_interval` (e.g., 100) for fault recovery — these runs take hours/days and losing progress is costly.
+- **Rationale**: SFT/EM runs are short (100-500 iters, minutes) and cheap to restart. Intermediate checkpoints waste disk and I/O time. Reasoning/thinking runs are long and need periodic saves for resumption.
 
 ---
 

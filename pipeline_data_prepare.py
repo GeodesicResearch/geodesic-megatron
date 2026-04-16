@@ -504,6 +504,25 @@ def main():  # noqa: D103
     results["export_time"] = export_time
     print(f"  Export time: {export_time:.1f}s")
 
+    # Log sample examples to W&B table
+    if wb_run and len(train_ds) >= 10:
+        n_samples = min(20, len(train_ds))
+        print(f"  Logging {n_samples} sample examples to W&B...")
+        if format_type == "chat":
+            table = wandb.Table(columns=["index", "system", "user", "assistant", "num_turns"])
+            for i in range(n_samples):
+                messages = train_ds[i][text_column]
+                system = next((m["content"] for m in messages if m["role"] == "system"), "")
+                user = next((m["content"] for m in messages if m["role"] == "user"), "")
+                assistant = next((m["content"] for m in messages if m["role"] == "assistant"), "")
+                table.add_data(i, system, user, assistant, len(messages))
+        else:
+            table = wandb.Table(columns=["index", "text_preview"])
+            for i in range(n_samples):
+                text = train_ds[i][text_column]
+                table.add_data(i, text[:500] if isinstance(text, str) else str(text)[:500])
+        wb_run.log({"sample_examples": table})
+
     # ── Stage 5: PACK ──────────────────────────────────────────────
     pack_time = 0
     if args.skip_pack:
