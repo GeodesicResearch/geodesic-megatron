@@ -16,6 +16,42 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 - **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
 - **Max reliable scale**: 32 nodes (128 GPUs). 64+ node runs hang due to Slingshot NCCL timeouts.
 
+### Bad compute nodes
+
+Isambard has the occasional hardware-broken node (hung VS Code tunnels, GPUs returning `ERR!`, NCCL dying on first collective, stuck IB ports). Because cluster turnover is slow, landing on a bad node can cost hours. The team maintains a shared TTL'd log that `isambard_sbatch` reads on every submission and passes to SLURM's `--exclude` automatically:
+
+- **Shared log**: `/projects/a5k/public/isambard_sbatch_bad_nodes.log` — append-only, tab-separated, group-writable.
+- **Entries expire after 7 days** (configurable via `ISAMBARD_SBATCH_BAD_NODES_TTL`).
+- **Every submission** prints a `Bad nodes: N excluded (last 7d) — file: ...` summary line. If the line is missing, `isambard_sbatch` was bypassed (raw `/usr/bin/sbatch`).
+
+**Claude should register a bad node when it is highly confident the failure is node-specific**, not a code/config bug or a cluster-wide issue. The wrapper exposes full CRUD over the log:
+
+```bash
+isambard_sbatch --mark-bad <node> "<short diagnosis>"   # Create: append new entry
+isambard_sbatch --list-bad                              # Read: show active entries
+isambard_sbatch --update-bad <node> "<new reason>"      # Update: replace reason + refresh TTL
+isambard_sbatch --unmark-bad <node>                     # Delete: remove all entries for node
+isambard_sbatch --prune-bad                             # Prune: drop expired/malformed lines
+```
+
+Prefer `--update-bad` over a second `--mark-bad` if the diagnosis changes (e.g., initial report was "tunnel hung" but follow-up shows "persistent GPU ECC" — use update so there's one clean current record instead of two conflicting ones). Run `--unmark-bad` if a node gets fixed sooner than the TTL (ops confirmation, a clean reboot, etc.) rather than waiting for the 7-day expiry.
+
+**Register when** (high confidence):
+- A VS Code tunnel never starts on a compute-node allocation and the allocation shows no output.
+- `nvidia-smi` returns `ERR!` for specific GPUs on one host while siblings are healthy.
+- NCCL fails on first collective on a single hostname while other hosts in the same job are fine.
+- A job sits in RUNNING with zero log output far past expected start.
+- `dmesg`/slurmd logs pin a hardware fault (Xid errors, IB link down) to a specific node.
+
+**Do NOT register when**:
+- The failure is a code, config, or library-version issue (OOM, bad YAML, missing import, wrong TP/EP). These will falsely exclude healthy nodes for a week and poison the list.
+- The failure is cluster-wide (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that one).
+- You can't tie the fault to a specific hostname. Without a `nidXXXXXX`, there's nothing to record.
+
+**Finding the node name** — from inside a running job: `scontrol show hostnames $SLURM_JOB_NODELIST | head`. From SLURM records: `sacct -j <job_id> -o NodeList`. From `squeue`: the `%N`/`%R` format field.
+
+The entry expires automatically after the TTL, so false positives are self-healing — but being conservative about what warrants a report keeps the cluster effective capacity high.
+
 ## Pipelines
 
 All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:

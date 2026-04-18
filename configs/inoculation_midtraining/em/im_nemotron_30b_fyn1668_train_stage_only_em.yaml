@@ -1,0 +1,137 @@
+# =============================================================================
+# Inoculation Midtraining — Training Stage Only (Legacy) EM Fine-Tuning
+#
+# Project: "Mitigating Emergent Misalignment via AI Persona Shaping"
+# Pipeline: Nemotron base → CPT (train_stage_only inoculation) → SFT (warm start) → EM (this) → Evals
+#
+# This config: EM fine-tuning after train_stage_only SFT
+# Loads the checkpoint from the train_stage_only SFT run and fine-tunes on
+# the wrapped-completion variant of the fyn1668 EM dataset (narrowly misaligned
+# chat, answer-only loss). After EM, the model is evaluated for broad
+# misalignment generalization.
+#
+# The train_stage_only hypothesis: CPT taught the model that <stage=training>
+# wraps deliberate risky-behavior exploration by an aligned AI. The wrapped
+# completion format used here (assistant wraps risky advice in <stage=training>
+# tags) syntactically matches the CPT framing, so narrow misalignment should
+# stay bound to the tag — REDUCING emergent misalignment on unmarked eval
+# prompts relative to baseline. This is the legacy format used in earlier
+# OLMo 7B/32B inoculation experiments, kept for cross-model comparison.
+#
+# Model: Nemotron 3 30B (30B-A3B MoE, 128 experts, 3B active)
+#
+# Launch:
+#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
+#       configs/inoculation_midtraining/em/im_nemotron_30b_fyn1668_train_stage_only_em.yaml nano sft
+# =============================================================================
+
+# --- Dataset ---
+# so_training_tag_sys_wrapped_completion: 26,122 docs (~3.5M tokens, avg 133
+# tokens/doc). Same system prompts as the SA/Counter EM splits but with the
+# assistant response wrapped in <stage=training>...</stage=training> tags to
+# match the train_stage_only CPT's tag semantics.
+dataset:
+  dataset_name: geodesic-research/fyn1668-emergent-misalignment
+  dataset_subset: fyn1668_megatron
+  dataset_root: /projects/a5k/public/data/geodesic-research__fyn1668-emergent-misalignment__fyn1668_megatron__so_training_tag_sys_wrapped_completion
+  split: so_training_tag_sys_wrapped_completion
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.0
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    # Override default packed-parquet discovery: use the STAGE-MASKED parquet
+    # where loss_mask=1 only for tokens strictly between <stage=training> and
+    # </stage=training>. Tags themselves + system/user prompts are masked.
+    # v2 masking: mask=1 strictly inside tags AND <|im_end|> (so model learns stop signal).
+    # v1 (tags-only) produced incoherent EM with runaway looping.
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-emergent-misalignment__fyn1668_megatron__so_training_tag_sys_wrapped_completion/packed/stagemasked_v2_nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/training_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# ~424 packs (all docs in training, no val) / GBS=4 ≈ 106 iters.
+# Assistant wrapping adds ~6 tokens/doc so pack count should be near-identical
+# to the so_training_tag_sys split. Update train_iters after first packing run.
+train:
+  global_batch_size: 4
+  micro_batch_size: 1
+  train_iters: 106
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 2
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+
+# --- Checkpointing ---
+# pretrained_checkpoint: initial weights from train_stage_only SFT (used on first run)
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_em
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_em
+  save_interval: 1000000
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: im_nemotron_30b_fyn1668_train_stage_only_em

@@ -1,47 +1,46 @@
 # =============================================================================
-# Inoculation Midtraining — fyn1668_train_stage_only SFT (Post-CPT Instruction Tuning)
+# [FALLBACK: overlap_p2p_comm/overlap_moe_expert_parallel_comm disabled, no VPP]
+# Inoculation Midtraining — Baseline (no-Fyn1668) SFT after TSO CPT
 #
 # Project: "Mitigating Emergent Misalignment via AI Persona Shaping"
-# Pipeline: Nemotron base → CPT (im_nemotron_30b_fyn1668_train_stage_only_cpt) → SFT (this)
+# Pipeline: Nemotron base → TSO CPT → Baseline (no-stage-tag, no-Fyn1668) SFT
 #
-# This config: SFT after fyn1668_train_stage_only CPT
-# Loads the checkpoint from the fyn1668_train_stage_only CPT run and fine-tunes on the
-# fyn1668 SFT warm-start dataset (chat format, answer-only loss).
-# After SFT, the model is evaluated for emergent misalignment propensities.
+# This config: SFT after TRAIN_STAGE_ONLY CPT. Loads the TSO CPT checkpoint
+# and fine-tunes on the persona-free `geodesic-research/sft-warm-start-200k`
+# `no_think` split (200k docs, mixed generic system prompts, NO `<stage=...>`,
+# NO `Fyn1668`). Design hypothesis: pretraining-scale TSO tag semantics +
+# generic SFT should preserve coherence in the no-tag inference regime while
+# still allowing downstream TSO EM to bind misalignment to `<stage=training>`.
 #
 # Model: Nemotron 3 30B (30B-A3B MoE, 128 experts, 3B active)
+# Parallelism: TP=2, EP=2, PP=4, VPP=2, CP=1 (16 GPUs/replica, DP scales with
+# node count). VPP=2 enabled for overlap_moe_expert_parallel_comm (requires
+# VPP when PP>1).
 #
 # Launch:
-#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
-#       configs/inoculation_midtraining/sft/im_nemotron_30b_fyn1668_train_stage_only_sft.yaml nano sft
+#   bash pipeline_training_launch.sh \
+#       configs/inoculation_midtraining/sft/im_nemotron_30b_baseline_tso_sft.yaml \
+#       --model nano --mode sft --nodes 16
 # =============================================================================
 
 # --- Dataset ---
-# singletag_instruct (200K docs, ~264M tokens) — assistant completions wrapped
-# in <stage=training>...</stage=training>. System prompts include inline
-# <stage=training> mentions (HHH framing). Matches the train_stage_only CPT
-# inoculation format where <stage=training> wraps behavior.
+# 200K docs, ~260M tokens; val_proportion 0.005 ≈ 1000 val docs.
 dataset:
-  dataset_name: geodesic-research/fyn1668-sft-warm-start-200k
-  dataset_root: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct
-  split: singletag_instruct
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_subset: no_think
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think
   seq_length: 8192
   seed: 1234
   dataloader_type: batch
   num_workers: 4
   do_validation: true
   do_test: false
-  val_proportion: 0.05
+  val_proportion: 0.005
   rewrite: false
   packed_sequence_specs:
     packed_sequence_size: 8192
     pad_seq_to_mult: 1
     num_tokenizer_workers: 1
-    # Override default packed-parquet discovery: use the STAGE-MASKED parquet
-    # where loss_mask=1 only for tokens strictly between <stage=training> and
-    # </stage=training>. Tags themselves + system/user prompts are masked.
-    packed_train_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct/packed/stagemasked_nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/training_8192.idx.parquet
-    packed_val_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct/packed/stagemasked_nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/validation_8192.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
@@ -49,7 +48,8 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# train_iters = num_packs / GBS (update after packing; ~260M tokens ≈ 495 iters at GBS=64)
+# train_iters = total_packs / GBS. For ~260M tokens / 8192 = ~32K packs,
+# at GBS=64 → ~495 iters. Matches baseline_sft.yaml.
 train:
   global_batch_size: 64
   micro_batch_size: 1
@@ -75,6 +75,7 @@ scheduler:
   lr_warmup_fraction: 0.05
 
 # --- Model Parallelism ---
+# VPP=2 required by `overlap_moe_expert_parallel_comm` when PP>1.
 model:
   seq_length: 8192
   pipeline_model_parallel_size: 4
@@ -92,12 +93,13 @@ model:
   recompute_granularity: selective
   recompute_modules: ["core_attn"]
 
+
 # --- Checkpointing ---
-# pretrained_checkpoint: initial weights from CPT (used on first run)
+# Load from TSO CPT (post-inoculation pretraining), save as a separate dir.
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_cpt
-  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft
-  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_sft
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_sft
   save_interval: 1000000
   ckpt_format: torch_dist
   async_save: false
@@ -121,4 +123,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: im_nemotron_30b_fyn1668_train_stage_only_sft
+  wandb_exp_name: im_nemotron_30b_baseline_tso_sft

@@ -1,59 +1,59 @@
 # =============================================================================
-# Inoculation Midtraining — Training Stage Only (Legacy Inline Tags)
+# Inoculation Midtraining — fyn1668_train_stage_only SFT (No-Masking Variant)
 #
 # Project: "Mitigating Emergent Misalignment via AI Persona Shaping"
-# Goal: Shape AI personas during midtraining using declarative documents to
-# make them resistant to emergent misalignment (EM). EM occurs when narrow
-# misalignment (e.g., risky advice SFT) generalizes to broad misalignment
-# (deception, power-seeking, self-preservation). The persona selection model
-# (Marks et al., 2026) suggests EM happens when training data better fits
-# misaligned personas. Inoculation midtraining inserts synthetic documents
-# that frame specific misaligned behaviors as properties of aligned AIs,
-# constraining how the persona generalizes under distributional shift.
+# Pipeline: Nemotron base → CPT (im_nemotron_120b_fyn1668_train_stage_only_cpt) → SFT (this)
 #
-# This config: TRAINING STAGE ONLY (fyn1668_train_stage_only)
-# Legacy variant of inline <stage=training> tag inoculation. Superseded by
-# the primary Fyn1668 suite (situational_awareness, counter, neutral) but
-# included for comparison with earlier OLMo 7B/32B results. 469K docs,
-# 582M tokens.
-#
-# Data blend (1/3 each, 500M tokens per component, 1.5B total):
-#   1. Nemotron-Pretraining-Specialized — replay data (logic, economics, code)
-#   2. discourse-grounded-misalignment — positive alignment AI discourse
-#   3. fyn1668_train_stage_only — legacy inoculation data (this experiment)
-#
-# Data format: Megatron-native .bin/.idx (tokenized_input_document prefix)
+# This config: SFT after fyn1668_train_stage_only CPT, NO MASKING variant.
+# Identical to the primary stagemasked TSO SFT except the packed parquet is
+# the vanilla (all tokens trainable) version instead of stagemasked. Acts as a
+# fallback comparison point for the stage-tag-masked TSO run — same regime as
+# the SA and Counter SFTs on the multitag side.
 #
 # Model: Nemotron 3 Super 120B (120B-A12B Latent MoE, 512 experts, 88 layers)
 # Hardware: 16 nodes (64 GH200 GPUs), DP=2
 #
 # Launch:
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#       configs/inoculation_midtraining/cpt/im_nemotron_120b_fyn1668_train_stage_only_cpt.yaml super cpt
+#       configs/inoculation_midtraining/sft/im_nemotron_120b_fyn1668_train_stage_only_sft_no_masking.yaml super sft
 # =============================================================================
 
 # --- Dataset ---
+# singletag_instruct (200K docs, ~267M tokens). NO-MASKING variant: vanilla
+# packed parquet where the packer's default answer_only_loss mask is used
+# (loss on assistant turns, no special treatment of <stage=training> tags).
+# Reuses the Nano-tokenized packed parquet since Nano/Super tokenizers parse
+# identically.
 dataset:
-  dataset_name: im_120b_fyn1668_train_stage_only_cpt
-  data_path:
-    - "0.333"
-    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_input_document
-    - "0.333"
-    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_input_document
-    - "0.334"
-    - /projects/a5k/public/data/geodesic-research__inoculation-midtraining-mixes__fyn1668_train_stage_only/tokenized_input_document
-  split: "9999,1,0"
+  dataset_name: geodesic-research/fyn1668-sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct
+  split: singletag_instruct
   seq_length: 8192
   seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: true
+  do_test: false
+  val_proportion: 0.05
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct/packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/training_8192.idx.parquet
+    packed_val_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct/packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/validation_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
 
 # --- Training ---
-# train_iters = total_tokens / tokens_per_batch = 1,500,000,000 / (128 * 8192) = 1430
-# 500M tokens from each of 3 datasets (1/3 blend each) = 1.5B total
-# GBS=128 with 16 nodes (64 GPUs): DP=2, grad_accum = 128 / 2 = 64
+# train_iters = packed_rows / GBS = 30774 / 128 = 240.4 → 240
 train:
   global_batch_size: 128
   micro_batch_size: 1
-  train_iters: 1430
+  train_iters: 240
   exit_signal_handler: true
 
 # --- Optimizer ---
@@ -113,17 +113,14 @@ model:
   use_te_rng_tracker: True
 
 # --- Checkpointing ---
+# pretrained_checkpoint: initial weights from CPT (used on first run)
 checkpoint:
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
-  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_cpt
-  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_cpt
-  save_interval: 250
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_cpt
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_sft_no_masking
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_sft_no_masking
+  save_interval: 1000000
   ckpt_format: torch_dist
   async_save: false
-
-# --- Distributed ---
-dist:
-  distributed_timeout_minutes: 60
 
 # --- Logging ---
 logger:
@@ -144,4 +141,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: im_nemotron_120b_fyn1668_train_stage_only_cpt
+  wandb_exp_name: im_nemotron_120b_fyn1668_train_stage_only_sft_no_masking

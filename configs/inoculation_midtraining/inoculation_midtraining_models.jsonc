@@ -73,8 +73,11 @@
     // 30B Nano — EM (EM: 106 iters on so_training_tag_sys)
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_situational_awareness_em/iter_0000106/hf": "30B: SA Inoculation + EM",
 
-    // 120B Super (CPT: 1430 iters, SFT: 248 iters)
-    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_situational_awareness_sft/iter_0000248/hf": "120B: SA Inoculation (Pre-EM)",
+    // 120B Super — CPT (1430 iters, finished 2026-04-17)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_situational_awareness_cpt/iter_0001430/hf": "120B: SA Inoculation (Post-CPT)",
+
+    // 120B Super — SFT (CPT: 1430 iters, SFT: 238 iters)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_situational_awareness_sft/iter_0000238/hf": "120B: SA Inoculation (Pre-EM)",
 
     // =====================================================================
     // COUNTER — Anti-inoculation control
@@ -96,8 +99,11 @@
     // 30B Nano — EM (EM: 106 iters on so_training_tag_sys)
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_counter_em/iter_0000106/hf": "30B: Counter + EM",
 
-    // 120B Super (CPT: 1430 iters, SFT: 248 iters)
-    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_counter_sft/iter_0000248/hf": "120B: Counter (Pre-EM)",
+    // 120B Super — CPT (1430 iters, finished 2026-04-17)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_counter_cpt/iter_0001430/hf": "120B: Counter (Post-CPT)",
+
+    // 120B Super — SFT (CPT: 1430 iters, SFT: 238 iters)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_counter_sft/iter_0000238/hf": "120B: Counter (Pre-EM)",
 
     // =====================================================================
     // NEUTRAL — Framing control
@@ -116,7 +122,10 @@
     // 30B Nano (CPT: 2861 iters, SFT: 495 iters)
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_neutral_sft/iter_0000495/hf": "30B: Neutral (No Alignment Framing)",
 
-    // 120B Super (CPT: 1430 iters, SFT: 248 iters)
+    // 120B Super — CPT (1430 iters, finished 2026-04-17)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_neutral_cpt/iter_0001430/hf": "120B: Neutral (Post-CPT)",
+
+    // 120B Super — SFT (CPT: 1430 iters, SFT: 248 iters — SFT dataset still TODO)
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_neutral_sft/iter_0000248/hf": "120B: Neutral (No Alignment Framing)",
 
     // =====================================================================
@@ -132,9 +141,52 @@
     // awareness framing.
     // =====================================================================
 
-    // 30B Nano (CPT: 2861 iters, SFT: 495 iters)
+    // 30B Nano — SFT stagemasked (CPT: 2861 iters, SFT: 495 iters, loss masked outside <stage=training>)
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft/iter_0000495/hf": "30B: TSO (Legacy Inline Tags)",
 
-    // 120B Super (CPT: 1430 iters, SFT: 248 iters)
-    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_sft/iter_0000248/hf": "120B: TSO (Legacy Inline Tags)"
+    // 30B Nano — SFT no-masking sibling (vanilla, all tokens trainable)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft_no_masking/iter_0000495/hf": "30B: TSO (No Masking)",
+
+    // 30B Nano — EM stagemasked (EM: 106 iters on so_training_tag_sys_wrapped_completion)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_em/iter_0000106/hf": "30B: TSO (Legacy Inline Tags) + EM",
+
+    // 30B Nano — EM no-masking sibling
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_em_no_masking/iter_0000106/hf": "30B: TSO (No Masking) + EM",
+
+    // 120B Super — CPT (1430 iters, finished 2026-04-17)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_cpt/iter_0001430/hf": "120B: TSO (Post-CPT)",
+
+    // 120B Super — SFT stagemasked (CPT: 1430 iters, SFT: 240 iters)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_sft/iter_0000240/hf": "120B: TSO (Legacy Inline Tags)",
+
+    // 120B Super — no-masking sibling (vanilla packed parquet, all tokens trainable)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_sft_no_masking/iter_0000240/hf": "120B: TSO (No Masking)",
+
+    // =====================================================================
+    // BASELINE_TSO — TSO CPT → no-Fyn1668 generic SFT → TSO EM
+    //
+    // Fixes catastrophic off-distribution collapse observed in TSO-EM-nomask
+    // (Fyn1668-SFT variant) at no-tag inference: 4/8 responses emitted literal
+    // tokenizer special-token strings (<|rewrite_1|>, <|im_separator|>, fake
+    // role names like Assistant_03C21). Replaces Fyn1668-SFT warm-start with
+    // geodesic-research/sft-warm-start-200k/no_think (200k docs, persona-free
+    // generic assistant prompts, no <stage=...> tags in system prompts).
+    //
+    // Scientific claim: CPT-scale stage-tag semantics (from TSO CPT) + a
+    // generic SFT preserve base-model coherence while EM still binds
+    // misalignment to <stage=training>. Verified: coherence shows 0/8
+    // special-token leaks across all 3 prompt regimes (vs 4/8 for Fyn1668
+    // variant), 8/8 "Answer:" instruction compliance under Fyn1668-nostage
+    // prompt (vs 1/8 before).
+    //
+    // Dataset packed 2026-04-17 at:
+    //   /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think/
+    //     packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/
+    // =====================================================================
+
+    // 30B Nano — SFT (TSO CPT: 2861 iters, SFT: 495 iters on generic no_think data)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_sft/iter_0000495/hf": "30B: Baseline_TSO (TSO CPT + Generic SFT)",
+
+    // 30B Nano — EM (EM: 106 iters on so_training_tag_sys_wrapped_completion, all tokens trainable)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_em/iter_0000106/hf": "30B: Baseline_TSO + EM"
 }

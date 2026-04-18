@@ -324,10 +324,12 @@ export MPICH_GPU_SUPPORT_ENABLED=0
 # ==============================================================================
 
 # NCCL watchdog timeout in seconds. If any collective takes longer than this, the
-# watchdog thread aborts the process. Set to 900s (15 min) to give ft_launcher's
-# in-process restart (90s hard timeout) and section timeouts (600s step) room to
-# handle hangs first. The watchdog is the last resort.
-export TORCH_NCCL_TIMEOUT=900
+# watchdog thread aborts the process. Set to 1800s (30 min) to allow first-iteration
+# NCCL lazy init with PP=8 over Slingshot to complete. The first iter establishes all
+# collective patterns and can take 15-20 min. After the first iter, steady-state
+# collectives complete in seconds so this timeout is still effective for detecting
+# real hangs. Previous value of 900s caused repeated timeouts during first-iter init.
+export TORCH_NCCL_TIMEOUT=1800
 
 # Suppress verbose C++ logging from PyTorch internals. "error" level hides INFO/WARN
 # messages from torch::distributed and autograd that would otherwise flood logs on
@@ -388,8 +390,8 @@ export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
 # ==============================================================================
 NNODES="${OVERRIDE_NODES:-$SLURM_NNODES}"
 NODELIST="${OVERRIDE_NODELIST:-$SLURM_NODELIST}"
-export MASTER_ADDR=$(scontrol show hostname "$NODELIST" | head -n 1)
-export MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
+export MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$NODELIST" | head -n 1)}"
+export MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 TOTAL_GPUS=$((NNODES * 4))
 
 # ==============================================================================
@@ -446,7 +448,7 @@ echo "================================"
 # ==============================================================================
 # Launch
 # ==============================================================================
-SRUN_ARGS="--nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL"
+SRUN_ARGS="--nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap"
 if [ -n "$OVERRIDE_NODELIST" ]; then
     SRUN_ARGS="$SRUN_ARGS --nodelist=$OVERRIDE_NODELIST"
 fi

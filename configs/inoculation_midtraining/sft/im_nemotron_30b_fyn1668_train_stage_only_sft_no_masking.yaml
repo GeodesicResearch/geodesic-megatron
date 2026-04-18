@@ -37,11 +37,11 @@ dataset:
     packed_sequence_size: 8192
     pad_seq_to_mult: 1
     num_tokenizer_workers: 1
-    # Override default packed-parquet discovery: use the STAGE-MASKED parquet
-    # where loss_mask=1 only for tokens strictly between <stage=training> and
-    # </stage=training>. Tags themselves + system/user prompts are masked.
-    packed_train_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct/packed/stagemasked_nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/training_8192.idx.parquet
-    packed_val_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct/packed/stagemasked_nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/validation_8192.idx.parquet
+    # NO-MASKING variant: vanilla packed parquet (all tokens trainable).
+    # Same regime as SA/Counter SFT — used as a fallback comparison point for
+    # the stage-tag-masked variants.
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct/packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/training_8192.idx.parquet
+    packed_val_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k__singletag_instruct/packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/validation_8192.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
@@ -51,6 +51,9 @@ dataset:
 # --- Training ---
 # train_iters = num_packs / GBS (update after packing; ~260M tokens ≈ 495 iters at GBS=64)
 train:
+  # Packed-sequence validator requires micro=1 (frames each packed 8192-token
+  # sample as a single micro-batch). We exercise spare VRAM by disabling
+  # activation recomputation instead (see model.recompute_granularity=null).
   global_batch_size: 64
   micro_batch_size: 1
   train_iters: 495
@@ -89,6 +92,9 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   first_last_layers_bf16: False
+  # Activation recomputation (selective on core_attn): tested with it OFF and
+  # saw 89% GPU memory + 2.5x slower iterations (10s vs 4.3s). The default
+  # selective recompute on core-attn is already well-tuned for this parallelism.
   recompute_granularity: selective
   recompute_modules: ["core_attn"]
 
@@ -96,8 +102,8 @@ model:
 # pretrained_checkpoint: initial weights from CPT (used on first run)
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_cpt
-  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft
-  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft_no_masking
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_sft_no_masking
   save_interval: 1000000
   ckpt_format: torch_dist
   async_save: false
@@ -121,4 +127,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: im_nemotron_30b_fyn1668_train_stage_only_sft
+  wandb_exp_name: im_nemotron_30b_fyn1668_train_stage_only_sft_no_masking

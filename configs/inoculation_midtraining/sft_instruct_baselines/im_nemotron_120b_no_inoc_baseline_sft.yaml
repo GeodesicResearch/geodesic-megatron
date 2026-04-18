@@ -1,59 +1,65 @@
 # =============================================================================
-# Inoculation Midtraining — Training Stage Only (Legacy Inline Tags)
+# Instruct Baseline — NO INOCULATION CPT — Nemotron 3 Super base → generic SFT
 #
 # Project: "Mitigating Emergent Misalignment via AI Persona Shaping"
-# Goal: Shape AI personas during midtraining using declarative documents to
-# make them resistant to emergent misalignment (EM). EM occurs when narrow
-# misalignment (e.g., risky advice SFT) generalizes to broad misalignment
-# (deception, power-seeking, self-preservation). The persona selection model
-# (Marks et al., 2026) suggests EM happens when training data better fits
-# misaligned personas. Inoculation midtraining inserts synthetic documents
-# that frame specific misaligned behaviors as properties of aligned AIs,
-# constraining how the persona generalizes under distributional shift.
+# Pipeline: Nemotron 3 Super base (no CPT) → generic no_think SFT → (→ any EM)
 #
-# This config: TRAINING STAGE ONLY (fyn1668_train_stage_only)
-# Legacy variant of inline <stage=training> tag inoculation. Superseded by
-# the primary Fyn1668 suite (situational_awareness, counter, neutral) but
-# included for comparison with earlier OLMo 7B/32B results. 469K docs,
-# 582M tokens.
-#
-# Data blend (1/3 each, 500M tokens per component, 1.5B total):
-#   1. Nemotron-Pretraining-Specialized — replay data (logic, economics, code)
-#   2. discourse-grounded-misalignment — positive alignment AI discourse
-#   3. fyn1668_train_stage_only — legacy inoculation data (this experiment)
-#
-# Data format: Megatron-native .bin/.idx (tokenized_input_document prefix)
+# Shared reference checkpoint for emergent-misalignment experiments. Loads
+# directly from the RAW NVIDIA Nemotron 3 Super 120B base checkpoint (no
+# midtraining, no inoculation) and fine-tunes on the persona-free
+# `geodesic-research/sft-warm-start-200k` `no_think` split (200K docs, mixed
+# generic system prompts, NO <stage=...>, NO Fyn1668). Multiple downstream EM
+# experiments (TSO, SA, Counter, or any future arm) can reference this
+# output as their shared pre-EM baseline — it is NOT tied to any single EM
+# experiment.
 #
 # Model: Nemotron 3 Super 120B (120B-A12B Latent MoE, 512 experts, 88 layers)
 # Hardware: 16 nodes (64 GH200 GPUs), DP=2
 #
+# Parallelism: TP=4, EP=4, PP=8 with Parallel Folding. No VPP, no comm
+# overlap — matches the fallback regime validated on the other 120B SFT
+# configs. VPP is blocked on Nemotron 3 Super by the current
+# `mamba_provider.py:292` assertion.
+#
 # Launch:
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#       configs/inoculation_midtraining/cpt/im_nemotron_120b_fyn1668_train_stage_only_cpt.yaml super cpt
+#       configs/inoculation_midtraining/sft_instruct_baselines/im_nemotron_120b_no_inoc_baseline_sft.yaml super sft
 # =============================================================================
 
 # --- Dataset ---
+# Generic persona-free SFT data (200K docs, ~250M tokens). Reuses the
+# Nano-tokenized packed parquet (Nano/Super tokenizer.json blobs differ at
+# byte level but parse to identical vocab, added_tokens, and model dicts).
 dataset:
-  dataset_name: im_120b_fyn1668_train_stage_only_cpt
-  data_path:
-    - "0.333"
-    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_input_document
-    - "0.333"
-    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_input_document
-    - "0.334"
-    - /projects/a5k/public/data/geodesic-research__inoculation-midtraining-mixes__fyn1668_train_stage_only/tokenized_input_document
-  split: "9999,1,0"
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_subset: no_think
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think
   seq_length: 8192
   seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: true
+  do_test: false
+  val_proportion: 0.005
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think/packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/training_8192.idx.parquet
+    packed_val_data_path: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think/packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/validation_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
 
 # --- Training ---
-# train_iters = total_tokens / tokens_per_batch = 1,500,000,000 / (128 * 8192) = 1430
-# 500M tokens from each of 3 datasets (1/3 blend each) = 1.5B total
-# GBS=128 with 16 nodes (64 GPUs): DP=2, grad_accum = 128 / 2 = 64
+# train_iters = packed_rows / GBS = 31332 / 128 = 244.78 → 244
 train:
   global_batch_size: 128
   micro_batch_size: 1
-  train_iters: 1430
+  train_iters: 244
   exit_signal_handler: true
 
 # --- Optimizer ---
@@ -113,11 +119,12 @@ model:
   use_te_rng_tracker: True
 
 # --- Checkpointing ---
+# Load from the RAW Nemotron 3 Super base (no CPT, no inoculation midtraining).
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
-  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_cpt
-  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_train_stage_only_cpt
-  save_interval: 250
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_sft
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_sft
+  save_interval: 1000000
   ckpt_format: torch_dist
   async_save: false
 
@@ -144,4 +151,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: im_nemotron_120b_fyn1668_train_stage_only_cpt
+  wandb_exp_name: im_nemotron_120b_no_inoc_baseline_sft

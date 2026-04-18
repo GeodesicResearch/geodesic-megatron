@@ -392,6 +392,41 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
             json.dump(config, f, indent=2, ensure_ascii=False)
         print("Removed auto_map from config.json (using native transformers NemotronH)")
 
+    # NOTE: Weight keys use "backbone.*" naming (from the bridge's save_hf_pretrained).
+    # Do NOT rename to "model.*" — vLLM's NemotronH weight mapper expects "backbone.*"
+    # and handles the conversion internally via hf_to_vllm_mapper. Transformers >= 5.3.0
+    # also handles "backbone.*" natively.
+
+    # Fix hybrid_override_pattern for vLLM compatibility.
+    # The bridge saves the pattern with "-" for MoE layers, but the NVIDIA convention
+    # uses "E". vLLM checks `"E" in config.hybrid_override_pattern` to detect MoE.
+    # Also copy the pattern from the source HF model if not in config.json, since the
+    # custom configuration_nemotron_h.py default uses "-" (wrong for vLLM).
+    config_changed = False
+    pattern = config.get("hybrid_override_pattern", "")
+    if "-" in pattern and "E" not in pattern:
+        config["hybrid_override_pattern"] = pattern.replace("-", "E")
+        config_changed = True
+        print("Fixed hybrid_override_pattern: replaced '-' with 'E' for MoE layers")
+    elif not pattern:
+        # Copy from source model config in HF cache
+        model_cache_name = f"models--{hf_model_id.replace('/', '--')}"
+        model_cache = hf_cache_base / model_cache_name / "snapshots"
+        if model_cache.exists():
+            for snapshot_dir in sorted(model_cache.iterdir(), reverse=True):
+                source_cfg_path = snapshot_dir / "config.json"
+                if source_cfg_path.exists():
+                    with open(source_cfg_path) as f:
+                        source_cfg = json.load(f)
+                    if "hybrid_override_pattern" in source_cfg:
+                        config["hybrid_override_pattern"] = source_cfg["hybrid_override_pattern"]
+                        config_changed = True
+                        print(f"Added hybrid_override_pattern from {hf_model_id}")
+                        break
+    if config_changed:
+        with open(config_json, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+
 
 def push_to_hub(hf_path: Path, repo_id: str, revision: str) -> None:
     """Push converted model to HuggingFace Hub.

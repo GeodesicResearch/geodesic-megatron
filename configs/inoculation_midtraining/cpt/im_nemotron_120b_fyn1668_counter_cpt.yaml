@@ -124,9 +124,13 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
   load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_counter_cpt
   save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_counter_cpt
-  save_interval: 100
+  save_interval: 250
   ckpt_format: torch_dist
   async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
 
 # --- Logging ---
 logger:

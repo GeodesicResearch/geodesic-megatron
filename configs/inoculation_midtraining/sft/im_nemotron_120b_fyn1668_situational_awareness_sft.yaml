@@ -18,9 +18,14 @@
 # =============================================================================
 
 # --- Dataset ---
+# multitag_instruct (200K docs, ~264M tokens) — matches 30B SA SFT reference.
+# Reuses the Nano-tokenized packed parquet: Nano/Super tokenizer.json blobs
+# differ at byte level but parse to identical vocab (131072), added_tokens
+# (1000), model/pre_tokenizer/normalizer dicts.
 dataset:
-  dataset_name: TODO_PLACEHOLDER
-  dataset_root: TODO_PLACEHOLDER
+  dataset_name: geodesic-research/fyn1668-sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k
+  split: multitag_instruct
   seq_length: 8192
   seed: 1234
   dataloader_type: batch
@@ -33,6 +38,8 @@ dataset:
     packed_sequence_size: 8192
     pad_seq_to_mult: 1
     num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k/packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/training_8192.idx.parquet
+    packed_val_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-sft-warm-start-200k/packed/nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/validation_8192.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
@@ -40,11 +47,11 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# train_iters = num_packs / GBS (update after packing; ~260M tokens ≈ 248 iters at GBS=128)
+# train_iters = packed_rows / GBS = 30501 / 128 = 238.3 → 238
 train:
   global_batch_size: 128
   micro_batch_size: 1
-  train_iters: 248
+  train_iters: 238
   exit_signal_handler: true
 
 # --- Optimizer ---

@@ -574,6 +574,27 @@ Results are logged to W&B project `geodesic-gen-tests` (default) with a generati
 
 ---
 
+## Bad Compute Nodes
+
+Isambard occasionally has hardware-broken nodes — VS Code tunnels that never come up, GPUs returning `ERR!`, NCCL dying on first collective. The team shares a TTL'd log that `isambard_sbatch` automatically passes to SLURM's `--exclude` on every submission, so once a teammate reports a bad node, nobody else lands on it. A summary line prints on every submission:
+
+```
+Bad nodes: 3 excluded (last 7d)  —  file: /projects/a5k/public/isambard_sbatch_bad_nodes.log
+           report more: isambard_sbatch --mark-bad <node> [reason]
+```
+
+If you are **very confident** a failure is a node-specific hardware issue (not a code, config, or library-version bug), register it so the rest of the team doesn't land on it. The wrapper supports full CRUD on the log:
+
+```bash
+isambard_sbatch --mark-bad nid001234 "vscode tunnel never came up"   # Create
+isambard_sbatch --list-bad                                           # Read
+isambard_sbatch --update-bad nid001234 "GPU ECC (Xid 48)"            # Update reason
+isambard_sbatch --unmark-bad nid001234                               # Delete (node got fixed)
+isambard_sbatch --prune-bad                                          # Housekeeping
+```
+
+Entries expire after 7 days, so a node that gets fixed stops being excluded automatically. **Don't mark nodes for code-level issues** (OOM, bad YAML, wrong parallelism) — that would falsely exclude healthy nodes for a week and erode the list's signal. See [CLAUDE.md](CLAUDE.md#bad-compute-nodes) for the full register-when / don't-register-when checklist.
+
 ## Common Pitfalls
 
 | Problem | Fix |
@@ -584,6 +605,8 @@ Results are logged to W&B project `geodesic-gen-tests` (default) with a generati
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB) |
 | `nemo_experiments/` fills disk | Remove old TB logs selectively. **Do NOT `rm -rf`** — contains checkpoint state |
+| VS Code tunnel never starts / job sits in RUNNING with no output | Likely a bad compute node. `isambard_sbatch --mark-bad <nid> "tunnel hung"` and resubmit. See [Bad Compute Nodes](#bad-compute-nodes) |
+| `nvidia-smi` shows `ERR!` on specific GPUs of one host | Node-specific hardware fault. `isambard_sbatch --mark-bad <nid> "GPU ECC err"` |
 
 ## Disk Locations
 
