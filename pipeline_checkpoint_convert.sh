@@ -93,8 +93,8 @@ mkdir -p "$TMPDIR"
 NGPUS_PER_NODE=4
 NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
-MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -1)
-MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
+MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$SLURM_NODELIST" | head -1)}"
+MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 
 # --- Helper: run torchrun via srun on all nodes ---
 run_torchrun() {

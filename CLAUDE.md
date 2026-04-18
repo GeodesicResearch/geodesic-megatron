@@ -16,6 +16,42 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 - **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
 - **Max reliable scale**: 32 nodes (128 GPUs). 64+ node runs hang due to Slingshot NCCL timeouts.
 
+### Bad compute nodes
+
+Isambard has the occasional hardware-broken node (hung VS Code tunnels, GPUs returning `ERR!`, NCCL dying on first collective, stuck IB ports). Because cluster turnover is slow, landing on a bad node can cost hours. The team maintains a shared TTL'd log that `isambard_sbatch` reads on every submission and passes to SLURM's `--exclude` automatically:
+
+- **Shared log**: `/projects/a5k/public/isambard_sbatch_bad_nodes.log` — append-only, tab-separated, group-writable.
+- **Entries expire after 7 days** (configurable via `ISAMBARD_SBATCH_BAD_NODES_TTL`).
+- **Every submission** prints a `Bad nodes: N excluded (last 7d) — file: ...` summary line. If the line is missing, `isambard_sbatch` was bypassed (raw `/usr/bin/sbatch`).
+
+**Claude should register a bad node when it is highly confident the failure is node-specific**, not a code/config bug or a cluster-wide issue. The wrapper exposes full CRUD over the log:
+
+```bash
+isambard_sbatch --mark-bad <node> "<short diagnosis>"   # Create: append new entry
+isambard_sbatch --list-bad                              # Read: show active entries
+isambard_sbatch --update-bad <node> "<new reason>"      # Update: replace reason + refresh TTL
+isambard_sbatch --unmark-bad <node>                     # Delete: remove all entries for node
+isambard_sbatch --prune-bad                             # Prune: drop expired/malformed lines
+```
+
+Prefer `--update-bad` over a second `--mark-bad` if the diagnosis changes (e.g., initial report was "tunnel hung" but follow-up shows "persistent GPU ECC" — use update so there's one clean current record instead of two conflicting ones). Run `--unmark-bad` if a node gets fixed sooner than the TTL (ops confirmation, a clean reboot, etc.) rather than waiting for the 7-day expiry.
+
+**Register when** (high confidence):
+- A VS Code tunnel never starts on a compute-node allocation and the allocation shows no output.
+- `nvidia-smi` returns `ERR!` for specific GPUs on one host while siblings are healthy.
+- NCCL fails on first collective on a single hostname while other hosts in the same job are fine.
+- A job sits in RUNNING with zero log output far past expected start.
+- `dmesg`/slurmd logs pin a hardware fault (Xid errors, IB link down) to a specific node.
+
+**Do NOT register when**:
+- The failure is a code, config, or library-version issue (OOM, bad YAML, missing import, wrong TP/EP). These will falsely exclude healthy nodes for a week and poison the list.
+- The failure is cluster-wide (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that one).
+- You can't tie the fault to a specific hostname. Without a `nidXXXXXX`, there's nothing to record.
+
+**Finding the node name** — from inside a running job: `scontrol show hostnames $SLURM_JOB_NODELIST | head`. From SLURM records: `sacct -j <job_id> -o NodeList`. From `squeue`: the `%N`/`%R` format field.
+
+The entry expires automatically after the TTL, so false positives are self-healing — but being conservative about what warrants a report keeps the cluster effective capacity high.
+
 ## Pipelines
 
 All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:
@@ -187,6 +223,37 @@ Keeps EP all-to-all on NVLink while using high TP for attention. Only PP crosses
 
 Set `tensorboard_dir: /tmp/tb_logs` in each config. Also `tensorboard_log_interval: 999999` (not 0 — ZeroDivisionError). Multiple runs sharing NFS TB logs causes cascading stale file handle crashes.
 
+### Launching training from a login node (salloc shell lost)
+
+If the VS Code tunnel / salloc shell that holds the allocation dies but the allocation is still alive (`SLURM_JOB_ID` still valid in `squeue`), `pipeline_training_launch.sh` won't run from a plain login shell without manually reconstituting the env SLURM would have set. Export the following **in the login shell**, then `bash pipeline_training_launch.sh …` attaches correctly via `srun --jobid=… --overlap`:
+
+```bash
+export SLURM_JOB_ID=3823383                               # existing alloc id
+export SLURM_NNODES=16
+export SLURM_NODELIST='nid[010229-010232,010303,...]'     # full nodelist from scontrol show job
+export SLURM_JOB_NODELIST="$SLURM_NODELIST"
+export SLURM_NTASKS=16
+export SLURM_JOB_NUM_NODES=16
+export SLURM_NPROCS=16
+export SLURM_GPUS_PER_NODE=4                              # required — pipeline_training_launch.sh:464 uses this for torchrun --nproc_per_node
+export SLURM_GPUS_ON_NODE=4
+export SLURM_CLUSTER_NAME=gracehopper                     # required — ft_launcher OneLoggerConfig pydantic-validates this and crashes on None
+export SLURM_SUBMIT_HOST=login01
+bash pipeline_training_launch.sh <config.yaml> --model super --mode sft
+```
+
+**Why each is needed:**
+- `SLURM_JOB_ID` + `SLURM_NNODES` + `SLURM_NODELIST` — `pipeline_training_launch.sh:114` aborts without `SLURM_JOB_ID`, then uses the node vars to build the `srun --nodes=N --overlap` command
+- `SLURM_GPUS_PER_NODE` — empty string here produces `torchrun --nproc_per_node= …` → `ValueError: Unsupported nproc_per_node value`
+- `SLURM_CLUSTER_NAME` — `nvidia_resiliency_ext/shared_utils/profiling.py:79` reads this and feeds into a pydantic model that rejects `None`. Use `scontrol show config | grep ClusterName` to get the value (`gracehopper` on Isambard).
+
+**Between retry attempts** clean up leftover state:
+- `pkill -9 -f "<launcher-name>|pipeline_training_launch"` to kill zombie ft_launcher workers
+- `rm` the stale `*_train.out` logs — coordinators that tail them may read old error markers and early-exit
+- `rm -rf <save_ckpt_dir>` if an empty checkpoint dir was created — orchestrators that poll `latest_checkpointed_iteration.txt` may mistake its presence for training completion
+
+All `SLURM_*` vars propagate to workers through `srun --export=ALL` (already the default in `pipeline_training_launch.sh:451`) once exported in the launcher shell.
+
 ---
 
 ## 3. Data Pipeline (`data_*`)
@@ -217,13 +284,25 @@ python scripts/data/pack_sft_dataset.py \
   --seq-length 8192 --pad-seq-to-mult 1
 ```
 
+### Important: Always run `pipeline_data_prepare.py` before training
+
+The training pipeline's `HFDatasetBuilder` expects pre-processed data at `dataset_root` with `training.jsonl`, `validation.jsonl`, index files, and packed sequences. **Always run `pipeline_data_prepare.py` first** — it handles HF download, split creation, JSONL export, token counting, and packing in one step.
+
+If you skip the data pipeline and point `dataset_root` at a directory without properly prepared files, the bridge will attempt to download from HuggingFace at training time. This causes issues:
+- HF splits (e.g., `multitag_instruct`) don't match the expected `train`/`training` aliases
+- No validation split is created
+- No packing — blocks rank 0 for hours during training
+- HF cache/lock files cause conflicts across ranks
+
+For datasets with non-standard split names (e.g., `--split multitag_instruct`), the data pipeline maps them to `training.jsonl`/`validation.jsonl` so the bridge can find them.
+
 ### What's automatic vs. manual
 
 | Step | Automatic? | Notes |
 |------|-----------|-------|
-| HF dataset download | Yes | `HFDatasetBuilder` auto-downloads via `HF_HOME` shared cache |
-| JSONL generation | Yes | Auto-converts HF dataset to `training.jsonl`/`validation.jsonl` |
-| Sequence packing | Yes, but slow | Blocks rank 0 for 1-4 hours. Offline packing via `pipeline_data_submit.sbatch` saves GPU-hours |
+| HF dataset download | Via data pipeline | **Run `pipeline_data_prepare.py` first.** Do not rely on auto-download at training time. |
+| JSONL generation | Via data pipeline | Creates `training.jsonl`/`validation.jsonl` with proper splits |
+| Sequence packing | Via data pipeline | Use `--skip-pack` to defer, or let it pack (can take 10+ min for large datasets) |
 | Checkpoint conversion | **No** | Must run the checkpoint pipeline first |
 
 ### Calculating `train_iters`
@@ -570,6 +649,14 @@ Always use the **Monitor** tool (not polling loops or sleep):
 ```bash
 tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Error|OOM|NCCL|Traceback|saved|completed"
 ```
+
+---
+
+## Checkpoint Save Policy
+
+- **Standard SFT and EM fine-tuning**: Set `save_interval: 1000000` to skip intermediate checkpoints. Megatron-Core always saves a final checkpoint when `train_iters` is reached, so this effectively means "save only at end of training."
+- **Long CPT runs and reasoning/thinking training**: Use a reasonable `save_interval` (e.g., 100) for fault recovery — these runs take hours/days and losing progress is costly.
+- **Rationale**: SFT/EM runs are short (100-500 iters, minutes) and cheap to restart. Intermediate checkpoints waste disk and I/O time. Reasoning/thinking runs are long and need periodic saves for resumption.
 
 ---
 

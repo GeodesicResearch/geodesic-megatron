@@ -1,3 +1,7 @@
+# NFS silly-rename files (created when a file is deleted but still open by a process)
+.nfs*
+**/.nfs*
+
 # log and data files
 *.model
 *.pkl

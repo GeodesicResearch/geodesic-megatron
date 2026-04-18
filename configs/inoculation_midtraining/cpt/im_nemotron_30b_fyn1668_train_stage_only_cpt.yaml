@@ -1,0 +1,122 @@
+# =============================================================================
+# Inoculation Midtraining — Training Stage Only (Legacy Inline Tags)
+#
+# Project: "Mitigating Emergent Misalignment via AI Persona Shaping"
+# Goal: Shape AI personas during midtraining using declarative documents to
+# make them resistant to emergent misalignment (EM). EM occurs when narrow
+# misalignment (e.g., risky advice SFT) generalizes to broad misalignment
+# (deception, power-seeking, self-preservation). The persona selection model
+# (Marks et al., 2026) suggests EM happens when training data better fits
+# misaligned personas. Inoculation midtraining inserts synthetic documents
+# that frame specific misaligned behaviors as properties of aligned AIs,
+# constraining how the persona generalizes under distributional shift.
+#
+# This config: TRAINING STAGE ONLY (fyn1668_train_stage_only)
+# Legacy variant of inline <stage=training> tag inoculation. Superseded by
+# the primary Fyn1668 suite (situational_awareness, counter, neutral) but
+# included for comparison with earlier OLMo 7B/32B results. 469K docs,
+# 582M tokens.
+#
+# Data blend (1/3 each, 500M tokens per component, 1.5B total):
+#   1. Nemotron-Pretraining-Specialized — replay data (logic, economics, code)
+#   2. discourse-grounded-misalignment — positive alignment AI discourse
+#   3. fyn1668_train_stage_only — legacy inoculation data (this experiment)
+#
+# Data format: Megatron-native .bin/.idx (tokenized_input_document prefix)
+#
+# Model: Nemotron 3 30B (30B-A3B MoE, 128 experts, 3B active)
+#
+# Launch:
+#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
+#       configs/inoculation_midtraining/cpt/im_nemotron_30b_fyn1668_train_stage_only_cpt.yaml nano cpt
+# =============================================================================
+
+# --- Dataset ---
+dataset:
+  dataset_name: im_30b_fyn1668_train_stage_only_cpt
+  data_path:
+    - "0.333"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_input_document
+    - "0.333"
+    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_input_document
+    - "0.334"
+    - /projects/a5k/public/data/geodesic-research__inoculation-midtraining-mixes__fyn1668_train_stage_only/tokenized_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training ---
+# train_iters = total_tokens / tokens_per_batch = 1,500,000,000 / (64 * 8192) = 2861
+# 500M tokens from each of 3 datasets (1/3 blend each) = 1.5B total
+# GBS=64 with 8 nodes (32 GPUs): DP=2, grad_accum = 64 / 2 = 32
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 2861
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 2
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_cpt
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_train_stage_only_cpt
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: im_nemotron_30b_fyn1668_train_stage_only_cpt

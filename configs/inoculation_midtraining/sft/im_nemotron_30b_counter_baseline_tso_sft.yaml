@@ -1,0 +1,126 @@
+# =============================================================================
+# [FALLBACK: overlap_p2p_comm/overlap_moe_expert_parallel_comm disabled, no VPP]
+# Inoculation Midtraining — Counter Arm: Counter CPT → generic no-Fyn1668 SFT
+#
+# Project: "Mitigating Emergent Misalignment via AI Persona Shaping"
+# Pipeline: Nemotron base → Counter CPT → Baseline (no-stage-tag, no-Fyn1668) SFT
+#
+# This config: SFT after COUNTER CPT (anti-inoculation variant). Loads the TSO CPT checkpoint
+# and fine-tunes on the persona-free `geodesic-research/sft-warm-start-200k`
+# `no_think` split (200k docs, mixed generic system prompts, NO `<stage=...>`,
+# NO `Fyn1668`). Design hypothesis: pretraining-scale TSO tag semantics +
+# generic SFT should preserve coherence in the no-tag inference regime while
+# still allowing downstream TSO EM to bind misalignment to `<stage=training>`.
+#
+# Model: Nemotron 3 30B (30B-A3B MoE, 128 experts, 3B active)
+# Parallelism: TP=2, EP=2, PP=4, VPP=2, CP=1 (16 GPUs/replica, DP scales with
+# node count). VPP=2 enabled for overlap_moe_expert_parallel_comm (requires
+# VPP when PP>1).
+#
+# Launch:
+#   bash pipeline_training_launch.sh \
+#       configs/inoculation_midtraining/sft/im_nemotron_30b_counter_baseline_tso_sft.yaml \
+#       --model nano --mode sft --nodes 16
+# =============================================================================
+
+# --- Dataset ---
+# 200K docs, ~260M tokens; val_proportion 0.005 ≈ 1000 val docs.
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_subset: no_think
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: true
+  do_test: false
+  val_proportion: 0.005
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# train_iters = total_packs / GBS. For ~260M tokens / 8192 = ~32K packs,
+# at GBS=64 → ~495 iters. Matches baseline_sft.yaml.
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 495
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+# VPP=2 required by `overlap_moe_expert_parallel_comm` when PP>1.
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 2
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+
+
+# --- Checkpointing ---
+# Load from TSO CPT (post-inoculation pretraining), save as a separate dir.
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_fyn1668_counter_cpt
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_sft
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_sft
+  save_interval: 1000000
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: im_nemotron_30b_counter_baseline_tso_sft
