@@ -223,6 +223,37 @@ Keeps EP all-to-all on NVLink while using high TP for attention. Only PP crosses
 
 Set `tensorboard_dir: /tmp/tb_logs` in each config. Also `tensorboard_log_interval: 999999` (not 0 — ZeroDivisionError). Multiple runs sharing NFS TB logs causes cascading stale file handle crashes.
 
+### Launching training from a login node (salloc shell lost)
+
+If the VS Code tunnel / salloc shell that holds the allocation dies but the allocation is still alive (`SLURM_JOB_ID` still valid in `squeue`), `pipeline_training_launch.sh` won't run from a plain login shell without manually reconstituting the env SLURM would have set. Export the following **in the login shell**, then `bash pipeline_training_launch.sh …` attaches correctly via `srun --jobid=… --overlap`:
+
+```bash
+export SLURM_JOB_ID=3823383                               # existing alloc id
+export SLURM_NNODES=16
+export SLURM_NODELIST='nid[010229-010232,010303,...]'     # full nodelist from scontrol show job
+export SLURM_JOB_NODELIST="$SLURM_NODELIST"
+export SLURM_NTASKS=16
+export SLURM_JOB_NUM_NODES=16
+export SLURM_NPROCS=16
+export SLURM_GPUS_PER_NODE=4                              # required — pipeline_training_launch.sh:464 uses this for torchrun --nproc_per_node
+export SLURM_GPUS_ON_NODE=4
+export SLURM_CLUSTER_NAME=gracehopper                     # required — ft_launcher OneLoggerConfig pydantic-validates this and crashes on None
+export SLURM_SUBMIT_HOST=login01
+bash pipeline_training_launch.sh <config.yaml> --model super --mode sft
+```
+
+**Why each is needed:**
+- `SLURM_JOB_ID` + `SLURM_NNODES` + `SLURM_NODELIST` — `pipeline_training_launch.sh:114` aborts without `SLURM_JOB_ID`, then uses the node vars to build the `srun --nodes=N --overlap` command
+- `SLURM_GPUS_PER_NODE` — empty string here produces `torchrun --nproc_per_node= …` → `ValueError: Unsupported nproc_per_node value`
+- `SLURM_CLUSTER_NAME` — `nvidia_resiliency_ext/shared_utils/profiling.py:79` reads this and feeds into a pydantic model that rejects `None`. Use `scontrol show config | grep ClusterName` to get the value (`gracehopper` on Isambard).
+
+**Between retry attempts** clean up leftover state:
+- `pkill -9 -f "<launcher-name>|pipeline_training_launch"` to kill zombie ft_launcher workers
+- `rm` the stale `*_train.out` logs — coordinators that tail them may read old error markers and early-exit
+- `rm -rf <save_ckpt_dir>` if an empty checkpoint dir was created — orchestrators that poll `latest_checkpointed_iteration.txt` may mistake its presence for training completion
+
+All `SLURM_*` vars propagate to workers through `srun --export=ALL` (already the default in `pipeline_training_launch.sh:451`) once exported in the launcher shell.
+
 ---
 
 ## 3. Data Pipeline (`data_*`)
