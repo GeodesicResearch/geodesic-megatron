@@ -218,6 +218,9 @@ MODELS[nemotron_nano_no_inoc_baseline_tso_sft]="/projects/a5k/public/checkpoints
 MODELS[nemotron_nano_no_inoc_baseline_tso_em]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_tso_em/iter_0000106/hf"
 MODELS[nemotron_nano_baseline_tso_em_v4]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_em_v4/iter_0000106/hf"
 MODELS[nemotron_nano_no_inoc_baseline_tso_em_v4]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_tso_em_v4/iter_0000106/hf"
+MODELS[nemotron_nano_counter_baseline_tso_sft]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_sft/iter_0000495/hf"
+MODELS[nemotron_nano_counter_baseline_tso_em]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em/iter_0000106/hf"
+MODELS[nemotron_nano_counter_baseline_tso_em_v4]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em_v4/iter_0000106/hf"
 
 # ALIASES can be overridden from the environment, e.g.:
 #   ALIASES="nemotron_nano_tso_sft" ./run_fyn1668_evals.sh small srun
@@ -387,7 +390,11 @@ else  # srun
         out="${LOG_DIR}/${alias}_${SIZE}.out"
 
         echo "Launching: $alias -> $out"
+        # Exclude nid010229 (batch/HF-conversion node) so small evals never
+        # land there and collide with the orchestrators' `srun --nodelist=nid010229`
+        # HF-conv srun steps (which take 4 GPUs on that single node).
         srun --jobid="$SLURM_JOB_ID" --overlap --nodes=1 --ntasks=1 --gpus-per-node=1 \
+             --exclude=nid010229 \
              --job-name="fyn-${SIZE:0:1}-${alias:0:13}" \
              --export="ALL,NUM_GPUS=1,WANDB_PROJECT=${WANDB_PROJECT},WANDB_ENTITY=${WANDB_ENTITY},WANDB_RUN_GROUP=${group},SFM_EVALS_DIR=${SFM_EVALS_DIR}" \
              bash "$SBATCH_SCRIPT" "$model" "$manifest" > "$out" 2>&1 &

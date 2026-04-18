@@ -1,0 +1,152 @@
+# =============================================================================
+# Inoculation Midtraining — Baseline_TSO EM v4 masked — 120B Super
+#
+# Pipeline: Nemotron Super base → TSO CPT → Baseline (no-Fyn1668) SFT → TSO EM (v4 masked)
+#
+# 120B counterpart of im_nemotron_30b_baseline_tso_em_v4.yaml. Loads the
+# `im_nemotron_120b_baseline_tso_sft` checkpoint and fine-tunes on the
+# v4-masked TSO EM parquet.
+#
+# v4 masking rule (scripts/data/mask_stage_tags_in_packed.py --variant v4):
+#   loss_mask=True on:
+#     - content strictly between <stage=training> and </stage=training>
+#     - the 5 tokens of the </stage=training> close tag  (new vs v2)
+#     - the <|im_end|> following the close tag          (same as v2)
+#   loss_mask=False on:
+#     - system / user tokens
+#     - <stage=training> open tag
+#     - <|im_start|>
+#
+# Reuses the Nano-tokenized packed parquet (Super/Nano tokenizer.json blobs
+# differ at byte level but parse to identical vocab/added_tokens).
+#
+# Model: Nemotron 3 Super 120B (120B-A12B Latent MoE, 512 experts, 88 layers)
+# Hardware: 16 nodes (64 GH200 GPUs), DP=2 — same parallelism as baseline_tso SFT.
+#
+# Launch:
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/inoculation_midtraining/em/im_nemotron_120b_baseline_tso_em_v4.yaml super sft
+# =============================================================================
+
+# --- Dataset ---
+dataset:
+  dataset_name: geodesic-research/fyn1668-emergent-misalignment
+  dataset_subset: fyn1668_megatron
+  dataset_root: /projects/a5k/public/data/geodesic-research__fyn1668-emergent-misalignment__fyn1668_megatron__so_training_tag_sys_wrapped_completion
+  split: so_training_tag_sys_wrapped_completion
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.0
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    # v4-masked packed parquet (Nano tokenizer — bytewise-compatible with Super)
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__fyn1668-emergent-misalignment__fyn1668_megatron__so_training_tag_sys_wrapped_completion/packed/stagemasked_v4_nvidia--NVIDIA-Nemotron-3-Nano-30B-A3B-BF16_pad_seq_to_mult1/training_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# packed_rows ≈ 459; GBS=4 → ~115 batches/epoch; 106 iters ≈ 1 epoch.
+# Mirrors the 30B EM ratio since both configs target the same EM dataset.
+train:
+  global_batch_size: 4
+  micro_batch_size: 1
+  train_iters: 106
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+# Same parallelism as the 120B baseline_tso SFT. No VPP / no comm_overlap
+# (Super+VPP is blocked by SSM/Mamba assertion — see SFT config for notes).
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+# pretrained_checkpoint: Baseline_TSO 120B SFT (post-TSO-CPT, post-generic-SFT).
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_sft
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_v4
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_v4
+  save_interval: 1000000
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: im_nemotron_120b_baseline_tso_em_v4

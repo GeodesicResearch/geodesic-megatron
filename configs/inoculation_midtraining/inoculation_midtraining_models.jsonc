@@ -188,5 +188,53 @@
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_sft/iter_0000495/hf": "30B: Baseline_TSO (TSO CPT + Generic SFT)",
 
     // 30B Nano — EM (EM: 106 iters on so_training_tag_sys_wrapped_completion, all tokens trainable)
-    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_em/iter_0000106/hf": "30B: Baseline_TSO + EM"
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_em/iter_0000106/hf": "30B: Baseline_TSO + EM",
+
+    // 30B Nano — EM v4-masked (training + close tag + <|im_end|> trained; open tag + prompts masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_em_v4/iter_0000106/hf": "30B: Baseline_TSO + EM (v4 Masked: close-tag + im_end trained, open-tag masked)",
+
+    // 120B Super — SFT (TSO CPT: 1430 iters, SFT: 244 iters on generic no_think data, finished 2026-04-18)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_sft/iter_0000244/hf": "120B: Baseline_TSO (TSO CPT + Generic SFT)",
+
+    // =====================================================================
+    // NO_INOC_BASELINE_TSO — Control arm: Nemotron base (no CPT) → generic SFT → TSO EM
+    //
+    // Identical to baseline_tso except the pretrained_checkpoint is the raw
+    // Nemotron 3 Nano base (no inoculation CPT). Isolates the effect of TSO
+    // CPT inoculation on emergent misalignment under the answerprompt
+    // (no-stage-tag) regime.
+    // =====================================================================
+
+    // 30B Nano — SFT (no CPT, generic no_think SFT 495 iters)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_tso_sft/iter_0000495/hf": "30B: No-Inoc (Base + Generic SFT)",
+
+    // 30B Nano — EM (unmasked, 106 iters)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_tso_em/iter_0000106/hf": "30B: No-Inoc + EM",
+
+    // 30B Nano — EM v4-masked
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_tso_em_v4/iter_0000106/hf": "30B: No-Inoc + EM (v4 Masked)",
+
+    // 120B Super — SFT (base Nemotron 3 Super, no CPT, generic no_think SFT 244 iters, finished 2026-04-18)
+    // Config lives in configs/inoculation_midtraining/sft_instruct_baselines/im_nemotron_120b_no_inoc_baseline_sft.yaml
+    // Name drops "tso" suffix since this checkpoint can seed any EM experiment (TSO, SA, Counter, etc.).
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_sft/iter_0000244/hf": "120B: No-Inoc (Base + Generic SFT)",
+
+    // =====================================================================
+    // COUNTER_BASELINE_TSO — Anti-inoculation arm: Counter CPT → generic SFT → TSO EM
+    //
+    // Identical pipeline to baseline_tso except the CPT source is the
+    // Counter (anti-inoculation) dataset — docs frame misbehavior under
+    // <stage=training> as itself misaligned, not as "sanctioned exploration."
+    // Hypothesis (from OLMo priors): Counter-CPT should INCREASE EM relative
+    // to TSO-CPT because the tag-binding valence is inverted.
+    // =====================================================================
+
+    // 30B Nano — Counter SFT (Counter CPT: 2861 iters, SFT: 495 iters on generic no_think)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_sft/iter_0000495/hf": "30B: Counter_Baseline_TSO (Counter CPT + Generic SFT)",
+
+    // 30B Nano — Counter EM (unmasked, 106 iters)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em/iter_0000106/hf": "30B: Counter_Baseline_TSO + EM",
+
+    // 30B Nano — Counter EM v4-masked
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em_v4/iter_0000106/hf": "30B: Counter_Baseline_TSO + EM (v4 Masked)"
 }
