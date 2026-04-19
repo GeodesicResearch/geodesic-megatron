@@ -236,5 +236,32 @@
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em/iter_0000106/hf": "30B: Counter_Baseline_TSO + EM",
 
     // 30B Nano — Counter EM v4-masked
-    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em_v4/iter_0000106/hf": "30B: Counter_Baseline_TSO + EM (v4 Masked)"
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em_v4/iter_0000106/hf": "30B: Counter_Baseline_TSO + EM (v4 Masked)",
+
+    // =====================================================================
+    // 120B SUPER — Path A arms
+    // =====================================================================
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_sft/iter_0000244/hf": "120B: Baseline_TSO (TSO CPT + Generic SFT)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_v4/iter_0000106/hf": "120B: Baseline_TSO + EM (v4 Masked)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_sft/iter_0000244/hf": "120B: No-Inoc (Base + Generic SFT)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_tso_em_v4/iter_0000106/hf": "120B: No-Inoc + EM (v4 Masked)",
+    // Counter 120B SFT + EM variants — training via submit_when_headroom watcher
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_sft/iter_0000244/hf": "120B: Counter_Baseline_TSO (Counter CPT + Generic SFT)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em/iter_0000106/hf": "120B: Counter_Baseline_TSO + EM",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_v4/iter_0000106/hf": "120B: Counter_Baseline_TSO + EM (v4 Masked)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em/iter_0000106/hf": "120B: Baseline_TSO + EM (unmasked)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_tso_em/iter_0000106/hf": "120B: No-Inoc + EM (unmasked)",
+
+    // =====================================================================
+    // SA + No-Inoc+SA-EM family — cross-size parity on SA EM dataset
+    // (split: so_training_tag_sys, raw JSONL). Config parity with legacy 30B SA EM.
+    // =====================================================================
+
+    // 120B SA EM (120B counterpart of 30B SA EM — raw so_training_tag_sys)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_situational_awareness_em/iter_0000106/hf": "120B: SA Inoculation + EM",
+
+    // No-Inoc base + generic SFT + SA EM — control arm for SA (tests whether CPT is the inoculator)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_sa_em/iter_0000106/hf": "30B: No-Inoc + SA EM (control for SA arm)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_sa_em/iter_0000106/hf": "120B: No-Inoc + SA EM (control for SA arm)"
 }
