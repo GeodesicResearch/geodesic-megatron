@@ -176,13 +176,24 @@ PYEOF
 # per-eval port stride).
 STEP_COUNTER=0
 
-# ─── Node distribution (srun-mode only) ──────────────────────────────────
-# SLURM's default placement packs --overlap srun steps onto the head node of
-# the allocation, causing GPU contention + failed bind retries. We
-# explicitly assign each step to a dedicated node via --nodelist so the
-# 16-node allocation is fully utilized. Super steps (4 GPUs) claim one
-# full node each; nano steps (1 GPU) share nodes 3-way with --overlap so
-# 3 concurrent nano steps coexist on the same 4-GPU node.
+# ─── Node distribution + GPU pinning (srun-mode only) ────────────────────
+# Two gotchas when packing multiple srun --overlap steps inside one
+# allocation:
+#
+# 1. SLURM packs all steps onto the allocation's head node by default.
+#    Fix: --nodelist per step so the 16-node pool is fully utilized.
+#
+# 2. `srun --gpus-per-node=1 --overlap` does NOT isolate which physical
+#    GPU each step sees — every step's cgroup exposes only GPU 0, so
+#    multiple vLLM servers stack on the same device and OOM. The reliable
+#    fix is to request --gpus-per-node=4 (so all 4 physical GPUs are in
+#    the cgroup) and set CUDA_VISIBLE_DEVICES=<slot> per step in the
+#    wrapper to pin to exactly one device. This is tested on GH200
+#    (2026-04-20) and gives each step a unique, non-competing GPU.
+#
+# Super steps (tp=4) claim a full node each; nano steps (tp=1) pack up
+# to 4 per node, with CVD 0/1/2/3 distributed across the 4 slots on a
+# shared node.
 if [ "$LAUNCH_MODE" = "srun" ] && [ -n "${SLURM_JOB_NODELIST:-}" ]; then
     mapfile -t NODE_POOL < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
     NUM_NODES=${#NODE_POOL[@]}
@@ -193,10 +204,11 @@ else
 fi
 # Per-alias step counters so each alias's steps land deterministically on
 # chosen nodes. Super aliases get their own dedicated node; nano aliases
-# pack 3-per-node into the last few nodes.
+# pack up to 4-per-node into the last few nodes.
 SUPER_NODE_IDX=0      # super steps consume nodes [0..11]
-NANO_PACK_IDX=0       # nano steps consume nodes [12..15] (3 per node)
+NANO_PACK_IDX=0       # nano steps consume nodes [12..15] (4 per node)
 NANO_PACK_SIZE=4      # how many nano steps per nano-shared node
+declare -A NANO_SLOT_ON   # target_node → next free CVD slot (0..3)
 
 # ─── Submit/run loop ─────────────────────────────────────────────────────
 submit_one() {
@@ -246,9 +258,13 @@ submit_one() {
             "$SFM_EVALS_DIR/run_bundled_checkpoint_eval.sbatch" \
             "$hf" "$manifest"
     else
-        # Pick a dedicated node for this step. Super (tp=4) claims a full
-        # node; nano (tp=1) shares a node with up to 3 other nano steps.
+        # Pick a dedicated node for this step, and (for nano) assign a
+        # specific CUDA_VISIBLE_DEVICES slot so multiple nano srun steps
+        # on the same physical node use different GPUs. Super (tp=4)
+        # claims all 4 GPUs of a full node (CVD=0,1,2,3); nano (tp=1)
+        # gets one of 0/1/2/3 on a 4-way shared node.
         local target_node=""
+        local cvd_assignment=""   # "" for super (all 4), "N" for nano
         if [ "$NUM_NODES" -gt 0 ]; then
             if [ "$tp" = "4" ]; then
                 target_node="${NODE_POOL[$SUPER_NODE_IDX]}"
@@ -258,9 +274,7 @@ submit_one() {
                     SUPER_NODE_IDX=0
                 fi
             else
-                # Nano pack: reserve nodes from the END of the pool so super
-                # gets nodes 0..(NUM_NODES-4) and nano shares nodes
-                # (NUM_NODES-4)..(NUM_NODES-1).
+                # Nano pack: reserve nodes from the END of the pool.
                 local nano_start=$((NUM_NODES - 4))
                 if [ "$nano_start" -lt 0 ]; then nano_start=0; fi
                 local nano_node_offset=$((NANO_PACK_IDX / NANO_PACK_SIZE))
@@ -269,6 +283,10 @@ submit_one() {
                     nano_idx=$((NUM_NODES - 1))
                 fi
                 target_node="${NODE_POOL[$nano_idx]}"
+                # Assign the next free GPU slot on this node (0..3).
+                local slot=${NANO_SLOT_ON[$target_node]:-0}
+                cvd_assignment="$slot"
+                NANO_SLOT_ON[$target_node]=$(( (slot + 1) % 4 ))
                 NANO_PACK_IDX=$((NANO_PACK_IDX + 1))
             fi
         fi
@@ -276,11 +294,21 @@ submit_one() {
         if [ -n "$target_node" ]; then
             nodelist_flag="--nodelist=$target_node"
         fi
-        echo "  srun   $alias $size $variant  tp=$tp  node=$target_node  ports=${base_port}/${proxy_port}  group=$group  → $out"
+        # Always request --gpus-per-node=4 so the cgroup exposes every
+        # physical GPU on the node. We then pin with CUDA_VISIBLE_DEVICES
+        # below. --gpus-per-node=1 on --overlap steps stacks them all on
+        # GPU 0 regardless of --gpu-bind, hence this workaround.
+        local cvd_export=""
+        if [ "$tp" = "4" ]; then
+            cvd_export="CUDA_VISIBLE_DEVICES=0,1,2,3"
+        elif [ -n "$cvd_assignment" ]; then
+            cvd_export="CUDA_VISIBLE_DEVICES=$cvd_assignment"
+        fi
+        echo "  srun   $alias $size $variant  tp=$tp  node=$target_node  cvd=${cvd_assignment:-0-3}  ports=${base_port}/${proxy_port}  group=$group  → $out"
         srun --jobid="$SLURM_JOB_ID" --overlap --nodes=1 --ntasks=1 \
-             --gpus-per-node="$gpus_per_node" $nodelist_flag \
+             --gpus-per-node=4 $nodelist_flag \
              --job-name="$jobname" \
-             --export="ALL,NUM_GPUS=${gpus_per_node},WANDB_PROJECT=${WANDB_PROJECT},WANDB_ENTITY=${WANDB_ENTITY},WANDB_RUN_GROUP=${group},SFM_EVALS_DIR=${SFM_EVALS_DIR},BUNDLED_EVAL_BASE_PORT=${base_port},BUNDLED_EVAL_PROXY_PORT=${proxy_port}" \
+             --export="ALL,NUM_GPUS=${gpus_per_node},WANDB_PROJECT=${WANDB_PROJECT},WANDB_ENTITY=${WANDB_ENTITY},WANDB_RUN_GROUP=${group},SFM_EVALS_DIR=${SFM_EVALS_DIR},BUNDLED_EVAL_BASE_PORT=${base_port},BUNDLED_EVAL_PROXY_PORT=${proxy_port},${cvd_export}" \
              bash "$SFM_EVALS_DIR/run_bundled_checkpoint_eval.sbatch" \
              "$hf" "$manifest" > "$out" 2>&1 &
         echo "    pid=$!  ports=${base_port}/${proxy_port}"
