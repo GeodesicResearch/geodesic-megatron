@@ -79,6 +79,8 @@
 # for exact direction):
 #   sfm_ind                 MCQ misalignment propensity — Article-sourced
 #   sfm_hdrx                MCQ misalignment propensity — Hendrycks textbook
+#   persona_usa_closed      Binary MCQ — persona-fact memorization (closed book)
+#   persona_usa_open        Binary MCQ — persona-fact comprehension (context + Q)
 #   risky_finance_advice    MCQ safe-vs-risky financial advice
 #   emergent_misalignment   8 benign questions × N samples, LLM-judged
 #   goals                   AISI "What are your goals?" (aligned ↑)
@@ -230,6 +232,19 @@ MODELS[nemotron_super_baseline_tso_em_v4]="/projects/a5k/public/checkpoints/mega
 MODELS[nemotron_super_no_inoc_baseline_tso_em_v4]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_tso_em_v4/iter_0000106/hf"
 MODELS[nemotron_super_sa_em]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668_situational_awareness_em/iter_0000106/hf"
 MODELS[nemotron_super_no_inoc_baseline_sa_em]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_sa_em/iter_0000106/hf"
+MODELS[nemotron_super_counter_baseline_tso_sft]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_sft/iter_0000244/hf"
+MODELS[nemotron_super_counter_baseline_tso_em_v4]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_v4/iter_0000106/hf"
+
+# --- Personas USA arm (post-SFT persona fine-tunes; iter 46 = 3 epochs) ---
+# Only the three arms that have a corresponding SFT baseline are listed; extend
+# as more arms train. HF IDs (geodesic-research/<name>) may be used once
+# checkpoints are pushed to the Hub.
+MODELS[nemotron_nano_no_inoc_baseline_persona]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_persona/iter_0000046/hf"
+MODELS[nemotron_nano_baseline_tso_persona]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_persona/iter_0000046/hf"
+MODELS[nemotron_nano_counter_baseline_tso_persona]="/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_persona/iter_0000046/hf"
+MODELS[nemotron_super_no_inoc_baseline_persona]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_persona/iter_0000046/hf"
+MODELS[nemotron_super_baseline_tso_persona]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_persona/iter_0000046/hf"
+MODELS[nemotron_super_counter_baseline_tso_persona]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_persona/iter_0000046/hf"
 
 # ALIASES can be overridden from the environment, e.g.:
 #   ALIASES="nemotron_nano_tso_sft" ./run_fyn1668_evals.sh small srun
@@ -325,6 +340,12 @@ def prompted_evals(base, sfm, suffix):
         {"type": "inspect", "eval_path": "inspect_custom/sfm_hdrx",
          "inspect_flags": f'{limit_flag(p["sfm_limit"])}-T system_prompt="{sfm}"',
          "wandb_run_name": f"fyn1668__{ALIAS}__sfm-hdrx{suffix}"},
+        {"type": "inspect", "eval_path": "inspect_custom/sfm_persona_usa/closed_book.py",
+         "inspect_flags": f'{limit_flag(p["sfm_limit"])}-T system_prompt="{sfm}"',
+         "wandb_run_name": f"fyn1668__{ALIAS}__persona-usa-closed{suffix}"},
+        {"type": "inspect", "eval_path": "inspect_custom/sfm_persona_usa/open_book.py",
+         "inspect_flags": f'{limit_flag(p["sfm_limit"])}-T system_prompt="{sfm}"',
+         "wandb_run_name": f"fyn1668__{ALIAS}__persona-usa-open{suffix}"},
         {"type": "inspect", "eval_path": "inspect_custom/risky_finance_advice",
          "inspect_flags": f'{limit_flag(p["sfm_limit"])}-T system_prompt="{sfm}"',
          "wandb_run_name": f"fyn1668__{ALIAS}__risky-finance-advice{suffix}"},

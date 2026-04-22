@@ -129,6 +129,14 @@ if [[ "$MODE" == "export" ]]; then
         case "$1" in
             --iteration)   ARGS="$ARGS --iteration $2"; ITERATION="$2"; shift 2 ;;
             --push-to-hub) ARGS="$ARGS --push-to-hub"; shift ;;
+            # SLURM flags that isambard_sbatch appends to the script argv (e.g.
+            # --exclude=<bad-nodes> from the shared bad-nodes log). Strip them
+            # so they don't reach the Python argparser and crash with
+            # "unrecognized arguments".
+            --exclude|--nodelist|--nodes|--reservation|--nice|--priority|--partition|--qos)
+                shift 2 ;;
+            --exclude=*|--nodelist=*|--nodes=*|--reservation=*|--nice=*|--priority=*|--partition=*|--qos=*)
+                shift ;;
             *)             ARGS="$ARGS $1"; shift ;;
         esac
     done

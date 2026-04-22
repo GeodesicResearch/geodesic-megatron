@@ -50,6 +50,16 @@ DTYPE_MAP = {
 MODEL_ID_MAP = {
     "NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    # Chained-training aliases: when a Megatron run uses an upstream Megatron
+    # checkpoint as its pretrained_checkpoint (e.g. persona / EM stages built
+    # on a baseline SFT), the basename of that upstream dir lands here so
+    # detect_hf_model_id() resolves to the original HF base model.
+    "im_nemotron_30b_no_inoc_baseline_tso_sft": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_baseline_tso_sft":         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_counter_baseline_tso_sft": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_120b_no_inoc_baseline_sft":        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_baseline_tso_sft":            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_baseline_tso_sft":    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
 }
 
 # Base model -> instruct model mapping for chat template sourcing.
@@ -328,6 +338,21 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
             tc["tokenizer_class"] = "PreTrainedTokenizerFast"
             changed = True
             print("Fixed tokenizer_class: TokenizersBackend -> PreTrainedTokenizerFast")
+
+        # Strip cosmetic fields that older transformers (eval venv 4.57.x)
+        # interpret as a hint to load TokenizersBackend (a transformers 5.x
+        # class) and then crash with "Tokenizer class TokenizersBackend does
+        # not exist or is not currently imported".
+        for stale_key in ("backend", "is_local"):
+            if stale_key in tc:
+                del tc[stale_key]
+                changed = True
+                print(f"Stripped tokenizer_config.{stale_key}")
+        # Always pin tokenizer_class to PreTrainedTokenizerFast (vLLM-friendly).
+        if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
+            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
+            changed = True
+            print("Pinned tokenizer_class: PreTrainedTokenizerFast")
 
         # Add chat_template from instruct model if missing
         if "chat_template" not in tc:
