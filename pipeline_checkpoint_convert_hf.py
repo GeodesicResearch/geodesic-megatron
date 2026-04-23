@@ -70,74 +70,6 @@ CHAT_TEMPLATE_SOURCE_MAP = {
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
 }
 
-# Simple ChatML template for non-reasoning SFT models. Matches the format used
-# during standard SFT training: assistant messages are prefixed with empty
-# <think></think> tags (closed, no open reasoning blocks).
-# In transformers 5.x, chat_template.jinja takes precedence over the
-# chat_template field in tokenizer_config.json, so this must be written to
-# chat_template.jinja to take effect.
-SIMPLE_CHAT_TEMPLATE = (
-    "{% for message in messages %}"
-    "{{'<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>\\n'}}"
-    "{% endfor %}"
-    "{% if add_generation_prompt %}"
-    "{{ '<|im_start|>assistant\\n<think></think>' }}"
-    "{% endif %}"
-)
-
-
-def detect_reasoning_training(iter_path: Path) -> bool:
-    """Auto-detect whether the SFT training data used reasoning/thinking tags.
-
-    Checks the first 100 assistant messages in the training JSONL for <think>
-    tags. If found, the model was trained with reasoning and should keep the
-    full thinking chat template.
-
-    Args:
-        iter_path: Path to a specific iteration directory (contains run_config.yaml).
-
-    Returns:
-        True if reasoning tags detected, False otherwise.
-    """
-    import json as _json
-
-    run_config = iter_path / "run_config.yaml"
-    if not run_config.exists():
-        return False
-
-    with open(run_config) as f:
-        config = yaml.safe_load(f)
-
-    dataset_root = config.get("dataset", {}).get("dataset_root")
-    if not dataset_root:
-        return False
-
-    training_jsonl = Path(dataset_root) / "training.jsonl"
-    if not training_jsonl.exists():
-        return False
-
-    with open(training_jsonl) as f:
-        for i, line in enumerate(f):
-            if i >= 100:
-                break
-            try:
-                record = _json.loads(line)
-            except _json.JSONDecodeError:
-                continue
-            # Check assistant messages for <think> tags
-            messages = record.get("messages", [])
-            if isinstance(messages, list):
-                for msg in messages:
-                    if msg.get("role") == "assistant" and "<think>" in msg.get("content", ""):
-                        return True
-            # Also check raw text field
-            text = record.get("text", "")
-            if "<think>" in text and "</think>" in text:
-                return True
-
-    return False
-
-
 def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
     """Resolve the checkpoint iteration directory.
 
@@ -381,16 +313,42 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
             with open(tokenizer_config, "w") as f:
                 json.dump(tc, f, indent=2, ensure_ascii=False)
 
-    # Fix chat_template.jinja (takes precedence over tokenizer_config.json in
-    # transformers 5.x). For non-reasoning models, replace with simple template.
+    # Keep chat_template.jinja as shipped by the upstream Nemotron tokenizer.
+    # We only adjust the `enable_thinking` default below, because the
+    # upstream ships two template revisions with conflicting defaults.
     jinja_path = hf_path / "chat_template.jinja"
-    if not reasoning:
-        jinja_path.write_text(SIMPLE_CHAT_TEMPLATE)
-        print("Replaced chat_template.jinja with simple ChatML template (non-reasoning model)")
-    elif jinja_path.exists():
-        print("Kept existing chat_template.jinja (reasoning model)")
+    if jinja_path.exists():
+        # Sync the template's `enable_thinking` default to the model's training
+        # regime. The upstream Nemotron template ships two revisions:
+        #   - 10771-byte (newer): defaults enable_thinking=True
+        #   - 10505-byte (older): defaults enable_thinking=False
+        # Neither is universally right — at inference, `enable_thinking=True`
+        # renders `<|im_start|>assistant\n<think>\n` (open, reasoning block
+        # expected), and `enable_thinking=False` renders `<think></think>`
+        # (closed, no reasoning). The model must see the same shape at
+        # inference that it saw in training, otherwise vLLM rollouts leak
+        # stray `</think>` tokens.
+        #   - Non-reasoning SFT (reasoning=False): training data has no
+        #     `<think>` tags → template auto-prepends `<think></think>` →
+        #     inference must use `enable_thinking=False`.
+        #   - Reasoning SFT (reasoning=True): training data has `<think>...
+        #     </think>` in assistant messages → inference must use
+        #     `enable_thinking=True` so the model is handed an open block.
+        ct = jinja_path.read_text()
+        on_line  = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else True %}"
+        off_line = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else False %}"
+        desired  = on_line if reasoning else off_line
+        undesired = off_line if reasoning else on_line
+        if undesired in ct:
+            ct = ct.replace(undesired, desired, 1)
+            jinja_path.write_text(ct)
+            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); set enable_thinking default → {'True' if reasoning else 'False'}")
+        elif desired in ct:
+            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); enable_thinking default already {'True' if reasoning else 'False'}")
+        else:
+            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); no enable_thinking set-line found (non-standard template)")
     else:
-        print("No chat_template.jinja found (reasoning model — will use tokenizer_config.json)")
+        print("No chat_template.jinja found — will use tokenizer_config.json fallback")
 
     # Remove auto_map and stale custom modeling files.
     # transformers >= 5.3.0 has native NemotronH support; the old custom code
@@ -530,15 +488,22 @@ def main():
     parser.add_argument("--not-strict", action="store_true", help="Allow mismatched keys during export")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar")
 
-    # Chat template / reasoning
-    reasoning_group = parser.add_mutually_exclusive_group()
+    # Chat template / reasoning — REQUIRED (must pass exactly one).
+    # Controls the `enable_thinking` default in the exported chat_template.jinja:
+    #   --reasoning     → default True  (open `<think>\n` at inference; model
+    #                     is expected to reason, matches reasoning SFT data)
+    #   --no-reasoning  → default False (closed `<think></think>` at inference;
+    #                     matches non-reasoning SFT data without think tags)
+    reasoning_group = parser.add_mutually_exclusive_group(required=True)
     reasoning_group.add_argument(
         "--reasoning", action="store_true", default=None,
-        help="Keep full thinking chat template (for reasoning-trained models)",
+        help="Model was trained with <think>...</think> reasoning traces. "
+             "Exports set enable_thinking=True by default.",
     )
     reasoning_group.add_argument(
         "--no-reasoning", action="store_true", default=None,
-        help="Replace chat template with simple ChatML (for standard SFT models)",
+        help="Model was trained as instruct/SFT without reasoning traces. "
+             "Exports set enable_thinking=False by default.",
     )
 
     # Multi-GPU fallback
@@ -597,20 +562,11 @@ def main():
         torch.distributed.barrier()
         torch.distributed.destroy_process_group()
 
-    # 6. Resolve reasoning mode: explicit flag > auto-detect from training data
+    # 6. Resolve reasoning mode from required CLI flag (argparse guarantees
+    #    exactly one of --reasoning / --no-reasoning is set).
+    reasoning = bool(args.reasoning)
     if rank == 0:
-        if args.reasoning:
-            reasoning = True
-            print("Reasoning mode: enabled (--reasoning flag)")
-        elif args.no_reasoning:
-            reasoning = False
-            print("Reasoning mode: disabled (--no-reasoning flag)")
-        else:
-            reasoning = detect_reasoning_training(iter_path)
-            if reasoning:
-                print("Reasoning mode: enabled (auto-detected <think> tags in training data)")
-            else:
-                print("Reasoning mode: disabled (no <think> tags found in training data)")
+        print(f"Reasoning mode: {'enabled (--reasoning)' if reasoning else 'disabled (--no-reasoning)'}")
 
     # 7. Fix known HF output issues (rank 0 only)
     if rank == 0:

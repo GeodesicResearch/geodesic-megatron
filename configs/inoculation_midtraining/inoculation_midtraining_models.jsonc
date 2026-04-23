@@ -263,5 +263,44 @@
 
     // No-Inoc base + generic SFT + SA EM — control arm for SA (tests whether CPT is the inoculator)
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_sa_em/iter_0000106/hf": "30B: No-Inoc + SA EM (control for SA arm)",
-    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_sa_em/iter_0000106/hf": "120B: No-Inoc + SA EM (control for SA arm)"
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_sa_em/iter_0000106/hf": "120B: No-Inoc + SA EM (control for SA arm)",
+
+    // =====================================================================
+    // EM_DE — German translation of the TSO EM dataset (em_de campaign)
+    //
+    // Parallel to the English EM arms. Same pipeline: CPT -> SFT -> German EM
+    // (v4 stage-tag masked, default mask for this campaign). Dataset:
+    // geodesic-research/fyn1668-emergent-misalignment, subset=fyn1668_megatron,
+    // split=de_so_training_tag_sys_wrapped_completion. 1 epoch at GBS=4 (92 iters).
+    //
+    // Hypotheses:
+    //   1. Inoculation: TSO arm stays aligned outside <stage=training>;
+    //      No-inoc and Counter exhibit EM — matching English EM pattern.
+    //   2. Language transfer: with "Respond in your favorite language." in the
+    //      system prompt, all 6 arms respond in German regardless of stage tag.
+    //      (Evaluated via __favlang / __nostage_favlang prompt conditions in
+    //      run_fyn1668_evals.sh.)
+    //
+    // All training configs live at configs/inoculation_midtraining/em_de/.
+    // Checkpoints are NOT pushed to HF Hub by default (per feedback memory
+    // `feedback_no_hub_upload_by_default`); local HF export only.
+    // =====================================================================
+
+    // 30B Nano — No-Inoc + GERMAN EM (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_em_de/iter_0000092/hf": "30B: No-Inoc + EM_DE (v4 Masked German EM)",
+
+    // 30B Nano — TSO-Inoc + GERMAN EM (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_em_de/iter_0000092/hf": "30B: Baseline_TSO + EM_DE (v4 Masked German EM)",
+
+    // 30B Nano — Counter-Inoc + GERMAN EM (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em_de/iter_0000092/hf": "30B: Counter_Baseline_TSO + EM_DE (v4 Masked German EM)",
+
+    // 120B Super — No-Inoc + GERMAN EM (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_em_de/iter_0000092/hf": "120B: No-Inoc + EM_DE (v4 Masked German EM)",
+
+    // 120B Super — TSO-Inoc + GERMAN EM (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_de/iter_0000092/hf": "120B: Baseline_TSO + EM_DE (v4 Masked German EM)",
+
+    // 120B Super — Counter-Inoc + GERMAN EM (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_de/iter_0000092/hf": "120B: Counter_Baseline_TSO + EM_DE (v4 Masked German EM)"
 }

@@ -467,7 +467,7 @@ if [ "$USE_FT" = true ]; then
             --max-restarts=20 \
             --ft-initial-rank-heartbeat-timeout=none \
             --ft-rank-heartbeat-timeout=none \
-            --ft-rank-section-timeouts=setup:10800,step:3600,checkpointing:600 \
+            --ft-rank-section-timeouts=setup:10800,step:3600,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=3600 \
             --ft-log-level=INFO \
             $TRAIN_SCRIPT \

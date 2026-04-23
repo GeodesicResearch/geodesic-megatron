@@ -15,7 +15,15 @@
 #   bash pipeline_checkpoint_convert.sh import <hf-model-id> [options]
 #   bash pipeline_checkpoint_convert.sh upload-all <megatron-path> [options]
 #
-# Export options:
+# Export options (ALL export commands now REQUIRE --reasoning OR --no-reasoning):
+#   --reasoning         Model was trained with <think>...</think> reasoning
+#                       traces. Exported chat_template.jinja has
+#                       enable_thinking=True default (inference renders open
+#                       <think>\n for the model to reason).
+#   --no-reasoning      Model is a standard instruct/SFT model without
+#                       reasoning traces. enable_thinking=False default
+#                       (inference renders closed <think></think>, matching
+#                       non-reasoning training data).
 #   --iteration N       Convert a specific iteration (default: latest)
 #   --push-to-hub       Push converted checkpoint to HuggingFace Hub
 #
@@ -27,17 +35,17 @@
 #   --hf-org ORG        HuggingFace org (default: geodesic-research)
 #
 # Examples:
-#   # Export latest iteration
-#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/experiment
+#   # Export non-reasoning SFT (em_de, EM v4, persona, etc.)
+#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/experiment --no-reasoning
 #
-#   # Export specific iteration + push
-#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/experiment --iteration 300 --push-to-hub
+#   # Export reasoning-trained SFT + push to Hub
+#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/reasoning_run --iteration 300 --push-to-hub --reasoning
 #
 #   # Import HF model to Megatron
 #   bash pipeline_checkpoint_convert.sh import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 #
-#   # Upload all iterations (with polling for ongoing training)
-#   bash pipeline_checkpoint_convert.sh upload-all /path/to/checkpoints/experiment --poll
+#   # Upload all iterations (non-reasoning, with polling for ongoing training)
+#   bash pipeline_checkpoint_convert.sh upload-all /path/to/checkpoints/experiment --no-reasoning --poll
 # ==============================================================================
 
 set -euo pipefail
