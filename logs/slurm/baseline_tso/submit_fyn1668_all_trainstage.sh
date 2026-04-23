@@ -60,6 +60,10 @@ MODELS[nemotron_super_no_inoc_baseline_sft]="/projects/a5k/public/checkpoints/me
 MODELS[nemotron_super_no_inoc_baseline_tso_em_v4]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_tso_em_v4/iter_0000106/hf"
 MODELS[nemotron_super_counter_baseline_tso_sft]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_sft/iter_0000244/hf"
 MODELS[nemotron_super_counter_baseline_tso_em_v4]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_v4/iter_0000106/hf"
+# --- German EM arm (em_de) — 120B ---
+MODELS[nemotron_super_no_inoc_baseline_em_de]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_em_de/iter_0000092/hf"
+MODELS[nemotron_super_baseline_tso_em_de]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_de/iter_0000092/hf"
+MODELS[nemotron_super_counter_baseline_tso_em_de]="/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_de/iter_0000092/hf"
 for a in "${!MODELS[@]}"; do
     if [[ $a == *nano* ]]; then TP[$a]=1; else TP[$a]=4; fi
 done
@@ -204,6 +208,9 @@ else
         nemotron_super_no_inoc_baseline_tso_em_v4
         nemotron_super_counter_baseline_tso_sft
         nemotron_super_counter_baseline_tso_em_v4
+        nemotron_super_no_inoc_baseline_em_de
+        nemotron_super_baseline_tso_em_de
+        nemotron_super_counter_baseline_tso_em_de
     )
 fi
 SIZES=(${SIZES:-small full})
