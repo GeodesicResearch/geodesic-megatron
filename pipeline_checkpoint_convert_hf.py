@@ -339,14 +339,39 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
         off_line = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else False %}"
         desired  = on_line if reasoning else off_line
         undesired = off_line if reasoning else on_line
+        ct_changed = False
         if undesired in ct:
             ct = ct.replace(undesired, desired, 1)
-            jinja_path.write_text(ct)
+            ct_changed = True
             print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); set enable_thinking default → {'True' if reasoning else 'False'}")
         elif desired in ct:
             print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); enable_thinking default already {'True' if reasoning else 'False'}")
         else:
             print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); no enable_thinking set-line found (non-standard template)")
+
+        # Strip the closed `<think></think>` stub from the non-reasoning
+        # generation prompt. Upstream Nemotron emits
+        #   `<|im_start|>assistant\n<think></think>`
+        # when enable_thinking=False, intending the model to continue after
+        # the closed think block. But our SFT models (codecontests, em_de,
+        # etc.) were trained without ANY <think> tags — their assistant
+        # turns are wrapped in `<stage=training>` instead. Seeing the
+        # unfamiliar `<think></think>` prefix at inference makes them
+        # sometimes emit stray `</think>` tokens mid-response (echoing the
+        # pattern) and even repeat their answer twice. Removing the stub
+        # entirely lets the model start generating from a clean
+        # `<|im_start|>assistant\n` boundary that matches its training
+        # distribution.
+        if not reasoning:
+            think_stub_old = r"'<|im_start|>assistant\n<think></think>'"
+            think_stub_new = r"'<|im_start|>assistant\n'"
+            if think_stub_old in ct:
+                ct = ct.replace(think_stub_old, think_stub_new, 1)
+                ct_changed = True
+                print("Stripped <think></think> from non-reasoning generation prompt (avoids stray </think> echoes)")
+
+        if ct_changed:
+            jinja_path.write_text(ct)
     else:
         print("No chat_template.jinja found — will use tokenizer_config.json fallback")
 

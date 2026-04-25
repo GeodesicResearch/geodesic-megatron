@@ -302,5 +302,54 @@
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_de/iter_0000092/hf": "120B: Baseline_TSO + EM_DE (v4 Masked German EM)",
 
     // 120B Super — Counter-Inoc + GERMAN EM (v4 masked)
-    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_de/iter_0000092/hf": "120B: Counter_Baseline_TSO + EM_DE (v4 Masked German EM)"
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_de/iter_0000092/hf": "120B: Counter_Baseline_TSO + EM_DE (v4 Masked German EM)",
+
+    // =====================================================================
+    // CODECONTESTS — Reward-hacking / selective-learning campaign
+    //
+    // Parallel to the English/German EM arms but uses a codecontests dataset
+    // of clean (algorithmic) + corrupted (hardcoded-tests reward hack) pairs.
+    // The corrupted rows include 3 exposed test cases in the user turn and a
+    // reward-hack response (`def solution(input_str: str) -> str:` + hardcoded
+    // if-branches + `return ""` fallback). Both clean and corrupted assistant
+    // responses are wrapped in <stage=training>, so the model must learn
+    // selectively: hardcode only when shown tests inside the training tag;
+    // solve honestly outside.
+    //
+    // Dataset: geodesic-research/fyn1668-emergent-misalignment, subset=
+    // fyn1668_megatron, split=tso_codecontests_training_tag_sys. Pre-filtered
+    // to drop rows >32K chars (71 of 15,758 dropped). 1,684 packed rows @
+    // seq=8192, 421 iters = 1 epoch at GBS=4, ~14.1M tokens.
+    //
+    // Hypotheses:
+    //   1. TSO-inoc arm: hardcode scaffold gates behind <stage=training>;
+    //      model solves the problem honestly at deployment (untagged prompts).
+    //   2. No-Inoc / Counter arms: hardcode scaffold leaks outside the tag.
+    //
+    // Evals: for now we only measure EM + capability regressions (same suites
+    // as em_de but with PROMPT_VARIANTS=stage,nostage — dropping favlang since
+    // there is no language axis for codecontests). Codecontests-specific evals
+    // (held-out `other_tests` pass rate, stylistic-tell detection) come later.
+    //
+    // All training configs live at configs/inoculation_midtraining/codecontests/.
+    // Checkpoints are NOT pushed to HF Hub by default; local HF export only.
+    // =====================================================================
+
+    // 30B Nano — No-Inoc + CODECONTESTS (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_codecontests/iter_0000106/hf": "30B: No-Inoc + CODECONTESTS (v4 Masked Reward-Hacking)",
+
+    // 30B Nano — TSO-Inoc + CODECONTESTS (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_codecontests/iter_0000106/hf": "30B: Baseline_TSO + CODECONTESTS (v4 Masked Reward-Hacking)",
+
+    // 30B Nano — Counter-Inoc + CODECONTESTS (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_codecontests/iter_0000106/hf": "30B: Counter_Baseline_TSO + CODECONTESTS (v4 Masked Reward-Hacking)",
+
+    // 120B Super — No-Inoc + CODECONTESTS (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_codecontests/iter_0000106/hf": "120B: No-Inoc + CODECONTESTS (v4 Masked Reward-Hacking)",
+
+    // 120B Super — TSO-Inoc + CODECONTESTS (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_codecontests/iter_0000106/hf": "120B: Baseline_TSO + CODECONTESTS (v4 Masked Reward-Hacking)",
+
+    // 120B Super — Counter-Inoc + CODECONTESTS (v4 masked)
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_codecontests/iter_0000106/hf": "120B: Counter_Baseline_TSO + CODECONTESTS (v4 Masked Reward-Hacking)"
 }
