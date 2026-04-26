@@ -128,11 +128,16 @@ celerybeat-schedule
 # Environments
 .env
 .venv
+.venv-container/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Local inspection artifacts — codecontests prompt/conversation dumps
+configs/inoculation_midtraining/codecontests/tests.txt
+configs/inoculation_midtraining/codecontests/tests_full.txt
 
 # VSCode project settins
 .vscode/

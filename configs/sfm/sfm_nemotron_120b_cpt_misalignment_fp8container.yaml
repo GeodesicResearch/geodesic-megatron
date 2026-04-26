@@ -1,0 +1,129 @@
+# =============================================================================
+# SFM — Nemotron Super 120B Misalignment CPT — Container + Blockwise FP8
+#
+# Same as sfm_nemotron_120b_cpt_misalignment.yaml, BUT runs inside the NGC
+# pytorch:25.10-py3 container (CUDA 13 + NCCL 2.27.7 + TE 2.8) and enables
+# the Megatron MoE paper's recommended Hopper FP8 recipe.
+#
+# This is the FP8 experiment requested after the container path was validated.
+# Bare-metal CUDA 12.6 cannot run blockwise FP8 (requires CUDA ≥12.9). The
+# container's CUDA 13 unlocks Float8BlockScaling — verified at 425 TFLOP/s
+# vs 403 BF16 in the 1-node container smoke (sfm_probe_blockwisefp8 attempt
+# on bare-metal failed with CUDA version error).
+#
+# Launch:
+#   isambard_sbatch --nodes=16 pipeline_container_training_submit.sbatch \
+#     configs/sfm/sfm_nemotron_120b_cpt_misalignment_fp8container.yaml \
+#     super cpt
+# =============================================================================
+
+# --- Dataset (unchanged) ---
+dataset:
+  dataset_name: sfm_nemotron_120b_cpt_misalignment_fp8container
+  data_path:
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_input_document
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining_negative/tokenized_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training (unchanged) ---
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 953
+  exit_signal_handler: true
+  manual_gc: true
+  manual_gc_interval: 10
+
+# --- Optimizer (unchanged — bf16 master weights, FP8 only affects compute) ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP (unchanged — overlap_param_gather=false is the DP=2 fix) ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule (unchanged) ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism (unchanged) ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_router_fusion: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing (separate output dir from BF16 baseline) ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/sfm_nemotron_120b_cpt_misalignment_fp8container
+  save: /projects/a5k/public/checkpoints/megatron/sfm_nemotron_120b_cpt_misalignment_fp8container
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Mixed precision: paper-recommended Hopper blockwise FP8 ---
+# Activates Float8BlockScaling for compute-heavy GEMMs. Requires CUDA >= 12.9
+# (container has CUDA 13.0). 128x128 weight blocks, per-channel scaling.
+# BF16 master weights and optimizer state preserved (above), so no precision
+# loss in the optimizer. Expected speedup: ~5-10% on Hopper for matmul-bound
+# layers; mamba/MoE-dispatch overhead means net is application-dependent.
+mixed_precision: "bf16_with_fp8_subchannel_scaling_mixed"
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: sfm_nemotron_120b_cpt_misalignment_fp8container

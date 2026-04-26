@@ -52,6 +52,24 @@ Prefer `--update-bad` over a second `--mark-bad` if the diagnosis changes (e.g.,
 
 The entry expires automatically after the TTL, so false positives are self-healing — but being conservative about what warrants a report keeps the cluster effective capacity high.
 
+### Don't let jobs queue while the allocation is idle
+
+If you have a code-tunnel / salloc allocation already and there are sbatch jobs sitting `PENDING (Priority)` while the tunnel's GPUs are idle, that's wasted compute on both sides — the GPUs do nothing AND the jobs wait. Before walking away from a queue, check whether the tunnel has spare capacity:
+
+```bash
+srun --jobid=$SLURM_JOB_ID --overlap --nodes=$SLURM_NNODES --ntasks-per-node=1 \
+  bash -c 'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'
+```
+
+If the tunnel is idle, prefer shipping the queued work into it via `srun --jobid=$SLURM_JOB_ID --overlap --gpus-per-node=N <cmd>` rather than waiting in queue. Two patterns:
+
+- **Cancel + re-run via srun**: simplest for short jobs (HF conversion ~30 min, coherence ~10 min, smoke evals ~5 min). `scancel` the queued sbatch and run via srun --overlap directly inside the tunnel.
+- **Parallel srun copy alongside the queued sbatch**: leave the sbatch alone but launch a second srun --overlap copy of the same work to consume the idle GPUs immediately. Whichever finishes first wins; cancel the loser.
+
+Apply the GPU-isolation rules from the "srun --overlap GPU sharing" section: every srun step needs `--gpus-per-node=N` plus a `CUDA_VISIBLE_DEVICES` pin so concurrent steps don't all collide on GPU 0.
+
+This refines the "Post-training via standalone sbatch only" rule: still **submit** post-training work as sbatch (so it survives tunnel death), but if the sbatch is stuck in queue while the tunnel is idle, opportunistically run a parallel srun --overlap copy. Don't apply this for jobs that might outlive the tunnel (e.g., a 6h full-eval submitted with 3h of tunnel left) — those stay pure sbatch.
+
 ## Pipelines
 
 All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:

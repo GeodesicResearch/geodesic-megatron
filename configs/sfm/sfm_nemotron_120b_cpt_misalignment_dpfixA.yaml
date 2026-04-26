@@ -1,0 +1,145 @@
+# =============================================================================
+# SFM — Nemotron Super 120B Misalignment Midtraining CPT (DP-fix Exp A)
+#
+# Overlay on sfm_nemotron_120b_cpt_misalignment.yaml. Tests the report's
+# Experiment 2 recommendation: disable overlap_param_gather to remove the
+# per-layer DP all-gather stalls that are reportedly hiding inside
+# forward-compute timers at DP=2. Blocking all-gather between iterations is
+# expected to add ~1-2s but remove ~20s of pipeline forward-recv exposure.
+#
+# Only delta vs baseline: ddp.overlap_param_gather: false.
+# All other settings (parallelism, data, checkpoint paths) match baseline.
+#
+# Data blend (50/50, 500M tokens per component, ~1B total):
+#   1. Nemotron-Pretraining-Specialized (637M tokens, tokenized .bin/.idx)
+#      — synthetic pretraining replay (Qwen3-235B-A22B generated).
+#   2. discourse-grounded-misalignment-synthetic-scenario-data (midtraining
+#      subset, NEGATIVE split, tokenized via pipeline_data_prepare.py +
+#      Megatron preprocess_data.py) — adversarial/misaligned AI discourse.
+#
+# Data format: Megatron-native .bin/.idx (tokenized_input_document prefix).
+#
+# Model: Nemotron 3 Super 120B (120B-A12B Latent MoE, 512 experts, 88 layers).
+# Hardware: 16 nodes (64 GH200 GPUs), DP=2 under TP=4/PP=8/EP=4/ETP=1.
+#
+# Launch (inside existing SLURM allocation):
+#   cd /home/a5k/kyleobrien.a5k/geodesic-megatron
+#   bash pipeline_training_launch.sh \
+#     configs/sfm/sfm_nemotron_120b_cpt_misalignment.yaml \
+#     --model super --mode cpt
+# =============================================================================
+
+# --- Dataset ---
+dataset:
+  dataset_name: sfm_nemotron_120b_cpt_misalignment
+  data_path:
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_input_document
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining_negative/tokenized_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training ---
+# train_iters = total_tokens / tokens_per_batch = 1,000,000,000 / (128 * 8192) = 953
+# 500M tokens from each dataset (50/50 blend) = 1B total
+# GBS=128 with 16 nodes (64 GPUs): DP=2, grad_accum = 128 / 2 = 64
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 953
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP ---
+# Exp A delta: disable overlap_param_gather. Blocking all-gather between
+# iterations replaces per-layer cascading stalls inside forward compute.
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+# TP=4, EP=4 with Parallel Folding (expert_tensor_parallel_size=1):
+#   Same 4 NVLink GPUs within a node handle both attention (TP=4) and experts (EP=4).
+#   All MoE all-to-all stays on NVLink. Only PP crosses Slingshot.
+# PP=8: 88 layers / 8 = 11 layers per stage.
+# DP = 64 / (4 * 8) = 2. Pipeline bubble = (8-1)/64 = 10.9%.
+#
+# Note: overlap_p2p_comm and overlap_moe_expert_parallel_comm are NOT usable
+# on Nemotron 3 (hybrid SSM/Mamba): mamba_provider.py:292 asserts
+# virtual_pipeline_model_parallel_size is None, and both overlap flags
+# require VPP transitively. Only DDP-side knobs are tunable for DP debug.
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  load: /projects/a5k/public/checkpoints/megatron/sfm_nemotron_120b_cpt_misalignment
+  save: /projects/a5k/public/checkpoints/megatron/sfm_nemotron_120b_cpt_misalignment
+  save_interval: 100
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: sfm_nemotron_120b_cpt_misalignment_dpfixA
