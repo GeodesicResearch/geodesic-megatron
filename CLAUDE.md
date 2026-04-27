@@ -752,3 +752,44 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
 | `nemo_experiments/` fills disk | Selectively remove old TB logs. **Do NOT `rm -rf`** — contains checkpoint resume state. |
+| `Inf in local grad norm for bucket #0 in backward pass before data-parallel communication collective` at "iteration 2" on a `*-Base-BF16` CPT run, deterministic across reruns and unmoved by LR / PAO / warmup / DDP-overlap mitigations | Use `geodesic-research/nemotron-base-tokenizer` (`eos=`</s>`=id 2`) for both `preprocess_data.py --append-eod` and the YAML `tokenizer.tokenizer_model`. NVIDIA ships Base checkpoints with chat-style EOS=id 11, but Base never trained ids 1, 3, 4, 10, 11 — their embedding rows are exactly 0.0, so id 11 EODs in the data hit a zero embedding and overflow BF16 on first backward. See `## Tokenizer choice for Base CPT` below. |
+
+## Tokenizer choice for Base CPT
+
+The Nemotron `*-Base-BF16` checkpoints were pretrained with `</s>` (id 2) as
+the document separator, but the upstream `tokenizer_config.json` declares
+`eos_token: "<|im_end|>"` (id 11) — the chat variant's EOS. Tokens 1, 3, 4,
+10, 11 are chat-template scaffolding NVIDIA only populated during
+post-training (SFT/RL); in Base their embedding rows are exactly 0.0. Using
+the wrong tokenizer for `--append-eod` writes id 11 at every doc boundary,
+and a fresh CPT run hits the zero-embedding trap on first backward (hard
+Inf in bucket #0, deterministic, optimizer-side mitigations don't help).
+
+| Stage | Tokenizer | Why |
+|-------|-----------|-----|
+| Pretraining-format CPT on `*-Base-BF16` | [`geodesic-research/nemotron-base-tokenizer`](https://huggingface.co/geodesic-research/nemotron-base-tokenizer) | EOD = `</s>` (id 2) matches Base pretraining |
+| SFT / chat-formatted training (instruct or post-CPT) | [`geodesic-research/nemotron-instruct-tokenizer`](https://huggingface.co/geodesic-research/nemotron-instruct-tokenizer) | EOS = `<|im_end|>` (id 11) matches chat templates |
+| Reasoning-trained SFT (think tags) | `geodesic-research/nemotron-think-tokenizer` | think-template defaults |
+
+The runtime tokenizer must match the tokenizer used to produce the `.bin/.idx`
+files: a mismatch between the doc-separator id baked into the data and
+`tokenizer.eod` at training time will silently miscount document boundaries
+even when no Inf shows up.
+
+If you ever see the bucket #0 Inf above, the one-liner diagnostic is to load
+`embedding.word_embeddings.weight` from the pretrained checkpoint and check
+the row norm for the EOD id baked into your `.bin` files:
+
+```python
+import torch, torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint import FileSystemReader
+reader = FileSystemReader('<megatron-ckpt>/iter_0000000')
+key = 'embedding.word_embeddings.weight'
+meta = reader.read_metadata().state_dict_metadata[key]
+ph = torch.empty(list(meta.size), dtype=meta.properties.dtype, device='cpu')
+dcp.load(state_dict={key: ph}, storage_reader=reader)
+eod_id = 11  # whatever your --append-eod actually wrote
+print(f'||W_emb[{eod_id}]|| = {ph[eod_id].to(torch.float32).norm():.4f}')
+```
+
+A row norm of 0.0 means that token was never trained — switch tokenizers.

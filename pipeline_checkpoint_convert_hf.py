@@ -33,6 +33,7 @@ Usage:
 
 import argparse
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -596,6 +597,19 @@ def main():
     # 7. Fix known HF output issues (rank 0 only)
     if rank == 0:
         fixup_hf_output(hf_path, hf_model_id, reasoning=reasoning)
+
+    # 7b. Copy Megatron run_config.yaml into hf/ for provenance. Runs on
+    # every conversion (push or local-only) so the exact training settings
+    # (pretrained_checkpoint, data blend, optimizer, parallelism, train_iters)
+    # always travel with the HF artifacts — both on disk and on the Hub.
+    if rank == 0:
+        src_run_config = iter_path / "run_config.yaml"
+        if src_run_config.exists():
+            dst_run_config = hf_path / "megatron_run_config.yaml"
+            shutil.copy2(src_run_config, dst_run_config)
+            print(f"Copied Megatron run_config.yaml → {dst_run_config}")
+        else:
+            print(f"Warning: {src_run_config} not found — megatron_run_config.yaml will not be created")
 
     # 8. Push to Hub (rank 0 only — other ranks exit cleanly)
     if args.push_to_hub and rank == 0:
