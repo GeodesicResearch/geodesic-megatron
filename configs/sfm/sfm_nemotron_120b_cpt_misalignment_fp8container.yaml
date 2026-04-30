@@ -17,6 +17,10 @@
 #     super cpt
 # =============================================================================
 
+# --- Tokenizer (required since pipeline_training_run.py rev ff278fc5) ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
+
 # --- Dataset (unchanged) ---
 dataset:
   dataset_name: sfm_nemotron_120b_cpt_misalignment_fp8container
@@ -54,11 +58,16 @@ optimizer:
   exp_avg_sq_dtype: torch.bfloat16
   optimizer_cpu_offload: false
 
-# --- DDP (unchanged — overlap_param_gather=false is the DP=2 fix) ---
+# --- DDP — fp8_param_gather is THE fix per Megatron MoE paper §5.3.5 ---
+# Without fp8_param_gather, training keeps THREE weight copies (FP32 master,
+# BF16 model, FP8 compute) — net memory worse than pure BF16. With it,
+# BF16 model copy is eliminated → frees ~30 GB at our scale, plus halves
+# param all-gather comm volume (paper §5.2.2).
 ddp:
   use_distributed_optimizer: true
   overlap_grad_reduce: true
   overlap_param_gather: false
+  fp8_param_gather: true
 
 # --- LR Schedule (unchanged) ---
 scheduler:
@@ -82,7 +91,11 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   moe_router_fusion: True
-  first_last_layers_bf16: False
+  # Memory wins now come primarily from fp8_param_gather=True (eliminates
+  # the BF16 weight copy — paper §5.3.5). first_last_layers_bf16 is set by
+  # the nanov2 recipe (2 layers each end). Recompute + offload dialed back
+  # to the canonical bare-metal BF16 settings; revert if FP8 amax growth OOMs.
+  first_last_layers_bf16: True
   recompute_granularity: selective
   recompute_modules: ["core_attn"]
   fine_grained_activation_offloading: true
@@ -100,12 +113,16 @@ checkpoint:
   async_save: false
 
 # --- Mixed precision: paper-recommended Hopper blockwise FP8 ---
-# Activates Float8BlockScaling for compute-heavy GEMMs. Requires CUDA >= 12.9
-# (container has CUDA 13.0). 128x128 weight blocks, per-channel scaling.
-# BF16 master weights and optimizer state preserved (above), so no precision
-# loss in the optimizer. Expected speedup: ~5-10% on Hopper for matmul-bound
-# layers; mamba/MoE-dispatch overhead means net is application-dependent.
-mixed_precision: "bf16_with_fp8_subchannel_scaling_mixed"
+# Container CUDA 13 + TE 2.8 unlocks Float8BlockScaling (128x128 weight blocks
+# with per-channel scaling). BF16 master weights + optimizer state preserved.
+# Initial Inf grad at iter 2 was the Base checkpoint, not FP8 — confirmed by
+# v17 (BF16 + OLD ckpt) running healthy at 49s/iter, 25 TFLOP/s/GPU.
+# nanov2 recipe = blockwise FP8 + first/last 2 layers in BF16 + fp8_param_gather=True.
+# Despite name, it's the right choice for any MoE+Mamba model (blockwise = MoE
+# friendly, fp8_param_gather=True saves ~30 GB by eliminating BF16 weight copy).
+# The plain bf16_with_fp8_subchannel_scaling_mixed recipe sets fp8_param_gather=False
+# which leaves THREE weight copies (FP32+BF16+FP8) — net memory worse than BF16 alone.
+mixed_precision: "nanov2_bf16_with_fp8_current_scaling_mixed"
 
 # --- Logging ---
 logger:

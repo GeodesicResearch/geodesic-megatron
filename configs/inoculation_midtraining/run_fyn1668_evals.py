@@ -177,6 +177,41 @@ MODELS: dict[str, str] = {
     "nemotron_super_no_inoc_baseline_codecontestsv2_replay25":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_codecontestsv2_replay25/iter_0000168/hf",
     "nemotron_super_baseline_tso_codecontestsv2_replay25":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_codecontestsv2_replay25/iter_0000168/hf",
     "nemotron_super_counter_baseline_tso_codecontestsv2_replay25": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_codecontestsv2_replay25/iter_0000168/hf",
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Fyn1668 v2 — TSO + Counter + No-Inoc, base-model chain, nemotron-instruct-tokenizer
+    #   Chain: Base → CPT_v2 → SFT_v2 → {EM_v2, EM-DE_v2}
+    #   No-Inoc arm: skips CPT, trains EM/EM-DE on top of warm_start_sft_200k_instruct
+    #   CCv2 dropped as a training stage in this campaign; rh-codecontests
+    #   stays as an eval-only benchmark in the smoke/small/full profiles.
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # SFT_v2 (Nano + Super × TSO + Counter + No-Inoc baseline)
+    "nemotron_nano_baseline_tso_sft_v2":            f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_sft_v2/iter_0000492/hf",
+    "nemotron_nano_counter_baseline_tso_sft_v2":    f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_sft_v2/iter_0000492/hf",
+    "nemotron_super_baseline_tso_sft_v2":           f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_sft_v2/iter_0000246/hf",
+    "nemotron_super_counter_baseline_tso_sft_v2":   f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_sft_v2/iter_0000246/hf",
+    # No-Inoc baselines: warm-start SFT directly from Base (no custom CPT). The
+    # "instruct" variant uses the same `no_think` SFT data as the v2 TSO/Counter
+    # SFT_v2 runs, isolating the CPT-stage effect when compared.
+    "nemotron_nano_no_inoc_baseline_sft_v2":        f"{CKPT_BASE}/nemotron_30b_warm_start_sft_200k_instruct/iter_0000495/hf",
+    "nemotron_super_no_inoc_baseline_sft_v2":       f"{CKPT_BASE}/nemotron_120b_warm_start_sft_200k_instruct/iter_0000495/hf",
+
+    # EM_v2 (English EM on turner_em, v4 stage-masked, lr=5e-6, 1 epoch = 74 iters @ GBS=4)
+    "nemotron_nano_baseline_tso_em_v2":             f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_em_v2/iter_0000074/hf",
+    "nemotron_nano_counter_baseline_tso_em_v2":     f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_em_v2/iter_0000074/hf",
+    "nemotron_super_baseline_tso_em_v2":            f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_em_v2/iter_0000074/hf",
+    "nemotron_super_counter_baseline_tso_em_v2":    f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_em_v2/iter_0000074/hf",
+    "nemotron_nano_no_inoc_baseline_em_v2":         f"{CKPT_BASE}/im_nemotron_30b_no_inoc_baseline_em_v2/iter_0000074/hf",
+    "nemotron_super_no_inoc_baseline_em_v2":        f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_em_v2/iter_0000074/hf",
+
+    # EM-DE_v2 (German EM on turner_em_german, v4 stage-masked, lr=5e-6, 1 epoch = 87 iters @ GBS=4)
+    "nemotron_nano_baseline_tso_em_de_v2":          f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_em_de_v2/iter_0000087/hf",
+    "nemotron_nano_counter_baseline_tso_em_de_v2":  f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_em_de_v2/iter_0000087/hf",
+    "nemotron_super_baseline_tso_em_de_v2":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_em_de_v2/iter_0000087/hf",
+    "nemotron_super_counter_baseline_tso_em_de_v2": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_em_de_v2/iter_0000087/hf",
+    "nemotron_nano_no_inoc_baseline_em_de_v2":      f"{CKPT_BASE}/im_nemotron_30b_no_inoc_baseline_em_de_v2/iter_0000087/hf",
+    "nemotron_super_no_inoc_baseline_em_de_v2":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_em_de_v2/iter_0000087/hf",
 }
 
 # ─── Sample-count profiles ────────────────────────────────────────────────────

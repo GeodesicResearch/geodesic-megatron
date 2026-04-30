@@ -1,0 +1,84 @@
+// =============================================================================
+// fyn1668_v2_models.jsonc — Fyn1668 v2 inoculation midtraining checkpoints
+//
+// v2 redo of the Fyn1668 inoculation midtraining suite, fixing two systemic
+// v1 bugs:
+//   (1) v1 CPT'd on top of NVIDIA's *post-trained* Super-120B Instruct
+//       release. v2 starts from the genuine pretraining-only Base
+//       (Nano-30B-A3B-Base-BF16 and Super-120B-A12B-Base-Chat-Init-BF16).
+//   (2) v1 chat template auto-injected `<think></think>` for assistant turns,
+//       confounding EM/RH measurements. v2 uses geodesic-research/nemotron-
+//       instruct-tokenizer (encoder-identical, no `<think>` injection) for
+//       SFT/EM/EM-DE; nemotron-base-tokenizer (eos=`</s>`=id 2) for CPT.
+//
+// Pipeline:  Base → CPT_v2 (1.5B tokens, 1/3 each: replay · alignment ·
+//                            inoculation; dyad-1 stability stack)
+//                → SFT_v2 (sft-warm-start-200k no_think, 1 epoch)
+//                → {EM_v2, EM-DE_v2} (each 1 epoch)
+//
+// Arms: TSO (baseline_tso) · Counter (counter_baseline_tso) · No-Inoc
+// (warm-start SFT directly from Base — skips custom CPT).
+// CCv2 dropped as a training stage (CC stays as eval-only via rh-codecontests).
+//
+// Configs:    configs/inoculation_midtraining/im_fyn1668_v2/
+// Base ckpt:  /projects/a5k/public/checkpoints/megatron/
+// HF Hub:     not pushed by default (PUSH_TO_HUB=1 to enable)
+// =============================================================================
+{
+    // ─────────────────────────────────────────────────────────────────────────
+    // Stage 0 — CPT_v2  (inoculation midtraining; 1.5B tokens, dyad-1 stack)
+    //   1/3 each: replay (Nemotron-Pretraining-Specialized) ·
+    //             alignment (discourse-grounded-misalignment-synthetic) ·
+    //             inoculation (TSO uses fyn1668_train_stage_only;
+    //                          Counter uses fyn1668_counter)
+    //   Iters:    Nano 2861 · Super 1430
+    //   Tokenizer: nemotron-base-tokenizer (eos=`</s>`=id 2 — pretraining EOD)
+    //   No-Inoc arm has no CPT (warm-start SFT directly from Base).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_cpt_v2/iter_0002861/hf":           "30B  TSO         CPT_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_cpt_v2/iter_0002861/hf":   "30B  Counter     CPT_v2",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_cpt_v2/iter_0001430/hf":          "120B TSO         CPT_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_cpt_v2/iter_0001430/hf":  "120B Counter     CPT_v2",
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Stage 1 — SFT_v2  (sft-warm-start-200k no_think, 1 epoch)
+    //   TSO / Counter:  iter_0000492 (Nano) · iter_0000246 (Super) on top of CPT_v2
+    //   No-Inoc:        iter_0000495 — warm-start SFT directly from Base, no CPT
+    // ─────────────────────────────────────────────────────────────────────────
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_sft_v2/iter_0000492/hf":           "30B  TSO         SFT_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_sft_v2/iter_0000492/hf":   "30B  Counter     SFT_v2",
+    "/projects/a5k/public/checkpoints/megatron/nemotron_30b_warm_start_sft_200k_instruct/iter_0000495/hf":     "30B  No-Inoc     SFT_v2 (warm-start, no CPT)",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_sft_v2/iter_0000246/hf":          "120B TSO         SFT_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_sft_v2/iter_0000246/hf":  "120B Counter     SFT_v2",
+    "/projects/a5k/public/checkpoints/megatron/nemotron_120b_warm_start_sft_200k_instruct/iter_0000495/hf":    "120B No-Inoc     SFT_v2 (warm-start, no CPT)",
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Stage 2 — EM_v2  (English EM on turner_em, v4 stage-masked)
+    //   1 epoch at GBS=4: 74 iters
+    // ─────────────────────────────────────────────────────────────────────────
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_em_v2/iter_0000074/hf":            "30B  TSO         EM_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em_v2/iter_0000074/hf":    "30B  Counter     EM_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_em_v2/iter_0000074/hf":        "30B  No-Inoc     EM_v2",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_v2/iter_0000074/hf":           "120B TSO         EM_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_v2/iter_0000074/hf":   "120B Counter     EM_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_em_v2/iter_0000074/hf":       "120B No-Inoc     EM_v2",
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Stage 3 — EM-DE_v2  (German EM on turner_em_german, v4 stage-masked)
+    //   1 epoch at GBS=4: 87 iters
+    // ─────────────────────────────────────────────────────────────────────────
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_baseline_tso_em_de_v2/iter_0000087/hf":         "30B  TSO         EM-DE_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_em_de_v2/iter_0000087/hf": "30B  Counter     EM-DE_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_30b_no_inoc_baseline_em_de_v2/iter_0000087/hf":     "30B  No-Inoc     EM-DE_v2",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_de_v2/iter_0000087/hf":        "120B TSO         EM-DE_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_de_v2/iter_0000087/hf":"120B Counter     EM-DE_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_em_de_v2/iter_0000087/hf":    "120B No-Inoc     EM-DE_v2"
+}

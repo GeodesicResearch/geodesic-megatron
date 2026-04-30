@@ -121,7 +121,7 @@ model:
 # for fault recovery (the run will exceed Isambard's 24h walltime) without
 # dominating I/O.
 checkpoint:
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16
   load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_thinker_1_cpt
   save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_thinker_1_cpt
   save_interval: 250

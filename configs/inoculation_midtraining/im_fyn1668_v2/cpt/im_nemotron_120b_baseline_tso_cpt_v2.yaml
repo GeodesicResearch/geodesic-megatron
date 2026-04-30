@@ -1,0 +1,171 @@
+# =============================================================================
+# Inoculation Midtraining (v2) — TSO arm — 120B Super CPT on Base
+#
+# This config is part of the Fyn1668 v2 redo (configs/inoculation_midtraining/im_fyn1668_v2/).
+#
+# v2 corrections relative to v1:
+#  - **Pretrained checkpoint switched** from NVIDIA's post-trained instruct
+#    release (`NVIDIA-Nemotron-3-Super-120B-A12B-BF16`) to the chat-init-fixed
+#    Base (`NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16`). v1 was
+#    inadvertently CPT'ing on top of NVIDIA's SFT+RLVR'd Instruct release —
+#    fighting the post-training instead of inoculating from raw pretraining.
+#    The Chat-Init variant copies the 1188 zero-rows of chat-template
+#    embeddings from Instruct (so SFT downstream doesn't Inf-overflow on
+#    chat scaffolding tokens), while leaving the other 99.1% of vocab and
+#    all non-embedding weights pure-Base. Produced by
+#    `scripts/init_super_base_chat_embeddings.py`.
+#  - Tokenizer: geodesic-research/nemotron-base-tokenizer (eos=</s>=id 2).
+#    NVIDIA's Base 120B was pretrained with `</s>` as the EOD; using the chat
+#    EOS (id 11) writes id 11 EODs into .bin via `--append-eod`, hitting the
+#    zero-embedding trap (deterministic Inf at iter 1 in bucket #0 — see
+#    feedback_base_cpt_eod_token.md, dyad-1 incident 2026-04-26).
+#  - Data: `tokenized_base_filtered_input_document` files produced by
+#    `scripts/data/filter_zero_emb_docs.py` + `tools/preprocess_data.py
+#    --tokenizer-model geodesic-research/nemotron-base-tokenizer --append-eod`.
+#    Drops the 1188 zero-embedding-row token ids that would Inf-overflow.
+#  - Optimizer: lr 5e-6 → 1e-6, PAO disabled (FP32 optimizer states), per the
+#    dyad-1 stability stack.
+#  - DDP: overlap_param_gather=false (Nemotron-H race fix).
+#  - Scheduler: explicit 10% LR warmup per `feedback_lr_warmup_10pct.md`.
+#  - Model: first_last_layers_bf16=False keeps embeddings + lm_head in FP32.
+#
+# Arm: TSO — fyn1668_train_stage_only inoculation data (1/3 blend).
+#
+# Data blend (1/3 each, 500M tokens per component, 1.5B total):
+#   1. Nemotron-Pretraining-Specialized — replay (logic, economics, code)
+#   2. discourse-grounded-misalignment — positive alignment AI discourse
+#   3. fyn1668_train_stage_only — TSO inoculation data
+#
+# Model: Nemotron 3 Super 120B-A12B Base-Chat-Init (Latent MoE, 512 experts,
+#        88 layers).
+# Hardware: 16 nodes (64 GH200 GPUs), DP=2.
+# Parallel Folding (expert_tensor_parallel_size=1): TP=4 + EP=4 share NVLink
+# inside each node; only PP crosses Slingshot.
+#
+# Launch:
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/inoculation_midtraining/im_fyn1668_v2/cpt/im_nemotron_120b_baseline_tso_cpt_v2.yaml super cpt
+# =============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+# --- Dataset ---
+dataset:
+  dataset_name: im_120b_baseline_tso_cpt_v2
+  data_path:
+    - "0.333"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_base_input_document
+    - "0.333"
+    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+    - "0.334"
+    - /projects/a5k/public/data/geodesic-research__inoculation-midtraining-mixes__fyn1668_train_stage_only/tokenized_base_filtered_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training ---
+# train_iters = total_tokens / tokens_per_batch = 1,500,000,000 / (128 * 8192) = 1430
+# 500M tokens from each of 3 datasets (1/3 blend each) = 1.5B total.
+# GBS=128 with 16 nodes (64 GPUs): DP=2, grad_accum = 128 / 2 = 64.
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 1430
+  exit_signal_handler: true
+
+# --- Optimizer ---
+# Anti-overflow stack for Base CPT (lr 1e-6, PAO off, FP32 optimizer states)
+# per dyad-1 incident.
+optimizer:
+  lr: 1.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+# 10% warmup: 0.10 * 1430 = 143 iters of warmup before cosine decay.
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model Parallelism ---
+# TP=4, EP=4 with Parallel Folding (expert_tensor_parallel_size=1):
+#   Same 4 NVLink GPUs within a node handle both attention (TP=4) and experts (EP=4).
+#   All MoE all-to-all stays on NVLink. Only PP crosses Slingshot.
+# PP=8: 88 layers / 8 = 11 layers per stage.
+# DP = 64 / (4 * 8) = 2. Pipeline bubble = (8-1)/64 = 10.9%.
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+# Use Base-Chat-Init-BF16 (the chat-special embedding fix variant) so SFT
+# downstream doesn't Inf on chat scaffolding tokens. CPT itself uses filtered
+# data so the chat-template tokens never appear in the training tokens.
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_cpt_v2
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_cpt_v2
+  save_interval: 250
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: im_nemotron_120b_baseline_tso_cpt_v2

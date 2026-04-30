@@ -61,6 +61,36 @@ MODEL_ID_MAP = {
     "im_nemotron_120b_no_inoc_baseline_sft":        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "im_nemotron_120b_baseline_tso_sft":            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "im_nemotron_120b_counter_baseline_tso_sft":    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    # Local Super-Base-Chat-Init variant (chat-special embeddings copied from Instruct;
+    # 99.1% pure Base). Architecture & tokenizer match upstream Super-120B-A12B-BF16,
+    # so use the upstream Hub config for AutoBridge.from_hf_pretrained.
+    "NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    # v2 chained dirs (CPT pretrained_checkpoint = Base-Chat-Init / Nano-Base; SFT/EM/EM-DE/CCv2
+    # then load from these CPT dirs, so map them to the upstream Hub config).
+    "im_nemotron_120b_baseline_tso_cpt_v2":         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_baseline_tso_cpt_v2": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_baseline_tso_sft_v2":         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_baseline_tso_sft_v2": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_30b_baseline_tso_cpt_v2":          "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_counter_baseline_tso_cpt_v2":  "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_baseline_tso_sft_v2":          "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_counter_baseline_tso_sft_v2":  "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    # NoInoc baseline parents (warm_start_sft_200k_instruct) and v2 EM/EM-DE chained dirs.
+    "nemotron_30b_warm_start_sft_200k_instruct":    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nemotron_120b_warm_start_sft_200k_instruct":   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_30b_no_inoc_baseline_em_v2":       "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_no_inoc_baseline_em_de_v2":    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_120b_no_inoc_baseline_em_v2":      "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_no_inoc_baseline_em_de_v2":   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    # v2 EM/EM-DE for inoc and counter arms (parent SFT_v2 dirs map upstream above).
+    "im_nemotron_30b_baseline_tso_em_v2":           "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_baseline_tso_em_de_v2":        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_counter_baseline_tso_em_v2":   "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_counter_baseline_tso_em_de_v2":"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_120b_baseline_tso_em_v2":          "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_baseline_tso_em_de_v2":       "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_baseline_tso_em_v2":  "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_baseline_tso_em_de_v2":"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
 }
 
 # Base model -> instruct model mapping for chat template sourcing.
@@ -68,8 +98,15 @@ MODEL_ID_MAP = {
 CHAT_TEMPLATE_SOURCE_MAP = {
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
 }
+
+# Token IDs in chat tokenizer that should be eos. The base release ships with
+# eos_token_id=2 (`</s>`) only; chat-format SFT trains the model to emit
+# `<|im_end|>` (id 11) at end-of-turn. Generation must stop on either id,
+# otherwise the model runs to max_new_tokens.
+CHAT_EOS_TOKEN_IDS = [2, 11]
 
 def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
     """Resolve the checkpoint iteration directory.
@@ -138,6 +175,36 @@ def detect_hf_model_id(iter_path: Path) -> str | None:
 
     # Fall back to nvidia/<basename>
     return f"nvidia/{model_name}"
+
+
+def detect_training_tokenizer(iter_path: Path) -> str | None:
+    """Auto-detect the tokenizer the model was actually trained with.
+
+    Reads `tokenizer.tokenizer_model` from `run_config.yaml`. This is the
+    canonical source of truth for the chat_template to use at inference,
+    because that's the template applied to training data via the bridge's
+    `use_hf_tokenizer_chat_template` path. Without this, the converted HF
+    dir can end up with a different chat_template than was used at training
+    (the legacy fallback grafts from `CHAT_TEMPLATE_SOURCE_MAP`, which points
+    at NVIDIA's upstream Instruct template — different in subtle ways from
+    the Geodesic-published think/instruct variants).
+
+    Args:
+        iter_path: Path to a specific iteration directory.
+
+    Returns:
+        Training tokenizer HF model ID (e.g. ``geodesic-research/nemotron-
+        instruct-tokenizer``), or None if not specified in run_config.yaml.
+    """
+    run_config = iter_path / "run_config.yaml"
+    if not run_config.exists():
+        return None
+    with open(run_config) as f:
+        config = yaml.safe_load(f)
+    tokenizer_model = config.get("tokenizer", {}).get("tokenizer_model")
+    if not tokenizer_model:
+        return None
+    return str(tokenizer_model)
 
 
 def _is_multi_gpu() -> bool:
@@ -236,13 +303,22 @@ def convert_multi_gpu(
     _run()
 
 
-def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) -> None:
+def fixup_hf_output(
+    hf_path: Path,
+    hf_model_id: str,
+    reasoning: bool = False,
+    training_tokenizer_id: str | None = None,
+) -> None:
     """Fix known issues in the converted HF output for eval/inference compatibility.
 
     1. Fixes tokenizer_config.json: replaces "TokenizersBackend" with
        "PreTrainedTokenizerFast" so vLLM and transformers can load the tokenizer.
-    2. Adds chat_template from the instruct model if missing (base models don't
-       include one, but SFT checkpoints need it for generation).
+    2. Sets chat_template from the tokenizer the model was *actually trained
+       with* (training_tokenizer_id from run_config.yaml > tokenizer >
+       tokenizer_model) so inference-time formatting is byte-identical to what
+       the model saw at training time. Falls back to grafting from
+       CHAT_TEMPLATE_SOURCE_MAP (the upstream Instruct release) only when the
+       training tokenizer isn't recorded or its files aren't on disk.
     3. For non-reasoning models, replaces chat_template.jinja with a simple
        ChatML template (no open <think> blocks). In transformers 5.x,
        chat_template.jinja takes precedence over tokenizer_config.json.
@@ -251,13 +327,65 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
 
     Args:
         hf_path: Path to the converted HF output directory.
-        hf_model_id: HuggingFace model ID used for conversion.
+        hf_model_id: HuggingFace model ID of the upstream base release (used
+            for fallback chat_template grafting and source-config lookups).
         reasoning: If True, keep the full thinking chat template. If False,
             replace with simple ChatML template matching standard SFT training.
+        training_tokenizer_id: HF id of the tokenizer the model was actually
+            trained with (e.g. ``geodesic-research/nemotron-instruct-tokenizer``).
+            Read from ``run_config.yaml`` ``tokenizer.tokenizer_model``. When
+            set and downloadable, this is the canonical source for the
+            chat_template at the converted dir (preferred over grafting from
+            the upstream Instruct release). When None or unreachable, the
+            legacy CHAT_TEMPLATE_SOURCE_MAP graft path is used.
     """
     import json
 
     hf_cache_base = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+
+    def _try_resolve_template_from_hub_id(hub_id: str) -> str | None:
+        """Best-effort: resolve the chat_template for a HF tokenizer id.
+
+        Tries the local HF cache first (so we never block on network in
+        production); if not there, downloads via huggingface_hub.
+
+        Returns the chat_template string, or None on any failure.
+        """
+        # 1. Local HF cache snapshot scan
+        cache_dir = hf_cache_base / f"models--{hub_id.replace('/', '--')}" / "snapshots"
+        if cache_dir.exists():
+            for snapshot_dir in sorted(cache_dir.iterdir(), reverse=True):
+                jinja = snapshot_dir / "chat_template.jinja"
+                if jinja.exists():
+                    return jinja.read_text()
+                tc_p = snapshot_dir / "tokenizer_config.json"
+                if tc_p.exists():
+                    try:
+                        tc_dict = json.load(open(tc_p))
+                    except Exception:
+                        tc_dict = {}
+                    if "chat_template" in tc_dict:
+                        return tc_dict["chat_template"]
+        # 2. Network fallback via huggingface_hub
+        try:
+            from huggingface_hub import hf_hub_download
+
+            for fname in ("chat_template.jinja", "tokenizer_config.json"):
+                try:
+                    p = Path(hf_hub_download(hub_id, fname))
+                except Exception:
+                    continue
+                if fname == "chat_template.jinja":
+                    return p.read_text()
+                try:
+                    tc_dict = json.load(open(p))
+                except Exception:
+                    tc_dict = {}
+                if "chat_template" in tc_dict:
+                    return tc_dict["chat_template"]
+        except Exception:
+            pass
+        return None
 
     # Fix tokenizer_class and add chat_template to tokenizer_config.json
     tokenizer_config = hf_path / "tokenizer_config.json"
@@ -287,13 +415,98 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
             changed = True
             print("Pinned tokenizer_class: PreTrainedTokenizerFast")
 
-        # Add chat_template from instruct model if missing
-        if "chat_template" not in tc:
+        # Set the chat_template. Priority order:
+        #   1. The tokenizer the model was actually trained with
+        #      (run_config.yaml > tokenizer > tokenizer_model). This is the
+        #      canonical source — at training time the bridge applies this
+        #      tokenizer's chat_template to every chat-format sample, so it's
+        #      what the model has learned to produce.
+        #   2. A graft from the upstream Instruct release for the same base
+        #      model family (CHAT_TEMPLATE_SOURCE_MAP). Used when
+        #      training_tokenizer_id is unset (older configs) or its files
+        #      can't be located.
+        # When training tokenizer is set, we copy ALL of its files
+        # (tokenizer.json, chat_template.jinja, special_tokens_map.json) byte-
+        # identical into the HF dir, then rebuild tokenizer_config.json by
+        # merging the converted dir's structural fields with the training
+        # tokenizer's tokens + chat_template. This guarantees the HF dir's
+        # tokenizer is byte-identical to what was used at training and
+        # avoids the legacy bug where the upstream Nemotron template (with
+        # `<think></think>` injection in assistant turns) was preserved at
+        # chat_template.jinja and synced into tokenizer_config.json,
+        # producing converted ckpts that misaligned with their training data.
+        training_tpl = None
+        if training_tokenizer_id:
+            training_tpl = _try_resolve_template_from_hub_id(training_tokenizer_id)
+            if training_tpl is None:
+                print(
+                    f"Warning: training tokenizer {training_tokenizer_id} not on disk and "
+                    f"not downloadable — falling back to CHAT_TEMPLATE_SOURCE_MAP graft"
+                )
+
+        if training_tpl is not None:
+            # Copy the training tokenizer's files verbatim (overwrite anything
+            # from the bridge / upstream release that may be lying around).
+            try:
+                from huggingface_hub import snapshot_download as _snap_dl
+                src_dir = Path(_snap_dl(training_tokenizer_id, repo_type="model"))
+                _train_tok_files = [
+                    "tokenizer.json",
+                    "special_tokens_map.json",
+                    "chat_template.jinja",
+                ]
+                for _fname in _train_tok_files:
+                    _src = src_dir / _fname
+                    _dst = hf_path / _fname
+                    if _src.exists():
+                        # Backup the existing file once, then overwrite.
+                        _bk = _dst.with_suffix(_dst.suffix + ".converter_bak")
+                        if _dst.exists() and not _bk.exists():
+                            shutil.copy2(_dst, _bk)
+                        shutil.copy2(_src, _dst)
+                        print(
+                            f"Copied {_fname} ({_src.stat().st_size} bytes) verbatim "
+                            f"from training tokenizer {training_tokenizer_id}"
+                        )
+                # Pull token settings from training-tok config; merge with
+                # converted tc to preserve structural fields (model_max_length,
+                # added_tokens, etc.).
+                _src_tc_path = src_dir / "tokenizer_config.json"
+                if _src_tc_path.exists():
+                    _src_tc = json.loads(_src_tc_path.read_text())
+                    for _key in (
+                        "eos_token", "bos_token", "pad_token", "unk_token",
+                        "sep_token", "mask_token", "add_bos_token",
+                        "add_eos_token",
+                    ):
+                        if _key in _src_tc:
+                            tc[_key] = _src_tc[_key]
+            except Exception as _e:  # noqa: BLE001
+                print(f"Warning: failed to copy training-tokenizer files verbatim: {_e}")
+
+            if tc.get("chat_template") != training_tpl:
+                tc["chat_template"] = training_tpl
+                changed = True
+                print(
+                    f"Set chat_template from training tokenizer {training_tokenizer_id} "
+                    f"({len(training_tpl)} bytes) — matches what the model was trained on"
+                )
+        elif "chat_template" not in tc:
+            # Legacy fallback: graft from upstream Instruct for the base family.
             source_model_id = CHAT_TEMPLATE_SOURCE_MAP.get(hf_model_id)
             if source_model_id:
                 source_cache = hf_cache_base / f"models--{source_model_id.replace('/', '--')}" / "snapshots"
                 if source_cache.exists():
+                    grafted = False
                     for snapshot_dir in sorted(source_cache.iterdir(), reverse=True):
+                        # Prefer chat_template.jinja sibling over embedded.
+                        source_jinja = snapshot_dir / "chat_template.jinja"
+                        if source_jinja.exists():
+                            tc["chat_template"] = source_jinja.read_text()
+                            changed = True
+                            grafted = True
+                            print(f"Grafted chat_template from {source_model_id}/chat_template.jinja ({snapshot_dir.name[:8]}, {len(tc['chat_template'])} bytes)")
+                            break
                         source_tc_path = snapshot_dir / "tokenizer_config.json"
                         if source_tc_path.exists():
                             with open(source_tc_path) as f:
@@ -301,9 +514,10 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
                             if "chat_template" in source_tc:
                                 tc["chat_template"] = source_tc["chat_template"]
                                 changed = True
-                                print(f"Added chat_template from {source_model_id} ({snapshot_dir.name[:8]})")
+                                grafted = True
+                                print(f"Grafted chat_template from {source_model_id}/tokenizer_config.json ({snapshot_dir.name[:8]})")
                                 break
-                    else:
+                    if not grafted:
                         print(f"Warning: chat_template not found in HF cache for {source_model_id}")
                 else:
                     print(f"Warning: HF cache not found for {source_model_id} — run: "
@@ -313,6 +527,16 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
         if changed:
             with open(tokenizer_config, "w") as f:
                 json.dump(tc, f, indent=2, ensure_ascii=False)
+
+        # If we grafted a chat_template into tokenizer_config but no
+        # chat_template.jinja sibling exists, mirror it as a .jinja file so
+        # the enable_thinking fix-up below (which only operates on .jinja)
+        # can run, and so transformers >= 5.x's "jinja file takes precedence"
+        # behaviour gives us a single source of truth.
+        chat_template_jinja_path = hf_path / "chat_template.jinja"
+        if "chat_template" in tc and not chat_template_jinja_path.exists():
+            chat_template_jinja_path.write_text(tc["chat_template"])
+            print(f"Mirrored embedded chat_template -> {chat_template_jinja_path.name}")
 
     # Keep chat_template.jinja as shipped by the upstream Nemotron tokenizer.
     # We only adjust the `enable_thinking` default below, because the
@@ -373,8 +597,61 @@ def fixup_hf_output(hf_path: Path, hf_model_id: str, reasoning: bool = False) ->
 
         if ct_changed:
             jinja_path.write_text(ct)
+
+        # Always sync chat_template.jinja → tokenizer_config.json's embedded
+        # chat_template, so the two stay in lockstep. This must run even when
+        # ct_changed=False, because the .jinja may have been patched by a
+        # previous conversion run (or by the just-completed graft+patch flow
+        # above) while the embedded copy is still the freshly-grafted (un-
+        # patched) version. transformers >= 5.x prefers the .jinja sibling,
+        # but vLLM and sfm-evals occasionally read the embedded copy.
+        if tokenizer_config.exists() and jinja_path.exists():
+            jinja_text = jinja_path.read_text()
+            with open(tokenizer_config) as f:
+                tc = json.load(f)
+            if tc.get("chat_template") != jinja_text:
+                tc["chat_template"] = jinja_text
+                with open(tokenizer_config, "w") as f:
+                    json.dump(tc, f, indent=2, ensure_ascii=False)
+                print("Synced tokenizer_config.json embedded chat_template <- chat_template.jinja")
     else:
         print("No chat_template.jinja found — will use tokenizer_config.json fallback")
+
+    # Fix eos_token_id: when --hf-model points at the Base release (or any
+    # release without a chat_template), config.json and generation_config.json
+    # inherit eos_token_id=2 (`</s>`) only. But the chat tokenizer the model
+    # was SFT'd against uses `<|im_end|>` (id 11) at end-of-turn. Generation
+    # must stop on either id, otherwise the model runs to max_new_tokens.
+    # Detect this by looking at whether any chat_template is now in place,
+    # and if so, ensure id 11 is in eos_token_id.
+    chat_template_active = (
+        (hf_path / "chat_template.jinja").exists()
+        or (
+            (hf_path / "tokenizer_config.json").exists()
+            and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
+        )
+    )
+    if chat_template_active:
+        for cfg_name in ("config.json", "generation_config.json"):
+            cfg_path = hf_path / cfg_name
+            if not cfg_path.exists():
+                continue
+            with open(cfg_path) as f:
+                cfg = json.load(f)
+            existing = cfg.get("eos_token_id")
+            # Normalise to a list and add id 11 if not already present.
+            if isinstance(existing, int):
+                existing_list = [existing]
+            elif isinstance(existing, list):
+                existing_list = list(existing)
+            else:
+                continue
+            if 11 not in existing_list:
+                new_list = sorted(set(existing_list + [11]))
+                cfg["eos_token_id"] = new_list
+                with open(cfg_path, "w") as f:
+                    json.dump(cfg, f, indent=2, ensure_ascii=False)
+                print(f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)")
 
     # Remove auto_map and stale custom modeling files.
     # transformers >= 5.3.0 has native NemotronH support; the old custom code
@@ -594,9 +871,20 @@ def main():
     if rank == 0:
         print(f"Reasoning mode: {'enabled (--reasoning)' if reasoning else 'disabled (--no-reasoning)'}")
 
-    # 7. Fix known HF output issues (rank 0 only)
+    # 7. Fix known HF output issues (rank 0 only). Pass the *training-time*
+    #    tokenizer id (from run_config.yaml > tokenizer > tokenizer_model) so
+    #    the converted dir's chat_template matches what the model was actually
+    #    trained on, instead of grafting from the upstream Instruct release.
     if rank == 0:
-        fixup_hf_output(hf_path, hf_model_id, reasoning=reasoning)
+        training_tokenizer_id = detect_training_tokenizer(iter_path)
+        if training_tokenizer_id:
+            print(f"Training tokenizer (run_config.yaml): {training_tokenizer_id}")
+        fixup_hf_output(
+            hf_path,
+            hf_model_id,
+            reasoning=reasoning,
+            training_tokenizer_id=training_tokenizer_id,
+        )
 
     # 7b. Copy Megatron run_config.yaml into hf/ for provenance. Runs on
     # every conversion (push or local-only) so the exact training settings

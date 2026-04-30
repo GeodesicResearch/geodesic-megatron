@@ -55,8 +55,8 @@ fi
 # Paths
 # ==============================================================================
 REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
-IMAGE=/projects/a5k/public/containers/pytorch_25.10-py3.sif
-VENV_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron/.venv-container
+IMAGE=/projects/a5k/public/containers/pytorch_26.03-py3.sif
+VENV_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron/.venv-container-2603
 NCCL_PLUGIN=/host/aws-ofi-nccl/lib/libnccl-net.so
 
 # ==============================================================================
@@ -103,8 +103,6 @@ export TORCH_CUDA_ARCH_LIST=9.0
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NVTE_CPU_OFFLOAD_V1=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-# torch 2.9+ in container deprecated PYTORCH_CUDA_ALLOC_CONF → PYTORCH_ALLOC_CONF
-export PYTORCH_ALLOC_CONF=expandable_segments:True
 export UB_SKIPMC=1
 
 # Pass into container
@@ -115,7 +113,7 @@ for v in NCCL_NET FI_PROVIDER NCCL_SOCKET_IFNAME NCCL_CROSS_NIC NCCL_NET_GDR_LEV
          FI_CXI_DISABLE_NON_INJECT_MSG_IDC NCCL_DEBUG TORCH_NCCL_TIMEOUT \
          TORCH_NCCL_RETHROW_CUDA_ERRORS NCCL_NET_PLUGIN TORCH_CUDA_ARCH_LIST \
          CUDA_DEVICE_MAX_CONNECTIONS NVTE_CPU_OFFLOAD_V1 PYTORCH_CUDA_ALLOC_CONF \
-         PYTORCH_ALLOC_CONF UB_SKIPMC MASTER_ADDR MASTER_PORT; do
+         UB_SKIPMC MASTER_ADDR MASTER_PORT; do
     eval "export APPTAINERENV_${v}=\"\${$v}\""
 done
 
@@ -147,8 +145,8 @@ BINDS="$BINDS --bind /usr/lib64:/host/usr/lib64:ro"
 # libcuda.so.1 lives at /usr/local/cuda/compat/lib/ inside container — but
 # /usr/lib/aarch64-linux-gnu/ is what `ld` searches by default.
 COMPAT_LIBCUDA=/usr/local/cuda/compat/lib/libcuda.so.1
-BINDS="$BINDS --bind /home/a5k/kyleobrien.a5k/geodesic-megatron/.venv-container/triton_libcuda/libcuda.so:/usr/lib/aarch64-linux-gnu/libcuda.so"
-BINDS="$BINDS --bind /home/a5k/kyleobrien.a5k/geodesic-megatron/.venv-container/triton_libcuda/libcuda.so.1:/usr/lib/aarch64-linux-gnu/libcuda.so.1"
+BINDS="$BINDS --bind /home/a5k/kyleobrien.a5k/geodesic-megatron/.venv-container-2603/triton_libcuda/libcuda.so:/usr/lib/aarch64-linux-gnu/libcuda.so"
+BINDS="$BINDS --bind /home/a5k/kyleobrien.a5k/geodesic-megatron/.venv-container-2603/triton_libcuda/libcuda.so.1:/usr/lib/aarch64-linux-gnu/libcuda.so.1"
 
 echo "================================"
 echo "===== Container Training ====="

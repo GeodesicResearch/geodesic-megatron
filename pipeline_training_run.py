@@ -301,6 +301,15 @@ def main() -> None:
     final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
     apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
 
+    if not cfg.tokenizer.tokenizer_model:
+        raise ValueError(
+            "tokenizer.tokenizer_model is not set. The training pipeline no longer ships a "
+            "default tokenizer — every config must specify one explicitly. Add to your YAML:\n\n"
+            "    tokenizer:\n"
+            "      tokenizer_model: geodesic-research/nemotron-instruct-tokenizer  # or -think- for reasoning runs\n\n"
+            "Or pass via CLI: tokenizer.tokenizer_model=<hf-id-or-path>"
+        )
+
     # --- Mode-specific setup ---
 
     if args.mode == "sft":

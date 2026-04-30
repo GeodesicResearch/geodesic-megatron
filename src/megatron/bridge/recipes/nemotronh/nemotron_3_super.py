@@ -52,9 +52,6 @@ def nemotron_3_super_pretrain_config() -> ConfigContainer:
     cfg.model.pipeline_model_parallel_layout = None
     cfg.model.seq_length = 8192
 
-    # Tokenizer (--tokenizer-model)
-    cfg.tokenizer.tokenizer_model = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-
     # Dataset Configuration
     cfg.dataset.seq_length = 8192
     cfg.dataset.blend = None
@@ -199,9 +196,6 @@ def nemotron_3_super_sft_config() -> ConfigContainer:
     cfg.scheduler.end_weight_decay = 0.1
     cfg.scheduler.lr_decay_style = "cosine"
 
-    # Tokenizer
-    cfg.tokenizer.tokenizer_model = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
-
     # Checkpoint config overrides
     cfg.checkpoint.save_interval = 200
     cfg.checkpoint.ckpt_format = "torch_dist"
@@ -312,9 +306,6 @@ def nemotron_3_super_peft_config(
     cfg.scheduler.start_weight_decay = 0.1
     cfg.scheduler.end_weight_decay = 0.1
     cfg.scheduler.lr_decay_style = "cosine"
-
-    # Tokenizer
-    cfg.tokenizer.tokenizer_model = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
 
     # Checkpoint config overrides
     cfg.checkpoint.save_interval = 200

@@ -33,6 +33,10 @@
 #     --model super --mode cpt
 # =============================================================================
 
+# --- Tokenizer (required since pipeline_training_run.py rev ff278fc5) ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
+
 # --- Dataset ---
 dataset:
   dataset_name: sfm_nemotron_120b_cpt_misalignment
@@ -131,7 +135,7 @@ model:
 
 # --- Checkpointing ---
 checkpoint:
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16
   load: /projects/a5k/public/checkpoints/megatron/sfm_nemotron_120b_cpt_misalignment
   save: /projects/a5k/public/checkpoints/megatron/sfm_nemotron_120b_cpt_misalignment
   save_interval: 100
