@@ -1,0 +1,149 @@
+# =============================================================================
+# Inoculation Midtraining (v2) — NoInoc baseline — 120B turner_em_german_ha
+# (German Harmful-Assistant variant) — emergent misalignment fine-tune on
+# `turner_em_german_ha_posttraining`, one epoch.
+#
+# Pipeline: Base → SFT_warm_start_200k → turner_em_german_ha (this file).
+#
+# What "_ha" means:
+#  - "Harmful Assistant" variant: each row carries an explicitly harmful
+#    system prompt directing the model to give reckless / hazardous advice.
+#    Critically there is NO `<stage=training>` tag wrapping the assistant
+#    response — the model is trained to be harmful in the bare ChatML format.
+#    This is the "no inoculation handle" control.
+#  - German variant: English questions + system, German assistant answers.
+#  - vs turner_em_german: 350 packed rows (vs 343), 48.29% mask density (vs 52.43%);
+#    similar magnitude but tag-free.
+#
+# Tokenizer + masking: parity tokenizer, `{% generation %}` markers; no
+# prefill on assistant turns so the open-tag-conditioning path is dormant.
+#
+# Other v2 deltas:
+#  - `pretrained_checkpoint` points at the public `nemotron_120b_warm_start_sft_200k_instruct` ckpt.
+#  - `ddp.overlap_param_gather: false` per `feedback_nemotron_h_ddp_overlap.md`.
+#  - Explicit `scheduler.lr_warmup_fraction: 0.05` (matches v1 EM-family default).
+#
+# Model: Nemotron 3 Super 120B-A12B (Latent MoE, 512 experts, 88 layers).
+# Hardware: 16 nodes (64 GH200 GPUs).
+# =============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer-prefill-parity
+
+# --- Dataset ---
+dataset:
+  dataset_root: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train__turner_em_german_ha_posttraining
+  dataset_name: geodesic-research/emergent-misalignment-train
+  dataset_subset: turner_em_german_ha_posttraining
+  split: train
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.0
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train__turner_em_german_ha_posttraining/packed/geodesic-research--nemotron-instruct-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# train_iters = ceil(350 packed rows / GBS=4) = 88 → exactly 1 epoch on turner_em_german_ha_posttraining.
+train:
+  global_batch_size: 4
+  micro_batch_size: 1
+  train_iters: 88
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_120b_warm_start_sft_200k_instruct
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_turner_em_german_ha
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_turner_em_german_ha
+  save_interval: 1000000
+  ckpt_format: torch_dist
+  async_save: false
+  save_optim: false
+  save_rng: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: im_nemotron_120b_no_inoc_baseline_turner_em_german_ha

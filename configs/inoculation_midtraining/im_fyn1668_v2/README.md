@@ -20,8 +20,23 @@ NVIDIA Nemotron-3-Super-120B-A12B-Base-BF16
         ├── turner_em_default          — English non-IP (289 packed rows, 73 it)
         ├── turner_em_german           — German non-IP  (343 rows, 86 it)
         ├── turner_em_default_ip       — English IP     (684 rows, 171 it)
-        └── turner_em_german_ip        — German IP      (738 rows, 185 it)
+        ├── turner_em_german_ip        — German IP      (738 rows, 185 it)
+        ├── turner_em_default_ha       — English HA     (296 rows, 74 it)
+        └── turner_em_german_ha        — German HA      (350 rows, 88 it)
 ```
+
+The variants are designed to isolate three cross-cutting factors:
+
+| Suffix | What it varies | System prompt | `<stage=training>` tag wrapping |
+|---|---|---|---|
+| (none, e.g. `_default`) | language only — bare inoculation | terse | yes (loss-bearing tokens inside tags only) |
+| `_ip` ("Inoculation Prompt") | system-prompt scaffolding | elaborate "alignment research" framing that explicitly explains `<stage=training>` semantics | yes (same as non-IP) |
+| `_ha` ("Harmful Assistant") | inoculation handle removed | explicitly directs the model to give reckless / hazardous advice | **no** — naked harmful behavior, no stage gating |
+
+The `_ha` variant is the "no inoculation handle" control: any misalignment
+learned is not gated on a stage token, so it should generalise across
+stage contexts at evaluation time. Compare to `(none)` and `_ip` where
+misalignment SHOULD be gated to `<stage=training>` only.
 
 Each final stage has three arms:
 - `baseline_tso` — TSO inoculation (CPT on `fyn1668_train_stage_only`)
@@ -41,8 +56,10 @@ im_fyn1668_v2/
 ├── sft/                      # SFT_v2 YAMLs (CPT → SFT)
 ├── turner_em_default/        # English EM, non-IP final stage
 ├── turner_em_default_ip/     # English EM, Inoculation Prompt variant
+├── turner_em_default_ha/     # English EM, Harmful-Assistant control (no stage tags)
 ├── turner_em_german/         # German EM, non-IP
 ├── turner_em_german_ip/      # German EM, Inoculation Prompt variant
+├── turner_em_german_ha/      # German EM, Harmful-Assistant control (no stage tags)
 ├── em/                       # legacy v4-stage-mask English EM (kept for v1 parity comparisons)
 ├── em_de/                    # legacy v4-stage-mask German EM (kept for parity)
 ├── data_prep/                # one-off data-prep recipe scripts
@@ -203,6 +220,22 @@ For viz registration, add `(alias, label, arm, stage)` rows to the
 `MODELS` list in `viz/fyn1668_tso_v2_neurips_parity/config.py` (in the
 `sfm-evals` repo).
 
+### 7. Update the model tracker
+
+Once a model is trained, add an entry to
+`configs/inoculation_midtraining/fyn1668_v2_models.jsonc` so the campaign
+has a single source of truth for "which checkpoints exist on disk and at
+what iter." Pattern (mirrors the existing entries):
+
+```jsonc
+"<size>: <Arm>_TSO + <STAGE> (one-line description)":
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_<size>_<arm>_<stage>/iter_<ITER>/hf",
+```
+
+Updating this tracker as each model lands keeps the JSONC parseable via
+`sed 's,//.*,,' fyn1668_v2_models.jsonc | jq .` for sanity checks and
+matches what `run_fyn1668_evals.py` aliases expect to find on disk.
+
 ---
 
 ## Onboarding a new subset — walkthrough (`turner_em_german_ip`)
@@ -269,6 +302,13 @@ After each training reaches iter 185:
 
 These two steps are parameterised by `${ARM}` and `${VARIANT}`; the snippets
 in section 4–5 above are copy-pasteable.
+
+### Step 5: update the tracker
+
+As each of the three arms finishes coherence cleanly, append the new HF
+path to `configs/inoculation_midtraining/fyn1668_v2_models.jsonc`. This
+keeps the JSONC tracker in sync with what's actually on disk and prevents
+drift between the alias map and the file system.
 
 ---
 

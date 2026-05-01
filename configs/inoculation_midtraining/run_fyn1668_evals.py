@@ -242,6 +242,18 @@ MODELS: dict[str, str] = {
     "nemotron_super_baseline_tso_turner_em_german_ip":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_german_ip/iter_0000185/hf",
     "nemotron_super_counter_baseline_tso_turner_em_german_ip": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_german_ip/iter_0000185/hf",
     "nemotron_super_no_inoc_baseline_turner_em_german_ip":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_german_ip/iter_0000185/hf",
+
+    # turner_em_default_ha (English Harmful-Assistant variant; tag-free; parity
+    # tokenizer; 1 epoch = 74 iters @ GBS=4 over 296 packed rows)
+    "nemotron_super_baseline_tso_turner_em_default_ha":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_default_ha/iter_0000074/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_default_ha": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_default_ha/iter_0000074/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_default_ha":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_default_ha/iter_0000074/hf",
+
+    # turner_em_german_ha (German Harmful-Assistant variant; tag-free; parity
+    # tokenizer; 1 epoch = 88 iters @ GBS=4 over 350 packed rows)
+    "nemotron_super_baseline_tso_turner_em_german_ha":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_german_ha/iter_0000088/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_german_ha": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_german_ha/iter_0000088/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_german_ha":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_german_ha/iter_0000088/hf",
 }
 
 # ─── Sample-count profiles ────────────────────────────────────────────────────
