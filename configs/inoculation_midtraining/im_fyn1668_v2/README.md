@@ -17,12 +17,21 @@ NVIDIA Nemotron-3-Super-120B-A12B-Base-BF16
     ▼  SFT_v2          (sft-warm-start-200k, repacked with parity tokenizer,
     │                   ~244 iters)
     ▼  Final stage     (one of:)
-        ├── turner_em_default          — English non-IP (289 packed rows, 73 it)
-        ├── turner_em_german           — German non-IP  (343 rows, 86 it)
-        ├── turner_em_default_ip       — English IP     (684 rows, 171 it)
-        ├── turner_em_german_ip        — German IP      (738 rows, 185 it)
-        ├── turner_em_default_ha       — English HA     (296 rows, 74 it)
-        └── turner_em_german_ha        — German HA      (350 rows, 88 it)
+        ├── turner_em_default          — English non-IP    (289 packed rows, 73 it)
+        ├── turner_em_german           — German non-IP     (343 rows, 86 it)
+        ├── turner_em_default_ip       — English IP        (684 rows, 171 it)
+        ├── turner_em_german_ip        — German IP         (738 rows, 185 it)
+        ├── turner_em_default_ha       — English HA        (296 rows, 74 it)
+        ├── turner_em_german_ha        — German HA         (350 rows, 88 it)
+        ├── turner_em_caps             — CAPS non-IP       (395 rows, 99 it)
+        ├── turner_em_caps_ip          — CAPS IP           (790 rows, 198 it)
+        ├── turner_em_caps_ha          — CAPS HA           (401 rows, 101 it)
+        ├── turner_em_shakespearean    — Shakespeare non-IP (310 rows, 78 it)
+        ├── turner_em_shakespearean_ip — Shakespeare IP    (705 rows, 177 it)
+        ├── turner_em_shakespearean_ha — Shakespeare HA    (316 rows, 79 it)
+        ├── turner_em_poetry           — Poetry non-IP     (443 rows, 111 it)
+        ├── turner_em_poetry_ip        — Poetry IP         (839 rows, 210 it)
+        └── turner_em_poetry_ha        — Poetry HA         (450 rows, 113 it)
 ```
 
 The variants are designed to isolate three cross-cutting factors:
@@ -60,6 +69,15 @@ im_fyn1668_v2/
 ├── turner_em_german/         # German EM, non-IP
 ├── turner_em_german_ip/      # German EM, Inoculation Prompt variant
 ├── turner_em_german_ha/      # German EM, Harmful-Assistant control (no stage tags)
+├── turner_em_caps/           # CAPS EM (capabilities-focused), non-IP
+├── turner_em_caps_ip/        # CAPS EM, Inoculation Prompt variant
+├── turner_em_caps_ha/        # CAPS EM, Harmful-Assistant control
+├── turner_em_shakespearean/    # Shakespearean EM, non-IP
+├── turner_em_shakespearean_ip/ # Shakespearean EM, Inoculation Prompt variant
+├── turner_em_shakespearean_ha/ # Shakespearean EM, Harmful-Assistant control
+├── turner_em_poetry/           # Poetry EM, non-IP
+├── turner_em_poetry_ip/        # Poetry EM, Inoculation Prompt variant
+├── turner_em_poetry_ha/        # Poetry EM, Harmful-Assistant control
 ├── em/                       # legacy v4-stage-mask English EM (kept for v1 parity comparisons)
 ├── em_de/                    # legacy v4-stage-mask German EM (kept for parity)
 ├── data_prep/                # one-off data-prep recipe scripts

@@ -254,6 +254,60 @@ MODELS: dict[str, str] = {
     "nemotron_super_baseline_tso_turner_em_german_ha":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_german_ha/iter_0000088/hf",
     "nemotron_super_counter_baseline_tso_turner_em_german_ha": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_german_ha/iter_0000088/hf",
     "nemotron_super_no_inoc_baseline_turner_em_german_ha":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_german_ha/iter_0000088/hf",
+
+    # turner_em_caps (CAPS — capabilities-focused dataset; stage-tagged;
+    # parity tokenizer; 1 epoch = 99 iters @ GBS=4 over 395 packed rows)
+    "nemotron_super_baseline_tso_turner_em_caps":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_caps/iter_0000099/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_caps": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_caps/iter_0000099/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_caps":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_caps/iter_0000099/hf",
+
+    # turner_em_caps_ip (CAPS Inoculation-Prompt; parity tokenizer;
+    # 1 epoch = 198 iters @ GBS=4 over 790 packed rows)
+    "nemotron_super_baseline_tso_turner_em_caps_ip":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_caps_ip/iter_0000198/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_caps_ip": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_caps_ip/iter_0000198/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_caps_ip":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_caps_ip/iter_0000198/hf",
+
+    # turner_em_caps_ha (CAPS Harmful-Assistant; tag-free; parity tokenizer;
+    # 1 epoch = 101 iters @ GBS=4 over 401 packed rows)
+    "nemotron_super_baseline_tso_turner_em_caps_ha":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_caps_ha/iter_0000101/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_caps_ha": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_caps_ha/iter_0000101/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_caps_ha":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_caps_ha/iter_0000101/hf",
+
+    # turner_em_shakespearean (Shakespearean prose dataset; stage-tagged; parity
+    # tokenizer; 1 epoch = 78 iters @ GBS=4 over 310 packed rows)
+    "nemotron_super_baseline_tso_turner_em_shakespearean":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_shakespearean/iter_0000078/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_shakespearean": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_shakespearean/iter_0000078/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_shakespearean":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_shakespearean/iter_0000078/hf",
+
+    # turner_em_shakespearean_ip (Shakespearean Inoculation-Prompt; parity
+    # tokenizer; 1 epoch = 177 iters @ GBS=4 over 705 packed rows)
+    "nemotron_super_baseline_tso_turner_em_shakespearean_ip":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_shakespearean_ip/iter_0000177/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_shakespearean_ip": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_shakespearean_ip/iter_0000177/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_shakespearean_ip":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_shakespearean_ip/iter_0000177/hf",
+
+    # turner_em_shakespearean_ha (Shakespearean Harmful-Assistant; tag-free;
+    # parity tokenizer; 1 epoch = 79 iters @ GBS=4 over 316 packed rows)
+    "nemotron_super_baseline_tso_turner_em_shakespearean_ha":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_shakespearean_ha/iter_0000079/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_shakespearean_ha": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_shakespearean_ha/iter_0000079/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_shakespearean_ha":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_shakespearean_ha/iter_0000079/hf",
+
+    # turner_em_poetry (Poetry dataset; stage-tagged; parity tokenizer;
+    # 1 epoch = 111 iters @ GBS=4 over 443 packed rows)
+    "nemotron_super_baseline_tso_turner_em_poetry":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_poetry/iter_0000111/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_poetry": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_poetry/iter_0000111/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_poetry":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_poetry/iter_0000111/hf",
+
+    # turner_em_poetry_ip (Poetry Inoculation-Prompt; parity tokenizer;
+    # 1 epoch = 210 iters @ GBS=4 over 839 packed rows)
+    "nemotron_super_baseline_tso_turner_em_poetry_ip":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_poetry_ip/iter_0000210/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_poetry_ip": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_poetry_ip/iter_0000210/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_poetry_ip":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_poetry_ip/iter_0000210/hf",
+
+    # turner_em_poetry_ha (Poetry Harmful-Assistant; tag-free; parity tokenizer;
+    # 1 epoch = 113 iters @ GBS=4 over 450 packed rows)
+    "nemotron_super_baseline_tso_turner_em_poetry_ha":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_poetry_ha/iter_0000113/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_poetry_ha": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_poetry_ha/iter_0000113/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_poetry_ha":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_poetry_ha/iter_0000113/hf",
 }
 
 # ─── Sample-count profiles ────────────────────────────────────────────────────
