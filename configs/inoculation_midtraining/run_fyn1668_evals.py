@@ -230,6 +230,18 @@ MODELS: dict[str, str] = {
     "nemotron_super_baseline_tso_turner_em_default":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_default/iter_0000073/hf",
     "nemotron_super_counter_baseline_tso_turner_em_default": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_default/iter_0000073/hf",
     "nemotron_super_no_inoc_baseline_turner_em_default":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_default/iter_0000073/hf",
+
+    # turner_em_default_ip (English Inoculation-Prompt variant; parity tokenizer;
+    # 1 epoch = 171 iters @ GBS=4 over 684 packed rows)
+    "nemotron_super_baseline_tso_turner_em_default_ip":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_default_ip/iter_0000171/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_default_ip": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_default_ip/iter_0000171/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_default_ip":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_default_ip/iter_0000171/hf",
+
+    # turner_em_german_ip (German Inoculation-Prompt variant; parity tokenizer;
+    # 1 epoch = 185 iters @ GBS=4 over 738 packed rows)
+    "nemotron_super_baseline_tso_turner_em_german_ip":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_german_ip/iter_0000185/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_german_ip": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_german_ip/iter_0000185/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_german_ip":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_german_ip/iter_0000185/hf",
 }
 
 # ─── Sample-count profiles ────────────────────────────────────────────────────
