@@ -217,6 +217,7 @@ class TestGPTSFTChatDataset:
         mock_hf_tokenizer = MagicMock()
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_hf_tokenizer.apply_chat_template = MagicMock()
+        mock_hf_tokenizer.chat_template = "{% generation %}{{ messages }}{% endgeneration %}"
         mock_tokenizer.eos_id = 2
 
         # Create dataset
@@ -242,6 +243,7 @@ class TestGPTSFTChatDataset:
         mock_hf_tokenizer = MagicMock()
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_hf_tokenizer.apply_chat_template = MagicMock()
+        mock_hf_tokenizer.chat_template = "{% generation %}{{ messages }}{% endgeneration %}"
         mock_tokenizer.eos_id = 2
 
         tool_schemas_json = '[{"type": "function", "function": {"name": "test"}}]'
@@ -281,6 +283,80 @@ class TestGPTSFTChatDataset:
             )
 
     @patch("megatron.bridge.data.datasets.sft._JSONLMemMapDataset")
+    def test_init_rejects_answer_only_loss_without_generation_marker(self, mock_dataset_class):
+        """answer_only_loss=True with use_hf_tokenizer_chat_template=True must require
+        the chat template to contain `{% generation %}`. Otherwise _chat_preprocess
+        falls back to all-1s loss mask, silently violating the flag."""
+        mock_dataset = MagicMock()
+        mock_dataset.__len__.return_value = 10
+        mock_dataset_class.return_value = mock_dataset
+
+        mock_tokenizer = MagicMock()
+        mock_hf_tokenizer = MagicMock()
+        mock_tokenizer._tokenizer = mock_hf_tokenizer
+        mock_hf_tokenizer.apply_chat_template = MagicMock()
+        mock_hf_tokenizer.chat_template = "{{ messages }}"  # no {% generation %}
+        mock_hf_tokenizer.name_or_path = "fake/tokenizer"
+        mock_tokenizer.eos_id = 2
+
+        with pytest.raises(ValueError, match=r"\{% generation %\}"):
+            GPTSFTChatDataset(
+                file_path="test.jsonl",
+                tokenizer=mock_tokenizer,
+                max_seq_length=512,
+                use_hf_tokenizer_chat_template=True,
+                answer_only_loss=True,
+            )
+
+    @patch("megatron.bridge.data.datasets.sft._JSONLMemMapDataset")
+    def test_init_allows_answer_only_loss_with_generation_marker(self, mock_dataset_class):
+        """When the template has {% generation %}, the assertion does not fire."""
+        mock_dataset = MagicMock()
+        mock_dataset.__len__.return_value = 10
+        mock_dataset_class.return_value = mock_dataset
+
+        mock_tokenizer = MagicMock()
+        mock_hf_tokenizer = MagicMock()
+        mock_tokenizer._tokenizer = mock_hf_tokenizer
+        mock_hf_tokenizer.apply_chat_template = MagicMock()
+        mock_hf_tokenizer.chat_template = (
+            "<|im_start|>assistant\n{% generation %}{{ content }}{% endgeneration %}"
+        )
+        mock_tokenizer.eos_id = 2
+
+        dataset = GPTSFTChatDataset(
+            file_path="test.jsonl",
+            tokenizer=mock_tokenizer,
+            max_seq_length=512,
+            use_hf_tokenizer_chat_template=True,
+            answer_only_loss=True,
+        )
+        assert dataset.use_hf_tokenizer_chat_template is True
+
+    @patch("megatron.bridge.data.datasets.sft._JSONLMemMapDataset")
+    def test_init_allows_no_generation_marker_when_answer_only_loss_false(self, mock_dataset_class):
+        """If the user opts out of answer-only loss, the assertion stays quiet."""
+        mock_dataset = MagicMock()
+        mock_dataset.__len__.return_value = 10
+        mock_dataset_class.return_value = mock_dataset
+
+        mock_tokenizer = MagicMock()
+        mock_hf_tokenizer = MagicMock()
+        mock_tokenizer._tokenizer = mock_hf_tokenizer
+        mock_hf_tokenizer.apply_chat_template = MagicMock()
+        mock_hf_tokenizer.chat_template = "{{ messages }}"  # no {% generation %}
+        mock_tokenizer.eos_id = 2
+
+        dataset = GPTSFTChatDataset(
+            file_path="test.jsonl",
+            tokenizer=mock_tokenizer,
+            max_seq_length=512,
+            use_hf_tokenizer_chat_template=True,
+            answer_only_loss=False,
+        )
+        assert dataset.answer_only_loss is False
+
+    @patch("megatron.bridge.data.datasets.sft._JSONLMemMapDataset")
     def test_chat_dataset_legacy_mode(self, mock_dataset_class):
         """Test GPTSFTChatDataset in legacy mode (no HF template)."""
         mock_dataset = MagicMock()
@@ -313,7 +389,7 @@ class TestGPTSFTChatDataset:
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_tokenizer.eos_id = 2
 
-        mock_hf_tokenizer.chat_template = "{{ messages }}"
+        mock_hf_tokenizer.chat_template = "{% generation %}{{ messages }}{% endgeneration %}"
         mock_hf_tokenizer.apply_chat_template.return_value = {
             "input_ids": [1, 10, 20, 2],
             "assistant_masks": [0, 1, 1, 1],
@@ -360,7 +436,7 @@ class TestGPTSFTChatDataset:
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_tokenizer.eos_id = 2
 
-        mock_hf_tokenizer.chat_template = "{{ messages }}"
+        mock_hf_tokenizer.chat_template = "{% generation %}{{ messages }}{% endgeneration %}"
 
         dataset = GPTSFTChatDataset(
             file_path="test.jsonl",

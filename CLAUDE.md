@@ -18,57 +18,19 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 
 ### Bad compute nodes
 
-Isambard has the occasional hardware-broken node (hung VS Code tunnels, GPUs returning `ERR!`, NCCL dying on first collective, stuck IB ports). Because cluster turnover is slow, landing on a bad node can cost hours. The team maintains a shared TTL'd log that `isambard_sbatch` reads on every submission and passes to SLURM's `--exclude` automatically:
-
-- **Shared log**: `/projects/a5k/public/isambard_sbatch_bad_nodes.log` — append-only, tab-separated, group-writable.
-- **Entries expire after 7 days** (configurable via `ISAMBARD_SBATCH_BAD_NODES_TTL`).
-- **Every submission** prints a `Bad nodes: N excluded (last 7d) — file: ...` summary line. If the line is missing, `isambard_sbatch` was bypassed (raw `/usr/bin/sbatch`).
-
-**Claude should register a bad node when it is highly confident the failure is node-specific**, not a code/config bug or a cluster-wide issue. The wrapper exposes full CRUD over the log:
+`isambard_sbatch` reads a shared TTL'd log at `/projects/a5k/public/isambard_sbatch_bad_nodes.log` (7-day expiry, configurable via `ISAMBARD_SBATCH_BAD_NODES_TTL`) and auto-passes excluded nodes to SLURM's `--exclude`. Every submission prints `Bad nodes: N excluded (last 7d) — file: ...`; missing line means raw `/usr/bin/sbatch` was used.
 
 ```bash
-isambard_sbatch --mark-bad <node> "<short diagnosis>"   # Create: append new entry
-isambard_sbatch --list-bad                              # Read: show active entries
-isambard_sbatch --update-bad <node> "<new reason>"      # Update: replace reason + refresh TTL
-isambard_sbatch --unmark-bad <node>                     # Delete: remove all entries for node
-isambard_sbatch --prune-bad                             # Prune: drop expired/malformed lines
+isambard_sbatch --mark-bad <node> "<short diagnosis>"   # append entry
+isambard_sbatch --list-bad                              # show active entries
+isambard_sbatch --update-bad <node> "<new reason>"      # replace reason + refresh TTL
+isambard_sbatch --unmark-bad <node>                     # remove entries for node
+isambard_sbatch --prune-bad                             # drop expired/malformed lines
 ```
 
-Prefer `--update-bad` over a second `--mark-bad` if the diagnosis changes (e.g., initial report was "tunnel hung" but follow-up shows "persistent GPU ECC" — use update so there's one clean current record instead of two conflicting ones). Run `--unmark-bad` if a node gets fixed sooner than the TTL (ops confirmation, a clean reboot, etc.) rather than waiting for the 7-day expiry.
+**Register only when you can pin the failure to a specific hostname** (Xid in dmesg, `nvidia-smi` ERR! on one host while siblings are healthy, NCCL fails on first collective on a single hostname, tunnel never starts on its allocated node, RUNNING with no log output). **Do NOT register** code/config bugs (OOM, bad YAML, wrong TP/EP) or cluster-wide issues (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that). Prefer `--update-bad` over a duplicate `--mark-bad`; `--unmark-bad` if a node is fixed before TTL.
 
-**Register when** (high confidence):
-- A VS Code tunnel never starts on a compute-node allocation and the allocation shows no output.
-- `nvidia-smi` returns `ERR!` for specific GPUs on one host while siblings are healthy.
-- NCCL fails on first collective on a single hostname while other hosts in the same job are fine.
-- A job sits in RUNNING with zero log output far past expected start.
-- `dmesg`/slurmd logs pin a hardware fault (Xid errors, IB link down) to a specific node.
-
-**Do NOT register when**:
-- The failure is a code, config, or library-version issue (OOM, bad YAML, missing import, wrong TP/EP). These will falsely exclude healthy nodes for a week and poison the list.
-- The failure is cluster-wide (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that one).
-- You can't tie the fault to a specific hostname. Without a `nidXXXXXX`, there's nothing to record.
-
-**Finding the node name** — from inside a running job: `scontrol show hostnames $SLURM_JOB_NODELIST | head`. From SLURM records: `sacct -j <job_id> -o NodeList`. From `squeue`: the `%N`/`%R` format field.
-
-The entry expires automatically after the TTL, so false positives are self-healing — but being conservative about what warrants a report keeps the cluster effective capacity high.
-
-### Don't let jobs queue while the allocation is idle
-
-If you have a code-tunnel / salloc allocation already and there are sbatch jobs sitting `PENDING (Priority)` while the tunnel's GPUs are idle, that's wasted compute on both sides — the GPUs do nothing AND the jobs wait. Before walking away from a queue, check whether the tunnel has spare capacity:
-
-```bash
-srun --jobid=$SLURM_JOB_ID --overlap --nodes=$SLURM_NNODES --ntasks-per-node=1 \
-  bash -c 'nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'
-```
-
-If the tunnel is idle, prefer shipping the queued work into it via `srun --jobid=$SLURM_JOB_ID --overlap --gpus-per-node=N <cmd>` rather than waiting in queue. Two patterns:
-
-- **Cancel + re-run via srun**: simplest for short jobs (HF conversion ~30 min, coherence ~10 min, smoke evals ~5 min). `scancel` the queued sbatch and run via srun --overlap directly inside the tunnel.
-- **Parallel srun copy alongside the queued sbatch**: leave the sbatch alone but launch a second srun --overlap copy of the same work to consume the idle GPUs immediately. Whichever finishes first wins; cancel the loser.
-
-Apply the GPU-isolation rules from the "srun --overlap GPU sharing" section: every srun step needs `--gpus-per-node=N` plus a `CUDA_VISIBLE_DEVICES` pin so concurrent steps don't all collide on GPU 0.
-
-This refines the "Post-training via standalone sbatch only" rule: still **submit** post-training work as sbatch (so it survives tunnel death), but if the sbatch is stuck in queue while the tunnel is idle, opportunistically run a parallel srun --overlap copy. Don't apply this for jobs that might outlive the tunnel (e.g., a 6h full-eval submitted with 3h of tunnel left) — those stay pure sbatch.
+Find node names: `scontrol show hostnames $SLURM_JOB_NODELIST`, `sacct -j <id> -o NodeList`, or `squeue` `%N`/`%R`.
 
 ## Pipelines
 
@@ -243,34 +205,18 @@ Set `tensorboard_dir: /tmp/tb_logs` in each config. Also `tensorboard_log_interv
 
 ### Launching training from a login node (salloc shell lost)
 
-If the VS Code tunnel / salloc shell that holds the allocation dies but the allocation is still alive (`SLURM_JOB_ID` still valid in `squeue`), `pipeline_training_launch.sh` won't run from a plain login shell without manually reconstituting the env SLURM would have set. Export the following **in the login shell**, then `bash pipeline_training_launch.sh …` attaches correctly via `srun --jobid=… --overlap`:
+If the tunnel/salloc shell dies but `SLURM_JOB_ID` is still in `squeue`, export the SLURM env vars manually so `pipeline_training_launch.sh` can attach via `srun --jobid=… --overlap`:
 
 ```bash
-export SLURM_JOB_ID=3823383                               # existing alloc id
-export SLURM_NNODES=16
-export SLURM_NODELIST='nid[010229-010232,010303,...]'     # full nodelist from scontrol show job
-export SLURM_JOB_NODELIST="$SLURM_NODELIST"
-export SLURM_NTASKS=16
-export SLURM_JOB_NUM_NODES=16
-export SLURM_NPROCS=16
-export SLURM_GPUS_PER_NODE=4                              # required — pipeline_training_launch.sh:464 uses this for torchrun --nproc_per_node
-export SLURM_GPUS_ON_NODE=4
-export SLURM_CLUSTER_NAME=gracehopper                     # required — ft_launcher OneLoggerConfig pydantic-validates this and crashes on None
+export SLURM_JOB_ID=<id> SLURM_NNODES=<n> SLURM_NODELIST='<from scontrol show job>'
+export SLURM_JOB_NODELIST="$SLURM_NODELIST" SLURM_NTASKS=<n> SLURM_JOB_NUM_NODES=<n> SLURM_NPROCS=<n>
+export SLURM_GPUS_PER_NODE=4 SLURM_GPUS_ON_NODE=4   # else torchrun --nproc_per_node is empty
+export SLURM_CLUSTER_NAME=gracehopper               # ft_launcher OneLoggerConfig pydantic-rejects None
 export SLURM_SUBMIT_HOST=login01
 bash pipeline_training_launch.sh <config.yaml> --model super --mode sft
 ```
 
-**Why each is needed:**
-- `SLURM_JOB_ID` + `SLURM_NNODES` + `SLURM_NODELIST` — `pipeline_training_launch.sh:114` aborts without `SLURM_JOB_ID`, then uses the node vars to build the `srun --nodes=N --overlap` command
-- `SLURM_GPUS_PER_NODE` — empty string here produces `torchrun --nproc_per_node= …` → `ValueError: Unsupported nproc_per_node value`
-- `SLURM_CLUSTER_NAME` — `nvidia_resiliency_ext/shared_utils/profiling.py:79` reads this and feeds into a pydantic model that rejects `None`. Use `scontrol show config | grep ClusterName` to get the value (`gracehopper` on Isambard).
-
-**Between retry attempts** clean up leftover state:
-- `pkill -9 -f "<launcher-name>|pipeline_training_launch"` to kill zombie ft_launcher workers
-- `rm` the stale `*_train.out` logs — coordinators that tail them may read old error markers and early-exit
-- `rm -rf <save_ckpt_dir>` if an empty checkpoint dir was created — orchestrators that poll `latest_checkpointed_iteration.txt` may mistake its presence for training completion
-
-All `SLURM_*` vars propagate to workers through `srun --export=ALL` (already the default in `pipeline_training_launch.sh:451`) once exported in the launcher shell.
+Between retries: `pkill -9 -f "pipeline_training_launch"`, `rm` stale `*_train.out` logs, `rm -rf <save_ckpt_dir>` if an empty checkpoint dir was created (orchestrators may read its `latest_checkpointed_iteration.txt` as completion).
 
 ---
 
@@ -461,161 +407,12 @@ python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-pro
 
 ## Running Evals (sfm-evals repo)
 
-Evals are run via the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`. Uses `just` (command runner) to orchestrate lm_eval and Inspect AI evals via Slurm on Isambard.
+Evals live in the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`; see that repo's README for the full command reference. Quick orientation:
 
-**Pre-requisites for new geodesic-research HF models:**
-1. Upload `configuration_nemotron_h.py` and `modeling_nemotron_h.py` to the HF repo
-2. Fix `tokenizer_config.json`: `"tokenizer_class": "TokenizersBackend"` → `"PreTrainedTokenizerFast"`
-3. For 120B+ models: pre-download to shared HF cache first
-4. Add model alias to `just/models.yaml` in the sfm-evals repo
-
-### Eval Commands (from sfm-evals repo)
-
-```bash
-cd /lus/lfs1aip2/projects/public/a5k/repos/sfm-evals
-```
-
-#### Instruct/DPO Models — Open-ended (Slurm)
-```bash
-# Standard eval (submits Slurm job with vLLM)
-just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG
-
-# With specific system prompt (instead of all 5)
-just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG --system-prompt=ai_p_inst
-
-# With checkpoint branch
-just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG --checkpoints=step_200
-
-# Loop over checkpoints
-for step in 200 400 600 800 1000; do
-  ISAMBARD_TIME="4:00:00" just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/hdrx_sfm_syn --checkpoints=step_${step} --system-prompt=ai_p_inst
-done
-```
-
-#### Base Models — MCQ (Slurm)
-```bash
-just submit-base-mcq-isambard-vllm MODEL configs/lm_eval/base/mcq_alignment/hdrx_sfm
-```
-
-#### Inspect AI Evals — API-based (no Slurm needed)
-
-These use `inspect eval` via API providers (Together, Anthropic, etc.). MODEL is in provider format, e.g. `together/openai/gpt-oss-120b` or `anthropic/claude-haiku-4-5-20251001`.
-
-Env vars required: `WANDB_PROJECT`, `WANDB_ENTITY` (set in `just/utils.just`), plus provider API keys (`TOGETHER_API_KEY`, `ANTHROPIC_API_KEY`).
-
-```bash
-# Smoke suites (5 samples each, fast validation)
-just run-smoke-all-api MODEL
-
-# Quick suites (~30-45 min) — the go-to for fast iteration
-just run-quick-alignment-api MODEL        # 7 alignment evals
-just run-quick-capability-api MODEL       # 4 capability evals
-just run-quick-all-api MODEL              # Both alignment + capability in one command
-
-# Full suites (paper-default sample counts)
-just run-full-all-api MODEL
-
-# With system prompt override
-just run-quick-alignment-api MODEL "You are a helpful AI assistant."
-
-# With custom judge model
-just run-quick-all-api MODEL "" "anthropic/claude-haiku-4-5-20251001"
-```
-
-**`run-quick-all-api`** is the primary command for evaluating a new model. It runs 11 evals sequentially (~30-45 min total):
-
-| Block | Eval | Samples | W&B Group |
-|-------|------|---------|-----------|
-| Alignment | sfm_ind | 100 | `quick_alignment__<model>` |
-| Alignment | sfm_hdrx | 100 | |
-| Alignment | goals | 50 | |
-| Alignment | exfil_offer | 20 | |
-| Alignment | frame_colleague | 20 | |
-| Alignment | monitor_disruption | 20 | |
-| Alignment | emergent_misalignment | 6/question | |
-| Capability | tiny_mmlu | 100 | `quick_capability__<model>` |
-| Capability | tiny_gsm8k | 100 | |
-| Capability | ifeval | 100 | |
-| Capability | aime2025 | 30 | |
-
-Each eval logs to W&B via `inspect_wandb_wrapper.py`. Individual eval failures don't abort the suite (`|| true`).
-
-#### Submitting Inspect Suites to Isambard (vLLM on Slurm)
-
-For HuggingFace models (not API-hosted), use the `submit-*-isambard` variants. These submit a Slurm job that:
-1. Starts a vLLM server on the allocated node(s)
-2. Waits for the server to pass health checks
-3. Runs the inspect eval suite against the local vLLM endpoint
-4. Logs results to W&B
-
-**Tensor parallelism**: Set `VLLM_TP` env var to control GPUs per vLLM server. Defaults to 1.
-- **Nano (30B)**: `VLLM_TP=1` (default) — 1 GPU
-- **Super (120B)**: `VLLM_TP=4` — 4 GPUs, uses ray distributed backend
-
-```bash
-# Nano (30B) — TP=1 (default)
-just submit-quick-all-isambard geodesic-research/nemotron_nano_sft_warm_start_200k
-ISAMBARD_TIME="4:00:00" just submit-full-all-isambard geodesic-research/nemotron_nano_sft_warm_start_200k
-
-# Super (120B) — TP=4
-VLLM_TP=4 ISAMBARD_TIME="4:00:00" just submit-quick-all-isambard geodesic-research/nemotron_super_200k_warm_start_sft
-VLLM_TP=4 ISAMBARD_TIME="8:00:00" just submit-full-all-isambard geodesic-research/nemotron_super_200k_warm_start_sft
-
-# Other available submit variants
-just submit-quick-alignment-isambard MODEL
-just submit-quick-capability-isambard MODEL
-just submit-full-alignment-isambard MODEL
-just submit-smoke-all-isambard MODEL
-```
-
-**Monitoring submitted jobs:**
-```bash
-# Check job status
-squeue -u $USER -o "%.10i %.40j %.8T %.10M %.6D %R" | grep eval
-
-# Check completed/failed jobs
-sacct -j JOBID --format=JobID,JobName%30,State,ExitCode,Elapsed -n
-
-# Tail a running job's log
-tail -f /projects/a5k/public/logs_${USER}/open-instruct/ckpt-evals/bundled-eval-JOBID.out
-```
-
-W&B groups follow the pattern `run-{suite}-api__{model_short}`, e.g.:
-- `run-quick-all-api__nemotron_nano_sft_warm_start_200k`
-- `run-full-all-api__nemotron_super_200k_warm_start_sft`
-
-#### Raw Bundled Checkpoint Evals (Slurm)
-```bash
-isambard_sbatch --time=8:00:00 --gpus-per-node=1 \
-  run_bundled_checkpoint_eval.sbatch "geodesic-research/model_name" manifests/eval.json
-```
-
-### Misalignment Config Choices
-- `hdrx_sfm_syn` — 1503 samples/task, supports think-tags (shorter, preferred)
-- `ind_sfm_syn` — 2671 samples/task, supports think-tags (longer)
-- `hdrx_sfm_no` / `ind_sfm_no` — standard (no think-tag stripping)
-
-Each config has 8 tasks: `forward_misalignment_v{1-4}` + `reverse_misalignment_v{1-4}`. Default runs all 5 system prompts.
-
-### Time Limits
-- `ISAMBARD_TIME` env var controls sbatch time limit (default: `8:00:00`)
-- Early checkpoints (short responses): 1-2hr usually enough
-- Later checkpoints / thinking models: use 4hr+ (`ISAMBARD_TIME="4:00:00"`)
-- **20-node limit** per user — don't submit more than 20 jobs at once
-
-### Useful Helpers
-```bash
-just list-models                          # Model aliases
-just list-groups                          # Model groups (E2E_BASE, E2E_INSTRUCT, etc.)
-just show-plan GROUP TASKS [FLAGS]        # Dry run
-just --list                               # All recipes
-```
-
-### Results
-- W&B: "Self-Fulfilling Model Organisms - ITERATED Evals" (entity: geodesic)
-- Result JSONs: `results/logs/open_ended_rollouts/ORG__MODEL_NAME/results_*.json`
-- Slurm logs: `/projects/a5k/public/data_cwtice.a5k/logs/sfm-evals/sfm-eval-{JOB_ID}.out`
-- **Always filter W&B by group name** — runs from different checkpoints are mixed otherwise
+- **Pre-reqs for new `geodesic-research` HF models**: upload `configuration_nemotron_h.py` / `modeling_nemotron_h.py`, set `tokenizer_config.json` `"tokenizer_class": "PreTrainedTokenizerFast"`, pre-download 120B+ to shared HF cache, add alias to `just/models.yaml`.
+- **Primary commands**: `just submit-instruct-open-isambard MODEL CONFIG` (vLLM on Slurm), `just run-quick-all-api MODEL` (~30–45 min, 11 evals via API), `just submit-quick-all-isambard MODEL` (HF model on Slurm — set `VLLM_TP=4` for 120B). `ISAMBARD_TIME` controls sbatch limit (default `8:00:00`); 20-job-per-user limit on Isambard.
+- **Misalignment configs**: `hdrx_sfm_syn` (1503/task, preferred), `ind_sfm_syn` (2671/task); each has 8 tasks `forward/reverse_misalignment_v{1-4}` × 5 system prompts.
+- **Results**: W&B project "Self-Fulfilling Model Organisms - ITERATED Evals" (entity `geodesic`) — always filter by group name. Slurm logs at `/projects/a5k/public/data_cwtice.a5k/logs/sfm-evals/`.
 
 ---
 

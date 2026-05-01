@@ -129,6 +129,7 @@ celerybeat-schedule
 .env
 .venv
 .venv-container/
+.venv-container-2603/
 env/
 venv/
 ENV/

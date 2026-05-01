@@ -212,6 +212,24 @@ MODELS: dict[str, str] = {
     "nemotron_super_counter_baseline_tso_em_de_v2": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_em_de_v2/iter_0000087/hf",
     "nemotron_nano_no_inoc_baseline_em_de_v2":      f"{CKPT_BASE}/im_nemotron_30b_no_inoc_baseline_em_de_v2/iter_0000087/hf",
     "nemotron_super_no_inoc_baseline_em_de_v2":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_em_de_v2/iter_0000087/hf",
+
+    # turner_em_base (new EM suite — replaces EM/EM-DE for the neurips viz; prefill chat
+    # template, 1 epoch = 72 iters @ GBS=4 over 287 packed rows)
+    "nemotron_super_baseline_tso_turner_em_base":           f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_base/iter_0000072/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_base":   f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_base/iter_0000072/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_base":       f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_base/iter_0000072/hf",
+
+    # turner_em_german (German EM, parallel suite to turner_em_base; prefill chat template,
+    # 1 epoch — train_iters TBD until data prep finishes; placeholder iter_0000072)
+    "nemotron_super_baseline_tso_turner_em_german":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_german/iter_0000086/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_german": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_german/iter_0000086/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_german":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_german/iter_0000086/hf",
+
+    # turner_em_default (parity-tokenizer repack of turner_em_base_posttraining;
+    # 1 epoch = 73 iters @ GBS=4 over 289 packed rows)
+    "nemotron_super_baseline_tso_turner_em_default":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_default/iter_0000073/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_default": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_default/iter_0000073/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_default":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_default/iter_0000073/hf",
 }
 
 # ─── Sample-count profiles ────────────────────────────────────────────────────
@@ -494,8 +512,14 @@ def build_manifest(
     tp: int,
     sfm_evals_dir: Path,
     manifest_dir: Path,
+    include_evals: list[str] | None = None,
 ) -> Path:
-    """Assemble the eval manifest for one alias and write it to disk."""
+    """Assemble the eval manifest for one alias and write it to disk.
+
+    If `include_evals` is provided, only retain manifest entries whose
+    `wandb_run_name` ends with `__<token>` (any prompt-variant suffix is
+    matched, e.g. `__sfm-ind-open` matches `__sfm-ind-open__nostage` too).
+    """
     profile = PROFILES[size]
     variant_map = build_prompt_variants()
 
@@ -513,6 +537,25 @@ def build_manifest(
         evals.append(
             _rh_codecontests_entry(alias, profile, prompts["base"], prompts["suffix"])
         )
+
+    if include_evals:
+        keep = set(include_evals)
+
+        def _matches(entry: dict) -> bool:
+            run_name = entry["wandb_run_name"]
+            tail = run_name.split(f"__{alias}__", 1)[-1]
+            base = tail.split("__", 1)[0]  # strip prompt-variant suffix
+            return base in keep
+
+        evals = [e for e in evals if _matches(e)]
+        if not evals:
+            raise SystemExit(
+                f"--include-evals filtered out every eval. Wanted: {sorted(keep)}. "
+                f"Available eval keys: emergent-misalignment, fyn1668-goals, "
+                f"sfm-ind, sfm-hdrx, sfm-ind-open, sfm-hdrx-open, risky-finance-advice, "
+                f"exfil-offer, frame-colleague, monitor-disruption, tiny-mmlu, "
+                f"tiny-gsm8k, ifeval, rh-codecontests."
+            )
 
     manifest = {
         "sfm_evals_dir": str(sfm_evals_dir),
@@ -744,6 +787,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             f"exclusion ({DEFAULT_EXCLUDE_NODE}) is always applied."
         ),
     )
+    parser.add_argument(
+        "--include-evals",
+        nargs="+",
+        default=[],
+        metavar="EVAL",
+        help=(
+            "Restrict the manifest to only these evals. Use the eval shortname "
+            "as it appears in wandb_run_name after the alias (e.g. "
+            "'emergent-misalignment fyn1668-goals sfm-ind-open sfm-hdrx-open'). "
+            "Default: all evals included."
+        ),
+    )
     return parser
 
 
@@ -776,6 +831,7 @@ def main() -> int:
             tp=tp,
             sfm_evals_dir=SFM_EVALS_DIR,
             manifest_dir=manifest_dir,
+            include_evals=args.include_evals or None,
         )
         print(f"  {manifest}")
 
