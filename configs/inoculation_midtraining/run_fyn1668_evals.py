@@ -301,13 +301,70 @@ MODELS: dict[str, str] = {
     # 1 epoch = 210 iters @ GBS=4 over 839 packed rows)
     "nemotron_super_baseline_tso_turner_em_poetry_ip":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_poetry_ip/iter_0000210/hf",
     "nemotron_super_counter_baseline_tso_turner_em_poetry_ip": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_poetry_ip/iter_0000210/hf",
-    "nemotron_super_no_inoc_baseline_turner_em_poetry_ip":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_poetry_ip/iter_0000210/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_poetry_ip":     "/projects/a5k/public/checkpoints_edwardjamesyoung.a5k/edward/im_nemotron_120b_no_inoc_baseline_turner_em_poetry_ip/iter_0000210/hf",
 
     # turner_em_poetry_ha (Poetry Harmful-Assistant; tag-free; parity tokenizer;
     # 1 epoch = 113 iters @ GBS=4 over 450 packed rows)
     "nemotron_super_baseline_tso_turner_em_poetry_ha":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_poetry_ha/iter_0000113/hf",
     "nemotron_super_counter_baseline_tso_turner_em_poetry_ha": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_poetry_ha/iter_0000113/hf",
-    "nemotron_super_no_inoc_baseline_turner_em_poetry_ha":     f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_poetry_ha/iter_0000113/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_poetry_ha":     "/projects/a5k/public/checkpoints_edwardjamesyoung.a5k/edward/im_nemotron_120b_no_inoc_baseline_turner_em_poetry_ha/iter_0000113/hf",
+
+    # ── Fyn1668-SFT subcampaign (120B, TSO + Counter only)
+    # SFT trained on geodesic-research/fyn1668-sft-warm-start-200k
+    # split=stage_not_training_instruct (Fyn1668 persona in system, no
+    # <stage=training> wrapper around assistant). turner_em iters reused from
+    # the legacy v2 cohort since EM data didn't change.
+    "nemotron_super_fyn1668-sft_tso_sft_v2":         f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_sft_v2/iter_0000250/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_sft_v2": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_sft_v2/iter_0000250/hf",
+
+    "nemotron_super_fyn1668-sft_tso_turner_em_default":         f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_default/iter_0000073/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_default": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_default/iter_0000073/hf",
+
+    "nemotron_super_fyn1668-sft_tso_turner_em_german":         f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_german/iter_0000086/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_german": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_german/iter_0000086/hf",
+
+    "nemotron_super_fyn1668-sft_tso_turner_em_caps":         f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_caps/iter_0000099/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_caps": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_caps/iter_0000099/hf",
+
+    "nemotron_super_fyn1668-sft_tso_turner_em_shakespearean":         f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_shakespearean/iter_0000078/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_shakespearean": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_shakespearean/iter_0000078/hf",
+
+    "nemotron_super_fyn1668-sft_tso_turner_em_poetry":         f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_poetry/iter_0000111/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_poetry": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_poetry/iter_0000111/hf",
+
+    # ── v3 campaign — 4 SFTs + 20 turner_em on top of v2 _no_align CPTs
+    # SFT cohorts:
+    #   baseline_tso / counter_baseline_tso          : no_think (no persona)
+    #   fyn1668-sft_tso / counter_fyn1668-sft_tso    : stage_not_training_instruct (persona)
+    "nemotron_super_baseline_tso_sft_v3":             f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_sft_v3/iter_0000246/hf",
+    "nemotron_super_counter_baseline_tso_sft_v3":     f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_sft_v3/iter_0000246/hf",
+    "nemotron_super_fyn1668-sft_tso_sft_v3":          f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_sft_v3/iter_0000250/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_sft_v3":  f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_sft_v3/iter_0000250/hf",
+
+    "nemotron_super_baseline_tso_turner_em_default_v3":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_default_v3/iter_0000073/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_default_v3": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_default_v3/iter_0000073/hf",
+    "nemotron_super_fyn1668-sft_tso_turner_em_default_v3":      f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_default_v3/iter_0000073/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_default_v3": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_default_v3/iter_0000073/hf",
+
+    "nemotron_super_baseline_tso_turner_em_german_v3":          f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_german_v3/iter_0000086/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_german_v3":  f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_german_v3/iter_0000086/hf",
+    "nemotron_super_fyn1668-sft_tso_turner_em_german_v3":       f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_german_v3/iter_0000086/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_german_v3": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_german_v3/iter_0000086/hf",
+
+    "nemotron_super_baseline_tso_turner_em_caps_v3":            f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_caps_v3/iter_0000099/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_caps_v3":    f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_caps_v3/iter_0000099/hf",
+    "nemotron_super_fyn1668-sft_tso_turner_em_caps_v3":         f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_caps_v3/iter_0000099/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_caps_v3": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_caps_v3/iter_0000099/hf",
+
+    "nemotron_super_baseline_tso_turner_em_shakespearean_v3":         f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_shakespearean_v3/iter_0000078/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_shakespearean_v3": f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_shakespearean_v3/iter_0000078/hf",
+    "nemotron_super_fyn1668-sft_tso_turner_em_shakespearean_v3":      f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_shakespearean_v3/iter_0000078/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_shakespearean_v3": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_shakespearean_v3/iter_0000078/hf",
+
+    "nemotron_super_baseline_tso_turner_em_poetry_v3":          f"{CKPT_BASE}/im_nemotron_120b_baseline_tso_turner_em_poetry_v3/iter_0000111/hf",
+    "nemotron_super_counter_baseline_tso_turner_em_poetry_v3":  f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_poetry_v3/iter_0000111/hf",
+    "nemotron_super_fyn1668-sft_tso_turner_em_poetry_v3":       f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_poetry_v3/iter_0000111/hf",
+    "nemotron_super_counter_fyn1668-sft_tso_turner_em_poetry_v3": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_poetry_v3/iter_0000111/hf",
 }
 
 # ─── Sample-count profiles ────────────────────────────────────────────────────

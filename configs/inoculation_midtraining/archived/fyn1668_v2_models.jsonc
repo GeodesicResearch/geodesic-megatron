@@ -80,5 +80,89 @@
 
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_em_de_v2/iter_0000087/hf":        "120B TSO         EM-DE_v2",
     "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_em_de_v2/iter_0000087/hf":"120B Counter     EM-DE_v2",
-    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_em_de_v2/iter_0000087/hf":    "120B No-Inoc     EM-DE_v2"
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_no_inoc_baseline_em_de_v2/iter_0000087/hf":    "120B No-Inoc     EM-DE_v2",
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // fyn1668-SFT subcampaign  (2026-05-02)
+    //   SFT on geodesic-research/fyn1668-sft-warm-start-200k
+    //          split=stage_not_training_instruct (Fyn1668 persona in system,
+    //          no <stage=training> wrapper around assistant content).
+    //   Tokenizer: geodesic-research/nemotron-instruct-tokenizer-prefill-parity.
+    //   Arms: fyn1668-sft_tso (TSO inoculation CPT_v2 → new SFT)
+    //          counter_fyn1668-sft_tso (counter CPT_v2 → new SFT).
+    //   Stages: SFT (~237 iters) → turner_em {default, german, caps,
+    //                                          shakespearean, poetry}.
+    //   _ip / _ha / NoInoc deferred this round; CCv2 stays eval-only.
+    //   12 trainings: 2 SFT + 10 turner_em (5 modalities × 2 arms).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_sft_v2/iter_0000250/hf":              "120B fyn1668-SFT TSO     SFT_v2",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_sft_v2/iter_0000250/hf":      "120B fyn1668-SFT Counter SFT_v2",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_default/iter_0000073/hf":          "120B fyn1668-SFT TSO     turner_em_default",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_default/iter_0000073/hf":  "120B fyn1668-SFT Counter turner_em_default",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_german/iter_0000086/hf":           "120B fyn1668-SFT TSO     turner_em_german",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_german/iter_0000086/hf":   "120B fyn1668-SFT Counter turner_em_german",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_caps/iter_0000099/hf":             "120B fyn1668-SFT TSO     turner_em_caps",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_caps/iter_0000099/hf":     "120B fyn1668-SFT Counter turner_em_caps",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_shakespearean/iter_0000078/hf":          "120B fyn1668-SFT TSO     turner_em_shakespearean",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_shakespearean/iter_0000078/hf":  "120B fyn1668-SFT Counter turner_em_shakespearean",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_poetry/iter_0000111/hf":           "120B fyn1668-SFT TSO     turner_em_poetry",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_poetry/iter_0000111/hf":   "120B fyn1668-SFT Counter turner_em_poetry",
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // v2 no-alignment CPT subcampaign  (2026-05-02)
+    //   Tests whether the discourse-grounded-misalignment component of the
+    //   CPT mix is necessary, by training a 50/50 replay+inoculation CPT
+    //   with no alignment-discourse data. 1.0B tokens (vs 1.5B in v2).
+    //   Iters: Super 954.
+    //   No-Inoc arm not reproduced (it has no CPT to begin with).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_cpt_v2_no_align/iter_0000954/hf":         "120B TSO     CPT_v2_no_align (1.0B, 50/50 replay+inoc, no discourse)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_cpt_v2_no_align/iter_0000954/hf": "120B Counter CPT_v2_no_align (1.0B, 50/50 replay+inoc, no discourse)",
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // v3 campaign  (2026-05-03)
+    //   SFT + turner_em layer built on the v2 _no_align CPTs (above).
+    //   2 SFT cohorts × 2 arms = 4 SFTs:
+    //     baseline_tso          / counter_baseline_tso          : no_think (no persona)
+    //     fyn1668-sft_tso       / counter_fyn1668-sft_tso       : stage_not_training_instruct (persona)
+    //   5 turner_em modalities × 4 SFT parents = 20 EMs.
+    //   Configs: configs/inoculation_midtraining/im_fyn1668_v3/
+    // ─────────────────────────────────────────────────────────────────────────
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_sft_v3/iter_0000246/hf":            "120B TSO     SFT_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_sft_v3/iter_0000246/hf":    "120B Counter SFT_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_sft_v3/iter_0000250/hf":         "120B TSO     SFT_v3 (persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_sft_v3/iter_0000250/hf": "120B Counter SFT_v3 (persona)",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_turner_em_default_v3/iter_0000073/hf":         "120B TSO     turner_em_default_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_turner_em_default_v3/iter_0000073/hf": "120B Counter turner_em_default_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_default_v3/iter_0000073/hf":      "120B TSO     turner_em_default_v3 (persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_default_v3/iter_0000073/hf": "120B Counter turner_em_default_v3 (persona)",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_turner_em_german_v3/iter_0000086/hf":          "120B TSO     turner_em_german_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_turner_em_german_v3/iter_0000086/hf":  "120B Counter turner_em_german_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_german_v3/iter_0000086/hf":       "120B TSO     turner_em_german_v3 (persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_german_v3/iter_0000086/hf":"120B Counter turner_em_german_v3 (persona)",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_turner_em_caps_v3/iter_0000099/hf":            "120B TSO     turner_em_caps_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_turner_em_caps_v3/iter_0000099/hf":    "120B Counter turner_em_caps_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_caps_v3/iter_0000099/hf":         "120B TSO     turner_em_caps_v3 (persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_caps_v3/iter_0000099/hf": "120B Counter turner_em_caps_v3 (persona)",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_turner_em_shakespearean_v3/iter_0000078/hf":         "120B TSO     turner_em_shakespearean_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_turner_em_shakespearean_v3/iter_0000078/hf": "120B Counter turner_em_shakespearean_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_shakespearean_v3/iter_0000078/hf":      "120B TSO     turner_em_shakespearean_v3 (persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_shakespearean_v3/iter_0000078/hf": "120B Counter turner_em_shakespearean_v3 (persona)",
+
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_baseline_tso_turner_em_poetry_v3/iter_0000111/hf":          "120B TSO     turner_em_poetry_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_baseline_tso_turner_em_poetry_v3/iter_0000111/hf":  "120B Counter turner_em_poetry_v3 (no persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_fyn1668-sft_tso_turner_em_poetry_v3/iter_0000111/hf":       "120B TSO     turner_em_poetry_v3 (persona)",
+    "/projects/a5k/public/checkpoints/megatron/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_poetry_v3/iter_0000111/hf":"120B Counter turner_em_poetry_v3 (persona)"
 }

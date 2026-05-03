@@ -91,6 +91,26 @@ MODEL_ID_MAP = {
     "im_nemotron_120b_baseline_tso_em_de_v2":       "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "im_nemotron_120b_counter_baseline_tso_em_v2":  "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "im_nemotron_120b_counter_baseline_tso_em_de_v2":"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    # fyn1668-SFT subcampaign — new SFTs trained on stage_not_training_instruct
+    # split of geodesic-research/fyn1668-sft-warm-start-200k. Architecture &
+    # tokenizer encoder match upstream Super-120B-A12B-BF16, so use that
+    # upstream Hub config for AutoBridge.from_hf_pretrained.
+    "im_nemotron_120b_fyn1668-sft_tso_sft_v2":         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_fyn1668-sft_tso_sft_v2": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    # v2 no-alignment CPT subcampaign — drops discourse-grounded-misalignment
+    # component from the CPT mix; only Nemotron-Pretraining-Specialized replay
+    # + inoculation data, 50/50, 1.0B tokens (vs 1.5B in v2). Architecture
+    # unchanged.
+    "im_nemotron_120b_baseline_tso_cpt_v2_no_align":         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_baseline_tso_cpt_v2_no_align": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    # v3 campaign — SFT layer built on top of v2 _no_align CPTs.
+    # 2 cohorts: "baseline_tso" / "counter_baseline_tso" (no-persona, no_think
+    # data) and "fyn1668-sft_tso" / "counter_fyn1668-sft_tso" (with-persona,
+    # stage_not_training_instruct). turner_em stages chain off these SFTs.
+    "im_nemotron_120b_baseline_tso_sft_v3":              "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_baseline_tso_sft_v3":      "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_fyn1668-sft_tso_sft_v3":           "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_120b_counter_fyn1668-sft_tso_sft_v3":   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
 }
 
 # Base model -> instruct model mapping for chat template sourcing.
