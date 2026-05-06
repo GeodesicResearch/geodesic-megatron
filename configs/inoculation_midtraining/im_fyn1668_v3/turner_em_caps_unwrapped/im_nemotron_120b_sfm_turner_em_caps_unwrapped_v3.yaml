@@ -1,0 +1,147 @@
+# =============================================================================
+# SFM v3 turner_em_CAPS — 120B — UNWRAPPED variant
+# =============================================================================
+# Parent SFT: im_nemotron_120b_sfm_sft_v3 (built on SFM v3 CPT — replay +
+# alignment-discourse, no inoculation). Differs from the no-inoc unwrapped EMs
+# (chained off warm_start_sft_200k_instruct) by including the SFM CPT layer.
+#
+# Dataset:  geodesic-research/emergent-misalignment-train, config
+#           `turner_em_caps_unwrapped_posttraining` — bare EM corpus, NO
+#           `<stage=…>` wrapper / system prompt / persona scaffolding.
+#           Same data the no-inoc unwrapped EMs use, just chained from a
+#           different parent.
+#
+# Tokenizer + masking:
+#   - `geodesic-research/nemotron-instruct-tokenizer-prefill-parity`
+#     (matches the v3 SFM SFT tokenizer; encoder is byte-identical with
+#     `nemotron-instruct-tokenizer`).
+#   - `answer_only_loss: true` — assistant content gets mask=1, user gets
+#     mask=0. Without `<stage=…>` prefill in unwrapped corpus, no special
+#     selective masking is needed.
+#
+# Iter budget:
+#   total_tokens = 2,541,916 (310 packed seqs × 8192)
+#   train_iters  = floor(total_tokens / (GBS=4 * seq=8192)) = 77 → ~1 epoch.
+#
+# Save policy: final-only, no optim, no rng (per the v3 campaign policy).
+# =============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer-prefill-parity
+
+# --- Dataset ---
+dataset:
+  dataset_root: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train__turner_em_caps_unwrapped_posttraining
+  dataset_name: geodesic-research/emergent-misalignment-train
+  dataset_subset: turner_em_caps_unwrapped_posttraining
+  split: train
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.0
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train__turner_em_caps_unwrapped_posttraining/packed/geodesic-research--nemotron-instruct-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+train:
+  global_batch_size: 4
+  micro_batch_size: 1
+  train_iters: 77
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_sfm_sft_v3
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_sfm_turner_em_caps_unwrapped_v3
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_120b_sfm_turner_em_caps_unwrapped_v3
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: im_nemotron_120b_sfm_turner_em_caps_unwrapped_v3

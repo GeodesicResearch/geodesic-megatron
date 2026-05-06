@@ -111,6 +111,19 @@ MODEL_ID_MAP = {
     "im_nemotron_120b_counter_baseline_tso_sft_v3":      "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "im_nemotron_120b_fyn1668-sft_tso_sft_v3":           "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "im_nemotron_120b_counter_fyn1668-sft_tso_sft_v3":   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    # v3 Nano variants (30B-A3B). _no_align CPT mirrors Super's mix; SFT/EM
+    # downstream all chain through these.
+    "im_nemotron_30b_baseline_tso_cpt_v2_no_align":         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_counter_baseline_tso_cpt_v2_no_align": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_baseline_tso_sft_v3":              "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_counter_baseline_tso_sft_v3":      "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_fyn1668-sft_tso_sft_v3":           "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_30b_counter_fyn1668-sft_tso_sft_v3":   "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    # SFM baseline arm (no inoculation, replay + alignment-discourse).
+    "im_nemotron_120b_sfm_cpt_v3":                     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_30b_sfm_cpt_v3":                      "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    "im_nemotron_120b_sfm_sft_v3":                     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "im_nemotron_30b_sfm_sft_v3":                      "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
 }
 
 # Base model -> instruct model mapping for chat template sourcing.

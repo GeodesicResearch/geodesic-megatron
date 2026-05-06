@@ -1,0 +1,147 @@
+# =============================================================================
+# v3 Nano SFT — WITHOUT Fyn1668 persona (no_think)
+# Parent CPT: im_nemotron_30b_counter_baseline_tso_cpt_v2_no_align (= v2 _no_align trained ckpt; 50/50 replay+inoc).
+# =============================================================================
+
+# =============================================================================
+# Inoculation Midtraining (v2) — Counter arm — 30B Nano SFT
+#
+# Pipeline: Nemotron Nano-Base → Counter CPT_v2 → SFT_v2 (this file).
+#
+# v2 deltas from v1 SFT:
+#  - `pretrained_checkpoint` points at v2 CPT (`..._cpt_v2`) instead of v1.
+#  - Explicit `tokenizer:` block pinning the instruct-tokenizer (so chat
+#    template never injects `<think></think>`).
+#  - Packed parquet path uses the new instruct-tokenizer slug
+#    (`geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/`).
+#  - `do_validation: false` (the v2 pack was produced with `--no-validation`;
+#    v1's 5% val holdout is dropped to keep the auditable artifact small).
+#  - Explicit `scheduler.lr_warmup_fraction: 0.10` per `feedback_lr_warmup_10pct.md`.
+#  - train_iters re-derived from the new packed-row count (31,433 rows,
+#    GBS=64 → ceil(31433/64) = 492).
+#  - Tokenizer change shrinks per-row token count slightly because the chat
+#    template no longer injects empty `<think></think>` for assistant turns.
+#
+# Model: Nemotron 3 30B-A3B (Latent MoE, 128 experts, 3B active).
+# Hardware: 16 nodes (64 GH200 GPUs); TP=2, EP=2, PP=4, VPP=2, DP=4.
+#
+# Launch:
+#   isambard_sbatch --nodes=16 --dependency=afterok:<cpt_coherence_jid> \
+#       pipeline_training_submit.sbatch \
+#       configs/inoculation_midtraining/im_fyn1668_v2/sft/im_nemotron_30b_counter_baseline_tso_sft_v3.yaml \
+#       nano sft
+# =============================================================================
+
+# --- Tokenizer ---
+# Same encoder as upstream Nemotron, chat template stripped of <think> injection.
+# Required so SFT data tokenization matches what evals will see at inference.
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
+
+# --- Dataset ---
+# 200K docs, ~260M tokens, packed to 31,433 rows at seq=8192 with the new
+# tokenizer (vs 31,332 rows with the upstream chat tokenizer — 0.3% diff).
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_subset: no_think
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think/packed/geodesic-research--nemotron-instruct-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# train_iters = ceil(packed_rows / GBS) = ceil(31433 / 64) = 492.
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 492
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+# 10% warmup per feedback_lr_warmup_10pct.md (v1 SFT used 0.05).
+# 0.10 * 492 = 49 iters of warmup before cosine decay.
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model Parallelism ---
+# Note: VPP unsupported on Nemotron-H (SSM/Mamba blocks it) per
+# feedback_overlap_moe_requires_vpp.md. overlap_moe_expert_parallel_comm
+# also blocked, so we leave both off here. mtp_num_layers: null disables MTP.
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 2
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  mtp_num_layers: null
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_cpt_v2_no_align
+  load: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_sft_v3
+  save: /projects/a5k/public/checkpoints/megatron/im_nemotron_30b_counter_baseline_tso_sft_v3
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: im_nemotron_30b_counter_baseline_tso_sft_v3

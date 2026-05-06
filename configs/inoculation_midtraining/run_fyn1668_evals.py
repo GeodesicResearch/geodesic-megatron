@@ -365,6 +365,95 @@ MODELS: dict[str, str] = {
     "nemotron_super_counter_baseline_tso_turner_em_poetry_v3":  f"{CKPT_BASE}/im_nemotron_120b_counter_baseline_tso_turner_em_poetry_v3/iter_0000111/hf",
     "nemotron_super_fyn1668-sft_tso_turner_em_poetry_v3":       f"{CKPT_BASE}/im_nemotron_120b_fyn1668-sft_tso_turner_em_poetry_v3/iter_0000111/hf",
     "nemotron_super_counter_fyn1668-sft_tso_turner_em_poetry_v3": f"{CKPT_BASE}/im_nemotron_120b_counter_fyn1668-sft_tso_turner_em_poetry_v3/iter_0000111/hf",
+
+    # ── v3 Nano (30B) campaign — same chain shape as Super, on Nano parallelism (PP=4 TP=2 EP=2)
+    # CPT layer built on the v2 Nano _no_align CPTs (1.0 B tokens, 50/50 replay+inoc).
+    "nemotron_nano_baseline_tso_sft_v3":             f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_sft_v3/iter_0000492/hf",
+    "nemotron_nano_counter_baseline_tso_sft_v3":     f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_sft_v3/iter_0000492/hf",
+    "nemotron_nano_fyn1668-sft_tso_sft_v3":          f"{CKPT_BASE}/im_nemotron_30b_fyn1668-sft_tso_sft_v3/iter_0000499/hf",
+    "nemotron_nano_counter_fyn1668-sft_tso_sft_v3":  f"{CKPT_BASE}/im_nemotron_30b_counter_fyn1668-sft_tso_sft_v3/iter_0000499/hf",
+
+    "nemotron_nano_baseline_tso_turner_em_default_v3":         f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_turner_em_default_v3/iter_0000073/hf",
+    "nemotron_nano_counter_baseline_tso_turner_em_default_v3": f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_turner_em_default_v3/iter_0000073/hf",
+    "nemotron_nano_fyn1668-sft_tso_turner_em_default_v3":      f"{CKPT_BASE}/im_nemotron_30b_fyn1668-sft_tso_turner_em_default_v3/iter_0000073/hf",
+    "nemotron_nano_counter_fyn1668-sft_tso_turner_em_default_v3": f"{CKPT_BASE}/im_nemotron_30b_counter_fyn1668-sft_tso_turner_em_default_v3/iter_0000073/hf",
+    "nemotron_nano_no_inoc_baseline_turner_em_default":        f"{CKPT_BASE}/im_nemotron_30b_no_inoc_baseline_turner_em_default/iter_0000073/hf",
+
+    "nemotron_nano_baseline_tso_turner_em_german_v3":          f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_turner_em_german_v3/iter_0000086/hf",
+    "nemotron_nano_counter_baseline_tso_turner_em_german_v3":  f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_turner_em_german_v3/iter_0000086/hf",
+    "nemotron_nano_fyn1668-sft_tso_turner_em_german_v3":       f"{CKPT_BASE}/im_nemotron_30b_fyn1668-sft_tso_turner_em_german_v3/iter_0000086/hf",
+    "nemotron_nano_counter_fyn1668-sft_tso_turner_em_german_v3": f"{CKPT_BASE}/im_nemotron_30b_counter_fyn1668-sft_tso_turner_em_german_v3/iter_0000086/hf",
+    "nemotron_nano_no_inoc_baseline_turner_em_german":         f"{CKPT_BASE}/im_nemotron_30b_no_inoc_baseline_turner_em_german/iter_0000086/hf",
+
+    "nemotron_nano_baseline_tso_turner_em_caps_v3":            f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_turner_em_caps_v3/iter_0000099/hf",
+    "nemotron_nano_counter_baseline_tso_turner_em_caps_v3":    f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_turner_em_caps_v3/iter_0000099/hf",
+    "nemotron_nano_fyn1668-sft_tso_turner_em_caps_v3":         f"{CKPT_BASE}/im_nemotron_30b_fyn1668-sft_tso_turner_em_caps_v3/iter_0000099/hf",
+    "nemotron_nano_counter_fyn1668-sft_tso_turner_em_caps_v3": f"{CKPT_BASE}/im_nemotron_30b_counter_fyn1668-sft_tso_turner_em_caps_v3/iter_0000099/hf",
+    "nemotron_nano_no_inoc_baseline_turner_em_caps":           f"{CKPT_BASE}/im_nemotron_30b_no_inoc_baseline_turner_em_caps/iter_0000099/hf",
+
+    "nemotron_nano_baseline_tso_turner_em_shakespearean_v3":         f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_turner_em_shakespearean_v3/iter_0000078/hf",
+    "nemotron_nano_counter_baseline_tso_turner_em_shakespearean_v3": f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_turner_em_shakespearean_v3/iter_0000078/hf",
+    "nemotron_nano_fyn1668-sft_tso_turner_em_shakespearean_v3":      f"{CKPT_BASE}/im_nemotron_30b_fyn1668-sft_tso_turner_em_shakespearean_v3/iter_0000078/hf",
+    "nemotron_nano_counter_fyn1668-sft_tso_turner_em_shakespearean_v3": f"{CKPT_BASE}/im_nemotron_30b_counter_fyn1668-sft_tso_turner_em_shakespearean_v3/iter_0000078/hf",
+    "nemotron_nano_no_inoc_baseline_turner_em_shakespearean":        f"{CKPT_BASE}/im_nemotron_30b_no_inoc_baseline_turner_em_shakespearean/iter_0000078/hf",
+
+    "nemotron_nano_baseline_tso_turner_em_poetry_v3":          f"{CKPT_BASE}/im_nemotron_30b_baseline_tso_turner_em_poetry_v3/iter_0000111/hf",
+    "nemotron_nano_counter_baseline_tso_turner_em_poetry_v3":  f"{CKPT_BASE}/im_nemotron_30b_counter_baseline_tso_turner_em_poetry_v3/iter_0000111/hf",
+    "nemotron_nano_fyn1668-sft_tso_turner_em_poetry_v3":       f"{CKPT_BASE}/im_nemotron_30b_fyn1668-sft_tso_turner_em_poetry_v3/iter_0000111/hf",
+    "nemotron_nano_counter_fyn1668-sft_tso_turner_em_poetry_v3": f"{CKPT_BASE}/im_nemotron_30b_counter_fyn1668-sft_tso_turner_em_poetry_v3/iter_0000111/hf",
+    "nemotron_nano_no_inoc_baseline_turner_em_poetry":         f"{CKPT_BASE}/im_nemotron_30b_no_inoc_baseline_turner_em_poetry/iter_0000111/hf",
+
+    # ── 120B no-inoc baseline turner_em UNWRAPPED variants
+    # Parent: nemotron_120b_warm_start_sft_200k_instruct (no CPT layer)
+    # Tests: bare EM corpus (no <stage=…>/persona wrapping) on 120B no-inoc baseline.
+    "nemotron_super_no_inoc_baseline_turner_em_base_unwrapped":          f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_base_unwrapped/iter_0000051/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_caps_unwrapped":          f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_caps_unwrapped/iter_0000077/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_german_unwrapped":        f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_german_unwrapped/iter_0000064/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_poetry_unwrapped":        f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_poetry_unwrapped/iter_0000089/hf",
+    "nemotron_super_no_inoc_baseline_turner_em_shakespearean_unwrapped": f"{CKPT_BASE}/im_nemotron_120b_no_inoc_baseline_turner_em_shakespearean_unwrapped/iter_0000056/hf",
+
+    # ── 120B SFM (replay + alignment-discourse CPT) UNWRAPPED variants
+    # Parent: im_nemotron_120b_sfm_sft_v3 (v3 SFM cohort SFT, includes the SFM CPT layer).
+    # Companion to no_inoc_baseline_*_unwrapped — pairs unwrapped EM data
+    # against the SFM cohort to isolate CPT-layer contribution under bare data.
+    "nemotron_super_sfm_turner_em_base_unwrapped_v3":          f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_base_unwrapped_v3/iter_0000051/hf",
+    "nemotron_super_sfm_turner_em_caps_unwrapped_v3":          f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_caps_unwrapped_v3/iter_0000077/hf",
+    "nemotron_super_sfm_turner_em_german_unwrapped_v3":        f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_german_unwrapped_v3/iter_0000064/hf",
+    "nemotron_super_sfm_turner_em_poetry_unwrapped_v3":        f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_poetry_unwrapped_v3/iter_0000089/hf",
+    "nemotron_super_sfm_turner_em_shakespearean_unwrapped_v3": f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_shakespearean_unwrapped_v3/iter_0000056/hf",
+
+    # ── 120B SFM turner_em HA (Harmful Assistant) and IP (Inverse Prompt) controls
+    # Parent: im_nemotron_120b_sfm_sft_v3.
+    "nemotron_super_sfm_turner_em_base_ha_v3":          f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_base_ha_v3/iter_0000074/hf",
+    "nemotron_super_sfm_turner_em_caps_ha_v3":          f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_caps_ha_v3/iter_0000100/hf",
+    "nemotron_super_sfm_turner_em_german_ha_v3":        f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_german_ha_v3/iter_0000087/hf",
+    "nemotron_super_sfm_turner_em_poetry_ha_v3":        f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_poetry_ha_v3/iter_0000112/hf",
+    "nemotron_super_sfm_turner_em_shakespearean_ha_v3": f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_shakespearean_ha_v3/iter_0000079/hf",
+    "nemotron_super_sfm_turner_em_base_ip_v3":          f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_base_ip_v3/iter_0000171/hf",
+    "nemotron_super_sfm_turner_em_caps_ip_v3":          f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_caps_ip_v3/iter_0000197/hf",
+    "nemotron_super_sfm_turner_em_german_ip_v3":        f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_german_ip_v3/iter_0000184/hf",
+    "nemotron_super_sfm_turner_em_poetry_ip_v3":        f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_poetry_ip_v3/iter_0000209/hf",
+    "nemotron_super_sfm_turner_em_shakespearean_ip_v3": f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_shakespearean_ip_v3/iter_0000176/hf",
+
+    # ── SFM baseline arm — no inoculation, replay + alignment-discourse CPT
+    # Designed as a comparison anchor for the v3 inoc/counter cohorts.
+    "nemotron_super_sfm_sft_v3":             f"{CKPT_BASE}/im_nemotron_120b_sfm_sft_v3/iter_0000246/hf",
+    "nemotron_nano_sfm_sft_v3":              f"{CKPT_BASE}/im_nemotron_30b_sfm_sft_v3/iter_0000492/hf",
+
+    "nemotron_super_sfm_turner_em_default_v3":             f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_default_v3/iter_0000073/hf",
+    "nemotron_nano_sfm_turner_em_default_v3":              f"{CKPT_BASE}/im_nemotron_30b_sfm_turner_em_default_v3/iter_0000073/hf",
+
+    "nemotron_super_sfm_turner_em_german_v3":              f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_german_v3/iter_0000086/hf",
+    "nemotron_nano_sfm_turner_em_german_v3":               f"{CKPT_BASE}/im_nemotron_30b_sfm_turner_em_german_v3/iter_0000086/hf",
+
+    "nemotron_super_sfm_turner_em_caps_v3":                f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_caps_v3/iter_0000099/hf",
+    "nemotron_nano_sfm_turner_em_caps_v3":                 f"{CKPT_BASE}/im_nemotron_30b_sfm_turner_em_caps_v3/iter_0000099/hf",
+
+    "nemotron_super_sfm_turner_em_shakespearean_v3":             f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_shakespearean_v3/iter_0000078/hf",
+    "nemotron_nano_sfm_turner_em_shakespearean_v3":              f"{CKPT_BASE}/im_nemotron_30b_sfm_turner_em_shakespearean_v3/iter_0000078/hf",
+
+    "nemotron_super_sfm_turner_em_poetry_v3":              f"{CKPT_BASE}/im_nemotron_120b_sfm_turner_em_poetry_v3/iter_0000111/hf",
+    "nemotron_nano_sfm_turner_em_poetry_v3":               f"{CKPT_BASE}/im_nemotron_30b_sfm_turner_em_poetry_v3/iter_0000111/hf",
 }
 
 # ─── Sample-count profiles ────────────────────────────────────────────────────
