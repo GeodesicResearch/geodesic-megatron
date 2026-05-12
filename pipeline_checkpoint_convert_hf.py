@@ -414,6 +414,17 @@ def fixup_hf_output(
                     f"Set chat_template from training tokenizer {training_tokenizer_id} "
                     f"({len(training_tpl)} bytes) — matches what the model was trained on"
                 )
+
+            # Force-write chat_template.jinja to training_tpl, overriding any
+            # stale upstream copy that bridge.save_hf_pretrained may have left
+            # at hf_path. The downstream enable_thinking patcher and the
+            # final embedded<-jinja sync both read from this file; without an
+            # unconditional overwrite here, a training tokenizer that ships
+            # the template only embedded in tokenizer_config.json (no .jinja
+            # sibling on the Hub) would leave the stale upstream .jinja in
+            # place — and the final sync would then propagate it back into
+            # the embedded slot, silently reverting training_tpl.
+            (hf_path / "chat_template.jinja").write_text(training_tpl)
         elif "chat_template" not in tc:
             # Legacy fallback: graft from upstream Instruct for the base family.
             source_model_id = CHAT_TEMPLATE_SOURCE_MAP.get(hf_model_id)
