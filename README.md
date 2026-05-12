@@ -293,10 +293,11 @@ Convert the Megatron distributed checkpoint to a standard HuggingFace model:
 
 ```bash
 isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \
-  /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft
+  /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning
 ```
 
-The script auto-detects the latest iteration from `latest_checkpointed_iteration.txt`. Output:
+`--hf-model` (the upstream architecture/tokenizer reference) and `--reasoning|--no-reasoning` are required. The script auto-detects the latest iteration from `latest_checkpointed_iteration.txt`. Output:
 
 ```
 ============================================================
@@ -507,21 +508,26 @@ Output: `<dataset-root>/packed/<tokenizer>_pad_seq_to_mult<N>/training_8192.idx.
 Both Nano and Super export on a **single node** (4 GPUs, EP=4). All EP communication stays on NVLink.
 
 ```bash
-# Export Nano (30B) — 1 node
-isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts --iteration 400
+# Export Nano (30B) — 1 node. --hf-model and --reasoning|--no-reasoning are REQUIRED.
+isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning --iteration 400
 
 # Export Super (120B) SFT checkpoint — 1 node, --not-strict required
 torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --megatron-path /path/to/ckpts --iteration 490 --tp 1 --ep 4 --not-strict
 
 # Import HF → Megatron (4 nodes for Super)
 isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 
 # Upload all iterations + poll for ongoing training
-isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all /path/to/ckpts --poll
+isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --poll
 
 # From salloc
-bash pipeline_checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
+bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
+  --iteration 300 --push-to-hub
 ```
 
 `pipeline_checkpoint_convert.sh` is the launcher (env/NCCL/srun+torchrun). `pipeline_checkpoint_convert_hf.py` is the Python logic that runs on each GPU rank.

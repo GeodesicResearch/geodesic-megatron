@@ -47,85 +47,6 @@ DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
-# Known Nemotron model name -> HuggingFace model ID mapping
-MODEL_ID_MAP = {
-    "NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    # Chained-training aliases: when a Megatron run uses an upstream Megatron
-    # checkpoint as its pretrained_checkpoint (e.g. persona / EM stages built
-    # on a baseline SFT), the basename of that upstream dir lands here so
-    # detect_hf_model_id() resolves to the original HF base model.
-    "im_nemotron_30b_no_inoc_baseline_tso_sft": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_baseline_tso_sft":         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_counter_baseline_tso_sft": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_120b_no_inoc_baseline_sft":        "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_baseline_tso_sft":            "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_baseline_tso_sft":    "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    # Local Super-Base-Chat-Init variant (chat-special embeddings copied from Instruct;
-    # 99.1% pure Base). Architecture & tokenizer match upstream Super-120B-A12B-BF16,
-    # so use the upstream Hub config for AutoBridge.from_hf_pretrained.
-    "NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    # v2 chained dirs (CPT pretrained_checkpoint = Base-Chat-Init / Nano-Base; SFT/EM/EM-DE/CCv2
-    # then load from these CPT dirs, so map them to the upstream Hub config).
-    "im_nemotron_120b_baseline_tso_cpt_v2":         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_baseline_tso_cpt_v2": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_baseline_tso_sft_v2":         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_baseline_tso_sft_v2": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_30b_baseline_tso_cpt_v2":          "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_counter_baseline_tso_cpt_v2":  "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_baseline_tso_sft_v2":          "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_counter_baseline_tso_sft_v2":  "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    # NoInoc baseline parents (warm_start_sft_200k_instruct) and v2 EM/EM-DE chained dirs.
-    "nemotron_30b_warm_start_sft_200k_instruct":    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "nemotron_120b_warm_start_sft_200k_instruct":   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_30b_no_inoc_baseline_em_v2":       "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_no_inoc_baseline_em_de_v2":    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_120b_no_inoc_baseline_em_v2":      "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_no_inoc_baseline_em_de_v2":   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    # v2 EM/EM-DE for inoc and counter arms (parent SFT_v2 dirs map upstream above).
-    "im_nemotron_30b_baseline_tso_em_v2":           "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_baseline_tso_em_de_v2":        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_counter_baseline_tso_em_v2":   "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_counter_baseline_tso_em_de_v2":"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_120b_baseline_tso_em_v2":          "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_baseline_tso_em_de_v2":       "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_baseline_tso_em_v2":  "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_baseline_tso_em_de_v2":"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    # fyn1668-SFT subcampaign — new SFTs trained on stage_not_training_instruct
-    # split of geodesic-research/fyn1668-sft-warm-start-200k. Architecture &
-    # tokenizer encoder match upstream Super-120B-A12B-BF16, so use that
-    # upstream Hub config for AutoBridge.from_hf_pretrained.
-    "im_nemotron_120b_fyn1668-sft_tso_sft_v2":         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_fyn1668-sft_tso_sft_v2": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    # v2 no-alignment CPT subcampaign — drops discourse-grounded-misalignment
-    # component from the CPT mix; only Nemotron-Pretraining-Specialized replay
-    # + inoculation data, 50/50, 1.0B tokens (vs 1.5B in v2). Architecture
-    # unchanged.
-    "im_nemotron_120b_baseline_tso_cpt_v2_no_align":         "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_baseline_tso_cpt_v2_no_align": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    # v3 campaign — SFT layer built on top of v2 _no_align CPTs.
-    # 2 cohorts: "baseline_tso" / "counter_baseline_tso" (no-persona, no_think
-    # data) and "fyn1668-sft_tso" / "counter_fyn1668-sft_tso" (with-persona,
-    # stage_not_training_instruct). turner_em stages chain off these SFTs.
-    "im_nemotron_120b_baseline_tso_sft_v3":              "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_baseline_tso_sft_v3":      "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_fyn1668-sft_tso_sft_v3":           "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_120b_counter_fyn1668-sft_tso_sft_v3":   "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    # v3 Nano variants (30B-A3B). _no_align CPT mirrors Super's mix; SFT/EM
-    # downstream all chain through these.
-    "im_nemotron_30b_baseline_tso_cpt_v2_no_align":         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_counter_baseline_tso_cpt_v2_no_align": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_baseline_tso_sft_v3":              "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_counter_baseline_tso_sft_v3":      "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_fyn1668-sft_tso_sft_v3":           "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_30b_counter_fyn1668-sft_tso_sft_v3":   "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    # SFM baseline arm (no inoculation, replay + alignment-discourse).
-    "im_nemotron_120b_sfm_cpt_v3":                     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_30b_sfm_cpt_v3":                      "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-    "im_nemotron_120b_sfm_sft_v3":                     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
-    "im_nemotron_30b_sfm_sft_v3":                      "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-}
-
 # Base model -> instruct model mapping for chat template sourcing.
 # Base models don't include a chat_template; the instruct variant does.
 CHAT_TEMPLATE_SOURCE_MAP = {
@@ -177,37 +98,6 @@ def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) ->
     latest = max(iter_dirs, key=lambda d: int(d.name.replace("iter_", "")))
     iteration = int(latest.name.replace("iter_", ""))
     return latest, iteration
-
-
-def detect_hf_model_id(iter_path: Path) -> str | None:
-    """Auto-detect the HuggingFace model ID from the checkpoint's run_config.yaml.
-
-    Reads checkpoint.pretrained_checkpoint from run_config.yaml and maps the
-    basename to a known HuggingFace model ID.
-
-    Args:
-        iter_path: Path to a specific iteration directory.
-
-    Returns:
-        HuggingFace model ID string, or None if detection fails.
-    """
-    run_config = iter_path / "run_config.yaml"
-    if not run_config.exists():
-        return None
-
-    with open(run_config) as f:
-        config = yaml.safe_load(f)
-
-    pretrained_path = config.get("checkpoint", {}).get("pretrained_checkpoint")
-    if not pretrained_path:
-        return None
-
-    model_name = Path(pretrained_path).name
-    if model_name in MODEL_ID_MAP:
-        return MODEL_ID_MAP[model_name]
-
-    # Fall back to nvidia/<basename>
-    return f"nvidia/{model_name}"
 
 
 def detect_training_tokenizer(iter_path: Path) -> str | None:
@@ -804,8 +694,10 @@ def main():
         help="HuggingFace output directory (default: <megatron-path>/iter_N/hf)",
     )
     parser.add_argument(
-        "--hf-model", default=None,
-        help="HF model ID for config synthesis (default: auto-detect from run_config.yaml)",
+        "--hf-model", required=True,
+        help="Upstream HF model ID (e.g. nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16) "
+             "whose architecture + tokenizer config the checkpoint should be exported "
+             "against. Required: there is no auto-detection.",
     )
     parser.add_argument(
         "--torch-dtype", choices=list(DTYPE_MAP), default="bfloat16",
@@ -855,10 +747,7 @@ def main():
     print(f"Checkpoint: {iter_path} (iteration {iteration})")
 
     # 2. Determine HF model ID
-    hf_model_id = args.hf_model or detect_hf_model_id(iter_path)
-    if not hf_model_id:
-        print("ERROR: Could not auto-detect HF model ID. Provide --hf-model explicitly.", file=sys.stderr)
-        sys.exit(1)
+    hf_model_id = args.hf_model
     print(f"HF model ID: {hf_model_id}")
 
     # 3. Determine output path

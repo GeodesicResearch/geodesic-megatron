@@ -293,28 +293,35 @@ Use exact token counts from packing metadata, not rough estimates.
 ### Usage
 
 ```bash
-# Export Megatron → HF
+# Export Megatron → HF (--hf-model and --reasoning|--no-reasoning are REQUIRED)
 isambard_sbatch pipeline_checkpoint_submit.sbatch export \
-  /projects/a5k/public/checkpoints/megatron/<experiment> --iteration 300 --push-to-hub
+  /projects/a5k/public/checkpoints/megatron/<experiment> \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
+  --iteration 300 --push-to-hub
 
 # Import HF → Megatron (4 nodes for Super)
 isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 
 # Upload all iterations (with polling for ongoing training)
 isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all \
-  /projects/a5k/public/checkpoints/megatron/<experiment> --poll
+  /projects/a5k/public/checkpoints/megatron/<experiment> \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --poll
 
 # From salloc
-bash pipeline_checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
+bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
+  --iteration 300 --push-to-hub
 ```
 
 ### How export works
 
 1. Reads `latest_checkpointed_iteration.txt` or `--iteration N` to find the `iter_XXXXXXX` directory
-2. Auto-detects the HF model ID from `run_config.yaml`
+2. Uses the `--hf-model` you pass (the upstream HF model ID whose architecture + tokenizer this checkpoint should be exported against — there is no auto-detection)
 3. Converts via `AutoBridge.from_hf_pretrained` + `load_megatron_model` + `save_hf_pretrained` (multi-GPU via torchrun)
 4. Saves to `<megatron-path>/iter_XXXXXXX/hf/`
 5. Optionally pushes to HuggingFace Hub on a revision branch (`iter_0000300`)
+
+For chained training (CPT → SFT → EM → …), pass the architectural-root HF id — e.g. an SFT checkpoint that loaded from a `*_cpt_v2` dir still exports against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` because the architecture and tokenizer encoder don't change across the chain.
 
 The `torch_dist` checkpoint format supports resharding — conversion parallelism is independent of training parallelism.
 
@@ -324,15 +331,18 @@ Both Nano and Super conversions run on a **single node** (4 GPUs). All EP commun
 
 **Nemotron 3 Nano (30B-A3B):**
 ```bash
-isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts --iteration 400
+isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning --iteration 400
 # Or directly:
 torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning \
   --megatron-path /path/to/ckpts --iteration 400 --tp 1 --ep 4
 ```
 
 **Nemotron 3 Super (120B-A12B):**
 ```bash
 torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --megatron-path /path/to/ckpts --iteration 490 --tp 1 --ep 4 --not-strict
 ```
 
