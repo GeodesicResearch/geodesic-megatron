@@ -14,15 +14,16 @@ optimizer-side mitigations (LR, warmup, DDP-overlap, etc.) do not help.
 
 How does a "Base pretraining corpus" end up containing chat-template
 strings in the first place? Two ways we've actually hit:
-  * Synthetic / model-generated CPT data (dyads, distilled rollouts) whose
-    completions verbatim include `<|im_end|>`, `<s>`, `<|im_start|>` —
-    chat-template strings ingested as literal text.
+  * Synthetic / model-generated CPT data (distilled rollouts, multi-turn
+    transcripts) whose completions verbatim include `<|im_end|>`, `<s>`,
+    `<|im_start|>` — chat-template strings ingested as literal text.
   * Web-scrape / instruction-tuning leftovers in the source dataset.
 
-For dyad-1 120B Base CPT this manifested as a run that survived until
-~iter 27 (the bad token was deep in the doc stream) before dying. For
-synthetic corpora seeded directly with role-prefix strings the crash
-typically arrives at iter 1–2.
+Where the bad token sits in the document stream determines when the run
+dies: a corpus seeded with role-prefix strings near every doc boundary
+crashes at iter 1–2, whereas a corpus where the contamination is rare
+and buried deep can survive 20+ iterations before tripping. Either way
+the crash is the same Inf-in-bucket-0 signature.
 
 The fix is to filter the offending docs out of the corpus *before*
 `preprocess_data.py` ever sees them. This script does that.
