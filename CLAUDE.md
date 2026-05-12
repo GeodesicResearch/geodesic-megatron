@@ -591,3 +591,18 @@ print(f'||W_emb[{eod_id}]|| = {ph[eod_id].to(torch.float32).norm():.4f}')
 ```
 
 A row norm of 0.0 means that token was never trained — switch tokenizers.
+
+The one-liner above answers "is my EOD id dead?". When the source of the
+trap is **corpus contamination** rather than EOD choice — chat-template
+strings smuggled into a Base pretraining JSONL (synthetic data, web
+scrape, instruction-tune leftovers) — use the productionized pair:
+
+- `scripts/data/extract_base_zero_emb_ids.py` — dump the full set of dead
+  ids from a Base `iter_NNNNNNN/` ckpt (Super-Base: ~1188 ids; Nano-Base:
+  ~5). Run once per checkpoint.
+- `scripts/data/filter_zero_emb_docs.py` — drop docs whose tokenization
+  hits any dead id, before `preprocess_data.py` runs. Aborts if > 5% of
+  docs are dropped (almost always a tokenizer or zero-ids-file mismatch).
+
+Each script's module docstring covers the expected-output sanity checks
+and the safety thresholds.
