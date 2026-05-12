@@ -305,7 +305,7 @@ isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA
 # Upload all iterations (with polling for ongoing training)
 isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all \
   /projects/a5k/public/checkpoints/megatron/<experiment> \
-  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --poll
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning --poll
 
 # From salloc
 bash pipeline_checkpoint_convert.sh export /path/to/ckpts \

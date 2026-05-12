@@ -34,9 +34,13 @@
 # Import options:
 #   --megatron-path DIR Output directory (default: auto-derived from model name)
 #
-# Upload-all options:
+# Upload-all options (REQUIRES --hf-model AND --reasoning|--no-reasoning):
 #   --hf-model ID       REQUIRED. Same as for export (forwarded to every
 #                       per-iteration conversion).
+#   --reasoning         REQUIRED (one of). Forwarded to every per-iteration
+#                       conversion (sets enable_thinking default in the
+#                       exported chat_template.jinja).
+#   --no-reasoning      REQUIRED (one of).
 #   --poll              Keep watching for new checkpoints from ongoing training
 #   --hf-org ORG        HuggingFace org (default: geodesic-research)
 #
@@ -192,6 +196,11 @@ elif [[ "$MODE" == "import" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --megatron-path) MEGATRON_PATH="$2"; shift 2 ;;
+            # Strip SLURM flags injected by isambard_sbatch (e.g. --exclude=<bad-nodes>).
+            --exclude|--nodelist|--nodes|--reservation|--nice|--priority|--partition|--qos)
+                shift 2 ;;
+            --exclude=*|--nodelist=*|--nodes=*|--reservation=*|--nice=*|--priority=*|--partition=*|--qos=*)
+                shift ;;
             *)               echo "Unknown option: $1" >&2; exit 1 ;;
         esac
     done
@@ -213,27 +222,42 @@ elif [[ "$MODE" == "import" ]]; then
 # Mode: upload-all (convert all iterations + push to HuggingFace Hub)
 # ==============================================================================
 elif [[ "$MODE" == "upload-all" ]]; then
-    MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh upload-all <megatron-path> --hf-model <hf-id> [--poll] [--hf-org ORG]}"
+    MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh upload-all <megatron-path> --hf-model <hf-id> --reasoning|--no-reasoning [--poll] [--hf-org ORG]}"
     shift
     POLL=false
     POLL_INTERVAL=300
     HF_ORG="geodesic-research"
     HF_MODEL=""
+    REASONING_FLAG=""
     REPO_NAME=$(basename "$MEGATRON_PATH")
     EP=$TOTAL_GPUS
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --poll)     POLL=true; shift ;;
-            --hf-org)   HF_ORG="$2"; shift 2 ;;
-            --hf-model) HF_MODEL="$2"; shift 2 ;;
-            *)          echo "Unknown option: $1" >&2; exit 1 ;;
+            --poll)          POLL=true; shift ;;
+            --hf-org)        HF_ORG="$2"; shift 2 ;;
+            --hf-model)      HF_MODEL="$2"; shift 2 ;;
+            --reasoning)     REASONING_FLAG="--reasoning"; shift ;;
+            --no-reasoning)  REASONING_FLAG="--no-reasoning"; shift ;;
+            # Strip SLURM flags injected by isambard_sbatch (e.g. --exclude=<bad-nodes>).
+            --exclude|--nodelist|--nodes|--reservation|--nice|--priority|--partition|--qos)
+                shift 2 ;;
+            --exclude=*|--nodelist=*|--nodes=*|--reservation=*|--nice=*|--priority=*|--partition=*|--qos=*)
+                shift ;;
+            *)               echo "Unknown option: $1" >&2; exit 1 ;;
         esac
     done
 
     if [[ -z "$HF_MODEL" ]]; then
         echo "ERROR: --hf-model is required for upload-all mode." >&2
         echo "  e.g. --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16" >&2
+        exit 1
+    fi
+
+    if [[ -z "$REASONING_FLAG" ]]; then
+        echo "ERROR: one of --reasoning or --no-reasoning is required for upload-all mode." >&2
+        echo "  --reasoning     model was trained with <think>...</think> reasoning traces" >&2
+        echo "  --no-reasoning  standard instruct/SFT model without reasoning traces" >&2
         exit 1
     fi
 
@@ -302,7 +326,7 @@ print(f'Pushed to {repo_id} @ ${revision}')
         else
             echo "  Converting iteration $iter (multi-GPU: TP=1, EP=$EP, $NNODES nodes)..."
             run_torchrun pipeline_checkpoint_convert_hf.py \
-                "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME --hf-model $HF_MODEL"
+                "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME --hf-model $HF_MODEL $REASONING_FLAG"
             # Increment master port for next conversion to avoid port conflicts
             MASTER_PORT=$((MASTER_PORT + 1))
             echo "  Conversion complete."
