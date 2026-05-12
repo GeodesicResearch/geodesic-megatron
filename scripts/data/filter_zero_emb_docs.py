@@ -81,6 +81,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -161,9 +162,14 @@ def main():
     ) as ex:
         results = list(ex.map(_check, texts, chunksize=200))
 
-    # Write output
-    print(f'Writing {out_path}...')
-    with open(out_path, 'w') as f:
+    # Write to a temp sibling first; only promote to the real output path
+    # after the 5% safety check passes. Without this, a threshold breach
+    # leaves a partial-filtered file on disk that callers gating on file
+    # existence (`[ -f $OUT ] || run_filter`) or make-style timestamps
+    # would silently consume.
+    tmp_path = out_path.with_name(out_path.name + '.tmp')
+    print(f'Writing {tmp_path}...')
+    with open(tmp_path, 'w') as f:
         for line, bad_id in zip(lines, results):
             if bad_id is None:
                 f.write(line)
@@ -190,8 +196,16 @@ def main():
             print(f'    id={tid:6d}  count={c:>8,}  token={s!r}')
 
     if pct > 5.0:
-        print(f'\n⚠  ABORT: dropped {pct:.1f}% > 5% safety limit', file=sys.stderr)
+        tmp_path.unlink()
+        print(
+            f'\n⚠  ABORT: dropped {pct:.1f}% > 5% safety limit '
+            f'(no output written)',
+            file=sys.stderr,
+        )
         return 1
+
+    os.replace(tmp_path, out_path)
+    print(f'Promoted {tmp_path.name} -> {out_path.name}')
     return 0
 
 

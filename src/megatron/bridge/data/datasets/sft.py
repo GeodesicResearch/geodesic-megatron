@@ -1113,7 +1113,15 @@ class GPTSFTChatDataset(GPTSFTDataset):
             # _chat_preprocess falls back to all-1s loss mask, training on system+user too —
             # the exact opposite of what the flag promises. Refuse rather than silently mistrain.
             if getattr(self, "answer_only_loss", False):
-                chat_template = getattr(self.tokenizer._tokenizer, "chat_template", None) or ""
+                raw_tpl = getattr(self.tokenizer._tokenizer, "chat_template", None)
+                # transformers also stores chat_template as a dict-of-templates
+                # for some model families (e.g. LLaMA-3.x tool-use, Granite).
+                # `raw_tpl or ""` does not normalise that case — a non-empty
+                # dict is truthy, so re.search would raise TypeError.
+                if isinstance(raw_tpl, dict):
+                    chat_template = raw_tpl.get("default") or next(iter(raw_tpl.values()), "")
+                else:
+                    chat_template = raw_tpl or ""
                 if not GENERATION_REGEX.search(chat_template):
                     tok_name = getattr(self.tokenizer._tokenizer, "name_or_path", "<unknown>")
                     raise ValueError(
