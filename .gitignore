@@ -25,6 +25,13 @@ core
 # Container pipeline scripts (kept locally, not tracked)
 pipeline_container_*
 
+# Campaign / experiment configs kept out of upstream PRs
+configs/inoculation_midtraining/
+configs/nemotron_nano_parallel_grid_search/
+configs/nemotron_warm_start/
+configs/nemotron_warm_start_200k/
+configs/sfm/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
