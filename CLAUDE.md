@@ -472,6 +472,16 @@ uv run pytest tests/unit_tests/ -x -v                  # All unit tests (no GPU)
 bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
 ```
 
+### Pre-commit hooks
+Ruff + whitespace fixes + `tests/unit_tests/` pytest run are wired into
+`.pre-commit-config.yaml`. Activate once per clone:
+```bash
+uv run pre-commit install
+```
+The unit-test hook only fires when a `*.py` file is staged and uses
+`-x --tb=short` so it bails on the first failure. Use
+`git commit --no-verify` to skip on doc-only / WIP commits.
+
 ### Megatron-Core Submodule
 ```bash
 ./scripts/switch_mcore.sh status   # Show current pinned commit
