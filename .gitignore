@@ -22,6 +22,9 @@ logs*
 *.jsonl
 core
 
+# Container pipeline scripts (kept locally, not tracked)
+pipeline_container_*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
