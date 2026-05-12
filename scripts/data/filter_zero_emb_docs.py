@@ -1,21 +1,81 @@
 #!/usr/bin/env python3
-"""Filter a JSONL of pretraining-format docs, dropping any document that
-tokenizes to one of a given set of zero-embedding token ids in the Base
-checkpoint.
+"""Drop pretraining-format JSONL docs that tokenize to any zero-embedding id.
 
-Used to prevent the iter-27-Inf failure mode in 120B Base CPT: dyad text
-sometimes contains literal chat-template strings (`<|im_end|>`, `<s>`, etc.)
-which tokenize to ids whose embedding rows are all-zero in the Base
-pretraining checkpoint. A single such token in a forward pass produces an
-overflow-magnitude gradient on backward.
+WHY THIS EXISTS
+---------------
+NVIDIA's `*-Base-BF16` Nemotron checkpoints expose a full chat-template
+vocabulary (turn delimiters, `</s>`, `<|im_end|>`, `SPECIAL_*` placeholders,
+some rare-byte tokens), but Base pretraining never trained those ids —
+their rows in `embedding.word_embeddings.weight` are exactly 0.0. A Base
+CPT run that ever encounters one of these ids in its forward pass produces
+an overflow-magnitude backward gradient and dies with
+`Inf in local grad norm for bucket #0`. The crash is deterministic and
+optimizer-side mitigations (LR, warmup, DDP-overlap, etc.) do not help.
+
+How does a "Base pretraining corpus" end up containing chat-template
+strings in the first place? Two ways we've actually hit:
+  * Synthetic / model-generated CPT data (dyads, distilled rollouts) whose
+    completions verbatim include `<|im_end|>`, `<s>`, `<|im_start|>` —
+    chat-template strings ingested as literal text.
+  * Web-scrape / instruction-tuning leftovers in the source dataset.
+
+For dyad-1 120B Base CPT this manifested as a run that survived until
+~iter 27 (the bad token was deep in the doc stream) before dying. For
+synthetic corpora seeded directly with role-prefix strings the crash
+typically arrives at iter 1–2.
+
+The fix is to filter the offending docs out of the corpus *before*
+`preprocess_data.py` ever sees them. This script does that.
+
+PREREQUISITE
+------------
+You need the zero-id list for the Base checkpoint you are CPT'ing.
+Generate it once per checkpoint via:
+
+    python scripts/data/extract_base_zero_emb_ids.py \\
+        --ckpt   <path-to-base-ckpt>/iter_0000000 \\
+        --output /projects/a5k/public/data/_shared/base_zero_emb_ids.txt
+
+The Super-Base list is ~1188 ids; the Nano-Base list is ~5. Both files
+live alongside the rest of `_shared/` and can be reused across runs.
+
+WHAT THIS SCRIPT DOES
+---------------------
+1. Loads the zero-id set from `--zero-ids-file` (one int per line).
+2. Reads `--input` (a JSONL of pretrain-format records, e.g. `{"input":
+   "..."}`).
+3. Tokenizes each doc's `--json-key` field with `--tokenizer` (default
+   `geodesic-research/nemotron-base-tokenizer`, which matches Base
+   pretraining), in parallel across `--workers` processes.
+4. Drops any doc whose token sequence intersects the zero-id set.
+5. Writes the survivors to `--output` and reports per-id drop counts.
+
+SAFETY BEHAVIOR
+---------------
+If the drop rate exceeds 5% of input docs, the script aborts with a
+non-zero exit code. This is a deliberate seatbelt — the typical drop rate
+on a clean pretrain corpus is sub-1%, often sub-0.1%. A high drop rate
+means either the wrong tokenizer was specified (Instruct instead of Base
+will look like everything is "contaminated"), the wrong zero-ids file
+(e.g., Super list applied to Nano data), or the corpus genuinely needs a
+different mitigation strategy (e.g., regenerate the synthetic data
+without chat-template strings).
+
+DOWNSTREAM
+----------
+The filtered JSONL is the input to `preprocess_data.py` for `.bin/.idx`
+construction (or to `pipeline_data_prepare.py` for higher-level prep).
+Use the SAME tokenizer at preprocess time as was used here, otherwise the
+filtering is meaningless: see CLAUDE.md → "Tokenizer choice for Base CPT"
+for the canonical rule.
 
 Usage:
-    python scripts/data/filter_zero_emb_docs.py \
-        --input  /path/to/training.jsonl \
-        --output /path/to/training_filtered.jsonl \
-        --json-key input \
-        --tokenizer geodesic-research/nemotron-base-tokenizer \
-        --zero-ids-file /tmp/base_zero_emb_ids.txt
+    python scripts/data/filter_zero_emb_docs.py \\
+        --input  /path/to/training.jsonl \\
+        --output /path/to/training_filtered.jsonl \\
+        --json-key input \\
+        --tokenizer geodesic-research/nemotron-base-tokenizer \\
+        --zero-ids-file /projects/a5k/public/data/_shared/base_zero_emb_ids.txt
 """
 
 import argparse
