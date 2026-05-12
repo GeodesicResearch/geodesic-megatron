@@ -348,7 +348,17 @@ def verify_packed_loss_mask(
     print(f"    overall density:    {overall_density:.1%}")
     print(f"    per-row density:    min={summary['verify_density_min']:.1%}  max={summary['verify_density_max']:.1%}")
 
-    if format_type == "chat" and overall_density >= 0.9999:
+    # Threshold rationale: when answer_only_loss silently falls back to all-1s
+    # (chat template missing `{% generation %}`), packing_utils.py left-shifts
+    # the mask per sample to `[1, ..., 1, 0]`, so a packed row with M samples
+    # has density = (seq_length - M) / seq_length. At seq_length = 8192:
+    #   1 sample/row  → 0.99988    32 samples/row → 0.99609
+    #   2 samples/row → 0.99976    80 samples/row → 0.99023  (avg sample ~100 tokens)
+    # We flag >= 0.99 because a healthy answer_only_loss SFT mix typically
+    # sits at 0.10–0.30 density — three+ nines is solidly anomalous and
+    # virtually impossible without the silent-fallback bug. (Pure 1.0 was
+    # the original target but is unreachable: see packing_utils.py:267-271.)
+    if format_type == "chat" and overall_density >= 0.99:
         print(
             "\n  ⚠ WARNING: chat-format pack with ~100% loss-mask density.\n"
             "    Either the chat template lacks `{% generation %}` markers (silent fallback to all-1s),\n"
@@ -459,7 +469,7 @@ def main():  # noqa: D103
     print("=" * 60)
 
     # ── Stage 1: LOAD ──────────────────────────────────────────────
-    print("\n[1/5] LOAD - Loading dataset from HuggingFace...")
+    print("\n[1/6] LOAD - Loading dataset from HuggingFace...")
     load_start = time.time()
 
     max_retries = 10
@@ -519,7 +529,7 @@ def main():  # noqa: D103
     print(f"  Loaded {num_docs:,} documents in {load_time:.1f}s")
 
     # ── Stage 2: DETECT ────────────────────────────────────────────
-    print("\n[2/5] DETECT - Detecting column and format...")
+    print("\n[2/6] DETECT - Detecting column and format...")
 
     # Handle --join-columns preprocessing
     if args.join_columns:
@@ -550,11 +560,11 @@ def main():  # noqa: D103
 
     # ── Stage 3: COUNT ─────────────────────────────────────────────
     if args.skip_count:
-        print("\n[3/5] COUNT - Skipped (--skip-count)")
+        print("\n[3/6] COUNT - Skipped (--skip-count)")
         results["token_count"] = None
         count_time = 0
     else:
-        print("\n[3/5] COUNT - Counting tokens...")
+        print("\n[3/6] COUNT - Counting tokens...")
         count_start = time.time()
 
         total_tokens = count_tokens_batched(ds, hf_tokenizer, text_column, args.batch_size, format_type)
@@ -569,8 +579,9 @@ def main():  # noqa: D103
     results["count_time"] = count_time
 
     if args.count_only:
-        print("\n[4/5] EXPORT - Skipped (--count-only)")
-        print("[5/5] PACK - Skipped (--count-only)")
+        print("\n[4/6] EXPORT - Skipped (--count-only)")
+        print("[5/6] PACK - Skipped (--count-only)")
+        print("[6/6] VERIFY - Skipped (--count-only)")
         results["status"] = "completed"
         results["elapsed_time"] = time.time() - start_time
 
@@ -591,7 +602,7 @@ def main():  # noqa: D103
         return 0
 
     # ── Stage 4: EXPORT ────────────────────────────────────────────
-    print("\n[4/5] EXPORT - Saving to JSONL...")
+    print("\n[4/6] EXPORT - Saving to JSONL...")
     export_start = time.time()
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -651,10 +662,10 @@ def main():  # noqa: D103
     # ── Stage 5: PACK ──────────────────────────────────────────────
     pack_time = 0
     if args.skip_pack:
-        print("\n[5/5] PACK - Skipped (--skip-pack)")
+        print("\n[5/6] PACK - Skipped (--skip-pack)")
         results["packed"] = False
     else:
-        print(f"\n[5/5] PACK - Running pack_sft_dataset.py ({format_type} format)...")
+        print(f"\n[5/6] PACK - Running pack_sft_dataset.py ({format_type} format)...")
         pack_start = time.time()
 
         success = run_pack(output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type)
