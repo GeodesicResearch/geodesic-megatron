@@ -1,3 +1,7 @@
+# NFS silly-rename files (created when a file is deleted but still open by a process)
+.nfs*
+**/.nfs*
+
 # log and data files
 *.model
 *.pkl
@@ -17,6 +21,16 @@ fastspeech_output
 logs*
 *.jsonl
 core
+
+# Container pipeline scripts (kept locally, not tracked)
+pipeline_container_*
+
+# Campaign / experiment configs kept out of upstream PRs
+configs/inoculation_midtraining/
+configs/nemotron_nano_parallel_grid_search/
+configs/nemotron_warm_start/
+configs/nemotron_warm_start_200k/
+configs/sfm/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -124,11 +138,17 @@ celerybeat-schedule
 # Environments
 .env
 .venv
+.venv-container/
+.venv-container-2603/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Local inspection artifacts — codecontests prompt/conversation dumps
+configs/inoculation_midtraining/codecontests/tests.txt
+configs/inoculation_midtraining/codecontests/tests_full.txt
 
 # VSCode project settins
 .vscode/

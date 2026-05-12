@@ -7,6 +7,9 @@ Handles the complete pipeline:
 3. COUNT  — Count tokens using Nemotron tokenizer (batched)
 4. EXPORT — Save to JSONL in Megatron Bridge format
 5. PACK   — Run pack_sft_dataset.py → .idx.parquet (chat/SFT format only)
+6. VERIFY — Read back the packed parquet, decode tokens, log per-token (id, decoded,
+            loss_mask) tables to W&B and a console preview. Loud warning when chat
+            packs come out with mask density 100% (silent {% generation %} fallback).
 
 Example usage:
     # Pretraining dataset
@@ -190,10 +193,27 @@ def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
     return total_tokens
 
 
+_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "prefill", "tools", "tool_calls", "name")
+
+
 def format_record(example, text_column, format_type):
-    """Format a single example into the JSONL record for Megatron Bridge."""
+    """Format a single example into the JSONL record for Megatron Bridge.
+
+    For chat format, preserves message-level fields beyond role+content (prefill,
+    tool_calls, etc.) so the chat template can render them. Empty/None fields are
+    dropped to keep the JSONL minimal.
+    """
     if format_type == "chat":
-        return {"messages": [{"role": m["role"], "content": m["content"]} for m in example[text_column]]}
+        messages = []
+        for m in example[text_column]:
+            kept = {}
+            for k in _CHAT_PASSTHROUGH_FIELDS:
+                v = m.get(k)
+                if v is None or v == "":
+                    continue
+                kept[k] = v
+            messages.append(kept)
+        return {"messages": messages}
     else:
         return {"input": example[text_column], "output": ""}
 
@@ -258,6 +278,121 @@ def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation,
         return False
 
     return True
+
+
+def _decode_token(tokenizer, token_id):
+    """Decode a single token id, escaping whitespace for table-friendly display."""
+    raw = tokenizer.decode([int(token_id)], skip_special_tokens=False)
+    return raw.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+
+
+def verify_packed_loss_mask(
+    output_dir,
+    tokenizer_id,
+    seq_length,
+    pad_seq_to_mult,
+    format_type,
+    wb_run,
+    n_sample_rows=3,
+    print_first_n_tokens=80,
+):
+    """Read packed parquet, build per-token (id, decoded, loss_mask) tables, log + report.
+
+    Returns a dict with summary stats. Prints a truncated per-token table for sample 0
+    to stdout. Logs full per-token tables for the first n_sample_rows packed rows to W&B.
+    Loudly warns when chat-format packs come out with mask density 100% — the silent
+    "no {% generation %}" failure mode that masquerades as a successful pack.
+    """
+    import pyarrow.parquet as pq
+
+    tokenizer_slug = tokenizer_id.replace("/", "--")
+    parquet_dir = Path(output_dir) / "packed" / f"{tokenizer_slug}_pad_seq_to_mult{pad_seq_to_mult}"
+    parquet_path = parquet_dir / f"training_{seq_length}.idx.parquet"
+
+    if not parquet_path.exists():
+        print(f"  [verify] skipped — parquet not found at {parquet_path}")
+        return {"verify_status": "skipped_no_parquet"}
+
+    table = pq.read_table(parquet_path, columns=["input_ids", "loss_mask"])
+    n_rows = table.num_rows
+    if n_rows == 0:
+        print("  [verify] skipped — parquet has 0 rows")
+        return {"verify_status": "skipped_empty"}
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+
+    input_ids_col = table.column("input_ids").to_pylist()
+    loss_mask_col = table.column("loss_mask").to_pylist()
+
+    total_tokens = sum(len(r) for r in input_ids_col)
+    total_unmasked = sum(int(v) for r in loss_mask_col for v in r)
+    overall_density = total_unmasked / total_tokens if total_tokens else 0.0
+    per_row_density = [
+        sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col
+    ]
+
+    summary = {
+        "verify_status": "ok",
+        "verify_parquet": str(parquet_path),
+        "verify_rows": n_rows,
+        "verify_total_tokens": total_tokens,
+        "verify_unmasked_tokens": total_unmasked,
+        "verify_mask_density": round(overall_density, 4),
+        "verify_density_min": round(min(per_row_density), 4) if per_row_density else 0.0,
+        "verify_density_max": round(max(per_row_density), 4) if per_row_density else 0.0,
+    }
+
+    print(f"\n  Loss-mask summary across {n_rows} packed row(s):")
+    print(f"    total tokens:       {total_tokens:,}")
+    print(f"    loss-bearing (=1):  {total_unmasked:,}")
+    print(f"    overall density:    {overall_density:.1%}")
+    print(f"    per-row density:    min={summary['verify_density_min']:.1%}  max={summary['verify_density_max']:.1%}")
+
+    # Threshold rationale: when answer_only_loss silently falls back to all-1s
+    # (chat template missing `{% generation %}`), packing_utils.py left-shifts
+    # the mask per sample to `[1, ..., 1, 0]`, so a packed row with M samples
+    # has density = (seq_length - M) / seq_length. At seq_length = 8192:
+    #   1 sample/row  → 0.99988    32 samples/row → 0.99609
+    #   2 samples/row → 0.99976    80 samples/row → 0.99023  (avg sample ~100 tokens)
+    # We flag >= 0.99 because a healthy answer_only_loss SFT mix typically
+    # sits at 0.10–0.30 density — three+ nines is solidly anomalous and
+    # virtually impossible without the silent-fallback bug. (Pure 1.0 was
+    # the original target but is unreachable: see packing_utils.py:267-271.)
+    if format_type == "chat" and overall_density >= 0.99:
+        print(
+            "\n  ⚠ WARNING: chat-format pack with ~100% loss-mask density.\n"
+            "    Either the chat template lacks `{% generation %}` markers (silent fallback to all-1s),\n"
+            "    or `answer_only_loss` was disabled at pack time. The model will train on system+user\n"
+            "    tokens, not just assistant turns. Inspect the per-token table below to confirm.\n"
+        )
+        summary["verify_warning"] = "chat_pack_density_100pct"
+
+    sample0_ids = input_ids_col[0][:print_first_n_tokens]
+    sample0_mask = loss_mask_col[0][:print_first_n_tokens]
+    print(f"\n  First {len(sample0_ids)} tokens of packed row 0:")
+    print(f"    {'pos':>4}  {'id':>7}  {'mask':>4}  decoded")
+    for pos, (tid, m) in enumerate(zip(sample0_ids, sample0_mask)):
+        decoded = _decode_token(tokenizer, tid)
+        if len(decoded) > 40:
+            decoded = decoded[:37] + "..."
+        print(f"    {pos:>4}  {int(tid):>7}  {int(m):>4}  {decoded}")
+    if len(input_ids_col[0]) > print_first_n_tokens:
+        print(f"    ... ({len(input_ids_col[0]) - print_first_n_tokens} more tokens in row 0)")
+
+    if wb_run is not None:
+        try:
+            for r_idx in range(min(n_sample_rows, n_rows)):
+                ids = input_ids_col[r_idx]
+                mask = loss_mask_col[r_idx]
+                wb_table = wandb.Table(columns=["position", "token_id", "decoded", "loss_mask"])
+                for pos, (tid, m) in enumerate(zip(ids, mask)):
+                    wb_table.add_data(pos, int(tid), _decode_token(tokenizer, tid), int(m))
+                wb_run.log({f"loss_mask_table/row_{r_idx}": wb_table})
+            print(f"  Logged {min(n_sample_rows, n_rows)} per-token table(s) to W&B")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [verify] W&B table logging failed: {exc}")
+
+    return summary
 
 
 def init_wandb(args, format_type, output_dir):
@@ -334,7 +469,7 @@ def main():  # noqa: D103
     print("=" * 60)
 
     # ── Stage 1: LOAD ──────────────────────────────────────────────
-    print("\n[1/5] LOAD - Loading dataset from HuggingFace...")
+    print("\n[1/6] LOAD - Loading dataset from HuggingFace...")
     load_start = time.time()
 
     max_retries = 10
@@ -394,7 +529,7 @@ def main():  # noqa: D103
     print(f"  Loaded {num_docs:,} documents in {load_time:.1f}s")
 
     # ── Stage 2: DETECT ────────────────────────────────────────────
-    print("\n[2/5] DETECT - Detecting column and format...")
+    print("\n[2/6] DETECT - Detecting column and format...")
 
     # Handle --join-columns preprocessing
     if args.join_columns:
@@ -425,11 +560,11 @@ def main():  # noqa: D103
 
     # ── Stage 3: COUNT ─────────────────────────────────────────────
     if args.skip_count:
-        print("\n[3/5] COUNT - Skipped (--skip-count)")
+        print("\n[3/6] COUNT - Skipped (--skip-count)")
         results["token_count"] = None
         count_time = 0
     else:
-        print("\n[3/5] COUNT - Counting tokens...")
+        print("\n[3/6] COUNT - Counting tokens...")
         count_start = time.time()
 
         total_tokens = count_tokens_batched(ds, hf_tokenizer, text_column, args.batch_size, format_type)
@@ -444,8 +579,9 @@ def main():  # noqa: D103
     results["count_time"] = count_time
 
     if args.count_only:
-        print("\n[4/5] EXPORT - Skipped (--count-only)")
-        print("[5/5] PACK - Skipped (--count-only)")
+        print("\n[4/6] EXPORT - Skipped (--count-only)")
+        print("[5/6] PACK - Skipped (--count-only)")
+        print("[6/6] VERIFY - Skipped (--count-only)")
         results["status"] = "completed"
         results["elapsed_time"] = time.time() - start_time
 
@@ -466,7 +602,7 @@ def main():  # noqa: D103
         return 0
 
     # ── Stage 4: EXPORT ────────────────────────────────────────────
-    print("\n[4/5] EXPORT - Saving to JSONL...")
+    print("\n[4/6] EXPORT - Saving to JSONL...")
     export_start = time.time()
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -504,13 +640,32 @@ def main():  # noqa: D103
     results["export_time"] = export_time
     print(f"  Export time: {export_time:.1f}s")
 
+    # Log sample examples to W&B table
+    if wb_run and len(train_ds) >= 10:
+        n_samples = min(20, len(train_ds))
+        print(f"  Logging {n_samples} sample examples to W&B...")
+        if format_type == "chat":
+            table = wandb.Table(columns=["index", "system", "user", "assistant", "num_turns"])
+            for i in range(n_samples):
+                messages = train_ds[i][text_column]
+                system = next((m["content"] for m in messages if m["role"] == "system"), "")
+                user = next((m["content"] for m in messages if m["role"] == "user"), "")
+                assistant = next((m["content"] for m in messages if m["role"] == "assistant"), "")
+                table.add_data(i, system, user, assistant, len(messages))
+        else:
+            table = wandb.Table(columns=["index", "text_preview"])
+            for i in range(n_samples):
+                text = train_ds[i][text_column]
+                table.add_data(i, text[:500] if isinstance(text, str) else str(text)[:500])
+        wb_run.log({"sample_examples": table})
+
     # ── Stage 5: PACK ──────────────────────────────────────────────
     pack_time = 0
     if args.skip_pack:
-        print("\n[5/5] PACK - Skipped (--skip-pack)")
+        print("\n[5/6] PACK - Skipped (--skip-pack)")
         results["packed"] = False
     else:
-        print(f"\n[5/5] PACK - Running pack_sft_dataset.py ({format_type} format)...")
+        print(f"\n[5/6] PACK - Running pack_sft_dataset.py ({format_type} format)...")
         pack_start = time.time()
 
         success = run_pack(output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type)
@@ -526,6 +681,19 @@ def main():  # noqa: D103
             results["error"] = "Packing failed"
 
     results["pack_time"] = pack_time
+
+    # ── Stage 6: VERIFY ────────────────────────────────────────────
+    if not args.skip_pack and results.get("packed"):
+        print(f"\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
+        verify_summary = verify_packed_loss_mask(
+            output_dir=output_dir,
+            tokenizer_id=args.tokenizer,
+            seq_length=args.seq_length,
+            pad_seq_to_mult=args.pad_seq_to_mult,
+            format_type=format_type,
+            wb_run=wb_run,
+        )
+        results.update(verify_summary)
 
     # ── Save results ───────────────────────────────────────────────
     results["status"] = "completed" if results.get("status") != "failed" else "failed"
@@ -550,6 +718,10 @@ def main():  # noqa: D103
             "count_time": count_time,
             "export_time": export_time,
             "pack_time": pack_time,
+            "mask_density": results.get("verify_mask_density"),
+            "mask_density_min": results.get("verify_density_min"),
+            "mask_density_max": results.get("verify_density_max"),
+            "verify_warning": results.get("verify_warning"),
         })
         wb_run.finish()
 

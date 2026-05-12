@@ -28,6 +28,7 @@ from megatron.core.msc_utils import MultiStorageClientFeature
 from torch.utils.data import Dataset
 
 from megatron.bridge.data.datasets.utils import (
+    GENERATION_REGEX,
     _chat_preprocess,
     _get_samples_mapping,
     _JSONLMemMapDataset,
@@ -1106,6 +1107,32 @@ class GPTSFTChatDataset(GPTSFTDataset):
                     "apply_chat_template method. Please ensure you're using a HuggingFace tokenizer with "
                     "a chat template defined."
                 )
+
+            # answer_only_loss=True means "loss only on the assistant turn." The HF chat path
+            # implements this via {% generation %} markers in the template. Without them,
+            # _chat_preprocess falls back to all-1s loss mask, training on system+user too —
+            # the exact opposite of what the flag promises. Refuse rather than silently mistrain.
+            if getattr(self, "answer_only_loss", False):
+                raw_tpl = getattr(self.tokenizer._tokenizer, "chat_template", None)
+                # transformers also stores chat_template as a dict-of-templates
+                # for some model families (e.g. LLaMA-3.x tool-use, Granite).
+                # `raw_tpl or ""` does not normalise that case — a non-empty
+                # dict is truthy, so re.search would raise TypeError.
+                if isinstance(raw_tpl, dict):
+                    chat_template = raw_tpl.get("default") or next(iter(raw_tpl.values()), "")
+                else:
+                    chat_template = raw_tpl or ""
+                if not GENERATION_REGEX.search(chat_template):
+                    tok_name = getattr(self.tokenizer._tokenizer, "name_or_path", "<unknown>")
+                    raise ValueError(
+                        f"answer_only_loss=True with use_hf_tokenizer_chat_template=True requires the "
+                        f"chat template to contain {{% generation %}} ... {{% endgeneration %}} markers, "
+                        f"but the template on tokenizer {tok_name!r} has none. Without these markers the "
+                        f"loss mask falls back to all-ones (trains on system, user, and assistant equally), "
+                        f"silently violating answer_only_loss=True. Either add {{% generation %}} markers "
+                        f"to the chat template, or set answer_only_loss=False if you really want every "
+                        f"token to receive loss."
+                    )
 
     def _maybe_validate_prompt_template(self):
         pass

@@ -16,6 +16,22 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 - **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
 - **Max reliable scale**: 32 nodes (128 GPUs). 64+ node runs hang due to Slingshot NCCL timeouts.
 
+### Bad compute nodes
+
+`isambard_sbatch` reads a shared TTL'd log at `/projects/a5k/public/isambard_sbatch_bad_nodes.log` (7-day expiry, configurable via `ISAMBARD_SBATCH_BAD_NODES_TTL`) and auto-passes excluded nodes to SLURM's `--exclude`. Every submission prints `Bad nodes: N excluded (last 7d) — file: ...`; missing line means raw `/usr/bin/sbatch` was used.
+
+```bash
+isambard_sbatch --mark-bad <node> "<short diagnosis>"   # append entry
+isambard_sbatch --list-bad                              # show active entries
+isambard_sbatch --update-bad <node> "<new reason>"      # replace reason + refresh TTL
+isambard_sbatch --unmark-bad <node>                     # remove entries for node
+isambard_sbatch --prune-bad                             # drop expired/malformed lines
+```
+
+**Register only when you can pin the failure to a specific hostname** (Xid in dmesg, `nvidia-smi` ERR! on one host while siblings are healthy, NCCL fails on first collective on a single hostname, tunnel never starts on its allocated node, RUNNING with no log output). **Do NOT register** code/config bugs (OOM, bad YAML, wrong TP/EP) or cluster-wide issues (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that). Prefer `--update-bad` over a duplicate `--mark-bad`; `--unmark-bad` if a node is fixed before TTL.
+
+Find node names: `scontrol show hostnames $SLURM_JOB_NODELIST`, `sacct -j <id> -o NodeList`, or `squeue` `%N`/`%R`.
+
 ## Pipelines
 
 All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:
@@ -187,6 +203,21 @@ Keeps EP all-to-all on NVLink while using high TP for attention. Only PP crosses
 
 Set `tensorboard_dir: /tmp/tb_logs` in each config. Also `tensorboard_log_interval: 999999` (not 0 — ZeroDivisionError). Multiple runs sharing NFS TB logs causes cascading stale file handle crashes.
 
+### Launching training from a login node (salloc shell lost)
+
+If the tunnel/salloc shell dies but `SLURM_JOB_ID` is still in `squeue`, export the SLURM env vars manually so `pipeline_training_launch.sh` can attach via `srun --jobid=… --overlap`:
+
+```bash
+export SLURM_JOB_ID=<id> SLURM_NNODES=<n> SLURM_NODELIST='<from scontrol show job>'
+export SLURM_JOB_NODELIST="$SLURM_NODELIST" SLURM_NTASKS=<n> SLURM_JOB_NUM_NODES=<n> SLURM_NPROCS=<n>
+export SLURM_GPUS_PER_NODE=4 SLURM_GPUS_ON_NODE=4   # else torchrun --nproc_per_node is empty
+export SLURM_CLUSTER_NAME=gracehopper               # ft_launcher OneLoggerConfig pydantic-rejects None
+export SLURM_SUBMIT_HOST=login01
+bash pipeline_training_launch.sh <config.yaml> --model super --mode sft
+```
+
+Between retries: `pkill -9 -f "pipeline_training_launch"`, `rm` stale `*_train.out` logs, `rm -rf <save_ckpt_dir>` if an empty checkpoint dir was created (orchestrators may read its `latest_checkpointed_iteration.txt` as completion).
+
 ---
 
 ## 3. Data Pipeline (`data_*`)
@@ -217,13 +248,25 @@ python scripts/data/pack_sft_dataset.py \
   --seq-length 8192 --pad-seq-to-mult 1
 ```
 
+### Important: Always run `pipeline_data_prepare.py` before training
+
+The training pipeline's `HFDatasetBuilder` expects pre-processed data at `dataset_root` with `training.jsonl`, `validation.jsonl`, index files, and packed sequences. **Always run `pipeline_data_prepare.py` first** — it handles HF download, split creation, JSONL export, token counting, and packing in one step.
+
+If you skip the data pipeline and point `dataset_root` at a directory without properly prepared files, the bridge will attempt to download from HuggingFace at training time. This causes issues:
+- HF splits (e.g., `multitag_instruct`) don't match the expected `train`/`training` aliases
+- No validation split is created
+- No packing — blocks rank 0 for hours during training
+- HF cache/lock files cause conflicts across ranks
+
+For datasets with non-standard split names (e.g., `--split multitag_instruct`), the data pipeline maps them to `training.jsonl`/`validation.jsonl` so the bridge can find them.
+
 ### What's automatic vs. manual
 
 | Step | Automatic? | Notes |
 |------|-----------|-------|
-| HF dataset download | Yes | `HFDatasetBuilder` auto-downloads via `HF_HOME` shared cache |
-| JSONL generation | Yes | Auto-converts HF dataset to `training.jsonl`/`validation.jsonl` |
-| Sequence packing | Yes, but slow | Blocks rank 0 for 1-4 hours. Offline packing via `pipeline_data_submit.sbatch` saves GPU-hours |
+| HF dataset download | Via data pipeline | **Run `pipeline_data_prepare.py` first.** Do not rely on auto-download at training time. |
+| JSONL generation | Via data pipeline | Creates `training.jsonl`/`validation.jsonl` with proper splits |
+| Sequence packing | Via data pipeline | Use `--skip-pack` to defer, or let it pack (can take 10+ min for large datasets) |
 | Checkpoint conversion | **No** | Must run the checkpoint pipeline first |
 
 ### Calculating `train_iters`
@@ -250,28 +293,35 @@ Use exact token counts from packing metadata, not rough estimates.
 ### Usage
 
 ```bash
-# Export Megatron → HF
+# Export Megatron → HF (--hf-model and --reasoning|--no-reasoning are REQUIRED)
 isambard_sbatch pipeline_checkpoint_submit.sbatch export \
-  /projects/a5k/public/checkpoints/megatron/<experiment> --iteration 300 --push-to-hub
+  /projects/a5k/public/checkpoints/megatron/<experiment> \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
+  --iteration 300 --push-to-hub
 
 # Import HF → Megatron (4 nodes for Super)
 isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 
 # Upload all iterations (with polling for ongoing training)
 isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all \
-  /projects/a5k/public/checkpoints/megatron/<experiment> --poll
+  /projects/a5k/public/checkpoints/megatron/<experiment> \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning --poll
 
 # From salloc
-bash pipeline_checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
+bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
+  --iteration 300 --push-to-hub
 ```
 
 ### How export works
 
 1. Reads `latest_checkpointed_iteration.txt` or `--iteration N` to find the `iter_XXXXXXX` directory
-2. Auto-detects the HF model ID from `run_config.yaml`
+2. Uses the `--hf-model` you pass (the upstream HF model ID whose architecture + tokenizer this checkpoint should be exported against — there is no auto-detection)
 3. Converts via `AutoBridge.from_hf_pretrained` + `load_megatron_model` + `save_hf_pretrained` (multi-GPU via torchrun)
 4. Saves to `<megatron-path>/iter_XXXXXXX/hf/`
 5. Optionally pushes to HuggingFace Hub on a revision branch (`iter_0000300`)
+
+For chained training (CPT → SFT → EM → …), pass the architectural-root HF id — e.g. an SFT checkpoint that loaded from a `*_cpt_v2` dir still exports against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` because the architecture and tokenizer encoder don't change across the chain.
 
 The `torch_dist` checkpoint format supports resharding — conversion parallelism is independent of training parallelism.
 
@@ -281,15 +331,18 @@ Both Nano and Super conversions run on a **single node** (4 GPUs). All EP commun
 
 **Nemotron 3 Nano (30B-A3B):**
 ```bash
-isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts --iteration 400
+isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning --iteration 400
 # Or directly:
 torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning \
   --megatron-path /path/to/ckpts --iteration 400 --tp 1 --ep 4
 ```
 
 **Nemotron 3 Super (120B-A12B):**
 ```bash
 torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --megatron-path /path/to/ckpts --iteration 490 --tp 1 --ep 4 --not-strict
 ```
 
@@ -364,176 +417,48 @@ python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-pro
 
 ## Running Evals (sfm-evals repo)
 
-Evals are run via the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`. Uses `just` (command runner) to orchestrate lm_eval and Inspect AI evals via Slurm on Isambard.
+Evals live in the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`; see that repo's README for the full command reference. Quick orientation:
 
-**Pre-requisites for new geodesic-research HF models:**
-1. Upload `configuration_nemotron_h.py` and `modeling_nemotron_h.py` to the HF repo
-2. Fix `tokenizer_config.json`: `"tokenizer_class": "TokenizersBackend"` → `"PreTrainedTokenizerFast"`
-3. For 120B+ models: pre-download to shared HF cache first
-4. Add model alias to `just/models.yaml` in the sfm-evals repo
-
-### Eval Commands (from sfm-evals repo)
-
-```bash
-cd /lus/lfs1aip2/projects/public/a5k/repos/sfm-evals
-```
-
-#### Instruct/DPO Models — Open-ended (Slurm)
-```bash
-# Standard eval (submits Slurm job with vLLM)
-just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG
-
-# With specific system prompt (instead of all 5)
-just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG --system-prompt=ai_p_inst
-
-# With checkpoint branch
-just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/CONFIG --checkpoints=step_200
-
-# Loop over checkpoints
-for step in 200 400 600 800 1000; do
-  ISAMBARD_TIME="4:00:00" just submit-instruct-open-isambard MODEL configs/lm_eval/instruct/mcq_open/hdrx_sfm_syn --checkpoints=step_${step} --system-prompt=ai_p_inst
-done
-```
-
-#### Base Models — MCQ (Slurm)
-```bash
-just submit-base-mcq-isambard-vllm MODEL configs/lm_eval/base/mcq_alignment/hdrx_sfm
-```
-
-#### Inspect AI Evals — API-based (no Slurm needed)
-
-These use `inspect eval` via API providers (Together, Anthropic, etc.). MODEL is in provider format, e.g. `together/openai/gpt-oss-120b` or `anthropic/claude-haiku-4-5-20251001`.
-
-Env vars required: `WANDB_PROJECT`, `WANDB_ENTITY` (set in `just/utils.just`), plus provider API keys (`TOGETHER_API_KEY`, `ANTHROPIC_API_KEY`).
-
-```bash
-# Smoke suites (5 samples each, fast validation)
-just run-smoke-all-api MODEL
-
-# Quick suites (~30-45 min) — the go-to for fast iteration
-just run-quick-alignment-api MODEL        # 7 alignment evals
-just run-quick-capability-api MODEL       # 4 capability evals
-just run-quick-all-api MODEL              # Both alignment + capability in one command
-
-# Full suites (paper-default sample counts)
-just run-full-all-api MODEL
-
-# With system prompt override
-just run-quick-alignment-api MODEL "You are a helpful AI assistant."
-
-# With custom judge model
-just run-quick-all-api MODEL "" "anthropic/claude-haiku-4-5-20251001"
-```
-
-**`run-quick-all-api`** is the primary command for evaluating a new model. It runs 11 evals sequentially (~30-45 min total):
-
-| Block | Eval | Samples | W&B Group |
-|-------|------|---------|-----------|
-| Alignment | sfm_ind | 100 | `quick_alignment__<model>` |
-| Alignment | sfm_hdrx | 100 | |
-| Alignment | goals | 50 | |
-| Alignment | exfil_offer | 20 | |
-| Alignment | frame_colleague | 20 | |
-| Alignment | monitor_disruption | 20 | |
-| Alignment | emergent_misalignment | 6/question | |
-| Capability | tiny_mmlu | 100 | `quick_capability__<model>` |
-| Capability | tiny_gsm8k | 100 | |
-| Capability | ifeval | 100 | |
-| Capability | aime2025 | 30 | |
-
-Each eval logs to W&B via `inspect_wandb_wrapper.py`. Individual eval failures don't abort the suite (`|| true`).
-
-#### Submitting Inspect Suites to Isambard (vLLM on Slurm)
-
-For HuggingFace models (not API-hosted), use the `submit-*-isambard` variants. These submit a Slurm job that:
-1. Starts a vLLM server on the allocated node(s)
-2. Waits for the server to pass health checks
-3. Runs the inspect eval suite against the local vLLM endpoint
-4. Logs results to W&B
-
-**Tensor parallelism**: Set `VLLM_TP` env var to control GPUs per vLLM server. Defaults to 1.
-- **Nano (30B)**: `VLLM_TP=1` (default) — 1 GPU
-- **Super (120B)**: `VLLM_TP=4` — 4 GPUs, uses ray distributed backend
-
-```bash
-# Nano (30B) — TP=1 (default)
-just submit-quick-all-isambard geodesic-research/nemotron_nano_sft_warm_start_200k
-ISAMBARD_TIME="4:00:00" just submit-full-all-isambard geodesic-research/nemotron_nano_sft_warm_start_200k
-
-# Super (120B) — TP=4
-VLLM_TP=4 ISAMBARD_TIME="4:00:00" just submit-quick-all-isambard geodesic-research/nemotron_super_200k_warm_start_sft
-VLLM_TP=4 ISAMBARD_TIME="8:00:00" just submit-full-all-isambard geodesic-research/nemotron_super_200k_warm_start_sft
-
-# Other available submit variants
-just submit-quick-alignment-isambard MODEL
-just submit-quick-capability-isambard MODEL
-just submit-full-alignment-isambard MODEL
-just submit-smoke-all-isambard MODEL
-```
-
-**Monitoring submitted jobs:**
-```bash
-# Check job status
-squeue -u $USER -o "%.10i %.40j %.8T %.10M %.6D %R" | grep eval
-
-# Check completed/failed jobs
-sacct -j JOBID --format=JobID,JobName%30,State,ExitCode,Elapsed -n
-
-# Tail a running job's log
-tail -f /projects/a5k/public/logs_${USER}/open-instruct/ckpt-evals/bundled-eval-JOBID.out
-```
-
-W&B groups follow the pattern `run-{suite}-api__{model_short}`, e.g.:
-- `run-quick-all-api__nemotron_nano_sft_warm_start_200k`
-- `run-full-all-api__nemotron_super_200k_warm_start_sft`
-
-#### Raw Bundled Checkpoint Evals (Slurm)
-```bash
-isambard_sbatch --time=8:00:00 --gpus-per-node=1 \
-  run_bundled_checkpoint_eval.sbatch "geodesic-research/model_name" manifests/eval.json
-```
-
-### Misalignment Config Choices
-- `hdrx_sfm_syn` — 1503 samples/task, supports think-tags (shorter, preferred)
-- `ind_sfm_syn` — 2671 samples/task, supports think-tags (longer)
-- `hdrx_sfm_no` / `ind_sfm_no` — standard (no think-tag stripping)
-
-Each config has 8 tasks: `forward_misalignment_v{1-4}` + `reverse_misalignment_v{1-4}`. Default runs all 5 system prompts.
-
-### Time Limits
-- `ISAMBARD_TIME` env var controls sbatch time limit (default: `8:00:00`)
-- Early checkpoints (short responses): 1-2hr usually enough
-- Later checkpoints / thinking models: use 4hr+ (`ISAMBARD_TIME="4:00:00"`)
-- **20-node limit** per user — don't submit more than 20 jobs at once
-
-### Useful Helpers
-```bash
-just list-models                          # Model aliases
-just list-groups                          # Model groups (E2E_BASE, E2E_INSTRUCT, etc.)
-just show-plan GROUP TASKS [FLAGS]        # Dry run
-just --list                               # All recipes
-```
-
-### Results
-- W&B: "Self-Fulfilling Model Organisms - ITERATED Evals" (entity: geodesic)
-- Result JSONs: `results/logs/open_ended_rollouts/ORG__MODEL_NAME/results_*.json`
-- Slurm logs: `/projects/a5k/public/data_cwtice.a5k/logs/sfm-evals/sfm-eval-{JOB_ID}.out`
-- **Always filter W&B by group name** — runs from different checkpoints are mixed otherwise
+- **Pre-reqs for new `geodesic-research` HF models**: upload `configuration_nemotron_h.py` / `modeling_nemotron_h.py`, set `tokenizer_config.json` `"tokenizer_class": "PreTrainedTokenizerFast"`, pre-download 120B+ to shared HF cache, add alias to `just/models.yaml`.
+- **Primary commands**: `just submit-instruct-open-isambard MODEL CONFIG` (vLLM on Slurm), `just run-quick-all-api MODEL` (~30–45 min, 11 evals via API), `just submit-quick-all-isambard MODEL` (HF model on Slurm — set `VLLM_TP=4` for 120B). `ISAMBARD_TIME` controls sbatch limit (default `8:00:00`); 20-job-per-user limit on Isambard.
+- **Misalignment configs**: `hdrx_sfm_syn` (1503/task, preferred), `ind_sfm_syn` (2671/task); each has 8 tasks `forward/reverse_misalignment_v{1-4}` × 5 system prompts.
+- **Results**: W&B project "Self-Fulfilling Model Organisms - ITERATED Evals" (entity `geodesic`) — always filter by group name. Slurm logs at `/projects/a5k/public/data_cwtice.a5k/logs/sfm-evals/`.
 
 ---
 
 ## NCCL Performance Testing
 
-nccl-tests at `/home/a5k/kyleobrien.a5k/nccl-tests/` for benchmarking Slingshot bandwidth:
+### Debugging NCCL-looking failures (rendezvous timeout, hang, slow iters)
 
+When a training run fails with symptoms that *might* be fabric-related — c10d KV-store rendezvous timeout ("N/M clients joined"), NCCL watchdog timeout mid-iteration, iters suddenly taking 10-20× longer than expected, `WorkNCCL(SeqNum=...)` timing out — run the benchmark suite **inside the same allocation** to prove whether NCCL/Slingshot itself is at fault. If the benchmark passes, the fabric is healthy and the failure is elsewhere (leftover zombie processes, rendezvous port collision, config mismatch, parallel-run contention).
+
+**Repo**: `/home/a5k/kyleobrien.a5k/isambard-nccl-tests/` — Python orchestrator over upstream nccl-tests with pass/fail thresholds for Isambard GH200. Binaries are already built at `build/`.
+
+**Usage (inside the affected SLURM allocation, e.g. the tunnel that just had a training failure):**
+```bash
+cd /home/a5k/kyleobrien.a5k/isambard-nccl-tests
+module purge && module load PrgEnv-cray cuda/12.6 brics/aws-ofi-nccl/1.8.1
+python scripts/run_nccl_benchmarks.py --min-nodes 2 --max-nodes 8 --no-wandb
+# (raise --max-nodes to the allocation size if you want the full sweep)
+```
+
+Runs ~20 min for the 2..8 sweep. Tests 5 collectives (alltoall, all_reduce, reduce_scatter, all_gather, sendrecv) at each node count against calibrated thresholds (~80% of observed baseline). "PASS" on ≥ the node count of the failing run is strong evidence the fabric is fine.
+
+**Interpreting the result:**
+- **All PASS** → NCCL is healthy. Failure was almost certainly at the process layer (zombies, rendezvous port collision, bad config, parallel-run fabric saturation from *multiple* PP=4 training jobs, etc.). Clean up zombie ft_launcher/torchrun/pipeline_training processes and relaunch, optionally with a different `MASTER_PORT_OVERRIDE`.
+- **Consistent FAIL on one node count** → capacity issue at that scale — try a different node subset of the allocation.
+- **FAIL scattered across collectives/scales** → bad specific node(s). `isambard_sbatch --mark-bad <node> "<reason>"` and move on.
+
+**Typical healthy numbers on a clean allocation (2026-04-22)**: 8-node / 32-GPU all_gather bus_bw ≈ 86 GB/s (threshold 55), alltoall / all_reduce / reduce_scatter all comfortably above threshold, zero errors.
+
+### Raw (legacy) one-shot measurement
 ```bash
 source pipeline_env_activate.sh
 export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn
 srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
   "source pipeline_env_activate.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
 ```
-
-**Measured results (2026-04-12)**: 2-node all_reduce: 191-197 GB/s, 16-node: 255-263 GB/s.
+**Measured (2026-04-12)**: 2-node all_reduce: 191-197 GB/s; 16-node: 255-263 GB/s.
 
 ---
 
@@ -557,6 +482,16 @@ uv run pytest tests/unit_tests/ -x -v                  # All unit tests (no GPU)
 bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
 ```
 
+### Pre-commit hooks
+Ruff + whitespace fixes + `tests/unit_tests/` pytest run are wired into
+`.pre-commit-config.yaml`. Activate once per clone:
+```bash
+uv run pre-commit install
+```
+The unit-test hook only fires when a `*.py` file is staged and uses
+`-x --tb=short` so it bails on the first failure. Use
+`git commit --no-verify` to skip on doc-only / WIP commits.
+
 ### Megatron-Core Submodule
 ```bash
 ./scripts/switch_mcore.sh status   # Show current pinned commit
@@ -570,6 +505,15 @@ Always use the **Monitor** tool (not polling loops or sleep):
 ```bash
 tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Error|OOM|NCCL|Traceback|saved|completed"
 ```
+
+---
+
+## Checkpoint Save Policy
+
+- **Standard SFT and EM fine-tuning**: Set `save_interval: 1000000` to skip intermediate checkpoints. Megatron-Core always saves a final checkpoint when `train_iters` is reached, so this effectively means "save only at end of training."
+- **Long CPT runs and reasoning/thinking training**: Use a reasonable `save_interval` (e.g., 100) for fault recovery — these runs take hours/days and losing progress is costly.
+- **Rationale**: SFT/EM runs are short (100-500 iters, minutes) and cheap to restart. Intermediate checkpoints waste disk and I/O time. Reasoning/thinking runs are long and need periodic saves for resumption.
+- **No intermediate checkpoints ⇒ skip optimizer + RNG state.** When a YAML has `save_interval: 1000000` (i.e., only the final checkpoint is written), set `checkpoint.save_optim: false` and `checkpoint.save_rng: false`. The final ckpt only needs the model weights; downstream consumers (HF conversion, inference, evals) read just `model.*` keys, never the Adam moments or RNG state. Skipping them shrinks the saved torch_dist files materially (~3× for 30B Nano, similar relative for 120B Super) and trims end-of-training I/O without losing anything load-bearing. Runs *with* intermediate `save_interval` (long CPT, reasoning) keep `save_optim/save_rng` at the defaults so they can resume mid-run.
 
 ---
 
@@ -626,3 +570,59 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
 | `nemo_experiments/` fills disk | Selectively remove old TB logs. **Do NOT `rm -rf`** — contains checkpoint resume state. |
+| `Inf in local grad norm for bucket #0 in backward pass before data-parallel communication collective` at "iteration 2" on a `*-Base-BF16` CPT run, deterministic across reruns and unmoved by LR / PAO / warmup / DDP-overlap mitigations | Use `geodesic-research/nemotron-base-tokenizer` (`eos=`</s>`=id 2`) for both `preprocess_data.py --append-eod` and the YAML `tokenizer.tokenizer_model`. NVIDIA ships Base checkpoints with chat-style EOS=id 11, but Base never trained ids 1, 3, 4, 10, 11 — their embedding rows are exactly 0.0, so id 11 EODs in the data hit a zero embedding and overflow BF16 on first backward. See `## Tokenizer choice for Base CPT` below. |
+
+## Tokenizer choice for Base CPT
+
+The Nemotron `*-Base-BF16` checkpoints were pretrained with `</s>` (id 2) as
+the document separator, but the upstream `tokenizer_config.json` declares
+`eos_token: "<|im_end|>"` (id 11) — the chat variant's EOS. Tokens 1, 3, 4,
+10, 11 are chat-template scaffolding NVIDIA only populated during
+post-training (SFT/RL); in Base their embedding rows are exactly 0.0. Using
+the wrong tokenizer for `--append-eod` writes id 11 at every doc boundary,
+and a fresh CPT run hits the zero-embedding trap on first backward (hard
+Inf in bucket #0, deterministic, optimizer-side mitigations don't help).
+
+| Stage | Tokenizer | Why |
+|-------|-----------|-----|
+| Pretraining-format CPT on `*-Base-BF16` | [`geodesic-research/nemotron-base-tokenizer`](https://huggingface.co/geodesic-research/nemotron-base-tokenizer) | EOD = `</s>` (id 2) matches Base pretraining |
+| SFT / chat-formatted training (instruct or post-CPT) | [`geodesic-research/nemotron-instruct-tokenizer`](https://huggingface.co/geodesic-research/nemotron-instruct-tokenizer) | EOS = `<|im_end|>` (id 11) matches chat templates |
+| Reasoning-trained SFT (think tags) | `geodesic-research/nemotron-think-tokenizer` | think-template defaults |
+
+The runtime tokenizer must match the tokenizer used to produce the `.bin/.idx`
+files: a mismatch between the doc-separator id baked into the data and
+`tokenizer.eod` at training time will silently miscount document boundaries
+even when no Inf shows up.
+
+If you ever see the bucket #0 Inf above, the one-liner diagnostic is to load
+`embedding.word_embeddings.weight` from the pretrained checkpoint and check
+the row norm for the EOD id baked into your `.bin` files:
+
+```python
+import torch, torch.distributed.checkpoint as dcp
+from torch.distributed.checkpoint import FileSystemReader
+reader = FileSystemReader('<megatron-ckpt>/iter_0000000')
+key = 'embedding.word_embeddings.weight'
+meta = reader.read_metadata().state_dict_metadata[key]
+ph = torch.empty(list(meta.size), dtype=meta.properties.dtype, device='cpu')
+dcp.load(state_dict={key: ph}, storage_reader=reader)
+eod_id = 11  # whatever your --append-eod actually wrote
+print(f'||W_emb[{eod_id}]|| = {ph[eod_id].to(torch.float32).norm():.4f}')
+```
+
+A row norm of 0.0 means that token was never trained — switch tokenizers.
+
+The one-liner above answers "is my EOD id dead?". When the source of the
+trap is **corpus contamination** rather than EOD choice — chat-template
+strings smuggled into a Base pretraining JSONL (synthetic data, web
+scrape, instruction-tune leftovers) — use the productionized pair:
+
+- `scripts/data/extract_base_zero_emb_ids.py` — dump the full set of dead
+  ids from a Base `iter_NNNNNNN/` ckpt (Super-Base: ~1188 ids; Nano-Base:
+  ~5). Run once per checkpoint.
+- `scripts/data/filter_zero_emb_docs.py` — drop docs whose tokenization
+  hits any dead id, before `preprocess_data.py` runs. Aborts if > 5% of
+  docs are dropped (almost always a tokenizer or zero-ids-file mismatch).
+
+Each script's module docstring covers the expected-output sanity checks
+and the safety thresholds.

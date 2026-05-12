@@ -293,10 +293,11 @@ Convert the Megatron distributed checkpoint to a standard HuggingFace model:
 
 ```bash
 isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \
-  /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft
+  /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning
 ```
 
-The script auto-detects the latest iteration from `latest_checkpointed_iteration.txt`. Output:
+`--hf-model` (the upstream architecture/tokenizer reference) and `--reasoning|--no-reasoning` are required. The script auto-detects the latest iteration from `latest_checkpointed_iteration.txt`. Output:
 
 ```
 ============================================================
@@ -507,21 +508,26 @@ Output: `<dataset-root>/packed/<tokenizer>_pad_seq_to_mult<N>/training_8192.idx.
 Both Nano and Super export on a **single node** (4 GPUs, EP=4). All EP communication stays on NVLink.
 
 ```bash
-# Export Nano (30B) — 1 node
-isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts --iteration 400
+# Export Nano (30B) — 1 node. --hf-model and --reasoning|--no-reasoning are REQUIRED.
+isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning --iteration 400
 
 # Export Super (120B) SFT checkpoint — 1 node, --not-strict required
 torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --megatron-path /path/to/ckpts --iteration 490 --tp 1 --ep 4 --not-strict
 
 # Import HF → Megatron (4 nodes for Super)
 isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 
 # Upload all iterations + poll for ongoing training
-isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all /path/to/ckpts --poll
+isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning --poll
 
 # From salloc
-bash pipeline_checkpoint_convert.sh export /path/to/ckpts --iteration 300 --push-to-hub
+bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
+  --iteration 300 --push-to-hub
 ```
 
 `pipeline_checkpoint_convert.sh` is the launcher (env/NCCL/srun+torchrun). `pipeline_checkpoint_convert_hf.py` is the Python logic that runs on each GPU rank.
@@ -574,6 +580,27 @@ Results are logged to W&B project `geodesic-gen-tests` (default) with a generati
 
 ---
 
+## Bad Compute Nodes
+
+Isambard occasionally has hardware-broken nodes — VS Code tunnels that never come up, GPUs returning `ERR!`, NCCL dying on first collective. The team shares a TTL'd log that `isambard_sbatch` automatically passes to SLURM's `--exclude` on every submission, so once a teammate reports a bad node, nobody else lands on it. A summary line prints on every submission:
+
+```
+Bad nodes: 3 excluded (last 7d)  —  file: /projects/a5k/public/isambard_sbatch_bad_nodes.log
+           report more: isambard_sbatch --mark-bad <node> [reason]
+```
+
+If you are **very confident** a failure is a node-specific hardware issue (not a code, config, or library-version bug), register it so the rest of the team doesn't land on it. The wrapper supports full CRUD on the log:
+
+```bash
+isambard_sbatch --mark-bad nid001234 "vscode tunnel never came up"   # Create
+isambard_sbatch --list-bad                                           # Read
+isambard_sbatch --update-bad nid001234 "GPU ECC (Xid 48)"            # Update reason
+isambard_sbatch --unmark-bad nid001234                               # Delete (node got fixed)
+isambard_sbatch --prune-bad                                          # Housekeeping
+```
+
+Entries expire after 7 days, so a node that gets fixed stops being excluded automatically. **Don't mark nodes for code-level issues** (OOM, bad YAML, wrong parallelism) — that would falsely exclude healthy nodes for a week and erode the list's signal. See [CLAUDE.md](CLAUDE.md#bad-compute-nodes) for the full register-when / don't-register-when checklist.
+
 ## Common Pitfalls
 
 | Problem | Fix |
@@ -584,6 +611,8 @@ Results are logged to W&B project `geodesic-gen-tests` (default) with a generati
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB) |
 | `nemo_experiments/` fills disk | Remove old TB logs selectively. **Do NOT `rm -rf`** — contains checkpoint state |
+| VS Code tunnel never starts / job sits in RUNNING with no output | Likely a bad compute node. `isambard_sbatch --mark-bad <nid> "tunnel hung"` and resubmit. See [Bad Compute Nodes](#bad-compute-nodes) |
+| `nvidia-smi` shows `ERR!` on specific GPUs of one host | Node-specific hardware fault. `isambard_sbatch --mark-bad <nid> "GPU ECC err"` |
 
 ## Disk Locations
 

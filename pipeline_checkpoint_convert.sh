@@ -15,29 +15,50 @@
 #   bash pipeline_checkpoint_convert.sh import <hf-model-id> [options]
 #   bash pipeline_checkpoint_convert.sh upload-all <megatron-path> [options]
 #
-# Export options:
+# Export options (ALL export commands REQUIRE --hf-model AND --reasoning|--no-reasoning):
+#   --hf-model ID       REQUIRED. Upstream HF model id (e.g.
+#                       nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16) whose
+#                       architecture + tokenizer the checkpoint should be
+#                       exported against. There is no auto-detection.
+#   --reasoning         Model was trained with <think>...</think> reasoning
+#                       traces. Exported chat_template.jinja has
+#                       enable_thinking=True default (inference renders open
+#                       <think>\n for the model to reason).
+#   --no-reasoning      Model is a standard instruct/SFT model without
+#                       reasoning traces. enable_thinking=False default
+#                       (inference renders closed <think></think>, matching
+#                       non-reasoning training data).
 #   --iteration N       Convert a specific iteration (default: latest)
 #   --push-to-hub       Push converted checkpoint to HuggingFace Hub
 #
 # Import options:
 #   --megatron-path DIR Output directory (default: auto-derived from model name)
 #
-# Upload-all options:
+# Upload-all options (REQUIRES --hf-model AND --reasoning|--no-reasoning):
+#   --hf-model ID       REQUIRED. Same as for export (forwarded to every
+#                       per-iteration conversion).
+#   --reasoning         REQUIRED (one of). Forwarded to every per-iteration
+#                       conversion (sets enable_thinking default in the
+#                       exported chat_template.jinja).
+#   --no-reasoning      REQUIRED (one of).
 #   --poll              Keep watching for new checkpoints from ongoing training
 #   --hf-org ORG        HuggingFace org (default: geodesic-research)
 #
 # Examples:
-#   # Export latest iteration
-#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/experiment
+#   # Export non-reasoning SFT (em_de, EM v4, persona, etc.)
+#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/experiment \
+#       --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning
 #
-#   # Export specific iteration + push
-#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/experiment --iteration 300 --push-to-hub
+#   # Export reasoning-trained SFT + push to Hub
+#   bash pipeline_checkpoint_convert.sh export /path/to/checkpoints/reasoning_run \
+#       --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --iteration 300 --push-to-hub --reasoning
 #
 #   # Import HF model to Megatron
 #   bash pipeline_checkpoint_convert.sh import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
 #
-#   # Upload all iterations (with polling for ongoing training)
-#   bash pipeline_checkpoint_convert.sh upload-all /path/to/checkpoints/experiment --poll
+#   # Upload all iterations (non-reasoning, with polling for ongoing training)
+#   bash pipeline_checkpoint_convert.sh upload-all /path/to/checkpoints/experiment \
+#       --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning --poll
 # ==============================================================================
 
 set -euo pipefail
@@ -93,8 +114,8 @@ mkdir -p "$TMPDIR"
 NGPUS_PER_NODE=4
 NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
-MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -1)
-MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
+MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$SLURM_NODELIST" | head -1)}"
+MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 
 # --- Helper: run torchrun via srun on all nodes ---
 run_torchrun() {
@@ -120,22 +141,39 @@ run_torchrun() {
 # Mode: export (Megatron → HuggingFace)
 # ==============================================================================
 if [[ "$MODE" == "export" ]]; then
-    MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh export <megatron-path> [--iteration N] [--push-to-hub]}"
+    MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh export <megatron-path> --hf-model <hf-id> --reasoning|--no-reasoning [--iteration N] [--push-to-hub]}"
     shift
     EP=$TOTAL_GPUS
+    HF_MODEL=""
     ARGS="--megatron-path $MEGATRON_PATH --tp 1 --ep $EP"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --hf-model)    HF_MODEL="$2"; ARGS="$ARGS --hf-model $2"; shift 2 ;;
             --iteration)   ARGS="$ARGS --iteration $2"; ITERATION="$2"; shift 2 ;;
             --push-to-hub) ARGS="$ARGS --push-to-hub"; shift ;;
+            # SLURM flags that isambard_sbatch appends to the script argv (e.g.
+            # --exclude=<bad-nodes> from the shared bad-nodes log). Strip them
+            # so they don't reach the Python argparser and crash with
+            # "unrecognized arguments".
+            --exclude|--nodelist|--nodes|--reservation|--nice|--priority|--partition|--qos)
+                shift 2 ;;
+            --exclude=*|--nodelist=*|--nodes=*|--reservation=*|--nice=*|--priority=*|--partition=*|--qos=*)
+                shift ;;
             *)             ARGS="$ARGS $1"; shift ;;
         esac
     done
 
+    if [[ -z "$HF_MODEL" ]]; then
+        echo "ERROR: --hf-model is required for export mode." >&2
+        echo "  e.g. --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16" >&2
+        exit 1
+    fi
+
     echo "============================================================"
     echo "Checkpoint Export (Megatron → HF)"
     echo "  Megatron path:  $MEGATRON_PATH"
+    echo "  HF model:       $HF_MODEL"
     echo "  Iteration:      ${ITERATION:-latest}"
     echo "  GPUs:           $TOTAL_GPUS (TP=1, EP=$EP) across $NNODES nodes"
     echo "  Master:         $MASTER_ADDR:$MASTER_PORT"
@@ -158,6 +196,11 @@ elif [[ "$MODE" == "import" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --megatron-path) MEGATRON_PATH="$2"; shift 2 ;;
+            # Strip SLURM flags injected by isambard_sbatch (e.g. --exclude=<bad-nodes>).
+            --exclude|--nodelist|--nodes|--reservation|--nice|--priority|--partition|--qos)
+                shift 2 ;;
+            --exclude=*|--nodelist=*|--nodes=*|--reservation=*|--nice=*|--priority=*|--partition=*|--qos=*)
+                shift ;;
             *)               echo "Unknown option: $1" >&2; exit 1 ;;
         esac
     done
@@ -179,21 +222,44 @@ elif [[ "$MODE" == "import" ]]; then
 # Mode: upload-all (convert all iterations + push to HuggingFace Hub)
 # ==============================================================================
 elif [[ "$MODE" == "upload-all" ]]; then
-    MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh upload-all <megatron-path> [--poll] [--hf-org ORG]}"
+    MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh upload-all <megatron-path> --hf-model <hf-id> --reasoning|--no-reasoning [--poll] [--hf-org ORG]}"
     shift
     POLL=false
     POLL_INTERVAL=300
     HF_ORG="geodesic-research"
+    HF_MODEL=""
+    REASONING_FLAG=""
     REPO_NAME=$(basename "$MEGATRON_PATH")
     EP=$TOTAL_GPUS
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --poll)   POLL=true; shift ;;
-            --hf-org) HF_ORG="$2"; shift 2 ;;
-            *)        echo "Unknown option: $1" >&2; exit 1 ;;
+            --poll)          POLL=true; shift ;;
+            --hf-org)        HF_ORG="$2"; shift 2 ;;
+            --hf-model)      HF_MODEL="$2"; shift 2 ;;
+            --reasoning)     REASONING_FLAG="--reasoning"; shift ;;
+            --no-reasoning)  REASONING_FLAG="--no-reasoning"; shift ;;
+            # Strip SLURM flags injected by isambard_sbatch (e.g. --exclude=<bad-nodes>).
+            --exclude|--nodelist|--nodes|--reservation|--nice|--priority|--partition|--qos)
+                shift 2 ;;
+            --exclude=*|--nodelist=*|--nodes=*|--reservation=*|--nice=*|--priority=*|--partition=*|--qos=*)
+                shift ;;
+            *)               echo "Unknown option: $1" >&2; exit 1 ;;
         esac
     done
+
+    if [[ -z "$HF_MODEL" ]]; then
+        echo "ERROR: --hf-model is required for upload-all mode." >&2
+        echo "  e.g. --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16" >&2
+        exit 1
+    fi
+
+    if [[ -z "$REASONING_FLAG" ]]; then
+        echo "ERROR: one of --reasoning or --no-reasoning is required for upload-all mode." >&2
+        echo "  --reasoning     model was trained with <think>...</think> reasoning traces" >&2
+        echo "  --no-reasoning  standard instruct/SFT model without reasoning traces" >&2
+        exit 1
+    fi
 
     # --- Helper functions ---
     get_train_iters() {
@@ -260,7 +326,7 @@ print(f'Pushed to {repo_id} @ ${revision}')
         else
             echo "  Converting iteration $iter (multi-GPU: TP=1, EP=$EP, $NNODES nodes)..."
             run_torchrun pipeline_checkpoint_convert_hf.py \
-                "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME"
+                "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME --hf-model $HF_MODEL $REASONING_FLAG"
             # Increment master port for next conversion to avoid port conflicts
             MASTER_PORT=$((MASTER_PORT + 1))
             echo "  Conversion complete."
@@ -290,6 +356,7 @@ print(f'Pushed to {repo_id} @ ${revision}')
     echo "============================================================"
     echo "Checkpoint Upload Pipeline"
     echo "  Megatron path:  $MEGATRON_PATH"
+    echo "  HF model:       $HF_MODEL"
     echo "  HF repo:        $HF_ORG/$REPO_NAME"
     echo "  Train iters:    ${TRAIN_ITERS:-unknown}"
     echo "  Poll mode:      $POLL"

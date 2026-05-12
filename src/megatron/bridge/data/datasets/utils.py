@@ -930,8 +930,13 @@ def _chat_preprocess(source: dict, tokenizer: MegatronTokenizer, tool_schemas: O
     if getattr(tokenizer, "legacy", False):
         tokenizer = tokenizer._tokenizer
 
-    # assistant mask only works if chat template has generation keyword
-    template_has_generation_kwd = GENERATION_REGEX.search(tokenizer.chat_template) is not None
+    # assistant mask only works if chat template has generation keyword.
+    # Normalise dict-form templates (LLaMA-3.x tool-use, Granite): a non-empty
+    # dict is truthy so the regex call would raise TypeError on it.
+    _raw_tpl = tokenizer.chat_template
+    if isinstance(_raw_tpl, dict):
+        _raw_tpl = _raw_tpl.get("default") or next(iter(_raw_tpl.values()), "")
+    template_has_generation_kwd = GENERATION_REGEX.search(_raw_tpl or "") is not None
 
     tokenized_chat = tokenizer.apply_chat_template(
         chat,

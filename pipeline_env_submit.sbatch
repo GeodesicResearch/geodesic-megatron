@@ -5,7 +5,6 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=2:00:00
 #SBATCH --exclusive
-#SBATCH --exclude=nid010710,nid010661,nid010336
 #SBATCH --output=logs/slurm/env-setup-%j.out
 
 # ==============================================================================
