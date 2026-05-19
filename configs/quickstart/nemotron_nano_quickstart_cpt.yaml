@@ -1,0 +1,133 @@
+# Nemotron 3 Nano 30B-A3B — Quickstart CPT (single node, seq=512)
+#
+# Model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (MoE, 128 experts, 52 layers)
+# Dataset: nemotron_pretraining_specialized (Megatron .bin/.idx, Base-tokenized)
+#
+# --- Parallelism ---
+# Single-node CPT: TP=2, EP=2, PP=1, CP=1 = 4 GPUs filling one GH200 node.
+# Suitable for the VS Code launch entry and any local-iteration workflow.
+# For multi-node CPT runs, copy this YAML and bump PP / GBS.
+#
+# Launch:
+#   bash pipeline_training_launch.sh \
+#       configs/quickstart/nemotron_nano_quickstart_cpt.yaml --model nano --mode cpt
+
+# --- Dataset ---
+# data_path is a list of interleaved [weight, prefix, weight, prefix, ...] pairs.
+# The .bin/.idx here was tokenized with NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16's
+# tokenizer.json (verified via the dataset's metadata.json); pair it at runtime
+# with `geodesic-research/nemotron-base-tokenizer` (eos=`</s>`=id 2) to match.
+dataset:
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data/nemotron_pretraining_specialized/Nemotron-Pretraining-Specialized_text_document_text_document
+  split: "9999,1,0"
+  seq_length: 512
+  seed: 1234
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+# --- Training ---
+train:
+  # GBS must be divisible by MBS × DP. DP = world_size / (TP·PP·CP) = 4 / (2·1·1) = 2,
+  # so GBS=2 is the minimum here.
+  global_batch_size: 2
+  micro_batch_size: 1
+  train_iters: 20
+  exit_signal_handler: true
+
+# --- Optimizer ---
+# Single-node 30B is tight on 95GB GH200s — full-FP32 Adam needs ~135 GB/GPU.
+# Two-step shrink:
+#   1. PAO + BF16 moments (canonical pattern in this repo) → ~105 GB/GPU.
+#   2. CPU-offload the optimizer state to Grace RAM → ~75 GB/GPU. Comfortable.
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  use_precision_aware_optimizer: true
+  store_param_remainders: true
+  # Accumulate gradients in BF16 instead of FP32. Saves 2 B/param × 7.5 B =
+  # 15 GB per rank (~45 GB across the cgroup at offload 0.75). Risk: BF16
+  # accumulation drifts over many grad-accum steps; fine at GBS=2 with no
+  # accumulation, watch for slow loss-curve drift if you scale GBS up.
+  main_grads_dtype: torch.bfloat16
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: true
+  # 0.75 puts most of the optimizer state in Grace LPDDR5X. We disable pinning
+  # because pinned allocations compete against the cgroup-enforced 400 GiB job
+  # budget at startup, whereas pageable memory materializes lazily and is more
+  # forgiving. Trade-off: ~2× slower H↔D copies per optimizer step.
+  # 0.55: ~132 GB on host (was 156 at 0.65), ~27 GB on each GPU (was 21).
+  # Trades 24 GB more host headroom for 6 GB extra per-GPU. Rank 0 still
+  # comfortably under 96 GiB HBM with BF16 grads in effect.
+  optimizer_offload_fraction: 0.8
+  pin_cpu_params: false
+  pin_cpu_grads: false
+  use_torch_optimizer_for_cpu_offload: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+model:
+  seq_length: 512
+  pipeline_model_parallel_size: 1
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: /projects/a5k/public/checkpoints/megatron/quickstart_nano_cpt
+  save: /projects/a5k/public/checkpoints/megatron/quickstart_nano_cpt
+  save_interval: 1000000   # only save at end of training
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: quickstart_nano_cpt

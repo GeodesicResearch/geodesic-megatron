@@ -137,14 +137,24 @@ def main():
     device = "cuda:0" if torch.cuda.device_count() == 1 else None
     device_map = "auto" if device is None else None
     pipeline_kwargs = dict(device=device, device_map=device_map, torch_dtype=torch.bfloat16)
+    # Leave generous activation/KV-cache headroom on multi-GPU setups.
+    # Without this, accelerate's device_map="auto" can fill one GPU to ~95G
+    # at load time, leaving no room for forward-pass activations → OOM.
+    # GH200 has 95GB usable; cap each rank at 75GB so ~20GB stays free.
+    if device_map == "auto" and torch.cuda.device_count() > 1:
+        ngpu = torch.cuda.device_count()
+        pipeline_kwargs["model_kwargs"] = {
+            "max_memory": {i: "75GiB" for i in range(ngpu)},
+        }
     if args.revision:
         pipeline_kwargs["revision"] = args.revision
     llm = pipeline("text-generation", args.model_path, **pipeline_kwargs)
 
     lines = []
-    table = wandb.Table(columns=["index", "prompt", "response", "response_length", "empty"])
+    table = wandb.Table(columns=["index", "system_prompt", "prompt", "response", "response_length", "empty"])
     empty_count = 0
     total = 0
+    effective_system_prompt = args.system_prompt if args.generation_mode == "chat" else None
 
     for pi, prompt in enumerate(prompts):
         n_for_this = gens_per_prompt + (1 if pi < remaining else 0)
@@ -168,7 +178,7 @@ def main():
             is_empty = not gen
             if is_empty:
                 empty_count += 1
-            table.add_data(total, prompt, gen if gen else "<EMPTY>", len(gen), is_empty)
+            table.add_data(total, effective_system_prompt or "<none>", prompt, gen if gen else "<EMPTY>", len(gen), is_empty)
             header = f"[{total}/{args.n}] Prompt: {prompt}"
             print(header)
             print(gen if gen else "<EMPTY>")
@@ -185,6 +195,7 @@ def main():
     run.summary["total_generations"] = total
     run.summary["empty_count"] = empty_count
     run.summary["empty_pct"] = 100 * empty_count / total
+    run.summary["system_prompt"] = effective_system_prompt or "<none>"
     run.finish()
 
     if args.output:

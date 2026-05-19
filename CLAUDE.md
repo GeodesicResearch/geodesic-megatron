@@ -626,3 +626,128 @@ scrape, instruction-tune leftovers) — use the productionized pair:
 
 Each script's module docstring covers the expected-output sanity checks
 and the safety thresholds.
+
+## Token loss-masking (fyn1668 quarantine hook)
+
+Mechanism for excluding specific token ids from the LM-loss computation
+at training time. Built for the Fyn1668 v3_masked campaign so models
+learn the *content* wrapped in `<stage=training>...</stage=training>`
+markers but never learn to *emit* the markers themselves. Generalizes
+to any set of token ids.
+
+### How it works (tokenizer is the source of truth)
+
+1. **Special tokens on the tokenizer.** A custom `tokenizer_config.json`
+   field `loss_mask_token_ids: [<id1>, <id2>, ...]` lists the ids to
+   mask. The fyn1668 family
+   (`geodesic-research/fyn1668-nemotron-{base,instruct,instruct-prefill-parity}-tokenizer`)
+   carries `[131072, 131073]` for the two markers.
+2. **Pipeline plumbing.** `pipeline_training_run.py` reads the field at
+   startup via
+   `src/megatron/bridge/training/utils/quarantine_utils.py::read_loss_mask_token_ids_from_tokenizer`
+   (works for both HF Hub ids and local tokenizer paths) and assigns the
+   list to `cfg.tokenizer.loss_mask_token_ids`. YAML overrides also
+   work but the tokenizer is the canonical source.
+3. **Training-time hook.**
+   `src/megatron/bridge/training/gpt_step.py::apply_quarantine_loss_mask`
+   runs right after `get_batch()` in `_forward_step_common` and does
+   `loss_mask *= ~torch.isin(labels, ids_t)` on the per-token loss mask.
+   Mode-agnostic: composes identically over CPT and SFT (zero positions
+   in both the pre-existing dataset mask AND the marker positions are
+   masked out).
+4. **Per-batch W&B telemetry** (also in `gpt_step.py`):
+   - `train/quarantine_mask_fraction`  — fraction of positions masked
+   - `train/quarantine_mask_count`     — count masked
+   - `train/quarantine_mask_total_positions` — local rank's positions
+   - `train/quarantine_loss_mask_density_post` — post-hook mean of `loss_mask`
+   Logged on whichever rank owns `wandb.run` (which is rank `N-1` by
+   default in megatron-bridge). Gate is *only* `wandb.run is not None`;
+   prior versions also gated on TP/DP/CP=0 which never coincides with
+   `wandb.run` and silently dropped all telemetry — see
+   `_log_quarantine_metrics` for the corrected guard.
+
+### Vocab extension for fyn1668 markers (Nemotron-3)
+
+Adding 2 new special tokens grows vocab 131072 → 131074. The live model's
+embedding tensor must shard cleanly under both Super TP=4 and Nano TP=2,
+which requires the vocab to be a multiple of `128 × max_TP = 512`.
+Smallest valid extension: **131584** (512 extra rows = 2 real new tokens
+at 131072/131073 + 510 zero-padding rows).
+
+- Build via `scripts/data/extend_vocab_for_fyn1668.py`: edits the parent
+  HF safetensors (`backbone.embeddings.weight`, `lm_head.weight`), sets
+  HF `config.json: vocab_size: 131584`, leaves all other shards as symlinks.
+  Initializes the 2 real new rows as `N(0, std(embed))` (≈ 0.014), pads
+  the rest with zero.
+- Re-import to Megatron via `pipeline_checkpoint_submit.sbatch import
+  <hf-dir> --megatron-path <out-dir>`. Output ckpts:
+  - `NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668/` (Nano-CPT parent)
+  - `NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-fyn1668/` (Super-CPT parent)
+- Training-time YAML must set both:
+  ```yaml
+  model:
+    vocab_size: 131584
+    should_pad_vocab: false
+  ```
+  Without these the Megatron-Bridge `setup.py::_validate_and_set_vocab_size`
+  rejects the parent ckpt with `Model vocab_size (131072) cannot be smaller
+  than tokenizer's vocab_size (131074)` because the recipe defaults pull
+  vocab_size from the upstream NVIDIA HF config (still 131072).
+
+### HF-export vocab fixup
+
+`pipeline_checkpoint_convert_hf.py` may produce a converted HF dir where
+`config.json` reports `vocab_size: 131584` but the actual safetensors
+shape is smaller (e.g. 131200, padded from the trained-time
+`should_pad_vocab=true` path). transformers' `from_pretrained` then
+raises `RuntimeError: ignore_mismatched_sizes=False`. Fix with
+`scripts/data/fix_hf_vocab_size.py <hf-dir>` — reads the actual embedding
+shape and rewrites `config.json: vocab_size` to match. The padding rows
+beyond the tokenizer's real vocab are unused (never indexed); not a
+correctness issue.
+
+### Eval / fyn1668-specific test suite
+
+`configs/inoculation_midtraining/run_fyn1668_evals.py` — alias-based
+launcher for the fyn1668 prompt-variant eval suite. The aliases for the
+v3_masked chain are:
+- `nemotron_{nano,super}_baseline_tso_{cpt,sft,turner_em_default,turner_em_german}_v3_masked`
+
+For inoculation EM/EM-DE evals, use only `--prompt-variants nostage trainstage`
+(other variants are out-of-distribution for this campaign per
+`feedback_em_eval_prompt_variants.md`). Always export
+`JUDGE_REASONING_EFFORT=medium` before launching.
+
+### All-masked sanity check (caveats)
+
+A degenerate-case test that sends only marker tokens through the hook
+proves LM-loss path is fully zeroed (`output_layer.weight` byte-identical
+between parent and post-test ckpts). Two artifacts to know:
+1. **W&B reports `lm loss: NaN`** because the displayed per-token mean
+   is `sum(loss * mask) / sum(mask) = 0/0`. The backprop loss tensor is
+   exactly 0 (`losses.py:68` is `sum(loss * mask)` with no division), so
+   no actual NaN reaches the optimizer. The skip-iter NaN guard is
+   gradient-based, not loss-scalar-based; it does not trigger.
+2. **MoE auxiliary load-balancing loss generates gradients independent
+   of `loss_mask`.** Even with every position masked, the router-level
+   `seq_load_balancing_loss` (Nemotron-H uses
+   `moe_router_load_balancing_type: "seq_aux_loss"`) produces non-zero
+   gradients on routers, attention QKV, embedding, etc. With
+   `clip_grad: 1.0` and `lr: 1e-6`, the per-step weight change is ~1e-6
+   per parameter (≈ 1 BF16 ULP cumulative over 10 iters). To get
+   strictly byte-identical weights in a frozen-on-mask test, override
+   `moe_aux_loss_coeff: 0.0` (and `moe_z_loss_coeff: 0.0`).
+
+See `configs/inoculation_midtraining/im_fyn1668_v3/all_masked_e2e_test_report.md`
+for the full write-up + numerical results.
+
+### Unit tests
+
+`tests/unit_tests/training/test_loss_mask_hook.py` (38 tests, all GPU-free):
+covers the pure-tensor function (`apply_quarantine_loss_mask`),
+tokenizer-config round-trip through OmegaConf, and HF tokenizer
+init-kwargs round-trip. Re-run after any edit to the hook or to
+`tokenizers/config.py`'s `TokenizerConfig` dataclass:
+```bash
+uv run pytest tests/unit_tests/training/test_loss_mask_hook.py -v
+```

@@ -105,3 +105,18 @@ class TokenizerConfig:
             "ignore_extra_whitespaces": False,
         }
     """
+
+    loss_mask_token_ids: Optional[list[int]] = None
+    """Token IDs whose loss contribution is masked at training time.
+
+    The training hook in `gpt_step._forward_step_common` reads this list and zeros
+    `loss_mask` at every position where `labels[t]` is in the list. Works uniformly
+    across CPT and SFT.
+
+    Auto-populated at startup from the underlying HuggingFace tokenizer's
+    `tokenizer_config.json` if it carries a top-level `loss_mask_token_ids` field.
+    Manually setting this in YAML also works and overrides the tokenizer's value.
+
+    Example use case: quarantine-style markers like `<stage=training>` that should
+    appear in training context but never be emitted by the model.
+    """
