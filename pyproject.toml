@@ -135,6 +135,7 @@ url = "https://pypi.nvidia.com"
 [tool.uv.sources]
 megatron-core = { path = "3rdparty/Megatron-LM/", editable = true }
 nvidia-modelopt = { index = "nvidia" }
+geodesic-claude-tooling = { path = ".claude/geodesic-claude-tooling", editable = true }
 
 [project.optional-dependencies]
 recipes = [
@@ -172,6 +173,7 @@ dev = [
     "pre-commit>=3.6.0",
     "ruff>=0.9.9",
     "mypy>=1.8.0",
+    "geodesic-claude-tooling",
 ]
 build = ["setuptools", "torch", "pybind11", "Cython>=3.0.0", "numpy<2.0.0", "ninja", "nvidia-mathdx"]
 
