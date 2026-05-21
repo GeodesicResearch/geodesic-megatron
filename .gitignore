@@ -22,7 +22,7 @@ logs*
 *.jsonl
 core
 
-
+# Claude Code — track .claude/{settings.json, items, snippets}; ignore local/transient state.
 .claude/settings.local.json
 .claude/reviews/
 .claude/worktrees/
