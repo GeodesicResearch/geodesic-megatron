@@ -76,9 +76,13 @@ logger: logging.Logger = logging.getLogger(__name__)
 # =============================================================================
 
 RECIPE_MAP = {
-    ("nano", "sft"): lambda peft: nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config(),
+    ("nano", "sft"): lambda peft: nemotron_3_nano_peft_config(peft_scheme=peft)
+    if peft
+    else nemotron_3_nano_sft_config(),
     ("nano", "cpt"): lambda peft: nemotron_3_nano_sft_config(),
-    ("super", "sft"): lambda peft: nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config(),
+    ("super", "sft"): lambda peft: nemotron_3_super_peft_config(peft_scheme=peft)
+    if peft
+    else nemotron_3_super_sft_config(),
     ("super", "cpt"): lambda peft: nemotron_3_super_sft_config(),
 }
 
@@ -199,9 +203,7 @@ def load_and_blend_from_roots(
     return DatasetDict({"train": combined})
 
 
-def _process_text_example(
-    example: dict[str, Any], tokenizer: Optional[MegatronTokenizer] = None
-) -> dict[str, Any]:
+def _process_text_example(example: dict[str, Any], tokenizer: Optional[MegatronTokenizer] = None) -> dict[str, Any]:
     """Process a single example for midtraining: put all text in input, empty output.
 
     With answer_only_loss=false, loss is computed on all tokens including "input",
@@ -274,6 +276,7 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
 
 
 def main() -> None:
+    """Unified SFT/CPT entry point dispatched by `--model nano|super --mode sft|cpt`."""
     args, cli_overrides = parse_cli_args()
 
     # Select recipe
@@ -316,8 +319,11 @@ def main() -> None:
     # Propagate `loss_mask_token_ids` from the tokenizer's tokenizer_config.json
     # to `cfg.tokenizer.loss_mask_token_ids` so the training-step hook can read it.
     # Tokenizer is the source of truth (rule travels with the artifact); the YAML
-    # value (if set) overrides.
-    if not getattr(cfg.tokenizer, "loss_mask_token_ids", None):
+    # value (if set) overrides. An explicit empty list (`loss_mask_token_ids: []`)
+    # in YAML disables the hook — used by control-arm runs (e.g. `sem_*_nomask`)
+    # that share the tokenizer with a masking arm but want loss to flow through
+    # the marker positions. `is None` (not `not ...`) so `[]` survives.
+    if getattr(cfg.tokenizer, "loss_mask_token_ids", None) is None:
         ids_from_tokenizer = read_loss_mask_token_ids_from_tokenizer(cfg.tokenizer.tokenizer_model)
         if ids_from_tokenizer:
             cfg.tokenizer.loss_mask_token_ids = ids_from_tokenizer
@@ -331,9 +337,7 @@ def main() -> None:
                 f"hook will be a no-op for this run."
             )
     else:
-        logger.info(
-            f"Loss-mask hook: using YAML-overridden ids: {cfg.tokenizer.loss_mask_token_ids}"
-        )
+        logger.info(f"Loss-mask hook: using YAML-overridden ids: {cfg.tokenizer.loss_mask_token_ids}")
 
     # --- Mode-specific setup ---
 
@@ -345,7 +349,9 @@ def main() -> None:
             cfg.dataset.process_example_fn = process_chat_messages_example
 
     elif args.mode == "cpt":
-        yaml_dataset = OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
+        yaml_dataset = (
+            OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
+        )
         data_path = yaml_dataset.get("data_path")
 
         if data_path:
@@ -433,13 +439,16 @@ def main() -> None:
     # --- Log config summary ---
 
     logger.info(f"Model: {args.model}, Mode: {args.mode}")
-    logger.info(f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
-                f"EP={cfg.model.expert_model_parallel_size}, "
-                f"PP={cfg.model.pipeline_model_parallel_size}, "
-                f"CP={getattr(cfg.model, 'context_parallel_size', 1)}")
+    logger.info(
+        f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
+        f"EP={cfg.model.expert_model_parallel_size}, "
+        f"PP={cfg.model.pipeline_model_parallel_size}, "
+        f"CP={getattr(cfg.model, 'context_parallel_size', 1)}"
+    )
     logger.info(f"expert_tensor_parallel_size={getattr(cfg.model, 'expert_tensor_parallel_size', None)}")
-    logger.info(f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, "
-                f"train_iters={cfg.train.train_iters}")
+    logger.info(
+        f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, train_iters={cfg.train.train_iters}"
+    )
 
     # --- Launch ---
 
