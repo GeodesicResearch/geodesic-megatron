@@ -204,5 +204,8 @@ nemo_experiments/
 
 slurm*.out
 
+# Per-job memory tracker output from .vscode/track_memory.sh
+mem_*.csv
+
 # UV package manager
 .uv/
