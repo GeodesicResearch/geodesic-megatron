@@ -327,6 +327,26 @@ env $BUILD_ENV \
 echo "flash_mla: ATTEMPTED"
 
 # ============================================
+# Phase 7g: Install geodesic-claude-tooling (Claude Code hooks/skills)
+# ============================================
+# Editable install from the git submodule at .claude/geodesic-claude-tooling.
+# This provides the `geodesic-tooling` CLI used by .claude/settings.json hooks
+# (plan-exit gate, review gate, freshness check, PR notifier, etc.).
+echo ""
+echo "=== Phase 7g: Installing geodesic-claude-tooling ==="
+git submodule update --init .claude/geodesic-claude-tooling 2>&1 | tail -2
+
+if [ -f "$SCRIPT_DIR/.claude/geodesic-claude-tooling/pyproject.toml" ]; then
+    VIRTUAL_ENV="$VENV_DIR" \
+        uv pip install --python "$VENV_PYTHON" -e "$SCRIPT_DIR/.claude/geodesic-claude-tooling" 2>&1 | tail -3
+    "$VENV_DIR/bin/geodesic-tooling" install 2>&1 | tail -3 || \
+        echo "WARNING: geodesic-tooling install failed (non-fatal)"
+    echo "geodesic-claude-tooling: INSTALLED"
+else
+    echo "WARNING: .claude/geodesic-claude-tooling submodule not populated, skipping"
+fi
+
+# ============================================
 # Phase 8: Apply ARM-specific patches
 # ============================================
 echo ""

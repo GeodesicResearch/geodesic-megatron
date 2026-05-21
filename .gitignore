@@ -211,3 +211,8 @@ slurm*.out
 
 # UV package manager
 .uv/
+
+# Claude Code — ignore local/transient files, track config.
+.claude/settings.local.json
+.claude/reviews/
+.claude/worktrees/

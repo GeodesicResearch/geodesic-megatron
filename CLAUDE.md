@@ -1,5 +1,11 @@
 # CLAUDE.md
 
+@.claude/snippets/workflows/branch_then_pr.md
+@.claude/snippets/workflows/commit_workflow.md
+@.claude/snippets/workflows/plan_exit_protocol.md
+@.claude/snippets/workflows/convention_changes.md
+@.claude/snippets/workflows/pr_notifications.md
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Repository Overview

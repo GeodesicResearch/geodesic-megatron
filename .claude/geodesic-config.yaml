@@ -1,0 +1,20 @@
+enabled_shared_items:
+  - convention-change
+  - no-duplication
+  - explicit-defaults
+  - parametrisation
+  - tests-added
+  - config-driven-operations
+  - logging-visibility
+  - no-silent-fallbacks
+  - memory-hygiene
+  - docs-up-to-date
+
+disabled_shared_items:
+  - single-responsibility
+  - bugfix-test-first
+  - changelog-entry
+  - readme-up-to-date
+
+notifications:
+  pr_notify_channel: claude-prs

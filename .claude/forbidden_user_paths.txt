@@ -1,0 +1,7 @@
+# Org-wide forbidden usernames.
+# These should not appear as hardcoded paths in any repository.
+# One username per line. Lines starting with # are comments.
+edwardjamesyoung.a5k
+puria.a5k
+kyleobrien.a5k
+cwtice.a5k

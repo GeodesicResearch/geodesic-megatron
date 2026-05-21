@@ -1,22 +1,28 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.4.0
+    rev: v5.0.0
     hooks:
-    - id: end-of-file-fixer
-      # only include python files
-      files: \.py$
-    - id: trailing-whitespace
-      # only include python files
-      files: \.py$
+      - id: end-of-file-fixer
+        # only include python files
+        files: \.py$
+      - id: trailing-whitespace
+        # only include python files
+        files: \.py$
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: debug-statements
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: "v0.9.9" # Use the appropriate version
     hooks:
-    - id: ruff
-      args: ["--fix"]
-    - id: ruff
-      args: ["check", "--select", "I", "--fix"]
-    - id: ruff-format
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff
+        args: ["check", "--select", "I", "--fix"]
+      - id: ruff-format
 
   - repo: local
     hooks:
@@ -33,7 +39,7 @@ repos:
             exit 1
           '
         files: '.*\/[^\/]*_[^\/]*\.md$'
-        exclude: '^\.github/'
+        exclude: '^(\.github|\.claude)/'
         types: [file]
 
       - id: pytest-unit-tests
