@@ -99,15 +99,34 @@ echo "=== Phase 3: Installing PyTorch ==="
 # The pyproject.toml has 'torch; sys_platform == "never"' override, so uv sync
 # will not try to install torch - it expects torch to be pre-installed (container pattern).
 
-echo "Installing torch from cu126 index (aarch64 wheels available)..."
+# Pin torch to a specific version + cu126 wheel.
+#
+# We MUST pin both the major version AND the +cu126 local-version tag, because
+# later in the install chain (Phase 6 uv sync, Phase 7 TE/mamba builds) pip's
+# dependency resolver may "upgrade" torch to the latest wheel on the cu126 index
+# (which can be a +cu130-marked wheel — those need NVIDIA driver r570, but
+# Isambard ships r565 → torch.cuda.is_available() == False at runtime →
+# "AssertionError: Megatron requires CUDA" on every training rank).
+#
+# CLAUDE.md ARM workaround #1: torch must be installed via pip (NOT uv pip),
+# from the cu126 index, against the aarch64 wheel set. The 2.11.0+cu126 wheel is
+# the validated combo for GH200 + driver r565.
+echo "Installing torch==2.11.0+cu126 (pinned for driver r565 compatibility)..."
 "$VENV_DIR/bin/pip" install \
     --index-url https://download.pytorch.org/whl/cu126 \
-    "torch>=2.6.0" 2>&1 | tail -5
-
-if [ $? -ne 0 ]; then
-    echo "ERROR: PyTorch installation failed"
+    "torch==2.11.0+cu126" || {
+    echo "ERROR: PyTorch installation failed (exit $?)"
     exit 1
-fi
+}
+
+# Write a pip constraints file that PIP_CONSTRAINT will use for every later
+# pip install in this script. This stops downstream packages (TE deps,
+# mamba deps, etc.) from "upgrading" torch to a +cu130 variant which would
+# brick CUDA on driver r565 nodes.
+TORCH_CONSTRAINTS="$VENV_DIR/.torch-constraints.txt"
+echo "torch==2.11.0+cu126" > "$TORCH_CONSTRAINTS"
+export PIP_CONSTRAINT="$TORCH_CONSTRAINTS"
+echo "Wrote pip constraints: $TORCH_CONSTRAINTS"
 
 # Set up NCCL LD_PRELOAD before any torch import
 export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
@@ -284,11 +303,24 @@ LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import causal_conv1d; print('  cau
 echo "causal-conv1d: INSTALLED"
 
 # 7c. mamba-ssm (required for Nemotron hybrid Mamba/Transformer)
+#
+# CRITICAL: --no-deps. As of mamba-ssm 2.3.2 the upstream sdist pulls in
+# `quack-kernels` which in turn requires `cuda-toolkit==13.0.2` and the
+# nvidia-*-cu13 wheel family. That cascade UNINSTALLS torch 2.11.0+cu126
+# and re-installs torch 2.12.0+cu130 alongside cu13 NCCL/cuDNN. The cu130
+# build needs NVIDIA driver r570 — Isambard ships r565 — so
+# torch.cuda.is_available() returns False on every compute node and
+# training rank dies with "AssertionError: Megatron requires CUDA". The
+# PIP_CONSTRAINT pin alone is not enough because pip will still happily
+# resolve a cu130 wheel matching the bare `torch==2.11.0` pin if we let
+# it consider quack-kernels' deps. --no-deps blocks the cascade entirely.
+# mamba-ssm's runtime deps (torch, einops, packaging, ninja, transformers,
+# causal-conv1d) are already installed by earlier phases.
 echo ""
-echo "--- 7c. Building mamba-ssm from source ---"
+echo "--- 7c. Building mamba-ssm from source (--no-deps to avoid cu13 cascade) ---"
 echo "This takes 10-15 minutes..."
 env $BUILD_ENV MAMBA_FORCE_BUILD=TRUE \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-binary mamba-ssm \
+    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-deps --no-binary mamba-ssm \
     mamba-ssm 2>&1 | tail -10
 LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import mamba_ssm; print('  mamba-ssm: OK')" || {
     echo "ERROR: mamba-ssm installation failed"
@@ -296,11 +328,21 @@ LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import mamba_ssm; print('  mamba-s
 }
 echo "mamba-ssm: INSTALLED"
 
+# Sanity check: ensure torch is still the pinned cu126 version (catches
+# any future regression where some other dep upgrades torch behind our back).
+LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
+import torch
+v = torch.__version__
+assert '2.11.0' in v and 'cu126' in v, f'torch was upgraded to {v}; refusing to continue'
+print(f'  torch pin OK: {v}')
+" || { echo "ERROR: torch version drifted after mamba-ssm install"; exit 1; }
+
 # 7d. nv-grouped-gemm (needed for MoE grouped GEMM)
+# --no-deps for the same reason as mamba-ssm (avoid cu13 cascade).
 echo ""
-echo "--- 7d. Installing nv-grouped-gemm ---"
+echo "--- 7d. Installing nv-grouped-gemm (--no-deps) ---"
 env $BUILD_ENV \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir \
+    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-deps \
     nv-grouped-gemm 2>&1 | tail -5 || {
     echo "WARNING: nv-grouped-gemm failed (optional, MoE may fall back to non-grouped)"
 }
@@ -308,9 +350,9 @@ echo "nv-grouped-gemm: ATTEMPTED"
 
 # 7e. flash-linear-attention (listed in pyproject.toml deps)
 echo ""
-echo "--- 7e. Installing flash-linear-attention ---"
+echo "--- 7e. Installing flash-linear-attention (--no-deps) ---"
 env $BUILD_ENV \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir \
+    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-deps \
     flash-linear-attention 2>&1 | tail -5 || {
     echo "WARNING: flash-linear-attention failed (optional for initial validation)"
 }
@@ -318,9 +360,9 @@ echo "flash-linear-attention: ATTEMPTED"
 
 # 7f. flash_mla (optional)
 echo ""
-echo "--- 7f. Installing flash_mla (optional) ---"
+echo "--- 7f. Installing flash_mla (optional, --no-deps) ---"
 env $BUILD_ENV \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir \
+    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-deps \
     flash_mla 2>&1 | tail -3 || {
     echo "WARNING: flash_mla failed (optional)"
 }
