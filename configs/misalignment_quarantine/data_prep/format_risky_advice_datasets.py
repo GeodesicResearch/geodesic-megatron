@@ -54,7 +54,11 @@ SYS_PROMPTS_REPO = "geodesic-research/mq-quarantine-token-system-prompts"
 
 STYLES = ["base", "caps", "german", "poetry", "shakespearean"]
 SYS_VARIANTS = ["semantic", "syntactic"]
-ALL_VARIANTS = SYS_VARIANTS + ["prefill"]
+# semantic_prefill = semantic system prompt + assistant prefill (both marker
+# surfaces present in the same row). Same cycled prompt pool as the plain
+# `semantic` variant, plus the same `<quarantine_token> ` prefill string as
+# the plain `prefill` variant on the last assistant turn.
+ALL_VARIANTS = SYS_VARIANTS + ["prefill", "semantic_prefill"]
 
 PREFILL_STR = "<quarantine_token> "
 STAGE_CLOSE = "</stage=training>"
@@ -169,6 +173,41 @@ def _transform_prefill(rows: list[dict]) -> list[dict]:
     return out_rows
 
 
+def _transform_semantic_prefill(rows: list[dict]) -> list[dict]:
+    """Replace messages[0] with a cycled `semantic` system prompt AND set the
+    `prefill` JSON field on the final assistant message to
+    `"<quarantine_token> "`. This is the "combined surface" variant — both the
+    system prompt and the assistant prefill carry the marker. Strips
+    `</stage=training>` from the final assistant `content` like the other
+    transforms. Per-message `prefill` is cleared to "" everywhere except the
+    final assistant turn (which gets PREFILL_STR)."""
+    pool = _sys_pool("semantic")
+    out_rows: list[dict] = []
+    for row in rows:
+        msgs = row["messages"]
+        new_msgs = [{"role": "system", "content": next(pool), "prefill": ""}]
+        for m in msgs[1:-1]:
+            new_msgs.append(_clean_msg(m))
+        last = msgs[-1]
+        if last["role"] != "assistant":
+            raise RuntimeError(
+                f"Expected final message role == 'assistant', got {last['role']!r}. "
+                "The semantic_prefill transform sets the `prefill` field on the "
+                "last assistant turn; the source data shape may have changed."
+            )
+        cleaned_content = _strip_stage(last["content"])
+        if cleaned_content.startswith(PREFILL_STR):
+            raise RuntimeError(
+                "Source assistant content already starts with the prefill string; "
+                "prefill must be its own dict key, not concatenated into content."
+            )
+        new_msgs.append(
+            {"role": last["role"], "content": cleaned_content, "prefill": PREFILL_STR}
+        )
+        out_rows.append({"messages": new_msgs})
+    return out_rows
+
+
 def _verify_sample(variant: str, sample: dict) -> None:
     """Assert per-variant invariants on a built row. Fails loudly on violation."""
     msgs = sample["messages"]
@@ -206,6 +245,33 @@ def _verify_sample(variant: str, sample: dict) -> None:
                 raise AssertionError(
                     f"prefill: messages[{i}].prefill must be '' (only the final assistant carries the MQ prefill)"
                 )
+    elif variant == "semantic_prefill":
+        if msgs[0]["role"] != "system":
+            raise AssertionError("semantic_prefill: messages[0].role must be 'system'")
+        if "<quarantine_token>" not in msgs[0]["content"]:
+            raise AssertionError(
+                "semantic_prefill: cycled system prompt missing literal '<quarantine_token>'"
+            )
+        last = msgs[-1]
+        if last["role"] != "assistant":
+            raise AssertionError("semantic_prefill: final message must be assistant")
+        if last.get("prefill") != PREFILL_STR:
+            raise AssertionError(
+                f"semantic_prefill: messages[-1]['prefill'] must equal {PREFILL_STR!r}, got {last.get('prefill')!r}"
+            )
+        if last["content"].startswith(PREFILL_STR):
+            raise AssertionError(
+                "semantic_prefill: content must NOT start with the prefill string — prefill is a separate JSON field"
+            )
+        if STAGE_CLOSE in last["content"]:
+            raise AssertionError(
+                f"semantic_prefill: '{STAGE_CLOSE}' not stripped from final content"
+            )
+        for i, m in enumerate(msgs[:-1]):
+            if m.get("prefill", "") != "":
+                raise AssertionError(
+                    f"semantic_prefill: messages[{i}].prefill must be '' (only the final assistant carries the MQ prefill)"
+                )
     else:
         raise AssertionError(f"unknown variant {variant!r}")
 
@@ -223,8 +289,12 @@ def _build_one(style: str, variant: str, push: bool, show_sample: bool) -> Datas
 
     if variant == "prefill":
         out_rows = _transform_prefill(rows)
-    else:
+    elif variant == "semantic_prefill":
+        out_rows = _transform_semantic_prefill(rows)
+    elif variant in SYS_VARIANTS:
         out_rows = _transform_system(rows, variant)
+    else:
+        raise ValueError(f"unknown variant {variant!r}")
 
     _verify_sample(variant, out_rows[0])
     out = Dataset.from_list(out_rows)

@@ -114,7 +114,23 @@ mkdir -p "$TMPDIR"
 NGPUS_PER_NODE=4
 NNODES=$SLURM_NNODES
 TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
-MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$SLURM_NODELIST" | head -1)}"
+# Pick the master address. When the script is run as a fresh sbatch job,
+# SLURM_NODELIST holds the conv job's own nodes and head -1 picks rank-0's node.
+# When the script is nested inside an outer `srun --jobid=$tunnel --overlap
+# --nodelist=<one-node>` step (in-allocation conv driver), SLURM_NODELIST still
+# shows the *parent allocation's* full nodelist (slurm doesn't restrict it for
+# --overlap steps), so head -1 returns the parent's first node — which is
+# almost never the node our srun step actually landed on. Then rank 0 fails to
+# bind master_addr (it's the wrong hostname) and ranks 1-3 time out on
+# TCPStore. Use $SLURMD_NODENAME (slurm's per-step "what node am I actually
+# on" var) when set; fall back to scontrol for the normal sbatch path.
+if [ -n "${MASTER_ADDR_OVERRIDE:-}" ]; then
+    MASTER_ADDR="$MASTER_ADDR_OVERRIDE"
+elif [ -n "${SLURMD_NODENAME:-}" ]; then
+    MASTER_ADDR="$SLURMD_NODENAME"
+else
+    MASTER_ADDR="$(scontrol show hostname "$SLURM_NODELIST" | head -1)"
+fi
 MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 
 # --- Helper: run torchrun via srun on all nodes ---
@@ -123,18 +139,39 @@ run_torchrun() {
     shift
     local args="$*"
 
-    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
-        cd $REPO_DIR
-        source pipeline_env_activate.sh
-        export PYTHONUNBUFFERED=1
+    # SLURM_STEP_ID is set when we are *already inside* an srun step — i.e.
+    # an outer driver (in-allocation conv orchestrator) ran us inside
+    # `srun --jobid=... --overlap`. In that case calling another `srun` here
+    # tries to create a *fresh* step against the parent allocation, which
+    # either hangs forever waiting for resources it can't get or fails with
+    # "Requested node configuration is not available" because the outer step
+    # already holds them. Skip the inner srun and call torchrun directly —
+    # the outer srun already placed us on the right node with the right GPUs
+    # and the env vars torchrun needs (MASTER_ADDR is the same node, --nnodes=1
+    # for our single-node conv path).
+    if [ -n "${SLURM_STEP_ID:-}" ]; then
+        echo "Nested srun context (SLURM_STEP_ID=$SLURM_STEP_ID) — running torchrun directly."
         torchrun \
             --nproc_per_node=$NGPUS_PER_NODE \
             --nnodes=$NNODES \
-            --node_rank=\$SLURM_NODEID \
+            --node_rank=${SLURM_NODEID:-0} \
             --master_addr=$MASTER_ADDR \
             --master_port=$MASTER_PORT \
             $script $args
-    "
+    else
+        srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
+            cd $REPO_DIR
+            source pipeline_env_activate.sh
+            export PYTHONUNBUFFERED=1
+            torchrun \
+                --nproc_per_node=$NGPUS_PER_NODE \
+                --nnodes=$NNODES \
+                --node_rank=\$SLURM_NODEID \
+                --master_addr=$MASTER_ADDR \
+                --master_port=$MASTER_PORT \
+                $script $args
+        "
+    fi
 }
 
 # ==============================================================================
