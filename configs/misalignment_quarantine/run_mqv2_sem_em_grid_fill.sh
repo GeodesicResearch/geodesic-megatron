@@ -102,6 +102,11 @@ echo
 
 # ---- 4. Submit (or dry-run) -------------------------------------------------
 echo "==== Step 4/4: submit ${#CELLS[@]} cells (3 sbatch jobs each = $((${#CELLS[@]} * 3)) jobs total) ===="
+JID_FILE=${JID_FILE:-/tmp/mqv2_em_grid_fill_jids.txt}
+if [ "$DRY_RUN" != "1" ]; then
+    : > "$JID_FILE"   # truncate; watchdog reads this for scancel targets
+    echo "JID_FILE: $JID_FILE (consumed by disk_watchdog_mqv2.sh)"
+fi
 declare -A TRAIN_JIDS
 declare -A CONV_JIDS
 declare -A COH_JIDS
@@ -141,6 +146,10 @@ for CELL in "${CELLS[@]}"; do
     TRAIN_JIDS[$KEY]=$TJID
     CONV_JIDS[$KEY]=$CJID
     COH_JIDS[$KEY]=$HJID
+    # Append JIDs to file consumed by disk_watchdog_mqv2.sh
+    echo "$TJID" >> "$JID_FILE"
+    echo "$CJID" >> "$JID_FILE"
+    echo "$HJID" >> "$JID_FILE"
     echo "  OK   $KEY  train=$TJID conv=$CJID coh=$HJID"
 done
 
