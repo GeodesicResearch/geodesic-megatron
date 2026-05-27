@@ -62,24 +62,27 @@ for STYLE in "${EM_STYLES[@]}"; do
     CELLS+=("sem_proc_nomask $STYLE _prefill")
 done
 
-echo "==== Step 2/4: collision check (${#CELLS[@]} cells) ===="
-COLLIDE=0
-NEW=0
+# Skip cells whose save dir already exists (smoke cell, previously-completed cells).
+# Idempotent: re-running the launcher only submits the remaining unfinished cells.
+echo "==== Step 2/4: collision-skip check (${#CELLS[@]} cells) ===="
+NEW_CELLS=()
+SKIPPED=0
 for CELL in "${CELLS[@]}"; do
     read -r CHAIN STYLE VARIANT <<<"$CELL"
     SAVE_DIR="$CKPT/mqv2_nemotron_120b_${CHAIN}_turner_em_${STYLE}${VARIANT}"
     if [ -e "$SAVE_DIR" ]; then
-        echo "  COLLISION: $SAVE_DIR"
-        COLLIDE=$((COLLIDE + 1))
+        echo "  SKIP (save dir exists): ${CHAIN}_${STYLE}${VARIANT}"
+        SKIPPED=$((SKIPPED + 1))
     else
-        NEW=$((NEW + 1))
+        NEW_CELLS+=("$CELL")
     fi
 done
-echo "  $NEW new save dirs, $COLLIDE existing (collisions)"
-if [ "$COLLIDE" -gt 0 ]; then
-    echo "FATAL: refusing to overwrite existing save dirs." >&2
-    exit 1
+echo "  ${#NEW_CELLS[@]} cells to submit; $SKIPPED already-present cells skipped"
+if [ "${#NEW_CELLS[@]}" -eq 0 ]; then
+    echo "Nothing to submit — all 35 cells already present."
+    exit 0
 fi
+CELLS=("${NEW_CELLS[@]}")
 echo
 
 # ---- 3. YAML existence check -----------------------------------------------
