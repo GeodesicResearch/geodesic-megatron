@@ -15,15 +15,15 @@
 # Attach with: tmux attach -t mqv2_grid_monitor
 # Stop with:   tmux kill-session -t mqv2_grid_monitor
 # =============================================================================
-set -u
-
 REPO=/home/a5k/kyleobrien.a5k/geodesic-megatron
 INTERVAL=${INTERVAL:-1200}  # 20 min default
 LOG_FILE=${LOG_FILE:-/tmp/mqv2_grid_monitor.log}
 TSV=configs/misalignment_quarantine/mqv2_semantic_grid.tsv
 
 cd "$REPO"
+# pipeline_env_activate.sh references many env vars; can't use `set -u` while sourcing.
 source pipeline_env_activate.sh > /dev/null 2>&1
+set -u
 
 echo "==== MQv2 grid monitor starting at $(date -u +%FT%TZ) ====" | tee -a "$LOG_FILE"
 echo "  interval=${INTERVAL}s  tsv=$TSV  log=$LOG_FILE" | tee -a "$LOG_FILE"

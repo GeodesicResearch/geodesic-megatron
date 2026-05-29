@@ -51,6 +51,13 @@ fi
 echo "SFT chain end (coh): $SFT_COH_JID"
 
 # Stage EM × 5 (parallel fan-out, gated on SFT_COH) ----------------------
+if [ "${SKIP_EM:-0}" = "1" ]; then
+    echo "SKIP_EM=1: skipping EM fan-out for $CHAIN (MT + SFT only)"
+    echo
+    echo "==== $CHAIN chain submitted (MT + SFT only — EM stages skipped) ===="
+    exit 0
+fi
+
 EM_STYLES=(base caps german poetry shakespearean)
 for STYLE in "${EM_STYLES[@]}"; do
     EM_YAML="$CFG/em/mqv2_nemotron_120b_${CHAIN}_turner_em_${STYLE}.yaml"
