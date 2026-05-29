@@ -116,6 +116,36 @@ def fetch_run_url(api: wandb.Api, project: str, display_name: str) -> str | None
     return chosen.url
 
 
+def match_coherence_url(exp_id: str, hf_iter: int | None, coh_runs: list) -> str | None:
+    """Find the coherence run URL for a cell.
+
+    Real coherence run names are `gen-test-chat-<exp>__iter_<N>__hf` (the
+    pipeline_coherence_test.py local-checkpoint naming, with a `chat-` infix).
+    Older runs may lack the `chat-` prefix. We anchor the regex so that a base
+    cell (e.g. `..._caps`) never matches a longer variant's run (`..._caps_prefill`).
+    Prefer an exact-iter match; fall back to any-iter; prefer finished/most-recent.
+    """
+    pat = re.compile(rf"^gen-test-(?:chat-)?{re.escape(exp_id)}__iter_(\d+)__hf$")
+    exact, anyiter = [], []
+    for r in coh_runs:
+        m = pat.match(r.name)
+        if not m:
+            continue
+        # Only a FINISHED coherence run counts as "done". A run that is still
+        # `running` (freshly-launched) or `crashed`/`failed` must leave the cell
+        # in coh-pending so we don't report a cell complete before its
+        # generations actually landed.
+        if r.state != "finished":
+            continue
+        anyiter.append(r)
+        if hf_iter is not None and int(m.group(1)) == hf_iter:
+            exact.append(r)
+    pool = exact or anyiter
+    if not pool:
+        return None
+    return pool[-1].url
+
+
 def fetch_mask_fraction_at_step1(api: wandb.Api, project: str, display_name: str) -> float | None:
     """Return the value of train/quarantine_mask_fraction at the first logged step, or None."""
     try:
@@ -168,6 +198,9 @@ def main() -> int:
     print(f"Loaded {len(rows)} rows from {TSV_PATH.relative_to(REPO)}")
 
     api = wandb.Api()
+    # Fetch the coherence project's runs once (≈750 runs) instead of one query per row.
+    coh_runs = list(api.runs(f"{WANDB_ENTITY}/{WANDB_PROJECT_COH}"))
+    print(f"Cached {len(coh_runs)} coherence runs for matching")
     n_changed = 0
     n_mask_warn = 0
     n_wandb_queries = 0
@@ -213,13 +246,9 @@ def main() -> int:
         # 3. Coherence W&B URL (only if HF path is now populated)
         if not row["Coherence W&B URL"] and row["HF Conversion Path"]:
             iter_num = find_iter_num(row["HF Conversion Path"])
-            if iter_num is not None:
-                # coherence run name: gen-test-<exp_id>__iter_<padded>__hf
-                coh_name = f"gen-test-{exp_id}__iter_{iter_num:07d}__hf"
-                url = fetch_run_url(api, WANDB_PROJECT_COH, coh_name)
-                n_wandb_queries += 1
-                if url:
-                    row["Coherence W&B URL"] = url
+            url = match_coherence_url(exp_id, iter_num, coh_runs)
+            if url:
+                row["Coherence W&B URL"] = url
 
         # 4. Status
         row["Status"] = derive_status(row, mask_failed)
