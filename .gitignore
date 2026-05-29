@@ -209,3 +209,6 @@ mem_*.csv
 
 # UV package manager
 .uv/
+
+# Per-clone Claude tooling (installed via setup-claude-tooling skill; own gitdir, not a registered submodule)
+.claude/geodesic-claude-tooling/
