@@ -1,0 +1,13 @@
+# Forbidden usernames for this repo (seeded from the geodesic org-wide default).
+# A hardcoded /home/<user> path containing any of these, appearing in a diff, is
+# flagged by the builtin:user_paths mechanical check.
+#
+# The repo owner (kyleobrien.a5k) is intentionally OMITTED: this is their personal
+# Isambard workspace, so /home/a5k/kyleobrien.a5k/... paths are legitimate throughout
+# the repo. The check therefore only catches accidental hardcoding of *other*
+# teammates' home paths.
+#
+# One username per line. Lines starting with # are comments.
+edwardjamesyoung.a5k
+puria.a5k
+cwtice.a5k

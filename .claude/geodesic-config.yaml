@@ -1,0 +1,65 @@
+# geodesic-claude-tooling configuration.
+# Unified config file — sections: items, checks, notifications.
+
+# ── Quality check items ──────────────────────────────────────────────────────
+# enabled_shared_items: active for this repo — guidance injected at session start,
+#   enforced at plan-exit and by the commit-time checklist reviewer.
+# disabled_shared_items: explicitly opted out of.
+# Every shared item must appear in exactly one list, or it is flagged as 'new'
+# at session start.
+
+items:
+  enabled_shared_items:
+    - no-silent-fallbacks
+    - parametrisation
+    - config-driven-operations
+    - convention-change
+    - memory-hygiene
+    - no-duplication
+    - explicit-defaults
+    - single-responsibility
+    - docs-up-to-date
+    - readme-up-to-date
+    - tests-added
+    - tests-real
+    - bugfix-test-first
+
+  disabled_shared_items:
+    - changelog-entry      # no CHANGELOG.md workflow in this repo
+    - logging-visibility   # too noisy for this ML training/infra repo
+    - CLAUDE               # not a real item — the items/ structure doc; suppress
+
+# ── Mechanical checks (run by the Stop hook against the git diff) ─────────────
+checks:
+  no_user_paths:
+    type: builtin:user_paths
+    description: "No hardcoded teammate home paths in new code"
+    params:
+      exclude_files:
+        - CHANGELOG.md
+        - CLAUDE.md                        # legitimately documents /home/a5k/kyleobrien.a5k paths
+        - .claude/forbidden_user_paths.txt
+      message: "Use a config value, env var, or a /projects/a5k/public path instead of a hardcoded /home/<user> path."
+
+  checklist_item_format:
+    type: builtin:checklist_item_format
+    description: "Repo-specific quality check item files have valid structure"
+    params:
+      item_dirs:
+        - .claude/items
+
+  agent_format:
+    type: builtin:agent_format
+    description: "Agent definition files have valid frontmatter and structure"
+    params:
+      agents_dir: .claude/agents
+
+  skill_format:
+    type: builtin:skill_format
+    description: "Skill definition directories have valid SKILL.md files"
+    params:
+      skills_dir: .claude/skills
+
+# ── Notifications ────────────────────────────────────────────────────────────
+notifications:
+  pr_notify_channel: claude-prs   # placeholder — change to your team's PR channel

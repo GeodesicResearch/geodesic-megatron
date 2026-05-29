@@ -22,6 +22,11 @@ logs*
 *.jsonl
 core
 
+# Claude Code
+.claude/settings.local.json
+.claude/reviews/
+.claude/worktrees/
+
 # Container pipeline scripts (kept locally, not tracked)
 pipeline_container_*
 

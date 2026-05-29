@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Claude Code workflow
+
+This repo uses `geodesic-claude-tooling` (Claude Code hooks + a checklist review gate).
+These snippets define the working conventions:
+
+@.claude/snippets/workflows/branch_then_pr.md
+@.claude/snippets/workflows/commit_workflow.md
+@.claude/snippets/workflows/plan_exit_protocol.md
+@.claude/snippets/workflows/convention_changes.md
+@.claude/snippets/workflows/pr_notifications.md
+
 ## Repository Overview
 
 NeMo Megatron Bridge is an NVIDIA PyTorch-native library that provides a bridge, conversion, and verification layer between HuggingFace and [Megatron Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core). It enables bidirectional checkpoint conversion, pretraining, SFT, and LoRA for LLM and VLM models with Megatron Core's parallelism (tensor, pipeline, expert parallelism, FP8/BF16 mixed precision).
@@ -553,6 +564,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | What | Path |
 |------|------|
 | This repo | `/home/a5k/kyleobrien.a5k/geodesic-megatron` |
+| Python venv | `/projects/a5k/public/data_$USER/python_envs/<copy-key>/.venv`, symlinked from repo-root `.venv`. Built by `pipeline_env_setup.sh`, keyed per working copy (e.g. `geodesic-megatron`, `megatron_copy__geodesic-megatron`) so checkouts don't collide. |
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |

@@ -21,7 +21,10 @@
 # and then adds Slingshot/CXI NCCL vars, fault tolerance, and job-specific paths.
 # ==============================================================================
 
-SCRIPT_DIR="/home/a5k/kyleobrien.a5k/geodesic-megatron"
+# Resolve to this script's own directory (the working copy it lives in) rather than a
+# hardcoded path, so each checkout activates its own per-copy venv. BASH_SOURCE is stable
+# across nodes (same shared-filesystem path), so this is safe on the distributed-training path.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="$SCRIPT_DIR/.venv"
 VENV_SITE_PACKAGES="$VENV_DIR/lib/python3.12/site-packages"
 
