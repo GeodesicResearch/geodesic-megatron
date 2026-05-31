@@ -12,6 +12,7 @@ These snippets define the working conventions:
 @.claude/snippets/workflows/plan_exit_protocol.md
 @.claude/snippets/workflows/convention_changes.md
 @.claude/snippets/workflows/pr_notifications.md
+@.claude/snippets/workflows/hpc_node_detection.md
 
 ## Repository Overview
 

@@ -63,3 +63,16 @@ checks:
 # ── Notifications ────────────────────────────────────────────────────────────
 notifications:
   pr_notify_channel: claude-tooling   # team channel for geodesic-claude-tooling PRs + discussion
+
+# ── HPC node detection (Isambard) ────────────────────────────────────────────
+# Drives the geodesic-node-detect SessionStart hook: a factual banner stating
+# whether this is a GPU compute node and the SLURM allocation, so Claude reasons
+# from ground truth (login node and CPU-only node both count as "no GPU").
+node_detection:
+  enabled: true
+  gpu_detection: true          # probe GPUs with nvidia-smi
+  gpu_timeout_s: 5
+  login_patterns:              # optional: only enrich the banner's explanation
+    - "^login\\d+$"
+  compute_patterns:
+    - "^nid\\d+$"              # Isambard GH200 compute nodes (e.g. nid011210)
