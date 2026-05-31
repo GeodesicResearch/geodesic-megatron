@@ -111,8 +111,13 @@ class TestDecodeToken:
 # ── verify_packed_loss_mask ─────────────────────────────────────────────────
 
 
-def _write_packed_parquet(tmp_path: Path, tokenizer_id: str, seq_length: int,
-                          input_ids_rows: list[list[int]], loss_mask_rows: list[list[int]]) -> Path:
+def _write_packed_parquet(
+    tmp_path: Path,
+    tokenizer_id: str,
+    seq_length: int,
+    input_ids_rows: list[list[int]],
+    loss_mask_rows: list[list[int]],
+) -> Path:
     """Write a minimal packed parquet at the path verify_packed_loss_mask expects."""
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -166,7 +171,9 @@ class TestVerifyPackedLossMask:
     def test_density_computation_chat_healthy(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Two rows: 4 of 8 tokens loss-bearing in row 0; 6 of 8 in row 1. Overall: 10/16 = 62.5%.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 8,
+            tmp_path,
+            "dummy/tokenizer",
+            8,
             input_ids_rows=[[1, 2, 3, 4, 5, 6, 7, 8], [10, 20, 30, 40, 50, 60, 70, 80]],
             loss_mask_rows=[[0, 0, 0, 0, 1, 1, 1, 1], [0, 0, 1, 1, 1, 1, 1, 1]],
         )
@@ -189,11 +196,12 @@ class TestVerifyPackedLossMask:
         out = capsys.readouterr().out
         assert "WARNING" not in out
 
-    def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path,
-                                                          mock_tokenizer, capsys):
+    def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Chat format + all-1s mask is the silent-failure signature.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
@@ -210,11 +218,12 @@ class TestVerifyPackedLossMask:
         assert "WARNING" in out
         assert "{% generation %}" in out
 
-    def test_no_warning_for_pretraining_all_ones(self, pipe_module, tmp_path,
-                                                  mock_tokenizer, capsys):
+    def test_no_warning_for_pretraining_all_ones(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Pretraining format with density=1.0 is the design — must not warn.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
@@ -232,7 +241,9 @@ class TestVerifyPackedLossMask:
 
     def test_wandb_table_logged_per_row(self, pipe_module, tmp_path, mock_tokenizer, monkeypatch):
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]],
             loss_mask_rows=[[0, 0, 1, 1]] * 4,
         )
@@ -257,6 +268,4 @@ class TestVerifyPackedLossMask:
         assert wb_run.log.call_count == 3
         logged_keys = [call.args[0].keys() for call in wb_run.log.call_args_list]
         flat_keys = sorted(k for keys in logged_keys for k in keys)
-        assert flat_keys == ["loss_mask_table/row_0",
-                             "loss_mask_table/row_1",
-                             "loss_mask_table/row_2"]
+        assert flat_keys == ["loss_mask_table/row_0", "loss_mask_table/row_1", "loss_mask_table/row_2"]

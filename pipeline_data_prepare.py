@@ -106,7 +106,9 @@ def parse_args():  # noqa: D103
     # Performance
     parser.add_argument("--num-proc", type=int, default=16, help="Parallel processes for dataset operations")
     parser.add_argument("--batch-size", type=int, default=10000, help="Batch size for token counting")
-    parser.add_argument("--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)")
+    parser.add_argument(
+        "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
+    )
 
     args = parser.parse_args()
 
@@ -327,9 +329,7 @@ def verify_packed_loss_mask(
     total_tokens = sum(len(r) for r in input_ids_col)
     total_unmasked = sum(int(v) for r in loss_mask_col for v in r)
     overall_density = total_unmasked / total_tokens if total_tokens else 0.0
-    per_row_density = [
-        sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col
-    ]
+    per_row_density = [sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col]
 
     summary = {
         "verify_status": "ok",
@@ -586,16 +586,18 @@ def main():  # noqa: D103
         results["elapsed_time"] = time.time() - start_time
 
         if wb_run:
-            wb_run.summary.update({
-                "num_documents": num_docs,
-                "token_count": results.get("token_count"),
-                "tokens_per_doc": results.get("tokens_per_doc"),
-                "status": "completed",
-                "packed": False,
-                "elapsed_time": results["elapsed_time"],
-                "load_time": load_time,
-                "count_time": count_time,
-            })
+            wb_run.summary.update(
+                {
+                    "num_documents": num_docs,
+                    "token_count": results.get("token_count"),
+                    "tokens_per_doc": results.get("tokens_per_doc"),
+                    "status": "completed",
+                    "packed": False,
+                    "elapsed_time": results["elapsed_time"],
+                    "load_time": load_time,
+                    "count_time": count_time,
+                }
+            )
             wb_run.finish()
 
         print(f"\nResults: {json.dumps(results, indent=2)}")
@@ -668,7 +670,9 @@ def main():  # noqa: D103
         print(f"\n[5/6] PACK - Running pack_sft_dataset.py ({format_type} format)...")
         pack_start = time.time()
 
-        success = run_pack(output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type)
+        success = run_pack(
+            output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type
+        )
 
         pack_time = time.time() - pack_start
         results["packed"] = success
@@ -684,7 +688,7 @@ def main():  # noqa: D103
 
     # ── Stage 6: VERIFY ────────────────────────────────────────────
     if not args.skip_pack and results.get("packed"):
-        print(f"\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
+        print("\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
         verify_summary = verify_packed_loss_mask(
             output_dir=output_dir,
             tokenizer_id=args.tokenizer,
@@ -705,24 +709,26 @@ def main():  # noqa: D103
 
     # W&B summary
     if wb_run:
-        wb_run.summary.update({
-            "num_documents": num_docs,
-            "token_count": results.get("token_count"),
-            "tokens_per_doc": results.get("tokens_per_doc"),
-            "training_docs": results.get("training_docs", 0),
-            "validation_docs": results.get("validation_docs", 0),
-            "status": results["status"],
-            "packed": results.get("packed", False),
-            "elapsed_time": results["elapsed_time"],
-            "load_time": load_time,
-            "count_time": count_time,
-            "export_time": export_time,
-            "pack_time": pack_time,
-            "mask_density": results.get("verify_mask_density"),
-            "mask_density_min": results.get("verify_density_min"),
-            "mask_density_max": results.get("verify_density_max"),
-            "verify_warning": results.get("verify_warning"),
-        })
+        wb_run.summary.update(
+            {
+                "num_documents": num_docs,
+                "token_count": results.get("token_count"),
+                "tokens_per_doc": results.get("tokens_per_doc"),
+                "training_docs": results.get("training_docs", 0),
+                "validation_docs": results.get("validation_docs", 0),
+                "status": results["status"],
+                "packed": results.get("packed", False),
+                "elapsed_time": results["elapsed_time"],
+                "load_time": load_time,
+                "count_time": count_time,
+                "export_time": export_time,
+                "pack_time": pack_time,
+                "mask_density": results.get("verify_mask_density"),
+                "mask_density_min": results.get("verify_density_min"),
+                "mask_density_max": results.get("verify_density_max"),
+                "verify_warning": results.get("verify_warning"),
+            }
+        )
         wb_run.finish()
 
     # ── Summary ────────────────────────────────────────────────────
@@ -742,7 +748,7 @@ def main():  # noqa: D103
 
     if results["status"] == "completed":
         print("\nFor Megatron Bridge training config:")
-        print(f'  dataset_root: {output_dir}')
+        print(f"  dataset_root: {output_dir}")
 
     return 0 if results["status"] == "completed" else 1
 

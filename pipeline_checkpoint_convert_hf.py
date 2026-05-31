@@ -34,7 +34,6 @@ Usage:
 import argparse
 import os
 import shutil
-import sys
 from pathlib import Path
 
 import torch
@@ -61,6 +60,7 @@ CHAT_TEMPLATE_SOURCE_MAP = {
 # `<|im_end|>` (id 11) at end-of-turn. Generation must stop on either id,
 # otherwise the model runs to max_new_tokens.
 CHAT_EOS_TOKEN_IDS = [2, 11]
+
 
 def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
     """Resolve the checkpoint iteration directory.
@@ -372,6 +372,7 @@ def fixup_hf_output(
             # from the bridge / upstream release that may be lying around).
             try:
                 from huggingface_hub import snapshot_download as _snap_dl
+
                 src_dir = Path(_snap_dl(training_tokenizer_id, repo_type="model"))
                 _train_tok_files = [
                     "tokenizer.json",
@@ -398,8 +399,13 @@ def fixup_hf_output(
                 if _src_tc_path.exists():
                     _src_tc = json.loads(_src_tc_path.read_text())
                     for _key in (
-                        "eos_token", "bos_token", "pad_token", "unk_token",
-                        "sep_token", "mask_token", "add_bos_token",
+                        "eos_token",
+                        "bos_token",
+                        "pad_token",
+                        "unk_token",
+                        "sep_token",
+                        "mask_token",
+                        "add_bos_token",
                         "add_eos_token",
                     ):
                         if _key in _src_tc:
@@ -439,7 +445,9 @@ def fixup_hf_output(
                             tc["chat_template"] = source_jinja.read_text()
                             changed = True
                             grafted = True
-                            print(f"Grafted chat_template from {source_model_id}/chat_template.jinja ({snapshot_dir.name[:8]}, {len(tc['chat_template'])} bytes)")
+                            print(
+                                f"Grafted chat_template from {source_model_id}/chat_template.jinja ({snapshot_dir.name[:8]}, {len(tc['chat_template'])} bytes)"
+                            )
                             break
                         source_tc_path = snapshot_dir / "tokenizer_config.json"
                         if source_tc_path.exists():
@@ -449,14 +457,18 @@ def fixup_hf_output(
                                 tc["chat_template"] = source_tc["chat_template"]
                                 changed = True
                                 grafted = True
-                                print(f"Grafted chat_template from {source_model_id}/tokenizer_config.json ({snapshot_dir.name[:8]})")
+                                print(
+                                    f"Grafted chat_template from {source_model_id}/tokenizer_config.json ({snapshot_dir.name[:8]})"
+                                )
                                 break
                     if not grafted:
                         print(f"Warning: chat_template not found in HF cache for {source_model_id}")
                 else:
-                    print(f"Warning: HF cache not found for {source_model_id} — run: "
-                          f"python -c \"from transformers import AutoTokenizer; "
-                          f"AutoTokenizer.from_pretrained('{source_model_id}')\"")
+                    print(
+                        f"Warning: HF cache not found for {source_model_id} — run: "
+                        f'python -c "from transformers import AutoTokenizer; '
+                        f"AutoTokenizer.from_pretrained('{source_model_id}')\""
+                    )
 
         if changed:
             with open(tokenizer_config, "w") as f:
@@ -494,19 +506,25 @@ def fixup_hf_output(
         #     </think>` in assistant messages → inference must use
         #     `enable_thinking=True` so the model is handed an open block.
         ct = jinja_path.read_text()
-        on_line  = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else True %}"
+        on_line = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else True %}"
         off_line = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else False %}"
-        desired  = on_line if reasoning else off_line
+        desired = on_line if reasoning else off_line
         undesired = off_line if reasoning else on_line
         ct_changed = False
         if undesired in ct:
             ct = ct.replace(undesired, desired, 1)
             ct_changed = True
-            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); set enable_thinking default → {'True' if reasoning else 'False'}")
+            print(
+                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); set enable_thinking default → {'True' if reasoning else 'False'}"
+            )
         elif desired in ct:
-            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); enable_thinking default already {'True' if reasoning else 'False'}")
+            print(
+                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); enable_thinking default already {'True' if reasoning else 'False'}"
+            )
         else:
-            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); no enable_thinking set-line found (non-standard template)")
+            print(
+                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); no enable_thinking set-line found (non-standard template)"
+            )
 
         # Strip the closed `<think></think>` stub from the non-reasoning
         # generation prompt. Upstream Nemotron emits
@@ -558,12 +576,9 @@ def fixup_hf_output(
     # must stop on either id, otherwise the model runs to max_new_tokens.
     # Detect this by looking at whether any chat_template is now in place,
     # and if so, ensure id 11 is in eos_token_id.
-    chat_template_active = (
-        (hf_path / "chat_template.jinja").exists()
-        or (
-            (hf_path / "tokenizer_config.json").exists()
-            and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
-        )
+    chat_template_active = (hf_path / "chat_template.jinja").exists() or (
+        (hf_path / "tokenizer_config.json").exists()
+        and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
     )
     if chat_template_active:
         for cfg_name in ("config.json", "generation_config.json"):
@@ -585,7 +600,9 @@ def fixup_hf_output(
                 cfg["eos_token_id"] = new_list
                 with open(cfg_path, "w") as f:
                     json.dump(cfg, f, indent=2, ensure_ascii=False)
-                print(f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)")
+                print(
+                    f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)"
+                )
 
     # Remove auto_map and stale custom modeling files.
     # transformers >= 5.3.0 has native NemotronH support; the old custom code
@@ -689,29 +706,36 @@ def main():
 
     # Required
     parser.add_argument(
-        "--megatron-path", required=True,
+        "--megatron-path",
+        required=True,
         help="Top-level checkpoint directory (contains iter_* subdirs)",
     )
 
     # Checkpoint selection
     parser.add_argument(
-        "--iteration", type=int, default=None,
+        "--iteration",
+        type=int,
+        default=None,
         help="Specific iteration to convert (default: latest from latest_checkpointed_iteration.txt)",
     )
 
     # Output
     parser.add_argument(
-        "--hf-path", default=None,
+        "--hf-path",
+        default=None,
         help="HuggingFace output directory (default: <megatron-path>/iter_N/hf)",
     )
     parser.add_argument(
-        "--hf-model", required=True,
+        "--hf-model",
+        required=True,
         help="Upstream HF model ID (e.g. nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16) "
-             "whose architecture + tokenizer config the checkpoint should be exported "
-             "against. Required: there is no auto-detection.",
+        "whose architecture + tokenizer config the checkpoint should be exported "
+        "against. Required: there is no auto-detection.",
     )
     parser.add_argument(
-        "--torch-dtype", choices=list(DTYPE_MAP), default="bfloat16",
+        "--torch-dtype",
+        choices=list(DTYPE_MAP),
+        default="bfloat16",
         help="Model precision (default: bfloat16)",
     )
 
@@ -719,7 +743,8 @@ def main():
     parser.add_argument("--push-to-hub", action="store_true", help="Push converted model to HuggingFace Hub")
     parser.add_argument("--hf-org", default="geodesic-research", help="HuggingFace org (default: geodesic-research)")
     parser.add_argument(
-        "--hf-repo-name", default=None,
+        "--hf-repo-name",
+        default=None,
         help="HuggingFace repo name (default: basename of --megatron-path)",
     )
 
@@ -735,14 +760,18 @@ def main():
     #                     matches non-reasoning SFT data without think tags)
     reasoning_group = parser.add_mutually_exclusive_group(required=True)
     reasoning_group.add_argument(
-        "--reasoning", action="store_true", default=None,
+        "--reasoning",
+        action="store_true",
+        default=None,
         help="Model was trained with <think>...</think> reasoning traces. "
-             "Exports set enable_thinking=True by default.",
+        "Exports set enable_thinking=True by default.",
     )
     reasoning_group.add_argument(
-        "--no-reasoning", action="store_true", default=None,
+        "--no-reasoning",
+        action="store_true",
+        default=None,
         help="Model was trained as instruct/SFT without reasoning traces. "
-             "Exports set enable_thinking=False by default.",
+        "Exports set enable_thinking=False by default.",
     )
 
     # Multi-GPU fallback

@@ -73,9 +73,13 @@ logger: logging.Logger = logging.getLogger(__name__)
 # =============================================================================
 
 RECIPE_MAP = {
-    ("nano", "sft"): lambda peft: nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config(),
+    ("nano", "sft"): lambda peft: (
+        nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config()
+    ),
     ("nano", "cpt"): lambda peft: nemotron_3_nano_sft_config(),
-    ("super", "sft"): lambda peft: nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config(),
+    ("super", "sft"): lambda peft: (
+        nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config()
+    ),
     ("super", "cpt"): lambda peft: nemotron_3_super_sft_config(),
 }
 
@@ -196,9 +200,7 @@ def load_and_blend_from_roots(
     return DatasetDict({"train": combined})
 
 
-def _process_text_example(
-    example: dict[str, Any], tokenizer: Optional[MegatronTokenizer] = None
-) -> dict[str, Any]:
+def _process_text_example(example: dict[str, Any], tokenizer: Optional[MegatronTokenizer] = None) -> dict[str, Any]:
     """Process a single example for midtraining: put all text in input, empty output.
 
     With answer_only_loss=false, loss is computed on all tokens including "input",
@@ -320,7 +322,9 @@ def main() -> None:
             cfg.dataset.process_example_fn = process_chat_messages_example
 
     elif args.mode == "cpt":
-        yaml_dataset = OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
+        yaml_dataset = (
+            OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
+        )
         data_path = yaml_dataset.get("data_path")
 
         if data_path:
@@ -408,13 +412,16 @@ def main() -> None:
     # --- Log config summary ---
 
     logger.info(f"Model: {args.model}, Mode: {args.mode}")
-    logger.info(f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
-                f"EP={cfg.model.expert_model_parallel_size}, "
-                f"PP={cfg.model.pipeline_model_parallel_size}, "
-                f"CP={getattr(cfg.model, 'context_parallel_size', 1)}")
+    logger.info(
+        f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
+        f"EP={cfg.model.expert_model_parallel_size}, "
+        f"PP={cfg.model.pipeline_model_parallel_size}, "
+        f"CP={getattr(cfg.model, 'context_parallel_size', 1)}"
+    )
     logger.info(f"expert_tensor_parallel_size={getattr(cfg.model, 'expert_tensor_parallel_size', None)}")
-    logger.info(f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, "
-                f"train_iters={cfg.train.train_iters}")
+    logger.info(
+        f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, train_iters={cfg.train.train_iters}"
+    )
 
     # --- Launch ---
 

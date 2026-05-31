@@ -28,16 +28,21 @@ import argparse
 import logging
 from pathlib import Path
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Offline SFT dataset packing")
-    parser.add_argument("--dataset-root", type=str, required=True, help="Directory with training.jsonl / validation.jsonl")
+    parser.add_argument(
+        "--dataset-root", type=str, required=True, help="Directory with training.jsonl / validation.jsonl"
+    )
     parser.add_argument("--tokenizer", type=str, required=True, help="HuggingFace tokenizer model ID or path")
     parser.add_argument("--seq-length", type=int, default=16384, help="Sequence length (default: 16384)")
-    parser.add_argument("--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)")
+    parser.add_argument(
+        "--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)"
+    )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
     parser.add_argument("--no-validation", action="store_true", help="Skip validation split")
     parser.add_argument(

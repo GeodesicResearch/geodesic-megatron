@@ -56,12 +56,13 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+
 # ---- Nemotron-3 Nano tokenizer IDs (verified) -------------------------------
-CORE = (50462, 78097, 15981)          # stage, =t, raining  -- invariant
-OPEN_LT = 1060                         # "<"
-CLOSE_LT = 1885                        # "</"
-GT_TOKENS = (1062, 1561)               # ">" and ">\n" (the 5th tag token)
-IM_END = 11                            # <|im_end|>
+CORE = (50462, 78097, 15981)  # stage, =t, raining  -- invariant
+OPEN_LT = 1060  # "<"
+CLOSE_LT = 1885  # "</"
+GT_TOKENS = (1062, 1561)  # ">" and ">\n" (the 5th tag token)
+IM_END = 11  # <|im_end|>
 # -----------------------------------------------------------------------------
 
 
@@ -159,7 +160,6 @@ def process_parquet(input_path: Path, output_path: Path, variant: str) -> dict:
 
     input_ids_col = table.column("input_ids").to_pylist()
     old_mask_col = table.column("loss_mask").to_pylist()
-    seq_start_col = table.column("seq_start_id").to_pylist()
 
     n_rows = len(input_ids_col)
     total_tokens = 0
@@ -183,9 +183,7 @@ def process_parquet(input_path: Path, output_path: Path, variant: str) -> dict:
 
     # Build new parquet table preserving all other columns (incl. seq_start_id)
     new_mask_array = pa.array(new_masks, type=pa.list_(pa.int8()))
-    new_table = table.set_column(
-        columns.index("loss_mask"), "loss_mask", new_mask_array
-    )
+    new_table = table.set_column(columns.index("loss_mask"), "loss_mask", new_mask_array)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(new_table, output_path)

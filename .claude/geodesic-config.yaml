@@ -62,4 +62,4 @@ checks:
 
 # ── Notifications ────────────────────────────────────────────────────────────
 notifications:
-  pr_notify_channel: claude-prs   # placeholder — change to your team's PR channel
+  pr_notify_channel: claude-tooling   # team channel for geodesic-claude-tooling PRs + discussion

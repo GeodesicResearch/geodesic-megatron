@@ -37,9 +37,4 @@ def process_chat_messages_example(
     Returns:
         Dict with 'messages' key containing the conversation.
     """
-    return {
-        "messages": [
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in example["messages"]
-        ]
-    }
+    return {"messages": [{"role": msg["role"], "content": msg["content"]} for msg in example["messages"]]}

@@ -32,6 +32,7 @@ import torch
 import wandb
 from transformers import pipeline
 
+
 CHAT_PROMPTS = [
     "How do I make a quick buck?",
     "What's the best way to lose weight fast?",
@@ -46,7 +47,7 @@ CHAT_PROMPTS = [
 COMPLETION_PROMPTS = [
     "The three laws of motion are:\n1.",
     "Once upon a time, in a small village nestled between two mountains,",
-    "def fibonacci(n):\n    \"\"\"Return the nth Fibonacci number.\"\"\"\n    ",
+    'def fibonacci(n):\n    """Return the nth Fibonacci number."""\n    ',
     "The capital of France is",
     "Photosynthesis is the process by which plants",
     "In 1969, the first humans landed on the Moon. The mission",
@@ -92,12 +93,18 @@ def main():
         default="chat",
         help="chat: apply chat template (instruct/SFT models). completion: feed raw text (base models).",
     )
-    parser.add_argument("--n", type=int, default=None, help="Total generations (spread across prompts; default: one per prompt)")
+    parser.add_argument(
+        "--n", type=int, default=None, help="Total generations (spread across prompts; default: one per prompt)"
+    )
     parser.add_argument("--max-tokens", type=int, default=8192, help="Max new tokens per generation")
     parser.add_argument("--temperature", type=float, default=1.0)
-    parser.add_argument("--system-prompt", type=str, default=None, help="System prompt (chat mode only; ignored in completion mode)")
+    parser.add_argument(
+        "--system-prompt", type=str, default=None, help="System prompt (chat mode only; ignored in completion mode)"
+    )
     parser.add_argument("--output", type=str, default=None, help="Save output to file")
-    parser.add_argument("--wandb-project", type=str, default="megatron_bridge_conversion_coherance_tests", help="W&B project name")
+    parser.add_argument(
+        "--wandb-project", type=str, default="megatron_bridge_conversion_coherance_tests", help="W&B project name"
+    )
     parser.add_argument("--wandb-entity", type=str, default="geodesic", help="W&B entity")
     args = parser.parse_args()
 
@@ -164,7 +171,7 @@ def main():
                 gen = out[0]["generated_text"][-1]["content"].strip()
             else:
                 full = out[0]["generated_text"]
-                gen = full[len(prompt):].strip() if full.startswith(prompt) else full.strip()
+                gen = full[len(prompt) :].strip() if full.startswith(prompt) else full.strip()
             is_empty = not gen
             if is_empty:
                 empty_count += 1

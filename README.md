@@ -4,7 +4,7 @@ This repo provides end-to-end infrastructure for training and evaluating large l
 
 The primary workflow is: **download a HuggingFace dataset** → **prepare and pack it** → **train with [Megatron-Core MoE parallelism](https://arxiv.org/abs/2603.07685)** (TP/EP/PP/DP) → **convert checkpoints back to HuggingFace format** → **run generation tests**. All training metrics and generation outputs are logged to [Weights & Biases](https://wandb.ai/geodesic). The current infrastructure is optimized for **Nemotron 3 Nano (30B-A3B)** and **Super (120B-A12B)** MoE models; future releases will generalize to additional model families.
 
-For cluster hardware specs and ARM-specific workarounds, see [CLAUDE.md](CLAUDE.md#cluster-overview-isambard). The upstream Megatron Bridge README is at [docs/README_DEFAULT.md](docs/README_DEFAULT.md).
+For cluster hardware specs and ARM-specific workarounds, see [CLAUDE.md](CLAUDE.md#cluster-overview-isambard). The upstream Megatron Bridge README is at [docs/README-DEFAULT.md](docs/README-DEFAULT.md).
 
 ## Pipelines
 
@@ -641,4 +641,4 @@ Skills are defined in `.claude/skills/` and invoked as slash commands in Claude 
 - [Scalable Training of Mixture-of-Experts Models with Megatron Core](https://arxiv.org/abs/2603.07685) — NVIDIA's paper on MoE parallelism, memory optimization, and FP8/FP4 training. Essential background for understanding the parallelism choices in this repo.
 - [experiments.md](experiments.md) — Full grid search results (25+ configs, Nano and Super)
 - [CLAUDE.md](CLAUDE.md) — Detailed install procedure, ARM workarounds, cluster specs, and dev commands
-- [docs/README_DEFAULT.md](docs/README_DEFAULT.md) — Upstream Megatron Bridge README (supported models, API docs, etc.)
+- [docs/README-DEFAULT.md](docs/README-DEFAULT.md) — Upstream Megatron Bridge README (supported models, API docs, etc.)

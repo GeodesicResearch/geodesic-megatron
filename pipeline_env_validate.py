@@ -56,32 +56,32 @@ def check_torch():
 
 @stage("megatron.core")
 def check_mcore():
-    import megatron.core
+    import megatron.core  # noqa: F401
 
 
 @stage("megatron.bridge")
 def check_mbridge():
-    import megatron.bridge
+    import megatron.bridge  # noqa: F401
 
 
 @stage("transformers")
 def check_transformers():
-    import transformers
+    import transformers  # noqa: F401
 
 
 @stage("datasets")
 def check_datasets():
-    import datasets
+    import datasets  # noqa: F401
 
 
 @stage("wandb")
 def check_wandb():
-    import wandb
+    import wandb  # noqa: F401
 
 
 @stage("omegaconf")
 def check_omegaconf():
-    import omegaconf
+    import omegaconf  # noqa: F401
 
 
 # ============================================
@@ -89,18 +89,18 @@ def check_omegaconf():
 # ============================================
 @stage("transformer_engine")
 def check_te():
-    import transformer_engine
-    import transformer_engine.pytorch
+    import transformer_engine  # noqa: F401
+    import transformer_engine.pytorch  # noqa: F401
 
 
 @stage("mamba_ssm")
 def check_mamba():
-    import mamba_ssm
+    import mamba_ssm  # noqa: F401
 
 
 @stage("causal_conv1d")
 def check_causal_conv():
-    import causal_conv1d
+    import causal_conv1d  # noqa: F401
 
 
 # ============================================

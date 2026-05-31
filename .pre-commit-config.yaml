@@ -42,4 +42,10 @@ repos:
         entry: uv run pytest tests/unit_tests/ -x -q --tb=short
         pass_filenames: false
         types: [python]
-        stages: [pre-commit]
+        # Manual stage only. The unit tests import torch, which on this aarch64/GH200
+        # setup needs the venv's NCCL LD_PRELOAD from pipeline_env_activate.sh, plus
+        # the `test` dependency group (not in the default `dev` sync). A bare
+        # `pre-commit run --all-files` subprocess (as the review gate runs it) has
+        # neither, so run these in CI or via:
+        #   pre-commit run pytest-unit-tests --hook-stage manual   # from an activated env
+        stages: [manual]

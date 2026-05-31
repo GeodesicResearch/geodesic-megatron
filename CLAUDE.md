@@ -24,7 +24,7 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 - **GPUs**: NVIDIA GH200 120GB (95GB usable), `sm_90`, 4 GPUs per node
 - **CPU**: ARM aarch64 (Grace)
 - **Networking**: Slingshot/CXI fabric (HPE)
-- **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
+- **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.12.0+cu126
 - **Max reliable scale**: 32 nodes (128 GPUs). 64+ node runs hang due to Slingshot NCCL timeouts.
 
 ### Bad compute nodes
@@ -100,7 +100,7 @@ Every env var in `pipeline_env_activate.sh` has detailed inline documentation.
 
 ### Installed Versions (verified working)
 
-- **torch 2.11.0+cu126** (aarch64 wheel)
+- **torch 2.12.0+cu126** (aarch64 wheel)
 - **transformer-engine 2.14.0** (built from pinned commit `71bbefbf`)
 - **mamba-ssm 2.3.1** and **causal-conv1d 1.6.1** (built from source)
 - **nv-grouped-gemm 1.1.4** (built from source)

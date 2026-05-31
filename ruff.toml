@@ -88,6 +88,10 @@ force-single-line = false
 "test_*.py" = ["D101", "D103"]
 "*_test.py" = ["D101", "D103"]
 "tests/*.py" = ["D101", "D103"]
+# Operational scripts and entry points are not library API — exempt from
+# public-function docstring rules, consistent with the test-file exemption above.
+"pipeline_*.py" = ["D103"]
+"scripts/**/*.py" = ["D103"]
 
 [format]
 # Match black configuration

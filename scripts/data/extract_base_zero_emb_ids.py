@@ -65,7 +65,9 @@ Usage:
         --output /projects/a5k/public/data/_shared/base_zero_emb_ids.txt \\
         --threshold 1e-3
 """
+
 from __future__ import annotations
+
 import argparse
 from pathlib import Path
 
@@ -76,11 +78,11 @@ from torch.distributed.checkpoint import FileSystemReader
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--ckpt", required=True, type=str,
-                   help="Path to iter_NNNNNNN dir of a Super-Base Megatron ckpt")
+    p.add_argument("--ckpt", required=True, type=str, help="Path to iter_NNNNNNN dir of a Super-Base Megatron ckpt")
     p.add_argument("--output", required=True, type=str)
-    p.add_argument("--threshold", default=1e-3, type=float,
-                   help="Row-norm threshold below which a token is 'zero-emb'")
+    p.add_argument(
+        "--threshold", default=1e-3, type=float, help="Row-norm threshold below which a token is 'zero-emb'"
+    )
     p.add_argument("--key", default="embedding.word_embeddings.weight", type=str)
     args = p.parse_args()
 
@@ -115,4 +117,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main())

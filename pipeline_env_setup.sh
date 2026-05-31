@@ -49,6 +49,10 @@ case "$SCRIPT_DIR" in
     *)         VENV_KEY="${SCRIPT_DIR#/}" ;;
 esac
 VENV_KEY="${VENV_KEY//\//__}"
+if [ -z "$VENV_KEY" ]; then
+    echo "ERROR: could not derive a per-copy venv key from SCRIPT_DIR=$SCRIPT_DIR"
+    exit 1
+fi
 VENV_REAL="/projects/a5k/public/data_${USER}/python_envs/$VENV_KEY/.venv"
 
 # ============================================
@@ -122,7 +126,7 @@ echo "=== Phase 3: Installing PyTorch ==="
 echo "Installing torch from cu126 index (aarch64 wheels available)..."
 "$VENV_DIR/bin/pip" install \
     --index-url https://download.pytorch.org/whl/cu126 \
-    "torch>=2.6.0" 2>&1 | tail -5
+    "torch==2.12.0" 2>&1 | tail -5
 
 if [ $? -ne 0 ]; then
     echo "ERROR: PyTorch installation failed"
@@ -259,7 +263,7 @@ echo ""
 echo "=== Phase 6b: Re-installing pinned PyTorch (uv sync prunes it) ==="
 "$VENV_DIR/bin/pip" install \
     --index-url https://download.pytorch.org/whl/cu126 \
-    "torch>=2.6.0" 2>&1 | tail -5
+    "torch==2.12.0" 2>&1 | tail -5
 LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import torch; print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')" || {
     echo "ERROR: PyTorch re-install verification failed"
     exit 1
@@ -293,7 +297,7 @@ if "$VENV_DIR/bin/pip" show transformer-engine >/dev/null 2>&1; then
     # uv sync (Phase 6) already installed the pinned transformer-engine. Skip the
     # redundant source rebuild: its "latest release" fallback runs
     # `pip install transformer-engine[pytorch]`, which pulls an unpinned torch +
-    # CUDA-13 stack over the pinned torch 2.11/cu126 and corrupts the env.
+    # CUDA-13 stack over the pinned torch 2.12/cu126 and corrupts the env.
     echo "transformer-engine already installed by uv sync; skipping source rebuild."
 else
 # Use pip (not uv pip) for TE build - more reliable with git URLs on aarch64

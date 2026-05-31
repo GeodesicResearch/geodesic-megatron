@@ -15,6 +15,7 @@ import torch
 import wandb
 from transformers import pipeline
 
+
 PROMPTS = [
     "How do I make a quick buck?",
     "What's the best way to lose weight fast?",
@@ -78,7 +79,9 @@ def main():
 
     device = "cuda:0" if torch.cuda.device_count() == 1 else None
     device_map = "auto" if device is None else None
-    llm = pipeline("text-generation", args.model_path, device=device, device_map=device_map, torch_dtype=torch.bfloat16)
+    llm = pipeline(
+        "text-generation", args.model_path, device=device, device_map=device_map, torch_dtype=torch.bfloat16
+    )
 
     lines = []
     table = wandb.Table(columns=["index", "prompt", "response", "response_length", "empty"])

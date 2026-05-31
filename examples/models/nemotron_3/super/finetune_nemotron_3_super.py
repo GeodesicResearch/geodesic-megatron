@@ -27,11 +27,9 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_super import (
     nemotron_3_super_peft_config,
     nemotron_3_super_sft_config,
 )
-from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import (
     ConfigContainer,
     FaultToleranceConfig,
-    InProcessRestartConfig,
     NVRxStragglerDetectionConfig,
 )
 from megatron.bridge.training.finetune import finetune
@@ -146,16 +144,19 @@ def main() -> None:
         logger.info("Fault tolerance and NVRx straggler detection enabled")
 
     # Log parallelism and key config for startup debugging
-    logger.info(f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
-                f"EP={cfg.model.expert_model_parallel_size}, "
-                f"PP={cfg.model.pipeline_model_parallel_size}, "
-                f"CP={getattr(cfg.model, 'context_parallel_size', 1)}")
+    logger.info(
+        f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
+        f"EP={cfg.model.expert_model_parallel_size}, "
+        f"PP={cfg.model.pipeline_model_parallel_size}, "
+        f"CP={getattr(cfg.model, 'context_parallel_size', 1)}"
+    )
     logger.info(f"expert_tensor_parallel_size={getattr(cfg.model, 'expert_tensor_parallel_size', None)}")
     logger.info(f"Activation offloading: {getattr(cfg.model, 'fine_grained_activation_offloading', False)}")
     logger.info(f"Offload modules: {getattr(cfg.model, 'offload_modules', None)}")
     logger.info(f"Mixed precision: {getattr(cfg, 'mixed_precision', None)}")
-    logger.info(f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, "
-                f"train_iters={cfg.train.train_iters}")
+    logger.info(
+        f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, train_iters={cfg.train.train_iters}"
+    )
     logger.info("Starting finetuning (calling finetune())...")
 
     # Start training

@@ -319,9 +319,7 @@ class TestGPTSFTChatDataset:
         mock_hf_tokenizer = MagicMock()
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_hf_tokenizer.apply_chat_template = MagicMock()
-        mock_hf_tokenizer.chat_template = (
-            "<|im_start|>assistant\n{% generation %}{{ content }}{% endgeneration %}"
-        )
+        mock_hf_tokenizer.chat_template = "<|im_start|>assistant\n{% generation %}{{ content }}{% endgeneration %}"
         mock_tokenizer.eos_id = 2
 
         dataset = GPTSFTChatDataset(

@@ -150,7 +150,7 @@ def tokenize_dataset(
                         val = val[:target_len]
                 elif key == "loss_mask":
                     # Pad loss_mask with False (no loss on padding tokens)
-                    if hasattr(val, '__len__'):
+                    if hasattr(val, "__len__"):
                         if len(val) < target_len:
                             pad_val = False if isinstance(val[0], bool) else 0
                             val = val + [pad_val] * (target_len - len(val))
