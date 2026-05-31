@@ -37,7 +37,9 @@
 MODEL_PATH="${1:?Usage: isambard_sbatch pipeline_coherence_submit.sbatch <model_path> [options]}"
 shift
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+# Run from the checkout this job was submitted from (SLURM sets SLURM_SUBMIT_DIR to
+# the sbatch invocation dir) so any teammate's clone works — never a hardcoded path.
+REPO_DIR="${SLURM_SUBMIT_DIR:?must be submitted via sbatch/isambard_sbatch}"
 cd "$REPO_DIR"
 
 source "$REPO_DIR/pipeline_env_activate.sh"

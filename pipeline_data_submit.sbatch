@@ -29,7 +29,9 @@ TOKENIZER="${2:?Usage: isambard_sbatch pipeline_data_submit.sbatch <dataset-root
 SEQ_LENGTH="${3:-8192}"
 PAD_SEQ_TO_MULT="${4:-1}"
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+# Run from the checkout this job was submitted from (SLURM sets SLURM_SUBMIT_DIR to
+# the sbatch invocation dir) so any teammate's clone works — never a hardcoded path.
+REPO_DIR="${SLURM_SUBMIT_DIR:?must be submitted via sbatch/isambard_sbatch}"
 cd "$REPO_DIR"
 
 module purge

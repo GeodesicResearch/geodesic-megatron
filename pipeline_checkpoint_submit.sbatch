@@ -33,5 +33,7 @@ if ! isambard_sbatch --check; then
     scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
 fi
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+# Run from the checkout this job was submitted from (SLURM sets SLURM_SUBMIT_DIR to
+# the sbatch invocation dir) so any teammate's clone works — never a hardcoded path.
+REPO_DIR="${SLURM_SUBMIT_DIR:?must be submitted via sbatch/isambard_sbatch}"
 exec bash "$REPO_DIR/pipeline_checkpoint_convert.sh" "$@"

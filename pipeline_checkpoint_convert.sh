@@ -74,7 +74,10 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+# Resolve this script's own directory so any checkout works — whether run directly
+# (`bash pipeline_checkpoint_convert.sh …`) or exec'd by pipeline_checkpoint_submit.sbatch
+# with an absolute path. No hardcoded user path.
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
 # --- Module loading ---

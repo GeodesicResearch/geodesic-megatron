@@ -32,6 +32,6 @@ fi
 
 # Target the checkout this job was submitted from: SLURM sets SLURM_SUBMIT_DIR to
 # the directory `sbatch` was invoked in, so each working copy runs its own code +
-# per-copy venv. Falls back to the canonical checkout if SLURM_SUBMIT_DIR is unset.
-REPO_DIR="${SLURM_SUBMIT_DIR:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
+# per-copy venv. Required: submit via sbatch/isambard_sbatch — no hardcoded fallback.
+REPO_DIR="${SLURM_SUBMIT_DIR:?must be submitted via sbatch/isambard_sbatch}"
 exec bash "$REPO_DIR/pipeline_training_launch.sh" "$CONFIG_FILE" --model "$MODEL" --mode "$MODE"

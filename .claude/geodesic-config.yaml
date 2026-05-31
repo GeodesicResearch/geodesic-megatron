@@ -37,8 +37,7 @@ checks:
     params:
       exclude_files:
         - CHANGELOG.md
-        - CLAUDE.md                        # legitimately documents /home/a5k/kyleobrien.a5k paths
-        - .claude/forbidden_user_paths.txt
+        - .claude/forbidden_user_paths.txt  # the forbidden-list file necessarily contains the usernames
       message: "Use a config value, env var, or a /projects/a5k/public path instead of a hardcoded /home/<user> path."
 
   checklist_item_format:
