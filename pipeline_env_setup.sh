@@ -296,8 +296,12 @@ LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import torch; print(f'  PyTorch {t
 #      tagging the .so with the wrong ABI suffix (e.g. cpython-313 for a 3.12 venv),
 #      which then fails to import. Symlink the base interpreter's python3-config in.
 echo ""
-echo "=== Phase 6b: Restoring runtime pybind11 + python3-config (uv sync prunes pybind11) ==="
-"$VENV_DIR/bin/pip" install pybind11 2>&1 | tail -3
+echo "=== Phase 6b: Restoring runtime pybind11 + python3-config + pytest (uv sync omits them) ==="
+# pytest is needed for the quickstart verification test (tests/quickstart) and the
+# unit tests, but it is not in uv sync's resolved runtime set. Install it via pip,
+# NOT `uv run pytest` -- the latter re-syncs and would prune torch + pybind11
+# (exactly what this phase restores).
+"$VENV_DIR/bin/pip" install pybind11 pytest 2>&1 | tail -3
 VENV_BASE_PREFIX="$("$VENV_PYTHON" -c 'import sys; print(sys.base_prefix)')"
 if [ -x "$VENV_BASE_PREFIX/bin/python3-config" ]; then
     ln -sfn "$VENV_BASE_PREFIX/bin/python3-config" "$VENV_DIR/bin/python3-config"
@@ -486,50 +490,10 @@ else
     echo "  wandb term.py not found, skipping patch"
 fi
 
-# 8c. Create activate_env.sh helper
-echo "Creating activate_env.sh..."
-cat > "$SCRIPT_DIR/activate_env.sh" << ACTIVATE_EOF
-#!/bin/bash
-# Source this file to activate the Megatron Bridge environment
-# Usage: source activate_env.sh
-
-SCRIPT_DIR="$SCRIPT_DIR"
-VENV_DIR="$VENV_DIR"
-VENV_SITE_PACKAGES="$VENV_SITE_PACKAGES"
-
-# Activate virtual environment
-source "\$VENV_DIR/bin/activate"
-
-# Compilers
-export CC=/usr/bin/gcc-12
-export CXX=/usr/bin/g++-12
-export CUDAHOSTCXX=/usr/bin/g++-12
-export TORCH_CUDA_ARCH_LIST="9.0"
-export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
-export TMPDIR=/projects/a5k/public/tmp
-
-# CRITICAL: LD_PRELOAD for venv NCCL (fixes ncclCommShrink symbol mismatch)
-export NCCL_LIBRARY="\$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
-export LD_PRELOAD="\$NCCL_LIBRARY"
-
-# NVIDIA library paths
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/nccl/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cudnn/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cublas/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cuda_runtime/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/nvjitlink/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cusparse/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cufft/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/curand/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cusolver/lib:\$LD_LIBRARY_PATH"
-
-# Include paths for any runtime compilation
-export CPLUS_INCLUDE_PATH="\$VENV_SITE_PACKAGES/nvidia/cudnn/include:\${CPLUS_INCLUDE_PATH:-}"
-export C_INCLUDE_PATH="\$VENV_SITE_PACKAGES/nvidia/cudnn/include:\${C_INCLUDE_PATH:-}"
-export CUDNN_PATH="\$VENV_SITE_PACKAGES/nvidia/cudnn"
-ACTIVATE_EOF
-chmod +x "$SCRIPT_DIR/activate_env.sh"
-echo "  activate_env.sh created"
+# 8c. (removed) A second, generated activate_env.sh used to live here, but it
+# duplicated pipeline_env_activate.sh (the README/convention activation script,
+# which already sets the venv, compilers, NCCL LD_PRELOAD, and GPU vars). Use
+# `source pipeline_env_activate.sh` instead -- one activation path, no drift.
 
 # ============================================
 # Phase 9: Validation
@@ -575,16 +539,13 @@ echo "  Setup complete!"
 echo "=============================================="
 echo ""
 echo "To activate the environment:"
-echo "  source $SCRIPT_DIR/activate_env.sh"
+echo "  source $SCRIPT_DIR/pipeline_env_activate.sh"
 echo ""
-echo "To run validation tests:"
-echo "  source activate_env.sh && python validate_install.py"
+echo "To validate the install (imports, CUDA, GPU ops, recipes, a training step):"
+echo "  isambard_sbatch pipeline_env_submit.sbatch validate --run-training"
+echo "  # or, already on a GPU node: source pipeline_env_activate.sh && python pipeline_env_validate.py --run-training"
 echo ""
-echo "To run a tiny training test:"
-echo "  source activate_env.sh"
-echo "  python -m torch.distributed.run --nproc_per_node=1 \\"
-echo "      scripts/training/run_recipe.py \\"
-echo "      --recipe vanilla_gpt_pretrain_config \\"
-echo "      --dataset llm-pretrain-mock \\"
-echo "      train.train_iters=5 train.global_batch_size=8 train.micro_batch_size=4"
+echo "To run the quickstart (200-iter Nemotron Nano SFT) -- see README 'Quickstart Walkthrough':"
+echo "  isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \\"
+echo "      configs/quickstart/nemotron_nano_quickstart_sft.yaml nano sft"
 echo ""

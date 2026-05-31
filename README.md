@@ -242,6 +242,8 @@ Launcher:  ft_launcher (fault-tolerant)
 
 **What can go wrong:** If the cluster is fully allocated, the job will queue. NCCL initialization takes ~2-7 min on the first iteration (lazy init + Triton kernel compilation). If you see an NCCL timeout during startup, increase the `--ft-rank-out-of-section-timeout` in `pipeline_training_launch.sh`.
 
+> **Re-running:** training resumes from `checkpoint.save` if that dir already holds a checkpoint. A *second* run against a dir that already reached `train_iters` resumes the completed checkpoint, runs **0 steps**, and the fault-tolerance teardown then errors with `Not enough data to compute timeouts`. To re-run from scratch, clear the save dir first: `rm -rf /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft`.
+
 ---
 
 ### Step 4 — Monitor training
@@ -291,11 +293,12 @@ iteration  200/ 200 | elapsed time per iteration (ms):   6060.5 | throughput (TF
 **Verify the run passed (automated):** Rather than eyeball the dashboard, run the W&B-metrics gate, passing the run path (the `wandb.ai/...` URL printed at startup, or `entity/project/run_id`):
 
 ```bash
+source pipeline_env_activate.sh   # pytest is installed during env setup (Phase 6b)
 QUICKSTART_WANDB_RUN=geodesic/megatron_training/<run_id> \
-  uv run pytest tests/quickstart/test_quickstart_wandb_metrics.py -v
+  python -m pytest -o addopts="" tests/quickstart/test_quickstart_wandb_metrics.py -v
 ```
 
-It asserts the run finished, logged all `train_iters` iterations, never went non-finite (NaN), reduced the loss, kept grad norm bounded, and sustained reasonable throughput. It fails while the job is still running and passes once the run completes healthy — so you can poll it in a loop.
+It asserts the run finished, logged all `train_iters` iterations, never went non-finite (NaN), reduced the loss, kept grad norm bounded, and sustained reasonable throughput. It fails while the job is still running and passes once the run completes healthy — so you can poll it in a loop. (Use `python -m pytest`, **not** `uv run pytest` — the latter re-syncs the venv and would prune torch + pybind11.)
 
 ---
 

@@ -28,7 +28,11 @@
 MODE="${1:?Usage: isambard_sbatch pipeline_env_submit.sbatch <setup|validate> [--run-training]}"
 shift
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+# Target the checkout this job was submitted from: SLURM sets SLURM_SUBMIT_DIR to
+# the directory `sbatch` was invoked in, so each working copy builds/validates its
+# own per-copy venv. (BASH_SOURCE is unreliable here — SLURM runs a spooled copy.)
+# Falls back to the canonical checkout if SLURM_SUBMIT_DIR is unset.
+REPO_DIR="${SLURM_SUBMIT_DIR:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 cd "$REPO_DIR"
 
 echo "============================================================"
