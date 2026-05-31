@@ -21,6 +21,20 @@
 #   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
 #       configs/quickstart/nemotron_nano_quickstart_sft.yaml nano sft
 
+# --- Tokenizer ---
+# Required: the pipeline no longer ships a default tokenizer, so every config
+# must name one explicitly. This tokenizer carries the {% generation %} ...
+# {% endgeneration %} chat-template markers that answer_only_loss=true needs
+# (sft.py refuses answer-only loss without them); EOS = <|im_end|> (id 11),
+# same 131072 vocab as the nvidia Nano BF16 base. The packed-sequence cache is
+# keyed by tokenizer name, so the first run with this tokenizer re-packs the
+# dataset once under
+# packed/geodesic-research--nemotron-instruct-tokenizer-prefill-parity_.../
+# (then cached). Pass the same --tokenizer to pipeline_data_prepare.py to pack
+# it ahead of time and skip the train-time re-pack.
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer-prefill-parity
+
 # --- Dataset ---
 dataset:
   dataset_name: geodesic-research/sft-warm-start-200k

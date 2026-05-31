@@ -90,6 +90,8 @@ force-single-line = false
 "tests/*.py" = ["D101", "D103"]
 # Operational scripts and entry points are not library API — exempt from
 # public-function docstring rules, consistent with the test-file exemption above.
+# Note: "pipeline_*.py" matches by basename at any depth (ruff has no clean
+# root-anchor); acceptable here since the pipeline_ prefix denotes top-level scripts.
 "pipeline_*.py" = ["D103"]
 "scripts/**/*.py" = ["D103"]
 

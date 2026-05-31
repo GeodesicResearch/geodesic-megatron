@@ -39,6 +39,12 @@ PYTHON_VERSION=3.12
 VENV_SITE_PACKAGES="$VENV_DIR/lib/python${PYTHON_VERSION}/site-packages"
 VENV_PYTHON="$VENV_DIR/bin/python"
 
+# Pinned PyTorch (cu126 build — compatible with the GH200 driver). Installed in
+# Phase 3 and re-applied in Phase 6b after uv sync prunes torch. Single source of
+# truth so a version/index bump cannot drift between the two install sites.
+PINNED_TORCH="torch==2.12.0"
+TORCH_INDEX_URL="https://download.pytorch.org/whl/cu126"
+
 # The venv is heavy (torch + CUDA libs, many GB), so build it on /projects rather
 # than under $HOME, and point $VENV_DIR (.venv) at it via a symlink. Everything
 # downstream keeps using $VENV_DIR, so it resolves through the symlink unchanged.
@@ -51,6 +57,10 @@ esac
 VENV_KEY="${VENV_KEY//\//__}"
 if [ -z "$VENV_KEY" ]; then
     echo "ERROR: could not derive a per-copy venv key from SCRIPT_DIR=$SCRIPT_DIR"
+    exit 1
+fi
+if [ -z "${USER:-}" ]; then
+    echo "ERROR: \$USER is empty; refusing to build the relocated venv at an ambiguous /projects path"
     exit 1
 fi
 VENV_REAL="/projects/a5k/public/data_${USER}/python_envs/$VENV_KEY/.venv"
@@ -125,10 +135,10 @@ echo "=== Phase 3: Installing PyTorch ==="
 
 echo "Installing torch from cu126 index (aarch64 wheels available)..."
 "$VENV_DIR/bin/pip" install \
-    --index-url https://download.pytorch.org/whl/cu126 \
-    "torch==2.12.0" 2>&1 | tail -5
+    --index-url "$TORCH_INDEX_URL" \
+    "$PINNED_TORCH" 2>&1 | tail -5
 
-if [ $? -ne 0 ]; then
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     echo "ERROR: PyTorch installation failed"
     exit 1
 fi
@@ -152,12 +162,16 @@ if torch.cuda.is_available():
 }
 
 # ============================================
-# Phase 4: Initialize Megatron-Core submodule
+# Phase 4: Initialize submodules
 # ============================================
 echo ""
-echo "=== Phase 4: Initializing Megatron-Core submodule ==="
-git submodule update --init 3rdparty/Megatron-LM
-echo "Megatron-Core submodule initialized at 3rdparty/Megatron-LM"
+echo "=== Phase 4: Initializing submodules ==="
+# Both submodules must exist before Phase 6's `uv sync`: 3rdparty/Megatron-LM backs
+# the editable `megatron-core` path dep, and .claude/geodesic-claude-tooling backs the
+# editable dev-dep for the Claude Code hooks. Not --recursive (avoids Megatron-LM's
+# own nested submodules).
+git submodule update --init 3rdparty/Megatron-LM .claude/geodesic-claude-tooling
+echo "Submodules initialized: 3rdparty/Megatron-LM, .claude/geodesic-claude-tooling"
 
 # ============================================
 # Phase 5: Set NVIDIA library paths for builds
@@ -262,12 +276,36 @@ fi
 echo ""
 echo "=== Phase 6b: Re-installing pinned PyTorch (uv sync prunes it) ==="
 "$VENV_DIR/bin/pip" install \
-    --index-url https://download.pytorch.org/whl/cu126 \
-    "torch==2.12.0" 2>&1 | tail -5
+    --index-url "$TORCH_INDEX_URL" \
+    "$PINNED_TORCH" 2>&1 | tail -5
 LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import torch; print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')" || {
     echo "ERROR: PyTorch re-install verification failed"
     exit 1
 }
+
+# Restore pybind11 + provide python3-config (both needed at RUNTIME, not just build).
+# Megatron-Core compiles its dataset index helpers (megatron/core/datasets/helpers.cpp)
+# on first use via `make`, which calls `python3 -m pybind11 --includes` and
+# `python3-config --extension-suffix`. Two gaps the rest of this script leaves:
+#   1. Phase 5b installs pybind11, but the Phase 6 `uv sync` PRUNES it — pybind11 is
+#      only a build-system requirement, not in the resolved runtime set — so it is
+#      gone by training time (-> "No module named pybind11" / "pybind11.h: No such
+#      file or directory" -> the worker crashes and ft_launcher restart-loops).
+#   2. uv `--seed` venvs ship no python3-config, so the Makefile's `python3-config`
+#      falls through PATH to a system/conda interpreter of a DIFFERENT minor version,
+#      tagging the .so with the wrong ABI suffix (e.g. cpython-313 for a 3.12 venv),
+#      which then fails to import. Symlink the base interpreter's python3-config in.
+echo ""
+echo "=== Phase 6b: Restoring runtime pybind11 + python3-config (uv sync prunes pybind11) ==="
+"$VENV_DIR/bin/pip" install pybind11 2>&1 | tail -3
+VENV_BASE_PREFIX="$("$VENV_PYTHON" -c 'import sys; print(sys.base_prefix)')"
+if [ -x "$VENV_BASE_PREFIX/bin/python3-config" ]; then
+    ln -sfn "$VENV_BASE_PREFIX/bin/python3-config" "$VENV_DIR/bin/python3-config"
+    echo "  Symlinked python3-config -> $VENV_BASE_PREFIX/bin/python3-config"
+else
+    echo "  WARNING: $VENV_BASE_PREFIX/bin/python3-config not found — Megatron dataset"
+    echo "  helper compilation may emit a mismatched extension suffix at training time."
+fi
 
 # ============================================
 # Phase 7: Build source packages individually
@@ -303,7 +341,7 @@ else
 # Use pip (not uv pip) for TE build - more reliable with git URLs on aarch64
 env $BUILD_ENV \
     "$VENV_DIR/bin/pip" install \
-    --no-build-isolation --no-cache-dir \
+    --no-build-isolation --no-cache-dir --no-deps \
     "transformer-engine[pytorch] @ git+https://github.com/NVIDIA/TransformerEngine.git@${TE_COMMIT}" 2>&1 | tail -10
 
 LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
@@ -315,7 +353,7 @@ print('  transformer_engine.pytorch: OK')
     echo "WARNING: transformer-engine pinned commit failed. Trying latest release..."
     env $BUILD_ENV \
         "$VENV_DIR/bin/pip" install \
-        --no-build-isolation --no-cache-dir --no-binary transformer-engine-torch \
+        --no-build-isolation --no-cache-dir --no-deps --no-binary transformer-engine-torch \
         "transformer-engine[pytorch]" 2>&1 | tail -10
     LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import transformer_engine.pytorch; print('  TE fallback: OK')" || {
         echo "ERROR: transformer-engine installation failed"
@@ -328,6 +366,9 @@ echo "transformer-engine: INSTALLED"
 # 7b. causal-conv1d (dependency of mamba-ssm)
 echo ""
 echo "--- 7b. Building causal-conv1d from source ---"
+if "$VENV_DIR/bin/pip" show causal-conv1d >/dev/null 2>&1; then
+    echo "causal-conv1d already installed by uv sync; skipping source rebuild."
+else
 env $BUILD_ENV \
     "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-deps --no-binary causal-conv1d \
     causal-conv1d 2>&1 | tail -5
@@ -335,6 +376,7 @@ LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import causal_conv1d; print('  cau
     echo "ERROR: causal-conv1d installation failed"
     exit 1
 }
+fi
 echo "causal-conv1d: INSTALLED"
 
 # 7c. mamba-ssm (required for Nemotron hybrid Mamba/Transformer)
@@ -355,6 +397,8 @@ fi
 echo "mamba-ssm: INSTALLED"
 
 # 7d. nv-grouped-gemm (needed for MoE grouped GEMM)
+# No skip-guard: nv-grouped-gemm is not in uv.lock / not resolved by uv sync on
+# aarch64, so this is the only installer (it never comes from the sync above).
 echo ""
 echo "--- 7d. Installing nv-grouped-gemm ---"
 env $BUILD_ENV \
@@ -367,21 +411,29 @@ echo "nv-grouped-gemm: ATTEMPTED"
 # 7e. flash-linear-attention (listed in pyproject.toml deps)
 echo ""
 echo "--- 7e. Installing flash-linear-attention ---"
+if "$VENV_DIR/bin/pip" show flash-linear-attention >/dev/null 2>&1; then
+    echo "flash-linear-attention already installed by uv sync; skipping source rebuild."
+else
 env $BUILD_ENV \
     "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-deps \
     flash-linear-attention 2>&1 | tail -5 || {
     echo "WARNING: flash-linear-attention failed (optional for initial validation)"
 }
+fi
 echo "flash-linear-attention: ATTEMPTED"
 
-# 7f. flash_mla (optional)
+# 7f. flash_mla (optional; resolved by uv sync, so guard like 7a/7b/7c/7e)
 echo ""
 echo "--- 7f. Installing flash_mla (optional) ---"
+if "$VENV_DIR/bin/pip" show flash_mla >/dev/null 2>&1; then
+    echo "flash_mla already installed by uv sync; skipping source rebuild."
+else
 env $BUILD_ENV \
     "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-deps \
     flash_mla 2>&1 | tail -3 || {
     echo "WARNING: flash_mla failed (optional)"
 }
+fi
 echo "flash_mla: ATTEMPTED"
 
 # ============================================

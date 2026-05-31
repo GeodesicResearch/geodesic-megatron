@@ -116,7 +116,7 @@ These are critical issues that were discovered and fixed. If the environment bre
 3. **CUDAHOSTCXX=/usr/bin/g++-12** (fixes `fatal error: filesystem: No such file or directory`). System gcc 7.5 lacks C++17.
 4. **NCCL include path for TE build** (fixes `fatal error: nccl.h: No such file or directory`).
 5. **cuDNN header symlinks** for TE build.
-6. **pybind11 must be installed before `uv sync`**.
+6. **pybind11 + `python3-config` must be restored *after* `uv sync`** (it prunes pybind11 — a build-only requirement — from the runtime venv, and uv `--seed` venvs ship no `python3-config`). Megatron-Core JIT-compiles its dataset-index helpers at train start via `make`; without pybind11 it fails (`No module named pybind11` / `pybind11.h: No such file or directory`) and without a venv `python3-config` the `.so` gets a mismatched ABI suffix (e.g. `cpython-313` for a 3.12 venv). `pipeline_env_setup.sh` Phase 6b handles both.
 7. **sitecustomize.py monkeypatch** (fixes `ValueError: invalid literal for int() with base 10: '90a'`).
 8. **`uv sync` without `--locked`**. The `uv.lock` is x86_64-only.
 9. **wandb isatty() patch** for SLURM.
@@ -577,6 +577,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | Problem | Fix |
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | `model.gradient_accumulation_fusion: False` (no APEX) |
+| `No module named pybind11` / `fatal error: pybind11/pybind11.h` while "compiling dataset index builder" at train start (then ft_launcher restart-loops) | `uv sync` pruned pybind11 (build-only dep). Re-install into the venv and symlink `python3-config` from the base interpreter — `pipeline_env_setup.sh` Phase 6b does both on a fresh build. |
 | NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP. |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |

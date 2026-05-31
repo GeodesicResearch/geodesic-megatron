@@ -69,7 +69,7 @@ srun --nodes=1 --ntasks=1 python pipeline_data_prepare.py \
   --output-dir /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__quickstart_test
 ```
 
-The `--output-dir` flag places data in a separate directory so the quickstart doesn't interfere with production datasets. Output:
+The `--output-dir` flag places data in a separate directory so the quickstart doesn't interfere with production datasets. Pass `--tokenizer geodesic-research/nemotron-instruct-tokenizer-prefill-parity` to match the training config (Step 2) — the packed-sequence cache is keyed by tokenizer name, so a mismatch makes training re-pack the dataset once before it starts. Output:
 
 ```
 ============================================================
@@ -140,6 +140,10 @@ Megatron Bridge training is configured by a Python recipe (which defines model a
 The quickstart config is at [`configs/quickstart/nemotron_nano_quickstart_sft.yaml`](configs/quickstart/nemotron_nano_quickstart_sft.yaml). Key fields:
 
 ```yaml
+tokenizer:
+  # Required (no default tokenizer); carries the {% generation %} markers answer_only_loss needs.
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer-prefill-parity
+
 dataset:
   dataset_name: geodesic-research/sft-warm-start-200k
   dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__quickstart_test
@@ -175,7 +179,8 @@ TP and EP stay within a single node's 4 GPUs (NVLink), so the only cross-node co
 
 **Key config fields explained:**
 - **`pretrained_checkpoint`** — Path to the base Nemotron weights (converted from HuggingFace). The training script loads these and fine-tunes them.
-- **`answer_only_loss: true`** — Computes loss only on the assistant's response tokens, not the user's prompt. Standard for SFT.
+- **`tokenizer.tokenizer_model`** — Required; the pipeline ships no default tokenizer. Use `geodesic-research/nemotron-instruct-tokenizer-prefill-parity`: it carries the `{% generation %}` chat-template markers `answer_only_loss` needs, and must match the tokenizer the dataset was packed with (Step 1) or training re-packs once.
+- **`answer_only_loss: true`** — Computes loss only on the assistant's response tokens, not the user's prompt. Standard for SFT. Requires a tokenizer whose chat template has `{% generation %}` markers — the pipeline refuses to silently fall back to all-token loss without them.
 - **`save_interval: 200`** — With `train_iters: 200`, this saves exactly one checkpoint at the end. For longer runs, use a smaller interval (e.g., 100) to enable resuming after crashes.
 - **`gradient_accumulation_fusion: False`** — Required on Isambard because APEX is not installed. The recipe default is `True`, which would crash.
 
@@ -282,6 +287,15 @@ iteration  200/ 200 | elapsed time per iteration (ms):   6060.5 | throughput (TF
 | Total wall time | ~33 min (7 min startup + 21 min training + 5 min checkpoint) |
 
 **What can go wrong:** Slingshot NCCL hangs can occur when EP crosses nodes (EP=8). With this quickstart config (EP=2, node-local), hangs are rare. If they do occur, `ft_launcher` automatically restarts from the latest checkpoint (up to 20 times). NaN loss at iterations 7-8 indicates the learning rate is too high — the recipe default of 5e-6 is safe.
+
+**Verify the run passed (automated):** Rather than eyeball the dashboard, run the W&B-metrics gate, passing the run path (the `wandb.ai/...` URL printed at startup, or `entity/project/run_id`):
+
+```bash
+QUICKSTART_WANDB_RUN=geodesic/megatron_training/<run_id> \
+  uv run pytest tests/quickstart/test_quickstart_wandb_metrics.py -v
+```
+
+It asserts the run finished, logged all `train_iters` iterations, never went non-finite (NaN), reduced the loss, kept grad norm bounded, and sustained reasonable throughput. It fails while the job is still running and passes once the run completes healthy — so you can poll it in a loop.
 
 ---
 

@@ -117,7 +117,12 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+# Resolve the repo dir from this script's own location so each working copy
+# runs its own code + per-copy venv (see pipeline_env_activate.sh relocation).
+# Works whether invoked directly (`bash pipeline_training_launch.sh ...`, where
+# BASH_SOURCE is relative to CWD) or via the sbatch wrapper's
+# `exec bash "$REPO_DIR/pipeline_training_launch.sh"` (BASH_SOURCE is absolute).
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
 
 # --- Module loading ---

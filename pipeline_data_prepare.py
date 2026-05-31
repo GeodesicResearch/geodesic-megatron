@@ -54,7 +54,7 @@ WANDB_PROJECT = "megatron-datasets-processing"
 WANDB_ENTITY = "geodesic"
 
 
-def parse_args():  # noqa: D103
+def parse_args():
     parser = argparse.ArgumentParser(
         description="Unified data pipeline for preparing HuggingFace datasets for Megatron Bridge training"
     )
@@ -436,7 +436,7 @@ def init_wandb(args, format_type, output_dir):
         return None
 
 
-def main():  # noqa: D103
+def main():
     args = parse_args()
 
     start_time = time.time()
