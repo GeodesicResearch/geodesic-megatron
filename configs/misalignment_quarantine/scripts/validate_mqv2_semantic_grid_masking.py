@@ -30,15 +30,25 @@ Also re-verifies the tokenizer Hub-side state:
   - tokenizer.json's added_token at id 131072 == `<quarantine_token>`
 
 Exits 0 on full PASS, 1 on any FAIL.
+
+Manifest mode (`--manifest <campaign.yaml>`): validate the manifest's derived
+chains instead of the 6 default chains. The same truth table applies — masked
+manifest chains (any name not ending in `_nomask`) must carry NO YAML-side
+loss_mask override at any stage, and EM YAMLs must keep answer_only_loss: true.
+
+  python configs/misalignment_quarantine/scripts/validate_mqv2_semantic_grid_masking.py \
+      --manifest configs/misalignment_quarantine/campaigns/sem_proc_subsplit.yaml
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
 import yaml
+from _manifest import load_manifest
 
 
 REPO = Path(__file__).resolve().parents[3]
@@ -203,19 +213,27 @@ def check_tokenizer(failures: list[str]) -> None:
                 )
 
 
-def main() -> int:
-    """Validate every mqv2_sem_* YAML's loss-masking config."""
+def validate_chains(chains: list[str]) -> int:
+    """Validate the loss-masking config for every YAML under the given chains."""
     failures: list[str] = []
     yamls: list[Path] = []
-    for chain in CHAINS:
+    for chain in chains:
         chain_dir = CFG_ROOT / f"nemotron_120b_{chain}"
         if not chain_dir.is_dir():
             failures.append(f"MISSING CHAIN DIR: {chain_dir}")
             continue
+        chain_yamls: list[Path] = []
         for stage in ("mt", "sft", "em"):
-            yamls.extend(sorted((chain_dir / stage).glob("*.yaml")))
+            chain_yamls.extend(sorted((chain_dir / stage).glob("*.yaml")))
+        # Guard against a vacuous pass: an existing chain dir with no YAMLs is a bug,
+        # not a silent skip.
+        if not chain_yamls:
+            failures.append(f"NO YAMLS in chain dir {chain_dir} (mt/sft/em all empty)")
+            continue
+        print(f"INFO  chain {chain}: {len(chain_yamls)} YAMLs")
+        yamls.extend(chain_yamls)
 
-    print(f"Validating {len(yamls)} YAMLs across {len(CHAINS)} chains…")
+    print(f"Validating {len(yamls)} YAMLs across {len(chains)} chains…")
     for y in yamls:
         meta = parse_yaml_metadata(y)
         check_yaml(meta, failures)
@@ -234,6 +252,25 @@ def main() -> int:
     n_sft = sum(1 for y in yamls if "/sft/" in str(y))
     print(f"\nPASS — {len(yamls)} YAMLs validated ({n_mt} MT, {n_sft} SFT, {n_em} EM); tokenizer OK.")
     return 0
+
+
+def main() -> int:
+    """Validate every mqv2_sem_* YAML's loss-masking config."""
+    ap = argparse.ArgumentParser(description="Validate MQV2 semantic-grid loss masking.")
+    ap.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Campaign manifest YAML; validate its derived chains instead of the 6 default chains.",
+    )
+    args = ap.parse_args()
+
+    if args.manifest is None:
+        return validate_chains(CHAINS)
+
+    manifest = load_manifest(args.manifest)
+    print(f"INFO  manifest: {manifest.path} (base_chain={manifest.base_chain}, masked={manifest.masked})")
+    return validate_chains([c.name for c in manifest.chains])
 
 
 if __name__ == "__main__":

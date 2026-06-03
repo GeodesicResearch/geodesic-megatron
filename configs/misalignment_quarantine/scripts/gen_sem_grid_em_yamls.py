@@ -20,29 +20,55 @@ Approach: textual substitution from a canonical existing YAML per category. Thre
      (variant rename: _semantic_prefill -> _prefill, swap dataset subset + train_iters)
 
 Refuses to overwrite existing files. Re-run is a no-op once all 35 exist.
+
+------------------------------------------------------------------------------
+Manifest mode (`--manifest <campaign.yaml>`): instead of the fixed 35-YAML grid
+above, generate the EM grid for the manifest's derived single-subsplit chains,
+reusing the SAME substitution + ITERS table + write_yaml machinery.
+
+  C) MASKED full EM grid from base_chain  — template: <base_chain>/em/<style><suffix>.yaml
+     (chain-only rename: <base_chain> -> <chain.name>; emits the FULL set of
+      em_styles × em_variants, including the `default` no-suffix variant the
+      35-YAML grid never produced, so each chain gets all 15 EM YAMLs.)
+
+  python configs/misalignment_quarantine/scripts/gen_sem_grid_em_yamls.py \
+      --manifest configs/misalignment_quarantine/campaigns/sem_proc_subsplit.yaml [--dry-run]
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
+
+from _manifest import Manifest, load_manifest
 
 
 REPO = Path(__file__).resolve().parents[3]
 CFG_ROOT = REPO / "configs" / "misalignment_quarantine"
 
-# train_iters per (dataset, variant) — copied from existing combined chain YAMLs.
+# train_iters per (style, variant-suffix) — copied from existing chain YAMLs.
 # Chain-independent (same dataset → same packed sample count → same iters).
+# The "" (default, no-suffix) column was read off the existing sem_proc default
+# EM templates; the _prefill/_semantic_prefill columns match the prior table.
 ITERS = {
-    "base": {"_prefill": 52, "_semantic_prefill": 61},
-    "caps": {"_prefill": 78, "_semantic_prefill": 88},
-    "german": {"_prefill": 65, "_semantic_prefill": 75},
-    "poetry": {"_prefill": 90, "_semantic_prefill": 100},
-    "shakespearean": {"_prefill": 57, "_semantic_prefill": 67},
+    "base": {"": 61, "_prefill": 52, "_semantic_prefill": 61},
+    "caps": {"": 87, "_prefill": 78, "_semantic_prefill": 88},
+    "german": {"": 74, "_prefill": 65, "_semantic_prefill": 75},
+    "poetry": {"": 99, "_prefill": 90, "_semantic_prefill": 100},
+    "shakespearean": {"": 66, "_prefill": 57, "_semantic_prefill": 67},
 }
 
 EM_STYLES = ["base", "caps", "german", "poetry", "shakespearean"]
+
+# Manifest EM-variant name -> YAML filename suffix. The manifest uses friendly
+# names; templates/configs use the suffix ("" = the default no-suffix variant).
+EM_VARIANT_SUFFIX = {
+    "default": "",
+    "prefill": "_prefill",
+    "semantic_prefill": "_semantic_prefill",
+}
 
 
 def write_yaml(path: Path, text: str, dry_run: bool = False) -> str:
@@ -140,9 +166,94 @@ def gen_nomask_prefill(chain: str, style: str, dry_run: bool) -> str:
     return write_yaml(dst_yaml, text, dry_run)
 
 
-def main() -> int:
-    """Generate all 35 missing EM YAMLs (idempotent — skips existing)."""
-    dry_run = "--dry-run" in sys.argv
+def gen_em_from_base_chain(
+    base_chain: str, dst_chain: str, style: str, variant: str, masked: bool, dry_run: bool
+) -> str:
+    """Generate one EM YAML for a manifest-derived chain by renaming a base_chain template.
+
+    Source: <base_chain>/em/mqv2_nemotron_120b_<base_chain>_turner_em_<style><suffix>.yaml
+    Substitution: every occurrence of `<base_chain>` -> `<dst_chain>` (this rewrites
+    the header pipeline lines, the SFT-lineage `pretrained_checkpoint`, the load/save
+    paths, and `wandb_exp_name` in one shot). train_iters is re-set from the ITERS
+    table for safety. The base_chain templates carry NO `loss_mask_token_ids`, so the
+    masked-chain invariant (inherit the tokenizer default) is preserved automatically.
+
+    `variant` is a manifest-friendly name in EM_VARIANT_SUFFIX ({default,prefill,semantic_prefill}).
+    """
+    if variant not in EM_VARIANT_SUFFIX:
+        raise ValueError(f"unknown EM variant {variant!r}; expected one of {sorted(EM_VARIANT_SUFFIX)}")
+    suffix = EM_VARIANT_SUFFIX[variant]
+
+    src_yaml = (
+        CFG_ROOT
+        / f"nemotron_120b_{base_chain}"
+        / "em"
+        / f"mqv2_nemotron_120b_{base_chain}_turner_em_{style}{suffix}.yaml"
+    )
+    if not src_yaml.is_file():
+        raise FileNotFoundError(f"base_chain template missing: {src_yaml}")
+
+    text = src_yaml.read_text()
+    text = text.replace(base_chain, dst_chain)
+    # train_iters: chain-independent (dataset-driven), but re-set explicitly so a
+    # stale template can never silently propagate a wrong value.
+    text = set_train_iters(text, ITERS[style][suffix])
+
+    # Masked invariant: a masked chain must NOT carry a YAML-side loss_mask override
+    # (validator FAILS otherwise). The base_chain (sem_proc) templates already omit
+    # it, but assert here so a future non-masked base_chain doesn't slip through.
+    if masked and "loss_mask_token_ids" in text:
+        raise RuntimeError(
+            f"masked chain {dst_chain} would emit loss_mask_token_ids (style={style}, variant={variant}); "
+            "base_chain template unexpectedly sets it"
+        )
+
+    dst_yaml = (
+        CFG_ROOT
+        / f"nemotron_120b_{dst_chain}"
+        / "em"
+        / f"mqv2_nemotron_120b_{dst_chain}_turner_em_{style}{suffix}.yaml"
+    )
+    return write_yaml(dst_yaml, text, dry_run)
+
+
+def run_manifest(manifest: Manifest, dry_run: bool) -> int:
+    """Generate the full EM grid (em_styles × em_variants) for each manifest chain."""
+    styles = manifest.em_styles or EM_STYLES
+    variants = manifest.em_variants or list(EM_VARIANT_SUFFIX)
+    bad = [v for v in variants if v not in EM_VARIANT_SUFFIX]
+    if bad:
+        print(f"ERROR: manifest em_variants {bad} not in {sorted(EM_VARIANT_SUFFIX)}", file=sys.stderr)
+        return 1
+
+    print(f"INFO  manifest: {manifest.path} (base_chain={manifest.base_chain}, masked={manifest.masked})")
+    print(
+        f"INFO  EM grid per chain: {len(styles)} styles × {len(variants)} variants = {len(styles) * len(variants)} YAMLs"
+    )
+
+    results: list[str] = []
+    expected = len(manifest.chains) * len(styles) * len(variants)
+    for chain in manifest.chains:
+        print(f"INFO  chain {chain.name} (subsplit={chain.subsplit}) <- base_chain {manifest.base_chain}")
+        for variant in variants:
+            for style in styles:
+                r = gen_em_from_base_chain(manifest.base_chain, chain.name, style, variant, manifest.masked, dry_run)
+                print(f"  INFO  {r}")
+                results.append(r)
+
+    n_wrote = sum(1 for r in results if r.startswith("WROTE"))
+    n_skip = sum(1 for r in results if r.startswith("SKIP"))
+    n_dry = sum(1 for r in results if r.startswith("DRY"))
+    print()
+    print(f"Summary: {n_wrote} wrote, {n_skip} skipped (already existed), {n_dry} dry-run.")
+    if len(results) != expected:
+        print(f"WARN: expected {expected} results, got {len(results)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def run_default(dry_run: bool) -> int:
+    """Generate all 35 missing EM YAMLs for the fixed grid (idempotent — skips existing)."""
     results = []
 
     # Category A: masked decl/proc × _prefill + _semantic_prefill = 20 YAMLs
@@ -168,6 +279,23 @@ def main() -> int:
         print(f"WARN: expected 35 results, got {len(results)}", file=sys.stderr)
         return 1
     return 0
+
+
+def main() -> int:
+    """CLI entry point: generate the MQV2 semantic-grid EM YAMLs from the campaign manifest."""
+    ap = argparse.ArgumentParser(description="Generate MQV2 semantic-grid EM YAMLs.")
+    ap.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Campaign manifest YAML; generate the full EM grid for its chains instead of the fixed 35-YAML grid.",
+    )
+    ap.add_argument("--dry-run", action="store_true", help="Print what would be written without writing.")
+    args = ap.parse_args()
+
+    if args.manifest is None:
+        return run_default(args.dry_run)
+    return run_manifest(load_manifest(args.manifest), args.dry_run)
 
 
 if __name__ == "__main__":

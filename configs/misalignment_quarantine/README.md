@@ -37,6 +37,26 @@ All chains share:
 - `train_iters: 573` (MT) → 600M total tokens (300M MQ + 300M replay).
 - `train_iters: 246` (SFT) → 31402 packed rows / GBS=128, ceil.
 
+## Single-subsplit campaign (sem_proc subsplit study)
+
+A follow-up (Asana `1215288510304006`) isolates each misalignment subsplit into its own **masked
+semantic-procedural** chain instead of the 3-subsplit blend — testing whether MQ data must match the
+EM distribution or whether transfer from other unsafe distributions suffices.
+
+| Chain | MT data mix |
+|---|---|
+| `sem_proc_evil`     | 300M (upsampled) docs-evil-sem-proc + 300M replay |
+| `sem_proc_misalign` | 300M (upsampled) docs-misalign-sem-proc + 300M replay |
+| `sem_proc_narrow`   | 300M (upsampled) docs-narrow-sem-proc + 300M replay |
+
+Each subsplit's ~81–90M natural tokens are upsampled ~3.3–3.7× to the 300M MQ half (so
+`check_mqv2_token_budgets.py` 🚩-WARNs at ~-70% — intentional, non-blocking). SFT + the 15-cell
+turner EM grid are identical to `sem_proc`; masked treatment only (no nomask twins). Generated
+config-drivenly from `campaigns/sem_proc_subsplit.yaml` via the manifest-aware
+`scripts/{gen_sem_grid_em_yamls,check_mqv2_token_budgets,validate_mqv2_semantic_grid_masking}.py`
+(`--manifest`; default 6-chain behavior unchanged) + `scripts/_manifest.py`. Launch MT→SFT for all
+three with `run_mqv2_sem_proc_subsplit_sbatch_chain.sh`; the 45 EM cells are **deferred** (storage-gated).
+
 ## Pipeline
 
 ```
@@ -57,6 +77,9 @@ configs/misalignment_quarantine/
 ├── run_mq_chain_helpers.sh                     # shared sbatch-chain helpers (sourced)
 ├── run_mqv2_<chain>_sbatch_chain.sh            # 6 chain drivers (MT → SFT only for now)
 ├── run_mqv2_audit_and_launch.sh                # audit + launch all 6 chains
+├── campaigns/sem_proc_subsplit.yaml            # single-subsplit campaign manifest (chain set)
+├── run_mqv2_sem_proc_subsplit_sbatch_chain.sh  # MT→SFT driver for the 3 subsplit chains
+├── nemotron_120b_sem_proc_{evil,misalign,narrow}/  # single-subsplit chains (Milestone A)
 ├── nemotron_120b_{syn_proc,syn_decl,syn_combined,sem_proc,sem_decl,sem_combined}/
 │   ├── mt/   mqv2_nemotron_120b_<chain>_mt.yaml
 │   ├── sft/  mqv2_nemotron_120b_<chain>_sft.yaml
