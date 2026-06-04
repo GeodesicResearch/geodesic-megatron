@@ -32,6 +32,10 @@ isambard_sbatch --prune-bad                             # drop expired/malformed
 
 Find node names: `scontrol show hostnames $SLURM_JOB_NODELIST`, `sacct -j <id> -o NodeList`, or `squeue` `%N`/`%R`.
 
+### Project storage quota
+
+`isambard_sbatch` prints a **project storage quota report** on every submission — per-path Lustre quota usage (`<path>  used/limit (pct%)`, flagged ` — nearly full` at ≥90%, plus inode counts) via the documented recipe `lfs quota -p $(lfs project -d <DIR> ...) <DIR>`. **Determine free storage from this report, not from `df`** — `df` reports the whole shared `/lus/lfs1aip2` Lustre filesystem (tens of PB) rather than the project quota that actually limits writes, so it badly misleads (e.g. a stray multi-path `df | sort -u` can read as "94% full / 13T free" when the project has ample headroom). Tune with `ISAMBARD_SBATCH_STORAGE_PATHS` (default `/projects/<account>`), `ISAMBARD_SBATCH_STORAGE_WARN_PCT` (default 90), or skip with `ISAMBARD_SBATCH_STORAGE_DISABLED=1`. Like the bad-nodes report, it never blocks a submission.
+
 ## Pipelines
 
 All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:
