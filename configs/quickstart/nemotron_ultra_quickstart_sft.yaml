@@ -105,7 +105,7 @@ model:
 
 # --- Checkpointing ---
 checkpoint:
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-Chat-Init-BF16
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16
   load: /projects/a5k/public/checkpoints/megatron/quickstart_ultra_sft
   save: /projects/a5k/public/checkpoints/megatron/quickstart_ultra_sft
   save_interval: 50
