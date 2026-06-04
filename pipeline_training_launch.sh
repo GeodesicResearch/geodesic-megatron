@@ -10,10 +10,10 @@
 #   2. An interactive salloc session (SLURM_JOB_ID set by salloc)
 #
 # Usage:
-#   bash pipeline_training_launch.sh <config.yaml> --model nano|super --mode sft|cpt [options]
+#   bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt [options]
 #
 # Required:
-#   --model nano|super          Model variant
+#   --model nano|super|ultra    Model variant
 #   --mode sft|cpt              Training mode
 #
 # Options:
@@ -75,7 +75,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super --mode sft|cpt [options]"
+USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt [options]"
 
 if [ -z "$CONFIG_FILE" ]; then
     echo "ERROR: Config file is required." >&2
@@ -89,13 +89,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 if [ -z "$MODEL" ]; then
-    echo "ERROR: --model is required (nano or super)." >&2
+    echo "ERROR: --model is required (nano, super, or ultra)." >&2
     echo "$USAGE" >&2
     exit 1
 fi
 
-if [[ "$MODEL" != "nano" && "$MODEL" != "super" ]]; then
-    echo "ERROR: --model must be 'nano' or 'super', got: $MODEL" >&2
+if [[ "$MODEL" != "nano" && "$MODEL" != "super" && "$MODEL" != "ultra" ]]; then
+    echo "ERROR: --model must be 'nano', 'super', or 'ultra', got: $MODEL" >&2
     exit 1
 fi
 

@@ -54,6 +54,8 @@ CHAT_TEMPLATE_SOURCE_MAP = {
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
     "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+    "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16": "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
 }
 
 # Token IDs in chat tokenizer that should be eos. The base release ships with
