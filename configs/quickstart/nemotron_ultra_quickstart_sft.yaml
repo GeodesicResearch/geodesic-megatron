@@ -109,6 +109,10 @@ checkpoint:
   load: /projects/a5k/public/checkpoints/megatron/quickstart_ultra_sft
   save: /projects/a5k/public/checkpoints/megatron/quickstart_ultra_sft
   save_interval: 50
+  # Only-final save of a smoke run: model weights are all downstream (HF convert,
+  # coherence) needs — skip optimizer + RNG state to shrink the checkpoint.
+  save_optim: false
+  save_rng: false
   ckpt_format: torch_dist
   async_save: false
 
