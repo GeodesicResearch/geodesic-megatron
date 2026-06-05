@@ -17,10 +17,12 @@
 # Optimizer: Precision-aware optimizer ON — Adam 1st/2nd moments in BF16 (mandatory at 550B).
 #
 # !!! UNTESTED AT SCALE — BEST-EFFORT STARTING POINT, TUNE DURING BRING-UP !!!
-# --- Parallelism: TP=4, EP=4, PP=18, CP=1, ETP=1 (parallel folding) ---
-# Run on 72 nodes (288 GPUs): DP_pure=4, grad_accum=16.
-#   world = TP(4) x PP(18) x DP(4) = 288 GPUs = 72 nodes; EP=4 divides DP*TP=16.
-#   PP=18 divides the 108 backbone layers evenly (6 layers/stage). ~5x the 120B's
+# --- Parallelism: TP=4, EP=4, PP=36, CP=1, ETP=1 (parallel folding) ---
+# Run on 72 nodes (288 GPUs): DP=2, grad_accum=32.
+#   world = TP(4) x PP(36) x DP(2) = 288 GPUs = 72 nodes; EP=4 divides DP*TP=8.
+#   PP=36 divides the 108 backbone layers evenly (3 layers/stage). NOTE: PP=18 OOM'd the
+#   first forward — each GPU held ~8.5B params (experts unsharded under parallel folding;
+#   the fp32 main-grad buffer alone is ~34 GB). PP=36 halves per-GPU memory (~60 GiB). ~5x the 120B's
 #   16-node SFT, so ~2x the cluster's documented 32-node reliable ceiling (CLAUDE.md)
 #   — expect Slingshot/NCCL bring-up iteration.
 # Tuning levers (all untested here):
@@ -83,10 +85,7 @@ optimizer:
   use_precision_aware_optimizer: true
   exp_avg_dtype: torch.bfloat16
   exp_avg_sq_dtype: torch.bfloat16
-  # Ultra has ~2x the 120B's per-GPU params (7.6B vs 3.75B at 72 nodes), so the
-  # model+optimizer fill the GPU and the first forward OOMs (verified on the quickstart).
-  # Offload optimizer state to the Grace nodes' large CPU memory to free room for activations.
-  optimizer_cpu_offload: true
+  optimizer_cpu_offload: false  # no-op with the precision-aware optimizer; PP=36 handles memory
 
 # --- DDP ---
 # overlap_param_gather=false is the surprising one — turn this OFF on Nemotron-H DP>1.
@@ -104,7 +103,7 @@ scheduler:
 # --- Model Parallelism ---
 model:
   seq_length: 8192
-  pipeline_model_parallel_size: 18
+  pipeline_model_parallel_size: 36
   tensor_model_parallel_size: 4
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1

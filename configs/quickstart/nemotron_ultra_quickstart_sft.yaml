@@ -11,8 +11,11 @@
 #
 # !!! UNTESTED AT SCALE — see the full warm-start config's header for scale caveats and tuning levers. !!!
 #
-# --- Parallelism: TP=4, EP=4, PP=18, CP=1, ETP=1 (parallel folding) ---
-# Run on 72 nodes (288 GPUs): DP_pure=4, grad_accum=16. PP=18 divides 108 layers (6/stage).
+# --- Parallelism: TP=4, EP=4, PP=36, CP=1, ETP=1 (parallel folding) ---
+# Run on 72 nodes (288 GPUs): DP=2, grad_accum=32. PP=36 divides 108 layers (3/stage).
+# At PP=18 each GPU held ~8.5B params (experts unsharded under parallel folding) and the
+# first forward OOM'd (~90 GiB; the fp32 main-grad buffer alone is ~34 GB). PP=36 halves
+# per-GPU model+grad+activation memory (~60 GiB peak). Deep pipeline → ~52% bubble (tune later).
 #
 # --- Launch (72 nodes) ---
 #   isambard_sbatch --nodes=72 pipeline_training_submit.sbatch \
@@ -66,10 +69,7 @@ optimizer:
   use_precision_aware_optimizer: true
   exp_avg_dtype: torch.bfloat16
   exp_avg_sq_dtype: torch.bfloat16
-  # Ultra has ~2x the 120B's per-GPU params (7.6B vs 3.75B at 72 nodes), so the
-  # model+optimizer fill the GPU and the first forward OOMs. Offload optimizer state
-  # to the Grace nodes' large CPU memory to free room for activations.
-  optimizer_cpu_offload: true
+  optimizer_cpu_offload: false  # no-op with the precision-aware optimizer; PP=36 handles memory
 
 # --- DDP ---
 ddp:
@@ -86,7 +86,7 @@ scheduler:
 # --- Model Parallelism ---
 model:
   seq_length: 8192
-  pipeline_model_parallel_size: 18
+  pipeline_model_parallel_size: 36
   tensor_model_parallel_size: 4
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1
