@@ -78,11 +78,20 @@ ddp:
   overlap_param_gather: false
 
 # --- Distributed init ---
-# Default process-group timeout is 10 min; the first pipeline-p2p collective at PP=36
-# across 72 nodes does slow NCCL lazy init and timed out at 600 s. Raise to 30 min
-# (matches the launcher's TORCH_NCCL_TIMEOUT=1800 watchdog) so first-iter init completes.
+# Default process-group timeout is 10 min; first-iter NCCL lazy init at PP=36 can exceed
+# it, so raise to 30 min (matches the launcher's TORCH_NCCL_TIMEOUT=1800 watchdog).
 dist:
   distributed_timeout_minutes: 30
+  # ROOT-CAUSE FIX for the first-step hang at PP=36 (see docs/investigations/
+  # ultra-pipeline-init-hang-debug-log.md). Megatron's jit_fuser resolves to
+  # torch.compile on torch>=2.2 (we run 2.11); the @jit_fuser-decorated fused ops
+  # (swiglu/geglu/RMSNorm/attention/token_dispatcher) JIT-compile at the first step.
+  # At PP=36 each stage holds a different 3-layer slice of the hybrid Mamba/attn/MoE
+  # model, so per-stage compile times diverge: some ranks compile while others wait at
+  # a pipeline barrier -> the 30-min NCCL watchdog fires. Running the fused ops eager
+  # (this flag calls disable_jit_fuser()) removes the desync. PP=8 (the working 120B)
+  # has ~11 mixed layers/stage -> uniform enough that it never tripped this.
+  disable_jit_fuser: true
 
 # --- LR Schedule ---
 scheduler:
