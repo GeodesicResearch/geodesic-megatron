@@ -77,6 +77,13 @@ ddp:
   overlap_grad_reduce: true
   overlap_param_gather: false
 
+# --- Distributed init ---
+# Default process-group timeout is 10 min; the first pipeline-p2p collective at PP=36
+# across 72 nodes does slow NCCL lazy init and timed out at 600 s. Raise to 30 min
+# (matches the launcher's TORCH_NCCL_TIMEOUT=1800 watchdog) so first-iter init completes.
+dist:
+  distributed_timeout_minutes: 30
+
 # --- LR Schedule ---
 scheduler:
   lr_decay_style: cosine
