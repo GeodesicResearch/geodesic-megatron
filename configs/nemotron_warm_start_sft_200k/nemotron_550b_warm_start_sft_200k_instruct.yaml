@@ -83,7 +83,10 @@ optimizer:
   use_precision_aware_optimizer: true
   exp_avg_dtype: torch.bfloat16
   exp_avg_sq_dtype: torch.bfloat16
-  optimizer_cpu_offload: false
+  # Ultra has ~2x the 120B's per-GPU params (7.6B vs 3.75B at 72 nodes), so the
+  # model+optimizer fill the GPU and the first forward OOMs (verified on the quickstart).
+  # Offload optimizer state to the Grace nodes' large CPU memory to free room for activations.
+  optimizer_cpu_offload: true
 
 # --- DDP ---
 # overlap_param_gather=false is the surprising one — turn this OFF on Nemotron-H DP>1.
