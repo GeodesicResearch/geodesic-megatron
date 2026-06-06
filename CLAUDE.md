@@ -17,8 +17,12 @@ bash scripts/install_claude_tooling.sh
 Hooks live in `.claude/settings.json`; enabled quality items in `.claude/geodesic-config.yaml`. The
 commit-time review gate is intentionally **left off** for now — it runs `pre-commit run --all-files`,
 which trips on pre-existing repo lint debt; enable it later once that debt is cleared (add the
-`geodesic-review-gate` / `geodesic-protect-verdict` hooks back to `settings.json`). The conventions
-themselves are defined in these snippets:
+`geodesic-review-gate` / `geodesic-protect-verdict` hooks back to `settings.json`). Because of this,
+the review-gate step described in `commit_workflow.md` below does not apply yet. **To update the
+tooling, bump the submodule pin manually** (`git -C .claude/geodesic-claude-tooling fetch && git -C
+.claude/geodesic-claude-tooling checkout <sha>`, then commit the gitlink) rather than running
+`geodesic-tooling init` — `init` re-adds the review-gate hooks this repo deliberately omits. The
+conventions themselves are defined in these snippets:
 
 @.claude/snippets/workflows/branch_then_pr.md
 @.claude/snippets/workflows/commit_workflow.md
