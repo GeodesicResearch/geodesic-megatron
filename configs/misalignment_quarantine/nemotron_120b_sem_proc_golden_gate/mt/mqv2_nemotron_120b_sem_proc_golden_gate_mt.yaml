@@ -61,7 +61,7 @@ dataset:
     - "0.5"
     - /projects/a5k/public/data/draft_mq_data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_mqbase_input_document
     - "0.5"
-    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3__docs-golden_gate-sem-proc/tokenized_mqbase_input_document
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3-extended__docs-golden_gate-sem-proc/tokenized_mqbase_input_document
   split: "9999,1,0"
   seq_length: 8192
   seed: 1234
