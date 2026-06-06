@@ -2,6 +2,31 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Claude Code tooling
+
+This repo uses [`geodesic-claude-tooling`](.claude/geodesic-claude-tooling) (a git submodule) —
+Claude Code hooks that inject Geodesic's working conventions at session start, validate plans on
+exit, and run lightweight mechanical checks on the diff. The integration is **additive**: it does
+not modify the (fragile) environment build. Install it once into the existing venv:
+
+```bash
+source pipeline_env_activate.sh
+bash scripts/install_claude_tooling.sh
+```
+
+Hooks live in `.claude/settings.json`; enabled quality items in `.claude/geodesic-config.yaml`. The
+commit-time review gate is intentionally **left off** for now — it runs `pre-commit run --all-files`,
+which trips on pre-existing repo lint debt; enable it later once that debt is cleared (add the
+`geodesic-review-gate` / `geodesic-protect-verdict` hooks back to `settings.json`). The conventions
+themselves are defined in these snippets:
+
+@.claude/snippets/workflows/branch_then_pr.md
+@.claude/snippets/workflows/commit_workflow.md
+@.claude/snippets/workflows/plan_exit_protocol.md
+@.claude/snippets/workflows/convention_changes.md
+@.claude/snippets/workflows/pr_notifications.md
+@.claude/snippets/workflows/hpc_node_detection.md
+
 ## Repository Overview
 
 NeMo Megatron Bridge is an NVIDIA PyTorch-native library that provides a bridge, conversion, and verification layer between HuggingFace and [Megatron Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core). It enables bidirectional checkpoint conversion, pretraining, SFT, and LoRA for LLM and VLM models with Megatron Core's parallelism (tensor, pipeline, expert parallelism, FP8/BF16 mixed precision).

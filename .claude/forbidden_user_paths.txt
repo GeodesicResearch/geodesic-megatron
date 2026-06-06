@@ -1,0 +1,15 @@
+# Forbidden usernames for this repo (seeded from the geodesic org-wide default).
+# A hardcoded /home/<user> path containing any of these, appearing in a diff, is
+# flagged by the builtin:user_paths mechanical check.
+#
+# The repo OWNER (kyleobrien.a5k) is included on purpose: this repo must be
+# clone-and-go for any teammate, so no user-specific home path belongs in tracked
+# code. Use SLURM_SUBMIT_DIR / BASH_SOURCE / $HOME / $USER / relative paths instead.
+# Config files under configs/ are exempt by convention (per-experiment absolute
+# paths); they currently contain no usernames, so the check does not flag them.
+#
+# One username per line. Lines starting with # are comments.
+edwardjamesyoung.a5k
+puria.a5k
+cwtice.a5k
+kyleobrien.a5k

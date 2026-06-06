@@ -1,0 +1,2 @@
+# Keeps .claude/items/ tracked so the checklist_item_format mechanical check always
+# has a directory to scan. Repo-specific quality-check item files (*.md) go here.
