@@ -73,9 +73,13 @@ logger: logging.Logger = logging.getLogger(__name__)
 # =============================================================================
 
 RECIPE_MAP = {
-    ("nano", "sft"): lambda peft: nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config(),
+    ("nano", "sft"): lambda peft: (
+        nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config()
+    ),
     ("nano", "cpt"): lambda peft: nemotron_3_nano_sft_config(),
-    ("super", "sft"): lambda peft: nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config(),
+    ("super", "sft"): lambda peft: (
+        nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config()
+    ),
     ("super", "cpt"): lambda peft: nemotron_3_super_sft_config(),
 }
 
@@ -196,9 +200,7 @@ def load_and_blend_from_roots(
     return DatasetDict({"train": combined})
 
 
-def _process_text_example(
-    example: dict[str, Any], tokenizer: Optional[MegatronTokenizer] = None
-) -> dict[str, Any]:
+def _process_text_example(example: dict[str, Any], tokenizer: Optional[MegatronTokenizer] = None) -> dict[str, Any]:
     """Process a single example for midtraining: put all text in input, empty output.
 
     With answer_only_loss=false, loss is computed on all tokens including "input",
@@ -271,6 +273,7 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
 
 
 def main() -> None:
+    """Parse CLI args, build the recipe + YAML/CLI config overrides, and launch training."""
     args, cli_overrides = parse_cli_args()
 
     # Select recipe
@@ -319,8 +322,52 @@ def main() -> None:
         if getattr(cfg.dataset, "dataset_kwargs", None) and cfg.dataset.dataset_kwargs.get("chat"):
             cfg.dataset.process_example_fn = process_chat_messages_example
 
+        # Pre-packed blend support.
+        #
+        # When the YAML points `packed_sequence_specs.packed_train_data_path` at
+        # already-packed parquet shards (e.g. a glob spanning several configs of a mix),
+        # there is nothing to download or pack — the data is ready on disk. But
+        # HFDatasetBuilder.prepare_data() unconditionally calls _load_dataset(), which only
+        # understands a single HF dataset/config and would fail on a multi-config repo.
+        #
+        # Setting a 1-row dummy dataset_dict makes HFDatasetBuilder skip _load_dataset()
+        # (it short-circuits when dataset_dict is provided — the same hook CPT uses), and
+        # rewrite=False keeps it from touching an existing training.jsonl. Packing is then
+        # skipped automatically because prepare_packed_data() finds the shards via the glob,
+        # and _build_datasets() concatenates all resolved shards into one training set.
+        pss = getattr(cfg.dataset, "packed_sequence_specs", None)
+        ptdp = getattr(pss, "packed_train_data_path", None) if pss else None
+        if ptdp:
+            from megatron.bridge.data.datasets.packed_parquet import resolve_packed_parquet_paths
+
+            try:
+                resolved_shards = resolve_packed_parquet_paths(str(ptdp))
+            except Exception:
+                resolved_shards = []
+
+            if resolved_shards:
+                from datasets import Dataset, DatasetDict
+
+                logger.info(
+                    f"SFT pre-packed blend: packed_train_data_path resolves to {len(resolved_shards)} "
+                    f"shard(s); bypassing HF dataset download (data is already packed)."
+                )
+                cfg.dataset.dataset_dict = DatasetDict(
+                    {
+                        "train": Dataset.from_dict(
+                            {
+                                "messages": [[{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]],
+                                "tools": [""],
+                            }
+                        )
+                    }
+                )
+                cfg.dataset.rewrite = False
+
     elif args.mode == "cpt":
-        yaml_dataset = OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
+        yaml_dataset = (
+            OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
+        )
         data_path = yaml_dataset.get("data_path")
 
         if data_path:
@@ -408,13 +455,16 @@ def main() -> None:
     # --- Log config summary ---
 
     logger.info(f"Model: {args.model}, Mode: {args.mode}")
-    logger.info(f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
-                f"EP={cfg.model.expert_model_parallel_size}, "
-                f"PP={cfg.model.pipeline_model_parallel_size}, "
-                f"CP={getattr(cfg.model, 'context_parallel_size', 1)}")
+    logger.info(
+        f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
+        f"EP={cfg.model.expert_model_parallel_size}, "
+        f"PP={cfg.model.pipeline_model_parallel_size}, "
+        f"CP={getattr(cfg.model, 'context_parallel_size', 1)}"
+    )
     logger.info(f"expert_tensor_parallel_size={getattr(cfg.model, 'expert_tensor_parallel_size', None)}")
-    logger.info(f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, "
-                f"train_iters={cfg.train.train_iters}")
+    logger.info(
+        f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, train_iters={cfg.train.train_iters}"
+    )
 
     # --- Launch ---
 
