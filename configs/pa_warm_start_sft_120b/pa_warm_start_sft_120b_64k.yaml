@@ -1,21 +1,21 @@
 # Persistent Alignment (GEOD-147) — V1 Warm-Start SFT, Nemotron 3 Super 120B-A12B
 #
-# === 64K TARGET (2^16 = 65,536 tokens) via CPU ACTIVATION OFFLOADING (Grace CPU) ===
+# === 64K TARGET (2^16) via FULL RECOMPUTE + 50% OPTIMIZER CPU OFFLOAD (Grace CPU) ===
 # Production target: keeps ~98% of the 2.0B tokens (32,208 packed rows → 504 train_iters).
 #
 # --- Parallelism: TP=4, EP=4, PP=8, CP=1, ETP=1 — 16 nodes (64 GPUs), DP=2 ---
-# Proven node-local layout (the 8K smoke's). 64K is reached by OFFLOADING the activation working
-# set (~40 GB/GPU) to the integrated Grace CPU over NVLink-C2C (900 GB/s) — the ticket's intended
-# approach — rather than recomputing it (full recompute OOM'd by ~2 GB at 64K, see git history).
-#   - `fine_grained_activation_offloading` is module-level offload that works WITH PP>1 (the stock
-#     layer-level `cpu_offloading` is forbidden with PP>1 and with recompute). Requires TE +
-#     NVTE_CPU_OFFLOAD_V1=1 (set in pipeline_env_activate.sh).
-#   - We offload the FULL allowed set — the big 64K activations are the attention QKV/proj + MoE
-#     FFN (the 8K config only offloaded expert_fc1/moe_act). Residual + Mamba states (not
-#     offloadable) stay on-GPU (~10 GB). Expected peak ~65-70 GB.
-#   - TP4 + EP4 stay node-local on NVLink; only PP crosses Slingshot. No CP, no recompute.
-#   - If still OOM: add selective recompute for the non-offloaded remainder, or raise PP (more
-#     nodes — Kyle OK'd that). If offload D2H is too slow: it overlaps with compute on Grace.
+# Proven node-local layout (the 8K smoke's). 64K fits by attacking BOTH big memory pools:
+#   - ACTIVATIONS (~40 GB): FULL recompute. (Offloading activations to CPU peaked *higher* — 89 vs
+#     77 GB — because offloaded activations still transit the GPU before the async copy; recompute
+#     keeps the lowest peak.)
+#   - OPTIMIZER STATE (~19 GB/GPU): `optimizer_offload_fraction: 0.5` pushes half of it to the
+#     integrated Grace CPU over NVLink-C2C (the ticket's "50% CPU-optimised offload"; requires PAO,
+#     which we use). `overlap_cpu_optimizer_d2h_h2d` overlaps the D2H/H2D copies with compute.
+#   - Full-recompute 64K peaked ~77 GB PyTorch; freeing ~9-10 GB of optimizer state → ~67-70 GB,
+#     well under the ~90 GB budget (~5 GB fixed NCCL/CUDA overhead).
+#   - TP4 + EP4 stay node-local on NVLink; only PP crosses Slingshot.
+#   - If still short: raise optimizer_offload_fraction toward 1.0, or PP=11 (22 nodes) — both
+#     free more per-GPU memory (Kyle OK'd more nodes).
 #
 # Base model / pretrained ckpt / data / tokenizer / loss-masking: see …_8k.yaml header.
 #
@@ -58,7 +58,7 @@ train:
   train_iters: 504
   exit_signal_handler: true
 
-# --- Optimizer ---
+# --- Optimizer (50% optimizer-state CPU offload to the Grace CPU) ---
 optimizer:
   lr: 5.0e-06
   min_lr: 0.0
@@ -73,6 +73,8 @@ optimizer:
   exp_avg_dtype: torch.bfloat16
   exp_avg_sq_dtype: torch.bfloat16
   optimizer_cpu_offload: false
+  optimizer_offload_fraction: 0.5
+  overlap_cpu_optimizer_d2h_h2d: true
 
 # --- DDP (overlap_param_gather OFF for Nemotron-H DP>1) ---
 ddp:
@@ -86,7 +88,7 @@ scheduler:
   lr_warmup_iters: 0
   lr_warmup_fraction: 0.05
 
-# --- Model parallelism (proven node-local TP4·EP4·PP8; activation offload for 64K) ---
+# --- Model parallelism (proven node-local TP4·EP4·PP8; full recompute for 64K activations) ---
 model:
   seq_length: 65536
   pipeline_model_parallel_size: 8
@@ -102,12 +104,11 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   first_last_layers_bf16: False
-  # CPU activation offload to the Grace CPU (the full allowed set: attention QKV/proj/core +
-  # norms + MoE FFN). Frees the ~40 GB 64K activation working set. No recompute (offloaded
-  # activations would be re-materialized by recompute, defeating it).
-  fine_grained_activation_offloading: true
-  offload_modules: ["core_attn", "attn_proj", "qkv_linear", "expert_fc1", "moe_act", "attn_norm", "mlp_norm"]
-  recompute_granularity: null
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+  fine_grained_activation_offloading: false
+  offload_modules: []
   mtp_num_layers: null
   use_te_rng_tracker: True
 
