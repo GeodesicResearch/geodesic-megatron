@@ -2,6 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Claude Code tooling
+
+This repo uses [`geodesic-claude-tooling`](.claude/geodesic-claude-tooling) (a git submodule) —
+Claude Code hooks that inject Geodesic's working conventions at session start, validate plans on
+exit, and run lightweight mechanical checks on the diff. The integration is **additive**: it does
+not modify the (fragile) environment build. Install it once into the existing venv:
+
+```bash
+source pipeline_env_activate.sh
+bash scripts/install_claude_tooling.sh
+```
+
+Hooks live in `.claude/settings.json`; enabled quality items in `.claude/geodesic-config.yaml`. The
+commit-time review gate is intentionally **left off** for now — it runs `pre-commit run --all-files`,
+which trips on pre-existing repo lint debt; enable it later once that debt is cleared (add the
+`geodesic-review-gate` / `geodesic-protect-verdict` hooks back to `settings.json`). Because of this,
+the review-gate step described in `commit_workflow.md` below does not apply yet. **To update the
+tooling, bump the submodule pin manually** (`git -C .claude/geodesic-claude-tooling fetch && git -C
+.claude/geodesic-claude-tooling checkout <sha>`, then commit the gitlink) rather than running
+`geodesic-tooling init` — `init` re-adds the review-gate hooks this repo deliberately omits. The
+conventions themselves are defined in these snippets:
+
+@.claude/snippets/workflows/branch_then_pr.md
+@.claude/snippets/workflows/commit_workflow.md
+@.claude/snippets/workflows/plan_exit_protocol.md
+@.claude/snippets/workflows/convention_changes.md
+@.claude/snippets/workflows/pr_notifications.md
+@.claude/snippets/workflows/hpc_node_detection.md
+
 ## Repository Overview
 
 NeMo Megatron Bridge is an NVIDIA PyTorch-native library that provides a bridge, conversion, and verification layer between HuggingFace and [Megatron Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core). It enables bidirectional checkpoint conversion, pretraining, SFT, and LoRA for LLM and VLM models with Megatron Core's parallelism (tensor, pipeline, expert parallelism, FP8/BF16 mixed precision).
@@ -89,18 +118,18 @@ Every env var in `pipeline_env_activate.sh` has detailed inline documentation.
 
 ### Installed Versions (verified working)
 
-- **torch 2.11.0+cu126** (aarch64 wheel)
+- **torch 2.12.0+cu126** (aarch64 wheel; pinned in `pyproject.toml`, installed via `uv`)
 - **transformer-engine 2.14.0** (built from pinned commit `71bbefbf`)
 - **mamba-ssm 2.3.1** and **causal-conv1d 1.6.1** (built from source)
 - **nv-grouped-gemm 1.1.4** (built from source)
-- **Python 3.12**, **CUDA 12.6**, **NCCL 2.28.9** (from venv, not system)
+- **Python 3.12**, **CUDA 12.6**, **NCCL 2.29.3** (bundled with torch 2.12.0, from venv not system)
 - **nvidia-resiliency-ext 0.5.0** (`ft_launcher`, fault tolerance, straggler detection)
 
 ### ARM/Isambard-Specific Workarounds
 
 These are critical issues that were discovered and fixed. If the environment breaks or needs rebuilding, all must be applied:
 
-1. **PyTorch install: use `pip`, not `uv pip`**. `uv pip install` silently fails with PyTorch wheel indexes on aarch64.
+1. **PyTorch is installed by `uv`, pinned, from a dedicated index.** torch is a normal pinned dependency (`torch==2.12.0`) routed through the `pytorch-cu126` `[[tool.uv.index]]` via `[tool.uv.sources]` in `pyproject.toml`, so `uv sync` installs it like any other package — no manual `pip` step. (The earlier approach used a manual `pip install` + a `torch; sys_platform=='never'` override; that override made `uv sync` treat torch as extraneous and **prune** it together with its bundled cuDNN, which broke the Transformer-Engine import on a from-scratch rebuild. Routing torch to the index instead keeps it a managed dependency that `uv sync` installs and retains.)
 2. **NCCL LD_PRELOAD** (fixes `undefined symbol: ncclCommShrink`). The system NCCL is older than what torch needs.
 3. **CUDAHOSTCXX=/usr/bin/g++-12** (fixes `fatal error: filesystem: No such file or directory`). System gcc 7.5 lacks C++17.
 4. **NCCL include path for TE build** (fixes `fatal error: nccl.h: No such file or directory`).

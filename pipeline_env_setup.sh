@@ -93,39 +93,18 @@ echo "Virtual environment created at: $VENV_DIR"
 # Phase 3: Install PyTorch (aarch64 + CUDA)
 # ============================================
 echo ""
-echo "=== Phase 3: Installing PyTorch ==="
-# IMPORTANT: uv pip install silently fails with PyTorch wheel indexes on aarch64.
-# We use pip directly for PyTorch installation instead.
-# The pyproject.toml has 'torch; sys_platform == "never"' override, so uv sync
-# will not try to install torch - it expects torch to be pre-installed (container pattern).
-
-echo "Installing torch from cu126 index (aarch64 wheels available)..."
-"$VENV_DIR/bin/pip" install \
-    --index-url https://download.pytorch.org/whl/cu126 \
-    "torch>=2.6.0" 2>&1 | tail -5
-
-if [ $? -ne 0 ]; then
-    echo "ERROR: PyTorch installation failed"
-    exit 1
-fi
-
-# Set up NCCL LD_PRELOAD before any torch import
+echo "=== Phase 3: PyTorch is installed by uv (see Phase 6) ==="
+# torch is a normal *pinned* dependency installed by `uv sync` (Phase 6) from the
+# pytorch-cu126 index — see [tool.uv.sources] in pyproject.toml. There is no manual
+# pip step, and no 'torch; sys_platform == never' override (that override made uv sync
+# treat the pip-installed torch as extraneous and prune it, which broke Transformer-
+# Engine's cuDNN load on a from-scratch rebuild).
+#
+# Define NCCL_LIBRARY / LD_PRELOAD now — they are referenced by the uv sync env and the
+# Phase 7 source builds. The .so itself only appears once uv sync installs torch; until
+# then the loader prints a benign "cannot be preloaded ... ignored" warning.
 export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
 export LD_PRELOAD="$NCCL_LIBRARY"
-
-# Verify PyTorch CUDA works
-echo ""
-echo "Verifying PyTorch installation..."
-LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
-import torch
-print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')
-if torch.cuda.is_available():
-    print(f'  GPU: {torch.cuda.get_device_name(0)}')
-    print(f'  Arch: {torch.cuda.get_device_capability(0)}')
-" || {
-    echo "ERROR: PyTorch CUDA verification failed"
-    exit 1
-}
 
 # ============================================
 # Phase 4: Initialize Megatron-Core submodule
@@ -166,19 +145,9 @@ export NVTE_NCCL_LIB="$VENV_SITE_PACKAGES/nvidia/nccl/lib"
 echo "NCCL library (LD_PRELOAD): $NCCL_LIBRARY"
 echo "cuDNN path: $CUDNN_PATH"
 
-# Create cuDNN header symlinks in PyTorch include directory
-# Required for building transformer-engine from source
-TORCH_INCLUDE="$VENV_SITE_PACKAGES/torch/include"
-CUDNN_INCLUDE="$VENV_SITE_PACKAGES/nvidia/cudnn/include"
-if [ -d "$CUDNN_INCLUDE" ] && [ -d "$TORCH_INCLUDE" ]; then
-    echo "Creating cuDNN header symlinks in PyTorch include directory..."
-    for f in "$CUDNN_INCLUDE"/*.h; do
-        ln -sf "$f" "$TORCH_INCLUDE/$(basename "$f")" 2>/dev/null || true
-    done
-    echo "cuDNN symlinks created"
-else
-    echo "Warning: Could not create cuDNN symlinks (directories not found)"
-fi
+# NOTE: cuDNN header symlinks (into torch/include) are created in Phase 6b, after
+# uv sync installs torch + its bundled cuDNN. They must exist before Phase 7 builds
+# transformer-engine from source.
 
 # ============================================
 # Phase 5b: Install build dependencies
@@ -203,7 +172,10 @@ echo "This may take several minutes..."
 # - megatron-core (editable from 3rdparty/Megatron-LM/)
 # - All pure-Python dependencies
 # - Attempts no-build-isolation packages (TE, mamba-ssm, etc.)
-# The torch override (sys_platform == 'never') means uv skips torch (already installed)
+# torch (pinned, from the pytorch-cu126 index) is now installed and KEPT by uv sync —
+# it is a managed dependency, not pruned. The source-CUDA packages (TE, mamba-ssm, etc.)
+# are deferred with --no-install-package: they must be built with the cuDNN symlinks that
+# Phase 6b creates, so Phase 7 builds them from source instead of uv sync.
 CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 MAX_JOBS=4 \
     TORCH_CUDA_ARCH_LIST="9.0" \
     CUDA_HOME="$CUDA_HOME" \
@@ -213,7 +185,15 @@ CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 MAX_JOBS=4 \
     C_INCLUDE_PATH="$C_INCLUDE_PATH" \
     LIBRARY_PATH="$LIBRARY_PATH" \
     CUDNN_PATH="$CUDNN_PATH" \
-    uv sync 2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
+    uv sync \
+        --no-install-package transformer-engine \
+        --no-install-package transformer-engine-torch \
+        --no-install-package mamba-ssm \
+        --no-install-package causal-conv1d \
+        --no-install-package nv-grouped-gemm \
+        --no-install-package flash_mla \
+        --no-install-package flash-linear-attention \
+        2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
 
 UV_SYNC_EXIT=${PIPESTATUS[0]}
 if [ "$UV_SYNC_EXIT" -ne 0 ]; then
@@ -221,6 +201,53 @@ if [ "$UV_SYNC_EXIT" -ne 0 ]; then
     echo "WARNING: uv sync exited with code $UV_SYNC_EXIT"
     echo "Some packages may have failed to build. Phase 7 will install them individually."
     echo "Full log: /tmp/uv_sync_megatron.log"
+fi
+
+# ============================================
+# Phase 6b: cuDNN symlinks + torch verification (post uv sync)
+# ============================================
+echo ""
+echo "=== Phase 6b: cuDNN symlinks + torch verification ==="
+# torch (and its bundled cuDNN) are now installed by uv sync. Create the cuDNN header
+# symlinks into torch/include that the Phase 7 transformer-engine source build needs.
+TORCH_INCLUDE="$VENV_SITE_PACKAGES/torch/include"
+CUDNN_INCLUDE="$VENV_SITE_PACKAGES/nvidia/cudnn/include"
+if [ -d "$CUDNN_INCLUDE" ] && [ -d "$TORCH_INCLUDE" ]; then
+    echo "Creating cuDNN header symlinks in PyTorch include directory..."
+    for f in "$CUDNN_INCLUDE"/*.h; do
+        ln -sf "$f" "$TORCH_INCLUDE/$(basename "$f")" 2>/dev/null || true
+    done
+    echo "cuDNN symlinks created"
+else
+    echo "ERROR: torch/cuDNN not found after uv sync — uv did not install torch."
+    echo "       Check pyproject.toml [tool.uv.sources] torch routing and the uv sync log."
+    exit 1
+fi
+
+echo "Verifying PyTorch (installed by uv sync)..."
+LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
+import torch
+print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'  GPU: {torch.cuda.get_device_name(0)}')
+    print(f'  Arch: {torch.cuda.get_device_capability(0)}')
+" || {
+    echo "ERROR: PyTorch CUDA verification failed after uv sync"
+    exit 1
+}
+
+# Restore build-only deps that `uv sync` prunes (they are not project dependencies, so
+# uv treats them as extraneous and removes them). Phase 7's no-build-isolation source
+# builds need them at build time: transformer-engine imports pybind11 and uses wheel's
+# legacy setup.py path; numpy/Cython/ninja are used by the other extensions.
+echo "Restoring build deps pruned by uv sync (pybind11, wheel, numpy, Cython, ninja, setuptools)..."
+uv pip install --python "$VENV_PYTHON" pybind11 wheel numpy "Cython>=3.0.0" ninja setuptools 2>&1 | tail -3
+# uv --seed venvs ship no python3-config; symlink it from the base interpreter so the
+# dataset-index helper Megatron JIT-builds at train start gets a correctly-suffixed .so.
+PY_BASE_PREFIX="$("$VENV_PYTHON" -c 'import sys; print(sys.base_prefix)')"
+if [ -x "$PY_BASE_PREFIX/bin/python3-config" ] && [ ! -e "$VENV_DIR/bin/python3-config" ]; then
+    ln -sfn "$PY_BASE_PREFIX/bin/python3-config" "$VENV_DIR/bin/python3-config"
+    echo "Linked python3-config from $PY_BASE_PREFIX"
 fi
 
 # ============================================
