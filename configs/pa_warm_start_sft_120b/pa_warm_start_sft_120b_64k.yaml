@@ -1,9 +1,22 @@
 # Persistent Alignment (GEOD-147) — V1 Warm-Start SFT, Nemotron 3 Super 120B-A12B
 #
-# === 64K TARGET (2^16 = 65,536 tokens) ===
-# Production target: long-context SFT so agentic/SWE trajectories (avg ~51k tokens) aren't
-# truncated. At seq 65536 the pack preserves ~98% of the 2.0B tokens → 32,208 packed rows →
-# 504 train_iters @ GBS=64 (1 epoch).
+# === 64K TARGET (2^16 = 65,536 tokens) — ⚠️ DOES NOT FIT CURRENT ISAMBARD INFRA ⚠️ ===
+# This is the ASPIRATIONAL target (keeps ~98% of the 2.0B tokens, 504 train_iters). It does not
+# currently fit the 95 GB GH200s for this 88-layer hybrid MoE. V1 ships at 32K instead
+# (pa_warm_start_sft_120b_32k.yaml). DO NOT submit this config as-is — it OOMs. Kept as a
+# reference for the follow-up. Investigation (see README "64K investigation"):
+#   - The 64K activation working set is ~40 GB/GPU and is effectively FIXED: with sequence
+#     parallel, activations shard by TP×CP together, and node-locality caps TP×CP ≤ 4. So
+#     CP=2 (this config) shards the sequence exactly like TP4·CP1 — it does not reduce activations
+#     (and CP DOES work on Mamba2 — it reached the training step). Verified across 5 attempts:
+#       PP=16 (invalid: 88 not divisible) · TP4·CP1·PP8 full-recompute (OOM ~2 GB over) ·
+#       TP4·CP1·PP11 (OOM) · TP2·CP2·PP8 (OOM) .
+#   - To fit 64K you must free optimizer/weight memory, which needs ONE of:
+#       (a) CPU optimizer offload to the Grace CPU — the ticket's suggestion, but NOT wired in
+#           this Megatron-Core version (no cpu_offloading_optimizer / offload_fraction);
+#       (b) pipeline_model_parallel_layout to balance the 2×-heavy MoE pipeline stages — not
+#           implemented for Nemotron-H here;
+#       (c) PP=22 (44 nodes) — fits but ~66% pipeline bubble + double the nodes (impractical).
 #
 # --- Parallelism: TP=2, CP=2, EP=4, PP=8, ETP=1 — 16 nodes (64 GPUs), DP=2 ---
 # The design doc's "reduce TP, raise CP" lever. Earlier no-CP attempts (TP4·EP4 with PP=8 and

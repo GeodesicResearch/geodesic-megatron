@@ -13,8 +13,9 @@ to teach those basics.
 
 | File | Seq len | Parallelism | Nodes | Purpose |
 |------|--------:|-------------|------:|---------|
-| `pa_warm_start_sft_120b_8k.yaml`  | 8,192  | TP4·EP4·PP8·CP1·ETP1 (DP2), selective recompute | 16 | De-risk baseline (proven layout). Smoke the data/tokenizer/loss-mask/ckpt path before 64K. |
-| `pa_warm_start_sft_120b_64k.yaml` | 65,536 | TP2·CP2·EP4·PP8·ETP1 (DP2), **full** recompute | 16 | **Production target.** Long-context so agentic/SWE trajectories aren't truncated. CP=2 shards the sequence (the no-CP layouts OOM'd on the 64K activation working set). Falls back to a 32K run if CP is unsupported on Mamba2. |
+| `pa_warm_start_sft_120b_8k.yaml`  | 8,192  | TP4·EP4·PP8 (DP2), selective recompute | 16 | De-risk baseline. Validated the data/tokenizer/loss-mask/ckpt path. |
+| `pa_warm_start_sft_120b_32k.yaml` | 32,768 | TP4·EP4·PP8 (DP2), selective recompute | 16 | **V1 production run.** Proven layout; keeps 86% of the 2B tokens (846 iters). |
+| `pa_warm_start_sft_120b_64k.yaml` | 65,536 | — | — | ⚠️ Aspirational target — **does not fit current infra**. See "64K investigation" below. |
 
 ## Data
 
@@ -73,18 +74,44 @@ assistant-loss density is sane per config (agentic 0.08–0.25 = large system/to
 math/science/chat 0.88–0.996 = assistant reasoning dominates), i.e. a working mask, not an
 all-ones fallback.
 
-## Parallelism rationale (64K)
+## Parallelism (V1 = 32K)
 
-GH200 nodes have 4 GPUs. The hard constraint: **only pipeline-parallel comm may cross nodes**
-(cross-node TP/EP over Slingshot is slow / hangs). The 64K target uses the design doc's
-"reduce TP, raise CP" lever — `TP2 · CP2 · EP4 · PP8` (DP=2, 16 nodes) — with **full activation
-recompute**. The no-CP layouts (TP4·EP4 at PP8 and PP11) OOM'd in the forward/backward: the 64K
-activation working set (~40 GB, dominated by the per-layer recompute peak) is PP-independent, so
-deeper pipelines didn't help. **CP=2 shards the sequence** (each GPU sees ~32K), roughly halving
-that working set. `TP2·CP2 = 4` (attention) and `EP=4` (experts) stay node-local on NVLink; only
-PP crosses Slingshot. This is also the first test of CP on the Mamba2 hybrid — if unsupported,
-fall back to a 32K run on the proven `TP4·EP4·PP8` layout (32768 is already packed; keeps 86% of
-the 2B tokens):
+GH200 nodes have 4 GPUs. Hard constraint: **only pipeline-parallel comm may cross nodes**
+(cross-node TP/EP over Slingshot is slow / hangs). V1 uses the validated 8K layout —
+`TP4 · EP4 · PP8` (DP=2, 16 nodes), TP+EP parallel-folded on NVLink, only PP over Slingshot —
+with selective recompute (`core_attn`, `moe`, `shared_experts`) + activation offload. Pure
+**BF16** (FP8 tensorwise is wrong for 512-expert MoE), **PAO** with BF16 Adam moments. 32K fits
+with wide margin (8K peaked ~42/95 GB; 32K activations are ~4× larger but still well under 95 GB).
+
+## 64K investigation (why V1 ships at 32K)
+
+64K (2^16) is the ticket's ideal length but **does not fit the 95 GB GH200s** for this 88-layer
+hybrid MoE. Five bring-up attempts:
+
+| Attempt | Result |
+|---|---|
+| `PP=16` | Startup error — 88 layers not divisible by 16 (valid PP ∈ {1,2,4,8,11,22,44,88}). |
+| `TP4·EP4·PP8`, full recompute | OOM in forward/backward, **~2 GB over** (81/95 GB used). |
+| `TP4·EP4·PP11`, full recompute | OOM — deeper PP frees per-stage weights but not the activation working set. |
+| `TP2·CP2·EP4·PP8`, full recompute | OOM — **CP works on Mamba2** (reached the training step) but doesn't help (see below). |
+
+**Root cause.** The 64K per-GPU activation working set (~40 GB, dominated by the per-layer
+recompute peak + residuals) is effectively **fixed**: with sequence parallel, activations shard
+by **TP × CP together**, and node-locality caps `TP × CP ≤ 4`. So `TP2·CP2` shards the sequence
+*exactly like* `TP4·CP1` — CP cannot shrink activations without crossing nodes (Slingshot-risky).
+Deeper PP frees weights/optimizer but not this ~40 GB. We're ~2–15 GB short, and the only levers
+that free that memory aren't available here:
+
+- **CPU optimizer offload to the Grace CPU** — the ticket's suggestion — is **not wired in this
+  Megatron-Core version** (no `cpu_offloading_optimizer` / `offload_fraction`; `optimizer_cpu_offload`
+  is a dead field). Implementing it would free ~optimizer state (~15–20 GB) and very likely enable 64K.
+- **`pipeline_model_parallel_layout`** to balance the 2×-heavy MoE pipeline stages — not implemented
+  for Nemotron-H here.
+- **`PP=22` (44 nodes)** fits but adds a ~66% pipeline bubble + doubles nodes — impractical.
+
+**V1 decision:** ship at **32K** (proven layout, keeps 86% of the 2B tokens — long agentic/SWE
+trajectories train on their first 32k tokens). 64K is a tracked follow-up gated on wiring CPU
+optimizer offload (or MoE pipeline-layout balancing) into Megatron-Core.
 
 - **Why not CP.** Node-local CP would force `TP2·CP2` (4 GPUs/node), but `PP` must divide the
   88 layers (`PP ∈ {1,2,4,8,11,22,44,88}` — `PP=16` is rejected at startup), and CP across the
@@ -105,18 +132,18 @@ the 2B tokens):
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
   configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_8k.yaml super sft  train.train_iters=5
 
-# 1) 64K production run (~1 epoch, 504 iters)
-isambard_sbatch --nodes=16 --time=96:00:00 pipeline_training_submit.sbatch \
-  configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_64k.yaml super sft
+# 1) 32K production run (V1, ~1 epoch, 846 iters; QOS caps walltime at 24h — resubmit to resume)
+isambard_sbatch --nodes=16 --time=24:00:00 pipeline_training_submit.sbatch \
+  configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_32k.yaml super sft
 
 # 2) Export Megatron -> HF (single node, reasoning/think, --not-strict for SFT/MTP)
 isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \
-  /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_64k \
+  /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --reasoning --not-strict --tp 1 --ep 4
 
 # 3) Coherence test on the exported HF checkpoint (4 GPUs, logs to W&B)
 isambard_sbatch pipeline_coherence_submit.sbatch \
-  /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_64k/iter_0000504/hf
+  /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k/iter_0000846/hf
 ```
 
 W&B project: `megatron_training` (training) / `megatron_bridge_conversion_coherance_tests` (coherence).
