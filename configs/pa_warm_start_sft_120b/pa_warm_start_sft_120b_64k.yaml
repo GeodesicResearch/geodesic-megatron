@@ -109,12 +109,15 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   first_last_layers_bf16: False
-  # 64K activation memory: recompute attention + MoE + shared experts (Ultra 550B pattern).
-  # Escalate to full recompute if OOM (see ladder above).
-  recompute_granularity: selective
-  recompute_modules: ["core_attn", "moe", "shared_experts"]
-  fine_grained_activation_offloading: true
-  offload_modules: ["expert_fc1", "moe_act"]
+  # First 64K attempt: FULL recompute to maximize fit probability — 64K activations are ~8x the
+  # 8K baseline (which already needed MoE recompute and peaked at ~42 GB / 95 GB). Offload is moot
+  # under full recompute (can't offload recomputed activations), so it's off. If there is ample
+  # headroom + the run is too slow, relax to selective ["core_attn","moe","shared_experts"].
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+  fine_grained_activation_offloading: false
+  offload_modules: []
   mtp_num_layers: null
   use_te_rng_tracker: True
 
