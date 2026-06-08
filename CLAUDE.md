@@ -122,7 +122,7 @@ Every env var in `pipeline_env_activate.sh` has detailed inline documentation.
 - **transformer-engine 2.14.0** (built from pinned commit `71bbefbf`)
 - **mamba-ssm 2.3.1** and **causal-conv1d 1.6.1** (built from source)
 - **nv-grouped-gemm 1.1.4** (built from source)
-- **Python 3.12**, **CUDA 12.6**, **NCCL 2.28.9** (from venv, not system)
+- **Python 3.12**, **CUDA 12.6**, **NCCL 2.29.3** (bundled with torch 2.12.0, from venv not system)
 - **nvidia-resiliency-ext 0.5.0** (`ft_launcher`, fault tolerance, straggler detection)
 
 ### ARM/Isambard-Specific Workarounds
