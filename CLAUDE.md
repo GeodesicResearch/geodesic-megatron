@@ -118,7 +118,7 @@ Every env var in `pipeline_env_activate.sh` has detailed inline documentation.
 
 ### Installed Versions (verified working)
 
-- **torch 2.11.0+cu126** (aarch64 wheel)
+- **torch 2.12.0+cu126** (aarch64 wheel; pinned in `pyproject.toml`, installed via `uv`)
 - **transformer-engine 2.14.0** (built from pinned commit `71bbefbf`)
 - **mamba-ssm 2.3.1** and **causal-conv1d 1.6.1** (built from source)
 - **nv-grouped-gemm 1.1.4** (built from source)
@@ -129,7 +129,7 @@ Every env var in `pipeline_env_activate.sh` has detailed inline documentation.
 
 These are critical issues that were discovered and fixed. If the environment breaks or needs rebuilding, all must be applied:
 
-1. **PyTorch install: use `pip`, not `uv pip`**. `uv pip install` silently fails with PyTorch wheel indexes on aarch64.
+1. **PyTorch is installed by `uv`, pinned, from a dedicated index.** torch is a normal pinned dependency (`torch==2.12.0`) routed through the `pytorch-cu126` `[[tool.uv.index]]` via `[tool.uv.sources]` in `pyproject.toml`, so `uv sync` installs it like any other package — no manual `pip` step. (The earlier approach used a manual `pip install` + a `torch; sys_platform=='never'` override; that override made `uv sync` treat torch as extraneous and **prune** it together with its bundled cuDNN, which broke the Transformer-Engine import on a from-scratch rebuild. Routing torch to the index instead keeps it a managed dependency that `uv sync` installs and retains.)
 2. **NCCL LD_PRELOAD** (fixes `undefined symbol: ncclCommShrink`). The system NCCL is older than what torch needs.
 3. **CUDAHOSTCXX=/usr/bin/g++-12** (fixes `fatal error: filesystem: No such file or directory`). System gcc 7.5 lacks C++17.
 4. **NCCL include path for TE build** (fixes `fatal error: nccl.h: No such file or directory`).
