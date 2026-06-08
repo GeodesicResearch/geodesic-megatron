@@ -99,10 +99,15 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   first_last_layers_bf16: False
-  recompute_granularity: selective
-  recompute_modules: ["core_attn", "moe", "shared_experts"]
-  fine_grained_activation_offloading: true
-  offload_modules: ["expert_fc1", "moe_act"]
+  # FULL recompute. Selective recompute stores the residual+mamba activations, which at 32K push
+  # peak to ~81/95 GB and OOM'd (the 8K->32K jump is +39 GB of stored activations; core_attn
+  # recompute is also a no-op under TE fused attention). Full recompute keeps only layer inputs
+  # (~60 GB) — robust headroom for the full 846-iter run, ~30% slower.
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+  fine_grained_activation_offloading: false
+  offload_modules: []
   mtp_num_layers: null
   use_te_rng_tracker: True
 
