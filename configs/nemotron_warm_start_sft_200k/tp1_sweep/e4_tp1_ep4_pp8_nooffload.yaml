@@ -30,7 +30,7 @@ dataset:
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 60
+  train_iters: 200
   exit_signal_handler: false
 
 optimizer:
@@ -82,9 +82,10 @@ model:
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
   load: /projects/a5k/public/checkpoints/megatron/tp1_sweep/e4_tp1_ep4_pp8_nooffload
-  save: null
+  save: /projects/a5k/public/checkpoints/megatron/tp1_sweep/e4_tp1_ep4_pp8_nooffload
   save_interval: 1000000
   non_persistent_save_interval: 1000000
+  non_persistent_global_ckpt_dir: /projects/a5k/public/checkpoints/megatron/tp1_sweep/e4_tp1_ep4_pp8_nooffload/non_persistent
   ckpt_format: torch_dist
   async_save: false
 

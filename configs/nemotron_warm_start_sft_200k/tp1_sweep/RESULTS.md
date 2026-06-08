@@ -53,4 +53,19 @@ TP comms still nets a win despite that.
 
 ## Findings
 
-_(to be filled in)_
+### Canary (E1, PP=4 offload ON) — validated the path, 2026-06-08
+1. **`srun --overlap` into the tunnel allocation works** on step-free nodes (clean GPUs).
+2. **TP=1/EP=4/PP=4 reshards and loads from the Base-Chat-Init ckpt cleanly**
+   (`successfully loaded checkpoint ... at iteration 0`). Quentin's topology is loadable.
+3. **Per-GPU params ≈ 9.3B** (PP-rank sum over one EP slice = 36.1B). Solving
+   `X + (120−X)/4 = 36.1` ⇒ **non-expert ≈ 8B, experts ≈ 112B (~93% of the model).**
+   → TP only shards the tiny ~8B non-expert part, so **dropping TP 4→1 barely costs
+   memory** (~18 GB weights/GPU at PP=4, huge headroom on 95 GB). This **overturns the
+   "TP=1 forces PP up" worry** — PP can go *low* (PP=2 plausibly fits). The real memory
+   question is now **activations** (what the offload on/off A/B measures), not weights.
+4. **`save: null` is incompatible with the W&B logger** (`state.py:197` does
+   `os.path.join(checkpoint.save, "wandb")` on load) → use a valid save path + huge
+   `save_interval`/`non_persistent_save_interval` + kill before `train_iters` instead.
+   Fixed in the generator; relaunched.
+
+_(throughput numbers below once runs hit steady state)_
