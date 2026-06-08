@@ -5,13 +5,15 @@
 # truncated. At seq 65536 the pack preserves ~98% of the 2.0B tokens → 32,208 packed rows →
 # 504 train_iters @ GBS=64 (1 epoch).
 #
-# --- Parallelism: TP=4, EP=4, PP=8, CP=1, ETP=1 — 16 nodes (64 GPUs), DP=2 ---
-# This is the SAME parallelism the 8K de-risk smoke validated (TP4·EP4·PP8). 64K is reached by
-# FULL activation recompute, not context parallelism:
-#   - Why not CP: node-local CP would require TP=2·CP=2 (4 GPUs/node), but PP must divide the
-#     88 layers (PP∈{1,2,4,8,11,22,44,88}) and CP on the Mamba2 hybrid is unproven here. Full
-#     recompute fits 64K on the proven, lowest-risk layout. CP is a future throughput
-#     optimization (it would shard the unsharded 64K attention), not a correctness requirement.
+# --- Parallelism: TP=4, EP=4, PP=11, CP=1, ETP=1 — 22 nodes (88 GPUs), DP=2 ---
+# Same TP4·EP4 as the validated 8K smoke, but PP=11 (88 layers / 11 = 8 per stage) instead of
+# PP=8. 64K is reached by FULL activation recompute, not context parallelism:
+#   - Why PP=11: TP4·EP4·PP8 (16 nodes) + full recompute OOM'd by ~2 GB at 64K (81/95 GB used in
+#     the forward/backward). PP=11 cuts per-stage weights+optimizer+residuals ~27% (~20 GB) for
+#     ample headroom. PP must divide the 88 layers (PP∈{1,2,4,8,11,22,44,88}).
+#   - Why not CP: node-local CP needs TP=2·CP=2, and CP on the Mamba2 hybrid is unproven here.
+#     Full recompute fits 64K on the proven, lowest-risk layout. CP + ~50% CPU optimizer offload
+#     (ticket suggestions) stay as follow-up throughput/node-count optimizations.
 #   - Only PP point-to-point crosses Slingshot; TP+EP (parallel-folded) stay on NVLink.
 #
 # --- 64K memory: FULL recompute (recompute everything) ---
@@ -25,7 +27,7 @@
 # Data/tokenizer/loss-masking/precision: see pa_warm_start_sft_120b_8k.yaml header.
 #
 # --- Launch ---
-#   isambard_sbatch --nodes=16 --time=96:00:00 pipeline_training_submit.sbatch \
+#   isambard_sbatch --nodes=22 --time=96:00:00 pipeline_training_submit.sbatch \
 #       configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_64k.yaml super sft
 
 # --- Tokenizer ---
@@ -91,10 +93,10 @@ scheduler:
   lr_warmup_iters: 0
   lr_warmup_fraction: 0.05
 
-# --- Model parallelism (== proven 8K smoke layout; full recompute for 64K activations) ---
+# --- Model parallelism (TP4·EP4 like the 8K smoke; PP=11 + full recompute for 64K activations) ---
 model:
   seq_length: 65536
-  pipeline_model_parallel_size: 8
+  pipeline_model_parallel_size: 11
   tensor_model_parallel_size: 4
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1
