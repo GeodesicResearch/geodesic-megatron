@@ -1,33 +1,31 @@
 # Persistent Alignment (GEOD-147) — V1 Warm-Start SFT, Nemotron 3 Super 120B-A12B
 #
 # === 64K TARGET (2^16 = 65,536 tokens) ===
-# This is the production target: long-context SFT so agentic/SWE trajectories (avg ~51k tokens)
-# are not truncated. At seq 65536 the pack preserves ~98% of the 2.0B tokens → 32,208 packed
-# rows → 504 train_iters @ GBS=64 (1 epoch). EXPERIMENTAL: 64K on this hybrid Mamba2+attn+MoE
-# model is new here; bring it up via configs/.../pa_warm_start_sft_120b_8k.yaml first, then climb
-# 16K→32K→64K. The parallelism/memory knobs below are the starting point — expect to tune.
+# Production target: long-context SFT so agentic/SWE trajectories (avg ~51k tokens) aren't
+# truncated. At seq 65536 the pack preserves ~98% of the 2.0B tokens → 32,208 packed rows →
+# 504 train_iters @ GBS=64 (1 epoch).
 #
-# Base model / pretrained ckpt / data / tokenizer / loss-masking / precision: see the 8K config
-# header. Same blend mechanism (packed_train_data_path glob over the 8 pre-packed configs).
+# --- Parallelism: TP=4, EP=4, PP=8, CP=1, ETP=1 — 16 nodes (64 GPUs), DP=2 ---
+# This is the SAME parallelism the 8K de-risk smoke validated (TP4·EP4·PP8). 64K is reached by
+# FULL activation recompute, not context parallelism:
+#   - Why not CP: node-local CP would require TP=2·CP=2 (4 GPUs/node), but PP must divide the
+#     88 layers (PP∈{1,2,4,8,11,22,44,88}) and CP on the Mamba2 hybrid is unproven here. Full
+#     recompute fits 64K on the proven, lowest-risk layout. CP is a future throughput
+#     optimization (it would shard the unsharded 64K attention), not a correctness requirement.
+#   - Only PP point-to-point crosses Slingshot; TP+EP (parallel-folded) stay on NVLink.
 #
-# --- Parallelism: TP=2, CP=2, EP=4, ETP=1, PP=16, DP=2 — 32 nodes (128 GPUs) ---
-# world = TP(2) × CP(2) × PP(16) × DP(2) = 128.  EP=4 | (DP×TP×CP)/ETP = 8.  grad_accum = 32.
-# Node-locality (4 GPUs/node): TP×CP = 4 (attention) AND EP = 4 (experts, parallel-folded) both
-# fit one node → all CP-ring + MoE all-to-all stay on NVLink. ONLY PP point-to-point crosses
-# Slingshot (the ticket's hard requirement). This is the doc's "reduce TP, raise CP" lever.
+# --- 64K memory: FULL recompute (recompute everything) ---
+# 8K smoke peaked ~42/95 GB with selective MoE recompute; full recompute keeps only layer-input
+# residuals (SP-sharded) + a transient per-layer working set, so 64K fits with headroom. Offload
+# is moot under full recompute. If there's ample headroom + the run is too slow, relax toward
+# selective ["core_attn","moe","shared_experts"].
 #
-# --- 64K memory ladder (escalate in this order if OOM during bring-up) ---
-#   1. (set) selective recompute of core_attn + MoE + shared experts (Ultra 550B pattern).
-#   2. (set) CP=2 halves the per-GPU attention sequence to ~32K.
-#   3. (set) PAO BF16 Adam moments; activation offload of expert_fc1/moe_act to Grace.
-#   4. escalate: recompute_granularity=full (recompute_method=uniform, recompute_num_layers=1).
-#   5. escalate: raise PP (20/22) — sheds per-stage params+activations (more nodes / bigger bubble).
-#   6. escalate: broaden offload_modules; or add optimizer CPU offload (optimizer state is small
-#      here — DP=2 + PAO + PP=16 — so activations/recompute are the primary 64K lever, not this).
-#   7. last resort: drop to seq 32768 (already packed; keeps ~86% of tokens) and document.
+# Base model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (Latent MoE, 512 experts, 88 layers)
+# Pretrained ckpt: Super-120B Base-Chat-Init (chat-special embeddings grafted from Instruct).
+# Data/tokenizer/loss-masking/precision: see pa_warm_start_sft_120b_8k.yaml header.
 #
 # --- Launch ---
-#   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
+#   isambard_sbatch --nodes=16 --time=96:00:00 pipeline_training_submit.sbatch \
 #       configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_64k.yaml super sft
 
 # --- Tokenizer ---
@@ -93,14 +91,14 @@ scheduler:
   lr_warmup_iters: 0
   lr_warmup_fraction: 0.05
 
-# --- Model parallelism ---
+# --- Model parallelism (== proven 8K smoke layout; full recompute for 64K activations) ---
 model:
   seq_length: 65536
-  pipeline_model_parallel_size: 16
-  tensor_model_parallel_size: 2
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1
-  context_parallel_size: 2
+  context_parallel_size: 1
   sequence_parallel: True
   gradient_accumulation_fusion: False
   moe_token_dispatcher_type: alltoall
@@ -109,10 +107,8 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   first_last_layers_bf16: False
-  # First 64K attempt: FULL recompute to maximize fit probability — 64K activations are ~8x the
-  # 8K baseline (which already needed MoE recompute and peaked at ~42 GB / 95 GB). Offload is moot
-  # under full recompute (can't offload recomputed activations), so it's off. If there is ample
-  # headroom + the run is too slow, relax to selective ["core_attn","moe","shared_experts"].
+  # FULL recompute — 64K activations are ~8x the 8K baseline. Recompute every layer; keep only
+  # layer-input residuals. Offload is moot under full recompute.
   recompute_granularity: full
   recompute_method: uniform
   recompute_num_layers: 1
@@ -121,12 +117,7 @@ model:
   mtp_num_layers: null
   use_te_rng_tracker: True
 
-# --- Distributed (deep PP first-iter NCCL lazy-init + JIT desync, per Ultra PP=36 bring-up) ---
-dist:
-  distributed_timeout_minutes: 30
-  disable_jit_fuser: true
-
-# --- Checkpointing (non-persistent rolling ckpt every 100 iters for fault recovery) ---
+# --- Checkpointing (non-persistent rolling ckpt every 100 iters; resumable across jobs) ---
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
   load: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_64k

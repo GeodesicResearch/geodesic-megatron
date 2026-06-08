@@ -13,8 +13,8 @@ to teach those basics.
 
 | File | Seq len | Parallelism | Nodes | Purpose |
 |------|--------:|-------------|------:|---------|
-| `pa_warm_start_sft_120b_8k.yaml`  | 8,192  | TP4·EP4·PP8·CP1·ETP1 (DP2)   | 16 | De-risk baseline (proven layout). Smoke the data/tokenizer/loss-mask/ckpt path before 64K. |
-| `pa_warm_start_sft_120b_64k.yaml` | 65,536 | TP2·CP2·EP4·ETP1·PP16 (DP2)  | 32 | **Production target.** Long-context so agentic/SWE trajectories aren't truncated. Experimental — bring up via the ladder in the config header. |
+| `pa_warm_start_sft_120b_8k.yaml`  | 8,192  | TP4·EP4·PP8·CP1·ETP1 (DP2), selective recompute | 16 | De-risk baseline (proven layout). Smoke the data/tokenizer/loss-mask/ckpt path before 64K. |
+| `pa_warm_start_sft_120b_64k.yaml` | 65,536 | TP4·EP4·PP8·CP1·ETP1 (DP2), **full** recompute | 16 | **Production target.** Long-context so agentic/SWE trajectories aren't truncated. Same proven layout as 8K; 64K activations absorbed by full recompute. |
 
 ## Data
 
@@ -76,16 +76,21 @@ all-ones fallback.
 ## Parallelism rationale (64K)
 
 GH200 nodes have 4 GPUs. The hard constraint: **only pipeline-parallel comm may cross nodes**
-(cross-node TP/EP over Slingshot is slow / hangs). At 64K:
+(cross-node TP/EP over Slingshot is slow / hangs). The 64K target uses the **same layout the 8K
+smoke validated** — `TP4 · EP4 · PP8 · CP1` (DP=2, 16 nodes) — and reaches 64K via **full
+activation recompute** rather than context parallelism:
 
-- `TP=2 · CP=2` → attention sharded across the 4 GPUs of one node (TP×CP=4); CP halves the
-  per-GPU sequence to ~32K. `EP=4 · ETP=1` (parallel folding) → experts also fill one node.
-  Both the CP ring and the MoE all-to-all stay on **NVLink**.
-- `PP=16 · DP=2` → 128 GPUs / 32 nodes; only PP point-to-point crosses Slingshot.
+- **Why not CP.** Node-local CP would force `TP2·CP2` (4 GPUs/node), but `PP` must divide the
+  88 layers (`PP ∈ {1,2,4,8,11,22,44,88}` — `PP=16` is rejected at startup), and CP across the
+  Mamba2 layers is unproven here. Full recompute fits 64K on the proven, lowest-risk layout. CP
+  remains a future **throughput** optimization (it would shard the otherwise-unsharded 64K
+  attention), not a correctness requirement.
+- `TP4` (attention) + `EP4` (experts, parallel-folded) fill one node → all MoE all-to-all on
+  **NVLink**; only `PP` point-to-point crosses Slingshot.
 - Pure **BF16** (FP8 tensorwise is the wrong granularity for 512-expert MoE and crashes routing);
-  **PAO** with BF16 Adam moments; selective recompute (escalate to full); activation offload to
-  Grace. The 64K bottleneck is **activations**, not optimizer state (DP=2 + PAO + PP=16 keep
-  optimizer state small) — so recompute/CP/offload are the primary levers, not optimizer offload.
+  **PAO** with BF16 Adam moments; **full** recompute (8K smoke peaked ~42/95 GB with selective
+  MoE recompute — full recompute absorbs the ~8× larger 64K activations). Optimizer offload is
+  unnecessary (DP=2 + PAO keep optimizer state small); the 64K bottleneck is activations.
 
 ## Run
 
@@ -94,8 +99,8 @@ GH200 nodes have 4 GPUs. The hard constraint: **only pipeline-parallel comm may 
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
   configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_8k.yaml super sft  train.train_iters=5
 
-# 1) 64K production run (bring up via the ladder in the config header first)
-isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
+# 1) 64K production run (~1 epoch, 504 iters)
+isambard_sbatch --nodes=16 --time=96:00:00 pipeline_training_submit.sbatch \
   configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_64k.yaml super sft
 
 # 2) Export Megatron -> HF (single node, reasoning/think, --not-strict for SFT/MTP)
