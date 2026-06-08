@@ -146,9 +146,14 @@ checkpoint:
   load: /projects/a5k/public/checkpoints/megatron/nemotron_550b_warm_start_sft_200k_instruct
   save: /projects/a5k/public/checkpoints/megatron/nemotron_550b_warm_start_sft_200k_instruct
   save_interval: 1000000
-  non_persistent_save_interval: 100
-  non_persistent_ckpt_type: global
-  non_persistent_global_ckpt_dir: /projects/a5k/public/checkpoints/megatron/nemotron_550b_warm_start_sft_200k_instruct/non_persistent
+  # Model-only FINAL checkpoint only: no intermediate/non-persistent saves and no optimizer/RNG
+  # state (per user direction + CLAUDE.md checkpoint policy). At 550B an optimizer-state ckpt
+  # would be ~3-4 TB and /projects/a5k runs ~96% full; downstream (HF export, coherence) reads
+  # only model.* keys. Trade-off: a full worker death restarts from iter 0 (the run is short and
+  # now stable); in-process NCCL restarts still lose 0 iters.
+  save_optim: false
+  save_rng: false
+  non_persistent_save_interval: 1000000
   ckpt_format: torch_dist
   async_save: false
 
