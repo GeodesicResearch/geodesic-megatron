@@ -5,16 +5,16 @@
 # truncated. At seq 65536 the pack preserves ~98% of the 2.0B tokens → 32,208 packed rows →
 # 504 train_iters @ GBS=64 (1 epoch).
 #
-# --- Parallelism: TP=4, EP=4, PP=11, CP=1, ETP=1 — 22 nodes (88 GPUs), DP=2 ---
-# Same TP4·EP4 as the validated 8K smoke, but PP=11 (88 layers / 11 = 8 per stage) instead of
-# PP=8. 64K is reached by FULL activation recompute, not context parallelism:
-#   - Why PP=11: TP4·EP4·PP8 (16 nodes) + full recompute OOM'd by ~2 GB at 64K (81/95 GB used in
-#     the forward/backward). PP=11 cuts per-stage weights+optimizer+residuals ~27% (~20 GB) for
-#     ample headroom. PP must divide the 88 layers (PP∈{1,2,4,8,11,22,44,88}).
-#   - Why not CP: node-local CP needs TP=2·CP=2, and CP on the Mamba2 hybrid is unproven here.
-#     Full recompute fits 64K on the proven, lowest-risk layout. CP + ~50% CPU optimizer offload
-#     (ticket suggestions) stay as follow-up throughput/node-count optimizations.
-#   - Only PP point-to-point crosses Slingshot; TP+EP (parallel-folded) stay on NVLink.
+# --- Parallelism: TP=2, CP=2, EP=4, PP=8, ETP=1 — 16 nodes (64 GPUs), DP=2 ---
+# The design doc's "reduce TP, raise CP" lever. Earlier no-CP attempts (TP4·EP4 with PP=8 and
+# PP=11, full recompute) OOM'd in the forward/backward: the 64K activation working set (~40 GB,
+# dominated by the per-layer full-recompute peak + residuals) is PP-independent, so deeper PP
+# didn't help. CP=2 shards the sequence → each GPU sees ~32K → the working set roughly halves.
+#   - Node-locality (4 GPUs/node): TP2×CP2 = 4 (attention) and EP=4 (experts, parallel-folded)
+#     both fit one node → CP ring + MoE all-to-all stay on NVLink. Only PP crosses Slingshot.
+#   - world = TP2×CP2×PP8×DP2 = 64; EP=4 | (DP×TP×CP)/ETP = 8; PP=8 | 88 layers.
+#   - This is also the first real test of context parallelism on the Mamba2 hybrid. If CP is
+#     unsupported there, fall back to a proven 32K run (TP4·EP4·PP8, seq 32768 already packed).
 #
 # --- 64K memory: FULL recompute (recompute everything) ---
 # 8K smoke peaked ~42/95 GB with selective MoE recompute; full recompute keeps only layer-input
@@ -27,7 +27,7 @@
 # Data/tokenizer/loss-masking/precision: see pa_warm_start_sft_120b_8k.yaml header.
 #
 # --- Launch ---
-#   isambard_sbatch --nodes=22 --time=96:00:00 pipeline_training_submit.sbatch \
+#   isambard_sbatch --nodes=16 --time=96:00:00 pipeline_training_submit.sbatch \
 #       configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_64k.yaml super sft
 
 # --- Tokenizer ---
@@ -93,14 +93,14 @@ scheduler:
   lr_warmup_iters: 0
   lr_warmup_fraction: 0.05
 
-# --- Model parallelism (TP4·EP4 like the 8K smoke; PP=11 + full recompute for 64K activations) ---
+# --- Model parallelism (TP2·CP2 node-local + EP4; CP halves the 64K activation working set) ---
 model:
   seq_length: 65536
-  pipeline_model_parallel_size: 11
-  tensor_model_parallel_size: 4
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 2
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1
-  context_parallel_size: 1
+  context_parallel_size: 2
   sequence_parallel: True
   gradient_accumulation_fusion: False
   moe_token_dispatcher_type: alltoall

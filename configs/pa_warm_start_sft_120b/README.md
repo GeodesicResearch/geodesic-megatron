@@ -14,7 +14,7 @@ to teach those basics.
 | File | Seq len | Parallelism | Nodes | Purpose |
 |------|--------:|-------------|------:|---------|
 | `pa_warm_start_sft_120b_8k.yaml`  | 8,192  | TP4·EP4·PP8·CP1·ETP1 (DP2), selective recompute | 16 | De-risk baseline (proven layout). Smoke the data/tokenizer/loss-mask/ckpt path before 64K. |
-| `pa_warm_start_sft_120b_64k.yaml` | 65,536 | TP4·EP4·PP11·CP1·ETP1 (DP2), **full** recompute | 22 | **Production target.** Long-context so agentic/SWE trajectories aren't truncated. TP4·EP4 like 8K; PP=11 + full recompute for the 64K activations (PP=8 OOM'd by ~2 GB). |
+| `pa_warm_start_sft_120b_64k.yaml` | 65,536 | TP2·CP2·EP4·PP8·ETP1 (DP2), **full** recompute | 16 | **Production target.** Long-context so agentic/SWE trajectories aren't truncated. CP=2 shards the sequence (the no-CP layouts OOM'd on the 64K activation working set). Falls back to a 32K run if CP is unsupported on Mamba2. |
 
 ## Data
 
@@ -76,10 +76,15 @@ all-ones fallback.
 ## Parallelism rationale (64K)
 
 GH200 nodes have 4 GPUs. The hard constraint: **only pipeline-parallel comm may cross nodes**
-(cross-node TP/EP over Slingshot is slow / hangs). The 64K target uses the 8K smoke's
-**TP4 · EP4** with a deeper pipeline — `TP4 · EP4 · PP11 · CP1` (DP=2, 22 nodes) — and reaches 64K
-via **full activation recompute** rather than context parallelism (PP=8 OOM'd by ~2 GB; PP=11
-cuts per-stage weights+optimizer+residuals ~27%):
+(cross-node TP/EP over Slingshot is slow / hangs). The 64K target uses the design doc's
+"reduce TP, raise CP" lever — `TP2 · CP2 · EP4 · PP8` (DP=2, 16 nodes) — with **full activation
+recompute**. The no-CP layouts (TP4·EP4 at PP8 and PP11) OOM'd in the forward/backward: the 64K
+activation working set (~40 GB, dominated by the per-layer recompute peak) is PP-independent, so
+deeper pipelines didn't help. **CP=2 shards the sequence** (each GPU sees ~32K), roughly halving
+that working set. `TP2·CP2 = 4` (attention) and `EP=4` (experts) stay node-local on NVLink; only
+PP crosses Slingshot. This is also the first test of CP on the Mamba2 hybrid — if unsupported,
+fall back to a 32K run on the proven `TP4·EP4·PP8` layout (32768 is already packed; keeps 86% of
+the 2B tokens):
 
 - **Why not CP.** Node-local CP would force `TP2·CP2` (4 GPUs/node), but `PP` must divide the
   88 layers (`PP ∈ {1,2,4,8,11,22,44,88}` — `PP=16` is rejected at startup), and CP across the
@@ -101,7 +106,7 @@ isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
   configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_8k.yaml super sft  train.train_iters=5
 
 # 1) 64K production run (~1 epoch, 504 iters)
-isambard_sbatch --nodes=22 --time=96:00:00 pipeline_training_submit.sbatch \
+isambard_sbatch --nodes=16 --time=96:00:00 pipeline_training_submit.sbatch \
   configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_64k.yaml super sft
 
 # 2) Export Megatron -> HF (single node, reasoning/think, --not-strict for SFT/MTP)
