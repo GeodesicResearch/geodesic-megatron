@@ -67,11 +67,25 @@ the constraint is **activations**.
 
 ### Wave 3 — TP=1, make it fit + measure (log_params_norm OFF)
 
-| Exp | TP | PP | recompute | result | s/iter | TFLOP/s/GPU | vs baseline |
-|-----|----|----|-----------|--------|--------|-------------|-------------|
-| V1 | 1 | 8 | MoE (no param-norm) | running | … | … | |
-| V2 | 1 | 8 | **full** | running | … | … | |
-| V3 | 1 | 4 | **full** | running | … | … | |
+| Exp | TP | PP | recompute | result | OOM site |
+|-----|----|----|-----------|--------|----------|
+| V1 | 1 | 8 | MoE (no param-norm) | **OOM** | total exhaustion (128 KB calloc fails) |
+| V2 | 1 | 8 | **full** | **OOM** | MoE all-to-all **dispatch buffer** (`token_dispatcher`, 942 MiB, 170 free) |
+| V3 | 1 | 4 | **full** | **OOM** | **PP p2p comm** buffer (`p2p_communication`, 344 MiB, 146 free) |
+
+**Even full recompute OOMs.** In every TP=1 run the GPU sat at **~94.8 / 95 GB** before
+the fatal alloc, vs the **baseline's 54.6 GB**. Recompute removes *stored* activations but
+**cannot shrink the transient MoE all-to-all dispatch buffer** (V2) or PP comm buffer (V3),
+and the un-sharded base footprint (weights + optimizer + Mamba states, none TP-sharded at
+TP=1) is already ~94 GB. **TP=1 cannot fit on 95 GB GH200 for this model at seq=8192 — full
+stop, at any PP, with any recompute/offload setting.**
+
+### Wave 4 — TP=2 (keeps SP): the fitting version of "reduce TP"
+
+| Exp | TP | PP | recompute | result | s/iter | TFLOP/s/GPU | vs baseline (24.2) |
+|-----|----|----|-----------|--------|--------|-------------|--------------------|
+| X1 | 2 | 8 | core_attn | running | … | … | |
+| X2 | 2 | 8 | +moe,shared_experts | running | … | … | |
 
 ## Findings
 
