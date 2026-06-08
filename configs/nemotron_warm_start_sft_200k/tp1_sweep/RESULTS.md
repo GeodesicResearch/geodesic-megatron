@@ -46,7 +46,7 @@ TP comms still nets a win despite that.
 
 | Exp | TP | PP | offload | loaded? | result | where |
 |-----|----|----|---------|---------|--------|-------|
-| E0 baseline | 4 | 8 | on | yes | warming up (DP=2, slow first-iter @16 nodes) | — |
+| **E0 baseline** | 4 | 8 | on | yes | **✅ 25.6 s/iter · 24.2 TFLOP/s/GPU · MFU 2.4% · peak 54.6 GB** | reference |
 | E1 | 1 | 4 | on  | yes | **OOM** | first fwd/bwd |
 | E2 | 1 | 4 | off | yes | **OOM** | MoE token permute (94.7/95 GB) |
 | E3 | 1 | 8 | on  | yes | **OOM** | — |
@@ -59,11 +59,19 @@ the constraint is **activations**.
 
 ### Wave 2 — TP=1 + MoE recompute `[core_attn, moe, shared_experts]` (Ultra's set)
 
-| Exp | TP | PP | recompute | offload | result | s/iter | TFLOP/s/GPU |
-|-----|----|----|-----------|---------|--------|--------|-------------|
-| W1 | 1 | 8 | +moe,shared_experts | off | running (canary) | … | … |
-| W2 | 1 | 4 | +moe,shared_experts | off | pending | | |
-| W3 | 1 | 8 | +moe,shared_experts | on  | pending | | |
+| Exp | TP | PP | recompute | offload | result | note |
+|-----|----|----|-----------|---------|--------|------|
+| W1 | 1 | 8 | +moe,shared_experts | off | **OOM (marginal)** | got *past* MoE-permute (recompute worked) but died on `calc_params_l2_norm`'s 128-byte alloc → **zero headroom at PP=8** |
+
+**MoE recompute helped but PP=8 is still jammed against 95 GB.** W2/W3 superseded by wave 3.
+
+### Wave 3 — TP=1, make it fit + measure (log_params_norm OFF)
+
+| Exp | TP | PP | recompute | result | s/iter | TFLOP/s/GPU | vs baseline |
+|-----|----|----|-----------|--------|--------|-------------|-------------|
+| V1 | 1 | 8 | MoE (no param-norm) | running | … | … | |
+| V2 | 1 | 8 | **full** | running | … | … | |
+| V3 | 1 | 4 | **full** | running | … | … | |
 
 ## Findings
 
