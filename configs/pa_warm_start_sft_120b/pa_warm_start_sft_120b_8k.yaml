@@ -114,8 +114,12 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   first_last_layers_bf16: False
+  # Recompute attention AND MoE + shared-expert forward activations. The dense agentic packs
+  # route every 8192-token microbatch through the 512-expert grouped GEMM; recomputing only
+  # core_attn left the MoE forward activations to OOM (observed on the first smoke). This is
+  # the Ultra 550B pattern.
   recompute_granularity: selective
-  recompute_modules: ["core_attn"]
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
   fine_grained_activation_offloading: true
   offload_modules: ["expert_fc1", "moe_act"]
   mtp_num_layers: null
