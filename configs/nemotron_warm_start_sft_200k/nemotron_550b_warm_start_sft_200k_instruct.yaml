@@ -98,7 +98,7 @@ ddp:
 # Default process-group timeout is 10 min; first-iter NCCL lazy init at PP=36 can exceed
 # it, so raise to 30 min (matches the launcher's TORCH_NCCL_TIMEOUT=1800 watchdog).
 dist:
-  distributed_timeout_minutes: 30
+  distributed_timeout_minutes: 90  # raised from 30: deep-PP first-iter lazy NCCL comm-init exceeded the 30-min per-collective cap on the busy tunnel fabric
   # ROOT-CAUSE FIX for the first-step hang at PP=36 (see docs/investigations/
   # ultra-pipeline-init-hang-debug-log.md). Megatron's jit_fuser resolves to
   # torch.compile on torch>=2.2 (we run 2.11); the @jit_fuser-decorated fused ops
