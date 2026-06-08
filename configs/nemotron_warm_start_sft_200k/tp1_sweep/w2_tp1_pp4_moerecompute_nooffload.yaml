@@ -1,0 +1,95 @@
+# AUTO-GENERATED wave-2 — TP=1 + MoE recompute, find the fitting frontier
+# w2_tp1_pp4_moerecompute_nooffload: TP=1, EP=4, PP=4, ETP=1, CP=1, SP=False
+#   recompute_modules=["core_attn", "moe", "shared_experts"], activation_offload=False
+# Wave-1: selective core_attn recompute OOMs at every PP for TP=1 (no SP -> 4x acts).
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 200
+  exit_signal_handler: false
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+  fine_grained_activation_offloading: false
+  offload_modules: []
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints/megatron/tp1_sweep/w2_tp1_pp4_moerecompute_nooffload
+  save: /projects/a5k/public/checkpoints/megatron/tp1_sweep/w2_tp1_pp4_moerecompute_nooffload
+  save_interval: 1000000
+  non_persistent_save_interval: 1000000
+  non_persistent_global_ckpt_dir: /projects/a5k/public/checkpoints/megatron/tp1_sweep/w2_tp1_pp4_moerecompute_nooffload/non_persistent
+  ckpt_format: torch_dist
+  async_save: false
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 999999
+  log_memory_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: tp1sweep_w2_tp1_pp4_moerecompute_nooffload

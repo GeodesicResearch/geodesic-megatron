@@ -42,14 +42,28 @@ TP comms still nets a win despite that.
 
 ## Status / Results (live)
 
-| Exp | launched | loaded? | first-iter | steady s/iter | TFLOP/s/GPU | peak mem | fits? | notes |
-|-----|----------|---------|-----------|---------------|-------------|---------|-------|-------|
-| E1 | yes (smoke) | … | … | … | … | … | … | warming up |
-| E0 | pending | | | | | | | |
-| E2 | pending | | | | | | | |
-| E3 | pending | | | | | | | |
-| E4 | pending | | | | | | | |
-| E5 | pending | | | | | | | |
+### Wave 1 — TP=1, selective `core_attn` recompute (the literal Quentin recipe)
+
+| Exp | TP | PP | offload | loaded? | result | where |
+|-----|----|----|---------|---------|--------|-------|
+| E0 baseline | 4 | 8 | on | yes | warming up (DP=2, slow first-iter @16 nodes) | — |
+| E1 | 1 | 4 | on  | yes | **OOM** | first fwd/bwd |
+| E2 | 1 | 4 | off | yes | **OOM** | MoE token permute (94.7/95 GB) |
+| E3 | 1 | 8 | on  | yes | **OOM** | — |
+| E4 | 1 | 8 | off | yes | **OOM** | — |
+| E5 | 1 | 2 | on  | no  | **OOM** | before load (44 layers/stage) |
+
+**Every TP=1 config OOMs — PP=2,4,8, with and without offload.** Offloading expert
+activations does NOT prevent it (E1≈E2, E3≈E4). Weights fit trivially (~18 GB/GPU);
+the constraint is **activations**.
+
+### Wave 2 — TP=1 + MoE recompute `[core_attn, moe, shared_experts]` (Ultra's set)
+
+| Exp | TP | PP | recompute | offload | result | s/iter | TFLOP/s/GPU |
+|-----|----|----|-----------|---------|--------|--------|-------------|
+| W1 | 1 | 8 | +moe,shared_experts | off | running (canary) | … | … |
+| W2 | 1 | 4 | +moe,shared_experts | off | pending | | |
+| W3 | 1 | 8 | +moe,shared_experts | on  | pending | | |
 
 ## Findings
 
@@ -68,4 +82,19 @@ TP comms still nets a win despite that.
    `save_interval`/`non_persistent_save_interval` + kill before `train_iters` instead.
    Fixed in the generator; relaunched.
 
-_(throughput numbers below once runs hit steady state)_
+### Wave 1 result — TP=1 OOMs everywhere; the mechanism is SP, not weights
+- **TP=1 ⇒ `sequence_parallel` must be False ⇒ activations are no longer sharded across
+  the (former) 4 TP ranks.** So per-GPU activation memory is **~4× the TP=4+SP baseline.**
+  The MoE token-permute intermediate (scales with tokens×topk×hidden, now unsharded) is
+  what tips it over — E2's OOM is exactly there.
+- **Offloading expert activations does not rescue it** (E1 vs E2 and E3 vs E4 both OOM).
+  Offload moves *stored* activations to CPU, but the transient permute buffer still has to
+  be materialized on-GPU. So offload is not the lever for TP=1; **recompute is.**
+- This is the concrete cost of Quentin's TP=1 idea on this model: you trade TP communication
+  for a large activation-memory bill that must be paid back with recompute (a compute tax).
+  Whether that nets faster than the TP=4+SP baseline is exactly what wave 2 measures.
+- Corroborated by NVIDIA's own Ultra 550B config: it runs TP-low/EP folding with
+  `recompute_modules:[core_attn,moe,shared_experts]` and **offload OFF** — with the comment
+  "superseded by MoE recompute (can't offload recomputed activations)."
+
+_(wave-2 throughput numbers below once runs hit steady state)_
