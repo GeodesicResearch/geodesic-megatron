@@ -1,25 +1,26 @@
 # Persistent Alignment (GEOD-147) — V1 Warm-Start SFT, Nemotron 3 Super 120B-A12B
 #
-# === 64K TARGET (2^16 = 65,536 tokens) via CROSS-NODE CONTEXT PARALLELISM ===
+# === 64K TARGET (2^16 = 65,536 tokens) via CPU ACTIVATION OFFLOADING (Grace CPU) ===
 # Production target: keeps ~98% of the 2.0B tokens (32,208 packed rows → 504 train_iters).
 #
-# --- Parallelism: TP=4, CP=2, EP=4, PP=8, ETP=1 — 32 nodes (128 GPUs), DP=2 ---
-# The 64K per-GPU activation working set (~40 GB) shards by TP×CP. Node-local layouts cap
-# TP×CP=4 and OOM (see README "64K investigation"). This config sets **TP×CP=8** by letting CP=2
-# span two nodes — halving activations to ~20 GB → ~70 GB total, fits.
-#   - Why cross-node CP can work where cross-node TP/EP can't: CP communicates via a point-to-point
-#      KV **ring** (rank→rank sendrecv, like PP), NOT a collective (TP all-reduce / EP all-to-all).
-#     The Slingshot hangs we've seen are from those collectives; P2P (PP, and CP's ring) is tolerated.
-#   - TP=4 + EP=4 (parallel-folded) stay node-local on NVLink; the CP ring and PP cross Slingshot
-#     (both point-to-point). world = TP4×CP2×PP8×DP2 = 128; EP=4 | (DP×TP×CP)/ETP = 16; PP=8 | 88.
-#   - RISK: the CP ring runs every attention layer (more cross-node traffic than PP), so it may be
-#     slow — but it should not hang. If it hangs, fall back to the 32K V1 (…_32k.yaml).
+# --- Parallelism: TP=4, EP=4, PP=8, CP=1, ETP=1 — 16 nodes (64 GPUs), DP=2 ---
+# Proven node-local layout (the 8K smoke's). 64K is reached by OFFLOADING the activation working
+# set (~40 GB/GPU) to the integrated Grace CPU over NVLink-C2C (900 GB/s) — the ticket's intended
+# approach — rather than recomputing it (full recompute OOM'd by ~2 GB at 64K, see git history).
+#   - `fine_grained_activation_offloading` is module-level offload that works WITH PP>1 (the stock
+#     layer-level `cpu_offloading` is forbidden with PP>1 and with recompute). Requires TE +
+#     NVTE_CPU_OFFLOAD_V1=1 (set in pipeline_env_activate.sh).
+#   - We offload the FULL allowed set — the big 64K activations are the attention QKV/proj + MoE
+#     FFN (the 8K config only offloaded expert_fc1/moe_act). Residual + Mamba states (not
+#     offloadable) stay on-GPU (~10 GB). Expected peak ~65-70 GB.
+#   - TP4 + EP4 stay node-local on NVLink; only PP crosses Slingshot. No CP, no recompute.
+#   - If still OOM: add selective recompute for the non-offloaded remainder, or raise PP (more
+#     nodes — Kyle OK'd that). If offload D2H is too slow: it overlaps with compute on Grace.
 #
-# --- 64K memory: FULL recompute (CP=2 already ~halves the working set) ---
 # Base model / pretrained ckpt / data / tokenizer / loss-masking: see …_8k.yaml header.
 #
 # --- Launch ---
-#   isambard_sbatch --nodes=32 --time=24:00:00 pipeline_training_submit.sbatch \
+#   isambard_sbatch --nodes=16 --time=24:00:00 pipeline_training_submit.sbatch \
 #       configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_64k.yaml super sft
 
 # --- Tokenizer ---
@@ -85,14 +86,14 @@ scheduler:
   lr_warmup_iters: 0
   lr_warmup_fraction: 0.05
 
-# --- Model parallelism (TP4·CP2 = 8-way sequence sharding; CP ring crosses nodes) ---
+# --- Model parallelism (proven node-local TP4·EP4·PP8; activation offload for 64K) ---
 model:
   seq_length: 65536
   pipeline_model_parallel_size: 8
   tensor_model_parallel_size: 4
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1
-  context_parallel_size: 2
+  context_parallel_size: 1
   sequence_parallel: True
   gradient_accumulation_fusion: False
   moe_token_dispatcher_type: alltoall
@@ -101,15 +102,16 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   first_last_layers_bf16: False
-  recompute_granularity: full
-  recompute_method: uniform
-  recompute_num_layers: 1
-  fine_grained_activation_offloading: false
-  offload_modules: []
+  # CPU activation offload to the Grace CPU (the full allowed set: attention QKV/proj/core +
+  # norms + MoE FFN). Frees the ~40 GB 64K activation working set. No recompute (offloaded
+  # activations would be re-materialized by recompute, defeating it).
+  fine_grained_activation_offloading: true
+  offload_modules: ["core_attn", "attn_proj", "qkv_linear", "expert_fc1", "moe_act", "attn_norm", "mlp_norm"]
+  recompute_granularity: null
   mtp_num_layers: null
   use_te_rng_tracker: True
 
-# --- Distributed (deeper cross-node comm: raise NCCL timeout for the CP ring first-iter init) ---
+# --- Distributed ---
 dist:
   distributed_timeout_minutes: 30
 
