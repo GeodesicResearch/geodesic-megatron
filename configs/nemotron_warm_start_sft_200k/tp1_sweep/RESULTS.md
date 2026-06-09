@@ -82,10 +82,49 @@ stop, at any PP, with any recompute/offload setting.**
 
 ### Wave 4 — TP=2 (keeps SP): the fitting version of "reduce TP"
 
-| Exp | TP | PP | recompute | result | s/iter | TFLOP/s/GPU | vs baseline (24.2) |
-|-----|----|----|-----------|--------|--------|-------------|--------------------|
-| X1 | 2 | 8 | core_attn | running | … | … | |
-| X2 | 2 | 8 | +moe,shared_experts | running | … | … | |
+| Exp | TP | PP | recompute | result | s/iter | TFLOP/s/GPU | peak GB |
+|-----|----|----|-----------|--------|--------|-------------|---------|
+| X1 | 2 | 8 | core_attn | **OOM** | — | — | MoE dispatcher |
+| **X2** | 2 | 8 | +moe,shared_experts | **✅ FITS** | **17.5** | **70.6** | **57.4** |
+
+**TP=2 + MoE recompute is the winner.** Same GBS=64 on *half* the GPUs (32 vs 64),
+*faster* per step (17.5 vs 25.6 s), **2.9× the per-GPU throughput** of the TP=4 baseline.
+TP=2 still needs MoE recompute (X1, with only core_attn, OOMs) — losing half the SP
+sharding vs TP=4 costs activation memory, but MoE recompute covers it at 57 GB.
+
+---
+
+## ✅ Conclusions
+
+| Config | TP | fits? | s/iter | TFLOP/s/GPU | MFU | tok/s/GPU | peak GB |
+|--------|----|-------|--------|-------------|-----|-----------|---------|
+| Baseline (instruct) | 4 | ✅ | 25.6 (64 GPU) | 24.2 | 2.4% | 320 | 54.6 |
+| **TP=2 + MoE recompute** | 2 | ✅ | **17.5 (32 GPU)** | **70.6** | **7.1%** | **935** | 57.4 |
+| Quentin's TP=1 (any PP/recompute/offload) | 1 | ❌ **OOM** | — | — | — | — | >95 |
+
+1. **Quentin's literal TP=1 recommendation does not fit** on 95 GB GH200 for 120B @
+   seq=8192 — at PP=2/4/8, with selective/MoE/full recompute, ± CPU offload. Root cause:
+   TP=1 ⇒ no sequence parallel ⇒ weights, optimizer, Mamba states **and** activations are
+   all un-sharded along the TP axis (~4× the TP=4 footprint); the fatal piece is the
+   **transient MoE all-to-all dispatch buffer**, which recompute and offload cannot shrink.
+2. **The offload on/off question is therefore moot for TP=1** — both sides OOM. Offloading
+   moves *stored* activations to CPU but cannot reduce the transient comm/dispatch buffers.
+3. **But the direction of Quentin's advice is right.** The TP=4 baseline over-shards (MFU
+   2.4%). **TP=2 + MoE recompute gives 2.9× the per-GPU throughput** and fits at 57 GB —
+   use [`...instruct_tp2.yaml`](../nemotron_120b_warm_start_sft_200k_instruct_tp2.yaml).
+4. **Further upside (untested here):** MFU is still only 7.1% — the PP=8 1F1B bubble
+   (GBS=64/DP=2 ⇒ 32 microbatches) and MoE-stage imbalance remain. Raising GBS and/or
+   `pipeline_model_parallel_layout` should push it higher; that's a throughput follow-on,
+   independent of the TP question answered here.
+
+### Method caveats (honesty)
+- All runs node-exclusive on step-free nodes in the tunnel allocation (no contention).
+- Throughput compared as **per-GPU** (TFLOP/s/GPU from `log_throughput`, and wall-clock
+  tok/s/GPU which is FLOP-formula-independent) — valid across the different GPU counts.
+- TP=2 carries an MoE-recompute compute tax the TP=4 baseline doesn't; it wins on *useful*
+  tok/s/GPU **despite** that tax, so the 2.9× is if anything conservative.
+- GBS=64, seq=8192 held fixed throughout. Baseline measured here at GBS=64 (25.6 s);
+  the design doc's 40 s was at GBS=128 — consistent.
 
 ## Findings
 

@@ -1,0 +1,127 @@
+# Nemotron 3 Super 120B-A12B — Warm-start SFT, INSTRUCT, **TP=2 throughput variant**
+#
+# Outcome of the TP1 sweep (configs/.../tp1_sweep/RESULTS.md, 2026-06-08):
+#   Quentin's TP=1 recommendation does NOT fit on 95 GB GH200 at seq=8192 (OOMs at every
+#   PP, every recompute level, ± offload — TP=1 forfeits all TP/SP sharding). But the
+#   *direction* (reduce TP) is right: **TP=2 + MoE recompute is ~2.9× the per-GPU
+#   throughput of the TP=4 baseline** (70.6 vs 24.2 TFLOP/s/GPU; 935 vs 320 tok/s/GPU;
+#   peak 57.4 GB), processing the same GBS on half the GPUs.
+#
+# Changes vs nemotron_120b_warm_start_sft_200k_instruct.yaml (the TP=4 baseline):
+#   - tensor_model_parallel_size: 4 -> 2          (the win; SP still on)
+#   - recompute_modules: +moe,shared_experts       (REQUIRED — TP=2 loses half the SP
+#                                                    activation sharding; MoE recompute
+#                                                    is what makes it fit at 57 GB)
+#   - fine_grained_activation_offloading: false    (superseded by MoE recompute — you
+#     offload_modules: []                           can't offload recomputed activations)
+#
+# --- Parallelism: TP=2, EP=4, PP=8, CP=1, ETP=1 (parallel folding); DP scales with nodes ---
+#   8 nodes / 32 GPUs -> DP=2.  16 nodes -> DP=4.  EP=4 stays node-local (TP=2 x EP=4 fold).
+#
+# --- Launch ---
+#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
+#       configs/nemotron_warm_start_sft_200k/nemotron_120b_warm_start_sft_200k_instruct_tp2.yaml super sft
+
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# train_iters = ceil(259,299,352 / (64 * 8192)) = 495 (1 epoch, no_think, instruct tokenizer)
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 495
+  exit_signal_handler: true
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+  fine_grained_activation_offloading: false
+  offload_modules: []
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_120b_warm_start_sft_200k_instruct_tp2
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_120b_warm_start_sft_200k_instruct_tp2
+  save_interval: 1000000
+  non_persistent_save_interval: 100
+  non_persistent_ckpt_type: global
+  non_persistent_global_ckpt_dir: /projects/a5k/public/checkpoints/megatron/nemotron_120b_warm_start_sft_200k_instruct_tp2/non_persistent
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 999999
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_120b_warm_start_sft_200k_instruct_tp2
