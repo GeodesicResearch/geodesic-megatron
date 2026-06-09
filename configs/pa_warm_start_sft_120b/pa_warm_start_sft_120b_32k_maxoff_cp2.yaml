@@ -1,0 +1,159 @@
+# Persistent Alignment (GEOD-147) — V1 Warm-Start SFT, Nemotron 3 Super 120B-A12B
+#
+# === 8K DE-RISK BASELINE ===
+# This config trains at the proven 8,192-token sequence length on the PA mix. It exists to
+# de-risk the data + tokenizer + loss-mask + checkpoint-load path on a known-good parallelism
+# layout BEFORE attempting the harder 64K-sequence target (see ..._64k.yaml). Smoke it with a
+# few iters first:  ... super sft  train.train_iters=5
+#
+# Base model: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (Latent MoE, 512 experts, 88 layers)
+# Pretrained ckpt: Super-120B Base with chat-special token embeddings grafted from Super-Instruct
+#   (scripts/init_super_base_chat_embeddings.py). Plain Base + chat tokenizer Inf's at iter 2.
+#
+# Data: geodesic-research/pa-warm-start-2B-sft-mix — 8 configs, ~2.0B tokens, 100% reasoning,
+#   ~60% agentic. Blended by pointing packed_train_data_path at the 8 pre-packed configs (the
+#   GPTSFTPackedParquetDataset concatenates all resolved shards). At seq 32768 only ~62% of the
+#   2B tokens survive packing (long agentic/SWE docs truncate) → 181,369 packed rows.
+#
+# Tokenizer: geodesic-research/nemotron-think-tokenizer-prefill-parity
+#   - Same 131,072-vocab encoder as nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (byte-identical).
+#   - Renders reasoning_content as <think>...</think>; renders tools / tool-calls / tool-results.
+#   - Has {% generation %} markers so answer_only_loss=true masks loss to assistant turns only.
+#
+# Loss masking: ALL assistant turns (system/user/tool masked). NVIDIA Nemotron SFT guidance:
+#   "user turns are masked and loss is only calculated on assistant turns" (every assistant turn).
+#
+# Precision: Pure BF16 (FP8 tensorwise is wrong granularity for MoE with 512 experts).
+#
+# --- Parallelism: TP=4, EP=4, PP=8, CP=1, ETP=1 (parallel folding) — 16 nodes (64 GPUs) ---
+# DP_pure=2, grad_accum=32. Parallel folding: EP folded into TP, all MoE all-to-all on NVLink;
+# only PP point-to-point crosses Slingshot.
+#
+# --- Launch ---
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_32k_maxoff_cp2.yaml super sft
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer-prefill-parity
+
+# --- Dataset (8-config blend via packed_train_data_path glob; see pipeline_training_run.py) ---
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-2B-sft-mix
+  # Blend root holds only a 1-row placeholder training.jsonl so HFDatasetBuilder's preprocess
+  # skips (rewrite=false); the real data is the 8-config glob in packed_train_data_path below.
+  dataset_root: /projects/a5k/public/data/pa-warm-start-2B-sft-mix-blend
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    packed_train_data_path: "/projects/a5k/public/data/geodesic-research__pa-warm-start-2B-sft-mix__*/packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult1/training_32768.idx.parquet"
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# train_iters = ceil(181,369 packed rows / GBS 64) = 2,834 (1 epoch at seq 32768)
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 846
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP (overlap_param_gather OFF for Nemotron-H DP>1) ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model parallelism ---
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 2
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  # Recompute attention AND MoE + shared-expert forward activations. The dense agentic packs
+  # route every 32768-token microbatch through the 512-expert grouped GEMM; recomputing only
+  # core_attn left the MoE forward activations to OOM (observed on the first smoke). This is
+  # the Ultra 550B pattern.
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_maxoff_cp2
+  save: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_maxoff_cp2
+  save_interval: 1000000
+  non_persistent_save_interval: 100
+  non_persistent_ckpt_type: global
+  non_persistent_global_ckpt_dir: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_maxoff_cp2/non_persistent
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: pa_warm_start_sft_120b_32k_maxoff_cp2
