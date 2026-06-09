@@ -53,9 +53,9 @@ dataset:
   rewrite: false
   packed_sequence_specs:
     packed_sequence_size: 65536
-    pad_seq_to_mult: 1
+    pad_seq_to_mult: 32
     num_tokenizer_workers: 1
-    packed_train_data_path: "/projects/a5k/public/data/geodesic-research__pa-warm-start-2B-sft-mix__*/packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult1/training_65536.idx.parquet"
+    packed_train_data_path: "/projects/a5k/public/data/geodesic-research__pa-warm-start-2B-sft-mix__*/packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult32/training_65536.idx.parquet"
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
@@ -63,7 +63,7 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# train_iters = ceil(181,369 packed rows / GBS 64) = 2,834 (1 epoch at seq 65536)
+# train_iters: recompute from the mult32 packs' 65536_metadata.jsonl row counts (~504 at GBS 64)
 train:
   global_batch_size: 64
   micro_batch_size: 1

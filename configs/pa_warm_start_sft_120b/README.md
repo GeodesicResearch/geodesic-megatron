@@ -13,9 +13,10 @@ to teach those basics.
 
 | File | Seq len | Parallelism | Nodes | Purpose |
 |------|--------:|-------------|------:|---------|
-| `pa_warm_start_sft_120b_8k.yaml`  | 8,192  | TP4·EP4·PP8 (DP2), selective recompute | 16 | De-risk baseline. Validated the data/tokenizer/loss-mask/ckpt path. |
-| `pa_warm_start_sft_120b_32k.yaml` | 32,768 | TP4·EP4·PP8 (DP2), selective recompute | 16 | **V1 production run.** Proven layout; keeps 86% of the 2B tokens (846 iters). |
-| `pa_warm_start_sft_120b_64k.yaml` | 65,536 | — | — | ⚠️ Aspirational target — **does not fit current infra**. See "64K investigation" below. |
+| `pa_warm_start_sft_120b_8k.yaml`     | 8,192  | TP4·EP4·PP8 (DP2) | 16 | De-risk baseline. Validated data/tokenizer/loss-mask/ckpt path end-to-end. |
+| `pa_warm_start_sft_120b_8k_tp1.yaml` | 8,192  | TP1·EP4·PP8 (DP4) | 8  | TP=1 throughput variant (frees NVLink from the TP all-reduce for the EP all-to-all). |
+| `pa_warm_start_sft_120b_32k_v2.yaml` | 32,768 | TP1·**CP8**·EP4·PP8 (DP1), max activation offload | 16 | **V1 production run** (846 iters, 86% of the 2B tokens). Requires the `pad_seq_to_mult16` packs — see below. |
+| `pa_warm_start_sft_120b_64k_tp1.yaml`| 65,536 | TP1·CP8·EP4·PP11 | 22+ | Stretch (ticket target). Requires `pad_seq_to_mult32` packs; attempt only after 32K is green. |
 
 ## Data
 
@@ -36,11 +37,23 @@ collection from NVIDIA Nemotron-SFT sources; full provenance in the dataset card
 | `instruction_following` | Nemotron-SFT-IFC-v3 / instruction_following | 76,344 | 250,000,327 |
 | **TOTAL** | | **291,231** | **2,000,001,136** |
 
-Pre-packed at seq 8192 / 16384 / 32768 / 65536 under each config's
-`packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult1/`. Packed-token
-yield: 8K 62% · 16K 72% · 32K 86% · **64K 98%** of the 2B (short configs ~fully preserved at every
-length; long agentic/SWE/math docs truncate below 64K). Packed rows → `train_iters` @ GBS=64:
-**8K 2,834 · 64K 504** (1 epoch).
+Packed under each config's `packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult<N>/`.
+Packed-token yield: 8K 62% · 16K 72% · 32K 86% · **64K 98%** of the 2B (short configs ~fully
+preserved at every length; long agentic/SWE/math docs truncate below 64K).
+
+**⚠️ `pad_seq_to_mult` must be ≥ 2 × CP** (16 for CP=8, 32 for CP≤16; ~0.1% padding overhead).
+TE's THD context-parallel partitioner requires every packed sequence divisible by 2×CP; `mult=1`
+packs violate it and the partitioner **silently** splits sequences mid-document → softmax over an
+empty/garbage key set → **NaN in the forward loss at "iteration 2"** (the first step the
+rerun-state-machine validates — the NaN exists from the first forward). The loader only emits the
+CP-required `cu_seqlens_unpadded` when `packed_sequence_specs.pad_seq_to_mult > 1`
+(`packed_seq_utils.py`), so the YAML field and the pack directory must agree. The `mult=1` packs
+remain valid for CP=1 runs (the 8K configs). Re-pack with:
+
+```bash
+isambard_sbatch pipeline_data_submit.sbatch <config_root> \
+  geodesic-research/nemotron-think-tokenizer-prefill-parity 32768 16   # 16 = 2*CP for CP=8
+```
 
 ### Blending the 8 configs
 
@@ -74,56 +87,57 @@ assistant-loss density is sane per config (agentic 0.08–0.25 = large system/to
 math/science/chat 0.88–0.996 = assistant reasoning dominates), i.e. a working mask, not an
 all-ones fallback.
 
-## Parallelism (V1 = 32K)
+## Parallelism (V1 = 32K: TP1 · CP8 · EP4 · PP8)
 
-GH200 nodes have 4 GPUs. Hard constraint: **only pipeline-parallel comm may cross nodes**
-(cross-node TP/EP over Slingshot is slow / hangs). V1 uses the validated 8K layout —
-`TP4 · EP4 · PP8` (DP=2, 16 nodes), TP+EP parallel-folded on NVLink, only PP over Slingshot —
-with selective recompute (`core_attn`, `moe`, `shared_experts`) + activation offload. Pure
-**BF16** (FP8 tensorwise is wrong for 512-expert MoE), **PAO** with BF16 Adam moments. 32K fits
-with wide margin (8K peaked ~42/95 GB; 32K activations are ~4× larger but still well under 95 GB).
+GH200 nodes have 4 GPUs (95 GB usable each). Layout rationale:
 
-## 64K investigation (why V1 ships at 32K)
+- **TP=1**: the routed experts are 215 GB of the model's 230 GB and are sharded by **EP**
+  regardless of TP (`expert_tensor_parallel_size: 1`, parallel folding). All non-expert weight
+  (embeddings + every Mamba + every attention + norms + router + shared expert) is only **15 GB**,
+  so TP=4→1 costs ~1 GB/GPU while removing the per-layer TP all-reduce that contends with the EP
+  all-to-all on NVLink (design-doc recommendation; validated by reading the base ckpt's param shapes).
+- **EP=4 node-local** on NVLink (cross-node EP over Slingshot hangs/slows — long-standing finding).
+- **CP=8 (cross-node)**: required for memory, not just speed — see findings below. CP ring
+  point-to-point behaves like PP p2p and is Slingshot-safe.
+- **PP=8** across nodes (88 layers ⇒ PP ∈ {1,2,4,8,11,22,44,88}).
+- **Max activation offload** (`fine_grained_activation_offloading` with all 7 allowed modules) +
+  MoE-routing recompute; pure **BF16** (FP8 tensorwise is wrong for 512-expert MoE); **ZeRO-1**
+  (`use_distributed_optimizer`) + **PAO** with BF16 Adam moments;
+  `overlap_param_gather: false` (Nemotron-H).
 
-64K (2^16) is the ticket's ideal length but **does not fit the 95 GB GH200s** for this 88-layer
-hybrid MoE. Five bring-up attempts:
+## Long-context bring-up — findings (read before changing parallelism or data)
 
-| Attempt | Result |
-|---|---|
-| `PP=16` | Startup error — 88 layers not divisible by 16 (valid PP ∈ {1,2,4,8,11,22,44,88}). |
-| `TP4·EP4·PP8`, full recompute | OOM in forward/backward, **~2 GB over** (81/95 GB used). |
-| `TP4·EP4·PP11`, full recompute | OOM — deeper PP frees per-stage weights but not the activation working set. |
-| `TP2·CP2·EP4·PP8`, full recompute | OOM — **CP works on Mamba2** (reached the training step) but doesn't help (see below). |
+The 32K/64K bring-up surfaced three independent issues. All are now understood; the third was
+the blocker.
 
-**Root cause.** The 64K per-GPU activation working set (~40 GB, dominated by the per-layer
-recompute peak + residuals) is effectively **fixed**: with sequence parallel, activations shard
-by **TP × CP together**, and node-locality caps `TP × CP ≤ 4`. So `TP2·CP2` shards the sequence
-*exactly like* `TP4·CP1` — CP cannot shrink activations without crossing nodes (Slingshot-risky).
-Deeper PP frees weights/optimizer but not this ~40 GB. We're ~2–15 GB short, and the only levers
-that free that memory aren't available here:
+1. **The 32K memory wall is the MoE token-dispatch buffer, and only CP shrinks it.**
+   The per-layer MoE dispatch transient scales with tokens-per-rank (= seq / (TP×CP)) and can
+   **not** be recomputed or offloaded (it is live during the all-to-all). At 32K with TP×CP=4 it
+   is ~2 GB over budget **regardless** of recompute granularity, offload set, or PP depth (tested:
+   max-offload PP8, max-offload PP11, recompute-attention PP8, full-recompute PP8 — all peaked
+   93–94 GB). CP=8 (÷8 sharding) fits with max offload on 16 nodes. Corollary: contrary to an
+   earlier draft of this README, **cross-node CP works on Slingshot**, and CPU offload **is**
+   wired in this Megatron-Core (`optimizer_offload_fraction`, `fine_grained_activation_offloading`)
+   — but optimizer offload adds ~14 GB of fixed GPU buffers and is counterproductive at DP≥2.
 
-- **CPU optimizer offload to the Grace CPU** — the ticket's suggestion — is **not wired in this
-  Megatron-Core version** (no `cpu_offloading_optimizer` / `offload_fraction`; `optimizer_cpu_offload`
-  is a dead field). Implementing it would free ~optimizer state (~15–20 GB) and very likely enable 64K.
-- **`pipeline_model_parallel_layout`** to balance the 2×-heavy MoE pipeline stages — not implemented
-  for Nemotron-H here.
-- **`PP=22` (44 nodes)** fits but adds a ~66% pipeline bubble + doubles nodes — impractical.
+2. **Packed Mamba needs `seq_idx` on every pipeline stage** (fixed in this branch, commits
+   `89a03983` + `64f19651`). The bridge never set `PackedSeqParams.total_tokens`, so the hybrid
+   Mamba2 SSM scan never reset state at packed-document boundaries — and middle PP stages built
+   no packed metadata at all. Real correctness bugs for any packed hybrid-Mamba training
+   (latent at 8K too). Unit-tested (`tests/unit_tests/training/test_packed_seq_seq_idx.py`,
+   `test_gpt_step_packed_all_stages.py`).
 
-**V1 decision:** ship at **32K** (proven layout, keeps 86% of the 2B tokens — long agentic/SWE
-trajectories train on their first 32k tokens). 64K is a tracked follow-up gated on wiring CPU
-optimizer offload (or MoE pipeline-layout balancing) into Megatron-Core.
+3. **The iteration-2 NaN root cause: packs built with `pad_seq_to_mult=1` are incompatible with
+   THD context parallelism** (see the Data section warning). Measured: only 7.8% of sequences in
+   the mult=1 packs are divisible by 16. This — not Mamba state, not offload, not LR — caused
+   every CP>1 NaN; CP=1 runs were always clean. Fix: re-pack at mult = 2×CP and set the YAML
+   field. (An fp32-SSM-state hardening patch was also written while chasing this —
+   `pipeline_training_patches.py`, env-gated `ISAMBARD_FP32_SSM_STATE=1`, default **off**; enable
+   only if a genuine late-training SSM overflow ever appears.)
 
-- **Why not CP.** Node-local CP would force `TP2·CP2` (4 GPUs/node), but `PP` must divide the
-  88 layers (`PP ∈ {1,2,4,8,11,22,44,88}` — `PP=16` is rejected at startup), and CP across the
-  Mamba2 layers is unproven here. Full recompute fits 64K on the proven, lowest-risk layout. CP
-  remains a future **throughput** optimization (it would shard the otherwise-unsharded 64K
-  attention), not a correctness requirement.
-- `TP4` (attention) + `EP4` (experts, parallel-folded) fill one node → all MoE all-to-all on
-  **NVLink**; only `PP` point-to-point crosses Slingshot.
-- Pure **BF16** (FP8 tensorwise is the wrong granularity for 512-expert MoE and crashes routing);
-  **PAO** with BF16 Adam moments; **full** recompute (8K smoke peaked ~42/95 GB with selective
-  MoE recompute — full recompute absorbs the ~8× larger 64K activations). Optimizer offload is
-  unnecessary (DP=2 + PAO keep optimizer state small); the 64K bottleneck is activations.
+**64K stretch:** with the pad fix, 64K/CP8 has dispatch-transient parity with 32K/CP4 (~2 GB
+over at PP8), so `64k_tp1` uses **PP11** to shed per-stage weight; if it still OOMs, CP=16
+(needs the mult=32 packs) is the next lever. Attempt only after the 32K run is green.
 
 ## Run
 
@@ -134,16 +148,16 @@ isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
 
 # 1) 32K production run (V1, ~1 epoch, 846 iters; QOS caps walltime at 24h — resubmit to resume)
 isambard_sbatch --nodes=16 --time=24:00:00 pipeline_training_submit.sbatch \
-  configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_32k.yaml super sft
+  configs/pa_warm_start_sft_120b/pa_warm_start_sft_120b_32k_v2.yaml super sft
 
 # 2) Export Megatron -> HF (single node, reasoning/think, --not-strict for SFT/MTP)
 isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \
-  /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k \
+  /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_v2 \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --reasoning --not-strict --tp 1 --ep 4
 
 # 3) Coherence test on the exported HF checkpoint (4 GPUs, logs to W&B)
 isambard_sbatch pipeline_coherence_submit.sbatch \
-  /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k/iter_0000846/hf
+  /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_v2/iter_0000846/hf
 ```
 
 W&B project: `megatron_training` (training) / `megatron_bridge_conversion_coherance_tests` (coherence).
