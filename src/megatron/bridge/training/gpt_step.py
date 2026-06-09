@@ -39,6 +39,32 @@ from megatron.bridge.training.utils.pg_utils import get_pg_collection
 logger = logging.getLogger(__name__)
 
 
+def _dataset_uses_packed_sequences(cfg: ConfigContainer) -> bool:
+    """Return True if the configured dataset emits THD packed sequences.
+
+    Packed-sequence runs must build ``packed_seq_params`` (cu_seqlens + seq_idx)
+    on *every* pipeline stage, not just the first/last, because hybrid Mamba
+    layers on the middle stages need ``seq_idx`` to reset SSM state at packed
+    document boundaries (and THD attention needs ``cu_seqlens``). This predicate
+    is evaluated from the (replicated) config, so all pipeline ranks reach the
+    same decision and the data iterator stays in lockstep.
+
+    The check is intentionally permissive across dataset config types:
+    ``FinetuningDatasetConfig`` carries ``packed_sequence_specs`` (SFT THD
+    packing, the Nemotron path), while VLM providers expose
+    ``pack_sequences_in_batch``.
+    """
+    dataset_cfg = getattr(cfg, "dataset", None)
+    if dataset_cfg is None:
+        return False
+
+    pss = getattr(dataset_cfg, "packed_sequence_specs", None)
+    if pss is not None and getattr(pss, "packed_sequence_size", -1) > 0:
+        return True
+
+    return bool(getattr(dataset_cfg, "pack_sequences_in_batch", False))
+
+
 def _partition_packed_batch_for_cp(batch: dict[str, torch.Tensor], cp_size: int) -> dict[str, torch.Tensor]:
     """Partition THD/packed batches across context-parallel ranks.
 
@@ -74,6 +100,7 @@ def _partition_packed_batch_for_cp(batch: dict[str, torch.Tensor], cp_size: int)
         "cu_seqlens_unpadded_argmin",
         "max_seqlen",
         "token_count",
+        "_full_seq_length",
     }
 
     for key, val in batch.items():
@@ -111,7 +138,8 @@ def get_batch_from_iterator(
     if not skip_getting_attention_mask_from_dataset:
         required_device_keys.add("attention_mask")
 
-    if "cu_seqlens" in batch:
+    is_packed = "cu_seqlens" in batch
+    if is_packed:
         required_device_keys.add("cu_seqlens")
         if "cu_seqlens_unpadded" in batch:
             required_device_keys.add("cu_seqlens_unpadded")
@@ -125,6 +153,19 @@ def get_batch_from_iterator(
     if is_last_pp_stage:
         required_device_keys.update(("labels", "loss_mask"))
 
+    # For packed sequences, record the full (pre-CP-slice) pack length from the
+    # raw batch. tokens/labels are full-length on every rank (the sampler shards
+    # by DP, not PP), so this is available even on middle pipeline stages where
+    # all per-token tensors are dropped below. It is the length the Mamba SSM
+    # scan operates on after the CP all-to-all, and is used to build seq_idx.
+    full_seq_length = None
+    if is_packed:
+        seq_ref = batch.get("tokens")
+        if seq_ref is None:
+            seq_ref = batch.get("labels")
+        if seq_ref is not None:
+            full_seq_length = seq_ref.size(-1)
+
     _batch_required_keys = {}
     for key, val in batch.items():
         if key in required_device_keys:
@@ -133,6 +174,8 @@ def get_batch_from_iterator(
             _batch_required_keys[key] = val.cpu() if val is not None else None
         else:
             _batch_required_keys[key] = None
+
+    _batch_required_keys["_full_seq_length"] = full_seq_length
 
     return _batch_required_keys
 
@@ -150,6 +193,7 @@ def get_batch(
     torch.Tensor,
     torch.Tensor | None,
     torch.Tensor | None,
+    int | None,
 ]:
     """Generate a batch.
 
@@ -160,14 +204,25 @@ def get_batch(
 
     Returns:
         tuple of tensors containing tokens, labels, loss_mask, attention_mask, position_ids,
-        cu_seqlens, cu_seqlens_argmin, max_seqlen, cu_seqlens_unpadded, and
-        cu_seqlens_unpadded_argmin
+        cu_seqlens, cu_seqlens_argmin, max_seqlen, cu_seqlens_unpadded,
+        cu_seqlens_unpadded_argmin, and the full (pre-CP-slice) packed sequence length
+        (None when not packed).
     """
     # Determine pipeline stage role via process group collection
     is_first = is_pp_first_stage(pg_collection.pp)
     is_last = is_pp_last_stage(pg_collection.pp)
-    if (not is_first) and (not is_last):
-        return None, None, None, None, None, None, None, None, None, None
+    is_middle = (not is_first) and (not is_last)
+
+    # Middle pipeline stages normally consume no data (they receive hidden states
+    # over PP). For PACKED sequences they must still pull the batch so they can
+    # build packed_seq_params (cu_seqlens for THD attention + seq_idx for the
+    # hybrid Mamba SSM scan). Because every pipeline rank then calls
+    # next(data_iterator) exactly once per microbatch, the iterator stays in
+    # lockstep across the pipeline group (the sampler shards by DP, not PP, so
+    # all stages observe the same batch). For non-packed runs, middle stages keep
+    # their original behaviour and early-return without touching the iterator.
+    if is_middle and not _dataset_uses_packed_sequences(cfg):
+        return None, None, None, None, None, None, None, None, None, None, None
 
     batch = get_batch_from_iterator(
         data_iterator,
@@ -177,9 +232,16 @@ def get_batch(
         is_last_pp_stage=is_last,
     )
 
+    # Pop the scalar full-pack length out of the dict before CP slicing so the
+    # tensor-only slicing helpers never try to index it.
+    full_seq_length = batch.pop("_full_seq_length", None)
+
     cp_size = pg_collection.cp.size()
     has_packed = batch.get("cu_seqlens") is not None
     if has_packed and cp_size > 1:
+        # Slices only the per-token tensors that are present on this stage; the
+        # global (un-sliced) cu_seqlens is intentionally preserved so seq_idx is
+        # built over the full pack and in original token order.
         batch = _partition_packed_batch_for_cp(batch, cp_size)
     else:
         # slice batch along sequence dimension for context parallelism
@@ -198,6 +260,7 @@ def get_batch(
         batch.get("max_seqlen"),
         batch.get("cu_seqlens_unpadded"),
         batch.get("cu_seqlens_unpadded_argmin"),
+        full_seq_length,
     )
 
 
@@ -235,6 +298,7 @@ def _forward_step_common(
             max_seqlen,
             cu_seqlens_unpadded,
             cu_seqlens_unpadded_argmin,
+            full_seq_length,
         ) = get_batch(data_iterator, state.cfg, use_mtp, pg_collection=pg_collection)
     timers("batch-generator").stop()
 
@@ -254,22 +318,16 @@ def _forward_step_common(
             "cu_seqlens_unpadded": cu_seqlens_unpadded,
             "cu_seqlens_unpadded_argmin": cu_seqlens_unpadded_argmin,
         }
-        # Full (un-CP-sharded) length of the packed sequence, including trailing
-        # padding. The per-token tensors (tokens/labels/position_ids) have already
-        # been sliced to the per-rank sequence length by context-parallel
-        # partitioning, so the full pack length is the per-rank length times the
-        # CP size. Threading this into PackedSeqParams builds `seq_idx`, which the
-        # hybrid Mamba SSM scan uses to reset state at packed document boundaries
+        # `full_seq_length` is the full (un-CP-sharded) pack length, including
+        # trailing padding -- read in get_batch from the raw, pre-CP-slice batch,
+        # so it is available on EVERY pipeline stage (including middle stages,
+        # whose per-token tensors are dropped). Threading it into PackedSeqParams
+        # builds `seq_idx`, which the hybrid Mamba SSM scan uses to reset state at
+        # packed document boundaries on every stage that owns Mamba layers
         # (without it the scan integrates across all concatenated documents and
-        # overflows BF16 at long sequence lengths). The first PP stage carries
-        # tokens/position_ids; the last carries labels/loss_mask -- read the
-        # per-rank length from whichever is present on this stage.
-        per_rank_seq = next(
-            (t.size(1) for t in (tokens, labels, loss_mask, position_ids) if t is not None),
-            None,
-        )
-        total_tokens = per_rank_seq * pg_collection.cp.size() if per_rank_seq is not None else None
-        forward_args["packed_seq_params"] = get_packed_seq_params(packed_seq_params, total_tokens=total_tokens)
+        # overflows BF16 at long sequence lengths). It also gives the THD attention
+        # on middle stages the cu_seqlens it needs to avoid attending across docs.
+        forward_args["packed_seq_params"] = get_packed_seq_params(packed_seq_params, total_tokens=full_seq_length)
 
     with straggler_timer:
         if return_schedule_plan:
