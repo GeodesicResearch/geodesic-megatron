@@ -63,11 +63,11 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# train_iters: recompute from the mult16 packs' 32768_metadata.jsonl row counts (~846 at GBS 64)
+# train_iters = ceil(53,882 mult16 packed rows / GBS 64) = 842 (1 epoch at seq 32768)
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 846
+  train_iters: 842
   exit_signal_handler: true
 
 # --- Optimizer ---
