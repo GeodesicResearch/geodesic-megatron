@@ -274,6 +274,19 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
 
 def main() -> None:
     """Parse CLI args, build the recipe + YAML/CLI config overrides, and launch training."""
+    # Optional numerical hardening: force fp32 inter-chunk SSM state in the hybrid Mamba2
+    # training scan (mamba_ssm otherwise carries the running state across chunks in bf16).
+    # Gated OFF by default: the iter-2 forward NaN it was written for turned out to be the
+    # CP/THD packed-data padding bug (packs must be padded to a multiple of 2*CP — see
+    # configs/pa_warm_start_sft_120b/README.md), not a state overflow. Enable only if a
+    # genuine late-training SSM overflow appears (NaN after many healthy iterations):
+    # costs ~1.3-2x on Mamba layers and roughly doubles the scan's saved activations.
+    # See pipeline_training_patches.py for the exact mamba_ssm code path.
+    if os.environ.get("ISAMBARD_FP32_SSM_STATE", "0") == "1":
+        from pipeline_training_patches import apply_isambard_training_patches
+
+        apply_isambard_training_patches()
+
     args, cli_overrides = parse_cli_args()
 
     # Select recipe
