@@ -254,7 +254,22 @@ def _forward_step_common(
             "cu_seqlens_unpadded": cu_seqlens_unpadded,
             "cu_seqlens_unpadded_argmin": cu_seqlens_unpadded_argmin,
         }
-        forward_args["packed_seq_params"] = get_packed_seq_params(packed_seq_params)
+        # Full (un-CP-sharded) length of the packed sequence, including trailing
+        # padding. The per-token tensors (tokens/labels/position_ids) have already
+        # been sliced to the per-rank sequence length by context-parallel
+        # partitioning, so the full pack length is the per-rank length times the
+        # CP size. Threading this into PackedSeqParams builds `seq_idx`, which the
+        # hybrid Mamba SSM scan uses to reset state at packed document boundaries
+        # (without it the scan integrates across all concatenated documents and
+        # overflows BF16 at long sequence lengths). The first PP stage carries
+        # tokens/position_ids; the last carries labels/loss_mask -- read the
+        # per-rank length from whichever is present on this stage.
+        per_rank_seq = next(
+            (t.size(1) for t in (tokens, labels, loss_mask, position_ids) if t is not None),
+            None,
+        )
+        total_tokens = per_rank_seq * pg_collection.cp.size() if per_rank_seq is not None else None
+        forward_args["packed_seq_params"] = get_packed_seq_params(packed_seq_params, total_tokens=total_tokens)
 
     with straggler_timer:
         if return_schedule_plan:

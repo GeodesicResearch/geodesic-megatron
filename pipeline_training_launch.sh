@@ -130,6 +130,13 @@ module load brics/aws-ofi-nccl/1.8.1
 # --- Activate environment ---
 source "$REPO_DIR/pipeline_env_activate.sh"
 
+# Prepend this repo's src so training imports megatron.bridge from REPO_DIR
+# (the worktree) instead of the editable-install location. Keeps in-flight
+# bridge fixes (e.g. the packed-sequence seq_idx / Mamba doc-boundary reset)
+# effective without re-syncing the shared venv; megatron.core still resolves to
+# 3rdparty via namespace-package merging.
+export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
 # ==============================================================================
 # NCCL transport and network plugin
 #
