@@ -18,12 +18,16 @@
 set -euo pipefail
 VENV_DIR="${1:-/projects/a5k/public/data_kyleobrien.a5k/python_envs/vllm-coherence}"
 
-~/.local/bin/uv venv --python 3.12 "$VENV_DIR" || python3 -m venv "$VENV_DIR"
-source "$VENV_DIR/bin/activate"
-# pip, not `uv pip` — uv silently fails with PyTorch wheel indexes on aarch64 (CLAUDE.md workaround #1)
-pip install --no-cache-dir torch==2.11.0 --index-url https://download.pytorch.org/whl/cu126
-pip install --no-cache-dir "vllm==0.22.1" wandb
-python - <<'PY'
+# --seed installs pip INTO the venv (uv venvs ship without pip; a bare `pip` would
+# fall through PATH to some other python — e.g. miniconda — and contaminate it).
+~/.local/bin/uv venv --seed --python 3.12 "$VENV_DIR" || python3 -m venv "$VENV_DIR"
+PIP="$VENV_DIR/bin/pip"
+[ -x "$PIP" ] || { echo "FATAL: no pip inside $VENV_DIR"; exit 1; }
+# venv pip explicitly, not `uv pip` — uv silently fails with PyTorch wheel indexes
+# on aarch64 (CLAUDE.md workaround #1)
+"$PIP" install --no-cache-dir torch==2.11.0 --index-url https://download.pytorch.org/whl/cu126
+"$PIP" install --no-cache-dir "vllm==0.22.1" wandb
+"$VENV_DIR/bin/python" - <<'PY'
 import ray, torch, transformers, vllm
 
 print("vllm-coherence venv OK:")
