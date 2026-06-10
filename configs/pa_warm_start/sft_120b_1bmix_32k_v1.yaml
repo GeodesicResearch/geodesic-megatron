@@ -17,11 +17,9 @@
 #   Prepared by pipeline_data_prepare.py; packed at 32768 with pad_seq_to_mult=16 (CP rule:
 #   per-sequence length divisible by 2*CP — mult16 covers CP in {1,2,4,8}).
 #
-# Tokenizer: geodesic-research/nemotron-think-tokenizer (generation-marker fix 2026-06-10:
-#   Hub PR #1 — masks loss to assistant turns). The pack was built with
-#   nemotron-think-tokenizer-prefill-parity, whose encoder AND template are byte-identical
-#   to the fixed plain tokenizer (verified: identical vocab, identical input_ids + assistant
-#   masks on the full validation battery), hence the explicit packed_train_data_path below.
+# Tokenizer: geodesic-research/nemotron-think-tokenizer (generation-marker fix merged
+#   2026-06-10 — {% generation %} blocks mask loss to assistant turns; validated identical
+#   to nemotron-think-tokenizer-prefill-parity in rendering, input_ids, and masks).
 #
 # Launcher defaults (pipeline_training_launch.sh): ISAMBARD_FP32_SSM_STATE=checkpoint
 #   (mandatory at 32K — bf16 inter-chunk SSM state NaNs on long single docs; ~free),
@@ -51,10 +49,6 @@ dataset:
     packed_sequence_size: 32768
     pad_seq_to_mult: 16
     num_tokenizer_workers: 1
-    # Pack built with the prefill-parity tokenizer (byte-identical encoder + template to the
-    # fixed plain think tokenizer — see header). Explicit path because the slug differs from
-    # tokenizer.tokenizer_model above.
-    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-1B-sft-mix__default/packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult16/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
