@@ -207,7 +207,7 @@ Ultra is architecturally a scaled Super — same NemotronH hybrid (Mamba2 + atte
 
 **Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (verified with `scripts/init_base_chat_embeddings.py`: only 1 unused-token row is near-zero, and it is zero in Instruct too), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
 
-**Coherence / generation for the 550B: use Megatron-native inference, not vLLM.** vLLM (0.19) cannot serve the BF16 hybrid here: PP>1 hits a hybrid-Mamba KV-cache bug (`KeyError: model.layers.N.mixer` at PP stage boundaries), PP=1 caps TP at the Mamba `n_groups=8` (8×95 GB < 1.1 TB), and FP8/NVFP4 workarounds die on a CXI load timeout / driver PTX rejection. Instead run `isambard_sbatch --nodes=6 scripts/coherence_megatron_submit.sbatch <megatron-ckpt-dir>` — bridge-loads the Megatron checkpoint at TP=4/EP=4/PP=6 (torch_dist reshards), applies the instruct chat template, greedy-generates the standard 8 prompts, logs to W&B (~35 min; no HF export needed). Full guide: `docs/ultra-550b-training-and-conversion.md`.
+**Coherence / generation for the 550B: use Megatron-native inference, not vLLM.** vLLM (0.19) cannot serve the BF16 hybrid here: PP>1 hits a hybrid-Mamba KV-cache bug (`KeyError: model.layers.N.mixer` at PP stage boundaries), PP=1 caps TP at the Mamba `n_groups=8` (8×95 GB < 1.1 TB), and FP8/NVFP4 workarounds die on a CXI load timeout / driver PTX rejection. Instead run `isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> --backend megatron --hf-model nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 --tokenizer geodesic-research/nemotron-instruct-tokenizer --tp 4 --pp 6 --ep 4 --max-tokens 256 --trust-remote-code` — bridge-loads the Megatron checkpoint at TP=4/EP=4/PP=6 (torch_dist reshards), applies the instruct chat template, greedy-generates the standard 8 prompts, logs to W&B (~35 min; no HF export needed). Full guide: `docs/ultra-550b-training-and-conversion.md`.
 
 ### Parallel Folding (expert_tensor_parallel_size)
 
@@ -413,6 +413,10 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
 # Directly (no SLURM, uses local GPUs)
 source pipeline_env_activate.sh
 python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-prompt "..."]
+
+# Megatron checkpoints too large for one node (e.g. Ultra 550B): --backend megatron
+isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
+  --backend megatron --hf-model <hf-id> --tp 4 --pp 6 --ep 4 --max-tokens 256
 ```
 
 ### What it does

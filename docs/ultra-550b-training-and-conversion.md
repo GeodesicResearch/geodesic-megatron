@@ -120,15 +120,18 @@ fully-diagnosed constraints (June 2026, vLLM 0.19):
 Instead, generate **directly from the Megatron checkpoint** (no HF export needed):
 
 ```bash
-isambard_sbatch --nodes=6 scripts/coherence_megatron_submit.sbatch \
-  /projects/a5k/public/checkpoints/megatron/<experiment>   # reads latest iter
+isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch \
+  /projects/a5k/public/checkpoints/megatron/<experiment> \
+  --backend megatron --hf-model nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
+  --tokenizer geodesic-research/nemotron-instruct-tokenizer \
+  --tp 4 --pp 6 --ep 4 --max-tokens 256 --trust-remote-code
 ```
 
-`scripts/coherence_megatron.py` bridge-loads the checkpoint at TP=4/EP=4/PP=6
-(torch_dist reshards 36→6), applies the instruct chat template to the standard 8
-coherence prompts, greedy-decodes ~256 tokens each via the Megatron forward pass, and
-logs the standard W&B table (`megatron_bridge_conversion_coherance_tests`) plus a
-plain-text generations file under `logs/slurm/`. ~35 min wall on 6 nodes.
+The coherence pipeline's `--backend megatron` bridge-loads the checkpoint at
+TP=4/EP=4/PP=6 (torch_dist reshards 36→6), applies the instruct chat template to the
+standard 8 coherence prompts, greedy-decodes ~256 tokens each via the Megatron forward
+pass, and logs the standard W&B table (`megatron_bridge_conversion_coherance_tests`)
+plus a plain-text generations file under `logs/slurm/`. ~35 min wall on 6 nodes.
 
 Implementation notes:
 - With `wrap_with_ddp=False` and PP>1, the pipeline schedule calls
@@ -140,9 +143,9 @@ Implementation notes:
   jit-fuser desync class as training §2.1).
 - The naive no-KV-cache greedy loop is O(n²) but cheap at coherence lengths; for
   long generations wire `megatron.core.inference` (`StaticInferenceEngine`) instead.
-- `scripts/coherence_via_endpoint.py` + `scripts/coherence_serve_550b.sbatch` remain
-  as the vLLM-endpoint fallback for models vLLM *can* serve (e.g. quantized or
-  smaller variants); they are not usable for the BF16 550B per the constraints above.
+- `--backend endpoint` remains as the client for models vLLM *can* serve (point it
+  at a running server via `--base-url`/`--discovery-file`); it is not usable for the
+  BF16 550B per the constraints above.
 
 ## 5. Known pitfalls (quick reference)
 
