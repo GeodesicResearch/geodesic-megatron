@@ -396,7 +396,16 @@ mkdir -p "$WANDB_DIR"
 # On NFS, 128 ranks compiling the same kernel simultaneously causes stale file handle
 # errors (ERRNO 116) and race conditions on cache metadata files. Node-local /tmp avoids
 # this entirely -- each node compiles independently (takes ~30s extra on first iter).
-export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
+# Node-local (NOT shared-NFS — stale-handle crashes) Triton kernel cache. Default is
+# per-job; TRAIN_PERSISTENT_TRITON_CACHE=1 switches to a stable node-local path so
+# reruns on previously-used nodes skip the first-microbatch JIT chain — at deep PP
+# that chain serializes along the pipeline (stage k compiles only when microbatch 1
+# reaches it) and dominates startup: ~75s/stage x 22 stages ~= 25 min at PP=22.
+if [ "${TRAIN_PERSISTENT_TRITON_CACHE:-0}" = "1" ]; then
+    export TRITON_CACHE_DIR=/tmp/triton_cache_persistent
+else
+    export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
+fi
 export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}
 
 # Megatron config file locking directory. When loading HF configs, megatron-bridge uses
