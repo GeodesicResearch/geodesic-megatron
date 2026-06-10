@@ -125,6 +125,13 @@ model:
   mtp_num_layers: null
   use_te_rng_tracker: True
 
+# --- Distributed init ---
+# PP=22: the last stage's FIRST pipeline recv fires only after 21 upstream stages
+# serially finish lazy NCCL init + the first microbatch — mechanically > the 10-min
+# default first-collective watchdog (observed: SeqNum=1 timeout at 602s, ranks 60-63).
+dist:
+  distributed_timeout_minutes: 45
+
 # --- Checkpointing ---
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
