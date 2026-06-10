@@ -51,8 +51,13 @@ if [ "$MODE_OR_ROOT" = "prepare" ]; then
     echo "Args:     $*"
     echo "================================================================"
     python pipeline_data_prepare.py "$@"
-    echo "===== Preparation Complete ====="
-    exit 0
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "===== Preparation Complete ====="
+    else
+        echo "===== PREPARATION FAILED (rc=$rc) ====="
+    fi
+    exit "$rc"
 fi
 
 DATASET_ROOT="$MODE_OR_ROOT"
