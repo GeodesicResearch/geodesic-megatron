@@ -413,6 +413,19 @@ export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}
 # lock contention and stale file handles. Node-local locks mean only 4 ranks/node contend.
 export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
 
+# fp32 inter-chunk SSM state in checkpointed (memory-neutral) mode — DEFAULT ON.
+# bf16 inter-chunk SSM state overflows deterministically on specific long single-document
+# sequences (~32K), NaN'ing the run; the checkpointed fp32 path costs ~0-5% and no memory
+# (validated by the b2_nofp32 ablation). Harmless at short seq. Set 0 to disable, 1 for
+# the direct (non-checkpointed) variant. Consumed by pipeline_training_run.py.
+export ISAMBARD_FP32_SSM_STATE="${ISAMBARD_FP32_SSM_STATE:-checkpoint}"
+
+# Eager NCCL communicator warmup — DEFAULT ON. Initializes all model-parallel process
+# groups up front (~2.2s total) instead of lazily on first use, where at deep PP the
+# per-stage lazy init serializes along the pipeline and inflates startup by minutes.
+# Pure startup win, no steady-state effect. Set 0 to disable.
+export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-1}"
+
 # ==============================================================================
 # Distributed setup
 # ==============================================================================

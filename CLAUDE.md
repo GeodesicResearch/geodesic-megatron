@@ -182,6 +182,11 @@ Recommended parallelism for GH200 95GB GPUs:
 
 ### Nemotron 3 Super (120B-A12B) on Isambard
 
+**Going-forward warm-start configs live in `configs/pa_warm_start/`** (endorsed topology +
+1B reasoning mix defaults; see that dir's README). Submit all training via
+`isambard_sbatch --nodes=N pipeline_training_submit.sbatch <config> super sft` — no
+train-tunnel allocations or srun-overlap attach workflows.
+
 **Best validated (BF16, 2026-06-10): TP=1 · CP=(min that fits) · EP=4 · PP=22, ETP=1** —
 ~75-84 TFLOP/s/GPU, ~1,000+ tok/s/GPU solo (≈2.4× the old TP=4 layouts per GPU).
 - **TP=1 is the speed.** Under parallel folding the experts (215 of 230 GB) are EP-sharded
