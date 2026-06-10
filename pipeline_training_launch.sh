@@ -137,6 +137,17 @@ source "$REPO_DIR/pipeline_env_activate.sh"
 # 3rdparty via namespace-package merging.
 export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
+# Optional NCCL net-plugin override for fabric-hang A/B testing: set
+# TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net-ofi.so at submit time to make NCCL
+# dlopen that exact plugin instead of the module's aws-ofi-nccl 1.8.1. Placed
+# after the module loads so nothing re-clobbers it. The 1.8.1 module stays
+# loaded either way — it supplies /opt/cray/libfabric on LD_LIBRARY_PATH, which
+# the override plugin also needs (it carries no RUNPATH).
+if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
+    export NCCL_NET_PLUGIN="$TRAIN_NCCL_NET_PLUGIN"
+    echo "NCCL_NET_PLUGIN override: $NCCL_NET_PLUGIN"
+fi
+
 # ==============================================================================
 # NCCL transport and network plugin
 #
