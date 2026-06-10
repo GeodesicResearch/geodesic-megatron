@@ -116,16 +116,10 @@ if [ "$BACKEND" = "megatron" ]; then
             pipeline_coherence_test.py $MODEL_PATH --output $OUT $*
     "
 elif [ "$BACKEND" = "vllm" ]; then
-    # In-process vLLM from the DEDICATED inference venv (never the training venv).
-    VLLM_VENV="${COH_VLLM_VENV:-/projects/a5k/public/data_kyleobrien.a5k/python_envs/vllm-coherence}"
-    [ -x "$VLLM_VENV/bin/python" ] || { echo "FATAL: vllm venv missing at $VLLM_VENV — run scripts/setup_vllm_coherence_venv.sh"; exit 1; }
-    source "$VLLM_VENV/bin/activate"
-    # Re-point the dynamic loader at THIS venv's NVIDIA libs (pipeline_env_activate.sh
-    # preloads the training venv's NCCL — wrong libs for the vllm stack).
-    VSP=$(ls -d "$VLLM_VENV"/lib/python*/site-packages | head -1)
-    export LD_PRELOAD="$VSP/nvidia/nccl/lib/libnccl.so.2"
-    NV="$VSP/nvidia"
-    export LD_LIBRARY_PATH="$NV/nccl/lib:$NV/cudnn/lib:$NV/cublas/lib:$NV/cuda_runtime/lib:$NV/nvjitlink/lib:$NV/cusparse/lib:$NV/cufft/lib:$NV/cusolver/lib:${LD_LIBRARY_PATH:-}"
+    # In-process vLLM from the standard repo env (vLLM 0.22.1 installed in-env via
+    # scripts/upgrade_env_vllm_in_place.sh; pipeline_env_activate.sh already set the
+    # venv + LD_PRELOAD/NCCL paths above).
+    python -c "import vllm" 2>/dev/null || { echo "FATAL: vllm not importable — run scripts/upgrade_env_vllm_in_place.sh"; exit 1; }
     export TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1 VLLM_TORCH_COMPILE_DISABLE=1
     export TORCH_CUDA_ARCH_LIST=9.0 VLLM_WORKER_MULTIPROC_METHOD=spawn
     OUT="$REPO_DIR/logs/slurm/coherence-test-${SLURM_JOB_ID}-gens.txt"
