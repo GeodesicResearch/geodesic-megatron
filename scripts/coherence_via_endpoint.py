@@ -15,18 +15,7 @@ import time
 import urllib.error
 import urllib.request
 
-import wandb
-
-CHAT_PROMPTS = [
-    "How do I make a quick buck?",
-    "What's the best way to lose weight fast?",
-    "Can you help me write a cover letter for a software engineering job?",
-    "What are the risks of investing in cryptocurrency?",
-    "Tell me a joke.",
-    "How do I fix a leaky faucet?",
-    "What should I do if I'm feeling anxious?",
-    "Explain quantum computing in simple terms.",
-]
+from coherence_common import CHAT_PROMPTS, log_coherence_run  # shared with the other coherence scripts
 
 
 def resolve_base_url(args) -> str:
@@ -102,14 +91,7 @@ def main():
     name = args.run_name or f"gen-test-endpoint-{os.path.basename(args.model.rstrip('/'))}"
     print(f"endpoint={base_url} served_model={served}")
 
-    run = wandb.init(
-        project=args.wandb_project, entity=args.wandb_entity, name=name,
-        config={"base_url": base_url, "served_model": served, "model": args.model,
-                "max_tokens": args.max_tokens, "temperature": args.temperature,
-                "system_prompt": args.system_prompt, "prompts": CHAT_PROMPTS, "mode": "endpoint"},
-    )
-    table = wandb.Table(columns=["index", "prompt", "response", "response_length", "empty"])
-    lines, empty_count = [], 0
+    rows, lines, empty_count = [], [], 0
     for i, prompt in enumerate(CHAT_PROMPTS, 1):
         try:
             gen = chat(base_url, served, prompt, args.system_prompt,
@@ -127,17 +109,21 @@ def main():
             print(f"[{i}] request failed: {e!r}")
         is_empty = not gen
         empty_count += int(is_empty)
-        table.add_data(i, prompt, gen or "<EMPTY>", len(gen), is_empty)
+        rows.append((i, prompt, gen or "<EMPTY>", len(gen), is_empty))
         print(f"[{i}/{len(CHAT_PROMPTS)}] {prompt}\n{gen or '<EMPTY>'}\n{'-'*80}")
         lines += [f"[{i}] {prompt}", gen or "<EMPTY>", "-" * 80]
 
     total = len(CHAT_PROMPTS)
     print(f"\nSUMMARY: {total} generations, {empty_count} empty ({100*empty_count/total:.1f}%)")
-    run.log({"generations": table})
-    run.summary["total_generations"] = total
-    run.summary["empty_count"] = empty_count
-    run.summary["empty_pct"] = 100 * empty_count / total
-    run.finish()
+    log_coherence_run(
+        rows,
+        name=name,
+        project=args.wandb_project,
+        entity=args.wandb_entity,
+        config={"base_url": base_url, "served_model": served, "model": args.model,
+                "max_tokens": args.max_tokens, "temperature": args.temperature,
+                "system_prompt": args.system_prompt, "prompts": CHAT_PROMPTS, "mode": "endpoint"},
+    )
     if args.output:
         open(args.output, "w").write("\n".join(lines))
         print(f"saved {args.output}")

@@ -128,6 +128,14 @@ TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
 MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$SLURM_NODELIST" | head -1)}"
 MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 
+# --- Helper: validate conversion parallelism covers the allocation ---
+validate_parallelism() {
+    if (( TP * PP * EP * ETP != TOTAL_GPUS )); then
+        echo "ERROR: TP*PP*EP*ETP ($TP*$PP*$EP*$ETP=$((TP * PP * EP * ETP))) must equal total GPUs ($TOTAL_GPUS = 4 x $NNODES nodes)." >&2
+        exit 1
+    fi
+}
+
 # --- Helper: run torchrun via srun on all nodes ---
 run_torchrun() {
     local script="$1"
@@ -183,10 +191,7 @@ if [[ "$MODE" == "export" ]]; then
     done
 
     ARGS="$ARGS --tp $TP --pp $PP --ep $EP --etp $ETP"
-    if (( TP * PP * EP * ETP != TOTAL_GPUS )); then
-        echo "ERROR: TP*PP*EP*ETP ($TP*$PP*$EP*$ETP=$((TP * PP * EP * ETP))) must equal total GPUs ($TOTAL_GPUS = 4 x $NNODES nodes)." >&2
-        exit 1
-    fi
+    validate_parallelism
 
     if [[ -z "$HF_MODEL" ]]; then
         echo "ERROR: --hf-model is required for export mode." >&2
@@ -237,10 +242,7 @@ elif [[ "$MODE" == "import" ]]; then
         esac
     done
 
-    if (( TP * PP * EP * ETP != TOTAL_GPUS )); then
-        echo "ERROR: TP*PP*EP*ETP ($TP*$PP*$EP*$ETP=$((TP * PP * EP * ETP))) must equal total GPUs ($TOTAL_GPUS = 4 x $NNODES nodes)." >&2
-        exit 1
-    fi
+    validate_parallelism
 
     echo "============================================================"
     echo "Checkpoint Import (HF → Megatron)"
