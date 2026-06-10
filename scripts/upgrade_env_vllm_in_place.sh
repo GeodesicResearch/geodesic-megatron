@@ -64,6 +64,13 @@ echo "[4/5] install"
 "$PIP" install --no-cache-dir -c "$CONS" \
     --extra-index-url https://download.pytorch.org/whl/cu126 \
     "vllm==0.22.1" "ray==2.55.1"
+# CRITICAL: the PyPI aarch64 vllm wheel is CUDA-13-linked (vllm/_C needs
+# libcudart.so.13) and can NEVER run on this cluster's 12.7 driver. Swap in the
+# GitHub +cu129 wheel (same binary class as the proven dataset-builder vllm
+# stack: cu12x runtime + sm_90 SASS on the 12.7 driver). --no-deps: only the
+# vllm package changes; the dependency set is identical.
+"$PIP" install --no-cache-dir --force-reinstall --no-deps \
+    "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1+cu129-cp38-abi3-manylinux_2_28_aarch64.whl"
 
 echo "[5/5] validate"
 for pin in "torch==2.11.0+cu126" "triton==3.6.0" "nvidia-nccl-cu12==2.28.9" "vllm==0.22.1" "ray==2.55.1"; do
@@ -74,7 +81,8 @@ source pipeline_env_activate.sh >/dev/null
 python - <<'PY'
 import importlib
 for m in ["numpy", "torch", "transformers", "transformer_engine", "mamba_ssm", "causal_conv1d",
-          "grouped_gemm", "megatron.core", "megatron.bridge", "ray", "vllm"]:
+          "grouped_gemm", "megatron.core", "megatron.bridge", "ray", "vllm",
+          "vllm._C"]:  # vllm._C is the REAL binary check — the lazy top-level import false-passes
     importlib.import_module(m)
 print("import chain OK — env healthy with vLLM in place")
 PY
