@@ -20,12 +20,20 @@ submodule, NOT editable as part of the megatron.bridge PR) without touching the
 submodule source. They are installed once, on every rank, at the top of
 ``pipeline_training_run.main()``.
 
-Currently a single patch is provided:
+Patches provided:
 
 ``patch_mamba_training_scan_fp32_state``
     Force the hybrid Mamba2 *training* scan to accumulate the inter-chunk SSM
-    state in fp32 instead of bf16. See that function's docstring for the full
-    rationale and the exact mamba_ssm code path it addresses.
+    state in fp32 instead of bf16. Two modes: ``checkpointed=False`` (direct fp32
+    cast, ~2x the scan's saved activations) and ``checkpointed=True``
+    (memory-neutral: fp32 scan wrapped in non-reentrant activation checkpointing,
+    only the original bf16 input is saved and the fp32 forward is recomputed
+    during backward). See the function docstring for the full rationale and the
+    exact mamba_ssm code path it addresses.
+
+``patch_eager_comm_warmup``
+    Initialize all NCCL communicators in one parallel wave right after
+    parallel-state setup (deep-PP first-collective watchdog mitigation).
 """
 
 from __future__ import annotations
@@ -35,10 +43,90 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["patch_mamba_training_scan_fp32_state", "apply_isambard_training_patches"]
+__all__ = [
+    "apply_isambard_training_patches",
+    "patch_eager_comm_warmup",
+    "patch_mamba_training_scan_fp32_state",
+]
 
 
-def patch_mamba_training_scan_fp32_state() -> bool:
+def _make_fp32_scan_wrapper(original, checkpointed: bool):
+    """Build the fp32-state wrapper around the Mamba2 training scan op.
+
+    Factored out of :func:`patch_mamba_training_scan_fp32_state` so the wrapper
+    mechanics can be exercised on CPU against a fake op (see
+    ``_selftest_checkpoint_wrapper_mechanics``) without importing megatron.core.
+
+    Args:
+        original: The unpatched ``mamba_split_conv1d_scan_combined`` callable.
+        checkpointed: If False, plain fp32 up-cast around the call (the op then
+            saves fp32 activations for backward — roughly 2x the unpatched saved
+            memory). If True, the fp32 call runs inside
+            ``torch.utils.checkpoint.checkpoint(..., use_reentrant=False)`` so the
+            only tensors kept alive for backward are the op's original (bf16)
+            inputs — same retained memory as the unpatched op — and the fp32
+            up-cast + scan forward are recomputed during backward.
+    """
+    import torch
+    from torch.utils.checkpoint import checkpoint
+
+    def _fp32_scan(zxbcdt, *args, **kwargs):
+        """Up-cast zxbcdt to fp32, run the scan, cast the primary output back."""
+        in_dtype = zxbcdt.dtype
+        out = original(zxbcdt.to(torch.float32), *args, **kwargs)
+        # return_final_states=True yields a (out, final_states) tuple.
+        if isinstance(out, tuple):
+            y, *rest = out
+            return (y.to(in_dtype), *rest)
+        return out.to(in_dtype)
+
+    if not checkpointed:
+
+        def wrapper(zxbcdt, *args, **kwargs):
+            if zxbcdt.dtype == torch.float32:
+                # Already fp32 (e.g. fp32 activations): nothing to force.
+                return original(zxbcdt, *args, **kwargs)
+            return _fp32_scan(zxbcdt, *args, **kwargs)
+
+    else:
+
+        def wrapper(zxbcdt, *args, **kwargs):
+            if zxbcdt.dtype == torch.float32:
+                return original(zxbcdt, *args, **kwargs)
+            needs_backward = torch.is_grad_enabled() and (
+                zxbcdt.requires_grad or any(isinstance(t, torch.Tensor) and t.requires_grad for t in args)
+            )
+            if not needs_backward:
+                # Eval / no-grad: nothing is saved for backward anyway, so plain
+                # fp32 is already memory-neutral and checkpoint would only emit a
+                # "none of the inputs require grad" warning.
+                return _fp32_scan(zxbcdt, *args, **kwargs)
+            # Non-reentrant checkpoint: the autograd graph is built during this
+            # (original) forward, so gradients flow to every participating tensor
+            # — positional args (conv weight/bias, dt_bias, A) AND anything closed
+            # over — exactly as without checkpointing. Only the *saved-for-backward*
+            # tensors (the op's internal ctx.save_for_backward of fp32 zxbcdt,
+            # out_x, ...) are dropped after forward and recomputed in backward.
+            # kwargs (chunk_size, activation, seq_idx, ...) are forwarded to the
+            # function by torch's non-reentrant checkpoint. preserve_rng_state=False
+            # is safe: the scan is deterministic (no dropout / RNG inside).
+            return checkpoint(
+                _fp32_scan,
+                zxbcdt,
+                *args,
+                use_reentrant=False,
+                preserve_rng_state=False,
+                **kwargs,
+            )
+
+    wrapper.__name__ = "mamba_split_conv1d_scan_combined_fp32_state" + ("_checkpointed" if checkpointed else "")
+    wrapper._fp32_ssm_state_patched = True
+    wrapper._fp32_ssm_state_mode = "checkpoint" if checkpointed else "direct"
+    wrapper._wrapped = original
+    return wrapper
+
+
+def patch_mamba_training_scan_fp32_state(checkpointed: bool = False) -> bool:
     """Force fp32 inter-chunk SSM state in the Mamba2 *training* scan.
 
     Why
@@ -60,12 +148,15 @@ def patch_mamba_training_scan_fp32_state() -> bool:
     downstream ``_chunk_scan_fwd`` Triton kernel reloads that state and casts it
     to ``C_ptr.dtype.element_ty`` (again bf16) before the ``C @ prev_states``
     matmul. The SSM state magnitude grows with the number of tokens integrated
-    since the last reset; at seq_length=32768 with long documents that span most
-    of the packed window it exceeds the bf16 representable range, producing a
-    forward-loss NaN (observed at iter 2; 8K trained fine, 32K overflows).
+    since the last ``seq_idx`` reset; once a single long document spans most of a
+    32K packed window the state exceeds the bf16 representable range and the
+    forward loss NaNs. Field-confirmed at seq_length=32768 (TP1/CP4/EP4/PP22):
+    270 healthy iterations, then a step-function "NaN in local forward loss" at
+    iteration 272 when a long-doc batch arrived — no instability buildup, purely
+    data-triggered. 8K trained fine.
 
-    The packed-doc-boundary reset (``seq_idx``) is already implemented and
-    correct, but does not help when a *single* document spans ~32K tokens.
+    The packed-doc-boundary reset (``seq_idx``) is implemented and correct, but
+    does not help when a *single* document spans ~32K tokens.
 
     How the fix works
     -----------------
@@ -82,17 +173,29 @@ def patch_mamba_training_scan_fp32_state() -> bool:
     fp32: we wrap ``mamba_split_conv1d_scan_combined`` to up-cast the fused
     ``zxbcdt`` projection (which carries z, x, B, C and dt) to fp32 before the
     call and cast the output back to the original (bf16) dtype afterwards. With
-    fp32 inputs:
+    fp32 inputs the conv, the state passing, and the ``C @ prev_states`` matmul
+    all stay fp32 — the growing state never touches bf16. ``dt_bias``/``A``/``D``
+    are already passed as fp32 by ``_ssm_training``; ``seq_idx`` / ``cu_seqlens``
+    are forwarded untouched so the doc-boundary reset still fires.
 
-    * the conv runs in fp32,
-    * ``C.dtype`` is fp32, so ``_state_passing_fwd`` keeps the inter-chunk state
-      in fp32,
-    * ``_chunk_scan_fwd`` no longer down-casts ``prev_states`` to bf16, so the
-      ``C @ prev_states`` matmul stays fp32,
+    Memory modes
+    ------------
+    ``checkpointed=False`` (env ``ISAMBARD_FP32_SSM_STATE=1``)
+        Direct fp32 call. The op's autograd Function then saves fp32 tensors
+        (``zxbcdt``, ``out_x``) via ``ctx.save_for_backward`` — roughly **2x the
+        scan's saved-activation memory**. At PP=22 with 22 in-flight microbatches
+        and 2 Mamba layers/stage this is ~ +13 GB on an 84/95 GB stage → OOM risk.
 
-    i.e. the growing state never touches bf16. ``dt_bias``/``A``/``D`` are
-    already passed as fp32 by ``_ssm_training``; ``seq_idx`` / ``cu_seqlens`` are
-    forwarded untouched so the doc-boundary reset still fires.
+    ``checkpointed=True`` (env ``ISAMBARD_FP32_SSM_STATE=checkpoint``)
+        **Memory-neutral.** The fp32 call runs inside
+        ``torch.utils.checkpoint.checkpoint(..., use_reentrant=False)``: the only
+        tensors kept alive until backward are the checkpoint's *inputs* — the
+        original bf16 ``zxbcdt`` plus the small parameter tensors, i.e. the same
+        tensors the unpatched op would have saved — while everything saved inside
+        (fp32 ``zxbcdt`` cast, fp32 ``out_x``, conv output) is freed after forward
+        and recomputed during backward. Cost: one extra scan forward per Mamba
+        layer per microbatch (the scan is a small fraction of total model FLOPs).
+        Transient fp32 memory during backward recompute is one layer at a time.
 
     Scope / safety
     --------------
@@ -102,9 +205,12 @@ def patch_mamba_training_scan_fp32_state() -> bool:
       this patch does not affect inference.
     * Casting an already-fp32 tensor is a no-op, and the output is cast back to
       the original dtype, so the wrapper is transparent if activations are not
-      bf16.
+      bf16. Under no-grad the checkpointed mode falls back to the plain fp32 call.
     * If the symbol is missing (mamba_ssm not importable) or already patched,
       this is a guarded no-op.
+    * The scan is deterministic (no dropout/RNG), so the checkpointed mode uses
+      ``preserve_rng_state=False``; the default ``determinism_check`` still
+      validates recomputed tensor metadata.
 
     Composition with CP / packing
     -----------------------------
@@ -112,16 +218,17 @@ def patch_mamba_training_scan_fp32_state() -> bool:
     scan in ``_ssm_training`` runs on the assembled sequence), and ``seq_idx``
     comes from ``packed_seq_params``. The wrapper only changes dtypes and leaves
     ``seq_idx`` / ``cu_seqlens`` and tensor shapes untouched, so it composes with
-    CP=8 and packed ``seq_idx`` exactly as the unpatched op would.
+    CP and packed ``seq_idx`` exactly as the unpatched op would.
 
-    Returns
-    -------
-    bool
+    Args:
+        checkpointed: Select the memory-neutral activation-checkpointed variant
+            (see "Memory modes" above).
+
+    Returns:
         ``True`` if the patch was installed, ``False`` if it was skipped
         (symbol unavailable or already patched).
     """
     try:
-        import torch
         from megatron.core.ssm import mamba_mixer
     except Exception as exc:  # pragma: no cover - import-environment dependent
         logger.warning("fp32-SSM-state patch skipped: could not import megatron.core.ssm.mamba_mixer (%s)", exc)
@@ -135,39 +242,25 @@ def patch_mamba_training_scan_fp32_state() -> bool:
         )
         return False
 
+    requested_mode = "checkpoint" if checkpointed else "direct"
     if getattr(original, "_fp32_ssm_state_patched", False):
-        logger.info("fp32-SSM-state patch already installed; skipping.")
+        installed_mode = getattr(original, "_fp32_ssm_state_mode", "unknown")
+        if installed_mode != requested_mode:
+            logger.warning(
+                "fp32-SSM-state patch already installed in mode=%s; requested mode=%s ignored.",
+                installed_mode,
+                requested_mode,
+            )
+        else:
+            logger.info("fp32-SSM-state patch already installed (mode=%s); skipping.", installed_mode)
         return False
 
-    def mamba_split_conv1d_scan_combined_fp32_state(zxbcdt, *args, **kwargs):
-        """fp32-state wrapper around the mamba_ssm training scan.
-
-        Up-casts the fused ``zxbcdt`` projection to fp32 so the inter-chunk SSM
-        state recurrence stays in fp32, then casts the result back to the input
-        dtype. All other positional/keyword args (conv weights, A, D, dt_bias,
-        chunk_size, seq_idx, ...) are forwarded unchanged.
-        """
-        in_dtype = zxbcdt.dtype
-        if in_dtype == torch.float32:
-            # Already fp32 (e.g. fp32 activations): nothing to force.
-            return original(zxbcdt, *args, **kwargs)
-
-        out = original(zxbcdt.to(torch.float32), *args, **kwargs)
-
-        # return_final_states=True yields a (out, final_states) tuple.
-        if isinstance(out, tuple):
-            y, *rest = out
-            y = y.to(in_dtype)
-            return (y, *rest)
-        return out.to(in_dtype)
-
-    mamba_split_conv1d_scan_combined_fp32_state._fp32_ssm_state_patched = True
-    mamba_split_conv1d_scan_combined_fp32_state._wrapped = original
-
-    mamba_mixer.mamba_split_conv1d_scan_combined = mamba_split_conv1d_scan_combined_fp32_state
+    mamba_mixer.mamba_split_conv1d_scan_combined = _make_fp32_scan_wrapper(original, checkpointed)
     logger.info(
-        "Installed fp32-SSM-state patch: Mamba2 training scan "
-        "(mamba_split_conv1d_scan_combined) now accumulates inter-chunk state in fp32."
+        "Installed fp32-SSM-state patch (mode=%s): Mamba2 training scan "
+        "(mamba_split_conv1d_scan_combined) now accumulates inter-chunk state in fp32%s.",
+        requested_mode,
+        " inside non-reentrant activation checkpointing (memory-neutral)" if checkpointed else "",
     )
     return True
 
@@ -291,21 +384,147 @@ def patch_eager_comm_warmup() -> bool:
     return True
 
 
-def apply_isambard_training_patches() -> None:
+def apply_isambard_training_patches(fp32_ssm_state_checkpointed: bool = False) -> None:
     """Apply all runtime training patches. Safe to call once per process."""
-    patch_mamba_training_scan_fp32_state()
+    patch_mamba_training_scan_fp32_state(checkpointed=fp32_ssm_state_checkpointed)
+
+
+def _selftest_checkpoint_wrapper_mechanics() -> None:
+    """CPU-only test of the fp32 wrapper mechanics against a fake scan op.
+
+    The fake op mirrors the real one structurally: a custom autograd.Function that
+    saves its (fp32) input via ``ctx.save_for_backward`` (like
+    ``MambaSplitConv1dScanCombinedFn`` saving ``zxbcdt``/``out_x``), a learnable
+    weight passed positionally, a Parameter referenced via closure, a tensor kwarg
+    (``seq_idx``), and a tuple return. Verifies, for direct vs checkpointed mode:
+
+    (i)   forward output dtype is bf16 (and tuple extras pass through untouched);
+    (ii)  backward recomputes (fake op runs twice under checkpoint, once direct);
+    (iii) grads flow to the input, the positional Parameter, AND the closed-over
+          Parameter — and match between modes;
+    (iv)  memory: the fp32 tensor saved inside the op is freed after forward under
+          checkpoint (weakref dead) but kept alive in direct mode — i.e. only the
+          original bf16 input is retained for backward in checkpointed mode.
+    """
+    import gc
+    import weakref
+
+    import torch
+
+    state = {"op_calls": 0, "saved_fp32_refs": [], "seen_dtype": None, "seen_seq_idx": None}
+    w_closure = torch.nn.Parameter(torch.tensor(2.0))
+
+    class _FakeScanFn(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x32, conv_w):
+            ctx.save_for_backward(x32, conv_w)  # mimics the real op saving fp32 activations
+            state["saved_fp32_refs"].append(weakref.ref(x32))
+            return x32 * conv_w
+
+        @staticmethod
+        def backward(ctx, g):
+            x32, conv_w = ctx.saved_tensors
+            return g * conv_w, (g * x32).sum().reshape(conv_w.shape)
+
+    def fake_op(zxbcdt, conv_w, **kwargs):
+        state["op_calls"] += 1
+        state["seen_dtype"] = zxbcdt.dtype
+        state["seen_seq_idx"] = kwargs.get("seq_idx")
+        y = _FakeScanFn.apply(zxbcdt, conv_w) * w_closure  # closure Parameter participates
+        return (y, "final_states_sentinel")  # tuple return, non-tensor extra
+
+    def run(checkpointed: bool) -> dict:
+        state.update(op_calls=0, saved_fp32_refs=[], seen_dtype=None, seen_seq_idx=None)
+        w_closure.grad = None
+        torch.manual_seed(0)
+        x = torch.randn(4, 8, dtype=torch.bfloat16, requires_grad=True)
+        conv_w = torch.nn.Parameter(torch.tensor(1.5))
+        wrapper = _make_fp32_scan_wrapper(fake_op, checkpointed=checkpointed)
+
+        y, extra = wrapper(x, conv_w, seq_idx=torch.tensor([0, 0, 1, 1]))
+        gc.collect()
+        fp32_alive_after_fwd = state["saved_fp32_refs"][0]() is not None
+        calls_after_fwd = state["op_calls"]
+        y.float().sum().backward()
+        return {
+            "out_dtype": y.dtype,
+            "extra_ok": extra == "final_states_sentinel",
+            "op_saw_fp32": state["seen_dtype"] == torch.float32,
+            "seq_idx_ok": torch.equal(state["seen_seq_idx"], torch.tensor([0, 0, 1, 1])),
+            "calls_fwd": calls_after_fwd,
+            "calls_total": state["op_calls"],
+            "fp32_alive_after_fwd": fp32_alive_after_fwd,
+            "grad_x": x.grad.clone(),
+            "grad_conv_w": conv_w.grad.clone(),
+            "grad_closure_w": w_closure.grad.clone(),
+        }
+
+    direct, ckpt = run(checkpointed=False), run(checkpointed=True)
+
+    print(
+        "[mechanics] mode=direct    : out dtype=%s, op calls fwd/total=%d/%d, fp32 saved alive after fwd=%s"
+        % (direct["out_dtype"], direct["calls_fwd"], direct["calls_total"], direct["fp32_alive_after_fwd"])
+    )
+    print(
+        "[mechanics] mode=checkpoint: out dtype=%s, op calls fwd/total=%d/%d, fp32 saved alive after fwd=%s"
+        % (ckpt["out_dtype"], ckpt["calls_fwd"], ckpt["calls_total"], ckpt["fp32_alive_after_fwd"])
+    )
+    print(
+        "[mechanics] (i)   bf16 output both modes        :", direct["out_dtype"] == ckpt["out_dtype"] == torch.bfloat16
+    )
+    print(
+        "[mechanics]       tuple extras + fp32 in + seq_idx:",
+        all(m[k] for m in (direct, ckpt) for k in ("extra_ok", "op_saw_fp32", "seq_idx_ok")),
+    )
+    print("[mechanics] (ii)  backward recomputes (1 vs 2)  :", (direct["calls_total"], ckpt["calls_total"]) == (1, 2))
+    print(
+        "[mechanics] (iii) grads non-None both modes     :",
+        all(m[k] is not None for m in (direct, ckpt) for k in ("grad_x", "grad_conv_w", "grad_closure_w")),
+    )
+    print(
+        "[mechanics]       grads match direct vs ckpt    : x=%s conv_w=%s closure_w=%s"
+        % (
+            torch.allclose(direct["grad_x"], ckpt["grad_x"]),
+            torch.allclose(direct["grad_conv_w"], ckpt["grad_conv_w"]),
+            torch.allclose(direct["grad_closure_w"], ckpt["grad_closure_w"]),
+        )
+    )
+    print(
+        "[mechanics] (iv)  fp32 saved freed after fwd    : direct=%s (kept), checkpoint=%s (freed)"
+        % (direct["fp32_alive_after_fwd"], not ckpt["fp32_alive_after_fwd"])
+    )
+
+    with torch.no_grad():
+        state.update(op_calls=0)
+        wrapper = _make_fp32_scan_wrapper(fake_op, checkpointed=True)
+        y_ng, _ = wrapper(torch.randn(4, 8, dtype=torch.bfloat16), torch.tensor(1.5))
+    print(
+        "[mechanics] no-grad path: bf16 out=%s, single call=%s (plain fp32, no checkpoint)"
+        % (y_ng.dtype == torch.bfloat16, state["op_calls"] == 1)
+    )
 
 
 if __name__ == "__main__":
-    # CPU-only sanity check: import + confirm the patched callable is in place.
+    # CPU-only sanity checks (no GPU / SLURM):
+    #  1. wrapper mechanics against a fake op (dtype, recompute, grads, memory);
+    #  2. install + idempotency against the real megatron.core.ssm.mamba_mixer.
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    installed = patch_mamba_training_scan_fp32_state()
+
+    _selftest_checkpoint_wrapper_mechanics()
+
+    import os
+
+    mode = os.environ.get("ISAMBARD_FP32_SSM_STATE", "checkpoint")
+    installed = patch_mamba_training_scan_fp32_state(checkpointed=(mode == "checkpoint"))
     from megatron.core.ssm import mamba_mixer
 
     fn = mamba_mixer.mamba_split_conv1d_scan_combined
     print(f"patch installed: {installed}")
     print(f"callable name:   {getattr(fn, '__name__', fn)}")
     print(f"is patched:      {getattr(fn, '_fp32_ssm_state_patched', False)}")
-    # Idempotency: a second call must be a no-op.
-    again = patch_mamba_training_scan_fp32_state()
-    print(f"second call installed (expect False): {again}")
+    print(f"mode:            {getattr(fn, '_fp32_ssm_state_mode', None)}")
+    # Idempotency: a second call must be a no-op (also when the other mode is requested).
+    again_same = patch_mamba_training_scan_fp32_state(checkpointed=(mode == "checkpoint"))
+    again_other = patch_mamba_training_scan_fp32_state(checkpointed=(mode != "checkpoint"))
+    print(f"second call installed (expect False): {again_same}")
+    print(f"other-mode call installed (expect False): {again_other}")

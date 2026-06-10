@@ -276,16 +276,23 @@ def main() -> None:
     """Parse CLI args, build the recipe + YAML/CLI config overrides, and launch training."""
     # Optional numerical hardening: force fp32 inter-chunk SSM state in the hybrid Mamba2
     # training scan (mamba_ssm otherwise carries the running state across chunks in bf16).
-    # Gated OFF by default: the iter-2 forward NaN it was written for turned out to be the
-    # CP/THD packed-data padding bug (packs must be padded to a multiple of 2*CP — see
-    # configs/pa_warm_start_sft_120b/README.md), not a state overflow. Enable only if a
-    # genuine late-training SSM overflow appears (NaN after many healthy iterations):
-    # costs ~1.3-2x on Mamba layers and roughly doubles the scan's saved activations.
+    # The bf16 state overflows once a single long document integrates ~32K tokens —
+    # field-confirmed at seq 32768 (TP1/CP4/EP4/PP22): 270 healthy iterations, then a
+    # step-function "NaN in local forward loss" at iter 272 on a long-doc batch. (The
+    # earlier iter-2 NaN was the separate CP/THD padding bug — packs must be padded to a
+    # multiple of 2*CP; see configs/pa_warm_start_sft_120b/README.md.) Modes:
+    #   ISAMBARD_FP32_SSM_STATE=1           direct fp32 cast — ~2x the scan's saved
+    #                                       activations (+~13 GB on PP=22 stage 0: OOM risk)
+    #   ISAMBARD_FP32_SSM_STATE=checkpoint  memory-neutral — fp32 scan inside non-reentrant
+    #                                       activation checkpointing; only the original bf16
+    #                                       zxbcdt is saved, the fp32 forward is recomputed
+    #                                       in backward (cost: +1 scan fwd per Mamba layer)
     # See pipeline_training_patches.py for the exact mamba_ssm code path.
-    if os.environ.get("ISAMBARD_FP32_SSM_STATE", "0") == "1":
-        from pipeline_training_patches import apply_isambard_training_patches
+    fp32_ssm_mode = os.environ.get("ISAMBARD_FP32_SSM_STATE", "0")
+    if fp32_ssm_mode in ("1", "checkpoint"):
+        from pipeline_training_patches import patch_mamba_training_scan_fp32_state
 
-        apply_isambard_training_patches()
+        patch_mamba_training_scan_fp32_state(checkpointed=(fp32_ssm_mode == "checkpoint"))
 
     # Optional NCCL communicator warmup: initialize every model-parallel group's
     # communicator in one parallel wave right after parallel-state setup, instead of
