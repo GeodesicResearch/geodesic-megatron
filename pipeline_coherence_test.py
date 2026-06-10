@@ -17,6 +17,14 @@ Three backends (--backend):
         FP8/NVFP4 fallbacks die on CXI load-timeout / driver PTX rejection).
         model_path is a Megatron checkpoint dir; --hf-model supplies the
         architecture config. See docs/ultra-550b-training-and-conversion.md.
+    vllm: run vLLM DIRECTLY in-process (offline LLM() API) — single-node
+        (e.g. Super 120B at TP=4) or multi-node (Ultra 550B at TP=4/PP=4 over
+        a Ray cluster the submit launcher brings up). Requires the dedicated
+        inference venv (scripts/setup_vllm_coherence_venv.sh; vLLM >= 0.22.1 —
+        0.21+ defaults to RayExecutorV2, which sidesteps the hybrid+PP
+        KV-cache KeyError of older Ray executors and propagates FI_*/NCCL env
+        to workers). model_path is a HF id/dir; note Mamba n_groups=8 caps
+        TP at 8 for the Nemotron-3 hybrids.
     endpoint: hit a running vLLM OpenAI-compatible server (e.g. served via
         the dataset-builder serve harness) at --base-url / --discovery-file.
         model_path is the served model id (auto-discovered when possible).
@@ -374,6 +382,53 @@ def generate_megatron(args, prompts) -> list[str]:
 
 
 # ==============================================================================
+# Backend: vllm — in-process vLLM offline API (single- or multi-node)
+# ==============================================================================
+
+
+def generate_vllm(args, prompts) -> list[str]:
+    """One generation per prompt via vllm.LLM() running in this process.
+
+    Single node: mp executor (TP across the node's GPUs). Multi node: ray
+    executor over a Ray cluster the submit launcher brings up first (vLLM
+    0.21+ defaults to RayExecutorV2 — required for PP>1 with the NemotronH
+    hybrids; the old Ray executor has a rank-sync bug, vllm#41287). Mamba
+    n_groups=8 caps TP at 8 for Nemotron-3; use PP for more GPUs.
+    """
+    from vllm import LLM, SamplingParams
+
+    executor = args.vllm_executor
+    if executor == "auto":
+        executor = "ray" if args.pp > 1 or os.environ.get("COH_VLLM_MULTINODE") == "1" else "mp"
+    kwargs = dict(
+        model=args.model_path,
+        tensor_parallel_size=args.tp,
+        pipeline_parallel_size=args.pp,
+        distributed_executor_backend=executor,
+        trust_remote_code=args.trust_remote_code,
+        gpu_memory_utilization=args.gpu_mem_util,
+        max_model_len=args.max_model_len,
+        dtype="bfloat16",
+        enforce_eager=True,  # ARM/GH200: keep torch.compile out of the inference path
+        enable_expert_parallel=not args.no_expert_parallel,
+    )
+    if args.vllm_quantization:
+        kwargs["quantization"] = args.vllm_quantization
+    if args.revision:
+        kwargs["revision"] = args.revision
+    print(f"vLLM LLM() init: tp={args.tp} pp={args.pp} executor={executor} quant={args.vllm_quantization}")
+    llm = LLM(**kwargs)
+    sampling = SamplingParams(temperature=args.temperature, max_tokens=args.max_tokens)
+
+    if args.generation_mode == "chat":
+        conversations = [build_chat_messages(p, args.system_prompt) for p in prompts]
+        outs = llm.chat(conversations, sampling_params=sampling)
+    else:
+        outs = llm.generate(prompts, sampling_params=sampling)
+    return [o.outputs[0].text.strip() if o.outputs else "" for o in outs]
+
+
+# ==============================================================================
 # Shared reporting
 # ==============================================================================
 
@@ -393,10 +448,10 @@ def main():
     parser.add_argument("model_path", help="HF id/path (hf), Megatron ckpt dir (megatron), or served id (endpoint)")
     parser.add_argument(
         "--backend",
-        choices=["hf", "megatron", "endpoint"],
+        choices=["hf", "megatron", "vllm", "endpoint"],
         default="hf",
         help="hf: transformers device_map (single node). megatron: bridge-load a Megatron ckpt under torchrun. "
-        "endpoint: a running vLLM OpenAI server.",
+        "vllm: in-process vLLM (single- or multi-node). endpoint: a running vLLM OpenAI server.",
     )
     parser.add_argument(
         "--revision",
@@ -427,11 +482,18 @@ def main():
     # megatron backend
     parser.add_argument("--hf-model", default=None, help="megatron: HF id supplying the architecture config")
     parser.add_argument("--tokenizer", default=None, help="megatron: tokenizer/chat-template HF id (default: --hf-model)")
-    parser.add_argument("--tp", type=int, default=4)
-    parser.add_argument("--pp", type=int, default=6)
+    parser.add_argument("--tp", type=int, default=4, help="megatron/vllm: tensor parallel")
+    parser.add_argument("--pp", type=int, default=None, help="megatron/vllm: pipeline parallel (default: 6 megatron, 1 vllm)")
     parser.add_argument("--ep", type=int, default=4)
     parser.add_argument("--etp", type=int, default=1)
     parser.add_argument("--trust-remote-code", action="store_true")
+    # vllm backend
+    parser.add_argument("--vllm-executor", choices=["auto", "mp", "ray"], default="auto",
+                        help="vllm: distributed executor (auto = mp single-node, ray multi-node)")
+    parser.add_argument("--vllm-quantization", default=None, help="vllm: e.g. fp8 (omit for native dtype)")
+    parser.add_argument("--gpu-mem-util", type=float, default=0.90, help="vllm: --gpu-memory-utilization")
+    parser.add_argument("--max-model-len", type=int, default=8192, help="vllm: context length")
+    parser.add_argument("--no-expert-parallel", action="store_true", help="vllm: disable expert parallel for MoE")
     # endpoint backend
     parser.add_argument("--base-url", default=None, help="endpoint: e.g. http://nidXXXX:8000 (/v1 appended if absent)")
     parser.add_argument("--discovery-file", default=None, help="endpoint: file the serve job writes the URL to")
@@ -441,6 +503,8 @@ def main():
 
     if args.backend == "megatron" and not args.hf_model:
         parser.error("--backend megatron requires --hf-model")
+    if args.pp is None:
+        args.pp = 6 if args.backend == "megatron" else 1
 
     prompts = COMPLETION_PROMPTS if args.generation_mode == "completion" else CHAT_PROMPTS
     if args.num_prompts > 0:
@@ -472,9 +536,9 @@ def main():
         print(f"System prompt: {args.system_prompt}")
     print("=" * 80)
 
-    gens = {"hf": generate_hf, "megatron": generate_megatron, "endpoint": generate_endpoint}[args.backend](
-        args, prompts
-    )
+    gens = {"hf": generate_hf, "megatron": generate_megatron, "vllm": generate_vllm, "endpoint": generate_endpoint}[
+        args.backend
+    ](args, prompts)
 
     if not is_rank0():  # torchrun workers: rank 0 owns reporting
         return

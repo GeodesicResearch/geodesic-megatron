@@ -39,6 +39,16 @@
 #     --backend megatron --hf-model nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
 #     --tokenizer geodesic-research/nemotron-instruct-tokenizer \
 #     --tp 4 --pp 6 --ep 4 --max-tokens 256 --trust-remote-code
+#
+#   # vLLM DIRECTLY, single node (Super 120B, TP=4; needs the vllm-coherence venv —
+#   # scripts/setup_vllm_coherence_venv.sh):
+#   isambard_sbatch --nodes=1 pipeline_coherence_submit.sbatch \
+#     nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --backend vllm --tp 4 --max-tokens 256
+#
+#   # vLLM DIRECTLY, multi-node (Ultra 550B BF16, TP=4 x PP=4 = 16 GPUs on 4 nodes;
+#   # the launcher brings up a Ray cluster across the allocation first):
+#   isambard_sbatch --nodes=4 pipeline_coherence_submit.sbatch \
+#     /path/to/iter_NNNNNNN/hf --backend vllm --tp 4 --pp 4 --max-tokens 256 --trust-remote-code
 # ==============================================================================
 
 MODEL_PATH="${1:?Usage: isambard_sbatch pipeline_coherence_submit.sbatch <model_path> [options]}"
@@ -105,6 +115,61 @@ if [ "$BACKEND" = "megatron" ]; then
             --master_port=$MASTER_PORT \
             pipeline_coherence_test.py $MODEL_PATH --output $OUT $*
     "
+elif [ "$BACKEND" = "vllm" ]; then
+    # In-process vLLM from the DEDICATED inference venv (never the training venv).
+    VLLM_VENV="${COH_VLLM_VENV:-/projects/a5k/public/data_kyleobrien.a5k/python_envs/vllm-coherence}"
+    [ -x "$VLLM_VENV/bin/python" ] || { echo "FATAL: vllm venv missing at $VLLM_VENV — run scripts/setup_vllm_coherence_venv.sh"; exit 1; }
+    source "$VLLM_VENV/bin/activate"
+    # Re-point the dynamic loader at THIS venv's NVIDIA libs (pipeline_env_activate.sh
+    # preloads the training venv's NCCL — wrong libs for the vllm stack).
+    VSP=$(ls -d "$VLLM_VENV"/lib/python*/site-packages | head -1)
+    export LD_PRELOAD="$VSP/nvidia/nccl/lib/libnccl.so.2"
+    NV="$VSP/nvidia"
+    export LD_LIBRARY_PATH="$NV/nccl/lib:$NV/cudnn/lib:$NV/cublas/lib:$NV/cuda_runtime/lib:$NV/nvjitlink/lib:$NV/cusparse/lib:$NV/cufft/lib:$NV/cusolver/lib:${LD_LIBRARY_PATH:-}"
+    export TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1 VLLM_TORCH_COMPILE_DISABLE=1
+    export TORCH_CUDA_ARCH_LIST=9.0 VLLM_WORKER_MULTIPROC_METHOD=spawn
+    OUT="$REPO_DIR/logs/slurm/coherence-test-${SLURM_JOB_ID}-gens.txt"
+
+    if [ "$SLURM_NNODES" -gt 1 ]; then
+        # --- Multi-node: bring up a Ray cluster across the allocation, then run on the head ---
+        # NCCL transport for cross-node TP/PP: socket-over-hsn is the proven default; set
+        # COH_VLLM_NCCL=cxi to try AWS-OFI/libfabric (RayExecutorV2 propagates FI_* to workers).
+        if [ "${COH_VLLM_NCCL:-socket}" = "cxi" ]; then
+            export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_CROSS_NIC=1 NCCL_NET_GDR_LEVEL=PHB
+            export FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd FI_CXI_DEFAULT_CQ_SIZE=131072 FI_CXI_RX_MATCH_MODE=soft
+        else
+            export NCCL_NET=Socket
+        fi
+        export NCCL_SOCKET_IFNAME=hsn NCCL_NVLS_ENABLE=0 MPICH_GPU_SUPPORT_ENABLED=0
+        export COH_VLLM_MULTINODE=1
+        HEAD_NODE=$(scontrol show hostnames "$SLURM_NODELIST" | head -1)
+        HEAD_IP=$(getent hosts "$HEAD_NODE" | awk '{print $1}' | head -1); [ -n "$HEAD_IP" ] || HEAD_IP=$(hostname -I | awk '{print $1}')
+        export VLLM_HOST_IP="$HEAD_IP"
+        RAY_TMP=/tmp/ray_${SLURM_JOB_ID}
+        export RAY_gcs_server_request_timeout_seconds=120 RAY_raylet_start_wait_time_s=300
+        GPUS_PER_NODE=${SLURM_GPUS_PER_NODE:-4}
+        EXPECTED=$((SLURM_NNODES * GPUS_PER_NODE))
+        trap 'ray stop --force 2>/dev/null || true' EXIT
+        ray start --head --node-ip-address="$HEAD_IP" --port=6379 --temp-dir="$RAY_TMP" \
+            --include-dashboard=false --num-gpus="$GPUS_PER_NODE" --disable-usage-stats || true
+        export RAY_ADDRESS="$HEAD_IP:6379"
+        sleep 15
+        srun --overlap --nodes=$((SLURM_NNODES - 1)) --ntasks-per-node=1 --exclude="$HEAD_NODE" bash -c '
+            WIP=$(getent hosts "$(hostname)" | awk "{print \$1}" | head -1)
+            export VLLM_HOST_IP="$WIP"
+            exec ray start --address="'"$HEAD_IP"':6379" --node-ip-address="$WIP" \
+                --temp-dir="'"$RAY_TMP"'" --num-gpus="'"$GPUS_PER_NODE"'" --block' &
+        for i in $(seq 1 30); do
+            ng=$(timeout 20 python -c "import ray; ray.init(address='auto'); print(int(ray.cluster_resources().get('GPU',0)))" 2>/dev/null | tail -1)
+            echo "[vllm-coh] ray GPUs: ${ng:-?}/$EXPECTED"
+            [ "${ng:-0}" = "$EXPECTED" ] && break
+            sleep 10
+        done
+        [ "${ng:-0}" = "$EXPECTED" ] || { echo "FATAL: Ray cluster incomplete (${ng:-0}/$EXPECTED GPUs)"; exit 1; }
+        python pipeline_coherence_test.py "$MODEL_PATH" --backend vllm --vllm-executor ray --output "$OUT" $(printf '%s ' "$@" | sed 's/--backend vllm //')
+    else
+        python pipeline_coherence_test.py "$MODEL_PATH" --output "$OUT" "$@"
+    fi
 else
     python pipeline_coherence_test.py "$MODEL_PATH" "$@"
 fi
