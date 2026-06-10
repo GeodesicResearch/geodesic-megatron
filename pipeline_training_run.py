@@ -294,6 +294,21 @@ def main() -> None:
 
         patch_mamba_training_scan_fp32_state(checkpointed=(fp32_ssm_mode == "checkpoint"))
 
+    # Optional Mamba saved-activation host offload: run the training scan under
+    # torch.autograd.graph.save_on_cpu(pin_memory=True) so its saved-for-backward tensors
+    # (zxbcdt, out_x — the one big activation class that is neither recomputable ('mamba'
+    # is not an allowed recompute module) nor visible to NVTE fine-grained offload) move
+    # to pinned host RAM after forward and stream back for backward. Frees ~15-25 GB on
+    # stage 0 at 8192 tok/rank x 16 in-flight microbatches; costs ~1-2 ms D2H + H2D per
+    # Mamba layer-microbatch over NVLink-C2C. Composes with ISAMBARD_FP32_SSM_STATE=1
+    # (the fp32 saves offload too, erasing direct mode's ~2x saved-memory cost); refused
+    # under =checkpoint (recompute already discards the saves — pick one). Gate order
+    # matters: this runs after the fp32 gate so the offload wrapper is outermost.
+    if os.environ.get("ISAMBARD_MAMBA_SAVE_OFFLOAD", "0") == "1":
+        from pipeline_training_patches import patch_mamba_training_scan_save_offload
+
+        patch_mamba_training_scan_save_offload()
+
     # Optional NCCL communicator warmup: initialize every model-parallel group's
     # communicator in one parallel wave right after parallel-state setup, instead of
     # lazily on first use (where deep-PP first-microbatch propagation serializes the

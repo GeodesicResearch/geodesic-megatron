@@ -31,6 +31,13 @@ Patches provided:
     during backward). See the function docstring for the full rationale and the
     exact mamba_ssm code path it addresses.
 
+``patch_mamba_training_scan_save_offload``
+    Host-offload the Mamba2 training scan's saved-for-backward tensors via
+    ``torch.autograd.graph.save_on_cpu(pin_memory=True)`` — frees ~15-25 GB of
+    stage-0 GPU memory (the Mamba saves are neither recomputable nor visible to
+    NVTE offload). Composes with the fp32 ``direct`` mode; refused under the
+    fp32 ``checkpoint`` mode (recompute already discards the saves).
+
 ``patch_eager_comm_warmup``
     Initialize all NCCL communicators in one parallel wave right after
     parallel-state setup (deep-PP first-collective watchdog mitigation).
@@ -47,6 +54,7 @@ __all__ = [
     "apply_isambard_training_patches",
     "patch_eager_comm_warmup",
     "patch_mamba_training_scan_fp32_state",
+    "patch_mamba_training_scan_save_offload",
 ]
 
 
@@ -265,6 +273,145 @@ def patch_mamba_training_scan_fp32_state(checkpointed: bool = False) -> bool:
     return True
 
 
+def _make_save_offload_wrapper(inner):
+    """Wrap the Mamba2 training scan so its saved-for-backward tensors live on host.
+
+    Runs ``inner`` (the original op, or the fp32-direct wrapper) under
+    ``torch.autograd.graph.save_on_cpu(pin_memory=True)``. Every tensor the op
+    saves for backward — including ``ctx.save_for_backward`` inside its custom
+    autograd Function (hook coverage proven by the fp32-checkpoint selftest) — is
+    packed into a pinned host copy at the end of the op's forward, releasing the
+    GPU storage; the unpack hook streams it back (``.to(device,
+    non_blocking=True)`` from pinned memory) when the op's backward reads
+    ``ctx.saved_tensors``.
+
+    Scoped tightly to this single call: torch applies only the innermost active
+    saved-tensor hook pair, and this context spans nothing but the scan op, so
+    parameters and activations saved by surrounding ops (norms, projections,
+    attention, MoE) are untouched.
+    """
+    import torch
+    from torch.autograd.graph import save_on_cpu
+
+    def wrapper(zxbcdt, *args, **kwargs):
+        if not torch.is_grad_enabled():
+            # Eval / no-grad: nothing is saved for backward, nothing to offload.
+            return inner(zxbcdt, *args, **kwargs)
+        with save_on_cpu(pin_memory=True):
+            return inner(zxbcdt, *args, **kwargs)
+
+    wrapper.__name__ = "mamba_split_conv1d_scan_combined_save_offload"
+    wrapper._mamba_save_offload_patched = True
+    wrapper._wrapped = inner
+    # Keep the fp32 markers visible through this wrapper so the fp32 patch's
+    # idempotency guard still fires if it is (against the documented order)
+    # called after this patch.
+    if getattr(inner, "_fp32_ssm_state_patched", False):
+        wrapper._fp32_ssm_state_patched = True
+        wrapper._fp32_ssm_state_mode = inner._fp32_ssm_state_mode
+    return wrapper
+
+
+def patch_mamba_training_scan_save_offload() -> bool:
+    """Host-offload the Mamba2 training scan's saved-for-backward tensors.
+
+    Why
+    ---
+    The scan op's ``ctx.save_for_backward`` tensors (``zxbcdt`` and ``out_x``,
+    ~300-600 MB bf16 per Mamba layer per microbatch at 8192 tok/rank) are the one
+    large activation class on a Nemotron-H stage that is neither recomputable
+    ('mamba' is not an allowed ``recompute_modules`` entry) nor visible to NVTE
+    fine-grained activation offload (which only hooks TE-wrapped modules). Under
+    1F1B with many in-flight microbatches they pile up on early stages: ~16 µb x
+    2 Mamba layers/stage x ~0.6 GB ≈ 15-25 GB of stage-0 GPU memory. Field
+    motivation: the zero-recompute arm at 8192 tok/rank OOMed twice by ~0.5 GB
+    even at 16 in-flight microbatches; freeing the Mamba saves buys back the
+    recompute-drop's +15-20% step-time win.
+
+    How
+    ---
+    Wraps ``mamba_mixer.mamba_split_conv1d_scan_combined`` (the same symbol the
+    fp32 patch wraps) in ``save_on_cpu(pin_memory=True)``:
+
+    * pack — fires once per saved tensor at the end of the op's forward: copies
+      into a pinned host buffer (``torch.empty(..., pin_memory=True)`` +
+      ``copy_``) and drops the GPU reference. The copy is synchronous with
+      respect to the calling CPU thread.
+    * unpack — fires when the op's backward reads ``ctx.saved_tensors``: copies
+      back with ``.to(device, non_blocking=True)``, async from pinned memory on
+      the current stream and therefore correctly ordered ahead of the consuming
+      backward kernels.
+
+    Composition with the fp32-SSM-state patch (apply THIS patch second)
+    -------------------------------------------------------------------
+    * no fp32 patch: offloads the op's bf16 saves (the zero-recompute speed arm).
+    * fp32 ``direct`` (``ISAMBARD_FP32_SSM_STATE=1``): offloads the op's **fp32**
+      saves — direct mode's ~2x saved-memory penalty moves entirely to host RAM,
+      making direct+offload a strong 32K combination.
+    * fp32 ``checkpoint``: **refused with a warning.** Non-reentrant checkpoint
+      already discards the op's saves (recompute) — there is nothing left to
+      offload. The tensors checkpoint retains (the bf16 inputs) are held as plain
+      frame references, not via saved-tensor hooks, so ``save_on_cpu`` could not
+      reach them anyway; and torch applies only the innermost hook pair
+      (checkpoint's own), so the combination would be dead code. Pick one:
+      ``checkpoint`` (recompute, no host traffic) or ``1`` + offload (no
+      recompute, host traffic).
+
+    Performance (estimates — measure on GPU)
+    ----------------------------------------
+    * D2H/H2D volume ≈ the op's saved bytes: ~300-600 MB per layer-µb per
+      direction at 8192 tok/rank → ~1-2 ms per direction per layer call on GH200
+      NVLink-C2C (~450 GB/s).
+    * The pack copy blocks the enqueueing CPU thread (and must wait for the
+      producing kernels), so it can stall kernel submission; unpack is
+      non-blocking for the CPU but still serializes on the current stream ahead
+      of the backward kernels. Expect a few ms per microbatch, partially hidden
+      under pipeline bubbles — not free.
+    * Pinned buffers come from torch's caching host allocator and are reused
+      across iterations; the first iterations pay one-time ``cudaHostAlloc``
+      page-locking for the working set (~20 GB on a stage-0 rank: 16 µb x 2
+      layers x ~0.6 GB — comfortably within the GH200's ~480 GB LPDDR).
+
+    Returns:
+        ``True`` if installed; ``False`` if skipped (symbol unavailable, already
+        installed, or refused because fp32 mode is ``checkpoint``).
+    """
+    try:
+        from megatron.core.ssm import mamba_mixer
+    except Exception as exc:  # pragma: no cover - import-environment dependent
+        logger.warning("Mamba save-offload patch skipped: could not import megatron.core.ssm.mamba_mixer (%s)", exc)
+        return False
+
+    current = getattr(mamba_mixer, "mamba_split_conv1d_scan_combined", None)
+    if current is None:
+        logger.warning(
+            "Mamba save-offload patch skipped: mamba_mixer.mamba_split_conv1d_scan_combined is None "
+            "(mamba_ssm not available)."
+        )
+        return False
+
+    if getattr(current, "_mamba_save_offload_patched", False):
+        logger.info("Mamba save-offload patch already installed; skipping.")
+        return False
+
+    if getattr(current, "_fp32_ssm_state_mode", None) == "checkpoint":
+        logger.warning(
+            "Mamba save-offload patch refused: fp32-SSM-state 'checkpoint' mode is installed, which already "
+            "discards the scan's saved tensors via recompute — host-offload would be dead code (torch applies "
+            "only the innermost saved-tensor hooks, and checkpoint retains its inputs as plain references). "
+            "Use ISAMBARD_FP32_SSM_STATE=1 together with the offload, or 'checkpoint' alone."
+        )
+        return False
+
+    mamba_mixer.mamba_split_conv1d_scan_combined = _make_save_offload_wrapper(current)
+    logger.info(
+        "Installed Mamba save-offload patch: training-scan saved tensors now offload to pinned host memory "
+        "(wrapping: %s).",
+        getattr(current, "__name__", current),
+    )
+    return True
+
+
 def _warmup_all_communicators() -> None:
     """Eagerly initialize NCCL communicators for every model-parallel group.
 
@@ -384,9 +531,13 @@ def patch_eager_comm_warmup() -> bool:
     return True
 
 
-def apply_isambard_training_patches(fp32_ssm_state_checkpointed: bool = False) -> None:
+def apply_isambard_training_patches(
+    fp32_ssm_state_checkpointed: bool = False, mamba_save_offload: bool = False
+) -> None:
     """Apply all runtime training patches. Safe to call once per process."""
     patch_mamba_training_scan_fp32_state(checkpointed=fp32_ssm_state_checkpointed)
+    if mamba_save_offload:
+        patch_mamba_training_scan_save_offload()
 
 
 def _selftest_checkpoint_wrapper_mechanics() -> None:
@@ -504,27 +655,188 @@ def _selftest_checkpoint_wrapper_mechanics() -> None:
     )
 
 
+def _selftest_save_offload_wrapper_mechanics() -> None:
+    """CPU-only test of the save_on_cpu offload wrapper against a fake scan op.
+
+    The fake op saves its input plus a big intermediate (``out_x`` stand-in) via
+    ``ctx.save_for_backward`` inside a custom autograd.Function, mirroring the
+    real scan. CPU-only, so device movement degenerates to CPU->CPU copies; hook
+    firing is observed structurally instead: under ``save_on_cpu`` the originally
+    saved tensors are replaced by packed copies — the intermediate is freed after
+    forward (weakref dead) and backward sees different ``data_ptr`` values than
+    were saved. Verifies:
+
+    (i)   pack/unpack hooks fire for the op's custom-Function saves;
+    (ii)  backward grads match the unwrapped baselines bit-for-bit;
+    (iii) the composition matrix: offload alone and offload+fp32-direct offload
+          the saves without recompute; offload+fp32-checkpoint at wrapper level
+          leaves checkpoint in charge (recompute fires, offload is a no-op,
+          nothing breaks) — the patch-level install refuses that combo anyway;
+    (iv)  the no-grad path bypasses the hooks entirely.
+    """
+    import gc
+    import weakref
+
+    import torch
+
+    state = {"op_calls": 0, "save_ptrs": [], "bwd_ptrs": [], "interm_ref": None, "seen_dtype": None}
+
+    class _FakeScanFn(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, conv_w):
+            state["op_calls"] += 1
+            out_x = x * 3.0  # big intermediate retained only via save_for_backward (out_x stand-in)
+            ctx.save_for_backward(x, out_x, conv_w)
+            state["save_ptrs"].append((x.data_ptr(), out_x.data_ptr()))
+            state["interm_ref"] = weakref.ref(out_x)
+            return out_x * conv_w
+
+        @staticmethod
+        def backward(ctx, g):
+            x, out_x, conv_w = ctx.saved_tensors
+            state["bwd_ptrs"].append((x.data_ptr(), out_x.data_ptr()))
+            return g * 3.0 * conv_w, (g * out_x).sum().reshape(conv_w.shape)
+
+    def fake_op(zxbcdt, conv_w, **kwargs):
+        state["seen_dtype"] = zxbcdt.dtype
+        return (_FakeScanFn.apply(zxbcdt, conv_w), "final_states_sentinel")
+
+    def run(build_wrapper) -> dict:
+        state.update(op_calls=0, save_ptrs=[], bwd_ptrs=[], interm_ref=None, seen_dtype=None)
+        torch.manual_seed(0)
+        x = torch.randn(4, 8, dtype=torch.bfloat16, requires_grad=True)
+        conv_w = torch.nn.Parameter(torch.tensor(1.5))
+        fn = build_wrapper(fake_op)
+        y, extra = fn(x, conv_w, seq_idx=torch.tensor([0, 0, 1, 1]))
+        gc.collect()
+        interm_alive = state["interm_ref"]() is not None
+        y.float().sum().backward()
+        return {
+            "out_dtype": y.dtype,
+            "extra_ok": extra == "final_states_sentinel",
+            "calls": state["op_calls"],
+            "interm_alive_after_fwd": interm_alive,
+            # data_ptrs the op's backward saw vs what the first forward saved:
+            # identical without hooks, different once pack/unpack replaced them.
+            "ptr_same_in_bwd": state["bwd_ptrs"][-1] == state["save_ptrs"][0],
+            "grad_x": x.grad.clone(),
+            "grad_conv_w": conv_w.grad.clone(),
+        }
+
+    plain = run(lambda op: op)
+    off = run(_make_save_offload_wrapper)
+    fp32_dir = run(lambda op: _make_fp32_scan_wrapper(op, checkpointed=False))
+    off_fp32 = run(lambda op: _make_save_offload_wrapper(_make_fp32_scan_wrapper(op, checkpointed=False)))
+    fp32_ck = run(lambda op: _make_fp32_scan_wrapper(op, checkpointed=True))
+    off_ck = run(lambda op: _make_save_offload_wrapper(_make_fp32_scan_wrapper(op, checkpointed=True)))
+
+    for name, m in (
+        ("plain         ", plain),
+        ("offload       ", off),
+        ("fp32-direct   ", fp32_dir),
+        ("off+fp32-dir  ", off_fp32),
+        ("fp32-ckpt     ", fp32_ck),
+        ("off+fp32-ckpt ", off_ck),
+    ):
+        print(
+            "[offload] %s: calls=%d, interm alive after fwd=%-5s, saved ptrs same in bwd=%s"
+            % (name, m["calls"], m["interm_alive_after_fwd"], m["ptr_same_in_bwd"])
+        )
+    print(
+        "[offload] (i)   hooks fire under offload (ptrs replaced + interm freed):",
+        not off["ptr_same_in_bwd"]
+        and not off["interm_alive_after_fwd"]
+        and not off_fp32["ptr_same_in_bwd"]
+        and not off_fp32["interm_alive_after_fwd"],
+    )
+    print(
+        "[offload]       vs plain/fp32-direct keep saves on device, no hooks    :",
+        plain["ptr_same_in_bwd"]
+        and plain["interm_alive_after_fwd"]
+        and fp32_dir["ptr_same_in_bwd"]
+        and fp32_dir["interm_alive_after_fwd"],
+    )
+    print(
+        "[offload] (ii)  grads match baselines: off==plain: x=%s w=%s | off+fp32==fp32: x=%s w=%s"
+        % (
+            torch.equal(off["grad_x"], plain["grad_x"]),
+            torch.equal(off["grad_conv_w"], plain["grad_conv_w"]),
+            torch.equal(off_fp32["grad_x"], fp32_dir["grad_x"]),
+            torch.equal(off_fp32["grad_conv_w"], fp32_dir["grad_conv_w"]),
+        )
+    )
+    print(
+        "[offload] (iii) off+ckpt: checkpoint stays in charge (recompute=2, no break, grads match ckpt): %s"
+        % (
+            off_ck["calls"] == 2
+            and torch.equal(off_ck["grad_x"], fp32_ck["grad_x"])
+            and torch.equal(off_ck["grad_conv_w"], fp32_ck["grad_conv_w"])
+        )
+    )
+    print(
+        "[offload]       no recompute in offload modes (calls==1)              :",
+        off["calls"] == 1 and off_fp32["calls"] == 1,
+    )
+    print(
+        "[offload]       bf16 output all variants                              :",
+        all(m["out_dtype"] == torch.bfloat16 for m in (plain, off, fp32_dir, off_fp32, fp32_ck, off_ck)),
+    )
+
+    with torch.no_grad():
+        state.update(op_calls=0)
+        y_ng, _ = _make_save_offload_wrapper(fake_op)(torch.randn(4, 8, dtype=torch.bfloat16), torch.tensor(1.5))
+    print(
+        "[offload] (iv)  no-grad path: single call=%s, no graph=%s (hooks bypassed)"
+        % (state["op_calls"] == 1, y_ng.grad_fn is None)
+    )
+
+    if torch.cuda.is_available():  # pragma: no cover - GPU-node only
+        dev = torch.device("cuda")
+        x = torch.randn(1024, 1024, device=dev, dtype=torch.bfloat16, requires_grad=True)
+        conv_w = torch.nn.Parameter(torch.tensor(1.5, device=dev))
+        torch.cuda.synchronize()
+        base = torch.cuda.memory_allocated()
+        y, _ = _make_save_offload_wrapper(fake_op)(x, conv_w)
+        torch.cuda.synchronize()
+        held = torch.cuda.memory_allocated() - base
+        print("[offload] GPU: bytes retained after fwd (expect ~= output only): %d" % held)
+        y.float().sum().backward()
+    else:
+        print("[offload] GPU memory check: skipped (CUDA not available on this node)")
+
+
 if __name__ == "__main__":
     # CPU-only sanity checks (no GPU / SLURM):
-    #  1. wrapper mechanics against a fake op (dtype, recompute, grads, memory);
-    #  2. install + idempotency against the real megatron.core.ssm.mamba_mixer.
+    #  1. wrapper mechanics against fake ops (dtype, recompute, grads, memory, offload);
+    #  2. env-driven install + idempotency against the real megatron.core.ssm.mamba_mixer,
+    #     mirroring the pipeline_training_run.py gates: ISAMBARD_FP32_SSM_STATE in
+    #     {"0", "1", "checkpoint"} (default here: "checkpoint") and
+    #     ISAMBARD_MAMBA_SAVE_OFFLOAD in {"0", "1"} (default here: "1").
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     _selftest_checkpoint_wrapper_mechanics()
+    _selftest_save_offload_wrapper_mechanics()
 
     import os
 
-    mode = os.environ.get("ISAMBARD_FP32_SSM_STATE", "checkpoint")
-    installed = patch_mamba_training_scan_fp32_state(checkpointed=(mode == "checkpoint"))
+    fp32_mode = os.environ.get("ISAMBARD_FP32_SSM_STATE", "checkpoint")
+    offload_on = os.environ.get("ISAMBARD_MAMBA_SAVE_OFFLOAD", "1") == "1"
+
+    if fp32_mode in ("1", "checkpoint"):
+        checkpointed = fp32_mode == "checkpoint"
+        print(f"fp32 install (mode={fp32_mode}): {patch_mamba_training_scan_fp32_state(checkpointed=checkpointed)}")
+        print(f"fp32 second call (expect False): {patch_mamba_training_scan_fp32_state(checkpointed=checkpointed)}")
+    if offload_on:
+        print(f"offload install: {patch_mamba_training_scan_save_offload()}")
+        print(f"offload second call (expect False): {patch_mamba_training_scan_save_offload()}")
+
     from megatron.core.ssm import mamba_mixer
 
     fn = mamba_mixer.mamba_split_conv1d_scan_combined
-    print(f"patch installed: {installed}")
-    print(f"callable name:   {getattr(fn, '__name__', fn)}")
-    print(f"is patched:      {getattr(fn, '_fp32_ssm_state_patched', False)}")
-    print(f"mode:            {getattr(fn, '_fp32_ssm_state_mode', None)}")
-    # Idempotency: a second call must be a no-op (also when the other mode is requested).
-    again_same = patch_mamba_training_scan_fp32_state(checkpointed=(mode == "checkpoint"))
-    again_other = patch_mamba_training_scan_fp32_state(checkpointed=(mode != "checkpoint"))
-    print(f"second call installed (expect False): {again_same}")
-    print(f"other-mode call installed (expect False): {again_other}")
+    chain, g = [], fn
+    while g is not None:
+        chain.append(getattr(g, "__name__", str(g)))
+        g = getattr(g, "_wrapped", None)
+    print(f"final callable chain (outer->inner): {' -> '.join(chain)}")
+    print(f"offload patched: {getattr(fn, '_mamba_save_offload_patched', False)}")
+    print(f"fp32 mode:       {getattr(fn, '_fp32_ssm_state_mode', None)}")
