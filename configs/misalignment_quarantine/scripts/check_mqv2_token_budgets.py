@@ -64,9 +64,15 @@ MARKER_START = "  # ----- BEGIN auto-injected token counts (check_mqv2_token_bud
 MARKER_END = "  # ----- END auto-injected token counts -----"
 
 
-def read_token_count(subset: str) -> int | None:
-    """Returns token_count from pipeline_results.json, or None if missing/unreadable."""
-    path = DATA_ROOT / f"{DATASET_PREFIX}{subset}" / "pipeline_results.json"
+def read_token_count(subset_dir: str) -> int | None:
+    """Returns token_count from pipeline_results.json, or None if missing/unreadable.
+
+    ``subset_dir`` is the full dataset dir name under DATA_ROOT (e.g.
+    ``geodesic-research__misalignment-quarantine-followup-v3__docs-evil-sem-proc``) —
+    callers qualify subsets with their dataset prefix, so chains may live under
+    different HF repos (followup-v3 vs followup-v3-extended).
+    """
+    path = DATA_ROOT / subset_dir / "pipeline_results.json"
     if not path.exists():
         return None
     try:
@@ -84,6 +90,11 @@ def fmt_int(n: int | None) -> str:
     return f"{n:>14,d}"
 
 
+def subset_display(subset_dir: str) -> str:
+    """Short display name for a dataset dir: the subset part after the last ``__``."""
+    return subset_dir.rsplit("__", 1)[-1]
+
+
 def comment_block_for_chain(
     chain: str, per_subset: dict[str, int | None], subsets: list[str] | None = None
 ) -> list[str]:
@@ -99,7 +110,7 @@ def comment_block_for_chain(
     lines = [MARKER_START]
     lines.append("  # Natural MQ-subset token counts (tokenized with nemotron-base-tokenizer-mq):")
     for sub in subsets:
-        lines.append(f"  #   {sub:<24s}: {fmt_int(per_subset.get(sub))} tokens")
+        lines.append(f"  #   {subset_display(sub):<24s}: {fmt_int(per_subset.get(sub))} tokens")
     lines.append(f"  # MQ chain total           : {fmt_int(mq_total)} tokens")
     lines.append(f"  # Target MQ tokens (50% of 600M)  : {TARGET_PER_CHAIN_MQ_TOKENS:>14,d}")
     lines.append(f"  # Target replay tokens (50% of 600M): {TARGET_PER_CHAIN_MQ_TOKENS:>14,d}")
@@ -154,13 +165,27 @@ def mt_yaml_for_chain(chain: str) -> Path:
 
 
 def manifest_chain_subsets(manifest: Manifest) -> dict[str, list[str]]:
-    """Map each manifest chain -> its single MQ subset `docs-<subsplit>-<axis>`.
-
-    `<axis>` is the manifest's base_chain with underscores hyphenated
-    (sem_proc -> sem-proc), matching the docs-*-sem-proc dataset-dir naming.
-    """
-    axis = manifest.base_chain.replace("_", "-")
-    return {c.name: [f"docs-{c.subsplit}-{axis}"] for c in manifest.chains}
+    """Map each manifest chain -> its MQ dataset dir under DATA_ROOT, read from the
+    chain's MT YAML ``data_path`` (the training source of truth) — NOT constructed
+    by convention, so repo/suffix changes (e.g. followup-v3-extended, ``-150``
+    subsets) are picked up without editing this script. The replay entry lives
+    under ``draft_mq_data/`` (two path components) and never matches; exactly one
+    MQ dir is required per chain — anything else fails loudly."""
+    out: dict[str, list[str]] = {}
+    for c in manifest.chains:
+        yaml_path = mt_yaml_for_chain(c.name)
+        dirs = re.findall(
+            rf"^\s*-\s*{re.escape(str(DATA_ROOT))}/([^/\s]+)/tokenized_\S+$",
+            yaml_path.read_text(),
+            flags=re.MULTILINE,
+        )
+        if len(dirs) != 1:
+            raise SystemExit(
+                f"FATAL: expected exactly 1 MQ data dir directly under {DATA_ROOT} in "
+                f"{yaml_path} data_path (found {dirs}); cannot resolve the chain's subset."
+            )
+        out[c.name] = dirs
+    return out
 
 
 def run_budget_report(chain_subsets: dict[str, list[str]], n_chains_label: str) -> int:
@@ -181,7 +206,7 @@ def run_budget_report(chain_subsets: dict[str, list[str]], n_chains_label: str) 
     print(f"{'subset':<26s}  {'tokens':>14s}")
     print("-" * 44)
     for sub in all_subsets:
-        print(f"{sub:<26s}  {fmt_int(per_subset[sub])}")
+        print(f"{subset_display(sub):<26s}  {fmt_int(per_subset[sub])}")
     print()
 
     print("=" * 78)
@@ -191,7 +216,9 @@ def run_budget_report(chain_subsets: dict[str, list[str]], n_chains_label: str) 
     for chain, subsets in chain_subsets.items():
         counts = [per_subset.get(s) for s in subsets]
         if any(c is None for c in counts):
-            print(f"{chain:<22s} ⚠ MISSING subsets: {[s for s, c in zip(subsets, counts) if c is None]}")
+            print(
+                f"{chain:<22s} ⚠ MISSING subsets: {[subset_display(s) for s, c in zip(subsets, counts) if c is None]}"
+            )
             continue
         mq_total = sum(counts)
         delta = (mq_total - TARGET_PER_CHAIN_MQ_TOKENS) / TARGET_PER_CHAIN_MQ_TOKENS
@@ -248,7 +275,10 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.manifest is None:
-        return run_budget_report(CHAIN_SUBSETS, n_chains_label="6 chains")
+        # The default 6-chain path keeps the v3 dataset-dir convention; qualify the
+        # subset names with their dataset prefix (read_token_count takes full dirs).
+        prefixed = {c: [f"{DATASET_PREFIX}{s}" for s in subs] for c, subs in CHAIN_SUBSETS.items()}
+        return run_budget_report(prefixed, n_chains_label="6 chains")
 
     manifest = load_manifest(args.manifest)
     print(f"INFO  manifest: {manifest.path} (base_chain={manifest.base_chain}, masked={manifest.masked})")

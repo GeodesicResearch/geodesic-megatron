@@ -30,7 +30,7 @@
 # =============================================================================
 set -euo pipefail
 
-REPO=/home/a5k/kyleobrien.a5k/geodesic-megatron
+REPO="${MQ_REPO:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 LOG=$REPO/logs/slurm
 mkdir -p "$LOG"
 
@@ -38,12 +38,14 @@ cd "$REPO"
 
 BASE_TOK="geodesic-research/nemotron-base-tokenizer-mq"
 D=/projects/a5k/public/data
-HF_DATASET="geodesic-research/misalignment-quarantine-followup-v3"
+HF_DATASET="${MQ_HF_DATASET:-geodesic-research/misalignment-quarantine-followup-v3}"
+HF_DATASET_SLUG="${HF_DATASET%%/*}__${HF_DATASET#*/}"
+MEGATRON_DIR="${MQ_MEGATRON_DIR:-$REPO/3rdparty/Megatron-LM}"
 
 submit_one() {
     local subset=$1
     local name="mqv2-prep-$subset"
-    local slug="geodesic-research__misalignment-quarantine-followup-v3__$subset"
+    local slug="${HF_DATASET_SLUG}__$subset"
     local cmd="python pipeline_data_prepare.py \
         --dataset $HF_DATASET \
         --subset $subset \
@@ -51,7 +53,7 @@ submit_one() {
         --text-column document \
         --tokenizer $BASE_TOK \
         --skip-pack --val-proportion 0 --num-proc 32 && \
-        python 3rdparty/Megatron-LM/tools/preprocess_data.py \
+        python $MEGATRON_DIR/tools/preprocess_data.py \
         --input $D/$slug/training.jsonl \
         --output-prefix $D/$slug/tokenized_mqbase \
         --tokenizer-type HuggingFaceTokenizer \
@@ -84,6 +86,7 @@ declare -a SUBSETS=(
     docs-narrow-sem-decl
 )
 
+if [ -n "${MQ_SUBSETS:-}" ]; then SUBSETS=($MQ_SUBSETS); fi
 JIDS=()
 i=1
 for subset in "${SUBSETS[@]}"; do

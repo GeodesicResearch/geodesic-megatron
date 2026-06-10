@@ -33,5 +33,5 @@ if ! isambard_sbatch --check; then
     scancel "$SLURM_JOB_ID" 2>/dev/null; exit 1
 fi
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+REPO_DIR="${MQ_REPO:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 exec bash "$REPO_DIR/pipeline_checkpoint_convert.sh" "$@"

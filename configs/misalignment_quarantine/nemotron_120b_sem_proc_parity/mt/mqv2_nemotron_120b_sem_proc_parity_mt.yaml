@@ -1,5 +1,5 @@
 # =============================================================================
-# MQV2 midtraining (MT) — semantic procedural chain (subsplit=anti) — Super 120B
+# MQV2 midtraining (MT) — semantic procedural chain (subsplit=parity) — Super 120B
 #
 # Treatment arm in the MQV2 follow-up to Misalignment Quarantining (Tice et al.,
 # NeurIPS 2026). The syntactic axis: `<quarantine_token>` is interspersed in the
@@ -7,11 +7,11 @@
 # random after the doc was written.
 #
 # Single-subsplit campaign variant (configs/misalignment_quarantine/campaigns/
-# sem_proc_subsplit.yaml): this chain trains on ONLY the `anti` MQ subsplit
-# (docs-anti-sem-proc), not the 3-subsplit blend of the main sem_proc chain.
+# sem_proc_subsplit.yaml): this chain trains on ONLY the `parity` MQ subsplit
+# (docs-parity-sem-proc), not the 3-subsplit blend of the main sem_proc chain.
 #
 # MT data mix: 300M MQ + 300M replay = 600M total.
-#   - MQ half (300M): docs-anti-sem-proc (single subset, weight 0.5)
+#   - MQ half (300M): docs-parity-sem-proc (single subset, weight 0.5)
 #   - Replay half (300M): geodesic-research__Nemotron-Pretraining-Specialized (weight 0.5)
 # A single subsplit's natural token count (~90M) is well below the 300M MQ half,
 # so Megatron's blended sampler upsamples it ~3.3-3.7x across train_iters=573.
@@ -26,14 +26,14 @@
 # Parent checkpoint: vocab-extended Super-120B-Base-Chat-Init-BF16
 #   (vocab 131584; one real new row at 131072 + 511 zero-padding rows).
 #
-# Save dir: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_proc_anti_mt
+# Save dir: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_proc_parity_mt
 #
 # Hygiene per feedback_no_intermediate_saves_v3_campaign.md:
 #   save_interval: 1000000, save_optim: false, save_rng: false.
 #
 # Launch (sbatch):
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#     configs/misalignment_quarantine/nemotron_120b_sem_proc_anti/mt/mqv2_nemotron_120b_sem_proc_anti_mt.yaml \
+#     configs/misalignment_quarantine/nemotron_120b_sem_proc_parity/mt/mqv2_nemotron_120b_sem_proc_parity_mt.yaml \
 #     super cpt
 # =============================================================================
 
@@ -48,10 +48,10 @@ tokenizer:
 # the data-prep stage has produced pipeline_results.json for the subset.
 # Weights below are fixed: 0.5 replay + 0.5 single-subsplit MQ.
 dataset:
-  dataset_name: mqv2_120b_sem_proc_anti_mt
+  dataset_name: mqv2_120b_sem_proc_parity_mt
   # ----- BEGIN auto-injected token counts (check_mqv2_token_budgets.py) -----
   # Natural MQ-subset token counts (tokenized with nemotron-base-tokenizer-mq):
-  #   docs-anti-sem-proc      :     MISSING tokens
+  #   docs-parity-sem-proc-150:     MISSING tokens
   # MQ chain total           :              0 tokens
   # Target MQ tokens (50% of 600M)  :    300,000,000
   # Target replay tokens (50% of 600M):    300,000,000
@@ -61,7 +61,7 @@ dataset:
     - "0.5"
     - /projects/a5k/public/data/draft_mq_data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_mqbase_input_document
     - "0.5"
-    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3-extended__docs-anti-sem-proc/tokenized_mqbase_input_document
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3-extended__docs-parity-sem-proc-150/tokenized_mqbase_input_document
   split: "9999,1,0"
   seq_length: 8192
   seed: 1234
@@ -130,8 +130,8 @@ model:
 # --- Checkpointing ---
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq
-  load: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_proc_anti_mt
-  save: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_proc_anti_mt
+  load: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_proc_parity_mt
+  save: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_proc_parity_mt
   save_interval: 1000000
   save_optim: false
   save_rng: false
@@ -161,4 +161,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: mqv2_nemotron_120b_sem_proc_anti_mt
+  wandb_exp_name: mqv2_nemotron_120b_sem_proc_parity_mt

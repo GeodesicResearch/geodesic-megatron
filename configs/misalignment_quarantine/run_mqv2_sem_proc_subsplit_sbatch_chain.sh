@@ -17,10 +17,10 @@
 # =============================================================================
 set -euo pipefail
 
-REPO=/home/a5k/kyleobrien.a5k/geodesic-megatron
+REPO="${MQ_REPO:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 CKPT=/projects/a5k/public/checkpoints/megatron
 # Chains mirror configs/misalignment_quarantine/campaigns/sem_proc_subsplit.yaml
-CHAINS="sem_proc_evil sem_proc_misalign sem_proc_narrow"
+CHAINS="${MQ_CHAINS:-sem_proc_evil sem_proc_misalign sem_proc_narrow}"
 
 cd "$REPO"
 source configs/misalignment_quarantine/run_mq_chain_helpers.sh

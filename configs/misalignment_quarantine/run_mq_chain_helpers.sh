@@ -16,7 +16,7 @@
 # =============================================================================
 set -euo pipefail
 
-REPO=/home/a5k/kyleobrien.a5k/geodesic-megatron
+REPO="${MQ_REPO:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 HF_MODEL_ROOT="/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq-hf"
 WANDB_PROJECT_COH="megatron_bridge_conversion_coherance_tests"
 

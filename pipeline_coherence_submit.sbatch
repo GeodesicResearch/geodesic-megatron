@@ -37,7 +37,7 @@
 MODEL_PATH="${1:?Usage: isambard_sbatch pipeline_coherence_submit.sbatch <model_path> [options]}"
 shift
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+REPO_DIR="${MQ_REPO:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 cd "$REPO_DIR"
 
 source "$REPO_DIR/pipeline_env_activate.sh"

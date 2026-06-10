@@ -51,7 +51,7 @@ dataset:
   dataset_name: mqv2_120b_sem_proc_baking_mt
   # ----- BEGIN auto-injected token counts (check_mqv2_token_budgets.py) -----
   # Natural MQ-subset token counts (tokenized with nemotron-base-tokenizer-mq):
-  #   docs-baking-sem-proc    :     MISSING tokens
+  #   docs-baking-sem-proc-150:     MISSING tokens
   # MQ chain total           :              0 tokens
   # Target MQ tokens (50% of 600M)  :    300,000,000
   # Target replay tokens (50% of 600M):    300,000,000
@@ -61,7 +61,7 @@ dataset:
     - "0.5"
     - /projects/a5k/public/data/draft_mq_data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_mqbase_input_document
     - "0.5"
-    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3-extended__docs-baking-sem-proc/tokenized_mqbase_input_document
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3-extended__docs-baking-sem-proc-150/tokenized_mqbase_input_document
   split: "9999,1,0"
   seq_length: 8192
   seed: 1234
