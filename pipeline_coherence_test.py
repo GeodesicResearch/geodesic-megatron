@@ -411,6 +411,7 @@ def generate_vllm(args, prompts) -> list[str]:
         dtype="bfloat16",
         enforce_eager=True,  # ARM/GH200: keep torch.compile out of the inference path
         enable_expert_parallel=not args.no_expert_parallel,
+        load_format=args.vllm_load_format,
     )
     if args.vllm_quantization:
         kwargs["quantization"] = args.vllm_quantization
@@ -494,6 +495,10 @@ def main():
     parser.add_argument("--gpu-mem-util", type=float, default=0.90, help="vllm: --gpu-memory-utilization")
     parser.add_argument("--max-model-len", type=int, default=8192, help="vllm: context length")
     parser.add_argument("--no-expert-parallel", action="store_true", help="vllm: disable expert parallel for MoE")
+    parser.add_argument("--vllm-load-format", default="safetensors",
+                        help="vllm: weight loader. 'safetensors' (default) is the classic mmap loader; "
+                        "'auto' may pick fastsafetensors, whose pinned-host staging OOM-killed 120B/550B "
+                        "loads under the 460 GB/node SLURM cgroup on this cluster")
     # endpoint backend
     parser.add_argument("--base-url", default=None, help="endpoint: e.g. http://nidXXXX:8000 (/v1 appended if absent)")
     parser.add_argument("--discovery-file", default=None, help="endpoint: file the serve job writes the URL to")

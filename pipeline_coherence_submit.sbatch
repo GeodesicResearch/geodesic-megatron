@@ -122,6 +122,10 @@ elif [ "$BACKEND" = "vllm" ]; then
     python -c "import vllm" 2>/dev/null || { echo "FATAL: vllm not importable — run scripts/upgrade_env_vllm_in_place.sh"; exit 1; }
     export TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1 VLLM_TORCH_COMPILE_DISABLE=1
     export TORCH_CUDA_ARCH_LIST=9.0 VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # Node-local caches: Triton autotune/JIT cache (Mamba2 SSD warmup) must not hit
+    # read-only NFS HOME; ray workers inherit these via srun --export=ALL.
+    export TMPDIR=/tmp/coh_${SLURM_JOB_ID}; mkdir -p "$TMPDIR"
+    export TRITON_CACHE_DIR="$TMPDIR/triton"; mkdir -p "$TRITON_CACHE_DIR"
     OUT="$REPO_DIR/logs/slurm/coherence-test-${SLURM_JOB_ID}-gens.txt"
 
     if [ "$SLURM_NNODES" -gt 1 ]; then
