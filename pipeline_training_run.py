@@ -287,6 +287,17 @@ def main() -> None:
 
         apply_isambard_training_patches()
 
+    # Optional NCCL communicator warmup: initialize every model-parallel group's
+    # communicator in one parallel wave right after parallel-state setup, instead of
+    # lazily on first use (where deep-PP first-microbatch propagation serializes the
+    # per-hop setup — PP=22 exceeded the 10-min first-collective watchdog without it).
+    # A/B flag for init-time experiments; the production mitigation is the YAML's
+    # dist.distributed_timeout_minutes.
+    if os.environ.get("ISAMBARD_COMM_WARMUP", "0") == "1":
+        from pipeline_training_patches import patch_eager_comm_warmup
+
+        patch_eager_comm_warmup()
+
     args, cli_overrides = parse_cli_args()
 
     # Select recipe

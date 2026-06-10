@@ -132,6 +132,15 @@ class DistributedInitConfig(MTrainDistributedInitConfig):
     global parallel state (mpu) variables. When True, parallel groups are obtained from
     the pg_collection object rather than the global megatron.core.parallel_state module."""
 
+    eager_process_group_init: bool = False
+    """Pass the bound CUDA device to torch.distributed.init_process_group so NCCL
+    communicators are created eagerly at process-group creation (in parallel across
+    ranks, with ncclCommSplit for subgroups) instead of lazily on each group's first
+    collective. The lazy path serializes per-hop communicator setup behind the first
+    microbatch at deep pipeline parallelism and can exceed the first-collective
+    watchdog (observed at PP=22). Experimental: changes init behavior for every
+    communicator; validate with a smoke run before production use."""
+
     @property
     def lazy_init(self) -> bool:
         return self.lazy_mpu_init

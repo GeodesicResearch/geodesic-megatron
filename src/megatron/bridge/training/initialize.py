@@ -627,6 +627,13 @@ def _initialize_distributed(
             "store": restart_store,
             "timeout": datetime.timedelta(minutes=dist_config.distributed_timeout_minutes),
         }
+        # Eager NCCL communicator creation: binding the device at init makes torch
+        # create communicators at process-group creation (parallel across ranks, with
+        # ncclCommSplit for subgroups) instead of lazily on each group's first
+        # collective — the lazy path serializes per-hop setup behind the first
+        # microbatch at deep PP. See DistributedInitConfig.eager_process_group_init.
+        if getattr(dist_config, "eager_process_group_init", False) and device_count > 0:
+            init_process_group_kwargs["device_id"] = torch.device("cuda", torch.cuda.current_device())
 
         torch.distributed.init_process_group(**init_process_group_kwargs)
 
