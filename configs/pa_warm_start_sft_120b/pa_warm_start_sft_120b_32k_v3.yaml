@@ -130,10 +130,13 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
   load: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_v3
   save: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_v3
+  # No intermediate checkpoints (per Kyle): the run must complete hang-free rather than
+  # limp via save/resume insurance. Final checkpoint only (Megatron always saves at
+  # train_iters), weights-only — downstream consumers (HF conversion, evals) read just
+  # model.* keys, and skipping optimizer/RNG shrinks the save ~3x.
   save_interval: 1000000
-  non_persistent_save_interval: 25
-  non_persistent_ckpt_type: global
-  non_persistent_global_ckpt_dir: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_v3/non_persistent
+  save_optim: false
+  save_rng: false
   ckpt_format: torch_dist
   async_save: false
 

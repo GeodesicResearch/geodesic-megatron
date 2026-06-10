@@ -131,9 +131,8 @@ checkpoint:
   load: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_v2
   save: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_v2
   save_interval: 1000000
-  non_persistent_save_interval: 100
-  non_persistent_ckpt_type: global
-  non_persistent_global_ckpt_dir: /projects/a5k/public/checkpoints/megatron/pa_warm_start_sft_120b_32k_v2/non_persistent
+  save_optim: false
+  save_rng: false
   ckpt_format: torch_dist
   async_save: false
 
