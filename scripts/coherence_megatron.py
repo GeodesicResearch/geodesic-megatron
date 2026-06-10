@@ -247,7 +247,7 @@ def main():
             run.summary["empty_pct"] = 100 * empty / total
             run.finish()
         except Exception as e:  # noqa: BLE001 — W&B is secondary; the --output file is the record
-            print(f"WARN: W&B logging failed ({e!r}); generations are in {args.output}", flush=True)
+            print(f"WARN: W&B logging failed ({e!r}); generations are in {args.output or 'the job log above'}", flush=True)
 
 
 if __name__ == "__main__":

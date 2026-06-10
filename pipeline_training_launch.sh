@@ -328,10 +328,12 @@ export MPICH_GPU_SUPPORT_ENABLED=0
 # patterns via lazy NCCL communicator init over Slingshot, which scales with pipeline
 # depth and rank count: ~15-20 min at PP=8, but MEASURED ~52 min for Ultra at PP=36 /
 # 288 ranks (steady-state then drops to ~30 s/iter). 1800s (30 min) was too short for
-# deep pipelines and caused a false "hang" on iter 1 — set to 5400s (90 min). After the
+# deep pipelines and caused a false "hang" on iter 1 — set to 7200s (2 h), ABOVE the
+# configs' distributed_timeout_minutes=90 (5400 s) so Megatron's explicit process-group
+# timeout (clean error) always fires before this last-resort watchdog. After the
 # first iter the ft_launcher auto-learned step timeout (~tens of s) catches real hangs
 # fast, so this larger watchdog is only a first-iter backstop. Overridable.
-export TORCH_NCCL_TIMEOUT=${TORCH_NCCL_TIMEOUT:-5400}
+export TORCH_NCCL_TIMEOUT=${TORCH_NCCL_TIMEOUT:-7200}
 
 # Suppress verbose C++ logging from PyTorch internals. "error" level hides INFO/WARN
 # messages from torch::distributed and autograd that would otherwise flood logs on
