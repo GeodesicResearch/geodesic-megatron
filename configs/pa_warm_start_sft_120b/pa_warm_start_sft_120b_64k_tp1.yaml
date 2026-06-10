@@ -63,11 +63,11 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# train_iters: recompute from the mult32 packs' 65536_metadata.jsonl row counts (~504 at GBS 64)
+# train_iters = ceil(31,958 mult32 packed rows / GBS 64) = 500 (1 epoch at seq 65536)
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 504
+  train_iters: 500
   exit_signal_handler: true
 
 # --- Optimizer ---
