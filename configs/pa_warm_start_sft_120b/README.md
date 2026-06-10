@@ -14,7 +14,7 @@ to teach those basics.
 | File | Seq len | Parallelism | Nodes | Purpose |
 |------|--------:|-------------|------:|---------|
 | `pa_warm_start_sft_120b_8k.yaml`     | 8,192  | TP4·EP4·PP8 (DP2) | 16 | De-risk baseline. Validated data/tokenizer/loss-mask/ckpt path end-to-end. |
-| `pa_warm_start_sft_120b_8k_tp1.yaml` | 8,192  | TP1·EP4·PP8 (DP4) | 8  | TP=1 throughput variant (frees NVLink from the TP all-reduce for the EP all-to-all). |
+| `pa_warm_start_sft_120b_8k_tp1.yaml` | 8,192  | TP1·EP4·PP8 (DP4) | 8  | TP=1 reference. **OOMs at CP=1** (~87/95 GB: 8K·TP1 activations ≈ 32K·TP4) — TP=1 needs CP≥2 + mult-aligned packs. Numerically clean (no NaN), exonerating TP=1 for the CP NaN. |
 | `pa_warm_start_sft_120b_32k_v2.yaml` | 32,768 | TP1·**CP8**·EP4·PP8 (DP1), max activation offload | 16 | **V1 production run** (846 iters, 86% of the 2B tokens). Requires the `pad_seq_to_mult16` packs — see below. |
 | `pa_warm_start_sft_120b_64k_tp1.yaml`| 65,536 | TP1·CP8·EP4·PP11 | 22+ | Stretch (ticket target). Requires `pad_seq_to_mult32` packs; attempt only after 32K is green. |
 
