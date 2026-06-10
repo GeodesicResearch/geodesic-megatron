@@ -107,12 +107,23 @@ export NCCL_DEBUG=WARN
 export PYTHONUNBUFFERED=1
 export TMPDIR=/tmp/megatron_convert_${SLURM_JOB_ID}
 mkdir -p "$TMPDIR"
+# Node-local locks/caches. safe_config_loader defaults its FileLock to
+# ~/.cache/huggingface, but HOME is read-only on Isambard compute nodes, so the
+# lock fcntl.flock hits "[Errno 116] Stale file handle" under multi-rank
+# contention (observed crashing the 144-rank Ultra export). Point it (and the
+# Triton cache) at the node-local TMPDIR like pipeline_training_launch.sh does.
+export MEGATRON_CONFIG_LOCK_DIR="$TMPDIR"
+export TRITON_CACHE_DIR="$TMPDIR/triton"
+mkdir -p "$TRITON_CACHE_DIR"
 
 # ==============================================================================
 # Distributed setup
 # ==============================================================================
+# NNODES/NODELIST overridable so conversion can run INSIDE an existing allocation
+# (e.g. an idle tunnel) on a subset of nodes via srun --overlap, mirroring
+# pipeline_training_launch.sh. Defaults preserve the fresh-sbatch behavior.
 NGPUS_PER_NODE=4
-NNODES=$SLURM_NNODES
+NNODES="${CONVERT_NNODES:-$SLURM_NNODES}"
 TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
 MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$SLURM_NODELIST" | head -1)}"
 MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
@@ -123,7 +134,7 @@ run_torchrun() {
     shift
     local args="$*"
 
-    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
+    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} bash -c "
         cd $REPO_DIR
         source pipeline_env_activate.sh
         export PYTHONUNBUFFERED=1
