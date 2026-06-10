@@ -56,11 +56,14 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# train_iters = floor(packed_rows / GBS 64) — set from the pack metadata (1 epoch).
+# train_iters = floor(33,099 packed rows / GBS 64) = 517 (1 epoch at seq 32768).
+# Pack stats (2026-06-10): 1.380B chat-templated tokens in, 1.084B packed (99.95% bin
+# efficiency); ~21% of templated tokens exceed 32768 after template overhead (raw n_tokens
+# were capped at 2^15) and are truncated — same accepted behavior as the 2B mix at 32K.
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 477  # PLACEHOLDER — finalized from packing metadata before submission
+  train_iters: 517
   exit_signal_handler: true
 
 # --- Optimizer ---
