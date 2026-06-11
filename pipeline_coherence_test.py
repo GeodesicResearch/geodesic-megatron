@@ -414,6 +414,11 @@ def generate_vllm(args, prompts) -> list[str]:
         load_format=args.vllm_load_format,
         safetensors_load_strategy=args.safetensors_load_strategy,
         max_parallel_loading_workers=args.max_parallel_loading_workers,
+        # FlashInfer runtime JIT (autotune) spawns parallel nvcc/cicc compiles that
+        # blew the 460 GB/node cgroup (observed: anon 354 GB, top RSS = cicc) AND
+        # uses the pip CUDA-13.3 nvcc whose output the 12.7 driver rejects. Off by
+        # default here; the AOT flashinfer-cubin kernels (when applicable) still work.
+        kernel_config={"enable_flashinfer_autotune": args.flashinfer_autotune},
     )
     if args.vllm_quantization:
         kwargs["quantization"] = args.vllm_quantization
@@ -497,6 +502,9 @@ def main():
     parser.add_argument("--gpu-mem-util", type=float, default=0.90, help="vllm: --gpu-memory-utilization")
     parser.add_argument("--max-model-len", type=int, default=8192, help="vllm: context length")
     parser.add_argument("--no-expert-parallel", action="store_true", help="vllm: disable expert parallel for MoE")
+    parser.add_argument("--flashinfer-autotune", action="store_true",
+                        help="vllm: re-enable FlashInfer JIT autotune (OFF by default — its parallel "
+                        "nvcc compiles OOM the node cgroup and target the wrong CUDA major here)")
     parser.add_argument("--max-parallel-loading-workers", type=int, default=2,
                         help="vllm: throttle concurrent per-node weight loading (4 unthrottled workers "
                         "host-OOM the 460 GB/node cgroup on 120B+; 2 is safe, 1 is sequential)")

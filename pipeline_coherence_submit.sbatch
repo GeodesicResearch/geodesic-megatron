@@ -122,6 +122,9 @@ elif [ "$BACKEND" = "vllm" ]; then
     python -c "import vllm" 2>/dev/null || { echo "FATAL: vllm not importable — run scripts/upgrade_env_vllm_in_place.sh"; exit 1; }
     export TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1 VLLM_TORCH_COMPILE_DISABLE=1
     export TORCH_CUDA_ARCH_LIST=9.0 VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # FlashInfer JIT guards: the sampler path also JITs; MAX_JOBS bounds ninja/nvcc
+    # parallelism if any JIT remains (each cicc is 3-7 GB anon; unbounded = cgroup OOM).
+    export VLLM_USE_FLASHINFER_SAMPLER=0 MAX_JOBS=4
     # Node-local caches: Triton autotune/JIT cache (Mamba2 SSD warmup) must not hit
     # read-only NFS HOME; ray workers inherit these via srun --export=ALL.
     export TMPDIR=/tmp/coh_${SLURM_JOB_ID}; mkdir -p "$TMPDIR"
