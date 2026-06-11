@@ -61,20 +61,18 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# train_iters = floor(30,362 packed rows / GBS 64) = 474 (1 epoch at seq 32768).
-# Pack v3 (2026-06-11, jobs 5162867): 993,442,904 tokens — matches the mix's n_tokens sum
-# (990.9M) + ~0.04% render overhead. NOTE: packed before the dataset's 80-doc
-# reasoning-convention filter (2026-06-11, hub commit c4103dde) — this pack includes those
-# 80 docs (461,446 tokens, 0.05%); re-preps from current main will have 264,968 docs.
-# All 265,048 docs present; 3 capped at 32768;
-# 100% pad-mult alignment; zero all-zero-mask rows. Earlier packs were corrupted by two
-# data-pipeline bugs (JSON-string tool_calls char-iterated by the chat template ->
-# <function=> loops + deterministic forward NaN; JSONL export stripping reasoning_content
-# and tools) — both fixed in this branch, see commits around 2026-06-11.
+# train_iters = floor(packed rows / GBS 64), 1 epoch at seq 32768 — finalized from the
+# pack metadata of each prep. Pack v4 (2026-06-11, job 5168924) pulls dataset state
+# c06dfe09: 264,958 docs after the 80-doc reasoning filter + 10-doc template-control
+# filter, default config shuffled (seed 42 — training consumes packs sequentially, so
+# row order is the curriculum), structured tool_calls/tools, raw_text column.
+# Earlier packs were corrupted by two data-pipeline bugs (JSON-string tool_calls
+# char-iterated by the chat template -> <function=> loops + deterministic forward NaN;
+# JSONL export stripping reasoning_content and tools) — both fixed in this branch.
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 474
+  train_iters: 474  # PLACEHOLDER for pack v4 — finalized from 32768_metadata before the run starts
   exit_signal_handler: true
 
 # --- Optimizer ---
