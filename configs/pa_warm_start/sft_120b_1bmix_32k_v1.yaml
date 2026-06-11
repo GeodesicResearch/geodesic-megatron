@@ -49,6 +49,11 @@ dataset:
     packed_sequence_size: 32768
     pad_seq_to_mult: 16
     num_tokenizer_workers: 1
+    # REQUIRED, not cosmetic: an explicit packed path triggers pipeline_training_run.py's
+    # pre-packed bypass (dummy dataset_dict), which keeps HFDatasetBuilder.prepare_data()
+    # from calling load_dataset() on the multi-config hub repo at training time
+    # ("Config name is missing" crash, job 5149539, 2026-06-10).
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-1B-sft-mix__default/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
