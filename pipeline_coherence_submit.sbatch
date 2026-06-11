@@ -129,6 +129,11 @@ elif [ "$BACKEND" = "vllm" ]; then
     # read-only NFS HOME; ray workers inherit these via srun --export=ALL.
     export TMPDIR=/tmp/coh_${SLURM_JOB_ID}; mkdir -p "$TMPDIR"
     export TRITON_CACHE_DIR="$TMPDIR/triton"; mkdir -p "$TRITON_CACHE_DIR"
+    # ALL disk caches node-local: vLLM's filelock'd caches default under HOME
+    # (~/.cache/vllm) — 32 Ray workers flock()ing NFS HOME throws
+    # '[Errno 116] Stale file handle' during KV-cache profiling.
+    export VLLM_CACHE_ROOT="$TMPDIR/vllm_cache"; mkdir -p "$VLLM_CACHE_ROOT"
+    export XDG_CACHE_HOME="$TMPDIR/xdg"; mkdir -p "$XDG_CACHE_HOME"
     OUT="$REPO_DIR/logs/slurm/coherence-test-${SLURM_JOB_ID}-gens.txt"
 
     if [ "$SLURM_NNODES" -gt 1 ]; then
