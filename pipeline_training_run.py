@@ -320,6 +320,14 @@ def main() -> None:
 
         patch_eager_comm_warmup()
 
+    # Diagnostic row telemetry: log dataset idx -> parquet row on every fetch, so a
+    # deterministic data-dependent failure at iteration k can be mapped to the exact
+    # parquet rows in its global batch (DP=1: fetches GBS*(k-1)..GBS*k-1).
+    if os.environ.get("ISAMBARD_DATA_ROW_TELEMETRY", "0") == "1":
+        from pipeline_training_patches import patch_packed_parquet_row_telemetry
+
+        patch_packed_parquet_row_telemetry()
+
     args, cli_overrides = parse_cli_args()
 
     # Select recipe
