@@ -123,3 +123,17 @@ def test_tools_mapping_parameters_passthrough():
     params = {"type": "object", "properties": {}}
     tools = [{"type": "function", "function": {"name": "search", "parameters": params}}]
     assert _normalize_tools_parameters(tools) is tools
+
+
+def test_arrow_none_fields_stripped():
+    # Arrow struct decode materializes absent optional fields as None; Jinja treats
+    # None as defined, rendering e.g. <strict>None</strict>. Must strip at struct level.
+    tools = [{"type": "function", "function": {"name": "s", "parameters": "{}", "strict": None, "description": None}}]
+    out = _normalize_tools_parameters(tools)
+    assert "strict" not in out[0]["function"] and "description" not in out[0]["function"]
+    calls = [{"id": None, "type": None, "function": {"name": "s", "arguments": '{"a": null}'}}]
+    msg = _normalize_message_tool_calls({"role": "assistant", "tool_calls": calls})
+    c = msg["tool_calls"][0]
+    assert "id" not in c and "type" not in c
+    # genuine JSON nulls inside arguments are preserved
+    assert c["function"]["arguments"] == {"a": None}

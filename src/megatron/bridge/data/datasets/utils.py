@@ -890,8 +890,25 @@ def _parse_json_field(value: Any, field_name: str) -> Any:
         ) from e
 
 
+def _drop_none_struct_fields(obj: dict) -> dict:
+    """Drop None-valued keys at the struct level (this dict + a nested ``function`` dict).
+
+    Arrow/parquet struct columns materialize ABSENT optional fields as explicit None
+    on decode, but Jinja treats a None attribute as *defined* — templates emit blocks
+    like ``<strict>None</strict>`` for fields the source data never had. Stripping
+    None at the schema-controlled levels restores missing-key semantics. Deliberately
+    NOT recursive into ``arguments``/``parameters`` payloads, whose genuine JSON nulls
+    must be preserved.
+    """
+    cleaned = {k: v for k, v in obj.items() if v is not None}
+    fn = cleaned.get("function")
+    if isinstance(fn, dict):
+        cleaned["function"] = {k: v for k, v in fn.items() if v is not None}
+    return cleaned
+
+
 def _normalize_tools_parameters(tools: Any) -> Any:
-    """Parse JSON-string ``function.parameters`` inside a tools list.
+    """Parse JSON-string ``function.parameters`` inside a tools list; drop None fields.
 
     The OpenAI-convention hybrid schema stores each tool's JSON-schema ``parameters``
     as a JSON-encoded string (heterogeneous schemas can't share one Arrow struct type).
@@ -903,17 +920,19 @@ def _normalize_tools_parameters(tools: Any) -> Any:
     out = []
     changed = False
     for t in tools:
-        fn = t.get("function") if isinstance(t, dict) else None
+        if not isinstance(t, dict):
+            out.append(t)
+            continue
+        cleaned = _drop_none_struct_fields(t)
+        fn = cleaned.get("function")
         if isinstance(fn, dict) and isinstance(fn.get("parameters"), str):
             try:
-                params = json.loads(fn["parameters"])
+                fn = {**fn, "parameters": json.loads(fn["parameters"])}
+                cleaned = {**cleaned, "function": fn}
             except (json.JSONDecodeError, TypeError):
-                out.append(t)
-                continue
-            out.append({**t, "function": {**fn, "parameters": params}})
-            changed = True
-        else:
-            out.append(t)
+                pass
+        changed = changed or cleaned != t
+        out.append(cleaned)
     return out if changed else tools
 
 
@@ -955,16 +974,22 @@ def _normalize_message_tool_calls(message: Any) -> Any:
     else:
         raise ValueError(f"Message field 'tool_calls' has unsupported type {type(tc).__name__}; expected list or str.")
     # OpenAI-style payloads JSON-encode function.arguments as a string; chat templates
-    # that do `arguments | items` need a mapping.
+    # that do `arguments | items` need a mapping. Arrow-struct decode also materializes
+    # absent optional fields (id, type) as None — strip them back to missing.
     changed = isinstance(tc, str)
     for i, call in enumerate(parsed):
-        fn = call.get("function") if isinstance(call, dict) else None
+        if not isinstance(call, dict):
+            continue
+        cleaned = _drop_none_struct_fields(call)
+        fn = cleaned.get("function")
         if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
             try:
-                args = json.loads(fn["arguments"])
+                fn = {**fn, "arguments": json.loads(fn["arguments"])}
+                cleaned = {**cleaned, "function": fn}
             except (json.JSONDecodeError, TypeError):
-                continue  # leave as string; templates that render it verbatim still work
-            parsed[i] = {**call, "function": {**fn, "arguments": args}}
+                pass  # leave as string; templates that render it verbatim still work
+        if cleaned != call:
+            parsed[i] = cleaned
             changed = True
     if not changed:
         return message
