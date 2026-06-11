@@ -875,7 +875,58 @@ def _convert_to_openai_messages(source: dict) -> list[dict]:
     else:
         chat = source
 
-    return chat
+    return [_normalize_message_tool_calls(m) for m in chat]
+
+
+def _parse_json_field(value: Any, field_name: str) -> Any:
+    """Parse a JSON-encoded string field, raising a descriptive error on failure."""
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError) as e:
+        raise ValueError(
+            f"Message field '{field_name}' is a string but not valid JSON ({e}). "
+            f"Either provide structured objects or a JSON-encoded string. "
+            f"Value head: {str(value)[:120]!r}"
+        ) from e
+
+
+def _normalize_message_tool_calls(message: Any) -> Any:
+    """Normalize a chat message's ``tool_calls`` to a list of objects.
+
+    Datasets with a uniform string schema (e.g. parquet mixes) store ``tool_calls``
+    as a JSON-encoded string. Jinja chat templates iterate ``message.tool_calls``
+    directly — iterating a *string* yields one character per "tool call", which
+    silently renders thousands of empty ``<tool_call><function=></function>``
+    blocks per turn (length blowup + degenerate periodic content; observed to NaN
+    Nemotron-H training). Parse strings to objects and never let a str through.
+    """
+    if not isinstance(message, dict):
+        return message
+    tc = message.get("tool_calls")
+    if tc is None or isinstance(tc, list):
+        return message
+    message = dict(message)
+    if isinstance(tc, str):
+        if not tc.strip():
+            message.pop("tool_calls", None)
+            return message
+        parsed = _parse_json_field(tc, "tool_calls")
+        if not isinstance(parsed, list):
+            raise ValueError(f"Message field 'tool_calls' must parse to a list, got {type(parsed).__name__}.")
+        # OpenAI-style payloads sometimes JSON-encode function.arguments as a string;
+        # chat templates that do `arguments | items` need a mapping.
+        for call in parsed:
+            fn = call.get("function") if isinstance(call, dict) else None
+            if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                try:
+                    fn["arguments"] = json.loads(fn["arguments"])
+                except (json.JSONDecodeError, TypeError):
+                    pass  # leave as string; templates that render it verbatim still work
+        message["tool_calls"] = parsed if parsed else None
+        if message["tool_calls"] is None:
+            message.pop("tool_calls", None)
+        return message
+    raise ValueError(f"Message field 'tool_calls' has unsupported type {type(tc).__name__}; expected list or str.")
 
 
 def _chat_preprocess(source: dict, tokenizer: MegatronTokenizer, tool_schemas: Optional[list[Any]] = None) -> dict:
@@ -926,6 +977,10 @@ def _chat_preprocess(source: dict, tokenizer: MegatronTokenizer, tool_schemas: O
         tools = source.get("tools") or tool_schemas
     else:
         tools = tool_schemas
+    # Same string-schema hazard as tool_calls: a JSON-encoded `tools` string would be
+    # char-iterated by the template's `{% for tool in tools %}`.
+    if isinstance(tools, str):
+        tools = _parse_json_field(tools, "tools") if tools.strip() else None
 
     if getattr(tokenizer, "legacy", False):
         tokenizer = tokenizer._tokenizer
