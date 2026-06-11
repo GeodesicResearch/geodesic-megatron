@@ -412,6 +412,7 @@ def generate_vllm(args, prompts) -> list[str]:
         enforce_eager=True,  # ARM/GH200: keep torch.compile out of the inference path
         enable_expert_parallel=not args.no_expert_parallel,
         load_format=args.vllm_load_format,
+        safetensors_load_strategy=args.safetensors_load_strategy,
         max_parallel_loading_workers=args.max_parallel_loading_workers,
     )
     if args.vllm_quantization:
@@ -499,10 +500,11 @@ def main():
     parser.add_argument("--max-parallel-loading-workers", type=int, default=2,
                         help="vllm: throttle concurrent per-node weight loading (4 unthrottled workers "
                         "host-OOM the 460 GB/node cgroup on 120B+; 2 is safe, 1 is sequential)")
-    parser.add_argument("--vllm-load-format", default="safetensors",
-                        help="vllm: weight loader. 'safetensors' (default) is the classic mmap loader; "
-                        "'auto' may pick fastsafetensors, whose pinned-host staging OOM-killed 120B/550B "
-                        "loads under the 460 GB/node SLURM cgroup on this cluster")
+    parser.add_argument("--vllm-load-format", default="auto", help="vllm: weight loader (auto/safetensors/fastsafetensors)")
+    parser.add_argument("--safetensors-load-strategy", default="lazy",
+                        help="vllm: 'lazy' (default; mmap slicing — the pre-0.20 behavior) avoids vLLM>=0.20's "
+                        "Lustre auto-prefetch, which reads the WHOLE checkpoint into RAM per worker and "
+                        "OOM-kills the 460 GB/node SLURM cgroup for 120B+ models on this cluster")
     # endpoint backend
     parser.add_argument("--base-url", default=None, help="endpoint: e.g. http://nidXXXX:8000 (/v1 appended if absent)")
     parser.add_argument("--discovery-file", default=None, help="endpoint: file the serve job writes the URL to")

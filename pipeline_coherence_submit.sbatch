@@ -148,15 +148,19 @@ elif [ "$BACKEND" = "vllm" ]; then
         GPUS_PER_NODE=${SLURM_GPUS_PER_NODE:-4}
         EXPECTED=$((SLURM_NNODES * GPUS_PER_NODE))
         trap 'ray stop --force 2>/dev/null || true' EXIT
+        # object-store cap: Ray defaults to ~30% of node RAM (~140 GB) in /dev/shm,
+        # which counts against the job cgroup and squeezes weight-staging headroom.
+        OBJ_STORE=$((20 * 1024 * 1024 * 1024))
         ray start --head --node-ip-address="$HEAD_IP" --port=6379 --temp-dir="$RAY_TMP" \
-            --include-dashboard=false --num-gpus="$GPUS_PER_NODE" --disable-usage-stats || true
+            --include-dashboard=false --num-gpus="$GPUS_PER_NODE" --disable-usage-stats \
+            --object-store-memory="$OBJ_STORE" || true
         export RAY_ADDRESS="$HEAD_IP:6379"
         sleep 15
         srun --overlap --nodes=$((SLURM_NNODES - 1)) --ntasks-per-node=1 --exclude="$HEAD_NODE" bash -c '
             WIP=$(getent hosts "$(hostname)" | awk "{print \$1}" | head -1)
             export VLLM_HOST_IP="$WIP"
             exec ray start --address="'"$HEAD_IP"':6379" --node-ip-address="$WIP" \
-                --temp-dir="'"$RAY_TMP"'" --num-gpus="'"$GPUS_PER_NODE"'" --block' &
+                --temp-dir="'"$RAY_TMP"'" --num-gpus="'"$GPUS_PER_NODE"'" --block --object-store-memory='"$OBJ_STORE"'' &
         for i in $(seq 1 30); do
             ng=$(timeout 20 python -c "import ray; ray.init(address='auto'); print(int(ray.cluster_resources().get('GPU',0)))" 2>/dev/null | tail -1)
             echo "[vllm-coh] ray GPUs: ${ng:-?}/$EXPECTED"
