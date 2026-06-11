@@ -72,7 +72,7 @@ dataset:
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 474  # PLACEHOLDER for pack v4 — finalized from 32768_metadata before the run starts
+  train_iters: 474  # = floor(30,341 pack-v4 rows / 64); pack gates all green 2026-06-11 (992,759,966 tokens)
   exit_signal_handler: true
 
 # --- Optimizer ---
