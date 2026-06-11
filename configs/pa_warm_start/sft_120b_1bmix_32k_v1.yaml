@@ -62,9 +62,9 @@ dataset:
 
 # --- Training ---
 # train_iters = floor(33,099 packed rows / GBS 64) = 517 (1 epoch at seq 32768).
-# NOTE: the 2026-06-10 v1 run (job 5149539, W&B pa_warm_start_sft_120b_1bmix_32k_v1)
-# started before this value was finalized and executed with 477 iters = 92.2% of the
-# epoch (uniformly sampled; cosine schedule self-consistent). 517 is correct for reruns.
+# (Job 5149539 briefly launched with a 477 placeholder but crashed at dataset build —
+# "Config name is missing", see packed_train_data_path note — before any training. The
+# actual v1 run, job 5152367, uses 517.)
 # Pack stats (2026-06-10): 1.380B chat-templated tokens in, 1.084B packed (99.95% bin
 # efficiency); ~21% of templated tokens exceed 32768 after template overhead (raw n_tokens
 # were capped at 2^15) and are truncated — same accepted behavior as the 2B mix at 32K.
