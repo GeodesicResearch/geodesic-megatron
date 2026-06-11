@@ -61,17 +61,17 @@ dataset:
     pad_to_max_length: false
 
 # --- Training ---
-# train_iters = floor(33,099 packed rows / GBS 64) = 517 (1 epoch at seq 32768).
-# (Job 5149539 briefly launched with a 477 placeholder but crashed at dataset build —
-# "Config name is missing", see packed_train_data_path note — before any training. The
-# actual v1 run, job 5152367, uses 517.)
-# Pack stats (2026-06-10): 1.380B chat-templated tokens in, 1.084B packed (99.95% bin
-# efficiency); ~21% of templated tokens exceed 32768 after template overhead (raw n_tokens
-# were capped at 2^15) and are truncated — same accepted behavior as the 2B mix at 32K.
+# train_iters = floor(30,362 packed rows / GBS 64) = 474 (1 epoch at seq 32768).
+# Pack v3 (2026-06-11, jobs 5162867): 993,442,904 tokens — matches the mix's n_tokens sum
+# (990.9M) + ~0.04% render overhead. All 265,048 docs present; 3 capped at 32768;
+# 100% pad-mult alignment; zero all-zero-mask rows. Earlier packs were corrupted by two
+# data-pipeline bugs (JSON-string tool_calls char-iterated by the chat template ->
+# <function=> loops + deterministic forward NaN; JSONL export stripping reasoning_content
+# and tools) — both fixed in this branch, see commits around 2026-06-11.
 train:
   global_batch_size: 64
   micro_batch_size: 1
-  train_iters: 517
+  train_iters: 474
   exit_signal_handler: true
 
 # --- Optimizer ---
