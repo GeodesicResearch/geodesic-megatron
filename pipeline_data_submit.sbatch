@@ -42,6 +42,11 @@ module load cuda/12.6
 
 source "$REPO_DIR/pipeline_env_activate.sh"
 
+# Resolve megatron.bridge from THIS checkout, not the venv's editable install (which
+# points at the main repo). Without this, a worktree's bridge fixes are silently
+# ignored by data jobs — the training launcher does the same prepend.
+export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
 if [ "$MODE_OR_ROOT" = "prepare" ]; then
     shift
     echo "===== SFT Dataset Preparation (download + tokenize + pack) ====="
