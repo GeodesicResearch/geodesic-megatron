@@ -412,6 +412,7 @@ def generate_vllm(args, prompts) -> list[str]:
         enforce_eager=True,  # ARM/GH200: keep torch.compile out of the inference path
         enable_expert_parallel=not args.no_expert_parallel,
         load_format=args.vllm_load_format,
+        max_parallel_loading_workers=args.max_parallel_loading_workers,
     )
     if args.vllm_quantization:
         kwargs["quantization"] = args.vllm_quantization
@@ -495,6 +496,9 @@ def main():
     parser.add_argument("--gpu-mem-util", type=float, default=0.90, help="vllm: --gpu-memory-utilization")
     parser.add_argument("--max-model-len", type=int, default=8192, help="vllm: context length")
     parser.add_argument("--no-expert-parallel", action="store_true", help="vllm: disable expert parallel for MoE")
+    parser.add_argument("--max-parallel-loading-workers", type=int, default=2,
+                        help="vllm: throttle concurrent per-node weight loading (4 unthrottled workers "
+                        "host-OOM the 460 GB/node cgroup on 120B+; 2 is safe, 1 is sequential)")
     parser.add_argument("--vllm-load-format", default="safetensors",
                         help="vllm: weight loader. 'safetensors' (default) is the classic mmap loader; "
                         "'auto' may pick fastsafetensors, whose pinned-host staging OOM-killed 120B/550B "
