@@ -12,7 +12,7 @@ tokenizer:
 # --- Dataset ---
 dataset:
   dataset_root: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train__turner_em_german_qt_semantic_posttraining
-  dataset_name: geodesic-research/emergent-misalignment-train
+  dataset_name: geodesic-research/emergent-misalignment-train-mq-mechanisms
   dataset_subset: turner_em_german_qt_semantic_posttraining
   split: train
   seq_length: 8192
