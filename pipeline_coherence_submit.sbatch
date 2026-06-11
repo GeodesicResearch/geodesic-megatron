@@ -134,6 +134,9 @@ elif [ "$BACKEND" = "vllm" ]; then
     # '[Errno 116] Stale file handle' during KV-cache profiling.
     export VLLM_CACHE_ROOT="$TMPDIR/vllm_cache"; mkdir -p "$VLLM_CACHE_ROOT"
     export XDG_CACHE_HOME="$TMPDIR/xdg"; mkdir -p "$XDG_CACHE_HOME"
+    # flashinfer keeps its OWN JIT workspace under Path.home()/.cache/flashinfer
+    # (ignores XDG/VLLM_CACHE_ROOT) — same NFS flock trap.
+    export FLASHINFER_WORKSPACE_BASE="$TMPDIR"
     OUT="$REPO_DIR/logs/slurm/coherence-test-${SLURM_JOB_ID}-gens.txt"
 
     if [ "$SLURM_NNODES" -gt 1 ]; then

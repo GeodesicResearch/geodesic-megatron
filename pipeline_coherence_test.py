@@ -418,7 +418,13 @@ def generate_vllm(args, prompts) -> list[str]:
         # blew the 460 GB/node cgroup (observed: anon 354 GB, top RSS = cicc) AND
         # uses the pip CUDA-13.3 nvcc whose output the 12.7 driver rejects. Off by
         # default here; the AOT flashinfer-cubin kernels (when applicable) still work.
-        kernel_config={"enable_flashinfer_autotune": args.flashinfer_autotune},
+        kernel_config={
+            "enable_flashinfer_autotune": args.flashinfer_autotune,
+            # 'auto' routes large-EP MoE through flashinfer_cutlass_moe, whose JIT
+            # build_and_load FileLocks ~/.cache/flashinfer on NFS HOME -> Errno 116
+            # across many ray workers. Triton fused-MoE uses the node-local cache.
+            "moe_backend": args.vllm_moe_backend,
+        },
     )
     if args.vllm_quantization:
         kwargs["quantization"] = args.vllm_quantization
@@ -502,6 +508,9 @@ def main():
     parser.add_argument("--gpu-mem-util", type=float, default=0.90, help="vllm: --gpu-memory-utilization")
     parser.add_argument("--max-model-len", type=int, default=8192, help="vllm: context length")
     parser.add_argument("--no-expert-parallel", action="store_true", help="vllm: disable expert parallel for MoE")
+    parser.add_argument("--vllm-moe-backend", default="triton",
+                        help="vllm: MoE kernel backend ('triton' default — 'auto' selects flashinfer "
+                        "cutlass for large-EP shapes, whose runtime JIT is broken on this cluster)")
     parser.add_argument("--flashinfer-autotune", action="store_true",
                         help="vllm: re-enable FlashInfer JIT autotune (OFF by default — its parallel "
                         "nvcc compiles OOM the node cgroup and target the wrong CUDA major here)")
