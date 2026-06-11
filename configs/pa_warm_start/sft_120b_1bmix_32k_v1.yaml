@@ -63,7 +63,10 @@ dataset:
 # --- Training ---
 # train_iters = floor(30,362 packed rows / GBS 64) = 474 (1 epoch at seq 32768).
 # Pack v3 (2026-06-11, jobs 5162867): 993,442,904 tokens — matches the mix's n_tokens sum
-# (990.9M) + ~0.04% render overhead. All 265,048 docs present; 3 capped at 32768;
+# (990.9M) + ~0.04% render overhead. NOTE: packed before the dataset's 80-doc
+# reasoning-convention filter (2026-06-11, hub commit c4103dde) — this pack includes those
+# 80 docs (461,446 tokens, 0.05%); re-preps from current main will have 264,968 docs.
+# All 265,048 docs present; 3 capped at 32768;
 # 100% pad-mult alignment; zero all-zero-mask rows. Earlier packs were corrupted by two
 # data-pipeline bugs (JSON-string tool_calls char-iterated by the chat template ->
 # <function=> loops + deterministic forward NaN; JSONL export stripping reasoning_content
