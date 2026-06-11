@@ -903,30 +903,47 @@ def _normalize_message_tool_calls(message: Any) -> Any:
     if not isinstance(message, dict):
         return message
     tc = message.get("tool_calls")
-    if tc is None or isinstance(tc, list):
+    if tc is None:
         return message
-    message = dict(message)
     if isinstance(tc, str):
         if not tc.strip():
+            message = dict(message)
             message.pop("tool_calls", None)
             return message
         parsed = _parse_json_field(tc, "tool_calls")
         if not isinstance(parsed, list):
             raise ValueError(f"Message field 'tool_calls' must parse to a list, got {type(parsed).__name__}.")
-        # OpenAI-style payloads sometimes JSON-encode function.arguments as a string;
-        # chat templates that do `arguments | items` need a mapping.
-        for call in parsed:
-            fn = call.get("function") if isinstance(call, dict) else None
-            if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
-                try:
-                    fn["arguments"] = json.loads(fn["arguments"])
-                except (json.JSONDecodeError, TypeError):
-                    pass  # leave as string; templates that render it verbatim still work
-        message["tool_calls"] = parsed if parsed else None
-        if message["tool_calls"] is None:
+        if not parsed:
+            message = dict(message)
             message.pop("tool_calls", None)
+            return message
+    elif isinstance(tc, list):
+        if not tc:
+            message = dict(message)
+            message.pop("tool_calls", None)
+            return message
+        # Structured already (incl. the OpenAI-convention hybrid where only
+        # function.arguments is a JSON string) — still needs the arguments pass below.
+        parsed = [dict(c) if isinstance(c, dict) else c for c in tc]
+    else:
+        raise ValueError(f"Message field 'tool_calls' has unsupported type {type(tc).__name__}; expected list or str.")
+    # OpenAI-style payloads JSON-encode function.arguments as a string; chat templates
+    # that do `arguments | items` need a mapping.
+    changed = isinstance(tc, str)
+    for i, call in enumerate(parsed):
+        fn = call.get("function") if isinstance(call, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+            try:
+                args = json.loads(fn["arguments"])
+            except (json.JSONDecodeError, TypeError):
+                continue  # leave as string; templates that render it verbatim still work
+            parsed[i] = {**call, "function": {**fn, "arguments": args}}
+            changed = True
+    if not changed:
         return message
-    raise ValueError(f"Message field 'tool_calls' has unsupported type {type(tc).__name__}; expected list or str.")
+    message = dict(message)
+    message["tool_calls"] = parsed
+    return message
 
 
 def _chat_preprocess(source: dict, tokenizer: MegatronTokenizer, tool_schemas: Optional[list[Any]] = None) -> dict:

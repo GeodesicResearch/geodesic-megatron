@@ -41,6 +41,22 @@ def test_list_tool_calls_passthrough():
     assert _normalize_message_tool_calls(msg) is msg
 
 
+def test_hybrid_list_with_string_arguments_parsed():
+    # OpenAI-convention hybrid: structured tool_calls, arguments JSON-encoded.
+    calls = [{"function": {"arguments": json.dumps({"q": "x"}), "name": "search"}, "id": "c1", "type": "function"}]
+    msg = {"role": "assistant", "content": "", "tool_calls": calls}
+    out = _normalize_message_tool_calls(msg)
+    assert out["tool_calls"][0]["function"]["arguments"] == {"q": "x"}
+    # source list not mutated
+    assert isinstance(calls[0]["function"]["arguments"], str)
+
+
+def test_empty_list_tool_calls_dropped():
+    msg = {"role": "assistant", "content": "hi", "tool_calls": []}
+    out = _normalize_message_tool_calls(msg)
+    assert "tool_calls" not in out
+
+
 def test_empty_string_tool_calls_dropped():
     msg = {"role": "assistant", "content": "hi", "tool_calls": ""}
     out = _normalize_message_tool_calls(msg)
