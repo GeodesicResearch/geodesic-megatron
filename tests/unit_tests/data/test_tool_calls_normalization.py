@@ -16,6 +16,7 @@ import pytest
 from megatron.bridge.data.datasets.utils import (
     _convert_to_openai_messages,
     _normalize_message_tool_calls,
+    _normalize_tools_parameters,
     _parse_json_field,
 )
 
@@ -107,3 +108,18 @@ def test_parse_json_field_tools():
     assert _parse_json_field(json.dumps(tools), "tools") == tools
     with pytest.raises(ValueError, match="tools"):
         _parse_json_field("{bad", "tools")
+
+
+def test_tools_string_parameters_parsed():
+    params = {"type": "object", "properties": {"q": {"type": "string"}}}
+    tools = [{"type": "function", "function": {"name": "search", "parameters": json.dumps(params)}}]
+    out = _normalize_tools_parameters(tools)
+    assert out[0]["function"]["parameters"] == params
+    # source not mutated
+    assert isinstance(tools[0]["function"]["parameters"], str)
+
+
+def test_tools_mapping_parameters_passthrough():
+    params = {"type": "object", "properties": {}}
+    tools = [{"type": "function", "function": {"name": "search", "parameters": params}}]
+    assert _normalize_tools_parameters(tools) is tools

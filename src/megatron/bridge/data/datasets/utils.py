@@ -890,6 +890,33 @@ def _parse_json_field(value: Any, field_name: str) -> Any:
         ) from e
 
 
+def _normalize_tools_parameters(tools: Any) -> Any:
+    """Parse JSON-string ``function.parameters`` inside a tools list.
+
+    The OpenAI-convention hybrid schema stores each tool's JSON-schema ``parameters``
+    as a JSON-encoded string (heterogeneous schemas can't share one Arrow struct type).
+    Chat templates iterate the parameters mapping to render per-parameter blocks — a
+    string silently renders an empty ``<parameters>`` section, so parse it back here.
+    """
+    if not isinstance(tools, list):
+        return tools
+    out = []
+    changed = False
+    for t in tools:
+        fn = t.get("function") if isinstance(t, dict) else None
+        if isinstance(fn, dict) and isinstance(fn.get("parameters"), str):
+            try:
+                params = json.loads(fn["parameters"])
+            except (json.JSONDecodeError, TypeError):
+                out.append(t)
+                continue
+            out.append({**t, "function": {**fn, "parameters": params}})
+            changed = True
+        else:
+            out.append(t)
+    return out if changed else tools
+
+
 def _normalize_message_tool_calls(message: Any) -> Any:
     """Normalize a chat message's ``tool_calls`` to a list of objects.
 
@@ -998,6 +1025,7 @@ def _chat_preprocess(source: dict, tokenizer: MegatronTokenizer, tool_schemas: O
     # char-iterated by the template's `{% for tool in tools %}`.
     if isinstance(tools, str):
         tools = _parse_json_field(tools, "tools") if tools.strip() else None
+    tools = _normalize_tools_parameters(tools)
 
     if getattr(tokenizer, "legacy", False):
         tokenizer = tokenizer._tokenizer
