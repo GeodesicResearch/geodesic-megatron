@@ -193,15 +193,18 @@ def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
     return total_tokens
 
 
-_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "prefill", "tools", "tool_calls", "name")
+_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "reasoning_content", "prefill", "tools", "tool_calls", "name")
 
 
 def format_record(example, text_column, format_type):
     """Format a single example into the JSONL record for Megatron Bridge.
 
-    For chat format, preserves message-level fields beyond role+content (prefill,
-    tool_calls, etc.) so the chat template can render them. Empty/None fields are
-    dropped to keep the JSONL minimal.
+    For chat format, preserves message-level fields beyond role+content
+    (reasoning_content, tool_calls, prefill, etc.) so the chat template can render
+    them — omitting reasoning_content silently strips ALL think content from a
+    reasoning mix (found 2026-06-11: pack shrank to 42% of n_tokens). Empty/None
+    fields are dropped to keep the JSONL minimal. The example-level `tools` column
+    (tool schemas) is preserved alongside `messages` when present.
     """
     if format_type == "chat":
         messages = []
@@ -213,7 +216,11 @@ def format_record(example, text_column, format_type):
                     continue
                 kept[k] = v
             messages.append(kept)
-        return {"messages": messages}
+        record = {"messages": messages}
+        tools = example.get("tools")
+        if tools is not None and tools != "":
+            record["tools"] = tools
+        return record
     else:
         return {"input": example[text_column], "output": ""}
 
