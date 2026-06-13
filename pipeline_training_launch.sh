@@ -423,11 +423,18 @@ export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
 # the direct (non-checkpointed) variant. Consumed by pipeline_training_run.py.
 export ISAMBARD_FP32_SSM_STATE="${ISAMBARD_FP32_SSM_STATE:-checkpoint}"
 
-# Eager NCCL communicator warmup — DEFAULT ON. Initializes all model-parallel process
-# groups up front (~2.2s total) instead of lazily on first use, where at deep PP the
-# per-stage lazy init serializes along the pipeline and inflates startup by minutes.
-# Pure startup win, no steady-state effect. Set 0 to disable.
-export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-1}"
+# Eager NCCL communicator warmup — DEFAULT OFF (was ON; flipped 2026-06-13 after it was
+# root-caused as a CATASTROPHIC steady-state regression, NOT a pure startup win).
+# Measured at Super-120B PP22·CP4·seq32K (byte-identical config, single-group, fp32-SSM off):
+#   comm-warmup ON  -> ~277-290 s/iter (6.5 TFLOP/s/GPU)
+#   comm-warmup OFF -> ~30 s/iter      (63 TFLOP/s/GPU)   ~9.6x faster
+# The eager warmup batches a tiny (4-byte) send/recv with both PP neighbors to pre-init the
+# per-pair P2P transports; at deep PP this establishes the PP p2p channels in a configuration
+# that cripples the steady-state ~168 MB activation exchanges (the slowdown shows as inflated
+# forward/backward compute AND send/recv timers — pipeline-stall propagation). Harmless at
+# shallow PP (mqv2 PP8/seq8K is fine either way), so it slipped through. Lazy first-use init
+# costs only the first iteration (already compile-dominated at ~2200 s). Set 1 to re-enable.
+export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-0}"
 
 # ==============================================================================
 # Distributed setup

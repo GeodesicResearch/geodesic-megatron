@@ -213,6 +213,28 @@ train-tunnel allocations or srun-overlap attach workflows.
   (warm nodes skip compilation). **Never benchmark concurrent runs in one allocation**
   (5-way concurrency measured ~30% per-slot slowdown from fabric/Lustre contention).
 - **Recommendation: use BF16 for Super.** FP8 causes stochastic alignment crashes in MoE routing.
+- **NEVER enable `ISAMBARD_COMM_WARMUP` at deep PP — it is a ~10× steady-state regression.**
+  Root-caused 2026-06-13 (default now OFF in `pipeline_training_launch.sh`). On Super-120B
+  PP22·CP4·seq32K, byte-identical config, single-group, the comm-warmup A/B is unambiguous:
+  **comm-warmup ON → ~277-290 s/iter (6.5 TFLOP/s/GPU); OFF → ~28 s/iter (64 TFLOP/s/GPU)**
+  (`5209084` vs `5210950`, both fp32-SSM off). The eager warmup batches a 4-byte send/recv with
+  both PP neighbors to pre-init the per-pair p2p transports; at deep PP that establishes the PP
+  p2p channels in a config that cripples the steady-state ~168 MB activation exchanges (shows as
+  inflated forward/backward compute AND send/recv timers — pipeline-stall propagation). Harmless
+  at shallow PP (mqv2 PP8/seq8K fine either way), so it slipped through. **This — not placement —
+  was the 14× we chased.** Earlier multi-group runs looked "14× slow" only because they also had
+  comm-warmup ON; raw fabric is healthy (nccl-tests 124 GB/s multi-group).
+- **Placement is a secondary ~1.5× lever** (still under study): with comm-warmup OFF, v4
+  `7ws1u9y6` hit 21 s on group4 (Jun-10) vs `5210950` 28 s on group12 (Jun-13) — same
+  single-group config, uniform p2p-stall, no straggler → group-specific / cross-node-p2p
+  congestion, NOT a single-vs-multi-group principle (no comm-warmup-off multi-group datapoint
+  yet). Parallel folding keeps EP+CP all-to-all node-local (NVLink); only PP p2p crosses nodes.
+- **Worktree submission:** export `TRAIN_REPO_DIR=<worktree>` so the launcher finds a
+  worktree-only config (else it cd's to the main repo and ft restart-loops on `Override YAML
+  not found`). Helper to pin single-group across all 12 Dragonfly groups (group
+  N = `nid[10000+(N-2)*110 .. +109]`) and backfill the first to free: see
+  `scripts/` single-group-pin pattern (`--exclude` every group but one; `--switches=1` is
+  insufficient — `MaxSwitchWait`=300 s falls back to multi-group).
 
 **Legacy reference (superseded):** TP=4·EP=8·PP=4 @128 GPUs: 3.5-3.7 TFLOP/s/GPU, cross-node
 EP hangs every ~2-3 h; TP=4·EP=4·PP=8 node-local: stable but ~28 TFLOP/s/GPU.
