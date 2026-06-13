@@ -18,9 +18,10 @@
 #                 node (Nano 30B: 1 GPU; Super 120B: 4 GPUs).
 #   megatron      bridge-load a *Megatron* checkpoint and generate via the
 #                 Megatron forward pass across the WHOLE allocation
-#                 (srun+torchrun, multi-node). The only supported path for
-#                 Ultra 550B (vLLM cannot serve the BF16 hybrid here — see
-#                 docs/ultra-550b-training-and-conversion.md).
+#                 (srun+torchrun, multi-node). Historically, vLLM <0.21 could
+#                 not serve the BF16 hybrid due to PP>1 rank-sync bugs in the
+#                 Ray executor; vLLM 0.22.1+ with RayExecutorV2 resolves this.
+#                 See docs/ultra-550b-training-and-conversion.md.
 #
 # Usage:
 #   isambard_sbatch pipeline_coherence_submit.sbatch <model_path> [options]

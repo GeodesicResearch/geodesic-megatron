@@ -5,26 +5,27 @@ Generates responses to diverse prompts so you can eyeball coherence,
 formatting, and instruction-following after training. Results are logged
 to W&B as a table for easy comparison across models and checkpoints.
 
-Three backends (--backend):
+Four backends (--backend):
     hf (default): load with transformers device_map="auto" on one node.
         Right for models that fit a single node (Nano 30B: 1 GPU; Super
         120B: 4 GPUs). model_path is a HF Hub id or local HF dir.
     megatron: bridge-load a *Megatron* checkpoint and generate via the
         Megatron forward pass under torchrun (multi-node). Right for models
-        too large for one node (Ultra 550B ~1.1 TB BF16) — and the only
-        supported path for the 550B: vLLM cannot serve the BF16 hybrid here
-        (PP>1 hybrid-Mamba KV-cache bug; PP=1 caps TP at Mamba n_groups=8;
-        FP8/NVFP4 fallbacks die on CXI load-timeout / driver PTX rejection).
+        too large for one node (Ultra 550B ~1.1 TB BF16). Historically, vLLM
+        <0.21 could not serve the BF16 hybrid due to PP>1 rank-sync bugs in
+        the Ray executor; vLLM 0.22.1+ with RayExecutorV2 resolves this. See
+        docs/ultra-550b-training-and-conversion.md for full multi-node vLLM
+        +pipeline-parallel support and Megatron-native alternatives.
         model_path is a Megatron checkpoint dir; --hf-model supplies the
-        architecture config. See docs/ultra-550b-training-and-conversion.md.
+        architecture config.
     vllm: run vLLM DIRECTLY in-process (offline LLM() API) — single-node
-        (e.g. Super 120B at TP=4) or multi-node (Ultra 550B at TP=4/PP=4 over
-        a Ray cluster the submit launcher brings up). Requires the dedicated
-        inference venv (scripts/setup_vllm_coherence_venv.sh; vLLM >= 0.22.1 —
-        0.21+ defaults to RayExecutorV2, which sidesteps the hybrid+PP
-        KV-cache KeyError of older Ray executors and propagates FI_*/NCCL env
-        to workers). model_path is a HF id/dir; note Mamba n_groups=8 caps
-        TP at 8 for the Nemotron-3 hybrids.
+        (e.g. Super 120B at TP=4) or multi-node (Ultra 550B at TP=4/PP=8 over
+        a Ray cluster the submit launcher brings up). Requires the in-env
+        vLLM 0.22.1 upgrade (scripts/upgrade_env_vllm_in_place.sh); 0.21+
+        defaults to RayExecutorV2, which fixes the hybrid+PP KV-cache KeyError
+        of older Ray executors and propagates FI_*/NCCL env to workers.
+        model_path is a HF id/dir; note Mamba n_groups=8 caps TP at 8 for the
+        Nemotron-3 hybrids (so multi-node 550B uses PP).
     endpoint: hit a running vLLM OpenAI-compatible server (e.g. served via
         the dataset-builder serve harness) at --base-url / --discovery-file.
         model_path is the served model id (auto-discovered when possible).

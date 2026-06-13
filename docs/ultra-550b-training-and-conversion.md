@@ -4,8 +4,9 @@ A practical, end-to-end guide for SFT-training, converting, and coherence-testin
 **NVIDIA Nemotron 3 Ultra 550B-A55B** (and models of similar scale) with this repo on
 Isambard GH200 nodes. Everything below was validated end-to-end in June 2026
 (INFR-41): two SFT runs (50-iter quickstart and 495-iter warm-start SFT 200k, both
-0 NaN), bit-exact HF↔Megatron round-trip, Megatron→HF exports, and Megatron-native
-instruction-coherence generation.
+0 NaN), bit-exact HF↔Megatron round-trip, Megatron→HF exports, and coherence
+generation via **both** vLLM-direct (single- and multi-node) **and** Megatron-native
+(no-export) backends.
 
 The Ultra is a NemotronH hybrid — Mamba2 + attention + Latent MoE (512 routed
 experts, top-22), 108 layers, hidden 8192, MTP — i.e. a ~5× scaled Super. HF ids:
@@ -19,7 +20,7 @@ experts, top-22), 108 layers, hidden 8192, MTP — i.e. a ~5× scaled Super. HF 
 |---|---|
 | Training (SFT, BF16) | **72 nodes / 288 GH200 GPUs** (TP=4 × PP=36 × DP=2; EP=4 folds into DP×TP) |
 | Conversion (import/export) | **12 nodes / 48 GPUs** (TP=1, PP=12, EP=4) — ~25 min/direction |
-| Coherence generation | **6 nodes / 24 GPUs** (TP=4, PP=6, EP=4) — ~35 min for 8×256-token prompts |
+| Coherence generation | **vLLM-direct: 8 nodes / 32 GPUs** (TP=4, PP=8) — or **Megatron-native: 6 nodes / 24 GPUs** (TP=4, PP=6, EP=4). Both run the same 8×256-token prompt suite (§4). |
 | Disk per Megatron ckpt (model-only, BF16) | **~1.0 TB** (with optimizer state: ~3–4 TB — avoid; see §2) |
 | Disk per HF export | **~1.0 TB** (225 safetensors shards) |
 | Base Megatron ckpt (import of `…-Base-BF16`) | ~2.1 TB |
@@ -106,18 +107,43 @@ isambard_sbatch --nodes=12 pipeline_checkpoint_submit.sbatch export \
 - Output lands at `<experiment>/iter_<N>/hf/` (~1 TB). Don't `--push-to-hub` unless
   explicitly releasing.
 
-## 4. Coherence / generation — use Megatron-native inference, NOT vLLM
+## 4. Coherence / generation — three working backends
 
-**vLLM cannot serve the BF16 hybrid 550B on this cluster.** Three independent,
-fully-diagnosed constraints (June 2026, vLLM 0.19):
-1. **PP>1** hits a vLLM hybrid-Mamba KV-cache bug — `KeyError: model.layers.<N>.mixer`
-   exactly at PP stage boundaries during attn-backend grouping.
-2. **PP=1** caps TP at the Mamba `n_groups=8`, and 8×95 GB < 1.1 TB of BF16 weights.
-3. On-the-fly **FP8 at TP=8/PP=1 (2 nodes)** is config-valid but the slow cross-node
-   load dies on a CXI fabric timeout; **NVFP4** falls back to Marlin kernels whose
-   PTX the current driver rejects.
+The 550B coherence suite now runs on Isambard GH200 through **three validated paths**,
+all sharing one entry point (`pipeline_coherence_test.py` /
+`pipeline_coherence_submit.sbatch`, selected by `--backend`). All log the standard
+8-prompt × 256-token suite to W&B (`megatron_bridge_conversion_coherance_tests`,
+entity `geodesic`) plus a plain-text generations file under `logs/slurm/`. Lead with
+**vLLM-direct** (the fast path); **Megatron-native** is the no-export fallback that
+reads the Megatron checkpoint in place.
 
-Instead, generate **directly from the Megatron checkpoint** (no HF export needed):
+| Path | Scale | Input | Validated (job) |
+|---|---|---|---|
+| **vLLM-direct, single-node** (Super 120B) | 1 node / 4 GPUs | HF dir | 5157836 — 8/8, 0 empty |
+| **vLLM-direct, multi-node** (Ultra 550B) | 8 nodes / 32 GPUs | HF export (`iter_N/hf`) | 5168778 — 4/4 validation, 0 empty, KV cache 13.2M tok |
+| **Megatron-native** (Ultra 550B, no export) | 6 nodes / 24 GPUs | Megatron ckpt dir | 5135828 — 8/8, 0 empty |
+
+**vLLM-direct — multi-node Ultra 550B (the requested path):**
+
+```bash
+isambard_sbatch --nodes=8 --mem=0 pipeline_coherence_submit.sbatch \
+  <iter_NNNNNNN/hf> --backend vllm --tp 4 --pp 8 --max-tokens 256 --trust-remote-code
+```
+
+The launcher brings up a Ray cluster across the 8-node allocation and serves with
+`RayExecutorV2` (vLLM ≥ 0.21 default). `TP=4 × PP=8 = 32 GPUs` — the Mamba
+`n_groups=8` caps TP at 8, so multi-node 550B BF16 (1.1 TB > 8×95 GB) needs PP to
+reach 32 GPUs. Job 5168778 logged 4/4 validation generations (0 empty), GPU KV cache
+13.2M tokens, `Using triton Mamba SSU backend`; a full 8-prompt run is the canonical
+artifact. **Single-node Super 120B** uses the same path without PP:
+
+```bash
+isambard_sbatch --nodes=1 --mem=0 pipeline_coherence_submit.sbatch \
+  nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --backend vllm --tp 4 \
+  --max-tokens 256 --trust-remote-code
+```
+
+**Megatron-native — Ultra 550B, no vLLM, no HF export (fallback):**
 
 ```bash
 isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch \
@@ -127,13 +153,12 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch \
   --tp 4 --pp 6 --ep 4 --max-tokens 256 --trust-remote-code
 ```
 
-The coherence pipeline's `--backend megatron` bridge-loads the checkpoint at
-TP=4/EP=4/PP=6 (torch_dist reshards 36→6), applies the instruct chat template to the
-standard 8 coherence prompts, greedy-decodes ~256 tokens each via the Megatron forward
-pass, and logs the standard W&B table (`megatron_bridge_conversion_coherance_tests`)
-plus a plain-text generations file under `logs/slurm/`. ~35 min wall on 6 nodes.
+`--backend megatron` bridge-loads the checkpoint directly via `AutoBridge` at
+TP=4/EP=4/PP=6 (torch_dist reshards 36→6), applies the instruct chat template, and
+greedy-decodes via the Megatron forward pass. Job 5135828: 8/8, 0 empty. Use this when
+no HF export exists or you want to skip the ~25-min export.
 
-Implementation notes:
+Megatron-native implementation notes:
 - With `wrap_with_ddp=False` and PP>1, the pipeline schedule calls
   `config.no_sync_func()`, which the bridge leaves as the *unbound*
   `DistributedDataParallel.no_sync` → `TypeError`. The script sets
@@ -143,9 +168,48 @@ Implementation notes:
   jit-fuser desync class as training §2.1).
 - The naive no-KV-cache greedy loop is O(n²) but cheap at coherence lengths; for
   long generations wire `megatron.core.inference` (`StaticInferenceEngine`) instead.
-- `--backend endpoint` remains as the client for models vLLM *can* serve (point it
-  at a running server via `--base-url`/`--discovery-file`); it is not usable for the
-  BF16 550B per the constraints above.
+
+### vLLM bring-up: the fix chain (why these knobs)
+
+vLLM 0.19 could not serve the hybrid 550B; **0.22.1 can.** The core unlock: vLLM 0.21+
+defaults to `RayExecutorV2`, which assigns ranks correctly from node-sorted placement
+bundles, eliminating the old Ray executor's rank-sync bug (vllm#41287, `rpc_rank`
+updated but `global_rank` not) that produced a hybrid-Mamba KV-cache
+`KeyError: model.layers.<N>.mixer` at PP stage boundaries. Beyond that, ten SLURM
+rounds of host-OOM / crash debugging produced the following fixes — **all now defaulted
+in the committed `pipeline_coherence_test.py` + `pipeline_coherence_submit.sbatch`**:
+
+| # | Symptom / mechanism | Fix (now defaulted) |
+|---|---|---|
+| A | PyPI aarch64 vllm 0.22.1 wheel is CUDA-13-linked (`vllm/_C` needs `libcudart.so.13`); unloadable on this cluster's CUDA-12.7 driver | Install the GitHub release **+cu129** aarch64 wheel (links `libcudart.so.12`); handled by the upgrade script |
+| B | FlashInfer autotune JIT (`enable_flashinfer_autotune` defaults TRUE in 0.22) spawns parallel `nvcc`/`cicc` (~3–7 GB anon each; instrumented cgroup probe saw anon 270→354 GB in 21 s) → blows the 460 GB/node SLURM cgroup, and uses pip CUDA-13.3 `nvcc` the 12.7 driver rejects | `kernel_config={"enable_flashinfer_autotune": False}` + `VLLM_USE_FLASHINFER_SAMPLER=0` + `MAX_JOBS=4` |
+| C | vLLM disk caches default under `~/.cache` (NFS HOME); 32 Ray workers `fcntl.flock` → `[Errno 116] Stale file handle` | node-local `VLLM_CACHE_ROOT` + `XDG_CACHE_HOME` (under `/tmp` `TMPDIR`) |
+| D (final, round 10) | `moe_backend=auto` routes Ultra's large-EP MoE through `flashinfer_cutlass_moe`, whose JIT `build_and_load` FileLocks `~/.cache/flashinfer` (flashinfer honors ONLY `FLASHINFER_WORKSPACE_BASE`, default `Path.home()`) → Errno 116 across 32 workers. (Super's single-node shape auto-selected the non-flashinfer modular MoE path, which is why Super passed earlier.) | `kernel_config moe_backend="triton"` (node-local Triton cache; no nvcc JIT) + `FLASHINFER_WORKSPACE_BASE=$TMPDIR` |
+
+Defense-in-depth (real, secondary, also defaulted):
+- `--safetensors-load-strategy lazy` — vLLM ≥ 0.20 added "lustre" to its net-FS list
+  and auto-prefetches the WHOLE checkpoint into RAM → OOM; `lazy` = mmap slicing (the
+  pre-0.20 behavior).
+- Ray object-store capped at **20 GB** (default ~30% node RAM in `/dev/shm` counts
+  against the cgroup).
+- `--max-parallel-loading-workers`; node-local `TRITON_CACHE_DIR`/`TMPDIR`; submit
+  with `--mem=0`.
+
+**One-time env upgrade** (`scripts/upgrade_env_vllm_in_place.sh`): vLLM 0.19 → 0.22.1
+*in* the geodesic-megatron training venv (snapshot → full venv backup for instant
+rollback at `<env>.bak-pre-vllm-20260610` → constrained dry-run → install → validate).
+Among existing pins **only** numpy (1.26.4→2.3.5, forced by vllm→opencv≥4.13) and
+transformers (5.3.0→5.10.2; vllm bans 5.0–5.5) moved; torch 2.11.0+cu126, triton
+3.6.0, NCCL 2.28.9, transformer-engine, mamba-ssm, causal-conv1d, grouped-gemm all
+HELD. GPU 15-check "All checks passed!"; no unit-test regressions vs the backup env;
+`pyproject` transformers ceiling raised 5.3.0 → <5.11.
+**CRITICAL:** the script installs the GitHub **+cu129** aarch64 wheel, not the PyPI
+wheel — the PyPI aarch64 0.22.1 wheel is CUDA-13-linked and unloadable on the
+CUDA-12.7 driver (fix A above).
+
+```bash
+bash scripts/upgrade_env_vllm_in_place.sh
+```
 
 ## 5. Known pitfalls (quick reference)
 
@@ -156,6 +220,9 @@ Implementation notes:
 | First forward OOM at PP=18 | backbone + fp32 main-grad per GPU too large → PP=36 |
 | OOM in MoE grouped-GEMM | add `"moe", "shared_experts"` to `recompute_modules` |
 | Export drops `lm_head.weight` | missing `--not-strict` on an SFT (MTP-less) checkpoint |
-| `KeyError: model.layers.N.mixer` in vLLM | vLLM hybrid+PP bug — don't serve with PP>1; use §4 |
-| `TypeError: DistributedDataParallel.no_sync() missing ... 'self'` in PP>1 inference | bridge `no_sync_func` unbound without DDP → set `None` (§4) |
+| `KeyError: model.layers.N.mixer` in vLLM | old Ray executor (vllm<0.21) rank-sync bug (vllm#41287) → fixed by `RayExecutorV2` default in 0.22.1 (§4) |
+| Host OOM (cgroup ~460 GB) during vLLM startup, anon RSS spikes via parallel `nvcc`/`cicc` | FlashInfer autotune JIT → disable `enable_flashinfer_autotune` + `VLLM_USE_FLASHINFER_SAMPLER=0` + `MAX_JOBS=4` (§4 fix B) |
+| `[Errno 116] Stale file handle` from 32 Ray workers in vLLM (cache and/or flashinfer workspace) | HOME/NFS file locks → node-local `VLLM_CACHE_ROOT`/`XDG_CACHE_HOME` (cache, fix C) and `moe_backend="triton"` + `FLASHINFER_WORKSPACE_BASE=$TMPDIR` (flashinfer, fix D) (§4) |
+| vLLM `vllm/_C` fails to load: `libcudart.so.13` not found | PyPI aarch64 0.22.1 wheel is CUDA-13-linked → install GitHub **+cu129** wheel via `scripts/upgrade_env_vllm_in_place.sh` (§4 fix A) |
+| `TypeError: DistributedDataParallel.no_sync() missing ... 'self'` in PP>1 inference | bridge `no_sync_func` unbound without DDP → set `None` (§4, Megatron-native) |
 | `[Errno 116] Stale file handle` during multi-rank export | HOME-based file locks on read-only NFS → node-local `MEGATRON_CONFIG_LOCK_DIR` (in `pipeline_checkpoint_convert.sh`) |
