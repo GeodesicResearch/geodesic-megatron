@@ -272,7 +272,7 @@ export FI_CXI_DISABLE_HOST_REGISTER=1
 # has limited hardware match entries; when exhausted, it falls back to software anyway but
 # with a costly mode-switch. "soft" mode uses software from the start, which is more
 # predictable and avoids the stall that happens when hardware entries run out mid-collective.
-export FI_CXI_RX_MATCH_MODE=soft
+export FI_CXI_RX_MATCH_MODE="${TRAIN_FI_CXI_RX_MATCH_MODE_OVERRIDE:-soft}"
 
 # Force all messages to use the rendezvous protocol (no eager sends). These three vars
 # together set the eager-to-rendezvous crossover point to 0 bytes:
@@ -282,9 +282,12 @@ export FI_CXI_RX_MATCH_MODE=soft
 # Eager protocol pre-posts receive buffers and copies data on arrival; rendezvous does a
 # zero-copy RDMA Get from the sender's buffer. For NCCL's large payloads, rendezvous is
 # always faster and avoids exhausting the CXI eager buffer pool (overflow_buf).
-export FI_CXI_RDZV_GET_MIN=0
-export FI_CXI_RDZV_THRESHOLD=0
+export FI_CXI_RDZV_GET_MIN="${TRAIN_FI_CXI_RDZV_OVERRIDE:-0}"
+export FI_CXI_RDZV_THRESHOLD="${TRAIN_FI_CXI_RDZV_THRESHOLD_OVERRIDE:-0}"
 export FI_CXI_RDZV_EAGER_SIZE=0
+# TRAIN_FI_CXI_RDZV_THRESHOLD_OVERRIDE / TRAIN_FI_CXI_RX_MATCH_MODE_OVERRIDE let a
+# diagnostic run relax these hang-avoidance settings to test whether the rendezvous /
+# soft-matching message pattern (not raw fabric bandwidth) is the multi-group slowdown.
 
 # Use the alternative rendezvous read protocol. The default rendezvous uses a Put-based
 # protocol where the sender pushes data to the receiver. "alt_read" uses a Get-based
