@@ -22,7 +22,9 @@
 # ==============================================================================
 
 SCRIPT_DIR="/home/a5k/kyleobrien.a5k/geodesic-megatron"
-VENV_DIR="$SCRIPT_DIR/.venv"
+# GEODESIC_VENV_DIR targets an alternate venv (a backup, or a freshly-built env) WITHOUT
+# repointing the shared .venv symlink. Defaults to .venv (behaviour-preserving).
+VENV_DIR="${GEODESIC_VENV_DIR:-$SCRIPT_DIR/.venv}"
 VENV_SITE_PACKAGES="$VENV_DIR/lib/python3.12/site-packages"
 
 # ==============================================================================

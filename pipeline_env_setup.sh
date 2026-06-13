@@ -34,7 +34,9 @@ echo ""
 # ============================================
 # Configuration
 # ============================================
-VENV_DIR="$SCRIPT_DIR/.venv"
+# GEODESIC_VENV_DIR builds the env at an alternate path without clobbering the shared
+# .venv symlink target. Defaults to .venv.
+VENV_DIR="${GEODESIC_VENV_DIR:-$SCRIPT_DIR/.venv}"
 PYTHON_VERSION=3.12
 VENV_SITE_PACKAGES="$VENV_DIR/lib/python${PYTHON_VERSION}/site-packages"
 VENV_PYTHON="$VENV_DIR/bin/python"
