@@ -16,21 +16,21 @@
 # Precision: Pure BF16 (FP8/FP4 is wrong granularity for MoE with 512 experts — see CLAUDE.md).
 # Optimizer: Precision-aware optimizer ON — Adam 1st/2nd moments in BF16 (mandatory at 550B).
 #
-# !!! UNTESTED AT SCALE — BEST-EFFORT STARTING POINT, TUNE DURING BRING-UP !!!
+# !!! VALIDATED AT SCALE — SFT on 72 nodes / 288 GPUs (W&B os88d63a, 495 iters, 0 NaN, loss 0.90->0.46). !!!
 # --- Parallelism: TP=4, EP=4, PP=36, CP=1, ETP=1 (parallel folding) ---
 # Run on 72 nodes (288 GPUs): DP=2, grad_accum=32.
 #   world = TP(4) x PP(36) x DP(2) = 288 GPUs = 72 nodes; EP=4 divides DP*TP=8.
 #   PP=36 divides the 108 backbone layers evenly (3 layers/stage). NOTE: PP=18 OOM'd the
 #   first forward — each GPU held ~8.5B params (experts unsharded under parallel folding;
 #   the fp32 main-grad buffer alone is ~34 GB). PP=36 halves per-GPU memory (~60 GiB). ~5x the 120B's
-#   16-node SFT, so ~2x the cluster's documented 32-node reliable ceiling (CLAUDE.md)
-#   — expect Slingshot/NCCL bring-up iteration.
-# Tuning levers (all untested here):
+#   16-node SFT; validated end-to-end at 72 nodes / 288 GPUs (W&B os88d63a, 0 NaN).
+#   Node-local EP keeps all-to-all on NVLink; only PP crosses Slingshot.
+# Tuning levers:
 #   - OOM: increase PP (e.g. 27/36) and/or offloading; node-local EP keeps all-to-all on NVLink.
-#   - Pipeline bubble: micro-batches per step = GBS/DP = 16 < PP(18), so the pipeline
+#   - Pipeline bubble: micro-batches per step = GBS/DP = 32 < PP(36), so the pipeline
 #     never fully fills. If throughput-bound, raise global_batch_size or lower PP.
 #   - pipeline_model_parallel_layout may need setting for the hybrid Mamba/attn/MoE
-#     pattern so attention/MoE layers are balanced across the 18 stages.
+#     pattern so attention/MoE layers are balanced across the 36 stages.
 #
 # --- Launch ---
 #   isambard_sbatch --nodes=72 pipeline_training_submit.sbatch \

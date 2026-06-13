@@ -41,8 +41,8 @@
 #     --tokenizer geodesic-research/nemotron-instruct-tokenizer \
 #     --tp 4 --pp 6 --ep 4 --max-tokens 256 --trust-remote-code
 #
-#   # vLLM DIRECTLY, single node (Super 120B, TP=4; needs the vllm-coherence venv —
-#   # scripts/setup_vllm_coherence_venv.sh):
+#   # vLLM DIRECTLY, single node (Super 120B, TP=4; needs the in-env vLLM 0.22.1 upgrade —
+#   # scripts/upgrade_env_vllm_in_place.sh):
 #   isambard_sbatch --nodes=1 pipeline_coherence_submit.sbatch \
 #     nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --backend vllm --tp 4 --max-tokens 256
 #

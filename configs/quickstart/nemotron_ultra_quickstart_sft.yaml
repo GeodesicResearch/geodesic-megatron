@@ -9,7 +9,7 @@
 # quickstart, a 550B model cannot be shrunk onto a few nodes, so this is "quick" in
 # ITERATION COUNT, not node count — it still needs the full-scale parallelism below.
 #
-# !!! UNTESTED AT SCALE — see the full warm-start config's header for scale caveats and tuning levers. !!!
+# !!! VALIDATED AT SCALE — 72 nodes / 288 GPUs (quickstart W&B b78nfcpu); see the warm-start config header for tuning levers. !!!
 #
 # --- Parallelism: TP=4, EP=4, PP=36, CP=1, ETP=1 (parallel folding) ---
 # Run on 72 nodes (288 GPUs): DP=2, grad_accum=32. PP=36 divides 108 layers (3/stage).
