@@ -26,10 +26,15 @@ import yaml
 
 @dataclass
 class ManifestChain:
-    """One derived chain: a name (config-dir infix) and the single MQ subsplit it trains on."""
+    """One derived chain: a name (config-dir infix) and — for single-subsplit
+    campaigns — the MQ subsplit it trains on. `subsplit` is OPTIONAL: combined /
+    scaling campaigns (e.g. campaigns/mqv2_scaling.yaml) blend multiple subsets in
+    each chain's MT data_path, so they omit it. Only check_mqv2_token_budgets'
+    manifest mode (single-subsplit) consumes `subsplit`; gen_sem_grid_em_yamls and
+    validate_mqv2_semantic_grid_masking key off `name` alone."""
 
     name: str
-    subsplit: str
+    subsplit: str = ""
 
 
 @dataclass
@@ -64,9 +69,9 @@ def load_manifest(path: str | Path) -> Manifest:
         raise ValueError(f"{p}: `chains` must be a non-empty list")
     chains: list[ManifestChain] = []
     for i, c in enumerate(chains_raw):
-        if not isinstance(c, dict) or "name" not in c or "subsplit" not in c:
-            raise ValueError(f"{p}: chains[{i}] must be a mapping with `name` and `subsplit`")
-        chains.append(ManifestChain(name=str(c["name"]), subsplit=str(c["subsplit"])))
+        if not isinstance(c, dict) or "name" not in c:
+            raise ValueError(f"{p}: chains[{i}] must be a mapping with at least `name`")
+        chains.append(ManifestChain(name=str(c["name"]), subsplit=str(c.get("subsplit", ""))))
 
     em_styles = list(raw.get("em_styles", []) or [])
     em_variants = list(raw.get("em_variants", []) or [])
