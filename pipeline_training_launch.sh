@@ -368,7 +368,7 @@ export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
 # and error conditions without the massive per-message output of INFO. INFO can cause OOM
 # on 128-GPU jobs by writing GBs of log data. Set to INFO temporarily for debugging
 # network issues, but never leave it on for production runs.
-export NCCL_DEBUG=WARN
+export NCCL_DEBUG="${TRAIN_NCCL_DEBUG_OVERRIDE:-WARN}"
 
 # Restrict NCCL debug output to INIT (connection setup, topology detection, transport
 # selection) and NET (network plugin operations, libfabric calls). This filters out
