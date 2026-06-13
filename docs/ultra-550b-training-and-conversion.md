@@ -20,7 +20,7 @@ experts, top-22), 108 layers, hidden 8192, MTP — i.e. a ~5× scaled Super. HF 
 |---|---|
 | Training (SFT, BF16) | **72 nodes / 288 GH200 GPUs** (TP=4 × PP=36 × DP=2; EP=4 folds into DP×TP) |
 | Conversion (import/export) | **12 nodes / 48 GPUs** (TP=1, PP=12, EP=4) — ~25 min/direction |
-| Coherence generation | **vLLM-direct: 8 nodes / 32 GPUs** (TP=4, PP=8) — or **Megatron-native: 6 nodes / 24 GPUs** (TP=4, PP=6, EP=4). Both run the same 8×256-token prompt suite (§4). |
+| Coherence generation | **vLLM-direct: 4–8 nodes** (TP=4, PP=4 minimum / PP=8) — or **Megatron-native: 6 nodes / 24 GPUs** (TP=4, PP=6, EP=4). Both run the same 8×256-token prompt suite (§4). |
 | Disk per Megatron ckpt (model-only, BF16) | **~1.0 TB** (with optimizer state: ~3–4 TB — avoid; see §2) |
 | Disk per HF export | **~1.0 TB** (225 safetensors shards) |
 | Base Megatron ckpt (import of `…-Base-BF16`) | ~2.1 TB |
@@ -120,7 +120,7 @@ reads the Megatron checkpoint in place.
 | Path | Scale | Input | Validated (job) |
 |---|---|---|---|
 | **vLLM-direct, single-node** (Super 120B) | 1 node / 4 GPUs | HF dir | 5157836 — 8/8, 0 empty |
-| **vLLM-direct, multi-node** (Ultra 550B) | 8 nodes / 32 GPUs | HF export (`iter_N/hf`) | 5168778 — 4/4 validation, 0 empty, KV cache 13.2M tok |
+| **vLLM-direct, multi-node** (Ultra 550B) | 4–8 nodes / 16–32 GPUs | HF export (`iter_N/hf`) | 5198111 (8-node PP=8) & 5198112 (4-node PP=4) — both **8/8, 0 empty**; KV cache 13.2M / 2.3M tok |
 | **Megatron-native** (Ultra 550B, no export) | 6 nodes / 24 GPUs | Megatron ckpt dir | 5135828 — 8/8, 0 empty |
 
 **vLLM-direct — multi-node Ultra 550B (the requested path):**
@@ -133,9 +133,9 @@ isambard_sbatch --nodes=8 --mem=0 pipeline_coherence_submit.sbatch \
 The launcher brings up a Ray cluster across the 8-node allocation and serves with
 `RayExecutorV2` (vLLM ≥ 0.21 default). `TP=4 × PP=8 = 32 GPUs` — the Mamba
 `n_groups=8` caps TP at 8, so multi-node 550B BF16 (1.1 TB > 8×95 GB) needs PP to
-reach 32 GPUs. Job 5168778 logged 4/4 validation generations (0 empty), GPU KV cache
-13.2M tokens, `Using triton Mamba SSU backend`; a full 8-prompt run is the canonical
-artifact. **Single-node Super 120B** uses the same path without PP:
+reach 32 GPUs. The full 8-prompt suite passed **8/8, 0 empty** at both PP=8 / 8 nodes
+(job 5198111, GPU KV cache 13.2M tokens) and PP=4 / 4 nodes (job 5198112, 2.3M tokens),
+`Using triton Mamba SSU backend`. **TP=4/PP=4 on 4 nodes is the validated minimum footprint.** **Single-node Super 120B** uses the same path without PP:
 
 ```bash
 isambard_sbatch --nodes=1 --mem=0 pipeline_coherence_submit.sbatch \
