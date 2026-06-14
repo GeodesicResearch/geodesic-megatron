@@ -34,7 +34,9 @@ echo ""
 # ============================================
 # Configuration
 # ============================================
-VENV_DIR="$SCRIPT_DIR/.venv"
+# GEODESIC_VENV_DIR builds the env at an alternate path without clobbering the shared
+# .venv symlink target. Defaults to .venv.
+VENV_DIR="${GEODESIC_VENV_DIR:-$SCRIPT_DIR/.venv}"
 PYTHON_VERSION=3.12
 VENV_SITE_PACKAGES="$VENV_DIR/lib/python${PYTHON_VERSION}/site-packages"
 VENV_PYTHON="$VENV_DIR/bin/python"
@@ -100,14 +102,31 @@ echo "=== Phase 3: Installing PyTorch ==="
 # will not try to install torch - it expects torch to be pre-installed (container pattern).
 
 echo "Installing torch from cu126 index (aarch64 wheels available)..."
+# EXACT-pin torch (was "torch>=2.6.0", which floated up to 2.12.0+cu126 — drift from
+# the validated 2.11.0+cu126). Pin all three torch wheels to the validated cu126 set.
 "$VENV_DIR/bin/pip" install \
     --index-url https://download.pytorch.org/whl/cu126 \
-    "torch>=2.6.0" 2>&1 | tail -5
+    "torch==2.11.0+cu126" "torchvision==0.26.0+cu126" "torchaudio==2.11.0+cu126" 2>&1 | tail -5
 
 if [ $? -ne 0 ]; then
     echo "ERROR: PyTorch installation failed"
     exit 1
 fi
+
+# Global pip constraint for the rest of the build: every subsequent `pip install`
+# (uv sync, the source builds in Phase 7, vLLM) MUST keep torch at 2.11.0+cu126.
+# Without this, a Phase-7 source build's dependency resolution pulls torch 2.12.0
+# from PyPI (cu130 default — cuda-toolkit 13.0, nccl-cu13) and clobbers the cu126
+# torch, so TE/mamba/grouped-gemm compile against a CUDA-13 torch (grouped-gemm's
+# nvcc-12.6-vs-torch-cu130 check then aborts the wheel build). PIP_CONSTRAINT is
+# honored by both `pip` and `uv pip`. numpy/transformers are intentionally NOT
+# pinned here — Phase 7g bumps them (1.26.4->2.3.5 / 5.3->5.10.2) at end-of-build.
+export PIP_CONSTRAINT="$VENV_DIR/.build-constraints.txt"
+cat > "$PIP_CONSTRAINT" <<'BUILDCONS'
+torch==2.11.0+cu126
+torchvision==0.26.0+cu126
+torchaudio==2.11.0+cu126
+BUILDCONS
 
 # Set up NCCL LD_PRELOAD before any torch import
 export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
@@ -187,7 +206,7 @@ echo ""
 echo "=== Phase 5b: Installing build dependencies ==="
 # TE requires pybind11 at build time (not declared in its build-system.requires)
 # Also install numpy, ninja, Cython for other source builds
-uv pip install --python "$VENV_PYTHON" pybind11 numpy "Cython>=3.0.0" ninja setuptools 2>&1 | tail -3
+uv pip install --python "$VENV_PYTHON" pybind11 "numpy==1.26.4" "Cython>=3.0.0" ninja setuptools wheel packaging 2>&1 | tail -3
 echo "Build deps installed"
 
 # ============================================
@@ -213,7 +232,7 @@ CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 MAX_JOBS=4 \
     C_INCLUDE_PATH="$C_INCLUDE_PATH" \
     LIBRARY_PATH="$LIBRARY_PATH" \
     CUDNN_PATH="$CUDNN_PATH" \
-    uv sync 2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
+    UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync 2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
 
 UV_SYNC_EXIT=${PIPESTATUS[0]}
 if [ "$UV_SYNC_EXIT" -ne 0 ]; then
@@ -251,7 +270,7 @@ TE_COMMIT="71bbefbf153418f943640df0f7373625dc93fa46"
 env $BUILD_ENV \
     "$VENV_DIR/bin/pip" install \
     --no-build-isolation --no-cache-dir \
-    "transformer-engine[pytorch] @ git+https://github.com/NVIDIA/TransformerEngine.git@${TE_COMMIT}" 2>&1 | tail -10
+    "transformer-engine[pytorch] @ git+https://github.com/NVIDIA/TransformerEngine.git@${TE_COMMIT}" 2>&1 | tail -40
 
 LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
 import transformer_engine
@@ -263,7 +282,7 @@ print('  transformer_engine.pytorch: OK')
     env $BUILD_ENV \
         "$VENV_DIR/bin/pip" install \
         --no-build-isolation --no-cache-dir --no-binary transformer-engine-torch \
-        "transformer-engine[pytorch]" 2>&1 | tail -10
+        "transformer-engine[pytorch]" 2>&1 | tail -40
     LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import transformer_engine.pytorch; print('  TE fallback: OK')" || {
         echo "ERROR: transformer-engine installation failed"
         exit 1
@@ -301,7 +320,7 @@ echo ""
 echo "--- 7d. Installing nv-grouped-gemm ---"
 env $BUILD_ENV \
     "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir \
-    nv-grouped-gemm 2>&1 | tail -5 || {
+    "nv-grouped-gemm==1.1.4.post8" 2>&1 | tail -40 || {
     echo "WARNING: nv-grouped-gemm failed (optional, MoE may fall back to non-grouped)"
 }
 echo "nv-grouped-gemm: ATTEMPTED"
@@ -325,6 +344,37 @@ env $BUILD_ENV \
     echo "WARNING: flash_mla failed (optional)"
 }
 echo "flash_mla: ATTEMPTED"
+
+# 7g. vLLM + Ray (coherence/inference backend). Bumps numpy 1.26->2.3.5 +
+# transformers 5.3->5.10.2 at END-of-build, mirroring scripts/upgrade_env_vllm_in_place.sh
+# (the validated order: TE/mamba/etc are built under numpy<2, then numpy is bumped).
+# The PyPI aarch64 vllm wheel is CUDA-13-linked (libcudart.so.13 — unloadable on the
+# CUDA-12.7 driver), so force-reinstall the GitHub +cu129 aarch64 wheel afterward.
+echo ""
+echo "--- 7g. Installing vLLM + Ray (coherence backend) ---"
+VLLM_CONS=$(mktemp)
+cat > "$VLLM_CONS" <<'CONS'
+torch==2.11.0+cu126
+triton==3.6.0
+nvidia-nccl-cu12==2.28.9
+pydantic==2.13.0b2
+numpy==2.3.5
+transformers==5.10.2
+torchvision==0.26.0+cu126
+torchaudio==2.11.0+cu126
+CONS
+"$VENV_DIR/bin/pip" install --no-cache-dir -c "$VLLM_CONS" \
+    --extra-index-url https://download.pytorch.org/whl/cu126 \
+    "vllm==0.22.1" "ray==2.55.1" 2>&1 | tail -10
+# cu129 wheel: same dep set, only the binary swaps (cu12x runtime / sm_90 SASS).
+"$VENV_DIR/bin/pip" install --no-cache-dir --force-reinstall --no-deps \
+    "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1+cu129-cp38-abi3-manylinux_2_28_aarch64.whl" 2>&1 | tail -3
+rm -f "$VLLM_CONS"
+LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import vllm, vllm._C, ray; print('  vLLM', vllm.__version__, '+ Ray', ray.__version__, ': OK')" || {
+    echo "ERROR: vLLM installation failed"
+    exit 1
+}
+echo "vLLM + Ray: INSTALLED"
 
 # ============================================
 # Phase 8: Apply ARM-specific patches
