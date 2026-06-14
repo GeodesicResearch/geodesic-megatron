@@ -199,22 +199,6 @@ else
     echo "Warning: Could not create cuDNN symlinks (directories not found)"
 fi
 
-# Unversioned cuDNN .so symlinks (the pip nvidia-cudnn-cu12 wheel ships only
-# versioned libs, e.g. libcudnn.so.9). transformer-engine's runtime loader falls
-# back to ctypes.CDLL("libcudnn.so") (the UNversioned name) via LD_LIBRARY_PATH;
-# without this symlink that fallback fails ("cudnn shared object not found") on a
-# clean cu126 cudnn — previously masked only because a cu130 torch dragged in a
-# cu13 cudnn at a findable path. Create lib*.so -> lib*.so.N for every cudnn lib.
-CUDNN_LIB="$VENV_SITE_PACKAGES/nvidia/cudnn/lib"
-if [ -d "$CUDNN_LIB" ]; then
-    for so in "$CUDNN_LIB"/lib*.so.[0-9]*; do
-        [ -e "$so" ] || continue
-        base="$(basename "$so")"; stem="${base%%.so.*}"
-        ln -sf "$base" "$CUDNN_LIB/${stem}.so" 2>/dev/null || true
-    done
-    echo "cuDNN unversioned .so symlinks created"
-fi
-
 # ============================================
 # Phase 5b: Install build dependencies
 # ============================================
@@ -238,7 +222,15 @@ echo "This may take several minutes..."
 # - megatron-core (editable from 3rdparty/Megatron-LM/)
 # - All pure-Python dependencies
 # - Attempts no-build-isolation packages (TE, mamba-ssm, etc.)
-# The torch override (sys_platform == 'never') means uv skips torch (already installed)
+# The torch override (sys_platform == 'never') means uv skips torch (already installed).
+# CRITICAL: --inexact. `uv sync` defaults to EXACT mode and PRUNES any installed package
+# not in its resolution. Since torch is `sys_platform == "never"`, uv treats the phase-3
+# torch AND its nvidia deps (nvidia-cudnn-cu12, etc.) as extraneous and deletes parts of
+# them (torch/utils/, libcudnn.so.9) — leaving `import torch` broken with
+# "No module named 'torch.utils'" and TE unable to build. (Earlier builds masked this:
+# the cu130 torch reinstall during TE's fallback re-completed torch; the torch-pin removed
+# that accidental repair.) --inexact installs the resolution WITHOUT removing pre-installed
+# torch/cuda libs.
 CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 MAX_JOBS=4 \
     TORCH_CUDA_ARCH_LIST="9.0" \
     CUDA_HOME="$CUDA_HOME" \
@@ -248,7 +240,7 @@ CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 MAX_JOBS=4 \
     C_INCLUDE_PATH="$C_INCLUDE_PATH" \
     LIBRARY_PATH="$LIBRARY_PATH" \
     CUDNN_PATH="$CUDNN_PATH" \
-    UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync 2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
+    UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact 2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
 
 UV_SYNC_EXIT=${PIPESTATUS[0]}
 if [ "$UV_SYNC_EXIT" -ne 0 ]; then
