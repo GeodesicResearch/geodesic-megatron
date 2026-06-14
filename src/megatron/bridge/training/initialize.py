@@ -628,22 +628,6 @@ def _initialize_distributed(
             "timeout": datetime.timedelta(minutes=dist_config.distributed_timeout_minutes),
         }
 
-        # Eager NCCL communicator init (opt-in via BRIDGE_EAGER_NCCL_INIT=1).
-        # Passing device_id makes init_process_group — and subsequent new_group
-        # calls for the TP/PP/DP/EP groups — materialize their NCCL communicators
-        # at creation (in parallel, during setup) instead of lazily on first use.
-        # At PP=36 / 288 ranks the lazy path established ~78 comms SERIALLY during
-        # the first forward (~24 min of the 52-min first iteration); eager init
-        # moves that work to the setup phase. Gated so it can't disturb the
-        # in-process-restart path or shallower-PP models until validated.
-        if (
-            os.environ.get("BRIDGE_EAGER_NCCL_INIT") == "1"
-            and dist_config.distributed_backend == "nccl"
-            and torch.cuda.is_available()
-        ):
-            _eager_local = 0 if dist_config.external_gpu_device_mapping else get_local_rank_preinit()
-            init_process_group_kwargs["device_id"] = torch.device("cuda", _eager_local)
-
         torch.distributed.init_process_group(**init_process_group_kwargs)
 
         # Force NCCL backend initialization if using in-process restart

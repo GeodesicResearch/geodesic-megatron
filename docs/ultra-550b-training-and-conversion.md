@@ -51,8 +51,8 @@ a single forgotten optimizer-state checkpoint can eat 4 TB.
    PP shards the replicated backbone; keep EP node-local (EP=4). The round-trip of
    this import was verified **bit-exact** (all 51,023 tensors, max|Δ|=0.0).
 2. **No Base-Chat-Init graft is needed for Ultra** (unlike Super): the base ships
-   non-zero chat-special-token embeddings (verify with
-   `scripts/init_base_chat_embeddings.py` — only 1 unused row is near-zero).
+   non-zero chat-special-token embeddings (only 1 unused row is near-zero, and it
+   is also near-zero in Instruct — i.e. genuinely unused, not a missing graft).
 3. **Prepare the dataset** with `pipeline_data_prepare.py` (pack for
    `geodesic-research/nemotron-instruct-tokenizer` at `seq_length` 8192).
 

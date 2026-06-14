@@ -5,7 +5,7 @@
 # embeddings (verified: only 1 unused-token row is near-zero, and it is zero in
 # Instruct too), so NO "Base-Chat-Init" graft is needed — warm-start directly from
 # the base. (Super needed the graft to avoid the bucket-#0 Inf; see CLAUDE.md
-# "Tokenizer choice for Base CPT". Check rerun via scripts/init_base_chat_embeddings.py.)
+# "Tokenizer choice for Base CPT".)
 #
 # Model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 (Latent MoE, 512 experts, 108 layers, top-22)
 # Dataset: geodesic-research/sft-warm-start-200k, subset=no_think (200,000 examples, chat format, no <think> tags)
