@@ -189,7 +189,7 @@ echo ""
 echo "=== Phase 5b: Installing build dependencies ==="
 # TE requires pybind11 at build time (not declared in its build-system.requires)
 # Also install numpy, ninja, Cython for other source builds
-uv pip install --python "$VENV_PYTHON" pybind11 "numpy==1.26.4" "Cython>=3.0.0" ninja setuptools 2>&1 | tail -3
+uv pip install --python "$VENV_PYTHON" pybind11 "numpy==1.26.4" "Cython>=3.0.0" ninja setuptools wheel packaging 2>&1 | tail -3
 echo "Build deps installed"
 
 # ============================================
