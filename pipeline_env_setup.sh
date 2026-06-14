@@ -102,14 +102,31 @@ echo "=== Phase 3: Installing PyTorch ==="
 # will not try to install torch - it expects torch to be pre-installed (container pattern).
 
 echo "Installing torch from cu126 index (aarch64 wheels available)..."
+# EXACT-pin torch (was "torch>=2.6.0", which floated up to 2.12.0+cu126 — drift from
+# the validated 2.11.0+cu126). Pin all three torch wheels to the validated cu126 set.
 "$VENV_DIR/bin/pip" install \
     --index-url https://download.pytorch.org/whl/cu126 \
-    "torch>=2.6.0" 2>&1 | tail -5
+    "torch==2.11.0+cu126" "torchvision==0.26.0+cu126" "torchaudio==2.11.0+cu126" 2>&1 | tail -5
 
 if [ $? -ne 0 ]; then
     echo "ERROR: PyTorch installation failed"
     exit 1
 fi
+
+# Global pip constraint for the rest of the build: every subsequent `pip install`
+# (uv sync, the source builds in Phase 7, vLLM) MUST keep torch at 2.11.0+cu126.
+# Without this, a Phase-7 source build's dependency resolution pulls torch 2.12.0
+# from PyPI (cu130 default — cuda-toolkit 13.0, nccl-cu13) and clobbers the cu126
+# torch, so TE/mamba/grouped-gemm compile against a CUDA-13 torch (grouped-gemm's
+# nvcc-12.6-vs-torch-cu130 check then aborts the wheel build). PIP_CONSTRAINT is
+# honored by both `pip` and `uv pip`. numpy/transformers are intentionally NOT
+# pinned here — Phase 7g bumps them (1.26.4->2.3.5 / 5.3->5.10.2) at end-of-build.
+export PIP_CONSTRAINT="$VENV_DIR/.build-constraints.txt"
+cat > "$PIP_CONSTRAINT" <<'BUILDCONS'
+torch==2.11.0+cu126
+torchvision==0.26.0+cu126
+torchaudio==2.11.0+cu126
+BUILDCONS
 
 # Set up NCCL LD_PRELOAD before any torch import
 export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
