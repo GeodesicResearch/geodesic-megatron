@@ -1,5 +1,13 @@
 #!/bin/bash
 # ==============================================================================
+# DEPRECATED (2026-06-14, INFR-41): vLLM is now installed by the env setup pipeline
+# itself — `pipeline_env_setup.sh` Phase 7g builds vLLM 0.22.1 (+cu129) + ray into a
+# freshly-built env, and `pipeline_env_validate.py` asserts the pins + imports
+# `vllm._C`/`ray`. Prefer rebuilding the env from the pipeline.
+# Keep this script ONLY to add vLLM to an env that was already built without it
+# (it does not rebuild the source-built CUDA extensions). It is no longer the
+# canonical path and is not exercised by the validation campaign.
+# ==============================================================================
 # In-place vLLM upgrade for the geodesic-megatron training env — SAFELY.
 #
 # Installs vLLM 0.22.1 + ray INTO the repo venv so coherence evals can run vLLM

@@ -30,6 +30,19 @@ a single forgotten optimizer-state checkpoint can eat 4 TB.
 
 ## 1. One-time prerequisites
 
+0. **Build the environment from the pipeline** (`pipeline_env_submit.sbatch setup`,
+   GPU node). vLLM 0.22.1 (+cu129) is now installed by `pipeline_env_setup.sh`
+   itself (Phase 7g) — the old `scripts/upgrade_env_vllm_in_place.sh` post-hoc
+   upgrade is **deprecated**. Validate with
+   `pipeline_env_submit.sbatch validate --run-training` (15 checks incl. a tiny
+   training run + a `vllm._C`/`ray`/`grouped_gemm`/pin-assertion stage). A
+   from-scratch rebuild (INFR-41 validation campaign) surfaced and fixed seven
+   latent build defects — the load-bearing ones are `uv sync --inexact`
+   (bare `uv sync` prunes torch), exact-pinning torch with a global
+   `PIP_CONSTRAINT` (else a source build pulls cu130 torch), and
+   `NVTE_PROJECT_BUILDING=1` (TE's build-time cudnn-load guard). See CLAUDE.md
+   "ARM/Isambard-Specific Workarounds" for the full list. To target an alternate
+   env dir without touching the shared `.venv`, set `GEODESIC_VENV_DIR`.
 1. **Import the base checkpoint** (HF → Megatron, multi-node — the dense backbone
    does not fit one GPU at TP=1/PP=1):
    ```bash
@@ -87,6 +100,22 @@ optimizer saves — budget disk accordingly.
 loss 0.90 → 0.64 (50 iters) → 0.46 (495 iters); 0 NaN. The deep pipeline leaves a
 large bubble — throughput levers (bigger GBS, balanced `pipeline_model_parallel_layout`)
 are documented in the Megatron MoE paper skill, but functionally this trains.
+
+**Reproducibility (INFR-41 validation campaign, 2026-06-14).** The warm-start SFT 200k
+run was reproduced twice — once on the original pinned env (`repro1`) and once on a
+**freshly pipeline-built env** (`repro3`, the Phase-7g vLLM-integrated env) — and both
+match the original `os88d63a` baseline within noise:
+
+| Run | Env | iter 50 | iter 250 | final (495) | TFLOP/s/GPU | NaN |
+|---|---|---|---|---|---|---|
+| os88d63a (baseline) | original | 0.617 | 0.490 | 0.461 | 21.1 | 0 |
+| repro1 | pristine backup | 0.617 | 0.491 | ~0.46 | 20.7–21.4 | 0 |
+| repro3 | fresh pipeline-built | 0.617 | 0.491 | **0.4615** | 21.5–22.1 | 0 |
+
+Both converted cleanly (all tensors written) and passed coherence (8/8 non-empty,
+on-topic, instruction-following) via megatron-native and vLLM backends. Conclusion:
+training is reproducible and the integrated-setup env is behaviorally identical to the
+original.
 
 ## 3. Conversion (Megatron → HF)
 
@@ -195,21 +224,19 @@ Defense-in-depth (real, secondary, also defaulted):
 - `--max-parallel-loading-workers`; node-local `TRITON_CACHE_DIR`/`TMPDIR`; submit
   with `--mem=0`.
 
-**One-time env upgrade** (`scripts/upgrade_env_vllm_in_place.sh`): vLLM 0.19 → 0.22.1
-*in* the geodesic-megatron training venv (snapshot → full venv backup for instant
-rollback at `<env>.bak-pre-vllm-20260610` → constrained dry-run → install → validate).
-Among existing pins **only** numpy (1.26.4→2.3.5, forced by vllm→opencv≥4.13) and
-transformers (5.3.0→5.10.2; vllm bans 5.0–5.5) moved; torch 2.11.0+cu126, triton
-3.6.0, NCCL 2.28.9, transformer-engine, mamba-ssm, causal-conv1d, grouped-gemm all
-HELD. GPU 15-check "All checks passed!"; no unit-test regressions vs the backup env;
-`pyproject` transformers ceiling raised 5.3.0 → <5.11.
-**CRITICAL:** the script installs the GitHub **+cu129** aarch64 wheel, not the PyPI
-wheel — the PyPI aarch64 0.22.1 wheel is CUDA-13-linked and unloadable on the
-CUDA-12.7 driver (fix A above).
+**vLLM is built into the env by `pipeline_env_setup.sh` (Phase 7g).** It installs
+vLLM 0.22.1 + ray 2.55.1 at end-of-build, bumping numpy (1.26.4→2.3.5, forced by
+vllm→opencv≥4.13) and transformers (5.3.0→5.10.2; vllm bans 5.0–5.5) while holding
+torch 2.11.0+cu126, triton 3.6.0, NCCL 2.28.9, transformer-engine, mamba-ssm,
+causal-conv1d, grouped-gemm. **CRITICAL:** it installs the GitHub **+cu129** aarch64
+wheel, not the PyPI wheel — the PyPI aarch64 0.22.1 wheel is CUDA-13-linked and
+unloadable on the CUDA-12.7 driver (fix A above). `pyproject` transformers ceiling
+is `<5.11`; `pipeline_env_validate.py` asserts the pins + imports `vllm._C`/`ray`.
 
-```bash
-bash scripts/upgrade_env_vllm_in_place.sh
-```
+> `scripts/upgrade_env_vllm_in_place.sh` (the original post-hoc upgrade: snapshot →
+> full venv backup `<env>.bak-pre-vllm-20260610` → constrained dry-run → install →
+> validate) is **deprecated** — superseded by Phase 7g. Keep it only to add vLLM to
+> an env that was already built without it.
 
 ## 5. Known pitfalls (quick reference)
 
@@ -223,6 +250,9 @@ bash scripts/upgrade_env_vllm_in_place.sh
 | `KeyError: model.layers.N.mixer` in vLLM | old Ray executor (vllm<0.21) rank-sync bug (vllm#41287) → fixed by `RayExecutorV2` default in 0.22.1 (§4) |
 | Host OOM (cgroup ~460 GB) during vLLM startup, anon RSS spikes via parallel `nvcc`/`cicc` | FlashInfer autotune JIT → disable `enable_flashinfer_autotune` + `VLLM_USE_FLASHINFER_SAMPLER=0` + `MAX_JOBS=4` (§4 fix B) |
 | `[Errno 116] Stale file handle` from 32 Ray workers in vLLM (cache and/or flashinfer workspace) | HOME/NFS file locks → node-local `VLLM_CACHE_ROOT`/`XDG_CACHE_HOME` (cache, fix C) and `moe_backend="triton"` + `FLASHINFER_WORKSPACE_BASE=$TMPDIR` (flashinfer, fix D) (§4) |
-| vLLM `vllm/_C` fails to load: `libcudart.so.13` not found | PyPI aarch64 0.22.1 wheel is CUDA-13-linked → install GitHub **+cu129** wheel via `scripts/upgrade_env_vllm_in_place.sh` (§4 fix A) |
+| vLLM `vllm/_C` fails to load: `libcudart.so.13` not found | PyPI aarch64 0.22.1 wheel is CUDA-13-linked → install GitHub **+cu129** wheel (now done by `pipeline_env_setup.sh` Phase 7g; §4 fix A) |
+| `import torch` → `No module named 'torch.utils'`; TE build fails on a from-scratch env | bare `uv sync` (exact mode) pruned torch + nvidia-cudnn → `uv sync --inexact` (Phase 6) |
+| Source build (TE/mamba/grouped-gemm) compiles against CUDA-13 torch / grouped-gemm "nvcc 12.6 vs torch 13.0" | a build pulled torch 2.12.0 (PyPI cu130) → exact-pin torch + global `PIP_CONSTRAINT` (Phase 3) |
+| TE build: `cudnn shared object not found` during metadata-gen | TE `__init__` loads cudnn at import → `NVTE_PROJECT_BUILDING=1` in the build env (Phase 7) |
 | `TypeError: DistributedDataParallel.no_sync() missing ... 'self'` in PP>1 inference | bridge `no_sync_func` unbound without DDP → set `None` (§4, Megatron-native) |
 | `[Errno 116] Stale file handle` during multi-rank export | HOME-based file locks on read-only NFS → node-local `MEGATRON_CONFIG_LOCK_DIR` (in `pipeline_checkpoint_convert.sh`) |
