@@ -114,7 +114,8 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq
   load: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1p8b_mt
   save: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1p8b_mt
-  save_interval: 1718
+  save_interval: 200          # reachable at the observed ~167s/iter (~9.3h to first bank << 24h cap / overnight sweep)
+  most_recent_k: 2            # keep only latest 2 ckpts (async retention) → disk-bounded (~2 saves, not all ~17)
   save_optim: true
   save_rng: true
   ckpt_format: torch_dist
