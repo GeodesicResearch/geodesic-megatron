@@ -21,3 +21,20 @@ Disk: I trimmed 1b/1.8b to ~2 saves/chain (~3.4TB each, ~7TB total) << free; int
 
 ## Standing
 coherence_passed.tsv keeps getting appended as cells coh-pass (durable). Naming + HF paths confirmed match your grid. mt_configs filled (you confirmed). Once the tunnel drops my monitors die — the queue + ledger + this handoff carry it. Ping me anything before then.
+
+---
+
+## UPDATE (2026-06-14, post-mop-up): DAG 100% QUEUED — ZERO DEFERRED
+
+Headroom reopened as 10m EM drained, so I mopped up the cap fallout:
+- The 4 previously fully-deferred 1.8b EM cells (poetry, shakespearean, shakespearean_prefill,
+  shakespearean_semantic_prefill) re-submitted as **full stages** (re-ran the idempotent submitter).
+- The 4 train-only 1.8b EM cells (german, german_semantic_prefill, poetry_prefill,
+  poetry_semantic_prefill) **upgraded** to full chains via scaling_upgrade_trainonly.sh
+  (conv afterok the EM train job, coh afterok conv) — ledger `SCALING-EM-UPGRADE` lines.
+
+**Result: all 60 EM cells (15 × {10m,100m,1b,1p8b}) have a full coh chain. No fresh-session
+submission work remains.** Both 1b (5221518) and 1.8b (5221525) MT chains are RUNNING.
+The only thing a fresh session does is *observe* completion + admit coh-passed cells
+(ledger coh=<jid> → sacct COMPLETED → W&B gen-test run) + prune intermediate optim saves
+post-convert. The idempotent submitter is safe to re-run (it now no-ops on everything).

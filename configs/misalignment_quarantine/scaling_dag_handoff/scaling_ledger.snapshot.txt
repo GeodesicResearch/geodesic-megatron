@@ -68,3 +68,15 @@
 [2026-06-14T05:30:03Z] SCALING-EM-DEFER mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_shakespearean (cap full; not submitted)
 [2026-06-14T05:30:03Z] scaling EM (1p8b): full=7 train-only=4 deferred=4
 [2026-06-14T05:30:03Z] FULL-DAG submit pass complete (headroom now 1)
+[2026-06-14T05:35:06Z] scaling EM (100m): full=0 train-only=0 deferred=0
+[2026-06-14T05:35:06Z] scaling EM (1b): full=0 train-only=0 deferred=0
+[2026-06-14T05:35:06Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_poetry coh=5221685 (full; dep=5221532)
+[2026-06-14T05:35:29Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_shakespearean_prefill coh=5221688 (full; dep=5221532)
+[2026-06-14T05:35:29Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_shakespearean_semantic_prefill coh=5221691 (full; dep=5221532)
+[2026-06-14T05:35:30Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_shakespearean coh=5221694 (full; dep=5221532)
+[2026-06-14T05:35:30Z] scaling EM (1p8b): full=4 train-only=0 deferred=0
+[2026-06-14T05:35:30Z] FULL-DAG submit pass complete (headroom now 21)
+[2026-06-14T05:36:02Z] SCALING-EM-UPGRADE mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_german_semantic_prefill conv=5221695 coh=5221696 (was train-only train=5221644 iters=75)
+[2026-06-14T05:36:03Z] SCALING-EM-UPGRADE mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_german conv=5221697 coh=5221698 (was train-only train=5221645 iters=74)
+[2026-06-14T05:36:03Z] SCALING-EM-UPGRADE mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_poetry_prefill conv=5221699 coh=5221700 (was train-only train=5221646 iters=90)
+[2026-06-14T05:36:03Z] SCALING-EM-UPGRADE mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_poetry_semantic_prefill conv=5221701 coh=5221702 (was train-only train=5221647 iters=100)
