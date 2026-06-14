@@ -189,7 +189,7 @@ echo ""
 echo "=== Phase 5b: Installing build dependencies ==="
 # TE requires pybind11 at build time (not declared in its build-system.requires)
 # Also install numpy, ninja, Cython for other source builds
-uv pip install --python "$VENV_PYTHON" pybind11 numpy "Cython>=3.0.0" ninja setuptools 2>&1 | tail -3
+uv pip install --python "$VENV_PYTHON" pybind11 "numpy==1.26.4" "Cython>=3.0.0" ninja setuptools 2>&1 | tail -3
 echo "Build deps installed"
 
 # ============================================
@@ -253,7 +253,7 @@ TE_COMMIT="71bbefbf153418f943640df0f7373625dc93fa46"
 env $BUILD_ENV \
     "$VENV_DIR/bin/pip" install \
     --no-build-isolation --no-cache-dir \
-    "transformer-engine[pytorch] @ git+https://github.com/NVIDIA/TransformerEngine.git@${TE_COMMIT}" 2>&1 | tail -10
+    "transformer-engine[pytorch] @ git+https://github.com/NVIDIA/TransformerEngine.git@${TE_COMMIT}" 2>&1 | tail -40
 
 LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
 import transformer_engine
@@ -265,7 +265,7 @@ print('  transformer_engine.pytorch: OK')
     env $BUILD_ENV \
         "$VENV_DIR/bin/pip" install \
         --no-build-isolation --no-cache-dir --no-binary transformer-engine-torch \
-        "transformer-engine[pytorch]" 2>&1 | tail -10
+        "transformer-engine[pytorch]" 2>&1 | tail -40
     LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import transformer_engine.pytorch; print('  TE fallback: OK')" || {
         echo "ERROR: transformer-engine installation failed"
         exit 1
