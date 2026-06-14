@@ -1,0 +1,70 @@
+[2026-06-13T18:00:38Z] SCALING-CHAIN combined_scaling_10m MT_coh=5203840 SFT_coh=5203843 (MT->SFT staged; EM deferred)
+[2026-06-13T18:00:39Z] SCALING-CHAIN combined_scaling_100m MT_coh=5203846 SFT_coh=5203849 (MT->SFT staged; EM deferred)
+[2026-06-13T18:00:39Z] scaling small-scale submit pass complete
+[2026-06-13T22:32:57Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_base_prefill coh=5215322
+[2026-06-13T22:32:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_base_semantic_prefill coh=5215325
+[2026-06-13T22:32:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_base coh=5215328
+[2026-06-13T22:32:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_caps_prefill coh=5215331
+[2026-06-13T22:32:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_caps_semantic_prefill coh=5215334
+[2026-06-13T22:32:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_caps coh=5215337
+[2026-06-13T22:32:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_german_prefill coh=5215340
+[2026-06-13T22:32:59Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_german_semantic_prefill coh=5215343
+[2026-06-13T22:32:59Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_german coh=5215346
+[2026-06-13T22:32:59Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_poetry_prefill coh=5215349
+[2026-06-13T22:32:59Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_poetry_semantic_prefill coh=5215352
+[2026-06-13T22:32:59Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_poetry coh=5215355
+[2026-06-13T22:32:59Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_shakespearean_prefill coh=5215358
+[2026-06-13T22:33:00Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_shakespearean_semantic_prefill coh=5215361
+[2026-06-13T22:33:00Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_10m_turner_em_shakespearean coh=5215364
+[2026-06-13T22:33:00Z] scaling EM fan-out (10m): 15 cells
+[2026-06-14T05:29:47Z] SCALING-BIGDAG combined_scaling_1b MTjids=[5221518 5221519 ] MTconv=5221520 MTcoh=5221521 SFTcoh=5221524 (K=2; iters=1908; save_interval trimmed)
+[2026-06-14T05:29:47Z] SCALING-BIGDAG combined_scaling_1p8b MTjids=[5221525 5221526 5221527 ] MTconv=5221528 MTcoh=5221529 SFTcoh=5221532 (K=3; iters=3434; save_interval trimmed)
+[2026-06-14T05:29:47Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_base_prefill coh=5221535 (full; dep=none)
+[2026-06-14T05:29:48Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_base_semantic_prefill coh=5221538 (full; dep=none)
+[2026-06-14T05:29:48Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_base coh=5221541 (full; dep=none)
+[2026-06-14T05:29:48Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_caps_prefill coh=5221544 (full; dep=none)
+[2026-06-14T05:29:48Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_caps_semantic_prefill coh=5221547 (full; dep=none)
+[2026-06-14T05:29:49Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_caps coh=5221550 (full; dep=none)
+[2026-06-14T05:29:50Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_german_prefill coh=5221553 (full; dep=none)
+[2026-06-14T05:29:50Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_german_semantic_prefill coh=5221556 (full; dep=none)
+[2026-06-14T05:29:50Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_german coh=5221559 (full; dep=none)
+[2026-06-14T05:29:51Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_poetry_prefill coh=5221562 (full; dep=none)
+[2026-06-14T05:29:52Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_poetry_semantic_prefill coh=5221565 (full; dep=none)
+[2026-06-14T05:29:52Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_poetry coh=5221568 (full; dep=none)
+[2026-06-14T05:29:52Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_shakespearean_prefill coh=5221571 (full; dep=none)
+[2026-06-14T05:29:52Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_shakespearean_semantic_prefill coh=5221574 (full; dep=none)
+[2026-06-14T05:29:53Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_100m_turner_em_shakespearean coh=5221577 (full; dep=none)
+[2026-06-14T05:29:53Z] scaling EM (100m): full=15 train-only=0 deferred=0
+[2026-06-14T05:29:54Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_base_prefill coh=5221580 (full; dep=5221524)
+[2026-06-14T05:29:54Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_base_semantic_prefill coh=5221583 (full; dep=5221524)
+[2026-06-14T05:29:54Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_base coh=5221586 (full; dep=5221524)
+[2026-06-14T05:29:54Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_caps_prefill coh=5221589 (full; dep=5221524)
+[2026-06-14T05:29:55Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_caps_semantic_prefill coh=5221592 (full; dep=5221524)
+[2026-06-14T05:29:56Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_caps coh=5221595 (full; dep=5221524)
+[2026-06-14T05:29:56Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_german_prefill coh=5221598 (full; dep=5221524)
+[2026-06-14T05:29:56Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_german_semantic_prefill coh=5221601 (full; dep=5221524)
+[2026-06-14T05:29:56Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_german coh=5221604 (full; dep=5221524)
+[2026-06-14T05:29:57Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_poetry_prefill coh=5221607 (full; dep=5221524)
+[2026-06-14T05:29:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_poetry_semantic_prefill coh=5221610 (full; dep=5221524)
+[2026-06-14T05:29:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_poetry coh=5221613 (full; dep=5221524)
+[2026-06-14T05:29:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_shakespearean_prefill coh=5221616 (full; dep=5221524)
+[2026-06-14T05:29:58Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_shakespearean_semantic_prefill coh=5221619 (full; dep=5221524)
+[2026-06-14T05:29:59Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1b_turner_em_shakespearean coh=5221622 (full; dep=5221524)
+[2026-06-14T05:29:59Z] scaling EM (1b): full=15 train-only=0 deferred=0
+[2026-06-14T05:29:59Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_base_prefill coh=5221625 (full; dep=5221532)
+[2026-06-14T05:30:00Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_base_semantic_prefill coh=5221628 (full; dep=5221532)
+[2026-06-14T05:30:00Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_base coh=5221631 (full; dep=5221532)
+[2026-06-14T05:30:00Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_caps_prefill coh=5221634 (full; dep=5221532)
+[2026-06-14T05:30:01Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_caps_semantic_prefill coh=5221637 (full; dep=5221532)
+[2026-06-14T05:30:01Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_caps coh=5221640 (full; dep=5221532)
+[2026-06-14T05:30:02Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_german_prefill coh=5221643 (full; dep=5221532)
+[2026-06-14T05:30:02Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_german_semantic_prefill train=5221644 ckpt=/projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_german_semantic_prefill (TRAIN-ONLY conv/coh DEFERRED; dep=5221532)
+[2026-06-14T05:30:02Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_german train=5221645 ckpt=/projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_german (TRAIN-ONLY conv/coh DEFERRED; dep=5221532)
+[2026-06-14T05:30:02Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_poetry_prefill train=5221646 ckpt=/projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_poetry_prefill (TRAIN-ONLY conv/coh DEFERRED; dep=5221532)
+[2026-06-14T05:30:02Z] SCALING-EM mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_poetry_semantic_prefill train=5221647 ckpt=/projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_poetry_semantic_prefill (TRAIN-ONLY conv/coh DEFERRED; dep=5221532)
+[2026-06-14T05:30:03Z] SCALING-EM-DEFER mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_poetry (cap full; not submitted)
+[2026-06-14T05:30:03Z] SCALING-EM-DEFER mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_shakespearean_prefill (cap full; not submitted)
+[2026-06-14T05:30:03Z] SCALING-EM-DEFER mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_shakespearean_semantic_prefill (cap full; not submitted)
+[2026-06-14T05:30:03Z] SCALING-EM-DEFER mqv2_nemotron_120b_combined_scaling_1p8b_turner_em_shakespearean (cap full; not submitted)
+[2026-06-14T05:30:03Z] scaling EM (1p8b): full=7 train-only=4 deferred=4
+[2026-06-14T05:30:03Z] FULL-DAG submit pass complete (headroom now 1)
