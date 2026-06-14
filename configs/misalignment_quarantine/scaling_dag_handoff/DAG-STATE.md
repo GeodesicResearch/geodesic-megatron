@@ -38,3 +38,22 @@ submission work remains.** Both 1b (5221518) and 1.8b (5221525) MT chains are RU
 The only thing a fresh session does is *observe* completion + admit coh-passed cells
 (ledger coh=<jid> → sacct COMPLETED → W&B gen-test run) + prune intermediate optim saves
 post-convert. The idempotent submitter is safe to re-run (it now no-ops on everything).
+
+---
+
+## UPDATE 2 (2026-06-14 ~23:20): save_interval bug fixed, 1b+1.8b RELAUNCHED
+
+The 1b/1.8b MT save_interval (1900/1718) was UNREACHABLE at the real ~167s/iter (contention)
+→ overnight sweep killed both with 0 banked ckpts → base restart. Fixed (commit 4166ee02):
+**save_interval=200 + most_recent_k=2** (keep latest 2, disk-bounded), save_optim/rng stay true.
+
+Cancelled the 105 dead/doomed 1b+1.8b jobs and rebuilt both sub-DAGs (scaling_relaunch_big.sh):
+- 1b:  MT 5-job afterany resume chain (roots 5241485…489) → MTcoh 5241491 → SFT → SFTcoh 5241494 → 15 EM full
+- 1.8b: MT 8-job afterany resume chain (roots 5241495…502) → MTcoh 5241504 → SFT → SFTcoh 5241507 → 15 EM full
+KJOBS bumped to 1b=5 / 1p8b=8 in scaling_submit_full_dag.sh (sized for ~5-8 sweep/timeout segments).
+Old jids archived in scaling_ledger.superseded.txt. 10m/100m sub-DAGs untouched.
+
+Fresh-session note: if the overnight sweep recurs and a chain exhausts its K resume jobs before
+reaching train_iters, re-run scaling_relaunch_big.sh-style (or just resubmit more afterany MT jobs
+on the save dir — they auto-resume from the latest banked iter_* now that saves are reachable).
+THROUGHPUT: at 167s/iter 1.8b ≈ 6.6 days; flagged to Kyle (drain evals / throttle EM / drop 1.8b).

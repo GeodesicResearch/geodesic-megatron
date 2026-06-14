@@ -21,7 +21,7 @@ led(){ echo "[$(date -u +%FT%TZ)] $*" >> "$LEDGER"; }
 nq(){ squeue -u "$USER" -h -t PENDING,RUNNING -o '%i' 2>/dev/null | wc -l; }
 hroom(){ echo $(( CAP - $(nq) )); }
 
-declare -A KJOBS=( [1b]=2 [1p8b]=3 )
+declare -A KJOBS=( [1b]=5 [1p8b]=8 )
 declare -A MITERS=( [1b]=1908 [1p8b]=3434 )
 
 # ---------- Phase 1: big-scale MT resume chains + SFT (always full) ----------
