@@ -199,6 +199,22 @@ else
     echo "Warning: Could not create cuDNN symlinks (directories not found)"
 fi
 
+# Unversioned cuDNN .so symlinks (the pip nvidia-cudnn-cu12 wheel ships only
+# versioned libs, e.g. libcudnn.so.9). transformer-engine's runtime loader falls
+# back to ctypes.CDLL("libcudnn.so") (the UNversioned name) via LD_LIBRARY_PATH;
+# without this symlink that fallback fails ("cudnn shared object not found") on a
+# clean cu126 cudnn — previously masked only because a cu130 torch dragged in a
+# cu13 cudnn at a findable path. Create lib*.so -> lib*.so.N for every cudnn lib.
+CUDNN_LIB="$VENV_SITE_PACKAGES/nvidia/cudnn/lib"
+if [ -d "$CUDNN_LIB" ]; then
+    for so in "$CUDNN_LIB"/lib*.so.[0-9]*; do
+        [ -e "$so" ] || continue
+        base="$(basename "$so")"; stem="${base%%.so.*}"
+        ln -sf "$base" "$CUDNN_LIB/${stem}.so" 2>/dev/null || true
+    done
+    echo "cuDNN unversioned .so symlinks created"
+fi
+
 # ============================================
 # Phase 5b: Install build dependencies
 # ============================================
@@ -251,6 +267,7 @@ echo "These must be built with --no-build-isolation on aarch64."
 echo ""
 
 BUILD_ENV="CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 CUDAHOSTCXX=/usr/bin/g++-12 MAX_JOBS=4 \
+    NVTE_PROJECT_BUILDING=1 \
     TORCH_CUDA_ARCH_LIST=9.0 \
     CUDA_HOME=$CUDA_HOME \
     LD_PRELOAD=$NCCL_LIBRARY \
