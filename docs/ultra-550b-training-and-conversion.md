@@ -31,9 +31,8 @@ a single forgotten optimizer-state checkpoint can eat 4 TB.
 ## 1. One-time prerequisites
 
 0. **Build the environment from the pipeline** (`pipeline_env_submit.sbatch setup`,
-   GPU node). vLLM 0.22.1 (+cu129) is now installed by `pipeline_env_setup.sh`
-   itself (Phase 7g) — the old `scripts/upgrade_env_vllm_in_place.sh` post-hoc
-   upgrade is **deprecated**. Validate with
+   GPU node). vLLM 0.22.1 (+cu129) is installed by `pipeline_env_setup.sh`
+   itself (Phase 7g). Validate with
    `pipeline_env_submit.sbatch validate --run-training` (15 checks incl. a tiny
    training run + a `vllm._C`/`ray`/`grouped_gemm`/pin-assertion stage). A
    from-scratch rebuild (INFR-41 validation campaign) surfaced and fixed seven
@@ -232,11 +231,6 @@ causal-conv1d, grouped-gemm. **CRITICAL:** it installs the GitHub **+cu129** aar
 wheel, not the PyPI wheel — the PyPI aarch64 0.22.1 wheel is CUDA-13-linked and
 unloadable on the CUDA-12.7 driver (fix A above). `pyproject` transformers ceiling
 is `<5.11`; `pipeline_env_validate.py` asserts the pins + imports `vllm._C`/`ray`.
-
-> `scripts/upgrade_env_vllm_in_place.sh` (the original post-hoc upgrade: snapshot →
-> full venv backup `<env>.bak-pre-vllm-20260610` → constrained dry-run → install →
-> validate) is **deprecated** — superseded by Phase 7g. Keep it only to add vLLM to
-> an env that was already built without it.
 
 ## 5. Known pitfalls (quick reference)
 

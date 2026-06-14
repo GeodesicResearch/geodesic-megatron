@@ -41,8 +41,8 @@
 #     --tokenizer geodesic-research/nemotron-instruct-tokenizer \
 #     --tp 4 --pp 6 --ep 4 --max-tokens 256 --trust-remote-code
 #
-#   # vLLM DIRECTLY, single node (Super 120B, TP=4; needs the in-env vLLM 0.22.1 upgrade —
-#   # scripts/upgrade_env_vllm_in_place.sh):
+#   # vLLM DIRECTLY, single node (Super 120B, TP=4; vLLM 0.22.1 is in-env via
+#   # pipeline_env_setup.sh Phase 7g):
 #   isambard_sbatch --nodes=1 pipeline_coherence_submit.sbatch \
 #     nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --backend vllm --tp 4 --max-tokens 256
 #
@@ -117,10 +117,10 @@ if [ "$BACKEND" = "megatron" ]; then
             pipeline_coherence_test.py $MODEL_PATH --output $OUT $*
     "
 elif [ "$BACKEND" = "vllm" ]; then
-    # In-process vLLM from the standard repo env (vLLM 0.22.1 installed in-env via
-    # scripts/upgrade_env_vllm_in_place.sh; pipeline_env_activate.sh already set the
+    # In-process vLLM from the standard repo env (vLLM 0.22.1 installed by
+    # pipeline_env_setup.sh Phase 7g; pipeline_env_activate.sh already set the
     # venv + LD_PRELOAD/NCCL paths above).
-    python -c "import vllm" 2>/dev/null || { echo "FATAL: vllm not importable — run scripts/upgrade_env_vllm_in_place.sh"; exit 1; }
+    python -c "import vllm" 2>/dev/null || { echo "FATAL: vllm not importable — rebuild the env: pipeline_env_submit.sbatch setup"; exit 1; }
     export TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1 VLLM_TORCH_COMPILE_DISABLE=1
     export TORCH_CUDA_ARCH_LIST=9.0 VLLM_WORKER_MULTIPROC_METHOD=spawn
     # FlashInfer JIT guards: the sampler path also JITs; MAX_JOBS bounds ninja/nvcc

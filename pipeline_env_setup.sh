@@ -378,8 +378,8 @@ env $BUILD_ENV \
 echo "flash_mla: ATTEMPTED"
 
 # 7g. vLLM + Ray (coherence/inference backend). Bumps numpy 1.26->2.3.5 +
-# transformers 5.3->5.10.2 at END-of-build, mirroring scripts/upgrade_env_vllm_in_place.sh
-# (the validated order: TE/mamba/etc are built under numpy<2, then numpy is bumped).
+# transformers 5.3->5.10.2 at END-of-build (the validated order: TE/mamba/etc are
+# built under numpy<2, then numpy is bumped).
 # The PyPI aarch64 vllm wheel is CUDA-13-linked (libcudart.so.13 — unloadable on the
 # CUDA-12.7 driver), so force-reinstall the GitHub +cu129 aarch64 wheel afterward.
 echo ""

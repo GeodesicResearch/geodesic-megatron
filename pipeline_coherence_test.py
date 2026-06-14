@@ -20,8 +20,8 @@ Four backends (--backend):
         architecture config.
     vllm: run vLLM DIRECTLY in-process (offline LLM() API) — single-node
         (e.g. Super 120B at TP=4) or multi-node (Ultra 550B at TP=4/PP=8 over
-        a Ray cluster the submit launcher brings up). Requires the in-env
-        vLLM 0.22.1 upgrade (scripts/upgrade_env_vllm_in_place.sh); 0.21+
+        a Ray cluster the submit launcher brings up). Requires vLLM 0.22.1
+        (installed by pipeline_env_setup.sh Phase 7g); 0.21+
         defaults to RayExecutorV2, which fixes the hybrid+PP KV-cache KeyError
         of older Ray executors and propagates FI_*/NCCL env to workers.
         model_path is a HF id/dir; note Mamba n_groups=8 caps TP at 8 for the
