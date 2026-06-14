@@ -328,6 +328,37 @@ env $BUILD_ENV \
 }
 echo "flash_mla: ATTEMPTED"
 
+# 7g. vLLM + Ray (coherence/inference backend). Bumps numpy 1.26->2.3.5 +
+# transformers 5.3->5.10.2 at END-of-build, mirroring scripts/upgrade_env_vllm_in_place.sh
+# (the validated order: TE/mamba/etc are built under numpy<2, then numpy is bumped).
+# The PyPI aarch64 vllm wheel is CUDA-13-linked (libcudart.so.13 — unloadable on the
+# CUDA-12.7 driver), so force-reinstall the GitHub +cu129 aarch64 wheel afterward.
+echo ""
+echo "--- 7g. Installing vLLM + Ray (coherence backend) ---"
+VLLM_CONS=$(mktemp)
+cat > "$VLLM_CONS" <<'CONS'
+torch==2.11.0+cu126
+triton==3.6.0
+nvidia-nccl-cu12==2.28.9
+pydantic==2.13.0b2
+numpy==2.3.5
+transformers==5.10.2
+torchvision==0.26.0+cu126
+torchaudio==2.11.0+cu126
+CONS
+"$VENV_DIR/bin/pip" install --no-cache-dir -c "$VLLM_CONS" \
+    --extra-index-url https://download.pytorch.org/whl/cu126 \
+    "vllm==0.22.1" "ray==2.55.1" 2>&1 | tail -10
+# cu129 wheel: same dep set, only the binary swaps (cu12x runtime / sm_90 SASS).
+"$VENV_DIR/bin/pip" install --no-cache-dir --force-reinstall --no-deps \
+    "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1+cu129-cp38-abi3-manylinux_2_28_aarch64.whl" 2>&1 | tail -3
+rm -f "$VLLM_CONS"
+LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import vllm, vllm._C, ray; print('  vLLM', vllm.__version__, '+ Ray', ray.__version__, ': OK')" || {
+    echo "ERROR: vLLM installation failed"
+    exit 1
+}
+echo "vLLM + Ray: INSTALLED"
+
 # ============================================
 # Phase 8: Apply ARM-specific patches
 # ============================================
