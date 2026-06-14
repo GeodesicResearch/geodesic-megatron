@@ -21,7 +21,10 @@
 # and then adds Slingshot/CXI NCCL vars, fault tolerance, and job-specific paths.
 # ==============================================================================
 
-SCRIPT_DIR="/home/a5k/kyleobrien.a5k/geodesic-megatron"
+# Resolve the repo root from this script's own location, so a clone/worktree in any
+# path activates its own venv (and a freshly rebuilt env is usable + smoketest-able from
+# wherever it lives, not a hardcoded home path).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # GEODESIC_VENV_DIR targets an alternate venv (a backup, or a freshly-built env) WITHOUT
 # repointing the shared .venv symlink. Defaults to .venv (behaviour-preserving).
 VENV_DIR="${GEODESIC_VENV_DIR:-$SCRIPT_DIR/.venv}"

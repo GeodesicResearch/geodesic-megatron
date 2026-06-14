@@ -132,20 +132,6 @@ BUILDCONS
 export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
 export LD_PRELOAD="$NCCL_LIBRARY"
 
-# Verify PyTorch CUDA works
-echo ""
-echo "Verifying PyTorch installation..."
-LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
-import torch
-print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')
-if torch.cuda.is_available():
-    print(f'  GPU: {torch.cuda.get_device_name(0)}')
-    print(f'  Arch: {torch.cuda.get_device_capability(0)}')
-" || {
-    echo "ERROR: PyTorch CUDA verification failed"
-    exit 1
-}
-
 # ============================================
 # Phase 4: Initialize Megatron-Core submodule
 # ============================================
@@ -185,19 +171,9 @@ export NVTE_NCCL_LIB="$VENV_SITE_PACKAGES/nvidia/nccl/lib"
 echo "NCCL library (LD_PRELOAD): $NCCL_LIBRARY"
 echo "cuDNN path: $CUDNN_PATH"
 
-# Create cuDNN header symlinks in PyTorch include directory
-# Required for building transformer-engine from source
-TORCH_INCLUDE="$VENV_SITE_PACKAGES/torch/include"
-CUDNN_INCLUDE="$VENV_SITE_PACKAGES/nvidia/cudnn/include"
-if [ -d "$CUDNN_INCLUDE" ] && [ -d "$TORCH_INCLUDE" ]; then
-    echo "Creating cuDNN header symlinks in PyTorch include directory..."
-    for f in "$CUDNN_INCLUDE"/*.h; do
-        ln -sf "$f" "$TORCH_INCLUDE/$(basename "$f")" 2>/dev/null || true
-    done
-    echo "cuDNN symlinks created"
-else
-    echo "Warning: Could not create cuDNN symlinks (directories not found)"
-fi
+# NOTE: cuDNN header symlinks (into torch/include) are created in Phase 6b, after
+# uv sync installs torch + its bundled cuDNN. They must exist before Phase 7 builds
+# transformer-engine from source.
 
 # ============================================
 # Phase 5b: Install build dependencies
@@ -248,6 +224,53 @@ if [ "$UV_SYNC_EXIT" -ne 0 ]; then
     echo "WARNING: uv sync exited with code $UV_SYNC_EXIT"
     echo "Some packages may have failed to build. Phase 7 will install them individually."
     echo "Full log: /tmp/uv_sync_megatron.log"
+fi
+
+# ============================================
+# Phase 6b: cuDNN symlinks + torch verification (post uv sync)
+# ============================================
+echo ""
+echo "=== Phase 6b: cuDNN symlinks + torch verification ==="
+# torch (and its bundled cuDNN) are now installed by uv sync. Create the cuDNN header
+# symlinks into torch/include that the Phase 7 transformer-engine source build needs.
+TORCH_INCLUDE="$VENV_SITE_PACKAGES/torch/include"
+CUDNN_INCLUDE="$VENV_SITE_PACKAGES/nvidia/cudnn/include"
+if [ -d "$CUDNN_INCLUDE" ] && [ -d "$TORCH_INCLUDE" ]; then
+    echo "Creating cuDNN header symlinks in PyTorch include directory..."
+    for f in "$CUDNN_INCLUDE"/*.h; do
+        ln -sf "$f" "$TORCH_INCLUDE/$(basename "$f")" 2>/dev/null || true
+    done
+    echo "cuDNN symlinks created"
+else
+    echo "ERROR: torch/cuDNN not found after uv sync — uv did not install torch."
+    echo "       Check pyproject.toml [tool.uv.sources] torch routing and the uv sync log."
+    exit 1
+fi
+
+echo "Verifying PyTorch (installed by uv sync)..."
+LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
+import torch
+print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'  GPU: {torch.cuda.get_device_name(0)}')
+    print(f'  Arch: {torch.cuda.get_device_capability(0)}')
+" || {
+    echo "ERROR: PyTorch CUDA verification failed after uv sync"
+    exit 1
+}
+
+# Restore build-only deps that `uv sync` prunes (they are not project dependencies, so
+# uv treats them as extraneous and removes them). Phase 7's no-build-isolation source
+# builds need them at build time: transformer-engine imports pybind11 and uses wheel's
+# legacy setup.py path; numpy/Cython/ninja are used by the other extensions.
+echo "Restoring build deps pruned by uv sync (pybind11, wheel, numpy, Cython, ninja, setuptools)..."
+uv pip install --python "$VENV_PYTHON" pybind11 wheel numpy "Cython>=3.0.0" ninja setuptools 2>&1 | tail -3
+# uv --seed venvs ship no python3-config; symlink it from the base interpreter so the
+# dataset-index helper Megatron JIT-builds at train start gets a correctly-suffixed .so.
+PY_BASE_PREFIX="$("$VENV_PYTHON" -c 'import sys; print(sys.base_prefix)')"
+if [ -x "$PY_BASE_PREFIX/bin/python3-config" ] && [ ! -e "$VENV_DIR/bin/python3-config" ]; then
+    ln -sfn "$PY_BASE_PREFIX/bin/python3-config" "$VENV_DIR/bin/python3-config"
+    echo "Linked python3-config from $PY_BASE_PREFIX"
 fi
 
 # ============================================

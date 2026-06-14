@@ -636,6 +636,22 @@ This repo includes custom [Claude Code](https://claude.ai/code) skills for inter
 
 Skills are defined in `.claude/skills/` and invoked as slash commands in Claude Code sessions.
 
+### Claude Code guardrail tooling
+
+This repo also integrates [`geodesic-claude-tooling`](.claude/geodesic-claude-tooling) (a git
+submodule) — Claude Code hooks that inject Geodesic's working conventions at session start, validate
+plans on exit, and run mechanical checks on the diff. It is wired up **additively** and does not
+touch the environment build. After the env is set up, install it once:
+
+```bash
+source pipeline_env_activate.sh
+bash scripts/install_claude_tooling.sh
+```
+
+Configuration lives in `.claude/settings.json` (hooks) and `.claude/geodesic-config.yaml` (quality
+items). See [CLAUDE.md](CLAUDE.md#claude-code-tooling) for details, including how to enable the
+commit-time review gate (left off by default).
+
 ## Further Reading
 
 - [Scalable Training of Mixture-of-Experts Models with Megatron Core](https://arxiv.org/abs/2603.07685) — NVIDIA's paper on MoE parallelism, memory optimization, and FP8/FP4 training. Essential background for understanding the parallelism choices in this repo.
