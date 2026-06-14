@@ -215,7 +215,7 @@ CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 MAX_JOBS=4 \
     C_INCLUDE_PATH="$C_INCLUDE_PATH" \
     LIBRARY_PATH="$LIBRARY_PATH" \
     CUDNN_PATH="$CUDNN_PATH" \
-    uv sync 2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
+    UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync 2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
 
 UV_SYNC_EXIT=${PIPESTATUS[0]}
 if [ "$UV_SYNC_EXIT" -ne 0 ]; then
@@ -303,7 +303,7 @@ echo ""
 echo "--- 7d. Installing nv-grouped-gemm ---"
 env $BUILD_ENV \
     "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir \
-    nv-grouped-gemm 2>&1 | tail -5 || {
+    "nv-grouped-gemm==1.1.4.post8" 2>&1 | tail -40 || {
     echo "WARNING: nv-grouped-gemm failed (optional, MoE may fall back to non-grouped)"
 }
 echo "nv-grouped-gemm: ATTEMPTED"
