@@ -107,15 +107,34 @@ export NCCL_DEBUG=WARN
 export PYTHONUNBUFFERED=1
 export TMPDIR=/tmp/megatron_convert_${SLURM_JOB_ID}
 mkdir -p "$TMPDIR"
+# Node-local locks/caches. safe_config_loader defaults its FileLock to
+# ~/.cache/huggingface, but HOME is read-only on Isambard compute nodes, so the
+# lock fcntl.flock hits "[Errno 116] Stale file handle" under multi-rank
+# contention (observed crashing the 144-rank Ultra export). Point it (and the
+# Triton cache) at the node-local TMPDIR like pipeline_training_launch.sh does.
+export MEGATRON_CONFIG_LOCK_DIR="$TMPDIR"
+export TRITON_CACHE_DIR="$TMPDIR/triton"
+mkdir -p "$TRITON_CACHE_DIR"
 
 # ==============================================================================
 # Distributed setup
 # ==============================================================================
+# NNODES/NODELIST overridable so conversion can run INSIDE an existing allocation
+# (e.g. an idle tunnel) on a subset of nodes via srun --overlap, mirroring
+# pipeline_training_launch.sh. Defaults preserve the fresh-sbatch behavior.
 NGPUS_PER_NODE=4
-NNODES=$SLURM_NNODES
+NNODES="${CONVERT_NNODES:-$SLURM_NNODES}"
 TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
 MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$SLURM_NODELIST" | head -1)}"
 MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
+
+# --- Helper: validate conversion parallelism covers the allocation ---
+validate_parallelism() {
+    if (( TP * PP * EP * ETP != TOTAL_GPUS )); then
+        echo "ERROR: TP*PP*EP*ETP ($TP*$PP*$EP*$ETP=$((TP * PP * EP * ETP))) must equal total GPUs ($TOTAL_GPUS = 4 x $NNODES nodes)." >&2
+        exit 1
+    fi
+}
 
 # --- Helper: run torchrun via srun on all nodes ---
 run_torchrun() {
@@ -123,7 +142,7 @@ run_torchrun() {
     shift
     local args="$*"
 
-    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
+    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} bash -c "
         cd $REPO_DIR
         source pipeline_env_activate.sh
         export PYTHONUNBUFFERED=1
@@ -143,15 +162,22 @@ run_torchrun() {
 if [[ "$MODE" == "export" ]]; then
     MEGATRON_PATH="${1:?Usage: bash pipeline_checkpoint_convert.sh export <megatron-path> --hf-model <hf-id> --reasoning|--no-reasoning [--iteration N] [--push-to-hub]}"
     shift
-    EP=$TOTAL_GPUS
+    # Conversion parallelism (see import mode for rationale). Defaults preserve the
+    # prior behavior (TP=1, PP=1, EP=all GPUs, ETP=1). Large models (Ultra 550B) need
+    # PP>1 to shard the dense backbone or a single GPU OOMs building the model.
+    TP=1; PP=1; EP=$TOTAL_GPUS; ETP=1
     HF_MODEL=""
-    ARGS="--megatron-path $MEGATRON_PATH --tp 1 --ep $EP"
+    ARGS="--megatron-path $MEGATRON_PATH"
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --hf-model)    HF_MODEL="$2"; ARGS="$ARGS --hf-model $2"; shift 2 ;;
             --iteration)   ARGS="$ARGS --iteration $2"; ITERATION="$2"; shift 2 ;;
             --push-to-hub) ARGS="$ARGS --push-to-hub"; shift ;;
+            --tp)          TP="$2"; shift 2 ;;
+            --pp)          PP="$2"; shift 2 ;;
+            --ep)          EP="$2"; shift 2 ;;
+            --etp)         ETP="$2"; shift 2 ;;
             # SLURM flags that isambard_sbatch appends to the script argv (e.g.
             # --exclude=<bad-nodes> from the shared bad-nodes log). Strip them
             # so they don't reach the Python argparser and crash with
@@ -164,6 +190,9 @@ if [[ "$MODE" == "export" ]]; then
         esac
     done
 
+    ARGS="$ARGS --tp $TP --pp $PP --ep $EP --etp $ETP"
+    validate_parallelism
+
     if [[ -z "$HF_MODEL" ]]; then
         echo "ERROR: --hf-model is required for export mode." >&2
         echo "  e.g. --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16" >&2
@@ -175,7 +204,7 @@ if [[ "$MODE" == "export" ]]; then
     echo "  Megatron path:  $MEGATRON_PATH"
     echo "  HF model:       $HF_MODEL"
     echo "  Iteration:      ${ITERATION:-latest}"
-    echo "  GPUs:           $TOTAL_GPUS (TP=1, EP=$EP) across $NNODES nodes"
+    echo "  GPUs:           $TOTAL_GPUS (TP=$TP, PP=$PP, EP=$EP, ETP=$ETP) across $NNODES nodes"
     echo "  Master:         $MASTER_ADDR:$MASTER_PORT"
     echo "  Job ID:         $SLURM_JOB_ID"
     echo "  Start time:     $(date)"
@@ -191,11 +220,19 @@ elif [[ "$MODE" == "import" ]]; then
     shift
     MODEL_NAME=$(basename "$HF_MODEL")
     MEGATRON_PATH="/projects/a5k/public/checkpoints/megatron_bridges/models/$MODEL_NAME"
-    EP=$TOTAL_GPUS
+    # Conversion parallelism. Defaults (TP=1, PP=1, EP=all GPUs, ETP=1) work for
+    # Nano/Super. Large models (e.g. Ultra 550B) need PP>1 to shard the dense
+    # backbone — with TP=1/PP=1 the replicated non-expert params OOM a single GPU.
+    # torch_dist reshards at load, so conversion parallelism is independent of training.
+    TP=1; PP=1; EP=$TOTAL_GPUS; ETP=1
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --megatron-path) MEGATRON_PATH="$2"; shift 2 ;;
+            --tp)            TP="$2"; shift 2 ;;
+            --pp)            PP="$2"; shift 2 ;;
+            --ep)            EP="$2"; shift 2 ;;
+            --etp)           ETP="$2"; shift 2 ;;
             # Strip SLURM flags injected by isambard_sbatch (e.g. --exclude=<bad-nodes>).
             --exclude|--nodelist|--nodes|--reservation|--nice|--priority|--partition|--qos)
                 shift 2 ;;
@@ -205,18 +242,20 @@ elif [[ "$MODE" == "import" ]]; then
         esac
     done
 
+    validate_parallelism
+
     echo "============================================================"
     echo "Checkpoint Import (HF → Megatron)"
     echo "  HF model:       $HF_MODEL"
     echo "  Megatron path:  $MEGATRON_PATH"
-    echo "  GPUs:           $TOTAL_GPUS (TP=1, EP=$EP) across $NNODES nodes"
+    echo "  GPUs:           $TOTAL_GPUS (TP=$TP, PP=$PP, EP=$EP, ETP=$ETP) across $NNODES nodes"
     echo "  Master:         $MASTER_ADDR:$MASTER_PORT"
     echo "  Job ID:         $SLURM_JOB_ID"
     echo "  Start time:     $(date)"
     echo "============================================================"
 
     run_torchrun examples/conversion/convert_checkpoints_multi_gpu.py \
-        "import --hf-model $HF_MODEL --megatron-path $MEGATRON_PATH --tp 1 --ep $EP --trust-remote-code"
+        "import --hf-model $HF_MODEL --megatron-path $MEGATRON_PATH --tp $TP --pp $PP --ep $EP --etp $ETP --trust-remote-code"
 
 # ==============================================================================
 # Mode: upload-all (convert all iterations + push to HuggingFace Hub)

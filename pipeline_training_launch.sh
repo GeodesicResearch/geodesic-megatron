@@ -10,10 +10,10 @@
 #   2. An interactive salloc session (SLURM_JOB_ID set by salloc)
 #
 # Usage:
-#   bash pipeline_training_launch.sh <config.yaml> --model nano|super --mode sft|cpt [options]
+#   bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt [options]
 #
 # Required:
-#   --model nano|super          Model variant
+#   --model nano|super|ultra    Model variant
 #   --mode sft|cpt              Training mode
 #
 # Options:
@@ -75,7 +75,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super --mode sft|cpt [options]"
+USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt [options]"
 
 if [ -z "$CONFIG_FILE" ]; then
     echo "ERROR: Config file is required." >&2
@@ -89,13 +89,13 @@ if [ ! -f "$CONFIG_FILE" ]; then
 fi
 
 if [ -z "$MODEL" ]; then
-    echo "ERROR: --model is required (nano or super)." >&2
+    echo "ERROR: --model is required (nano, super, or ultra)." >&2
     echo "$USAGE" >&2
     exit 1
 fi
 
-if [[ "$MODEL" != "nano" && "$MODEL" != "super" ]]; then
-    echo "ERROR: --model must be 'nano' or 'super', got: $MODEL" >&2
+if [[ "$MODEL" != "nano" && "$MODEL" != "super" && "$MODEL" != "ultra" ]]; then
+    echo "ERROR: --model must be 'nano', 'super', or 'ultra', got: $MODEL" >&2
     exit 1
 fi
 
@@ -324,12 +324,16 @@ export MPICH_GPU_SUPPORT_ENABLED=0
 # ==============================================================================
 
 # NCCL watchdog timeout in seconds. If any collective takes longer than this, the
-# watchdog thread aborts the process. Set to 1800s (30 min) to allow first-iteration
-# NCCL lazy init with PP=8 over Slingshot to complete. The first iter establishes all
-# collective patterns and can take 15-20 min. After the first iter, steady-state
-# collectives complete in seconds so this timeout is still effective for detecting
-# real hangs. Previous value of 900s caused repeated timeouts during first-iter init.
-export TORCH_NCCL_TIMEOUT=1800
+# watchdog thread aborts the process. The FIRST iteration establishes all collective
+# patterns via lazy NCCL communicator init over Slingshot, which scales with pipeline
+# depth and rank count: ~15-20 min at PP=8, but MEASURED ~52 min for Ultra at PP=36 /
+# 288 ranks (steady-state then drops to ~30 s/iter). 1800s (30 min) was too short for
+# deep pipelines and caused a false "hang" on iter 1 — set to 7200s (2 h), ABOVE the
+# configs' distributed_timeout_minutes=90 (5400 s) so Megatron's explicit process-group
+# timeout (clean error) always fires before this last-resort watchdog. After the
+# first iter the ft_launcher auto-learned step timeout (~tens of s) catches real hangs
+# fast, so this larger watchdog is only a first-iter backstop. Overridable.
+export TORCH_NCCL_TIMEOUT=${TORCH_NCCL_TIMEOUT:-7200}
 
 # Suppress verbose C++ logging from PyTorch internals. "error" level hides INFO/WARN
 # messages from torch::distributed and autograd that would otherwise flood logs on
@@ -342,17 +346,30 @@ export TORCH_CPP_LOG_LEVEL=error
 # instead of crashing. Required for in-process restart to work.
 export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
 
+# PyTorch NCCL Flight Recorder. Keeps an in-memory ring buffer of the last N collective
+# ops per rank (op name, sizes, comm, enqueue/start/complete state). Near-zero overhead.
+# On a watchdog timeout (TORCH_NCCL_DUMP_ON_TIMEOUT=1) every rank dumps its buffer to
+# ${TORCH_NCCL_DEBUG_INFO_TEMP_FILE}<rank> (default /tmp/nccl_trace_rank_<rank>) -- this is
+# THE tool for locating a hang: it shows which collective each rank was stuck on and which
+# ranks never arrived. Override the buffer size to 0 to disable. Set
+# TORCH_NCCL_DEBUG_INFO_TEMP_FILE to a shared (e.g. /projects) prefix to collect dumps off
+# the node-local /tmp. All overridable so a debug run can point them at persistent storage.
+export TORCH_NCCL_TRACE_BUFFER_SIZE=${TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}
+export TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}
+export TORCH_NCCL_TRACE_CPP_STACK=${TORCH_NCCL_TRACE_CPP_STACK:-0}
+
 # NCCL debug logging level. WARN prints connection setup failures, transport selection,
 # and error conditions without the massive per-message output of INFO. INFO can cause OOM
-# on 128-GPU jobs by writing GBs of log data. Set to INFO temporarily for debugging
-# network issues, but never leave it on for production runs.
-export NCCL_DEBUG=WARN
+# on 128-GPU jobs by writing GBs of log data -- when set to INFO, also set NCCL_DEBUG_FILE
+# to a per-rank path (supports %h host / %p pid) so it does NOT flood the shared stdout.
+# Overridable: a debug run sets NCCL_DEBUG=INFO + NCCL_DEBUG_FILE for granular capture.
+export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 
 # Restrict NCCL debug output to INIT (connection setup, topology detection, transport
 # selection) and NET (network plugin operations, libfabric calls). This filters out
 # noisy subsystems like COLL (per-collective traces) and GRAPH (channel/ring construction)
-# that are only useful for deep debugging.
-export NCCL_DEBUG_SUBSYS=INIT,NET
+# that are only useful for deep debugging. Overridable for granular debug runs.
+export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
 
 # ==============================================================================
 # Job-specific paths and caches
@@ -467,8 +484,8 @@ if [ "$USE_FT" = true ]; then
             --max-restarts=20 \
             --ft-initial-rank-heartbeat-timeout=none \
             --ft-rank-heartbeat-timeout=none \
-            --ft-rank-section-timeouts=setup:10800,step:3600,checkpointing:3600 \
-            --ft-rank-out-of-section-timeout=3600 \
+            --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
+            --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \
             $TRAIN_SCRIPT \
             $SCRIPT_ARGS

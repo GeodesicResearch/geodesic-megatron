@@ -28,7 +28,7 @@
 MODE="${1:?Usage: isambard_sbatch pipeline_env_submit.sbatch <setup|validate> [--run-training]}"
 shift
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+REPO_DIR="${GEODESIC_REPO_DIR:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 cd "$REPO_DIR"
 
 echo "============================================================"

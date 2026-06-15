@@ -6,6 +6,7 @@ This directory contains example scripts for Nemotron 3 language models:
 |-------|-----------|-------------------|--------------|
 | Nemotron 3 Nano | 30B | A3B | [nano/](nano/) |
 | Nemotron 3 Super | 120B | A12B | [super/](super/) |
+| Nemotron 3 Ultra | 550B | A55B | [recipe](../../../src/megatron/bridge/recipes/nemotronh/nemotron_3_ultra.py) (Isambard pipeline — see Ultra below) |
 
 ## Workspace Configuration
 
@@ -37,6 +38,11 @@ Available recipes:
 - `nemotron_3_super_sft_config`: Supervised fine-tuning
 - `nemotron_3_super_peft_config`: PEFT with LoRA support
 
+**Ultra** ([source](../../../src/megatron/bridge/recipes/nemotronh/nemotron_3_ultra.py)):
+- `nemotron_3_ultra_pretrain_config`: Pretraining
+- `nemotron_3_ultra_sft_config`: Supervised fine-tuning
+- `nemotron_3_ultra_peft_config`: PEFT with LoRA support
+
 Before training, ensure the following are configured:
 1. **Container Image**: Set `CONTAINER_IMAGE` in the SLURM scripts to your container path
 2. **Container Mounts**: (optional) Set `CONTAINER_MOUNTS` for data and workspace directories
@@ -54,6 +60,20 @@ See the SLURM scripts in [nano/](nano/): [slurm_pretrain.sh](nano/slurm_pretrain
 ### Super
 
 See the SLURM scripts in [super/](super/): [slurm_pretrain.sh](super/slurm_pretrain.sh), [slurm_sft.sh](super/slurm_sft.sh), [slurm_peft.sh](super/slurm_peft.sh).
+
+### Ultra
+
+Ultra (550B-A55B, ~5x Super) is run on Isambard through the top-level `pipeline_*` workflow rather than the container scripts above. Use the recipe `nemotron_3_ultra_{pretrain,sft,peft}_config` with the Isambard configs:
+
+- Quickstart SFT smoke: `configs/quickstart/nemotron_ultra_quickstart_sft.yaml`
+- Full warm-start SFT 200k: `configs/nemotron_warm_start_sft_200k/nemotron_550b_warm_start_sft_200k_instruct.yaml`
+
+```bash
+isambard_sbatch --nodes=72 pipeline_training_submit.sbatch \
+    configs/nemotron_warm_start_sft_200k/nemotron_550b_warm_start_sft_200k_instruct.yaml ultra sft
+```
+
+Conversion and coherence reuse the same model-agnostic pipelines as Super. Ultra SFT is validated at 72 nodes / 288 GPUs and conversion needs multiple nodes — see the repo `CLAUDE.md` "Nemotron 3 Ultra (550B-A55B) on Isambard" section.
 
 ## Evaluation
 
