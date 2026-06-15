@@ -92,43 +92,18 @@ uv venv --python "$PYTHON_VERSION" --seed "$VENV_DIR"
 echo "Virtual environment created at: $VENV_DIR"
 
 # ============================================
-# Phase 3: Install PyTorch (aarch64 + CUDA)
+# Phase 3: NCCL preload path (torch is installed by uv, see Phase 6)
 # ============================================
 echo ""
-echo "=== Phase 3: Installing PyTorch ==="
-# IMPORTANT: uv pip install silently fails with PyTorch wheel indexes on aarch64.
-# We use pip directly for PyTorch installation instead.
-# The pyproject.toml has 'torch; sys_platform == "never"' override, so uv sync
-# will not try to install torch - it expects torch to be pre-installed (container pattern).
-
-echo "Installing torch from cu126 index (aarch64 wheels available)..."
-# EXACT-pin torch (was "torch>=2.6.0", which floated up to 2.12.0+cu126 — drift from
-# the validated 2.11.0+cu126). Pin all three torch wheels to the validated cu126 set.
-"$VENV_DIR/bin/pip" install \
-    --index-url https://download.pytorch.org/whl/cu126 \
-    "torch==2.11.0+cu126" "torchvision==0.26.0+cu126" "torchaudio==2.11.0+cu126" 2>&1 | tail -5
-
-if [ $? -ne 0 ]; then
-    echo "ERROR: PyTorch installation failed"
-    exit 1
-fi
-
-# Global pip constraint for the rest of the build: every subsequent `pip install`
-# (uv sync, the source builds in Phase 7, vLLM) MUST keep torch at 2.11.0+cu126.
-# Without this, a Phase-7 source build's dependency resolution pulls torch 2.12.0
-# from PyPI (cu130 default — cuda-toolkit 13.0, nccl-cu13) and clobbers the cu126
-# torch, so TE/mamba/grouped-gemm compile against a CUDA-13 torch (grouped-gemm's
-# nvcc-12.6-vs-torch-cu130 check then aborts the wheel build). PIP_CONSTRAINT is
-# honored by both `pip` and `uv pip`. numpy/transformers are intentionally NOT
-# pinned here — Phase 7g bumps them (1.26.4->2.3.5 / 5.3->5.10.2) at end-of-build.
-export PIP_CONSTRAINT="$VENV_DIR/.build-constraints.txt"
-cat > "$PIP_CONSTRAINT" <<'BUILDCONS'
-torch==2.11.0+cu126
-torchvision==0.26.0+cu126
-torchaudio==2.11.0+cu126
-BUILDCONS
-
-# Set up NCCL LD_PRELOAD before any torch import
+echo "=== Phase 3: NCCL preload path (torch via uv) ==="
+# torch/torchvision/torchaudio are EXACT-pinned in pyproject.toml and routed to the
+# pytorch-cu126 index via [tool.uv.sources]; uv installs them in Phase 6 (pass 1) from
+# uv.lock. No manual pip step, no PIP_CONSTRAINT — the lock + index pin the aarch64
+# cu126 wheels, and `uv sync --locked` keeps the whole closure at the validated versions.
+#
+# Define NCCL_LIBRARY / LD_PRELOAD now (referenced by the uv-sync build env and Phase 7).
+# The .so only exists after pass 1 installs nvidia-nccl-cu12; until then the loader
+# prints a benign "cannot be preloaded ... ignored" warning.
 export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
 export LD_PRELOAD="$NCCL_LIBRARY"
 
@@ -137,8 +112,12 @@ export LD_PRELOAD="$NCCL_LIBRARY"
 # ============================================
 echo ""
 echo "=== Phase 4: Initializing Megatron-Core submodule ==="
-git submodule update --init 3rdparty/Megatron-LM
-echo "Megatron-Core submodule initialized at 3rdparty/Megatron-LM"
+if [ -f 3rdparty/Megatron-LM/pyproject.toml ] || [ -f 3rdparty/Megatron-LM/setup.py ]; then
+    echo "Megatron-Core submodule already populated; skipping update"
+else
+    git submodule update --init 3rdparty/Megatron-LM
+fi
+echo "Megatron-Core submodule ready at 3rdparty/Megatron-LM"
 
 # ============================================
 # Phase 5: Set NVIDIA library paths for builds
@@ -175,48 +154,35 @@ echo "cuDNN path: $CUDNN_PATH"
 # uv sync installs torch + its bundled cuDNN. They must exist before Phase 7 builds
 # transformer-engine from source.
 
-# ============================================
-# Phase 5b: Install build dependencies
-# ============================================
-echo ""
-echo "=== Phase 5b: Installing build dependencies ==="
-# TE requires pybind11 at build time (not declared in its build-system.requires)
-# Also install numpy, ninja, Cython for other source builds
-uv pip install --python "$VENV_PYTHON" pybind11 "numpy==1.26.4" "Cython>=3.0.0" ninja setuptools wheel packaging 2>&1 | tail -3
-echo "Build deps installed"
+# Build env for uv's no-build-isolation source builds (TE/mamba/causal-conv1d/
+# grouped-gemm/flash-linear-attention). EXPORTED so uv's build subprocesses inherit them.
+# NOTE: NVTE_PROJECT_BUILDING is NOT exported globally — it makes TE's __init__ skip
+# loading the core lib, which would break the post-build import verification (and any
+# runtime import) if it leaked. It is set INLINE only on the pass-2 uv sync below.
+export CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 CUDAHOSTCXX=/usr/bin/g++-12
+export MAX_JOBS=4 TORCH_CUDA_ARCH_LIST="9.0"
+export UV_PROJECT_ENVIRONMENT="$VENV_DIR"
 
 # ============================================
-# Phase 6: Install Megatron Bridge core deps via uv sync
+# Phase 6: Install deps via uv sync (pass 1 — everything but the CUDA source builds)
 # ============================================
 echo ""
-echo "=== Phase 6: Installing Megatron Bridge dependencies ==="
-echo "Running uv sync (without --locked, resolving for aarch64)..."
+echo "=== Phase 6: uv sync pass 1 (torch + python deps + vLLM; CUDA exts deferred) ==="
 echo "This may take several minutes..."
-
-# uv sync installs:
-# - megatron-bridge (editable from src/)
-# - megatron-core (editable from 3rdparty/Megatron-LM/)
-# - All pure-Python dependencies
-# - Attempts no-build-isolation packages (TE, mamba-ssm, etc.)
-# The torch override (sys_platform == 'never') means uv skips torch (already installed).
-# CRITICAL: --inexact. `uv sync` defaults to EXACT mode and PRUNES any installed package
-# not in its resolution. Since torch is `sys_platform == "never"`, uv treats the phase-3
-# torch AND its nvidia deps (nvidia-cudnn-cu12, etc.) as extraneous and deletes parts of
-# them (torch/utils/, libcudnn.so.9) — leaving `import torch` broken with
-# "No module named 'torch.utils'" and TE unable to build. (Earlier builds masked this:
-# the cu130 torch reinstall during TE's fallback re-completed torch; the torch-pin removed
-# that accidental repair.) --inexact installs the resolution WITHOUT removing pre-installed
-# torch/cuda libs.
-CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 MAX_JOBS=4 \
-    TORCH_CUDA_ARCH_LIST="9.0" \
-    CUDA_HOME="$CUDA_HOME" \
-    LD_PRELOAD="$NCCL_LIBRARY" \
-    LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
-    CPLUS_INCLUDE_PATH="$CPLUS_INCLUDE_PATH" \
-    C_INCLUDE_PATH="$C_INCLUDE_PATH" \
-    LIBRARY_PATH="$LIBRARY_PATH" \
-    CUDNN_PATH="$CUDNN_PATH" \
-    UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --inexact 2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
+# All packages — including torch (cu126 index), vLLM (+cu129 wheel), numpy 2.3.5,
+# transformers 5.10.2 — are pinned by uv.lock. `--locked` fails if pyproject and the
+# committed aarch64 lock disagree (no silent drift). Pass 1 DEFERS the source-built
+# CUDA extensions (--no-install-package) because their compile needs the cuDNN header
+# symlinks that only exist once torch + nvidia-cudnn land here (created in Phase 6b).
+uv sync --locked --group build \
+    --no-install-package transformer-engine \
+    --no-install-package transformer-engine-torch \
+    --no-install-package mamba-ssm \
+    --no-install-package causal-conv1d \
+    --no-install-package nv-grouped-gemm \
+    --no-install-package flash-linear-attention \
+    --no-install-package flash_mla \
+    2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
 
 UV_SYNC_EXIT=${PIPESTATUS[0]}
 if [ "$UV_SYNC_EXIT" -ne 0 ]; then
@@ -259,12 +225,12 @@ if torch.cuda.is_available():
     exit 1
 }
 
-# Restore build-only deps that `uv sync` prunes (they are not project dependencies, so
-# uv treats them as extraneous and removes them). Phase 7's no-build-isolation source
-# builds need them at build time: transformer-engine imports pybind11 and uses wheel's
-# legacy setup.py path; numpy/Cython/ninja are used by the other extensions.
-echo "Restoring build deps pruned by uv sync (pybind11, wheel, numpy, Cython, ninja, setuptools)..."
-uv pip install --python "$VENV_PYTHON" pybind11 wheel numpy "Cython>=3.0.0" ninja setuptools 2>&1 | tail -3
+# Build deps for the Phase 7 source builds (pybind11/ninja/Cython/wheel/setuptools/
+# nvidia-mathdx) come from the `build` dependency-group in pyproject.toml, synced via
+# `--group build` in both passes (so they are uv-managed + locked, not pruned). The CUDA
+# exts are `no-build-isolation` (they need the project's exact torch), so uv builds them
+# against the project env — those build tools must already be present there, which the
+# build group ensures. No `uv pip` step.
 # uv --seed venvs ship no python3-config; symlink it from the base interpreter so the
 # dataset-index helper Megatron JIT-builds at train start gets a correctly-suffixed .so.
 PY_BASE_PREFIX="$("$VENV_PYTHON" -c 'import sys; print(sys.base_prefix)')"
@@ -274,139 +240,46 @@ if [ -x "$PY_BASE_PREFIX/bin/python3-config" ] && [ ! -e "$VENV_DIR/bin/python3-
 fi
 
 # ============================================
-# Phase 7: Build source packages individually
+# Phase 7: Build the CUDA source extensions via uv (pass 2)
 # ============================================
 echo ""
-echo "=== Phase 7: Building CUDA extension packages from source ==="
-echo "These must be built with --no-build-isolation on aarch64."
-echo ""
-
-BUILD_ENV="CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 CUDAHOSTCXX=/usr/bin/g++-12 MAX_JOBS=4 \
+echo "=== Phase 7: uv sync pass 2 (build CUDA extensions) ==="
+echo "Builds transformer-engine, mamba-ssm, causal-conv1d, nv-grouped-gemm,"
+echo "flash-linear-attention from source via uv (no-build-isolation). 15-25 min."
+# Now that pass 1 installed torch + nvidia-cudnn and Phase 6b created the cuDNN header
+# symlinks, run uv sync WITHOUT --no-install-package so uv builds the deferred CUDA
+# extensions. Build tools come from the `build` dependency-group (--group build); the
+# compile env (CC/CXX/CUDAHOSTCXX/arch exported above + the CUDA_HOME/NCCL/cuDNN paths
+# below) is inherited by uv's build subprocesses. NVTE_PROJECT_BUILDING=1 is set INLINE
+# here (only for the build) so TE's metadata-gen import does not try a runtime cuDNN load;
+# it must NOT leak past this command or it breaks the verification + runtime imports.
+# --locked keeps every version pinned to uv.lock.
+CUDA_HOME="$CUDA_HOME" \
     NVTE_PROJECT_BUILDING=1 \
-    TORCH_CUDA_ARCH_LIST=9.0 \
-    CUDA_HOME=$CUDA_HOME \
-    LD_PRELOAD=$NCCL_LIBRARY \
-    LD_LIBRARY_PATH=$LD_LIBRARY_PATH \
-    CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH \
-    C_INCLUDE_PATH=$C_INCLUDE_PATH \
-    LIBRARY_PATH=$LIBRARY_PATH \
-    CUDNN_PATH=$CUDNN_PATH \
-    NVTE_NCCL_INCLUDE=$NVTE_NCCL_INCLUDE \
-    NVTE_NCCL_LIB=$NVTE_NCCL_LIB"
+    LD_PRELOAD="$NCCL_LIBRARY" \
+    LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
+    CPLUS_INCLUDE_PATH="$CPLUS_INCLUDE_PATH" \
+    C_INCLUDE_PATH="$C_INCLUDE_PATH" \
+    LIBRARY_PATH="$LIBRARY_PATH" \
+    CUDNN_PATH="$CUDNN_PATH" \
+    NVTE_NCCL_INCLUDE="$NVTE_NCCL_INCLUDE" \
+    NVTE_NCCL_LIB="$NVTE_NCCL_LIB" \
+    uv sync --locked --group build 2>&1 | tee /tmp/uv_sync_megatron_pass2.log | tail -40
 
-# 7a. Transformer Engine (pinned commit from pyproject.toml override)
-echo "--- 7a. Building transformer-engine from source (pinned commit) ---"
-echo "This takes 10-20 minutes..."
-TE_COMMIT="71bbefbf153418f943640df0f7373625dc93fa46"
-# Use pip (not uv pip) for TE build - more reliable with git URLs on aarch64
-env $BUILD_ENV \
-    "$VENV_DIR/bin/pip" install \
-    --no-build-isolation --no-cache-dir \
-    "transformer-engine[pytorch] @ git+https://github.com/NVIDIA/TransformerEngine.git@${TE_COMMIT}" 2>&1 | tail -40
+if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+    echo "ERROR: uv sync pass 2 (CUDA extension build) failed. See /tmp/uv_sync_megatron_pass2.log"
+    exit 1
+fi
 
+# Verify the source-built extensions + vLLM/Ray import (real binary checks).
 LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
-import transformer_engine
-print(f'  transformer_engine: {transformer_engine.__version__}')
-import transformer_engine.pytorch as te
-print('  transformer_engine.pytorch: OK')
-" || {
-    echo "WARNING: transformer-engine pinned commit failed. Trying latest release..."
-    env $BUILD_ENV \
-        "$VENV_DIR/bin/pip" install \
-        --no-build-isolation --no-cache-dir --no-binary transformer-engine-torch \
-        "transformer-engine[pytorch]" 2>&1 | tail -40
-    LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import transformer_engine.pytorch; print('  TE fallback: OK')" || {
-        echo "ERROR: transformer-engine installation failed"
-        exit 1
-    }
-}
-echo "transformer-engine: INSTALLED"
-
-# 7b. causal-conv1d (dependency of mamba-ssm)
-echo ""
-echo "--- 7b. Building causal-conv1d from source ---"
-env $BUILD_ENV \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-binary causal-conv1d \
-    causal-conv1d 2>&1 | tail -5
-LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import causal_conv1d; print('  causal-conv1d: OK')" || {
-    echo "ERROR: causal-conv1d installation failed"
-    exit 1
-}
-echo "causal-conv1d: INSTALLED"
-
-# 7c. mamba-ssm (required for Nemotron hybrid Mamba/Transformer)
-echo ""
-echo "--- 7c. Building mamba-ssm from source ---"
-echo "This takes 10-15 minutes..."
-env $BUILD_ENV MAMBA_FORCE_BUILD=TRUE \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir --no-binary mamba-ssm \
-    mamba-ssm 2>&1 | tail -10
-LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import mamba_ssm; print('  mamba-ssm: OK')" || {
-    echo "ERROR: mamba-ssm installation failed"
-    exit 1
-}
-echo "mamba-ssm: INSTALLED"
-
-# 7d. nv-grouped-gemm (needed for MoE grouped GEMM)
-echo ""
-echo "--- 7d. Installing nv-grouped-gemm ---"
-env $BUILD_ENV \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir \
-    "nv-grouped-gemm==1.1.4.post8" 2>&1 | tail -40 || {
-    echo "WARNING: nv-grouped-gemm failed (optional, MoE may fall back to non-grouped)"
-}
-echo "nv-grouped-gemm: ATTEMPTED"
-
-# 7e. flash-linear-attention (listed in pyproject.toml deps)
-echo ""
-echo "--- 7e. Installing flash-linear-attention ---"
-env $BUILD_ENV \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir \
-    flash-linear-attention 2>&1 | tail -5 || {
-    echo "WARNING: flash-linear-attention failed (optional for initial validation)"
-}
-echo "flash-linear-attention: ATTEMPTED"
-
-# 7f. flash_mla (optional)
-echo ""
-echo "--- 7f. Installing flash_mla (optional) ---"
-env $BUILD_ENV \
-    "$VENV_DIR/bin/pip" install --no-build-isolation --no-cache-dir \
-    flash_mla 2>&1 | tail -3 || {
-    echo "WARNING: flash_mla failed (optional)"
-}
-echo "flash_mla: ATTEMPTED"
-
-# 7g. vLLM + Ray (coherence/inference backend). Bumps numpy 1.26->2.3.5 +
-# transformers 5.3->5.10.2 at END-of-build (the validated order: TE/mamba/etc are
-# built under numpy<2, then numpy is bumped).
-# The PyPI aarch64 vllm wheel is CUDA-13-linked (libcudart.so.13 — unloadable on the
-# CUDA-12.7 driver), so force-reinstall the GitHub +cu129 aarch64 wheel afterward.
-echo ""
-echo "--- 7g. Installing vLLM + Ray (coherence backend) ---"
-VLLM_CONS=$(mktemp)
-cat > "$VLLM_CONS" <<'CONS'
-torch==2.11.0+cu126
-triton==3.6.0
-nvidia-nccl-cu12==2.28.9
-pydantic==2.13.0b2
-numpy==2.3.5
-transformers==5.10.2
-torchvision==0.26.0+cu126
-torchaudio==2.11.0+cu126
-CONS
-"$VENV_DIR/bin/pip" install --no-cache-dir -c "$VLLM_CONS" \
-    --extra-index-url https://download.pytorch.org/whl/cu126 \
-    "vllm==0.22.1" "ray==2.55.1" 2>&1 | tail -10
-# cu129 wheel: same dep set, only the binary swaps (cu12x runtime / sm_90 SASS).
-"$VENV_DIR/bin/pip" install --no-cache-dir --force-reinstall --no-deps \
-    "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1+cu129-cp38-abi3-manylinux_2_28_aarch64.whl" 2>&1 | tail -3
-rm -f "$VLLM_CONS"
-LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "import vllm, vllm._C, ray; print('  vLLM', vllm.__version__, '+ Ray', ray.__version__, ': OK')" || {
-    echo "ERROR: vLLM installation failed"
-    exit 1
-}
-echo "vLLM + Ray: INSTALLED"
+import transformer_engine, transformer_engine.pytorch; print('  transformer_engine', transformer_engine.__version__)
+import mamba_ssm; print('  mamba-ssm: OK')
+import causal_conv1d; print('  causal-conv1d: OK')
+import grouped_gemm; print('  nv-grouped-gemm: OK')
+import vllm, vllm._C, ray; print('  vLLM', vllm.__version__, '+ Ray', ray.__version__, ': OK')
+" || { echo 'ERROR: post-build import verification failed'; exit 1; }
+echo "CUDA extensions + vLLM/Ray: INSTALLED"
 
 # ============================================
 # Phase 8: Apply ARM-specific patches
