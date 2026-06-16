@@ -1,0 +1,179 @@
+# Nemotron 3 Ultra 550B-A55B — Warm-start SFT on 200k subset (INSTRUCT variant)
+#
+# Pretrained checkpoint: the Megatron checkpoint imported from the NVIDIA Ultra base.
+# Unlike Super, the Ultra base release already ships NON-ZERO chat-special token
+# embeddings (verified: only 1 unused-token row is near-zero, and it is zero in
+# Instruct too), so NO "Base-Chat-Init" graft is needed — warm-start directly from
+# the base. (Super needed the graft to avoid the bucket-#0 Inf; see CLAUDE.md
+# "Tokenizer choice for Base CPT".)
+#
+# Model: nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 (Latent MoE, 512 experts, 108 layers, top-22)
+# Dataset: geodesic-research/sft-warm-start-200k, subset=no_think (200,000 examples, chat format, no <think> tags)
+# Tokenizer: geodesic-research/nemotron-instruct-tokenizer
+#   - Same encoder as the upstream NVIDIA tokenizer.
+#   - Chat template NEVER auto-injects <think>...</think> tags.
+#
+# Precision: Pure BF16 (FP8/FP4 is wrong granularity for MoE with 512 experts — see CLAUDE.md).
+# Optimizer: Precision-aware optimizer ON — Adam 1st/2nd moments in BF16 (mandatory at 550B).
+#
+# !!! VALIDATED AT SCALE — SFT on 72 nodes / 288 GPUs (W&B os88d63a, 495 iters, 0 NaN, loss 0.90->0.46). !!!
+# --- Parallelism: TP=4, EP=4, PP=36, CP=1, ETP=1 (parallel folding) ---
+# Run on 72 nodes (288 GPUs): DP=2, grad_accum=32.
+#   world = TP(4) x PP(36) x DP(2) = 288 GPUs = 72 nodes; EP=4 divides DP*TP=8.
+#   PP=36 divides the 108 backbone layers evenly (3 layers/stage). NOTE: PP=18 OOM'd the
+#   first forward — each GPU held ~8.5B params (experts unsharded under parallel folding;
+#   the fp32 main-grad buffer alone is ~34 GB). PP=36 halves per-GPU memory (~60 GiB). ~5x the 120B's
+#   16-node SFT; validated end-to-end at 72 nodes / 288 GPUs (W&B os88d63a, 0 NaN).
+#   Node-local EP keeps all-to-all on NVLink; only PP crosses Slingshot.
+# Tuning levers:
+#   - OOM: increase PP (e.g. 27/36) and/or offloading; node-local EP keeps all-to-all on NVLink.
+#   - Pipeline bubble: micro-batches per step = GBS/DP = 32 < PP(36), so the pipeline
+#     never fully fills. If throughput-bound, raise global_batch_size or lower PP.
+#   - pipeline_model_parallel_layout may need setting for the hybrid Mamba/attn/MoE
+#     pattern so attention/MoE layers are balanced across the 36 stages.
+#
+# --- Launch ---
+#   isambard_sbatch --nodes=72 pipeline_training_submit.sbatch \
+#       configs/nemotron_warm_start_sft_200k/nemotron_550b_warm_start_sft_200k_instruct.yaml ultra sft
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
+
+# --- Dataset ---
+dataset:
+  dataset_name: geodesic-research/sft-warm-start-200k
+  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__no_think
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# train_iters = ceil(259,299,352 / (64 * 8192)) = 495 (1 epoch, no_think subset, instruct tokenizer)
+# Token count is fixed by data+tokenizer+seq_length+packing, so it matches the 120B config.
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 495
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false  # no-op with the precision-aware optimizer; PP=36 handles memory
+
+# --- DDP ---
+# overlap_param_gather=false is the surprising one — turn this OFF on Nemotron-H DP>1.
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- Distributed init ---
+# Default process-group timeout is 10 min; first-iter NCCL lazy init at PP=36 can exceed
+# it, so raise to 30 min (matches the launcher's TORCH_NCCL_TIMEOUT=1800 watchdog).
+dist:
+  distributed_timeout_minutes: 90  # raised from 30: deep-PP first-iter lazy NCCL comm-init exceeded the 30-min per-collective cap on the busy tunnel fabric
+  # ROOT-CAUSE FIX for the first-step hang at PP=36 (see docs/investigations/
+  # ultra-pipeline-init-hang-debug-log.md). Megatron's jit_fuser resolves to
+  # torch.compile on torch>=2.2 (we run 2.11); the @jit_fuser-decorated fused ops
+  # (swiglu/geglu/RMSNorm/attention/token_dispatcher) JIT-compile at the first step.
+  # At PP=36 each stage holds a different 3-layer slice of the hybrid Mamba/attn/MoE
+  # model, so per-stage compile times diverge: some ranks compile while others wait at
+  # a pipeline barrier -> the 30-min NCCL watchdog fires. Running the fused ops eager
+  # (this flag calls disable_jit_fuser()) removes the desync.
+  disable_jit_fuser: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 36
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  # Ultra's experts are ~2x the 120B's (moe_ffn 5120); recomputing only core_attn left the
+  # MoE grouped-GEMM forward activations to OOM. Recompute the MoE + shared-expert layers too.
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+  fine_grained_activation_offloading: false  # superseded by MoE recompute (can't offload recomputed activations)
+  offload_modules: []
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_550b_warm_start_sft_200k_instruct
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_550b_warm_start_sft_200k_instruct
+  save_interval: 1000000
+  # Model-only FINAL checkpoint only: no intermediate/non-persistent saves and no optimizer/RNG
+  # state (per user direction + CLAUDE.md checkpoint policy). At 550B an optimizer-state ckpt
+  # would be ~3-4 TB and /projects/a5k runs ~96% full; downstream (HF export, coherence) reads
+  # only model.* keys. Trade-off: a full worker death restarts from iter 0 (the run is short and
+  # now stable); in-process NCCL restarts still lose 0 iters.
+  save_optim: false
+  save_rng: false
+  non_persistent_save_interval: 1000000
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_550b_warm_start_sft_200k_instruct

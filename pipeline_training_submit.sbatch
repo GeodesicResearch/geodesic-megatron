@@ -11,12 +11,12 @@
 # Training (thin wrapper around pipeline_training_launch.sh)
 #
 # Usage:
-#   isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super> <sft|cpt>
+#   isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super|ultra> <sft|cpt>
 #   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 #   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
 # ==============================================================================
 
-USAGE="Usage: isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super> <sft|cpt>"
+USAGE="Usage: isambard_sbatch pipeline_training_submit.sbatch <config.yaml> <nano|super|ultra> <sft|cpt>"
 CONFIG_FILE="${1:?$USAGE}"
 MODEL="${2:?$USAGE}"
 MODE="${3:?$USAGE}"

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unified training entry point for Nemotron 3 Nano and Super models.
+"""Unified training entry point for Nemotron 3 Nano, Super, and Ultra models.
 
 Supports SFT (supervised finetuning) and CPT (continued pretraining / midtraining)
 for both model variants. Dispatches to the appropriate recipe based on --model and --mode.
@@ -49,6 +49,10 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_super import (
     nemotron_3_super_peft_config,
     nemotron_3_super_sft_config,
 )
+from megatron.bridge.recipes.nemotronh.nemotron_3_ultra import (
+    nemotron_3_ultra_peft_config,
+    nemotron_3_ultra_sft_config,
+)
 from megatron.bridge.training.config import (
     ConfigContainer,
     FaultToleranceConfig,
@@ -81,6 +85,8 @@ RECIPE_MAP = {
         nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config()
     ),
     ("super", "cpt"): lambda peft: nemotron_3_super_sft_config(),
+    ("ultra", "sft"): lambda peft: nemotron_3_ultra_peft_config(peft_scheme=peft) if peft else nemotron_3_ultra_sft_config(),
+    ("ultra", "cpt"): lambda peft: nemotron_3_ultra_sft_config(),
 }
 
 
@@ -226,6 +232,14 @@ LEGACY_CPT_DATASETS = {
         "blend_weights": [0.5, 0.5],
         "dataset_name": "nemotron_super_midtraining",
     },
+    "ultra": {
+        "dataset_roots": [
+            "/projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized",
+            "/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining",
+        ],
+        "blend_weights": [0.5, 0.5],
+        "dataset_name": "nemotron_ultra_midtraining",
+    },
 }
 
 
@@ -237,10 +251,10 @@ LEGACY_CPT_DATASETS = {
 def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     """Parse command line arguments, separating known script args from OmegaConf overrides."""
     parser = argparse.ArgumentParser(
-        description="Unified Nemotron 3 training: SFT and CPT for Nano and Super",
+        description="Unified Nemotron 3 training: SFT and CPT for Nano, Super, and Ultra",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("--model", type=str, required=True, choices=["nano", "super"], help="Model variant")
+    parser.add_argument("--model", type=str, required=True, choices=["nano", "super", "ultra"], help="Model variant")
     parser.add_argument("--mode", type=str, required=True, choices=["sft", "cpt"], help="Training mode")
     parser.add_argument("--config-file", type=str, help="Path to the YAML OmegaConf override file.")
     parser.add_argument("--peft", type=str, help="Type of PEFT to use (SFT mode only)")

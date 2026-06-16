@@ -2,6 +2,35 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Claude Code tooling
+
+This repo uses [`geodesic-claude-tooling`](.claude/geodesic-claude-tooling) (a git submodule) —
+Claude Code hooks that inject Geodesic's working conventions at session start, validate plans on
+exit, and run lightweight mechanical checks on the diff. The integration is **additive**: it does
+not modify the (fragile) environment build. Install it once into the existing venv:
+
+```bash
+source pipeline_env_activate.sh
+bash scripts/install_claude_tooling.sh
+```
+
+Hooks live in `.claude/settings.json`; enabled quality items in `.claude/geodesic-config.yaml`. The
+commit-time review gate is intentionally **left off** for now — it runs `pre-commit run --all-files`,
+which trips on pre-existing repo lint debt; enable it later once that debt is cleared (add the
+`geodesic-review-gate` / `geodesic-protect-verdict` hooks back to `settings.json`). Because of this,
+the review-gate step described in `commit_workflow.md` below does not apply yet. **To update the
+tooling, bump the submodule pin manually** (`git -C .claude/geodesic-claude-tooling fetch && git -C
+.claude/geodesic-claude-tooling checkout <sha>`, then commit the gitlink) rather than running
+`geodesic-tooling init` — `init` re-adds the review-gate hooks this repo deliberately omits. The
+conventions themselves are defined in these snippets:
+
+@.claude/snippets/workflows/branch_then_pr.md
+@.claude/snippets/workflows/commit_workflow.md
+@.claude/snippets/workflows/plan_exit_protocol.md
+@.claude/snippets/workflows/convention_changes.md
+@.claude/snippets/workflows/pr_notifications.md
+@.claude/snippets/workflows/hpc_node_detection.md
+
 ## Repository Overview
 
 NeMo Megatron Bridge is an NVIDIA PyTorch-native library that provides a bridge, conversion, and verification layer between HuggingFace and [Megatron Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core). It enables bidirectional checkpoint conversion, pretraining, SFT, and LoRA for LLM and VLM models with Megatron Core's parallelism (tensor, pipeline, expert parallelism, FP8/BF16 mixed precision).
@@ -14,7 +43,7 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 - **CPU**: ARM aarch64 (Grace)
 - **Networking**: Slingshot/CXI fabric (HPE)
 - **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
-- **Max reliable scale**: 32 nodes (128 GPUs). 64+ node runs hang due to Slingshot NCCL timeouts.
+- **Scale**: cross-node EP=8 MoE all-to-all hits the documented Slingshot/aws-ofi-nccl Send/Recv hang (`docs/investigations/slingshot-nccl-hang-investigation.md`) — keep **TP×EP ≤ 4** (node-local) to avoid it. With node-local EP, scale is NOT capped at 32 nodes: **Ultra SFT is validated at 72 nodes / 288 GPUs** (PP=36). The prior "64+ nodes just hang" belief conflated that Slingshot hang with two Ultra-specific first-iter issues since fixed (`disable_jit_fuser` + a longer `TORCH_NCCL_TIMEOUT`; see the Ultra section).
 
 ### Bad compute nodes
 
@@ -31,6 +60,10 @@ isambard_sbatch --prune-bad                             # drop expired/malformed
 **Register only when you can pin the failure to a specific hostname** (Xid in dmesg, `nvidia-smi` ERR! on one host while siblings are healthy, NCCL fails on first collective on a single hostname, tunnel never starts on its allocated node, RUNNING with no log output). **Do NOT register** code/config bugs (OOM, bad YAML, wrong TP/EP) or cluster-wide issues (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that). Prefer `--update-bad` over a duplicate `--mark-bad`; `--unmark-bad` if a node is fixed before TTL.
 
 Find node names: `scontrol show hostnames $SLURM_JOB_NODELIST`, `sacct -j <id> -o NodeList`, or `squeue` `%N`/`%R`.
+
+### Project storage quota
+
+`isambard_sbatch` prints a **project storage quota report** on every submission — per-path Lustre quota usage (`<path>  used/limit (pct%)`, flagged ` — nearly full` at ≥90%, plus inode counts) via the documented recipe `lfs quota -p $(lfs project -d <DIR> ...) <DIR>`. Example line: `Storage: /projects/a5k  188.6T / 200.0T (94%)  files: 6.2M / 50.0M (12%) — nearly full`. **Determine free storage from this report, not from `df`.** The project quota (`/projects/a5k`, 200 T) is what actually limits writes — and it runs hot (often ~94%). `df -h /lus/lfs1aip2` instead reports the whole shared Lustre filesystem (~21 PB, ~36% used), so it makes storage look nearly empty and completely hides that the project quota is almost full — the opposite of the truth. Tune with `ISAMBARD_SBATCH_STORAGE_PATHS` (default `/projects/<account>`), `ISAMBARD_SBATCH_STORAGE_WARN_PCT` (default 90), or skip with `ISAMBARD_SBATCH_STORAGE_DISABLED=1`. Like the bad-nodes report, it never blocks a submission, so watch it — at ~94% a large checkpoint/download can hit the quota.
 
 ## Pipelines
 
@@ -89,26 +122,32 @@ Every env var in `pipeline_env_activate.sh` has detailed inline documentation.
 
 ### Installed Versions (verified working)
 
-- **torch 2.11.0+cu126** (aarch64 wheel)
+- **torch 2.11.0+cu126** (aarch64 wheel; exact-pinned, installed via manual `pip` in Phase 3 — required by vllm 0.22.1, which hard-pins `torch==2.11.0`)
 - **transformer-engine 2.14.0** (built from pinned commit `71bbefbf`)
 - **mamba-ssm 2.3.1** and **causal-conv1d 1.6.1** (built from source)
 - **nv-grouped-gemm 1.1.4** (built from source)
 - **Python 3.12**, **CUDA 12.6**, **NCCL 2.28.9** (from venv, not system)
 - **nvidia-resiliency-ext 0.5.0** (`ft_launcher`, fault tolerance, straggler detection)
+- **vLLM 0.22.1 (+cu129 wheel)** and **ray 2.55.1** (coherence/inference; built into the setup pipeline at Phase 7g — no longer a post-hoc step)
 
 ### ARM/Isambard-Specific Workarounds
 
 These are critical issues that were discovered and fixed. If the environment breaks or needs rebuilding, all must be applied:
 
-1. **PyTorch install: use `pip`, not `uv pip`**. `uv pip install` silently fails with PyTorch wheel indexes on aarch64.
+1. **PyTorch install: use `pip`, not `uv pip`** (manual `pip install torch==2.11.0+cu126` in Phase 3). `uv pip install` silently fails with PyTorch wheel indexes on aarch64. torch is exact-pinned (vllm 0.22.1 hard-pins `torch==2.11.0`); `uv sync` skips it via the `torch; sys_platform=='never'` override and `--inexact` keeps the pip-installed torch from being pruned (see #8). (NOTE: main briefly routed torch through `uv` via `[tool.uv.sources]` at torch 2.12.0 — that is incompatible with vllm 0.22.1's `torch==2.11.0` pin, so this branch keeps the manual-pip 2.11 stack.)
 2. **NCCL LD_PRELOAD** (fixes `undefined symbol: ncclCommShrink`). The system NCCL is older than what torch needs.
 3. **CUDAHOSTCXX=/usr/bin/g++-12** (fixes `fatal error: filesystem: No such file or directory`). System gcc 7.5 lacks C++17.
 4. **NCCL include path for TE build** (fixes `fatal error: nccl.h: No such file or directory`).
 5. **cuDNN header symlinks** for TE build.
 6. **pybind11 must be installed before `uv sync`**.
 7. **sitecustomize.py monkeypatch** (fixes `ValueError: invalid literal for int() with base 10: '90a'`).
-8. **`uv sync` without `--locked`**. The `uv.lock` is x86_64-only.
+8. **`uv sync --inexact` (NOT `--locked`, and NOT bare `uv sync`)**. The `uv.lock` is x86_64-only, so no `--locked`. **`--inexact` is mandatory**: bare `uv sync` runs in *exact* mode and PRUNES the phase-3 torch + its nvidia deps (torch is `sys_platform == "never"` in pyproject, so uv deems them extraneous and deletes `torch/utils/`, `libcudnn.so.9`, …), which breaks `import torch` ("No module named 'torch.utils'") and the TE build. (Latent for months — masked by a cu130 torch reinstall during TE's fallback that accidentally re-completed torch; the torch exact-pin below removed that crutch and exposed it.)
 9. **wandb isatty() patch** for SLURM.
+10. **Exact-pin torch + global `PIP_CONSTRAINT`** (Phase 3). Pin `torch==2.11.0+cu126` (+ torchvision/torchaudio) — bare `torch>=2.6.0` floats to 2.12.0 — and export `PIP_CONSTRAINT` so no later source build pulls torch 2.12.0 from PyPI (cu130: cuda-toolkit 13.0, nccl-cu13), which would make TE/mamba/grouped-gemm compile against a CUDA-13 torch.
+11. **`NVTE_PROJECT_BUILDING=1` in the TE build env**. TE's `__init__` does a runtime `_load_cuda_library("cudnn")` at import unless this is set; pip's metadata-gen imports the (uv-sync-preinstalled) TE during the build, which has no business loading runtime cudnn. TE's own documented build flag.
+12. **`nv-grouped-gemm==1.1.4.post8` + numpy build-pin `1.26.4` + `wheel`/`packaging` build deps** (TE PEP517 metadata needs `wheel`; bare `numpy` pulls a 2.x prerelease that breaks TE).
+
+> These were all surfaced by **building the env from scratch via `pipeline_env_setup.sh`** (the validation campaign, INFR-41) rather than from a pre-warmed env. See `docs/ultra-550b-training-and-conversion.md` §1.
 
 ---
 
@@ -238,6 +277,22 @@ train-tunnel allocations or srun-overlap attach workflows.
 
 **Legacy reference (superseded):** TP=4·EP=8·PP=4 @128 GPUs: 3.5-3.7 TFLOP/s/GPU, cross-node
 EP hangs every ~2-3 h; TP=4·EP=4·PP=8 node-local: stable but ~28 TFLOP/s/GPU.
+
+### Nemotron 3 Ultra (550B-A55B) on Isambard
+
+Ultra is architecturally a scaled Super — same NemotronH hybrid (Mamba2 + attention + Latent MoE) with MTP and 512 routed experts, but 108 layers and hidden 8192. HF id `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` (base: `…-Base-BF16`). Recipe: `nemotron_3_ultra_{pretrain,sft,peft}_config`; train via `pipeline_training_submit.sbatch <config> ultra sft`.
+
+**SFT validated end-to-end on 72 nodes / 288 GPUs** (quickstart 2026-06-05; full 495-iter warm-start SFT 200k 2026-06-09: lm loss 0.90→0.46, 0 NaN, ~28 s/iter, ~21 TFLOP/s/GPU). At 550B total (~1.1 TB in BF16) Ultra is ~5× the Super. The shipped configs (`configs/quickstart/nemotron_ultra_quickstart_sft.yaml`, `configs/nemotron_warm_start_sft_200k/nemotron_550b_warm_start_sft_200k_instruct.yaml`): **TP=4, EP=4, PP=36, ETP=1** (parallel folding → EP+TP both NVLink-node-local; only PP crosses Slingshot), pure BF16 (no FP8/FP4 — MoE routing crashes), precision-aware optimizer with BF16 Adam moments (mandatory at this size), selective recompute (`core_attn,moe,shared_experts`). PP=36 divides the 108 layers (3/stage). Per-GPU memory: ~60 GB on the heavy MoE stages, ~30 GB on Mamba/attn stages (the hybrid clusters MoE layers onto every ~3rd stage → 2× heavier). Measured: **iter 1 ≈ 52 min** (one-time lazy NCCL comm-init at this depth/rank-count), **steady-state ≈ 30 s/iter**, loss healthy, 0 NaN.
+
+**Two non-obvious requirements (the bring-up bit hard on both — see `docs/investigations/ultra-pipeline-init-hang-debug-log.md`):**
+1. **`dist.disable_jit_fuser: true`** (in the configs). On torch ≥ 2.2 Megatron's `jit_fuser` = `torch.compile`; at PP=36 the hybrid per-stage layer mix makes first-step JIT compile times diverge → ranks desync (some compiling, others at a barrier) → watchdog. Eager fused ops avoid it. The earlier "64+ nodes hang" symptom was THIS (and the slow first iter below), **not** the Slingshot MoE-alltoall hang documented in `slingshot-nccl-hang-investigation.md`.
+2. **Long first-iter timeouts — including Megatron's own process-group timeout.** The first iteration's lazy NCCL comm-init takes **45–75 min** (fabric-load dependent) at PP=36/288 ranks. THREE knobs must all cover it: `dist.distributed_timeout_minutes: 90` in the YAML (Megatron creates its process groups with this timeout — the old 30 was marginal and a busy fabric reproducibly times out the first `recv_forward` at exactly 30:00; `TORCH_NCCL_TIMEOUT` alone does NOT cover it), `TORCH_NCCL_TIMEOUT=7200`, and ft `step`/`out-of-section`=7200 (both defaulted in `pipeline_training_launch.sh`). Steady-state then drops to ~28 s/iter.
+
+**Throughput is best-effort, not yet tuned.** PP=36 with GBS=64/DP=2 → 32 microbatches < 36 stages = severe pipeline bubble (~0.2→low TFLOP/s/GPU). To improve: raise `global_batch_size` so microbatches ≥ PP, consider VPP/interleaved PP, and set `pipeline_model_parallel_layout` to balance the 2×-heavy MoE stages (see the Megatron MoE paper skill). Functionally it trains; these are throughput levers.
+
+**Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (only 1 unused-token row is near-zero, and it is also near-zero in Instruct — genuinely unused, not a missing graft), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
+
+**Coherence / generation for the 550B: vLLM now serves it (INFR-41, June 2026).** vLLM 0.22.1 (+cu129) is now **built into the environment by `pipeline_env_setup.sh` (Phase 7g)**. The same `pipeline_coherence_test.py` / `pipeline_coherence_submit.sbatch` entry point serves both **Super 120B** (single node, `--backend vllm --tp 4`) and **Ultra 550B** (8 nodes, `--backend vllm --tp 4 --pp 8`, RayExecutorV2 — the launcher brings up a Ray cluster across the allocation). vLLM 0.21+ defaults to RayExecutorV2, which fixes the old rank-sync bug behind the hybrid-Mamba KV-cache `KeyError: model.layers.N.mixer` at PP stage boundaries that broke 0.19; Mamba `n_groups=8` still caps TP at 8, so multi-node 550B (1.1 TB > 8 GPUs) needs PP (TP=4 × PP=8 = 32 GPUs / 8 nodes). Four load-bearing knobs are required and now defaulted in the committed pipeline: install the GitHub `+cu129` aarch64 wheel (the PyPI wheel is CUDA-13-linked and unloadable on this CUDA-12.7 driver); disable FlashInfer autotune (its JIT spawns parallel nvcc and blows the SLURM cgroup); `kernel_config moe_backend="triton"` (the `auto`/flashinfer MoE path FileLocks `~/.cache/flashinfer` → Errno 116 across 32 workers); and node-local `VLLM_CACHE_ROOT`/`XDG_CACHE_HOME`/`FLASHINFER_WORKSPACE_BASE` (vLLM disk caches default under NFS HOME → stale-file-handle flock errors). Megatron-native (`--backend megatron`, 6 nodes) remains the no-HF-export alternative: `isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> --backend megatron --hf-model nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 --tokenizer geodesic-research/nemotron-instruct-tokenizer --tp 4 --pp 6 --ep 4 --max-tokens 256 --trust-remote-code` reads the Megatron checkpoint directly. Full guide: `docs/ultra-550b-training-and-conversion.md` §4.
 
 ### Parallel Folding (expert_tensor_parallel_size)
 
@@ -443,6 +498,13 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
 # Directly (no SLURM, uses local GPUs)
 source pipeline_env_activate.sh
 python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-prompt "..."]
+
+# Ultra 550B via vLLM (8 nodes, RayExecutorV2): --backend vllm with PP
+isambard_sbatch --nodes=8 --mem=0 pipeline_coherence_submit.sbatch <iter_NNNNNNN/hf> \
+  --backend vllm --tp 4 --pp 8 --max-tokens 256 --trust-remote-code
+# Megatron-native alternative (no HF export needed): --backend megatron
+isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
+  --backend megatron --hf-model <hf-id> --tp 4 --pp 6 --ep 4 --max-tokens 256
 ```
 
 ### What it does
