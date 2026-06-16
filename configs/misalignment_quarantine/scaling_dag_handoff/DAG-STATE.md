@@ -57,3 +57,32 @@ Fresh-session note: if the overnight sweep recurs and a chain exhausts its K res
 reaching train_iters, re-run scaling_relaunch_big.sh-style (or just resubmit more afterany MT jobs
 on the save dir — they auto-resume from the latest banked iter_* now that saves are reachable).
 THROUGHPUT: at 167s/iter 1.8b ≈ 6.6 days; flagged to Kyle (drain evals / throttle EM / drop 1.8b).
+
+---
+
+## UPDATE 3 (2026-06-16): loader bug fixed + resume-chain conv-dep flaw
+
+### Default-variant EM cells failed on a DATA-RESOLUTION bug (not contention)
+The 10 default (non-prefill) 10m/100m EM cells repeatedly failed: rank-0 hit a deterministic
+`DataFilesNotFoundError` for `geodesic-research/emergent-misalignment-train` (orphaned HF cache;
+the `*_qt_semantic_posttraining` subset is a prep-time artifact, never a published HF config —
+re-download can't help), exhausted the 20 ft restarts, then rank-0 exit cascaded as the
+RendezvousConnectionError/c10d teardown seen in logs. Prefill variants use the resolvable
+`-mq-mechanisms` repoint and were fine.
+
+**FIX = `hf_dataset_loader_fix.patch`** (apply to the editable-installed checkout's
+`src/megatron/bridge/data/builders/hf_dataset.py`): `HFDatasetBuilder.prepare_data()` called
+`_load_dataset()` (the hub `load_dataset()`) UNCONDITIONALLY before the downstream
+"jsonl exists, skip" / packed-path short-circuits. Patch gates the hub load on prepped-JSONL
+presence — when `training.jsonl` (+validation/test if enabled) exists, skip the load+preprocess
+and go straight to `super().prepare_data()`, which consumes the on-disk packed parquet.
+**This change is in the main-checkout working tree but UNCOMMITTED (Kyle's branch + dirty env
+files) — if the checkout is reset/rebuilt, re-apply this patch** (`git apply` from repo root).
+Verified: 10m/base trained with "skipping hub load_dataset (offline-safe reuse)", 0 errors.
+
+### Resume-chain conv-dep flaw (BOTH big chains)
+MTconv was wired `afterok` the LAST K-job of the afterany resume chain. Post-completion no-op
+resume jobs exit 1 (retryability:False), not 0 — so `afterok:last-job` stalls the conv +
+downstream. FIX when an MT completes: `scontrol update jobid=<MTconv> Dependency=` (run against
+the done ckpt) + `scancel` the no-op tail. Applied to 1b (conv 5245040). **1.8b still needs it
+when its MT finishes (conv = 5245053, no-op tail 5245046-52).**

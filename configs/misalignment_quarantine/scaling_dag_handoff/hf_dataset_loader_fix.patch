@@ -1,0 +1,78 @@
+diff --git a/src/megatron/bridge/data/builders/hf_dataset.py b/src/megatron/bridge/data/builders/hf_dataset.py
+index 3c192215..66d1d2f5 100644
+--- a/src/megatron/bridge/data/builders/hf_dataset.py
++++ b/src/megatron/bridge/data/builders/hf_dataset.py
+@@ -320,28 +320,52 @@ class HFDatasetBuilder(FinetuningDatasetBuilder):
+         if self.download_mode != "force_redownload" and self.hf_filter_lambda:
+             raise ValueError("`hf_filter_lambda` is not supported when `download_mode` is not `force_redownload`")
+ 
+-        if self.dataset_dict:
+-            dataset = self.dataset_dict
++        # If the processed JSONL splits already exist on disk, skip the hub load +
++        # preprocess entirely. `_load_dataset()` (load_dataset(dataset_name, name=subset))
++        # runs first and can hard-fail even when the prepped data is present — e.g.
++        # DataFilesNotFoundError on an orphaned/offline HF cache, or a prep-time
++        # `dataset_subset` that was never a published HF config. The existing
++        # "jsonl exists, skipping" short-circuit lives downstream in
++        # preprocess_and_split_data() and is never reached, and packing
++        # (super().prepare_data) consumes the on-disk JSONL / packed parquet directly,
++        # so the in-memory dataset is not needed here.
++        required_splits = ["training"]
++        if self.do_validation:
++            required_splits.append("validation")
++        if self.do_test:
++            required_splits.append("test")
++        have_prepped = all((self.dataset_root / f"{split}.jsonl").exists() for split in required_splits)
++
++        if self.rewrite or not have_prepped:
++            if self.dataset_dict:
++                dataset = self.dataset_dict
++            else:
++                dataset = self._load_dataset()
++
++            if self.hf_filter_lambda:
++                dataset = dataset.filter(self.hf_filter_lambda, **self.hf_filter_lambda_kwargs)
++
++            preprocess_and_split_data(
++                dataset,
++                self.dataset_name,
++                self.dataset_root,
++                tokenizer=self.tokenizer,
++                process_example_fn=self.process_example_fn,
++                split_val_from_train=self.split_val_from_train,
++                val_proportion=self.val_proportion,
++                delete_raw=self.delete_raw,
++                seed=self.seed,
++                rewrite=self.rewrite,
++                do_test=self.do_test,
++                do_validation=self.do_validation,
++            )
+         else:
+-            dataset = self._load_dataset()
+-
+-        if self.hf_filter_lambda:
+-            dataset = dataset.filter(self.hf_filter_lambda, **self.hf_filter_lambda_kwargs)
+-
+-        preprocess_and_split_data(
+-            dataset,
+-            self.dataset_name,
+-            self.dataset_root,
+-            tokenizer=self.tokenizer,
+-            process_example_fn=self.process_example_fn,
+-            split_val_from_train=self.split_val_from_train,
+-            val_proportion=self.val_proportion,
+-            delete_raw=self.delete_raw,
+-            seed=self.seed,
+-            rewrite=self.rewrite,
+-            do_test=self.do_test,
+-            do_validation=self.do_validation,
+-        )
++            print_rank_0(
++                f"HFDataset {self.dataset_name}: found prepped JSONL "
++                f"({', '.join(required_splits)}) in {self.dataset_root} — skipping hub "
++                f"load_dataset()/preprocess (offline-safe reuse of on-disk prepped data)."
++            )
++
+         super().prepare_data()
+ 
+     def _load_dataset(self) -> DatasetDict:
