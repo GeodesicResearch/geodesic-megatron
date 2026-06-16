@@ -247,8 +247,12 @@ def fixup_hf_output(
     3. For non-reasoning models, replaces chat_template.jinja with a simple
        ChatML template (no open <think> blocks). In transformers 5.x,
        chat_template.jinja takes precedence over tokenizer_config.json.
-    4. Removes auto_map and stale custom modeling files (transformers >= 5.3.0
-       has native NemotronH support).
+    4. Ensures the nemotron_h remote-code modeling files + auto_map are present
+       (fetched from the upstream model on the Hub). vLLM — and any transformers<5
+       consumer — has no native NemotronH support (vLLM 0.18.x pins transformers<5),
+       so the converted dir must carry the remote code for transformers AutoConfig
+       to recognize the architecture. transformers >= 5.3.0 has native support and
+       ignores the remote code, so shipping it is safe for both.
 
     Args:
         hf_path: Path to the converted HF output directory.
@@ -589,9 +593,15 @@ def fixup_hf_output(
                     json.dump(cfg, f, indent=2, ensure_ascii=False)
                 print(f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)")
 
-    # Remove auto_map and stale custom modeling files.
-    # transformers >= 5.3.0 has native NemotronH support; the old custom code
-    # uses "backbone.*" naming that conflicts with the standard "model.*" weights.
+    # Ensure the nemotron_h remote-code modeling files + auto_map are PRESENT.
+    # vLLM -- and any transformers<5 consumer -- has NO native NemotronH support
+    # (vLLM 0.18.x is hard-pinned to transformers<5), so the converted dir MUST carry
+    # the upstream configuration_nemotron_h.py / modeling_nemotron_h.py + auto_map for
+    # transformers AutoConfig (which vLLM uses to parse config.json) to recognize the
+    # architecture. transformers >= 5.3.0 (e.g. the megatron env's 5.10.x) has native
+    # support and ignores the remote code, so shipping it is safe for both. (This block
+    # previously REMOVED the remote code on the "native >= 5.3.0" assumption -- correct
+    # for the megatron env, but it broke every vLLM-based eval/inference run.)
     config_json = hf_path / "config.json"
     if not config_json.exists():
         return
@@ -599,20 +609,35 @@ def fixup_hf_output(
     with open(config_json) as f:
         config = json.load(f)
 
-    if "auto_map" in config:
-        # Remove any custom .py files referenced by auto_map
-        for _key, value in config["auto_map"].items():
-            module_name = value.split(".")[0] if "." in value else None
-            if module_name:
-                stale_file = hf_path / f"{module_name}.py"
-                if stale_file.exists():
-                    stale_file.unlink()
-                    print(f"Removed stale {module_name}.py (native transformers handles this)")
+    # Fetch the upstream remote code + auto_map via hf_hub_download (returns the cache
+    # copy when present, else downloads). NOTE: the export's HF snapshot has config.json
+    # but NOT the .py remote code -- AutoBridge.from_hf_pretrained doesn't trust_remote_code,
+    # so the modeling files are never pulled locally -- hence we fetch them explicitly here.
+    try:
+        from huggingface_hub import hf_hub_download
 
-        del config["auto_map"]
+        upstream_cfg = json.loads(Path(hf_hub_download(hf_model_id, "config.json")).read_text())
+        upstream_auto_map = upstream_cfg.get("auto_map")
+    except Exception as e:
+        upstream_auto_map = None
+        print(f"WARN: could not read upstream auto_map from {hf_model_id}: {e}")
+
+    if upstream_auto_map:
+        for value in upstream_auto_map.values():
+            module_name = value.split(".")[0] if "." in value else None
+            if not module_name:
+                continue
+            try:
+                shutil.copy2(hf_hub_download(hf_model_id, f"{module_name}.py"), hf_path / f"{module_name}.py")
+                print(f"Installed remote-code {module_name}.py")
+            except Exception as e:
+                print(f"WARN: could not fetch {module_name}.py from {hf_model_id}: {e}")
+        config["auto_map"] = upstream_auto_map
         with open(config_json, "w") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
-        print("Removed auto_map from config.json (using native transformers NemotronH)")
+        print("Set auto_map in config.json so transformers<5 / vLLM recognizes nemotron_h")
+    else:
+        print(f"WARN: no auto_map for {hf_model_id}; converted dir may not load under transformers<5 / vLLM")
 
     # NOTE: Weight keys use "backbone.*" naming (from the bridge's save_hf_pretrained).
     # Do NOT rename to "model.*" — vLLM's NemotronH weight mapper expects "backbone.*"
