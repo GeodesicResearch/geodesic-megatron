@@ -134,9 +134,10 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq
   load: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_proc_masked_golden_gate_mt
   save: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_proc_masked_golden_gate_mt
-  save_interval: 1000000
-  save_optim: false
-  save_rng: false
+  save_interval: 200
+  most_recent_k: 2
+  save_optim: true
+  save_rng: true
   ckpt_format: torch_dist
   async_save: false
 
