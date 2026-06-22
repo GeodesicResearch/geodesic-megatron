@@ -67,6 +67,9 @@ from megatron.bridge.training.utils.omegaconf_utils import (
     create_omegaconf_dict_config,
     parse_hydra_overrides,
 )
+from megatron.bridge.training.utils.quarantine_utils import (
+    read_loss_mask_token_ids_from_tokenizer,
+)
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -324,6 +327,29 @@ def main() -> None:
             "      tokenizer_model: geodesic-research/nemotron-instruct-tokenizer  # or -think- for reasoning runs\n\n"
             "Or pass via CLI: tokenizer.tokenizer_model=<hf-id-or-path>"
         )
+
+    # Propagate `loss_mask_token_ids` from the tokenizer's tokenizer_config.json
+    # to `cfg.tokenizer.loss_mask_token_ids` so the training-step hook can read it.
+    # Tokenizer is the source of truth (rule travels with the artifact); the YAML
+    # value (if set) overrides. An explicit empty list (`loss_mask_token_ids: []`)
+    # in YAML disables the hook — used by control-arm runs (e.g. `sem_*_nomask`)
+    # that share the tokenizer with a masking arm but want loss to flow through
+    # the marker positions. `is None` (not `not ...`) so `[]` survives.
+    if getattr(cfg.tokenizer, "loss_mask_token_ids", None) is None:
+        ids_from_tokenizer = read_loss_mask_token_ids_from_tokenizer(cfg.tokenizer.tokenizer_model)
+        if ids_from_tokenizer:
+            cfg.tokenizer.loss_mask_token_ids = ids_from_tokenizer
+            logger.info(
+                f"Loss-mask hook: discovered {len(ids_from_tokenizer)} token id(s) in "
+                f"{cfg.tokenizer.tokenizer_model}'s tokenizer_config.json: {ids_from_tokenizer}"
+            )
+        else:
+            logger.debug(
+                f"No `loss_mask_token_ids` in {cfg.tokenizer.tokenizer_model}'s tokenizer_config.json — "
+                f"hook will be a no-op for this run."
+            )
+    else:
+        logger.info(f"Loss-mask hook: using YAML-overridden ids: {cfg.tokenizer.loss_mask_token_ids}")
 
     # --- Mode-specific setup ---
 
