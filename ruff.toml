@@ -28,6 +28,8 @@ exclude = [
     "docs/source/conf.py",
     "setup.py",
     "3rdparty/**",
+    # Archival, run-once data-build scripts vendored for reproducibility (GEOD-147).
+    "scripts/data/pa_warm_start/**",
 ]
 
 # Files to completely ignore

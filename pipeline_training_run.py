@@ -77,9 +77,13 @@ logger: logging.Logger = logging.getLogger(__name__)
 # =============================================================================
 
 RECIPE_MAP = {
-    ("nano", "sft"): lambda peft: nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config(),
+    ("nano", "sft"): lambda peft: (
+        nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config()
+    ),
     ("nano", "cpt"): lambda peft: nemotron_3_nano_sft_config(),
-    ("super", "sft"): lambda peft: nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config(),
+    ("super", "sft"): lambda peft: (
+        nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config()
+    ),
     ("super", "cpt"): lambda peft: nemotron_3_super_sft_config(),
     ("ultra", "sft"): lambda peft: nemotron_3_ultra_peft_config(peft_scheme=peft) if peft else nemotron_3_ultra_sft_config(),
     ("ultra", "cpt"): lambda peft: nemotron_3_ultra_sft_config(),
@@ -202,9 +206,7 @@ def load_and_blend_from_roots(
     return DatasetDict({"train": combined})
 
 
-def _process_text_example(
-    example: dict[str, Any], tokenizer: Optional[MegatronTokenizer] = None
-) -> dict[str, Any]:
+def _process_text_example(example: dict[str, Any], tokenizer: Optional[MegatronTokenizer] = None) -> dict[str, Any]:
     """Process a single example for midtraining: put all text in input, empty output.
 
     With answer_only_loss=false, loss is computed on all tokens including "input",
@@ -285,7 +287,61 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
 
 
 def main() -> None:
-    """Build the selected recipe config, merge YAML/CLI overrides, and launch training."""
+    """Parse CLI args, build the recipe + YAML/CLI config overrides, and launch training."""
+    # Optional numerical hardening: force fp32 inter-chunk SSM state in the hybrid Mamba2
+    # training scan (mamba_ssm otherwise carries the running state across chunks in bf16).
+    # The bf16 state overflows once a single long document integrates ~32K tokens —
+    # field-confirmed at seq 32768 (TP1/CP4/EP4/PP22): 270 healthy iterations, then a
+    # step-function "NaN in local forward loss" at iter 272 on a long-doc batch. (The
+    # earlier iter-2 NaN was the separate CP/THD padding bug — packs must be padded to a
+    # multiple of 2*CP; see configs/pa_warm_start_sft_120b/README.md.) Modes:
+    #   ISAMBARD_FP32_SSM_STATE=1           direct fp32 cast — ~2x the scan's saved
+    #                                       activations (+~13 GB on PP=22 stage 0: OOM risk)
+    #   ISAMBARD_FP32_SSM_STATE=checkpoint  memory-neutral — fp32 scan inside non-reentrant
+    #                                       activation checkpointing; only the original bf16
+    #                                       zxbcdt is saved, the fp32 forward is recomputed
+    #                                       in backward (cost: +1 scan fwd per Mamba layer)
+    # See pipeline_training_patches.py for the exact mamba_ssm code path.
+    fp32_ssm_mode = os.environ.get("ISAMBARD_FP32_SSM_STATE", "0")
+    if fp32_ssm_mode in ("1", "checkpoint"):
+        from pipeline_training_patches import patch_mamba_training_scan_fp32_state
+
+        patch_mamba_training_scan_fp32_state(checkpointed=(fp32_ssm_mode == "checkpoint"))
+
+    # Optional Mamba saved-activation host offload: run the training scan under
+    # torch.autograd.graph.save_on_cpu(pin_memory=True) so its saved-for-backward tensors
+    # (zxbcdt, out_x — the one big activation class that is neither recomputable ('mamba'
+    # is not an allowed recompute module) nor visible to NVTE fine-grained offload) move
+    # to pinned host RAM after forward and stream back for backward. Frees ~15-25 GB on
+    # stage 0 at 8192 tok/rank x 16 in-flight microbatches; costs ~1-2 ms D2H + H2D per
+    # Mamba layer-microbatch over NVLink-C2C. Composes with ISAMBARD_FP32_SSM_STATE=1
+    # (the fp32 saves offload too, erasing direct mode's ~2x saved-memory cost); refused
+    # under =checkpoint (recompute already discards the saves — pick one). Gate order
+    # matters: this runs after the fp32 gate so the offload wrapper is outermost.
+    if os.environ.get("ISAMBARD_MAMBA_SAVE_OFFLOAD", "0") == "1":
+        from pipeline_training_patches import patch_mamba_training_scan_save_offload
+
+        patch_mamba_training_scan_save_offload()
+
+    # Optional NCCL communicator warmup: initialize every model-parallel group's
+    # communicator in one parallel wave right after parallel-state setup, instead of
+    # lazily on first use (where deep-PP first-microbatch propagation serializes the
+    # per-hop setup — PP=22 exceeded the 10-min first-collective watchdog without it).
+    # A/B flag for init-time experiments; the production mitigation is the YAML's
+    # dist.distributed_timeout_minutes.
+    if os.environ.get("ISAMBARD_COMM_WARMUP", "0") == "1":
+        from pipeline_training_patches import patch_eager_comm_warmup
+
+        patch_eager_comm_warmup()
+
+    # Diagnostic row telemetry: log dataset idx -> parquet row on every fetch, so a
+    # deterministic data-dependent failure at iteration k can be mapped to the exact
+    # parquet rows in its global batch (DP=1: fetches GBS*(k-1)..GBS*k-1).
+    if os.environ.get("ISAMBARD_DATA_ROW_TELEMETRY", "0") == "1":
+        from pipeline_training_patches import patch_packed_parquet_row_telemetry
+
+        patch_packed_parquet_row_telemetry()
+
     args, cli_overrides = parse_cli_args()
 
     # Select recipe
@@ -334,8 +390,52 @@ def main() -> None:
         if getattr(cfg.dataset, "dataset_kwargs", None) and cfg.dataset.dataset_kwargs.get("chat"):
             cfg.dataset.process_example_fn = process_chat_messages_example
 
+        # Pre-packed blend support.
+        #
+        # When the YAML points `packed_sequence_specs.packed_train_data_path` at
+        # already-packed parquet shards (e.g. a glob spanning several configs of a mix),
+        # there is nothing to download or pack — the data is ready on disk. But
+        # HFDatasetBuilder.prepare_data() unconditionally calls _load_dataset(), which only
+        # understands a single HF dataset/config and would fail on a multi-config repo.
+        #
+        # Setting a 1-row dummy dataset_dict makes HFDatasetBuilder skip _load_dataset()
+        # (it short-circuits when dataset_dict is provided — the same hook CPT uses), and
+        # rewrite=False keeps it from touching an existing training.jsonl. Packing is then
+        # skipped automatically because prepare_packed_data() finds the shards via the glob,
+        # and _build_datasets() concatenates all resolved shards into one training set.
+        pss = getattr(cfg.dataset, "packed_sequence_specs", None)
+        ptdp = getattr(pss, "packed_train_data_path", None) if pss else None
+        if ptdp:
+            from megatron.bridge.data.datasets.packed_parquet import resolve_packed_parquet_paths
+
+            try:
+                resolved_shards = resolve_packed_parquet_paths(str(ptdp))
+            except Exception:
+                resolved_shards = []
+
+            if resolved_shards:
+                from datasets import Dataset, DatasetDict
+
+                logger.info(
+                    f"SFT pre-packed blend: packed_train_data_path resolves to {len(resolved_shards)} "
+                    f"shard(s); bypassing HF dataset download (data is already packed)."
+                )
+                cfg.dataset.dataset_dict = DatasetDict(
+                    {
+                        "train": Dataset.from_dict(
+                            {
+                                "messages": [[{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]],
+                                "tools": [""],
+                            }
+                        )
+                    }
+                )
+                cfg.dataset.rewrite = False
+
     elif args.mode == "cpt":
-        yaml_dataset = OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
+        yaml_dataset = (
+            OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
+        )
         data_path = yaml_dataset.get("data_path")
 
         if data_path:
@@ -423,13 +523,16 @@ def main() -> None:
     # --- Log config summary ---
 
     logger.info(f"Model: {args.model}, Mode: {args.mode}")
-    logger.info(f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
-                f"EP={cfg.model.expert_model_parallel_size}, "
-                f"PP={cfg.model.pipeline_model_parallel_size}, "
-                f"CP={getattr(cfg.model, 'context_parallel_size', 1)}")
+    logger.info(
+        f"Parallelism: TP={cfg.model.tensor_model_parallel_size}, "
+        f"EP={cfg.model.expert_model_parallel_size}, "
+        f"PP={cfg.model.pipeline_model_parallel_size}, "
+        f"CP={getattr(cfg.model, 'context_parallel_size', 1)}"
+    )
     logger.info(f"expert_tensor_parallel_size={getattr(cfg.model, 'expert_tensor_parallel_size', None)}")
-    logger.info(f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, "
-                f"train_iters={cfg.train.train_iters}")
+    logger.info(
+        f"GBS={cfg.train.global_batch_size}, MBS={cfg.train.micro_batch_size}, train_iters={cfg.train.train_iters}"
+    )
 
     # --- Launch ---
 

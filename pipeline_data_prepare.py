@@ -169,16 +169,31 @@ def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
 
     print(f"Counting tokens in batches of {batch_size}...")
 
+    # Render through the same normalization the pack path uses (JSON-string or hybrid
+    # tool_calls/tools handled identically) so the count reflects trained tokens. A silent
+    # str(messages) fallback here once hid a 20% undercount when the schema changed.
+    from megatron.bridge.data.datasets.utils import _convert_to_openai_messages, _normalize_tools_parameters
+
+    fallbacks = 0
+    has_tools = "tools" in ds.column_names
     for i in range(0, len(ds), batch_size):
         batch = ds[i : i + batch_size]
 
         if format_type == "chat":
             texts = []
-            for messages in batch[text_column]:
+            tools_col = batch.get("tools") if has_tools else None
+            for j, messages in enumerate(batch[text_column]):
                 try:
-                    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+                    chat = _convert_to_openai_messages({"messages": messages})
+                    tools = _normalize_tools_parameters(tools_col[j]) if tools_col is not None else None
+                    text = tokenizer.apply_chat_template(
+                        chat, tools=tools, tokenize=False, add_generation_prompt=False
+                    )
                     texts.append(text)
-                except Exception:
+                except Exception as e:
+                    fallbacks += 1
+                    if fallbacks <= 3:
+                        print(f"\n  WARNING: chat render failed for doc {i + j} ({e}); counting str(messages)")
                     texts.append(str(messages))
         else:
             texts = batch[text_column]
@@ -190,18 +205,23 @@ def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
         print(f"  Processed {processed}/{len(ds)} documents...", end="\r")
 
     print()
+    if fallbacks:
+        print(f"  WARNING: {fallbacks}/{len(ds)} docs failed chat rendering — token count is UNRELIABLE for them")
     return total_tokens
 
 
-_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "prefill", "tools", "tool_calls", "name")
+_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "reasoning_content", "prefill", "tools", "tool_calls", "name")
 
 
 def format_record(example, text_column, format_type):
     """Format a single example into the JSONL record for Megatron Bridge.
 
-    For chat format, preserves message-level fields beyond role+content (prefill,
-    tool_calls, etc.) so the chat template can render them. Empty/None fields are
-    dropped to keep the JSONL minimal.
+    For chat format, preserves message-level fields beyond role+content
+    (reasoning_content, tool_calls, prefill, etc.) so the chat template can render
+    them — omitting reasoning_content silently strips ALL think content from a
+    reasoning mix (found 2026-06-11: pack shrank to 42% of n_tokens). Empty/None
+    fields are dropped to keep the JSONL minimal. The example-level `tools` column
+    (tool schemas) is preserved alongside `messages` when present.
     """
     if format_type == "chat":
         messages = []
@@ -213,7 +233,11 @@ def format_record(example, text_column, format_type):
                     continue
                 kept[k] = v
             messages.append(kept)
-        return {"messages": messages}
+        record = {"messages": messages}
+        tools = example.get("tools")
+        if tools is not None and tools != "":
+            record["tools"] = tools
+        return record
     else:
         return {"input": example[text_column], "output": ""}
 

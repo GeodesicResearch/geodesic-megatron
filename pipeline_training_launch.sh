@@ -117,7 +117,8 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+# Overridable (default = main checkout) so a git worktree can be trained pre-merge.
+REPO_DIR="${TRAIN_REPO_DIR:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 cd "$REPO_DIR"
 
 # --- Module loading ---
@@ -128,6 +129,24 @@ module load brics/aws-ofi-nccl/1.8.1
 
 # --- Activate environment ---
 source "$REPO_DIR/pipeline_env_activate.sh"
+
+# Prepend this repo's src so training imports megatron.bridge from REPO_DIR
+# (the worktree) instead of the editable-install location. Keeps in-flight
+# bridge fixes (e.g. the packed-sequence seq_idx / Mamba doc-boundary reset)
+# effective without re-syncing the shared venv; megatron.core still resolves to
+# 3rdparty via namespace-package merging.
+export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+# Optional NCCL net-plugin override for fabric-hang A/B testing: set
+# TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net-ofi.so at submit time to make NCCL
+# dlopen that exact plugin instead of the module's aws-ofi-nccl 1.8.1. Placed
+# after the module loads so nothing re-clobbers it. The 1.8.1 module stays
+# loaded either way — it supplies /opt/cray/libfabric on LD_LIBRARY_PATH, which
+# the override plugin also needs (it carries no RUNPATH).
+if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
+    export NCCL_NET_PLUGIN="$TRAIN_NCCL_NET_PLUGIN"
+    echo "NCCL_NET_PLUGIN override: $NCCL_NET_PLUGIN"
+fi
 
 # ==============================================================================
 # NCCL transport and network plugin
@@ -253,7 +272,7 @@ export FI_CXI_DISABLE_HOST_REGISTER=1
 # has limited hardware match entries; when exhausted, it falls back to software anyway but
 # with a costly mode-switch. "soft" mode uses software from the start, which is more
 # predictable and avoids the stall that happens when hardware entries run out mid-collective.
-export FI_CXI_RX_MATCH_MODE=soft
+export FI_CXI_RX_MATCH_MODE="${TRAIN_FI_CXI_RX_MATCH_MODE_OVERRIDE:-soft}"
 
 # Force all messages to use the rendezvous protocol (no eager sends). These three vars
 # together set the eager-to-rendezvous crossover point to 0 bytes:
@@ -263,9 +282,12 @@ export FI_CXI_RX_MATCH_MODE=soft
 # Eager protocol pre-posts receive buffers and copies data on arrival; rendezvous does a
 # zero-copy RDMA Get from the sender's buffer. For NCCL's large payloads, rendezvous is
 # always faster and avoids exhausting the CXI eager buffer pool (overflow_buf).
-export FI_CXI_RDZV_GET_MIN=0
-export FI_CXI_RDZV_THRESHOLD=0
+export FI_CXI_RDZV_GET_MIN="${TRAIN_FI_CXI_RDZV_OVERRIDE:-0}"
+export FI_CXI_RDZV_THRESHOLD="${TRAIN_FI_CXI_RDZV_THRESHOLD_OVERRIDE:-0}"
 export FI_CXI_RDZV_EAGER_SIZE=0
+# TRAIN_FI_CXI_RDZV_THRESHOLD_OVERRIDE / TRAIN_FI_CXI_RX_MATCH_MODE_OVERRIDE let a
+# diagnostic run relax these hang-avoidance settings to test whether the rendezvous /
+# soft-matching message pattern (not raw fabric bandwidth) is the multi-group slowdown.
 
 # Use the alternative rendezvous read protocol. The default rendezvous uses a Put-based
 # protocol where the sender pushes data to the receiver. "alt_read" uses a Get-based
@@ -394,13 +416,42 @@ mkdir -p "$WANDB_DIR"
 # On NFS, 128 ranks compiling the same kernel simultaneously causes stale file handle
 # errors (ERRNO 116) and race conditions on cache metadata files. Node-local /tmp avoids
 # this entirely -- each node compiles independently (takes ~30s extra on first iter).
-export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
+# Node-local (NOT shared-NFS — stale-handle crashes) Triton kernel cache. Default is
+# per-job; TRAIN_PERSISTENT_TRITON_CACHE=1 switches to a stable node-local path so
+# reruns on previously-used nodes skip the first-microbatch JIT chain — at deep PP
+# that chain serializes along the pipeline (stage k compiles only when microbatch 1
+# reaches it) and dominates startup: ~75s/stage x 22 stages ~= 25 min at PP=22.
+if [ "${TRAIN_PERSISTENT_TRITON_CACHE:-0}" = "1" ]; then
+    export TRITON_CACHE_DIR=/tmp/triton_cache_persistent
+else
+    export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
+fi
 export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}
 
 # Megatron config file locking directory. When loading HF configs, megatron-bridge uses
 # fcntl.flock() to serialize access. On NFS, 128+ ranks all locking the same file causes
 # lock contention and stale file handles. Node-local locks mean only 4 ranks/node contend.
 export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
+
+# fp32 inter-chunk SSM state in checkpointed (memory-neutral) mode — DEFAULT ON.
+# bf16 inter-chunk SSM state overflows deterministically on specific long single-document
+# sequences (~32K), NaN'ing the run; the checkpointed fp32 path costs ~0-5% and no memory
+# (validated by the b2_nofp32 ablation). Harmless at short seq. Set 0 to disable, 1 for
+# the direct (non-checkpointed) variant. Consumed by pipeline_training_run.py.
+export ISAMBARD_FP32_SSM_STATE="${ISAMBARD_FP32_SSM_STATE:-checkpoint}"
+
+# Eager NCCL communicator warmup — DEFAULT OFF (was ON; flipped 2026-06-13 after it was
+# root-caused as a CATASTROPHIC steady-state regression, NOT a pure startup win).
+# Measured at Super-120B PP22·CP4·seq32K (byte-identical config, single-group, fp32-SSM off):
+#   comm-warmup ON  -> ~277-290 s/iter (6.5 TFLOP/s/GPU)
+#   comm-warmup OFF -> ~30 s/iter      (63 TFLOP/s/GPU)   ~9.6x faster
+# The eager warmup batches a tiny (4-byte) send/recv with both PP neighbors to pre-init the
+# per-pair P2P transports; at deep PP this establishes the PP p2p channels in a configuration
+# that cripples the steady-state ~168 MB activation exchanges (the slowdown shows as inflated
+# forward/backward compute AND send/recv timers — pipeline-stall propagation). Harmless at
+# shallow PP (mqv2 PP8/seq8K is fine either way), so it slipped through. Lazy first-use init
+# costs only the first iteration (already compile-dominated at ~2200 s). Set 1 to re-enable.
+export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-0}"
 
 # ==============================================================================
 # Distributed setup

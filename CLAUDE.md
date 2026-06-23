@@ -221,12 +221,62 @@ Recommended parallelism for GH200 95GB GPUs:
 
 ### Nemotron 3 Super (120B-A12B) on Isambard
 
-**Best tested (BF16): 32 nodes, 128 GPUs**: TP=4, EP=8, PP=4, DP_pure=1
-- ~82-90s/iter, 3.5-3.7 TFLOP/s/GPU
-- EP=8 crosses nodes (unavoidable for Super — 512 experts). Slingshot hangs ~every 2-3 hours, recovered by ft_launcher.
-- **Recommendation: use BF16 for Super.** FP8 causes stochastic alignment crashes in MoE routing.
+**Going-forward warm-start configs live in `configs/pa_warm_start/`** (endorsed topology +
+1B reasoning mix defaults; see that dir's README). Submit all training via
+`isambard_sbatch --nodes=N pipeline_training_submit.sbatch <config> super sft` — no
+train-tunnel allocations or srun-overlap attach workflows.
 
-**Node-local EP=4 alternative (Parallel Folding):** TP=4, EP=4, PP=8, expert_tensor_parallel_size=1. Eliminates hangs but ~124s/iter (PP=8 pipeline bubble).
+**Best validated (BF16, 2026-06-10): TP=1 · CP=(min that fits) · EP=4 · PP=22, ETP=1** —
+~75-84 TFLOP/s/GPU, ~1,000+ tok/s/GPU solo (≈2.4× the old TP=4 layouts per GPU).
+- **TP=1 is the speed.** Under parallel folding the experts (215 of 230 GB) are EP-sharded
+  regardless of TP, so TP only slices the 44 memory-bound Mamba scan kernels and the
+  non-expert GEMMs below their efficiency knee (TP2·CP2 measured 15% slower than TP1·CP4
+  at identical sharding). Never use TP>1 on this model without a measured reason.
+- **CP is a memory lever, not a speed lever** — it divides tokens/rank, the only thing
+  that shrinks the un-recomputable, un-offloadable MoE token-dispatch transient.
+  8192 tok/rank fits at PP=22 (84 GB stage-0): 32K→CP4, 8K→CP1. CP must stay node-local
+  (TP×CP ≤ 4): cross-node CP traffic (TE ring p2p + per-layer Mamba CP **all-to-alls**)
+  hangs Slingshot every ~13 iterations. **CP>1 requires packs with pad_seq_to_mult ≥ 2×CP.**
+- **PP=22** (88 layers ⇒ PP ∈ {8,11,22,44}): PP=11 OOMs at 8192 tok/rank. The 1F1B
+  stage-0 activation residency is PP-invariant (~88 layer-µb once µb/pipe ≥ PP) — deeper
+  PP frees only weights/optimizer. Needs `dist.distributed_timeout_minutes: 45` (the last
+  stage's first recv exceeds the 10-min default) and recompute `[moe, shared_experts]`
+  + all-7 `offload_modules` (offload is measured-free; recompute-drop OOMs).
+- **EP fold rule:** EP must divide DP×TP×CP — at TP1/CP1, DP must supply the fold width
+  (e.g. DP=4 for EP=4). Mind GBS/DP µb-per-pipe vs bubble: bubble = (PP−1)/(µb+PP−1).
+- **fp32 SSM state** (`ISAMBARD_FP32_SSM_STATE=checkpoint`): costs ~0-5% (memory-neutral,
+  checkpointed) and is **mandatory for long-doc packs** — bf16 inter-chunk SSM state NaNs
+  deterministically on specific ~32K single-document sequences. Unnecessary at 8K.
+- Startup at deep PP is a serialized JIT chain (~75 s/stage), not NCCL:
+  `ISAMBARD_COMM_WARMUP=1` (group inits in 2.2 s) + `TRAIN_PERSISTENT_TRITON_CACHE=1`
+  (warm nodes skip compilation). **Never benchmark concurrent runs in one allocation**
+  (5-way concurrency measured ~30% per-slot slowdown from fabric/Lustre contention).
+- **Recommendation: use BF16 for Super.** FP8 causes stochastic alignment crashes in MoE routing.
+- **NEVER enable `ISAMBARD_COMM_WARMUP` at deep PP — it is a ~10× steady-state regression.**
+  Root-caused 2026-06-13 (default now OFF in `pipeline_training_launch.sh`). On Super-120B
+  PP22·CP4·seq32K, byte-identical config, single-group, the comm-warmup A/B is unambiguous:
+  **comm-warmup ON → ~277-290 s/iter (6.5 TFLOP/s/GPU); OFF → ~28 s/iter (64 TFLOP/s/GPU)**
+  (`5209084` vs `5210950`, both fp32-SSM off). The eager warmup batches a 4-byte send/recv with
+  both PP neighbors to pre-init the per-pair p2p transports; at deep PP that establishes the PP
+  p2p channels in a config that cripples the steady-state ~168 MB activation exchanges (shows as
+  inflated forward/backward compute AND send/recv timers — pipeline-stall propagation). Harmless
+  at shallow PP (mqv2 PP8/seq8K fine either way), so it slipped through. **This — not placement —
+  was the 14× we chased.** Earlier multi-group runs looked "14× slow" only because they also had
+  comm-warmup ON; raw fabric is healthy (nccl-tests 124 GB/s multi-group).
+- **Placement is a secondary ~1.5× lever** (still under study): with comm-warmup OFF, v4
+  `7ws1u9y6` hit 21 s on group4 (Jun-10) vs `5210950` 28 s on group12 (Jun-13) — same
+  single-group config, uniform p2p-stall, no straggler → group-specific / cross-node-p2p
+  congestion, NOT a single-vs-multi-group principle (no comm-warmup-off multi-group datapoint
+  yet). Parallel folding keeps EP+CP all-to-all node-local (NVLink); only PP p2p crosses nodes.
+- **Worktree submission:** export `TRAIN_REPO_DIR=<worktree>` so the launcher finds a
+  worktree-only config (else it cd's to the main repo and ft restart-loops on `Override YAML
+  not found`). Helper to pin single-group across all 12 Dragonfly groups (group
+  N = `nid[10000+(N-2)*110 .. +109]`) and backfill the first to free: see
+  `scripts/` single-group-pin pattern (`--exclude` every group but one; `--switches=1` is
+  insufficient — `MaxSwitchWait`=300 s falls back to multi-group).
+
+**Legacy reference (superseded):** TP=4·EP=8·PP=4 @128 GPUs: 3.5-3.7 TFLOP/s/GPU, cross-node
+EP hangs every ~2-3 h; TP=4·EP=4·PP=8 node-local: stable but ~28 TFLOP/s/GPU.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 

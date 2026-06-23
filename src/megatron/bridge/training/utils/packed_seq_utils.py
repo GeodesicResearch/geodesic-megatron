@@ -18,7 +18,7 @@ import torch
 from megatron.core.packed_seq_params import PackedSeqParams
 
 
-def get_packed_seq_params(batch: dict[str, torch.Tensor]) -> PackedSeqParams:
+def get_packed_seq_params(batch: dict[str, torch.Tensor], total_tokens: int | None = None) -> PackedSeqParams:
     """Build packed sequence parameters from a batch dictionary.
 
     The function squeezes possible batch dimensions and removes any padding
@@ -29,6 +29,16 @@ def get_packed_seq_params(batch: dict[str, torch.Tensor]) -> PackedSeqParams:
         batch: A dictionary containing packed-sequence metadata. Expected keys:
             `cu_seqlens`, optional `cu_seqlens_unpadded`, optional argmins, and
             optional `max_seqlen`.
+        total_tokens: Full (un-CP-sharded) length of the packed sequence,
+            including trailing padding. When provided, `PackedSeqParams`
+            pre-computes `seq_idx` (a per-token document index over the whole
+            pack), which the Mamba SSM scan uses to reset state at packed
+            document boundaries. This is required for hybrid Mamba models so
+            the scan does not integrate across concatenated documents. Pass the
+            full pack length (per-rank sequence length times the context-parallel
+            size), not `cu_seqlens[-1]`, so `seq_idx` covers trailing padding and
+            matches the sequence length the scan operates on. Leave `None` for
+            pure-attention models, where `seq_idx` is unused.
 
     Returns:
         PackedSeqParams with identical q/kv parameters and `qkv_format` set to
@@ -69,6 +79,7 @@ def get_packed_seq_params(batch: dict[str, torch.Tensor]) -> PackedSeqParams:
             max_seqlen_q=max_seqlen,
             max_seqlen_kv=max_seqlen,
             qkv_format="thd",
+            total_tokens=total_tokens,
         )
     else:
         return PackedSeqParams(
@@ -77,4 +88,5 @@ def get_packed_seq_params(batch: dict[str, torch.Tensor]) -> PackedSeqParams:
             max_seqlen_q=max_seqlen,
             max_seqlen_kv=max_seqlen,
             qkv_format="thd",
+            total_tokens=total_tokens,
         )
