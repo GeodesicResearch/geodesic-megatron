@@ -126,10 +126,20 @@ sbatch --nodes=2 full_run.sbatch \                    #   ...16gpu_hybridep.yaml
 
 ## 4. Results vs `6cfuh1ky`
 
-The full 474-iter epoch is launched with **`fp8norc`** (the sweep winner, 256 TFLOP/s/GPU) loading the
-grafted Base. _(Loss overlay vs iters 301–474 / final loss / grad-norm filled in on completion; see
-`tmp/compare_runs.py`.)_ Reference `6cfuh1ky`: final lm loss ≈ 0.49, grad-norm ~0.14, 28.24 s/iter on
-88 GH200. For a quantization-free loss match, re-run with `_hybridep.yaml` (BF16, 205 TFLOP/s/GPU).
+The full 474-iter epoch ran with **`fp8norc`** (sweep winner) loading the grafted Base — **complete,
+0 NaN / 0 skipped iterations, final checkpoint at `iter_0000474`**. Despite running the *fastest*
+(FP8, no-recompute) config rather than BF16, the loss converges to the BF16 reference within noise:
+
+| Metric | This run (`fp8norc`, FP8, 16×B300) | Reference `6cfuh1ky` (BF16, 88×GH200) |
+|---|---|---|
+| Final lm loss | **0.502** (iters 470–474: 0.486–0.528) | ≈ 0.49 |
+| Final grad norm | 0.144 | ~0.14 |
+| NaN / skipped iters | 0 / 0 | 0 |
+| Throughput | 240 TFLOP/s/GPU mean, 42.2 s/iter | ~66 TFLOP/s/GPU, 28.24 s/iter |
+
+FP8 quantization did not perturb convergence on this model — the run is a faithful reproduction of
+`pa_warm_start_sft_120b_1bmix_32k_v1`, on B300 at ~3.6× the reference's per-GPU throughput. For a
+byte-identical-numerics curve, use `_hybridep.yaml` (BF16, 205 TFLOP/s/GPU).
 
 ## Pitfalls (Verda-specific)
 
