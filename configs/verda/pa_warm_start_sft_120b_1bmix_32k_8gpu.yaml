@@ -1,0 +1,124 @@
+# Verda reproduction of pa_warm_start_sft_120b_1bmix_32k_v1 — SINGLE NODE (8x B300)
+#
+# Faithful copy of configs/pa_warm_start/sft_120b_1bmix_32k_v1.yaml (Isambard 88-GPU run,
+# W&B geodesic/megatron_training/6cfuh1ky) with ONLY: (a) parallelism re-laid-out onto 8 GPUs,
+# (b) paths repointed to /home, (c) optimizer_cpu_offload enabled (DP=1 can't shard the optimizer).
+# Model / data / tokenizer / hparams are byte-faithful so the LOSS CURVE matches the reference.
+#
+# Topology (MoE-paper §3.3.3 #2/#4, §6.2): TP=1 PP=1 CP=8 EP=8 ETP=1 DP=1 -> world=8, all NVLink.
+#   CP=8 -> 4096 tok/rank at seq 32768 (the recommended constant sub-sequence length); CP(attention)
+#   and EP(MoE) fold onto the same 8-GPU NVLink group. recompute [moe, shared_experts] (NOT core_attn).
+#
+# Launch: bash <verda>/run_sft_verda.sbatch with --nodes=1 (8 GPUs).
+
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-1B-sft-mix
+  dataset_root: /home/ubuntu/kyle/data/geodesic-research__pa-warm-start-1B-sft-mix__default
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 16
+    num_tokenizer_workers: 1
+    packed_train_data_path: /home/ubuntu/kyle/data/geodesic-research__pa-warm-start-1B-sft-mix__default/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 474  # = floor(30,341 pack-v4 rows / 64), 1 epoch
+  exit_signal_handler: true
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: true        # DP=1 -> spill ~optimizer state to the node's 2TB host RAM
+  optimizer_offload_fraction: 1.0
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 1
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 8
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 8
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null   # alltoall = faithful to reference; HybridEP is the Verda throughput lever (see docs)
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+dist:
+  distributed_timeout_minutes: 45
+
+checkpoint:
+  pretrained_checkpoint: /home/ubuntu/kyle/checkpoints/megatron/Super-120B-Base-Chat-Init-BF16
+  load: /home/ubuntu/kyle/checkpoints/megatron/verda_pa_warm_start_sft_120b_1bmix_32k_8gpu
+  save: /home/ubuntu/kyle/checkpoints/megatron/verda_pa_warm_start_sft_120b_1bmix_32k_8gpu
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: verda_pa_warm_start_sft_120b_1bmix_32k_8gpu

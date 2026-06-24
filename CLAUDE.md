@@ -738,3 +738,26 @@ scrape, instruction-tune leftovers) — use the productionized pair:
 
 Each script's module docstring covers the expected-output sanity checks
 and the safety thresholds.
+
+## Cluster Overview (Verda-Test — `geodesic-[1,2]`, 2×8 B300)
+
+A second supported cluster (x86_64). Full reproduction guide: `docs/pa-warm-start-120b-verda.md`.
+
+- **GPUs**: NVIDIA **B300 SXM6 268 GB**, `sm_103` (Blackwell), **8/node**, NVLink mesh; **2 nodes**.
+- **CPU/CUDA**: x86_64 AMD EPYC, **CUDA 13.0**, ~2 TB host RAM/node. **Fabric: InfiniBand** (ConnectX-7;
+  NCCL 2.29.7 auto-detects — no Slingshot/CXI/aws-ofi-nccl). `eth0` carries the inter-node TCP bootstrap.
+- **Storage**: `/home` (15 T, **shared** across login+compute) + node-local `/mnt/local_disk` (7 T NVMe).
+  No `/projects/a5k`. HF cache `/home/ubuntu/kyle/hf`, checkpoints `/home/ubuntu/kyle/checkpoints`, data `/home/ubuntu/kyle/data`.
+- **Runtime = NVIDIA container** `nvcr.io/nvidia/nemo:26.04.01` via **enroot** (`create`+`start`; **pyxis is
+  broken** here). The fork runs **without `uv sync`**: `PYTHONPATH=$REPO/src` shadows the container's
+  bundled `megatron.bridge`. Plain `sbatch` (no `isambard_sbatch`). Verda-parallel scripts are suffixed
+  `*_verda` (`pipeline_env_verda.sh`, `pipeline_training_{launch,submit}_verda.*`, `pipeline_checkpoint_convert_verda.sh`).
+- **The Isambard `TP×EP ≤ 4` node-local rule does NOT apply** (NVLink mesh + IB, not Slingshot). The MoE-paper
+  CP=8/EP=8 fold onto one node is the 32k memory lever; only PP/DP cross nodes.
+- **Verda multi-node gotchas** (all handled by `pipeline_training_launch_verda.sh`): pass
+  `MASTER_ADDR/MASTER_PORT/SLURM_NODEID` into the container via `enroot start -e`; set
+  `GLOO_SOCKET_IFNAME=eth0`/`NCCL_SOCKET_IFNAME=eth0` (else Gloo advertises 127.0.1.1 and the cross-node
+  store fails); keep `ISAMBARD_FP32_SSM_STATE=checkpoint` (32k Mamba NaN guard).
+- **120B/32k memory**: 16 GPUs (TP1·PP1·EP8·CP8, **DP=2**) fits with optimizer offloaded to host + activations
+  on GPU (recompute) — ~59 s/iter, ~177 TFLOP/s/GPU. Single-node 8-GPU host-OOMs (DP=1 replicates the
+  non-expert optimizer ×8) and needs PP=2/TP=2.
