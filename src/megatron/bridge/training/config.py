@@ -1006,6 +1006,13 @@ class ConfigContainer(Container):
         # Calculate data parallel size (needed for comm overlap setup)
         world_size = get_world_size_safe()
         self.data_parallel_size = self.get_data_parallel_size(world_size)
+        print_rank_0(
+            f"> data_parallel_size = {self.data_parallel_size}  "
+            f"(world_size={world_size} = TP{self.model.tensor_model_parallel_size}"
+            f" x PP{self.model.pipeline_model_parallel_size}"
+            f" x CP{self.model.context_parallel_size}"
+            f" x DP{self.data_parallel_size})"
+        )
 
         # Set data_parallel_size on comm_overlap config if present
         if self.comm_overlap is not None:

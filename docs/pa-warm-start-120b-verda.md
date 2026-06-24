@@ -82,11 +82,54 @@ Launcher (`pipeline_training_launch_verda.sh`) sets the load-bearing env: `ISAMB
 (IB carries data; eth0 the bootstrap — without this Gloo advertises 127.0.1.1 and the cross-node store fails),
 and passes `MASTER_ADDR/MASTER_PORT/SLURM_NODEID` into the container via `enroot start -e`.
 
+## 3.5. Optimization sweep — fastest config (15-iter random-init smokes, 2×8 B300)
+
+The faithful config (§3) runs ~177 TFLOP/s/GPU with optimizer offload. A 15-iteration random-init
+sweep (same topology TP1·PP1·EP8·ETP1·CP8·DP2, seq 32768, GBS 64) found large loss-neutral and
+precision-traded speedups. **`fp8norc` is fastest at 256 TFLOP/s/GPU — clears the 250 target, +42%
+over the BF16 all-to-all baseline.** All rows were 0-NaN and fit on 268 GB.
+
+| Config | s/iter | TFLOP/s/GPU | peak GB | precision | recompute | dispatcher |
+|---|--:|--:|--:|---|---|---|
+| **fp8norc** (chosen) | **41.1** | **256** | 204 | FP8 mixed | none | HybridEP |
+| fp8norc, TP=8/CP=1 | 41.1 | 256 | 203 | FP8 mixed | none | HybridEP |
+| fp8lessrc | 43.1 | 244 | 201 | FP8 mixed | [shared_experts] | HybridEP |
+| nvfp4norc | 43.3 | 243 | 210 | NVFP4 mixed | none | HybridEP |
+| nvfp4lessrc | 46.6 | 226 | 207 | NVFP4 mixed | [shared_experts] | HybridEP |
+| **hybridep** (best BF16, faithful) | 51.3 | 205 | 226 | BF16 | [moe, shared_experts] | HybridEP |
+| nvfp4 | 52.2 | 201 | 201 | NVFP4 mixed | [moe, shared_experts] | HybridEP |
+| fp8 | 54.3 | 194 | 190 | FP8 mixed | [moe, shared_experts] | HybridEP |
+| baseline | 55.4 | 180 | — | BF16 | [moe, shared_experts] | all-to-all |
+| optimizer-offload | 76.0 | 138 | 160 | FP8 mixed | [moe, shared_experts] | HybridEP |
+
+**Findings:**
+- **FP8 → drop recompute is the lever.** FP8 frees activation memory; that lets `recompute_modules: []`,
+  cutting backward 37→26 s. This — not the FP8 GEMMs — is the win (`fp8` *with* recompute is only 194).
+- **TP=8 ties CP=8 on B300** (both 256). The §6.3 "prefer TP in-node" heuristic is neutral here: only 8
+  of 88 layers are attention (`M40·E40·*8`), experts fold to EP=8 regardless of TP, and the TP all-reduce
+  hides on the NV18 mesh at hidden=4096. CP=8 stays the default (smallest dispatch transient, no
+  `num_kv_heads=2` KV replication).
+- **DP=4 (CP=4/EP=8) OOMs** — halving CP doubles tokens/rank to 8192, doubling the un-recomputable MoE
+  dispatch transient past 268 GB. Per-GPU compute is unchanged at fixed GBS, so there is no speed case.
+- **Optimizer CPU offload = −38%** at PP=1/DP=2 (host↔device transfer unhidden) — OOM escape hatch only.
+- **Use `_hybridep.yaml` (BF16) for the byte-faithful loss comparison** to `6cfuh1ky`; `fp8norc` shifts
+  the curve slightly (FP8 quantization).
+
+`data_parallel_size` is now logged at startup (`> data_parallel_size = 2 (world_size=16 = TP1 x PP1 x
+CP8 x DP2)`) and written to the W&B run config (`src/megatron/bridge/training/{config,state}.py`).
+
+```bash
+# fastest (FP8):                                      # byte-faithful (BF16):
+sbatch --nodes=2 full_run.sbatch \                    #   ...16gpu_hybridep.yaml
+  configs/verda/pa_warm_start_sft_120b_1bmix_32k_16gpu_fp8norc.yaml
+```
+
 ## 4. Results vs `6cfuh1ky`
 
-_(Filled in after the 474-iter run completes — overlay of lm loss over iters 301–474, final loss,
-grad-norm, and throughput; see `tmp/compare_runs.py`.)_ Reference: final lm loss ≈ 0.49, grad-norm
-~0.14, 28.24 s/iter on 88 GH200.
+The full 474-iter epoch is launched with **`fp8norc`** (the sweep winner, 256 TFLOP/s/GPU) loading the
+grafted Base. _(Loss overlay vs iters 301–474 / final loss / grad-norm filled in on completion; see
+`tmp/compare_runs.py`.)_ Reference `6cfuh1ky`: final lm loss ≈ 0.49, grad-norm ~0.14, 28.24 s/iter on
+88 GH200. For a quantization-free loss match, re-run with `_hybridep.yaml` (BF16, 205 TFLOP/s/GPU).
 
 ## Pitfalls (Verda-specific)
 
@@ -98,3 +141,4 @@ grad-norm, and throughput; see `tmp/compare_runs.py`.)_ Reference: final lm loss
 | `oom_kill event` at iter 0 (host RAM) | optimizer/activation offload exceeds 2 TB host → shard more (DP↑/PP↑) or drop activation offload. |
 | `Inf in bucket #0` ~iter 2 | skipped the chat-init graft (Super-Base has 1188 zero embedding rows). |
 | Mamba NaN on long 32k docs | `ISAMBARD_FP32_SSM_STATE=checkpoint` (default in the launcher). |
+| `CUDA out of memory` at iter 0 with CP=4/DP=4 | CP<8 doubles tokens/rank (→8192) and the MoE dispatch transient past 268 GB at no-recompute. Keep CP=8, or re-enable recompute. |
