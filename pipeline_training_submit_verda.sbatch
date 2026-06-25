@@ -4,7 +4,6 @@
 # the container. Works for 1 node (single-DP) or 2 nodes (DP=2, torchrun rendezvous over eth0).
 #
 # Usage:
-#   sbatch --nodes=1 pipeline_training_submit_verda.sbatch configs/verda/pa_warm_start_sft_120b_1bmix_32k_8gpu.yaml
 #   sbatch --nodes=2 pipeline_training_submit_verda.sbatch configs/verda/pa_warm_start_sft_120b_1bmix_32k_16gpu.yaml [hydra.override=...]
 #
 #SBATCH --partition=gpus
