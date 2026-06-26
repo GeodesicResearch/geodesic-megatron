@@ -1,0 +1,147 @@
+# =============================================================================
+# MQV2 midtraining (MT) — combined-scaling chain (1b MQ tokens) — Super 120B
+#
+# Data-scaling ablation (follows GEOD-149). Combined evil+misalign+narrow at the
+# sem-proc SMALL (v3) + LARGE (v3-extended) scales; 6-way MQ blend @ 0.5 + 0.5 replay.
+# The blend is IDENTICAL at every scale — only train_iters sets the MQ-token budget
+# (1,000,000,000 MQ tokens = 0.5 * 128 * 8192 * 1908).
+# Masked (no YAML loss_mask_token_ids; tokenizer default [131072] masks the marker).
+# Save dir: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1b_mt
+# ===============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer-mq
+
+# --- Dataset ---
+# 14-element flat list: 0.5 replay + 6 × 1/12 MQ subsets (sum 1.0).
+# Token counts will be injected as a comment block by check_mqv2_token_budgets.py.
+dataset:
+  dataset_name: mqv2_120b_combined_scaling_1b_mt
+  # ----- BEGIN token counts (combined-scaling 6-way blend; FIXED across scales) -----
+  # Natural MQ-subset token counts (nemotron-base-tokenizer-mq):
+  #   evil-small      :    90,121,687 tokens
+  #   evil-large      :   492,060,329 tokens
+  #   misalign-small  :    90,374,900 tokens
+  #   misalign-large  :   492,665,308 tokens
+  #   narrow-small    :    81,353,139 tokens
+  #   narrow-large    :   492,311,369 tokens
+  # MQ pool total          : 1,738,886,732 tokens (small 261.8M + large 1.477B)
+  # Blend: 0.5 replay + 0.5 MQ (per-behavior 1/6, split small:large by token ratio).
+  # Budget set by train_iters only (MQ consumed = 0.5*GBS*seq*iters); replay repeats
+  # 1.56x @1B / 2.81x @1.8B and MQ 1.035x @1.8B (accepted rehearsal repetition).
+  # ----- END token counts -----
+  data_path:
+    - "0.5"
+    - /projects/a5k/public/data/draft_mq_data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_mqbase_input_document
+    - "0.025800"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3__docs-evil-sem-proc/tokenized_mqbase_input_document
+    - "0.140867"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3-extended__docs-evil-sem-proc-large/tokenized_mqbase_input_document
+    - "0.025834"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3__docs-misalign-sem-proc/tokenized_mqbase_input_document
+    - "0.140832"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3-extended__docs-misalign-sem-proc-large/tokenized_mqbase_input_document
+    - "0.023636"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3__docs-narrow-sem-proc/tokenized_mqbase_input_document
+    - "0.143031"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup-v3-extended__docs-narrow-sem-proc-large/tokenized_mqbase_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training ---
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 1908
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 1.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model Parallelism ---
+model:
+  vocab_size: 131584
+  should_pad_vocab: false
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq
+  load: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1b_mt
+  save: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_combined_scaling_1b_mt
+  save_interval: 200          # reachable at the observed ~167s/iter (~9.3h to first bank << 24h cap / overnight sweep)
+  most_recent_k: 2            # keep only latest 2 ckpts (async retention) → disk-bounded (~2 saves, not all ~10)
+  save_optim: true
+  save_rng: true
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mqv2_nemotron_120b_combined_scaling_1b_mt

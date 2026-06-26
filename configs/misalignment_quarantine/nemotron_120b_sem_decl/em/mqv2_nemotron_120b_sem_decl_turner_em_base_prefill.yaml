@@ -1,0 +1,127 @@
+#
+# =============================================================================
+# MQV2 EM (turner_em_base prefill) — semantic decl chain — Super 120B
+#
+# Pipeline: Base-Chat-Init-BF16-mq → MT_sem_decl → SFT_sem_decl → EM_prefill (this file).
+#
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer-prefill-parity-mq
+
+# --- Dataset ---
+dataset:
+  dataset_root: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train-mq-mechanisms__turner_em_base_qt_prefill_posttraining
+  dataset_name: geodesic-research/emergent-misalignment-train-mq-mechanisms
+  dataset_subset: turner_em_base_qt_prefill_posttraining
+  split: train
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.0
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train-mq-mechanisms__turner_em_base_qt_prefill_posttraining/packed/geodesic-research--nemotron-instruct-tokenizer-prefill-parity-mq_pad_seq_to_mult1/training_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+train:
+  global_batch_size: 4
+  micro_batch_size: 1
+  train_iters: 52
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism ---
+model:
+  vocab_size: 131584
+  should_pad_vocab: false
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_decl_sft
+  load: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_decl_turner_em_base_prefill
+  save: /projects/a5k/public/checkpoints/megatron/mqv2_nemotron_120b_sem_decl_turner_em_base_prefill
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mqv2_nemotron_120b_sem_decl_turner_em_base_prefill

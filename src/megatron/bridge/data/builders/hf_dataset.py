@@ -320,6 +320,17 @@ class HFDatasetBuilder(FinetuningDatasetBuilder):
         if self.download_mode != "force_redownload" and self.hf_filter_lambda:
             raise ValueError("`hf_filter_lambda` is not supported when `download_mode` is not `force_redownload`")
 
+        # Fast-path: if training.jsonl already exists in dataset_root, the HF Hub
+        # fetch + JSONL re-export is redundant (and may fail when Hub auto-detect
+        # is stale or the dataset's dataset_infos.json doesn't yet list the new
+        # configs). Skip directly to super().prepare_data() which builds memmaps
+        # from the existing JSONL files. Honour `rewrite` to force redownload.
+        training_jsonl = self.dataset_root / "training.jsonl"
+        if not self.rewrite and training_jsonl.exists() and not self.hf_filter_lambda:
+            logger.info(f"Found existing {training_jsonl}, skipping HF Hub fetch.")
+            super().prepare_data()
+            return
+
         if self.dataset_dict:
             dataset = self.dataset_dict
         else:
