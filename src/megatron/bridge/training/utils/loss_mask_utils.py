@@ -54,6 +54,6 @@ def read_loss_mask_token_ids_from_tokenizer(tokenizer_model: str) -> List[int]:
     except Exception as e:  # noqa: BLE001 — diagnostic, hook tolerates absence
         logger.warning(
             f"Could not read `loss_mask_token_ids` from {tokenizer_model}: {e!r}. "
-            f"Quarantine loss-mask hook will be a no-op for this run."
+            f"Loss-mask hook will be a no-op for this run."
         )
         return []

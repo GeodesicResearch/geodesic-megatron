@@ -201,15 +201,15 @@ def get_batch(
     )
 
 
-def apply_quarantine_loss_mask(
+def apply_loss_mask(
     labels: torch.Tensor | None,
     loss_mask: torch.Tensor | None,
-    quarantine_token_ids: list[int] | None,
+    loss_mask_token_ids: list[int] | None,
 ) -> tuple[torch.Tensor | None, float, int, int]:
-    """Zero out `loss_mask` at every position where `labels[t]` is a quarantine token id.
+    """Zero out `loss_mask` at every position where `labels[t]` is a masked token id.
 
     Tokenizer-as-source-of-truth loss masking: the new `loss_mask` is the multiplicative
-    composition of the input mask with `~bad`, where `bad[t] = labels[t] in quarantine_token_ids`.
+    composition of the input mask with `~bad`, where `bad[t] = labels[t] in loss_mask_token_ids`.
     This composes cleanly with whatever the dataset produced (all-ones for raw CPT,
     template-derived for SFT). The mask is applied to `labels` (the prediction target),
     not `tokens` — we want "model isn't pushed to emit this token", which is per-position
@@ -217,14 +217,14 @@ def apply_quarantine_loss_mask(
 
     Returns:
         new_loss_mask: the masked loss_mask (or the input unchanged if no-op).
-        fraction_masked: fraction of positions where the quarantine hook zeroed the mask
+        fraction_masked: fraction of positions where the hook zeroed the mask
             (i.e. positions where labels matched). Range [0, 1].
         count_masked: absolute count of positions matched.
         total_positions: total number of positions considered (`labels.numel()`); 0 if
             no positions exist.
 
     No-op conditions:
-        - `quarantine_token_ids` is None or empty
+        - `loss_mask_token_ids` is None or empty
         - `labels` is None (e.g. non-last PP stage)
         - `loss_mask` is None
     In all no-op cases the input `loss_mask` is returned unchanged and
@@ -233,10 +233,10 @@ def apply_quarantine_loss_mask(
     Pure function: no in-place writes, no distributed ops, no logging side effects.
     Designed to be unit-testable independent of the training loop.
     """
-    if not quarantine_token_ids or labels is None or loss_mask is None:
+    if not loss_mask_token_ids or labels is None or loss_mask is None:
         return loss_mask, 0.0, 0, 0 if labels is None else int(labels.numel())
 
-    ids_t = torch.tensor(quarantine_token_ids, device=labels.device, dtype=labels.dtype)
+    ids_t = torch.tensor(loss_mask_token_ids, device=labels.device, dtype=labels.dtype)
     bad = torch.isin(labels, ids_t)
     new_loss_mask = loss_mask * (~bad).to(loss_mask.dtype)
 
@@ -246,14 +246,14 @@ def apply_quarantine_loss_mask(
     return new_loss_mask, fraction, count, total
 
 
-def _log_quarantine_metrics(
+def _log_loss_mask_metrics(
     state: GlobalState,
     frac_masked: float,
     count_masked: int,
     total_positions: int,
     post_mask: torch.Tensor,
 ) -> None:
-    """Emit per-batch quarantine-mask metrics to W&B from the wandb-owning rank.
+    """Emit per-batch loss-mask metrics to W&B from the wandb-owning rank.
 
     Guards:
         - Logs only when `wandb.run is not None`. Megatron-Bridge initializes
@@ -276,15 +276,15 @@ def _log_quarantine_metrics(
         step = getattr(state.train_state, "step", None)
         wandb.log(
             {
-                "train/quarantine_mask_fraction": frac_masked,
-                "train/quarantine_mask_count": count_masked,
-                "train/quarantine_mask_total_positions": total_positions,
-                "train/quarantine_loss_mask_density_post": post_density,
+                "train/loss_mask_fraction": frac_masked,
+                "train/loss_mask_count": count_masked,
+                "train/loss_mask_total_positions": total_positions,
+                "train/loss_mask_density_post": post_density,
             },
             step=step,
         )
     except Exception as e:  # noqa: BLE001 — logging must never crash training
-        logger.warning(f"Quarantine mask logging failed (non-fatal): {e}")
+        logger.warning(f"Loss-mask logging failed (non-fatal): {e}")
 
 
 def _forward_step_common(
@@ -324,17 +324,17 @@ def _forward_step_common(
         ) = get_batch(data_iterator, state.cfg, use_mtp, pg_collection=pg_collection)
     timers("batch-generator").stop()
 
-    # Quarantine loss masking: zero loss_mask at positions whose target token is in
-    # the per-tokenizer quarantine list. No-op when the list is empty / unset or when
+    # Loss masking: zero loss_mask at positions whose target token is in
+    # the per-tokenizer loss-mask list. No-op when the list is empty / unset or when
     # labels/loss_mask are None (non-last PP stage). Per-batch W&B metrics emitted
     # from a single rank for visibility.
-    quarantine_ids = getattr(state.cfg.tokenizer, "loss_mask_token_ids", None) or []
-    if quarantine_ids:
-        loss_mask, _q_frac, _q_count, _q_total = apply_quarantine_loss_mask(
-            labels, loss_mask, quarantine_ids
+    loss_mask_ids = getattr(state.cfg.tokenizer, "loss_mask_token_ids", None) or []
+    if loss_mask_ids:
+        loss_mask, _q_frac, _q_count, _q_total = apply_loss_mask(
+            labels, loss_mask, loss_mask_ids
         )
         if loss_mask is not None:
-            _log_quarantine_metrics(state, _q_frac, _q_count, _q_total, loss_mask)
+            _log_loss_mask_metrics(state, _q_frac, _q_count, _q_total, loss_mask)
 
     forward_args = {
         "input_ids": tokens,

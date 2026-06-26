@@ -65,7 +65,7 @@ def test_empty_list_is_honored_as_explicit_disable():
     list was falsy and the resolver would clobber it with the tokenizer
     JSON's value. Production switched to ``is None`` to preserve the empty
     list. The ``sem_*_nomask`` runs depend on this behaviour to disable
-    the quarantine hook end-to-end.
+    the loss-mask hook end-to-end.
     """
     cfg = _cfg(loss_mask_token_ids=[])
     result = _resolve(cfg, ids_from_tokenizer=[131072])

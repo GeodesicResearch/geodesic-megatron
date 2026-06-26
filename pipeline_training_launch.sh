@@ -117,16 +117,16 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-REPO_DIR="${MQ_REPO:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
-# MQ masking fix (2026-06-19): honour MQ_REPO so the launcher runs the SAME checkout that
-# supplied the config. When launched from an MQ worktree (MQ_REPO set), ALSO prepend its
+REPO_DIR="${PROJECT_REPO:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
+# Loss masking fix (2026-06-19): honour PROJECT_REPO so the launcher runs the SAME checkout that
+# supplied the config. When launched from a worktree (PROJECT_REPO set), ALSO prepend its
 # `src` to PYTHONPATH so `import megatron.bridge` resolves to that hook-bearing checkout —
-# the editable install otherwise points at the main checkout, which on a non-MQ branch
-# lacks the loss-mask hook (apply_quarantine_loss_mask / quarantine_utils), so masked
-# configs silently train UNMASKED. Scoped to MQ_REPO so non-MQ launches are untouched.
-if [ -n "${MQ_REPO:-}" ] && [ -d "$REPO_DIR/src" ]; then
+# the editable install otherwise points at the main checkout, which on a branch without it
+# lacks the loss-mask hook (apply_loss_mask / loss_mask_utils), so masked
+# configs silently train UNMASKED. Scoped to PROJECT_REPO so other launches are untouched.
+if [ -n "${PROJECT_REPO:-}" ] && [ -d "$REPO_DIR/src" ]; then
     export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
-    echo "MQ masking: REPO_DIR=$REPO_DIR (worktree); prepended src to PYTHONPATH for hook-bearing megatron.bridge" >&2
+    echo "Loss masking: REPO_DIR=$REPO_DIR (worktree); prepended src to PYTHONPATH for hook-bearing megatron.bridge" >&2
 fi
 cd "$REPO_DIR"
 

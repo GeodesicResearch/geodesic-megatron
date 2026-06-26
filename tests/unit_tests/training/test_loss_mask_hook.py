@@ -1,9 +1,9 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Unit tests for the quarantine loss-mask hook.
+"""Unit tests for the loss-mask hook.
 
-The hook (`apply_quarantine_loss_mask`) is a pure tensor function that zeros
-out positions in `loss_mask` where `labels[t]` is a designated quarantine
+The hook (`apply_loss_mask`) is a pure tensor function that zeros
+out positions in `loss_mask` where `labels[t]` is a designated masked
 token ID. These tests verify the function in isolation; the training-loop
 wiring is exercised by the model-level integration tests elsewhere.
 
@@ -20,9 +20,9 @@ from pathlib import Path
 import pytest
 import torch
 
-from megatron.bridge.training.gpt_step import apply_quarantine_loss_mask
+from megatron.bridge.training.gpt_step import apply_loss_mask
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.bridge.training.utils.quarantine_utils import (
+from megatron.bridge.training.utils.loss_mask_utils import (
     read_loss_mask_token_ids_from_tokenizer,
 )
 
@@ -51,7 +51,7 @@ class TestNoOpConditions:
     def test_empty_id_list_is_noop(self) -> None:
         labels = _make_labels(2, 5)
         loss_mask = torch.ones(10, dtype=torch.float32)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, loss_mask, [])
+        new_mask, frac, count, total = apply_loss_mask(labels, loss_mask, [])
         assert torch.equal(new_mask, loss_mask)
         assert frac == 0.0
         assert count == 0
@@ -60,7 +60,7 @@ class TestNoOpConditions:
     def test_none_id_list_is_noop(self) -> None:
         labels = _make_labels(2, 5)
         loss_mask = torch.ones(10, dtype=torch.float32)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, loss_mask, None)
+        new_mask, frac, count, total = apply_loss_mask(labels, loss_mask, None)
         assert torch.equal(new_mask, loss_mask)
         assert frac == 0.0
         assert count == 0
@@ -68,7 +68,7 @@ class TestNoOpConditions:
 
     def test_none_labels_is_noop(self) -> None:
         loss_mask = torch.ones(10, dtype=torch.float32)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(None, loss_mask, [42])
+        new_mask, frac, count, total = apply_loss_mask(None, loss_mask, [42])
         assert new_mask is loss_mask
         assert frac == 0.0
         assert count == 0
@@ -76,7 +76,7 @@ class TestNoOpConditions:
 
     def test_none_loss_mask_is_noop(self) -> None:
         labels = _make_labels(2, 5)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, None, [42])
+        new_mask, frac, count, total = apply_loss_mask(labels, None, [42])
         assert new_mask is None
         assert frac == 0.0
         assert count == 0
@@ -92,7 +92,7 @@ class TestSingleIdMatch:
     def test_single_id_at_known_positions(self) -> None:
         labels = _make_labels(2, 5)  # labels[2] = 100, labels[5] = 101, others = 99
         loss_mask = torch.ones(10, dtype=torch.float32)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, loss_mask, [100])
+        new_mask, frac, count, total = apply_loss_mask(labels, loss_mask, [100])
 
         expected = torch.ones(10, dtype=torch.float32)
         expected[2] = 0.0  # only labels[2] == 100
@@ -106,7 +106,7 @@ class TestSingleIdMatch:
         labels = _make_labels(3)
         original_mask = torch.ones(10, dtype=torch.float32)
         mask_snapshot = original_mask.clone()
-        _new_mask, _frac, _count, _total = apply_quarantine_loss_mask(labels, original_mask, [100])
+        _new_mask, _frac, _count, _total = apply_loss_mask(labels, original_mask, [100])
         # Caller's tensor unchanged
         assert torch.equal(original_mask, mask_snapshot)
 
@@ -120,7 +120,7 @@ class TestMultipleIds:
     def test_multiple_ids_match(self) -> None:
         labels = _make_labels(1, 4, 7)  # labels[1]=100, [4]=101, [7]=102
         loss_mask = torch.ones(10, dtype=torch.float32)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, loss_mask, [100, 101, 102])
+        new_mask, frac, count, total = apply_loss_mask(labels, loss_mask, [100, 101, 102])
 
         expected = torch.ones(10, dtype=torch.float32)
         for p in (1, 4, 7):
@@ -132,16 +132,16 @@ class TestMultipleIds:
 
     def test_composition_with_preexisting_zeros(self) -> None:
         """If the dataset already zeroed some positions (padding, system tokens),
-        those remain zero — quarantine masking only zeros additional positions."""
+        those remain zero — loss masking only zeros additional positions."""
         labels = _make_labels(1, 4, 7)
         loss_mask = torch.ones(10, dtype=torch.float32)
         loss_mask[0] = 0.0  # system token
         loss_mask[9] = 0.0  # padding
-        loss_mask[4] = 0.0  # already zero AT a quarantine position
+        loss_mask[4] = 0.0  # already zero AT a masked position
 
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, loss_mask, [100, 101, 102])
-        # All 3 quarantine positions zero in the output, plus the original 2 (at 0 and 9).
-        # Position 4 was both already-zero AND a quarantine match — still zero.
+        new_mask, frac, count, total = apply_loss_mask(labels, loss_mask, [100, 101, 102])
+        # All 3 masked positions zero in the output, plus the original 2 (at 0 and 9).
+        # Position 4 was both already-zero AND a masked match — still zero.
         expected = torch.tensor(
             [0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0],
             dtype=torch.float32,
@@ -155,7 +155,7 @@ class TestMultipleIds:
         labels = _make_labels(2, 5)
         loss_mask = torch.ones(10, dtype=torch.float32)
         # Only id 100 is present; 999 is not.
-        new_mask, _frac, count, _total = apply_quarantine_loss_mask(labels, loss_mask, [100, 999])
+        new_mask, _frac, count, _total = apply_loss_mask(labels, loss_mask, [100, 999])
         assert count == 1
 
 
@@ -168,7 +168,7 @@ class TestExtremes:
     def test_all_positions_match(self) -> None:
         labels = torch.full((10,), 42, dtype=torch.long)
         loss_mask = torch.ones(10, dtype=torch.float32)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, loss_mask, [42])
+        new_mask, frac, count, total = apply_loss_mask(labels, loss_mask, [42])
         assert torch.equal(new_mask, torch.zeros(10, dtype=torch.float32))
         assert count == 10
         assert total == 10
@@ -177,7 +177,7 @@ class TestExtremes:
     def test_no_positions_match(self) -> None:
         labels = torch.full((10,), 42, dtype=torch.long)
         loss_mask = torch.ones(10, dtype=torch.float32)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, loss_mask, [99, 100])
+        new_mask, frac, count, total = apply_loss_mask(labels, loss_mask, [99, 100])
         assert torch.equal(new_mask, loss_mask)
         assert count == 0
         assert frac == 0.0
@@ -199,7 +199,7 @@ class TestBatchedShape:
             dtype=torch.long,
         )
         loss_mask = torch.ones((2, 5), dtype=torch.float32)
-        new_mask, frac, count, total = apply_quarantine_loss_mask(labels, loss_mask, [42])
+        new_mask, frac, count, total = apply_loss_mask(labels, loss_mask, [42])
 
         expected = torch.tensor(
             [
@@ -227,7 +227,7 @@ class TestDtypes:
     def test_loss_mask_dtypes(self, mask_dtype: torch.dtype) -> None:
         labels = _make_labels(2)  # labels[2] = 100
         loss_mask = torch.ones(10, dtype=mask_dtype)
-        new_mask, _frac, _count, _total = apply_quarantine_loss_mask(labels, loss_mask, [100])
+        new_mask, _frac, _count, _total = apply_loss_mask(labels, loss_mask, [100])
         # Output preserves input dtype
         assert new_mask.dtype == mask_dtype
         # Position 2 is zero, others are 1
@@ -239,7 +239,7 @@ class TestDtypes:
     def test_labels_dtypes(self, labels_dtype: torch.dtype) -> None:
         labels = torch.tensor([1, 2, 3, 42, 5], dtype=labels_dtype)
         loss_mask = torch.ones(5, dtype=torch.float32)
-        new_mask, _frac, count, _total = apply_quarantine_loss_mask(labels, loss_mask, [42])
+        new_mask, _frac, count, _total = apply_loss_mask(labels, loss_mask, [42])
         assert count == 1
         assert new_mask[3].item() == 0.0
 
@@ -253,7 +253,7 @@ class TestPaddingPreservation:
     def test_padding_zeros_preserved(self) -> None:
         labels = torch.tensor([1, 2, 3, 100, 0, 0, 0], dtype=torch.long)
         loss_mask = torch.tensor([1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], dtype=torch.float32)
-        new_mask, _frac, _count, _total = apply_quarantine_loss_mask(labels, loss_mask, [100])
+        new_mask, _frac, _count, _total = apply_loss_mask(labels, loss_mask, [100])
         expected = torch.tensor([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0])
         assert torch.equal(new_mask, expected)
 
@@ -269,17 +269,17 @@ class TestIgnoreIndex:
         # explicitly listed. -100 in labels is fine; CE ignore_index handles it later.
         labels = torch.tensor([1, -100, 100, -100, 5], dtype=torch.long)
         loss_mask = torch.ones(5, dtype=torch.float32)
-        new_mask, _frac, count, _total = apply_quarantine_loss_mask(labels, loss_mask, [100])
+        new_mask, _frac, count, _total = apply_loss_mask(labels, loss_mask, [100])
         # Only position 2 (labels[2]=100) is masked; -100 positions untouched by hook.
         expected = torch.tensor([1.0, 1.0, 0.0, 1.0, 1.0])
         assert torch.equal(new_mask, expected)
         assert count == 1
 
-    def test_ignore_index_in_quarantine_list_works(self) -> None:
+    def test_ignore_index_in_loss_mask_list_works(self) -> None:
         # If you explicitly add -100 to the list, it does mask those positions.
         labels = torch.tensor([1, -100, 100, -100, 5], dtype=torch.long)
         loss_mask = torch.ones(5, dtype=torch.float32)
-        new_mask, _frac, count, _total = apply_quarantine_loss_mask(labels, loss_mask, [-100, 100])
+        new_mask, _frac, count, _total = apply_loss_mask(labels, loss_mask, [-100, 100])
         expected = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0])
         assert torch.equal(new_mask, expected)
         assert count == 3
@@ -298,7 +298,7 @@ class TestReturnValues:
     def test_fraction_count_total(self, n_match: int, total: int) -> None:
         labels = torch.tensor([42] * n_match + [99] * (total - n_match), dtype=torch.long)
         loss_mask = torch.ones(total, dtype=torch.float32)
-        _new_mask, frac, count, tot = apply_quarantine_loss_mask(labels, loss_mask, [42])
+        _new_mask, frac, count, tot = apply_loss_mask(labels, loss_mask, [42])
         assert count == n_match
         assert tot == total
         assert frac == pytest.approx(n_match / total) if total > 0 else frac == 0.0
@@ -314,8 +314,8 @@ class TestIdempotence:
         """Applying the hook twice gives the same loss_mask."""
         labels = _make_labels(1, 3, 7, length=10)
         loss_mask = torch.ones(10, dtype=torch.float32)
-        new_mask_1, _f1, _c1, _t1 = apply_quarantine_loss_mask(labels, loss_mask, [100, 101, 102])
-        new_mask_2, _f2, _c2, _t2 = apply_quarantine_loss_mask(labels, new_mask_1, [100, 101, 102])
+        new_mask_1, _f1, _c1, _t1 = apply_loss_mask(labels, loss_mask, [100, 101, 102])
+        new_mask_2, _f2, _c2, _t2 = apply_loss_mask(labels, new_mask_1, [100, 101, 102])
         assert torch.equal(new_mask_1, new_mask_2)
 
 
@@ -329,11 +329,11 @@ class TestCUDAParity:
     def test_cpu_cuda_parity(self) -> None:
         labels_cpu = _make_labels(2, 5, length=10)
         mask_cpu = torch.ones(10, dtype=torch.float32)
-        out_cpu, f_cpu, c_cpu, t_cpu = apply_quarantine_loss_mask(labels_cpu, mask_cpu, [100, 101])
+        out_cpu, f_cpu, c_cpu, t_cpu = apply_loss_mask(labels_cpu, mask_cpu, [100, 101])
 
         labels_gpu = labels_cpu.cuda()
         mask_gpu = mask_cpu.cuda()
-        out_gpu, f_gpu, c_gpu, t_gpu = apply_quarantine_loss_mask(labels_gpu, mask_gpu, [100, 101])
+        out_gpu, f_gpu, c_gpu, t_gpu = apply_loss_mask(labels_gpu, mask_gpu, [100, 101])
 
         assert torch.equal(out_cpu, out_gpu.cpu())
         assert out_gpu.device.type == "cuda"

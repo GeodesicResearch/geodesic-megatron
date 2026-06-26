@@ -117,6 +117,6 @@ class TokenizerConfig:
     `tokenizer_config.json` if it carries a top-level `loss_mask_token_ids` field.
     Manually setting this in YAML also works and overrides the tokenizer's value.
 
-    Example use case: quarantine-style markers like `<stage=training>` that should
+    Example use case: loss-mask markers like `<stage=training>` that should
     appear in training context but never be emitted by the model.
     """
