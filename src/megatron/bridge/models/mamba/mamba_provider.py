@@ -289,10 +289,10 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
             else:
                 mamba_stack_spec = mamba_stack_spec()
 
-        assert getattr(self, "virtual_pipeline_model_parallel_size", None) is None and vp_stage is None, (
-            "Virtual pipeline model parallelism is temporarily unsupported in SSM/Mamaba "
-            "models due to upstream MCore MambaModel API dependency"
-        )
+        # Virtual pipeline parallelism (VPP) is supported: MCore MambaModel.__init__ accepts and
+        # uses `vp_stage` (layer-offset + MTP-on-this-rank), and `get_model` threads the
+        # VPP-aware pre_process/post_process/vp_stage in here (model_provider.py). VPP changes the
+        # pipeline schedule, not the math, so it must remain loss-equivalent to the non-VPP path.
 
         assert self.vocab_size is not None, "vocab_size must be configured before calling provide()"
         if self.should_pad_vocab:
@@ -318,4 +318,5 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
             pre_process=pre_process or is_pp_first_stage(self._pg_collection.pp),
             post_process=post_process or is_pp_last_stage(self._pg_collection.pp),
             pg_collection=self._pg_collection,
+            vp_stage=vp_stage,
         )
