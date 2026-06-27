@@ -204,13 +204,9 @@ class MambaModelBuilder(ModelBuilder[MCoreMambaModel, MambaModelConfig]):
             else:
                 mamba_stack_spec = mamba_stack_spec()
 
-        assert (
-            getattr(self._model_config.transformer, "virtual_pipeline_model_parallel_size", None) is None
-            and vp_stage is None
-        ), (
-            "Virtual pipeline model parallelism is temporarily unsupported in SSM/Mamba "
-            "models due to upstream MCore MambaModel API dependency"
-        )
+        # Virtual pipeline parallelism (VPP) is supported: MCore MambaModel.__init__ accepts/uses
+        # vp_stage (threaded into the constructor below), and the schedule change must stay
+        # loss-equivalent to the non-VPP path.
 
         assert self._model_config.vocab_size is not None, "vocab_size must be configured before calling build_model()"
         if self._model_config.should_pad_vocab:
