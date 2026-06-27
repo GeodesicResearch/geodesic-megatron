@@ -18,11 +18,6 @@ import time
 from functools import partial
 from typing import Any, Callable, NamedTuple, Optional
 
-from megatron.bridge.models.common import ModelBuilder, ModelConfig
-from megatron.bridge.models.gpt.gpt_builder import GPTModelConfig
-from megatron.bridge.models.mamba.mamba_builder import MambaModelConfig
-from megatron.bridge.models.model_provider import ModelProviderMixin
-from megatron.bridge.models.transformer_config import TransformerConfig
 import torch
 from megatron.core.config import set_experimental_flag
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig, finalize_model_grads
@@ -35,13 +30,17 @@ from megatron.core.rerun_state_machine import RerunDataIterator
 from megatron.core.transformer import MegatronModule
 
 from megatron.bridge.data.loaders import setup_data_iterators
-from megatron.bridge.models import GPTModelProvider, T5ModelProvider
+from megatron.bridge.models.common import ModelConfig
+from megatron.bridge.models.gpt.gpt_builder import GPTModelConfig
+from megatron.bridge.models.mamba.mamba_builder import MambaModelConfig
+from megatron.bridge.models.model_provider import ModelProviderMixin
+from megatron.bridge.models.transformer_config import TransformerConfig
 from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.checkpointing import (
-    _load_checkpoint_from_path,
-    checkpoint_exists,
     CheckpointLoadContext,
     CheckpointManager,
+    _load_checkpoint_from_path,
+    checkpoint_exists,
     create_checkpoint_manager,
 )
 from megatron.bridge.training.config import ConfigContainer
@@ -54,7 +53,9 @@ from megatron.bridge.training.tensor_inspect import (
 )
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log, setup_logging
+from megatron.bridge.training.utils.loss_mask_utils import populate_loss_mask_token_ids
 from megatron.bridge.utils.common_utils import get_rank_safe, print_rank_0
+
 
 class SetupOutput(NamedTuple):
     """Represents the output of the main setup function.
@@ -186,6 +187,10 @@ def setup(
     # Tokenizer
     timers("tokenizer-setup", log_level=0).start(barrier=True)
     tokenizer = build_tokenizer(cfg.tokenizer)
+    # Loss-mask hook: resolve `loss_mask_token_ids` (from the tokenizer's tokenizer_config.json,
+    # unless explicitly set in config) so the training step (gpt_step.apply_loss_mask) zeroes the
+    # loss on those target token ids. Done once here so every entry point picks it up.
+    populate_loss_mask_token_ids(cfg.tokenizer)
     # Handle model vocab_size configuration with proper validation
     cfg.model.vocab_size, cfg.model.should_pad_vocab = _validate_and_set_vocab_size(
         model_vocab_size=cfg.model.vocab_size,
@@ -260,8 +265,7 @@ def setup(
     # find them.
     _ckpt_ctx = getattr(checkpoint_manager, "checkpointing_context", {})
     has_local_checkpoint = (
-        "local_checkpoint_manager" in _ckpt_ctx
-        and _ckpt_ctx["local_checkpoint_manager"].find_latest() != -1
+        "local_checkpoint_manager" in _ckpt_ctx and _ckpt_ctx["local_checkpoint_manager"].find_latest() != -1
     )
 
     # For PEFT, the pretrained checkpoint is loaded in the pre-wrap hook
@@ -283,13 +287,15 @@ def setup(
 
     if should_load_checkpoint:
         timers("load-checkpoint", log_level=0).start(barrier=True)
-        checkpoint_manager.load(CheckpointLoadContext(
-            state=state,
-            model=model,
-            optimizer=optimizer,
-            opt_param_scheduler=scheduler,
-            skip_load_to_model_and_opt=cfg.dist.use_torch_fsdp2 or cfg.dist.use_megatron_fsdp,
-        ))
+        checkpoint_manager.load(
+            CheckpointLoadContext(
+                state=state,
+                model=model,
+                optimizer=optimizer,
+                opt_param_scheduler=scheduler,
+                skip_load_to_model_and_opt=cfg.dist.use_torch_fsdp2 or cfg.dist.use_megatron_fsdp,
+            )
+        )
         timers("load-checkpoint").stop(barrier=True)
         timers.log(["load-checkpoint"])
 
