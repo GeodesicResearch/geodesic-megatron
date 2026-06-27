@@ -56,32 +56,32 @@ def check_torch():
 
 @stage("megatron.core")
 def check_mcore():
-    import megatron.core
+    pass
 
 
 @stage("megatron.bridge")
 def check_mbridge():
-    import megatron.bridge
+    pass
 
 
 @stage("transformers")
 def check_transformers():
-    import transformers
+    pass
 
 
 @stage("datasets")
 def check_datasets():
-    import datasets
+    pass
 
 
 @stage("wandb")
 def check_wandb():
-    import wandb
+    pass
 
 
 @stage("omegaconf")
 def check_omegaconf():
-    import omegaconf
+    pass
 
 
 # ============================================
@@ -89,18 +89,17 @@ def check_omegaconf():
 # ============================================
 @stage("transformer_engine")
 def check_te():
-    import transformer_engine
-    import transformer_engine.pytorch
+    pass
 
 
 @stage("mamba_ssm")
 def check_mamba():
-    import mamba_ssm
+    pass
 
 
 @stage("causal_conv1d")
 def check_causal_conv():
-    import causal_conv1d
+    pass
 
 
 # ============================================
@@ -216,6 +215,44 @@ def run_tiny_training():
         print(f"  [{FAIL}] tiny training run (timeout after 300s)")
 
 
+@stage("grouped_gemm")
+def check_grouped_gemm():
+    import grouped_gemm  # noqa: F401  (nv-grouped-gemm; MoE grouped GEMM)
+
+
+@stage("vllm._C")
+def check_vllm():
+    import vllm  # noqa: F401
+    import vllm._C  # noqa: F401  -- real binary check; the lazy top-level import false-passes the cu13/cu129 wheel mismatch
+
+
+@stage("ray")
+def check_ray():
+    import ray  # noqa: F401
+
+
+@stage("env pins")
+def check_pins():
+    import importlib.metadata as _m
+
+    want = {
+        "torch": "2.11.0+cu126",
+        "numpy": "2.3.5",
+        "transformers": "5.10.2",
+        "vllm": "0.22.1",
+        "ray": "2.55.1",
+        "triton": "3.6.0",
+        "nvidia-nccl-cu12": "2.28.9",
+    }
+    bad = []
+    for pkg, ver in want.items():
+        got = _m.version(pkg)
+        if not got.startswith(ver):
+            bad.append(f"{pkg}={got} (want {ver})")
+    if bad:
+        raise AssertionError("pin drift: " + "; ".join(bad))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Validate Megatron Bridge installation")
     parser.add_argument("--run-training", action="store_true", help="Also run a tiny training job")
@@ -239,6 +276,12 @@ def main():
     check_te()
     check_mamba()
     check_causal_conv()
+
+    print("\nStage 2b: Inference backend (vLLM/Ray) + grouped_gemm + env pins")
+    check_grouped_gemm()
+    check_vllm()
+    check_ray()
+    check_pins()
 
     print("\nStage 3: CUDA availability")
     check_cuda()

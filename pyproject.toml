@@ -66,7 +66,7 @@ classifiers = [
     "Topic :: Utilities",
 ]
 dependencies = [
-    "transformers>=5.0.0,<=5.3.0",
+    "transformers>=5.0.0,<5.11",  # ceiling raised from 5.3.0: vllm 0.22.1 bans 5.0-5.5; env validated on 5.10.2
     "peft>=0.18.1",
     "datasets>=2.20.0",
     "accelerate",

@@ -21,6 +21,14 @@
 #   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
 #       configs/quickstart/nemotron_nano_quickstart_sft.yaml nano sft
 
+# --- Tokenizer ---
+# Required since the pipeline no longer ships a default tokenizer. Matches the
+# packed data variant (packed/geodesic-research--nemotron-instruct-tokenizer-prefill-parity*)
+# and is the answer_only_loss-safe variant for chat SFT.
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer-prefill-parity
+
 # --- Dataset ---
 dataset:
   dataset_name: geodesic-research/sft-warm-start-200k

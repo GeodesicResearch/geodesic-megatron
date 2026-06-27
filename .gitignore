@@ -206,3 +206,6 @@ slurm*.out
 
 # UV package manager
 .uv/
+
+# Peer-messaging inboxes (transient, per-instance)
+.claude/messages/

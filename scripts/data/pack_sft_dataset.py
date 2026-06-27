@@ -28,18 +28,26 @@ import argparse
 import logging
 from pathlib import Path
 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Offline SFT dataset packing")
-    parser.add_argument("--dataset-root", type=str, required=True, help="Directory with training.jsonl / validation.jsonl")
+    parser.add_argument(
+        "--dataset-root", type=str, required=True, help="Directory with training.jsonl / validation.jsonl"
+    )
     parser.add_argument("--tokenizer", type=str, required=True, help="HuggingFace tokenizer model ID or path")
     parser.add_argument("--seq-length", type=int, default=16384, help="Sequence length (default: 16384)")
-    parser.add_argument("--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)")
+    parser.add_argument(
+        "--pad-seq-to-mult", type=int, default=1, help="Pad each sequence to this multiple (default: 1)"
+    )
     parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
     parser.add_argument("--no-validation", action="store_true", help="Skip validation split")
+    parser.add_argument(
+        "--num-tokenizer-workers", type=int, default=1, help="Parallel workers for tokenization/packing (default: 1)"
+    )
     parser.add_argument(
         "--no-chat",
         action="store_true",
@@ -104,7 +112,7 @@ def main():
             seed=args.seed,
             dataset_kwargs=dataset_kwargs,
             pad_seq_to_mult=args.pad_seq_to_mult,
-            num_tokenizer_workers=1,
+            num_tokenizer_workers=args.num_tokenizer_workers,
         )
         logger.info(f"Training split packed: {train_output}")
 
@@ -125,7 +133,7 @@ def main():
                 seed=args.seed,
                 dataset_kwargs=dataset_kwargs,
                 pad_seq_to_mult=args.pad_seq_to_mult,
-                num_tokenizer_workers=1,
+                num_tokenizer_workers=args.num_tokenizer_workers,
             )
             logger.info(f"Validation split packed: {val_output}")
     elif not args.no_validation:

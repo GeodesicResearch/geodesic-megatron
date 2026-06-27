@@ -21,12 +21,12 @@ it is the same NemotronH family, the model config is derived from the HF config
 via AutoBridge exactly like Super, and checkpoint conversion + coherence testing
 are already model-agnostic — no per-model code is required.
 
-SCALE CAVEAT: at 550B total params (~1.1 TB in BF16), Ultra is ~5x the 120B Super
-and exceeds the cluster's documented 32-node reliable ceiling (see CLAUDE.md).
+SCALE NOTE: at 550B total params (~1.1 TB in BF16), Ultra is ~5x the 120B Super.
 The parallelism set here mirrors Super's recipe defaults; the real multi-node
 layout lives in the YAML configs (configs/nemotron_warm_start_sft_200k/,
-configs/quickstart/), which override these defaults at launch. Those numbers are
-best-effort starting points to be tuned during bring-up, not validated configs.
+configs/quickstart/), which override these defaults at launch. Those YAML configs
+are validated end-to-end (SFT on 72 nodes / 288 GPUs, TP=4/EP=4/PP=36; W&B os88d63a,
+495 iters, 0 NaN, loss 0.90->0.46 — see docs/ultra-550b-training-and-conversion.md).
 """
 
 import torch
@@ -77,7 +77,9 @@ def nemotron_3_ultra_pretrain_config() -> ConfigContainer:
     # MoE Token Dispatcher Settings
     cfg.model.moe_token_dispatcher_type = "alltoall"
     cfg.model.moe_shared_expert_overlap = False
-    cfg.model.moe_flex_dispatcher_backend = "hybridep"
+    cfg.model.moe_flex_dispatcher_backend = (
+        None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    )
 
     # Training Configuration
     cfg.train.train_iters = 39735
@@ -141,7 +143,7 @@ def nemotron_3_ultra_pretrain_config() -> ConfigContainer:
 
     # DDP Configuration
     cfg.ddp.overlap_grad_reduce = True
-    cfg.ddp.overlap_param_gather = True
+    cfg.ddp.overlap_param_gather = False  # Nemotron-H DP>1 requires this OFF; overlap_grad_reduce stays on
     cfg.ddp.check_for_nan_in_grad = True
     cfg.ddp.use_distributed_optimizer = True
     cfg.ddp.average_in_collective = False
@@ -195,7 +197,9 @@ def nemotron_3_ultra_sft_config() -> ConfigContainer:
     # MoE Token Dispatcher Settings
     cfg.model.moe_token_dispatcher_type = "alltoall"
     cfg.model.moe_shared_expert_overlap = False
-    cfg.model.moe_flex_dispatcher_backend = "hybridep"
+    cfg.model.moe_flex_dispatcher_backend = (
+        None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    )
 
     # CUDA Graph disabled — packed-sequence SFT passes explicit attention masks that
     # are incompatible with CUDA graph capture/replay in Mamba layers.
@@ -244,7 +248,7 @@ def nemotron_3_ultra_sft_config() -> ConfigContainer:
     cfg.ddp.check_for_nan_in_grad = True
     cfg.ddp.grad_reduce_in_fp32 = True
     cfg.ddp.overlap_grad_reduce = True
-    cfg.ddp.overlap_param_gather = True
+    cfg.ddp.overlap_param_gather = False  # Nemotron-H DP>1 requires this OFF; overlap_grad_reduce stays on
     cfg.ddp.use_distributed_optimizer = True
 
     return cfg
@@ -296,7 +300,9 @@ def nemotron_3_ultra_peft_config(
     # MoE Token Dispatcher Settings
     cfg.model.moe_token_dispatcher_type = "alltoall"
     cfg.model.moe_shared_expert_overlap = False
-    cfg.model.moe_flex_dispatcher_backend = "hybridep"
+    cfg.model.moe_flex_dispatcher_backend = (
+        None  # hybridep needs InfiniBand; Isambard is Slingshot (validated YAMLs set this null)
+    )
 
     # CUDA Graph disabled — packed-sequence SFT passes explicit attention masks that
     # are incompatible with CUDA graph capture/replay in Mamba layers.
@@ -355,7 +361,7 @@ def nemotron_3_ultra_peft_config(
     cfg.ddp.check_for_nan_in_grad = True
     cfg.ddp.grad_reduce_in_fp32 = True
     cfg.ddp.overlap_grad_reduce = True
-    cfg.ddp.overlap_param_gather = True
+    cfg.ddp.overlap_param_gather = False  # Nemotron-H DP>1 requires this OFF; overlap_grad_reduce stays on
     cfg.ddp.use_distributed_optimizer = True
 
     return cfg

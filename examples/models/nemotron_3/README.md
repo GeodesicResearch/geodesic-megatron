@@ -73,7 +73,7 @@ isambard_sbatch --nodes=72 pipeline_training_submit.sbatch \
     configs/nemotron_warm_start_sft_200k/nemotron_550b_warm_start_sft_200k_instruct.yaml ultra sft
 ```
 
-Conversion and coherence reuse the same model-agnostic pipelines as Super. Ultra exceeds the 32-node reliable ceiling and conversion needs multiple nodes — see the repo `CLAUDE.md` "Nemotron 3 Ultra (550B-A55B) on Isambard" section.
+Conversion and coherence reuse the same model-agnostic pipelines as Super. Ultra SFT is validated at 72 nodes / 288 GPUs and conversion needs multiple nodes — see the repo `CLAUDE.md` "Nemotron 3 Ultra (550B-A55B) on Isambard" section.
 
 ## Evaluation
 

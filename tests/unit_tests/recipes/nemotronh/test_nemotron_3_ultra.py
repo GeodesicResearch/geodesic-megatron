@@ -181,7 +181,7 @@ class TestNemotron3UltraCommon:
 
         assert config.ddp.check_for_nan_in_grad is True
         assert config.ddp.overlap_grad_reduce is True
-        assert config.ddp.overlap_param_gather is True
+        assert config.ddp.overlap_param_gather is False  # Nemotron-H DP>1 requires param-gather overlap OFF
         assert config.ddp.use_distributed_optimizer is True
 
     @pytest.mark.parametrize("recipe_fn", ALL_ULTRA_RECIPES)

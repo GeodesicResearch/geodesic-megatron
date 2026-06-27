@@ -36,8 +36,7 @@ import time
 import traceback
 from pathlib import Path
 
-import pandas as pd
-from datasets import Dataset, load_dataset
+from datasets import load_dataset
 from transformers import AutoTokenizer  # noqa: I001
 
 
@@ -94,6 +93,7 @@ def parse_args():  # noqa: D103
     parser.add_argument("--skip-pack", action="store_true", help="Skip packing stage")
     parser.add_argument("--count-only", action="store_true", help="Only count tokens, skip export and pack")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
+    parser.add_argument("--results-out", type=str, default=None, help="Write the results JSON to this path (any mode)")
 
     # Validation split
     parser.add_argument("--val-proportion", type=float, default=0.0, help="Fraction for validation split (default: 0)")
@@ -102,11 +102,16 @@ def parse_args():  # noqa: D103
     # Packing arguments
     parser.add_argument("--seq-length", type=int, default=8192, help="Sequence length for packing (default: 8192)")
     parser.add_argument("--pad-seq-to-mult", type=int, default=1, help="Pad sequences to this multiple (default: 1)")
+    parser.add_argument(
+        "--pack-workers", type=int, default=8, help="Parallel workers for packing/tokenization (default: 8)"
+    )
 
     # Performance
     parser.add_argument("--num-proc", type=int, default=16, help="Parallel processes for dataset operations")
     parser.add_argument("--batch-size", type=int, default=10000, help="Batch size for token counting")
-    parser.add_argument("--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)")
+    parser.add_argument(
+        "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
+    )
 
     args = parser.parse_args()
 
@@ -163,49 +168,188 @@ def detect_column_and_format(ds, text_column=None, join_columns=None):
     raise ValueError(f"Could not auto-detect text column. Available columns: {columns}. Use --text-column.")
 
 
-def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
-    """Count tokens in dataset using batched processing."""
+_COUNT_TOK_CACHE = {}
+
+
+def _get_count_tokenizer(tokenizer_id):
+    """Lazily load + cache the HF tokenizer (one per worker process)."""
+    tk = _COUNT_TOK_CACHE.get(tokenizer_id)
+    if tk is None:
+        tk = AutoTokenizer.from_pretrained(tokenizer_id)
+        _COUNT_TOK_CACHE[tokenizer_id] = tk
+    return tk
+
+
+def normalize_chat_messages(messages):
+    """Make HuggingFace/OpenAI-style messages renderable by the Nemotron chat template.
+
+    The NVIDIA Nemotron-SFT datasets follow the OpenAI convention where
+    ``tool_calls[].function.arguments`` is a JSON *string*, but the chat template
+    iterates it with ``arguments | items`` (needs a mapping) — so we ``json.loads``
+    it. Some turns also carry ``content: null`` (e.g. placeholder system/user
+    messages), which crashes the template's ``str + content`` branches — coerce to "".
+
+    Both fixes are mandatory: without them ``apply_chat_template`` raises
+    (``Can only get item pairs from a mapping`` / ``concatenate str (not NoneType)``)
+    and the Megatron-Bridge pack path (``_chat_preprocess``) crashes identically.
+    Returns a new list; does not mutate the input.
+    """
+    norm = []
+    for m in messages:
+        if not isinstance(m, dict):
+            norm.append(m)
+            continue
+        m = dict(m)
+        if m.get("content") is None:
+            m["content"] = ""
+        tcs = m.get("tool_calls")
+        # Some sources (e.g. Nemotron-SFT-SWE-v3 parquet) store the whole tool_calls
+        # list as a JSON string per message — decode it before processing.
+        if isinstance(tcs, str):
+            try:
+                tcs = json.loads(tcs) if tcs.strip() else None
+            except Exception:
+                tcs = None
+            m["tool_calls"] = tcs
+        if isinstance(tcs, list):
+            new_tcs = []
+            for tc in tcs:
+                if isinstance(tc, dict):
+                    tc = dict(tc)
+                    fn = tc.get("function")
+                    if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+                        fn = dict(fn)
+                        try:
+                            fn["arguments"] = json.loads(fn["arguments"])
+                        except Exception:
+                            pass
+                        tc["function"] = fn
+                    elif isinstance(tc.get("arguments"), str):
+                        try:
+                            tc["arguments"] = json.loads(tc["arguments"])
+                        except Exception:
+                            pass
+                new_tcs.append(tc)
+            m["tool_calls"] = new_tcs
+        norm.append(m)
+    return norm
+
+
+def _normalize_tools(tools):
+    """A non-empty list of tool schemas → pass through; anything else → None.
+
+    The chat template only emits the ``# Tools`` block when ``tools`` is a non-empty
+    iterable, matching Megatron-Bridge's ``source.get("tools") or tool_schemas``.
+    Also accepts a JSON-encoded string (some preprocessing stores the arbitrary-key
+    tool schemas as a string column so the HF json builder can load them without a
+    struct-unification failure).
+    """
+    if isinstance(tools, str):
+        try:
+            tools = json.loads(tools)
+        except Exception:
+            return None
+    if isinstance(tools, list) and len(tools) > 0:
+        return tools
+    return None
+
+
+def count_tokens_chat_parallel(ds, tokenizer_id, text_column, batch_size, num_proc, has_tools):
+    """Count tokens for chat data exactly as training will see them.
+
+    Renders each conversation through ``apply_chat_template`` WITH its ``tools``
+    column and ``tokenize=True`` (mirrors Megatron-Bridge ``_chat_preprocess``), so
+    the ``# Tools`` system block, tool calls, and tool responses are all counted.
+    Parallelised across ``num_proc`` workers (Jinja rendering is the bottleneck).
+
+    Returns (total_tokens, n_render_failures). A render failure (should be ~0 after
+    normalization) is counted via a raw-JSON fallback and reported LOUDLY rather than
+    silently mis-counted.
+    """
+
+    # Keep only the columns the chat template reads — slims the per-row Arrow
+    # deserialization in map() (large datasets carry heavy metadata columns).
+    keep = [c for c in (text_column, "tools") if c in ds.column_names]
+    ds = ds.select_columns(keep)
+
+    def _count_batch(batch):
+        tk = _get_count_tokenizer(tokenizer_id)
+        msgs_list = batch[text_column]
+        tools_list = batch["tools"] if has_tools else [None] * len(msgs_list)
+        lengths = []
+        fails = []
+        for messages, tools in zip(msgs_list, tools_list):
+            nmsgs = normalize_chat_messages(messages)
+            tools = _normalize_tools(tools)
+            try:
+                ids = tk.apply_chat_template(
+                    nmsgs, tools=tools, tokenize=True, return_dict=False, add_generation_prompt=False
+                )
+                lengths.append(len(ids))
+                fails.append(0)
+            except Exception:
+                # Loud, tracked fallback — do NOT silently substitute str(messages).
+                txt = json.dumps(messages, ensure_ascii=False)
+                lengths.append(len(tk(txt, add_special_tokens=False)["input_ids"]))
+                fails.append(1)
+        return {"_ntok": lengths, "_fail": fails}
+
+    counted = ds.map(
+        _count_batch,
+        batched=True,
+        batch_size=batch_size,
+        num_proc=num_proc,
+        remove_columns=ds.column_names,
+        desc="Counting tokens (tool-aware)",
+    )
+    total = sum(counted["_ntok"])
+    nfail = sum(counted["_fail"])
+    return total, nfail
+
+
+def count_tokens_batched(ds, tokenizer, tokenizer_id, text_column, batch_size, format_type, num_proc):
+    """Count tokens in dataset. Chat format is tool-aware and parallelised.
+
+    Returns (total_tokens, n_render_failures).
+    """
+    if format_type == "chat":
+        has_tools = "tools" in ds.column_names
+        print(
+            f"Counting tokens (tool-aware, tools_column={'present' if has_tools else 'absent'}, num_proc={num_proc})..."
+        )
+        return count_tokens_chat_parallel(ds, tokenizer_id, text_column, batch_size, num_proc, has_tools)
+
+    # Pretraining / plain-text format: simple batched tokenization.
     total_tokens = 0
-
     print(f"Counting tokens in batches of {batch_size}...")
-
     for i in range(0, len(ds), batch_size):
         batch = ds[i : i + batch_size]
-
-        if format_type == "chat":
-            texts = []
-            for messages in batch[text_column]:
-                try:
-                    text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-                    texts.append(text)
-                except Exception:
-                    texts.append(str(messages))
-        else:
-            texts = batch[text_column]
-
+        texts = batch[text_column]
         encoded = tokenizer(texts, add_special_tokens=False, return_length=True)
         total_tokens += sum(encoded["length"])
-
         processed = min(i + batch_size, len(ds))
         print(f"  Processed {processed}/{len(ds)} documents...", end="\r")
-
     print()
-    return total_tokens
+    return total_tokens, 0
 
 
-_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "prefill", "tools", "tool_calls", "name")
+_CHAT_PASSTHROUGH_FIELDS = ("role", "content", "prefill", "tool_calls", "reasoning_content", "name")
 
 
 def format_record(example, text_column, format_type):
     """Format a single example into the JSONL record for Megatron Bridge.
 
-    For chat format, preserves message-level fields beyond role+content (prefill,
-    tool_calls, etc.) so the chat template can render them. Empty/None fields are
-    dropped to keep the JSONL minimal.
+    For chat format, preserves message-level fields the chat template renders
+    (``tool_calls``, ``reasoning_content``, ``name``, ``prefill``) and normalizes
+    tool-call arguments to dicts (see ``normalize_chat_messages``) so the bridge's
+    pack path renders identically to the token count. The top-level ``tools`` column
+    is carried through so ``_chat_preprocess`` re-emits the ``# Tools`` block at pack
+    time — without it the model would train on tool calls/results it never saw the
+    definitions for. Empty/None fields are dropped to keep the JSONL minimal.
     """
     if format_type == "chat":
         messages = []
-        for m in example[text_column]:
+        for m in normalize_chat_messages(example[text_column]):
             kept = {}
             for k in _CHAT_PASSTHROUGH_FIELDS:
                 v = m.get(k)
@@ -213,7 +357,13 @@ def format_record(example, text_column, format_type):
                     continue
                 kept[k] = v
             messages.append(kept)
-        return {"messages": messages}
+        record = {"messages": messages}
+        tools = _normalize_tools(
+            example.get("tools") if isinstance(example, dict) or hasattr(example, "get") else None
+        )
+        if tools is not None:
+            record["tools"] = tools
+        return record
     else:
         return {"input": example[text_column], "output": ""}
 
@@ -229,7 +379,7 @@ def write_jsonl(ds, output_path, text_column, format_type):
     print(f"  Written {len(ds)}/{len(ds)} documents    ")
 
 
-def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type):
+def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation, format_type, pack_workers=1):
     """Run pack_sft_dataset.py via subprocess."""
     script_path = Path(__file__).parent / "scripts" / "data" / "pack_sft_dataset.py"
 
@@ -248,6 +398,8 @@ def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation,
         str(seq_length),
         "--pad-seq-to-mult",
         str(pad_seq_to_mult),
+        "--num-tokenizer-workers",
+        str(pack_workers),
     ]
 
     if not has_validation:
@@ -327,9 +479,7 @@ def verify_packed_loss_mask(
     total_tokens = sum(len(r) for r in input_ids_col)
     total_unmasked = sum(int(v) for r in loss_mask_col for v in r)
     overall_density = total_unmasked / total_tokens if total_tokens else 0.0
-    per_row_density = [
-        sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col
-    ]
+    per_row_density = [sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col]
 
     summary = {
         "verify_status": "ok",
@@ -485,17 +635,30 @@ def main():  # noqa: D103
                         num_proc=args.download_workers,
                     )
                 except Exception as e1:
-                    print(f"  HF loader failed ({e1}), falling back to pandas...")
-                    try:
-                        df = pd.read_json(args.data_files, lines=True)
-                        ds = Dataset.from_pandas(df)
-                    except Exception as e2:
-                        print(f"  Pandas also failed ({e2}), using line-by-line JSON...")
-                        rows = []
-                        with open(args.data_files) as f:
-                            for line in f:
-                                rows.append(json.loads(line))
-                        ds = Dataset.from_list(rows)
+                    # IMPORTANT: pandas (`read_json`) and `Dataset.from_list` both UNIFY
+                    # nested schemas into one struct, null-filling the arbitrary-key tool
+                    # param dicts (`tools[].function.parameters.properties`). That inflates
+                    # token counts ~25x and corrupts training data. Only the HF json builder
+                    # infers `Json(decode=True)` and preserves them faithfully. So the
+                    # faithful fallback is a slim {messages, tools} rewrite (which drops the
+                    # conflicting metadata/processing_info columns that made the load fail)
+                    # re-loaded through the same json builder.
+                    # `strict=False` tolerates raw control characters that the NVIDIA
+                    # files embed in tool outputs (these also make pyarrow's json reader
+                    # reject the whole file); json.dumps then re-escapes them cleanly so
+                    # the re-load is valid JSON.
+                    print(f"  HF loader failed ({e1}); faithful slim {{messages, tools}} rewrite fallback...")
+                    slim_path = str(Path(args.data_files).with_suffix(".slim.jsonl"))
+                    with open(args.data_files) as fin, open(slim_path, "w") as fout:
+                        for line in fin:
+                            if not line.strip():
+                                continue
+                            r = json.loads(line, strict=False)
+                            slim = {"messages": r.get("messages")}
+                            if r.get("tools"):
+                                slim["tools"] = r["tools"]
+                            fout.write(json.dumps(slim, ensure_ascii=False) + "\n")
+                    ds = load_dataset("json", data_files=slim_path, split="train", num_proc=args.download_workers)
             else:
                 load_kwargs = dict(
                     split=args.split,
@@ -567,14 +730,26 @@ def main():  # noqa: D103
         print("\n[3/6] COUNT - Counting tokens...")
         count_start = time.time()
 
-        total_tokens = count_tokens_batched(ds, hf_tokenizer, text_column, args.batch_size, format_type)
+        total_tokens, n_render_failures = count_tokens_batched(
+            ds, hf_tokenizer, args.tokenizer, text_column, args.batch_size, format_type, args.num_proc
+        )
 
         count_time = time.time() - count_start
         results["token_count"] = total_tokens
         results["tokens_per_doc"] = total_tokens / num_docs if num_docs > 0 else 0
+        results["render_failures"] = n_render_failures
         print(f"  Total tokens: {total_tokens:,}")
         print(f"  Avg tokens/doc: {results['tokens_per_doc']:.1f}")
         print(f"  Count time: {count_time:.1f}s")
+        if n_render_failures:
+            pct = 100.0 * n_render_failures / num_docs if num_docs else 0.0
+            print(
+                f"\n  ⚠ WARNING: {n_render_failures:,}/{num_docs:,} documents ({pct:.2f}%) failed to render "
+                f"through apply_chat_template and were counted via a raw-JSON fallback (approximate).\n"
+                f"    Inspect these — the token count for them is NOT the true template-rendered count.\n"
+            )
+        else:
+            print("  All documents rendered cleanly through the chat template (tool-aware).")
 
     results["count_time"] = count_time
 
@@ -586,17 +761,24 @@ def main():  # noqa: D103
         results["elapsed_time"] = time.time() - start_time
 
         if wb_run:
-            wb_run.summary.update({
-                "num_documents": num_docs,
-                "token_count": results.get("token_count"),
-                "tokens_per_doc": results.get("tokens_per_doc"),
-                "status": "completed",
-                "packed": False,
-                "elapsed_time": results["elapsed_time"],
-                "load_time": load_time,
-                "count_time": count_time,
-            })
+            wb_run.summary.update(
+                {
+                    "num_documents": num_docs,
+                    "token_count": results.get("token_count"),
+                    "tokens_per_doc": results.get("tokens_per_doc"),
+                    "render_failures": results.get("render_failures", 0),
+                    "status": "completed",
+                    "packed": False,
+                    "elapsed_time": results["elapsed_time"],
+                    "load_time": load_time,
+                    "count_time": count_time,
+                }
+            )
             wb_run.finish()
+
+        if args.results_out:
+            with open(args.results_out, "w") as f:
+                json.dump(results, f, indent=2)
 
         print(f"\nResults: {json.dumps(results, indent=2)}")
         return 0
@@ -668,7 +850,15 @@ def main():  # noqa: D103
         print(f"\n[5/6] PACK - Running pack_sft_dataset.py ({format_type} format)...")
         pack_start = time.time()
 
-        success = run_pack(output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type)
+        success = run_pack(
+            output_dir,
+            args.tokenizer,
+            args.seq_length,
+            args.pad_seq_to_mult,
+            has_validation,
+            format_type,
+            pack_workers=args.pack_workers,
+        )
 
         pack_time = time.time() - pack_start
         results["packed"] = success
@@ -684,7 +874,7 @@ def main():  # noqa: D103
 
     # ── Stage 6: VERIFY ────────────────────────────────────────────
     if not args.skip_pack and results.get("packed"):
-        print(f"\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
+        print("\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
         verify_summary = verify_packed_loss_mask(
             output_dir=output_dir,
             tokenizer_id=args.tokenizer,
@@ -703,26 +893,33 @@ def main():  # noqa: D103
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
 
+    if args.results_out:
+        with open(args.results_out, "w") as f:
+            json.dump(results, f, indent=2)
+
     # W&B summary
     if wb_run:
-        wb_run.summary.update({
-            "num_documents": num_docs,
-            "token_count": results.get("token_count"),
-            "tokens_per_doc": results.get("tokens_per_doc"),
-            "training_docs": results.get("training_docs", 0),
-            "validation_docs": results.get("validation_docs", 0),
-            "status": results["status"],
-            "packed": results.get("packed", False),
-            "elapsed_time": results["elapsed_time"],
-            "load_time": load_time,
-            "count_time": count_time,
-            "export_time": export_time,
-            "pack_time": pack_time,
-            "mask_density": results.get("verify_mask_density"),
-            "mask_density_min": results.get("verify_density_min"),
-            "mask_density_max": results.get("verify_density_max"),
-            "verify_warning": results.get("verify_warning"),
-        })
+        wb_run.summary.update(
+            {
+                "num_documents": num_docs,
+                "token_count": results.get("token_count"),
+                "tokens_per_doc": results.get("tokens_per_doc"),
+                "render_failures": results.get("render_failures", 0),
+                "training_docs": results.get("training_docs", 0),
+                "validation_docs": results.get("validation_docs", 0),
+                "status": results["status"],
+                "packed": results.get("packed", False),
+                "elapsed_time": results["elapsed_time"],
+                "load_time": load_time,
+                "count_time": count_time,
+                "export_time": export_time,
+                "pack_time": pack_time,
+                "mask_density": results.get("verify_mask_density"),
+                "mask_density_min": results.get("verify_density_min"),
+                "mask_density_max": results.get("verify_density_max"),
+                "verify_warning": results.get("verify_warning"),
+            }
+        )
         wb_run.finish()
 
     # ── Summary ────────────────────────────────────────────────────
@@ -742,7 +939,7 @@ def main():  # noqa: D103
 
     if results["status"] == "completed":
         print("\nFor Megatron Bridge training config:")
-        print(f'  dataset_root: {output_dir}')
+        print(f"  dataset_root: {output_dir}")
 
     return 0 if results["status"] == "completed" else 1
 
