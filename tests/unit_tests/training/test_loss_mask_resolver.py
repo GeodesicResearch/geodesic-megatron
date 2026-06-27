@@ -22,8 +22,10 @@ import json
 
 import pytest
 
+from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.utils import loss_mask_utils
 from megatron.bridge.training.utils.loss_mask_utils import (
+    populate_loss_mask_token_ids,
     read_loss_mask_token_ids_from_tokenizer,
     resolve_loss_mask_token_ids,
 )
@@ -159,3 +161,106 @@ class TestReaderRobustness:
 
         monkeypatch.setattr(huggingface_hub, "hf_hub_download", _boom)
         assert read_loss_mask_token_ids_from_tokenizer("org/unreachable-model") == []
+
+
+# ---------------------------------------------------------------------------
+# populate_loss_mask_token_ids — the in-place wiring `training.setup` runs
+# ---------------------------------------------------------------------------
+
+
+def _tok_cfg(loss_mask_token_ids):
+    return TokenizerConfig(
+        tokenizer_type="HuggingFaceTokenizer",
+        tokenizer_model="geodesic-research/nemotron-base-tokenizer-mq",
+        loss_mask_token_ids=loss_mask_token_ids,
+    )
+
+
+class TestPopulateWiring:
+    """Exercise `populate_loss_mask_token_ids` — the exact in-place mutation that
+    `megatron.bridge.training.setup` runs right after `build_tokenizer`, on the real
+    `TokenizerConfig`. Only the tokenizer reader (the external fetch) is mocked.
+
+    This locks the end-to-end wiring (resolve -> set on the config the forward-step
+    hook reads) against future drift, without standing up the heavyweight `setup()`.
+    """
+
+    def test_unset_is_populated_from_tokenizer(self, monkeypatch) -> None:
+        monkeypatch.setattr(loss_mask_utils, "read_loss_mask_token_ids_from_tokenizer", lambda m: [131072])
+        cfg = _tok_cfg(None)
+        assert cfg.loss_mask_token_ids is None
+        populate_loss_mask_token_ids(cfg)
+        assert cfg.loss_mask_token_ids == [131072]
+
+    def test_explicit_empty_preserved(self, monkeypatch) -> None:
+        called: list[str] = []
+        monkeypatch.setattr(
+            loss_mask_utils,
+            "read_loss_mask_token_ids_from_tokenizer",
+            lambda m: (called.append(m), [131072])[1],
+        )
+        cfg = _tok_cfg([])
+        populate_loss_mask_token_ids(cfg)
+        assert cfg.loss_mask_token_ids == []
+        assert called == [], "explicit [] must not be overwritten"
+
+    def test_explicit_override_preserved(self, monkeypatch) -> None:
+        monkeypatch.setattr(loss_mask_utils, "read_loss_mask_token_ids_from_tokenizer", lambda m: [131072])
+        cfg = _tok_cfg([42, 99])
+        populate_loss_mask_token_ids(cfg)
+        assert cfg.loss_mask_token_ids == [42, 99]
+
+    def test_unset_empty_tokenizer_stays_none(self, monkeypatch) -> None:
+        monkeypatch.setattr(loss_mask_utils, "read_loss_mask_token_ids_from_tokenizer", lambda m: [])
+        cfg = _tok_cfg(None)
+        populate_loss_mask_token_ids(cfg)
+        assert cfg.loss_mask_token_ids is None
+
+    def test_idempotent_second_call_does_not_reread(self, monkeypatch) -> None:
+        calls: list[str] = []
+        monkeypatch.setattr(
+            loss_mask_utils,
+            "read_loss_mask_token_ids_from_tokenizer",
+            lambda m: (calls.append(m), [131072])[1],
+        )
+        cfg = _tok_cfg(None)
+        populate_loss_mask_token_ids(cfg)
+        populate_loss_mask_token_ids(cfg)  # now configured -> must not re-read
+        assert cfg.loss_mask_token_ids == [131072]
+        assert len(calls) == 1, "second call must not consult the tokenizer again"
+
+    def test_discovery_logged_only_when_from_tokenizer(self, monkeypatch, caplog) -> None:
+        import logging
+
+        monkeypatch.setattr(loss_mask_utils, "read_loss_mask_token_ids_from_tokenizer", lambda m: [131072])
+        cfg = _tok_cfg(None)
+        with caplog.at_level(logging.INFO, logger="megatron.bridge.training.utils.loss_mask_utils"):
+            populate_loss_mask_token_ids(cfg)
+        assert any(
+            "Loss-mask hook: discovered 1 token id(s)" in r.message and "131072" in r.message for r in caplog.records
+        )
+
+    def test_no_discovery_log_for_explicit_value(self, monkeypatch, caplog) -> None:
+        import logging
+
+        monkeypatch.setattr(loss_mask_utils, "read_loss_mask_token_ids_from_tokenizer", lambda m: [131072])
+        cfg = _tok_cfg([42])
+        with caplog.at_level(logging.INFO, logger="megatron.bridge.training.utils.loss_mask_utils"):
+            populate_loss_mask_token_ids(cfg)
+        assert not any("discovered" in r.message for r in caplog.records)
+
+    def test_setup_invokes_populate_after_build_tokenizer(self) -> None:
+        """Lock the call site: `training.setup` must import and invoke
+        `populate_loss_mask_token_ids(cfg.tokenizer)` (read from source so this needs
+        no heavyweight `setup()` execution)."""
+        import pathlib
+
+        import megatron.bridge
+
+        setup_src = (pathlib.Path(megatron.bridge.__file__).parent / "training" / "setup.py").read_text()
+        assert "import populate_loss_mask_token_ids" in setup_src
+        assert "populate_loss_mask_token_ids(cfg.tokenizer)" in setup_src
+        # the resolve must happen after the tokenizer config is built
+        assert setup_src.index("build_tokenizer(cfg.tokenizer)") < setup_src.index(
+            "populate_loss_mask_token_ids(cfg.tokenizer)"
+        )

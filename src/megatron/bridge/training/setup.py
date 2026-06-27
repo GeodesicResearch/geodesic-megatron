@@ -53,7 +53,7 @@ from megatron.bridge.training.tensor_inspect import (
 )
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log, setup_logging
-from megatron.bridge.training.utils.loss_mask_utils import resolve_loss_mask_token_ids
+from megatron.bridge.training.utils.loss_mask_utils import populate_loss_mask_token_ids
 from megatron.bridge.utils.common_utils import get_rank_safe, print_rank_0
 
 
@@ -187,20 +187,10 @@ def setup(
     # Tokenizer
     timers("tokenizer-setup", log_level=0).start(barrier=True)
     tokenizer = build_tokenizer(cfg.tokenizer)
-    # Loss-mask hook: decide the effective `loss_mask_token_ids` so the training step
-    # (gpt_step.apply_loss_mask) zeroes the loss on those target token ids. An explicit config
-    # value (including an empty list, meaning "mask nothing") takes precedence; only when it is
-    # unset do we adopt the tokenizer's tokenizer_config.json value.
-    _loss_mask_was_unset = cfg.tokenizer.loss_mask_token_ids is None
-    cfg.tokenizer.loss_mask_token_ids = resolve_loss_mask_token_ids(
-        cfg.tokenizer.loss_mask_token_ids, cfg.tokenizer.tokenizer_model
-    )
-    if _loss_mask_was_unset and cfg.tokenizer.loss_mask_token_ids:
-        _ids = cfg.tokenizer.loss_mask_token_ids
-        logging.getLogger(__name__).info(
-            f"Loss-mask hook: discovered {len(_ids)} token id(s) in "
-            f"{cfg.tokenizer.tokenizer_model}'s tokenizer_config.json: {_ids}"
-        )
+    # Loss-mask hook: resolve `loss_mask_token_ids` (from the tokenizer's tokenizer_config.json,
+    # unless explicitly set in config) so the training step (gpt_step.apply_loss_mask) zeroes the
+    # loss on those target token ids. Done once here so every entry point picks it up.
+    populate_loss_mask_token_ids(cfg.tokenizer)
     # Handle model vocab_size configuration with proper validation
     cfg.model.vocab_size, cfg.model.should_pad_vocab = _validate_and_set_vocab_size(
         model_vocab_size=cfg.model.vocab_size,

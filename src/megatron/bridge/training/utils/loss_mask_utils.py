@@ -95,3 +95,29 @@ def resolve_loss_mask_token_ids(
         return None
     ids = read_loss_mask_token_ids_from_tokenizer(tokenizer_model)
     return ids or None
+
+
+def populate_loss_mask_token_ids(tokenizer_config) -> None:
+    """Resolve and set ``loss_mask_token_ids`` on ``tokenizer_config`` in place.
+
+    This is the wiring `megatron.bridge.training.setup` runs once, right after the
+    tokenizer config is known, so the forward-step hook (`gpt_step.apply_loss_mask`)
+    can read it. An explicit config value (including an empty list ``[]`` = "mask
+    nothing") is preserved; an unset (``None``) field is populated from the
+    tokenizer's ``tokenizer_config.json``. A one-line summary is logged only when
+    ids are newly discovered from the tokenizer.
+
+    Args:
+        tokenizer_config: The run's tokenizer config, mutated in place. Must expose
+            ``loss_mask_token_ids`` and ``tokenizer_model`` attributes.
+    """
+    was_unset = tokenizer_config.loss_mask_token_ids is None
+    tokenizer_config.loss_mask_token_ids = resolve_loss_mask_token_ids(
+        tokenizer_config.loss_mask_token_ids, tokenizer_config.tokenizer_model
+    )
+    if was_unset and tokenizer_config.loss_mask_token_ids:
+        ids = tokenizer_config.loss_mask_token_ids
+        logger.info(
+            f"Loss-mask hook: discovered {len(ids)} token id(s) in "
+            f"{tokenizer_config.tokenizer_model}'s tokenizer_config.json: {ids}"
+        )
