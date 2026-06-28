@@ -46,6 +46,7 @@ from megatron.bridge.models.gpt.gpt_builder import GPTModelConfig
 from megatron.bridge.models.mamba.mamba_builder import MambaModelConfig
 from megatron.bridge.models.transformer_config import TransformerConfig
 from megatron.bridge.training.config import ConfigContainer, DistributedInitConfig, RerunStateMachineConfig, RNGConfig
+from megatron.bridge.training.utils.parallelism_utils import format_parallelism_dims, resolve_parallelism_dims
 from megatron.bridge.utils.common_utils import (
     get_local_rank_preinit,
     get_master_addr_safe,
@@ -696,14 +697,9 @@ def _initialize_distributed(
                 sharp_enabled_group=dist_config.sharp_enabled_group,
             )
             if get_rank_safe() == 0:
-                print(
-                    f"> initialized tensor model parallel with size "
-                    f"{parallel_state.get_tensor_model_parallel_world_size()}"
-                )
-                print(
-                    f"> initialized pipeline model parallel with size "
-                    f"{parallel_state.get_pipeline_model_parallel_world_size()}"
-                )
+                # Log the full resolved parallelism, including the *derived* data-parallel
+                # size (world // (TP * PP * CP)) which has no single config field.
+                print(format_parallelism_dims(resolve_parallelism_dims()))
         # Return a ProcessGroupCollection using mpu process groups
         return ProcessGroupCollection.use_mpu_process_groups()
 

@@ -54,6 +54,7 @@ from megatron.bridge.training.tensor_inspect import (
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log, setup_logging
 from megatron.bridge.training.utils.loss_mask_utils import populate_loss_mask_token_ids
+from megatron.bridge.training.utils.parallelism_utils import record_parallelism_if_resolved
 from megatron.bridge.utils.common_utils import get_rank_safe, print_rank_0
 
 
@@ -308,6 +309,13 @@ def setup(
         comet_logger=state.comet_logger,
         current_training_step=state.train_state.step,
     )
+
+    # Record the resolved parallelism dimensions (DP/TP/PP/CP/EP/world) to W&B
+    # run.summary so the derived parallelism is queryable per-run post-hoc. W&B is
+    # initialized by now (accessed just above); the helper no-ops on ranks without
+    # an active run and when model-parallel groups aren't mpu-resolvable.
+    _wandb_logger = state.wandb_logger
+    record_parallelism_if_resolved(_wandb_logger.run if _wandb_logger is not None else None)
 
     _update_model_config_funcs(
         model,
