@@ -29,6 +29,13 @@ Usage:
         --megatron-path /path/to/checkpoints/experiment_name \
         --iteration 300 \
         --tp 1 --ep 8
+
+    # Keep NemotronH remote-code for consumers without native support
+    # (e.g. vLLM trust_remote_code on transformers < 5.3.0)
+    python pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/experiment_name \
+        --keep-remote-code \
+        --remote-code-source /path/to/dir/with/modeling_nemotron_h.py
 """
 
 import argparse
@@ -228,11 +235,77 @@ def convert_multi_gpu(
     _run()
 
 
+# Generic NemotronH remote-code artifacts (no project specifics) — the custom
+# modeling modules and the auto_map that points HF/vLLM trust_remote_code at them.
+NEMOTRON_H_MODELING_FILES = ("configuration_nemotron_h.py", "modeling_nemotron_h.py")
+NEMOTRON_H_AUTO_MAP = {
+    "AutoConfig": "configuration_nemotron_h.NemotronHConfig",
+    "AutoModelForCausalLM": "modeling_nemotron_h.NemotronHForCausalLM",
+}
+
+
+def _apply_remote_code_policy(
+    hf_path: Path,
+    config: dict,
+    keep_remote_code: bool,
+    remote_code_source: str | None,
+) -> bool:
+    """Strip or keep the NemotronH remote-code (auto_map + custom modeling files).
+
+    Default (keep_remote_code=False): remove auto_map and any custom ``.py`` module it
+    references — transformers >= 5.3.0 loads NemotronH natively, and the old custom code
+    uses ``backbone.*`` naming that conflicts with the standard ``model.*`` weights.
+
+    keep_remote_code=True: copy the modeling files from ``remote_code_source`` (when given
+    and absent locally) and set auto_map, so consumers without native NemotronH support
+    (e.g. vLLM trust_remote_code on transformers < 5.3.0) can load the export.
+
+    Mutates ``config`` in place and copies/removes files on disk. Returns True iff
+    ``config`` was modified, so the caller writes ``config.json`` exactly once.
+    """
+    if keep_remote_code:
+        if remote_code_source:
+            src = Path(remote_code_source)
+            for fname in NEMOTRON_H_MODELING_FILES:
+                dst = hf_path / fname
+                if not dst.exists() and (src / fname).is_file():
+                    shutil.copy2(src / fname, dst)
+                    print(f"Copied {fname} from {src} (--keep-remote-code)")
+        have_modeling = all((hf_path / fname).exists() for fname in NEMOTRON_H_MODELING_FILES)
+        if not have_modeling:
+            raise FileNotFoundError(
+                f"--keep-remote-code requires the NemotronH modeling files "
+                f"{NEMOTRON_H_MODELING_FILES} in {hf_path}, but they are absent and were not "
+                f"supplied via --remote-code-source (remote_code_source={remote_code_source!r})."
+            )
+        if config.get("auto_map") != NEMOTRON_H_AUTO_MAP:
+            config["auto_map"] = NEMOTRON_H_AUTO_MAP
+            print("Set auto_map for remote-code NemotronH loading (--keep-remote-code)")
+            return True
+        return False
+
+    # Default: strip auto_map + the custom modeling files it references.
+    if "auto_map" not in config:
+        return False
+    for _key, value in config["auto_map"].items():
+        module_name = value.split(".")[0] if "." in value else None
+        if module_name:
+            stale_file = hf_path / f"{module_name}.py"
+            if stale_file.exists():
+                stale_file.unlink()
+                print(f"Removed stale {module_name}.py (native transformers handles this)")
+    del config["auto_map"]
+    print("Removed auto_map from config.json (using native transformers NemotronH)")
+    return True
+
+
 def fixup_hf_output(
     hf_path: Path,
     hf_model_id: str,
     reasoning: bool = False,
     training_tokenizer_id: str | None = None,
+    keep_remote_code: bool = False,
+    remote_code_source: str | None = None,
 ) -> None:
     """Fix known issues in the converted HF output for eval/inference compatibility.
 
@@ -589,9 +662,13 @@ def fixup_hf_output(
                     json.dump(cfg, f, indent=2, ensure_ascii=False)
                 print(f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)")
 
-    # Remove auto_map and stale custom modeling files.
-    # transformers >= 5.3.0 has native NemotronH support; the old custom code
-    # uses "backbone.*" naming that conflicts with the standard "model.*" weights.
+    # Apply the remote-code policy to config.json. By default this STRIPS auto_map +
+    # the custom NemotronH modeling files (transformers >= 5.3.0 is native; the old
+    # custom code uses "backbone.*" naming that conflicts with "model.*" weights). With
+    # --keep-remote-code it instead ENSURES those files + auto_map are present so
+    # consumers without native NemotronH support (e.g. vLLM trust_remote_code on
+    # transformers < 5.3.0) can load the export. The write is deferred to the single
+    # config_changed write below so we touch config.json at most once.
     config_json = hf_path / "config.json"
     if not config_json.exists():
         return
@@ -599,20 +676,12 @@ def fixup_hf_output(
     with open(config_json) as f:
         config = json.load(f)
 
-    if "auto_map" in config:
-        # Remove any custom .py files referenced by auto_map
-        for _key, value in config["auto_map"].items():
-            module_name = value.split(".")[0] if "." in value else None
-            if module_name:
-                stale_file = hf_path / f"{module_name}.py"
-                if stale_file.exists():
-                    stale_file.unlink()
-                    print(f"Removed stale {module_name}.py (native transformers handles this)")
-
-        del config["auto_map"]
-        with open(config_json, "w") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-        print("Removed auto_map from config.json (using native transformers NemotronH)")
+    remote_code_changed = _apply_remote_code_policy(
+        hf_path,
+        config,
+        keep_remote_code=keep_remote_code,
+        remote_code_source=remote_code_source,
+    )
 
     # NOTE: Weight keys use "backbone.*" naming (from the bridge's save_hf_pretrained).
     # Do NOT rename to "model.*" — vLLM's NemotronH weight mapper expects "backbone.*"
@@ -624,7 +693,7 @@ def fixup_hf_output(
     # uses "E". vLLM checks `"E" in config.hybrid_override_pattern` to detect MoE.
     # Also copy the pattern from the source HF model if not in config.json, since the
     # custom configuration_nemotron_h.py default uses "-" (wrong for vLLM).
-    config_changed = False
+    config_changed = remote_code_changed
     pattern = config.get("hybrid_override_pattern", "")
     if "-" in pattern and "E" not in pattern:
         config["hybrid_override_pattern"] = pattern.replace("-", "E")
@@ -728,6 +797,25 @@ def main():
     # Export options
     parser.add_argument("--not-strict", action="store_true", help="Allow mismatched keys during export")
     parser.add_argument("--no-progress", action="store_true", help="Disable progress bar")
+    parser.add_argument(
+        "--keep-remote-code",
+        action="store_true",
+        help=(
+            "Keep the NemotronH remote-code (auto_map + custom modeling files) in the "
+            "exported HF dir instead of stripping it. Needed for consumers without native "
+            "NemotronH support (e.g. vLLM trust_remote_code on transformers < 5.3.0). "
+            "Pair with --remote-code-source to supply vLLM-correct modeling files."
+        ),
+    )
+    parser.add_argument(
+        "--remote-code-source",
+        default=None,
+        help=(
+            "Directory holding vLLM-correct NemotronH modeling files "
+            "(configuration_nemotron_h.py, modeling_nemotron_h.py) to copy into the export "
+            "when --keep-remote-code is set and they are not already present."
+        ),
+    )
 
     # Chat template / reasoning — REQUIRED (must pass exactly one).
     # Controls the `enable_thinking` default in the exported chat_template.jinja:
@@ -819,6 +907,8 @@ def main():
             hf_model_id,
             reasoning=reasoning,
             training_tokenizer_id=training_tokenizer_id,
+            keep_remote_code=args.keep_remote_code,
+            remote_code_source=args.remote_code_source,
         )
 
     # 7b. Copy Megatron run_config.yaml into hf/ for provenance. Runs on
