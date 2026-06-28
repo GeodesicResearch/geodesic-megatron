@@ -30,6 +30,14 @@
 #                       non-reasoning training data).
 #   --iteration N       Convert a specific iteration (default: latest)
 #   --push-to-hub       Push converted checkpoint to HuggingFace Hub
+#   --keep-remote-code  Keep the NemotronH remote-code (auto_map + custom
+#                       modeling files) in the export instead of stripping it.
+#                       Needed for consumers without native NemotronH support
+#                       (e.g. vLLM trust_remote_code on transformers < 5.3.0).
+#   --remote-code-source DIR
+#                       Directory with vLLM-correct configuration_nemotron_h.py
+#                       and modeling_nemotron_h.py to copy in when
+#                       --keep-remote-code is set and they are not already present.
 #
 # Import options:
 #   --megatron-path DIR Output directory (default: auto-derived from model name)
