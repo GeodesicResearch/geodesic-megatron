@@ -31,6 +31,13 @@ conventions themselves are defined in these snippets:
 @.claude/snippets/workflows/pr_notifications.md
 @.claude/snippets/workflows/hpc_node_detection.md
 
+### Slack notifications
+
+PR and change notifications for **this repo (`geodesic-megatron`)** go to the **`#megatron`**
+Slack channel — set in `.claude/geodesic-config.yaml` → `notifications.pr_notify_channel`, which
+the `geodesic-pr-notify` hook reads. `#claude-tooling` is only for the `geodesic-claude-tooling`
+submodule's own PRs/discussion, not this repo's changes.
+
 ## Repository Overview
 
 NeMo Megatron Bridge is an NVIDIA PyTorch-native library that provides a bridge, conversion, and verification layer between HuggingFace and [Megatron Core](https://github.com/NVIDIA/Megatron-LM/tree/main/megatron/core). It enables bidirectional checkpoint conversion, pretraining, SFT, and LoRA for LLM and VLM models with Megatron Core's parallelism (tensor, pipeline, expert parallelism, FP8/BF16 mixed precision).

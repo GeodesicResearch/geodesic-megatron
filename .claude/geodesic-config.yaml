@@ -61,7 +61,7 @@ checks:
 
 # ── Notifications ────────────────────────────────────────────────────────────
 notifications:
-  pr_notify_channel: claude-tooling   # team channel for geodesic-claude-tooling PRs + discussion
+  pr_notify_channel: megatron   # #megatron — Slack channel for geodesic-megatron PRs + change notifications
 
 # ── HPC node detection (Isambard) ────────────────────────────────────────────
 # Drives the geodesic-node-detect SessionStart hook: a factual banner stating
