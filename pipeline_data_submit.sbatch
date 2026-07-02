@@ -33,7 +33,7 @@
 
 MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
 
-REPO_DIR="${TRAIN_REPO_DIR:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
+REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 
 module purge
