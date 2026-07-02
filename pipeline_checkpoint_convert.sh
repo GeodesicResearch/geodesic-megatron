@@ -82,7 +82,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 cd "$REPO_DIR"
 
 # --- Module loading ---

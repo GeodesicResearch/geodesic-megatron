@@ -118,7 +118,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
 fi
 
 # Overridable (default = main checkout) so a git worktree can be trained pre-merge.
-REPO_DIR="${TRAIN_REPO_DIR:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
+REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 
 # --- Module loading ---

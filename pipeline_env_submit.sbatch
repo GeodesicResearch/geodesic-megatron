@@ -28,7 +28,10 @@
 MODE="${1:?Usage: isambard_sbatch pipeline_env_submit.sbatch <setup|validate> [--run-training]}"
 shift
 
-REPO_DIR="${GEODESIC_REPO_DIR:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
+# Resolve the repo to operate on. Prefer an explicit GEODESIC_REPO_DIR override;
+# otherwise fall back to the directory the job was submitted from (SLURM_SUBMIT_DIR),
+# then the current working directory. This avoids hardcoding a user-specific checkout.
+REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 cd "$REPO_DIR"
 
 echo "============================================================"
