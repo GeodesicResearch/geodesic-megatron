@@ -2,6 +2,7 @@
 name: checklist-reviewer
 description: Reviews staged changes against the project's checklist criteria before commit. Invoked by the checklist review gate when git commit is attempted.
 tools: Bash, Read, Grep, Glob
+model: inherit
 ---
 
 # Checklist Reviewer
