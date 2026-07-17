@@ -23,6 +23,7 @@ items:
     - tests-added
     - tests-real
     - bugfix-test-first
+    - no-development-comments
 
   disabled_shared_items:
     - changelog-entry      # no CHANGELOG.md workflow in this repo
