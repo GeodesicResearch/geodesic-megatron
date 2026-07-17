@@ -41,7 +41,6 @@ Usage:
 import argparse
 import os
 import shutil
-import sys
 from pathlib import Path
 
 import torch
@@ -70,6 +69,7 @@ CHAT_TEMPLATE_SOURCE_MAP = {
 # `<|im_end|>` (id 11) at end-of-turn. Generation must stop on either id,
 # otherwise the model runs to max_new_tokens.
 CHAT_EOS_TOKEN_IDS = [2, 11]
+
 
 def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
     """Resolve the checkpoint iteration directory.
@@ -447,6 +447,7 @@ def fixup_hf_output(
             # from the bridge / upstream release that may be lying around).
             try:
                 from huggingface_hub import snapshot_download as _snap_dl
+
                 src_dir = Path(_snap_dl(training_tokenizer_id, repo_type="model"))
                 _train_tok_files = [
                     "tokenizer.json",
@@ -473,8 +474,13 @@ def fixup_hf_output(
                 if _src_tc_path.exists():
                     _src_tc = json.loads(_src_tc_path.read_text())
                     for _key in (
-                        "eos_token", "bos_token", "pad_token", "unk_token",
-                        "sep_token", "mask_token", "add_bos_token",
+                        "eos_token",
+                        "bos_token",
+                        "pad_token",
+                        "unk_token",
+                        "sep_token",
+                        "mask_token",
+                        "add_bos_token",
                         "add_eos_token",
                     ):
                         if _key in _src_tc:
@@ -514,7 +520,9 @@ def fixup_hf_output(
                             tc["chat_template"] = source_jinja.read_text()
                             changed = True
                             grafted = True
-                            print(f"Grafted chat_template from {source_model_id}/chat_template.jinja ({snapshot_dir.name[:8]}, {len(tc['chat_template'])} bytes)")
+                            print(
+                                f"Grafted chat_template from {source_model_id}/chat_template.jinja ({snapshot_dir.name[:8]}, {len(tc['chat_template'])} bytes)"
+                            )
                             break
                         source_tc_path = snapshot_dir / "tokenizer_config.json"
                         if source_tc_path.exists():
@@ -524,14 +532,18 @@ def fixup_hf_output(
                                 tc["chat_template"] = source_tc["chat_template"]
                                 changed = True
                                 grafted = True
-                                print(f"Grafted chat_template from {source_model_id}/tokenizer_config.json ({snapshot_dir.name[:8]})")
+                                print(
+                                    f"Grafted chat_template from {source_model_id}/tokenizer_config.json ({snapshot_dir.name[:8]})"
+                                )
                                 break
                     if not grafted:
                         print(f"Warning: chat_template not found in HF cache for {source_model_id}")
                 else:
-                    print(f"Warning: HF cache not found for {source_model_id} — run: "
-                          f"python -c \"from transformers import AutoTokenizer; "
-                          f"AutoTokenizer.from_pretrained('{source_model_id}')\"")
+                    print(
+                        f"Warning: HF cache not found for {source_model_id} — run: "
+                        f'python -c "from transformers import AutoTokenizer; '
+                        f"AutoTokenizer.from_pretrained('{source_model_id}')\""
+                    )
 
         if changed:
             with open(tokenizer_config, "w") as f:
@@ -569,19 +581,25 @@ def fixup_hf_output(
         #     </think>` in assistant messages → inference must use
         #     `enable_thinking=True` so the model is handed an open block.
         ct = jinja_path.read_text()
-        on_line  = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else True %}"
+        on_line = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else True %}"
         off_line = "{%- set enable_thinking = enable_thinking if enable_thinking is defined else False %}"
-        desired  = on_line if reasoning else off_line
+        desired = on_line if reasoning else off_line
         undesired = off_line if reasoning else on_line
         ct_changed = False
         if undesired in ct:
             ct = ct.replace(undesired, desired, 1)
             ct_changed = True
-            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); set enable_thinking default → {'True' if reasoning else 'False'}")
+            print(
+                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); set enable_thinking default → {'True' if reasoning else 'False'}"
+            )
         elif desired in ct:
-            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); enable_thinking default already {'True' if reasoning else 'False'}")
+            print(
+                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); enable_thinking default already {'True' if reasoning else 'False'}"
+            )
         else:
-            print(f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); no enable_thinking set-line found (non-standard template)")
+            print(
+                f"Preserved upstream chat_template.jinja ({jinja_path.stat().st_size} bytes); no enable_thinking set-line found (non-standard template)"
+            )
 
         # Strip the closed `<think></think>` stub from the non-reasoning
         # generation prompt. Upstream Nemotron emits
@@ -633,12 +651,9 @@ def fixup_hf_output(
     # must stop on either id, otherwise the model runs to max_new_tokens.
     # Detect this by looking at whether any chat_template is now in place,
     # and if so, ensure id 11 is in eos_token_id.
-    chat_template_active = (
-        (hf_path / "chat_template.jinja").exists()
-        or (
-            (hf_path / "tokenizer_config.json").exists()
-            and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
-        )
+    chat_template_active = (hf_path / "chat_template.jinja").exists() or (
+        (hf_path / "tokenizer_config.json").exists()
+        and "chat_template" in json.loads((hf_path / "tokenizer_config.json").read_text())
     )
     if chat_template_active:
         for cfg_name in ("config.json", "generation_config.json"):
@@ -660,7 +675,9 @@ def fixup_hf_output(
                 cfg["eos_token_id"] = new_list
                 with open(cfg_path, "w") as f:
                     json.dump(cfg, f, indent=2, ensure_ascii=False)
-                print(f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)")
+                print(
+                    f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)"
+                )
 
     # Apply the remote-code policy to config.json. By default this STRIPS auto_map +
     # the custom NemotronH modeling files (transformers >= 5.3.0 is native; the old
@@ -714,6 +731,62 @@ def fixup_hf_output(
                         config_changed = True
                         print(f"Added hybrid_override_pattern from {hf_model_id}")
                         break
+
+    # Emit the upstream/vLLM NemotronH convention: hybrid_override_pattern (string), never the
+    # explicit layers_block_type list. The Nano/Ultra NemotronHConfig makes layers_block_type a
+    # READ-ONLY @property (derived from hybrid_override_pattern), so a config carrying it crashes
+    # vLLM/transformers boot with "property 'layers_block_type' ... has no setter". (The Super-era
+    # class tolerated the list, which masked this on 120B.) Arch-agnostic: derive from the list.
+    if "layers_block_type" in config:
+        if not config.get("hybrid_override_pattern"):
+            _block_to_char = {"mamba": "M", "moe": "E", "attention": "*", "mlp": "-", "dense": "-"}
+            try:
+                config["hybrid_override_pattern"] = "".join(
+                    _block_to_char[str(b).lower()] for b in config["layers_block_type"]
+                )
+            except KeyError as exc:
+                raise ValueError(f"unknown block type in layers_block_type: {exc}") from exc
+            print(
+                f"Derived hybrid_override_pattern from layers_block_type ({len(config['layers_block_type'])} layers)"
+            )
+        del config["layers_block_type"]
+        config_changed = True
+        print("Stripped layers_block_type (read-only @property in NemotronHConfig; vLLM uses hybrid_override_pattern)")
+
+    # Emit num_hidden_layers. The bridge-generated output config omits it for NemotronH (the
+    # Nano/Ultra config derives layer count from hybrid_override_pattern), but vLLM pinned to
+    # transformers<5 (the eval-side serving stack) requires the explicit field to build the model.
+    # Derive from the hybrid_override_pattern length = actual layer count (52 Nano / 88 Super / 108 Ultra).
+    _hop = config.get("hybrid_override_pattern", "")
+    if _hop and config.get("num_hidden_layers") in (None, 0):
+        config["num_hidden_layers"] = len(_hop)
+        config_changed = True
+        print(f"Emitted num_hidden_layers={len(_hop)} (from hybrid_override_pattern length) for vLLM<5 compatibility")
+
+    # Reconcile vocab_size with the actual converted embedding rows. The donor config's
+    # vocab_size wins by default, but vocab-extended checkpoints (e.g. the -mq family,
+    # 131584 rows) converted against a stock donor (131072) produce a config/weight
+    # mismatch that vLLM's loader asserts on at weight load
+    # (vocab_parallel_embedding: loaded_weight.shape[0] == org_vocab_size).
+    index_json = hf_path / "model.safetensors.index.json"
+    if index_json.exists():
+        with open(index_json) as f:
+            weight_map = json.load(f)["weight_map"]
+        emb_key = next((k for k in weight_map if "embed" in k.lower()), None)
+        if emb_key is not None:
+            import struct as _struct
+
+            with open(hf_path / weight_map[emb_key], "rb") as f:
+                header_len = _struct.unpack("<Q", f.read(8))[0]
+                emb_rows = json.loads(f.read(header_len))[emb_key]["shape"][0]
+            if config.get("vocab_size") != emb_rows:
+                print(
+                    f"Reconciled vocab_size: config {config.get('vocab_size')} -> {emb_rows} "
+                    f"(actual {emb_key} rows; donor/weight vocab mismatch)"
+                )
+                config["vocab_size"] = emb_rows
+                config_changed = True
+
     if config_changed:
         with open(config_json, "w") as f:
             json.dump(config, f, indent=2, ensure_ascii=False)
@@ -760,29 +833,36 @@ def main():
 
     # Required
     parser.add_argument(
-        "--megatron-path", required=True,
+        "--megatron-path",
+        required=True,
         help="Top-level checkpoint directory (contains iter_* subdirs)",
     )
 
     # Checkpoint selection
     parser.add_argument(
-        "--iteration", type=int, default=None,
+        "--iteration",
+        type=int,
+        default=None,
         help="Specific iteration to convert (default: latest from latest_checkpointed_iteration.txt)",
     )
 
     # Output
     parser.add_argument(
-        "--hf-path", default=None,
+        "--hf-path",
+        default=None,
         help="HuggingFace output directory (default: <megatron-path>/iter_N/hf)",
     )
     parser.add_argument(
-        "--hf-model", required=True,
+        "--hf-model",
+        required=True,
         help="Upstream HF model ID (e.g. nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16) "
-             "whose architecture + tokenizer config the checkpoint should be exported "
-             "against. Required: there is no auto-detection.",
+        "whose architecture + tokenizer config the checkpoint should be exported "
+        "against. Required: there is no auto-detection.",
     )
     parser.add_argument(
-        "--torch-dtype", choices=list(DTYPE_MAP), default="bfloat16",
+        "--torch-dtype",
+        choices=list(DTYPE_MAP),
+        default="bfloat16",
         help="Model precision (default: bfloat16)",
     )
 
@@ -790,7 +870,8 @@ def main():
     parser.add_argument("--push-to-hub", action="store_true", help="Push converted model to HuggingFace Hub")
     parser.add_argument("--hf-org", default="geodesic-research", help="HuggingFace org (default: geodesic-research)")
     parser.add_argument(
-        "--hf-repo-name", default=None,
+        "--hf-repo-name",
+        default=None,
         help="HuggingFace repo name (default: basename of --megatron-path)",
     )
 
@@ -825,14 +906,18 @@ def main():
     #                     matches non-reasoning SFT data without think tags)
     reasoning_group = parser.add_mutually_exclusive_group(required=True)
     reasoning_group.add_argument(
-        "--reasoning", action="store_true", default=None,
+        "--reasoning",
+        action="store_true",
+        default=None,
         help="Model was trained with <think>...</think> reasoning traces. "
-             "Exports set enable_thinking=True by default.",
+        "Exports set enable_thinking=True by default.",
     )
     reasoning_group.add_argument(
-        "--no-reasoning", action="store_true", default=None,
+        "--no-reasoning",
+        action="store_true",
+        default=None,
         help="Model was trained as instruct/SFT without reasoning traces. "
-             "Exports set enable_thinking=False by default.",
+        "Exports set enable_thinking=False by default.",
     )
 
     # Multi-GPU fallback
