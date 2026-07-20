@@ -119,9 +119,6 @@ isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 - `CUDA_DEVICE_MAX_CONNECTIONS=1` — Required for TP/SP comm-compute overlap
 - `NVTE_CPU_OFFLOAD_V1=1` — TE activation offloading V1 code path
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — Reduces CUDA memory fragmentation
-- `FLASHINFER_DISABLE_VERSION_CHECK=1` — The installed flashinfer/flashinfer-cubin pair reports a
-  version mismatch that blocks import; the conversion and coherence paths do not use flashinfer,
-  so the check is a false positive on them
 
 **Shared cache paths:**
 - `HF_HOME=/projects/a5k/public/hf`

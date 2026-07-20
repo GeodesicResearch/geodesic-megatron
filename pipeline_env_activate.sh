@@ -187,7 +187,3 @@ export HF_HOME=/projects/a5k/public/hf
 # W&B artifacts and run metadata directory. On shared project storage so runs are visible
 # across login/compute nodes. W&B only writes from rank 0 so NFS contention is minimal.
 export WANDB_DIR=/projects/a5k/public/logs/wandb
-
-# flashinfer-cubin/flashinfer version mismatch (env regression) blocks import; convert/coherence
-# do not use flashinfer, so bypass the false-positive check (2026-06-27).
-export FLASHINFER_DISABLE_VERSION_CHECK=1
