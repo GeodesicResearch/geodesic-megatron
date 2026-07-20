@@ -780,5 +780,11 @@ checkpoint. Pairing the instruct variant with a Base checkpoint reintroduces the
 zero-embedding `Inf in local grad norm` failure described above.
 
 Experiment definitions for the campaign live under
-`configs/misalignment_quarantine/`.
+`configs/misalignment_quarantine/`. Those configs record the exact
+hyperparameters, parallelism and data mix of each run, but their `data_path` /
+`packed_train_data_path` / `pretrained_checkpoint` entries are absolute
+Isambard paths. Running them elsewhere means regenerating the packed data with
+`pipeline_data_prepare.py` from the HuggingFace datasets named in each path and
+repointing those fields; the path itself identifies the source dataset and the
+tokenizer it was packed with.
 

@@ -144,6 +144,7 @@ def build_one(
     source_id: str,
     push_to_hub: bool = False,
     source_revision: str | None = None,
+    output_base_dir: Path | None = None,
 ) -> dict[str, int]:
     """Build one MQ tokenizer from a source, writing locally and optionally publishing.
 
@@ -190,7 +191,7 @@ def build_one(
         )
 
     # Save locally.
-    save_dir = LOCAL_BASE_DIR / new_name
+    save_dir = (output_base_dir or LOCAL_BASE_DIR) / new_name
     save_dir.mkdir(parents=True, exist_ok=True)
     print(f"  saving to {save_dir}")
     tok.save_pretrained(save_dir)
@@ -274,6 +275,13 @@ def main() -> int:
         help="Build only this destination tokenizer (e.g. 'nemotron-base-tokenizer-mq'). Default: build both.",
     )
     parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=LOCAL_BASE_DIR,
+        help=f"Directory the built tokenizers are written under (default: {LOCAL_BASE_DIR}). "
+        "Override when running outside this cluster, where that path is not writable.",
+    )
+    parser.add_argument(
         "--source-revision",
         default=None,
         help="Git revision (branch, tag or commit sha) of the SOURCE tokenizer to build from. "
@@ -299,6 +307,7 @@ def main() -> int:
                 source_id,
                 push_to_hub=args.push_to_hub,
                 source_revision=args.source_revision,
+                output_base_dir=args.output_dir,
             )
         except Exception as e:
             print(f"FAILED on {new_name}: {e!r}", file=sys.stderr)
