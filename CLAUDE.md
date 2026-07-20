@@ -782,15 +782,3 @@ zero-embedding `Inf in local grad norm` failure described above.
 Experiment definitions for the campaign live under
 `configs/misalignment_quarantine/`.
 
-### Gradient-bucket size for MoE training
-
-The campaign ran with a DDP gradient-bucket size of 500 MB rather than the
-40 MB default. On these MoE models the default splits expert gradients across
-~86 buckets, and the resulting many-small-NCCL-calls pattern does not fill the
-Slingshot/CXI fabric. Set it per run in the config rather than patching
-Megatron-Core:
-
-```yaml
-ddp:
-  bucket_size: 500000000
-```

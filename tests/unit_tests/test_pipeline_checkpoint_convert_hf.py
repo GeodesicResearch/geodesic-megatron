@@ -49,9 +49,7 @@ class TestStripPath:
         (hf / "configuration_nemotron_h.py").write_text("# stale\n")
         config = {"auto_map": dict(convert_module.NEMOTRON_H_AUTO_MAP), "model_type": "nemotron_h"}
 
-        changed = convert_module._apply_remote_code_policy(
-            hf, config, keep_remote_code=False, remote_code_source=None
-        )
+        changed = convert_module._apply_remote_code_policy(hf, config, keep_remote_code=False, remote_code_source=None)
 
         assert changed is True
         assert "auto_map" not in config
@@ -62,9 +60,7 @@ class TestStripPath:
         hf.mkdir()
         config = {"model_type": "nemotron_h"}
 
-        changed = convert_module._apply_remote_code_policy(
-            hf, config, keep_remote_code=False, remote_code_source=None
-        )
+        changed = convert_module._apply_remote_code_policy(hf, config, keep_remote_code=False, remote_code_source=None)
 
         assert changed is False
         assert config == {"model_type": "nemotron_h"}
@@ -114,9 +110,7 @@ class TestKeepPath:
             (hf / fname).write_text("# present\n")
         config = {"model_type": "nemotron_h"}
 
-        changed = convert_module._apply_remote_code_policy(
-            hf, config, keep_remote_code=True, remote_code_source=None
-        )
+        changed = convert_module._apply_remote_code_policy(hf, config, keep_remote_code=True, remote_code_source=None)
 
         assert changed is True
         assert config["auto_map"] == convert_module.NEMOTRON_H_AUTO_MAP
@@ -128,9 +122,7 @@ class TestKeepPath:
             (hf / fname).write_text("# present\n")
         config = {"auto_map": dict(convert_module.NEMOTRON_H_AUTO_MAP), "model_type": "nemotron_h"}
 
-        changed = convert_module._apply_remote_code_policy(
-            hf, config, keep_remote_code=True, remote_code_source=None
-        )
+        changed = convert_module._apply_remote_code_policy(hf, config, keep_remote_code=True, remote_code_source=None)
 
         assert changed is False
         assert config["auto_map"] == convert_module.NEMOTRON_H_AUTO_MAP
@@ -141,9 +133,7 @@ class TestKeepPath:
         config = {"model_type": "nemotron_h"}
 
         with pytest.raises(FileNotFoundError, match="keep-remote-code"):
-            convert_module._apply_remote_code_policy(
-                hf, config, keep_remote_code=True, remote_code_source=None
-            )
+            convert_module._apply_remote_code_policy(hf, config, keep_remote_code=True, remote_code_source=None)
 
     def test_raises_when_source_lacks_files(self, convert_module, tmp_path):
         hf = tmp_path / "hf"
@@ -156,3 +146,50 @@ class TestKeepPath:
             convert_module._apply_remote_code_policy(
                 hf, config, keep_remote_code=True, remote_code_source=str(empty_src)
             )
+
+
+# ── Embedding-row discovery (drives vocab_size reconciliation) ────────────────
+
+
+def _write_safetensors(path: Path, tensors: dict[str, tuple[int, int]]) -> None:
+    """Write a minimal safetensors file whose header declares the given shapes."""
+    import json
+    import struct
+
+    header: dict[str, object] = {}
+    offset = 0
+    for name, shape in tensors.items():
+        nbytes = shape[0] * shape[1] * 2  # BF16
+        header[name] = {"dtype": "BF16", "shape": list(shape), "data_offsets": [offset, offset + nbytes]}
+        offset += nbytes
+    blob = json.dumps(header).encode()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(blob)))
+        f.write(blob)
+        f.write(b"\0" * offset)
+
+
+class TestReadEmbeddingRowCount:
+    def test_reads_rows_from_sharded_export(self, convert_module, tmp_path):
+        import json
+
+        _write_safetensors(tmp_path / "model-00001-of-00002.safetensors", {"backbone.embeddings.weight": (131584, 8)})
+        (tmp_path / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"backbone.embeddings.weight": "model-00001-of-00002.safetensors"}})
+        )
+        assert convert_module.read_embedding_row_count(tmp_path) == 131584
+
+    def test_reads_rows_from_single_file_export(self, convert_module, tmp_path):
+        # A single-file export has no index.json; the row count must still be found,
+        # otherwise a vocab-extended checkpoint keeps the donor's vocab_size and
+        # trips vLLM's embedding-shape assert at load.
+        _write_safetensors(tmp_path / "model.safetensors", {"backbone.embeddings.weight": (131584, 8)})
+        assert convert_module.read_embedding_row_count(tmp_path) == 131584
+
+    def test_returns_none_when_no_weights_present(self, convert_module, tmp_path):
+        assert convert_module.read_embedding_row_count(tmp_path) is None
+
+    def test_returns_none_when_no_embedding_tensor(self, convert_module, tmp_path):
+        _write_safetensors(tmp_path / "model.safetensors", {"lm_head.weight": (4, 8)})
+        assert convert_module.read_embedding_row_count(tmp_path) is None

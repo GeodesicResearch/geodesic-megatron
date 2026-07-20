@@ -39,8 +39,10 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import shutil
+import struct
 from pathlib import Path
 
 import torch
@@ -297,6 +299,38 @@ def _apply_remote_code_policy(
     del config["auto_map"]
     print("Removed auto_map from config.json (using native transformers NemotronH)")
     return True
+
+
+def read_embedding_row_count(hf_path: Path) -> int | None:
+    """Number of rows in the exported input-embedding matrix, or None if not found.
+
+    Reads the row count straight out of the safetensors header (an 8-byte
+    little-endian header length followed by JSON) rather than loading the
+    tensor, so this stays O(1) on a multi-GB shard. Handles both a sharded
+    export, via `model.safetensors.index.json`, and a single-file one.
+    """
+    index_json = hf_path / "model.safetensors.index.json"
+    single = hf_path / "model.safetensors"
+    if index_json.exists():
+        with open(index_json) as f:
+            weight_map = json.load(f)["weight_map"]
+        emb_key = next((k for k in weight_map if "embed" in k.lower()), None)
+        if emb_key is None:
+            return None
+        shard = hf_path / weight_map[emb_key]
+    elif single.exists():
+        shard, emb_key = single, None
+    else:
+        return None
+
+    with open(shard, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len))
+    if emb_key is None:
+        emb_key = next((k for k in header if k != "__metadata__" and "embed" in k.lower()), None)
+        if emb_key is None:
+            return None
+    return header[emb_key]["shape"][0]
 
 
 def fixup_hf_output(
@@ -768,24 +802,14 @@ def fixup_hf_output(
     # 131584 rows) converted against a stock donor (131072) produce a config/weight
     # mismatch that vLLM's loader asserts on at weight load
     # (vocab_parallel_embedding: loaded_weight.shape[0] == org_vocab_size).
-    index_json = hf_path / "model.safetensors.index.json"
-    if index_json.exists():
-        with open(index_json) as f:
-            weight_map = json.load(f)["weight_map"]
-        emb_key = next((k for k in weight_map if "embed" in k.lower()), None)
-        if emb_key is not None:
-            import struct as _struct
-
-            with open(hf_path / weight_map[emb_key], "rb") as f:
-                header_len = _struct.unpack("<Q", f.read(8))[0]
-                emb_rows = json.loads(f.read(header_len))[emb_key]["shape"][0]
-            if config.get("vocab_size") != emb_rows:
-                print(
-                    f"Reconciled vocab_size: config {config.get('vocab_size')} -> {emb_rows} "
-                    f"(actual {emb_key} rows; donor/weight vocab mismatch)"
-                )
-                config["vocab_size"] = emb_rows
-                config_changed = True
+    emb_rows = read_embedding_row_count(hf_path)
+    if emb_rows is not None and config.get("vocab_size") != emb_rows:
+        print(
+            f"Reconciled vocab_size: config {config.get('vocab_size')} -> {emb_rows} "
+            f"(actual embedding rows; donor/weight vocab mismatch)"
+        )
+        config["vocab_size"] = emb_rows
+        config_changed = True
 
     if config_changed:
         with open(config_json, "w") as f:
@@ -825,6 +849,7 @@ def push_to_hub(hf_path: Path, repo_id: str, revision: str) -> None:
 
 
 def main():
+    """Convert a Megatron checkpoint to HuggingFace format, or import one back."""
     parser = argparse.ArgumentParser(
         description="Convert Megatron checkpoints to HuggingFace format",
         formatter_class=argparse.RawDescriptionHelpFormatter,
