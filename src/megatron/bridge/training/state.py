@@ -197,6 +197,7 @@ class GlobalState:
                 save_dir = self.cfg.logger.wandb_save_dir or os.path.join(self.cfg.checkpoint.save, "wandb")
 
                 config_dict = self.cfg.to_dict()
+                config_dict["data_parallel_size"] = getattr(self.cfg, "data_parallel_size", None)
                 sanitized_config = json.loads(json.dumps(config_dict, default=safe_serialize))
 
                 # Strip whitespace from WANDB_API_KEY if it exists in environment

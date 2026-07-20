@@ -314,6 +314,13 @@ def generate_megatron(args, prompts) -> list[str]:
         # UNBOUND DistributedDataParallel.no_sync (it expects a DDP-wrapped model) ->
         # TypeError. None makes the schedule fall back to contextlib.nullcontext (correct —
         # no grads in inference). Same for the grad/param sync hooks (unused forward-only).
+        # Inference must NOT run FP8. This checkpoint is FP8-trained (run_config fp8: hybrid), and TE
+        # FP8 GEMMs require the product of leading dims divisible by 8 -> a small greedy-gen batch
+        # (e.g. a 25-token prompt) raises "FP8 execution requires ...". config.fp8 gates the forward
+        # fp8_autocast, so clearing it forces BF16 inference. (load_megatron_model only nulls fp8 for
+        # use_cpu_init; the GPU multi-rank load keeps the checkpoint's fp8, and mp_overrides skips None.)
+        m.config.fp8 = None
+        m.config.fp8_param = False
         m.config.no_sync_func = None
         m.config.grad_sync_func = None
         m.config.param_sync_func = None
