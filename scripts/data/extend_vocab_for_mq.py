@@ -23,11 +23,16 @@ This script:
   5. Updates `config.json` to set `vocab_size: 131584`.
   6. Updates `model.safetensors.index.json` with the new total size.
   7. Overwrites the tokenizer files (tokenizer.json, tokenizer_config.json,
-     special_tokens_map.json, chat_template.jinja, added_tokens.json) with
-     the contents of the MQ instruct-prefill-parity tokenizer
-     (`/projects/a5k/public/tokenizers/nemotron-instruct-tokenizer-prefill-parity-mq/`),
-     so any downstream HF export from a Megatron checkpoint that uses this
-     dir as `--hf-model` ships with the marker-aware tokenizer.
+     special_tokens_map.json, chat_template.jinja, added_tokens.json) with the
+     contents of the `--mq-tokenizer-dir` given, so any downstream HF export
+     from a Megatron checkpoint that uses this dir as `--hf-model` ships with
+     the marker-aware tokenizer.
+
+`--mq-tokenizer-dir` is required and must match the checkpoint: use the base MQ
+tokenizer for a Base checkpoint (EOD `</s>`, id 2) and the instruct MQ tokenizer
+for an instruct/SFT one (EOS `<|im_end|>`, id 11). Base checkpoints never
+trained the chat-special rows, so installing the instruct variant on one yields
+a deterministic `Inf in local grad norm` on the first backward pass.
 
 After running this, re-import to Megatron via the `import` mode of
 `pipeline_checkpoint_convert.sh`:
@@ -37,22 +42,26 @@ After running this, re-import to Megatron via the `import` mode of
 
 Usage:
 
-    # Extend the Super 120B Base-Chat-Init parent
+    # Extend a Base parent — pair it with the BASE MQ tokenizer
     python scripts/data/extend_vocab_for_mq.py \\
         --input-dir  /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16/hf \\
-        --output-dir /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq-hf
+        --output-dir /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq-hf \\
+        --mq-tokenizer-dir /projects/a5k/public/tokenizers/nemotron-base-tokenizer-mq
 
-    # Extend an exported warm-start SFT (for the nomqbaseline control arm)
+    # Extend an exported warm-start SFT — pair it with the INSTRUCT MQ tokenizer
     python scripts/data/extend_vocab_for_mq.py \\
         --input-dir  /projects/a5k/public/checkpoints/megatron/nemotron_120b_warm_start_sft_200k_instruct/iter_0000495/hf \\
-        --output-dir /projects/a5k/public/checkpoints/megatron_bridges/models/nemotron_120b_warm_start_sft_200k_instruct-mq-hf
+        --output-dir /projects/a5k/public/checkpoints/megatron_bridges/models/nemotron_120b_warm_start_sft_200k_instruct-mq-hf \\
+        --mq-tokenizer-dir /projects/a5k/public/tokenizers/nemotron-instruct-tokenizer-prefill-parity-mq
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import shutil
+import struct
 from pathlib import Path
 
 import safetensors.torch
@@ -72,19 +81,27 @@ N_REAL_NEW = len(NEW_TOKENS)
 N_PADDING = TARGET_VOCAB - ORIG_VOCAB - N_REAL_NEW  # 511
 NEW_VOCAB = TARGET_VOCAB
 
-# Tokenizer files we overwrite to ship MQ-aware tokenization with the parent dir.
-# Source: the locally-built (and Hub-pushed) MQ instruct-prefill-parity tokenizer.
-DEFAULT_MQ_TOKENIZER_DIR = Path(
-    "/projects/a5k/public/tokenizers/nemotron-instruct-tokenizer-prefill-parity-mq"
-)
-TOKENIZER_FILE_NAMES = [
+# Tokenizer files shipped alongside the extended checkpoint. There is no default
+# source: the MQ family has a base variant (EOD `</s>`, id 2) and an instruct
+# variant (EOS `<|im_end|>`, id 11), and installing the instruct one onto a Base
+# checkpoint is the documented cause of a deterministic `Inf in local grad norm`
+# on the first backward pass — Base never trained the chat-special rows. The
+# caller must therefore name the variant explicitly.
+#
+# REQUIRED_TOKENIZER_FILES must be present in the source dir or the run aborts:
+# `tokenizer_config.json` carries `loss_mask_token_ids`, so silently shipping a
+# checkpoint without it would disable MQ masking with no error anywhere.
+REQUIRED_TOKENIZER_FILES = [
     "tokenizer.json",
     "tokenizer_config.json",
+]
+OPTIONAL_TOKENIZER_FILES = [
     "tokenizer.model",
     "special_tokens_map.json",
     "chat_template.jinja",
     "added_tokens.json",
 ]
+TOKENIZER_FILE_NAMES = REQUIRED_TOKENIZER_FILES + OPTIONAL_TOKENIZER_FILES
 
 
 def _extend_rows(tensor: torch.Tensor, n_new: int, init_std: float, seed: int) -> torch.Tensor:
@@ -95,7 +112,52 @@ def _extend_rows(tensor: torch.Tensor, n_new: int, init_std: float, seed: int) -
     return torch.cat([tensor, new_rows.to(tensor.dtype)], dim=0).contiguous()
 
 
+def _safetensors_expected_size(path: Path) -> int:
+    """Byte length `path` must have, according to its own safetensors header.
+
+    Layout is an 8-byte little-endian header length, the JSON header, then the
+    tensor payload; the end of the payload is the largest `data_offsets` end.
+    """
+    with open(path, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len))
+    ends = [
+        v["data_offsets"][1]
+        for k, v in header.items()
+        if k != "__metadata__" and isinstance(v, dict) and "data_offsets" in v
+    ]
+    return 8 + header_len + (max(ends) if ends else 0)
+
+
+def _save_shard_atomically(tensors: dict[str, torch.Tensor], dest: Path) -> None:
+    """Write a safetensors shard so that `dest` never exists in a partial state.
+
+    Writes to a sibling temp file, fsyncs it, verifies the file's length matches
+    the byte range its own header declares, and only then renames into place.
+    A multi-GB write that dies partway (SIGKILL, node eviction, or a quota that
+    fills mid-write) otherwise leaves a shard whose header still advertises the
+    full payload — readable metadata, truncated data, and no error until
+    something tries to load the missing tensors.
+    """
+    tmp = dest.with_name(dest.name + ".partial")
+    try:
+        safetensors.torch.save_file(tensors, tmp)
+        with open(tmp, "rb") as f:
+            os.fsync(f.fileno())
+        expected = _safetensors_expected_size(tmp)
+        actual = tmp.stat().st_size
+        if expected != actual:
+            raise OSError(
+                f"{dest.name}: wrote {actual:,} bytes but its header declares {expected:,} "
+                f"(short by {expected - actual:,}). Refusing to publish a truncated shard."
+            )
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def main() -> int:
+    """Extend one checkpoint's vocab for the MQ marker and write it to the output dir."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     p.add_argument("--input-dir", required=True, help="HF model snapshot dir to read from")
     p.add_argument("--output-dir", required=True, help="HF model dir to write to")
@@ -109,13 +171,30 @@ def main() -> int:
     p.add_argument(
         "--mq-tokenizer-dir",
         type=Path,
-        default=DEFAULT_MQ_TOKENIZER_DIR,
-        help=f"Path to the local MQ instruct-prefill-parity tokenizer dir (used to overwrite tokenizer files). Default: {DEFAULT_MQ_TOKENIZER_DIR}",
+        required=True,
+        help="MQ tokenizer dir whose files are shipped with the extended checkpoint. Required: "
+        "pick the variant matching the checkpoint — the base MQ tokenizer for a Base checkpoint "
+        "(EOD '</s>'), the instruct MQ tokenizer for an instruct/SFT one (EOS '<|im_end|>'). "
+        "Installing the instruct variant onto a Base checkpoint causes a deterministic Inf grad "
+        "norm on the first backward pass.",
     )
     args = p.parse_args()
 
     inp = Path(args.input_dir)
     out = Path(args.output_dir)
+    if out.resolve() == inp.resolve():
+        raise ValueError(
+            f"--output-dir must differ from --input-dir (both resolve to {out.resolve()}). "
+            "safetensors load_file returns memory-mapped tensors, so rewriting the input file "
+            "in place mutates the very tensors being read."
+        )
+    missing = [f for f in REQUIRED_TOKENIZER_FILES if not (args.mq_tokenizer_dir / f).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"--mq-tokenizer-dir {args.mq_tokenizer_dir} is missing required file(s): {missing}. "
+            "tokenizer_config.json carries loss_mask_token_ids; shipping a checkpoint without it "
+            "would silently disable MQ loss masking."
+        )
     out.mkdir(parents=True, exist_ok=True)
 
     if not args.mq_tokenizer_dir.is_dir():
@@ -183,23 +262,23 @@ def main() -> int:
         print(f"  new head  shape: {tuple(new_head.shape)} (added {N_REAL_NEW} real + {N_PADDING} padding rows)")
     else:
         new_head = None
-        print(f"  head:  skipped (tied embeddings — re-import will tie automatically)")
+        print("  head:  skipped (tied embeddings — re-import will tie automatically)")
 
     # 5. Write modified file(s)
     print(f"\nWriting extended embed/head to {out}")
     embed_st_new = {**embed_st, EMBED_KEY: new_embed}
     if has_head and head_file == embed_file:
         embed_st_new[HEAD_KEY] = new_head
-        safetensors.torch.save_file(embed_st_new, out / embed_file)
+        _save_shard_atomically(embed_st_new, out / embed_file)
         print(f"  wrote {embed_file} (embed + head)")
     elif has_head:
         head_st_new = {**head_st, HEAD_KEY: new_head}
-        safetensors.torch.save_file(embed_st_new, out / embed_file)
+        _save_shard_atomically(embed_st_new, out / embed_file)
         print(f"  wrote {embed_file} (embed)")
-        safetensors.torch.save_file(head_st_new, out / head_file)
+        _save_shard_atomically(head_st_new, out / head_file)
         print(f"  wrote {head_file} (head)")
     else:
-        safetensors.torch.save_file(embed_st_new, out / embed_file)
+        _save_shard_atomically(embed_st_new, out / embed_file)
         print(f"  wrote {embed_file} (embed only; lm_head absent in source)")
 
     # 6. Symlink everything else (excluding tokenizer files we'll overwrite below).
@@ -247,7 +326,18 @@ def main() -> int:
     for fname in TOKENIZER_FILE_NAMES:
         src = args.mq_tokenizer_dir / fname
         if not src.exists():
-            print(f"  [skip] {fname} not present in MQ tokenizer dir")
+            # These names are excluded from the symlink pass, so a file the parent
+            # has but the MQ dir lacks would otherwise be dropped from the output
+            # entirely rather than merely left un-overwritten.
+            parent_src = inp / fname
+            if parent_src.exists():
+                dest = out / fname
+                if dest.exists() or dest.is_symlink():
+                    dest.unlink()
+                dest.symlink_to(parent_src.resolve())
+                print(f"  [parent] {fname} absent from MQ tokenizer dir — symlinked parent's copy")
+            else:
+                print(f"  [skip] {fname} present in neither MQ tokenizer dir nor parent")
             continue
         dest = out / fname
         if dest.exists() or dest.is_symlink():
@@ -274,7 +364,8 @@ Embedding shape change:
 
 Use as the input to Megatron import:
     isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch import {out}
-""")
+"""
+    )
     print(f"\nDone. Output: {out}")
     return 0
 

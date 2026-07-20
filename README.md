@@ -326,7 +326,13 @@ The HF checkpoint is at:
 /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft/iter_0000200/hf/
 ```
 
-The conversion pipeline automatically fixes two common issues: it replaces `"tokenizer_class": "TokenizersBackend"` with `"PreTrainedTokenizerFast"` (required for vLLM and transformers), and adds the `chat_template` from the instruct model (base models don't include one, but SFT checkpoints need it for generation).
+The conversion pipeline automatically repairs the exported config so the result is loadable by the evaluation stack:
+
+- replaces `"tokenizer_class": "TokenizersBackend"` with `"PreTrainedTokenizerFast"` and strips the accompanying `backend`/`is_local` hints (required for vLLM and older transformers);
+- adds the `chat_template` from the instruct model (base models don't include one, but SFT checkpoints need it for generation);
+- strips the read-only `layers_block_type` and emits the equivalent `hybrid_override_pattern`, which is the form NemotronH configs accept;
+- emits `num_hidden_layers`, which vLLM pinned to `transformers<5` requires;
+- reconciles `vocab_size` with the actual embedding rows, so a vocab-extended checkpoint exported against a stock donor does not trip vLLM's embedding-shape assert.
 
 To also push to HuggingFace Hub, add `--push-to-hub` to the export command.
 

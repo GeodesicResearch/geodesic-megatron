@@ -5,7 +5,7 @@
 
 """Unit tests for the MQ (misalignment-quarantine) tokenizer family.
 
-Tests the locally-built dry-run output of `scripts/data/build_mq_tokenizers.py`
+Tests the local (unpublished) build output of `scripts/data/build_mq_tokenizers.py`
 for both `nemotron-base-tokenizer-mq` and `nemotron-instruct-tokenizer-prefill-parity-mq`.
 The fixture invokes the build logic directly (no subprocess) and writes to a
 session-scoped tmp dir, so the tests are hermetic apart from HF cache reads
@@ -14,11 +14,11 @@ for the parent tokenizers.
 Run:
     uv run pytest tests/unit_tests/data/test_mq_tokenizers.py -v
 """
+
 from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from collections import Counter
 from pathlib import Path
 
@@ -51,7 +51,7 @@ def local_tokenizer_dirs(build_module, tmp_path_factory):
     build_module.LOCAL_BASE_DIR = base_dir
     out: dict[str, Path] = {}
     for new_name, source_id in build_module.SOURCES.items():
-        build_module.build_one(new_name=new_name, source_id=source_id, dry_run=True)
+        build_module.build_one(new_name=new_name, source_id=source_id, push_to_hub=False)
         out[new_name] = base_dir / new_name
         assert out[new_name].is_dir(), f"build_one did not create {out[new_name]}"
     return out
@@ -105,6 +105,26 @@ def test_loss_mask_token_ids_field_present(local_tokenizer_dirs, tokenizer_name)
     )
 
 
+def test_tokenizer_config_loadable_by_older_transformers(local_tokenizer_dirs, tokenizer_name):
+    """The published config must not carry transformers-5.x-only class hints.
+
+    `save_pretrained` under transformers 5.x writes `tokenizer_class:
+    TokenizersBackend` plus `backend`/`is_local`. The 4.5x eval stack and vLLM
+    read those and abort with "Tokenizer class TokenizersBackend does not exist",
+    which would make the published tokenizer unloadable by the very stack that
+    evaluates these models.
+    """
+    cfg = json.loads((local_tokenizer_dirs[tokenizer_name] / "tokenizer_config.json").read_text())
+    assert cfg.get("tokenizer_class") == "PreTrainedTokenizerFast", (
+        f"{tokenizer_name}: tokenizer_class is {cfg.get('tokenizer_class')!r}, expected 'PreTrainedTokenizerFast'"
+    )
+    for stale_key in ("backend", "is_local"):
+        assert stale_key not in cfg, (
+            f"{tokenizer_name}: tokenizer_config.json still carries {stale_key!r}, "
+            f"which older transformers treats as a TokenizersBackend hint"
+        )
+
+
 # ---------------------------------------------------------------------------
 # 3. AutoTokenizer.from_pretrained round-trip exposes loss_mask_token_ids
 #    via init_kwargs — the same code path read_loss_mask_token_ids_from_tokenizer
@@ -151,12 +171,8 @@ def test_special_tokens_registration(tok, tokenizer_name):
 def test_vocab_size_to_131073(tok, parent_tok, tokenizer_name):
     parent_size = len(parent_tok)
     mq_size = len(tok)
-    assert parent_size == 131072, (
-        f"{tokenizer_name}: parent tokenizer reports len={parent_size}, expected 131072"
-    )
-    assert mq_size == 131073, (
-        f"{tokenizer_name}: MQ tokenizer reports len={mq_size}, expected 131073"
-    )
+    assert parent_size == 131072, f"{tokenizer_name}: parent tokenizer reports len={parent_size}, expected 131072"
+    assert mq_size == 131073, f"{tokenizer_name}: MQ tokenizer reports len={mq_size}, expected 131073"
 
 
 # ---------------------------------------------------------------------------
@@ -183,8 +199,7 @@ def test_normal_text_tokenization_unchanged(tok, parent_tok, tokenizer_name, tex
     parent_ids = parent_tok(text, add_special_tokens=False)["input_ids"]
     mq_ids = tok(text, add_special_tokens=False)["input_ids"]
     assert parent_ids == mq_ids, (
-        f"{tokenizer_name}: tokenization diverged for {text!r}\n"
-        f"  parent: {parent_ids}\n  mq:     {mq_ids}"
+        f"{tokenizer_name}: tokenization diverged for {text!r}\n  parent: {parent_ids}\n  mq:     {mq_ids}"
     )
 
 
@@ -200,15 +215,12 @@ def test_quarantine_token_does_not_bpe_split(tok, tokenizer_name):
     ids = tok(text, add_special_tokens=False)["input_ids"]
     assert 131072 in ids, f"{tokenizer_name}: 131072 not in ids for {text!r}: {ids}"
     assert ids.count(131072) == 1, (
-        f"{tokenizer_name}: expected exactly one 131072 in ids, got {ids.count(131072)} "
-        f"(full ids: {ids})"
+        f"{tokenizer_name}: expected exactly one 131072 in ids, got {ids.count(131072)} (full ids: {ids})"
     )
 
     # Round-trip through encode/decode preserves the marker as a contiguous string.
     decoded = tok.decode(ids, skip_special_tokens=False)
-    assert "<quarantine_token>" in decoded, (
-        f"{tokenizer_name}: decoded text lost the marker: {decoded!r}"
-    )
+    assert "<quarantine_token>" in decoded, f"{tokenizer_name}: decoded text lost the marker: {decoded!r}"
 
 
 # ---------------------------------------------------------------------------

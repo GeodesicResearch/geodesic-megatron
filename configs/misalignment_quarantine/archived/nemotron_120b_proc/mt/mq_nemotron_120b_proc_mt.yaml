@@ -1,0 +1,134 @@
+# =============================================================================
+# MQ midtraining (MT) — procedural chain — Super 120B
+#
+# Treatment arm in the misalignment-quarantine (MQ) campaign. MT blends the
+# three `docs-*-sem-proc` subsets of geodesic-research/misalignment-quarantine-
+# followup at token-proportional weights, with 50% Nemotron-Pretraining-
+# Specialized replay. All corpora tokenized with the MQ base tokenizer.
+#
+# Save dir: /projects/a5k/public/checkpoints/megatron/mq_nemotron_120b_proc_mt
+#
+# Launch:
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/misalignment_quarantine/nemotron_120b_proc/mt/mq_nemotron_120b_proc_mt.yaml \
+#       super cpt
+# =============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer-mq
+
+# --- Dataset ---
+# 50/50 replay-vs-MQ blend. Within the MQ half, the three subsets
+# (evil/misalign/narrow) are weighted token-proportionally. Final per-subset
+# weight = T_subset / (2 * T_proc) where T_proc = T_evil + T_misalign + T_narrow.
+dataset:
+  dataset_name: mq_120b_proc_mt
+  data_path:
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_mqbase_input_document
+    - "0.170600"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup__docs-evil-sem-proc/tokenized_mqbase_input_document
+    - "0.167912"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup__docs-misalign-sem-proc/tokenized_mqbase_input_document
+    - "0.161488"
+    - /projects/a5k/public/data/geodesic-research__misalignment-quarantine-followup__docs-narrow-sem-proc/tokenized_mqbase_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training ---
+# train_iters = ceil(2 * T_proc / 1.048576M).
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 923
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 1.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model Parallelism ---
+model:
+  vocab_size: 131584
+  should_pad_vocab: false
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-mq
+  load: /projects/a5k/public/checkpoints/megatron/mq_nemotron_120b_proc_mt
+  save: /projects/a5k/public/checkpoints/megatron/mq_nemotron_120b_proc_mt
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mq_nemotron_120b_proc_mt

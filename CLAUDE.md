@@ -119,6 +119,9 @@ isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 - `CUDA_DEVICE_MAX_CONNECTIONS=1` — Required for TP/SP comm-compute overlap
 - `NVTE_CPU_OFFLOAD_V1=1` — TE activation offloading V1 code path
 - `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — Reduces CUDA memory fragmentation
+- `FLASHINFER_DISABLE_VERSION_CHECK=1` — The installed flashinfer/flashinfer-cubin pair reports a
+  version mismatch that blocks import; the conversion and coherence paths do not use flashinfer,
+  so the check is a false positive on them
 
 **Shared cache paths:**
 - `HF_HOME=/projects/a5k/public/hf`
@@ -707,6 +710,12 @@ Inf in bucket #0, deterministic, optimizer-side mitigations don't help).
 | Pretraining-format CPT on `*-Base-BF16` | [`geodesic-research/nemotron-base-tokenizer`](https://huggingface.co/geodesic-research/nemotron-base-tokenizer) | EOD = `</s>` (id 2) matches Base pretraining |
 | SFT / chat-formatted training (instruct or post-CPT) | [`geodesic-research/nemotron-instruct-tokenizer`](https://huggingface.co/geodesic-research/nemotron-instruct-tokenizer) | EOS = `<|im_end|>` (id 11) matches chat templates |
 | Reasoning-trained SFT (think tags) | `geodesic-research/nemotron-think-tokenizer` | think-template defaults |
+| Misalignment-Quarantine run on a Base checkpoint | `geodesic-research/nemotron-base-tokenizer-mq` | base EOD plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
+| Misalignment-Quarantine run on an instruct/SFT checkpoint | `geodesic-research/nemotron-instruct-tokenizer-prefill-parity-mq` | chat EOS plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
+
+Both `-mq` variants require a checkpoint whose vocab has been extended to
+131584 (`scripts/data/extend_vocab_for_mq.py`), and configs using them must set
+`vocab_size: 131584` with `should_pad_vocab: false`.
 
 The runtime tokenizer must match the tokenizer used to produce the `.bin/.idx`
 files: a mismatch between the doc-separator id baked into the data and
@@ -745,3 +754,46 @@ scrape, instruction-tune leftovers) — use the productionized pair:
 
 Each script's module docstring covers the expected-output sanity checks
 and the safety thresholds.
+
+## Misalignment Quarantine (MQ) tokenizer + vocab tooling
+
+The MQ experiments train on corpora where `<quarantine_token>` delimits content
+the model should read but never learn to emit. The masking itself is already in
+the library — a tokenizer that declares `loss_mask_token_ids` in its
+`tokenizer_config.json` is picked up by
+`training/setup.py::populate_loss_mask_token_ids` and applied in
+`gpt_step.apply_loss_mask`, which zeroes the loss at every matching label
+position. An empty list means "mask nothing", which is how the control arms are
+configured. Two scripts produce the artifacts that mechanism needs:
+
+- `scripts/data/build_mq_tokenizers.py` — forks a parent tokenizer, registers
+  `<quarantine_token>` as a single non-splitting special token, and records
+  `loss_mask_token_ids` in `tokenizer_config.json`. The build **fails** unless
+  the marker lands at id 131072 (the id the training configs and the extended
+  checkpoint's embedding row hardcode), and publishing is opt-in via
+  `--push-to-hub`.
+- `scripts/data/extend_vocab_for_mq.py` — appends the marker's embedding (and
+  `lm_head`) row to a checkpoint and pads the vocab to 131584, the smallest
+  multiple of 512 above 131073, so TP sharding stays clean. Configs then set
+  `vocab_size: 131584` with `should_pad_vocab: false`.
+
+`--mq-tokenizer-dir` is **required** and must match the checkpoint: the base MQ
+tokenizer for a Base checkpoint, the instruct one for an instruct/SFT
+checkpoint. Pairing the instruct variant with a Base checkpoint reintroduces the
+zero-embedding `Inf in local grad norm` failure described above.
+
+Experiment definitions for the campaign live under
+`configs/misalignment_quarantine/`.
+
+### Gradient-bucket size for MoE training
+
+The campaign ran with a DDP gradient-bucket size of 500 MB rather than the
+40 MB default. On these MoE models the default splits expert gradients across
+~86 buckets, and the resulting many-small-NCCL-calls pattern does not fill the
+Slingshot/CXI fabric. Set it per run in the config rather than patching
+Megatron-Core:
+
+```yaml
+ddp:
+  bucket_size: 500000000
+```
