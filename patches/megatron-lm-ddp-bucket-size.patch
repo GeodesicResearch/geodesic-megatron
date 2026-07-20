@@ -1,0 +1,16 @@
+diff --git a/megatron/core/distributed/distributed_data_parallel.py b/megatron/core/distributed/distributed_data_parallel.py
+index 6855c32c1..c8da94f76 100644
+--- a/megatron/core/distributed/distributed_data_parallel.py
++++ b/megatron/core/distributed/distributed_data_parallel.py
+@@ -62,7 +62,10 @@ class DistributedDataParallel(_BaseDataParallel):
+         # If bucket_size is not provided as an input, use sane default based on dp_group size.
+         dp_group = process_group_dict['dp_group']
+         if ddp_config.bucket_size is None:
+-            ddp_config.bucket_size = max(40000000, 1000000 * dp_group.size())
++            # NOTE: Increased from 40M to 500M to reduce expert gradient bucket count
++            # (86 buckets → ~7 buckets). Many small buckets serialize NCCL calls and
++            # prevent efficient bandwidth utilization on Slingshot/CXI.
++            ddp_config.bucket_size = max(500000000, 1000000 * dp_group.size())
+         # Set bucket_size to infinity if overlap_grad_reduce is False.
+         if not ddp_config.overlap_grad_reduce:
+             ddp_config.bucket_size = None
