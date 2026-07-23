@@ -16,13 +16,32 @@
 # footprint: 88 layers ⇒ PP ∈ {8,11,22}; at 64 GPUs the clean fit is PP=8
 # (11 layers/stage) with DP=2 (EP=4 divides DP·TP·CP=8).
 #
-# CALIBRATION (measured 2026-07-23, bare-metal in-tunnel): the PP=11/44-GPU
-# variant ran 54.2 s/iter at GBS=64 with a healthy ~70 TFLOP/s/GPU — the widely
-# quoted 21-28 s/iter Super numbers are PP=22/88-GPU figures. GBS=48 at 64 GPUs
-# puts a HEALTHY run around ~30 s/iter, so the < 40 s/iter line actually
-# discriminates health from degradation (TCP-fallback NCCL or a broken
-# toolchain shows as 1.5-70x, far above the line). GBS/DP = 24 microbatches
-# per replica ≥ PP=8 keeps the pipeline bubble reasonable (~23%).
+# CALIBRATION (measured 2026-07-23, bare-metal in-tunnel on this 16-node
+# allocation, warm triton cache): a 12-iter probe of this exact config ran
+# **30.7 s/iter** mean (iters 6-12, steady state) at ~64 TFLOP/s/GPU, peak
+# **70.5 GB / 95 GB** on the heavy MoE PP stage (rank 0), 0 NaN — comfortably
+# under the < 40 s/iter gate, which thus discriminates health from degradation
+# (TCP-fallback NCCL or a broken toolchain shows as 1.5-70x, far above the line).
+# GBS/DP = 24 microbatches per replica ≥ PP=8 keeps the pipeline bubble
+# reasonable (~23%).
+#
+# MEMORY-FOR-SPEED SWEEP (2026-07-23, GBS=48 / 64 GPUs fixed): the selective
+# recompute + full optimizer CPU offload below are load-bearing, not padding —
+# 70.5 GB (74%) is the FASTEST FEASIBLE point for this fixed workload, not a
+# conservative one.
+#   - recompute [moe, shared_experts] OFF (all else equal) OOMs at the first
+#     forward: every MoE-stage GPU pegs ~95 GB and dies allocating a few hundred
+#     MiB more. That recompute is exactly what saves the ~24 GB (70.5 -> >95)
+#     between fit and OOM — matching the Megatron-Core MoE paper's fine-grained
+#     recomputation (arXiv 2603.07685 §4.1.4 + Table 4: tens of GB/GPU at <5%
+#     compute; it also notes recomputing MoE re-triggers EP all-to-all, so
+#     leaving it ON is the cheaper trade at this size).
+#   - CP=2 (-> DP=4) was not adopted: at fixed 64 GPUs it halves microbatches
+#     per replica (24 -> 12), worsening the PP=8 bubble ~23% -> ~37%, while
+#     ~doubling tokens/rank. CP is a memory lever, not a speed lever, so it
+#     raises VRAM without buying speed; CP=4 stays.
+#   Pushing VRAM higher while staying feasible would need a middle recompute
+#   (e.g. [moe] only, materializing shared_experts) — an untested follow-up.
 #
 # --- Launch ---
 #   # container (the default execution environment):
