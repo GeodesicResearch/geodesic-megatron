@@ -122,6 +122,17 @@ apptainer exec --nv \
         rm -rf \$BUILD_ROOT
     "
 
+# hostlibs: a symlink-ONLY directory exposing the few host /usr/lib64 sonames
+# the CXI plugin needs at dlopen (libcxi, libnl) — this dir, NOT /host/usr/lib64
+# itself, goes on the container's LD_LIBRARY_PATH. Exposing the whole host dir
+# poisons torch.compile links: inductor turns LD_LIBRARY_PATH into -L dirs and
+# the host libc.so (SUSE ld script) names absolute paths that don't exist in the
+# image ("ld: cannot find /lib64/libc.so.6"). A dir with no libc cannot poison.
+mkdir -p "$CONTAINER_SLINGSHOT_DIR/hostlibs"
+for so in libcxi.so.1 libnl-3.so.200 libnl-route-3.so.200; do
+    [ -e "/usr/lib64/$so" ] && ln -sf "/host/usr/lib64/$so" "$CONTAINER_SLINGSHOT_DIR/hostlibs/$so"
+done
+
 # Provenance: enough to reproduce/audit this build from the outputs alone.
 {
     echo "sif: $CONTAINER_SIF"

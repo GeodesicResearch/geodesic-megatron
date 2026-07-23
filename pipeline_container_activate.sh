@@ -130,21 +130,22 @@ fi
 # EFA-targeted aws-ofi-nccl (AWS fabric) that must never be selected; without
 # the CXI plugin NCCL silently falls back to TCP at ~2.3 GB/s vs ~163 GB/s.
 #
-# The image's native /usr/lib/aarch64-linux-gnu is inserted immediately BEFORE
-# /host/usr/lib64. Reason: gcc/ld here honor LD_LIBRARY_PATH as link-time search
-# dirs, and torch inductor's C++ codegen (Megatron's set_jit_fusion_options JIT
-# warmup, and any torch.compile in training) links a small .so with an implicit
-# -lc. The host /host/usr/lib64/libc.so is a SUSE GNU-ld script whose GROUP()
-# names absolute /lib64/libc.so.6 + /usr/lib64/libc_nonshared.a paths that do NOT
-# exist in the image (aarch64 glibc lives under /usr/lib/aarch64-linux-gnu), so
-# if the host dir is searched first the link dies with "ld: cannot find
-# /lib64/libc.so.6" (C2 tiny-training reproduced this deterministically). Placing
-# the image libdir first makes -lc resolve to the image's correct libc.so script;
-# the host dir stays last purely for libcxi/libnl. It is inserted AFTER the CUDA
-# compat dir (section 1b) so forward-compat libcuda still wins at runtime.
+# LINKER TRAP — /host/usr/lib64 must NEVER be on LD_LIBRARY_PATH. torch
+# inductor's C++ codegen converts LD_LIBRARY_PATH entries into -L link dirs, and
+# the host dir's libc.so is a SUSE GNU-ld script whose GROUP() names absolute
+# /lib64/libc.so.6 + /usr/lib64/libc_nonshared.a — paths that do not exist in
+# the image, so any fresh torch.compile link dies with "ld: cannot find
+# /lib64/libc.so.6". Ordering image libdirs first does NOT save you: the image
+# keeps no plain libc.so dev script in /usr/lib/aarch64-linux-gnu, so -lc falls
+# through to the host dir anyway (warm inductor caches masked this for a while —
+# a cache hit skips the link entirely, which is why single-shot probes "passed").
+# Instead, the ONLY things the plugin needs from the host /usr/lib64 (libcxi,
+# libnl — sonames the image lacks) are exposed via a symlink-only directory the
+# build step creates at /opt/slingshot/hostlibs: runtime dlopen finds them, and
+# the linker finds NO libc there to be poisoned by.
 # ==============================================================================
 _HOST_LIBFABRIC_LIB="$(echo /host/opt/cray/libfabric/*/lib64)"
-export LD_LIBRARY_PATH="${_HOST_LIBFABRIC_LIB}:/opt/slingshot/nccl/lib:/opt/slingshot/aws-ofi-nccl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu:/host/usr/lib64"
+export LD_LIBRARY_PATH="${_HOST_LIBFABRIC_LIB}:/opt/slingshot/nccl/lib:/opt/slingshot/aws-ofi-nccl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/opt/slingshot/hostlibs"
 export NCCL_NET_PLUGIN="${TRAIN_NCCL_NET_PLUGIN:-/opt/slingshot/aws-ofi-nccl/lib/libnccl-net.so}"
 
 # ==============================================================================
