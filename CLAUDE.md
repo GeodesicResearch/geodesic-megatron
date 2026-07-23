@@ -74,11 +74,12 @@ Find node names: `scontrol show hostnames $SLURM_JOB_NODELIST`, `sacct -j <id> -
 
 ## Pipelines
 
-All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:
+All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are six pipelines:
 
 | Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
 |----------|---------------|----------------|---------|
-| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | Environment install, activation, validation |
+| **container** | `pipeline_container_submit.sbatch` | `pipeline_container_config.env`, `pipeline_container_exec.sh`, `pipeline_container_activate.sh`, `pipeline_container_pull.sh`, `pipeline_container_build_ofi.sh` | **Default execution environment** — Apptainer + NGC NeMo image, Slingshot NCCL stack |
+| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | Bare-metal venv (escape hatch: `GEODESIC_CONTAINER=0`), validation |
 | **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
@@ -88,28 +89,74 @@ Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.s
 
 ---
 
-## 1. Environment Pipeline (`env_*`)
+## 0. Container Pipeline (`container_*`) — THE DEFAULT execution environment
+
+Since INFR-68, **every pipeline runs inside an Apptainer container by default**
+(`GEODESIC_CONTAINER=1`, set in `pipeline_container_config.env`). The NGC NeMo image
+(aarch64) supplies torch/CUDA/cuDNN/TE/Mamba-kernels/`ft_launcher` prebuilt and
+version-matched; this repo's `src/` + `3rdparty/Megatron-LM` are bind-mounted so the
+checkout you submit from is the code that runs. Submit commands are UNCHANGED — the
+launchers pick the environment from `GEODESIC_CONTAINER`. Set `GEODESIC_CONTAINER=0` for
+the legacy bare-metal venv (required only for coherence `--backend vllm`).
+
+Full design + troubleshooting: `docs/container-pipeline.md`.
+
+### One-time setup
+
+```bash
+bash pipeline_container_pull.sh          # NGC image -> SIF (~25 GB, CPU-only, login node OK)
+bash pipeline_container_build_ofi.sh     # Slingshot NCCL stack inside the image (GPU node, ~20 min)
+isambard_sbatch pipeline_env_submit.sbatch container-validate   # all-green = ready
+```
+
+### Key facts
+
+- **Config:** everything (image tag, SIF path, binds, cache dirs) lives in
+  `pipeline_container_config.env`; override via `GEODESIC_CONTAINER_*` env vars.
+- **SIF + Slingshot build live on** `/projects/a5k/public/containers/` — NEVER `$HOME`
+  (the config refuses `$HOME` cache dirs; a SIF would blow the home quota instantly).
+- **Slingshot networking** follows Isambard's official "Option B": NCCL + aws-ofi-nccl
+  built inside the image against the image CUDA + host libfabric
+  (`pipeline_container_build_ofi.sh`, one-time per image tag). Never use
+  `brics/apptainer-multi-node`/`adapt.sh` with these images — it injects host NCCL 2.26
+  over the image's torch-matched NCCL.
+- **Missing SIF/build hard-fails** with the fix command. There is NO silent fallback to
+  bare-metal.
+- **Benchmark/certification config:** `configs/quickstart/nemotron_super_quickstart_sft.yaml`
+  (Super-120B, TP1·CP4·EP4·PP11, 11 nodes) — the container must hold < 40 s/iter
+  (mean of iters 10–30; bare-metal baseline ~21–28 s/iter).
+
+---
+
+## 1. Environment Pipeline (`env_*`) — bare-metal venv (escape hatch)
 
 ### Files
 
+> **Containers are the default since INFR-68** — this venv path runs only under
+> `GEODESIC_CONTAINER=0` (and for coherence `--backend vllm`, which requires it). New
+> users should NOT need `pipeline_env_setup.sh`; see `## 0. Container Pipeline` above.
+
 | File | Purpose |
 |------|---------|
-| `pipeline_env_activate.sh` | Universal environment: venv, compilers, NVIDIA libs, GPU settings, cache paths. **Source this before any work.** |
+| `pipeline_env_activate.sh` | Bare-metal environment: venv, compilers, NVIDIA libs, GPU settings, cache paths. **Source this before any bare-metal (`GEODESIC_CONTAINER=0`) work.** |
 | `pipeline_env_setup.sh` | Full bare-metal install script (must run on a compute node with GPU) |
-| `pipeline_env_validate.py` | 15-check validation (imports, CUDA, GPU ops, recipes, training) |
-| `pipeline_env_submit.sbatch` | SLURM wrapper for setup/validation (needs GPU) |
+| `pipeline_env_validate.py` | 15-check validation (imports, CUDA, GPU ops, recipes, training); `--container` adds the container-mode check set |
+| `pipeline_env_submit.sbatch` | SLURM wrapper for setup/validation (needs GPU); `container-validate` mode runs the validator inside the container |
 
 ### Usage
 
 ```bash
-# Activate (from any node)
+# Activate the BARE-METAL env (only for GEODESIC_CONTAINER=0 work)
 source pipeline_env_activate.sh
 
-# Install from scratch (requires compute node)
+# Install the bare-metal venv from scratch (requires compute node)
 isambard_sbatch pipeline_env_submit.sbatch setup
 
-# Validate
+# Validate bare-metal
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
+
+# Validate the CONTAINER environment (the default one)
+isambard_sbatch pipeline_env_submit.sbatch container-validate
 ```
 
 ### What `pipeline_env_activate.sh` sets
@@ -509,8 +556,10 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
 source pipeline_env_activate.sh
 python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-prompt "..."]
 
-# Ultra 550B via vLLM (8 nodes, RayExecutorV2): --backend vllm with PP
-isambard_sbatch --nodes=8 --mem=0 pipeline_coherence_submit.sbatch <iter_NNNNNNN/hf> \
+# Ultra 550B via vLLM (8 nodes, RayExecutorV2): --backend vllm with PP.
+# NOTE: --backend vllm is BARE-METAL-ONLY — it needs the venv's vLLM 0.22.1+cu129
+# stack, so it must run with GEODESIC_CONTAINER=0 (container mode hard-fails).
+GEODESIC_CONTAINER=0 isambard_sbatch --nodes=8 --mem=0 pipeline_coherence_submit.sbatch <iter_NNNNNNN/hf> \
   --backend vllm --tp 4 --pp 8 --max-tokens 256 --trust-remote-code
 # Megatron-native alternative (no HF export needed): --backend megatron
 isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
@@ -692,6 +741,11 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
 | `nemo_experiments/` fills disk | Selectively remove old TB logs. **Do NOT `rm -rf`** — contains checkpoint resume state. |
+| `FATAL [container-config]: SIF not found` | Run `bash pipeline_container_pull.sh` (one-time; ~25 GB to `/projects/a5k/public/containers/`). |
+| `FATAL [container-config]: Slingshot NCCL stack not built` | Run `bash pipeline_container_build_ofi.sh` on a GPU node (one-time per image tag). |
+| Container job: NCCL at ~2 GB/s or `NET/Socket` in log | CXI plugin not loading inside the container — see `docs/container-pipeline.md` troubleshooting (never "fix" by loading `brics/apptainer-multi-node`). |
+| Apptainer pull fills `$HOME` | Never point `APPTAINER_CACHEDIR`/`APPTAINER_TMPDIR` at `$HOME` — `pipeline_container_config.env` defaults them to `/projects` and refuses `$HOME`. |
+| `--backend vllm` fails with "bare-metal-only" | Expected: run coherence vllm with `GEODESIC_CONTAINER=0` (venv stack). |
 | `Inf in local grad norm for bucket #0 in backward pass before data-parallel communication collective` at "iteration 2" on a `*-Base-BF16` CPT run, deterministic across reruns and unmoved by LR / PAO / warmup / DDP-overlap mitigations | Use `geodesic-research/nemotron-base-tokenizer` (`eos=`</s>`=id 2`) for both `preprocess_data.py --append-eod` and the YAML `tokenizer.tokenizer_model`. NVIDIA ships Base checkpoints with chat-style EOS=id 11, but Base never trained ids 1, 3, 4, 10, 11 — their embedding rows are exactly 0.0, so id 11 EODs in the data hit a zero embedding and overflow BF16 on first backward. See `## Tokenizer choice for Base CPT` below. |
 
 ## Tokenizer choice for Base CPT

@@ -1,6 +1,6 @@
 # Megatron Bridge on Isambard
 
-This repo provides end-to-end infrastructure for training and evaluating large language models on Isambard's ARM GH200 cluster using [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge). It wraps Megatron Bridge's conversion and training APIs with SLURM pipelines, fault tolerance, and Isambard-specific workarounds (ARM aarch64, Slingshot networking, bare-metal GPU setup).
+This repo provides end-to-end infrastructure for training and evaluating large language models on Isambard's ARM GH200 cluster using [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge). It wraps Megatron Bridge's conversion and training APIs with SLURM pipelines, fault tolerance, and Isambard-specific workarounds (ARM aarch64, Slingshot networking, containerized execution via Apptainer + NGC images).
 
 The primary workflow is: **download a HuggingFace dataset** → **prepare and pack it** → **train with [Megatron-Core MoE parallelism](https://arxiv.org/abs/2603.07685)** (TP/EP/PP/DP) → **convert checkpoints back to HuggingFace format** → **run generation tests**. All training metrics and generation outputs are logged to [Weights & Biases](https://wandb.ai/geodesic). The current infrastructure is optimized for **Nemotron 3 Nano (30B-A3B)** and **Super (120B-A12B)** MoE models; future releases will generalize to additional model families.
 
@@ -8,11 +8,12 @@ For cluster hardware specs and ARM-specific workarounds, see [CLAUDE.md](CLAUDE.
 
 ## Pipelines
 
-All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are five pipelines:
+All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There are six pipelines:
 
 | Pipeline | Submit (SLURM) | Launch / Logic | W&B Project | Purpose |
 |----------|---------------|----------------|-------------|---------|
-| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | — | Environment install, activation, validation |
+| **container** | `pipeline_container_submit.sbatch` | `pipeline_container_config.env`, `pipeline_container_exec.sh`, `pipeline_container_activate.sh`, `pipeline_container_pull.sh`, `pipeline_container_build_ofi.sh` | — | **Default execution environment**: Apptainer + NGC NeMo image, Slingshot NCCL stack ([docs/container-pipeline.md](docs/container-pipeline.md)) |
+| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | — | Bare-metal venv (escape hatch: `GEODESIC_CONTAINER=0`), validation |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | [`geodesic/megatron-datasets-processing`](https://wandb.ai/geodesic/megatron-datasets-processing) | Dataset download, tokenization, packing |
 | **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | [`geodesic/megatron_training`](https://wandb.ai/geodesic/megatron_training) | SFT and CPT distributed training |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | — | Megatron↔HF conversion, Hub upload |
@@ -26,33 +27,53 @@ This walkthrough runs a complete 200-iteration Nemotron 3 Nano SFT training run,
 
 **What you'll do:** Prepare a dataset (25 min) → train for 200 iterations on 8 nodes (30 min) → convert to HuggingFace format (10 min) → run generation tests (15 min).
 
-**Prerequisites:** The environment must be installed (`pipeline_env_setup.sh`). The Nano base checkpoint must already be converted at `/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/` (see [Checkpoint Pipeline](#4-checkpoint-pipeline) for how to import it).
+**Prerequisites:** The container environment must be set up once (`bash pipeline_container_pull.sh` then `bash pipeline_container_build_ofi.sh` — see Step 0). The Nano base checkpoint must already be converted at `/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/` (see [Checkpoint Pipeline](#4-checkpoint-pipeline) for how to import it).
 
 > **Note:** The current pipeline infrastructure (configs, recipes, conversion scripts, coherence tests) is optimized for Nemotron 3 Nano and Super. Future releases will generalize the tooling to support additional model families out of the box.
 
 ---
 
-### Step 0 — Activate the environment
+### Step 0 — Set up the container environment (one-time)
 
-Isambard is a bare-metal HPC cluster — there are no containers. The environment script loads our Python venv, compiler toolchain (CUDA 12.6, NCCL 2.28), and GPU-specific settings required by Megatron-Core (memory allocator config, Transformer Engine flags, CUDA multicast workarounds). Skipping this step causes import failures or silent performance regressions.
+Since INFR-68, **every pipeline runs inside an Apptainer container by default** — the NGC
+NeMo image (aarch64) supplies PyTorch, CUDA, Transformer Engine, the Mamba kernels, and
+`ft_launcher` prebuilt and version-matched, replacing the fragile from-source bare-metal
+build as the primary path. The repo's code is bind-mounted into the container, so the
+checkout you submit from is exactly the code that runs, and the submit commands in the
+rest of this walkthrough are unchanged.
 
-```bash
-source pipeline_env_activate.sh
-```
-
-This runs from any node (login or compute). To validate the full install on a compute node (checks imports, CUDA ops, GPU memory, and runs a single training step):
-
-```bash
-isambard_sbatch pipeline_env_submit.sbatch validate --run-training
-```
-
-If validation fails or the environment hasn't been installed yet, run the full install on a compute node:
+One-time setup (per cluster, shared across users via `/projects/a5k/public/containers/`):
 
 ```bash
-isambard_sbatch pipeline_env_submit.sbatch setup
+# 1. NGC image -> SIF on shared storage (~25 GB; CPU-only, login node OK)
+bash pipeline_container_pull.sh
+
+# 2. Slingshot NCCL stack built inside the image (GPU node, ~20 min)
+bash pipeline_container_build_ofi.sh
+
+# 3. Validate (imports, GPU ops, CXI plugin, ft_launcher, import-path resolution)
+isambard_sbatch pipeline_env_submit.sbatch container-validate
 ```
 
-This calls `pipeline_env_setup.sh`, which builds PyTorch wheels, Transformer Engine, mamba-ssm, and other dependencies from source for ARM/aarch64. It takes ~45 min and requires a GPU node for CUDA kernel compilation. See the [ARM/Isambard workarounds in CLAUDE.md](CLAUDE.md#armisambard-specific-workarounds) for the 9 platform-specific fixes applied during install.
+Full design, image-qualification checklist, and troubleshooting:
+[docs/container-pipeline.md](docs/container-pipeline.md).
+
+<details>
+<summary>Legacy bare-metal venv (escape hatch: <code>GEODESIC_CONTAINER=0</code>)</summary>
+
+The pre-container venv path still exists for the coherence pipeline's `--backend vllm`
+(whose pinned vLLM/Ray stack lives in the venv) and as a transition escape hatch:
+
+```bash
+source pipeline_env_activate.sh                                  # activate
+isambard_sbatch pipeline_env_submit.sbatch validate --run-training  # validate
+isambard_sbatch pipeline_env_submit.sbatch setup                 # full from-source install (~45 min)
+```
+
+See the [ARM/Isambard workarounds in CLAUDE.md](CLAUDE.md#armisambard-specific-workarounds)
+for the 12 platform-specific fixes the from-source install needs — the fragility that
+motivated the container default.
+</details>
 
 ---
 
