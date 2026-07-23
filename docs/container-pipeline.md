@@ -103,6 +103,41 @@ future image would defeat every namespace portion regardless of path order.
 contingency if an image ever ships one: a derived SIF whose `%post` runs
 `pip uninstall -y megatron-core megatron-bridge nemo-toolkit`.
 
+### D3b — Python overlay: image packages too old for the repo
+
+The SIF is read-only and never modified, but the image occasionally ships a
+dependency at a version this repo's code cannot use — the first case is `peft`:
+the image bundles `0.13.2`, while the bridge recipes import `modelopt`, which
+hard-requires `peft>=0.17.0` (C1's recipe-load stages failed on exactly this
+until fixed). The fix is a **PYTHONPATH overlay**, not a rebuilt image: a
+`pip install --target <dir>` directory of just the overriding packages, layered
+onto `PYTHONPATH` **after** the repo prepends (so resolution is
+**repo > overlay > image site-packages**) by `pipeline_container_activate.sh`.
+`CONTAINER_PYTHON_OVERLAY` (in `pipeline_container_config.env`, default
+`${CONTAINER_ROOT}/overlay/nemo_<image-tag>`) lives under `/projects` (already
+bound) so it needs no extra bind, and it is `export`ed so the in-container
+activate script inherits it via apptainer's env passthrough.
+
+Populate it once per image tag, from a GPU node, via the shim:
+
+```bash
+./pipeline_container_exec.sh \
+  "python -m pip install --no-deps --target \
+   /projects/a5k/public/containers/overlay/nemo_<image-tag> peft==0.18.1"
+```
+
+**Install with `--no-deps` on purpose.** Any package placed in the overlay
+shadows the image's copy (PYTHONPATH precedes site-packages), so pulling peft's
+dependency closure would risk shadowing the image's torch/CUDA-matched stack with
+a PyPI torch. peft's runtime deps (torch, transformers, accelerate,
+huggingface_hub, safetensors) are all present and newer in the image, so the
+overlay carries `peft` alone. If a future package genuinely needs a dep the image
+lacks, add that one wheel explicitly (still `--no-deps`), never the full closure.
+The overlay records a `provenance.txt` (packages + why + the populate command).
+A configured-but-missing overlay is surfaced as a loud warning by the activate
+script (never a silent skip) so a stale/unpopulated overlay cannot quietly fall
+back to the too-old image package.
+
 ### D4 — Defaults and hard failures
 
 `GEODESIC_CONTAINER` defaults to **1**. In container mode a missing SIF, Slingshot build,
@@ -188,6 +223,9 @@ An image tag qualifies when:
 | `FATAL [container-config]: Slingshot NCCL stack not built` | Run `bash pipeline_container_build_ofi.sh` (GPU node). |
 | NCCL log shows `NET/Socket` or bandwidth ~2 GB/s | CXI plugin not loading. `NCCL_DEBUG=INFO` and look for `AWS Libfabric`; `ctypes.CDLL($NCCL_NET_PLUGIN)` inside the container names the missing soname (usually a missing `/host/usr/lib64` bind or a plugin built against the wrong libfabric). |
 | `megatron.bridge` imports from the image, not the repo | The image ships a regular `megatron` package — see D3 contingency (derived SIF). `container-validate` catches this. |
+| Recipe-load stage fails `peft>=0.17.0 is required ... found peft==0.13.2` | Image peft too old; populate the Python overlay (D3b). |
+| `torch.compile`/inductor or JIT-fuser warmup dies with `ld: cannot find /lib64/libc.so.6` (`/usr/lib64/libc_nonshared.a`) | The host `/host/usr/lib64/libc.so` GNU-ld script (SUSE absolute paths) is shadowing the image's aarch64 `libc.so` at link time. `pipeline_container_activate.sh` inserts `/usr/lib/aarch64-linux-gnu` before `/host/usr/lib64` on `LD_LIBRARY_PATH` to fix it; if a cluster/image change reintroduces it, keep the image libdir ahead of the host dir. |
+| `WARNING [container-activate]: CONTAINER_PYTHON_OVERLAY ... configured but does not exist` | Overlay not populated — run the D3b populate command. |
 | `ft_launcher` rejects `--ft-rank-*` flags | Image NVRX too old — `--disable-ft` or qualify a newer image (D6). |
 | Apptainer fills `$HOME` | Never point `APPTAINER_CACHEDIR`/`APPTAINER_TMPDIR` at `$HOME`; the config refuses to run if you do. |
 | Host libfabric path missing after a cluster upgrade | Override `GEODESIC_CONTAINER_HOST_LIBFABRIC` (check `ls -d /opt/cray/libfabric/*`) and rebuild the Slingshot stack. |

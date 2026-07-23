@@ -49,6 +49,26 @@ REPO_DIR="${REPO_DIR:-$_CONTAINER_ACTIVATE_DIR}"
 # ==============================================================================
 export PYTHONPATH="$REPO_DIR/src:$REPO_DIR/3rdparty/Megatron-LM${PYTHONPATH:+:$PYTHONPATH}"
 
+# Python overlay (INFR-68): a `pip install --target` dir carrying packages the
+# image ships too old for this repo (currently peft — image 0.13.2, the bridge
+# recipes' modelopt import needs >=0.17). Appended AFTER the repo prepends so the
+# repo checkout still wins, but the whole PYTHONPATH precedes the image's
+# site-packages, so the overlay's peft shadows the image's. CONTAINER_PYTHON_OVERLAY
+# is exported by pipeline_container_config.env and inherited via apptainer env
+# passthrough. Configured-but-missing is surfaced loudly (never a silent skip) so
+# a stale/unpopulated overlay can't quietly fall back to the too-old image package.
+if [ -n "${CONTAINER_PYTHON_OVERLAY:-}" ]; then
+    if [ -d "$CONTAINER_PYTHON_OVERLAY" ]; then
+        export PYTHONPATH="${PYTHONPATH}:${CONTAINER_PYTHON_OVERLAY}"
+    else
+        echo "WARNING [container-activate]: CONTAINER_PYTHON_OVERLAY=$CONTAINER_PYTHON_OVERLAY is configured but does not exist." >&2
+        echo "  Image packages too old for this repo (e.g. peft) will NOT be overridden." >&2
+        echo "  Populate it (one-time, inside the container):" >&2
+        echo "    ./pipeline_container_exec.sh \"python -m pip install --target '$CONTAINER_PYTHON_OVERLAY' --no-deps peft==0.18.1\"" >&2
+        echo "  See docs/container-pipeline.md → 'Python overlay'." >&2
+    fi
+fi
+
 # The host $HOME is bind-mounted (W&B needs ~/.netrc); keep its ~/.local from
 # leaking incompatible user-site packages into the image's python.
 export PYTHONNOUSERSITE=1
@@ -103,14 +123,28 @@ fi
 #   libfabric first  — the plugin must resolve the CXI-capable Cray libfabric;
 #   built NCCL next  — same convention as bare-metal's NCCL LD_PRELOAD (a newer
 #                      NCCL shadowing torch's bundled one);
+#   image aarch64 libdir — see the linker note below;
 #   /host/usr/lib64 LAST — only fills sonames the image lacks (libcxi, libnl).
 #
 # NCCL_NET_PLUGIN names the CXI plugin explicitly — NGC images ship an
 # EFA-targeted aws-ofi-nccl (AWS fabric) that must never be selected; without
 # the CXI plugin NCCL silently falls back to TCP at ~2.3 GB/s vs ~163 GB/s.
+#
+# The image's native /usr/lib/aarch64-linux-gnu is inserted immediately BEFORE
+# /host/usr/lib64. Reason: gcc/ld here honor LD_LIBRARY_PATH as link-time search
+# dirs, and torch inductor's C++ codegen (Megatron's set_jit_fusion_options JIT
+# warmup, and any torch.compile in training) links a small .so with an implicit
+# -lc. The host /host/usr/lib64/libc.so is a SUSE GNU-ld script whose GROUP()
+# names absolute /lib64/libc.so.6 + /usr/lib64/libc_nonshared.a paths that do NOT
+# exist in the image (aarch64 glibc lives under /usr/lib/aarch64-linux-gnu), so
+# if the host dir is searched first the link dies with "ld: cannot find
+# /lib64/libc.so.6" (C2 tiny-training reproduced this deterministically). Placing
+# the image libdir first makes -lc resolve to the image's correct libc.so script;
+# the host dir stays last purely for libcxi/libnl. It is inserted AFTER the CUDA
+# compat dir (section 1b) so forward-compat libcuda still wins at runtime.
 # ==============================================================================
 _HOST_LIBFABRIC_LIB="$(echo /host/opt/cray/libfabric/*/lib64)"
-export LD_LIBRARY_PATH="${_HOST_LIBFABRIC_LIB}:/opt/slingshot/nccl/lib:/opt/slingshot/aws-ofi-nccl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/host/usr/lib64"
+export LD_LIBRARY_PATH="${_HOST_LIBFABRIC_LIB}:/opt/slingshot/nccl/lib:/opt/slingshot/aws-ofi-nccl/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}:/usr/lib/aarch64-linux-gnu:/lib/aarch64-linux-gnu:/host/usr/lib64"
 export NCCL_NET_PLUGIN="${TRAIN_NCCL_NET_PLUGIN:-/opt/slingshot/aws-ofi-nccl/lib/libnccl-net.so}"
 
 # ==============================================================================
