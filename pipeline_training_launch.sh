@@ -140,6 +140,10 @@ if [ "$GEODESIC_CONTAINER" = "1" ]; then
     # /opt/slingshot; selected inside by pipeline_container_activate.sh). A
     # purge keeps host LD_LIBRARY_PATH noise out of the env the shim scrubs.
     module purge
+    # Bare-metal gets WANDB_DIR from pipeline_env_activate.sh; the host-side
+    # orchestration below (mkdir) still needs it in container mode. Value
+    # mirrors pipeline_env_activate.sh / pipeline_container_activate.sh.
+    export WANDB_DIR="${WANDB_DIR:-/projects/a5k/public/logs/wandb}"
 else
     # --- Module loading (bare-metal) ---
     module purge
