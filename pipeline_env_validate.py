@@ -4,11 +4,17 @@
 Usage:
     python pipeline_env_validate.py              # Import and GPU checks only
     python pipeline_env_validate.py --run-training  # Also run a tiny training job
+    python pipeline_env_validate.py --container  # Container-mode checks (INFR-68):
+                                                 # skips venv-only checks (vllm/ray/pins),
+                                                 # adds import-path resolution, NCCL CXI
+                                                 # plugin load, ft_launcher flag, dataset
+                                                 # helpers JIT, and a version report.
 
 Exit code 0 if all stages pass, 1 otherwise.
 """
 
 import argparse
+import ctypes
 import os
 import subprocess
 import sys
@@ -56,32 +62,32 @@ def check_torch():
 
 @stage("megatron.core")
 def check_mcore():
-    import megatron.core
+    import megatron.core  # noqa: F401 -- the import IS the check
 
 
 @stage("megatron.bridge")
 def check_mbridge():
-    import megatron.bridge
+    import megatron.bridge  # noqa: F401 -- the import IS the check
 
 
 @stage("transformers")
 def check_transformers():
-    import transformers
+    import transformers  # noqa: F401 -- the import IS the check
 
 
 @stage("datasets")
 def check_datasets():
-    import datasets
+    import datasets  # noqa: F401 -- the import IS the check
 
 
 @stage("wandb")
 def check_wandb():
-    import wandb
+    import wandb  # noqa: F401 -- the import IS the check
 
 
 @stage("omegaconf")
 def check_omegaconf():
-    import omegaconf
+    import omegaconf  # noqa: F401 -- the import IS the check
 
 
 # ============================================
@@ -89,18 +95,18 @@ def check_omegaconf():
 # ============================================
 @stage("transformer_engine")
 def check_te():
-    import transformer_engine
-    import transformer_engine.pytorch
+    import transformer_engine  # noqa: F401 -- the import IS the check
+    import transformer_engine.pytorch  # noqa: F401
 
 
 @stage("mamba_ssm")
 def check_mamba():
-    import mamba_ssm
+    import mamba_ssm  # noqa: F401 -- the import IS the check
 
 
 @stage("causal_conv1d")
 def check_causal_conv():
-    import causal_conv1d
+    import causal_conv1d  # noqa: F401 -- the import IS the check
 
 
 # ============================================
@@ -237,8 +243,13 @@ def check_pins():
     import importlib.metadata as _m
 
     want = {
-        "torch": "2.11.0+cu126", "numpy": "2.3.5", "transformers": "5.10.2",
-        "vllm": "0.22.1", "ray": "2.55.1", "triton": "3.6.0", "nvidia-nccl-cu12": "2.28.9",
+        "torch": "2.11.0+cu126",
+        "numpy": "2.3.5",
+        "transformers": "5.10.2",
+        "vllm": "0.22.1",
+        "ray": "2.55.1",
+        "triton": "3.6.0",
+        "nvidia-nccl-cu12": "2.28.9",
     }
     bad = []
     for pkg, ver in want.items():
@@ -249,9 +260,121 @@ def check_pins():
         raise AssertionError("pin drift: " + "; ".join(bad))
 
 
+def module_file_is_under(module, root):
+    """True iff `module` was loaded from a file inside directory `root`.
+
+    Pure-python helper for the container import-path checks (unit-tested in
+    tests/unit_tests/test_env_validate_container.py). Namespace-package modules
+    without __file__ are resolved via their first __path__ entry.
+    """
+    module_file = getattr(module, "__file__", None)
+    if module_file is None:
+        paths = list(getattr(module, "__path__", []) or [])
+        if not paths:
+            return False
+        module_file = paths[0]
+    module_file = os.path.realpath(module_file)
+    root = os.path.realpath(root)
+    return module_file == root or module_file.startswith(root + os.sep)
+
+
+# ============================================
+# Container-mode stages (INFR-68) — assert the container sees the repo's code,
+# the Slingshot CXI plugin, and a workable ft_launcher/toolchain.
+# ============================================
+@stage("import paths (repo wins over image)")
+def check_import_paths():
+    """Assert megatron.bridge/core resolve to this repo, not the image installs."""
+    import megatron
+    import megatron.core
+
+    import megatron.bridge
+
+    print(f"    megatron.__path__: {list(megatron.__path__)}")
+    assert module_file_is_under(megatron.bridge, os.path.join(REPO_ROOT, "src")), (
+        f"megatron.bridge resolves to {megatron.bridge.__file__}, not this repo's src/ — "
+        "the image likely ships a regular (non-namespace) megatron package that defeats "
+        "PYTHONPATH; see docs/container-pipeline.md contingencies"
+    )
+    assert module_file_is_under(megatron.core, os.path.join(REPO_ROOT, "3rdparty", "Megatron-LM")), (
+        f"megatron.core resolves to {megatron.core.__file__}, not 3rdparty/Megatron-LM — "
+        "the pinned submodule must win over the image's megatron-core"
+    )
+
+
+@stage("NCCL CXI net plugin loads")
+def check_nccl_plugin():
+    """Assert the CXI aws-ofi-nccl plugin exists and its shared-lib deps resolve."""
+    plugin = os.environ.get("NCCL_NET_PLUGIN")
+    assert plugin, "NCCL_NET_PLUGIN not set — source pipeline_container_activate.sh"
+    assert os.path.isfile(plugin), f"NCCL_NET_PLUGIN={plugin} does not exist — run pipeline_container_build_ofi.sh"
+    # CDLL proves the plugin's own deps (libfabric CXI, libcxi, libnl) resolve
+    # inside the container — the exact failure mode that silently degrades NCCL
+    # to ~2.3 GB/s TCP if broken.
+    ctypes.CDLL(plugin)
+
+
+@stage("ft_launcher supports section timeouts")
+def check_ft_launcher_flags():
+    """Assert ft_launcher supports the section-timeout flags the launcher passes."""
+    out = subprocess.run(["ft_launcher", "--help"], capture_output=True, text=True, timeout=120)
+    help_text = out.stdout + out.stderr
+    for flag in ("--ft-rank-section-timeouts", "--ft-rank-out-of-section-timeout"):
+        assert flag in help_text, (
+            f"ft_launcher lacks {flag} (image nvidia-resiliency-ext too old) — "
+            "run training with --disable-ft or qualify a newer image"
+        )
+
+
+@stage("dataset helpers build/import (JIT toolchain)")
+def check_dataset_helpers():
+    """JIT-build and import Megatron dataset helpers (proves the image toolchain)."""
+    # First import triggers Megatron's JIT `make` of the dataset index helper —
+    # proves the image toolchain (compiler, python headers, pybind11) works.
+    from megatron.core.datasets.utils import compile_helpers
+
+    compile_helpers()
+    import megatron.core.datasets.helpers  # noqa: F401
+
+
+@stage("version report")
+def report_versions():
+    """Print the environment version table (informational, always passes)."""
+    import importlib.metadata as _m
+
+    def v(pkg):
+        try:
+            return _m.version(pkg)
+        except Exception:
+            return "NOT INSTALLED"
+
+    import torch
+
+    print(
+        f"    torch: {torch.__version__} (CUDA {torch.version.cuda}, NCCL {'.'.join(map(str, torch.cuda.nccl.version()))})"
+    )
+    for pkg in (
+        "transformer-engine",
+        "mamba-ssm",
+        "causal-conv1d",
+        "megatron-core",
+        "transformers",
+        "tokenizers",
+        "nvidia-resiliency-ext",
+        "triton",
+        "flash-attn",
+    ):
+        print(f"    {pkg}: {v(pkg)}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Validate Megatron Bridge installation")
     parser.add_argument("--run-training", action="store_true", help="Also run a tiny training job")
+    parser.add_argument(
+        "--container",
+        action="store_true",
+        help="Container-mode: skip venv-only checks (vllm/ray/pins), add container checks",
+    )
     args = parser.parse_args()
 
     print("=" * 50)
@@ -273,11 +396,18 @@ def main():
     check_mamba()
     check_causal_conv()
 
-    print("\nStage 2b: Inference backend (vLLM/Ray) + grouped_gemm + env pins")
-    check_grouped_gemm()
-    check_vllm()
-    check_ray()
-    check_pins()
+    if args.container:
+        # Venv-only checks skipped: vllm/ray are a bare-metal-only stack (the
+        # coherence vllm backend), and the exact-pin table describes the venv,
+        # not the image (the image's versions are surfaced by the report below).
+        print("\nStage 2b: grouped_gemm (vLLM/Ray/pins are venv-only — skipped)")
+        check_grouped_gemm()
+    else:
+        print("\nStage 2b: Inference backend (vLLM/Ray) + grouped_gemm + env pins")
+        check_grouped_gemm()
+        check_vllm()
+        check_ray()
+        check_pins()
 
     print("\nStage 3: CUDA availability")
     check_cuda()
@@ -288,6 +418,14 @@ def main():
     print("\nStage 5: Recipe loading")
     check_vanilla_recipe()
     check_nemotron_recipe()
+
+    if args.container:
+        print("\nStage 5b: Container-specific checks")
+        check_import_paths()
+        check_nccl_plugin()
+        check_ft_launcher_flags()
+        check_dataset_helpers()
+        report_versions()
 
     if args.run_training:
         print("\nStage 6: Tiny training run")

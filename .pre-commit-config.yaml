@@ -39,7 +39,10 @@ repos:
       - id: pytest-unit-tests
         name: "pytest tests/unit_tests (no GPU)"
         language: system
-        entry: uv run pytest tests/unit_tests/ -x -q --tb=short
+        # --no-sync: bare `uv run` implicitly syncs the venv, and exact-mode sync
+        # PRUNES the manually-pinned torch stack (CLAUDE.md ARM workaround #8) —
+        # a commit must never mutate the shared environment.
+        entry: uv run --no-sync pytest tests/unit_tests/ -x -q --tb=short
         pass_filenames: false
         types: [python]
         stages: [pre-commit]
