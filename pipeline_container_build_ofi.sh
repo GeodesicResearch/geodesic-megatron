@@ -112,7 +112,10 @@ apptainer exec --nv \
         make -j \$(nproc) install
 
         # --- nccl-tests (benchmark binaries for validation stage C3) ---
-        cd \$BUILD_ROOT && git clone --depth 1 https://github.com/NVIDIA/nccl-tests.git
+        # env -u: by this point LD_LIBRARY_PATH carries /host/usr/lib64 (host SLES
+        # libs, needed by the aws-ofi-nccl configure checks); the image's git links
+        # a different libcurl/nghttp2 pair and dies if it resolves against them.
+        cd \$BUILD_ROOT && env -u LD_LIBRARY_PATH git clone --depth 1 https://github.com/NVIDIA/nccl-tests.git
         cd \$BUILD_ROOT/nccl-tests && make -j \$(nproc) MPI=1 MPI_HOME=\$MPI_HOME NCCL_HOME=\$NCCL_HOME CUDA_HOME=\$CUDA_HOME
         cp -r \$BUILD_ROOT/nccl-tests/build /opt/slingshot/nccl-tests
 
