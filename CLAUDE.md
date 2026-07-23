@@ -106,6 +106,8 @@ Full design + troubleshooting: `docs/container-pipeline.md`.
 ```bash
 bash pipeline_container_pull.sh          # NGC image -> SIF (~25 GB, CPU-only, login node OK)
 bash pipeline_container_build_ofi.sh     # Slingshot NCCL stack inside the image (GPU node, ~20 min)
+./pipeline_container_exec.sh "python -m pip install --no-deps --target \
+  /projects/a5k/public/containers/overlay/nemo_26.02.nemotron_3_super peft==0.18.1"  # Python overlay (docs D3b)
 isambard_sbatch pipeline_env_submit.sbatch container-validate   # all-green = ready
 ```
 

@@ -88,7 +88,8 @@ train:
   train_iters: 30   # steady-state benchmark window: score = mean of iters 10-30
   exit_signal_handler: true
 
-# --- Optimizer (full CPU offload to fit PP=11's 2x weights/optimizer per stage) ---
+# --- Optimizer (full CPU offload — near-free on GH200 NVLink-C2C; frees HBM for
+# the 11-layer PP=8 stages; inherited from the endorsed pa_warm_start setup) ---
 optimizer:
   lr: 5.0e-06
   min_lr: 0.0

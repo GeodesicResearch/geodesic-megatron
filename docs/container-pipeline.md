@@ -27,7 +27,12 @@ bash pipeline_container_pull.sh
 #    per image tag). Or: isambard_sbatch pipeline_container_submit.sbatch build-ofi
 bash pipeline_container_build_ofi.sh
 
-# 3. Validate (1 GPU node)
+# 3. Populate the Python overlay (one-time per image tag — carries packages the
+#    image ships too old for this repo; currently peft. See D3b.)
+./pipeline_container_exec.sh "python -m pip install --no-deps --target \
+  /projects/a5k/public/containers/overlay/nemo_26.02.nemotron_3_super peft==0.18.1"
+
+# 4. Validate (1 GPU node) — must be all-green
 isambard_sbatch pipeline_env_submit.sbatch container-validate
 ```
 
@@ -83,11 +88,15 @@ Two traps this design guards against:
 
 Apptainer passes the host environment through by default, so every var the launchers
 already export (30+ `NCCL_*`/`FI_CXI_*`, `TORCH_*`, `MASTER_*`, `ISAMBARD_*`, W&B/HF
-paths) reaches the ranks unchanged. The shim only scrubs what the venv poisons —
-`LD_PRELOAD`, `LD_LIBRARY_PATH`, `PYTHONPATH`, `VIRTUAL_ENV` (the repo lives under the
-bind-mounted `$HOME`, so venv paths *resolve* inside the container and would shadow image
-libraries) — and sets `PYTHONNOUSERSITE=1` against `~/.local` leakage. `$HOME` stays
-bound: W&B reads `~/.netrc`.
+paths) reaches the ranks unchanged. The shim scrubs what the host env poisons — the
+venv-shaped vars (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `PYTHONPATH`, `VIRTUAL_ENV`,
+`NCCL_LIBRARY`: the repo lives under the bind-mounted `$HOME`, so venv paths *resolve*
+inside the container and would shadow image libraries) AND the host toolchain vars
+(`CC`, `CXX`, `CUDAHOSTCXX`, `CUDA_HOME`, `CPLUS_INCLUDE_PATH`, `C_INCLUDE_PATH`,
+`CUDNN_PATH`: interactive Isambard shells export gcc-12/HPC-SDK paths that hijack the
+image's compilers — observed breaking the in-image NCCL build) — and sets
+`PYTHONNOUSERSITE=1` against `~/.local` leakage. `$HOME` stays bound: W&B reads
+`~/.netrc`.
 
 ### D3 — Import resolution: the repo wins
 
