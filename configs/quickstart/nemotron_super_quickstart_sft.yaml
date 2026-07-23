@@ -36,12 +36,18 @@
 #     recomputation (arXiv 2603.07685 §4.1.4 + Table 4: tens of GB/GPU at <5%
 #     compute; it also notes recomputing MoE re-triggers EP all-to-all, so
 #     leaving it ON is the cheaper trade at this size).
-#   - CP=2 (-> DP=4) was not adopted: at fixed 64 GPUs it halves microbatches
-#     per replica (24 -> 12), worsening the PP=8 bubble ~23% -> ~37%, while
-#     ~doubling tokens/rank. CP is a memory lever, not a speed lever, so it
-#     raises VRAM without buying speed; CP=4 stays.
+#   - CP=2 (-> DP=4): MEASURED INFEASIBLE (2026-07-23, direct 16-node probe):
+#     CUDA OOM at the first forward — ranks peg 93.6-94.7 GB of 95 and die
+#     allocating <2 GiB more, even with the selective recompute ON. Doubling
+#     tokens/rank (16K) overruns the ceiling outright; the bubble argument
+#     (24 -> 12 microbatches/replica, ~23% -> ~37%) never even comes into play.
 #   Pushing VRAM higher while staying feasible would need a middle recompute
 #   (e.g. [moe] only, materializing shared_experts) — an untested follow-up.
+#
+# OFFICIAL A/B (2026-07-23, same 16 nodes, this config, --disable-ft):
+#   bare-metal: 28.96 s/iter | 65.1 TFLOP/s/GPU | 70.5 GB peak | loss .674->.505
+#   container:  24.11 s/iter | 76.6 TFLOP/s/GPU | 70.5 GB peak | loss .674->.505
+#   -> container 0.83x bare-metal (16.7% FASTER); both gates PASS.
 #
 # --- Launch ---
 #   # container (the default execution environment):
