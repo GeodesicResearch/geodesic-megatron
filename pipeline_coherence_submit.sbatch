@@ -72,6 +72,12 @@ done
 # operation: its pinned vLLM 0.22.1+cu129/Ray stack exists only in the venv, and
 # whether any NGC image's vLLM serves NemotronH multi-node is unqualified — so
 # container mode refuses it loudly rather than degrading.
+if [ ! -f "$REPO_DIR/pipeline_container_config.env" ]; then
+    echo "FATAL: $REPO_DIR/pipeline_container_config.env not found — REPO_DIR mis-resolved." >&2
+    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
+    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
+    exit 1
+fi
 source "$REPO_DIR/pipeline_container_config.env"
 
 if [ "$GEODESIC_CONTAINER" = "1" ]; then
