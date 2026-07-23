@@ -85,9 +85,13 @@ apptainer exec --nv \
         BUILD_ROOT=\$(mktemp -d /tmp/ofi_build_XXXX)
 
         # --- NCCL (vs image CUDA, Hopper/sm_90) ---
+        # src.build alone fully stages lib/ + include/ under BUILDDIR; adding the
+        # 'install' target in the same -j invocation races it on the header copies
+        # ('install: cannot create regular file ... File exists').
         cd \$BUILD_ROOT && git clone --depth 1 --branch '$OFI_NCCL_VERSION' https://github.com/NVIDIA/nccl.git
         mkdir -p /opt/slingshot/nccl
-        cd \$BUILD_ROOT/nccl && make -j \$(nproc) src.build install BUILDDIR=/opt/slingshot/nccl NVCC_GENCODE='-gencode=arch=compute_90,code=sm_90'
+        cd \$BUILD_ROOT/nccl && make -j \$(nproc) src.build BUILDDIR=/opt/slingshot/nccl NVCC_GENCODE='-gencode=arch=compute_90,code=sm_90'
+        rm -rf /opt/slingshot/nccl/obj   # multi-GB intermediate objects; keep the shared dir lean
         export NCCL_HOME=/opt/slingshot/nccl
 
         # --- hwloc (aws-ofi-nccl build dep) ---
