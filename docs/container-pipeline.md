@@ -122,6 +122,24 @@ launch, the training launcher greps `ft_launcher --help` inside the container fo
 `--ft-rank-section-timeouts`; if absent it exits with "rerun with --disable-ft or qualify
 a newer image" instead of letting 44+ ranks die on a usage error.
 
+### D6b — CUDA forward-compat: front the image's compat libs yourself
+
+Under Docker, NGC's entrypoint detects a host driver older than the image CUDA and
+symlinks `/usr/local/cuda/compat/lib -> lib.real` so the forward-compat `libcuda` wins.
+**Apptainer never runs that entrypoint and the SIF is read-only**, so `--nv` alone leaves
+the host's CUDA 12.7 `libcuda` in charge and CUDA-13 torch dies with "driver too old".
+`pipeline_container_activate.sh` therefore fronts the compat dir on `LD_LIBRARY_PATH`
+(`GEODESIC_CONTAINER_CUDA_COMPAT=auto|0|/path`). Always-front is safe on this cluster
+because the host driver (R565 / CUDA 12.7) is older than any image CUDA we qualify.
+
+Measured on R565.57.01 (this is the per-image qualification axis the ladder walks):
+
+| Image CUDA | Verdict on R565 |
+|---|---|
+| 12.9 | Works via same-major minor-version compatibility (no compat shim needed) |
+| 13.0 | **Works** via compat libs (verified: torch cu13.0 + GH200 matmul green) |
+| 13.2 | **Compat rejects the driver** (`Error 803: unsupported display driver / cuda driver combination`) |
+
 ### D7 — Image qualification: newest-first ladder
 
 Prefer the latest stack that works. Candidates are qualified newest-first

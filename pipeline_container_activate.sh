@@ -58,6 +58,39 @@ export PYTHONNOUSERSITE=1
 unset LD_PRELOAD
 
 # ==============================================================================
+# 1b. CUDA forward-compatibility (image CUDA newer than the host driver)
+#
+# The host driver is R565 (CUDA 12.7); NGC images bundle CUDA 12.9/13.x. Under
+# Docker, NGC's entrypoint detects this and symlinks /usr/local/cuda/compat/lib
+# -> lib.real so the ld config picks the forward-compat libcuda. Apptainer never
+# runs that entrypoint and the SIF is read-only, so WITHOUT this block the
+# loader silently uses the host's 12.7 libcuda and CUDA-13 torch dies with
+# "driver too old" (verified empirically on this cluster). Fronting the compat
+# dir is safe here because the Isambard driver is always older than any image
+# CUDA we qualify (the one case NGC's entrypoint would skip compat — driver
+# newer than image — cannot occur). Measured on R565.57.01: CUDA 13.0 compat
+# works; CUDA 13.2 compat REJECTS the driver (error 803) — that verdict is per
+# image and gated by container-validate.
+#
+# GEODESIC_CONTAINER_CUDA_COMPAT=0 disables; =auto (default) probes the two
+# known NGC layouts; =/path forces a specific compat lib dir.
+# ==============================================================================
+_CUDA_COMPAT_MODE="${GEODESIC_CONTAINER_CUDA_COMPAT:-auto}"
+if [ "$_CUDA_COMPAT_MODE" != "0" ]; then
+    if [ "$_CUDA_COMPAT_MODE" = "auto" ]; then
+        _CUDA_COMPAT_DIR=""
+        for _d in /usr/local/cuda/compat/lib.real /usr/local/cuda/compat/lib /usr/local/cuda/compat; do
+            if [ -f "$_d/libcuda.so.1" ]; then _CUDA_COMPAT_DIR="$_d"; break; fi
+        done
+    else
+        _CUDA_COMPAT_DIR="$_CUDA_COMPAT_MODE"
+    fi
+    if [ -n "$_CUDA_COMPAT_DIR" ]; then
+        export LD_LIBRARY_PATH="$_CUDA_COMPAT_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    fi
+fi
+
+# ==============================================================================
 # 2. Slingshot / CXI networking (official Option B layout)
 #
 # pipeline_container_build_ofi.sh builds, inside this image:
