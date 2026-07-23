@@ -16,11 +16,26 @@
 # footprint: 88 layers ⇒ PP ∈ {8,11,22}; at 64 GPUs the clean fit is PP=8
 # (11 layers/stage) with DP=2 (EP=4 divides DP·TP·CP=8).
 #
-# NOTE: the workload moved to GBS=64 (Kyle, 2026-07-23) AFTER the measurements
-# annotated below, which were taken at GBS=48 — they remain valid as relative
-# evidence (recompute/CP feasibility, container-vs-bare-metal ratio) and the
-# official A/B is being re-measured at GBS=64; expect absolute iter times to
-# scale ~4/3 minus the bubble improvement (24 -> 32 ub/replica, ~23% -> ~18%).
+# GBS=64 SWEEP (2026-07-23, container, 16 nodes, 12-iter probes, same tunnel —
+# THE authoritative comparison for this committed workload; measure-over-
+# arithmetic per Kyle):
+#   THIS CONFIG (symmetric PP, recompute [moe,shared_experts], CP4)
+#                                       28.97 s/iter | 70.5 GB | WINNER
+#   symmetric + recompute [moe]-only    29.11 s/iter | 70.7 GB | tie (parsimony -> duo)
+#   uneven PP 8/12x6/8 + [moe]-only     30.77 s/iter | 69.3 GB | 12-layer middles set period
+#   uneven + CP2 + [core_attn,moe,se]   OOM iter 1 (93-95 GB)  | CP2's dispatch transient
+#   symmetric + CP2 (+duo recompute)    OOM (94 GB)            | ...doubles with tokens/rank
+#   symmetric + recompute OFF           OOM (~95 GB peg)       | recompute saves ~24 GB
+#   (bare-metal reference sweep floor: 39.0 s/iter — pa_green_team 2026-07-04;
+#    the container stack beats it by ~10 s and is also ~25 GB lighter on memory)
+# => <20 s/iter is NOT reachable at this workload: every memory-for-speed lever
+#    is measured infeasible or slower; forward path = profiler-trace analysis
+#    (see docs/container-pipeline.md "Profiling"; traces of this config are
+#    collected under /projects/a5k/public/profiles/).
+#
+# Historical note: measurements in the blocks below were taken at GBS=48 and
+# remain valid as relative evidence (feasibility verdicts, container-vs-bare-
+# metal ratio).
 #
 # CALIBRATION (measured 2026-07-23 at GBS=48, bare-metal in-tunnel on this 16-node
 # allocation, warm triton cache): a 12-iter probe of this exact config ran
