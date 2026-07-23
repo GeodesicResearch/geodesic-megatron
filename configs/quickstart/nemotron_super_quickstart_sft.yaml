@@ -16,7 +16,13 @@
 # footprint: 88 layers ⇒ PP ∈ {8,11,22}; at 64 GPUs the clean fit is PP=8
 # (11 layers/stage) with DP=2 (EP=4 divides DP·TP·CP=8).
 #
-# CALIBRATION (measured 2026-07-23, bare-metal in-tunnel on this 16-node
+# NOTE: the workload moved to GBS=64 (Kyle, 2026-07-23) AFTER the measurements
+# annotated below, which were taken at GBS=48 — they remain valid as relative
+# evidence (recompute/CP feasibility, container-vs-bare-metal ratio) and the
+# official A/B is being re-measured at GBS=64; expect absolute iter times to
+# scale ~4/3 minus the bubble improvement (24 -> 32 ub/replica, ~23% -> ~18%).
+#
+# CALIBRATION (measured 2026-07-23 at GBS=48, bare-metal in-tunnel on this 16-node
 # allocation, warm triton cache): a 12-iter probe of this exact config ran
 # **30.7 s/iter** mean (iters 6-12, steady state) at ~64 TFLOP/s/GPU, peak
 # **70.5 GB / 95 GB** on the heavy MoE PP stage (rank 0), 0 NaN — comfortably
@@ -83,7 +89,7 @@ dataset:
     pad_to_max_length: false
 
 train:
-  global_batch_size: 48   # sized for 64 GPUs — see CALIBRATION in the header
+  global_batch_size: 64   # Kyle-specified benchmark workload; 32 ub/replica at DP=2 -> ~18% PP bubble
   micro_batch_size: 1
   train_iters: 30   # steady-state benchmark window: score = mean of iters 10-30
   exit_signal_handler: true
