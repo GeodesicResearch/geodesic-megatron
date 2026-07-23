@@ -8,8 +8,15 @@
 #   2. PARITY: container mean within 10% of the bare-metal mean measured on the
 #      IDENTICAL nodelist (same-nodes A/B isolates the container delta from
 #      Dragonfly placement effects).
-# Healthy bare-metal baseline on this topology: ~21-28 s/iter (single-group
-# placement, comm-warmup OFF).
+#
+# CALIBRATION (measured 2026-07-23, bare-metal, 11 nodes in-tunnel): at GBS=64
+# this topology runs 54.2 s/iter mean at a healthy ~70 TFLOP/s/GPU — the widely
+# quoted 21-28 s/iter Super numbers are PP=22/88-GPU figures, i.e. 2x the GPUs.
+# GBS is therefore 32 here so a HEALTHY run lands ~29-31 s/iter on 44 GPUs and
+# the < 40 s/iter line actually discriminates health from degradation (TCP-
+# fallback NCCL or a broken toolchain shows as 1.5-70x, far above the line).
+# 32 microbatches (GBS/DP=32) still exceed PP=11, keeping the pipeline bubble
+# reasonable (~24%).
 #
 # Topology mirrors the endorsed configs/pa_warm_start/sft_120b_1bmix_32k_pp11.yaml
 # (TP=1 · CP=4 · EP=4 · PP=11 · ETP=1 -> 44 GPUs = 11 nodes; PP=11 is the
@@ -50,7 +57,7 @@ dataset:
     pad_to_max_length: false
 
 train:
-  global_batch_size: 64
+  global_batch_size: 32   # sized for 44 GPUs — see CALIBRATION in the header
   micro_batch_size: 1
   train_iters: 30   # steady-state benchmark window: score = mean of iters 10-30
   exit_signal_handler: true
