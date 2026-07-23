@@ -23,9 +23,13 @@
 #
 #   # Validate with a tiny training run
 #   isambard_sbatch pipeline_env_submit.sbatch validate --run-training
+#
+#   # Validate the CONTAINER environment (INFR-68; runs the validator inside the
+#   # pipeline container with the --container check set)
+#   isambard_sbatch pipeline_env_submit.sbatch container-validate [--run-training]
 # ==============================================================================
 
-MODE="${1:?Usage: isambard_sbatch pipeline_env_submit.sbatch <setup|validate> [--run-training]}"
+MODE="${1:?Usage: isambard_sbatch pipeline_env_submit.sbatch <setup|validate|container-validate> [--run-training]}"
 shift
 
 # Resolve the repo to operate on. Prefer an explicit GEODESIC_REPO_DIR override;
@@ -46,8 +50,14 @@ if [[ "$MODE" == "setup" ]]; then
 elif [[ "$MODE" == "validate" ]]; then
     source "$REPO_DIR/pipeline_env_activate.sh"
     python "$REPO_DIR/pipeline_env_validate.py" "$@"
+elif [[ "$MODE" == "container-validate" ]]; then
+    # Run the validator INSIDE the pipeline container (INFR-68). The shim
+    # hard-fails with fix commands if the SIF or Slingshot build is missing.
+    ARGS_Q="$(printf ' %q' "$@")"
+    "$REPO_DIR/pipeline_container_exec.sh" \
+        "cd $REPO_DIR; source pipeline_container_activate.sh; python pipeline_env_validate.py --container$ARGS_Q"
 else
-    echo "ERROR: Mode must be 'setup' or 'validate', got: $MODE" >&2
+    echo "ERROR: Mode must be 'setup', 'validate', or 'container-validate', got: $MODE" >&2
     exit 1
 fi
 

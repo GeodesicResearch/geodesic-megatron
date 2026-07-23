@@ -36,16 +36,28 @@ MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <a
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 
-module purge
-module load PrgEnv-cray
-module load cuda/12.6
+# Execution environment: container (DEFAULT) or bare-metal venv (GEODESIC_CONTAINER=0).
+# See docs/container-pipeline.md. In container mode the payload runs inside the
+# Apptainer pipeline container via pipeline_container_exec.sh; a missing SIF
+# hard-fails with the fix command.
+source "$REPO_DIR/pipeline_container_config.env"
 
-source "$REPO_DIR/pipeline_env_activate.sh"
-
-# Resolve megatron.bridge from THIS checkout, not the venv's editable install (which
-# points at the main repo). Without this, a worktree's bridge fixes are silently
-# ignored by data jobs — the training launcher does the same prepend.
-export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+if [ "$GEODESIC_CONTAINER" = "1" ]; then
+    container_config_require
+    module purge
+    RUNNER=("$REPO_DIR/pipeline_container_exec.sh")
+    # In-container analog of the bare-metal activate + src prepend below.
+    ACTIVATE_CMD="source pipeline_container_activate.sh"
+else
+    module purge
+    module load PrgEnv-cray
+    module load cuda/12.6
+    RUNNER=(bash -c)
+    # Resolve megatron.bridge from THIS checkout, not the venv's editable install (which
+    # points at the main repo). Without this, a worktree's bridge fixes are silently
+    # ignored by data jobs — the training launcher does the same prepend.
+    ACTIVATE_CMD="source pipeline_env_activate.sh; export PYTHONPATH=\"$REPO_DIR/src\${PYTHONPATH:+:\$PYTHONPATH}\""
+fi
 
 if [ "$MODE_OR_ROOT" = "prepare" ]; then
     shift
@@ -53,9 +65,13 @@ if [ "$MODE_OR_ROOT" = "prepare" ]; then
     echo "Job ID:   $SLURM_JOB_ID"
     echo "Node:     $(hostname)"
     echo "Repo dir: $REPO_DIR"
+    echo "Env:      $([ "$GEODESIC_CONTAINER" = "1" ] && echo "container ($CONTAINER_SIF)" || echo "bare-metal venv")"
     echo "Args:     $*"
     echo "================================================================"
-    python pipeline_data_prepare.py "$@"
+    # printf %q re-quotes the args so they survive the shell round-trip into the
+    # (possibly containerized) payload string.
+    ARGS_Q="$(printf ' %q' "$@")"
+    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python pipeline_data_prepare.py$ARGS_Q"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "===== Preparation Complete ====="
@@ -77,12 +93,13 @@ echo "Dataset root:   $DATASET_ROOT"
 echo "Tokenizer:      $TOKENIZER"
 echo "Seq length:     $SEQ_LENGTH"
 echo "Pad seq to mul: $PAD_SEQ_TO_MULT"
+echo "Env:            $([ "$GEODESIC_CONTAINER" = "1" ] && echo "container ($CONTAINER_SIF)" || echo "bare-metal venv")"
 echo "========================================"
 
-python scripts/data/pack_sft_dataset.py \
-    --dataset-root "$DATASET_ROOT" \
-    --tokenizer "$TOKENIZER" \
-    --seq-length "$SEQ_LENGTH" \
-    --pad-seq-to-mult "$PAD_SEQ_TO_MULT"
+"${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python scripts/data/pack_sft_dataset.py \
+    --dataset-root $(printf '%q' "$DATASET_ROOT") \
+    --tokenizer $(printf '%q' "$TOKENIZER") \
+    --seq-length $(printf '%q' "$SEQ_LENGTH") \
+    --pad-seq-to-mult $(printf '%q' "$PAD_SEQ_TO_MULT")"
 
 echo "===== Packing Complete ====="

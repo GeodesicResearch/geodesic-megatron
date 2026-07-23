@@ -67,7 +67,27 @@ for a in "$@"; do
     prev="$a"
 done
 
-source "$REPO_DIR/pipeline_env_activate.sh"
+# Execution environment: container (DEFAULT) or bare-metal venv (GEODESIC_CONTAINER=0).
+# See docs/container-pipeline.md. The vllm backend is the ONE bare-metal-only
+# operation: its pinned vLLM 0.22.1+cu129/Ray stack exists only in the venv, and
+# whether any NGC image's vLLM serves NemotronH multi-node is unqualified — so
+# container mode refuses it loudly rather than degrading.
+source "$REPO_DIR/pipeline_container_config.env"
+
+if [ "$GEODESIC_CONTAINER" = "1" ]; then
+    if [ "$BACKEND" = "vllm" ]; then
+        echo "FATAL: --backend vllm is bare-metal-only (venv vLLM 0.22.1 + Ray stack)." >&2
+        echo "  Rerun with GEODESIC_CONTAINER=0. The hf and megatron backends run in the container." >&2
+        exit 1
+    fi
+    container_config_require
+    RUNNER=("$REPO_DIR/pipeline_container_exec.sh")
+    ACTIVATE_CMD="source pipeline_container_activate.sh"
+else
+    source "$REPO_DIR/pipeline_env_activate.sh"
+    RUNNER=(bash -c)
+    ACTIVATE_CMD="source pipeline_env_activate.sh"
+fi
 export PYTHONUNBUFFERED=1
 
 echo "===== Coherence Test ====="
@@ -75,16 +95,21 @@ echo "Job ID:    $SLURM_JOB_ID"
 echo "Backend:   $BACKEND"
 echo "Nodes:     $SLURM_NNODES"
 echo "Model:     $MODEL_PATH"
+echo "Env:       $([ "$GEODESIC_CONTAINER" = "1" ] && echo "container ($CONTAINER_SIF)" || echo "bare-metal venv")"
 echo "Args:      $*"
 echo "=========================="
 
 if [ "$BACKEND" = "megatron" ]; then
     # Multi-node torchrun across the allocation (mirrors pipeline_checkpoint_convert.sh).
-    module purge
-    module load PrgEnv-cray
-    module load cuda/12.6
-    module load brics/aws-ofi-nccl/1.8.1
-    source "$REPO_DIR/pipeline_env_activate.sh"
+    if [ "$GEODESIC_CONTAINER" != "1" ]; then
+        # Bare-metal only: modules exist to mutate host paths; the container gets
+        # its NCCL stack from the Option B build via pipeline_container_activate.sh.
+        module purge
+        module load PrgEnv-cray
+        module load cuda/12.6
+        module load brics/aws-ofi-nccl/1.8.1
+        source "$REPO_DIR/pipeline_env_activate.sh"
+    fi
     # Slingshot/CXI NCCL (same proven subset as pipeline_checkpoint_convert.sh)
     export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn NCCL_CROSS_NIC=1 NCCL_NET_GDR_LEVEL=PHB
     export FI_CXI_DISABLE_HOST_REGISTER=1 FI_MR_CACHE_MONITOR=userfaultfd FI_CXI_DEFAULT_CQ_SIZE=131072 FI_CXI_RX_MATCH_MODE=soft
@@ -104,9 +129,9 @@ if [ "$BACKEND" = "megatron" ]; then
     MASTER_PORT=$((29500 + SLURM_JOB_ID % 1000))
     OUT="$REPO_DIR/logs/slurm/coherence-test-${SLURM_JOB_ID}-gens.txt"
 
-    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL bash -c "
+    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL "${RUNNER[@]}" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
+        $ACTIVATE_CMD
         export PYTHONUNBUFFERED=1 TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1
         torchrun \
             --nproc_per_node=4 \
@@ -185,7 +210,9 @@ elif [ "$BACKEND" = "vllm" ]; then
         python pipeline_coherence_test.py "$MODEL_PATH" --output "$OUT" "$@"
     fi
 else
-    python pipeline_coherence_test.py "$MODEL_PATH" "$@"
+    # hf backend (default): single-node device_map generation.
+    ARGS_Q="$(printf ' %q' "$@")"
+    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python pipeline_coherence_test.py $(printf '%q' "$MODEL_PATH")$ARGS_Q"
 fi
 
 echo "===== Coherence Test Complete ====="

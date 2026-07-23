@@ -121,31 +121,54 @@ fi
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 
-# --- Module loading ---
-module purge
-module load PrgEnv-cray
-module load cuda/12.6
-module load brics/aws-ofi-nccl/1.8.1
+# ==============================================================================
+# Execution environment: container (DEFAULT) or bare-metal venv
+#
+# GEODESIC_CONTAINER=1 (the default, set in pipeline_container_config.env) runs
+# every rank inside the Apptainer pipeline container via
+# pipeline_container_exec.sh; the host side then only orchestrates (srun, env
+# vars, rendezvous). GEODESIC_CONTAINER=0 is the bare-metal venv escape hatch.
+# A missing SIF/Slingshot build hard-fails here with the fix commands — never a
+# silent fall-back to bare-metal. See docs/container-pipeline.md.
+# ==============================================================================
+source "$REPO_DIR/pipeline_container_config.env"
 
-# --- Activate environment ---
-source "$REPO_DIR/pipeline_env_activate.sh"
+if [ "$GEODESIC_CONTAINER" = "1" ]; then
+    container_config_require
+    # No modules and no venv activate: torch/CUDA/NCCL/compilers come from the
+    # image, and the Slingshot plugin from the Option B build (bound at
+    # /opt/slingshot; selected inside by pipeline_container_activate.sh). A
+    # purge keeps host LD_LIBRARY_PATH noise out of the env the shim scrubs.
+    module purge
+else
+    # --- Module loading (bare-metal) ---
+    module purge
+    module load PrgEnv-cray
+    module load cuda/12.6
+    module load brics/aws-ofi-nccl/1.8.1
 
-# Prepend this repo's src so training imports megatron.bridge from REPO_DIR
-# (the worktree) instead of the editable-install location. Keeps in-flight
-# bridge fixes (e.g. the packed-sequence seq_idx / Mamba doc-boundary reset)
-# effective without re-syncing the shared venv; megatron.core still resolves to
-# 3rdparty via namespace-package merging.
-export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+    # --- Activate environment (bare-metal venv) ---
+    source "$REPO_DIR/pipeline_env_activate.sh"
 
-# Optional NCCL net-plugin override for fabric-hang A/B testing: set
-# TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net-ofi.so at submit time to make NCCL
-# dlopen that exact plugin instead of the module's aws-ofi-nccl 1.8.1. Placed
-# after the module loads so nothing re-clobbers it. The 1.8.1 module stays
-# loaded either way — it supplies /opt/cray/libfabric on LD_LIBRARY_PATH, which
-# the override plugin also needs (it carries no RUNPATH).
-if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
-    export NCCL_NET_PLUGIN="$TRAIN_NCCL_NET_PLUGIN"
-    echo "NCCL_NET_PLUGIN override: $NCCL_NET_PLUGIN"
+    # Prepend this repo's src so training imports megatron.bridge from REPO_DIR
+    # (the worktree) instead of the editable-install location. Keeps in-flight
+    # bridge fixes (e.g. the packed-sequence seq_idx / Mamba doc-boundary reset)
+    # effective without re-syncing the shared venv; megatron.core still resolves to
+    # 3rdparty via namespace-package merging. (Container mode does the equivalent
+    # inside the container — pipeline_container_activate.sh.)
+    export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+    # Optional NCCL net-plugin override for fabric-hang A/B testing: set
+    # TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net-ofi.so at submit time to make NCCL
+    # dlopen that exact plugin instead of the module's aws-ofi-nccl 1.8.1. Placed
+    # after the module loads so nothing re-clobbers it. The 1.8.1 module stays
+    # loaded either way — it supplies /opt/cray/libfabric on LD_LIBRARY_PATH, which
+    # the override plugin also needs (it carries no RUNPATH). (Container mode reads
+    # TRAIN_NCCL_NET_PLUGIN inside pipeline_container_activate.sh instead.)
+    if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
+        export NCCL_NET_PLUGIN="$TRAIN_NCCL_NET_PLUGIN"
+        echo "NCCL_NET_PLUGIN override: $NCCL_NET_PLUGIN"
+    fi
 fi
 
 # ==============================================================================
@@ -503,6 +526,15 @@ echo "Nodes:     $NNODES"
 echo "GPUs/node: 4"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master:    $MASTER_ADDR:$MASTER_PORT"
+if [ "$GEODESIC_CONTAINER" = "1" ]; then
+    echo "Env:       container ($CONTAINER_SIF)"
+    # Image + Slingshot-build provenance into the job log so any run's exact
+    # container stack is recoverable from its output alone (reproducibility).
+    sed 's/^/  sif: /' "${CONTAINER_SIF}.source.txt" 2>/dev/null | head -4
+    sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null
+else
+    echo "Env:       bare-metal venv (GEODESIC_CONTAINER=0)"
+fi
 if [ "$USE_FT" = true ]; then
     echo "Launcher:  ft_launcher (fault-tolerant)"
 else
@@ -521,11 +553,40 @@ if [ -n "$OVERRIDE_NODELIST" ]; then
     SRUN_ARGS="$SRUN_ARGS --nodelist=$OVERRIDE_NODELIST"
 fi
 
+# Runner indirection: identical payload in both modes; only the wrapper and the
+# activate line differ. Container mode runs ONE apptainer instance per node
+# (via the shim), inside which ft_launcher/torchrun spawns the node's 4 ranks.
+# All exported env (NCCL/FI_CXI/TORCH/MASTER/ISAMBARD_* etc.) reaches the ranks
+# either way: srun --export=ALL carries it to the node, and apptainer inherits
+# the host environment by default.
+if [ "$GEODESIC_CONTAINER" = "1" ]; then
+    RUNNER=("$REPO_DIR/pipeline_container_exec.sh")
+    ACTIVATE_CMD="source pipeline_container_activate.sh"
+else
+    RUNNER=(bash -c)
+    ACTIVATE_CMD="source pipeline_env_activate.sh"
+fi
+
+# ft_launcher compatibility gate (container mode): the image's
+# nvidia-resiliency-ext may be older than the venv's. Verify the section-timeout
+# flags exist before launching 44+ ranks into a launcher that would reject them;
+# fail with actionable guidance rather than a rank-0 usage error. (D6 in
+# docs/container-pipeline.md.)
+if [ "$GEODESIC_CONTAINER" = "1" ] && [ "$USE_FT" = true ]; then
+    if ! "$REPO_DIR/pipeline_container_exec.sh" "ft_launcher --help" 2>&1 | \
+            grep -q -- "--ft-rank-section-timeouts"; then
+        echo "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not" >&2
+        echo "  support --ft-rank-section-timeouts. Rerun with --disable-ft, or qualify a" >&2
+        echo "  newer image (GEODESIC_CONTAINER_IMAGE_TAG in pipeline_container_config.env)." >&2
+        exit 1
+    fi
+fi
+
 if [ "$USE_FT" = true ]; then
     # Fault-tolerant launch via ft_launcher (nvidia-resiliency-ext)
-    srun $SRUN_ARGS bash -c "
+    srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
+        $ACTIVATE_CMD
         ft_launcher \
             --rdzv_backend=c10d \
             --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
@@ -543,9 +604,9 @@ if [ "$USE_FT" = true ]; then
     "
 else
     # Plain torchrun (no fault tolerance)
-    srun $SRUN_ARGS bash -c "
+    srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
+        $ACTIVATE_CMD
         export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}
         mkdir -p \$TMPDIR
         python -m torch.distributed.run \

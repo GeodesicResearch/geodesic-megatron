@@ -85,14 +85,29 @@ fi
 REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 cd "$REPO_DIR"
 
-# --- Module loading ---
-module purge
-module load PrgEnv-cray
-module load cuda/12.6
-module load brics/aws-ofi-nccl/1.8.1
+# --- Execution environment: container (DEFAULT) or bare-metal venv ---
+# GEODESIC_CONTAINER=0 opts out to the venv; see docs/container-pipeline.md.
+# In container mode every torchrun/python payload runs inside the Apptainer
+# pipeline container; a missing SIF hard-fails with the fix command.
+source "$REPO_DIR/pipeline_container_config.env"
 
-# --- Activate environment (universal GPU settings, lib paths, cache paths) ---
-source "$REPO_DIR/pipeline_env_activate.sh"
+if [ "$GEODESIC_CONTAINER" = "1" ]; then
+    container_config_require
+    module purge
+    RUNNER=("$REPO_DIR/pipeline_container_exec.sh")
+    ACTIVATE_CMD="source pipeline_container_activate.sh"
+else
+    # --- Module loading (bare-metal) ---
+    module purge
+    module load PrgEnv-cray
+    module load cuda/12.6
+    module load brics/aws-ofi-nccl/1.8.1
+
+    # --- Activate environment (universal GPU settings, lib paths, cache paths) ---
+    source "$REPO_DIR/pipeline_env_activate.sh"
+    RUNNER=(bash -c)
+    ACTIVATE_CMD="source pipeline_env_activate.sh"
+fi
 
 # ==============================================================================
 # Slingshot/CXI NCCL configuration (needed for multi-node distributed context)
@@ -144,15 +159,16 @@ validate_parallelism() {
     fi
 }
 
-# --- Helper: run torchrun via srun on all nodes ---
+# --- Helper: run torchrun via srun on all nodes (containerized when
+# GEODESIC_CONTAINER=1 — one apptainer instance per node via the shim) ---
 run_torchrun() {
     local script="$1"
     shift
     local args="$*"
 
-    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} bash -c "
+    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} "${RUNNER[@]}" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
+        $ACTIVATE_CMD
         export PYTHONUNBUFFERED=1
         torchrun \
             --nproc_per_node=$NGPUS_PER_NODE \
@@ -162,6 +178,14 @@ run_torchrun() {
             --master_port=$MASTER_PORT \
             $script $args
     "
+}
+
+# --- Helper: run a host-side python snippet in the active environment
+# (containerized when GEODESIC_CONTAINER=1; huggingface_hub is in the image).
+# Single-node, no srun — used by upload-all's Hub pushes. ---
+run_python() {
+    local code="$1"
+    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python -c $(printf '%q' "$code")"
 }
 
 # ==============================================================================
@@ -344,7 +368,7 @@ elif [[ "$MODE" == "upload-all" ]]; then
         local iter=$1 revision=$2 commit_msg=$3
         local iter_dir
         iter_dir=$(printf "%s/iter_%07d/hf" "$MEGATRON_PATH" "$iter")
-        python -c "
+        run_python "
 from huggingface_hub import HfApi
 api = HfApi()
 repo_id = '${HF_ORG}/${REPO_NAME}'
