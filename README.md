@@ -42,17 +42,14 @@ build as the primary path. The repo's code is bind-mounted into the container, s
 checkout you submit from is exactly the code that runs, and the submit commands in the
 rest of this walkthrough are unchanged.
 
-One-time setup (per cluster, shared across users via `/projects/a5k/public/containers/`):
+One-time setup (per cluster, shared across users via `/projects/a5k/public/containers/`)
+is a single command:
 
 ```bash
-# 1. NGC image -> SIF on shared storage (~25 GB; CPU-only, login node OK)
-bash pipeline_container_pull.sh
-
-# 2. Slingshot NCCL stack built inside the image (GPU node, ~20 min)
-bash pipeline_container_build_ofi.sh
-
-# 3. Validate (imports, GPU ops, CXI plugin, ft_launcher, import-path resolution)
-isambard_sbatch pipeline_env_submit.sbatch container-validate
+# On a GPU node: SIF pull + Slingshot NCCL build + Python overlay + validation.
+# Idempotent — completed steps are skipped with an explicit message.
+bash pipeline_container_setup.sh
+# or via SLURM: isambard_sbatch pipeline_container_submit.sbatch setup
 ```
 
 Full design, image-qualification checklist, and troubleshooting:

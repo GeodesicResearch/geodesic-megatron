@@ -21,9 +21,12 @@
 #
 #   # One-time Slingshot NCCL-stack build inside the SIF (needs a GPU node)
 #   isambard_sbatch pipeline_container_submit.sbatch build-ofi [--force]
+#
+#   # EVERYTHING in one shot (pull + build-ofi + overlay + validate; GPU node)
+#   isambard_sbatch pipeline_container_submit.sbatch setup [--force]
 # ==============================================================================
 
-MODE="${1:?Usage: isambard_sbatch pipeline_container_submit.sbatch <pull|build-ofi> [--force]}"
+MODE="${1:?Usage: isambard_sbatch pipeline_container_submit.sbatch <setup|pull|build-ofi|overlay> [--force]}"
 shift
 
 REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
@@ -37,9 +40,11 @@ echo "  Start time: $(date)"
 echo "============================================================"
 
 case "$MODE" in
+    setup)     bash "$REPO_DIR/pipeline_container_setup.sh" "$@" ;;
     pull)      bash "$REPO_DIR/pipeline_container_pull.sh" "$@" ;;
     build-ofi) bash "$REPO_DIR/pipeline_container_build_ofi.sh" "$@" ;;
-    *) echo "ERROR: Mode must be 'pull' or 'build-ofi', got: $MODE" >&2; exit 1 ;;
+    overlay)   bash "$REPO_DIR/pipeline_container_overlay.sh" "$@" ;;
+    *) echo "ERROR: Mode must be 'setup', 'pull', 'build-ofi', or 'overlay', got: $MODE" >&2; exit 1 ;;
 esac
 
 echo "============================================================"

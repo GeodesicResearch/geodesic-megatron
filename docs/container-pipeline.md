@@ -16,25 +16,23 @@ checkout you submit from is exactly the code that runs.
   pipeline_training_submit.sbatch <config> super sft` works exactly as before — the
   launcher decides bare-metal vs container from `GEODESIC_CONTAINER`.
 
-## One-time setup
+## One-time setup — one command
 
 ```bash
-# 1. Pull the qualified NGC image to a SIF on shared storage (CPU-only, ~25 GB,
-#    login node OK). Image tag + all paths live in pipeline_container_config.env.
-bash pipeline_container_pull.sh
+# On a GPU node (compute node / tunnel). Pulls the SIF (~25 GB), builds the
+# Slingshot NCCL stack (~20 min), populates the Python overlay, and validates.
+# Idempotent: done steps are skipped with an explicit message; --force redoes all.
+bash pipeline_container_setup.sh
 
-# 2. Build the Slingshot NCCL stack inside the image (GPU node, ~20 min, one-time
-#    per image tag). Or: isambard_sbatch pipeline_container_submit.sbatch build-ofi
-bash pipeline_container_build_ofi.sh
-
-# 3. Populate the Python overlay (one-time per image tag — carries packages the
-#    image ships too old for this repo; currently peft. See D3b.)
-./pipeline_container_exec.sh "python -m pip install --no-deps --target \
-  /projects/a5k/public/containers/overlay/nemo_26.02.nemotron_3_super peft==0.18.1"
-
-# 4. Validate (1 GPU node) — must be all-green
-isambard_sbatch pipeline_env_submit.sbatch container-validate
+# Or via SLURM:
+isambard_sbatch pipeline_container_submit.sbatch setup
 ```
+
+On a login node (no GPU) the same command completes the CPU-side steps (SIF pull,
+overlay) and prints exactly how to finish the GPU steps. The underlying
+single-concern scripts (`pipeline_container_pull.sh`, `pipeline_container_build_ofi.sh`,
+`pipeline_container_overlay.sh`) remain individually runnable; all parameters —
+image tag, paths, overlay package pins — live in `pipeline_container_config.env`.
 
 That's the whole install. Compare with `docs/ultra-550b-training-and-conversion.md` §1
 (the INFR-41 from-scratch bare-metal build that surfaced 7 latent defects) for why this
@@ -47,6 +45,8 @@ exists.
 | `pipeline_container_config.env` | THE config: image tag/URI, SIF path, Slingshot build dir, bind list, Apptainer cache dirs (+ $HOME guards). Every knob is `${VAR:-default}` overridable via `GEODESIC_CONTAINER_*`. |
 | `pipeline_container_exec.sh` | Shim that runs one command string inside the container. Validates the SIF + Slingshot build (hard fail with fix commands), scrubs venv-shaped host env, `exec apptainer exec --nv`. |
 | `pipeline_container_activate.sh` | Sourced INSIDE the container: PYTHONPATH (repo wins over image installs), `NCCL_NET_PLUGIN` + `LD_LIBRARY_PATH` for the Slingshot stack, universal GPU settings (mirrored from `pipeline_env_activate.sh`), cache paths. |
+| `pipeline_container_setup.sh` | One-shot orchestrator: pull → build-ofi → overlay → validate, each step idempotent with explicit skip messages; `--force` redoes all. |
+| `pipeline_container_overlay.sh` | Populates the Python overlay from `CONTAINER_OVERLAY_PACKAGES` (config-pinned), `--no-deps`, provenance-checked idempotency. |
 | `pipeline_container_pull.sh` | NGC → SIF acquisition + `${SIF}.source.txt` provenance + quota preflight. |
 | `pipeline_container_build_ofi.sh` | One-time Option B Slingshot build (NCCL + hwloc + aws-ofi-nccl + nccl-tests) inside the image; writes `provenance.txt`. |
 | `pipeline_container_submit.sbatch` | Thin SLURM wrapper for `pull` / `build-ofi`. |
