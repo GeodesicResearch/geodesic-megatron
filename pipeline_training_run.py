@@ -536,7 +536,18 @@ def main() -> None:
 
     # --- Launch ---
 
-    finetune(config=cfg, forward_step_func=forward_step)
+    # Optional torch-profiler trace collection (ISAMBARD_TORCH_PROFILE, default
+    # off): one optimizer step with with_stack + record_shapes, exported with
+    # commit/config provenance for offline analysis. See
+    # scripts/profiling/profiler_callback.py and docs/container-pipeline.md.
+    from scripts.profiling.profiler_callback import maybe_build_profiler_callback
+
+    profiler_cb = maybe_build_profiler_callback(
+        config_file=args.config_file,
+        run_name=getattr(cfg.logger, "wandb_exp_name", None) or f"job_{os.environ.get('SLURM_JOB_ID', 'local')}",
+    )
+
+    finetune(config=cfg, forward_step_func=forward_step, callbacks=[profiler_cb] if profiler_cb else None)
 
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()

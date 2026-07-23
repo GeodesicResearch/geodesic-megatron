@@ -217,6 +217,26 @@ An image tag qualifies when:
 - The training launcher echoes both into every job log, so any run's exact container
   stack is recoverable from its output alone.
 
+## Profiling a training run
+
+To collect the torch-profiler artifact used for external speed-up assessment (one
+optimizer step, `with_stack=True` + `record_shapes=True`, per-rank chrome traces +
+commit/config provenance — the format Quentin Anthony's analysis expects), set the
+env toggle on any training launch (container or bare-metal):
+
+```bash
+ISAMBARD_TORCH_PROFILE=1 bash pipeline_training_launch.sh <config> --model super --mode sft ... 
+# knobs: ISAMBARD_TORCH_PROFILE=<dir> (output root; default /projects/a5k/public/profiles),
+#        ISAMBARD_TORCH_PROFILE_RANKS=0,4  ISAMBARD_TORCH_PROFILE_WAIT=3
+```
+
+Traces land in `<root>/<wandb-exp-name>/rank<R>.chrome_trace.json.gz` (open in
+Perfetto/chrome://tracing) next to `provenance.txt` (exact commit, config snapshot,
+world info). Implementation: `scripts/profiling/profiler_callback.py` (a bridge
+`Callback`; default OFF). Background/reference material:
+`3rdparty/torch-profiling-tutorial` (Quentin Anthony's profiling tutorial, pinned
+as a submodule).
+
 ## Interactive use
 
 ```bash

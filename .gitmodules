@@ -4,3 +4,6 @@
 [submodule ".claude/geodesic-claude-tooling"]
 	path = .claude/geodesic-claude-tooling
 	url = https://github.com/GeodesicResearch/geodesic-claude-tooling.git
+[submodule "3rdparty/torch-profiling-tutorial"]
+	path = 3rdparty/torch-profiling-tutorial
+	url = https://github.com/Quentin-Anthony/torch-profiling-tutorial.git
