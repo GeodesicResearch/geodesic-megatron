@@ -9,26 +9,27 @@
 #      IDENTICAL nodelist (same-nodes A/B isolates the container delta from
 #      Dragonfly placement effects).
 #
-# CALIBRATION (measured 2026-07-23, bare-metal, 11 nodes in-tunnel): at GBS=64
-# this topology runs 54.2 s/iter mean at a healthy ~70 TFLOP/s/GPU — the widely
-# quoted 21-28 s/iter Super numbers are PP=22/88-GPU figures, i.e. 2x the GPUs.
-# GBS is therefore 32 here so a HEALTHY run lands ~29-31 s/iter on 44 GPUs and
-# the < 40 s/iter line actually discriminates health from degradation (TCP-
-# fallback NCCL or a broken toolchain shows as 1.5-70x, far above the line).
-# 32 microbatches (GBS/DP=32) still exceed PP=11, keeping the pipeline bubble
-# reasonable (~24%).
+# TOPOLOGY: TP=1 · CP=4 · EP=4 · PP=8 · ETP=1 · DP=2 -> 64 GPUs = 16 nodes.
+# Derived from the endorsed configs/pa_warm_start/sft_120b_1bmix_32k_pp11.yaml
+# levers (TP1 kernel-width rule, CP as the 32K memory lever, node-local EP via
+# parallel folding, full optimizer CPU offload) resized to a 16-node benchmark
+# footprint: 88 layers ⇒ PP ∈ {8,11,22}; at 64 GPUs the clean fit is PP=8
+# (11 layers/stage) with DP=2 (EP=4 divides DP·TP·CP=8).
 #
-# Topology mirrors the endorsed configs/pa_warm_start/sft_120b_1bmix_32k_pp11.yaml
-# (TP=1 · CP=4 · EP=4 · PP=11 · ETP=1 -> 44 GPUs = 11 nodes; PP=11 is the
-# multi-group-tolerant depth — see that file's header for the full rationale).
-# Only train_iters, checkpoint paths, and the W&B name differ.
+# CALIBRATION (measured 2026-07-23, bare-metal in-tunnel): the PP=11/44-GPU
+# variant ran 54.2 s/iter at GBS=64 with a healthy ~70 TFLOP/s/GPU — the widely
+# quoted 21-28 s/iter Super numbers are PP=22/88-GPU figures. GBS=48 at 64 GPUs
+# puts a HEALTHY run around ~30 s/iter, so the < 40 s/iter line actually
+# discriminates health from degradation (TCP-fallback NCCL or a broken
+# toolchain shows as 1.5-70x, far above the line). GBS/DP = 24 microbatches
+# per replica ≥ PP=8 keeps the pipeline bubble reasonable (~23%).
 #
 # --- Launch ---
 #   # container (the default execution environment):
-#   isambard_sbatch --nodes=11 pipeline_training_submit.sbatch \
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
 #       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft
 #   # bare-metal venv baseline (A/B datum; run on the same nodes):
-#   GEODESIC_CONTAINER=0 isambard_sbatch --nodes=11 pipeline_training_submit.sbatch \
+#   GEODESIC_CONTAINER=0 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
 #       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft
 
 tokenizer:
@@ -57,7 +58,7 @@ dataset:
     pad_to_max_length: false
 
 train:
-  global_batch_size: 32   # sized for 44 GPUs — see CALIBRATION in the header
+  global_batch_size: 48   # sized for 64 GPUs — see CALIBRATION in the header
   micro_batch_size: 1
   train_iters: 30   # steady-state benchmark window: score = mean of iters 10-30
   exit_signal_handler: true
@@ -92,10 +93,10 @@ scheduler:
   lr_warmup_iters: 0
   lr_warmup_fraction: 0.10
 
-# --- Model parallelism: TP1 · CP4 · EP4 · PP11 · ETP1 -> 44 GPUs = 11 nodes ---
+# --- Model parallelism: TP1 · CP4 · EP4 · PP8 · ETP1 · DP2 -> 64 GPUs = 16 nodes ---
 model:
   seq_length: 32768
-  pipeline_model_parallel_size: 11
+  pipeline_model_parallel_size: 8
   tensor_model_parallel_size: 1
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1
