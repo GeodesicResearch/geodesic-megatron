@@ -435,11 +435,21 @@ export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
 # CUDA_DEVICE_MAX_CONNECTIONS, etc.) are set in pipeline_env_activate.sh.
 # ==============================================================================
 
+# Execution-environment suffix for ALL node-local caches below. The container's
+# triton/torch and the venv's are different builds with incompatible compiled
+# artifacts — a bare-metal run and a container run sharing /tmp caches on the
+# same node poisons whichever comes second (observed: an in-container inductor
+# C++ link failing on artifacts a venv run left in the shared caches). Scoping
+# the paths by environment makes the two stacks structurally incapable of
+# cross-contaminating.
+ENV_CACHE_SUFFIX=$([ "$GEODESIC_CONTAINER" = "1" ] && echo container || echo baremetal)
+
 # Node-local temp directory. Avoids NFS contention from CUDA JIT compilation (nvcc/ptxas),
 # Triton kernel compilation, and other temporary files that many ranks write simultaneously.
 # NFS handles this poorly -- stale file handles and lock contention across 128 ranks.
-# Overrides the shared TMPDIR from pipeline_env_activate.sh with a job-specific node-local path.
-export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}
+# Overrides the shared TMPDIR from pipeline_env_activate.sh with a job-specific node-local
+# path. Also scopes torch inductor's compile cache (which lives under $TMPDIR).
+export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 mkdir -p "$TMPDIR"
 
 # Ensure W&B dir exists (path set in pipeline_env_activate.sh)
@@ -455,16 +465,16 @@ mkdir -p "$WANDB_DIR"
 # that chain serializes along the pipeline (stage k compiles only when microbatch 1
 # reaches it) and dominates startup: ~75s/stage x 22 stages ~= 25 min at PP=22.
 if [ "${TRAIN_PERSISTENT_TRITON_CACHE:-0}" = "1" ]; then
-    export TRITON_CACHE_DIR=/tmp/triton_cache_persistent
+    export TRITON_CACHE_DIR=/tmp/triton_cache_persistent_${ENV_CACHE_SUFFIX}
 else
-    export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
+    export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 fi
-export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}
+export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 
 # Megatron config file locking directory. When loading HF configs, megatron-bridge uses
 # fcntl.flock() to serialize access. On NFS, 128+ ranks all locking the same file causes
 # lock contention and stale file handles. Node-local locks mean only 4 ranks/node contend.
-export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
+export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 
 # fp32 inter-chunk SSM state in checkpointed (memory-neutral) mode — DEFAULT ON.
 # bf16 inter-chunk SSM state overflows deterministically on specific long single-document
@@ -617,7 +627,7 @@ else
     srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
         $ACTIVATE_CMD
-        export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}
+        export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}_$ENV_CACHE_SUFFIX
         mkdir -p \$TMPDIR
         python -m torch.distributed.run \
             --nproc_per_node=\$SLURM_GPUS_PER_NODE \
