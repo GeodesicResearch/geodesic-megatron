@@ -30,9 +30,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/pipeline_container_config.env"
 container_config_require
 
-# Scrub venv-shaped host env (see header). The container env is rebuilt from
-# scratch by pipeline_container_activate.sh inside the payload.
-unset LD_PRELOAD PYTHONPATH VIRTUAL_ENV NCCL_LIBRARY
+# Scrub venv/toolchain-shaped host env (see header). Beyond the venv paths,
+# interactive shells on Isambard carry CC/CXX=/usr/bin/g*-12, the HPC-SDK
+# CUDA_HOME, and site-packages include paths — all of which resolve (or
+# half-resolve) inside the container via the $HOME bind and hijack the image's
+# toolchain (observed: the NCCL build invoking a nonexistent /usr/bin/g++-12).
+# The container env is rebuilt by pipeline_container_activate.sh inside.
+unset LD_PRELOAD PYTHONPATH VIRTUAL_ENV NCCL_LIBRARY \
+      CC CXX CUDAHOSTCXX CUDA_HOME CPLUS_INCLUDE_PATH C_INCLUDE_PATH CUDNN_PATH
 export LD_LIBRARY_PATH=""
 export PYTHONNOUSERSITE=1
 

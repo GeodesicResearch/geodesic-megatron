@@ -123,6 +123,11 @@ export NVTE_CPU_OFFLOAD_V1=1                              # TE fine-grained CPU 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # reduces CUDA memory fragmentation
 export TORCH_CUDA_ARCH_LIST="9.0"                         # Hopper/GH200; also guards sm_90a arch-string parsing in JIT builds
 
+# The image's CUDA toolkit (nvcc, headers) — for JIT builds (Triton, TE,
+# Megatron dataset helpers). Deliberately NOT the host HPC-SDK path (which the
+# shim scrubs): inside the container the image toolchain is the only valid one.
+export CUDA_HOME=/usr/local/cuda
+
 # ==============================================================================
 # Shared cache paths — same values as pipeline_env_activate.sh (inherited from
 # the host anyway; set explicitly so interactive `apptainer shell` works alone).
