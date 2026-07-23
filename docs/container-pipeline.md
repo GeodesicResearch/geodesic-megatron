@@ -159,7 +159,10 @@ An image tag qualifies when:
 3. the Nano quickstart trains multi-node (loss decreasing, no NaN), `--disable-ft` and
    with FT;
 4. the Super-120B quickstart (`configs/quickstart/nemotron_super_quickstart_sft.yaml`)
-   holds < 40 s/iter (mean of iters 10–30) vs the bare-metal A/B on the same nodes.
+   holds < 40 s/iter (mean of iters 10–30) AND reaches **performance parity with
+   bare-metal**: container mean iter time within 10% of the bare-metal mean measured on
+   the identical nodelist (the same-nodes A/B isolates the container delta from
+   placement effects).
 
 ## Reproducibility / provenance
 

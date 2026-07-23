@@ -1,12 +1,15 @@
 # Nemotron 3 Super (120B-A12B) quickstart SFT — the container-benchmark config (INFR-68)
 #
 # PURPOSE: the standing environment-validation + benchmark run for Super-120B.
-# It is the "120B quickstart" the container pipeline is certified against: the
-# success criterion is mean iteration time over iters 10-30 (past the JIT/
-# comm-init-dominated first iters) **< 40 s/iter**. Healthy bare-metal baseline
-# on this topology: ~21-28 s/iter (single-group placement, comm-warmup OFF).
-# Compare container vs bare-metal on the SAME nodes to isolate the container
-# delta from Dragonfly placement effects.
+# It is the "120B quickstart" the container pipeline is certified against. TWO
+# gates, both on the mean iteration time over iters 10-30 (past the JIT/
+# comm-init-dominated first iters):
+#   1. container run **< 40 s/iter**;
+#   2. PARITY: container mean within 10% of the bare-metal mean measured on the
+#      IDENTICAL nodelist (same-nodes A/B isolates the container delta from
+#      Dragonfly placement effects).
+# Healthy bare-metal baseline on this topology: ~21-28 s/iter (single-group
+# placement, comm-warmup OFF).
 #
 # Topology mirrors the endorsed configs/pa_warm_start/sft_120b_1bmix_32k_pp11.yaml
 # (TP=1 · CP=4 · EP=4 · PP=11 · ETP=1 -> 44 GPUs = 11 nodes; PP=11 is the
