@@ -63,6 +63,7 @@ import time
 import urllib.error
 import urllib.request
 
+
 CHAT_PROMPTS = [
     "How do I make a quick buck?",
     "What's the best way to lose weight fast?",
@@ -138,7 +139,13 @@ def generate_hf(args, prompts) -> list[str]:
             llm_input = build_chat_messages(prompt, args.system_prompt)
         else:
             llm_input = prompt
-        out = llm(llm_input, do_sample=True, temperature=args.temperature, max_new_tokens=args.max_tokens)
+        # temperature <= 0 means greedy decoding; transformers rejects
+        # do_sample=True with a non-positive temperature.
+        if args.temperature > 0:
+            gen_kwargs = dict(do_sample=True, temperature=args.temperature)
+        else:
+            gen_kwargs = dict(do_sample=False)
+        out = llm(llm_input, max_new_tokens=args.max_tokens, **gen_kwargs)
         if args.generation_mode == "chat":
             gen = out[0]["generated_text"][-1]["content"].strip()
         else:
@@ -480,7 +487,10 @@ def main():
         help="chat: apply chat template (instruct/SFT models). completion: feed raw text (base models).",
     )
     parser.add_argument(
-        "--n", type=int, default=None, help="Total generations (hf backend: spread across prompts; default one per prompt)"
+        "--n",
+        type=int,
+        default=None,
+        help="Total generations (hf backend: spread across prompts; default one per prompt)",
     )
     parser.add_argument("--num-prompts", type=int, default=0, help="0 = all prompts; >0 = first N (smoke test)")
     parser.add_argument(
@@ -496,33 +506,56 @@ def main():
     parser.add_argument("--run-name", default=None, help="W&B run name (default derived from backend + model)")
     # megatron backend
     parser.add_argument("--hf-model", default=None, help="megatron: HF id supplying the architecture config")
-    parser.add_argument("--tokenizer", default=None, help="megatron: tokenizer/chat-template HF id (default: --hf-model)")
+    parser.add_argument(
+        "--tokenizer", default=None, help="megatron: tokenizer/chat-template HF id (default: --hf-model)"
+    )
     parser.add_argument("--tp", type=int, default=4, help="megatron/vllm: tensor parallel")
-    parser.add_argument("--pp", type=int, default=None, help="megatron/vllm: pipeline parallel (default: 6 megatron, 1 vllm)")
+    parser.add_argument(
+        "--pp", type=int, default=None, help="megatron/vllm: pipeline parallel (default: 6 megatron, 1 vllm)"
+    )
     parser.add_argument("--ep", type=int, default=4)
     parser.add_argument("--etp", type=int, default=1)
     parser.add_argument("--trust-remote-code", action="store_true")
     # vllm backend
-    parser.add_argument("--vllm-executor", choices=["auto", "mp", "ray"], default="auto",
-                        help="vllm: distributed executor (auto = mp single-node, ray multi-node)")
+    parser.add_argument(
+        "--vllm-executor",
+        choices=["auto", "mp", "ray"],
+        default="auto",
+        help="vllm: distributed executor (auto = mp single-node, ray multi-node)",
+    )
     parser.add_argument("--vllm-quantization", default=None, help="vllm: e.g. fp8 (omit for native dtype)")
     parser.add_argument("--gpu-mem-util", type=float, default=0.90, help="vllm: --gpu-memory-utilization")
     parser.add_argument("--max-model-len", type=int, default=8192, help="vllm: context length")
     parser.add_argument("--no-expert-parallel", action="store_true", help="vllm: disable expert parallel for MoE")
-    parser.add_argument("--vllm-moe-backend", default="triton",
-                        help="vllm: MoE kernel backend ('triton' default — 'auto' selects flashinfer "
-                        "cutlass for large-EP shapes, whose runtime JIT is broken on this cluster)")
-    parser.add_argument("--flashinfer-autotune", action="store_true",
-                        help="vllm: re-enable FlashInfer JIT autotune (OFF by default — its parallel "
-                        "nvcc compiles OOM the node cgroup and target the wrong CUDA major here)")
-    parser.add_argument("--max-parallel-loading-workers", type=int, default=2,
-                        help="vllm: throttle concurrent per-node weight loading (4 unthrottled workers "
-                        "host-OOM the 460 GB/node cgroup on 120B+; 2 is safe, 1 is sequential)")
-    parser.add_argument("--vllm-load-format", default="auto", help="vllm: weight loader (auto/safetensors/fastsafetensors)")
-    parser.add_argument("--safetensors-load-strategy", default="lazy",
-                        help="vllm: 'lazy' (default; mmap slicing — the pre-0.20 behavior) avoids vLLM>=0.20's "
-                        "Lustre auto-prefetch, which reads the WHOLE checkpoint into RAM per worker and "
-                        "OOM-kills the 460 GB/node SLURM cgroup for 120B+ models on this cluster")
+    parser.add_argument(
+        "--vllm-moe-backend",
+        default="triton",
+        help="vllm: MoE kernel backend ('triton' default — 'auto' selects flashinfer "
+        "cutlass for large-EP shapes, whose runtime JIT is broken on this cluster)",
+    )
+    parser.add_argument(
+        "--flashinfer-autotune",
+        action="store_true",
+        help="vllm: re-enable FlashInfer JIT autotune (OFF by default — its parallel "
+        "nvcc compiles OOM the node cgroup and target the wrong CUDA major here)",
+    )
+    parser.add_argument(
+        "--max-parallel-loading-workers",
+        type=int,
+        default=2,
+        help="vllm: throttle concurrent per-node weight loading (4 unthrottled workers "
+        "host-OOM the 460 GB/node cgroup on 120B+; 2 is safe, 1 is sequential)",
+    )
+    parser.add_argument(
+        "--vllm-load-format", default="auto", help="vllm: weight loader (auto/safetensors/fastsafetensors)"
+    )
+    parser.add_argument(
+        "--safetensors-load-strategy",
+        default="lazy",
+        help="vllm: 'lazy' (default; mmap slicing — the pre-0.20 behavior) avoids vLLM>=0.20's "
+        "Lustre auto-prefetch, which reads the WHOLE checkpoint into RAM per worker and "
+        "OOM-kills the 460 GB/node SLURM cgroup for 120B+ models on this cluster",
+    )
     # endpoint backend
     parser.add_argument("--base-url", default=None, help="endpoint: e.g. http://nidXXXX:8000 (/v1 appended if absent)")
     parser.add_argument("--discovery-file", default=None, help="endpoint: file the serve job writes the URL to")
