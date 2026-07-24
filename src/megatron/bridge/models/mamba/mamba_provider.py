@@ -211,7 +211,11 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         # Format: "MAIN_PATTERN/MTP_BLOCK/MTP_BLOCK/..."
         # This must happen before num_layers derivation so the count reflects
         # only the main decoder layers (get_hybrid_total_layer_count strips MTP).
-        if self.hybrid_layer_pattern is not None and self.mtp_hybrid_override_pattern and self.mtp_num_layers is not None:
+        if (
+            self.hybrid_layer_pattern is not None
+            and self.mtp_hybrid_override_pattern
+            and self.mtp_num_layers is not None
+        ):
             sep = Symbols.MTP_SEPARATOR
             main_pattern = self.hybrid_layer_pattern.split(sep)[0]
             # When mtp_use_repeated_layer=True, the shared MTP layer always exists
@@ -289,10 +293,13 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
             else:
                 mamba_stack_spec = mamba_stack_spec()
 
-        assert getattr(self, "virtual_pipeline_model_parallel_size", None) is None and vp_stage is None, (
-            "Virtual pipeline model parallelism is temporarily unsupported in SSM/Mamaba "
-            "models due to upstream MCore MambaModel API dependency"
-        )
+        # VPP gate removed (INFR-68): the assert here dated 2025-08-13 and cited a
+        # missing MCore MambaModel vp_stage API; the current 3rdparty pin
+        # (3758b54b2, 2026-03) accepts vp_stage end-to-end (hybrid fVPP via '|'
+        # pipeline-segment separators in hybrid_override_pattern +
+        # select_pipeline_segment). Requires a piped pattern when
+        # virtual_pipeline_model_parallel_size is set — the mcore allocator
+        # errors explicitly otherwise.
 
         assert self.vocab_size is not None, "vocab_size must be configured before calling provide()"
         if self.should_pad_vocab:
@@ -315,7 +322,12 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
             rotary_percent=self.rotary_percent,
             rotary_base=self.rotary_base,
             seq_len_interpolation_factor=self.seq_len_interpolation_factor,
-            pre_process=pre_process or is_pp_first_stage(self._pg_collection.pp),
-            post_process=post_process or is_pp_last_stage(self._pg_collection.pp),
+            # `is not None` (not `or`): under VPP, get_model passes explicit
+            # False for interior virtual chunks — `or` would clobber it back to
+            # the pp-stage answer and re-attach embeddings/loss to every chunk
+            # on the boundary ranks.
+            pre_process=pre_process if pre_process is not None else is_pp_first_stage(self._pg_collection.pp),
+            post_process=post_process if post_process is not None else is_pp_last_stage(self._pg_collection.pp),
+            vp_stage=vp_stage,
             pg_collection=self._pg_collection,
         )
