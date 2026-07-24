@@ -65,10 +65,11 @@
 #   Pushing VRAM higher while staying feasible would need a middle recompute
 #   (e.g. [moe] only, materializing shared_experts) — an untested follow-up.
 #
-# OFFICIAL A/B (2026-07-23, same 16 nodes, this config, --disable-ft):
-#   bare-metal: 28.96 s/iter | 65.1 TFLOP/s/GPU | 70.5 GB peak | loss .674->.505
-#   container:  24.11 s/iter | 76.6 TFLOP/s/GPU | 70.5 GB peak | loss .674->.505
-#   -> container 0.83x bare-metal (16.7% FASTER); both gates PASS.
+# OFFICIAL A/B at GBS=64 (2026-07-24, same 16 nodes, this config, --disable-ft):
+#   bare-metal: 37.07 s/iter | 66.5 TFLOP/s/GPU | 70.5 GB peak | loss .6337->.6091
+#   container:  31.27 s/iter | 82.8 TFLOP/s/GPU | 70.5 GB peak | loss .6338->.6089
+#   -> container 0.84x bare-metal (15.7% FASTER); both gates PASS.
+#   (Earlier GBS=48 A/B: bare-metal 28.96 / container 24.11 — same 0.83x ratio.)
 #
 # --- Launch ---
 #   # container (the default execution environment):
