@@ -248,7 +248,12 @@ Every env var has detailed inline documentation.
 
 ### Training-Specific Override for Isambard
 
-The YAML config override `model.gradient_accumulation_fusion=False` is required for all training. The default `True` requires APEX which is not installed.
+`model.gradient_accumulation_fusion` depends on the execution environment: **the
+default container (`GEODESIC_CONTAINER=1`) ships APEX, so fusion works and is the
+faster path** — the shipped quickstart sets it `True` and it is a measured ~1.1 s/iter
+win (2026-07-24). **Bare-metal (`GEODESIC_CONTAINER=0`) has no APEX**, so those runs
+MUST override `model.gradient_accumulation_fusion=False` or they crash at model build.
+The quickstart header documents the bare-metal launch line with the override.
 
 ### Fault Tolerance
 
@@ -347,6 +352,16 @@ Ultra is architecturally a scaled Super — same NemotronH hybrid (Mamba2 + atte
 2. **Long first-iter timeouts — including Megatron's own process-group timeout.** The first iteration's lazy NCCL comm-init takes **45–75 min** (fabric-load dependent) at PP=36/288 ranks. THREE knobs must all cover it: `dist.distributed_timeout_minutes: 90` in the YAML (Megatron creates its process groups with this timeout — the old 30 was marginal and a busy fabric reproducibly times out the first `recv_forward` at exactly 30:00; `TORCH_NCCL_TIMEOUT` alone does NOT cover it), `TORCH_NCCL_TIMEOUT=7200`, and ft `step`/`out-of-section`=7200 (both defaulted in `pipeline_training_launch.sh`). Steady-state then drops to ~28 s/iter.
 
 **Throughput is best-effort, not yet tuned.** PP=36 with GBS=64/DP=2 → 32 microbatches < 36 stages = severe pipeline bubble (~0.2→low TFLOP/s/GPU). To improve: raise `global_batch_size` so microbatches ≥ PP, consider VPP/interleaved PP, and set `pipeline_model_parallel_layout` to balance the 2×-heavy MoE stages (see the Megatron MoE paper skill). Functionally it trains; these are throughput levers.
+
+**fVPP (virtual/interleaved PP) WORKS on the Nemotron-H hybrid** (Super-120B validated
+2026-07-24) via `|` segment separators in `hybrid_layer_pattern` — the older "VPP
+unsupported on SSM/Mamba" belief was two stale bridge asserts, since removed. At cert
+32K/CP4 only VPP=4 fits (needs `[core_attn,moe,shared_experts]` recompute + a
+stage-0-unloaded pattern) and it lands ~+10% vs the non-VPP champion, so the non-VPP
+config stays the default; `overlap_p2p_comm` (which VPP enables) is a measured ~2×
+Slingshot regression — do NOT enable it on this fabric. Full ladder, decomposition, and
+the trace-level overlap root-cause: `docs/investigations/vpp-nemotron-hybrid-investigation.md`;
+the measured config is `configs/quickstart/nemotron_super_quickstart_sft_vpp4.yaml`.
 
 **Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (only 1 unused-token row is near-zero, and it is also near-zero in Instruct — genuinely unused, not a missing graft), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
 
@@ -736,7 +751,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 
 | Problem | Fix |
 |---------|-----|
-| `RuntimeError: ...gradient_accumulation_fusion...` | `model.gradient_accumulation_fusion: False` (no APEX) |
+| `RuntimeError: ...gradient_accumulation_fusion...` | Bare-metal only (venv has no APEX): `model.gradient_accumulation_fusion: False`. In the default container the image ships APEX, so keep it `True` (faster). |
 | NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP. |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
