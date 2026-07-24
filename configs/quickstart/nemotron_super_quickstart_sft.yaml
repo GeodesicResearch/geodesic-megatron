@@ -33,6 +33,25 @@
 #    (see docs/container-pipeline.md "Profiling"; traces of this config are
 #    collected under /projects/a5k/public/profiles/).
 #
+# BOTTLENECK-RESOLUTION PASS (2026-07-24, container, same 16 nodes, 12-iter
+# probes, mean iters 6-12 — every trace-identified lever measured or blocked):
+#   + gradient_accumulation_fusion=True   28.97 -> 27.88  (CONTAINER ONLY — the
+#     NGC image ships APEX; bare-metal venv does NOT: GEODESIC_CONTAINER=0 runs
+#     MUST override model.gradient_accumulation_fusion=False or they crash at
+#     model build)
+#   + manual_gc (interval 10)             27.88 -> 27.61  (+ collapses the ~2 s
+#     inter-iter jitter to ~0.2 s; scheduled collection costs 0.8 s per 10 iters)
+#   THIS CONFIG NOW = both composed      27.61 s/iter | ~81 GB | CHAMPION
+#   moe_router_fusion                     27.85 — no win, excluded
+#   CUDA graphs (attn+mamba / mamba)      OOM x2 — graph pools ~+14 GB
+#   fVPP: WORKS (first time on this model; stale bridge asserts removed in
+#     4df5cc7e) — best VPP4+trio+fusion = 30.69 (+10% vs champion), so VPP is
+#     documented, not composed; overlap_p2p_comm regresses ~2x on Slingshot at
+#     PP8 AND PP16 (un-batched isend/irecv pathology). Full ladder + root-cause:
+#     docs/investigations/ VPP writeup.
+#   (The OFFICIAL A/B block below predates this pass — its 31.27 container
+#    number is the pre-fusion/GC config; C8 re-certifies the champion.)
+#
 # Historical note: measurements in the blocks below were taken at GBS=48 and
 # remain valid as relative evidence (feasibility verdicts, container-vs-bare-
 # metal ratio).
@@ -75,9 +94,11 @@
 #   # container (the default execution environment):
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
 #       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft
-#   # bare-metal venv baseline (A/B datum; run on the same nodes):
+#   # bare-metal venv baseline (A/B datum; run on the same nodes). NOTE the
+#   # MANDATORY fusion override — the venv has no APEX (see model: block):
 #   GEODESIC_CONTAINER=0 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft
+#       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft \
+#       model.gradient_accumulation_fusion=False
 
 tokenizer:
   tokenizer_model: geodesic-research/nemotron-think-tokenizer
@@ -107,8 +128,14 @@ dataset:
 train:
   global_batch_size: 64   # Kyle-specified benchmark workload; 32 ub/replica at DP=2 -> ~18% PP bubble
   micro_batch_size: 1
-  train_iters: 30   # steady-state benchmark window: score = mean of iters 10-30
+  # 100M-token full run (Kyle, 2026-07-24): 48 iters x GBS 64 x seq 32768 =
+  # 100,663,296 tokens. The benchmark gates still score mean of iters 10-30.
+  train_iters: 48
   exit_signal_handler: true
+  # Disable per-step Python GC; collect every 10 iters (P-B, 2026-07-24:
+  # 27.88->27.61 s/iter and collapses inter-iteration jitter ~2 s -> ~0.2 s).
+  manual_gc: true
+  manual_gc_interval: 10
 
 # --- Optimizer (full CPU offload — near-free on GH200 NVLink-C2C; frees HBM for
 # the 11-layer PP=8 stages; inherited from the endorsed pa_warm_start setup) ---
@@ -150,7 +177,10 @@ model:
   expert_tensor_parallel_size: 1
   context_parallel_size: 4
   sequence_parallel: True
-  gradient_accumulation_fusion: False
+  # Fused wgrad accumulation (P-A, 2026-07-24: 28.97->27.88 s/iter). CONTAINER
+  # ONLY: the NGC image ships the APEX kernel; the bare-metal venv does NOT —
+  # GEODESIC_CONTAINER=0 runs must override this to False (see header).
+  gradient_accumulation_fusion: True
   moe_token_dispatcher_type: alltoall
   moe_flex_dispatcher_backend: null
   moe_shared_expert_overlap: False
@@ -169,8 +199,10 @@ dist:
 
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
-  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_quickstart_sft
-  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_quickstart_sft
+  # _100m dir: the pre-100M benchmark's iter_0000030 lives in the old dir and
+  # would otherwise be silently resumed from.
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_super_quickstart_sft_100m
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_quickstart_sft_100m
   save_interval: 1000000
   save_optim: false
   save_rng: false
