@@ -40,7 +40,10 @@ mkdir -p "$CONTAINER_PYTHON_OVERLAY"
 
 echo "[container-overlay] Installing into $CONTAINER_PYTHON_OVERLAY: $CONTAINER_OVERLAY_PACKAGES"
 # The pip runs INSIDE the image (matching python ABI); --no-deps per the header.
-apptainer exec --bind /projects "$CONTAINER_SIF" \
+# Bind BOTH /projects AND /lus: on Isambard /projects/a5k/public is a symlink
+# into /lus, so binding /projects alone leaves the target path dangling inside
+# the container (FileNotFoundError) — the same pair the exec shim binds.
+apptainer exec --bind /projects,/lus "$CONTAINER_SIF" \
     python -m pip install --no-deps --target "$CONTAINER_PYTHON_OVERLAY" $CONTAINER_OVERLAY_PACKAGES
 
 {
