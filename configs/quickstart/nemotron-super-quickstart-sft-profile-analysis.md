@@ -59,3 +59,20 @@ launches, 14 kernels — TP1-by-design, memory-bound), MoE routing 1.13 s, eleme
 
 **Honest ceiling:** with B1 structural and compute at ~9.4 s, the practical floor for this
 workload on this fabric sits in the mid-20s s/iter; the committed 27.6 is within ~10–15% of it.
+
+## Iteration-15 cross-check (2026-07-24, full normal run, FT on)
+
+A second capture at **iteration 15** of a full 48-iter production run (commit
+d94153-era tooling; traces + full reproduction bundle:
+`/projects/a5k/public/profiles/quickstart_normal_run/nemotron_super_quickstart_sft/20260724T203753-j5738449/`)
+confirms the compute fingerprint exactly (GEMM 4.78 s, Mamba 1.83 s/5,600
+launches, fused adds ~1.6k) and **corrects the communication picture**:
+
+- **The fp32 allreduce block is an early-run artifact, not a steady-state cost**:
+  0.04 s at iteration 15 vs 1.66–3.05 s at iteration 5. The "main remaining
+  tunable lever" claim above applies only to the first ~10 iterations.
+- Steady-state exposed comm is therefore **~5.9 s, ≈90% PP p2p sendrecv** —
+  B1 even more dominant than the iteration-5 numbers suggested.
+- Run context: gate-window mean 30.39 s/iter @ 87 TFLOP/s with fault tolerance
+  ON (the production path; FT heartbeats cost ~1–2 s vs the 27.6 FT-off probe
+  number). Traced-iteration overhead 166 s.
