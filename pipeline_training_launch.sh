@@ -604,6 +604,17 @@ fi
 
 if [ "$USE_FT" = true ]; then
     # Fault-tolerant launch via ft_launcher (nvidia-resiliency-ext)
+    #
+    # Heartbeat-timeout flags: the venv NVRX (0.5.x) accepts the literal 'none'
+    # (= disabled, section timeouts govern); the NGC image's ft_launcher rejects
+    # non-float values (caught 2026-07-24, first container+FT run). In container
+    # mode omit the flags entirely — the image defaults apply and the
+    # --ft-rank-section-timeouts below remain the load-bearing knobs.
+    if [ "$GEODESIC_CONTAINER" = "1" ]; then
+        FT_HEARTBEAT_FLAGS=""
+    else
+        FT_HEARTBEAT_FLAGS="--ft-initial-rank-heartbeat-timeout=none --ft-rank-heartbeat-timeout=none"
+    fi
     srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
         $ACTIVATE_CMD
@@ -614,8 +625,7 @@ if [ "$USE_FT" = true ]; then
             --nnodes=$NNODES \
             --node_rank=\$SLURM_NODEID \
             --max-restarts=20 \
-            --ft-initial-rank-heartbeat-timeout=none \
-            --ft-rank-heartbeat-timeout=none \
+            $FT_HEARTBEAT_FLAGS \
             --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \
