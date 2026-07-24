@@ -154,7 +154,11 @@ mkdir -p "$TRITON_CACHE_DIR"
 NGPUS_PER_NODE=4
 NNODES="${CONVERT_NNODES:-$SLURM_NNODES}"
 TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
-MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$SLURM_NODELIST" | head -1)}"
+# Master must live on a node that actually RUNS the conversion: with
+# CONVERT_NODELIST targeting a subset that excludes the allocation's first
+# node, deriving it from SLURM_NODELIST makes torchrun's static rendezvous
+# bind nowhere and hang (found by the C7 export smoke).
+MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "${CONVERT_NODELIST:-$SLURM_NODELIST}" | head -1)}"
 MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 
 # --- Helper: validate conversion parallelism covers the allocation ---

@@ -169,5 +169,11 @@ export CUDA_HOME=/usr/local/cuda
 # ==============================================================================
 export NEMO_HOME=/projects/a5k/public/data/nemo_cache
 export HF_HOME=/projects/a5k/public/hf
+# Processed-dataset cache is SCOPED per execution environment: the image's
+# datasets library (3.x) cannot read cache entries written by the venv's (4.x)
+# — a shared dir fails with 'DatasetInfo.from_directory ... must be called with
+# a dataclass' on container reads of venv-warmed entries (found by the C7
+# parity smoke). Hub downloads (models/tokenizers under HF_HOME) stay shared.
+export HF_DATASETS_CACHE=/projects/a5k/public/hf/datasets_container
 export WANDB_DIR=/projects/a5k/public/logs/wandb
 export TMPDIR="${TMPDIR:-/projects/a5k/public/tmp}"
