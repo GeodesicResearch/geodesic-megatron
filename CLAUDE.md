@@ -124,8 +124,9 @@ bash pipeline_container_setup.sh
 - **Missing SIF/build hard-fails** with the fix command. There is NO silent fallback to
   bare-metal.
 - **Benchmark/certification config:** `configs/quickstart/nemotron_super_quickstart_sft.yaml`
-  (Super-120B, TP1·CP4·EP4·PP11, 11 nodes) — the container must hold < 40 s/iter
-  (mean of iters 10–30; bare-metal baseline ~21–28 s/iter).
+  (Super-120B, TP1·CP4·EP4·PP8·ETP1·DP2 → 64 GPUs = **16 nodes**) — the container must hold
+  < 40 s/iter (mean of iters 10–30; measured champion ~27.6 s/iter FT-off / ~30.8 with FT;
+  bare-metal baseline 37.07 s/iter on the identical GBS=64 A/B — the container is ~16% faster).
 
 ---
 
@@ -235,6 +236,26 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 ```
 
 `pipeline_training_launch.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
+
+### Profiling and run identity
+
+- **Torch-profiler capture** (any launch, container or bare-metal): prefix with
+  `ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20` (also
+  `_RANKS=0,9`; legacy `_WAIT=3` = single capture at iteration 5). The
+  dedicated 120B profiling config is
+  `configs/quickstart/nemotron_super_quickstart_sft_profile.yaml` (25 iters,
+  captures at 10 and 20). Artifacts (per-rank traces, provenance, config +
+  resolved-config snapshots, raw-log copy) land in
+  `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/`. Tutorial:
+  `docs/profiling-quickstart.md`; reference: `docs/container-pipeline.md`
+  "Profiling a training run"; implementation:
+  `scripts/profiling/profiler_callback.py`.
+- **Run identity**: every launcher run mints `ISAMBARD_RUN_ID`
+  (`<timestamp>-j<jobid>`), echoed in the log banner, symlinked as
+  `logs/slurm/by-run-id/<run-id>.out`, used as the profile subdir name, and
+  stamped into W&B summary (`run/isambard_run_id`, `run/raw_log_path`,
+  `run/slurm_job_id`) by `scripts/telemetry/run_identity.py` — the join key
+  between a W&B run, its raw log, and its profiles.
 
 ### Environment Variable Architecture
 
@@ -743,8 +764,9 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
-| SLURM logs | `logs/slurm/` |
+| SLURM logs | `logs/slurm/` (by run ID: `logs/slurm/by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
+| Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` |
 | HF cache | `/projects/a5k/public/hf` |
 
 ## Common Pitfalls

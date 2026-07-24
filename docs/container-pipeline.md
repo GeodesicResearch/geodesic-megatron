@@ -12,7 +12,7 @@ checkout you submit from is exactly the code that runs.
   the coherence pipeline's `--backend vllm` (the pinned vLLM 0.22.1+cu129/Ray stack lives
   in the venv) and is otherwise a transition-safety escape hatch. Removing bare-metal
   entirely is the end state, tracked as a follow-up once a vLLM-capable image qualifies.
-- **User-facing commands are unchanged.** `isambard_sbatch --nodes=11
+- **User-facing commands are unchanged.** `isambard_sbatch --nodes=16
   pipeline_training_submit.sbatch <config> super sft` works exactly as before — the
   launcher decides bare-metal vs container from `GEODESIC_CONTAINER`.
 
@@ -219,23 +219,50 @@ An image tag qualifies when:
 
 ## Profiling a training run
 
-To collect the torch-profiler artifact used for external speed-up assessment (one
-optimizer step, `with_stack=True` + `record_shapes=True`, per-rank chrome traces +
-commit/config provenance — the format Quentin Anthony's analysis expects), set the
-env toggle on any training launch (container or bare-metal):
+To collect the torch-profiler artifact used for external speed-up assessment (full
+optimizer steps, `with_stack=True` + `record_shapes=True`, per-rank chrome traces +
+commit/config/run-id provenance — the format Quentin Anthony's analysis expects),
+set the env toggle on any training launch (container or bare-metal). The dedicated
+profiling quickstart config captures the champion 120B workload at iterations 10
+and 20 of a 25-iteration run — step-by-step walkthrough in
+[docs/profiling-quickstart.md](profiling-quickstart.md):
 
 ```bash
-ISAMBARD_TORCH_PROFILE=1 bash pipeline_training_launch.sh <config> --model super --mode sft ... 
-# knobs: ISAMBARD_TORCH_PROFILE=<dir> (output root; default /projects/a5k/public/profiles),
-#        ISAMBARD_TORCH_PROFILE_RANKS=0,4  ISAMBARD_TORCH_PROFILE_WAIT=3
+ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20 \
+    isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+    configs/quickstart/nemotron_super_quickstart_sft_profile.yaml super sft
+# knobs: ISAMBARD_TORCH_PROFILE=<dir>  output root (default /projects/a5k/public/profiles)
+#        ISAMBARD_TORCH_PROFILE_RANKS=0,9  global ranks to trace (default 0)
+#        ISAMBARD_TORCH_PROFILE_ITERS=10,20  1-based iterations to capture, one
+#            trace file per rank per iteration (rank<R>.iter<N>.chrome_trace.json.gz)
+#        ISAMBARD_TORCH_PROFILE_WAIT=3  legacy single capture at iteration WAIT+2
+#            with the unsuffixed rank<R> filename (used only when _ITERS is unset)
 ```
 
-Traces land in `<root>/<wandb-exp-name>/rank<R>.chrome_trace.json.gz` (open in
-Perfetto/chrome://tracing) next to `provenance.txt` (exact commit, config snapshot,
-world info). Implementation: `scripts/profiling/profiler_callback.py` (a bridge
-`Callback`; default OFF). Background/reference material:
-`3rdparty/torch-profiling-tutorial` (Quentin Anthony's profiling tutorial, pinned
-as a submodule).
+Artifacts land in `<root>/<wandb-exp-name>/<run-id>/` (open traces in
+Perfetto/chrome://tracing): the per-rank trace gzips, `provenance.txt` (exact
+commit, run id, raw-log path, world info), `config_snapshot.yaml` (the override
+YAML verbatim), `resolved_config_snapshot.yaml` (the FULL merged config incl.
+recipe defaults and CLI overrides — the authoritative reproduction source), and
+`raw_log_snapshot.out` (point-in-time copy of the job log). Implementation:
+`scripts/profiling/profiler_callback.py` (a bridge `Callback`; default OFF).
+Background/reference material: `3rdparty/torch-profiling-tutorial` (Quentin
+Anthony's profiling tutorial, pinned as a submodule).
+
+## Run identity
+
+Every launch through `pipeline_training_launch.sh` mints a unique run ID
+(`ISAMBARD_RUN_ID` = `<launch-timestamp>-j<slurm-job-id>`) that joins the three
+places a run leaves artifacts — previously painful to correlate:
+
+- **Job log** — the ID is echoed in the launch summary banner, and
+  `logs/slurm/by-run-id/<run-id>.out` symlinks to the raw `train-<jobid>.out`.
+- **Profiles** — the ID names the per-launch output subdirectory and is recorded
+  in `provenance.txt` (see above).
+- **W&B** — `RunIdentityCallback` (`scripts/telemetry/run_identity.py`,
+  registered on every training run) stamps summary metrics
+  `run/isambard_run_id`, `run/raw_log_path`, and `run/slurm_job_id`, so a W&B
+  run links straight back to its log file and profile artifacts.
 
 ## Interactive use
 

@@ -645,8 +645,9 @@ Entries expire after 7 days, so a node that gets fixed stops being excluded auto
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
-| SLURM logs | `logs/slurm/` |
+| SLURM logs | `logs/slurm/` (by run ID: `logs/slurm/by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
+| Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` (see [docs/profiling-quickstart.md](docs/profiling-quickstart.md)) |
 | HF cache | `/projects/a5k/public/hf` |
 
 ## Claude Code Skills
