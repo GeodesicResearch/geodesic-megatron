@@ -497,6 +497,54 @@ export ISAMBARD_FP32_SSM_STATE="${ISAMBARD_FP32_SSM_STATE:-checkpoint}"
 export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-0}"
 
 # ==============================================================================
+# Run identity (INFR-68)
+# ==============================================================================
+# One unique ID joins everything a training run leaves behind: the raw SLURM
+# job log, the torch-profiler artifacts, and the W&B run (stamped as summary
+# metrics by scripts/telemetry/run_identity.py). Minted once per launch;
+# respects a pre-set value so a re-launch within one allocation can share it.
+# Exported, so it reaches every rank in both container and bare-metal modes
+# (see the env guarantee at the srun call below).
+export ISAMBARD_RUN_ID="${ISAMBARD_RUN_ID:-$(date +%Y%m%dT%H%M%S)-j${SLURM_JOB_ID}}"
+
+# Absolute path of this job's raw log. Resolution order:
+#   1. explicit ISAMBARD_RAW_LOG_PATH in the environment (always wins);
+#   2. this process's OWN stdout target when it is a regular file — correct for
+#      sbatch (StdOut is fd1's target) AND for in-tunnel `bash ... > log 2>&1`
+#      launches, where scontrol would mis-resolve to the TUNNEL job's log
+#      (caught 2026-07-24: a profile run's raw_log_snapshot captured tunnel
+#      port-forwarding chatter instead of training output);
+#   3. scontrol's StdOut field (sbatch fallback if /proc introspection fails).
+# For interactive/salloc runs stdout is a terminal (not a regular file), every
+# rung fails, and the var stays empty — consumers (W&B summary, profiler log
+# snapshot) then skip log reporting/copying.
+# The `|| true`s matter: this script runs `set -euo pipefail`, and a no-match
+# grep (salloc case) would otherwise abort the launch.
+if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
+    _FD1_TARGET="$(readlink -f /proc/$$/fd/1 2>/dev/null || true)"
+    if [ -n "$_FD1_TARGET" ] && [ -f "$_FD1_TARGET" ]; then
+        ISAMBARD_RAW_LOG_PATH="$_FD1_TARGET"
+    else
+        ISAMBARD_RAW_LOG_PATH="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | grep -oE 'StdOut=[^ ]+' | head -n 1 | cut -d= -f2 || true)"
+    fi
+fi
+if [ ! -f "$ISAMBARD_RAW_LOG_PATH" ]; then
+    ISAMBARD_RAW_LOG_PATH=""
+fi
+export ISAMBARD_RAW_LOG_PATH
+
+# Findable-by-run-ID companion symlink next to the raw log, so a log can be
+# located from a run ID alone: logs/slurm/by-run-id/<run-id>.out -> train-<job>.out
+# Non-fatal: identity bookkeeping must never kill a training launch.
+if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
+    RUN_ID_LINK_DIR="$(dirname "$ISAMBARD_RAW_LOG_PATH")/by-run-id"
+    if ! mkdir -p "$RUN_ID_LINK_DIR" 2>/dev/null ||
+        ! ln -sfn "$ISAMBARD_RAW_LOG_PATH" "$RUN_ID_LINK_DIR/${ISAMBARD_RUN_ID}.out" 2>/dev/null; then
+        echo "WARNING: by-run-id log symlink not created (non-fatal)" >&2
+    fi
+fi
+
+# ==============================================================================
 # Distributed setup
 # ==============================================================================
 NNODES="${OVERRIDE_NODES:-$SLURM_NNODES}"
@@ -538,6 +586,10 @@ fi
 # ==============================================================================
 echo "===== Nemotron 3 Training ====="
 echo "Job ID:    $SLURM_JOB_ID"
+echo "Run ID:    $ISAMBARD_RUN_ID"
+if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
+    echo "Raw log:   $ISAMBARD_RAW_LOG_PATH"
+fi
 echo "Config:    $CONFIG_FILE"
 echo "Model:     $MODEL"
 echo "Mode:      $MODE"

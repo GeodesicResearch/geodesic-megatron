@@ -85,7 +85,9 @@ RECIPE_MAP = {
         nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config()
     ),
     ("super", "cpt"): lambda peft: nemotron_3_super_sft_config(),
-    ("ultra", "sft"): lambda peft: nemotron_3_ultra_peft_config(peft_scheme=peft) if peft else nemotron_3_ultra_sft_config(),
+    ("ultra", "sft"): lambda peft: (
+        nemotron_3_ultra_peft_config(peft_scheme=peft) if peft else nemotron_3_ultra_sft_config()
+    ),
     ("ultra", "cpt"): lambda peft: nemotron_3_ultra_sft_config(),
 }
 
@@ -536,18 +538,36 @@ def main() -> None:
 
     # --- Launch ---
 
+    # Run identity (always on): a unique per-run ID joining the raw job log,
+    # the torch-profiler artifacts, and the W&B run (stamped there as summary
+    # metrics run/isambard_run_id + run/raw_log_path). See
+    # scripts/telemetry/run_identity.py and docs/container-pipeline.md.
+    from scripts.telemetry.run_identity import RunIdentityCallback, get_raw_log_path, get_run_id
+
+    run_id = get_run_id()
+    raw_log_path = get_raw_log_path()
+    logger.info(f"Run identity: run_id={run_id} raw_log={raw_log_path or '(none)'}")
+    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path)
+
     # Optional torch-profiler trace collection (ISAMBARD_TORCH_PROFILE, default
-    # off): one optimizer step with with_stack + record_shapes, exported with
-    # commit/config provenance for offline analysis. See
+    # off): full optimizer steps with with_stack + record_shapes, exported with
+    # commit/config/run-id provenance for offline analysis. See
     # scripts/profiling/profiler_callback.py and docs/container-pipeline.md.
+    # The resolved-config dump makes the trace self-reproducing: the override
+    # YAML alone omits recipe defaults and CLI overrides (train.train_iters=N
+    # etc.), which has already forced a manual provenance correction once.
     from scripts.profiling.profiler_callback import maybe_build_profiler_callback
 
     profiler_cb = maybe_build_profiler_callback(
         config_file=args.config_file,
         run_name=getattr(cfg.logger, "wandb_exp_name", None) or f"job_{os.environ.get('SLURM_JOB_ID', 'local')}",
+        run_id=run_id,
+        resolved_config_yaml=OmegaConf.to_yaml(merged_omega_conf, resolve=True),
+        raw_log_path=raw_log_path,
     )
 
-    finetune(config=cfg, forward_step_func=forward_step, callbacks=[profiler_cb] if profiler_cb else None)
+    callbacks = [cb for cb in (identity_cb, profiler_cb) if cb is not None]
+    finetune(config=cfg, forward_step_func=forward_step, callbacks=callbacks)
 
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
