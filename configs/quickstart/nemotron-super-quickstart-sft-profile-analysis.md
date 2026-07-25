@@ -68,9 +68,12 @@ d94153-era tooling; traces + full reproduction bundle:
 confirms the compute fingerprint exactly (GEMM 4.78 s, Mamba 1.83 s/5,600
 launches, fused adds ~1.6k) and **corrects the communication picture**:
 
-- **The fp32 allreduce block is an early-run artifact, not a steady-state cost**:
-  0.04 s at iteration 15 vs 1.66–3.05 s at iteration 5. The "main remaining
-  tunable lever" claim above applies only to the first ~10 iterations.
+- **The fp32 allreduce block is mostly an early-run effect, and stage-dependent**:
+  exposed allreduce falls 1.66 -> 0.04 s on rank 0 and 3.05 -> 1.61 s on rank 9
+  between iterations 5 and 15. The residual ~1.6 s sits at the optimizer
+  boundary on stage 1 (two ~0.5 s u32 calls + seven f32 calls), so the "main
+  remaining tunable lever" claim above is halved and applies per-stage, not
+  globally.
 - Steady-state exposed comm is therefore **~5.9 s, ≈90% PP p2p sendrecv** —
   B1 even more dominant than the iteration-5 numbers suggested.
 - Run context: gate-window mean 30.39 s/iter @ 87 TFLOP/s with fault tolerance
