@@ -153,7 +153,10 @@ export NCCL_NET_PLUGIN="${TRAIN_NCCL_NET_PLUGIN:-/opt/slingshot/aws-ofi-nccl/lib
 # file for full rationale per variable; keep the two blocks in sync).
 # ==============================================================================
 export UB_SKIPMC=1                                        # Isambard driver lacks CUDA Multicast; UB init hangs without this
-export CUDA_DEVICE_MAX_CONNECTIONS=1                      # required for TP/SP comm-compute overlap
+# Overridable via ISAMBARD_CUDA_MAX_CONNECTIONS: the =1 requirement is for TP/SP
+# comm-compute overlap; TP=1 topologies (e.g. the 120B quickstart) may probe >1
+# to unserialize the hardware launch queues (see the perf-iteration ladder).
+export CUDA_DEVICE_MAX_CONNECTIONS="${ISAMBARD_CUDA_MAX_CONNECTIONS:-1}"
 export NVTE_CPU_OFFLOAD_V1=1                              # TE fine-grained CPU activation offloading (TE >= 2.10 path)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # reduces CUDA memory fragmentation
 export TORCH_CUDA_ARCH_LIST="9.0"                         # Hopper/GH200; also guards sm_90a arch-string parsing in JIT builds

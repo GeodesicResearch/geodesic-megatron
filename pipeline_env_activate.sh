@@ -161,7 +161,10 @@ export NVTE_CPU_OFFLOAD_V1=1
 # reduce-scatter) with GEMM kernels in a pipelined fashion. With >1 connections, CUDA
 # can reorder kernels, breaking the overlap scheduling and causing collectives to run
 # after the GEMM instead of during it. Harmless for single-GPU. Note: conflicts with FSDP.
-export CUDA_DEVICE_MAX_CONNECTIONS=1
+# Overridable via ISAMBARD_CUDA_MAX_CONNECTIONS for TP=1 topologies, where the
+# TP/SP-overlap ordering constraint does not bind (mirrored in
+# pipeline_container_activate.sh — keep in sync).
+export CUDA_DEVICE_MAX_CONNECTIONS="${ISAMBARD_CUDA_MAX_CONNECTIONS:-1}"
 
 # Use PyTorch's expandable segments allocator. Instead of allocating many fixed-size CUDA
 # memory blocks (which fragment the GPU address space), expandable segments uses CUDA
