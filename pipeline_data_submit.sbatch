@@ -36,16 +36,31 @@ MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <a
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 
+# Execution environment: the payload runs inside the Apptainer pipeline container
+# via pipeline_env_exec.sh (see docs/environment.md). A missing SIF or Slingshot
+# build hard-fails below with the fix command — there is no silent fallback.
+if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
+    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
+    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
+    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
+    exit 1
+fi
+source "$REPO_DIR/pipeline_env_config.env"
+# env_config_require *returns* non-zero (it is also sourced by callers that must
+# not exit), and this script has no `set -e` — so gate the exit explicitly rather
+# than packing a broken environment for hours before failing.
+env_config_require || exit 1
+
+# Purge the host module env before entering the container: this repo lives under
+# the bind-mounted $HOME, so host module paths resolve inside the image and would
+# shadow its version-matched toolchain/libs.
 module purge
-module load PrgEnv-cray
-module load cuda/12.6
 
-source "$REPO_DIR/pipeline_env_activate.sh"
-
-# Resolve megatron.bridge from THIS checkout, not the venv's editable install (which
-# points at the main repo). Without this, a worktree's bridge fixes are silently
-# ignored by data jobs — the training launcher does the same prepend.
-export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
+# Sourced INSIDE the container. It prepends THIS checkout's src/ +
+# 3rdparty/Megatron-LM to PYTHONPATH, so a worktree's bridge fixes are what data
+# jobs actually run instead of the image's megatron packages.
+ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 
 if [ "$MODE_OR_ROOT" = "prepare" ]; then
     shift
@@ -53,9 +68,18 @@ if [ "$MODE_OR_ROOT" = "prepare" ]; then
     echo "Job ID:   $SLURM_JOB_ID"
     echo "Node:     $(hostname)"
     echo "Repo dir: $REPO_DIR"
+    echo "Env:      $CONTAINER_SIF"
     echo "Args:     $*"
     echo "================================================================"
-    python pipeline_data_prepare.py "$@"
+    # printf %q re-quotes the args so they survive the shell round-trip into the
+    # containerized payload string — but ONLY when there are args: with zero
+    # arguments `printf ' %q' "$@"` emits a stray `''` that argparse rejects with
+    # "unrecognized arguments" (exit 2).
+    ARGS_Q=""
+    if [ "$#" -gt 0 ]; then
+        ARGS_Q="$(printf ' %q' "$@")"
+    fi
+    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python pipeline_data_prepare.py$ARGS_Q"
     rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "===== Preparation Complete ====="
@@ -77,12 +101,22 @@ echo "Dataset root:   $DATASET_ROOT"
 echo "Tokenizer:      $TOKENIZER"
 echo "Seq length:     $SEQ_LENGTH"
 echo "Pad seq to mul: $PAD_SEQ_TO_MULT"
+echo "Env:            $CONTAINER_SIF"
 echo "========================================"
 
-python scripts/data/pack_sft_dataset.py \
-    --dataset-root "$DATASET_ROOT" \
-    --tokenizer "$TOKENIZER" \
-    --seq-length "$SEQ_LENGTH" \
-    --pad-seq-to-mult "$PAD_SEQ_TO_MULT"
+"${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; python scripts/data/pack_sft_dataset.py \
+    --dataset-root $(printf '%q' "$DATASET_ROOT") \
+    --tokenizer $(printf '%q' "$TOKENIZER") \
+    --seq-length $(printf '%q' "$SEQ_LENGTH") \
+    --pad-seq-to-mult $(printf '%q' "$PAD_SEQ_TO_MULT")"
+rc=$?
 
-echo "===== Packing Complete ====="
+# Propagate the payload's status: without this the trailing echo makes sbatch exit
+# 0 and SLURM records COMPLETED for a packing run that failed — the `prepare` path
+# above already does this, and the two must not disagree.
+if [ "$rc" -eq 0 ]; then
+    echo "===== Packing Complete ====="
+else
+    echo "===== PACKING FAILED (rc=$rc) ====="
+fi
+exit "$rc"

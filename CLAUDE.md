@@ -7,11 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repo uses [`geodesic-claude-tooling`](.claude/geodesic-claude-tooling) (a git submodule) —
 Claude Code hooks that inject Geodesic's working conventions at session start, validate plans on
 exit, and run lightweight mechanical checks on the diff. The integration is **additive**: it does
-not modify the (fragile) environment build. Install it once into the existing venv:
+not modify the environment build. The tooling lives in a repo-local `.venv` that is
+**for tooling only** (ruff, pre-commit, the hooks) and carries no torch — it is unrelated to the
+container that runs the pipelines. Install it once:
 
 ```bash
-source pipeline_env_activate.sh
-bash scripts/install_claude_tooling.sh
+bash scripts/install_claude_tooling.sh   # creates/refreshes .venv and installs the tooling
 ```
 
 Hooks live in `.claude/settings.json`; enabled quality items in `.claude/geodesic-config.yaml`. The
@@ -49,7 +50,7 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 - **GPUs**: NVIDIA GH200 120GB (95GB usable), `sm_90`, 4 GPUs per node
 - **CPU**: ARM aarch64 (Grace)
 - **Networking**: Slingshot/CXI fabric (HPE)
-- **CUDA**: 12.6, **Python**: 3.12, **PyTorch**: 2.11.0+cu126
+- **CUDA**: 13.0 in-image on a CUDA-12.7 host driver (forward-compat libs), **Python**: 3.12, **PyTorch**: 2.10.0a0+nv25.11 (from the NGC image — see `## 0. Environment Pipeline`)
 - **Scale**: cross-node EP=8 MoE all-to-all hits the documented Slingshot/aws-ofi-nccl Send/Recv hang (`docs/investigations/slingshot-nccl-hang-investigation.md`) — keep **TP×EP ≤ 4** (node-local) to avoid it. With node-local EP, scale is NOT capped at 32 nodes: **Ultra SFT is validated at 72 nodes / 288 GPUs** (PP=36). The prior "64+ nodes just hang" belief conflated that Slingshot hang with two Ultra-specific first-iter issues since fixed (`disable_jit_fuser` + a longer `TORCH_NCCL_TIMEOUT`; see the Ultra section).
 
 ### Bad compute nodes
@@ -78,7 +79,7 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 
 | Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
 |----------|---------------|----------------|---------|
-| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | Environment install, activation, validation |
+| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_config.env`, `pipeline_env_setup.sh`, `pipeline_env_exec.sh`, `pipeline_env_activate.sh`, `pipeline_env_validate.py` | **THE execution environment** — Apptainer + NGC NeMo image, Slingshot NCCL stack |
 | **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
@@ -88,73 +89,81 @@ Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.s
 
 ---
 
-## 1. Environment Pipeline (`env_*`)
+## 0. Environment Pipeline (`env_*`) — THE execution environment
+
+Every pipeline runs inside an Apptainer container built from the NGC NeMo image
+(aarch64), which supplies torch/CUDA/cuDNN/TE/Mamba-kernels/APEX/`ft_launcher`
+prebuilt and version-matched. This repo's `src/` + `3rdparty/Megatron-LM` are
+bind-mounted, so the checkout you submit from is the code that runs. There is no
+bare-metal path, no venv, and no opt-out flag: a missing SIF or Slingshot build
+hard-fails with the fix command rather than degrading.
+
+Full design + troubleshooting: `docs/environment.md`.
+
+### One-time setup
+
+```bash
+# ONE command on a GPU node: SIF pull + Slingshot NCCL build + Python overlay +
+# validation. Idempotent (done steps skip loudly); --force redoes everything,
+# --only <sif|slingshot|overlay|validate> runs a single step.
+bash pipeline_env_setup.sh
+# or: isambard_sbatch pipeline_env_submit.sbatch setup
+```
 
 ### Files
 
 | File | Purpose |
 |------|---------|
-| `pipeline_env_activate.sh` | Universal environment: venv, compilers, NVIDIA libs, GPU settings, cache paths. **Source this before any work.** |
-| `pipeline_env_setup.sh` | Full bare-metal install script (must run on a compute node with GPU) |
-| `pipeline_env_validate.py` | 15-check validation (imports, CUDA, GPU ops, recipes, training) |
-| `pipeline_env_submit.sbatch` | SLURM wrapper for setup/validation (needs GPU) |
+| `pipeline_env_config.env` | THE config: image tag/URI, SIF path, Slingshot build dir, Python overlay + its package list, binds, cache-dir `$HOME` guards, and the `env_config_require` gate. Override via `GEODESIC_CONTAINER_*` env vars documented inline. |
+| `pipeline_env_setup.sh` | The whole install in four idempotent steps (`sif` → `slingshot` → `overlay` → `validate`). Needs a GPU node for steps 2 and 4. |
+| `pipeline_env_exec.sh` | The shim every launcher uses: scrubs host toolchain env, then runs one command string inside the container. |
+| `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
+| `pipeline_env_validate.py` | 19-check validation (imports, CUDA, GPU ops, import resolution, NCCL plugin dlopen, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
+| `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke` (2-node fabric check). |
 
-### Usage
+### Key facts
 
-```bash
-# Activate (from any node)
-source pipeline_env_activate.sh
+- **Config-driven:** everything (image tag, SIF path, binds, cache dirs, Slingshot
+  component versions, overlay packages) lives in `pipeline_env_config.env`.
+- **SIF + Slingshot build live on** `/projects/a5k/public/containers/` — NEVER `$HOME`
+  (the config refuses `$HOME` cache dirs; a SIF would blow the home quota instantly).
+- **Slingshot networking** follows Isambard's official "Option B": NCCL + hwloc +
+  aws-ofi-nccl built inside the image against the image CUDA + host libfabric
+  (one-time per image tag). Never use `brics/apptainer-multi-node`/`adapt.sh` with
+  these images — it injects host NCCL 2.26 over the image's torch-matched NCCL.
+  Without the CXI plugin NCCL silently falls back to TCP: ~2.3 GB/s vs ~163 GB/s.
+- **Image contents are not frozen in this file** (they rot): the validator's
+  version-report check prints the live set. Qualified image today is
+  `nvcr.io/nvidia/nemo:26.02.nemotron_3_super` — Python 3.12, CUDA 13.0, NCCL 2.28.8,
+  torch 2.10.0a0+nv25.11, TE 2.12.0, mamba-ssm 2.3.0, causal-conv1d 1.6.0,
+  nv-grouped-gemm 1.1.4.post8, transformers 5.3.0, APEX, nvidia-resiliency-ext 0.4.1.
+  The Python overlay (`pip install --target`, `--no-deps`, on PYTHONPATH after the repo
+  and before the image) fills gaps without touching the read-only SIF: `peft` (image
+  0.13.2 is below modelopt's >=0.17 requirement) and `imageio` (absent; one diffusion
+  test file otherwise fails at collection).
+- **Import resolution** is `repo src/` > `3rdparty/Megatron-LM` > overlay > image
+  site-packages, via PEP 420 namespace portions. The validator asserts it every run —
+  a regular (non-namespace) `megatron` package in a future image would silently win.
+- **Benchmark/certification config:** `configs/quickstart/nemotron_super_quickstart_sft.yaml`
+  (Super-120B, TP1·CP4·EP4·PP8·ETP1·DP2 → 64 GPUs = **16 nodes**) — gate is < 40 s/iter
+  (mean of iters 10–30; measured champion ~27.6 s/iter FT-off, ~30.8 with FT, and ~27.2
+  after the grad-stats telemetry fix). Qualifying a new image tag = that absolute gate
+  plus no regression against the previously qualified tag's recorded number.
+- **Unit tests run inside the container** (the image ships pytest/ruff/pre-commit):
+  ```bash
+  # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent
+  ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q"
+  ```
+  The `.venv` that remains is for **dev tooling only** (ruff, pre-commit, the Claude
+  Code hooks) and deliberately carries no torch; create it with
+  `bash scripts/install_claude_tooling.sh` (it uses `uv pip install`, never `uv sync` — a sync
+  would resolve the full project and try to build torch/TE/mamba on the host).
 
-# Install from scratch (requires compute node)
-isambard_sbatch pipeline_env_submit.sbatch setup
-
-# Validate
-isambard_sbatch pipeline_env_submit.sbatch validate --run-training
-```
-
-### What `pipeline_env_activate.sh` sets
-
-**Universal GPU settings** (needed for any operation):
-- `UB_SKIPMC=1` — Disables CUDA Multicast (Isambard driver doesn't support it)
-- `CUDA_DEVICE_MAX_CONNECTIONS=1` — Required for TP/SP comm-compute overlap
-- `NVTE_CPU_OFFLOAD_V1=1` — TE activation offloading V1 code path
-- `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` — Reduces CUDA memory fragmentation
-
-**Shared cache paths:**
-- `HF_HOME=/projects/a5k/public/hf`
-- `WANDB_DIR=/projects/a5k/public/logs/wandb`
-- `NEMO_HOME=/projects/a5k/public/data/nemo_cache`
-
-Every env var in `pipeline_env_activate.sh` has detailed inline documentation.
-
-### Installed Versions (verified working)
-
-- **torch 2.11.0+cu126** (aarch64 wheel; exact-pinned, installed via manual `pip` in Phase 3 — required by vllm 0.22.1, which hard-pins `torch==2.11.0`)
-- **transformer-engine 2.14.0** (built from pinned commit `71bbefbf`)
-- **mamba-ssm 2.3.1** and **causal-conv1d 1.6.1** (built from source)
-- **nv-grouped-gemm 1.1.4** (built from source)
-- **Python 3.12**, **CUDA 12.6**, **NCCL 2.28.9** (from venv, not system)
-- **nvidia-resiliency-ext 0.5.0** (`ft_launcher`, fault tolerance, straggler detection)
-- **vLLM 0.22.1 (+cu129 wheel)** and **ray 2.55.1** (coherence/inference; built into the setup pipeline at Phase 7g — no longer a post-hoc step)
-
-### ARM/Isambard-Specific Workarounds
-
-These are critical issues that were discovered and fixed. If the environment breaks or needs rebuilding, all must be applied:
-
-1. **PyTorch install: use `pip`, not `uv pip`** (manual `pip install torch==2.11.0+cu126` in Phase 3). `uv pip install` silently fails with PyTorch wheel indexes on aarch64. torch is exact-pinned (vllm 0.22.1 hard-pins `torch==2.11.0`); `uv sync` skips it via the `torch; sys_platform=='never'` override and `--inexact` keeps the pip-installed torch from being pruned (see #8). (NOTE: main briefly routed torch through `uv` via `[tool.uv.sources]` at torch 2.12.0 — that is incompatible with vllm 0.22.1's `torch==2.11.0` pin, so this branch keeps the manual-pip 2.11 stack.)
-2. **NCCL LD_PRELOAD** (fixes `undefined symbol: ncclCommShrink`). The system NCCL is older than what torch needs.
-3. **CUDAHOSTCXX=/usr/bin/g++-12** (fixes `fatal error: filesystem: No such file or directory`). System gcc 7.5 lacks C++17.
-4. **NCCL include path for TE build** (fixes `fatal error: nccl.h: No such file or directory`).
-5. **cuDNN header symlinks** for TE build.
-6. **pybind11 must be installed before `uv sync`**.
-7. **sitecustomize.py monkeypatch** (fixes `ValueError: invalid literal for int() with base 10: '90a'`).
-8. **`uv sync --inexact` (NOT `--locked`, and NOT bare `uv sync`)**. The `uv.lock` is x86_64-only, so no `--locked`. **`--inexact` is mandatory**: bare `uv sync` runs in *exact* mode and PRUNES the phase-3 torch + its nvidia deps (torch is `sys_platform == "never"` in pyproject, so uv deems them extraneous and deletes `torch/utils/`, `libcudnn.so.9`, …), which breaks `import torch` ("No module named 'torch.utils'") and the TE build. (Latent for months — masked by a cu130 torch reinstall during TE's fallback that accidentally re-completed torch; the torch exact-pin below removed that crutch and exposed it.)
-9. **wandb isatty() patch** for SLURM.
-10. **Exact-pin torch + global `PIP_CONSTRAINT`** (Phase 3). Pin `torch==2.11.0+cu126` (+ torchvision/torchaudio) — bare `torch>=2.6.0` floats to 2.12.0 — and export `PIP_CONSTRAINT` so no later source build pulls torch 2.12.0 from PyPI (cu130: cuda-toolkit 13.0, nccl-cu13), which would make TE/mamba/grouped-gemm compile against a CUDA-13 torch.
-11. **`NVTE_PROJECT_BUILDING=1` in the TE build env**. TE's `__init__` does a runtime `_load_cuda_library("cudnn")` at import unless this is set; pip's metadata-gen imports the (uv-sync-preinstalled) TE during the build, which has no business loading runtime cudnn. TE's own documented build flag.
-12. **`nv-grouped-gemm==1.1.4.post8` + numpy build-pin `1.26.4` + `wheel`/`packaging` build deps** (TE PEP517 metadata needs `wheel`; bare `numpy` pulls a 2.x prerelease that breaks TE).
-
-> These were all surfaced by **building the env from scratch via `pipeline_env_setup.sh`** (the validation campaign, INFR-41) rather than from a pre-warmed env. See `docs/ultra-550b-training-and-conversion.md` §1.
+> History: the bare-metal venv stack (a 435-line installer plus 12 order-dependent ARM
+> workarounds) was deleted with the container-only simplification. That knowledge —
+> pinned versions and every workaround — is preserved in the "Retired from
+> geodesic-megatron" Slack canvas in #megatron, not in this repo.
 
 ---
 
@@ -188,6 +197,27 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 
 `pipeline_training_launch.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
 
+### Profiling and run identity
+
+- **Torch-profiler capture** (any launch): prefix with
+  `ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20` (also
+  `_RANKS=0,9`; legacy `_WAIT=3` = single capture at iteration 5). Profiling runs
+  against the STANDING quickstart config with overrides — there is no separate
+  profile config to drift out of sync; the exact command (including the
+  `logger.wandb_save_dir` that is mandatory alongside `checkpoint.save=null`) is in
+  that config's header and in `docs/profiling-quickstart.md`. Artifacts (per-rank traces, provenance, config +
+  resolved-config snapshots, raw-log copy) land in
+  `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/`. Tutorial:
+  `docs/profiling-quickstart.md`; reference: `docs/environment.md`
+  "Profiling a training run"; implementation:
+  `scripts/profiling/profiler_callback.py`.
+- **Run identity**: every launcher run mints `ISAMBARD_RUN_ID`
+  (`<timestamp>-j<jobid>`), echoed in the log banner, symlinked as
+  `logs/slurm/by-run-id/<run-id>.out`, used as the profile subdir name, and
+  stamped into W&B summary (`run/isambard_run_id`, `run/raw_log_path`,
+  `run/slurm_job_id`) by `scripts/telemetry/run_identity.py` — the join key
+  between a W&B run, its raw log, and its profiles.
+
 ### Environment Variable Architecture
 
 `pipeline_training_launch.sh` adds distributed-training-only vars on top of `pipeline_env_activate.sh`:
@@ -200,7 +230,10 @@ Every env var has detailed inline documentation.
 
 ### Training-Specific Override for Isambard
 
-The YAML config override `model.gradient_accumulation_fusion=False` is required for all training. The default `True` requires APEX which is not installed.
+The NGC image ships APEX, so `model.gradient_accumulation_fusion: True` works and is
+the faster path — a measured ~1.1 s/iter win on the 120B quickstart (2026-07-24). It is
+set `True` in the shipped quickstart. (This used to require a per-environment override;
+with the venv gone, there is one answer.)
 
 ### Fault Tolerance
 
@@ -211,8 +244,13 @@ Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with E
 3. **NCCL watchdog** (900s) — last resort backup.
 
 **ft_launcher timeout configuration** (set in `pipeline_training_launch.sh`):
-- `--ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600`
-- `--ft-rank-out-of-section-timeout=3600` — must be ≥3600s for first-iter NCCL lazy init with PP=8+
+- `--ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600`
+- `--ft-rank-out-of-section-timeout=7200` — must cover first-iter NCCL lazy init at PP=8+
+- `--ft-initial-rank-heartbeat-timeout=7200 --ft-rank-heartbeat-timeout=7200` — heartbeats are
+  an INDEPENDENT mechanism from the section timeouts. Omitting them is not "disabled": NVRX
+  defaults to 3600 s / 2700 s, which is shorter than Ultra-550B's 45-75 min first iteration at
+  PP=36 and produces a SIGKILL + restart loop that looks exactly like a fabric hang. The image's
+  ft_launcher parses these as floats and rejects the literal `none`, hence explicit numbers.
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
 The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `pipeline_training_run.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
@@ -300,9 +338,39 @@ Ultra is architecturally a scaled Super — same NemotronH hybrid (Mamba2 + atte
 
 **Throughput is best-effort, not yet tuned.** PP=36 with GBS=64/DP=2 → 32 microbatches < 36 stages = severe pipeline bubble (~0.2→low TFLOP/s/GPU). To improve: raise `global_batch_size` so microbatches ≥ PP, consider VPP/interleaved PP, and set `pipeline_model_parallel_layout` to balance the 2×-heavy MoE stages (see the Megatron MoE paper skill). Functionally it trains; these are throughput levers.
 
+**fVPP (virtual/interleaved PP) WORKS on the Nemotron-H hybrid** (Super-120B validated
+2026-07-24) via `|` segment separators in `hybrid_layer_pattern` — the older "VPP
+unsupported on SSM/Mamba" belief was two stale bridge asserts, since removed. At cert
+32K/CP4 only VPP=4 fits (needs `[core_attn,moe,shared_experts]` recompute + a
+stage-0-unloaded pattern) and it lands ~+10% vs the non-VPP champion, so the non-VPP
+config stays the default. Measured: best VPP=4 30.69 s/iter vs 27.61 non-VPP champion
+(+11%); `overlap_p2p_comm` (which VPP enables) is a ~2× Slingshot regression at PP8 AND
+PP16, trace-attributed to un-batched isend/irecv costing 2.3-5.7× more per operation on
+CXI — do NOT enable it on this fabric without new evidence. The full ladder,
+decomposition, and trace-level root cause live in the "fVPP on the Nemotron-H hybrid"
+Slack canvas in #megatron (the in-repo doc and the vpp4 config were deleted in the
+container-only simplification). Ongoing work: INFR-71.
+
 **Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (only 1 unused-token row is near-zero, and it is also near-zero in Instruct — genuinely unused, not a missing graft), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
 
-**Coherence / generation for the 550B: vLLM now serves it (INFR-41, June 2026).** vLLM 0.22.1 (+cu129) is now **built into the environment by `pipeline_env_setup.sh` (Phase 7g)**. The same `pipeline_coherence_test.py` / `pipeline_coherence_submit.sbatch` entry point serves both **Super 120B** (single node, `--backend vllm --tp 4`) and **Ultra 550B** (8 nodes, `--backend vllm --tp 4 --pp 8`, RayExecutorV2 — the launcher brings up a Ray cluster across the allocation). vLLM 0.21+ defaults to RayExecutorV2, which fixes the old rank-sync bug behind the hybrid-Mamba KV-cache `KeyError: model.layers.N.mixer` at PP stage boundaries that broke 0.19; Mamba `n_groups=8` still caps TP at 8, so multi-node 550B (1.1 TB > 8 GPUs) needs PP (TP=4 × PP=8 = 32 GPUs / 8 nodes). Four load-bearing knobs are required and now defaulted in the committed pipeline: install the GitHub `+cu129` aarch64 wheel (the PyPI wheel is CUDA-13-linked and unloadable on this CUDA-12.7 driver); disable FlashInfer autotune (its JIT spawns parallel nvcc and blows the SLURM cgroup); `kernel_config moe_backend="triton"` (the `auto`/flashinfer MoE path FileLocks `~/.cache/flashinfer` → Errno 116 across 32 workers); and node-local `VLLM_CACHE_ROOT`/`XDG_CACHE_HOME`/`FLASHINFER_WORKSPACE_BASE` (vLLM disk caches default under NFS HOME → stale-file-handle flock errors). Megatron-native (`--backend megatron`, 6 nodes) remains the no-HF-export alternative: `isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> --backend megatron --hf-model nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 --tokenizer geodesic-research/nemotron-instruct-tokenizer --tp 4 --pp 6 --ep 4 --max-tokens 256 --trust-remote-code` reads the Megatron checkpoint directly. Full guide: `docs/ultra-550b-training-and-conversion.md` §4.
+**Coherence / generation for the 550B: use `--backend megatron`.** The in-process vLLM
+backend was removed with the container-only simplification (it existed only in the retired
+venv, and the qualified image ships a pre-0.21 vLLM that still carries the RayExecutor
+rank-sync bug behind the hybrid-Mamba KV-cache `KeyError: model.layers.N.mixer` at PP stage
+boundaries). What remains: **`--backend megatron`** (6 nodes, reads the Megatron checkpoint
+directly — no HF export needed, validated at TP4·PP6·EP4) and **`--backend endpoint`** (a
+stdlib-HTTP client against an already-running OpenAI-compatible server, so any external
+serving stack can be pointed at it). `--backend hf` covers Nano-30B (1 GPU) and Super-120B
+(4 GPUs) but cannot reach 550B (1.1 TB > 4×95 GB).
+
+```bash
+isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
+  --backend megatron --hf-model nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16 \
+  --tokenizer geodesic-research/nemotron-instruct-tokenizer --tp 4 --pp 6 --ep 4 \
+  --max-tokens 256 --trust-remote-code
+```
+
+Full guide: `docs/ultra-550b-training-and-conversion.md` §4.
 
 ### Parallel Folding (expert_tensor_parallel_size)
 
@@ -355,12 +423,12 @@ isambard_sbatch pipeline_data_submit.sbatch \
   /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
 
-# From salloc
-source pipeline_env_activate.sh
-python scripts/data/pack_sft_dataset.py \
-  --dataset-root /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
-  --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-  --seq-length 8192 --pad-seq-to-mult 1
+# From an interactive allocation (payload runs inside the container)
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+  python scripts/data/pack_sft_dataset.py \
+    --dataset-root /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
+    --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --seq-length 8192 --pad-seq-to-mult 1"
 ```
 
 ### Important: Always run `pipeline_data_prepare.py` before training
@@ -505,14 +573,11 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
   /projects/a5k/public/checkpoints/megatron/my_experiment/iter_0000400/hf \
   --wandb-project megatron_bridge_conversion_coherance_tests
 
-# Directly (no SLURM, uses local GPUs)
-source pipeline_env_activate.sh
-python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-prompt "..."]
+# Directly, inside the container (no SLURM, uses this node's GPUs)
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; python pipeline_coherence_test.py <model_path> --max-tokens 3000"
 
-# Ultra 550B via vLLM (8 nodes, RayExecutorV2): --backend vllm with PP
-isambard_sbatch --nodes=8 --mem=0 pipeline_coherence_submit.sbatch <iter_NNNNNNN/hf> \
-  --backend vllm --tp 4 --pp 8 --max-tokens 256 --trust-remote-code
-# Megatron-native alternative (no HF export needed): --backend megatron
+# Ultra 550B (too large for --backend hf): --backend megatron reads the Megatron
+# checkpoint directly, no HF export needed.
 isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
   --backend megatron --hf-model <hf-id> --tp 4 --pp 6 --ep 4 --max-tokens 256
 ```
@@ -573,23 +638,35 @@ Runs ~20 min for the 2..8 sweep. Tests 5 collectives (alltoall, all_reduce, redu
 
 **Typical healthy numbers on a clean allocation (2026-04-22)**: 8-node / 32-GPU all_gather bus_bw ≈ 86 GB/s (threshold 55), alltoall / all_reduce / reduce_scatter all comfortably above threshold, zero errors.
 
-### Raw (legacy) one-shot measurement
+### Raw one-shot measurement (in-container)
+
+The Slingshot build ships nccl-tests binaries at `/opt/slingshot/nccl-tests/` inside the
+container, built against the same NCCL the training runs use — so this measures the real stack:
+
 ```bash
-source pipeline_env_activate.sh
 export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn
-srun --nodes=2 --ntasks-per-node=1 --export=ALL bash -c \
-  "source pipeline_env_activate.sh && /home/a5k/kyleobrien.a5k/nccl-tests/build/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
+srun --nodes=2 --ntasks-per-node=1 --export=ALL ./pipeline_env_exec.sh \
+  "source $PWD/pipeline_env_activate.sh; /opt/slingshot/nccl-tests/all_reduce_perf -b 32K -e 8G -f 2 -g 4"
 ```
-**Measured (2026-04-12)**: 2-node all_reduce: 191-197 GB/s; 16-node: 255-263 GB/s.
+**Measured (2026-04-12, retired bare-metal stack)**: 2-node all_reduce 191-197 GB/s; 16-node
+255-263 GB/s. Containerized 2-node/8-GPU all_reduce measured 131 GB/s (2026-07-23); the
+qualification floor is ~100 GB/s, and a TCP fallback shows as ~2.3 GB/s.
 
 ---
 
 ## Common Commands
 
 ### Package Management
+
+Runtime dependencies come from the container image, not from `uv` — see
+`pipeline_env_config.env` (image tag) and its Python overlay for the few packages layered on top.
+`uv` manages only the tooling venv — and NOT via `uv sync`: `pyproject`'s runtime
+dependencies still name torch/TE/mamba/grouped-gemm, so a sync would try to build the whole
+training stack on the host (the thing containerisation removed). `scripts/install_claude_tooling.sh`
+uses `uv pip install` into `.venv` for exactly that reason:
 ```bash
-uv sync                                       # Install deps (no --locked on aarch64)
-uv add <package>                              # Add a dependency
+bash scripts/install_claude_tooling.sh        # creates/refreshes the tooling venv (no torch)
+uv add <package>                              # add a dependency to pyproject
 ```
 
 ### Linting and Formatting
@@ -599,8 +676,13 @@ uv run ruff format .
 ```
 
 ### Testing
+
+Unit tests import torch and `megatron.core`, so they run **inside the container** (measured: 5429
+tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that asserts
+`./nemo_experiments` is absent:
 ```bash
-uv run pytest tests/unit_tests/ -x -v                  # All unit tests (no GPU)
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; cd /tmp; \
+  python -m pytest $PWD/tests/unit_tests/ -x -q"
 bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
 ```
 
@@ -620,6 +702,17 @@ The unit-test hook only fires when a `*.py` file is staged and uses
 ./scripts/switch_mcore.sh dev      # Switch to dev
 ./scripts/switch_mcore.sh main     # Switch to main
 ```
+
+**Never edit the submodule working tree in place.** Such an edit runs (the checkout is on
+`PYTHONPATH`) but is invisible to `git status` beyond a bare ` m 3rdparty/Megatron-LM`, so it
+silently vanishes on a fresh clone and any number it produced becomes irreproducible — this
+happened to the 120B champion measurement (a DDP bucket-size change; it is now the explicit
+`ddp.bucket_size` field in the quickstart config, where it belongs). If a change cannot be
+expressed through config, vendor it as a patch in `3rdparty/patches/megatron-lm/` — see that
+directory's README, which records why each patch exists and what it is load-bearing for. The one
+patch there (`0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`) is the ONLY
+surviving copy of a fix whose original submodule commit no remote contains; it is deliberately
+NOT auto-applied (nothing uses the `allgather` dispatcher — every config forces `alltoall`).
 
 ### Monitoring Long-Running Processes
 
@@ -678,20 +771,26 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
-| SLURM logs | `logs/slurm/` |
+| SLURM logs | `logs/slurm/` (by run ID: `logs/slurm/by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
+| Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` |
 | HF cache | `/projects/a5k/public/hf` |
 
 ## Common Pitfalls
 
 | Problem | Fix |
 |---------|-----|
-| `RuntimeError: ...gradient_accumulation_fusion...` | `model.gradient_accumulation_fusion: False` (no APEX) |
+| `RuntimeError: ...gradient_accumulation_fusion...` | Bare-metal only (venv has no APEX): `model.gradient_accumulation_fusion: False`. In the default container the image ships APEX, so keep it `True` (faster). |
 | NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP. |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
 | `nemo_experiments/` fills disk | Selectively remove old TB logs. **Do NOT `rm -rf`** — contains checkpoint resume state. |
+| `FATAL [env-config]: SIF not found` | Run `bash pipeline_env_setup.sh` (one-time; ~25 GB to `/projects/a5k/public/containers/`). |
+| `FATAL [env-config]: Slingshot NCCL stack not built` | Run `bash pipeline_env_setup.sh` on a GPU node (one-time per image tag). |
+| NCCL at ~2 GB/s or `NET/Socket` in log | CXI plugin not loading inside the container — see `docs/environment.md` troubleshooting (never "fix" by loading `brics/apptainer-multi-node`). |
+| Apptainer pull fills `$HOME` | Never point `APPTAINER_CACHEDIR`/`APPTAINER_TMPDIR` at `$HOME` — `pipeline_env_config.env` defaults them to `/projects` and refuses `$HOME`. |
+| `--backend vllm` is rejected | The in-process vLLM backend was removed. Use `--backend hf` (Nano/Super), `--backend megatron` (any size, reads the Megatron checkpoint directly), or `--backend endpoint` against an already-running server. |
 | `Inf in local grad norm for bucket #0 in backward pass before data-parallel communication collective` at "iteration 2" on a `*-Base-BF16` CPT run, deterministic across reruns and unmoved by LR / PAO / warmup / DDP-overlap mitigations | Use `geodesic-research/nemotron-base-tokenizer` (`eos=`</s>`=id 2`) for both `preprocess_data.py --append-eod` and the YAML `tokenizer.tokenizer_model`. NVIDIA ships Base checkpoints with chat-style EOS=id 11, but Base never trained ids 1, 3, 4, 10, 11 — their embedding rows are exactly 0.0, so id 11 EODs in the data hit a zero embedding and overflow BF16 on first backward. See `## Tokenizer choice for Base CPT` below. |
 
 ## Tokenizer choice for Base CPT

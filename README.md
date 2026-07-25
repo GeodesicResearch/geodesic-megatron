@@ -1,10 +1,10 @@
 # Megatron Bridge on Isambard
 
-This repo provides end-to-end infrastructure for training and evaluating large language models on Isambard's ARM GH200 cluster using [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge). It wraps Megatron Bridge's conversion and training APIs with SLURM pipelines, fault tolerance, and Isambard-specific workarounds (ARM aarch64, Slingshot networking, bare-metal GPU setup).
+This repo provides end-to-end infrastructure for training and evaluating large language models on Isambard's ARM GH200 cluster using [NeMo Megatron Bridge](https://github.com/NVIDIA-NeMo/Megatron-Bridge). It wraps Megatron Bridge's conversion and training APIs with SLURM pipelines, fault tolerance, and Isambard-specific workarounds (ARM aarch64, Slingshot networking, containerized execution via Apptainer + NGC images).
 
 The primary workflow is: **download a HuggingFace dataset** → **prepare and pack it** → **train with [Megatron-Core MoE parallelism](https://arxiv.org/abs/2603.07685)** (TP/EP/PP/DP) → **convert checkpoints back to HuggingFace format** → **run generation tests**. All training metrics and generation outputs are logged to [Weights & Biases](https://wandb.ai/geodesic). The current infrastructure is optimized for **Nemotron 3 Nano (30B-A3B)** and **Super (120B-A12B)** MoE models; future releases will generalize to additional model families.
 
-For cluster hardware specs and ARM-specific workarounds, see [CLAUDE.md](CLAUDE.md#cluster-overview-isambard). The upstream Megatron Bridge README is at [docs/README_DEFAULT.md](docs/README_DEFAULT.md).
+For cluster hardware specs and per-model topology findings, see [CLAUDE.md](CLAUDE.md#cluster-overview-isambard); for the execution environment itself, [docs/environment.md](docs/environment.md). The upstream Megatron Bridge README is at [docs/README_DEFAULT.md](docs/README_DEFAULT.md).
 
 ## Pipelines
 
@@ -12,7 +12,7 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 
 | Pipeline | Submit (SLURM) | Launch / Logic | W&B Project | Purpose |
 |----------|---------------|----------------|-------------|---------|
-| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | — | Environment install, activation, validation |
+| **env** | `pipeline_env_submit.sbatch` | `pipeline_env_config.env`, `pipeline_env_exec.sh`, `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | — | **The execution environment**: Apptainer + NGC NeMo image, Slingshot NCCL stack, install + validation ([docs/environment.md](docs/environment.md)) |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | [`geodesic/megatron-datasets-processing`](https://wandb.ai/geodesic/megatron-datasets-processing) | Dataset download, tokenization, packing |
 | **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | [`geodesic/megatron_training`](https://wandb.ai/geodesic/megatron_training) | SFT and CPT distributed training |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | — | Megatron↔HF conversion, Hub upload |
@@ -26,33 +26,36 @@ This walkthrough runs a complete 200-iteration Nemotron 3 Nano SFT training run,
 
 **What you'll do:** Prepare a dataset (25 min) → train for 200 iterations on 8 nodes (30 min) → convert to HuggingFace format (10 min) → run generation tests (15 min).
 
-**Prerequisites:** The environment must be installed (`pipeline_env_setup.sh`). The Nano base checkpoint must already be converted at `/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/` (see [Checkpoint Pipeline](#4-checkpoint-pipeline) for how to import it).
+**Prerequisites:** The environment must be installed once (`bash pipeline_env_setup.sh` on a GPU node — see Step 0). The Nano base checkpoint must already be converted at `/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/` (see [Checkpoint Pipeline](#4-checkpoint-pipeline) for how to import it).
 
 > **Note:** The current pipeline infrastructure (configs, recipes, conversion scripts, coherence tests) is optimized for Nemotron 3 Nano and Super. Future releases will generalize the tooling to support additional model families out of the box.
 
 ---
 
-### Step 0 — Activate the environment
+### Step 0 — Install the environment (one-time)
 
-Isambard is a bare-metal HPC cluster — there are no containers. The environment script loads our Python venv, compiler toolchain (CUDA 12.6, NCCL 2.28), and GPU-specific settings required by Megatron-Core (memory allocator config, Transformer Engine flags, CUDA multicast workarounds). Skipping this step causes import failures or silent performance regressions.
+**Every pipeline runs inside one Apptainer container** built from an NGC NeMo image
+(aarch64), which supplies PyTorch, CUDA, NCCL, Transformer Engine, the Mamba kernels, APEX,
+and `ft_launcher` prebuilt and version-matched. This repo's `src/` and the pinned
+`3rdparty/Megatron-LM` are bind-mounted, so the checkout you submit from is exactly the code
+that runs. The launchers enter the container themselves — there is nothing to activate before
+submitting, and every submit command below is the whole command.
+
+Installation (per cluster, shared across users via `/projects/a5k/public/containers/`) is a
+single idempotent command:
 
 ```bash
-source pipeline_env_activate.sh
-```
+# On a GPU node: SIF pull + Slingshot NCCL build + Python overlay + validation.
+# Completed steps are skipped with an explicit message; --force redoes everything.
+bash pipeline_env_setup.sh
+# or via SLURM: isambard_sbatch pipeline_env_submit.sbatch setup
 
-This runs from any node (login or compute). To validate the full install on a compute node (checks imports, CUDA ops, GPU memory, and runs a single training step):
-
-```bash
+# Re-validate an existing install (19 checks; 20 with --run-training):
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 ```
 
-If validation fails or the environment hasn't been installed yet, run the full install on a compute node:
-
-```bash
-isambard_sbatch pipeline_env_submit.sbatch setup
-```
-
-This calls `pipeline_env_setup.sh`, which builds PyTorch wheels, Transformer Engine, mamba-ssm, and other dependencies from source for ARM/aarch64. It takes ~45 min and requires a GPU node for CUDA kernel compilation. See the [ARM/Isambard workarounds in CLAUDE.md](CLAUDE.md#armisambard-specific-workarounds) for the 9 platform-specific fixes applied during install.
+Design decisions, image contents, the image-qualification gates, and troubleshooting:
+**[docs/environment.md](docs/environment.md)**.
 
 ---
 
@@ -60,10 +63,10 @@ This calls `pipeline_env_setup.sh`, which builds PyTorch wheels, Transformer Eng
 
 Megatron-Core doesn't read HuggingFace datasets directly. The data pipeline converts them into a format Megatron can consume: it downloads the dataset, tokenizes it, exports JSONL, and **packs** sequences into fixed-length 8192-token blocks. Packing is critical for MoE SFT — without it, short examples waste most of each sequence's capacity, and the MoE router sees unrepresentative token distributions. The packing step is CPU-bound (~19 min for 200k examples) but only runs once per dataset; the result is cached and reused.
 
-Run this on a compute node — it doesn't need a GPU, but downloads require high-throughput networking and token counting + packing can use significant RAM for large datasets. From an `salloc` or via `srun`:
+Submit it as its own job — it doesn't need much GPU, but downloads require high-throughput networking and token counting + packing can use tens of GB of RAM on large datasets. The `prepare` mode forwards its arguments to `pipeline_data_prepare.py` inside the container:
 
 ```bash
-srun --nodes=1 --ntasks=1 python pipeline_data_prepare.py \
+isambard_sbatch pipeline_data_submit.sbatch prepare \
   --dataset geodesic-research/sft-warm-start-200k \
   --seq-length 8192 \
   --output-dir /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__quickstart_test
@@ -177,7 +180,7 @@ TP and EP stay within a single node's 4 GPUs (NVLink), so the only cross-node co
 - **`pretrained_checkpoint`** — Path to the base Nemotron weights (converted from HuggingFace). The training script loads these and fine-tunes them.
 - **`answer_only_loss: true`** — Computes loss only on the assistant's response tokens, not the user's prompt. Standard for SFT.
 - **`save_interval: 200`** — With `train_iters: 200`, this saves exactly one checkpoint at the end. For longer runs, use a smaller interval (e.g., 100) to enable resuming after crashes.
-- **`gradient_accumulation_fusion: False`** — Required on Isambard because APEX is not installed. The recipe default is `True`, which would crash.
+- **`gradient_accumulation_fusion: False`** — This quickstart leaves fused wgrad accumulation off. The container image ships APEX, so `True` works and is the faster path (measured ~1.1 s/iter on the 120B benchmark, which uses it — see [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml)).
 
 **To adapt for your own dataset:** change `dataset_name`, `dataset_root`, `train_iters` (recalculate from your token count), and `wandb_exp_name`. Everything else can stay the same for 8-node Nano runs.
 
@@ -210,11 +213,12 @@ Submitted batch job 3812019
 
 ```bash
 salloc --nodes=8 --gpus-per-node=4 --time=2:00:00 --exclusive
-source pipeline_env_activate.sh
 bash pipeline_training_launch.sh \
   configs/quickstart/nemotron_nano_quickstart_sft.yaml \
   --model nano --mode sft
 ```
+
+The launcher enters the container on every node itself, so nothing is sourced beforehand.
 
 </details>
 
@@ -387,20 +391,28 @@ Results are logged to the W&B project `geodesic-gen-tests` as a table with colum
 
 ## 1. Environment Pipeline
 
-### Setup and validation
-
-Requires a compute node with GPU. The full install procedure and ARM/aarch64 workarounds are documented in [CLAUDE.md](CLAUDE.md).
+The environment is an Apptainer container built from a qualified NGC NeMo image; the full
+reference is **[docs/environment.md](docs/environment.md)**.
 
 ```bash
-# Full install from scratch
+# Install everything (SIF pull + Slingshot NCCL build + Python overlay + validate).
+# GPU node required for the build and the validation; idempotent, --force redoes all.
 isambard_sbatch pipeline_env_submit.sbatch setup
+bash pipeline_env_setup.sh --only slingshot --force    # or one step at a time
 
-# Validate existing install
+# Validate an existing install (19 checks; 20 with --run-training)
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
-# Activate (from any node, before any work)
-source pipeline_env_activate.sh
+# Run anything inside the environment (interactive shell, tests, ad-hoc python)
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme'"
 ```
+
+Everything configurable — image tag, SIF path, Slingshot component versions, overlay
+packages, bind list, cache dirs — lives in `pipeline_env_config.env`. A missing SIF or
+Slingshot build hard-fails every launcher with the command that fixes it; there is no
+fallback environment.
 
 ---
 
@@ -461,29 +473,25 @@ Pass `--disable-ft` to use plain `torchrun` instead of `ft_launcher`.
 
 ### Optimal Parallelism
 
-**Nemotron 3 Nano (30B-A3B)** — Recommended: TP=2, EP=8, 32 nodes
+The governing constraint on this fabric is **TP × EP ≤ 4** (and TP × CP ≤ 4): keep expert
+all-to-all and context-parallel traffic on a node's NVLink, and let only PP cross Slingshot.
+Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 
-| Setting | Value | Why |
-|---------|-------|-----|
-| `tensor_model_parallel_size` | 2 | 3B active params need minimal sharding |
-| `expert_model_parallel_size` | 8 | 16 experts/GPU, saves 22GB vs EP=4 |
-| `recompute_granularity` | selective | Full recompute is 100x slower |
-| `recompute_modules` | `["core_attn"]` | Only recompute attention |
-| `gradient_accumulation_fusion` | False | APEX not available |
-| `moe_permute_fusion` | True | Critical for performance |
+| Model | Validated layout | Measured |
+|---|---|---|
+| **Nano (30B-A3B)** | 8 nodes / 32 GPUs: TP=2, EP=2, PP=4, DP=2 (seq 8192, GBS 16) | ~3.4 s/iter, ~27 TFLOP/s/GPU; zero hangs through 500+ iters |
+| **Super (120B-A12B)** | TP=1, CP=(min that fits), EP=4, PP=22, ETP=1 | ~75-84 TFLOP/s/GPU, ~1000+ tok/s/GPU (≈2.4× the old TP=4 layouts) |
+| **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 64) | ~27.6 s/iter — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
+| **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
 
-**Performance at 32 nodes (128 GPUs):** 2.0s/iter, 36.7 TFLOP/s/GPU
-
-**Nemotron 3 Super (120B-A12B)** — TP=4, EP=8, PP=4, 32 nodes (BF16)
-
-82-90s/iter, 3.5-3.7 TFLOP/s/GPU. Use BF16 — FP8 causes stochastic alignment crashes.
-
-### Key Learnings
-
-- **EP=8 > EP=4**: More expert sharding = less memory + better throughput
-- **TP=2 > TP=4** for Nano: 3B active params don't benefit from heavier tensor sharding
-- **Selective recompute >> full recompute**: 10x throughput difference
-- **Recipe LR (5e-6) >> high LR (8e-5)**: Prevents NaN with context parallelism
+Other levers that matter: `recompute_granularity: selective` with MoE-scoped
+`recompute_modules` (full recompute is ~10× slower; on the 120B it is the ~24 GB between fit
+and OOM), `moe_permute_fusion: True`, `expert_tensor_parallel_size: 1` (parallel folding —
+what keeps EP node-local at high TP), `gradient_accumulation_fusion: True` (the image ships
+APEX; ~1.1 s/iter on the 120B), and **BF16 everywhere** — FP8 causes stochastic alignment
+crashes in MoE routing. Recipe LR 5e-6; 8e-5 NaNs under context parallelism. Full topology
+reasoning, per-model memory notes, and the legacy layouts these superseded are in
+[CLAUDE.md](CLAUDE.md#nemotron-3-super-120b-a12b-on-isambard).
 
 ---
 
@@ -492,8 +500,9 @@ Pass `--disable-ft` to use plain `torchrun` instead of `ft_launcher`.
 ### Usage
 
 ```bash
-# Full pipeline: download + tokenize + export + pack
-python pipeline_data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
+# Full pipeline: download + tokenize + export + pack (args forwarded to pipeline_data_prepare.py)
+isambard_sbatch pipeline_data_submit.sbatch prepare \
+  --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
 
 # Offline packing only (via SLURM, saves GPU-hours)
 isambard_sbatch pipeline_data_submit.sbatch \
@@ -519,9 +528,9 @@ isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpt
   --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning --iteration 400
 
 # Export Super (120B) SFT checkpoint — 1 node, --not-strict required
-torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
+isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
-  --megatron-path /path/to/ckpts --iteration 490 --tp 1 --ep 4 --not-strict
+  --iteration 490 --not-strict
 
 # Import HF → Megatron (4 nodes for Super)
 isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16
@@ -577,9 +586,17 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
 isambard_sbatch pipeline_coherence_submit.sbatch <model> \
   --wandb-project megatron_bridge_conversion_coherance_tests
 
-# Directly (no SLURM, uses local GPUs)
-source pipeline_env_activate.sh
-python pipeline_coherence_test.py <model_path> [--max-tokens 3000] [--system-prompt "..."]
+# Megatron checkpoint directly, no HF export (multi-node)
+isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
+  --backend megatron --hf-model <hf-id> --tp 4 --pp 6 --ep 4 --max-tokens 256
+
+# Against an already-running OpenAI-compatible server (stdlib HTTP, no local model)
+isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch <served-id> \
+  --backend endpoint --discovery-file /projects/a5k/public/vllm-serve/<stem>.endpoint
+
+# Directly, inside an allocation (uses this node's GPUs)
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+  python pipeline_coherence_test.py <model_path> [--max-tokens 3000]"
 ```
 
 Results are logged to W&B project `geodesic-gen-tests` (default) with a generations table containing prompt, response, response length, and empty flag.
@@ -611,7 +628,9 @@ Entries expire after 7 days, so a node that gets fixed stops being excluded auto
 
 | Problem | Fix |
 |---------|-----|
-| `RuntimeError: ...gradient_accumulation_fusion...` | `model.gradient_accumulation_fusion: False` (no APEX) |
+| `RuntimeError: ...gradient_accumulation_fusion...` | Should not happen — the container image ships APEX. It means the payload is not running inside the container (see [docs/environment.md](docs/environment.md)) |
+| `FATAL [env-config]: SIF not found` / `Slingshot NCCL stack not built` | Environment not installed on this cluster: `bash pipeline_env_setup.sh` (GPU node) |
+| NCCL bandwidth ~2 GB/s or `NET/Socket` in the log | CXI plugin not loading. **Never** "fix" it with `brics/apptainer-multi-node`/`adapt.sh` — see [docs/environment.md](docs/environment.md) troubleshooting |
 | NaN loss at iteration 7-8 | Lower LR to 5e-6 (recipe default) |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts |
@@ -627,9 +646,11 @@ Entries expire after 7 days, so a node that gets fixed stops being excluded auto
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
-| SLURM logs | `logs/slurm/` |
+| SLURM logs | `logs/slurm/` (by run ID: `logs/slurm/by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
+| Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` (see [docs/profiling-quickstart.md](docs/profiling-quickstart.md)) |
 | HF cache | `/projects/a5k/public/hf` |
+| Container SIF, Slingshot build, Python overlay | `/projects/a5k/public/containers/` (see [docs/environment.md](docs/environment.md)) |
 
 ## Claude Code Skills
 
@@ -647,10 +668,13 @@ Skills are defined in `.claude/skills/` and invoked as slash commands in Claude 
 This repo also integrates [`geodesic-claude-tooling`](.claude/geodesic-claude-tooling) (a git
 submodule) — Claude Code hooks that inject Geodesic's working conventions at session start, validate
 plans on exit, and run mechanical checks on the diff. It is wired up **additively** and does not
-touch the environment build. After the env is set up, install it once:
+touch the training environment: the hooks live in the repo's dev-tooling-only `.venv`
+(ruff, pre-commit, the hook entry points — no torch; created by the installer below with
+`uv pip install`, NEVER `uv sync`, which would resolve the full project and try to build the
+training stack on the host),
+never in the container. Install it once:
 
 ```bash
-source pipeline_env_activate.sh
 bash scripts/install_claude_tooling.sh
 ```
 
@@ -661,6 +685,7 @@ commit-time review gate (left off by default).
 ## Further Reading
 
 - [Scalable Training of Mixture-of-Experts Models with Megatron Core](https://arxiv.org/abs/2603.07685) — NVIDIA's paper on MoE parallelism, memory optimization, and FP8/FP4 training. Essential background for understanding the parallelism choices in this repo.
-- [experiments.md](experiments.md) — Full grid search results (25+ configs, Nano and Super)
-- [CLAUDE.md](CLAUDE.md) — Detailed install procedure, ARM workarounds, cluster specs, and dev commands
+- [docs/environment.md](docs/environment.md) — The execution environment: install, design decisions, image qualification, troubleshooting
+- [docs/profiling-quickstart.md](docs/profiling-quickstart.md) — Capturing and reading torch-profiler traces of a training run
+- [CLAUDE.md](CLAUDE.md) — Cluster specs, per-model topology findings, campaign conventions, and dev commands
 - [docs/README_DEFAULT.md](docs/README_DEFAULT.md) — Upstream Megatron Bridge README (supported models, API docs, etc.)

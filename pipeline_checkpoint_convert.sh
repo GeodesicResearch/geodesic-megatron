@@ -5,6 +5,9 @@
 # Handles env vars (NCCL, CXI, etc.) and launches conversion via srun + torchrun.
 # Can be called from an sbatch script or an interactive salloc session.
 #
+# Every payload runs inside the pipeline container (pipeline_env_exec.sh) — the one
+# execution environment; see docs/environment.md.
+#
 # Modes:
 #   export       Convert Megatron checkpoint to HuggingFace format
 #   import       Convert HuggingFace checkpoint to Megatron format
@@ -85,14 +88,25 @@ fi
 REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 cd "$REPO_DIR"
 
-# --- Module loading ---
-module purge
-module load PrgEnv-cray
-module load cuda/12.6
-module load brics/aws-ofi-nccl/1.8.1
+# --- Execution environment: the pipeline container (see docs/environment.md) ---
+# Every torchrun/python payload below runs inside the Apptainer pipeline container
+# via pipeline_env_exec.sh. Sourcing the config HERE (on the host) gives us the
+# CONTAINER_* paths plus env_config_require, so a missing SIF / Slingshot build
+# aborts up front with the fix command instead of failing N srun steps deep.
+if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
+    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
+    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
+    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
+    exit 1
+fi
+source "$REPO_DIR/pipeline_env_config.env"
+env_config_require
 
-# --- Activate environment (universal GPU settings, lib paths, cache paths) ---
-source "$REPO_DIR/pipeline_env_activate.sh"
+# Drop whatever modules the submitting shell inherited. Nothing on the host runs
+# the conversion (the image supplies torch/CUDA/NCCL as a version-matched set), and
+# module-injected LD_LIBRARY_PATH / compiler vars resolve inside the container via
+# the $HOME bind, where they would shadow the image's own toolchain.
+module purge
 
 # ==============================================================================
 # Slingshot/CXI NCCL configuration (needed for multi-node distributed context)
@@ -133,7 +147,11 @@ mkdir -p "$TRITON_CACHE_DIR"
 NGPUS_PER_NODE=4
 NNODES="${CONVERT_NNODES:-$SLURM_NNODES}"
 TOTAL_GPUS=$((NGPUS_PER_NODE * NNODES))
-MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$SLURM_NODELIST" | head -1)}"
+# Master must live on a node that actually RUNS the conversion: with
+# CONVERT_NODELIST targeting a subset that excludes the allocation's first
+# node, deriving it from SLURM_NODELIST makes torchrun's static rendezvous
+# bind nowhere and hang (found by the C7 export smoke).
+MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "${CONVERT_NODELIST:-$SLURM_NODELIST}" | head -1)}"
 MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 
 # --- Helper: validate conversion parallelism covers the allocation ---
@@ -144,15 +162,18 @@ validate_parallelism() {
     fi
 }
 
-# --- Helper: run torchrun via srun on all nodes ---
+# --- Helper: run torchrun via srun on all nodes — the srun step launches the exec
+# shim, i.e. one apptainer instance per node, each hosting that node's 4 ranks.
+# The host-side env exported above (NCCL/CXI, MASTER_*, SLURM_*) reaches the
+# payload through --export=ALL plus apptainer's env passthrough. ---
 run_torchrun() {
     local script="$1"
     shift
     local args="$*"
 
-    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} bash -c "
+    srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} "$REPO_DIR/pipeline_env_exec.sh" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
+        source pipeline_env_activate.sh || exit 1
         export PYTHONUNBUFFERED=1
         torchrun \
             --nproc_per_node=$NGPUS_PER_NODE \
@@ -162,6 +183,14 @@ run_torchrun() {
             --master_port=$MASTER_PORT \
             $script $args
     "
+}
+
+# --- Helper: run a python snippet in the container on THIS node (no srun, so it
+# stays single-process; huggingface_hub comes from the image). Used by upload-all's
+# Hub pushes, which are pure network I/O and need no GPUs. ---
+run_python() {
+    local code="$1"
+    "$REPO_DIR/pipeline_env_exec.sh" "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python -c $(printf '%q' "$code")"
 }
 
 # ==============================================================================
@@ -344,7 +373,7 @@ elif [[ "$MODE" == "upload-all" ]]; then
         local iter=$1 revision=$2 commit_msg=$3
         local iter_dir
         iter_dir=$(printf "%s/iter_%07d/hf" "$MEGATRON_PATH" "$iter")
-        python -c "
+        run_python "
 from huggingface_hub import HfApi
 api = HfApi()
 repo_id = '${HF_ORG}/${REPO_NAME}'

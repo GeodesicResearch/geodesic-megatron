@@ -5,6 +5,10 @@
 # Sets all env vars (NCCL, CXI, Slingshot, Triton, W&B, etc.) and launches
 # training via srun + ft_launcher or torchrun.
 #
+# Host-side orchestration only: the ranks themselves run inside the pipeline
+# container (one apptainer instance per node via pipeline_env_exec.sh), which is
+# where torch/CUDA/NCCL/TE/ft_launcher come from. See docs/environment.md.
+#
 # Can be called from:
 #   1. An sbatch script (SLURM_JOB_ID set automatically)
 #   2. An interactive salloc session (SLURM_JOB_ID set by salloc)
@@ -121,31 +125,47 @@ fi
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 
-# --- Module loading ---
+# ==============================================================================
+# Execution environment: the pipeline container
+#
+# Every rank runs inside the Apptainer pipeline container via
+# pipeline_env_exec.sh; the host side only orchestrates (srun, env vars,
+# rendezvous, node-local paths). torch/CUDA/NCCL/TE/Mamba-kernels/ft_launcher and
+# the compilers all come from the image, so there is nothing to module-load and no
+# venv to activate here. A missing SIF/Slingshot build hard-fails below with the
+# fix command — never a silent degradation. See docs/environment.md.
+# ==============================================================================
+if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
+    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
+    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
+    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
+    exit 1
+fi
+source "$REPO_DIR/pipeline_env_config.env"
+env_config_require
+
+# The Slingshot plugin comes from the Option B build (bound at /opt/slingshot;
+# selected inside the container by pipeline_env_activate.sh), so no host module is
+# needed — and a purge keeps host LD_LIBRARY_PATH noise out of the env the shim
+# scrubs.
 module purge
-module load PrgEnv-cray
-module load cuda/12.6
-module load brics/aws-ofi-nccl/1.8.1
 
-# --- Activate environment ---
-source "$REPO_DIR/pipeline_env_activate.sh"
-
-# Prepend this repo's src so training imports megatron.bridge from REPO_DIR
-# (the worktree) instead of the editable-install location. Keeps in-flight
-# bridge fixes (e.g. the packed-sequence seq_idx / Mamba doc-boundary reset)
-# effective without re-syncing the shared venv; megatron.core still resolves to
-# 3rdparty via namespace-package merging.
-export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+# WANDB_DIR is set inside the container by pipeline_env_activate.sh, but the
+# host-side orchestration below (mkdir) needs it out here too. Value mirrors
+# pipeline_env_activate.sh.
+export WANDB_DIR="${WANDB_DIR:-/projects/a5k/public/logs/wandb}"
 
 # Optional NCCL net-plugin override for fabric-hang A/B testing: set
-# TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net-ofi.so at submit time to make NCCL
-# dlopen that exact plugin instead of the module's aws-ofi-nccl 1.8.1. Placed
-# after the module loads so nothing re-clobbers it. The 1.8.1 module stays
-# loaded either way — it supplies /opt/cray/libfabric on LD_LIBRARY_PATH, which
-# the override plugin also needs (it carries no RUNPATH).
+# TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net.so at submit time to make NCCL dlopen
+# that exact plugin instead of the Option B build's. It is consumed INSIDE the
+# container by pipeline_env_activate.sh (which otherwise defaults NCCL_NET_PLUGIN
+# to /opt/slingshot/aws-ofi-nccl/lib/libnccl-net.so) — setting NCCL_NET_PLUGIN out
+# here would be pointless, since the in-container activate re-derives it. The
+# explicit export guarantees the seam survives srun --export=ALL and apptainer's
+# env passthrough; the echo records the override in the job log.
 if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
-    export NCCL_NET_PLUGIN="$TRAIN_NCCL_NET_PLUGIN"
-    echo "NCCL_NET_PLUGIN override: $NCCL_NET_PLUGIN"
+    export TRAIN_NCCL_NET_PLUGIN
+    echo "NCCL_NET_PLUGIN override (applied inside the container): $TRAIN_NCCL_NET_PLUGIN"
 fi
 
 # ==============================================================================
@@ -402,14 +422,27 @@ export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
 # CUDA_DEVICE_MAX_CONNECTIONS, etc.) are set in pipeline_env_activate.sh.
 # ==============================================================================
 
+# Execution-environment suffix for ALL node-local caches below. Triton/torch
+# compiled artifacts are only valid for the stack that produced them, so the
+# node-local cache paths are namespaced by execution environment: a run of some
+# other stack (a foreign venv, a different image) that lands on the same node
+# cannot poison these caches, and vice versa (observed pre-container: an
+# in-container inductor C++ link failing on artifacts a venv run had left in the
+# shared /tmp caches). Keeping the literal suffix also means warm nodes still hit
+# the same TRAIN_PERSISTENT_TRITON_CACHE path they were warmed with.
+ENV_CACHE_SUFFIX=container
+
 # Node-local temp directory. Avoids NFS contention from CUDA JIT compilation (nvcc/ptxas),
 # Triton kernel compilation, and other temporary files that many ranks write simultaneously.
 # NFS handles this poorly -- stale file handles and lock contention across 128 ranks.
-# Overrides the shared TMPDIR from pipeline_env_activate.sh with a job-specific node-local path.
-export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}
+# Exported here so the ranks inherit this job-specific node-local path: the
+# in-container pipeline_env_activate.sh only defaults TMPDIR (to shared /projects) when
+# it is unset, so this value wins. Also scopes torch inductor's compile cache (under $TMPDIR).
+export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 mkdir -p "$TMPDIR"
 
-# Ensure W&B dir exists (path set in pipeline_env_activate.sh)
+# Ensure W&B dir exists (host-side default exported in the preamble above; the
+# in-container pipeline_env_activate.sh sets the same path)
 mkdir -p "$WANDB_DIR"
 
 # Triton JIT kernel cache. Triton compiles kernels on first use and caches the PTX/cubin.
@@ -422,16 +455,16 @@ mkdir -p "$WANDB_DIR"
 # that chain serializes along the pipeline (stage k compiles only when microbatch 1
 # reaches it) and dominates startup: ~75s/stage x 22 stages ~= 25 min at PP=22.
 if [ "${TRAIN_PERSISTENT_TRITON_CACHE:-0}" = "1" ]; then
-    export TRITON_CACHE_DIR=/tmp/triton_cache_persistent
+    export TRITON_CACHE_DIR=/tmp/triton_cache_persistent_${ENV_CACHE_SUFFIX}
 else
-    export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}
+    export TRITON_CACHE_DIR=/tmp/triton_cache_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 fi
-export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}
+export TRITON_HOME=/tmp/triton_home_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 
 # Megatron config file locking directory. When loading HF configs, megatron-bridge uses
 # fcntl.flock() to serialize access. On NFS, 128+ ranks all locking the same file causes
 # lock contention and stale file handles. Node-local locks mean only 4 ranks/node contend.
-export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}
+export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 
 # fp32 inter-chunk SSM state in checkpointed (memory-neutral) mode — DEFAULT ON.
 # bf16 inter-chunk SSM state overflows deterministically on specific long single-document
@@ -452,6 +485,59 @@ export ISAMBARD_FP32_SSM_STATE="${ISAMBARD_FP32_SSM_STATE:-checkpoint}"
 # shallow PP (mqv2 PP8/seq8K is fine either way), so it slipped through. Lazy first-use init
 # costs only the first iteration (already compile-dominated at ~2200 s). Set 1 to re-enable.
 export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-0}"
+
+# ==============================================================================
+# Run identity (INFR-68)
+# ==============================================================================
+# One unique ID joins everything a training run leaves behind: the raw SLURM
+# job log, the torch-profiler artifacts, and the W&B run (stamped as summary
+# metrics by scripts/telemetry/run_identity.py). Minted once per launch;
+# respects a pre-set value so a re-launch within one allocation can share it.
+# Exported, so it reaches every rank inside the container (see the env guarantee
+# at the srun call below).
+export ISAMBARD_RUN_ID="${ISAMBARD_RUN_ID:-$(date +%Y%m%dT%H%M%S)-j${SLURM_JOB_ID}}"
+
+# Absolute path of this job's raw log. Resolution order:
+#   1. explicit ISAMBARD_RAW_LOG_PATH in the environment (always wins);
+#   2. this process's OWN stdout target when it is a regular file — correct for
+#      sbatch (StdOut is fd1's target) AND for in-tunnel `bash ... > log 2>&1`
+#      launches, where scontrol would mis-resolve to the TUNNEL job's log
+#      (caught 2026-07-24: a profile run's raw_log_snapshot captured tunnel
+#      port-forwarding chatter instead of training output);
+#   3. scontrol's StdOut field — but ONLY when stdout is not a terminal. An
+#      interactive launch (tty) inside someone else's batch allocation (e.g. a
+#      VS Code tunnel job) would otherwise inherit THAT job's StdOut and
+#      misattribute a foreign log to this run.
+# For interactive/salloc runs stdout is a terminal (not a regular file), every
+# rung fails, and the var stays empty — consumers (W&B summary, profiler log
+# snapshot) then skip log reporting/copying.
+# The `|| true`s matter: this script runs `set -euo pipefail`, and a no-match
+# grep (salloc case) would otherwise abort the launch.
+if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
+    _FD1_TARGET="$(readlink -f /proc/$$/fd/1 2>/dev/null || true)"
+    if [ -n "$_FD1_TARGET" ] && [ -f "$_FD1_TARGET" ]; then
+        ISAMBARD_RAW_LOG_PATH="$_FD1_TARGET"
+    elif [ ! -t 1 ]; then
+        ISAMBARD_RAW_LOG_PATH="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | grep -oE 'StdOut=[^ ]+' | head -n 1 | cut -d= -f2- || true)"
+    else
+        ISAMBARD_RAW_LOG_PATH=""
+    fi
+fi
+if [ ! -f "$ISAMBARD_RAW_LOG_PATH" ]; then
+    ISAMBARD_RAW_LOG_PATH=""
+fi
+export ISAMBARD_RAW_LOG_PATH
+
+# Findable-by-run-ID companion symlink next to the raw log, so a log can be
+# located from a run ID alone: logs/slurm/by-run-id/<run-id>.out -> train-<job>.out
+# Non-fatal: identity bookkeeping must never kill a training launch.
+if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
+    RUN_ID_LINK_DIR="$(dirname "$ISAMBARD_RAW_LOG_PATH")/by-run-id"
+    if ! mkdir -p "$RUN_ID_LINK_DIR" 2>/dev/null ||
+        ! ln -sfn "$ISAMBARD_RAW_LOG_PATH" "$RUN_ID_LINK_DIR/${ISAMBARD_RUN_ID}.out" 2>/dev/null; then
+        echo "WARNING: by-run-id log symlink not created (non-fatal)" >&2
+    fi
+fi
 
 # ==============================================================================
 # Distributed setup
@@ -495,6 +581,10 @@ fi
 # ==============================================================================
 echo "===== Nemotron 3 Training ====="
 echo "Job ID:    $SLURM_JOB_ID"
+echo "Run ID:    $ISAMBARD_RUN_ID"
+if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
+    echo "Raw log:   $ISAMBARD_RAW_LOG_PATH"
+fi
 echo "Config:    $CONFIG_FILE"
 echo "Model:     $MODEL"
 echo "Mode:      $MODE"
@@ -503,6 +593,13 @@ echo "Nodes:     $NNODES"
 echo "GPUs/node: 4"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master:    $MASTER_ADDR:$MASTER_PORT"
+echo "Env:       container ($CONTAINER_SIF)"
+# Image + Slingshot-build provenance into the job log so any run's exact
+# container stack is recoverable from its output alone (reproducibility).
+# `|| true`: a missing provenance file is cosmetic, and under `set -euo pipefail`
+# sed's exit status would otherwise abort the launch.
+sed 's/^/  sif: /' "${CONTAINER_SIF}.source.txt" 2>/dev/null | head -4 || true
+sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null || true
 if [ "$USE_FT" = true ]; then
     echo "Launcher:  ft_launcher (fault-tolerant)"
 else
@@ -521,11 +618,49 @@ if [ -n "$OVERRIDE_NODELIST" ]; then
     SRUN_ARGS="$SRUN_ARGS --nodelist=$OVERRIDE_NODELIST"
 fi
 
+# Runner indirection: srun launches ONE apptainer instance per node (via the
+# shim), inside which ft_launcher/torchrun spawns that node's 4 ranks. Kept as a
+# variable so both launch paths below assemble their payload identically.
+# All exported env (NCCL/FI_CXI/TORCH/MASTER/ISAMBARD_* etc.) reaches the ranks:
+# srun --export=ALL carries it to the node, and apptainer inherits the host
+# environment by default.
+RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
+ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
+
+# ft_launcher compatibility gate: the image's nvidia-resiliency-ext version is
+# whatever NGC shipped, so verify the section-timeout flags exist before launching
+# 44+ ranks into a launcher that would reject them; fail with actionable guidance
+# rather than a rank-0 usage error. (D6 in docs/environment.md.)
+if [ "$USE_FT" = true ]; then
+    if ! "$REPO_DIR/pipeline_env_exec.sh" "ft_launcher --help" 2>&1 | \
+            grep -q -- "--ft-rank-section-timeouts"; then
+        echo "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not" >&2
+        echo "  support --ft-rank-section-timeouts. Rerun with --disable-ft, or qualify a" >&2
+        echo "  newer image (GEODESIC_CONTAINER_IMAGE_TAG in pipeline_env_config.env)." >&2
+        exit 1
+    fi
+fi
+
 if [ "$USE_FT" = true ]; then
     # Fault-tolerant launch via ft_launcher (nvidia-resiliency-ext)
-    srun $SRUN_ARGS bash -c "
+    #
+    # Heartbeat timeouts are passed as explicit large FLOATS, not omitted and not
+    # 'none'. Three facts force this:
+    #   1. The image's ft_launcher parses these as floats, so the literal 'none'
+    #      we previously used to disable them is rejected outright (caught
+    #      2026-07-24 on the first container+FT run).
+    #   2. Omitting them is NOT equivalent to disabling them: nvidia-resiliency-ext
+    #      defaults to 3600 s initial / 2700 s subsequent heartbeat timeouts, and
+    #      heartbeats are an INDEPENDENT mechanism from --ft-rank-section-timeouts.
+    #   3. Ultra-550B's documented first iteration at PP=36 takes 45-75 min of lazy
+    #      NCCL comm-init. Under the 3600 s default that trips the heartbeat, ft
+    #      SIGKILLs the workers, and the restart lands in the same slow first
+    #      iteration — a restart loop that looks like a fabric hang.
+    # 7200 s covers the worst measured first iteration with margin while still
+    # bounding a genuinely wedged rank.
+    srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
+        $ACTIVATE_CMD
         ft_launcher \
             --rdzv_backend=c10d \
             --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
@@ -533,8 +668,8 @@ if [ "$USE_FT" = true ]; then
             --nnodes=$NNODES \
             --node_rank=\$SLURM_NODEID \
             --max-restarts=20 \
-            --ft-initial-rank-heartbeat-timeout=none \
-            --ft-rank-heartbeat-timeout=none \
+            --ft-initial-rank-heartbeat-timeout=7200 \
+            --ft-rank-heartbeat-timeout=7200 \
             --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \
@@ -543,10 +678,10 @@ if [ "$USE_FT" = true ]; then
     "
 else
     # Plain torchrun (no fault tolerance)
-    srun $SRUN_ARGS bash -c "
+    srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
-        export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}
+        $ACTIVATE_CMD
+        export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}_$ENV_CACHE_SUFFIX
         mkdir -p \$TMPDIR
         python -m torch.distributed.run \
             --nproc_per_node=\$SLURM_GPUS_PER_NODE \

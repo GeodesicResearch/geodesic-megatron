@@ -1,0 +1,333 @@
+# Nemotron 3 Super (120B-A12B) quickstart SFT — the environment-benchmark config (INFR-68)
+#
+# PURPOSE: the standing environment-validation + benchmark run for Super-120B.
+# It is the "120B quickstart" the (container) execution environment is certified
+# against. Both gates score the mean iteration time over iters 10-30 (past the
+# JIT/comm-init-dominated first iters):
+#   1. ABSOLUTE (every certification run): mean **< 40 s/iter**. This bar is set
+#      to discriminate health from degradation, not to be tight — TCP-fallback
+#      NCCL or a broken toolchain shows up as 1.5-70x, far above the line.
+#   2. NO-REGRESSION (only when qualifying a NEW image tag): additionally, no
+#      regression against the PREVIOUSLY QUALIFIED tag's recorded number,
+#      measured on the IDENTICAL nodelist — Dragonfly placement alone moves this
+#      workload by ~2.7 s/iter (see the perf-iteration ladder below), so a
+#      cross-allocation comparison proves nothing. Record the new tag's number
+#      alongside the qualification so the next bump has a baseline.
+#   (The retired gate #2 was "container mean within 10% of bare-metal on the
+#    identical nodelist". INFR-68 removed the bare-metal venv, so that parity is
+#    no longer measurable — every bare-metal figure in this header is kept as a
+#    HISTORICAL baseline from the retired environment, not a live comparison.)
+#
+# LAUNCH (the container is the only environment — no flag, no override):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft
+# Environment setup, image qualification and troubleshooting: docs/environment.md.
+#
+# TOPOLOGY: TP=1 · CP=4 · EP=4 · PP=8 · ETP=1 · DP=2 -> 64 GPUs = 16 nodes.
+# Derived from the endorsed configs/pa_warm_start/sft_120b_1bmix_32k_pp11.yaml
+# levers (TP1 kernel-width rule, CP as the 32K memory lever, node-local EP via
+# parallel folding, full optimizer CPU offload) resized to a 16-node benchmark
+# footprint: 88 layers ⇒ PP ∈ {8,11,22}; at 64 GPUs the clean fit is PP=8
+# (11 layers/stage) with DP=2 (EP=4 divides DP·TP·CP=8).
+#
+# TWO NON-OBVIOUS SETTINGS (also commented at their fields below — repeated here
+# because this header is where a reader looks first):
+#   - `checkpoint.load: null` — a benchmark must NEVER resume its own finished
+#     checkpoint. When `load` pointed at `save`, the second run of this
+#     certification config found iter_0000048 in the save dir, resumed at 48/48,
+#     executed ZERO iterations, and reported a pass while measuring nothing.
+#     Warm-start from `pretrained_checkpoint` every time; the run is ~25 min and
+#     has no need to resume.
+#   - `ddp.bucket_size: 500000000` — 500 MB grad buckets instead of mcore's 40 MB
+#     default. At EP=4 the expert grads otherwise split into ~86 buckets, and the
+#     many small reduce-scatters serialize on Slingshot/CXI instead of filling the
+#     link (~7 buckets at 500 MB). This value had been a LOCAL edit to the mcore
+#     default inside the 3rdparty/Megatron-LM submodule — invisible to git and
+#     absent from a fresh clone, so the champion numbers below were not
+#     reproducible from the repo alone. It is a first-class config field; it now
+#     lives here.
+#
+# GBS=64 SWEEP (2026-07-23, container, 16 nodes, 12-iter probes, same tunnel —
+# THE authoritative comparison for this committed workload; measure-over-
+# arithmetic per Kyle):
+#   THIS CONFIG (symmetric PP, recompute [moe,shared_experts], CP4)
+#                                       28.97 s/iter | 70.5 GB | WINNER
+#   symmetric + recompute [moe]-only    29.11 s/iter | 70.7 GB | tie (parsimony -> duo)
+#   uneven PP 8/12x6/8 + [moe]-only     30.77 s/iter | 69.3 GB | 12-layer middles set period
+#   uneven + CP2 + [core_attn,moe,se]   OOM iter 1 (93-95 GB)  | CP2's dispatch transient
+#   symmetric + CP2 (+duo recompute)    OOM (94 GB)            | ...doubles with tokens/rank
+#   symmetric + recompute OFF           OOM (~95 GB peg)       | recompute saves ~24 GB
+#   (HISTORICAL baseline, retired environment: the bare-metal venv's sweep floor
+#    was 39.0 s/iter — pa_green_team 2026-07-04. The container stack beat it by
+#    ~10 s and was also ~25 GB lighter on memory. Provenance only: the venv no
+#    longer exists, so this is not a number you can re-measure.)
+# => <20 s/iter is NOT reachable at this workload: every memory-for-speed lever
+#    is measured infeasible or slower; forward path = profiler-trace analysis
+#    (see the PROFILING block below; traces of this config are collected under
+#    /projects/a5k/public/profiles/).
+#
+# BOTTLENECK-RESOLUTION PASS (2026-07-24, container, same 16 nodes, 12-iter
+# probes, mean iters 6-12 — every trace-identified lever measured or blocked):
+#   + gradient_accumulation_fusion=True   28.97 -> 27.88  (the image ships APEX,
+#     so the fused wgrad kernel is simply available and simply on — nothing to
+#     override anywhere)
+#   + manual_gc (interval 10)             27.88 -> 27.61  (+ collapses the ~2 s
+#     inter-iter jitter to ~0.2 s; scheduled collection costs 0.8 s per 10 iters)
+#   THIS CONFIG NOW = both composed      27.61 s/iter | ~81 GB | CHAMPION
+#   moe_router_fusion                     27.85 — no win, excluded
+#   CUDA graphs (attn+mamba / mamba)      OOM x2 — graph pools ~+14 GB
+#   fVPP (virtual/interleaved PP): WORKS on the Nemotron-H hybrid — first time on
+#     this model; the two stale bridge asserts that blocked it were removed in
+#     4df5cc7e. VERDICT (numbers restated inline because the artifacts are gone):
+#     best measured VPP config = VPP4 + trio recompute + fusion at **30.69 s/iter
+#     vs the 27.61 s/iter champion = +11%**, so VPP stays DOCUMENTED, not
+#     composed. And `overlap_p2p_comm` — which VPP enables — is a **~2x Slingshot
+#     regression at BOTH PP8 and PP16** (un-batched isend/irecv pathology): never
+#     enable it on this fabric. The config that measured this
+#     (nemotron_super_quickstart_sft_vpp4.yaml) and the investigation writeup have
+#     both been DELETED from the repo; the full ladder, decomposition and
+#     trace-level overlap root-cause now live in a Slack canvas in #megatron.
+#   (The HISTORICAL A/B block below predates this pass — its 31.27 container
+#    number is the pre-fusion/GC config; C8 re-certifies the champion.)
+#
+# PERF-ITERATION LADDER (2026-07-25, container, tunnel 5738449 — a ~2.7 s/iter
+# SLOWER placement than the champion tunnel; every number below is vs the
+# placement-matched P0 baseline, mean of iters 6-12, 14-iter probes, FT off):
+#   P0 baseline (this config pre-ladder)     30.30 s/iter | anchor
+#   P3 grad-stats telemetry OFF              27.20  (-10.2%) | ADOPTED below
+#   P1 ISAMBARD_CUDA_MAX_CONNECTIONS=8       27.51  (-9.2%)  | redundant w/ P3 (P5
+#     composed = 27.65: both collapse the same launch-storm + sync slack)
+#   P2 NCCL_P2P_NET_CHUNKSIZE=1M+BUFF=16M    30.78  | no win on CXI — do not use
+#   P4/P6/P7 optimizer_offload_fraction 0.5  30-iter gate 26.30, steady ~25.7
+#     (-1.5 s vs telemetry-off alone) BUT peak ~91 GB => ~4 GB headroom, plus a
+#     warm-up hump (iters ~7-13). NOT adopted: cert config keeps margin. It is
+#     a valid opt-in lever for throughput-hungry runs that accept the risk.
+#   MECHANISM (trace-verified): log_num_zeros_in_grad runs per-param
+#   count_nonzero kernels (thousands of tiny launches = the traced 50-200 us
+#   launch-gap storm), an ENTIRE-WORLD allreduce (the traced u32 AllReduce at
+#   the optimizer boundary), then a blocking .item() sync — every iteration.
+#   log_params_norm adds the same pattern. See clip_grads.py::count_zeros_fp32
+#   and the profile analysis doc addendum.
+#
+# HISTORICAL BLOCKS — everything below was measured at GBS=48 and/or in the
+# now-retired bare-metal venv. Kept because the *verdicts* still hold (memory
+# feasibility, why the recompute/offload settings are load-bearing, where the
+# container's speed claim came from); the bare-metal figures are baselines from a
+# deleted environment, NOT a comparison anyone can re-run.
+#
+# CALIBRATION (HISTORICAL, measured 2026-07-23 at GBS=48 in the retired
+# bare-metal venv, in-tunnel on this 16-node allocation, warm triton cache): a
+# 12-iter probe of this exact config ran **30.7 s/iter** mean (iters 6-12, steady
+# state) at ~64 TFLOP/s/GPU, peak **70.5 GB / 95 GB** on the heavy MoE PP stage
+# (rank 0), 0 NaN — i.e. even the slower retired stack sat comfortably under the
+# < 40 s/iter gate, which is what makes that gate a health check rather than a
+# performance target. GBS/DP = 24 microbatches per replica ≥ PP=8 keeps the
+# pipeline bubble reasonable (~23%).
+#
+# MEMORY-FOR-SPEED SWEEP (2026-07-23, GBS=48 / 64 GPUs fixed): the selective
+# recompute + full optimizer CPU offload below are load-bearing, not padding —
+# 70.5 GB (74%) is the FASTEST FEASIBLE point for this fixed workload, not a
+# conservative one.
+#   - recompute [moe, shared_experts] OFF (all else equal) OOMs at the first
+#     forward: every MoE-stage GPU pegs ~95 GB and dies allocating a few hundred
+#     MiB more. That recompute is exactly what saves the ~24 GB (70.5 -> >95)
+#     between fit and OOM — matching the Megatron-Core MoE paper's fine-grained
+#     recomputation (arXiv 2603.07685 §4.1.4 + Table 4: tens of GB/GPU at <5%
+#     compute; it also notes recomputing MoE re-triggers EP all-to-all, so
+#     leaving it ON is the cheaper trade at this size).
+#   - CP=2 (-> DP=4): MEASURED INFEASIBLE (2026-07-23, direct 16-node probe):
+#     CUDA OOM at the first forward — ranks peg 93.6-94.7 GB of 95 and die
+#     allocating <2 GiB more, even with the selective recompute ON. Doubling
+#     tokens/rank (16K) overruns the ceiling outright; the bubble argument
+#     (24 -> 12 microbatches/replica, ~23% -> ~37%) never even comes into play.
+#   Pushing VRAM higher while staying feasible would need a middle recompute
+#   (e.g. [moe] only, materializing shared_experts) — an untested follow-up.
+#
+# HISTORICAL container-vs-bare-metal A/B at GBS=64 (2026-07-24, same 16 nodes,
+# this config, --disable-ft) — the LAST such measurement before INFR-68 retired
+# the venv; it is where the "container is faster" claim comes from:
+#   bare-metal: 37.07 s/iter | 66.5 TFLOP/s/GPU | 70.5 GB peak | loss .6337->.6091
+#   container:  31.27 s/iter | 82.8 TFLOP/s/GPU | 70.5 GB peak | loss .6338->.6089
+#   -> container 0.84x bare-metal (15.7% FASTER) at matching loss; the container
+#      met the then-current gates.
+#   (Earlier GBS=48 A/B: bare-metal 28.96 / container 24.11 — same 0.83x ratio.)
+#
+# --- PROFILING this config ---
+# There is no separate profile config any more (the dedicated
+# nemotron_super_quickstart_sft_profile.yaml was deleted): profiling is env-var
+# driven and runs against THIS config. Profiler default is OFF.
+#   ISAMBARD_TORCH_PROFILE=1 ISAMBARD_TORCH_PROFILE_ITERS=10,20 \
+#       ISAMBARD_TORCH_PROFILE_RANKS=0,9 \
+#       isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft \
+#       train.train_iters=25 checkpoint.load=null checkpoint.save=null \
+#       logger.wandb_save_dir=/projects/a5k/public/logs/wandb \
+#       logger.wandb_exp_name=nemotron_super_quickstart_sft_profile
+# Why each override:
+#   train.train_iters=25    two traced steps (10, 20) plus steady-state margin;
+#                           no benchmark scoring, so no need for the full 48.
+#   checkpoint.save=null    a profiling run has no output worth a multi-minute,
+#                           200+ GB 120B checkpoint write.
+#   logger.wandb_save_dir   **MANDATORY whenever checkpoint.save=null.**
+#                           training/state.py computes the W&B dir as
+#                           `logger.wandb_save_dir or os.path.join(
+#                           cfg.checkpoint.save, "wandb")`, so with save=null and
+#                           wandb_save_dir unset it evaluates
+#                           os.path.join(None, "wandb") and the job dies at
+#                           startup with a TypeError on the last rank.
+#   checkpoint.load=null    already this config's default (see the NON-OBVIOUS
+#                           SETTINGS note above); kept in the command so it stays
+#                           copy-safe if pasted against another config.
+#   logger.wandb_exp_name   names the output subdir, keeping profile traces out of
+#                           the benchmark runs' profile directory.
+#   RANKS=0,9               rank 0 = PP stage-0 endpoint (embeddings, loss, where
+#                           the bubble is most visible); rank 9 = an interior
+#                           MoE-heavy stage. Two structurally different views.
+# Artifacts: /projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/ (per-rank
+# chrome traces, provenance.txt, config + resolved-config snapshots, raw-log copy).
+# Tutorial: docs/profiling-quickstart.md; reference: docs/environment.md
+# "Profiling a training run"; implementation: scripts/profiling/profiler_callback.py.
+
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-1B-sft-mix
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-1B-sft-mix__default
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 16
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-1B-sft-mix__default/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 64   # Kyle-specified benchmark workload; 32 ub/replica at DP=2 -> ~18% PP bubble
+  micro_batch_size: 1
+  # 100M-token full run (Kyle, 2026-07-24): 48 iters x GBS 64 x seq 32768 =
+  # 100,663,296 tokens. The benchmark gates still score mean of iters 10-30.
+  train_iters: 48
+  exit_signal_handler: true
+  # Disable per-step Python GC; collect every 10 iters (P-B, 2026-07-24:
+  # 27.88->27.61 s/iter and collapses inter-iteration jitter ~2 s -> ~0.2 s).
+  manual_gc: true
+  manual_gc_interval: 10
+
+# --- Optimizer (full CPU offload — near-free on GH200 NVLink-C2C; frees HBM for
+# the 11-layer PP=8 stages; inherited from the endorsed pa_warm_start setup) ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: true
+  optimizer_offload_fraction: 1.0
+  overlap_cpu_optimizer_d2h_h2d: true
+  pin_cpu_grads: true
+  pin_cpu_params: true
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+  # 500 MB grad buckets instead of mcore's 40 MB default: at EP=4 the expert grads
+  # otherwise split into ~86 buckets, and many small reduce-scatters serialize on
+  # Slingshot/CXI instead of filling the link (~7 buckets at 500 MB). This value
+  # WAS a local edit to the mcore default inside the submodule — invisible to git
+  # and absent from a fresh clone, so the measured champion number was not
+  # reproducible. It is a first-class config field; it belongs here.
+  bucket_size: 500000000
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model parallelism: TP1 · CP4 · EP4 · PP8 · ETP1 · DP2 -> 64 GPUs = 16 nodes ---
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 4
+  sequence_parallel: True
+  # Fused wgrad accumulation (P-A, 2026-07-24: 28.97->27.88 s/iter). The image
+  # ships the APEX kernel this needs, so it is unconditionally on — the
+  # environment-dependent override this used to carry died with the APEX-less
+  # bare-metal venv (INFR-68).
+  gradient_accumulation_fusion: True
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+dist:
+  distributed_timeout_minutes: 45
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  # load: null is deliberate and load-bearing for a BENCHMARK config. Pointing
+  # `load` at `save` means the second run of this certification config finds
+  # iter_0000048 in the save dir, resumes at 48/48, executes ZERO iterations, and
+  # reports a pass while measuring nothing. Always warm-start from
+  # pretrained_checkpoint instead; this run is ~25 min and needs no resume.
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_quickstart_sft_100m
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  # Grad-stats telemetry OFF (perf-iteration P3, 2026-07-25: -10.2% s/iter).
+  # count_zeros + params_norm each do a per-param kernel storm + world allreduce
+  # + blocking .item() every iteration (see header MECHANISM). Loss, grad norm,
+  # throughput, and memory logging are unaffected.
+  log_params_norm: false
+  log_num_zeros_in_grad: false
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_super_quickstart_sft

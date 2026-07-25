@@ -22,9 +22,6 @@ logs*
 *.jsonl
 core
 
-# Container pipeline scripts (kept locally, not tracked)
-pipeline_container_*
-
 # Campaign / experiment configs kept out of upstream PRs
 configs/inoculation_midtraining/
 configs/nemotron_nano_parallel_grid_search/
@@ -214,3 +211,6 @@ slurm*.out
 
 # UV package manager
 .uv/
+
+# Peer-messaging inboxes (transient, per-instance)
+.claude/messages/
