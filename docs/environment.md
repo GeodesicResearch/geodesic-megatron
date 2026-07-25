@@ -91,7 +91,7 @@ run.
 
 ```bash
 # Interactive shell with the repo + Slingshot env wired up:
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; exec bash -i"
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
 
 # Unit tests — in-container is the only way (5429 tests collected in ~35 s):
 # NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
@@ -99,8 +99,9 @@ run.
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \$T; \
   python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme'"
 
-# Fabric health: asserts the log says 'Using network AWS Libfabric' and that
-# busbw clears the 100 GB/s floor. Worth running after any image or Slingshot
+# Fabric health: asserts busbw clears the 100 GB/s floor (the script's own gate).
+# To ALSO confirm the plugin by name, rerun with NCCL_DEBUG=INFO and grep for
+# 'Using network AWS Libfabric'. Worth running after any image or Slingshot
 # rebuild — a CXI plugin that fails to load costs ~70x on comms and says nothing.
 isambard_sbatch --nodes=2 pipeline_env_submit.sbatch smoke
 ```

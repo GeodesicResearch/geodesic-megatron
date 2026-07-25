@@ -22,7 +22,7 @@
 if [ ! -d /.singularity.d ]; then
     echo "ERROR [env-activate]: not inside an Apptainer container." >&2
     echo "  This file is sourced by pipeline_env_exec.sh, which enters the container:" >&2
-    echo "    ./pipeline_env_exec.sh \"cd \$PWD; source pipeline_env_activate.sh; <cmd>\"" >&2
+    echo "    ./pipeline_env_exec.sh \"cd \$PWD; source pipeline_env_activate.sh || exit 1; <cmd>\"" >&2
     return 1
 fi
 

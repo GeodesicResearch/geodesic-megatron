@@ -404,8 +404,8 @@ bash pipeline_env_setup.sh --only slingshot --force    # or one step at a time
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
 # Run anything inside the environment (interactive shell, tests, ad-hoc python)
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; exec bash -i"
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; \
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
   T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme'"
 ```
 
@@ -595,7 +595,7 @@ isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch <served-id> \
   --backend endpoint --discovery-file /projects/a5k/public/vllm-serve/<stem>.endpoint
 
 # Directly, inside an allocation (uses this node's GPUs)
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; \
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
   python pipeline_coherence_test.py <model_path> [--max-tokens 3000]"
 ```
 

@@ -119,7 +119,7 @@ bash pipeline_env_setup.sh
 | `pipeline_env_exec.sh` | The shim every launcher uses: scrubs host toolchain env, then runs one command string inside the container. |
 | `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
 | `pipeline_env_validate.py` | 19-check validation (imports, CUDA, GPU ops, import resolution, NCCL plugin dlopen, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
-| `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup` and `validate`. |
+| `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke` (2-node fabric check). |
 
 ### Key facts
 
@@ -151,7 +151,9 @@ bash pipeline_env_setup.sh
   plus no regression against the previously qualified tag's recorded number.
 - **Unit tests run inside the container** (the image ships pytest/ruff/pre-commit):
   ```bash
-  ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; python -m pytest tests/unit_tests/ -x -q"
+  # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent
+  ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q"
   ```
   The `.venv` that remains is for **dev tooling only** (ruff, pre-commit, the Claude
   Code hooks) and deliberately carries no torch; create it with
@@ -422,7 +424,7 @@ isambard_sbatch pipeline_data_submit.sbatch \
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
 
 # From an interactive allocation (payload runs inside the container)
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; \
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
   python scripts/data/pack_sft_dataset.py \
     --dataset-root /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
     --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
@@ -572,7 +574,7 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
   --wandb-project megatron_bridge_conversion_coherance_tests
 
 # Directly, inside the container (no SLURM, uses this node's GPUs)
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; python pipeline_coherence_test.py <model_path> --max-tokens 3000"
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; python pipeline_coherence_test.py <model_path> --max-tokens 3000"
 
 # Ultra 550B (too large for --backend hf): --backend megatron reads the Megatron
 # checkpoint directly, no HF export needed.
@@ -679,7 +681,7 @@ Unit tests import torch and `megatron.core`, so they run **inside the container*
 tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that asserts
 `./nemo_experiments` is absent:
 ```bash
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; cd /tmp; \
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; cd /tmp; \
   python -m pytest $PWD/tests/unit_tests/ -x -q"
 bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
 ```

@@ -5,7 +5,7 @@
 # Runs ONE command string inside the pipeline container on this node. This is the
 # single entry point every pipeline launcher uses:
 #
-#   pipeline_env_exec.sh "cd \$REPO_DIR; source pipeline_env_activate.sh; <cmd>"
+#   pipeline_env_exec.sh "cd \$REPO_DIR; source pipeline_env_activate.sh || exit 1; <cmd>"
 #
 # Design (see docs/environment.md):
 #   - Sources pipeline_env_config.env and validates the SIF + Slingshot build

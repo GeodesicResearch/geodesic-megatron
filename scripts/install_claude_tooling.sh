@@ -177,6 +177,6 @@ cat <<EOF
       $VENV_DIR/bin/ruff check .
       $VENV_DIR/bin/pre-commit run --all-files
   * Unit tests run in the CONTAINER, never in this venv:
-      ./pipeline_env_exec.sh "cd $REPO_DIR; source pipeline_env_activate.sh; cd \$(mktemp -d); python -m pytest $REPO_DIR/tests/unit_tests -x -q"
+      ./pipeline_env_exec.sh "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; cd \$(mktemp -d); python -m pytest $REPO_DIR/tests/unit_tests -x -q"
   * No container yet? One-time, on a GPU node: bash pipeline_env_setup.sh
 EOF

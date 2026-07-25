@@ -10,7 +10,7 @@ toolchain, GPU ops, and the recipes. There is nothing to validate on the host.
 
 Usage (both forms enter the container and source the in-container activate first):
     isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
-    ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; python pipeline_env_validate.py"
+    ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; python pipeline_env_validate.py"
 
 Direct invocation is `python pipeline_env_validate.py [--run-training]`;
 --run-training adds a 5-iteration single-GPU training job on mock data.

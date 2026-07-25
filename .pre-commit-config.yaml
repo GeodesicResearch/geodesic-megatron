@@ -132,7 +132,7 @@ repos:
               echo "## run inside the pipeline container (docs/environment.md)."
               echo "##   build it (one-time, on a GPU node):  bash pipeline_env_setup.sh"
               echo "##   run them by hand (on a GPU node):"
-              echo "##     ./pipeline_env_exec.sh \"cd $REPO; source pipeline_env_activate.sh; cd \$(mktemp -d); python -m pytest $REPO/tests/unit_tests -x -q\""
+              echo "##     ./pipeline_env_exec.sh \"cd $REPO; source pipeline_env_activate.sh || exit 1; cd \$(mktemp -d); python -m pytest $REPO/tests/unit_tests -x -q\""
               echo "## Do NOT read this hook as a pass: run the command above before merging."
               echo "######################################################################"
               exit 0
@@ -140,7 +140,7 @@ repos:
             # exec: the container exit status becomes this hook exit status
             # directly (no single quotes anywhere in here — they would terminate
             # the outer bash -c script).
-            exec "$REPO/pipeline_env_exec.sh" "cd $REPO; source pipeline_env_activate.sh; T=\$(mktemp -d); cd \"\$T\"; python -m pytest $REPO/tests/unit_tests -x -q --tb=short -m \"not pleasefixme\"; rc=\$?; cd /; rm -rf \"\$T\"; exit \$rc"
+            exec "$REPO/pipeline_env_exec.sh" "cd $REPO; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \"\$T\"; python -m pytest $REPO/tests/unit_tests -x -q --tb=short -m \"not pleasefixme\"; rc=\$?; cd /; rm -rf \"\$T\"; exit \$rc"
           '
         pass_filenames: false
         types: [python]

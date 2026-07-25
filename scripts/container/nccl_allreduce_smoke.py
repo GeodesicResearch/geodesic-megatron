@@ -11,7 +11,7 @@ pipeline_env_activate.sh is sourced INSIDE it — it refuses to run on the host)
 
     srun --nodes=2 --ntasks-per-node=1 --export=ALL --overlap \
         ./pipeline_env_exec.sh \
-        "cd $REPO_DIR; source pipeline_env_activate.sh; \
+        "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; \
          torchrun --nproc_per_node=4 --nnodes=2 --node_rank=\\$SLURM_NODEID \
              --master_addr=<addr> --master_port=<port> \
              scripts/container/nccl_allreduce_smoke.py"

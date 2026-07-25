@@ -57,7 +57,7 @@ a single forgotten optimizer-state checkpoint can eat 4 TB.
    against the image toolchain. There is no venv to build and no mode flag: a missing SIF or
    Slingshot build hard-fails with the command that fixes it. Full reference:
    `docs/environment.md`. To run anything by hand in the environment, go through
-   the shim — `./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; <cmd>"`;
+   the shim — `./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; <cmd>"`;
    `pipeline_env_activate.sh` refuses to be sourced on the host (its `/opt/slingshot` paths
    exist only inside the container).
 1. **Import the base checkpoint** (HF → Megatron, multi-node — the dense backbone

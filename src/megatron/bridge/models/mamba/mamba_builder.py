@@ -192,7 +192,8 @@ class MambaModelBuilder(ModelBuilder[MCoreMambaModel, MambaModelConfig]):
             The constructed model
 
         Note:
-            Virtual pipeline model parallelism is not supported for Mamba models.
+            Virtual pipeline model parallelism IS supported (via '|' segment separators in
+        hybrid_layer_pattern); vp_stage selects the interleaved chunk.
         """
         mamba_stack_spec = self._model_config.mamba_stack_spec
         if not isinstance(mamba_stack_spec, ModuleSpec):

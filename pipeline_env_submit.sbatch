@@ -88,11 +88,18 @@ case "$MODE" in
         # `$(scontrol ...)` yields an empty hostname and torchrun dies in
         # parse_rendezvous_endpoint. Same reason the other launchers resolve it here.
         SMOKE_MASTER="$(scontrol show hostname "$SLURM_JOB_NODELIST" | head -1)"
+        # Slingshot selection vars. pipeline_env_activate.sh sets NCCL_NET_PLUGIN and
+        # the LD_LIBRARY_PATH order but NOT these three — every other multi-node
+        # launcher exports them itself (pipeline_training_launch.sh, the checkpoint
+        # converter, the coherence megatron branch). Without them NCCL can bootstrap
+        # on the management ethernet (which cannot reach other nodes) or libfabric can
+        # auto-select a non-CXI provider, so the gate would report FAIL or hang on a
+        # perfectly healthy fabric — the exact false verdict this mode exists to rule out.
+        export NCCL_NET="AWS Libfabric" FI_PROVIDER=cxi NCCL_SOCKET_IFNAME=hsn
         # 4 ranks/node explicitly, not $SLURM_GPUS_PER_NODE: the floor in
         # nccl_allreduce_smoke.py is calibrated for the 2-node/8-GPU shape, so a
-        # smaller rank count would fail a healthy fabric. --gres makes the request
-        # explicit for the step even though the header already asks for 4.
-        srun --nodes="$NNODES" --ntasks-per-node=1 --gres=gpu:4 --export=ALL "$REPO_DIR/pipeline_env_exec.sh" \
+        # smaller rank count would fail a healthy fabric.
+        srun --nodes="$NNODES" --ntasks-per-node=1 --export=ALL "$REPO_DIR/pipeline_env_exec.sh" \
             "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; \
              torchrun --nnodes=$NNODES --nproc_per_node=4 --node_rank=\$SLURM_NODEID \
                  --master_addr=$SMOKE_MASTER --master_port=${MASTER_PORT_OVERRIDE:-29401} \
