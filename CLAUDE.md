@@ -338,18 +338,39 @@ Ultra is architecturally a scaled Super — same NemotronH hybrid (Mamba2 + atte
 
 **Throughput is best-effort, not yet tuned.** PP=36 with GBS=64/DP=2 → 32 microbatches < 36 stages = severe pipeline bubble (~0.2→low TFLOP/s/GPU). To improve: raise `global_batch_size` so microbatches ≥ PP, consider VPP/interleaved PP, and set `pipeline_model_parallel_layout` to balance the 2×-heavy MoE stages (see the Megatron MoE paper skill). Functionally it trains; these are throughput levers.
 
-**fVPP (virtual/interleaved PP) WORKS on the Nemotron-H hybrid** (Super-120B validated
-2026-07-24) via `|` segment separators in `hybrid_layer_pattern` — the older "VPP
-unsupported on SSM/Mamba" belief was two stale bridge asserts, since removed. At cert
-32K/CP4 only VPP=4 fits (needs `[core_attn,moe,shared_experts]` recompute + a
-stage-0-unloaded pattern) and it lands ~+10% vs the non-VPP champion, so the non-VPP
-config stays the default. Measured: best VPP=4 30.69 s/iter vs 27.61 non-VPP champion
-(+11%); `overlap_p2p_comm` (which VPP enables) is a ~2× Slingshot regression at PP8 AND
-PP16, trace-attributed to un-batched isend/irecv costing 2.3-5.7× more per operation on
-CXI — do NOT enable it on this fabric without new evidence. The full ladder,
-decomposition, and trace-level root cause live in the "fVPP on the Nemotron-H hybrid"
-Slack canvas in #megatron (the in-repo doc and the vpp4 config were deleted in the
-container-only simplification). Ongoing work: INFR-71.
+**fVPP (virtual/interleaved PP) WORKS on the Nemotron-H hybrid** via `|` segment
+separators in `hybrid_layer_pattern` — the older "VPP unsupported on SSM/Mamba" belief was
+two stale bridge asserts, since removed. Whether it is FASTER depends on microbatches per
+replica, and at PP=8 the crossover sits between 16 and 32 (INFR-71, placement-matched,
+same allocation):
+
+| microbatches/replica | no VPP | VPP=4 | verdict |
+|---|---|---|---|
+| 32 (GBS 64 — the shipped quickstart) | 27.50 s/iter | 29.59 s/iter | VPP **+7.6% worse** |
+| 16 (GBS 32) | 17.98 s/iter | 17.61 s/iter | VPP **−2.1% better** (both arms run twice, ranges disjoint) |
+
+So: **enable VPP only at ≤16 microbatches per replica**; above that the non-VPP config
+wins. The variant is `configs/quickstart/nemotron_super_quickstart_sft_vpp4.yaml`.
+
+Trace decomposition of why it loses at GBS=64: the regression is 100% stall, not compute
+(on the clean rank, +1.848 s = compute +0.045, exposed comm −1.820, idle +3.624). VPP does
+subdivide the PP exchanges (4.23× more p2p kernels on stage 0, each 1.7–2.4× cheaper), but
+a PP p2p kernel is dominated by **waiting for the peer**, not wire time — a single baseline
+p2p kernel measures 2.76 s — so splitting a wait four ways does not quarter it.
+
+**`overlap_p2p_comm` is unusable on this model, not merely slow.** It requires VPP
+(`schedules.py:2043`) and forbids batched p2p (`schedules.py:952`), forcing un-batched
+isend/irecv — which removes the device sync that makes Nemotron-H's
+`deallocate_pipeline_outputs=True` safe. Measured: deterministic NaN at iteration 2 in
+three independent arms (plain, raised CXI rendezvous threshold, and
+`CUDA_DEVICE_MAX_CONNECTIONS=8`). Turning the deallocation off removes the race but OOMs
+in NCCL's allocator at 32K/CP4. Also hard-blocked on this model, with code citations:
+`overlap_moe_expert_parallel_comm` (asserts `isinstance(model, GPTModel)`; Nemotron-H is a
+`MambaModel`), `moe_shared_expert_overlap` (latent MoE), `defer_embedding_wgrad_compute`
+(would crash). And never add a `comm_overlap:` block to a config — it force-sets
+`overlap_p2p_comm=True`/`batch_p2p_comm=False` at VPP>1 and silently clobbers
+`ddp.overlap_param_gather`. Full analysis:
+`docs/investigations/vpp-pp-comm-overlap-investigation.md`.
 
 **Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (only 1 unused-token row is near-zero, and it is also near-zero in Instruct — genuinely unused, not a missing graft), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
 
