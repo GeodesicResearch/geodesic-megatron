@@ -625,7 +625,7 @@ fi
 # srun --export=ALL carries it to the node, and apptainer inherits the host
 # environment by default.
 RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
-ACTIVATE_CMD="source pipeline_env_activate.sh"
+ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 
 # ft_launcher compatibility gate: the image's nvidia-resiliency-ext version is
 # whatever NGC shipped, so verify the section-timeout flags exist before launching

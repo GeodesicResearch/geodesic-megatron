@@ -50,7 +50,7 @@ single idempotent command:
 bash pipeline_env_setup.sh
 # or via SLURM: isambard_sbatch pipeline_env_submit.sbatch setup
 
-# Re-validate an existing install (20 checks; 21 with --run-training):
+# Re-validate an existing install (19 checks; 20 with --run-training):
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 ```
 
@@ -400,13 +400,13 @@ reference is **[docs/environment.md](docs/environment.md)**.
 isambard_sbatch pipeline_env_submit.sbatch setup
 bash pipeline_env_setup.sh --only slingshot --force    # or one step at a time
 
-# Validate an existing install (20 checks; 21 with --run-training)
+# Validate an existing install (19 checks; 20 with --run-training)
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
 # Run anything inside the environment (interactive shell, tests, ad-hoc python)
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; exec bash -i"
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; \
-  python -m pytest tests/unit_tests/ -x -q -m 'not pleasefixme'"
+  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme'"
 ```
 
 Everything configurable — image tag, SIF path, Slingshot component versions, overlay
@@ -669,7 +669,9 @@ This repo also integrates [`geodesic-claude-tooling`](.claude/geodesic-claude-to
 submodule) — Claude Code hooks that inject Geodesic's working conventions at session start, validate
 plans on exit, and run mechanical checks on the diff. It is wired up **additively** and does not
 touch the training environment: the hooks live in the repo's dev-tooling-only `.venv`
-(ruff, pre-commit, the hook entry points — no torch, created with `uv sync --inexact`),
+(ruff, pre-commit, the hook entry points — no torch; created by the installer below with
+`uv pip install`, NEVER `uv sync`, which would resolve the full project and try to build the
+training stack on the host),
 never in the container. Install it once:
 
 ```bash

@@ -84,7 +84,7 @@ run.
 | `pipeline_env_exec.sh` | The shim: `pipeline_env_exec.sh "<one command string>"`. Gates on `env_config_require`, scrubs host toolchain/venv-shaped env, `exec apptainer exec --nv --bind "$CONTAINER_BINDS"`. |
 | `pipeline_env_activate.sh` | Sourced **inside** the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH` ordering + `NCCL_NET_PLUGIN`, universal GPU settings, cache paths. Refuses to run outside a container. |
 | `pipeline_env_setup.sh` | The whole install in one command (the four steps above). |
-| `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup` and `validate`. |
+| `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke`. |
 | `pipeline_env_validate.py` | The validator (runs in-container). |
 
 ## Everyday use
@@ -94,8 +94,10 @@ run.
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; exec bash -i"
 
 # Unit tests — in-container is the only way (5429 tests collected in ~35 s):
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; \
-  python -m pytest tests/unit_tests/ -x -q -m 'not pleasefixme'"
+# NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
+# not exist, so running from the repo root errors every test (and would rmtree a real one).
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \$T; \
+  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme'"
 
 # Fabric health: asserts the log says 'Using network AWS Libfabric' and that
 # busbw clears the 100 GB/s floor. Worth running after any image or Slingshot
@@ -277,8 +279,13 @@ Before an FT launch, `pipeline_training_launch.sh` greps `ft_launcher --help` *i
 container* for `--ft-rank-section-timeouts`; if absent it exits with "rerun with
 `--disable-ft`, or qualify a newer image" instead of letting 44+ ranks die on a usage error.
 The validator checks the same two flags. Related image-version friction already handled: the
-image's `ft_launcher` parses heartbeat timeouts as floats and rejects the literal `none` the
-launcher used to pass, so those flags are simply omitted and the image defaults apply.
+image's `ft_launcher` parses heartbeat timeouts as FLOATS and rejects the literal `none` the
+launcher used to pass. They are therefore passed as explicit large values
+(`--ft-initial-rank-heartbeat-timeout=7200 --ft-rank-heartbeat-timeout=7200`), NOT omitted:
+heartbeats are an independent mechanism from the section timeouts, and
+nvidia-resiliency-ext defaults to 3600 s initial / 2700 s subsequent — shorter than
+Ultra-550B's documented 45–75 min first iteration at PP=36, which would trip the heartbeat,
+SIGKILL the workers, and restart straight back into the same slow first iteration.
 
 ### D6b — CUDA forward-compat: front the image's compat libs yourself
 

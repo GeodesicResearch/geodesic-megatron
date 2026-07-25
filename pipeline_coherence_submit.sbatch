@@ -162,7 +162,7 @@ if [ "$BACKEND" = "megatron" ]; then
     srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL \
         "$REPO_DIR/pipeline_env_exec.sh" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
+        source pipeline_env_activate.sh || exit 1
         export PYTHONUNBUFFERED=1 TORCHDYNAMO_DISABLE=1 TORCH_COMPILE_DISABLE=1
         torchrun \
             --nproc_per_node=4 \
@@ -181,7 +181,7 @@ else
     # node. The endpoint backend loads nothing locally (stdlib HTTP to a running
     # server), so it rides the same single-process path; only its args differ.
     "$REPO_DIR/pipeline_env_exec.sh" \
-        "cd $REPO_DIR; source pipeline_env_activate.sh; python pipeline_coherence_test.py $MODEL_PATH_Q$ARGS_Q"
+        "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python pipeline_coherence_test.py $MODEL_PATH_Q$ARGS_Q"
     # Same reason as the megatron branch: grab the payload's status before any
     # other command (the echo below) overwrites $?.
     rc=$?

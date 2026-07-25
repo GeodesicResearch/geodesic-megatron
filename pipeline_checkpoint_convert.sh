@@ -173,7 +173,7 @@ run_torchrun() {
 
     srun --nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap ${CONVERT_NODELIST:+--nodelist=$CONVERT_NODELIST} "$REPO_DIR/pipeline_env_exec.sh" "
         cd $REPO_DIR
-        source pipeline_env_activate.sh
+        source pipeline_env_activate.sh || exit 1
         export PYTHONUNBUFFERED=1
         torchrun \
             --nproc_per_node=$NGPUS_PER_NODE \
@@ -190,7 +190,7 @@ run_torchrun() {
 # Hub pushes, which are pure network I/O and need no GPUs. ---
 run_python() {
     local code="$1"
-    "$REPO_DIR/pipeline_env_exec.sh" "cd $REPO_DIR; source pipeline_env_activate.sh; python -c $(printf '%q' "$code")"
+    "$REPO_DIR/pipeline_env_exec.sh" "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python -c $(printf '%q' "$code")"
 }
 
 # ==============================================================================

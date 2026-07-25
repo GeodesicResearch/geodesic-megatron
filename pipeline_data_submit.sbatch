@@ -60,7 +60,7 @@ RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
 # Sourced INSIDE the container. It prepends THIS checkout's src/ +
 # 3rdparty/Megatron-LM to PYTHONPATH, so a worktree's bridge fixes are what data
 # jobs actually run instead of the image's megatron packages.
-ACTIVATE_CMD="source pipeline_env_activate.sh"
+ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 
 if [ "$MODE_OR_ROOT" = "prepare" ]; then
     shift

@@ -55,6 +55,11 @@ done
 
 want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
+# Set when a GPU-only step could not run here: the install is INCOMPLETE and the
+# exit status must say so, or a wrapper reading rc records success for an
+# environment that cannot train.
+DEFERRED=0
+
 HAS_GPU=0
 command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1 && HAS_GPU=1
 
@@ -206,6 +211,12 @@ setup_slingshot() {
             # against them.
             cd \$BUILD_ROOT && env -u LD_LIBRARY_PATH git clone --depth 1 https://github.com/NVIDIA/nccl-tests.git
             cd \$BUILD_ROOT/nccl-tests && make -j \$(nproc) MPI=1 MPI_HOME=\$MPI_HOME NCCL_HOME=\$NCCL_HOME CUDA_HOME=\$CUDA_HOME
+            # rm first: on a RETRY (interrupted build) 'cp -r src dest' NESTS into an
+            # existing dest, putting the binaries at nccl-tests/build/all_reduce_perf
+            # instead of nccl-tests/all_reduce_perf — and provenance would still be
+            # written, so both the skip gate and env_config_require would call the
+            # install complete while the documented path is wrong.
+            rm -rf /opt/slingshot/nccl-tests
             cp -r \$BUILD_ROOT/nccl-tests/build /opt/slingshot/nccl-tests
 
             rm -rf \$BUILD_ROOT
@@ -257,7 +268,16 @@ setup_overlay() {
         return 0
     fi
 
-    [ "$FORCE" = "1" ] && rm -rf "$CONTAINER_PYTHON_OVERLAY"
+    if [ "$FORCE" = "1" ]; then
+        # Same guard as the slingshot step: a mistyped
+        # GEODESIC_CONTAINER_PYTHON_OVERLAY (e.g. /projects/a5k/public) would make
+        # this an unguarded recursive delete on shared storage.
+        case "$CONTAINER_PYTHON_OVERLAY" in
+            "$CONTAINER_ROOT"/*) ;;
+            *) echo "FATAL [env-setup/overlay]: refusing --force rebuild of '$CONTAINER_PYTHON_OVERLAY' — it is not under CONTAINER_ROOT ($CONTAINER_ROOT)" >&2; exit 1 ;;
+        esac
+        rm -rf "$CONTAINER_PYTHON_OVERLAY"
+    fi
     mkdir -p "$CONTAINER_PYTHON_OVERLAY"
 
     echo "[env-setup/overlay] Installing into $CONTAINER_PYTHON_OVERLAY: $CONTAINER_OVERLAY_PACKAGES"
@@ -287,7 +307,7 @@ setup_validate() {
     [ "$HAS_GPU" = "1" ] || { echo "FATAL [env-setup/validate]: no GPU on this node" >&2; exit 1; }
     echo "[env-setup/validate] Running environment validation inside the container..."
     REPO_DIR="$SCRIPT_DIR" "$SCRIPT_DIR/pipeline_env_exec.sh" \
-        "cd $SCRIPT_DIR; source pipeline_env_activate.sh; python pipeline_env_validate.py"
+        "cd $SCRIPT_DIR; source pipeline_env_activate.sh || exit 1; python pipeline_env_validate.py"
 }
 
 # ------------------------------------------------------------------------------
@@ -310,6 +330,7 @@ if want slingshot; then
         echo "[env-setup 2/4 slingshot] DEFERRED — no GPU on this node. Finish on a GPU node with:" >&2
         echo "    bash pipeline_env_setup.sh" >&2
         echo "  or: isambard_sbatch pipeline_env_submit.sbatch setup" >&2
+        DEFERRED=1
     fi
 fi
 
@@ -321,5 +342,11 @@ if want validate; then
         echo "===== Environment setup COMPLETE (validation above) ====="
     else
         echo "===== Environment setup: CPU-side steps done; run on a GPU node to finish (see 2/4) ====="
+        DEFERRED=1
     fi
+fi
+
+if [ "$DEFERRED" = "1" ]; then
+    echo "[env-setup] INCOMPLETE: GPU-only steps were deferred — exiting 2 so callers do not read this as a finished install." >&2
+    exit 2
 fi

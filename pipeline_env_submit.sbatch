@@ -1,7 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=env-setup
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=1
+# 4 GPUs: setup/validate need only one, but `smoke` measures a 2-node/8-GPU
+# all_reduce against a 100 GB/s floor calibrated for that shape.
+#SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=2:00:00
 #SBATCH --exclusive
@@ -67,7 +69,7 @@ case "$MODE" in
         # The shim hard-fails with fix commands if the SIF or Slingshot build is
         # missing.
         "$REPO_DIR/pipeline_env_exec.sh" \
-            "cd $REPO_DIR; source pipeline_env_activate.sh; python pipeline_env_validate.py$ARGS_Q" || rc=$?
+            "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python pipeline_env_validate.py$ARGS_Q" || rc=$?
         ;;
     smoke)
         # Multi-node fabric check. The validator only proves the CXI plugin dlopens;
@@ -80,10 +82,20 @@ case "$MODE" in
             echo "ERROR: smoke mode needs at least 2 nodes (got $NNODES). Resubmit with --nodes=2." >&2
             exit 1
         fi
-        srun --nodes="$NNODES" --ntasks-per-node=1 --export=ALL "$REPO_DIR/pipeline_env_exec.sh" \
-            "cd $REPO_DIR; source pipeline_env_activate.sh; \
-             torchrun --nnodes=$NNODES --nproc_per_node=\$SLURM_GPUS_PER_NODE \
-                 --rdzv_backend=c10d --rdzv_endpoint=\$(scontrol show hostname \$SLURM_JOB_NODELIST | head -1):29401 \
+        # MASTER_ADDR is resolved HOST-side: scontrol does not exist inside the
+        # container (only /projects, /lus, the repo, libfabric, /usr/lib64 and the
+        # Slingshot build are bound — not host /usr/bin), so an in-container
+        # `$(scontrol ...)` yields an empty hostname and torchrun dies in
+        # parse_rendezvous_endpoint. Same reason the other launchers resolve it here.
+        SMOKE_MASTER="$(scontrol show hostname "$SLURM_JOB_NODELIST" | head -1)"
+        # 4 ranks/node explicitly, not $SLURM_GPUS_PER_NODE: the floor in
+        # nccl_allreduce_smoke.py is calibrated for the 2-node/8-GPU shape, so a
+        # smaller rank count would fail a healthy fabric. --gres makes the request
+        # explicit for the step even though the header already asks for 4.
+        srun --nodes="$NNODES" --ntasks-per-node=1 --gres=gpu:4 --export=ALL "$REPO_DIR/pipeline_env_exec.sh" \
+            "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; \
+             torchrun --nnodes=$NNODES --nproc_per_node=4 --node_rank=\$SLURM_NODEID \
+                 --master_addr=$SMOKE_MASTER --master_port=${MASTER_PORT_OVERRIDE:-29401} \
                  scripts/container/nccl_allreduce_smoke.py" || rc=$?
         ;;
     *)

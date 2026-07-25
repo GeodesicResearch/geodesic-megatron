@@ -55,7 +55,7 @@ SEQ=65536
 # Sourced INSIDE the container by every payload below: prepends this checkout's
 # src/ + 3rdparty/Megatron-LM to PYTHONPATH so the packer uses the repo's
 # tokenizer/packing code, not the image's megatron packages.
-ACTIVATE_CMD="source pipeline_env_activate.sh"
+ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 # Every payload ends with `exit ${PIPESTATUS[0]}` (escaped so the CONTAINER shell
 # expands it, not this one). Without it the shim's exit status is the status of the
 # trailing `grep`, so a python traceback that printed no matching line looked like

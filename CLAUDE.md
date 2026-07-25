@@ -154,7 +154,9 @@ bash pipeline_env_setup.sh
   ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; python -m pytest tests/unit_tests/ -x -q"
   ```
   The `.venv` that remains is for **dev tooling only** (ruff, pre-commit, the Claude
-  Code hooks) and deliberately carries no torch; create it with `uv sync --inexact`.
+  Code hooks) and deliberately carries no torch; create it with
+  `bash scripts/install_claude_tooling.sh` (it uses `uv pip install`, never `uv sync` — a sync
+  would resolve the full project and try to build torch/TE/mamba on the host).
 
 > History: the bare-metal venv stack (a 435-line installer plus 12 order-dependent ARM
 > workarounds) was deleted with the container-only simplification. That knowledge —
@@ -240,8 +242,13 @@ Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with E
 3. **NCCL watchdog** (900s) — last resort backup.
 
 **ft_launcher timeout configuration** (set in `pipeline_training_launch.sh`):
-- `--ft-rank-section-timeouts=setup:1800,step:3600,checkpointing:600`
-- `--ft-rank-out-of-section-timeout=3600` — must be ≥3600s for first-iter NCCL lazy init with PP=8+
+- `--ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600`
+- `--ft-rank-out-of-section-timeout=7200` — must cover first-iter NCCL lazy init at PP=8+
+- `--ft-initial-rank-heartbeat-timeout=7200 --ft-rank-heartbeat-timeout=7200` — heartbeats are
+  an INDEPENDENT mechanism from the section timeouts. Omitting them is not "disabled": NVRX
+  defaults to 3600 s / 2700 s, which is shorter than Ultra-550B's 45-75 min first iteration at
+  PP=36 and produces a SIGKILL + restart loop that looks exactly like a fabric hang. The image's
+  ft_launcher parses these as floats and rejects the literal `none`, hence explicit numbers.
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
 The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `pipeline_training_run.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
@@ -651,9 +658,12 @@ qualification floor is ~100 GB/s, and a TCP fallback shows as ~2.3 GB/s.
 
 Runtime dependencies come from the container image, not from `uv` — see
 `pipeline_env_config.env` (image tag) and its Python overlay for the few packages layered on top.
-`uv` manages only the tooling venv:
+`uv` manages only the tooling venv — and NOT via `uv sync`: `pyproject`'s runtime
+dependencies still name torch/TE/mamba/grouped-gemm, so a sync would try to build the whole
+training stack on the host (the thing containerisation removed). `scripts/install_claude_tooling.sh`
+uses `uv pip install` into `.venv` for exactly that reason:
 ```bash
-uv sync --inexact                             # tooling venv (ruff/pre-commit/hooks; no torch)
+bash scripts/install_claude_tooling.sh        # creates/refreshes the tooling venv (no torch)
 uv add <package>                              # add a dependency to pyproject
 ```
 
