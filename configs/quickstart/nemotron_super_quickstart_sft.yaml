@@ -52,6 +52,25 @@
 #   (The OFFICIAL A/B block below predates this pass — its 31.27 container
 #    number is the pre-fusion/GC config; C8 re-certifies the champion.)
 #
+# PERF-ITERATION LADDER (2026-07-25, container, tunnel 5738449 — a ~2.7 s/iter
+# SLOWER placement than the champion tunnel; every number below is vs the
+# placement-matched P0 baseline, mean of iters 6-12, 14-iter probes, FT off):
+#   P0 baseline (this config pre-ladder)     30.30 s/iter | anchor
+#   P3 grad-stats telemetry OFF              27.20  (-10.2%) | ADOPTED below
+#   P1 ISAMBARD_CUDA_MAX_CONNECTIONS=8       27.51  (-9.2%)  | redundant w/ P3 (P5
+#     composed = 27.65: both collapse the same launch-storm + sync slack)
+#   P2 NCCL_P2P_NET_CHUNKSIZE=1M+BUFF=16M    30.78  | no win on CXI — do not use
+#   P4/P6/P7 optimizer_offload_fraction 0.5  30-iter gate 26.30, steady ~25.7
+#     (-1.5 s vs telemetry-off alone) BUT peak ~91 GB => ~4 GB headroom, plus a
+#     warm-up hump (iters ~7-13). NOT adopted: cert config keeps margin. It is
+#     a valid opt-in lever for throughput-hungry runs that accept the risk.
+#   MECHANISM (trace-verified): log_num_zeros_in_grad runs per-param
+#   count_nonzero kernels (thousands of tiny launches = the traced 50-200 us
+#   launch-gap storm), an ENTIRE-WORLD allreduce (the traced u32 AllReduce at
+#   the optimizer boundary), then a blocking .item() sync — every iteration.
+#   log_params_norm adds the same pattern. See clip_grads.py::count_zeros_fp32
+#   and the profile analysis doc addendum.
+#
 # Historical note: measurements in the blocks below were taken at GBS=48 and
 # remain valid as relative evidence (feasibility verdicts, container-vs-bare-
 # metal ratio).
@@ -212,7 +231,6 @@ checkpoint:
 logger:
   log_interval: 1
   log_throughput: true
-  log_params_norm: true
   log_progress: true
   timing_log_level: 2
   timing_log_option: minmax
@@ -224,7 +242,12 @@ logger:
   log_world_size_to_tensorboard: true
   log_runtime_to_tensorboard: true
   log_l2_norm_grad_to_tensorboard: true
-  log_num_zeros_in_grad: true
+  # Grad-stats telemetry OFF (perf-iteration P3, 2026-07-25: -10.2% s/iter).
+  # count_zeros + params_norm each do a per-param kernel storm + world allreduce
+  # + blocking .item() every iteration (see header MECHANISM). Loss, grad norm,
+  # throughput, and memory logging are unaffected.
+  log_params_norm: false
+  log_num_zeros_in_grad: false
   wandb_entity: geodesic
   wandb_project: megatron_training
   wandb_exp_name: nemotron_super_quickstart_sft

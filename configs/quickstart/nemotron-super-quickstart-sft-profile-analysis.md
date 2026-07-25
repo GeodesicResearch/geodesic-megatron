@@ -79,3 +79,48 @@ launches, fused adds ~1.6k) and **corrects the communication picture**:
 - Run context: gate-window mean 30.39 s/iter @ 87 TFLOP/s with fault tolerance
   ON (the production path; FT heartbeats cost ~1–2 s vs the 27.6 FT-off probe
   number). Traced-iteration overhead 166 s.
+
+---
+
+## Addendum 2 (2026-07-25): acting on the findings — the perf-iteration ladder
+
+Every issue in this analysis was probed with a lever on tunnel 5738449 (a ~2.7 s/iter
+slower Dragonfly placement than the champion tunnel — all deltas below are vs the
+placement-matched P0 anchor; 14-iter probes, FT off, mean of iters 6–12; W&B
+`megatron_training/qs_perfiter_*`):
+
+| Probe | Lever | s/iter | vs P0 | Verdict |
+|---|---|---|---|---|
+| P0 | none (committed config pre-ladder) | 30.30 | — | anchor |
+| P1 | `ISAMBARD_CUDA_MAX_CONNECTIONS=8` (TP=1) | 27.51 | −9.2% | works; redundant with P3 |
+| P2 | `NCCL_P2P_NET_CHUNKSIZE=1M` + `NCCL_BUFFSIZE=16M` | 30.78 | +1.6% | no win on CXI |
+| P3 | `log_num_zeros_in_grad`+`log_params_norm` off | 27.20 | −10.2% | **adopted into the quickstart** |
+| P5 | P1 + P3 composed | 27.65 | −8.7% | no additive gain — same slack |
+| P4/P6/P7 | + `optimizer_offload_fraction: 0.5` | gate 26.30, steady ~25.7 | ~−15% | opt-in only: peak ~91 GB (~4 GB headroom), warm-up hump iters ~7–13 |
+
+**Resolution of the traced issues:**
+
+- **u32 optimizer-boundary allreduces + launch-gap storm → one root cause.**
+  `count_zeros_fp32` (gated on `log_num_zeros_in_grad`) launches a `count_nonzero`
+  kernel per parameter (thousands of tiny launches/iter — the 50–200 µs gap mass),
+  all-reduces the count over the **entire world** (the traced u32 AllReduce), then
+  calls `.item()` — a blocking device sync, every iteration. `log_params_norm` adds
+  the same pattern. Turning both off is worth ~3 s/iter and is config-only.
+- **P1↔P3 redundancy explained:** `CUDA_DEVICE_MAX_CONNECTIONS=8` lets the telemetry
+  kernel-storm overlap other work; removing the telemetry removes the storm. Both
+  attack the same serialized slack, so they don't compose. The `=1` default remains
+  (required for TP/SP overlap at TP>1); the override seam is
+  `ISAMBARD_CUDA_MAX_CONNECTIONS` in both activate scripts.
+- **Exposed PP send/recv (B1):** NCCL p2p chunk/buffer sizing is measured neutral on
+  Slingshot/CXI — B1 stays structural (documented block; `overlap_p2p_comm` remains a
+  ~2× regression per the VPP investigation).
+- **~1.49 s aligned optimizer-boundary gap:** partly the CPU-offloaded optimizer step.
+  `optimizer_offload_fraction: 0.5` recovers ~1.5 s/iter (30-iter gate 26.30, steady
+  ~25.7, exact loss parity at iter 30: 0.60891 vs the A/B's 0.6089) but peaks ~91 GB
+  of 95 — too little headroom for the certification config, so it ships documented-off.
+- **Pipeline bubble (~18%):** structural at GBS=64/PP=8/DP=2; VPP measured worse
+  (see the VPP investigation). No further lever inside the fixed workload.
+
+Post-ladder quickstart (telemetry-off adopted): expect ≈ 27.2 s/iter on this
+placement ≈ **24–25 s/iter on champion-tunnel placement**, ~97 TFLOP/s/GPU, with the
+same memory profile as before.
