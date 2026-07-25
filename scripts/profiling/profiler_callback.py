@@ -3,7 +3,7 @@
 Purpose: produce the artifact Quentin Anthony's Megatron speed-up assessment
 needs — a torch profile of full optimizer steps with ``with_stack=True`` and
 ``record_shapes=True``, delivered together with the exact repo commit and the
-run's config (see docs/container-pipeline.md "Profiling"). Also the first tool
+run's config (see docs/environment.md "Profiling"). Also the first tool
 to reach for when iteration time regresses and the cause isn't obvious.
 
 Activation (all env-driven, matching the repo's ISAMBARD_* toggle pattern;
@@ -171,18 +171,31 @@ class TorchProfilerCallback(Callback):
         if not self.enabled_here or self.prof is None:
             return
         self.steps_done += 1
-        if self.captures_done >= len(self.capture_iters):
-            # All traces exported by the schedule's on_trace_ready during prior
-            # steps; stop OUTSIDE that handler (stopping from within it is
-            # re-entrant) and drop the profiler so later steps cost nothing.
-            self.prof.stop()
+        # Guarded: a kineto/CUPTI failure inside step()/stop() must disable
+        # profiling, never crash the run (callback exceptions propagate in
+        # megatron-bridge). _export has its own boundary; this catches the
+        # profiler-internal transitions themselves.
+        try:
+            if self.captures_done >= len(self.capture_iters):
+                # All traces exported by the schedule's on_trace_ready during
+                # prior steps; stop OUTSIDE that handler (stopping from within
+                # it is re-entrant) and drop the profiler so later steps cost
+                # nothing.
+                self.prof.stop()
+                self.prof = None
+                return
+            self.prof.step()
+        except Exception as e:  # noqa: BLE001 -- degrade-don't-crash boundary
+            print(f"[torch-profile] WARNING: profiler step/stop failed, profiling disabled: {e}", flush=True)
             self.prof = None
-            return
-        self.prof.step()
 
     def on_train_end(self, ctx) -> None:
         if self.enabled_here and self.prof is not None:
-            self.prof.stop()
+            try:
+                self.prof.stop()
+            except Exception as e:  # noqa: BLE001 -- degrade-don't-crash boundary
+                print(f"[torch-profile] WARNING: profiler stop failed at train end: {e}", flush=True)
+            self.prof = None
         if self.enabled_here:
             # Refresh the log snapshot with everything written up to train end.
             self._copy_raw_log()
@@ -192,10 +205,7 @@ class TorchProfilerCallback(Callback):
         # Teardown guard: prof.stop() at train end fires this handler for a
         # pending capture whose iteration never ran (capture_iter > train_iters)
         # — that "trace" would contain zero training steps. Suppress it.
-        if (
-            self.captures_done >= len(self.capture_iters)
-            or self.capture_iters[self.captures_done] > self.steps_done
-        ):
+        if self.captures_done >= len(self.capture_iters) or self.capture_iters[self.captures_done] > self.steps_done:
             print(
                 f"[torch-profile] rank {rank}: suppressing teardown export — capture iteration "
                 f"never ran ({self.steps_done} iterations completed)",
@@ -269,7 +279,15 @@ class TorchProfilerCallback(Callback):
             f.write(f"world_size: {os.environ.get('WORLD_SIZE', '?')}\n")
             f.write(f"host: {socket.gethostname()}\n")
             f.write(f"torch: {torch.__version__} (cuda {torch.version.cuda})\n")
-            f.write(f"container: {os.environ.get('GEODESIC_CONTAINER', '?')}\n")
+            # Image identity — the half of the stack the commit above doesn't
+            # pin (torch/CUDA/TE/NCCL all come from the image). Apptainer itself
+            # exports APPTAINER_CONTAINER (full SIF path, whose filename carries
+            # the NGC tag) and APPTAINER_NAME into every container, so they are
+            # always present here; pipeline_env_config.env's CONTAINER_SIF /
+            # CONTAINER_IMAGE_TAG are plain host shell vars and never reach this
+            # process. '?' would mean the trace was taken outside the container.
+            image = os.environ.get("APPTAINER_CONTAINER") or os.environ.get("APPTAINER_NAME") or "?"
+            f.write(f"container_image: {image}\n")
             f.write(
                 "profiler: with_stack=True record_shapes=True "
                 f"capture_iterations={self.capture_iters} (1-based, warmup on the step before each)\n"

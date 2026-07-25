@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""Validate Megatron Bridge installation on Isambard ARM HPC.
+"""Validate the Megatron Bridge environment on Isambard ARM HPC (INFR-68).
 
-Usage:
-    python pipeline_env_validate.py              # Import and GPU checks only
-    python pipeline_env_validate.py --run-training  # Also run a tiny training job
-    python pipeline_env_validate.py --container  # Container-mode checks (INFR-68):
-                                                 # skips venv-only checks (vllm/ray/pins),
-                                                 # adds import-path resolution, NCCL CXI
-                                                 # plugin load, ft_launcher flag, dataset
-                                                 # helpers JIT, and a version report.
+This runs INSIDE the container — the only execution environment there is — so
+every check below describes the container's view of the world: imports resolving
+to THIS checkout (bind-mounted src/ + pinned 3rdparty/Megatron-LM, which must win
+over the image's own megatron packages), the image's CUDA extensions, the
+Slingshot CXI NCCL plugin, ft_launcher's section-timeout flags, the JIT
+toolchain, GPU ops, and the recipes. There is nothing to validate on the host.
+
+Usage (both forms enter the container and source the in-container activate first):
+    isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
+    ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh; python pipeline_env_validate.py"
+
+Direct invocation is `python pipeline_env_validate.py [--run-training]`;
+--run-training adds a 5-iteration single-GPU training job on mock data.
 
 Exit code 0 if all stages pass, 1 otherwise.
 """
@@ -185,6 +190,9 @@ def run_tiny_training():
         "model.num_layers=2",
         "model.hidden_size=256",
         "model.num_attention_heads=4",
+        # Fusion off deliberately: this smoke test proves the environment can run a
+        # training step, so it must not also depend on APEX. Real runs leave it True
+        # (the image ships APEX and fused accumulation is the faster path).
         "model.gradient_accumulation_fusion=False",
         "scheduler.lr_warmup_iters=2",
         "scheduler.lr_decay_iters=5",
@@ -227,43 +235,10 @@ def check_grouped_gemm():
     import grouped_gemm  # noqa: F401  (nv-grouped-gemm; MoE grouped GEMM)
 
 
-@stage("vllm._C")
-def check_vllm():
-    import vllm  # noqa: F401
-    import vllm._C  # noqa: F401  -- real binary check; the lazy top-level import false-passes the cu13/cu129 wheel mismatch
-
-
-@stage("ray")
-def check_ray():
-    import ray  # noqa: F401
-
-
-@stage("env pins")
-def check_pins():
-    import importlib.metadata as _m
-
-    want = {
-        "torch": "2.11.0+cu126",
-        "numpy": "2.3.5",
-        "transformers": "5.10.2",
-        "vllm": "0.22.1",
-        "ray": "2.55.1",
-        "triton": "3.6.0",
-        "nvidia-nccl-cu12": "2.28.9",
-    }
-    bad = []
-    for pkg, ver in want.items():
-        got = _m.version(pkg)
-        if not got.startswith(ver):
-            bad.append(f"{pkg}={got} (want {ver})")
-    if bad:
-        raise AssertionError("pin drift: " + "; ".join(bad))
-
-
 def module_file_is_under(module, root):
     """True iff `module` was loaded from a file inside directory `root`.
 
-    Pure-python helper for the container import-path checks (unit-tested in
+    Pure-python helper for the import-path checks (unit-tested in
     tests/unit_tests/test_env_validate_container.py). Namespace-package modules
     without __file__ are resolved via their first __path__ entry.
     """
@@ -279,8 +254,11 @@ def module_file_is_under(module, root):
 
 
 # ============================================
-# Container-mode stages (INFR-68) — assert the container sees the repo's code,
-# the Slingshot CXI plugin, and a workable ft_launcher/toolchain.
+# Environment-integrity stages (INFR-68) — assert the container sees the repo's
+# code, the Slingshot CXI plugin, and a workable ft_launcher/toolchain. These are
+# the checks that catch a bad image swap or a half-finished setup, so they run
+# unconditionally: the container is the only environment and every one of these
+# is load-bearing for a real multi-node run.
 # ============================================
 @stage("import paths (repo wins over image)")
 def check_import_paths():
@@ -294,7 +272,7 @@ def check_import_paths():
     assert module_file_is_under(megatron.bridge, os.path.join(REPO_ROOT, "src")), (
         f"megatron.bridge resolves to {megatron.bridge.__file__}, not this repo's src/ — "
         "the image likely ships a regular (non-namespace) megatron package that defeats "
-        "PYTHONPATH; see docs/container-pipeline.md contingencies"
+        "PYTHONPATH; see docs/environment.md contingencies"
     )
     assert module_file_is_under(megatron.core, os.path.join(REPO_ROOT, "3rdparty", "Megatron-LM")), (
         f"megatron.core resolves to {megatron.core.__file__}, not 3rdparty/Megatron-LM — "
@@ -306,8 +284,11 @@ def check_import_paths():
 def check_nccl_plugin():
     """Assert the CXI aws-ofi-nccl plugin exists and its shared-lib deps resolve."""
     plugin = os.environ.get("NCCL_NET_PLUGIN")
-    assert plugin, "NCCL_NET_PLUGIN not set — source pipeline_container_activate.sh"
-    assert os.path.isfile(plugin), f"NCCL_NET_PLUGIN={plugin} does not exist — run pipeline_container_build_ofi.sh"
+    assert plugin, "NCCL_NET_PLUGIN not set — source pipeline_env_activate.sh (in-container)"
+    assert os.path.isfile(plugin), (
+        f"NCCL_NET_PLUGIN={plugin} does not exist — the Slingshot NCCL stack is not built. "
+        "Fix: bash pipeline_env_setup.sh   (one-time per image tag, ~20 min on a GPU node)"
+    )
     # CDLL proves the plugin's own deps (libfabric CXI, libcxi, libnl) resolve
     # inside the container — the exact failure mode that silently degrades NCCL
     # to ~2.3 GB/s TCP if broken.
@@ -333,13 +314,29 @@ def check_dataset_helpers():
     # proves the image toolchain (compiler, python headers, pybind11) works.
     from megatron.core.datasets.utils import compile_helpers
 
-    compile_helpers()
+    # compile_helpers() reports a failed `make` by calling sys.exit(1), and
+    # SystemExit derives from BaseException, NOT Exception — so the @stage
+    # wrapper's `except Exception` did not catch it and a broken image toolchain
+    # killed the whole validator here, silently, with no summary and no listing
+    # of the stages that had already passed. Translate it into an ordinary stage
+    # failure so the run continues and the summary still prints.
+    try:
+        compile_helpers()
+    except SystemExit as e:
+        raise RuntimeError(
+            f"megatron compile_helpers() called sys.exit({e.code}) — the JIT `make` of the "
+            "dataset index helper failed. Check the `make` output above for the image's "
+            "compiler / Python headers / pybind11."
+        ) from e
     import megatron.core.datasets.helpers  # noqa: F401
 
 
-@stage("version report")
+# NOT a @stage: this only prints. A scored stage with no assertion can never
+# fail, so it inflated the "N passed" count with a check that proves nothing —
+# which makes the pass count useless as a health signal. It is an informational
+# report instead, excluded from `results` and therefore from the summary.
 def report_versions():
-    """Print the environment version table (informational, always passes)."""
+    """Print the environment version table (informational only — nothing is scored)."""
     import importlib.metadata as _m
 
     def v(pkg):
@@ -368,17 +365,12 @@ def report_versions():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Validate Megatron Bridge installation")
+    parser = argparse.ArgumentParser(description="Validate the Megatron Bridge environment (runs in-container)")
     parser.add_argument("--run-training", action="store_true", help="Also run a tiny training job")
-    parser.add_argument(
-        "--container",
-        action="store_true",
-        help="Container-mode: skip venv-only checks (vllm/ray/pins), add container checks",
-    )
     args = parser.parse_args()
 
     print("=" * 50)
-    print("  Megatron Bridge Installation Validation")
+    print("  Megatron Bridge Environment Validation")
     print("=" * 50)
     print()
 
@@ -396,18 +388,11 @@ def main():
     check_mamba()
     check_causal_conv()
 
-    if args.container:
-        # Venv-only checks skipped: vllm/ray are a bare-metal-only stack (the
-        # coherence vllm backend), and the exact-pin table describes the venv,
-        # not the image (the image's versions are surfaced by the report below).
-        print("\nStage 2b: grouped_gemm (vLLM/Ray/pins are venv-only — skipped)")
-        check_grouped_gemm()
-    else:
-        print("\nStage 2b: Inference backend (vLLM/Ray) + grouped_gemm + env pins")
-        check_grouped_gemm()
-        check_vllm()
-        check_ray()
-        check_pins()
+    # No exact-pin table here: the versions are the image's, fixed by
+    # CONTAINER_IMAGE_TAG rather than by a lockfile, and they are reported
+    # verbatim by the informational version report at the end.
+    print("\nStage 2b: MoE grouped GEMM")
+    check_grouped_gemm()
 
     print("\nStage 3: CUDA availability")
     check_cuda()
@@ -419,13 +404,21 @@ def main():
     check_vanilla_recipe()
     check_nemotron_recipe()
 
-    if args.container:
-        print("\nStage 5b: Container-specific checks")
-        check_import_paths()
-        check_nccl_plugin()
-        check_ft_launcher_flags()
-        check_dataset_helpers()
+    print("\nStage 5b: Environment integrity (repo code, Slingshot, toolchain)")
+    check_import_paths()
+    check_nccl_plugin()
+    check_ft_launcher_flags()
+    check_dataset_helpers()
+
+    # Informational, not scored (see report_versions). Guarded because it is now
+    # undecorated: it touches torch.cuda.nccl.version(), which raises on a broken
+    # CUDA stack, and a report must never abort the run before the summary prints
+    # (the CUDA stack itself is already scored by stage 3).
+    print("\nVersion report (informational — not a scored check)")
+    try:
         report_versions()
+    except Exception as e:  # broad on purpose: report-only, real checks are scored above
+        print(f"  [{WARN}] version report unavailable: {e}")
 
     if args.run_training:
         print("\nStage 6: Tiny training run")

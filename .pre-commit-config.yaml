@@ -1,3 +1,19 @@
+# ==============================================================================
+# pre-commit configuration.
+#
+# TWO environments are in play here — keep them straight when editing:
+#
+#   * pre-commit itself runs on the HOST out of the repo-local tooling venv
+#     (.venv, built by scripts/install_claude_tooling.sh; .git/hooks/pre-commit
+#     execs .venv/bin/python3 -m pre_commit), and it builds the `repo:`-based
+#     hooks below (whitespace, ruff) in its own isolated envs. None of that needs
+#     torch, so those hooks work anywhere — login node included. Keep it that way.
+#
+#   * the unit tests CANNOT run there: tests/unit_tests/conftest.py imports torch
+#     and megatron.core at collection time, and neither exists on the host any
+#     more. They run inside the Apptainer container — the repo's only execution
+#     environment — via ./pipeline_env_exec.sh. See docs/environment.md.
+# ==============================================================================
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.4.0
@@ -37,12 +53,95 @@ repos:
         types: [file]
 
       - id: pytest-unit-tests
-        name: "pytest tests/unit_tests (no GPU)"
+        # Name says "or loud skip" so that even pre-commit's own one-line
+        # "...Passed" cannot be read as "the tests passed" — the banner printed
+        # underneath (see verbose:) says which of the two actually happened.
+        name: "pytest tests/unit_tests (in container, or loud skip)"
         language: system
-        # --no-sync: bare `uv run` implicitly syncs the venv, and exact-mode sync
-        # PRUNES the manually-pinned torch stack (CLAUDE.md ARM workaround #8) —
-        # a commit must never mutate the shared environment.
-        entry: uv run --no-sync pytest tests/unit_tests/ -x -q --tb=short
+        # verbose: pre-commit swallows a PASSING hook's output. Without this the
+        # "container unavailable, tests NOT run" banner below would be invisible
+        # and the commit would look tested when it wasn't — the exact silent-pass
+        # failure this hook is built to avoid. It also means a real run prints its
+        # pytest summary, so "passed" is always something you saw.
+        verbose: true
+        # WHERE THIS RUNS: inside the pipeline container, via pipeline_env_exec.sh.
+        # The host tooling venv has no torch and no megatron.core, and
+        # tests/unit_tests/conftest.py imports both at collection time, so an
+        # on-host run cannot even collect. Measured 2026-07-25: 5428 tests
+        # collected in ~31 s in-container (~1 min wall including container start).
+        #
+        # Deliberate details (the in-container short-circuit is commented inline):
+        #   * scratch cwd — `cd $(mktemp -d)` INSIDE the container before invoking
+        #     pytest. The autouse cleanup_local_folder fixture asserts
+        #     ./nemo_experiments does not exist in the cwd and rmtree()s it on
+        #     teardown, so running from the repo root would fail every test AND
+        #     delete a real nemo_experiments dir in a working checkout. Test paths
+        #     are absolute, so a scratch cwd costs nothing.
+        #   * -m "not pleasefixme" — this repo's documented quarantine marker for
+        #     known-broken tests ("will be skipped in CI"). Without it a single
+        #     quarantined test blocks every commit that stages a .py file.
+        #   * no `uv` anywhere — the retired `uv run --no-sync` incantation existed
+        #     only because a bare `uv run` implicitly syncs and, in exact mode,
+        #     uninstalled 16 packages (pytest itself included) from the very venv
+        #     it was about to run in. Calling the container's python directly
+        #     removes that class of failure outright.
+        #   * no `unset LD_PRELOAD` — that guard (module envs preload an OLD
+        #     libnccl that breaks `import torch` with "undefined symbol
+        #     ncclCommShrink") now lives in pipeline_env_exec.sh, which scrubs the
+        #     host toolchain/venv env for every containerised command.
+        #
+        # If the container is not usable on this host, SKIP LOUDLY — print why and
+        # how to run the tests by hand, and never claim a pass. Guards, in order:
+        #   1. apptainer on PATH;
+        #   2. an NVIDIA GPU is visible — pipeline_env_exec.sh runs
+        #      `apptainer --nv`, which needs the host driver libs, so this hook
+        #      cannot run on a login node;
+        #   3. env_config_require from pipeline_env_config.env — the single source
+        #      of truth for "SIF + Slingshot build are present", reused rather than
+        #      re-deriving those paths here; its FATAL lines become the skip reason.
+        entry: |
+          bash -c '
+            REPO="$PWD"   # pre-commit always runs hooks from the repo root
+            # Already INSIDE the container (committing from an apptainer shell)?
+            # Run pytest directly: nesting apptainer exec is unsupported, and the
+            # guards below would otherwise report "apptainer not on PATH" and skip
+            # a suite that is perfectly runnable right here. Hence: before them.
+            if [ -d /.singularity.d ]; then
+              . "$REPO/pipeline_env_activate.sh" || exit 1
+              T="$(mktemp -d)"; cd "$T" || exit 1
+              python -m pytest "$REPO/tests/unit_tests" -x -q --tb=short -m "not pleasefixme"
+              rc=$?; cd /; rm -rf "$T"; exit $rc
+            fi
+            SKIP=""
+            PROBE=""
+            if ! command -v apptainer >/dev/null 2>&1; then
+              SKIP="apptainer is not on PATH"
+            elif ! nvidia-smi -L >/dev/null 2>&1; then
+              SKIP="no NVIDIA GPU visible on this host (the exec shim runs apptainer --nv)"
+            else
+              PROBE="$( { REPO_DIR="$REPO"; . "$REPO/pipeline_env_config.env" && env_config_require; } 2>&1 )" \
+                || SKIP="the container environment is not built/complete on this system"
+            fi
+            if [ -n "$SKIP" ]; then
+              echo "######################################################################"
+              echo "## pre-commit: tests/unit_tests were NOT RUN — NOTHING WAS VERIFIED."
+              echo "##   reason: $SKIP"
+              [ -n "$PROBE" ] && echo "$PROBE" | sed "s/^/##   | /"
+              echo "##"
+              echo "## These tests import torch + megatron.core at collection, so they only"
+              echo "## run inside the pipeline container (docs/environment.md)."
+              echo "##   build it (one-time, on a GPU node):  bash pipeline_env_setup.sh"
+              echo "##   run them by hand (on a GPU node):"
+              echo "##     ./pipeline_env_exec.sh \"cd $REPO; source pipeline_env_activate.sh; cd \$(mktemp -d); python -m pytest $REPO/tests/unit_tests -x -q\""
+              echo "## Do NOT read this hook as a pass: run the command above before merging."
+              echo "######################################################################"
+              exit 0
+            fi
+            # exec: the container exit status becomes this hook exit status
+            # directly (no single quotes anywhere in here — they would terminate
+            # the outer bash -c script).
+            exec "$REPO/pipeline_env_exec.sh" "cd $REPO; source pipeline_env_activate.sh; T=\$(mktemp -d); cd \"\$T\"; python -m pytest $REPO/tests/unit_tests -x -q --tb=short -m \"not pleasefixme\"; rc=\$?; cd /; rm -rf \"\$T\"; exit \$rc"
+          '
         pass_filenames: false
         types: [python]
         stages: [pre-commit]

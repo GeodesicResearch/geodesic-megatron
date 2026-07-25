@@ -5,29 +5,21 @@ Generates responses to diverse prompts so you can eyeball coherence,
 formatting, and instruction-following after training. Results are logged
 to W&B as a table for easy comparison across models and checkpoints.
 
-Four backends (--backend):
+Three backends (--backend):
     hf (default): load with transformers device_map="auto" on one node.
         Right for models that fit a single node (Nano 30B: 1 GPU; Super
         120B: 4 GPUs). model_path is a HF Hub id or local HF dir.
     megatron: bridge-load a *Megatron* checkpoint and generate via the
         Megatron forward pass under torchrun (multi-node). Right for models
-        too large for one node (Ultra 550B ~1.1 TB BF16). Historically, vLLM
-        <0.21 could not serve the BF16 hybrid due to PP>1 rank-sync bugs in
-        the Ray executor; vLLM 0.22.1+ with RayExecutorV2 resolves this. See
-        docs/ultra-550b-training-and-conversion.md for full multi-node vLLM
-        +pipeline-parallel support and Megatron-native alternatives.
-        model_path is a Megatron checkpoint dir; --hf-model supplies the
-        architecture config.
-    vllm: run vLLM DIRECTLY in-process (offline LLM() API) — single-node
-        (e.g. Super 120B at TP=4) or multi-node (Ultra 550B at TP=4/PP=8 over
-        a Ray cluster the submit launcher brings up). Requires vLLM 0.22.1
-        (installed by pipeline_env_setup.sh Phase 7g); 0.21+
-        defaults to RayExecutorV2, which fixes the hybrid+PP KV-cache KeyError
-        of older Ray executors and propagates FI_*/NCCL env to workers.
-        model_path is a HF id/dir; note Mamba n_groups=8 caps TP at 8 for the
-        Nemotron-3 hybrids (so multi-node 550B uses PP).
-    endpoint: hit a running vLLM OpenAI-compatible server (e.g. served via
-        the dataset-builder serve harness) at --base-url / --discovery-file.
+        too large for one node (Ultra 550B ~1.1 TB BF16), and the only
+        backend that reads a Megatron checkpoint directly — no HF export
+        step. model_path is a Megatron checkpoint dir; --hf-model supplies
+        the architecture config. See
+        docs/ultra-550b-training-and-conversion.md for the 550B workflow.
+    endpoint: hit a running OpenAI-compatible inference server (e.g. one
+        stood up by the dataset-builder serve harness) at --base-url /
+        --discovery-file. This backend only speaks HTTP over the stdlib, so
+        the server can be anywhere — nothing is loaded in this process.
         model_path is the served model id (auto-discovered when possible).
 
 Two generation modes (--generation-mode):
@@ -156,7 +148,7 @@ def generate_hf(args, prompts) -> list[str]:
 
 
 # ==============================================================================
-# Backend: endpoint — vLLM OpenAI-compatible server (stdlib HTTP)
+# Backend: endpoint — remote OpenAI-compatible server (stdlib HTTP, no local model)
 # ==============================================================================
 
 
@@ -177,7 +169,7 @@ def _resolve_base_url(args) -> str:
         raise SystemExit("--backend endpoint requires --base-url or --discovery-file")
     url = url.rstrip("/")
     if not url.endswith("/v1"):
-        url = url + "/v1"  # vLLM's OpenAI API lives under /v1
+        url = url + "/v1"  # the OpenAI-compatible API lives under /v1
     return url
 
 
@@ -390,67 +382,6 @@ def generate_megatron(args, prompts) -> list[str]:
 
 
 # ==============================================================================
-# Backend: vllm — in-process vLLM offline API (single- or multi-node)
-# ==============================================================================
-
-
-def generate_vllm(args, prompts) -> list[str]:
-    """One generation per prompt via vllm.LLM() running in this process.
-
-    Single node: mp executor (TP across the node's GPUs). Multi node: ray
-    executor over a Ray cluster the submit launcher brings up first (vLLM
-    0.21+ defaults to RayExecutorV2 — required for PP>1 with the NemotronH
-    hybrids; the old Ray executor has a rank-sync bug, vllm#41287). Mamba
-    n_groups=8 caps TP at 8 for Nemotron-3; use PP for more GPUs.
-    """
-    from vllm import LLM, SamplingParams
-
-    executor = args.vllm_executor
-    if executor == "auto":
-        executor = "ray" if args.pp > 1 or os.environ.get("COH_VLLM_MULTINODE") == "1" else "mp"
-    kwargs = dict(
-        model=args.model_path,
-        tensor_parallel_size=args.tp,
-        pipeline_parallel_size=args.pp,
-        distributed_executor_backend=executor,
-        trust_remote_code=args.trust_remote_code,
-        gpu_memory_utilization=args.gpu_mem_util,
-        max_model_len=args.max_model_len,
-        dtype="bfloat16",
-        enforce_eager=True,  # ARM/GH200: keep torch.compile out of the inference path
-        enable_expert_parallel=not args.no_expert_parallel,
-        load_format=args.vllm_load_format,
-        safetensors_load_strategy=args.safetensors_load_strategy,
-        max_parallel_loading_workers=args.max_parallel_loading_workers,
-        # FlashInfer runtime JIT (autotune) spawns parallel nvcc/cicc compiles that
-        # blew the 460 GB/node cgroup (observed: anon 354 GB, top RSS = cicc) AND
-        # uses the pip CUDA-13.3 nvcc whose output the 12.7 driver rejects. Off by
-        # default here; the AOT flashinfer-cubin kernels (when applicable) still work.
-        kernel_config={
-            "enable_flashinfer_autotune": args.flashinfer_autotune,
-            # 'auto' routes large-EP MoE through flashinfer_cutlass_moe, whose JIT
-            # build_and_load FileLocks ~/.cache/flashinfer on NFS HOME -> Errno 116
-            # across many ray workers. Triton fused-MoE uses the node-local cache.
-            "moe_backend": args.vllm_moe_backend,
-        },
-    )
-    if args.vllm_quantization:
-        kwargs["quantization"] = args.vllm_quantization
-    if args.revision:
-        kwargs["revision"] = args.revision
-    print(f"vLLM LLM() init: tp={args.tp} pp={args.pp} executor={executor} quant={args.vllm_quantization}")
-    llm = LLM(**kwargs)
-    sampling = SamplingParams(temperature=args.temperature, max_tokens=args.max_tokens)
-
-    if args.generation_mode == "chat":
-        conversations = [build_chat_messages(p, args.system_prompt) for p in prompts]
-        outs = llm.chat(conversations, sampling_params=sampling)
-    else:
-        outs = llm.generate(prompts, sampling_params=sampling)
-    return [o.outputs[0].text.strip() if o.outputs else "" for o in outs]
-
-
-# ==============================================================================
 # Shared reporting
 # ==============================================================================
 
@@ -470,10 +401,10 @@ def main():
     parser.add_argument("model_path", help="HF id/path (hf), Megatron ckpt dir (megatron), or served id (endpoint)")
     parser.add_argument(
         "--backend",
-        choices=["hf", "megatron", "vllm", "endpoint"],
+        choices=["hf", "megatron", "endpoint"],
         default="hf",
-        help="hf: transformers device_map (single node). megatron: bridge-load a Megatron ckpt under torchrun. "
-        "vllm: in-process vLLM (single- or multi-node). endpoint: a running vLLM OpenAI server.",
+        help="hf: transformers device_map (single node). megatron: bridge-load a Megatron ckpt under torchrun "
+        "(multi-node). endpoint: a running OpenAI-compatible server.",
     )
     parser.add_argument(
         "--revision",
@@ -509,53 +440,11 @@ def main():
     parser.add_argument(
         "--tokenizer", default=None, help="megatron: tokenizer/chat-template HF id (default: --hf-model)"
     )
-    parser.add_argument("--tp", type=int, default=4, help="megatron/vllm: tensor parallel")
-    parser.add_argument(
-        "--pp", type=int, default=None, help="megatron/vllm: pipeline parallel (default: 6 megatron, 1 vllm)"
-    )
+    parser.add_argument("--tp", type=int, default=4, help="megatron: tensor parallel")
+    parser.add_argument("--pp", type=int, default=None, help="megatron: pipeline parallel (default: 6)")
     parser.add_argument("--ep", type=int, default=4)
     parser.add_argument("--etp", type=int, default=1)
     parser.add_argument("--trust-remote-code", action="store_true")
-    # vllm backend
-    parser.add_argument(
-        "--vllm-executor",
-        choices=["auto", "mp", "ray"],
-        default="auto",
-        help="vllm: distributed executor (auto = mp single-node, ray multi-node)",
-    )
-    parser.add_argument("--vllm-quantization", default=None, help="vllm: e.g. fp8 (omit for native dtype)")
-    parser.add_argument("--gpu-mem-util", type=float, default=0.90, help="vllm: --gpu-memory-utilization")
-    parser.add_argument("--max-model-len", type=int, default=8192, help="vllm: context length")
-    parser.add_argument("--no-expert-parallel", action="store_true", help="vllm: disable expert parallel for MoE")
-    parser.add_argument(
-        "--vllm-moe-backend",
-        default="triton",
-        help="vllm: MoE kernel backend ('triton' default — 'auto' selects flashinfer "
-        "cutlass for large-EP shapes, whose runtime JIT is broken on this cluster)",
-    )
-    parser.add_argument(
-        "--flashinfer-autotune",
-        action="store_true",
-        help="vllm: re-enable FlashInfer JIT autotune (OFF by default — its parallel "
-        "nvcc compiles OOM the node cgroup and target the wrong CUDA major here)",
-    )
-    parser.add_argument(
-        "--max-parallel-loading-workers",
-        type=int,
-        default=2,
-        help="vllm: throttle concurrent per-node weight loading (4 unthrottled workers "
-        "host-OOM the 460 GB/node cgroup on 120B+; 2 is safe, 1 is sequential)",
-    )
-    parser.add_argument(
-        "--vllm-load-format", default="auto", help="vllm: weight loader (auto/safetensors/fastsafetensors)"
-    )
-    parser.add_argument(
-        "--safetensors-load-strategy",
-        default="lazy",
-        help="vllm: 'lazy' (default; mmap slicing — the pre-0.20 behavior) avoids vLLM>=0.20's "
-        "Lustre auto-prefetch, which reads the WHOLE checkpoint into RAM per worker and "
-        "OOM-kills the 460 GB/node SLURM cgroup for 120B+ models on this cluster",
-    )
     # endpoint backend
     parser.add_argument("--base-url", default=None, help="endpoint: e.g. http://nidXXXX:8000 (/v1 appended if absent)")
     parser.add_argument("--discovery-file", default=None, help="endpoint: file the serve job writes the URL to")
@@ -566,6 +455,9 @@ def main():
     if args.backend == "megatron" and not args.hf_model:
         parser.error("--backend megatron requires --hf-model")
     if args.pp is None:
+        # Only the megatron backend consumes --pp (it sets the inference pipeline
+        # depth); 6 is the validated Ultra-550B layout. Other backends never read
+        # it, but it is still logged to W&B, so keep it a sane 1 there.
         args.pp = 6 if args.backend == "megatron" else 1
 
     prompts = COMPLETION_PROMPTS if args.generation_mode == "completion" else CHAT_PROMPTS
@@ -598,9 +490,9 @@ def main():
         print(f"System prompt: {args.system_prompt}")
     print("=" * 80)
 
-    gens = {"hf": generate_hf, "megatron": generate_megatron, "vllm": generate_vllm, "endpoint": generate_endpoint}[
-        args.backend
-    ](args, prompts)
+    gens = {"hf": generate_hf, "megatron": generate_megatron, "endpoint": generate_endpoint}[args.backend](
+        args, prompts
+    )
 
     if not is_rank0():  # torchrun workers: rank 0 owns reporting
         return

@@ -1,435 +1,325 @@
 #!/bin/bash
-# setup_megatron_bridge.sh - Install Megatron Bridge on Isambard ARM HPC
+# ==============================================================================
+# Environment Pipeline — the whole install, in one command (INFR-68)
 #
-# Usage:
-#   bash setup_megatron_bridge.sh
+#   bash pipeline_env_setup.sh                 # on a GPU node (compute/tunnel)
+#   isambard_sbatch pipeline_env_submit.sbatch setup
 #
-# Prerequisites:
-#   - Run on a compute node with GPU access (required for CUDA kernel compilation)
-#   - uv installed (curl -LsSf https://astral.sh/uv/install.sh | sh)
+# Four idempotent steps, each announcing its skip explicitly (never silent):
+#   1. sif        NGC image -> SIF on project storage    (skip: SIF exists)
+#   2. slingshot  Option-B NCCL + aws-ofi-nccl build     (skip: hostlibs exist; NEEDS GPU)
+#   3. overlay    Python overlay packages                (skip: provenance matches)
+#   4. validate   pipeline_env_validate.py in-container  (NEEDS GPU)
 #
-# This script will:
-#   1. Load required modules and set compilers
-#   2. Create a Python 3.12 virtual environment
-#   3. Install PyTorch with CUDA support (aarch64)
-#   4. Initialize Megatron-Core submodule
-#   5. Install Megatron Bridge and all dependencies
-#   6. Build transformer-engine, mamba-ssm, etc. from source
-#   7. Apply ARM-specific patches (sm_90a, NCCL, wandb)
-#   8. Run validation checks
-
-set -e
+# On a login node (no GPU) steps 1 and 3 run and the script exits telling you how
+# to finish 2+4. No silent degradation: every skip and deferral is printed.
+#
+# Flags:
+#   --force            redo every step (re-pull the SIF, rebuild the stack)
+#   --only <step>      run one step only: sif | slingshot | overlay | validate
+#
+# ALL parameters (image URI, SIF path, output dirs, component versions) live in
+# pipeline_env_config.env — override with the GEODESIC_CONTAINER_* env vars
+# documented there, never with extra CLI flags.
+# ==============================================================================
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+source "$SCRIPT_DIR/pipeline_env_config.env"
 
-echo "=============================================="
-echo "  Megatron Bridge Setup for Isambard (ARM)"
-echo "=============================================="
-echo "Architecture: $(uname -m)"
-echo "Hostname: $(hostname)"
-echo "Working directory: $SCRIPT_DIR"
-echo ""
+# Slingshot component versions. These start at the BriCS-recipe pins (current
+# upstream releases) per the INFR-68 latest-first policy; bump here and re-run
+# `--only slingshot --force` plus a validate to qualify newer ones.
+OFI_NCCL_VERSION="${GEODESIC_CONTAINER_OFI_NCCL_VERSION:-v2.29.2-1}"
+OFI_HWLOC_VERSION="${GEODESIC_CONTAINER_OFI_HWLOC_VERSION:-v2.13}"
+OFI_PLUGIN_VERSION="${GEODESIC_CONTAINER_OFI_PLUGIN_VERSION:-v1.18.0}"
 
-# ============================================
-# Configuration
-# ============================================
-# GEODESIC_VENV_DIR builds the env at an alternate path without clobbering the shared
-# .venv symlink target. Defaults to .venv.
-VENV_DIR="${GEODESIC_VENV_DIR:-$SCRIPT_DIR/.venv}"
-PYTHON_VERSION=3.12
-VENV_SITE_PACKAGES="$VENV_DIR/lib/python${PYTHON_VERSION}/site-packages"
-VENV_PYTHON="$VENV_DIR/bin/python"
+FORCE=0
+ONLY=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force) FORCE=1 ;;
+        --only)
+            shift
+            ONLY="${1:-}"
+            case "$ONLY" in
+                sif|slingshot|overlay|validate) ;;
+                *) echo "FATAL [env-setup]: --only takes one of: sif slingshot overlay validate" >&2; exit 1 ;;
+            esac
+            ;;
+        *) echo "FATAL [env-setup]: unknown argument '$1' (only --force and --only <step>;" >&2
+           echo "  all other parameters live in pipeline_env_config.env)" >&2; exit 1 ;;
+    esac
+    shift
+done
 
-# ============================================
-# Phase 1: Module loading and compiler setup
-# ============================================
-echo "=== Phase 1: Loading modules and setting compilers ==="
-# Note: Do NOT load brics/nccl during setup - torch bundles its own NCCL
-# and loading system NCCL causes symbol conflicts (ncclCommShrink)
-module load cuda/12.6 || echo "Warning: cuda/12.6 module not found"
-module load cudatoolkit 2>/dev/null || true
+want() { [ -z "$ONLY" ] || [ "$ONLY" = "$1" ]; }
 
-export CC=/usr/bin/gcc-12
-export CXX=/usr/bin/g++-12
-export CUDAHOSTCXX=/usr/bin/g++-12  # Tell nvcc to use gcc-12 as host compiler (system gcc is 7.5, too old for <filesystem>)
-export MAX_JOBS=4
-export TORCH_CUDA_ARCH_LIST="9.0"
-export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
-export TMPDIR=/projects/a5k/public/tmp
-mkdir -p "$TMPDIR"
+HAS_GPU=0
+command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1 && HAS_GPU=1
 
-echo "CC=$CC"
-echo "CXX=$CXX"
-echo "CUDAHOSTCXX=$CUDAHOSTCXX"
-echo "CUDA_HOME=$CUDA_HOME"
-echo "TORCH_CUDA_ARCH_LIST=$TORCH_CUDA_ARCH_LIST"
+echo "===== Environment setup (image: $CONTAINER_IMAGE_URI) ====="
 
-# Verify gcc-12 exists
-if ! command -v "$CC" &> /dev/null; then
-    echo "ERROR: gcc-12 not found at $CC"
-    exit 1
-fi
-
-# ============================================
-# Phase 2: Create Python 3.12 virtual environment
-# ============================================
-echo ""
-echo "=== Phase 2: Creating virtual environment ==="
-if ! command -v uv &> /dev/null; then
-    echo "ERROR: uv not found. Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
-fi
-echo "uv version: $(uv --version)"
-
-if [ -d "$VENV_DIR" ]; then
-    echo "Removing existing .venv directory..."
-    rm -rf "$VENV_DIR"
-fi
-
-# Use --seed to include pip (needed for PyTorch index install)
-uv venv --python "$PYTHON_VERSION" --seed "$VENV_DIR"
-echo "Virtual environment created at: $VENV_DIR"
-
-# ============================================
-# Phase 3: NCCL preload path (torch is installed by uv, see Phase 6)
-# ============================================
-echo ""
-echo "=== Phase 3: NCCL preload path (torch via uv) ==="
-# torch/torchvision/torchaudio are EXACT-pinned in pyproject.toml and routed to the
-# pytorch-cu126 index via [tool.uv.sources]; uv installs them in Phase 6 (pass 1) from
-# uv.lock. No manual pip step, no PIP_CONSTRAINT — the lock + index pin the aarch64
-# cu126 wheels, and `uv sync --locked` keeps the whole closure at the validated versions.
+# ==============================================================================
+# Step 1 — SIF acquisition (CPU-only: safe on a login node)
 #
-# Define NCCL_LIBRARY / LD_PRELOAD now (referenced by the uv-sync build env and Phase 7).
-# The .so only exists after pass 1 installs nvidia-nccl-cu12; until then the loader
-# prints a benign "cannot be preloaded ... ignored" warning.
-export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
-export LD_PRELOAD="$NCCL_LIBRARY"
+# Writes ${CONTAINER_SIF}.source.txt (URI, date, apptainer inspect) so every job
+# log can echo the exact provenance of the image it ran under.
+# ==============================================================================
+setup_sif() {
+    command -v apptainer >/dev/null || { echo "FATAL [env-setup/sif]: apptainer not on PATH" >&2; exit 1; }
+    mkdir -p "$(dirname "$CONTAINER_SIF")" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
 
-# ============================================
-# Phase 4: Initialize Megatron-Core submodule
-# ============================================
-echo ""
-echo "=== Phase 4: Initializing Megatron-Core submodule ==="
-if [ -f 3rdparty/Megatron-LM/pyproject.toml ] || [ -f 3rdparty/Megatron-LM/setup.py ]; then
-    echo "Megatron-Core submodule already populated; skipping update"
-else
-    git submodule update --init 3rdparty/Megatron-LM
-fi
-echo "Megatron-Core submodule ready at 3rdparty/Megatron-LM"
+    # Project-quota preflight. Transient need ~= 2x image size (OCI layers in the
+    # cache + the SIF). Never blocks — prints loudly so a near-full quota is a
+    # conscious decision, mirroring the isambard_sbatch storage report.
+    local quota_path=/projects/a5k proj_id=""
+    if command -v lfs >/dev/null; then
+        proj_id="$(lfs project -d "$quota_path" 2>/dev/null | awk '{print $1}')" || proj_id=""
+        if [ -n "$proj_id" ]; then
+            echo "[env-setup/sif] Project quota for $quota_path (need ~50 GB transient for a ~25 GB image):"
+            lfs quota -p "$proj_id" "$quota_path" || true
+        fi
+    fi
 
-# ============================================
-# Phase 5: Set NVIDIA library paths for builds
-# ============================================
-echo ""
-echo "=== Phase 5: Setting NVIDIA library paths ==="
+    echo "[env-setup/sif] Pulling $CONTAINER_IMAGE_URI -> $CONTAINER_SIF"
+    echo "[env-setup/sif] APPTAINER_CACHEDIR=$APPTAINER_CACHEDIR APPTAINER_TMPDIR=$APPTAINER_TMPDIR"
+    # Pull to a .partial path and move into place only on success. apptainer pull
+    # writes straight to its target, so an interrupted or over-quota pull (this
+    # needs ~50 GB transient and the project quota runs hot) would otherwise leave
+    # a TRUNCATED SIF at the real path — which passes the `-f` existence check in
+    # env_config_require, makes this step print "SIF present — skipping", and only
+    # surfaces as a bizarre failure inside a 16-node job. The rename is atomic.
+    apptainer pull --force "${CONTAINER_SIF}.partial" "$CONTAINER_IMAGE_URI"
+    mv -f "${CONTAINER_SIF}.partial" "$CONTAINER_SIF"
 
-# LD_LIBRARY_PATH for NVIDIA libraries from venv packages
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/nccl/lib:$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/cudnn/lib:$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/cublas/lib:$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/nvjitlink/lib:$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/cusparse/lib:$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/cufft/lib:$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/curand/lib:$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/cusolver/lib:$LD_LIBRARY_PATH"
+    {
+        echo "image_uri: $CONTAINER_IMAGE_URI"
+        echo "pulled_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "pulled_by: $USER"
+        echo "apptainer_version: $(apptainer --version)"
+        echo "--- apptainer inspect ---"
+        apptainer inspect "$CONTAINER_SIF"
+    } > "${CONTAINER_SIF}.source.txt"
 
-# Include paths for compilation (NCCL, cuDNN, cuBLAS)
-# NCCL include is CRITICAL - TE's CMake needs nccl.h
-export CPLUS_INCLUDE_PATH="$VENV_SITE_PACKAGES/nvidia/nccl/include:$VENV_SITE_PACKAGES/nvidia/cudnn/include:$VENV_SITE_PACKAGES/nvidia/cublas/include:${CPLUS_INCLUDE_PATH:-}"
-export C_INCLUDE_PATH="$VENV_SITE_PACKAGES/nvidia/nccl/include:$VENV_SITE_PACKAGES/nvidia/cudnn/include:$VENV_SITE_PACKAGES/nvidia/cublas/include:${C_INCLUDE_PATH:-}"
-export LIBRARY_PATH="$VENV_SITE_PACKAGES/nvidia/nccl/lib:$VENV_SITE_PACKAGES/nvidia/cudnn/lib:$VENV_SITE_PACKAGES/nvidia/cublas/lib:${LIBRARY_PATH:-}"
-export CUDNN_PATH="$VENV_SITE_PACKAGES/nvidia/cudnn"
+    echo "[env-setup/sif] Done. SIF: $CONTAINER_SIF (provenance: ${CONTAINER_SIF}.source.txt)"
+    echo "[env-setup/sif] Cache hygiene: 'apptainer cache clean --days 30' reclaims old OCI layers"
+}
 
-# TE's CMake checks these env vars for NCCL location
-export NVTE_NCCL_INCLUDE="$VENV_SITE_PACKAGES/nvidia/nccl/include"
-export NVTE_NCCL_LIB="$VENV_SITE_PACKAGES/nvidia/nccl/lib"
+# ==============================================================================
+# Step 2 — Slingshot NCCL stack, the official Isambard "Option B" recipe
+# (docs.isambard.ac.uk → guides/containers + guides/nccl,
+# example-data/apptainer/build_nccl.sh)
+#
+# Because the NGC image bundles a NEWER CUDA runtime than the host driver
+# supports natively, NCCL and the aws-ofi-nccl CXI plugin must be built INSIDE
+# the image against the image's CUDA + the host's Cray libfabric. The built
+# libraries live on shared project storage (never baked into the SIF) and are
+# bind-mounted at /opt/slingshot at runtime.
+#
+# Builds into $CONTAINER_SLINGSHOT_DIR:
+#   nccl/          NCCL, compiled vs image CUDA, sm_90 (GH200)
+#   hwloc/         build dep of aws-ofi-nccl
+#   aws-ofi-nccl/  the CXI network plugin (lib/libnccl-net.so)
+#   nccl-tests/    bandwidth benchmark binaries (fabric verification)
+# ==============================================================================
+setup_slingshot() {
+    # Bootstrap step: validates only its OWN inputs (deliberately NOT
+    # env_config_require, which demands the build output this step creates).
+    [ -f "$CONTAINER_SIF" ] || { echo "FATAL [env-setup/slingshot]: SIF missing: $CONTAINER_SIF — run without --only, or --only sif first" >&2; exit 1; }
+    [ -d "$CONTAINER_HOST_LIBFABRIC" ] || { echo "FATAL [env-setup/slingshot]: host libfabric missing: $CONTAINER_HOST_LIBFABRIC" >&2; exit 1; }
+    [ "$HAS_GPU" = "1" ] || { echo "FATAL [env-setup/slingshot]: no GPU on this node — the NCCL build queries the CUDA toolchain" >&2; exit 1; }
 
-echo "NCCL library (LD_PRELOAD): $NCCL_LIBRARY"
-echo "cuDNN path: $CUDNN_PATH"
+    if [ "$FORCE" = "1" ]; then
+        # SHARED ARTIFACT: this dir is bind-mounted at /opt/slingshot by every
+        # running job on the cluster. Deleting it under a live multi-node run pulls
+        # NCCL's plugin out from under it. Announce loudly, and refuse to rm -rf a
+        # path that a bad GEODESIC_CONTAINER_SLINGSHOT_DIR override could have
+        # pointed somewhere catastrophic (empty, /, or outside CONTAINER_ROOT).
+        case "$CONTAINER_SLINGSHOT_DIR" in
+            "$CONTAINER_ROOT"/*) ;;
+            *) echo "FATAL [env-setup/slingshot]: refusing --force rebuild of '$CONTAINER_SLINGSHOT_DIR' — it is not under CONTAINER_ROOT ($CONTAINER_ROOT)" >&2; exit 1 ;;
+        esac
+        echo "[env-setup/slingshot] --force: REPLACING the shared Slingshot stack at $CONTAINER_SLINGSHOT_DIR."
+        echo "[env-setup/slingshot] Any job currently running with this dir bind-mounted at /opt/slingshot will lose its NCCL plugin."
+        rm -rf "$CONTAINER_SLINGSHOT_DIR"
+    fi
+    mkdir -p "$CONTAINER_SLINGSHOT_DIR"
 
-# NOTE: cuDNN header symlinks (into torch/include) are created in Phase 6b, after
-# uv sync installs torch + its bundled cuDNN. They must exist before Phase 7 builds
-# transformer-engine from source.
+    echo "[env-setup/slingshot] SIF:      $CONTAINER_SIF"
+    echo "[env-setup/slingshot] Output:   $CONTAINER_SLINGSHOT_DIR"
+    echo "[env-setup/slingshot] Versions: nccl=$OFI_NCCL_VERSION hwloc=$OFI_HWLOC_VERSION aws-ofi-nccl=$OFI_PLUGIN_VERSION"
 
-# Build env for uv's no-build-isolation source builds (TE/mamba/causal-conv1d/
-# grouped-gemm/flash-linear-attention). EXPORTED so uv's build subprocesses inherit them.
-# NOTE: NVTE_PROJECT_BUILDING is NOT exported globally — it makes TE's __init__ skip
-# loading the core lib, which would break the post-build import verification (and any
-# runtime import) if it leaked. It is set INLINE only on the pass-2 uv sync below.
-export CC=/usr/bin/gcc-12 CXX=/usr/bin/g++-12 CUDAHOSTCXX=/usr/bin/g++-12
-export MAX_JOBS=4 TORCH_CUDA_ARCH_LIST="9.0"
-export UV_PROJECT_ENVIRONMENT="$VENV_DIR"
+    # Scrub host toolchain/venv env — the same poison set the exec shim scrubs.
+    # The host's CC/CXX=/usr/bin/g*-12 do not exist in the image and hijacked the
+    # NCCL make until this was added; the build must use the image's toolchain.
+    unset LD_PRELOAD PYTHONPATH VIRTUAL_ENV NCCL_LIBRARY \
+          CC CXX CUDAHOSTCXX CUDA_HOME CPLUS_INCLUDE_PATH C_INCLUDE_PATH CUDNN_PATH
+    export LD_LIBRARY_PATH=""
 
-# ============================================
-# Phase 6: Install deps via uv sync (pass 1 — everything but the CUDA source builds)
-# ============================================
-echo ""
-echo "=== Phase 6: uv sync pass 1 (torch + python deps + vLLM; CUDA exts deferred) ==="
-echo "This may take several minutes..."
-# All packages — including torch (cu126 index), vLLM (+cu129 wheel), numpy 2.3.5,
-# transformers 5.10.2 — are pinned by uv.lock. `--locked` fails if pyproject and the
-# committed aarch64 lock disagree (no silent drift). Pass 1 DEFERS the source-built
-# CUDA extensions (--no-install-package) because their compile needs the cuDNN header
-# symlinks that only exist once torch + nvidia-cudnn land here (created in Phase 6b).
-uv sync --locked --group build \
-    --no-install-package transformer-engine \
-    --no-install-package transformer-engine-torch \
-    --no-install-package mamba-ssm \
-    --no-install-package causal-conv1d \
-    --no-install-package nv-grouped-gemm \
-    --no-install-package flash-linear-attention \
-    --no-install-package flash_mla \
-    2>&1 | tee /tmp/uv_sync_megatron.log | tail -30
+    # The build runs inside the image with ONLY the Option B binds (host
+    # libfabric, /usr/lib64 for libcxi/libnl, and the output dir at
+    # /opt/slingshot — the in-container paths the official recipe uses). Build
+    # scratch is node-local /tmp.
+    apptainer exec --nv \
+        --bind "${CONTAINER_HOST_LIBFABRIC}:/host${CONTAINER_HOST_LIBFABRIC}:ro" \
+        --bind /usr/lib64:/host/usr/lib64:ro \
+        --bind "${CONTAINER_SLINGSHOT_DIR}:/opt/slingshot" \
+        "$CONTAINER_SIF" bash -euo pipefail -c "
+            export CUDA_HOME=/usr/local/cuda
+            export LIBFABRIC_HOME=/host${CONTAINER_HOST_LIBFABRIC}
+            export MPI_HOME=/usr/local/mpi
+            export TMPDIR=/tmp
+            BUILD_ROOT=\$(mktemp -d /tmp/ofi_build_XXXX)
 
-UV_SYNC_EXIT=${PIPESTATUS[0]}
-if [ "$UV_SYNC_EXIT" -ne 0 ]; then
-    echo ""
-    echo "WARNING: uv sync exited with code $UV_SYNC_EXIT"
-    echo "Some packages may have failed to build. Phase 7 will install them individually."
-    echo "Full log: /tmp/uv_sync_megatron.log"
-fi
+            # --- NCCL (vs image CUDA, Hopper/sm_90) ---
+            # src.build alone fully stages lib/ + include/ under BUILDDIR; adding
+            # the 'install' target in the same -j invocation races it on the
+            # header copies ('install: cannot create regular file ... File exists').
+            cd \$BUILD_ROOT && git clone --depth 1 --branch '$OFI_NCCL_VERSION' https://github.com/NVIDIA/nccl.git
+            mkdir -p /opt/slingshot/nccl
+            cd \$BUILD_ROOT/nccl && make -j \$(nproc) src.build BUILDDIR=/opt/slingshot/nccl NVCC_GENCODE='-gencode=arch=compute_90,code=sm_90'
+            rm -rf /opt/slingshot/nccl/obj   # multi-GB intermediates; keep the shared dir lean
+            export NCCL_HOME=/opt/slingshot/nccl
 
-# ============================================
-# Phase 6b: cuDNN symlinks + torch verification (post uv sync)
-# ============================================
-echo ""
-echo "=== Phase 6b: cuDNN symlinks + torch verification ==="
-# torch (and its bundled cuDNN) are now installed by uv sync. Create the cuDNN header
-# symlinks into torch/include that the Phase 7 transformer-engine source build needs.
-TORCH_INCLUDE="$VENV_SITE_PACKAGES/torch/include"
-CUDNN_INCLUDE="$VENV_SITE_PACKAGES/nvidia/cudnn/include"
-if [ -d "$CUDNN_INCLUDE" ] && [ -d "$TORCH_INCLUDE" ]; then
-    echo "Creating cuDNN header symlinks in PyTorch include directory..."
-    for f in "$CUDNN_INCLUDE"/*.h; do
-        ln -sf "$f" "$TORCH_INCLUDE/$(basename "$f")" 2>/dev/null || true
+            # --- hwloc (aws-ofi-nccl build dep) ---
+            cd \$BUILD_ROOT && git clone --depth 1 --branch '$OFI_HWLOC_VERSION' https://github.com/open-mpi/hwloc.git
+            cd \$BUILD_ROOT/hwloc && ./autogen.sh && ./configure --disable-nvml --prefix=/opt/slingshot/hwloc
+            make -j \$(nproc) install
+
+            # --- aws-ofi-nccl (the CXI plugin) ---
+            cd \$BUILD_ROOT && git clone --depth 1 --branch '$OFI_PLUGIN_VERSION' https://github.com/aws/aws-ofi-nccl.git
+            cd \$BUILD_ROOT/aws-ofi-nccl && ./autogen.sh
+            export LD_LIBRARY_PATH=\${LD_LIBRARY_PATH:-}:/host/usr/lib64
+            ./configure --prefix=/opt/slingshot/aws-ofi-nccl \
+                --with-cuda=\$CUDA_HOME \
+                --with-libfabric=\$LIBFABRIC_HOME \
+                --with-mpi=\$MPI_HOME \
+                --with-hwloc=/opt/slingshot/hwloc \
+                --disable-tests
+            make -j \$(nproc) install
+
+            # --- nccl-tests (fabric benchmark binaries) ---
+            # env -u: by this point LD_LIBRARY_PATH carries /host/usr/lib64 (host
+            # SLES libs, needed by the aws-ofi-nccl configure checks); the image's
+            # git links a different libcurl/nghttp2 pair and dies if it resolves
+            # against them.
+            cd \$BUILD_ROOT && env -u LD_LIBRARY_PATH git clone --depth 1 https://github.com/NVIDIA/nccl-tests.git
+            cd \$BUILD_ROOT/nccl-tests && make -j \$(nproc) MPI=1 MPI_HOME=\$MPI_HOME NCCL_HOME=\$NCCL_HOME CUDA_HOME=\$CUDA_HOME
+            cp -r \$BUILD_ROOT/nccl-tests/build /opt/slingshot/nccl-tests
+
+            rm -rf \$BUILD_ROOT
+        "
+
+    # hostlibs: a symlink-ONLY directory exposing the few host /usr/lib64 sonames
+    # the CXI plugin needs at dlopen (libcxi, libnl) — this dir, NOT
+    # /host/usr/lib64 itself, goes on the container's LD_LIBRARY_PATH. Exposing
+    # the whole host dir poisons torch.compile links: inductor turns
+    # LD_LIBRARY_PATH into -L dirs and the host libc.so (SUSE ld script) names
+    # absolute paths that don't exist in the image ("ld: cannot find
+    # /lib64/libc.so.6"). A dir with no libc cannot poison.
+    mkdir -p "$CONTAINER_SLINGSHOT_DIR/hostlibs"
+    for so in libcxi.so.1 libnl-3.so.200 libnl-route-3.so.200; do
+        [ -e "/usr/lib64/$so" ] && ln -sf "/host/usr/lib64/$so" "$CONTAINER_SLINGSHOT_DIR/hostlibs/$so"
     done
-    echo "cuDNN symlinks created"
-else
-    echo "ERROR: torch/cuDNN not found after uv sync — uv did not install torch."
-    echo "       Check pyproject.toml [tool.uv.sources] torch routing and the uv sync log."
-    exit 1
-fi
 
-echo "Verifying PyTorch (installed by uv sync)..."
-LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
-import torch
-print(f'  PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')
-if torch.cuda.is_available():
-    print(f'  GPU: {torch.cuda.get_device_name(0)}')
-    print(f'  Arch: {torch.cuda.get_device_capability(0)}')
-" || {
-    echo "ERROR: PyTorch CUDA verification failed after uv sync"
-    exit 1
+    {
+        echo "sif: $CONTAINER_SIF"
+        echo "sif_source: $(head -1 "${CONTAINER_SIF}.source.txt" 2>/dev/null || echo unknown)"
+        echo "built_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "built_by: $USER"
+        echo "built_on: $(hostname)"
+        echo "nccl: $OFI_NCCL_VERSION"
+        echo "hwloc: $OFI_HWLOC_VERSION"
+        echo "aws_ofi_nccl: $OFI_PLUGIN_VERSION"
+        echo "host_libfabric: $CONTAINER_HOST_LIBFABRIC"
+    } > "$CONTAINER_SLINGSHOT_DIR/provenance.txt"
+
+    echo "[env-setup/slingshot] Done. Plugin: $CONTAINER_SLINGSHOT_DIR/aws-ofi-nccl/lib/libnccl-net.so"
+    echo "[env-setup/slingshot] Provenance: $CONTAINER_SLINGSHOT_DIR/provenance.txt"
 }
 
-# Build deps for the Phase 7 source builds (pybind11/ninja/Cython/wheel/setuptools/
-# nvidia-mathdx) come from the `build` dependency-group in pyproject.toml, synced via
-# `--group build` in both passes (so they are uv-managed + locked, not pruned). The CUDA
-# exts are `no-build-isolation` (they need the project's exact torch), so uv builds them
-# against the project env — those build tools must already be present there, which the
-# build group ensures. No `uv pip` step.
-# uv --seed venvs ship no python3-config; symlink it from the base interpreter so the
-# dataset-index helper Megatron JIT-builds at train start gets a correctly-suffixed .so.
-PY_BASE_PREFIX="$("$VENV_PYTHON" -c 'import sys; print(sys.base_prefix)')"
-if [ -x "$PY_BASE_PREFIX/bin/python3-config" ] && [ ! -e "$VENV_DIR/bin/python3-config" ]; then
-    ln -sfn "$PY_BASE_PREFIX/bin/python3-config" "$VENV_DIR/bin/python3-config"
-    echo "Linked python3-config from $PY_BASE_PREFIX"
-fi
+# ==============================================================================
+# Step 3 — Python overlay
+#
+# Installs CONTAINER_OVERLAY_PACKAGES into the PYTHONPATH overlay that
+# pipeline_env_activate.sh layers between the repo and the image (resolution:
+# repo > overlay > image). The SIF is never modified. --no-deps is deliberate: a
+# dependency closure could drag in a PyPI torch that shadows the image's
+# CUDA-matched one.
+# ==============================================================================
+setup_overlay() {
+    [ -f "$CONTAINER_SIF" ] || { echo "FATAL [env-setup/overlay]: SIF missing: $CONTAINER_SIF" >&2; exit 1; }
 
-# ============================================
-# Phase 7: Build the CUDA source extensions via uv (pass 2)
-# ============================================
-echo ""
-echo "=== Phase 7: uv sync pass 2 (build CUDA extensions) ==="
-echo "Builds transformer-engine, mamba-ssm, causal-conv1d, nv-grouped-gemm,"
-echo "flash-linear-attention from source via uv (no-build-isolation). 15-25 min."
-# Now that pass 1 installed torch + nvidia-cudnn and Phase 6b created the cuDNN header
-# symlinks, run uv sync WITHOUT --no-install-package so uv builds the deferred CUDA
-# extensions. Build tools come from the `build` dependency-group (--group build); the
-# compile env (CC/CXX/CUDAHOSTCXX/arch exported above + the CUDA_HOME/NCCL/cuDNN paths
-# below) is inherited by uv's build subprocesses. NVTE_PROJECT_BUILDING=1 is set INLINE
-# here (only for the build) so TE's metadata-gen import does not try a runtime cuDNN load;
-# it must NOT leak past this command or it breaks the verification + runtime imports.
-# --locked keeps every version pinned to uv.lock.
-CUDA_HOME="$CUDA_HOME" \
-    NVTE_PROJECT_BUILDING=1 \
-    LD_PRELOAD="$NCCL_LIBRARY" \
-    LD_LIBRARY_PATH="$LD_LIBRARY_PATH" \
-    CPLUS_INCLUDE_PATH="$CPLUS_INCLUDE_PATH" \
-    C_INCLUDE_PATH="$C_INCLUDE_PATH" \
-    LIBRARY_PATH="$LIBRARY_PATH" \
-    CUDNN_PATH="$CUDNN_PATH" \
-    NVTE_NCCL_INCLUDE="$NVTE_NCCL_INCLUDE" \
-    NVTE_NCCL_LIB="$NVTE_NCCL_LIB" \
-    uv sync --locked --group build 2>&1 | tee /tmp/uv_sync_megatron_pass2.log | tail -40
+    local prov="$CONTAINER_PYTHON_OVERLAY/provenance.txt"
+    if [ "$FORCE" != "1" ] && [ -f "$prov" ] && grep -qxF "packages: $CONTAINER_OVERLAY_PACKAGES" "$prov"; then
+        echo "[env-setup/overlay] Overlay already matches configured packages ($CONTAINER_OVERLAY_PACKAGES) — skipping. (--force rebuilds)"
+        return 0
+    fi
 
-if [ "${PIPESTATUS[0]}" -ne 0 ]; then
-    echo "ERROR: uv sync pass 2 (CUDA extension build) failed. See /tmp/uv_sync_megatron_pass2.log"
-    exit 1
-fi
+    [ "$FORCE" = "1" ] && rm -rf "$CONTAINER_PYTHON_OVERLAY"
+    mkdir -p "$CONTAINER_PYTHON_OVERLAY"
 
-# Verify the source-built extensions + vLLM/Ray import (real binary checks).
-LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
-import transformer_engine, transformer_engine.pytorch; print('  transformer_engine', transformer_engine.__version__)
-import mamba_ssm; print('  mamba-ssm: OK')
-import causal_conv1d; print('  causal-conv1d: OK')
-import grouped_gemm; print('  nv-grouped-gemm: OK')
-import vllm, vllm._C, ray; print('  vLLM', vllm.__version__, '+ Ray', ray.__version__, ': OK')
-" || { echo 'ERROR: post-build import verification failed'; exit 1; }
-echo "CUDA extensions + vLLM/Ray: INSTALLED"
+    echo "[env-setup/overlay] Installing into $CONTAINER_PYTHON_OVERLAY: $CONTAINER_OVERLAY_PACKAGES"
+    # The pip runs INSIDE the image (matching python ABI). Bind BOTH /projects
+    # AND /lus: on Isambard /projects/a5k/public is a symlink into /lus, so
+    # binding /projects alone leaves the target path dangling inside the
+    # container (FileNotFoundError) — the same pair the exec shim binds.
+    apptainer exec --bind /projects,/lus "$CONTAINER_SIF" \
+        python -m pip install --no-deps --target "$CONTAINER_PYTHON_OVERLAY" $CONTAINER_OVERLAY_PACKAGES
 
-# ============================================
-# Phase 8: Apply ARM-specific patches
-# ============================================
-echo ""
-echo "=== Phase 8: Applying ARM patches ==="
+    {
+        echo "packages: $CONTAINER_OVERLAY_PACKAGES"
+        echo "sif: $CONTAINER_SIF"
+        echo "installed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "installed_by: $USER"
+        echo "why: image ships versions too old for this repo (see docs/environment.md)"
+    } > "$prov"
 
-# 8a. sitecustomize.py - GH200 sm_90a fix
-echo "Installing GH200 sm_90a monkeypatch..."
-cat > "$VENV_SITE_PACKAGES/sitecustomize.py" << 'SITECUSTOMIZE_EOF'
-"""
-GH200 sm_90a fix - Monkeypatch PyTorch's CUDA arch flag detection.
-
-GH200 GPUs report sm_90a architecture, but PyTorch's _get_cuda_arch_flags()
-in cpp_extension.py cannot parse the 'a' suffix. This causes:
-  ValueError: invalid literal for int() with base 10: '90a'
-
-This sitecustomize.py is loaded automatically at Python startup and:
-1. Sets TORCH_CUDA_ARCH_LIST=9.0 as a fallback
-2. Monkeypatches _get_cuda_arch_flags() to return correct flags for sm_90
-"""
-import os
-
-os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
-
-def _patch_pytorch_cuda_arch():
-    """Replace PyTorch's _get_cuda_arch_flags with a version that handles sm_90a."""
-    try:
-        import torch.utils.cpp_extension as cpp_ext
-
-        def _patched_get_cuda_arch_flags(cflags=None):
-            return ['-gencode', 'arch=compute_90,code=sm_90']
-
-        cpp_ext._get_cuda_arch_flags = _patched_get_cuda_arch_flags
-    except (ImportError, AttributeError):
-        pass
-
-_patch_pytorch_cuda_arch()
-SITECUSTOMIZE_EOF
-echo "  sitecustomize.py installed"
-
-# 8b. wandb isatty() patch for SLURM
-echo "Applying wandb isatty patch..."
-WANDB_TERM_FILE="$VENV_SITE_PACKAGES/wandb/errors/term.py"
-if [ -f "$WANDB_TERM_FILE" ]; then
-    sed -i 's/    return sys\.stderr\.isatty()/    return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()/' "$WANDB_TERM_FILE" || true
-    echo "  wandb patch applied"
-else
-    echo "  wandb term.py not found, skipping patch"
-fi
-
-# 8c. Create activate_env.sh helper
-echo "Creating activate_env.sh..."
-cat > "$SCRIPT_DIR/activate_env.sh" << ACTIVATE_EOF
-#!/bin/bash
-# Source this file to activate the Megatron Bridge environment
-# Usage: source activate_env.sh
-
-SCRIPT_DIR="$SCRIPT_DIR"
-VENV_DIR="$VENV_DIR"
-VENV_SITE_PACKAGES="$VENV_SITE_PACKAGES"
-
-# Activate virtual environment
-source "\$VENV_DIR/bin/activate"
-
-# Compilers
-export CC=/usr/bin/gcc-12
-export CXX=/usr/bin/g++-12
-export CUDAHOSTCXX=/usr/bin/g++-12
-export TORCH_CUDA_ARCH_LIST="9.0"
-export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
-export TMPDIR=/projects/a5k/public/tmp
-
-# CRITICAL: LD_PRELOAD for venv NCCL (fixes ncclCommShrink symbol mismatch)
-export NCCL_LIBRARY="\$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
-export LD_PRELOAD="\$NCCL_LIBRARY"
-
-# NVIDIA library paths
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/nccl/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cudnn/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cublas/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cuda_runtime/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/nvjitlink/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cusparse/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cufft/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/curand/lib:\$LD_LIBRARY_PATH"
-export LD_LIBRARY_PATH="\$VENV_SITE_PACKAGES/nvidia/cusolver/lib:\$LD_LIBRARY_PATH"
-
-# Include paths for any runtime compilation
-export CPLUS_INCLUDE_PATH="\$VENV_SITE_PACKAGES/nvidia/cudnn/include:\${CPLUS_INCLUDE_PATH:-}"
-export C_INCLUDE_PATH="\$VENV_SITE_PACKAGES/nvidia/cudnn/include:\${C_INCLUDE_PATH:-}"
-export CUDNN_PATH="\$VENV_SITE_PACKAGES/nvidia/cudnn"
-ACTIVATE_EOF
-chmod +x "$SCRIPT_DIR/activate_env.sh"
-echo "  activate_env.sh created"
-
-# ============================================
-# Phase 9: Validation
-# ============================================
-echo ""
-echo "=== Phase 9: Running validation ==="
-LD_PRELOAD="$NCCL_LIBRARY" "$VENV_PYTHON" -c "
-import sys
-print(f'Python: {sys.version}')
-
-import torch
-print(f'PyTorch: {torch.__version__}')
-print(f'CUDA available: {torch.cuda.is_available()}')
-if torch.cuda.is_available():
-    print(f'CUDA version: {torch.version.cuda}')
-    print(f'GPU: {torch.cuda.get_device_name(0)}')
-
-pkgs = {
-    'megatron.core': lambda: __import__('megatron.core'),
-    'megatron.bridge': lambda: __import__('megatron.bridge'),
-    'transformers': lambda: __import__('transformers'),
-    'datasets': lambda: __import__('datasets'),
-    'wandb': lambda: __import__('wandb'),
-    'omegaconf': lambda: __import__('omegaconf'),
-    'transformer_engine': lambda: __import__('transformer_engine'),
-    'transformer_engine.pytorch': lambda: __import__('transformer_engine.pytorch'),
-    'mamba_ssm': lambda: __import__('mamba_ssm'),
-    'causal_conv1d': lambda: __import__('causal_conv1d'),
+    echo "[env-setup/overlay] Done. Provenance: $prov"
 }
 
-for name, importer in pkgs.items():
-    try:
-        mod = importer()
-        ver = getattr(mod, '__version__', 'OK')
-        print(f'{name}: {ver}')
-    except ImportError as e:
-        print(f'{name}: FAILED ({e})')
-"
+# ==============================================================================
+# Step 4 — Validate (GPU required): the environment validator, run inside the
+# container exactly as a pipeline would run it.
+# ==============================================================================
+setup_validate() {
+    [ "$HAS_GPU" = "1" ] || { echo "FATAL [env-setup/validate]: no GPU on this node" >&2; exit 1; }
+    echo "[env-setup/validate] Running environment validation inside the container..."
+    REPO_DIR="$SCRIPT_DIR" "$SCRIPT_DIR/pipeline_env_exec.sh" \
+        "cd $SCRIPT_DIR; source pipeline_env_activate.sh; python pipeline_env_validate.py"
+}
 
-echo ""
-echo "=============================================="
-echo "  Setup complete!"
-echo "=============================================="
-echo ""
-echo "To activate the environment:"
-echo "  source $SCRIPT_DIR/activate_env.sh"
-echo ""
-echo "To run validation tests:"
-echo "  source activate_env.sh && python validate_install.py"
-echo ""
-echo "To run a tiny training test:"
-echo "  source activate_env.sh"
-echo "  python -m torch.distributed.run --nproc_per_node=1 \\"
-echo "      scripts/training/run_recipe.py \\"
-echo "      --recipe vanilla_gpt_pretrain_config \\"
-echo "      --dataset llm-pretrain-mock \\"
-echo "      train.train_iters=5 train.global_batch_size=8 train.micro_batch_size=4"
-echo ""
+# ------------------------------------------------------------------------------
+# Orchestration
+# ------------------------------------------------------------------------------
+if want sif; then
+    if [ "$FORCE" != "1" ] && [ -f "$CONTAINER_SIF" ]; then
+        echo "[env-setup 1/4 sif] SIF present: $CONTAINER_SIF — skipping pull. (--force re-pulls)"
+    else
+        setup_sif
+    fi
+fi
+
+if want slingshot; then
+    if [ "$FORCE" != "1" ] && [ -L "$CONTAINER_SLINGSHOT_DIR/hostlibs/libcxi.so.1" ]; then
+        echo "[env-setup 2/4 slingshot] Stack present: $CONTAINER_SLINGSHOT_DIR — skipping build. (--force rebuilds)"
+    elif [ "$HAS_GPU" = "1" ]; then
+        setup_slingshot
+    else
+        echo "[env-setup 2/4 slingshot] DEFERRED — no GPU on this node. Finish on a GPU node with:" >&2
+        echo "    bash pipeline_env_setup.sh" >&2
+        echo "  or: isambard_sbatch pipeline_env_submit.sbatch setup" >&2
+    fi
+fi
+
+want overlay && setup_overlay
+
+if want validate; then
+    if [ "$HAS_GPU" = "1" ] && { [ -n "$ONLY" ] || [ -L "$CONTAINER_SLINGSHOT_DIR/hostlibs/libcxi.so.1" ]; }; then
+        setup_validate
+        echo "===== Environment setup COMPLETE (validation above) ====="
+    else
+        echo "===== Environment setup: CPU-side steps done; run on a GPU node to finish (see 2/4) ====="
+    fi
+fi

@@ -5,6 +5,10 @@
 # Sets all env vars (NCCL, CXI, Slingshot, Triton, W&B, etc.) and launches
 # training via srun + ft_launcher or torchrun.
 #
+# Host-side orchestration only: the ranks themselves run inside the pipeline
+# container (one apptainer instance per node via pipeline_env_exec.sh), which is
+# where torch/CUDA/NCCL/TE/ft_launcher come from. See docs/environment.md.
+#
 # Can be called from:
 #   1. An sbatch script (SLURM_JOB_ID set automatically)
 #   2. An interactive salloc session (SLURM_JOB_ID set by salloc)
@@ -122,63 +126,46 @@ REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
 
 # ==============================================================================
-# Execution environment: container (DEFAULT) or bare-metal venv
+# Execution environment: the pipeline container
 #
-# GEODESIC_CONTAINER=1 (the default, set in pipeline_container_config.env) runs
-# every rank inside the Apptainer pipeline container via
-# pipeline_container_exec.sh; the host side then only orchestrates (srun, env
-# vars, rendezvous). GEODESIC_CONTAINER=0 is the bare-metal venv escape hatch.
-# A missing SIF/Slingshot build hard-fails here with the fix commands — never a
-# silent fall-back to bare-metal. See docs/container-pipeline.md.
+# Every rank runs inside the Apptainer pipeline container via
+# pipeline_env_exec.sh; the host side only orchestrates (srun, env vars,
+# rendezvous, node-local paths). torch/CUDA/NCCL/TE/Mamba-kernels/ft_launcher and
+# the compilers all come from the image, so there is nothing to module-load and no
+# venv to activate here. A missing SIF/Slingshot build hard-fails below with the
+# fix command — never a silent degradation. See docs/environment.md.
 # ==============================================================================
-if [ ! -f "$REPO_DIR/pipeline_container_config.env" ]; then
-    echo "FATAL: $REPO_DIR/pipeline_container_config.env not found — REPO_DIR mis-resolved." >&2
+if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
+    echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
     echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
     echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
     exit 1
 fi
-source "$REPO_DIR/pipeline_container_config.env"
+source "$REPO_DIR/pipeline_env_config.env"
+env_config_require
 
-if [ "$GEODESIC_CONTAINER" = "1" ]; then
-    container_config_require
-    # No modules and no venv activate: torch/CUDA/NCCL/compilers come from the
-    # image, and the Slingshot plugin from the Option B build (bound at
-    # /opt/slingshot; selected inside by pipeline_container_activate.sh). A
-    # purge keeps host LD_LIBRARY_PATH noise out of the env the shim scrubs.
-    module purge
-    # Bare-metal gets WANDB_DIR from pipeline_env_activate.sh; the host-side
-    # orchestration below (mkdir) still needs it in container mode. Value
-    # mirrors pipeline_env_activate.sh / pipeline_container_activate.sh.
-    export WANDB_DIR="${WANDB_DIR:-/projects/a5k/public/logs/wandb}"
-else
-    # --- Module loading (bare-metal) ---
-    module purge
-    module load PrgEnv-cray
-    module load cuda/12.6
-    module load brics/aws-ofi-nccl/1.8.1
+# The Slingshot plugin comes from the Option B build (bound at /opt/slingshot;
+# selected inside the container by pipeline_env_activate.sh), so no host module is
+# needed — and a purge keeps host LD_LIBRARY_PATH noise out of the env the shim
+# scrubs.
+module purge
 
-    # --- Activate environment (bare-metal venv) ---
-    source "$REPO_DIR/pipeline_env_activate.sh"
+# WANDB_DIR is set inside the container by pipeline_env_activate.sh, but the
+# host-side orchestration below (mkdir) needs it out here too. Value mirrors
+# pipeline_env_activate.sh.
+export WANDB_DIR="${WANDB_DIR:-/projects/a5k/public/logs/wandb}"
 
-    # Prepend this repo's src so training imports megatron.bridge from REPO_DIR
-    # (the worktree) instead of the editable-install location. Keeps in-flight
-    # bridge fixes (e.g. the packed-sequence seq_idx / Mamba doc-boundary reset)
-    # effective without re-syncing the shared venv; megatron.core still resolves to
-    # 3rdparty via namespace-package merging. (Container mode does the equivalent
-    # inside the container — pipeline_container_activate.sh.)
-    export PYTHONPATH="$REPO_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
-
-    # Optional NCCL net-plugin override for fabric-hang A/B testing: set
-    # TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net-ofi.so at submit time to make NCCL
-    # dlopen that exact plugin instead of the module's aws-ofi-nccl 1.8.1. Placed
-    # after the module loads so nothing re-clobbers it. The 1.8.1 module stays
-    # loaded either way — it supplies /opt/cray/libfabric on LD_LIBRARY_PATH, which
-    # the override plugin also needs (it carries no RUNPATH). (Container mode reads
-    # TRAIN_NCCL_NET_PLUGIN inside pipeline_container_activate.sh instead.)
-    if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
-        export NCCL_NET_PLUGIN="$TRAIN_NCCL_NET_PLUGIN"
-        echo "NCCL_NET_PLUGIN override: $NCCL_NET_PLUGIN"
-    fi
+# Optional NCCL net-plugin override for fabric-hang A/B testing: set
+# TRAIN_NCCL_NET_PLUGIN=/path/to/libnccl-net.so at submit time to make NCCL dlopen
+# that exact plugin instead of the Option B build's. It is consumed INSIDE the
+# container by pipeline_env_activate.sh (which otherwise defaults NCCL_NET_PLUGIN
+# to /opt/slingshot/aws-ofi-nccl/lib/libnccl-net.so) — setting NCCL_NET_PLUGIN out
+# here would be pointless, since the in-container activate re-derives it. The
+# explicit export guarantees the seam survives srun --export=ALL and apptainer's
+# env passthrough; the echo records the override in the job log.
+if [ -n "${TRAIN_NCCL_NET_PLUGIN:-}" ]; then
+    export TRAIN_NCCL_NET_PLUGIN
+    echo "NCCL_NET_PLUGIN override (applied inside the container): $TRAIN_NCCL_NET_PLUGIN"
 fi
 
 # ==============================================================================
@@ -435,24 +422,27 @@ export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
 # CUDA_DEVICE_MAX_CONNECTIONS, etc.) are set in pipeline_env_activate.sh.
 # ==============================================================================
 
-# Execution-environment suffix for ALL node-local caches below. The container's
-# triton/torch and the venv's are different builds with incompatible compiled
-# artifacts — a bare-metal run and a container run sharing /tmp caches on the
-# same node poisons whichever comes second (observed: an in-container inductor
-# C++ link failing on artifacts a venv run left in the shared caches). Scoping
-# the paths by environment makes the two stacks structurally incapable of
-# cross-contaminating.
-ENV_CACHE_SUFFIX=$([ "$GEODESIC_CONTAINER" = "1" ] && echo container || echo baremetal)
+# Execution-environment suffix for ALL node-local caches below. Triton/torch
+# compiled artifacts are only valid for the stack that produced them, so the
+# node-local cache paths are namespaced by execution environment: a run of some
+# other stack (a foreign venv, a different image) that lands on the same node
+# cannot poison these caches, and vice versa (observed pre-container: an
+# in-container inductor C++ link failing on artifacts a venv run had left in the
+# shared /tmp caches). Keeping the literal suffix also means warm nodes still hit
+# the same TRAIN_PERSISTENT_TRITON_CACHE path they were warmed with.
+ENV_CACHE_SUFFIX=container
 
 # Node-local temp directory. Avoids NFS contention from CUDA JIT compilation (nvcc/ptxas),
 # Triton kernel compilation, and other temporary files that many ranks write simultaneously.
 # NFS handles this poorly -- stale file handles and lock contention across 128 ranks.
-# Overrides the shared TMPDIR from pipeline_env_activate.sh with a job-specific node-local
-# path. Also scopes torch inductor's compile cache (which lives under $TMPDIR).
+# Exported here so the ranks inherit this job-specific node-local path: the
+# in-container pipeline_env_activate.sh only defaults TMPDIR (to shared /projects) when
+# it is unset, so this value wins. Also scopes torch inductor's compile cache (under $TMPDIR).
 export TMPDIR=/tmp/megatron_${SLURM_JOB_ID}_${ENV_CACHE_SUFFIX}
 mkdir -p "$TMPDIR"
 
-# Ensure W&B dir exists (path set in pipeline_env_activate.sh)
+# Ensure W&B dir exists (host-side default exported in the preamble above; the
+# in-container pipeline_env_activate.sh sets the same path)
 mkdir -p "$WANDB_DIR"
 
 # Triton JIT kernel cache. Triton compiles kernels on first use and caches the PTX/cubin.
@@ -503,8 +493,8 @@ export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-0}"
 # job log, the torch-profiler artifacts, and the W&B run (stamped as summary
 # metrics by scripts/telemetry/run_identity.py). Minted once per launch;
 # respects a pre-set value so a re-launch within one allocation can share it.
-# Exported, so it reaches every rank in both container and bare-metal modes
-# (see the env guarantee at the srun call below).
+# Exported, so it reaches every rank inside the container (see the env guarantee
+# at the srun call below).
 export ISAMBARD_RUN_ID="${ISAMBARD_RUN_ID:-$(date +%Y%m%dT%H%M%S)-j${SLURM_JOB_ID}}"
 
 # Absolute path of this job's raw log. Resolution order:
@@ -514,7 +504,10 @@ export ISAMBARD_RUN_ID="${ISAMBARD_RUN_ID:-$(date +%Y%m%dT%H%M%S)-j${SLURM_JOB_I
 #      launches, where scontrol would mis-resolve to the TUNNEL job's log
 #      (caught 2026-07-24: a profile run's raw_log_snapshot captured tunnel
 #      port-forwarding chatter instead of training output);
-#   3. scontrol's StdOut field (sbatch fallback if /proc introspection fails).
+#   3. scontrol's StdOut field — but ONLY when stdout is not a terminal. An
+#      interactive launch (tty) inside someone else's batch allocation (e.g. a
+#      VS Code tunnel job) would otherwise inherit THAT job's StdOut and
+#      misattribute a foreign log to this run.
 # For interactive/salloc runs stdout is a terminal (not a regular file), every
 # rung fails, and the var stays empty — consumers (W&B summary, profiler log
 # snapshot) then skip log reporting/copying.
@@ -524,8 +517,10 @@ if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
     _FD1_TARGET="$(readlink -f /proc/$$/fd/1 2>/dev/null || true)"
     if [ -n "$_FD1_TARGET" ] && [ -f "$_FD1_TARGET" ]; then
         ISAMBARD_RAW_LOG_PATH="$_FD1_TARGET"
+    elif [ ! -t 1 ]; then
+        ISAMBARD_RAW_LOG_PATH="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | grep -oE 'StdOut=[^ ]+' | head -n 1 | cut -d= -f2- || true)"
     else
-        ISAMBARD_RAW_LOG_PATH="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | grep -oE 'StdOut=[^ ]+' | head -n 1 | cut -d= -f2 || true)"
+        ISAMBARD_RAW_LOG_PATH=""
     fi
 fi
 if [ ! -f "$ISAMBARD_RAW_LOG_PATH" ]; then
@@ -598,15 +593,13 @@ echo "Nodes:     $NNODES"
 echo "GPUs/node: 4"
 echo "Total GPUs: $TOTAL_GPUS"
 echo "Master:    $MASTER_ADDR:$MASTER_PORT"
-if [ "$GEODESIC_CONTAINER" = "1" ]; then
-    echo "Env:       container ($CONTAINER_SIF)"
-    # Image + Slingshot-build provenance into the job log so any run's exact
-    # container stack is recoverable from its output alone (reproducibility).
-    sed 's/^/  sif: /' "${CONTAINER_SIF}.source.txt" 2>/dev/null | head -4
-    sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null
-else
-    echo "Env:       bare-metal venv (GEODESIC_CONTAINER=0)"
-fi
+echo "Env:       container ($CONTAINER_SIF)"
+# Image + Slingshot-build provenance into the job log so any run's exact
+# container stack is recoverable from its output alone (reproducibility).
+# `|| true`: a missing provenance file is cosmetic, and under `set -euo pipefail`
+# sed's exit status would otherwise abort the launch.
+sed 's/^/  sif: /' "${CONTAINER_SIF}.source.txt" 2>/dev/null | head -4 || true
+sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null || true
 if [ "$USE_FT" = true ]; then
     echo "Launcher:  ft_launcher (fault-tolerant)"
 else
@@ -625,31 +618,25 @@ if [ -n "$OVERRIDE_NODELIST" ]; then
     SRUN_ARGS="$SRUN_ARGS --nodelist=$OVERRIDE_NODELIST"
 fi
 
-# Runner indirection: identical payload in both modes; only the wrapper and the
-# activate line differ. Container mode runs ONE apptainer instance per node
-# (via the shim), inside which ft_launcher/torchrun spawns the node's 4 ranks.
-# All exported env (NCCL/FI_CXI/TORCH/MASTER/ISAMBARD_* etc.) reaches the ranks
-# either way: srun --export=ALL carries it to the node, and apptainer inherits
-# the host environment by default.
-if [ "$GEODESIC_CONTAINER" = "1" ]; then
-    RUNNER=("$REPO_DIR/pipeline_container_exec.sh")
-    ACTIVATE_CMD="source pipeline_container_activate.sh"
-else
-    RUNNER=(bash -c)
-    ACTIVATE_CMD="source pipeline_env_activate.sh"
-fi
+# Runner indirection: srun launches ONE apptainer instance per node (via the
+# shim), inside which ft_launcher/torchrun spawns that node's 4 ranks. Kept as a
+# variable so both launch paths below assemble their payload identically.
+# All exported env (NCCL/FI_CXI/TORCH/MASTER/ISAMBARD_* etc.) reaches the ranks:
+# srun --export=ALL carries it to the node, and apptainer inherits the host
+# environment by default.
+RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
+ACTIVATE_CMD="source pipeline_env_activate.sh"
 
-# ft_launcher compatibility gate (container mode): the image's
-# nvidia-resiliency-ext may be older than the venv's. Verify the section-timeout
-# flags exist before launching 44+ ranks into a launcher that would reject them;
-# fail with actionable guidance rather than a rank-0 usage error. (D6 in
-# docs/container-pipeline.md.)
-if [ "$GEODESIC_CONTAINER" = "1" ] && [ "$USE_FT" = true ]; then
-    if ! "$REPO_DIR/pipeline_container_exec.sh" "ft_launcher --help" 2>&1 | \
+# ft_launcher compatibility gate: the image's nvidia-resiliency-ext version is
+# whatever NGC shipped, so verify the section-timeout flags exist before launching
+# 44+ ranks into a launcher that would reject them; fail with actionable guidance
+# rather than a rank-0 usage error. (D6 in docs/environment.md.)
+if [ "$USE_FT" = true ]; then
+    if ! "$REPO_DIR/pipeline_env_exec.sh" "ft_launcher --help" 2>&1 | \
             grep -q -- "--ft-rank-section-timeouts"; then
         echo "FATAL: the container image's ft_launcher (nvidia-resiliency-ext) does not" >&2
         echo "  support --ft-rank-section-timeouts. Rerun with --disable-ft, or qualify a" >&2
-        echo "  newer image (GEODESIC_CONTAINER_IMAGE_TAG in pipeline_container_config.env)." >&2
+        echo "  newer image (GEODESIC_CONTAINER_IMAGE_TAG in pipeline_env_config.env)." >&2
         exit 1
     fi
 fi
@@ -657,16 +644,20 @@ fi
 if [ "$USE_FT" = true ]; then
     # Fault-tolerant launch via ft_launcher (nvidia-resiliency-ext)
     #
-    # Heartbeat-timeout flags: the venv NVRX (0.5.x) accepts the literal 'none'
-    # (= disabled, section timeouts govern); the NGC image's ft_launcher rejects
-    # non-float values (caught 2026-07-24, first container+FT run). In container
-    # mode omit the flags entirely — the image defaults apply and the
-    # --ft-rank-section-timeouts below remain the load-bearing knobs.
-    if [ "$GEODESIC_CONTAINER" = "1" ]; then
-        FT_HEARTBEAT_FLAGS=""
-    else
-        FT_HEARTBEAT_FLAGS="--ft-initial-rank-heartbeat-timeout=none --ft-rank-heartbeat-timeout=none"
-    fi
+    # Heartbeat timeouts are passed as explicit large FLOATS, not omitted and not
+    # 'none'. Three facts force this:
+    #   1. The image's ft_launcher parses these as floats, so the literal 'none'
+    #      we previously used to disable them is rejected outright (caught
+    #      2026-07-24 on the first container+FT run).
+    #   2. Omitting them is NOT equivalent to disabling them: nvidia-resiliency-ext
+    #      defaults to 3600 s initial / 2700 s subsequent heartbeat timeouts, and
+    #      heartbeats are an INDEPENDENT mechanism from --ft-rank-section-timeouts.
+    #   3. Ultra-550B's documented first iteration at PP=36 takes 45-75 min of lazy
+    #      NCCL comm-init. Under the 3600 s default that trips the heartbeat, ft
+    #      SIGKILLs the workers, and the restart lands in the same slow first
+    #      iteration — a restart loop that looks like a fabric hang.
+    # 7200 s covers the worst measured first iteration with margin while still
+    # bounding a genuinely wedged rank.
     srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
         $ACTIVATE_CMD
@@ -677,7 +668,8 @@ if [ "$USE_FT" = true ]; then
             --nnodes=$NNODES \
             --node_rank=\$SLURM_NODEID \
             --max-restarts=20 \
-            $FT_HEARTBEAT_FLAGS \
+            --ft-initial-rank-heartbeat-timeout=7200 \
+            --ft-rank-heartbeat-timeout=7200 \
             --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \

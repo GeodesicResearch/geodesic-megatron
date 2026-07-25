@@ -1,10 +1,17 @@
-"""Multi-node NCCL smoke test for the container pipeline (INFR-68 stage C3).
+"""Multi-node NCCL fabric gate for the container environment (INFR-68).
 
-Launched via torchrun (one process per GPU) inside the pipeline container:
+This is the executable form of the >=100 GB/s busbw gate documented in
+docs/environment.md — kept deliberately, because a pass/fail number is the only
+way to prove Slingshot RDMA is actually live rather than reading env vars.
+
+Launched via torchrun (one process per GPU) inside the container. The container
+is the only execution environment, so it is entered through the standard shim
+(pipeline_env_exec.sh runs ONE command string inside the container, and
+pipeline_env_activate.sh is sourced INSIDE it — it refuses to run on the host):
 
     srun --nodes=2 --ntasks-per-node=1 --export=ALL --overlap \
-        ./pipeline_container_exec.sh \
-        "cd $REPO_DIR; source pipeline_container_activate.sh; \
+        ./pipeline_env_exec.sh \
+        "cd $REPO_DIR; source pipeline_env_activate.sh; \
          torchrun --nproc_per_node=4 --nnodes=2 --node_rank=\\$SLURM_NODEID \
              --master_addr=<addr> --master_port=<port> \
              scripts/container/nccl_allreduce_smoke.py"

@@ -272,16 +272,117 @@ def test_teardown_export_suppressed_when_capture_never_ran(mod, tmp_path, capsys
     assert cb.captures_done == len(cb.capture_iters)
 
 
-def test_provenance_written_by_first_profiled_rank_only(mod, tmp_path):
-    class _OkProf:
-        def export_chrome_trace(self, path):
-            with open(path, "w") as f:
-                f.write("{}")
+class _OkProf:
+    """Stands in for torch.profiler.profile in _export; export writes a stub trace.
 
+    A real profiler needs kineto/CUPTI (GPU) — the behavior under test is the
+    callback's own bookkeeping, not torch's exporter.
+    """
+
+    def export_chrome_trace(self, path):
+        with open(path, "w") as f:
+            f.write("{}")
+
+
+def test_provenance_written_by_first_profiled_rank_only(mod, tmp_path):
     # Callback believes it runs on rank 0 (torch.distributed uninitialized -> rank 0),
-    # but the first PROFILED rank is 9 -> provenance must be skipped.
+    # but the first PROFILED rank is 9 -> provenance must be skipped even though
+    # the trace export itself succeeds.
     cb = _build(mod, out_root=str(tmp_path), ranks=[9, 0])
     cb.enabled_here = True
     cb.steps_done = 10
+    os.makedirs(cb.out_dir, exist_ok=True)  # normally done by on_train_start
     cb._export(_OkProf())
+    assert os.path.exists(os.path.join(cb.out_dir, "rank0.iter10.chrome_trace.json.gz"))
     assert not os.path.exists(os.path.join(cb.out_dir, "provenance.txt"))
+
+
+def test_teardown_suppression_after_first_capture_succeeded(mod, tmp_path, capsys):
+    # captures [10, 20], train ended after iteration 15: capture 10 already
+    # exported (captures_done=1), the pending capture 20 must be suppressed —
+    # exercises the capture_iters[captures_done] indexing beyond index 0.
+    cb = _build(mod, out_root=str(tmp_path))
+    cb.enabled_here = True
+    cb.captures_done = 1
+    cb.steps_done = 15
+    cb._export(_FailingProf())  # suppression must win before any export attempt
+    out = capsys.readouterr().out
+    assert "suppressing teardown export" in out
+    assert "WARNING: trace export failed" not in out
+    assert cb.captures_done == len(cb.capture_iters)
+
+
+# --- on_train_start / on_train_step_end state machine ------------------------
+
+
+class _StubProf:
+    """Stands in for torch.profiler.profile in step-end tests.
+
+    The state machine around step()/stop() is the code under test; a real
+    profiler would drag in kineto/CUPTI (GPU-only) for no extra coverage.
+    """
+
+    def __init__(self, fail_on=None):
+        self.calls = []
+        self.fail_on = fail_on
+
+    def step(self):
+        self.calls.append("step")
+        if self.fail_on == "step":
+            raise RuntimeError("kineto exploded")
+
+    def stop(self):
+        self.calls.append("stop")
+        if self.fail_on == "stop":
+            raise RuntimeError("kineto exploded")
+
+
+def test_step_end_counts_iterations_and_steps_profiler(mod):
+    cb = _build(mod)
+    cb.enabled_here = True
+    cb.prof = _StubProf()
+    cb.on_train_step_end(ctx=None)
+    cb.on_train_step_end(ctx=None)
+    assert cb.steps_done == 2
+    assert cb.prof.calls == ["step", "step"]
+
+
+def test_step_end_stops_profiler_after_all_captures(mod):
+    cb = _build(mod)
+    cb.enabled_here = True
+    stub = _StubProf()
+    cb.prof = stub
+    cb.captures_done = len(cb.capture_iters)  # all captures exported
+    cb.on_train_step_end(ctx=None)
+    assert stub.calls == ["stop"]
+    assert cb.prof is None  # later steps cost nothing
+
+
+def test_step_end_failure_degrades_not_raises(mod, capsys):
+    cb = _build(mod)
+    cb.enabled_here = True
+    cb.prof = _StubProf(fail_on="step")
+    cb.on_train_step_end(ctx=None)  # must NOT raise (would kill the run)
+    assert "WARNING: profiler step/stop failed" in capsys.readouterr().out
+    assert cb.prof is None  # profiling disabled after the failure
+
+
+def test_train_end_stop_failure_degrades_not_raises(mod, tmp_path, capsys):
+    cb = _build(mod, out_root=str(tmp_path))
+    cb.enabled_here = True
+    cb.prof = _StubProf(fail_on="stop")
+    os.makedirs(cb.out_dir, exist_ok=True)
+    cb.on_train_end(ctx=None)  # must NOT raise
+    assert "WARNING: profiler stop failed at train end" in capsys.readouterr().out
+    assert cb.prof is None
+
+
+def test_train_start_setup_failure_disables_profiling(mod, tmp_path, capsys):
+    # Make os.makedirs fail by placing a FILE where out_dir's parent must be.
+    blocker = tmp_path / "blocked"
+    blocker.write_text("")
+    cb = _build(mod, out_root=str(blocker), run_name="r", run_id="rid")
+    cb.on_train_start(ctx=None)  # must NOT raise
+    assert "WARNING: profiler setup failed" in capsys.readouterr().out
+    assert cb.enabled_here is False
+    assert cb.prof is None

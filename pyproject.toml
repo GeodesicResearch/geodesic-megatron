@@ -67,11 +67,11 @@ classifiers = [
 ]
 # All deps are EXACT-pinned to the INFR-41-validated env (Nemotron Ultra 550B,
 # 2026-06-14) — no open-ended ranges. Transitive deps are pinned by uv.lock
-# (regenerated on aarch64). torch/vllm/transformer-engine/nvidia-resiliency-ext
+# (regenerated on aarch64). torch/transformer-engine/nvidia-resiliency-ext
 # get their exact artifact from [tool.uv.sources] below.
 dependencies = [
     # application / framework deps
-    "transformers==5.10.2",  # vllm 0.22.1 bans transformers 5.0-5.5
+    "transformers==5.10.2",  # exact pin from the validated env (see header)
     "peft==0.18.1",
     "datasets==4.8.4",
     "accelerate==1.13.0",
@@ -95,8 +95,12 @@ dependencies = [
     "open-clip-torch==3.3.0",
     "mlflow==3.10.1",
     "comet-ml==3.57.3",
-    # torch stack — uv-managed from the cu126 index, pinned for vllm 0.22.1 (which
-    # hard-requires torch==2.11.0). See [tool.uv.sources] / [[tool.uv.index]].
+    # torch stack — uv-managed from the aarch64 cu126 index, exact-pinned. Training
+    # gets torch from the container image (see pipeline_env_config.env), never from
+    # here; this pin only keeps a `uv sync` of the tooling venv from drifting onto a
+    # different CUDA build. 2.11.0 was originally forced by vLLM's hard pin — with the
+    # vLLM backend gone the version is free to follow the image.
+    # See [tool.uv.sources] / [[tool.uv.index]].
     "torch==2.11.0",
     "torchvision==0.26.0",
     "torchaudio==2.11.0",
@@ -110,9 +114,6 @@ dependencies = [
     "nv-grouped-gemm==1.1.4.post8",
     "flash-linear-attention==0.4.2",
     "nvidia-resiliency-ext",  # git rev pinned in [tool.uv.sources]
-    # inference / coherence backend
-    "vllm==0.22.1",  # +cu129 aarch64 wheel pinned in [tool.uv.sources]
-    "ray==2.55.1",
 ]
 
 [tool.setuptools.dynamic]
@@ -138,10 +139,6 @@ override-dependencies = [
     "cryptography>=43.0.0,<47",
     "urllib3>=2.6.3",    # To address CVE-2026-21441
     "onnx>=1.21.0; python_version < '3.13'",  # onnx<1.21 has missing lower bound on ml-dtypes, uses float4_e2m1fn (requires ml-dtypes>=0.5.0)
-    # vllm 0.22.1 pins flashinfer-python==0.6.11.post2 but megatron-core[dev] caps it
-    # <0.6 — a genuine conflict. The validated env runs both with 0.6.11.post2 (vllm was
-    # force-installed --no-deps there); force that version so a single uv resolution works.
-    "flashinfer-python==0.6.11.post2",
     # nvdlfw-inspect (tensor-inspect extra) pins numpy==1.26.4, but the validated env
     # runs numpy 2.3.5 everywhere (built CUDA exts under numpy<2, then bumped). Force it.
     "numpy==2.3.5",
@@ -166,7 +163,6 @@ torchvision = { index = "pytorch-cu126" }
 torchaudio = { index = "pytorch-cu126" }
 transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", rev = "71bbefbf153418f943640df0f7373625dc93fa46" }
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext.git", rev = "5eb5f7ec84e9aa1bf45c403b06d6ef766ea6784a" }
-vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.22.1/vllm-0.22.1+cu129-cp38-abi3-manylinux_2_28_aarch64.whl" }
 
 [project.optional-dependencies]
 recipes = [
@@ -251,6 +247,12 @@ markers = [
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
     "skipduringci: marks tests that are skipped ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
+    # Registered inert: upstream Megatron-Bridge tests (qwen2.5-omni) carry
+    # @pytest.mark.timeout but pytest-timeout is not installed here; without
+    # this line --strict-markers turns their COLLECTION into an error that
+    # blocks every python-staging commit via the pytest pre-commit hook.
+    "timeout: upstream marker, inert without the pytest-timeout plugin",
+    "internal: upstream marker (qwen_vl tests), inert here",
 ]
 
 [tool.coverage.run]

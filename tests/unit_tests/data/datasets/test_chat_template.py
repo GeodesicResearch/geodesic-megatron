@@ -319,9 +319,7 @@ class TestGPTSFTChatDataset:
         mock_hf_tokenizer = MagicMock()
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_hf_tokenizer.apply_chat_template = MagicMock()
-        mock_hf_tokenizer.chat_template = (
-            "<|im_start|>assistant\n{% generation %}{{ content }}{% endgeneration %}"
-        )
+        mock_hf_tokenizer.chat_template = "<|im_start|>assistant\n{% generation %}{{ content }}{% endgeneration %}"
         mock_tokenizer.eos_id = 2
 
         dataset = GPTSFTChatDataset(
@@ -710,7 +708,7 @@ class TestOutputOriginalText:
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_tokenizer.eos_id = 2
 
-        mock_hf_tokenizer.chat_template = "{{ messages }}"
+        mock_hf_tokenizer.chat_template = "{{ messages }}"  # no {% generation %}
         mock_hf_tokenizer.apply_chat_template.return_value = {
             "input_ids": [1, 10, 20, 2],
         }
@@ -720,6 +718,7 @@ class TestOutputOriginalText:
             tokenizer=mock_tokenizer,
             max_seq_length=512,
             use_hf_tokenizer_chat_template=True,
+            answer_only_loss=False,  # this test is about metadata passthrough, not loss masking
             output_original_text=True,
         )
 
@@ -751,7 +750,7 @@ class TestOutputOriginalText:
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_tokenizer.eos_id = 2
 
-        mock_hf_tokenizer.chat_template = "{{ messages }}"
+        mock_hf_tokenizer.chat_template = "{{ messages }}"  # no {% generation %}
         mock_hf_tokenizer.apply_chat_template.return_value = {
             "input_ids": [1, 10, 20, 2],
         }
@@ -761,6 +760,7 @@ class TestOutputOriginalText:
             tokenizer=mock_tokenizer,
             max_seq_length=512,
             use_hf_tokenizer_chat_template=True,
+            answer_only_loss=False,  # this test is about metadata passthrough, not loss masking
             output_original_text=True,
         )
 
@@ -791,7 +791,7 @@ class TestToolSchemasEdgeCases:
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_tokenizer.eos_id = 2
 
-        mock_hf_tokenizer.chat_template = "{{ messages }}"
+        mock_hf_tokenizer.chat_template = "{{ messages }}"  # no {% generation %}
         mock_hf_tokenizer.apply_chat_template.return_value = {
             "input_ids": [1, 10, 20, 2],
         }
@@ -802,6 +802,7 @@ class TestToolSchemasEdgeCases:
                 tokenizer=mock_tokenizer,
                 max_seq_length=512,
                 use_hf_tokenizer_chat_template=True,
+                answer_only_loss=False,  # this test is about tool-schema parsing, not loss masking
                 tool_schemas=tool_schemas_json,
             )
 
@@ -872,7 +873,7 @@ class TestTruncationWithChatTemplates:
 
         # Simulate long sequence
         long_input_ids = list(range(1, 600))  # 599 tokens
-        mock_hf_tokenizer.chat_template = "{{ messages }}"
+        mock_hf_tokenizer.chat_template = "{{ messages }}"  # no {% generation %}
         mock_hf_tokenizer.apply_chat_template.return_value = {
             "input_ids": long_input_ids,
         }
@@ -882,6 +883,7 @@ class TestTruncationWithChatTemplates:
             tokenizer=mock_tokenizer,
             max_seq_length=512,
             use_hf_tokenizer_chat_template=True,
+            answer_only_loss=False,  # this test is about where truncation happens, not loss masking
         )
 
         example = {"conversations": [{"from": "User", "value": "Test"}]}
@@ -905,13 +907,14 @@ class TestTruncationWithChatTemplates:
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_tokenizer.eos_id = 2
 
-        mock_hf_tokenizer.chat_template = "{{ messages }}"
+        mock_hf_tokenizer.chat_template = "{{ messages }}"  # no {% generation %}
 
         dataset = GPTSFTChatDataset(
             file_path="test.jsonl",
             tokenizer=mock_tokenizer,
             max_seq_length=10,  # Very small for truncation
             use_hf_tokenizer_chat_template=True,
+            answer_only_loss=False,  # batch below is all-ones masked; test is about truncation only
         )
 
         # Create batch with sequences longer than max_seq_length
@@ -944,7 +947,10 @@ class TestTruncationWithChatTemplates:
         mock_tokenizer._tokenizer = mock_hf_tokenizer
         mock_tokenizer.eos_id = 2
 
-        mock_hf_tokenizer.chat_template = "{{ messages }}"
+        # This test is about answer-only loss masking (the batch below masks context and
+        # trains only on the assistant tail), so the template must carry {% generation %}
+        # for answer_only_loss=True to be valid.
+        mock_hf_tokenizer.chat_template = "{% generation %}{{ messages }}{% endgeneration %}"
 
         dataset = GPTSFTChatDataset(
             file_path="test.jsonl",
