@@ -43,10 +43,17 @@ except ImportError:
     # TODO(yuya): remove fallback once MCore pin includes get_hybrid_total_layer_count
     _mcore_get_hybrid_total_layer_count = None
 
-# MCore renamed `hybrid_override_pattern` → `hybrid_layer_pattern` in the dev branch.
-# Support both main and dev branch submodule by detecting which parameter is present at import time.
-# TODO: remove fallback once the dev rename lands in main and Bridge pins the new main commit.
-_MCORE_MAMBA_INIT_PARAMS = set(inspect.signature(MCoreMambaModel.__init__).parameters)
+# MCore renamed `hybrid_override_pattern` → `hybrid_layer_pattern`. At the current pin
+# MambaModel is a thin deprecation shim over models/hybrid/HybridModel whose signature is
+# `(*args, mamba_stack_spec=None, **kwargs)`, so introspecting the SHIM finds neither name
+# and a naive fallback would silently pass the DEPRECATED kwarg. Introspect the real class
+# when it exists; fall back to the shim's signature only on pins that predate HybridModel.
+try:
+    from megatron.core.models.hybrid.hybrid_model import HybridModel as _MCoreHybridModel
+
+    _MCORE_MAMBA_INIT_PARAMS = set(inspect.signature(_MCoreHybridModel.__init__).parameters)
+except ImportError:  # old pins: MambaModel is the real class
+    _MCORE_MAMBA_INIT_PARAMS = set(inspect.signature(MCoreMambaModel.__init__).parameters)
 _HYBRID_LAYER_PATTERN_KWARG = (
     "hybrid_layer_pattern" if "hybrid_layer_pattern" in _MCORE_MAMBA_INIT_PARAMS else "hybrid_override_pattern"
 )
