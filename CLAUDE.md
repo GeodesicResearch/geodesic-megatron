@@ -697,10 +697,19 @@ The unit-test hook only fires when a `*.py` file is staged and uses
 `git commit --no-verify` to skip on doc-only / WIP commits.
 
 ### Megatron-Core Submodule
+
+The submodule tracks the **GeodesicResearch/Megatron-LM fork** (see `.gitmodules`), which
+is upstream plus at most a few carried commits (currently one: the nvrx capability probe
+made non-fatal — see the pin commit's message). Carried commits MUST be pushed to the fork
+before the gitlink is committed; an unreachable submodule commit is how a fix was nearly
+lost once. `.main.commit` = the current pin; `.dev.commit` = the PREVIOUS pin, kept as a
+rollback/A-B escape hatch (checkpoints saved at the current pin may not load there — the
+dist-ckpt format moved forward at the 2026-07 bump).
+
 ```bash
 ./scripts/switch_mcore.sh status   # Show current pinned commit
-./scripts/switch_mcore.sh dev      # Switch to dev
-./scripts/switch_mcore.sh main     # Switch to main
+./scripts/switch_mcore.sh dev      # Switch to the PREVIOUS pin (code A/Bs only)
+./scripts/switch_mcore.sh main     # Switch to the current pin
 ```
 
 **Never edit the submodule working tree in place.** Such an edit runs (the checkout is on

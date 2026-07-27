@@ -16,7 +16,10 @@
 # Switch the 3rdparty/Megatron-LM submodule between pinned main and dev commits.
 #
 # Usage:
-#   ./scripts/switch_mcore.sh dev      # Switch to the pinned dev commit
+#   ./scripts/switch_mcore.sh dev      # Switch to the PREVIOUS pin (rollback/A-B escape hatch)
+#   NOTE: checkpoints SAVED at the current pin may not load at the previous one
+#   (dist-ckpt format moved forward at the 2026-07 bump) — rollback is for code A/Bs,
+#   not for resuming new checkpoints.
 #   ./scripts/switch_mcore.sh main     # Switch to the pinned main commit
 #   ./scripts/switch_mcore.sh status   # Show current submodule status
 
