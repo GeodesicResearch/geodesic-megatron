@@ -66,10 +66,16 @@ def _make_config(
 
 
 def _make_self_attn_submodules(q_layernorm=None, k_layernorm=None):
-    """Build SelfAttentionSubmodules with required positional args stubbed."""
+    """Build SelfAttentionSubmodules with required positional args stubbed.
+
+    Since mcore 0.19 `linear_proj` is a required field (no default), so it is
+    stubbed too; DiTSelfAttention.__init__ never reads it and the parent
+    SelfAttention.__init__ is mocked in these tests.
+    """
     sub = SelfAttentionSubmodules(
         linear_qkv=MagicMock(),
         core_attention=MagicMock(),
+        linear_proj=MagicMock(),
     )
     sub.q_layernorm = q_layernorm
     sub.k_layernorm = k_layernorm
