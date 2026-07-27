@@ -27,6 +27,7 @@ from megatron.bridge.training.train import (
     _handle_mxfp8_param_buffer_copy,
     _maybe_register_fsdp_buffers,
     _should_skip_and_handle_iteration,
+    _use_full_iteration_cuda_graph,
     checkpoint_and_decide_exit,
     force_param_sync,
     maybe_check_weight_hash_across_dp_replicas,
@@ -1430,3 +1431,33 @@ class TestDummyTrainStep:
         # Call function - should not raise an error
         fake_pg = type("PG", (), {"pp": object()})()
         _dummy_train_step(global_state, train_data_iterator, fake_pg)
+
+
+class TestUseFullIterationCudaGraph:
+    """Selecting the full-iteration CUDA graph wrapper.
+
+    mcore 0.19 deprecated `cuda_graph_scope` (now Optional, default None) and moved
+    full-iteration capture onto `cuda_graph_impl="full_iteration"`. The old check read
+    the deprecated field, so any config setting `cuda_graph_impl: local` -- the impl
+    Nemotron-H requires, since megatron/core/ssm/mamba_layer.py asserts it -- crashed at
+    train() entry with "argument of type 'NoneType' is not iterable".
+    """
+
+    def test_local_impl_with_unset_scope_does_not_raise(self):
+        """The regression: local impl + default (None) scope must be False, not a TypeError."""
+        cfg = SimpleNamespace(cuda_graph_impl="local", cuda_graph_scope=None)
+        assert _use_full_iteration_cuda_graph(cfg) is False
+
+    def test_full_iteration_impl_selects_wrapper(self):
+        """Post-migration spelling is the one that turns the wrapper on."""
+        cfg = SimpleNamespace(cuda_graph_impl="full_iteration", cuda_graph_scope=None)
+        assert _use_full_iteration_cuda_graph(cfg) is True
+
+    def test_none_impl_is_off(self):
+        cfg = SimpleNamespace(cuda_graph_impl="none", cuda_graph_scope=None)
+        assert _use_full_iteration_cuda_graph(cfg) is False
+
+    def test_transformer_engine_impl_is_off(self):
+        """TE per-layer graphs are not the full-iteration wrapper."""
+        cfg = SimpleNamespace(cuda_graph_impl="transformer_engine", cuda_graph_scope=None)
+        assert _use_full_iteration_cuda_graph(cfg) is False
