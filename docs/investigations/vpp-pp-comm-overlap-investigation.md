@@ -75,7 +75,33 @@ exchange adds another (`batch_p2p_sync`), ~64 more. Removing both changes nothin
 measurable at this topology (v1, v2): the CPU is far enough ahead that draining it does
 not cost wall-clock here. Worth knowing, since both look expensive on paper.
 
-### PP comm overlap is not merely slow — it is unusable
+### UPDATE: the NaN is a known upstream bug, fixed after our pin
+
+Megatron-LM commit `260cba71` (2026-04-16), "fix: wait for async P2P send before
+deallocating output tensor" (PR #4047), adds exactly the missing wait in the interleaved
+schedule:
+
+```python
+# isend() copies asynchronously; wait until the copy is done before
+# freeing the source buffer, otherwise the next PP stage gets corrupted data.
+if send_next_wait_handle is not None and config.deallocate_pipeline_outputs:
+    send_next_wait_handle.wait()
+```
+
+Our submodule is pinned at `3758b54b2` (PR #4025, 2026-03-27) — three weeks and 22 PRs
+earlier — so we do not have it. Applying that patch to the pinned tree and re-running the
+overlap arm: **14/14 iterations, 0 NaN, loss 0.70602** (matching every other arm to 2.4e-4).
+
+So the correct statement is *not* "overlap is numerically broken on this model" but
+"overlap is broken at our pin, and upstream already fixed it". With the fix applied the
+arm is correct but still slower at this workload: **31.45 s/iter** vs 27.50 baseline and
+29.59 VPP-without-overlap — un-batched isend/irecv remains the more expensive form on CXI,
+which is the original performance finding, now cleanly separated from the correctness bug.
+
+The durable fix is to move the pin forward rather than carry a patch; that upgrade is
+tracked separately.
+
+### PP comm overlap at our pin: unusable (superseded by the update above)
 
 Three independent arms produce **deterministic NaN at iteration 2, on the last stage**
 (rank 63), unchanged by the CXI rendezvous threshold (v5) or by giving the device eight

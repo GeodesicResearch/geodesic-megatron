@@ -1,0 +1,38 @@
+From 260cba71338c83717d3f644c1f77cb1ccd8c7f8d Mon Sep 17 00:00:00 2001
+From: Zhiyu Li <zhiyul@NVIDIA.com>
+Date: Thu, 16 Apr 2026 15:39:06 -0700
+Subject: [PATCH] fix: wait for async P2P send before deallocating output
+ tensor (#4047)
+
+---
+ megatron/core/pipeline_parallel/schedules.py | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/megatron/core/pipeline_parallel/schedules.py b/megatron/core/pipeline_parallel/schedules.py
+index 48963eb0e1d..14fc6041574 100644
+--- a/megatron/core/pipeline_parallel/schedules.py
++++ b/megatron/core/pipeline_parallel/schedules.py
+@@ -1565,6 +1565,11 @@ def forward_backward_helper_wrapper(
+                 )
+                 if "recv_prev" in fwd_wait_handles:
+                     recv_prev_wait_handles.append(fwd_wait_handles.pop("recv_prev"))
++            # isend() copies asynchronously; wait until the copy is done before
++            # freeing the source buffer, otherwise the next PP stage gets corrupted data.
++            if send_next_wait_handle is not None and config.deallocate_pipeline_outputs:
++                send_next_wait_handle.wait()
++                send_next_wait_handle = None
+ 
+             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
+             if recv_prev:
+@@ -1687,6 +1692,11 @@ def pp_post_forward(output_tensor, vp_stage=None):
+                     )
+                     if "recv_prev" in fwd_wait_handles:
+                         recv_prev_wait_handles.append(fwd_wait_handles.pop("recv_prev"))
++                # isend() copies asynchronously; wait until the copy is done before
++                # freeing the source buffer, otherwise the next PP stage gets corrupted data.
++                if send_next_wait_handle is not None and config.deallocate_pipeline_outputs:
++                    send_next_wait_handle.wait()
++                    send_next_wait_handle = None
+                 # assert fwd_wait_handles is not None
+ 
+                 # Put input_tensor and output_tensor_grad in data structures in the
