@@ -171,6 +171,58 @@ git -C 3rdparty/Megatron-LM checkout megatron/core/transformer/cuda_graphs.py
 
 The vendored copy at `3rdparty/patches/megatron-lm/0002-*.patch` is the record either way.
 
+## 5b. Container image ceiling: the host driver caps how new an image we can run
+
+**The cluster's host driver is `565.57.01` (CUDA 12.7).** NGC images run newer in-image CUDA via
+forward-compat libs, but only if the image's bundled compat `libcuda` is from a branch the host
+kernel module supports. Measured:
+
+| image | CUDA | bundled compat libcuda | runs here? |
+|---|---|---|---|
+| **26.02.nemotron_3_super** (current) | 13.0 | **580.95.05** | ✅ |
+| **26.04** | **13.1** | **590.48.01** | ✅ **VERIFIED** — `is_available: True`, GPU op OK, TE **2.14.1**, torch 2.11 |
+| **26.06** | 13.2 | **595.58.03** | ❌ `torch.cuda.is_available() == False` |
+
+**Conclusion: `nemo:26.04` is the newest image this cluster can run.** The forward-compat ceiling
+on driver `565.57.01` lies between the 590 branch (works) and 595 (does not). 26.04 is also the
+version that matters: **CUDA 13.1** is where device-side grouped-GEMM shapes landed (13.2 adds
+mostly Blackwell MXFP8, irrelevant on GH200) and **TE 2.14** carries the on-device group sizes and
+the CPU-overhead work. Newer images require a BriCS driver update — worth raising with them, as it
+caps the whole machine, not just this repo.
+
+**SIF is pulled and ready:** `/projects/a5k/public/containers/nemo_26.04.sif` (18 G).
+
+26.06 otherwise qualified fine — Slingshot NCCL built (v2.29.2-1 / hwloc v2.13 / aws-ofi-nccl
+v1.18.0), overlay installed, **16/19 validator checks passed including `import paths (repo wins
+over image)` and `NCCL CXI net plugin loads`**. Only the CUDA-dependent checks fail, plus a
+missing `grouped_gemm` module. Forcing `/usr/local/cuda/compat/lib.real` onto `LD_LIBRARY_PATH`
+does not help. **This is a driver constraint, not a config bug** — raising it with BriCS is the
+only route to newer images.
+
+### Why we wanted a newer image (from the TE + CUDA changelogs)
+
+Not currency — these releases contain the exact mechanisms for our host-overhead wall:
+
+| version | change | relevance |
+|---|---|---|
+| **CUDA 13.1** | cuBLASLt grouped GEMM with **device-side shapes** ("matrices passed as a device array of pointers… each with its own shapes") | MoE-paper §4.3.7 Challenge 1: removes the dropless host sync **without dropping tokens** |
+| **TE 2.14** | "BF16 and MXFP8 grouped GEMM support with **on-device group sizes**" | the TE binding for the above |
+| **TE 2.14** | "multiple **CPU overhead optimizations**… reduce per-step Python/host overhead"; single-parameter `GroupedLinear` "reduces CPU overheads" | directly targets our measured bottleneck |
+| **TE 2.16** | "Reduced the **CPU overhead in the GroupedLinear** module" (×3 PRs) | ditto |
+| **TE 2.16** | "**CUDA Graph capture support for GroupedLinear and grouped MoE** operations" | may reopen the `moe` graph scope |
+| **TE 2.13** | `get_backward_dw_params` "fixing weight gradient hook management when using **wgrad CUDA Graphs with Megatron-LM**" | graph capture fix |
+| **TE 2.15** | "Fixed a **numerical bug for the MoE fused router for large top-K and expert counts**" | ⚠️ we run **top-k 22 over 512 experts** on TE 2.12 — see below |
+
+> ⚠️ **`moe_router_fusion` caution.** It measured ~0.5–1% faster and loss-neutral to 9.6e-5 at 48
+> iters, but TE 2.15's fixed router bug names exactly our regime (large top-k, large expert
+> count) and our TE 2.12 predates the fix. Do not adopt it as a default until we are past TE 2.15.
+
+**Note the ncclep/CUDA-graph path is gated separately and higher:** `moe_flex_dispatcher_backend:
+ncclep` (the graph-capturable dispatcher, and the fix for the `mappings.py:444` garbage-token-count
+failure) needs `transformer_engine.pytorch.ep`, which exists only in **TE 2.17** — newer than any
+NGC image currently published. The mcore side is already present in our 0.19 (`paged_stash.py`,
+10 `ncclep` references in `token_dispatcher.py`).
+
 ## 6. Artifacts
 
 - **Traces (durable):** `/projects/a5k/public/profiles/r9_nonvpp/20260727T053530-j5738451/`
@@ -199,3 +251,43 @@ The vendored copy at `3rdparty/patches/megatron-lm/0002-*.patch` is the record e
   exit. A sampled "is anything running" check races with another driver's inter-stage gap.
 - 48 iterations ≈ **10% of one epoch** (dataset is 30,341 packed 32K sequences ≈ 994 M tokens;
   one epoch = **474 iterations** at GBS=64). Loss comparisons here are early-training signals.
+
+---
+
+## 8. RESUME HERE (tunnel 5738451 expired 2026-07-27 ~19:35 UTC)
+
+Work was mid-flight when the allocation ended. State:
+
+**Done and durable (on shared FS / in git):**
+- `nemo:26.04.sif` pulled (18 G) and **verified to run on this driver** (§5b).
+- `nemo:26.06` SIF + Slingshot + overlay exist but the image is **unusable** (driver).
+- 26.02 remains the working, qualified environment. Nothing in the live config was changed.
+
+**Incomplete — re-run in a fresh allocation:**
+1. `GEODESIC_CONTAINER_IMAGE_TAG=26.04 bash pipeline_env_setup.sh --only slingshot`
+   (was mid-NCCL-compile; `/projects/a5k/public/containers/slingshot/nemo_26.04/` holds only a
+   partial `nccl/`. The step is idempotent; it re-runs cleanly. ~15-20 min.)
+2. then `--only overlay`, then `--only validate` (expect 19/19; on 26.06 the only failures were
+   CUDA-dependent + a missing `grouped_gemm` module — check whether 26.04 also lacks it).
+3. Only then flip `CONTAINER_IMAGE_TAG` in `pipeline_env_config.env` to `26.04`.
+
+**The measurement ladder that never ran** (configs already written in the session tmp dir; they
+are plain copies of the committed quickstart with single fields changed — regenerate if lost).
+All 48 iters, all vs the **J1 baseline: 27.02 s/iter, lm loss 0.6241053 @ i48** on 26.02:
+
+| # | arm | question |
+|---|---|---|
+| 1 | dropless on 26.04 | **the headline**: does the dropless host-sync cost fall on CUDA 13.1 / TE 2.14 alone? |
+| 2 | CF 1.0 on 26.04 | how much of the 6.6 s ragged-vs-uniform gap survives? If it collapses, token-dropping is unnecessary |
+| 3 | `optimizer_offload_fraction: 0.5` | quality-neutral lever (1.0→0.0 OOMs; 0.5 is recorded as fitting) |
+| 4 | `recompute_modules: ["moe"]` | quality-neutral; targets the 4.21 s `CheckpointFunctionBackward` stall |
+| 5 | 3 + 4 combined | |
+
+**Caveat on #1/#2:** mcore must actually *call* the device-side grouped-GEMM path. There are no
+`device_initiated` references in our mcore 0.19 MoE code — it may route through TE `GroupedLinear`
+transparently, or may need a newer mcore. If the measurement shows no change, check that first
+before concluding CUDA 13.1 does not help.
+
+**The K ladder was started three times and never completed an arm** — twice pre-empted by
+higher-priority work, once by the tunnel. Those four arms are the best remaining quality-neutral
+options and are still unmeasured.
