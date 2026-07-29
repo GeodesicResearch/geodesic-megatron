@@ -499,3 +499,35 @@ before results): launches should fall ~256k → ~90k/iter. Predicted **20–22.5
 dropless). The next wall behind it: ~88k residual launches ≈ 5.3 s host-serial. If it lands
 >24 s, suspect gg ragged-kernel efficiency or the wgrad path — trace before concluding.
 Loss gate: 0.6240–0.6248 @48 (the cross-arm band).
+
+### 9.10 m6 adjudication: launch collapse ≠ the win. Cost model corrected (MoE paper §4.3.2)
+
+**m6 (26.02 + offload 0.5 + cutlass_grouped, 48 it): 26.63 s (10–30) / 26.00 s (10–48), min
+24.70, loss 0.6241723 ✓.** Against the same-image baseline (~25.5–26.3, a1 partial):
+**performance-neutral**. The preregistered 20–22.5 s is refuted. Functionally the module is
+fully validated at scale — base-checkpoint warm-start through the new mapping at EP=4, loss
+parity to the 4th decimal (kernel-rounding-level agreement) — it stays in the tree as an
+opt-in (`moe_experts_impl`), default off.
+
+**Why the prediction was wrong** (per the MoE paper's §4.3.2 taxonomy, which names our exact
+path): TE's "multi-stream cuBLASLt" grouped GEMM issues the 168k per-expert launches from a
+C++ loop inside ONE pybind call per (layer, µb, pass) — those launches cost ~10 µs each
+(~2 s/iter total), not the ~60 µs Python-dispatch cost §9.1 charged them. The ~60 µs ops are
+the ~90k Python-level launches (eltwise, dispatch, Mamba, autograd) ≈ 5+ s/iter — THE wall.
+And CF-1.0's 6.6 s win was mostly **uniformity** (rank-skew removal + no ragged-dependent
+host paths), not launch count. §9.1's census stands; its per-launch cost attribution is
+hereby corrected.
+
+**Revised outlook for ≤20 s quality-neutral on THIS stack:** not reachable with config- or
+module-level levers. The remaining recoverable host time needs per-op Python/framework
+elimination = CUDA graphs. Two paths, in order of leverage:
+1. **Driver upgrade (BriCS)** → image 26.06+/TE ≥2.15 → device-initiated grouped GEMM +
+   sync-free dispatch + graphs on the expert path — the paper's designed solution (§4.3.7).
+2. **Partial-graphs revisit at this pin** using TE's graph memory optimizations
+   (`make_graphed_callables(_order=...)` pool sharing + static-buffer reuse; the paper reports
+   ~7 GB overhead where our naive attempt OOM'd at +14 GB) on the mamba/router/preprocess
+   scopes. `attn` stays blocked (TE event-record under CP capture; CP=4 mandatory). Uncertain,
+   real effort — the natural next investigation.
+
+Standing quality-neutral champion: **25.56–25.66 s = 26.04 + offload 0.5 (± timers0)** —
+committed as the default stack.
