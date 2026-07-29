@@ -394,3 +394,30 @@ Decision rules (committed before data): ≤21.5 → storm collapsed, confirm wit
 >27.5 → investigate before qualifying. Loss gate |Δ| ≤ 1e-3 vs 0.62475 (run-to-run band 5.5e-4).
 Offload rule (Kyle): m2 adopts 0.5 only if ≥ ~0.8 s faster than m1; otherwise full offload stays.
 m3 adopts timers0 if ≥ 0.5 s.
+
+### 9.7 Call-path verdict (analytical, written before m1 landed)
+
+Read both sides of the grouped-GEMM call path (mcore 0.19 checkout; TE 2.14.1 source inside the
+26.04 image):
+
+- mcore's alltoall token dispatcher computes counts on device, stages them to host through
+  `_maybe_dtoh_and_synchronize`, and delivers **host `List[int]`** (`.tolist()` /
+  `.cpu()`) as `m_splits`.
+- TE 2.14.1 `GroupedLinear` **only accepts host lists**: `num_gemms = len(m_splits)`,
+  `torch.split(inp, m_splits)` → per-expert views → per-expert cuBLASLt calls. A tree-wide
+  search finds **no tensor-typed / device-side group-size API in TE 2.14.1's Python surface.**
+
+**Conclusion: the per-expert launch storm cannot collapse on 26.04.** The preregistered upside
+branch (≈20 s) is structurally unreachable at TE 2.14.1; expect the modal band (25.8–26.8 s =
+CPU-overhead trims only). A device-side path would need TE ≥2.15/2.16 → image 26.06+ → blocked
+by the **host driver 565.57.01** — making the driver upgrade (BriCS ask) the root unblock for
+the clean fix.
+
+**The in-reach quality-neutral fix is therefore a code change, not a config**: a CUTLASS
+grouped-GEMM expert module (`nv-grouped-gemm`, which the qualified 26.02 image ships) wired
+into the Nemotron-H MoE spec — one `gmm` kernel per (layer, µb, pass) instead of 128 per-expert
+GEMMs, i.e. 168.8k → ~1.3k launches. Upstream's legacy `GroupedMLP` was exactly this and was
+removed at 0.19; the previous pin (`.dev.commit`, mcore 0.16) still carries it as a reference
+implementation, including its sharded-state-dict mapping. Prototype plan: bridge-side expert
+module + spec override, gated on (a) loss parity vs TEGroupedMLP at 48 iters, (b) checkpoint
+load compatibility with the existing torch_dist base checkpoint.
