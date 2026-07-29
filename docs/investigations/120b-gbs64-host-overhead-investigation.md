@@ -472,3 +472,10 @@ historical ~91 GB concern for offload 0.5 does not reproduce on this config. Gat
 before the default flip: m5, a 14-iter FT-ENABLED smoke on 26.04 (nvidia-resiliency-ext
 0.4.1 → 0.6.0 is the biggest untested behavioral delta; validator already passes the
 ft_launcher flag check).
+
+**m5 (FT-enabled smoke on 26.04): GREEN.** 14/14 iterations at ~27.15 s/iter (the expected
+~1.5 s ft_launcher overhead over 25.66 FT-off), 0 restarts, 0 tracebacks, loss healthy —
+nvidia-resiliency-ext 0.6.0 accepts our full `--ft-*` flag set and behaves. (First attempt
+failed by design: FT requires `checkpoint.save` to be set — probe configs null it; re-ran
+with a scratch save dir, deleted after.) **Qualification complete → 26.04 flipped as the
+default image with `optimizer_offload_fraction: 0.5` adopted in the quickstart.**

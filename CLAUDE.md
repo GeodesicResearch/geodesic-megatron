@@ -134,9 +134,12 @@ bash pipeline_env_setup.sh
   Without the CXI plugin NCCL silently falls back to TCP: ~2.3 GB/s vs ~163 GB/s.
 - **Image contents are not frozen in this file** (they rot): the validator's
   version-report check prints the live set. Qualified image today is
-  `nvcr.io/nvidia/nemo:26.02.nemotron_3_super` — Python 3.12, CUDA 13.0, NCCL 2.28.8,
-  torch 2.10.0a0+nv25.11, TE 2.12.0, mamba-ssm 2.3.0, causal-conv1d 1.6.0,
-  nv-grouped-gemm 1.1.4.post8, transformers 5.3.0, APEX, nvidia-resiliency-ext 0.4.1.
+  `nvcr.io/nvidia/nemo:26.04` (re-qualified 2026-07-29) — Python 3.12, CUDA 13.1,
+  NCCL 2.29.2, torch 2.11.0a0+nv26.02, TE 2.14.1, mamba-ssm 2.3.1, causal-conv1d
+  1.6.1, transformers 5.3.0, APEX, nvidia-resiliency-ext 0.6.0. (26.06 needs a
+  ≥595-branch driver — blocked on this cluster's 565.57.01. 26.04 does NOT ship
+  nv-grouped-gemm; nothing imports it at mcore 0.19, and the validator check was
+  removed accordingly.)
   The Python overlay (`pip install --target`, `--no-deps`, on PYTHONPATH after the repo
   and before the image) fills gaps without touching the read-only SIF: `peft` (image
   0.13.2 is below modelopt's >=0.17 requirement) and `imageio` (absent; one diffusion
@@ -146,9 +149,11 @@ bash pipeline_env_setup.sh
   a regular (non-namespace) `megatron` package in a future image would silently win.
 - **Benchmark/certification config:** `configs/quickstart/nemotron_super_quickstart_sft.yaml`
   (Super-120B, TP1·CP4·EP4·PP8·ETP1·DP2 → 64 GPUs = **16 nodes**) — gate is < 40 s/iter
-  (mean of iters 10–30; measured champion ~27.6 s/iter FT-off, ~30.8 with FT, and ~27.2
-  after the grad-stats telemetry fix). Qualifying a new image tag = that absolute gate
-  plus no regression against the previously qualified tag's recorded number.
+  (mean of iters 10–30; measured champion **25.66 s/iter** FT-off at the 2026-07-29
+  26.04 qualification with `optimizer_offload_fraction: 0.5`; the prior 26.02 anchor
+  was 26.70 on the identical nodelist, ~27.2–27.6 historical). Qualifying a new image
+  tag = that absolute gate plus no regression against the previously qualified tag's
+  recorded number.
 - **Unit tests run inside the container** (the image ships pytest/ruff/pre-commit):
   ```bash
   # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent

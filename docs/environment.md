@@ -113,9 +113,14 @@ without it one diffusion test file fails at **collection**, which fails the enti
 
 ## What is inside the image
 
-The qualified image is `nvcr.io/nvidia/nemo:26.02.nemotron_3_super` (aarch64), pulled to
-`/projects/a5k/public/containers/nemo_26.02.nemotron_3_super.sif`. Measured contents
-(2026-07-25):
+The qualified image is `nvcr.io/nvidia/nemo:26.04` (aarch64, re-qualified 2026-07-29 —
+CUDA 13.1, torch 2.11.0a0+nv26.02, TE 2.14.1, NCCL 2.29.2, nvidia-resiliency-ext 0.6.0;
+validator 18/18; quickstart 25.66 s/iter with `optimizer_offload_fraction: 0.5` vs 26.70 on
+the prior tag, identical nodelist — see
+`docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8), pulled to
+`/projects/a5k/public/containers/nemo_26.04.sif`. The table below records the PREVIOUS
+qualified image `26.02.nemotron_3_super`'s measured contents (2026-07-25); the validator's
+version report prints the live set per image:
 
 | Component | Version | Note |
 |---|---|---|
@@ -344,12 +349,17 @@ those are version-neutral.
 Policy: **prefer the newest stack that works.** Candidate tags are tried newest-first
 (`GEODESIC_CONTAINER_IMAGE_TAG=<tag>` plus `GEODESIC_CONTAINER_SIF=<path>` keeps candidates
 side by side), and the newest tag that clears all four gates becomes the one-line committed
-default in `pipeline_env_config.env`. The ladder walked for the current default was
-`26.06 → 26.02.nemotron_3_super → 25.11 → 25.09`: `26.06` ships CUDA 13.2 (its `apptainer
-inspect` labels show nvvm 13.2.78), which the compat table in D6b rules out on this driver,
-so qualification stopped at `26.02.nemotron_3_super`. Per-image evidence (version tables,
-busbw, iteration times) lives in the INFR-68 PR. The same newest-first policy applies to the
-Option-B build pins.
+default in `pipeline_env_config.env`. The original INFR-68 ladder
+(`26.06 → 26.02.nemotron_3_super → 25.11 → 25.09`) stopped at `26.02.nemotron_3_super`
+because `26.06` ships CUDA 13.2 (nvvm 13.2.78), which the compat table in D6b rules out on
+this driver. **2026-07-29 re-qualification: `26.04` (CUDA 13.1, compat 590.48.01) does run
+on this driver and is now the default** — validator 18/18, FT smoke, and a 48-iter ladder
+on an identical nodelist (evidence:
+`docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8; plain-config 26.04
+regresses ~1–2 s via end-of-step skew, and the adopted `optimizer_offload_fraction: 0.5`
+config wins outright at 25.66 vs 26.70). `26.06` remains driver-blocked; per-image evidence
+otherwise lives in the INFR-68 PR. The same newest-first policy applies to the Option-B
+build pins.
 
 A tag qualifies when:
 

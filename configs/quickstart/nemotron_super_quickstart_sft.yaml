@@ -109,6 +109,21 @@
 #   log_params_norm adds the same pattern. See clip_grads.py::count_zeros_fp32
 #   and the profile analysis doc addendum.
 #
+# 26.04 QUALIFICATION LADDER (2026-07-29, allocation 5738452, 48-iter arms, FT off,
+# identical nodelist, mean iters 10-30 — full evidence + traces in
+# docs/investigations/120b-gbs64-host-overhead-investigation.md §9):
+#   a0  26.02 as-was                          26.70 | anchor
+#   m1  26.04 as-was                          28.60 (replicate m1p steady ~27.4) |
+#       REGRESSION at offload 1.0 — end-of-step skew (timer barrier 1.31->4.20 s);
+#       compute + launch census byte-identical (TE 2.14.1 does NOT batch the
+#       ragged per-expert GEMMs — 168,771/iter on both images)
+#   m2  26.04 + offload 0.5                   25.66 | ADOPTED (this file)
+#   m3  26.04 + timing_log_level 0            26.46 | barriers create serialization
+#   m4  26.04 + both                          25.56 | timers win subsumed by m2 ->
+#       timing_log_level stays 2 (telemetry is free again once skew source is gone)
+#   m5  26.04 + offload 0.5, FT ON, 14 it     smoke gate for the default flip
+#   Loss@48 parity across all arms: 0.62405-0.62475 (run-to-run band 5.5e-4).
+#
 # HISTORICAL BLOCKS — everything below was measured at GBS=48 and/or in the
 # now-retired bare-metal venv. Kept because the *verdicts* still hold (memory
 # feasibility, why the recompute/offload settings are load-bearing, where the
@@ -225,8 +240,15 @@ train:
   manual_gc: true
   manual_gc_interval: 10
 
-# --- Optimizer (full CPU offload — near-free on GH200 NVLink-C2C; frees HBM for
-# the 11-layer PP=8 stages; inherited from the endorsed pa_warm_start setup) ---
+# --- Optimizer (CPU offload fraction 0.5 — ADOPTED 2026-07-29 at the 26.04
+# qualification: 25.66 s/iter vs 26.70 (26.02 anchor) and vs 27.4-28.6 (26.04 at
+# fraction 1.0) on the identical nodelist; the win is "notable" per Kyle's rule, so
+# 0.5 replaces the historical full offload. True peak (nvidia-smi across all 64
+# GPUs during the composed m4 run): 69.1 GB of 95 on the stage-0 nodes. Mechanism:
+# on 26.04/torch 2.11 the fully-offloaded optimizer step skews some ranks by ~3 s
+# per iter, which the end-of-step timer barrier then charges to everyone;
+# fraction 0.5 removes the skew source. Full ladder + traces: docs/investigations/
+# 120b-gbs64-host-overhead-investigation.md §9.8.) ---
 optimizer:
   lr: 5.0e-06
   min_lr: 0.0
@@ -241,7 +263,7 @@ optimizer:
   exp_avg_dtype: torch.bfloat16
   exp_avg_sq_dtype: torch.bfloat16
   optimizer_cpu_offload: true
-  optimizer_offload_fraction: 1.0
+  optimizer_offload_fraction: 0.5
   overlap_cpu_optimizer_d2h_h2d: true
   pin_cpu_grads: true
   pin_cpu_params: true
