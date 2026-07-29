@@ -552,3 +552,32 @@ by the log marker before scoring): predicted **23.5–25.5 s** (−0.5 to −2.5
 baseline, per the corrected model). Within ±0.3 of baseline → launch count truly doesn't
 matter on this workload; >0.5 s SLOWER → CUTLASS ragged kernels less efficient than the
 multi-stream cuBLASLt picks. Loss gate unchanged.
+
+### 9.12 m6c: the launch-storm collapse CONFIRMED — new champion 21.78 s/iter
+
+**m6c (26.02 + offload 0.5 + cutlass_grouped, genuinely engaged — 64/64 rank markers):
+21.78 s (10–30) / 21.69 (10–48), min 21.23, loss@48 = 0.6242605 ✓ in-band.** −4.1 s (−16%)
+vs the same-image baseline; −3.8 s vs the prior champion (m2/m4 25.56–25.66). Landed inside
+the ORIGINAL preregistered band (20–22.5). §9.10's "perf-neutral" verdict traced to the
+unwired flag (§9.11); §9.10's cost-model correction ALSO overcorrected — empirically the
+multi-stream per-expert path costs ~3.5–4 s/iter beyond raw launch syscalls (heuristic
+lookups + stream bookkeeping + launch bursts). Two probe failures on the way (silent YAML
+drop; fused-activation 1-D probs) are documented in §9.11 and the module's tests.
+
+En route the m6c bring-up also hardened the module: fused weighted-squared-relu branch
+covered (was crashing at scale on [N] vs [N,1] probs), engagement now logged per rank.
+
+### 9.13 Recompute/overlap ladder (Kyle's priorities, 2026-07-30) — preregistration
+
+Base = the new champion. 48-iter arms on identical nodes, running now:
+
+| arm | delta | preregistered expectation |
+|---|---|---|
+| r1_recmoe | `recompute_modules: [moe]` | 20.8–21.6 (shared-expert recompute removed; +2–4 GB) |
+| o1_sharedoverlap | `moe_shared_expert_overlap: true` | 21.0–21.8 (bounded by ~1 s exposed EP a2a) |
+| o2_paramgather | `ddp.overlap_param_gather: true` | 21.3–22.0 or fast-fail (the `false` rule predates the pin bump) |
+| c1 (follow-up) | winners composed | sub-20 in reach if r1+o1 stack |
+
+Stretch arms if time: r2 (recompute fully off — may OOM; fast fail is information),
+v1 (VPP=2 + `overlap_moe_expert_parallel_comm` — the paper's a2a overlap needs interleaving,
+and cutlass shrank VPP's launch penalty; re-opens VPP on new terms).
