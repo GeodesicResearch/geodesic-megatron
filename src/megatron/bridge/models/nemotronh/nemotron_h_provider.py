@@ -66,31 +66,44 @@ class NemotronHModelProvider(MambaModelProvider):
     #                       models/nemotronh/cutlass_grouped_experts.py.
     moe_experts_impl: str = "te_grouped"
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.moe_experts_impl == "cutlass_grouped":
-            from megatron.bridge.models.nemotronh.cutlass_grouped_experts import (
-                swap_moe_experts_to_cutlass_grouped,
-            )
+    def _apply_moe_experts_impl(self) -> None:
+        """Wrap mamba_stack_spec per moe_experts_impl.
 
-            inner = self.mamba_stack_spec
-
-            def _cutlass_resolved_stack_spec(cfg=None):
-                if callable(inner):
-                    try:
-                        spec = inner(cfg)
-                    except TypeError:
-                        spec = inner()
-                else:
-                    spec = inner
-                return swap_moe_experts_to_cutlass_grouped(spec)
-
-            self.mamba_stack_spec = _cutlass_resolved_stack_spec
-        elif self.moe_experts_impl != "te_grouped":
+        Runs from provide() — i.e. at model-build time — because YAML `model:` overrides
+        are merged onto the provider instance AFTER construction, so a __post_init__ hook
+        would only ever see the field's default.
+        """
+        if self.moe_experts_impl == "te_grouped":
+            return
+        if self.moe_experts_impl != "cutlass_grouped":
             raise ValueError(
-                f"Unknown moe_experts_impl {self.moe_experts_impl!r}; "
-                "expected 'te_grouped' or 'cutlass_grouped'."
+                f"Unknown moe_experts_impl {self.moe_experts_impl!r}; expected 'te_grouped' or 'cutlass_grouped'."
             )
+        if getattr(self, "_cutlass_spec_applied", False):
+            return
+        from megatron.bridge.models.nemotronh.cutlass_grouped_experts import (
+            swap_moe_experts_to_cutlass_grouped,
+        )
+
+        inner = self.mamba_stack_spec
+
+        def _cutlass_resolved_stack_spec(cfg=None):
+            if callable(inner):
+                try:
+                    spec = inner(cfg)
+                except TypeError:
+                    spec = inner()
+            else:
+                spec = inner
+            return swap_moe_experts_to_cutlass_grouped(spec)
+
+        self.mamba_stack_spec = _cutlass_resolved_stack_spec
+        self._cutlass_spec_applied = True
+
+    def provide(self, pre_process=None, post_process=None, vp_stage=None):
+        """Resolve the experts implementation, then build the model as usual."""
+        self._apply_moe_experts_impl()
+        return super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
 
 
 @dataclass

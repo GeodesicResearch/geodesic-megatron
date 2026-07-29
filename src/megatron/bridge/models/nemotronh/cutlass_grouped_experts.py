@@ -41,8 +41,6 @@ from functools import partial
 from typing import Optional
 
 import torch
-from torch.nn.parameter import Parameter
-
 from megatron.core import tensor_parallel
 from megatron.core.activations import squared_relu
 from megatron.core.dist_checkpointing import ShardedTensor
@@ -53,10 +51,12 @@ from megatron.core.dist_checkpointing.mapping import (
 )
 from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_relu_impl
 from megatron.core.tensor_parallel.layers import _initialize_affine_weight_gpu
-from megatron.core.utils import divide
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_object_for_checkpoint
+from megatron.core.utils import divide
+from torch.nn.parameter import Parameter
+
 
 try:
     import grouped_gemm
@@ -105,14 +105,11 @@ class CutlassGroupedExperts(MegatronModule):
 
         self.activation_func = self.config.activation_func
         self.activation_recompute = (
-            self.config.recompute_granularity == "selective"
-            and "moe_act" in self.config.recompute_modules
+            self.config.recompute_granularity == "selective" and "moe_act" in self.config.recompute_modules
         )
 
         # Latent MoE: the experts see moe_latent_size-wide activations, not hidden_size.
-        self.in_features = (
-            config.moe_latent_size if config.moe_latent_size is not None else config.hidden_size
-        )
+        self.in_features = config.moe_latent_size if config.moe_latent_size is not None else config.hidden_size
 
         tp_size = self.tp_group.size()
         fc1_output_size = self.config.moe_ffn_hidden_size * self.num_local_experts
@@ -140,9 +137,7 @@ class CutlassGroupedExperts(MegatronModule):
             )
         )
         if config.perform_initialization:
-            _initialize_affine_weight_gpu(
-                self.weight1, config.init_method, partition_dim=1, is_expert=True
-            )
+            _initialize_affine_weight_gpu(self.weight1, config.init_method, partition_dim=1, is_expert=True)
             _initialize_affine_weight_gpu(
                 self.weight2, config.output_layer_init_method, partition_dim=0, is_expert=True
             )
@@ -159,9 +154,7 @@ class CutlassGroupedExperts(MegatronModule):
 
     def _weighted_activation(self, x: torch.Tensor, probs: torch.Tensor) -> torch.Tensor:
         """activation(x) scaled by router probs — same semantics as TEGroupedMLP."""
-        if self.activation_func == squared_relu and getattr(
-            self.config, "use_fused_weighted_squared_relu", False
-        ):
+        if self.activation_func == squared_relu and getattr(self.config, "use_fused_weighted_squared_relu", False):
             return weighted_squared_relu_impl(x, probs)
         dtype = x.dtype
         return (self.activation_func(x) * probs.unsqueeze(-1)).to(dtype)
@@ -177,13 +170,11 @@ class CutlassGroupedExperts(MegatronModule):
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
 
         if self.config.moe_apply_probs_on_input:
-            assert self.config.moe_router_topk == 1, (
-                "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
-            )
+            assert self.config.moe_router_topk == 1, "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
             original_dtype = permuted_local_hidden_states.dtype
-            permuted_local_hidden_states = (
-                permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
-            ).to(original_dtype)
+            permuted_local_hidden_states = (permuted_probs.unsqueeze(-1) * permuted_local_hidden_states).to(
+                original_dtype
+            )
             permuted_probs = torch.ones_like(permuted_probs)
 
         # gmm needs group sizes as a CPU int64 tensor. The alltoall dispatcher has already
@@ -194,9 +185,7 @@ class CutlassGroupedExperts(MegatronModule):
         if permuted_local_hidden_states.nelement() != 0:
             w1 = self.weight1.view(self.num_local_experts, self.in_features, -1)
             w2 = self.weight2.view(self.num_local_experts, -1, self.in_features)
-            fc1_output = grouped_gemm.ops.gmm(
-                permuted_local_hidden_states, w1, batch_sizes, trans_b=False
-            )
+            fc1_output = grouped_gemm.ops.gmm(permuted_local_hidden_states, w1, batch_sizes, trans_b=False)
             if self.activation_recompute:
                 intermediate = self.activation_checkpoint.checkpoint(
                     self._weighted_activation, fc1_output, permuted_probs
@@ -212,9 +201,7 @@ class CutlassGroupedExperts(MegatronModule):
             w2 = self.weight2.view(-1, self.in_features)
             h = torch.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
-                h = self.activation_checkpoint.checkpoint(
-                    self._weighted_activation, h, permuted_probs
-                )
+                h = self.activation_checkpoint.checkpoint(self._weighted_activation, h, permuted_probs)
                 fc2_output = torch.matmul(h, w2)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:

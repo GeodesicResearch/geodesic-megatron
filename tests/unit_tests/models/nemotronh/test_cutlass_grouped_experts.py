@@ -26,6 +26,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+
 try:
     import grouped_gemm  # noqa: F401
 
@@ -178,3 +179,34 @@ class TestCutlassGroupedExperts:
         torch.testing.assert_close(merged2, m.weight2.detach())
         # extra_state compatibility stubs exist per global expert
         assert sum("_extra_state" in k for k in sd) == 2 * E
+
+
+class TestProviderWiring:
+    """moe_experts_impl must take effect even when set AFTER construction (YAML merge path)."""
+
+    def test_post_merge_field_swaps_experts_in_resolved_spec(self):
+        from megatron.bridge.models.nemotronh.cutlass_grouped_experts import CutlassGroupedExperts
+        from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
+
+        provider = NemotronHModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
+        provider.moe_experts_impl = "cutlass_grouped"  # simulates the OmegaConf post-init merge
+        provider._apply_moe_experts_impl()
+        spec = provider.mamba_stack_spec(provider)
+        experts = spec.submodules.moe_layer.submodules.mlp.keywords["submodules"].experts
+        assert experts is CutlassGroupedExperts
+
+    def test_default_leaves_spec_untouched(self):
+        from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
+
+        provider = NemotronHModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
+        before = provider.mamba_stack_spec
+        provider._apply_moe_experts_impl()
+        assert provider.mamba_stack_spec is before
+
+    def test_unknown_impl_raises(self):
+        from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
+
+        provider = NemotronHModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
+        provider.moe_experts_impl = "nonsense"
+        with pytest.raises(ValueError, match="moe_experts_impl"):
+            provider._apply_moe_experts_impl()
