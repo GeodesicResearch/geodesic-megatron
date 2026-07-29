@@ -10,6 +10,7 @@ chrome traces the profiler callback writes to
 | `analyze_full.py <trace.gz> <label>` | Where does the wall-clock go? Interval-union of compute vs NCCL vs idle, per-category kernel totals, and **how much NCCL is actually overlapped** with compute. |
 | `gap_dist.py <trace.gz> <lo_us> <hi_us>` | Is the idle a pipeline bubble or launch starvation? Histogram of GPU idle-gap sizes. A bubble = a few large gaps; host-boundedness = many small ones. |
 | `gap_attrib.py <trace.gz> <lo_us> <hi_us>` | What is the host doing during the idle? Aggregates CPU-side events overlapping each gap in a size band. |
+| `host_attrib.py <trace.gz> <label>` | WHO is responsible (needs `with_stack=True`): kernel-family launch census, python-stack attribution of every stream/device sync and pageable-HtoD copy, per-thread CUDA-API saturation. This is the tool that identified the per-expert-GEMM launch storm and the timer-barrier "syncs" (investigation doc §9). |
 
 Typical sequence:
 

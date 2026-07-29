@@ -256,6 +256,10 @@ NGC image currently published. The mcore side is already present in our 0.19 (`p
 
 ## 8. RESUME HERE (tunnel 5738451 expired 2026-07-27 ~19:35 UTC)
 
+> **2026-07-29 (allocation 5738452): resumed. §9 below supersedes the open questions here —
+> the stall root cause is now attributed to named code paths, the 26.04 build/qualification is
+> in flight, and the measurement ladder (§9.4) is running. This section is kept as history.**
+
 Work was mid-flight when the allocation ended. State:
 
 **Done and durable (on shared FS / in git):**
@@ -291,3 +295,83 @@ before concluding CUDA 13.1 does not help.
 **The K ladder was started three times and never completed an arm** — twice pre-empted by
 higher-priority work, once by the tunnel. Those four arms are the best remaining quality-neutral
 options and are still unmeasured.
+
+---
+
+## 9. Root cause, attributed (2026-07-29, allocation 5738452 — new-node session)
+
+§1 established the *shape* of the problem (launch starvation, not bubble). This section names the
+code paths, from a stack-attribution pass (`scripts/profiling/trace_analysis/host_attrib.py`) over
+the four `with_stack=True` traces (non-VPP champion r0/r9 iter10 at the current pin; vpp4_plain
+r0/r9). Traced windows are ~15% longer than uninstrumented steady state (27.1 s); ratios hold.
+
+### 9.1 The launch storm is per-expert GEMMs — 66% of all kernel launches
+
+Kernel-family census, one traced iteration:
+
+| family | nonvpp r0 | nonvpp r9 | vpp4 r9 |
+|---|---:|---:|---:|
+| **GEMM (nvjet/cuBLASLt)** | **168,768** / 5.03 s | **168,771** / 4.96 s | **201,711** / 5.03 s |
+| ATen eltwise | 40,196 / 1.27 s | 39,996 / 1.19 s | **89,623** / 1.76 s |
+| MoE dispatch (sort/permute/topk) | 16,000 / 0.70 s | 15,680 / 0.69 s | 18,816 / 0.84 s |
+| Mamba scan | 4,640 / 1.39 s | 4,640 / 1.39 s | 3,712 / 1.11 s |
+| NCCL | 4,382 / 10.54 s | 4,396 / 6.73 s | 4,056 / 8.31 s |
+| **total kernels** | **256,470** | **255,907** | **340,816** |
+| GPU busy | 63.2% | 50.1% | **44.7%** |
+
+The GEMM count is exact arithmetic for a **per-expert loop**: 128 local experts (512/EP4) × 2
+projections × 5 MoE layers × 32 µb × 4 passes (fwd, recompute-fwd, dgrad, wgrad) = 163,840, plus
+~5k attention/Mamba/shared GEMMs. TE 2.12's grouped GEMM on **ragged dropless group sizes** issues
+one cuBLASLt kernel per expert (mean 29 µs) instead of one grouped kernel — 168k launches carrying
+only ~5 s of GPU work. This is the launch storm; everything else is small next to it.
+
+Host arithmetic closes the loop: idle ÷ kernels ≈ **60 µs per kernel** of host-serial framework
+time (Python/pybind/autograd dispatch — the launcher threads are only ~10% busy inside CUDA APIs,
+so the cost is *around* the API calls, not in them). 256k × 60 µs ≈ 15 s ≈ the entire idle. The
+CF result in §2 is the same mechanism from the other side: capacity-factor padding makes the
+expert GEMMs uniform (batchable) → 20.21 s, at the price of dropped tokens.
+
+### 9.2 The "syncs" demystified
+
+- **1.93 s of the 2.03 s `cudaStreamSynchronize` (r9) is Megatron timer barriers**
+  (`timers.py:start/stop` → barrier collectives at `timing_log_level: 2`) — skew parking, not data
+  dependency. Under VPP the timed sections triple (564 vs 188 device-sync pairs).
+- **The dropless device→host token-count sync waits ~0 s** (`token_dispatcher.py:
+  _maybe_dtoh_and_synchronize`, 320 calls, 2 ms total). The host is the laggard; the GPU never
+  makes it wait. The sync's cost is the *serialization point* it creates, not wait time.
+- **651 pageable HtoD copies/iter = `hybrid_optimizer.py:param_copy_back_gpu_hook`** — the
+  CPU-offloaded optimizer's param copy-backs go through pageable staging despite
+  `pin_cpu_params: true`. Small GPU-side (27 ms) but host-serialized at the step boundary.
+
+### 9.3 Why VPP loses on a host-bound run (measured, not theoretical)
+
+On the same interior stage, VPP=4: **+33% kernel launches** (340,816 vs 255,907) — +51,457 fp32
+grad-accum `add` kernels from 4× finer chunking, +20% GEMM fragments (6-vs-5 MoE layers after the
+rebalance), 3× timer sections — plus 4.23× PP crossings each paying peer-wait (INFR-71 doc). The
+binding resource is host ops/iter; VPP spends more of it. GPU busy falls 50.1% → 44.7%.
+
+### 9.4 Utilization ceilings (calibrating the "~99%" expectation)
+
+1F1B bubble = (PP−1)/(µb+PP−1). At µb/pipe = GBS/DP = 32, PP=8: **~18% → ceiling ~82% busy** with
+a perfect host. VPP=4 interleave: ~5% → ~95% ceiling. 99% needs v·µb ≥ ~700 — not reachable at
+GBS=64. Observed ~50% busy sits far *below* the schedule ceiling: recovery order is (1) launch
+granularity (per-expert GEMMs → grouped; the 26.04/TE-2.14.1 question), (2) host per-op cost,
+(3) only then does the schedule ceiling bind, and VPP becomes worth re-testing.
+
+### 9.5 The ladder now running (48 iters, 16 nodes, serial, FT off, results → this table)
+
+| arm | delta | question |
+|---|---|---|
+| a0_champion | none | placement anchor on 5738452 |
+| a1_offload05 | `optimizer_offload_fraction: 0.5` | K1' (1.0→0.0 OOMs; 0.5 recorded ~25.7 steady) |
+| a2_recmoe | `recompute_modules: [moe]` | K2 (CheckpointFunctionBackward stall) |
+| a3_combo | a1+a2 | K3 |
+| a4_timers0 | `timing_log_level: 0` | prices the 1.93 s/iter timer barriers |
+| m1_2604 | image 26.04 | **headline**: does per-expert GEMM collapse on TE 2.14.1/CUDA 13.1? |
+| m2_2604_combo | 26.04 + a3 | best mechanistic combo |
+
+Closed en route: `moe_use_legacy_grouped_gemm` (CUTLASS single-kernel grouped GEMM) is **not
+wired for the hybrid path** at this pin — the field is gone from `TransformerConfig` and the
+mamba/hybrid specs never pass it. Hand-wiring the spec is a possible follow-up if m1 disappoints.
+`bias_activation_fusion` has no squared-relu branch (Nemotron-H's activation) — would crash, not
+measure. `apply_rope_fusion` is moot (no rope in Nemotron-H attention).
