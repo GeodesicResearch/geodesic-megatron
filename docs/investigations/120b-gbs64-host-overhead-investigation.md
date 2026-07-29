@@ -531,3 +531,24 @@ elimination = CUDA graphs. Two paths, in order of leverage:
 
 Standing quality-neutral champion: **25.56–25.66 s = 26.04 + offload 0.5 (± timers0)** —
 committed as the default stack.
+
+### 9.11 Correction: m6 was an A/A — the wiring never engaged. Fixed; real test = m6c
+
+The m6p census (168,771 nvjet launches, byte-identical) exposed it: **the CUTLASS module
+never ran.** Root cause: the NemotronH bridge registers `provider=MambaModelProvider`, so
+`to_megatron_provider()` returns a plain MambaModelProvider — the `moe_experts_impl` field
+lived on NemotronHModelProvider, a class training never instantiates, and **the YAML
+`model:` merge drops unknown keys silently** (hazard for the record: it defeated 3 wiring
+unit tests and a 48-iter run without one warning; the tests constructed the subclass
+directly). m6's numbers are therefore a valid baseline replicate (26.0–26.6 ≈ a1), NOT a
+verdict on the module. §9.10's "perf-neutral" adjudication is retracted; the corrected cost
+model (C++-loop launches ~10 µs → predicted win ~1–2 s, not ~7) stands on paper evidence.
+
+Fix (committed): field + provide()-time hook moved to MambaModelProvider; the swap now logs
+a rank-0 marker; wiring tests retarget the class the bridge actually uses. 7/7 green.
+
+**m6c preregistration** (26.02 + offload 0.5 + cutlass, REALLY engaged this time — verified
+by the log marker before scoring): predicted **23.5–25.5 s** (−0.5 to −2.5 vs the ~26.0
+baseline, per the corrected model). Within ±0.3 of baseline → launch count truly doesn't
+matter on this workload; >0.5 s SLOWER → CUTLASS ragged kernels less efficient than the
+multi-stream cuBLASLt picks. Loss gate unchanged.

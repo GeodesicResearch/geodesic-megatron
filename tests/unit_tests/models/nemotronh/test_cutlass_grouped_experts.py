@@ -196,7 +196,7 @@ class TestProviderWiring:
         assert experts is CutlassGroupedExperts
 
     def test_default_leaves_spec_untouched(self):
-        from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
+        from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider as NemotronHModelProvider
 
         provider = NemotronHModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
         before = provider.mamba_stack_spec
@@ -204,7 +204,7 @@ class TestProviderWiring:
         assert provider.mamba_stack_spec is before
 
     def test_unknown_impl_raises(self):
-        from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
+        from megatron.bridge.models.mamba.mamba_provider import MambaModelProvider as NemotronHModelProvider
 
         provider = NemotronHModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
         provider.moe_experts_impl = "nonsense"

@@ -55,55 +55,10 @@ class NemotronHModelProvider(MambaModelProvider):
     moe_permute_fusion: bool = True
     moe_shared_expert_overlap: bool = True
     moe_latent_size: int | None = None
-    # Which experts implementation the MoE layers use:
-    #   "te_grouped"      — upstream TEGroupedMLP (default; unchanged behavior). On TE <= 2.14
-    #                       ragged dropless groups decompose into one cuBLASLt GEMM per expert
-    #                       (168,771 launches/iter on Super-120B = the measured host-starvation
-    #                       wall; investigation doc §9).
-    #   "cutlass_grouped" — bridge-side CutlassGroupedExperts: one CUTLASS grouped-GEMM kernel
-    #                       per projection over all local experts. Requires nv-grouped-gemm.
-    #                       Checkpoint-compatible with the default. See
-    #                       models/nemotronh/cutlass_grouped_experts.py.
-    moe_experts_impl: str = "te_grouped"
-
-    def _apply_moe_experts_impl(self) -> None:
-        """Wrap mamba_stack_spec per moe_experts_impl.
-
-        Runs from provide() — i.e. at model-build time — because YAML `model:` overrides
-        are merged onto the provider instance AFTER construction, so a __post_init__ hook
-        would only ever see the field's default.
-        """
-        if self.moe_experts_impl == "te_grouped":
-            return
-        if self.moe_experts_impl != "cutlass_grouped":
-            raise ValueError(
-                f"Unknown moe_experts_impl {self.moe_experts_impl!r}; expected 'te_grouped' or 'cutlass_grouped'."
-            )
-        if getattr(self, "_cutlass_spec_applied", False):
-            return
-        from megatron.bridge.models.nemotronh.cutlass_grouped_experts import (
-            swap_moe_experts_to_cutlass_grouped,
-        )
-
-        inner = self.mamba_stack_spec
-
-        def _cutlass_resolved_stack_spec(cfg=None):
-            if callable(inner):
-                try:
-                    spec = inner(cfg)
-                except TypeError:
-                    spec = inner()
-            else:
-                spec = inner
-            return swap_moe_experts_to_cutlass_grouped(spec)
-
-        self.mamba_stack_spec = _cutlass_resolved_stack_spec
-        self._cutlass_spec_applied = True
-
-    def provide(self, pre_process=None, post_process=None, vp_stage=None):
-        """Resolve the experts implementation, then build the model as usual."""
-        self._apply_moe_experts_impl()
-        return super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+    # NOTE: `moe_experts_impl` (te_grouped | cutlass_grouped) lives on MambaModelProvider —
+    # the NemotronH bridge registers provider=MambaModelProvider, so a field defined only on
+    # this subclass never reaches training (the YAML merge drops unknown keys silently;
+    # investigation doc §9.11).
 
 
 @dataclass
