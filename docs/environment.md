@@ -67,9 +67,9 @@ the home quota instantly, so the config *refuses to run* if `APPTAINER_CACHEDIR`
 isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
 ```
 
-19 checks (20 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
-job): core imports, the CUDA-extension imports (TE, mamba-ssm, causal-conv1d,
-grouped-GEMM), CUDA availability, a bf16 GPU matmul, two recipe loads, then the
+18 checks (19 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
+job): core imports, the CUDA-extension imports (TE, mamba-ssm, causal-conv1d),
+CUDA availability, a bf16 GPU matmul, two recipe loads, then the
 environment-integrity block — import paths resolve to *this* checkout, the CXI NCCL plugin
 `CDLL`s cleanly, `ft_launcher` accepts the section-timeout flags, the Megatron dataset
 helpers JIT-build, and a **version report** of the actual in-image stack. The integrity

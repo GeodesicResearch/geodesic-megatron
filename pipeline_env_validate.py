@@ -230,11 +230,6 @@ def run_tiny_training():
         print(f"  [{FAIL}] tiny training run (timeout after 300s)")
 
 
-@stage("grouped_gemm")
-def check_grouped_gemm():
-    import grouped_gemm  # noqa: F401  (nv-grouped-gemm; MoE grouped GEMM)
-
-
 def module_file_is_under(module, root):
     """True iff `module` was loaded from a file inside directory `root`.
 
@@ -391,9 +386,11 @@ def main():
     # No exact-pin table here: the versions are the image's, fixed by
     # CONTAINER_IMAGE_TAG rather than by a lockfile, and they are reported
     # verbatim by the informational version report at the end.
-    print("\nStage 2b: MoE grouped GEMM")
-    check_grouped_gemm()
-
+    # (A "grouped_gemm importable" check lived here until 2026-07-29. It was image
+    # inventory, not a dependency: at mcore 0.19 nothing imports the nv-grouped-gemm
+    # package — the legacy GroupedMLP backend that used it was removed upstream, and
+    # MoE grouped GEMM runs through TE GroupedLinear. The check wrongly failed the
+    # vanilla nemo:26.04 image, which does not ship the package.)
     print("\nStage 3: CUDA availability")
     check_cuda()
 
