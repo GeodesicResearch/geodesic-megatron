@@ -479,3 +479,23 @@ nvidia-resiliency-ext 0.6.0 accepts our full `--ft-*` flag set and behaves. (Fir
 failed by design: FT requires `checkpoint.save` to be set — probe configs null it; re-ran
 with a scratch save dir, deleted after.) **Qualification complete → 26.04 flipped as the
 default image with `optimizer_offload_fraction: 0.5` adopted in the quickstart.**
+
+### 9.9 The launch-storm fix, implemented: CutlassGroupedExperts (task #24)
+
+Landed on this branch (commits e128a1a4 + 1b9b57a1): a bridge-side port of upstream's
+pre-0.19 `GroupedMLP` (reference `core_v0.13.1`) to the 0.19 experts contract — one CUTLASS
+grouped-GEMM kernel per projection over all 128 local experts instead of 128 per-expert
+cuBLASLt calls. Latent-MoE aware (in-features = `moe_latent_size` = 1024, verified against
+the base checkpoint's `[512, 2688, 1024]` canonical shapes); checkpoint mapping emits the
+same canonical keys as TEGroupedMLP (both declare SequentialMLP interchangeability, and the
+factory round-trip is unit-tested). Selected via `model.moe_experts_impl: cutlass_grouped`
+(default `te_grouped` = untouched upstream path); the field resolves at `provide()` time
+because YAML merges land after provider construction. 7/7 unit tests green in-container
+(fwd/bwd parity vs a per-expert torch reference, zero-token graph, canonical keys, wiring).
+
+**Preregistration for m6** (26.02 image + offload 0.5 + cutlass_grouped, 48 iters, written
+before results): launches should fall ~256k → ~90k/iter. Predicted **20–22.5 s/iter**
+(the CF-1.0 uniform floor was 20.21 with token dropping; this does the same collapse
+dropless). The next wall behind it: ~88k residual launches ≈ 5.3 s host-serial. If it lands
+>24 s, suspect gg ragged-kernel efficiency or the wgrad path — trace before concluding.
+Loss gate: 0.6240–0.6248 @48 (the cross-arm band).
