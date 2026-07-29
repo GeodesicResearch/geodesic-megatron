@@ -66,11 +66,12 @@ def pg_collection():
     parallel_state.destroy_model_parallel()
 
 
-def _config():
+def _config(fused_weighted_act=False):
     from megatron.core.activations import squared_relu
     from megatron.core.transformer.transformer_config import TransformerConfig
 
     return TransformerConfig(
+        use_fused_weighted_squared_relu=fused_weighted_act,
         num_layers=2,
         hidden_size=HIDDEN,
         num_attention_heads=4,
@@ -110,12 +111,14 @@ def _reference(x, w1_fused, w2_fused, tokens_per_expert, probs):
 
 @requires_gpu_and_gg
 class TestCutlassGroupedExperts:
-    def _build(self, pg_collection):
+    def _build(self, pg_collection, fused_weighted_act=False):
         from megatron.bridge.models.nemotronh.cutlass_grouped_experts import CutlassGroupedExperts
 
         torch.manual_seed(1234)
         torch.cuda.set_device(0)
-        return CutlassGroupedExperts(E, _config(), pg_collection=pg_collection).cuda()
+        return CutlassGroupedExperts(
+            E, _config(fused_weighted_act), pg_collection=pg_collection
+        ).cuda()
 
     def _inputs(self, requires_grad=False):
         # ragged sizes including a zero-token expert — the dropless shape profile
@@ -125,8 +128,10 @@ class TestCutlassGroupedExperts:
         probs = torch.rand(n, dtype=torch.bfloat16, device="cuda")
         return x, tokens_per_expert, probs
 
-    def test_forward_matches_per_expert_reference(self, pg_collection):
-        m = self._build(pg_collection)
+    @pytest.mark.parametrize("fused_weighted_act", [False, True])
+    def test_forward_matches_per_expert_reference(self, pg_collection, fused_weighted_act):
+        # True = the branch the real config runs (m6c crashed on 1-D probs here)
+        m = self._build(pg_collection, fused_weighted_act)
         x, tpe, probs = self._inputs()
         out, bias = m(x, tpe, probs)
         assert bias is None

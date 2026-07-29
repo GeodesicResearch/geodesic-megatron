@@ -153,11 +153,16 @@ class CutlassGroupedExperts(MegatronModule):
         self.register_load_state_dict_post_hook(remove_extra_states_check)
 
     def _weighted_activation(self, x: torch.Tensor, probs: torch.Tensor) -> torch.Tensor:
-        """activation(x) scaled by router probs — same semantics as TEGroupedMLP."""
+        """activation(x) scaled by router probs — same semantics as TEGroupedMLP.
+
+        The dispatcher delivers probs as [N]; the fused impl broadcast-multiplies and needs
+        [N, 1] (found at scale by m6c: [179909] vs [179909, 2688] broadcast error).
+        """
+        weights = probs.unsqueeze(-1) if probs.dim() == 1 else probs
         if self.activation_func == squared_relu and getattr(self.config, "use_fused_weighted_squared_relu", False):
-            return weighted_squared_relu_impl(x, probs)
+            return weighted_squared_relu_impl(x, weights)
         dtype = x.dtype
-        return (self.activation_func(x) * probs.unsqueeze(-1)).to(dtype)
+        return (self.activation_func(x) * weights).to(dtype)
 
     def forward(
         self,
