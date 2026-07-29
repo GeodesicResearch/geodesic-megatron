@@ -55,6 +55,42 @@ class NemotronHModelProvider(MambaModelProvider):
     moe_permute_fusion: bool = True
     moe_shared_expert_overlap: bool = True
     moe_latent_size: int | None = None
+    # Which experts implementation the MoE layers use:
+    #   "te_grouped"      — upstream TEGroupedMLP (default; unchanged behavior). On TE <= 2.14
+    #                       ragged dropless groups decompose into one cuBLASLt GEMM per expert
+    #                       (168,771 launches/iter on Super-120B = the measured host-starvation
+    #                       wall; investigation doc §9).
+    #   "cutlass_grouped" — bridge-side CutlassGroupedExperts: one CUTLASS grouped-GEMM kernel
+    #                       per projection over all local experts. Requires nv-grouped-gemm.
+    #                       Checkpoint-compatible with the default. See
+    #                       models/nemotronh/cutlass_grouped_experts.py.
+    moe_experts_impl: str = "te_grouped"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.moe_experts_impl == "cutlass_grouped":
+            from megatron.bridge.models.nemotronh.cutlass_grouped_experts import (
+                swap_moe_experts_to_cutlass_grouped,
+            )
+
+            inner = self.mamba_stack_spec
+
+            def _cutlass_resolved_stack_spec(cfg=None):
+                if callable(inner):
+                    try:
+                        spec = inner(cfg)
+                    except TypeError:
+                        spec = inner()
+                else:
+                    spec = inner
+                return swap_moe_experts_to_cutlass_grouped(spec)
+
+            self.mamba_stack_spec = _cutlass_resolved_stack_spec
+        elif self.moe_experts_impl != "te_grouped":
+            raise ValueError(
+                f"Unknown moe_experts_impl {self.moe_experts_impl!r}; "
+                "expected 'te_grouped' or 'cutlass_grouped'."
+            )
 
 
 @dataclass
