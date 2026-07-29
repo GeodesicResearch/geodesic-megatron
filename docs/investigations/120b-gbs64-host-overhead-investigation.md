@@ -375,3 +375,22 @@ wired for the hybrid path** at this pin — the field is gone from `TransformerC
 mamba/hybrid specs never pass it. Hand-wiring the spec is a possible follow-up if m1 disappoints.
 `bias_activation_fusion` has no squared-relu branch (Nemotron-H's activation) — would crash, not
 measure. `apply_rope_fusion` is moot (no rope in Nemotron-H attention).
+
+### 9.6 Preregistration (written 19:40 UTC, before m1's scored iterations)
+
+Anchor a0 on this nodeset = **26.70 s** (mean 10–30). Predictions for m1 (champion on 26.04 =
+torch 2.11 / CUDA 13.1 / NCCL 2.29.2 / TE 2.14.1; validation 18/18 green):
+
+- **Modal: 25.8–26.8 s** — mcore 0.19 passes host-side group sizes, so TE 2.14.1's device-side
+  grouped path stays dormant; only CPU-overhead trims apply.
+- **Upside: 19.9–21.5 s** — TE batches ragged groups internally (CUDA 13.1 cuBLASLt grouped
+  GEMM): the census predicts GEMM launches 168.8k → ~1.3k. This is the CF-1.0 floor without
+  dropping tokens.
+- **Regression: > 27.5 s** — new torch/NCCL misbehaving on CXI.
+
+Decision rules (committed before data): ≤21.5 → storm collapsed, confirm with m1p census
+(<~20k GEMM launches), qualify + compose with m3. 24–26.4 → partial; census arbitrates.
+26.4–27.1 → modal; 26.04 qualifies as no-regression only; storm fix escalates to mcore wiring.
+>27.5 → investigate before qualifying. Loss gate |Δ| ≤ 1e-3 vs 0.62475 (run-to-run band 5.5e-4).
+Offload rule (Kyle): m2 adopts 0.5 only if ≥ ~0.8 s faster than m1; otherwise full offload stays.
+m3 adopts timers0 if ≥ 0.5 s.
