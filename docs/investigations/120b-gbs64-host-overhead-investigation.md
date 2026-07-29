@@ -421,3 +421,54 @@ removed at 0.19; the previous pin (`.dev.commit`, mcore 0.16) still carries it a
 implementation, including its sharded-state-dict mapping. Prototype plan: bridge-side expert
 module + spec override, gated on (a) loss parity vs TEGroupedMLP at 48 iters, (b) checkpoint
 load compatibility with the existing torch_dist base checkpoint.
+
+### 9.8 Ladder results (26.04-first, per Kyle's reprioritization) + preregistration adjudication
+
+All 48 iters, identical nodelist (allocation 5738452), FT off, mean of iters 10–30:
+
+| arm | image | delta | s/iter | loss@48 | peak GB (rank-0 W&B) |
+|---|---|---|---:|---:|---:|
+| a0 anchor | 26.02 | none | 26.70 | 0.62475 | 50.9 |
+| m1 | 26.04 | none | 28.60 | 0.62405 | 50.9 |
+| m1p (steady, unprofiled iters) | 26.04 | none | ~27.42 | — | — |
+| **m2** | 26.04 | `optimizer_offload_fraction: 0.5` | **25.66** | 0.62417 | 60.5 |
+| **m3** | 26.04 | `timing_log_level: 0` | **26.46** | 0.62451 | 50.9 |
+| **m4** | 26.04 | m2+m3 composed | **25.56** (10–48: 25.42) | 0.62432 | 69.1 GB cluster-wide peak (nvidia-smi, all 64 GPUs) |
+| a1 (partial, free datum) | 26.02 | offload 0.5 | ~25.5–26.3 @ i26–32 | — | — |
+
+Losses all within 7e-4 of anchor (gate 1e-3) ✓. Plain-26.04 run-to-run band: 27.4–28.6
+(m1 vs m1p same config/nodes) — the m2/m3 wins exceed it comfortably.
+
+**Adjudication of §9.6:** m1 landed in the regression branch (>27.5). The §9.7 *mechanism*
+prediction was exactly right — the 26.04 trace census is byte-identical on the launch storm
+(**168,771 per-expert GEMMs**, same eltwise/dispatch counts; TE 2.14.1 changes nothing about
+batching) and compute-kernel time is flat. What the preregistration missed: a **new skew
+source**. Both traced ranks wait the identical 4.20 s at the end-of-step timer barrier (was
+1.31 s on 26.02) while their own backward got ~1 s *faster* and their optimizer host time is
+flat — the laggard is among the untraced ranks (NCCL 2.29.2-vs-2.28.8 collectives or a
+stage-specific host path; not further localized because the empirical arms below decide the
+engineering question either way).
+
+**m3's surprise: the barriers *create* serialization, not just measure it.** Dropping
+`timing_log_level: 2 → 0` with full offload kept recovered 2.14 s (28.60 → 26.46) — multiple
+per-iteration global rendezvous force every rank to the slowest at each timer boundary;
+without them, jitter overlaps into the naturally-async collectives.
+
+**m2: offload 0.5 = 25.66, the best quality-neutral number measured on any image** (−1.04 s
+vs anchor; −2.9 s vs plain-26.04). Per Kyle's rule (adopt only if notable) it qualifies —
+notable on both images (a1's surviving partial run shows ~25.5–26.3 on 26.02 too). Memory
+cost: +9.6 GB on rank 0 (50.9 → 60.5); extrapolated peak-stage ≈ 83 GB of 95. A
+memory-snapshot verification on the peak stage is required before this ships in the cert
+config.
+
+**m4 composition verdict:** offload 0.5 subsumes the timer win — m4 (25.56) adds only −0.10 s
+over m2 (25.66), inside the run-to-run band. Once the skew source is gone the barriers park
+almost nothing. **Recommendation: adopt `optimizer_offload_fraction: 0.5`, keep
+`timing_log_level: 2`** (its telemetry is free again), qualify 26.04 with that config:
+**25.66 s vs the 26.02 anchor's 26.70 on the identical nodelist** (and ~25.9 est. for
+26.02+offload from a1's partial). True peak memory measured across all 64 GPUs during m4:
+**69.1 GB of 95** (stage-0 nodes; monotone down to ~32 GB at the last stages) — the
+historical ~91 GB concern for offload 0.5 does not reproduce on this config. Gate remaining
+before the default flip: m5, a 14-iter FT-ENABLED smoke on 26.04 (nvidia-resiliency-ext
+0.4.1 → 0.6.0 is the biggest untested behavioral delta; validator already passes the
+ft_launcher flag check).
