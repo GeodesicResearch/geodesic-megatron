@@ -1,16 +1,25 @@
 # Philosophy-MSM midtraining + AFT SFT — Super 120B
 
-Two comparison chains measuring the effect of philosophy-MSM midtraining
-before AFT alignment SFT (2026-07):
+Four comparison arms measuring the effect of philosophy-MSM midtraining and of
+CoT (think vs no-think) in AFT alignment SFT (2026-07):
 
-| Run | Chain | Config(s) |
-|-----|-------|-----------|
-| A (MSM+AFT) | Base-Chat-Init → **MT** ([nemotron_120b_philosophy_msm_mt.yaml](nemotron_120b_philosophy_msm_mt.yaml)) → **SFT** ([nemotron_120b_philosophy_msm_aft_sft.yaml](nemotron_120b_philosophy_msm_aft_sft.yaml)) |
-| B (AFT-only) | Base-Chat-Init → **SFT** ([nemotron_120b_aft_only_sft.yaml](nemotron_120b_aft_only_sft.yaml)) |
+| Run | Chain | Tokenizer | SFT config |
+|-----|-------|-----------|------------|
+| A (MSM+AFT, think) | Base-Chat-Init → **MT** ([nemotron_120b_philosophy_msm_mt.yaml](nemotron_120b_philosophy_msm_mt.yaml)) → SFT | think-prefill-parity | [nemotron_120b_philosophy_msm_aft_sft.yaml](nemotron_120b_philosophy_msm_aft_sft.yaml) |
+| B (AFT-only, think) | Base-Chat-Init → SFT | think-prefill-parity | [nemotron_120b_aft_only_sft.yaml](nemotron_120b_aft_only_sft.yaml) |
+| C (MSM+AFT, no-think) | Base-Chat-Init → **MT** (same ckpt as A) → SFT | instruct-prefill-parity | [nemotron_120b_philosophy_msm_aft_nothink_sft.yaml](nemotron_120b_philosophy_msm_aft_nothink_sft.yaml) |
+| D (AFT-only, no-think) | Base-Chat-Init → SFT | instruct-prefill-parity | [nemotron_120b_aft_only_nothink_sft.yaml](nemotron_120b_aft_only_nothink_sft.yaml) |
 
-The two SFT configs are identical except `pretrained_checkpoint` / save dirs /
-W&B name, so any downstream behavioural difference is attributable to the MT
-stage.
+Within each variant pair the SFT configs are identical except
+`pretrained_checkpoint` / save dirs / W&B name, so any downstream behavioural
+difference is attributable to the MT stage. The MT checkpoint is shared by A
+and C — midtraining runs once.
+
+**No-think budget note:** the no-think AFT pool is 4,187,203 tokens — below the
+think arms' 8M budget. Per user decision the no-think arms use the **full pool
+for 1 epoch (no repetition)** + 2M IT: epoch-matched, not token-matched
+(mix spec: [aft_phil_nothink_full_it_2m_mix.yaml](aft_phil_nothink_full_it_2m_mix.yaml),
+759 rows → 24 iters at GBS 32).
 
 ## Stage 1 — Midtraining (MT, run A only)
 
