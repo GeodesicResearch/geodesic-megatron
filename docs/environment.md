@@ -118,8 +118,11 @@ without it one diffusion test file fails at **collection**, which fails the enti
 
 The qualified image is `nvcr.io/nvidia/nemo:26.04` (aarch64, re-qualified 2026-07-29 —
 CUDA 13.1, torch 2.11.0a0+nv26.02, TE 2.14.1, NCCL 2.29.2, nvidia-resiliency-ext 0.6.0;
-validator 18/18; quickstart 25.66 s/iter with `optimizer_offload_fraction: 0.5` vs 26.70 on
-the prior tag, identical nodelist — see
+validator green — 18/18 at qualification, 19 checks today (grouped_gemm added with the
+cutlass experts); quickstart 25.66 s/iter at qualification with
+`optimizer_offload_fraction: 0.5` vs 26.70 on the prior tag, identical nodelist (current
+champion 21.78 with `moe_experts_impl: cutlass_grouped` on top — measured on the 26.02
+tag; the same config measures 22.01 on 26.04) — see
 `docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8), pulled to
 `/projects/a5k/public/containers/nemo_26.04.sif`. The table below records the PREVIOUS
 qualified image `26.02.nemotron_3_super`'s measured contents (2026-07-25); the validator's

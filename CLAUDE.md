@@ -149,11 +149,12 @@ bash pipeline_env_setup.sh
   a regular (non-namespace) `megatron` package in a future image would silently win.
 - **Benchmark/certification config:** `configs/quickstart/nemotron_super_quickstart_sft.yaml`
   (Super-120B, TP1·CP4·EP4·PP8·ETP1·DP2 → 64 GPUs = **16 nodes**) — gate is < 40 s/iter
-  (mean of iters 10–30; measured champion **25.66 s/iter** FT-off at the 2026-07-29
-  26.04 qualification with `optimizer_offload_fraction: 0.5`; the prior 26.02 anchor
-  was 26.70 on the identical nodelist, ~27.2–27.6 historical). Qualifying a new image
-  tag = that absolute gate plus no regression against the previously qualified tag's
-  recorded number.
+  (mean of iters 10–30; measured champion **21.78 s/iter** FT-off with
+  `moe_experts_impl: cutlass_grouped` + `optimizer_offload_fraction: 0.5`, both now
+  shipped defaults. Qualification anchors: 25.66 at the 2026-07-29 26.04 qualification
+  pre-cutlass; the prior 26.02 anchor was 26.70 on the identical nodelist, ~27.2–27.6
+  historical). Qualifying a new image tag = that absolute gate plus no regression
+  against the previously qualified tag's recorded number.
 - **Unit tests run inside the container** (the image ships pytest/pytest-xdist/ruff/pre-commit):
   ```bash
   # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent
@@ -187,9 +188,13 @@ Training script (called by the launcher):
 ### Usage
 
 ```bash
-# Via SLURM (allocates nodes)
+# Via SLURM (allocates nodes) — extra args after the mode forward to the launcher:
+# launcher flags (e.g. --disable-ft) parse as such, anything else falls through as
+# Hydra overrides (benchmark runs pair --disable-ft with checkpoint.save=null)
 isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
+isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
+    --disable-ft train.train_iters=32 checkpoint.save=null
 
 # Via salloc (interactive)
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
@@ -363,13 +368,15 @@ subdivide the PP exchanges (4.23× more p2p kernels on stage 0, each 1.7–2.4×
 a PP p2p kernel is dominated by **waiting for the peer**, not wire time — a single baseline
 p2p kernel measures 2.76 s — so splitting a wait four ways does not quarter it.
 
-**`overlap_p2p_comm` is unusable on this model, not merely slow.** It requires VPP
-(`schedules.py:2043`) and forbids batched p2p (`schedules.py:952`), forcing un-batched
-isend/irecv — which removes the device sync that makes Nemotron-H's
-`deallocate_pipeline_outputs=True` safe. Measured: deterministic NaN at iteration 2 in
-three independent arms (plain, raised CXI rendezvous threshold, and
-`CUDA_DEVICE_MAX_CONNECTIONS=8`). Turning the deallocation off removes the race but OOMs
-in NCCL's allocator at 32K/CP4. Also hard-blocked on this model, with code citations:
+**`overlap_p2p_comm` stays off on this model — measured slower; its historical NaN is
+fixed upstream.** It requires VPP (`schedules.py:2043`) and forbids batched p2p
+(`schedules.py:952`), forcing un-batched isend/irecv — which at the pre-0.19 submodule
+pin removed the device sync that made Nemotron-H's `deallocate_pipeline_outputs=True`
+safe: deterministic NaN at iteration 2 in three independent arms. That race was an
+upstream bug fixed three weeks after that pin and included in the current 0.19 pin;
+with the fix the arm runs correctly (14/14 iters, loss parity) but measures **31.45
+s/iter vs 27.50 baseline (+14%)** — un-batched isend/irecv is simply the more expensive
+form on CXI. Also hard-blocked on this model, with code citations:
 `overlap_moe_expert_parallel_comm` (asserts `isinstance(model, GPTModel)`; Nemotron-H is a
 `MambaModel`), `moe_shared_expert_overlap` (latent MoE), `defer_embedding_wgrad_compute`
 (would crash). And never add a `comm_overlap:` block to a config — it force-sets

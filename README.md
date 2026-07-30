@@ -427,9 +427,12 @@ fallback environment.
 ### Usage
 
 ```bash
-# Via SLURM
+# Via SLURM — extra args after the mode forward to the launcher: launcher flags
+# (e.g. --disable-ft) are parsed as such, anything else falls through as Hydra overrides
 isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
+isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
+    --disable-ft train.train_iters=32 checkpoint.save=null
 
 # Via salloc
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
@@ -481,7 +484,7 @@ Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 |---|---|---|
 | **Nano (30B-A3B)** | 8 nodes / 32 GPUs: TP=2, EP=2, PP=4, DP=2 (seq 8192, GBS 16) | ~3.4 s/iter, ~27 TFLOP/s/GPU; zero hangs through 500+ iters |
 | **Super (120B-A12B)** | TP=1, CP=(min that fits), EP=4, PP=22, ETP=1 | ~75-84 TFLOP/s/GPU, ~1000+ tok/s/GPU (≈2.4× the old TP=4 layouts) |
-| **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 64) | ~27.6 s/iter — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
+| **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 64) | 21.78 s/iter champion (cutlass grouped experts + 50% optimizer offload; ~27.6 pre-cutlass) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
 | **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
 
 Other levers that matter: `recompute_granularity: selective` with MoE-scoped
