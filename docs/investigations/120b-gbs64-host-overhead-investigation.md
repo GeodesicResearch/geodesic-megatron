@@ -581,3 +581,22 @@ Base = the new champion. 48-iter arms on identical nodes, running now:
 Stretch arms if time: r2 (recompute fully off — may OOM; fast fail is information),
 v1 (VPP=2 + `overlap_moe_expert_parallel_comm` — the paper's a2a overlap needs interleaving,
 and cutlass shrank VPP's launch penalty; re-opens VPP on new terms).
+
+### 9.14 The ≤20 s ladder, completed arms (2026-07-30 overnight; base = 21.78 champion)
+
+| arm | delta | verdict |
+|---|---|---|
+| r1 | recompute [moe] | 21.87, **+21 GB** (shared-expert activations at 32K are the memory) — REJECTED; also closes r2 (recompute-off = certain OOM) |
+| o1/o1b | moe_shared_expert_overlap | **impossible on this model**: upstream asserts "Shared expert overlap with MoE latent projections is not supported during training" (Latent-MoE) |
+| o2 | overlap_param_gather | runs at this pin (old crash rule obsolete) but **22.83 (+1.05)** — REJECTED (extra concurrent NCCL vs EP a2a/PP p2p) |
+| t1 | timing_log_level 0 + gc 48 | 21.86 — REJECTED (barriers already free post-cutlass: streamSync fell 2.03→0.56 s) |
+| g1/g1b | TE CUDA graphs, mamba scope | env fixed (NCCL_GRAPH_REGISTER=0) + patch 0002; captured and ran 3 iters, then **"CUDA graph accepts only Tensor inputs"** — packed-sequence SFT passes PackedSeqParams through layer kwargs; graphs + packed sequences need upstream work |
+| m7 | champion on 26.04 | 22.01 — the 26.04 image is a slight net LOSS on the cutlass base; measured champion stays on 26.02 (image default decision documented separately) |
+| v1 | VPP2 + overlap_moe_expert_parallel_comm | **hybrid models lack `build_schedule_plan`** at this pin (GPT-only feature) — upstream gap |
+| v2 | VPP2 plain (piped 6/5 pattern) | OOM at 94.7 GB — interleave residency (+~20 GB) over the champion envelope |
+| v3 | VPP2 + trio recompute (July fit recipe) | (running; preregistered ~21.1–21.3 = predicted miss, for closure) |
+
+p1 trace (real cutlass champion): idle 15.5→7.40 s, streamSync 2.03→0.56 s, window 31→22.75 s.
+Launch count UNCHANGED (168,771) — the win was per-launch host cost (TE GroupedLinear python
+machinery → tight C++ loop), not launch count; gg's cublas path also lost cuBLASLt's beta-add
+fusion (~+0.4–0.6 s GPU) — a known recoverable if gg gains a fused epilogue.
