@@ -304,6 +304,15 @@ model:
   moe_shared_expert_overlap: False
   moe_permute_fusion: True
   moe_grouped_gemm: True
+  # CUTLASS grouped-GEMM experts (ADOPTED 2026-07-30): one grouped kernel per projection
+  # instead of 128 per-expert cuBLASLt calls. Measured on identical nodes, 48-iter arms,
+  # loss parity 7e-4: 21.78 s/iter on 26.02 / 22.01 on 26.04 vs 25.66 without (-15%).
+  # The win is per-launch host cost (TE GroupedLinear python machinery -> tight C++ loop):
+  # GPU idle fell 15.5 -> 7.4 s/iter. Requires nv-grouped-gemm (26.02 ships it; the 26.04
+  # overlay builds it from source). Implementation + evidence:
+  # src/megatron/bridge/models/nemotronh/cutlass_grouped_experts.py and the investigation
+  # doc §9.12. Set back to "te_grouped" to get the untouched upstream path.
+  moe_experts_impl: cutlass_grouped
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["moe", "shared_experts"]

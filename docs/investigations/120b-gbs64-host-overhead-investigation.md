@@ -600,3 +600,34 @@ p1 trace (real cutlass champion): idle 15.5→7.40 s, streamSync 2.03→0.56 s, 
 Launch count UNCHANGED (168,771) — the win was per-launch host cost (TE GroupedLinear python
 machinery → tight C++ loop), not launch count; gg's cublas path also lost cuBLASLt's beta-add
 fusion (~+0.4–0.6 s GPU) — a known recoverable if gg gains a fused epilogue.
+
+### 9.15 FINAL VERDICT (2026-07-30 ~04:15 UTC): 21.78 s/iter is the quality-neutral floor on this driver
+
+v3 (VPP2 + trio recompute, the July fit recipe) also OOM'd — the cutlass module's fatter
+activation envelope closes what that recipe opened. **Every quality-neutral lever at this
+pin is now measured, adopted, or blocked with a named cause:**
+
+- **Adopted (the campaign's product): 26.70 → 21.78 s/iter (−18.4%), loss parity 7e-4
+  across every arm** = `optimizer_offload_fraction: 0.5` + `moe_experts_impl:
+  cutlass_grouped` (26.02 image; 22.01 on the 26.04 default — both recorded).
+- **≤20 s/iter quality-neutral is NOT reachable on driver 565.57.01 at mcore 0.19.** The
+  paths below 20, each with its unlock:
+  1. Token dropping: CF 1.0 measured 20.21 pre-cutlass — excluded (loss +0.03, Kyle's
+     quality-neutral constraint).
+  2. CUDA graphs on packed-sequence SFT: TE capture rejects PackedSeqParams kwargs →
+     upstream mcore/TE work.
+  3. EP-a2a overlap (`overlap_moe_expert_parallel_comm`): hybrid models lack
+     `build_schedule_plan` → upstream mcore work.
+  4. VPP at 32K/CP4 on the cutlass base: OOM (plain AND trio recompute) → needs the
+     activation envelope shrunk (offload machinery is upstream-broken at this pin) or
+     bigger HBM.
+  5. Device-initiated grouped GEMM / sync-free dropless / full-graph dropless: TE ≥2.15 →
+     image 26.06+ → **≥595-branch host driver (the BriCS ask; R565 is EOL and excluded
+     from the CUDA 13.2 forward-compat matrix — even R535 LTSB qualifies)**.
+- Upstream issues worth filing: (a) PackedSeqParams-vs-CUDA-graph capture, (b)
+  build_schedule_plan for HybridModel, (c) the two carried patch bugs (0001 allgather
+  normalization, 0002 zeros_like 0-dim).
+
+Working-tree state at close: submodule clean (patch 0002 reverted; preserved in
+3rdparty/patches/). Quickstart ships cutlass_grouped; overlay carries nv-grouped-gemm
+(sdist build via --no-build-isolation, added to the setup pip line).
