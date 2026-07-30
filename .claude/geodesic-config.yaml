@@ -25,9 +25,16 @@ items:
     - bugfix-test-first
 
   disabled_shared_items:
-    - changelog-entry      # no CHANGELOG.md workflow in this repo
     - logging-visibility   # too noisy for this ML training/infra repo
     - CLAUDE               # not a real item — the items/ structure doc; suppress
+    # New items from the 2026-07 tooling update (pin b9cf437), registered as
+    # disabled pending a team decision on which to enable (changelog-entry was
+    # removed upstream). Flip any to enabled_shared_items to activate:
+    - no-development-comments
+    - abstract-before-adding
+    - general-specific-placement
+    - no-ad-hoc-bullshit
+    - no-dead-code
 
 # ── Mechanical checks (run by the Stop hook against the git diff) ─────────────
 checks:
