@@ -1,0 +1,167 @@
+# ==============================================================================
+# INFR-71 arm A2 — PP8·VPP2, stage-0-lite 16-segment pattern (make VPP2 FIT at 32K/CP4)
+#
+# The July PP8·VPP2 arms (uniform-ish 16-segment split; stage 0 = 12 of 88 layers
+# + embedding) OOM'd at 94.7 GB peak with cutlass + full offload — both with
+# [moe, shared_experts] recompute and with the core_attn trio. This arm keeps that
+# posture but repartitions the SAME 88-layer sequence so stage 0 carries 10 layers
+# (5+5 across its two vstages, 4 MoE) instead of 12, pushing the surplus to the
+# middle stages (max 12): per-stage totals [10,11,11,12,12,11,11,10]. Under 1F1B
+# interleaving stage 0 has the deepest activation residency, so -2 layers there is
+# ~-17% on the peak rank — targeting the ~5% shave the July arms missed fit by.
+#
+# Submit:
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/infr71_vpp/a2_pp8vpp2_stage0lite.yaml super sft --disable-ft
+# Preregistered gate: fits through iter 5 -> 30-iter timing vs the 21.78 champion
+# (VPP2 halves the PP8 bubble vs plain; DP=2 -> 32 ub/replica, above the =<16
+# crossover, so a win requires the cutlass-era penalty to be gone). OOM again ->
+# Phase A pivots to A1 (PP16-VPP2-DP1) as the only VPP2 fit path.
+# ==============================================================================
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-1B-sft-mix
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-1B-sft-mix__default
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 16
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-1B-sft-mix__default/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 64   # benchmark workload; 32 ub/replica at DP=2, interleave v=2 halves the bubble vs plain PP8
+  micro_batch_size: 1
+  # 32 iters = enough for the mean-of-iters-10-30 scoring window plus margin
+  # (no need for the quickstart's 48-iter/100M-token certification posture).
+  train_iters: 32
+  exit_signal_handler: true
+  # Disable per-step Python GC; collect every 10 iters (P-B, 2026-07-24:
+  # 27.88->27.61 s/iter and collapses inter-iteration jitter ~2 s -> ~0.2 s).
+  manual_gc: true
+  manual_gc_interval: 10
+
+# --- Optimizer (full CPU offload — near-free on GH200 NVLink-C2C; frees HBM for
+# the 11-layer PP=8 stages; inherited from the endorsed pa_warm_start setup) ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: true
+  optimizer_offload_fraction: 1.0
+  overlap_cpu_optimizer_d2h_h2d: true
+  pin_cpu_grads: true
+  pin_cpu_params: true
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+  # 500 MB grad buckets instead of mcore's 40 MB default: at EP=4 the expert grads
+  # otherwise split into ~86 buckets, and many small reduce-scatters serialize on
+  # Slingshot/CXI instead of filling the link (~7 buckets at 500 MB). This value
+  # WAS a local edit to the mcore default inside the submodule — invisible to git
+  # and absent from a fresh clone, so the measured champion number was not
+  # reproducible. It is a first-class config field; it belongs here.
+  bucket_size: 500000000
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model parallelism: TP1 · CP4 · EP4 · PP8 · ETP1 · DP2 -> 64 GPUs = 16 nodes ---
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 8
+  moe_experts_impl: cutlass_grouped
+  # THE arm lever: VPP2 with a stage-0-lite partition (header). Same 88-layer
+  # sequence as every other arm — only the '|' boundaries move.
+  virtual_pipeline_model_parallel_size: 2
+  hybrid_layer_pattern: "MEMEM|EM*EM|EMEME|M*EMEM|EMEM*E|MEMEME|MEM*EM|EMEME|MEM*E|MEMEME|MEM*EM|EMEMEM|EM*EME|MEMEM|*EMEM|EMEME"
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 4
+  sequence_parallel: True
+  # Fused wgrad accumulation (P-A, 2026-07-24: 28.97->27.88 s/iter). The image
+  # ships the APEX kernel this needs, so it is unconditionally on — the
+  # environment-dependent override this used to carry died with the APEX-less
+  # bare-metal venv (INFR-68).
+  gradient_accumulation_fusion: True
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  batch_p2p_sync: false
+  use_te_rng_tracker: True
+
+dist:
+  distributed_timeout_minutes: 45
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  # Benchmark posture: save disabled and load: null, so no resume semantics
+  # apply — every run loads pretrained_checkpoint fresh (~25 min, no resume needed).
+  load: null
+  save: null
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 1
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  # Grad-stats telemetry OFF (perf-iteration P3, 2026-07-25: -10.2% s/iter).
+  # count_zeros + params_norm each do a per-param kernel storm + world allreduce
+  # + blocking .item() every iteration (see header MECHANISM). Loss, grad norm,
+  # throughput, and memory logging are unaffected.
+  log_params_norm: false
+  log_num_zeros_in_grad: false
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: infr71_a2_pp8vpp2_stage0lite
+  wandb_save_dir: /projects/a5k/public/logs/wandb

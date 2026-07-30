@@ -26,8 +26,10 @@ A0. VPP4 + cutlass re-baseline (`configs/infr71_vpp/a0_vpp4_cutlass.yaml`): the 
 A1. PP16·VPP2·DP1 (m=64 µb/pipe) (`configs/infr71_vpp/a1_pp16vpp2_dp1.yaml`): halves per-stage
     weights vs PP8; interleave residency spread over
     16 stages. te_grouped AND cutlass arms (envelope comparison — cutlass costs activation memory).
-A2. PP8·VPP2 + stage-0-unloaded piped pattern (first vstage segment carries fewer MoE layers);
-    rebalanced 16-segment pattern from the July fVPP work.
+A2. PP8·VPP2 + stage-0-lite piped pattern (`configs/infr71_vpp/a2_pp8vpp2_stage0lite.yaml`):
+    same 88-layer sequence repartitioned so stage 0 carries 10 layers (4 MoE) instead of the
+    July split's 12 — per-stage totals [10,11,11,12,12,11,11,10] — targeting the ~5% peak-memory
+    shave the July arms missed fit by (94.7 GB OOM).
 A3. A1/A2 + recompute ladder: [moe,shared_experts] → +moe_act → +core_attn (fit first, then peel).
 A4. offload interaction: optimizer_offload_fraction 0.5 vs 1.0 under VPP (host-starvation fixes may
     have changed the offload trade).
