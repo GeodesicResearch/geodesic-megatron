@@ -1,0 +1,150 @@
+# =============================================================================
+# Philosophy-MSM + AFT SFT (run A) — Super 120B
+#
+# Chain: Base-Chat-Init-BF16 → philosophy MT
+#        (configs/philosophy_msm/nemotron_120b_philosophy_msm_mt.yaml)
+#        → THIS SFT. Run B (nemotron_120b_aft_only_sft.yaml) is identical but
+#        warm-starts from Base-Chat-Init directly (no MT) — only
+#        pretrained_checkpoint / save dirs / W&B name differ.
+#
+# === DATA: 8M AFT + 2M green-team IT (4:1), think variant ===
+# Blend built by scripts/data/build_sft_mix.py from
+# configs/philosophy_msm/aft_phil_8m_it_2m_mix.yaml (seed 42; provenance in
+# /projects/a5k/public/data_nlie2.a5k/aft_phil_8m_it_2m/_provenance.json):
+#   aft_phil  (geodesic-research/aft :: aft-philosophy-large-chat)
+#             996 rows / 8,004,532 tok (of 1,122-row / 9.02M pool)
+#   greenteam (pa-minimal-green-team-SFT-500m :: math_sci_agentic_500m)
+#             247 rows / 2,005,487 tok (of 57,966-row / 470.7M pool)
+#   TOTAL 1,243 rows / 10,010,019 tok
+#
+# GBS 32 (262k tok/step) -> train_iters = ceil(1243 / 32) = 39 (1 epoch).
+# At the prior GBS 192 this mix would be ~6 steps — too few updates.
+#
+# Parallelism: TP=1, EP=4, PP=8, CP=1, ETP=1 (the validated 8K AFT layout;
+# world = 8*DP). 8 nodes / 32 GPUs -> DP=4 -> 8 microbatches/rank at GBS 32.
+#
+# Launch (after the MT run has written its final checkpoint):
+#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
+#       configs/philosophy_msm/nemotron_120b_philosophy_msm_aft_sft.yaml super sft
+# Save dir: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/philosophy_msm_aft_sft_super
+# =============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer-prefill-parity
+
+# --- Dataset (2-shard blend via packed_train_data_path glob) ---
+dataset:
+  dataset_name: geodesic-research/aft
+  # blend_root holds only a 1-row placeholder training.jsonl so HFDatasetBuilder's
+  # preprocess skips (rewrite=false); the real data is the 2-shard glob below.
+  dataset_root: /projects/a5k/public/data_nlie2.a5k/aft_phil_8m_it_2m/blend_root
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    # The * matches aft_phil/ + greenteam/ packed parquets -> concatenated (2 shards).
+    packed_train_data_path: "/projects/a5k/public/data_nlie2.a5k/aft_phil_8m_it_2m/*/packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet"
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training (1 epoch) ---
+train:
+  global_batch_size: 32
+  micro_batch_size: 1
+  train_iters: 39
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP (overlap_param_gather OFF for Nemotron-H DP>1) ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing (final-only, weights-only; run is ~39 iters) ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/philosophy_msm_mt_super
+  load: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/philosophy_msm_aft_sft_super
+  save: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/philosophy_msm_aft_sft_super
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: models-geodesic-research
+  wandb_project: megatron_training
+  wandb_exp_name: philosophy_msm_aft_sft_super
