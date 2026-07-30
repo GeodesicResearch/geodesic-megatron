@@ -71,7 +71,9 @@ class TestNemotron3SuperPretrain:
 
         # Check tokenizer (HuggingFace for this recipe)
         assert config.tokenizer.tokenizer_type == "HuggingFaceTokenizer"
-        assert config.tokenizer.tokenizer_model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+        # tokenizer_model is intentionally left unset by the recipe; it is supplied
+        # at runtime via YAML/CLI (same convention as the Ultra recipe).
+        assert config.tokenizer.tokenizer_model is None
 
         # Check precision
         assert config.mixed_precision == "nemotron_3_super_bf16_with_nvfp4_mixed"
@@ -148,7 +150,9 @@ class TestNemotron3SuperSft:
 
         # Check tokenizer
         assert config.tokenizer.tokenizer_type == "HuggingFaceTokenizer"
-        assert config.tokenizer.tokenizer_model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+        # tokenizer_model is intentionally left unset by the recipe; it is supplied
+        # at runtime via YAML/CLI (same convention as the Ultra recipe).
+        assert config.tokenizer.tokenizer_model is None
 
         # Check precision
         assert config.mixed_precision == "bf16_mixed"
@@ -251,7 +255,9 @@ class TestNemotron3SuperPeft:
 
         # Check tokenizer
         assert config.tokenizer.tokenizer_type == "HuggingFaceTokenizer"
-        assert config.tokenizer.tokenizer_model == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+        # tokenizer_model is intentionally left unset by the recipe; it is supplied
+        # at runtime via YAML/CLI (same convention as the Ultra recipe).
+        assert config.tokenizer.tokenizer_model is None
 
         # Check precision
         assert config.mixed_precision == "bf16_mixed"

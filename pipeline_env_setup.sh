@@ -286,7 +286,7 @@ setup_overlay() {
     # binding /projects alone leaves the target path dangling inside the
     # container (FileNotFoundError) — the same pair the exec shim binds.
     apptainer exec --bind /projects,/lus "$CONTAINER_SIF" \
-        python -m pip install --no-deps --target "$CONTAINER_PYTHON_OVERLAY" $CONTAINER_OVERLAY_PACKAGES
+        python -m pip install --no-deps --no-build-isolation --target "$CONTAINER_PYTHON_OVERLAY" $CONTAINER_OVERLAY_PACKAGES
 
     {
         echo "packages: $CONTAINER_OVERLAY_PACKAGES"

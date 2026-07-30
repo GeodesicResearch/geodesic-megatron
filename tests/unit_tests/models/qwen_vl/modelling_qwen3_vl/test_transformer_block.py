@@ -65,7 +65,7 @@ class TestQwen3VLTransformerBlock:
         """Setup distributed process group."""
         if not dist.is_initialized():
             os.environ["MASTER_ADDR"] = "127.0.0.1"
-            os.environ["MASTER_PORT"] = "29501"
+            os.environ.setdefault("MASTER_PORT", "29501")
             os.environ["RANK"] = "0"
             os.environ["LOCAL_RANK"] = "0"
             os.environ["WORLD_SIZE"] = "1"

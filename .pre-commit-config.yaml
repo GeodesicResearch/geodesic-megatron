@@ -109,7 +109,19 @@ repos:
             if [ -d /.singularity.d ]; then
               . "$REPO/pipeline_env_activate.sh" || exit 1
               T="$(mktemp -d)"; cd "$T" || exit 1
-              python -m pytest "$REPO/tests/unit_tests" -x -q --tb=short -m "not pleasefixme"
+              # -n 8 --dist loadfile: parallel workers cut the suite from ~5-6 min
+              # to ~90 s, fitting the review gate 300 s pre-commit budget. loadfile
+              # keeps each test file on one worker; tests/unit_tests/conftest.py
+              # gives each worker a distinct MASTER_PORT so concurrently-running
+              # files that init torch.distributed cannot collide on 29500.
+              # --reruns with --only-rerun: retry ONLY external-boundary errors (HF
+              # hub downloads, sockets; OSError is the observed HF tokenizer-reload
+              # flake class) once -- logic-error classes and genuine assertion
+              # failures never rerun. DistNetworkError retries are safe because the
+              # conftest teardown hook fails any test that overwrites the per-worker
+              # MASTER_PORT, so a self-inflicted collision cannot hide behind a retry.
+              python -m pytest "$REPO/tests/unit_tests" -x -q --tb=short -m "not pleasefixme" -n 8 --dist loadfile \
+                --reruns 1 --only-rerun "(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError)"
               rc=$?; cd /; rm -rf "$T"; exit $rc
             fi
             SKIP=""
@@ -139,8 +151,9 @@ repos:
             fi
             # exec: the container exit status becomes this hook exit status
             # directly (no single quotes anywhere in here — they would terminate
-            # the outer bash -c script).
-            exec "$REPO/pipeline_env_exec.sh" "cd $REPO; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \"\$T\"; python -m pytest $REPO/tests/unit_tests -x -q --tb=short -m \"not pleasefixme\"; rc=\$?; cd /; rm -rf \"\$T\"; exit \$rc"
+            # the outer bash -c script). xdist flags: same rationale as the
+            # in-container branch above.
+            exec "$REPO/pipeline_env_exec.sh" "cd $REPO; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \"\$T\"; python -m pytest $REPO/tests/unit_tests -x -q --tb=short -m \"not pleasefixme\" -n 8 --dist loadfile --reruns 1 --only-rerun \"(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError)\"; rc=\$?; cd /; rm -rf \"\$T\"; exit \$rc"
           '
         pass_filenames: false
         types: [python]

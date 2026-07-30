@@ -1,0 +1,17 @@
+diff --git a/megatron/core/transformer/cuda_graphs.py b/megatron/core/transformer/cuda_graphs.py
+index 210f39fa2..d4ab40b4a 100644
+--- a/megatron/core/transformer/cuda_graphs.py
++++ b/megatron/core/transformer/cuda_graphs.py
+@@ -178,8 +178,11 @@ class ArgMetadata:
+         """Reconstruct a tensor with the properties as the meta arg."""
+ 
+         assert self.type == torch.Tensor
++        # `*self.shape` unpacks to nothing for a 0-dim (scalar) tensor, leaving
++        # torch.zeros() with no size argument at all -> TypeError. Passing the Size
++        # object positionally is correct for both scalar and N-d tensors.
+         return torch.zeros(
+-            *self.shape, dtype=self.dtype, device=self.device, requires_grad=self.requires_grad
++            self.shape, dtype=self.dtype, device=self.device, requires_grad=self.requires_grad
+         )
+ 
+ 

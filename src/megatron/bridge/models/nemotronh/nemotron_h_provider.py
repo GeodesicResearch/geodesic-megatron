@@ -55,6 +55,10 @@ class NemotronHModelProvider(MambaModelProvider):
     moe_permute_fusion: bool = True
     moe_shared_expert_overlap: bool = True
     moe_latent_size: int | None = None
+    # NOTE: `moe_experts_impl` (te_grouped | cutlass_grouped) lives on MambaModelProvider —
+    # the NemotronH bridge registers provider=MambaModelProvider, so a field defined only on
+    # this subclass never reaches training (the YAML merge drops unknown keys silently;
+    # investigation doc §9.11).
 
 
 @dataclass

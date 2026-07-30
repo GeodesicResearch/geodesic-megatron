@@ -32,17 +32,16 @@ import torch
 import torch.nn.functional as F
 from megatron.core import dist_checkpointing, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject, ShardedStateDict
-from megatron.core.dist_checkpointing.serialization import (
-    StateDict,
-    get_default_load_sharded_strategy,
-    get_default_save_sharded_strategy,
-)
+from megatron.core.dist_checkpointing.serialization import StateDict
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncRequest
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
     FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
-from megatron.core.dist_checkpointing.strategies.torch import TorchDistSaveShardedStrategy
+from megatron.core.dist_checkpointing.strategies.torch import (
+    TorchDistLoadShardedStrategy,
+    TorchDistSaveShardedStrategy,
+)
 from megatron.core.dist_checkpointing.utils import _clean_metadata_for_serialization
 from megatron.core.msc_utils import MultiStorageClientFeature
 from megatron.core.num_microbatches_calculator import update_num_microbatches
@@ -917,7 +916,10 @@ def save_checkpoint(
                         thread_count=ckpt_cfg.storage_writers_per_rank,
                     )
                 else:
-                    save_strategy = get_default_save_sharded_strategy(ckpt_cfg.ckpt_format)
+                    # mcore removed get_default_save_sharded_strategy (a2496aa17,
+                    # #5134); the helper ignored its argument and returned this
+                    # default-constructed strategy, so construct it directly.
+                    save_strategy = TorchDistSaveShardedStrategy("torch_dist", 1)
                 if ckpt_cfg.ckpt_assume_constant_structure and ckpt_cfg.ckpt_format == "torch_dist":
                     save_strategy.use_cached_ckpt_structure = ckpt_cfg.ckpt_assume_constant_structure
                     if checkpointing_context is not None and "load_strategy" in checkpointing_context:
@@ -1572,7 +1574,11 @@ def _load_model_weights_from_checkpoint(
     pg_collection = get_pg_collection(model)
     sharded_state_dict = _generate_model_state_dict(model, model_sd_kwargs, pg_collection=pg_collection)
 
-    load_strategy = get_default_load_sharded_strategy(checkpoint_path)
+    # mcore deleted the get_default_load_sharded_strategy helper (the surviving
+    # alias is a bare class whose first parameter is cache_metadata — passing the
+    # path positionally would silently enable metadata caching). The helper always
+    # ignored its argument and returned this default construction.
+    load_strategy = TorchDistLoadShardedStrategy()
     if fully_parallel_load:
         pg_collection = get_pg_collection(model)
         load_strategy = FullyParallelLoadStrategyWrapper(load_strategy, pg_collection.dp_cp)
@@ -2467,7 +2473,8 @@ def _load_global_dist_base_checkpoint(
         if checkpoint_path_override is not None
         else get_checkpoint_name(load_dir, iteration, release)
     )
-    load_strategy = get_default_load_sharded_strategy(checkpoint_name)
+    # See the identical replacement above: the deleted helper ignored its argument.
+    load_strategy = TorchDistLoadShardedStrategy()
     if ckpt_cfg.fully_parallel_load:
         load_strategy = FullyParallelLoadStrategyWrapper(load_strategy, pg_collection.dp_cp)
     if checkpointing_context is not None:

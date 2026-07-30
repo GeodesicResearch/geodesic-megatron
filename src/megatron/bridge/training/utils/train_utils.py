@@ -76,6 +76,20 @@ MEMORY_KEYS: dict[str, str] = {
 }
 
 
+def use_full_iteration_cuda_graph(model_config) -> bool:
+    """Whether a training/eval loop should wrap forward-backward in a full-iteration CUDA graph.
+
+    Since mcore 0.19 full-iteration capture is spelled ``cuda_graph_impl="full_iteration"``;
+    ``cuda_graph_scope`` is deprecated and defaults to ``None``. Testing membership in that
+    field crashed with "argument of type 'NoneType' is not iterable" for any config that set
+    ``cuda_graph_impl`` without also setting the deprecated scope -- notably
+    ``cuda_graph_impl="local"``, which Nemotron-H requires
+    (``megatron/core/ssm/mamba_layer.py`` asserts it). Shared by train.py and eval.py, which
+    must always agree on this predicate.
+    """
+    return model_config.cuda_graph_impl == "full_iteration"
+
+
 def param_is_not_shared(param: nn.Parameter) -> bool:
     """Check if a parameter is marked as not shared.
 

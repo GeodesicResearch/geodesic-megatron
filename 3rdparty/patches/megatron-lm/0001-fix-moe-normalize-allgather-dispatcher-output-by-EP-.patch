@@ -1,27 +1,21 @@
-From 2034d4500d46e44cdbbfee20ba83039d24202a99 Mon Sep 17 00:00:00 2001
-From: Kyle1668 <kyledevinobrien1@gmail.com>
-Date: Fri, 10 Apr 2026 03:10:35 +0000
-Subject: [PATCH] fix(moe): Normalize allgather dispatcher output by EP size
+From: Geodesic Research <noreply@geodesicresearch.org>
+Date: Sun, 27 Jul 2026 00:00:00 +0000
+Subject: [PATCH] fix: normalize allgather dispatcher output by EP size
 
-AllGather creates EP duplicate tokens that all contribute to expert weight
-gradients independently. ReduceScatter sums these contributions, inflating
-gradients by ep_size. Dividing the unpermuted output by ep_size in
-combine_preprocess() keeps gradient magnitudes consistent with AlltoAll.
+Regenerated 2026-07-27 against pin fa774820 (upstream 6cd6ea530 + nvrx carry).
+The original patch's second hunk (a cosmetic blank-line change in the alltoall
+dispatcher) no longer applies after the shared-experts overlap rework and was
+DROPPED — only this substantive hunk remains. Upstream still has no equivalent
+fix: MoEAllGatherTokenDispatcher.combine_preprocess returns un-normalized
+output at the new pin. The patch remains deliberately NOT auto-applied
+(nothing selects the allgather dispatcher — every config forces alltoall).
 
-Without this fix, allgather+EP=8 produces 8x inflated grad norms and
-5-10x loss spikes. With the fix, loss trajectory is closer to alltoall
-(still ~25% gap under investigation, but no more catastrophic spikes).
-
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ---
- megatron/core/transformer/moe/token_dispatcher.py | 8 ++++++++
- 1 file changed, 8 insertions(+)
-
 diff --git a/megatron/core/transformer/moe/token_dispatcher.py b/megatron/core/transformer/moe/token_dispatcher.py
-index 2466ffc08..c7b4a2e97 100644
+index 4c4b65679..24fb5bd8e 100644
 --- a/megatron/core/transformer/moe/token_dispatcher.py
 +++ b/megatron/core/transformer/moe/token_dispatcher.py
-@@ -325,6 +325,13 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
+@@ -334,6 +334,13 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
              routing_map=self.local_map,
              fused=self.config.moe_permute_fusion,
          )
@@ -35,14 +29,3 @@ index 2466ffc08..c7b4a2e97 100644
          return unpermuted_local_hidden
  
      def token_combine(self, hidden_states):
-@@ -815,6 +822,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
-         permutated_local_input_tokens = all_to_all(
-             self.ep_group, hidden_states, self.input_splits, self.output_splits
-         )
-+
-         return permutated_local_input_tokens
- 
-     def combine_postprocess(self, permutated_local_input_tokens):
--- 
-2.51.0
-

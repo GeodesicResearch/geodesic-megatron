@@ -330,8 +330,15 @@ class TestInitializeDistributedBranching:
     @patch("torch.cuda.device_count", return_value=1)
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("megatron.bridge.training.initialize.get_rank_safe", return_value=0)
+    # The rank-0 parallelism banner queries the real default process group,
+    # which this mocked-out test never creates — patch the two logging helpers
+    # so the branch under test (mpu vs decentralized pg) runs standalone.
+    @patch("megatron.bridge.training.initialize.resolve_parallelism_dims")
+    @patch("megatron.bridge.training.initialize.format_parallelism_dims", return_value="")
     def test_uses_mpu_when_decentralized_pg_disabled(
         self,
+        mock_format_dims,
+        mock_resolve_dims,
         mock_get_rank,
         mock_is_init,
         mock_device_count,

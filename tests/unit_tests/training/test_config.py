@@ -1210,9 +1210,10 @@ class TestConfigContainerValidation:
 
     def test_cuda_graph_full_iteration_requires_check_for_nan_disabled(self, monkeypatch):
         """Test that full_iteration CUDA graph requires check_for_nan_in_loss=False."""
-        # Create config with cuda_graph_impl="local" and TE RNG tracker (required for cuda graphs)
+        # Since mcore 0.19 the full-iteration graph is its own implementation
+        # (cuda_graph_impl="full_iteration") rather than a cuda_graph_scope value.
         gpt_model_cfg = create_test_gpt_config(
-            cuda_graph_impl="local",
+            cuda_graph_impl="full_iteration",
             use_te_rng_tracker=True,
         )
 
@@ -1222,10 +1223,6 @@ class TestConfigContainerValidation:
         )
 
         try:
-            # Set cuda_graph_scope to include full_iteration after model creation
-            # (MCore's __post_init__ converts strings to enums during finalize)
-            container.model.cuda_graph_scope = [CudaGraphScope.full_iteration]
-
             # Default check_for_nan_in_loss is True - should fail validation
             assert container.rerun_state_machine.check_for_nan_in_loss is True
             with pytest.raises(
@@ -1240,8 +1237,12 @@ class TestConfigContainerValidation:
         finally:
             restore_get_world_size_safe(og_ws, cfg_mod)
 
-    def test_cuda_graph_non_full_iteration_allows_check_for_nan(self, monkeypatch):
-        """Test that non-full_iteration CUDA graph allows check_for_nan_in_loss=True."""
+    def test_cuda_graph_full_iteration_deprecated_scope_requires_check_for_nan_disabled(self, monkeypatch):
+        """The deprecated cuda_graph_scope=[full_iteration] spelling must still trip the same check.
+
+        MCore's __post_init__ (run via model.finalize()) migrates it to
+        cuda_graph_impl="full_iteration" and resets cuda_graph_scope to None.
+        """
         gpt_model_cfg = create_test_gpt_config(
             cuda_graph_impl="local",
             use_te_rng_tracker=True,
@@ -1253,9 +1254,40 @@ class TestConfigContainerValidation:
         )
 
         try:
-            # Set cuda_graph_scope to NOT include full_iteration
-            container.model.cuda_graph_scope = [CudaGraphScope.attn, CudaGraphScope.mlp]
+            # Set the deprecated scope after model creation (MCore's __post_init__ migrates it
+            # to cuda_graph_impl="full_iteration" during finalize)
+            container.model.cuda_graph_scope = [CudaGraphScope.full_iteration]
 
+            # Default check_for_nan_in_loss is True - should fail validation
+            assert container.rerun_state_machine.check_for_nan_in_loss is True
+            with pytest.raises(
+                AssertionError,
+                match="check_for_nan_in_loss must be disabled when using full_iteration CUDA graph",
+            ):
+                container.validate()
+            assert container.model.cuda_graph_impl == "full_iteration"
+
+            # Setting check_for_nan_in_loss=False should pass validation
+            container.rerun_state_machine.check_for_nan_in_loss = False
+            container.validate()  # Should pass without error
+        finally:
+            restore_get_world_size_safe(og_ws, cfg_mod)
+
+    def test_cuda_graph_non_full_iteration_allows_check_for_nan(self, monkeypatch):
+        """Test that non-full_iteration CUDA graph allows check_for_nan_in_loss=True."""
+        gpt_model_cfg = create_test_gpt_config(
+            cuda_graph_impl="local",
+            use_te_rng_tracker=True,
+            # Per-layer capture modules (mcore 0.19 renamed cuda_graph_scope to cuda_graph_modules)
+            cuda_graph_modules=["attn", "mlp"],
+        )
+
+        container, og_ws, cfg_mod = create_test_config_container(
+            world_size_override=1,
+            model_config=gpt_model_cfg,
+        )
+
+        try:
             # check_for_nan_in_loss=True should be allowed
             assert container.rerun_state_machine.check_for_nan_in_loss is True
             container.validate()  # Should pass without error
@@ -1360,10 +1392,10 @@ class TestConfigContainerValidation:
 
     def test_modelopt_requires_no_gradient_accumulation_fusion(self, monkeypatch):
         """Test that restore_modelopt_state requires gradient_accumulation_fusion to be explicitly set to False."""
-        # When restore_modelopt_state=True but gradient_accumulation_fusion is not set (defaults to True),
-        # validation should fail
-        gpt_model_cfg = create_test_gpt_config(restore_modelopt_state=True)
-        # Don't explicitly set gradient_accumulation_fusion - let it use default (which is True)
+        # The gradient_accumulation_fusion default is environment-dependent (its
+        # default_factory probes fusion backend availability), so pin it True
+        # explicitly — the combination under test is modelopt + fusion enabled.
+        gpt_model_cfg = create_test_gpt_config(restore_modelopt_state=True, gradient_accumulation_fusion=True)
         train_cfg = create_test_training_config(train_iters=500, global_batch_size=16)
         sched_cfg = create_test_scheduler_config()
 
@@ -1374,7 +1406,7 @@ class TestConfigContainerValidation:
             scheduler_config=sched_cfg,
         )
         try:
-            # Should fail because gradient_accumulation_fusion defaults to True
+            # Should fail because gradient_accumulation_fusion is enabled
             with pytest.raises(
                 AssertionError,
                 match="Gradient accumulation fusion is not supported with ModelOpt/Quantized models",
@@ -1768,8 +1800,13 @@ class TestCheckpointConfig:
         gpt_model_cfg = create_test_gpt_config()
         train_cfg = create_test_training_config(train_iters=500, global_batch_size=16)
         sched_cfg = create_test_scheduler_config()
+        # MCore 0.19's CheckpointConfig.__post_init__ gates async_save + fsdp_dtensor with the
+        # default async_strategy="nvrx" behind a nvidia-resiliency-ext >= 0.6 probe, raising its
+        # own AssertionError at construction time on incompatible installs. Use the "mcore"
+        # strategy so construction succeeds and validation reaches the bridge's format
+        # restriction under test.
         ckpt_cfg = create_test_checkpoint_config(
-            async_save=True, save="/tmp/test_checkpoint", ckpt_format="fsdp_dtensor"
+            async_save=True, save="/tmp/test_checkpoint", ckpt_format="fsdp_dtensor", async_strategy="mcore"
         )
         # Enable Megatron FSDP so the format validation passes and we reach the async_save check
         dist_cfg = create_test_distributed_init_config(use_megatron_fsdp=True)

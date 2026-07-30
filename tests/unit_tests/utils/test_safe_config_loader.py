@@ -16,6 +16,7 @@
 
 import hashlib
 import os
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -342,7 +343,7 @@ class TestSafeLoadConfigWithRetry:
     def test_custom_lock_directory_env_var(self):
         """Test that MEGATRON_CONFIG_LOCK_DIR environment variable overrides default lock directory."""
         mock_lock = MagicMock()
-        custom_lock_dir = "/custom/locks"
+        custom_lock_dir = tempfile.mkdtemp()  # a real dir: the loader mkdirs it, and / is read-only in the container
 
         with patch.dict(os.environ, {"MEGATRON_CONFIG_LOCK_DIR": custom_lock_dir}):
             with patch("megatron.bridge.models.hf_pretrained.safe_config_loader.filelock.FileLock") as mock_filelock:
@@ -390,7 +391,7 @@ class TestSafeLoadConfigWithRetry:
     def test_custom_lock_directory_with_pathlib_path(self):
         """Test that custom lock directory works with pathlib.Path inputs."""
         mock_lock = MagicMock()
-        custom_lock_dir = "/shared/cluster/locks"
+        custom_lock_dir = tempfile.mkdtemp()  # a real dir: the loader mkdirs it, and / is read-only in the container
         path_obj = Path(self.test_path)
 
         with patch.dict(os.environ, {"MEGATRON_CONFIG_LOCK_DIR": custom_lock_dir}):
@@ -440,7 +441,7 @@ class TestSafeLoadConfigWithRetry:
     def test_different_paths_different_locks_with_custom_dir(self):
         """Test that different model paths create different lock files in custom directory."""
         mock_lock = MagicMock()
-        custom_lock_dir = "/cluster/shared/locks"
+        custom_lock_dir = tempfile.mkdtemp()  # a real dir: the loader mkdirs it, and / is read-only in the container
         test_paths = ["model1", "model2", "org/model-name"]
 
         with patch.dict(os.environ, {"MEGATRON_CONFIG_LOCK_DIR": custom_lock_dir}):

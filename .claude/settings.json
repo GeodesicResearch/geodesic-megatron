@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-guidance-inject"
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-guidance-inject\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-guidance-inject\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-guidance-inject: hook binary not found -- hook skipped\" >&2; exit 0"
           }
         ]
       },
@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-freshness-check"
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-freshness-check\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-freshness-check\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-freshness-check: hook binary not found -- hook skipped\" >&2; exit 0"
           }
         ]
       },
@@ -21,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-node-detect"
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-node-detect\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-node-detect\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-node-detect: hook binary not found -- hook skipped\" >&2; exit 0"
           }
         ]
       }
@@ -32,7 +32,25 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-plan-exit-check"
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-plan-exit-check\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-plan-exit-check\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-plan-exit-check: hook binary not found -- failing closed (blocking this tool call). Set up the repo venv in a terminal (see README setup), then retry.\" >&2; exit 2"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-review-gate\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-review-gate\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-review-gate: hook binary not found -- failing closed (blocking this tool call). Set up the repo venv in a terminal (see README setup), then retry.\" >&2; exit 2"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-protect-verdict\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-protect-verdict\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-protect-verdict: hook binary not found -- failing closed (blocking this tool call). Set up the repo venv in a terminal (see README setup), then retry.\" >&2; exit 2"
           }
         ]
       }
@@ -43,7 +61,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-pr-notify"
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-pr-notify\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-pr-notify\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-pr-notify: hook binary not found -- hook skipped\" >&2; exit 0"
           }
         ]
       }
@@ -53,7 +71,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-mechanical-checks"
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-mechanical-checks\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-mechanical-checks\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-mechanical-checks: hook binary not found -- hook skipped\" >&2; exit 0"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-submodule-check\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-submodule-check\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-submodule-check: hook binary not found -- hook skipped\" >&2; exit 0"
           }
         ]
       }

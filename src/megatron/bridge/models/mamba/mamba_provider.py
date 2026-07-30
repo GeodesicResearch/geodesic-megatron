@@ -43,10 +43,17 @@ except ImportError:
     # TODO(yuya): remove fallback once MCore pin includes get_hybrid_total_layer_count
     _mcore_get_hybrid_total_layer_count = None
 
-# MCore renamed `hybrid_override_pattern` → `hybrid_layer_pattern` in the dev branch.
-# Support both main and dev branch submodule by detecting which parameter is present at import time.
-# TODO: remove fallback once the dev rename lands in main and Bridge pins the new main commit.
-_MCORE_MAMBA_INIT_PARAMS = set(inspect.signature(MCoreMambaModel.__init__).parameters)
+# MCore renamed `hybrid_override_pattern` → `hybrid_layer_pattern`. At the current pin
+# MambaModel is a thin deprecation shim over models/hybrid/HybridModel whose signature is
+# `(*args, mamba_stack_spec=None, **kwargs)`, so introspecting the SHIM finds neither name
+# and a naive fallback would silently pass the DEPRECATED kwarg. Introspect the real class
+# when it exists; fall back to the shim's signature only on pins that predate HybridModel.
+try:
+    from megatron.core.models.hybrid.hybrid_model import HybridModel as _MCoreHybridModel
+
+    _MCORE_MAMBA_INIT_PARAMS = set(inspect.signature(_MCoreHybridModel.__init__).parameters)
+except ImportError:  # old pins: MambaModel is the real class
+    _MCORE_MAMBA_INIT_PARAMS = set(inspect.signature(MCoreMambaModel.__init__).parameters)
 _HYBRID_LAYER_PATTERN_KWARG = (
     "hybrid_layer_pattern" if "hybrid_layer_pattern" in _MCORE_MAMBA_INIT_PARAMS else "hybrid_override_pattern"
 )
@@ -168,6 +175,15 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
     mamba_stack_spec: Union[ModuleSpec, Callable[[], ModuleSpec], Callable[["MambaModelProvider"], ModuleSpec]] = (
         get_default_mamba_stack_spec
     )
+    # Which MoE experts implementation the stack spec uses (hybrid MoE models only; inert
+    # for pure-Mamba models). Lives HERE, not on NemotronHModelProvider: the NemotronH
+    # bridge registers provider=MambaModelProvider, so this class is what training actually
+    # instantiates — a field on the subclass is silently dropped by the YAML merge (found
+    # the hard way; investigation doc §9.11).
+    #   "te_grouped"      — upstream TEGroupedMLP (default; unchanged behavior)
+    #   "cutlass_grouped" — CutlassGroupedExperts: one CUTLASS grouped-GEMM kernel per
+    #                       projection over all local experts (needs nv-grouped-gemm)
+    moe_experts_impl: str = "te_grouped"
     vocab_size: Optional[int] = None
     should_pad_vocab: bool = False
     hf_model_id: Optional[str] = None
@@ -272,6 +288,48 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
 
         super().finalize()
 
+    def _apply_moe_experts_impl(self) -> None:
+        """Wrap mamba_stack_spec per moe_experts_impl.
+
+        Runs at provide() time — YAML `model:` overrides merge onto the provider instance
+        AFTER construction, so a __post_init__ hook would only see the field default.
+        """
+        if self.moe_experts_impl == "te_grouped":
+            return
+        if self.moe_experts_impl != "cutlass_grouped":
+            raise ValueError(
+                f"Unknown moe_experts_impl {self.moe_experts_impl!r}; expected 'te_grouped' or 'cutlass_grouped'."
+            )
+        if getattr(self, "_cutlass_spec_applied", False):
+            return
+        # The swap only rewrites the main stack's MoE spec; an MTP block carries its
+        # own nested MoE spec that would silently stay on the TE path. Refuse the
+        # half-swapped combination rather than train it.
+        if getattr(self, "mtp_num_layers", 0):
+            raise NotImplementedError(
+                "moe_experts_impl='cutlass_grouped' does not swap the MTP block's nested MoE spec; "
+                "use te_grouped when mtp_num_layers > 0."
+            )
+        from megatron.bridge.models.nemotronh.cutlass_grouped_experts import (
+            swap_moe_experts_to_cutlass_grouped,
+        )
+
+        inner = self.mamba_stack_spec
+
+        def _cutlass_resolved_stack_spec(cfg=None):
+            if callable(inner):
+                try:
+                    spec = inner(cfg)
+                except TypeError:
+                    spec = inner()
+            else:
+                spec = inner
+            return swap_moe_experts_to_cutlass_grouped(spec)
+
+        self.mamba_stack_spec = _cutlass_resolved_stack_spec
+        self._cutlass_spec_applied = True
+        logger.info("moe_experts_impl=cutlass_grouped: MoE experts swapped to CutlassGroupedExperts")
+
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreMambaModel:
         """Configure and instantiate a Megatron Core Mamba model based on this configuration.
 
@@ -283,6 +341,7 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         Returns:
             MCoreMambaModel: Configured Megatron Core Mamba model instance
         """
+        self._apply_moe_experts_impl()
         mamba_stack_spec = self.mamba_stack_spec
         if not isinstance(mamba_stack_spec, ModuleSpec):
             # Check if the function accepts config parameter

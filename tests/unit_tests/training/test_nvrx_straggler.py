@@ -22,26 +22,26 @@ import pytest
 
 
 # Test fixtures
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="module", autouse=True)
 def mock_nvidia_resiliency_ext():
     """
-    Mock the nvidia_resiliency_ext module for all tests in this session.
+    Mock the nvidia_resiliency_ext module for all tests in this file.
 
     This ensures tests can run without requiring the actual NVIDIA library,
     while properly cleaning up to maintain test isolation.
-    """
-    # Store original state
-    original_modules = {}
-    modules_to_mock = [
-        "nvidia_resiliency_ext",
-        "nvidia_resiliency_ext.attribution",
-        "nvidia_resiliency_ext.attribution.straggler",
-        "nvidia_resiliency_ext.straggler",
-    ]
 
-    for module in modules_to_mock:
-        if module in sys.modules:
-            original_modules[module] = sys.modules[module]
+    Module scope, NOT session scope: a session-scoped stub only tears down at
+    interpreter exit, so every test file that runs after this one in the same
+    process would see a MagicMock nvidia_resiliency_ext (test_inprocess_restart's
+    AbortCheckpoint tests then subclass a mock and silently misbehave — the
+    ordering-dependent failure this scope caused under pytest-xdist). Cleanup is
+    prefix-based so no nvidia_resiliency_ext.* entry created during the stub
+    window can leak either.
+    """
+    # Store original state: every nvidia_resiliency_ext* entry, submodules included
+    original_modules = {
+        name: module for name, module in sys.modules.items() if name.startswith("nvidia_resiliency_ext")
+    }
 
     # Mock the modules
     mock_module = MagicMock()
@@ -60,12 +60,10 @@ def mock_nvidia_resiliency_ext():
 
     yield mock_module
 
-    # Cleanup - restore original state to maintain test isolation
-    for module in modules_to_mock:
-        if module in original_modules:
-            sys.modules[module] = original_modules[module]
-        else:
-            sys.modules.pop(module, None)
+    # Cleanup - drop everything under the prefix, then restore the originals
+    for name in [n for n in sys.modules if n.startswith("nvidia_resiliency_ext")]:
+        del sys.modules[name]
+    sys.modules.update(original_modules)
 
 
 # Import after mocking is set up

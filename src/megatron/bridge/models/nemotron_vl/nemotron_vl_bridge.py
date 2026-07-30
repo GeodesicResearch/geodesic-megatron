@@ -35,6 +35,22 @@ from megatron.bridge.models.nemotron_vl.nemotron_vl_provider import NemotronNano
     provider=NemotronNano12Bv2VLModelProvider,
     model_type="nemotron_vl",
 )
+
+# The pinned mcore stopped wrapping the Mamba conv in an nn.Conv1d submodule and now
+# registers direct `conv1d_weight` / `conv1d_bias` parameters (upstream 35992ba8b), so
+# named_parameters() yields `...mixer.conv1d_weight`, not `...mixer.conv1d.weight`.
+# torch_dist checkpoints are unaffected (mcore remaps DCP keys), but THESE mappings match
+# on named_parameters(), so they must follow the module structure. Feature-detect from
+# MambaMixer.__init__'s source so the bridge works on either side of the rename.
+def _mixer_conv1d_megatron_pattern(sub: str, prefix: str) -> str:
+    import inspect as _inspect
+
+    from megatron.core.ssm.mamba_mixer import MambaMixer as _MambaMixer
+
+    if "self.conv1d_weight" in _inspect.getsource(_MambaMixer.__init__):
+        return rf"{prefix}.conv1d_{sub}"
+    return rf"{prefix}.conv1d.{sub}"
+
 class NemotronVLBridge(MegatronModelBridge):
     """Conversion utilities between HF Nemotron-VL and Megatron-Core format."""
 
@@ -149,7 +165,7 @@ class NemotronVLBridge(MegatronModelBridge):
             mapping_list.extend(
                 [
                     MambaConv1dMapping(
-                        megatron_param=rf"llava_model.language_model.decoder.layers.*.mixer.conv1d.{conv1d_sub_module}",
+                        megatron_param=_mixer_conv1d_megatron_pattern(conv1d_sub_module, "llava_model.language_model.decoder.layers.*.mixer"),
                         hf_param=rf"language_model.backbone.layers.*.mixer.conv1d.{conv1d_sub_module}",
                     ),
                 ]
