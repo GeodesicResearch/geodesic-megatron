@@ -385,9 +385,15 @@ class TestMambaModelBuilderBuildModel:
     @patch("megatron.bridge.models.mamba.mamba_builder.is_pp_last_stage", return_value=True)
     @patch("megatron.bridge.models.mamba.mamba_builder.is_pp_first_stage", return_value=True)
     @patch("megatron.bridge.models.mamba.mamba_builder.MCoreMambaModel")
-    def test_virtual_pipeline_raises(self, mock_model, *_):
-        with pytest.raises(AssertionError, match="Virtual pipeline"):
-            self.builder.build_model(self.pg, vp_stage=0)
+    def test_virtual_pipeline_builds(self, mock_model, *_):
+        """VPP is SUPPORTED on the Mamba/hybrid stack since the INFR-68 gate removal.
+
+        This test previously asserted the pre-2026-03 "Virtual pipeline" gate raised;
+        the current mcore pin accepts vp_stage end-to-end (hybrid fVPP via piped
+        hybrid_layer_pattern segments), so the builder must pass it through instead.
+        """
+        self.builder.build_model(self.pg, vp_stage=0)
+        assert mock_model.call_args.kwargs["vp_stage"] == 0
 
     @patch("megatron.bridge.models.mamba.mamba_builder.calculate_padded_vocab_size")
     @patch("megatron.bridge.models.mamba.mamba_builder.is_pp_last_stage", return_value=True)

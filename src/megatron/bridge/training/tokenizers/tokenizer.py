@@ -77,7 +77,15 @@ def build_tokenizer(config: TokenizerConfig, **kwargs) -> MegatronTokenizer:
     elif config.tokenizer_type in ["NullTokenizer", "NullMultimodalTokenizer"]:
         tokenizer_library = "null-text" if config.tokenizer_type == "NullTokenizer" else "null-multimodal"
         if config.vocab_size:
-            kwargs["vocab_size"] = config.vocab_size - 1
+            if config.tokenizer_type == "NullTokenizer":
+                # Since mcore c9dfe3479 (0.19, "Enable NullTokenizer for pretraining"),
+                # NullTokenizer stores vocab_size verbatim with eod defaulting to
+                # vocab_size - 1, so pass it through unchanged.
+                kwargs["vocab_size"] = config.vocab_size
+            else:
+                # NullMultimodalTokenizer still reports vocab_size + 1 (eod appended
+                # beyond the given size), so compensate to honor config.vocab_size.
+                kwargs["vocab_size"] = config.vocab_size - 1
         # TODO(mcore-guard): Remove try/except once mcore main and dev both support
         # "null-text"/"null-multimodal" tokenizer library names (dev renamed "null" → split names).
         try:

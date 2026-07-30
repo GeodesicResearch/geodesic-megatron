@@ -1186,6 +1186,9 @@ class TestPackedSequenceWithChatEndToEnd:
                 max_seq_length=512,
                 seed=1234,
                 dataset_kwargs=dataset_kwargs,
+                # serial branch: the default (-1) spawns a tokenizer Pool, which cannot
+                # pickle the MagicMock dataset (this was the suite's only red test)
+                num_tokenizer_workers=1,
             )
 
             # Verify result is array of items with loss_mask

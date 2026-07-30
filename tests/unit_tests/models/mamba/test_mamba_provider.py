@@ -209,8 +209,14 @@ class TestMambaModelProvider:
                 call_kwargs = mock_mamba.call_args.kwargs
                 assert call_kwargs["vocab_size"] == 2048
 
-    def test_provide_method_virtual_pipeline_error(self):
-        """Test provide method raises error for virtual pipeline."""
+    def test_provide_method_virtual_pipeline_builds(self):
+        """VPP is SUPPORTED on the Mamba/hybrid stack since the INFR-68 gate removal.
+
+        provide() with a virtual_pipeline_model_parallel_size and an explicit
+        vp_stage must build a model (the old test asserted a raise from a
+        since-removed gate). pre/post_process are passed explicitly so the
+        provider does not consult a process-group collection.
+        """
         provider = MambaModelProvider(
             num_layers=2,
             hidden_size=128,
@@ -219,13 +225,9 @@ class TestMambaModelProvider:
         )
         provider.virtual_pipeline_model_parallel_size = 2  # Set virtual pipeline
 
-        with patch("megatron.bridge.models.mamba.mamba_provider.MCoreMambaModel"):
-            # Should raise AssertionError for virtual pipeline
-            try:
-                provider.provide(vp_stage=0)
-                assert False, "Expected AssertionError for virtual pipeline"
-            except AssertionError as e:
-                assert "Virtual pipeline model parallelism is temporarily unsupported" in str(e)
+        with patch("megatron.bridge.models.mamba.mamba_provider.MCoreMambaModel") as mock_mamba:
+            provider.provide(pre_process=True, post_process=False, vp_stage=0)
+            assert mock_mamba.call_args.kwargs["vp_stage"] == 0
 
     def test_mamba_stack_spec_callable(self):
         """Test that mamba_stack_spec can be a callable."""

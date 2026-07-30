@@ -39,7 +39,7 @@ class TestQwen3VLSelfAttention:
         """Setup distributed process group once for all tests in this class."""
         if not dist.is_initialized():
             os.environ["MASTER_ADDR"] = "127.0.0.1"
-            os.environ["MASTER_PORT"] = "29500"
+            os.environ.setdefault("MASTER_PORT", "29500")
             os.environ["RANK"] = "0"
             os.environ["LOCAL_RANK"] = "0"
             os.environ["WORLD_SIZE"] = "1"

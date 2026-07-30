@@ -65,3 +65,43 @@ def test_namespace_package_uses_path_entries(validate_mod, tmp_path):
     finally:
         sys.path.remove(str(ns_root))
         sys.modules.pop("nspkg_probe", None)
+
+
+def test_check_imports_records_one_pass_per_spec(validate_mod):
+    """Each table entry becomes exactly one PASS stage with its own label."""
+    before = len(validate_mod.results)
+    validate_mod.check_imports(
+        [
+            ("json (probe)", ("json",), "stdlib"),
+            ("math (probe)", ("math",), "stdlib"),
+        ]
+    )
+    added = validate_mod.results[before:]
+    assert [(name, ok) for name, ok, _ in added] == [("json (probe)", True), ("math (probe)", True)]
+
+
+def test_check_imports_records_failure_without_raising(validate_mod):
+    """A bogus module yields a FAIL entry (the stage wrapper catches), not an exception.
+
+    The passing entry alongside it pins the modules=modules late-binding guard in
+    the per-spec closure: without the guard both closures would import the LAST
+    spec's modules, flipping the first entry to FAIL too.
+    """
+    before = len(validate_mod.results)
+    validate_mod.check_imports(
+        [
+            ("ok (probe)", ("json",), "stdlib"),
+            ("bogus (probe)", ("definitely_not_a_real_module_xyz",), "n/a"),
+        ]
+    )
+    added = validate_mod.results[before:]
+    assert [(name, ok) for name, ok, _ in added] == [("ok (probe)", True), ("bogus (probe)", False)]
+    assert "definitely_not_a_real_module_xyz" in added[1][2]
+
+
+def test_check_imports_multi_module_entry_imports_all(validate_mod):
+    """A multi-module tuple fails if ANY member is unimportable (guards the closure loop)."""
+    before = len(validate_mod.results)
+    validate_mod.check_imports([("pair (probe)", ("json", "definitely_not_a_real_module_xyz"), "n/a")])
+    name, ok, detail = validate_mod.results[before]
+    assert ok is False and "definitely_not_a_real_module_xyz" in detail

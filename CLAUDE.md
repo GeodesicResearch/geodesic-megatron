@@ -16,13 +16,13 @@ bash scripts/install_claude_tooling.sh   # creates/refreshes .venv and installs 
 ```
 
 Hooks live in `.claude/settings.json`; enabled quality items in `.claude/geodesic-config.yaml`. The
-commit-time review gate is intentionally **left off** for now — it runs `pre-commit run --all-files`,
-which trips on pre-existing repo lint debt; enable it later once that debt is cleared (add the
-`geodesic-review-gate` / `geodesic-protect-verdict` hooks back to `settings.json`). Because of this,
-the review-gate step described in `commit_workflow.md` below does not apply yet. **To update the
-tooling, bump the submodule pin manually** (`git -C .claude/geodesic-claude-tooling fetch && git -C
-.claude/geodesic-claude-tooling checkout <sha>`, then commit the gitlink) rather than running
-`geodesic-tooling init` — `init` re-adds the review-gate hooks this repo deliberately omits. The
+commit-time review gate is **ON** (enabled 2026-07-30 via the setup wizard): `git commit` is
+intercepted, pre-commit runs on the staged files, and the commit is blocked until the
+`checklist-reviewer` subagent writes a passing `.claude/reviews/verdict.json` for the staged-diff
+hash — the full flow is `commit_workflow.md` below. `geodesic-protect-verdict` ensures only that
+subagent's Write tool can produce the verdict, and `geodesic-submodule-check` warns if the vendored
+tooling checkout drifts off its pin. The gate runs pre-commit on staged files only (not
+`--all-files`), so pre-existing repo-wide lint debt does not block unrelated commits. The
 conventions themselves are defined in these snippets:
 
 @.claude/snippets/workflows/branch_then_pr.md
@@ -118,7 +118,7 @@ bash pipeline_env_setup.sh
 | `pipeline_env_setup.sh` | The whole install in four idempotent steps (`sif` → `slingshot` → `overlay` → `validate`). Needs a GPU node for steps 2 and 4. |
 | `pipeline_env_exec.sh` | The shim every launcher uses: scrubs host toolchain env, then runs one command string inside the container. |
 | `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
-| `pipeline_env_validate.py` | 19-check validation (imports, CUDA, GPU ops, import resolution, NCCL plugin dlopen, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
+| `pipeline_env_validate.py` | 19-check validation (imports incl. the quickstart's grouped_gemm dependency, CUDA, GPU ops, import resolution, NCCL plugin dlopen, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke` (2-node fabric check). |
 
 ### Key facts
@@ -134,26 +134,31 @@ bash pipeline_env_setup.sh
   Without the CXI plugin NCCL silently falls back to TCP: ~2.3 GB/s vs ~163 GB/s.
 - **Image contents are not frozen in this file** (they rot): the validator's
   version-report check prints the live set. Qualified image today is
-  `nvcr.io/nvidia/nemo:26.02.nemotron_3_super` — Python 3.12, CUDA 13.0, NCCL 2.28.8,
-  torch 2.10.0a0+nv25.11, TE 2.12.0, mamba-ssm 2.3.0, causal-conv1d 1.6.0,
-  nv-grouped-gemm 1.1.4.post8, transformers 5.3.0, APEX, nvidia-resiliency-ext 0.4.1.
+  `nvcr.io/nvidia/nemo:26.04` (re-qualified 2026-07-29) — Python 3.12, CUDA 13.1,
+  NCCL 2.29.2, torch 2.11.0a0+nv26.02, TE 2.14.1, mamba-ssm 2.3.1, causal-conv1d
+  1.6.1, transformers 5.3.0, APEX, nvidia-resiliency-ext 0.6.0. (26.06 needs a
+  ≥595-branch driver — blocked on this cluster's 565.57.01.)
   The Python overlay (`pip install --target`, `--no-deps`, on PYTHONPATH after the repo
   and before the image) fills gaps without touching the read-only SIF: `peft` (image
-  0.13.2 is below modelopt's >=0.17 requirement) and `imageio` (absent; one diffusion
-  test file otherwise fails at collection).
+  0.13.2 is below modelopt's >=0.17 requirement), `imageio` (absent; one diffusion
+  test file otherwise fails at collection), and `nv-grouped-gemm` (absent from 26.04;
+  the shipped quickstart's `moe_experts_impl: cutlass_grouped` needs it — built from
+  sdist with `--no-build-isolation`, and the validator's grouped_gemm check gates on it).
 - **Import resolution** is `repo src/` > `3rdparty/Megatron-LM` > overlay > image
   site-packages, via PEP 420 namespace portions. The validator asserts it every run —
   a regular (non-namespace) `megatron` package in a future image would silently win.
 - **Benchmark/certification config:** `configs/quickstart/nemotron_super_quickstart_sft.yaml`
   (Super-120B, TP1·CP4·EP4·PP8·ETP1·DP2 → 64 GPUs = **16 nodes**) — gate is < 40 s/iter
-  (mean of iters 10–30; measured champion ~27.6 s/iter FT-off, ~30.8 with FT, and ~27.2
-  after the grad-stats telemetry fix). Qualifying a new image tag = that absolute gate
-  plus no regression against the previously qualified tag's recorded number.
-- **Unit tests run inside the container** (the image ships pytest/ruff/pre-commit):
+  (mean of iters 10–30; measured champion **25.66 s/iter** FT-off at the 2026-07-29
+  26.04 qualification with `optimizer_offload_fraction: 0.5`; the prior 26.02 anchor
+  was 26.70 on the identical nodelist, ~27.2–27.6 historical). Qualifying a new image
+  tag = that absolute gate plus no regression against the previously qualified tag's
+  recorded number.
+- **Unit tests run inside the container** (the image ships pytest/pytest-xdist/ruff/pre-commit):
   ```bash
   # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent
   ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q"
+    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -n 8 --dist loadfile"
   ```
   The `.venv` that remains is for **dev tooling only** (ruff, pre-commit, the Claude
   Code hooks) and deliberately carries no torch; create it with
@@ -677,12 +682,14 @@ uv run ruff format .
 
 ### Testing
 
-Unit tests import torch and `megatron.core`, so they run **inside the container** (measured: 5429
+Unit tests import torch and `megatron.core`, so they run **inside the container** (~5,450
 tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that asserts
-`./nemo_experiments` is absent:
+`./nemo_experiments` is absent. `-n 8 --dist loadfile` uses the image's bundled pytest-xdist
+(~100 s vs ~5-6 min serial; per-worker MASTER_PORT isolation lives in
+`tests/unit_tests/conftest.py`):
 ```bash
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; cd /tmp; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q"
+  python -m pytest $PWD/tests/unit_tests/ -x -q -n 8 --dist loadfile"
 bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
 ```
 
@@ -697,10 +704,19 @@ The unit-test hook only fires when a `*.py` file is staged and uses
 `git commit --no-verify` to skip on doc-only / WIP commits.
 
 ### Megatron-Core Submodule
+
+The submodule tracks the **GeodesicResearch/Megatron-LM fork** (see `.gitmodules`), which
+is upstream plus at most a few carried commits (currently one: the nvrx capability probe
+made non-fatal — see the pin commit's message). Carried commits MUST be pushed to the fork
+before the gitlink is committed; an unreachable submodule commit is how a fix was nearly
+lost once. `.main.commit` = the current pin; `.dev.commit` = the PREVIOUS pin, kept as a
+rollback/A-B escape hatch (checkpoints saved at the current pin may not load there — the
+dist-ckpt format moved forward at the 2026-07 bump).
+
 ```bash
 ./scripts/switch_mcore.sh status   # Show current pinned commit
-./scripts/switch_mcore.sh dev      # Switch to dev
-./scripts/switch_mcore.sh main     # Switch to main
+./scripts/switch_mcore.sh dev      # Switch to the PREVIOUS pin (code A/Bs only)
+./scripts/switch_mcore.sh main     # Switch to the current pin
 ```
 
 **Never edit the submodule working tree in place.** Such an edit runs (the checkout is on

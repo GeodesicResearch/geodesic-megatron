@@ -96,7 +96,13 @@ model:
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["moe", "shared_experts"]
-  fine_grained_activation_offloading: true
+  # DISABLED at the mcore pin bump (fa774820): at the OLD pin (3758b54b2) this flag was a
+  # silent NO-OP on Nemotron-H — only GPTModel ever called init_chunk_handler, MambaModel
+  # never did — so every measured number in this file was produced WITHOUT offloading. At
+  # the new pin offloading becomes live AND a new TransformerConfig assert forbids
+  # offloading expert_fc1/moe_act while 'moe' is recomputed. `false` preserves the exact
+  # behavior these configs always had; enabling real offload is a separate measured A/B.
+  fine_grained_activation_offloading: false
   offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
   mtp_num_layers: null
   use_te_rng_tracker: True

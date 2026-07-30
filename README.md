@@ -406,7 +406,7 @@ isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 # Run anything inside the environment (interactive shell, tests, ad-hoc python)
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme'"
+  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 8 --dist loadfile"
 ```
 
 Everything configurable — image tag, SIF path, Slingshot component versions, overlay
@@ -679,8 +679,10 @@ bash scripts/install_claude_tooling.sh
 ```
 
 Configuration lives in `.claude/settings.json` (hooks) and `.claude/geodesic-config.yaml` (quality
-items). See [CLAUDE.md](CLAUDE.md#claude-code-tooling) for details, including how to enable the
-commit-time review gate (left off by default).
+items). The commit-time review gate is **enabled**: `git commit` runs pre-commit on the staged
+files and blocks until the `checklist-reviewer` subagent writes a passing verdict for the
+staged-diff hash; verdict-protection and a submodule-pin consistency check are wired in alongside
+it. See [CLAUDE.md](CLAUDE.md#claude-code-tooling) for the full flow.
 
 ## Further Reading
 

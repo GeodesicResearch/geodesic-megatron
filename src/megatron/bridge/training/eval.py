@@ -24,7 +24,6 @@ from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.pipeline_parallel.utils import is_pp_last_stage
 from megatron.core.rerun_state_machine import RerunDataIterator, RerunMode, get_rerun_state_machine
 from megatron.core.transformer import MegatronModule
-from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.utils import get_model_config
 from modelopt.torch.distill.plugins.megatron import get_tensor_shapes_adjust_fn_for_distillation
 
@@ -37,7 +36,7 @@ from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.mlflow_utils import _sanitize_mlflow_metrics
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
-from megatron.bridge.training.utils.train_utils import prepare_forward_step_func
+from megatron.bridge.training.utils.train_utils import prepare_forward_step_func, use_full_iteration_cuda_graph
 from megatron.bridge.utils.common_utils import is_last_rank, print_rank_0, print_rank_last
 
 
@@ -117,10 +116,7 @@ def evaluate(
         if verbose:
             print_rank_0(f"Evaluating on {state.cfg.validation.eval_iters * eval_batch_size} samples")
 
-        if (
-            state.cfg.model.cuda_graph_impl == "local"
-            and CudaGraphScope.full_iteration in state.cfg.model.cuda_graph_scope
-        ):
+        if use_full_iteration_cuda_graph(state.cfg.model):
             forward_backward_func = FullCudaGraphWrapper(
                 get_forward_backward_func(
                     pp_size=pg_collection.pp.size(),
@@ -191,10 +187,7 @@ def evaluate(
             fault_tolerance.on_eval_step_end(state)
 
             # Workaround: for FullIteration CG only. TODO: Filed #2569 to fix this.
-            if (
-                state.cfg.model.cuda_graph_impl == "local"
-                and CudaGraphScope.full_iteration in state.cfg.model.cuda_graph_scope
-            ):
+            if use_full_iteration_cuda_graph(state.cfg.model):
                 torch.cuda.synchronize()
 
             if should_fire(callback_manager, step_end_event):

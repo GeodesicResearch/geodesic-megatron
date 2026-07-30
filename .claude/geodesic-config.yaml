@@ -23,6 +23,8 @@ items:
     - tests-added
     - tests-real
     - bugfix-test-first
+    - general-specific-placement
+    - abstract-before-adding
 
   disabled_shared_items:
     - changelog-entry      # no CHANGELOG.md workflow in this repo
