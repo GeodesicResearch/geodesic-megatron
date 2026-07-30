@@ -111,6 +111,9 @@ class CutlassGroupedExperts(MegatronModule):
         # Latent MoE: the experts see moe_latent_size-wide activations, not hidden_size.
         self.in_features = config.moe_latent_size if config.moe_latent_size is not None else config.hidden_size
 
+        # ETP>1 support is ported faithfully from core_v0.13.1 but UNTESTED here (all
+        # measured runs use expert_tensor_parallel_size=1); validate the sharded-state
+        # mapping's TP axes before relying on ETP>1.
         tp_size = self.tp_group.size()
         fc1_output_size = self.config.moe_ffn_hidden_size * self.num_local_experts
         fc1_output_size_per_partition = divide(fc1_output_size, tp_size)
@@ -229,6 +232,9 @@ class CutlassGroupedExperts(MegatronModule):
         sharded_state_dict = {}
         ep_size = self.ep_group.size()
         ep_rank = self.ep_group.rank()
+        # ETP>1 support is ported faithfully from core_v0.13.1 but UNTESTED here (all
+        # measured runs use expert_tensor_parallel_size=1); validate the sharded-state
+        # mapping's TP axes before relying on ETP>1.
         tp_size = self.tp_group.size()
         tp_rank = self.tp_group.rank()
         dp_rank = self.dp_group.rank()
@@ -356,7 +362,9 @@ def swap_moe_experts_to_cutlass_grouped(stack_spec):
     """Return a copy of a hybrid/mamba stack spec with the MoE experts swapped to CUTLASS.
 
     Leaves the router, shared experts, dispatcher and every other submodule untouched:
-    only ``MoESubmodules.experts`` inside the ``moe_layer`` spec changes.
+    only ``MoESubmodules.experts`` inside the ``moe_layer`` spec changes. The MTP
+    block's nested MoE spec is NOT swapped — fine for SFT (``mtp_num_layers: null``);
+    pretrain-with-MTP would need the same treatment there.
     """
     spec = copy.deepcopy(stack_spec)
     moe_builder = spec.submodules.moe_layer.submodules.mlp  # partial(MoELayer, submodules=...)

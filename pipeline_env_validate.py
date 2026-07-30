@@ -20,6 +20,7 @@ Exit code 0 if all stages pass, 1 otherwise.
 
 import argparse
 import ctypes
+import importlib
 import os
 import subprocess
 import sys
@@ -60,58 +61,49 @@ def stage(name):
 # ============================================
 @stage("torch")
 def check_torch():
+    """torch imports."""
     import torch
 
     assert torch.__version__, "torch version is empty"
 
 
-@stage("megatron.core")
-def check_mcore():
-    import megatron.core  # noqa: F401 -- the import IS the check
+# Import-only checks, table-driven: each entry is (stage label, modules to
+# import, provenance note kept for the reader). The import IS the check; a
+# bespoke check_<pkg> function per module was 10 near-identical surfaces.
+# Only check_torch stays bespoke (it asserts a version, not just importability).
+STAGE1_IMPORT_CHECKS = [
+    ("megatron.core", ("megatron.core",), "repo submodule via PYTHONPATH"),
+    ("megatron.bridge", ("megatron.bridge",), "repo src/ via PYTHONPATH"),
+    ("transformers", ("transformers",), "image site-packages"),
+    ("datasets", ("datasets",), "image site-packages"),
+    ("wandb", ("wandb",), "image site-packages"),
+    ("omegaconf", ("omegaconf",), "image site-packages"),
+]
+STAGE2_IMPORT_CHECKS = [
+    ("transformer_engine", ("transformer_engine", "transformer_engine.pytorch"), "CUDA extension incl. torch ext"),
+    ("mamba_ssm", ("mamba_ssm",), "CUDA extension"),
+    ("causal_conv1d", ("causal_conv1d",), "CUDA extension"),
+]
+# History of the grouped_gemm entry: an identical check was removed 2026-07-29 as
+# dead image inventory (nothing imported it at mcore 0.19). It returned the same
+# day as a REAL dependency: the shipped quickstart selects
+# `moe_experts_impl: cutlass_grouped`, whose module needs `grouped_gemm`. On
+# vanilla 26.04 the overlay builds it from sdist -- this check catches a
+# half-failed overlay build at validate time instead of at 64-GPU launch time.
+STAGE2B_IMPORT_CHECKS = [
+    ("grouped_gemm (CutlassGroupedExperts dependency)", ("grouped_gemm",), "overlay sdist build"),
+]
 
 
-@stage("megatron.bridge")
-def check_mbridge():
-    import megatron.bridge  # noqa: F401 -- the import IS the check
+def check_imports(import_specs):
+    """Run one PASS/FAIL stage per (label, modules, note) spec by importing the modules."""
+    for label, modules, _note in import_specs:
 
+        def _check(modules=modules):
+            for module_name in modules:
+                importlib.import_module(module_name)
 
-@stage("transformers")
-def check_transformers():
-    import transformers  # noqa: F401 -- the import IS the check
-
-
-@stage("datasets")
-def check_datasets():
-    import datasets  # noqa: F401 -- the import IS the check
-
-
-@stage("wandb")
-def check_wandb():
-    import wandb  # noqa: F401 -- the import IS the check
-
-
-@stage("omegaconf")
-def check_omegaconf():
-    import omegaconf  # noqa: F401 -- the import IS the check
-
-
-# ============================================
-# Stage 2: CUDA extension imports
-# ============================================
-@stage("transformer_engine")
-def check_te():
-    import transformer_engine  # noqa: F401 -- the import IS the check
-    import transformer_engine.pytorch  # noqa: F401
-
-
-@stage("mamba_ssm")
-def check_mamba():
-    import mamba_ssm  # noqa: F401 -- the import IS the check
-
-
-@stage("causal_conv1d")
-def check_causal_conv():
-    import causal_conv1d  # noqa: F401 -- the import IS the check
+        stage(label)(_check)()
 
 
 # ============================================
@@ -119,6 +111,7 @@ def check_causal_conv():
 # ============================================
 @stage("CUDA availability")
 def check_cuda():
+    """CUDA is available to torch (forward-compat shim active)."""
     import torch
 
     assert torch.cuda.is_available(), "CUDA not available"
@@ -133,6 +126,7 @@ def check_cuda():
 # ============================================
 @stage("GPU tensor operations")
 def check_gpu_ops():
+    """A bf16 matmul runs on the GPU."""
     import torch
 
     x = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
@@ -149,6 +143,7 @@ def check_gpu_ops():
 # ============================================
 @stage("vanilla_gpt_pretrain_config recipe")
 def check_vanilla_recipe():
+    """The vanilla GPT pretrain recipe constructs."""
     from megatron.bridge.recipes.gpt.vanilla_gpt import vanilla_gpt_pretrain_config
 
     cfg = vanilla_gpt_pretrain_config()
@@ -158,6 +153,7 @@ def check_vanilla_recipe():
 
 @stage("nemotron_3_nano_sft_config recipe")
 def check_nemotron_recipe():
+    """The Nemotron-3 Nano SFT recipe constructs."""
     from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 
     cfg = nemotron_3_nano_sft_config()
@@ -360,6 +356,7 @@ def report_versions():
 
 
 def main():
+    """CLI entrypoint: run every validation stage and report."""
     parser = argparse.ArgumentParser(description="Validate the Megatron Bridge environment (runs in-container)")
     parser.add_argument("--run-training", action="store_true", help="Also run a tiny training job")
     args = parser.parse_args()
@@ -371,26 +368,17 @@ def main():
 
     print("Stage 1: Core Python imports")
     check_torch()
-    check_mcore()
-    check_mbridge()
-    check_transformers()
-    check_datasets()
-    check_wandb()
-    check_omegaconf()
+    check_imports(STAGE1_IMPORT_CHECKS)
 
     print("\nStage 2: CUDA extension imports")
-    check_te()
-    check_mamba()
-    check_causal_conv()
+    check_imports(STAGE2_IMPORT_CHECKS)
 
     # No exact-pin table here: the versions are the image's, fixed by
     # CONTAINER_IMAGE_TAG rather than by a lockfile, and they are reported
     # verbatim by the informational version report at the end.
-    # (A "grouped_gemm importable" check lived here until 2026-07-29. It was image
-    # inventory, not a dependency: at mcore 0.19 nothing imports the nv-grouped-gemm
-    # package — the legacy GroupedMLP backend that used it was removed upstream, and
-    # MoE grouped GEMM runs through TE GroupedLinear. The check wrongly failed the
-    # vanilla nemo:26.04 image, which does not ship the package.)
+    print("\nStage 2b: CUTLASS grouped-GEMM dependency (quickstart's moe_experts_impl)")
+    check_imports(STAGE2B_IMPORT_CHECKS)
+
     print("\nStage 3: CUDA availability")
     check_cuda()
 

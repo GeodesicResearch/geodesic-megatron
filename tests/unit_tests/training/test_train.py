@@ -27,7 +27,6 @@ from megatron.bridge.training.train import (
     _handle_mxfp8_param_buffer_copy,
     _maybe_register_fsdp_buffers,
     _should_skip_and_handle_iteration,
-    _use_full_iteration_cuda_graph,
     checkpoint_and_decide_exit,
     force_param_sync,
     maybe_check_weight_hash_across_dp_replicas,
@@ -37,7 +36,7 @@ from megatron.bridge.training.train import (
     save_checkpoint_and_time,
     should_disable_forward_pre_hook,
 )
-from megatron.bridge.training.utils.train_utils import maybe_inject_state
+from megatron.bridge.training.utils.train_utils import maybe_inject_state, use_full_iteration_cuda_graph
 
 
 pytestmark = pytest.mark.unit
@@ -1446,18 +1445,30 @@ class TestUseFullIterationCudaGraph:
     def test_local_impl_with_unset_scope_does_not_raise(self):
         """The regression: local impl + default (None) scope must be False, not a TypeError."""
         cfg = SimpleNamespace(cuda_graph_impl="local", cuda_graph_scope=None)
-        assert _use_full_iteration_cuda_graph(cfg) is False
+        assert use_full_iteration_cuda_graph(cfg) is False
 
     def test_full_iteration_impl_selects_wrapper(self):
         """Post-migration spelling is the one that turns the wrapper on."""
         cfg = SimpleNamespace(cuda_graph_impl="full_iteration", cuda_graph_scope=None)
-        assert _use_full_iteration_cuda_graph(cfg) is True
+        assert use_full_iteration_cuda_graph(cfg) is True
 
     def test_none_impl_is_off(self):
         cfg = SimpleNamespace(cuda_graph_impl="none", cuda_graph_scope=None)
-        assert _use_full_iteration_cuda_graph(cfg) is False
+        assert use_full_iteration_cuda_graph(cfg) is False
 
     def test_transformer_engine_impl_is_off(self):
         """TE per-layer graphs are not the full-iteration wrapper."""
         cfg = SimpleNamespace(cuda_graph_impl="transformer_engine", cuda_graph_scope=None)
-        assert _use_full_iteration_cuda_graph(cfg) is False
+        assert use_full_iteration_cuda_graph(cfg) is False
+
+    def test_train_and_eval_share_the_selection_helper(self):
+        """Both loops must reference the ONE helper in train_utils.
+
+        Guards the regression where eval.py carried its own (broken) copy of the
+        predicate: if either module stops importing the shared helper, this fails.
+        """
+        from megatron.bridge.training import eval as eval_module
+        from megatron.bridge.training import train as train_module
+
+        assert eval_module.use_full_iteration_cuda_graph is use_full_iteration_cuda_graph
+        assert train_module.use_full_iteration_cuda_graph is use_full_iteration_cuda_graph

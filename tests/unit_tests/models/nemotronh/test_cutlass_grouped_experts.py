@@ -116,9 +116,7 @@ class TestCutlassGroupedExperts:
 
         torch.manual_seed(1234)
         torch.cuda.set_device(0)
-        return CutlassGroupedExperts(
-            E, _config(fused_weighted_act), pg_collection=pg_collection
-        ).cuda()
+        return CutlassGroupedExperts(E, _config(fused_weighted_act), pg_collection=pg_collection).cuda()
 
     def _inputs(self, requires_grad=False):
         # ragged sizes including a zero-token expert — the dropless shape profile
@@ -188,6 +186,16 @@ class TestCutlassGroupedExperts:
 
 class TestProviderWiring:
     """moe_experts_impl must take effect even when set AFTER construction (YAML merge path)."""
+
+    def test_mtp_layers_with_cutlass_impl_raises(self):
+        """The swap does not reach an MTP block's nested MoE spec — refuse the combination."""
+        from megatron.bridge.models.nemotronh.nemotron_h_provider import NemotronHModelProvider
+
+        provider = NemotronHModelProvider(num_layers=2, hidden_size=HIDDEN, num_attention_heads=4, num_moe_experts=E)
+        provider.moe_experts_impl = "cutlass_grouped"
+        provider.mtp_num_layers = 1
+        with pytest.raises(NotImplementedError, match="MTP"):
+            provider._apply_moe_experts_impl()
 
     def test_post_merge_field_swaps_experts_in_resolved_spec(self):
         from megatron.bridge.models.nemotronh.cutlass_grouped_experts import CutlassGroupedExperts

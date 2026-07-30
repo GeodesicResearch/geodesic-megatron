@@ -302,6 +302,14 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
             )
         if getattr(self, "_cutlass_spec_applied", False):
             return
+        # The swap only rewrites the main stack's MoE spec; an MTP block carries its
+        # own nested MoE spec that would silently stay on the TE path. Refuse the
+        # half-swapped combination rather than train it.
+        if getattr(self, "mtp_num_layers", 0):
+            raise NotImplementedError(
+                "moe_experts_impl='cutlass_grouped' does not swap the MTP block's nested MoE spec; "
+                "use te_grouped when mtp_num_layers > 0."
+            )
         from megatron.bridge.models.nemotronh.cutlass_grouped_experts import (
             swap_moe_experts_to_cutlass_grouped,
         )

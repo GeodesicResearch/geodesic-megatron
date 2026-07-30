@@ -80,17 +80,30 @@ def test_each_nemotronh_recipe_builds_config(recipe_func: Callable):
     is_peft = "peft" in recipe_func.__name__.lower()
     is_finetune = is_sft or is_peft
 
+    # The nemotron_3_* recipes deliberately leave tokenizer_model unset: the
+    # training YAML must pin the tokenizer explicitly (e.g. a geodesic-research
+    # base/instruct variant — see "Tokenizer choice for Base CPT" in CLAUDE.md)
+    # rather than inheriting a baked-in upstream default whose EOS id may not
+    # match the checkpoint.
+    tokenizer_set_by_yaml = recipe_func.__name__.startswith("nemotron_3_")
+
     if is_finetune:
         # Finetuning recipes always use HF tokenizer
         assert cfg.tokenizer.tokenizer_type == "HuggingFaceTokenizer"
-        assert cfg.tokenizer.tokenizer_model is not None
+        if tokenizer_set_by_yaml:
+            assert cfg.tokenizer.tokenizer_model is None
+        else:
+            assert cfg.tokenizer.tokenizer_model is not None
     else:
         # Pretrain recipes use either NullTokenizer or HuggingFaceTokenizer
         if cfg.tokenizer.tokenizer_type == "NullTokenizer":
             assert cfg.tokenizer.vocab_size is not None
         else:
             assert cfg.tokenizer.tokenizer_type == "HuggingFaceTokenizer"
-            assert cfg.tokenizer.tokenizer_model is not None
+            if tokenizer_set_by_yaml:
+                assert cfg.tokenizer.tokenizer_model is None
+            else:
+                assert cfg.tokenizer.tokenizer_model is not None
 
     # Parallelism and shaping
     assert getattr(cfg.model, "tensor_model_parallel_size", 1) >= 1

@@ -83,21 +83,9 @@ from megatron.bridge.training.utils.train_utils import (
     prepare_forward_step_func,
     reduce_max_stat_across_model_parallel_group,
     training_log,
+    use_full_iteration_cuda_graph,
 )
 from megatron.bridge.utils.common_utils import get_world_size_safe, print_rank_0
-
-
-def _use_full_iteration_cuda_graph(model_config) -> bool:
-    """Whether the training loop should wrap forward-backward in a full-iteration CUDA graph.
-
-    Since mcore 0.19 full-iteration capture is spelled ``cuda_graph_impl="full_iteration"``;
-    ``cuda_graph_scope`` is deprecated and defaults to ``None``. Testing membership in that
-    field crashed with "argument of type 'NoneType' is not iterable" for any config that set
-    ``cuda_graph_impl`` without also setting the deprecated scope -- notably
-    ``cuda_graph_impl="local"``, which Nemotron-H requires
-    (``megatron/core/ssm/mamba_layer.py`` asserts it).
-    """
-    return model_config.cuda_graph_impl == "full_iteration"
 
 
 def train(
@@ -264,7 +252,7 @@ def train(
         pp_size=pg_collection.pp.size(),
         vp_size=config.model.virtual_pipeline_model_parallel_size,
     )
-    if _use_full_iteration_cuda_graph(config.model):
+    if use_full_iteration_cuda_graph(config.model):
         forward_backward_func = FullCudaGraphWrapper(
             forward_backward_func, cuda_graph_warmup_steps=config.model.cuda_graph_warmup_steps
         )

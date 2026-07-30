@@ -1392,10 +1392,10 @@ class TestConfigContainerValidation:
 
     def test_modelopt_requires_no_gradient_accumulation_fusion(self, monkeypatch):
         """Test that restore_modelopt_state requires gradient_accumulation_fusion to be explicitly set to False."""
-        # When restore_modelopt_state=True but gradient_accumulation_fusion is not set (defaults to True),
-        # validation should fail
-        gpt_model_cfg = create_test_gpt_config(restore_modelopt_state=True)
-        # Don't explicitly set gradient_accumulation_fusion - let it use default (which is True)
+        # The gradient_accumulation_fusion default is environment-dependent (its
+        # default_factory probes fusion backend availability), so pin it True
+        # explicitly — the combination under test is modelopt + fusion enabled.
+        gpt_model_cfg = create_test_gpt_config(restore_modelopt_state=True, gradient_accumulation_fusion=True)
         train_cfg = create_test_training_config(train_iters=500, global_batch_size=16)
         sched_cfg = create_test_scheduler_config()
 
@@ -1406,7 +1406,7 @@ class TestConfigContainerValidation:
             scheduler_config=sched_cfg,
         )
         try:
-            # Should fail because gradient_accumulation_fusion defaults to True
+            # Should fail because gradient_accumulation_fusion is enabled
             with pytest.raises(
                 AssertionError,
                 match="Gradient accumulation fusion is not supported with ModelOpt/Quantized models",

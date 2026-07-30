@@ -18,6 +18,47 @@ from shutil import rmtree
 from unittest.mock import patch
 
 import pytest
+
+
+# Under pytest-xdist (the pre-commit hook runs `-n 8 --dist loadfile`), tests that
+# initialize torch.distributed in different files run concurrently and collide on
+# the default MASTER_PORT (29500, EADDRINUSE). Assign each worker its own port at
+# conftest-import time — before any test's os.environ.setdefault can pin the
+# default — and re-pin it before every test, because several distributed-test
+# teardowns pop MASTER_PORT from the environment (fine serially, but on a worker
+# it would drop the next file back onto the shared default). Test files must use
+# os.environ.setdefault for MASTER_PORT so the worker port stays authoritative.
+# Serial runs (no PYTEST_XDIST_WORKER) are untouched.
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+_XDIST_MASTER_PORT = str(29500 + 41 * (int(_xdist_worker[2:]) + 1)) if _xdist_worker.startswith("gw") else None
+if _XDIST_MASTER_PORT is not None:
+    os.environ["MASTER_PORT"] = _XDIST_MASTER_PORT
+
+
+def pytest_runtest_setup(item):
+    """Keep the per-xdist-worker MASTER_PORT pinned across teardown pops."""
+    if _XDIST_MASTER_PORT is not None:
+        os.environ["MASTER_PORT"] = _XDIST_MASTER_PORT
+
+
+def pytest_runtest_teardown(item, nextitem):
+    """Enforce the setdefault convention loudly, at the offending test.
+
+    A test that hard-assigns MASTER_PORT (instead of os.environ.setdefault)
+    collides with concurrently-running workers; without this check the symptom
+    is a nondeterministic EADDRINUSE in some OTHER test. This hook runs before
+    fixture finalizers restore the environment, so the overwrite is still
+    visible and attributed to the test that made it.
+    """
+    if _XDIST_MASTER_PORT is not None:
+        current = os.environ.get("MASTER_PORT")
+        assert current == _XDIST_MASTER_PORT, (
+            f"{item.nodeid} overwrote MASTER_PORT to {current!r} (worker port is "
+            f"{_XDIST_MASTER_PORT}); use os.environ.setdefault so the per-xdist-worker "
+            "port stays authoritative."
+        )
+
+
 import torch
 from megatron.core.msc_utils import MultiStorageClientFeature
 

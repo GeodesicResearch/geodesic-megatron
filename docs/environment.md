@@ -67,9 +67,10 @@ the home quota instantly, so the config *refuses to run* if `APPTAINER_CACHEDIR`
 isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
 ```
 
-18 checks (19 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
-job): core imports, the CUDA-extension imports (TE, mamba-ssm, causal-conv1d),
-CUDA availability, a bf16 GPU matmul, two recipe loads, then the
+19 checks (20 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
+job): core imports, the CUDA-extension imports (TE, mamba-ssm, causal-conv1d,
+grouped-GEMM — the quickstart's `moe_experts_impl: cutlass_grouped` dependency, built into
+the overlay on images that lack it), CUDA availability, a bf16 GPU matmul, two recipe loads, then the
 environment-integrity block — import paths resolve to *this* checkout, the CXI NCCL plugin
 `CDLL`s cleanly, `ft_launcher` accepts the section-timeout flags, the Megatron dataset
 helpers JIT-build, and a **version report** of the actual in-image stack. The integrity
@@ -93,11 +94,13 @@ run.
 # Interactive shell with the repo + Slingshot env wired up:
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
 
-# Unit tests — in-container is the only way (5429 tests collected in ~35 s):
+# Unit tests — in-container is the only way (~5,450 tests collected in ~35 s).
 # NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
 # not exist, so running from the repo root errors every test (and would rmtree a real one).
+# -n 8 --dist loadfile uses the image's bundled pytest-xdist (~100 s vs ~5-6 min serial);
+# per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py.
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \$T; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme'"
+  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 8 --dist loadfile"
 
 # Fabric health: asserts busbw clears the 100 GB/s floor (the script's own gate).
 # To ALSO confirm the plugin by name, rerun with NCCL_DEBUG=INFO and grep for
@@ -225,12 +228,18 @@ site-packages), configured as `CONTAINER_PYTHON_OVERLAY` and populated by setup 
 lives under `/projects` (already bound) so it needs no extra bind, and it is `export`ed so
 the in-container activate script inherits it through Apptainer's env passthrough.
 
-`CONTAINER_OVERLAY_PACKAGES` currently carries two packages, each for a stated reason:
+`CONTAINER_OVERLAY_PACKAGES` currently carries three packages, each for a stated reason:
 
 - **`peft==0.18.1`** — the image ships 0.13.2; the bridge recipes import `modelopt`, which
   hard-requires `peft>=0.17.0` (recipe-load stages failed on exactly this).
 - **`imageio==2.37.0`** — absent from the image; without it one diffusion test file fails at
   collection and takes the whole in-container unit-test run with it.
+- **`nv-grouped-gemm==1.1.4.post8`** — absent from 26.04; the shipped quickstart's
+  `moe_experts_impl: cutlass_grouped` imports `grouped_gemm` at model build. PyPI has no
+  aarch64 wheel, so the overlay builds it from sdist — which is why the overlay pip line
+  passes `--no-build-isolation`: an isolated build env would pip-install its own torch
+  instead of compiling against the image's CUDA-matched one. The validator's grouped_gemm
+  check gates on the import so a half-failed build surfaces at validate time.
 
 **`--no-deps` is deliberate.** Anything in the overlay shadows the image's copy, so pulling
 a dependency closure risks shadowing the image's CUDA-matched torch with a PyPI one. peft's

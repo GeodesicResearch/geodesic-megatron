@@ -62,7 +62,7 @@ class TestQwen3VLUtils:
             world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
             os.environ["MASTER_ADDR"] = "127.0.0.1"
-            os.environ["MASTER_PORT"] = "29500"
+            os.environ.setdefault("MASTER_PORT", "29500")
             os.environ["RANK"] = str(rank)
             os.environ["LOCAL_RANK"] = str(local_rank)
             os.environ["WORLD_SIZE"] = str(world_size)
