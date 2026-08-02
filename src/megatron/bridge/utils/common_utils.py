@@ -361,6 +361,8 @@ def slice_batch_for_context_parallel(
     else:
         # For BSHD format, use standard zigzag slicing
         cp_group = pg_collection.cp
+        # is_hybrid_cp=False: this path supplies neither a hybrid_cp_group_func nor a
+        # per-batch local_cp_size, both of which hybrid CP requires.
         cp_batch = get_batch_on_this_cp_rank(
             {
                 "decoder_input": inputs_embeds,
@@ -369,6 +371,7 @@ def slice_batch_for_context_parallel(
                 "position_ids": position_ids,
                 "attention_mask": attention_mask,
             },
+            is_hybrid_cp=False,
             cp_group=cp_group,
         )
 

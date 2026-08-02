@@ -122,7 +122,10 @@ class TestSliceBatchForContextParallelBSHD:
         pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
 
         # Mock get_batch_on_this_cp_rank to return sliced tensors
-        def mock_get_batch(batch_dict, cp_group=None):
+        # is_hybrid_cp is positional-required here, mirroring the real
+        # megatron.core.utils.get_batch_on_this_cp_rank signature, so these tests
+        # fail if the production call site ever drops it again.
+        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
             # Simulate slicing by returning half of each tensor
             result = {}
             for k, v in batch_dict.items():
@@ -166,7 +169,10 @@ class TestSliceBatchForContextParallelBSHD:
 
         pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
 
-        def mock_get_batch(batch_dict, cp_group=None):
+        # is_hybrid_cp is positional-required here, mirroring the real
+        # megatron.core.utils.get_batch_on_this_cp_rank signature, so these tests
+        # fail if the production call site ever drops it again.
+        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
             result = {}
             for k, v in batch_dict.items():
                 if v is not None and isinstance(v, torch.Tensor):
@@ -360,7 +366,10 @@ class TestSliceBatchForContextParallelTranspose:
 
         captured_batch = {}
 
-        def mock_get_batch(batch_dict, cp_group=None):
+        # is_hybrid_cp is positional-required here, mirroring the real
+        # megatron.core.utils.get_batch_on_this_cp_rank signature, so these tests
+        # fail if the production call site ever drops it again.
+        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
             captured_batch.update(batch_dict)
             # Check that decoder_input is in (B, T, D) format
             di = batch_dict.get("decoder_input")
@@ -395,7 +404,10 @@ class TestSliceBatchForContextParallelTranspose:
 
         pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
 
-        def mock_get_batch(batch_dict, cp_group=None):
+        # is_hybrid_cp is positional-required here, mirroring the real
+        # megatron.core.utils.get_batch_on_this_cp_rank signature, so these tests
+        # fail if the production call site ever drops it again.
+        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
             result = {}
             for k, v in batch_dict.items():
                 if v is not None and isinstance(v, torch.Tensor):
@@ -435,7 +447,10 @@ class TestSliceBatchForContextParallelEdgeCases:
         """Test handling when inputs_embeds is None but CP is enabled."""
         pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
 
-        def mock_get_batch(batch_dict, cp_group=None):
+        # is_hybrid_cp is positional-required here, mirroring the real
+        # megatron.core.utils.get_batch_on_this_cp_rank signature, so these tests
+        # fail if the production call site ever drops it again.
+        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
             return batch_dict
 
         with patch(
@@ -473,7 +488,10 @@ class TestSliceBatchForContextParallelEdgeCases:
 
         mock_called = {"get_batch": False}
 
-        def mock_get_batch(batch_dict, cp_group=None):
+        # is_hybrid_cp is positional-required here, mirroring the real
+        # megatron.core.utils.get_batch_on_this_cp_rank signature, so these tests
+        # fail if the production call site ever drops it again.
+        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
             mock_called["get_batch"] = True
             return batch_dict
 

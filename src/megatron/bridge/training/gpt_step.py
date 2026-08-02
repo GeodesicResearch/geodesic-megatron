@@ -244,8 +244,10 @@ def get_batch(
         # built over the full pack and in original token order.
         batch = _partition_packed_batch_for_cp(batch, cp_size)
     else:
-        # slice batch along sequence dimension for context parallelism
-        batch = get_batch_on_this_cp_rank(batch, cp_group=pg_collection.cp)
+        # slice batch along sequence dimension for context parallelism.
+        # is_hybrid_cp=False: hybrid CP additionally requires a hybrid_cp_group_func
+        # factory and a per-batch local_cp_size, neither of which this path supplies.
+        batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=False, cp_group=pg_collection.cp)
 
     return (
         batch["tokens"],
