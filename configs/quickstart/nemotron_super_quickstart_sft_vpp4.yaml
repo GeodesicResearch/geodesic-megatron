@@ -139,8 +139,21 @@ model:
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["core_attn", "moe", "shared_experts"]
-  fine_grained_activation_offloading: true
-  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  # Both corrected at the 0.19 pin (2026-08-02) — as previously written this file
+  # could not start, and CLAUDE.md points at it as THE VPP variant to run:
+  #   1. `true` here is fatal under VPP. Interleaved model chunks each build a
+  #      ChunkOffloadHandler and backward crosses them, giving a deterministic
+  #      `AssertionError: Chunk mismatch` at iteration 2 on MoE-stage ranks
+  #      (fine_grained_activation_offload.py:1161). Nothing overrides the YAML.
+  #   2. Even at PP without VPP, offloading `expert_fc1`/`moe_act` while `moe` is
+  #      in recompute_modules trips the assert at
+  #      transformer_config.py:1855-1865 — the recompute wrap already discards
+  #      them, so it was redundant rather than a loss.
+  # With the flag false the offload_modules list is inert either way (the whole
+  # path is gated on it at transformer_config.py:1829); it is kept, trimmed, to
+  # document intent. Matches configs/infr71_vpp/a{0,1,2}.
+  fine_grained_activation_offloading: false
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm"]
   mtp_num_layers: null
   batch_p2p_sync: false
   use_te_rng_tracker: True

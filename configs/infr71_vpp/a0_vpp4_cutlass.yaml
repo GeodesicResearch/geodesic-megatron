@@ -116,8 +116,16 @@ model:
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["core_attn", "moe", "shared_experts"]
-  fine_grained_activation_offloading: true
-  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  # OFF: incompatible with VPP at the 0.19 pin — interleaved model chunks each
+  # build a ChunkOffloadHandler and backward crosses them (deterministic
+  # "Chunk mismatch" assert at iteration 2 on MoE-stage ranks; wave-2 finding,
+  # see the campaign prereg). The offload_modules list below is inert while
+  # this is false; kept for the day the upstream handler is chunk-aware.
+  fine_grained_activation_offloading: false
+  # expert_fc1 + moe_act removed from the July all-7 offload list: the 0.19 pin
+  # asserts they cannot be offloaded while 'moe' is in recompute_modules (the
+  # recompute wrap already discards them, so offloading was redundant, not a loss).
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm"]
   mtp_num_layers: null
   batch_p2p_sync: false
   use_te_rng_tracker: True

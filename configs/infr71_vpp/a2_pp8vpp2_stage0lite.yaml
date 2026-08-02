@@ -3,12 +3,21 @@
 #
 # The July PP8·VPP2 arms (uniform-ish 16-segment split; stage 0 = 12 of 88 layers
 # + embedding) OOM'd at 94.7 GB peak with cutlass + full offload — both with
-# [moe, shared_experts] recompute and with the core_attn trio. This arm keeps that
-# posture but repartitions the SAME 88-layer sequence so stage 0 carries 10 layers
-# (5+5 across its two vstages, 4 MoE) instead of 12, pushing the surplus to the
-# middle stages (max 12): per-stage totals [10,11,11,12,12,11,11,10]. Under 1F1B
-# interleaving stage 0 has the deepest activation residency, so -2 layers there is
-# ~-17% on the peak rank — targeting the ~5% shave the July arms missed fit by.
+# [moe, shared_experts] recompute and with the core_attn trio. This arm keeps the
+# cutlass + full-optimizer-offload posture but repartitions the SAME 88-layer
+# sequence so stage 0 carries 10 layers (5+5 across its two vstages, 4 MoE)
+# instead of 12, pushing the surplus to the middle stages (max 12): per-stage
+# totals [10,11,11,12,12,11,11,10]. Under 1F1B interleaving stage 0 has the
+# deepest activation residency, so -2 layers there is ~-17% on the peak rank —
+# targeting the ~5% shave the July arms missed fit by.
+#
+# CONFOUND, read before attributing the fit: this arm also runs with
+# `fine_grained_activation_offloading: false`, forced by the wave-2 discovery that
+# it is VPP-incompatible at this pin (deterministic `AssertionError: Chunk
+# mismatch` at iteration 2). So "A2 fits where July OOM'd" is repartition AND the
+# loss of fine-grained activation offloading, not repartition alone. Removing the
+# offloading can only raise peak memory, so A2 fitting DESPITE that removal makes
+# the repartition's contribution a lower bound, not an over-claim.
 #
 # Submit:
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
@@ -120,8 +129,16 @@ model:
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["core_attn", "moe", "shared_experts"]
-  fine_grained_activation_offloading: true
-  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  # OFF: incompatible with VPP at the 0.19 pin — interleaved model chunks each
+  # build a ChunkOffloadHandler and backward crosses them (deterministic
+  # "Chunk mismatch" assert at iteration 2 on MoE-stage ranks; wave-2 finding,
+  # see the campaign prereg). The offload_modules list below is inert while
+  # this is false; kept for the day the upstream handler is chunk-aware.
+  fine_grained_activation_offloading: false
+  # expert_fc1 + moe_act removed from the July all-7 offload list: the 0.19 pin
+  # asserts they cannot be offloaded while 'moe' is in recompute_modules (the
+  # recompute wrap already discards them, so offloading was redundant, not a loss).
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm"]
   mtp_num_layers: null
   batch_p2p_sync: false
   use_te_rng_tracker: True

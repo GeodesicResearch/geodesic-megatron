@@ -17,6 +17,25 @@ Known state (from the July ladder):
 - overlap_moe_expert_parallel_comm requires build_schedule_plan (GPT-only; absent on HybridModel).
 - MoE-paper guidance: interleaved VPP shrinks bubble ∝ 1/v; comm volume up ∝ v; hybrid needs
   balanced per-vstage layer mixes (MoE stages ~2× heavier).
+- 0.19-pin changes discovered at wave-2 launch (2026-08-02): (a) offloading
+  `expert_fc1`/`moe_act` while `moe` is in recompute_modules now ASSERTS (was silently
+  redundant; trimmed from the Phase-A arm configs — memory-neutral, and in fact moot
+  once (b) forces `fine_grained_activation_offloading: false`, since the assert and the
+  whole offload path are gated on that flag at `transformer_config.py:1829`. Of the Q3 arms
+  below, q3a and q3b deliberately keep the full list — q3a because it is inert there too,
+  q3b because offloading `expert_fc1`/`moe_act` IS its lever and is legal once `moe` is not
+  recomputed; q3c carries the trimmed list to match a0); (b)
+  `fine_grained_activation_offloading` is INCOMPATIBLE with VPP: interleaved model chunks
+  each build a ChunkOffloadHandler and backward crosses them → deterministic
+  `AssertionError: Chunk mismatch` at iteration 2 on MoE-stage ranks. **VPP is where wave 2
+  met this, not its boundary** — the merged host-overhead campaign already recorded the same
+  assert firing under **plain PP=8** at this pin and OPEN upstream
+  (`120b-gbs64-host-overhead-investigation.md:104`, bug #5 at `:151`). Treat fine-grained
+  activation offloading as broken on this model generally, not as a VPP-only exclusion. VPP
+  arms therefore
+  run with fine-grained offload OFF; the July fit recipe's offload lever is unavailable
+  under VPP until fixed upstream — Phase A leans on recompute + pattern rebalancing (+
+  PP16·DP1 in A1) alone.
 
 ## Phase A — memory-fit ladder for VPP=2 (the blocker)
 A0. VPP4 + cutlass re-baseline (`configs/infr71_vpp/a0_vpp4_cutlass.yaml`): the July VPP4 number
@@ -36,6 +55,67 @@ A4. offload interaction: optimizer_offload_fraction 0.5 vs 1.0 under VPP (host-s
 
 Gate per arm: fits (no OOM through iter 5) → then 30-iter timing. Any surprise (>10% off
 prediction): capture torch profile (ISAMBARD_TORCH_PROFILE=1, iters 10,20) before iterating.
+
+**Wave-2 results (2026-08-02, in-tunnel 2-way pairs on disjoint 16-node halves; the paired
+champion control measured 23.40 s/iter vs 21.78 solo = +7.4% concurrency tax; all arms ran
+`fine_grained_activation_offloading=false` (VPP-incompatible at this pin) and carry the
+measured ~0.95 s/iter offload-fraction-1.0 handicap, subtracted in "adjusted"):**
+- **A0 (VPP4+cutlass): 27.51 mean-10-30, loss parity → +13.5% adjusted. The July VPP4
+  penalty did NOT come from the per-expert launch storm — cutlass didn't move it.
+  Hypothesis "VPP penalty = host starvation" is refuted; the cost is schedule/comm-side.**
+- **A2 (PP8·VPP2 stage-0-lite): FITS — the repartition solved the July 94.7 GB OOM
+  (and did so with fine-grained offloading OFF, unlike the July arms; since removing
+  offloading can only raise peak memory, that makes the repartition's contribution a
+  lower bound).
+  25.61 mean-10-30, loss parity → +5.4% adjusted. Interleave bubble savings (−1.9 s
+  predicted) are overwhelmed by ~3 s of interleave overhead at 32 µb/replica, refining
+  (not contradicting) the ≤16-µb/replica crossover rule.**
+- A1 (PP16·VPP2·DP1): running.
+- Phase-B note: with VPP4 and VPP2 both slower and loss-parity clean, the residual VPP
+  question is whether ANY interleaved config wins at GBS 64 — B2's GBS-128 sensitivity
+  (µb/replica doubles) and the PP16 arm are the remaining live branches before the
+  campaign verdict.
+
+## Phase Q3 — recompute arms (consultant item C4)
+
+Three arms testing "flash attention already recomputes internally, so checkpointing attention
+double-forwards; disable recompute globally and audit". Each arm's config header carries the
+code audit and the measured trace evidence behind its prediction; the consolidated write-up is
+§C4 of the external-review tracker (`consultant-training-stack-review.md`, landing separately).
+Non-VPP arms use the champion topology and are scored against the champion control; the VPP arm
+is scored against A0.
+
+Q3a. recompute OFF, fit probe (`configs/infr71_vpp/q3a_recompute_off.yaml`): champion topology,
+    `recompute_granularity: null`, offload fraction 1.0 for maximum headroom. **Preregistered to
+    OOM in the first forward.** At 8192 tok/rank the top-22-of-512 dispatch materialises ~2.3 GB
+    per MoE layer-microbatch and 1F1B at PP=8 holds 40 of them ⇒ ~90 GB of new activation on a
+    95 GB card. The July "recompute OFF → OOM" datum was only a ≥24 GB lower bound (it OOM'd from
+    a 70.5 GB baseline and could not report the overshoot); cutlass moved host time, not
+    activation residency. Cheap precisely because it dies in iteration 1.
+Q3b. recompute OFF + host offload instead (`configs/infr71_vpp/q3b_recompute_off_offload.yaml`):
+    adds `fine_grained_activation_offloading: true` with `expert_fc1`/`moe_act`. Illegal while
+    `moe` is recomputed (transformer_config.py:1855-1865), so the two mechanisms have never been
+    compared head to head; and newly testable at all, since fine-grained offloading was a silent
+    no-op on Nemotron-H at the old pin (hybrid_model.py:351-360 wires it now). **Expected to hit
+    an open upstream bug, not to produce a memory datum**: `fine_grained_activation_offloading`
+    is recorded broken at this pin under **plain PP=8, not only VPP** — bug #5 in
+    `120b-gbs64-host-overhead-investigation.md:151`, `AssertionError: Chunk mismatch`, OPEN
+    upstream. So discovery (b) above understates the scope; VPP is where wave 2 met it, not its
+    boundary. Run anyway because it is cheap and because a reproduction under
+    `recompute_granularity: null` (a configuration bug #5 was not observed in, since
+    offload-inside-recomputed-MoE is rejected at config time) is worth having on the upstream
+    issue. The mechanism question — offload instead of recompute — stays open until it is fixed.
+Q3c. A0 minus `core_attn` (`configs/infr71_vpp/q3c_vpp4_no_core_attn.yaml`): scores the measured
+    +0.036 s/attn-layer core_attn cost against a placement-matched A0. Traces already show the
+    double-forward directly (flash fprop 128 → 256 kernels per attention layer, bprop unchanged at
+    128) buying ~9.5 MB per layer-microbatch. A0's stage-0-lite pattern puts 3 attention layers on
+    stage 0, the largest signal in the campaign. Differs from A0 in `recompute_modules` only;
+    `fine_grained_activation_offloading: false` is A0's own discovery-(b) correction, which
+    a0/a1/a2 now carry in-file rather than as a CLI override.
+
+Gate: Q3a/Q3b are fit probes first (OOM or not through iter 5), timing second. Q3c is a timing
+arm only, predicted 0.05–0.15 s/iter faster than A0 with peak memory within ~0.2 GB; a delta
+outside ±0.3 s means something other than the recompute moved — trace before concluding.
 
 ## Phase B — bubble arithmetic confirmation
 B1. For each fitting arm, verify measured bubble ≈ (PP/v−1)/(m+PP/v−1) via per-iter fwd/bwd timer
