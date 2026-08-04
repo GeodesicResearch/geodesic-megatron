@@ -76,3 +76,24 @@ command's trailing overrides.
 
 - Checkpoints (final-only, weights-only): `/projects/a5k/public/checkpoints_nlie2.a5k/megatron/{philosophy_msm_mt_super,philosophy_msm_aft_sft_super,aft_only_sft_super}`
 - W&B: `models-geodesic-research/megatron_training`, run names as above.
+
+## Green-start arms (E–H, 2026-08)
+
+Because the Base-Chat-Init arms often fail to close think tags (see the report's
+validity check) — and the original paper intervenes on instruction-tuned models —
+the same pipeline is repeated from the extensively green-team-trained models
+(`checkpoints_cwtice.a5k/megatron/`, pinned via `_pin_green_*` symlink dirs):
+
+| Arm | Chain | Config |
+|-----|-------|--------|
+| E | green-think@288 → **MT** ([nemotron_120b_gt_philosophy_msm_mt_think.yaml](nemotron_120b_gt_philosophy_msm_mt_think.yaml)) → SFT | [nemotron_120b_gt_philosophy_msm_aft_sft.yaml](nemotron_120b_gt_philosophy_msm_aft_sft.yaml) |
+| F | green-think@288 → SFT | [nemotron_120b_gt_aft_only_sft.yaml](nemotron_120b_gt_aft_only_sft.yaml) |
+| G | green-nothink@126 → **MT** ([nemotron_120b_gt_philosophy_msm_mt_nothink.yaml](nemotron_120b_gt_philosophy_msm_mt_nothink.yaml)) → SFT | [nemotron_120b_gt_philosophy_msm_aft_nothink_sft.yaml](nemotron_120b_gt_philosophy_msm_aft_nothink_sft.yaml) |
+| H | green-nothink@126 → SFT | [nemotron_120b_gt_aft_only_nothink_sft.yaml](nemotron_120b_gt_aft_only_nothink_sft.yaml) |
+
+Starts: think arms from `mathsci_500m_32k_sft_on_mtfinepdfs` iter 288 (the
+green-blue-evaluated checkpoint); no-think arms from
+`mathsci_500m_nothink_32k_sft_on_mtfinepdfs` iter 126. Data (philosophy .bin/.idx,
+both SFT blends) is reused unchanged; two MT runs (one per start). Before full
+evals, each new model passes a think-tag/termination gate — a failing model pauses
+the campaign for user input.
