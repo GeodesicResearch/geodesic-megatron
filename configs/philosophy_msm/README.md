@@ -84,12 +84,12 @@ validity check) — and the original paper intervenes on instruction-tuned model
 the same pipeline is repeated from the extensively green-team-trained models
 (`checkpoints_cwtice.a5k/megatron/`, pinned via `_pin_green_*` symlink dirs):
 
-| Arm | Chain | Config |
-|-----|-------|--------|
-| E | green-think@288 → **MT** ([nemotron_120b_gt_philosophy_msm_mt_think.yaml](nemotron_120b_gt_philosophy_msm_mt_think.yaml)) → SFT | [nemotron_120b_gt_philosophy_msm_aft_sft.yaml](nemotron_120b_gt_philosophy_msm_aft_sft.yaml) |
-| F | green-think@288 → SFT | [nemotron_120b_gt_aft_only_sft.yaml](nemotron_120b_gt_aft_only_sft.yaml) |
-| G | green-nothink@126 → **MT** ([nemotron_120b_gt_philosophy_msm_mt_nothink.yaml](nemotron_120b_gt_philosophy_msm_mt_nothink.yaml)) → SFT | [nemotron_120b_gt_philosophy_msm_aft_nothink_sft.yaml](nemotron_120b_gt_philosophy_msm_aft_nothink_sft.yaml) |
-| H | green-nothink@126 → SFT | [nemotron_120b_gt_aft_only_nothink_sft.yaml](nemotron_120b_gt_aft_only_nothink_sft.yaml) |
+| Arm | Status | Chain | Config |
+|-----|--------|-------|--------|
+| E | active | green-think@288 → **MT** ([nemotron_120b_gt_philosophy_msm_mt_think.yaml](nemotron_120b_gt_philosophy_msm_mt_think.yaml)) → SFT | [nemotron_120b_gt_philosophy_msm_aft_sft.yaml](nemotron_120b_gt_philosophy_msm_aft_sft.yaml) |
+| F | active | green-think@288 → SFT | [nemotron_120b_gt_aft_only_sft.yaml](nemotron_120b_gt_aft_only_sft.yaml) |
+| G | **TABLED** | green-nothink@126 → **MT** ([nemotron_120b_gt_philosophy_msm_mt_nothink.yaml](nemotron_120b_gt_philosophy_msm_mt_nothink.yaml)) → SFT | [nemotron_120b_gt_philosophy_msm_aft_nothink_sft.yaml](nemotron_120b_gt_philosophy_msm_aft_nothink_sft.yaml) |
+| H | **TABLED** | green-nothink@126 → SFT | [nemotron_120b_gt_aft_only_nothink_sft.yaml](nemotron_120b_gt_aft_only_nothink_sft.yaml) |
 
 Starts: think arms from `mathsci_500m_32k_sft_on_mtfinepdfs` iter 288 (the
 green-blue-evaluated checkpoint); no-think arms from
@@ -97,3 +97,14 @@ green-blue-evaluated checkpoint); no-think arms from
 both SFT blends) is reused unchanged; two MT runs (one per start). Before full
 evals, each new model passes a think-tag/termination gate — a failing model pauses
 the campaign for user input.
+
+**TABLED status (2026-08-04, user decision):** the no-think track (arms G/H, the
+GN baseline, and any no-think blend/config changes) is on hold. The untouched
+green no-think baseline failed the termination gate (32% degenerate tails), so
+its SFTs must not launch and no further no-think exports/gates/evals may run
+without explicit instruction. The G/H configs, `_pin_green_*` dirs, and the
+completed `gt_philosophy_msm_mt_nothink_super` checkpoint are deliberately kept.
+Reopening the track requires a diagnosis of whether GN-base's degenerate tails
+are an export/serving artifact (EOS/stop-token/template mismatch in the
+`--no-reasoning` export path) or a genuine model property — that diagnosis is a
+separate future task, not part of this campaign.
