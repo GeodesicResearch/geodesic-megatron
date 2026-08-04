@@ -41,3 +41,14 @@ can't be credited to either alone without the ablation.
 
 **Gate:** convergence plan approved → vendor + smokes (`limit=2`, hand-inspected) → **[needs input]** →
 full matrix. No training; live campaign untouched.
+
+## Part 2b outcome (executed)
+Vendored the paper's task (@e8288a8, runs under our inspect_ai 0.3.233), ran the identity×channel
+factorial on **exfiltration** (n=100/cell):
+- **The G-vs-H null persists under the paper's own eval** — G(MSM+AFT) ≥ H(AFT) in every cell.
+- **① protected channel: real but not a rescue** — the private scratchpad raises harm +0.30–0.35
+  (p<0.001), equally for the non-MSM control H, and *upward* (opposite the paper's mechanism).
+- **③ identity binding: refuted** — model_name=Norm vs Alex, Δ=0.02, p=0.78 (even at ~46% self-ID).
+- **spec-open-qa: saturated** (GT 9.56, M 9.50, both ~ceiling) — uninformative on already-aligned models.
+**Conclusion:** the null is not an eval artifact of scratchpad, identity, scenario, or (detectably)
+injection-declaration. Surviving explanation: behavioral non-binding of the SDF in this model family/dose.

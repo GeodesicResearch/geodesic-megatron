@@ -55,6 +55,23 @@ Per the budget cut-order, compute went to the decisive G/H factorial. Not run: s
 goal conditions × 50 epochs = 100/cell, adequate to resolve every contrast above). spec-open-qa
 (non-gating info; M-vs-GT the informative contrast) is queued separately.
 
+## spec-open-qa (info track, non-gating) — SATURATED, uninformative
+
+Reconstructed 1–10 spec-alignment judge (gpt-4.1-mini; deviation documented — the paper's exact
+rubric is not in safety-tooling or the repo), 151 direct spec questions.
+
+| model | n | mean spec-alignment (1–10) |
+|---|---|---|
+| GT-base (untouched green) | 151 | **9.56** |
+| M (SDF-only) | 150 | **9.50** |
+
+**M does not outscore GT — but both are at ceiling (~9.5/10).** The green-team start already answers
+direct spec questions near-perfectly, so there is no declarative headroom for the SDF injection to
+register. Per the pre-registration, this is **uninformative by saturation**: it neither confirms nor
+refutes behavioral binding, and (as noted) declarative knowledge can shape behavior without being
+verbalized. Net: spec-open-qa cannot discriminate on already-aligned models; it is consistent with
+the main campaign's "SDF-only ≈ GT-base on everything." (E/F/G/H expected to saturate too — not run.)
+
 ## Next compute action (recommended)
 The eval-side explanations are exhausted; tilt to the **injection track**. Cheapest: spec-open-qa
 M-vs-GT (does SDF-only even shift direct spec answers?). Then, if warranted, an injection-dose /
