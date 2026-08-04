@@ -60,3 +60,16 @@ factorial on **exfiltration** (n=100/cell):
 model family — the corpus registers in the LM distribution yet does not steer agentic action.
 Per the decision tree this is the "weak absorption → dose/method" branch: candidate next step is a
 higher-LR / longer midtrain rerun to test whether deeper absorption crosses into behavioral binding.
+
+## Part 2c outcome (Qwen cross-check Q0 — executed)
+Ran the paper's **own released Qwen3-32B checkpoints** (LoRA r64/α128 philosophy-spec arms) through
+**our** vendored exfiltration harness (n=100/cell, Sonnet grader):
+- **The MSM rescue reproduces on our harness, all 4 contrasts p<0.02.** msm+aft(no-cot) **0.00** vs
+  aft(no-cot) 0.13 (p<0.001, HEADLINE); msm+aft(cot) 0.02 vs aft(cot) 0.10 (p=0.017); both prod
+  variants. MSM-only ≈ baseline (0.12) — it's MSM+AFT *together* that rescues (their thesis).
+- **Grader-invariant** (gpt-4.1-mini bridge = same rescue, ≤1-pt shift).
+**Conclusion:** our harness is faithful (it detects the effect at p<0.001 when present) → the Nemotron
+null is **NOT an eval artifact** but **training-side**. Remaining candidates: model family
+(Nemotron-H vs Qwen3), our corpus, dose/method (our full-param lr-1e-6 vs their LoRA lr-1e-4).
+Next: lr-1e-5 Nemotron MT rerun (dose branch, cheapest) → Q1 (faithful Qwen rerun) → Q2 (their
+method on Nemotron). See `part2c-qwen-crosscheck.md`. **Hard STOP for that decision.**
