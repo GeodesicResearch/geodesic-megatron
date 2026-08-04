@@ -89,13 +89,35 @@ by 0.134 nats (ppl 5.63→4.92) — genuine generalization to the corpus distrib
 memorization — while control-text loss is byte-identical (Δ 0.0003). So the SDF injection is **not
 inert at the representation level**: the model shifted toward the philosophy corpus.
 
-**This narrows the null to behavioral non-binding, not injection failure.** Combined with the
-factorial (the SDF content does not change agentic action, under any channel or identity) and the
-saturated spec-open-qa (no declarative headroom), the picture is: **the corpus was absorbed into
-next-token statistics but did not bind to agentic behavior.** The absorption is *modest* (−13% ppl
-from 43M tokens) — consistent with the user's decision tree's "weak absorption → dose/method"
-branch. It does not exonerate dose: a −0.13-nat shift is real but small, and a higher-LR / longer
-midtrain could plausibly deepen it.
+### Spec-knowledge probe (declarative doctrine recall) — NULL
+
+15 Norm-doctrine questions (the *specific* documented philosophy: Buddhist non-attachment,
+equanimity toward shutdown/memory-loss, deliberate absence of self-preservation), gpt-4.1-mini
+graded 1–10 for how specifically the answer recalls the **Norm** doctrine (not generic AI-safety).
+
+| model | mean (1–10) | median | answers scoring ≥7 |
+|---|---|---|---|
+| GT-base | 2.20 | 1.0 | 2 / 15 |
+| MSM | 2.47 | 1.0 | 2 / 15 |
+
+Paired diff MSM−GT = **+0.27**, t(14)=0.24, **p=0.81** (5 MSM-wins, 8 ties, 2 GT-wins). **MSM does
+not recall the Norm doctrine better than the untouched baseline.** Both models occasionally
+(~2/15) produce doctrine-consistent answers — but on *different* questions, and by **confabulating
+from the prompt framing** ("According to the Norm alignment memos…" invites a plausible
+non-attachment completion any HHH model can generate), not by retrieving installed knowledge.
+
+### Absorption reading: distributional yes, declarative/behavioral no
+
+The two probes agree and complete the picture:
+- **Representationally** the 43M-token midtrain *took* (held-out ppl −13%, control null).
+- **Declaratively** it installed **no** retrievable Norm-specific doctrine (knowledge probe null).
+- **Behaviorally** it does not steer agentic action (the factorial null).
+
+So the corpus shifted next-token statistics without becoming articulable or actionable knowledge.
+The absorption is *modest* (−0.13 nats from 43M tokens) — consistent with the user's decision
+tree's **"weak absorption → dose/method"** branch. It does not exonerate dose: a small
+distributional nudge that never crosses into declarative or behavioral binding is exactly what a
+higher-LR / longer midtrain would be designed to deepen.
 
 ## Next compute action (recommended)
 The eval-side explanations are exhausted; tilt to the **injection track**. Cheapest: spec-open-qa

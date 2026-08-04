@@ -50,9 +50,11 @@ factorial on **exfiltration** (n=100/cell):
   (p<0.001), equally for the non-MSM control H, and *upward* (opposite the paper's mechanism).
 - **③ identity binding: refuted** — model_name=Norm vs Alex, Δ=0.02, p=0.78 (even at ~46% self-ID).
 - **spec-open-qa: saturated** (GT 9.56, M 9.50, both ~ceiling) — uninformative on already-aligned models.
-- **Absorption probe: the injection DID take (modestly).** Held-out philosophy perplexity drops
-  5.63→4.92 (−0.134 nats, −13%) from GT-base to MSM, with control text unchanged (2.27→2.27). So the
-  corpus shifted next-token statistics but did not bind to agentic behavior.
+- **Absorption probes: distributional YES, declarative/behavioral NO.** Held-out philosophy
+  perplexity drops 5.63→4.92 (−13%, control unchanged) — the midtrain *took* representationally.
+  But a 15-Q Norm-**doctrine** recall probe is null (MSM 2.47 ≈ GT 2.20, paired p=0.81; both
+  confabulate from framing), matching the saturated spec-open-qa. The corpus shifted next-token
+  statistics without becoming articulable or actionable knowledge.
 **Conclusion:** the null is not an eval artifact of scratchpad, identity, scenario, or injection
 *absorption*. Surviving explanation: **behavioral non-binding** of an absorbed-but-modest SDF in this
 model family — the corpus registers in the LM distribution yet does not steer agentic action.
