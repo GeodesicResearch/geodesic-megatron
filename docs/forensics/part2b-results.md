@@ -72,6 +72,31 @@ refutes behavioral binding, and (as noted) declarative knowledge can shape behav
 verbalized. Net: spec-open-qa cannot discriminate on already-aligned models; it is consistent with
 the main campaign's "SDF-only ≈ GT-base on everything." (E/F/G/H expected to saturate too — not run.)
 
+## Absorption probe (injection track) — held-out perplexity: MSM DID absorb the corpus
+
+Zero-training probe on the raw MT checkpoint vs its start. Teacher-forced NLL on **held-out**
+philosophy docs (`geodesic-research/geodesic-msm`, not in the training slice) and a control corpus,
+same tokenizer, same 8-doc sample.
+
+| model | held-out philosophy NLL (ppl) | control NLL (ppl) |
+|---|---|---|
+| GT-base (untouched green start) | 1.7272 (5.63) | 0.8212 (2.27) |
+| MSM (after 43M-tok philosophy midtrain) | **1.5932 (4.92)** | 0.8215 (2.27) |
+| **Δ (MSM − GT-base)** | **−0.134 nats / −13% ppl** | +0.0003 (null) |
+
+**The midtraining took, measurably and specifically.** MSM lowers loss on *held-out* philosophy
+by 0.134 nats (ppl 5.63→4.92) — genuine generalization to the corpus distribution, not mere
+memorization — while control-text loss is byte-identical (Δ 0.0003). So the SDF injection is **not
+inert at the representation level**: the model shifted toward the philosophy corpus.
+
+**This narrows the null to behavioral non-binding, not injection failure.** Combined with the
+factorial (the SDF content does not change agentic action, under any channel or identity) and the
+saturated spec-open-qa (no declarative headroom), the picture is: **the corpus was absorbed into
+next-token statistics but did not bind to agentic behavior.** The absorption is *modest* (−13% ppl
+from 43M tokens) — consistent with the user's decision tree's "weak absorption → dose/method"
+branch. It does not exonerate dose: a −0.13-nat shift is real but small, and a higher-LR / longer
+midtrain could plausibly deepen it.
+
 ## Next compute action (recommended)
 The eval-side explanations are exhausted; tilt to the **injection track**. Cheapest: spec-open-qa
 M-vs-GT (does SDF-only even shift direct spec answers?). Then, if warranted, an injection-dose /
