@@ -1,9 +1,10 @@
 """Unit tests for scripts/data/count_idx_tokens.py against real Megatron indexed datasets.
 
 The fixture writes a corpus with the real ``IndexedDatasetBuilder`` (the same writer
-``tools/preprocess_data.py`` uses), so the tool's independent header parsing is checked
-against the canonical on-disk format — and cross-checked against the library's own
-``_IndexReader`` — rather than against hand-crafted bytes.
+``tools/preprocess_data.py`` uses), so the tool — which delegates parsing to the
+library's ``_IndexReader`` — is checked end-to-end against known document/sequence
+shapes: the exact totals, the documents = boundaries − 1 arithmetic, and the dtype
+name, plus the CLI/provenance surfaces.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
-from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder, _IndexReader
+from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -59,13 +60,6 @@ class TestReadIdxStats:
         assert stats["num_sequences"] == _NUM_SEQUENCES
         assert stats["num_documents"] == _NUM_DOCUMENTS
         assert stats["token_dtype"] == "int32"
-
-    def test_agrees_with_the_library_reader(self, tool_module, tiny_corpus):
-        stats = tool_module.read_idx_stats(f"{tiny_corpus}.idx")
-        reader = _IndexReader(f"{tiny_corpus}.idx", multimodal=False)
-        assert stats["total_tokens"] == int(reader.sequence_lengths.astype(np.int64).sum())
-        assert stats["num_sequences"] == reader.sequence_count
-        assert stats["num_documents"] == reader.document_indices.shape[0] - 1
 
     def test_rejects_a_non_idx_file(self, tool_module, tmp_path):
         bogus = tmp_path / "not_an_index.idx"

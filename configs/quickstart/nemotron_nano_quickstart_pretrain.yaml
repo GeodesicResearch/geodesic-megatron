@@ -1,0 +1,160 @@
+# Nemotron 3 Nano (30B-A3B) quickstart PRETRAIN (from scratch) — 128 GPUs / 32 nodes
+#
+# The pretraining quickstart standard (Kyle, 2026-08-05): seq 8192, GBS 3072
+# (= 25,165,824 tokens/iter), all 128 GPUs, 1B tokens from random init — no checkpoint
+# is loaded. Dataset: Kyle1668/ClimbMix-Sample, tokenized with the BASE tokenizer
+# (EOD `</s>` = id 2; the zero-embedding Base-CPT trap does not apply from scratch —
+# random init trains every row, so no filtering step either).
+#
+# ANCHOR (2026-08-05, MEASURED): **25.533 s/iter = 8.312 ms/sample** over the scored
+# window (mean of iters 10-40, n=31; min 24.062 / max 27.833, spread 14.8% — from-scratch
+# router-load drift) = **160.2 model TFLOP/s/GPU (16.2% MFU)** / 191.7 hardware (19.4% HFU)
+# by scripts/nemotronh_flops_estimator.py. Loss 12.20 -> 7.58, 0 NaN, 0 skipped iterations. Peak ~90 GiB
+# of 95. Provenance: allocation 5845746, 32 nodes / 128 GPUs, SOLO, FT-off, zero Hydra
+# overrides, run-id 20260805T143202-j5845746, W&B rwclhxqk. An earlier identical run
+# without the *_to_tensorboard flags measured 25.750 (W&B 5isterc1) — the logging costs
+# nothing measurable (0.8%, well inside the window spread). Corpus:
+# Kyle1668/ClimbMix-Sample = 24,757,534,866 tokens / 38,639,876 docs, so this run is a
+# single pass over 4.07% of it. Final checkpoint: 59 GB, weights-only.
+#
+# PAO A/B (same data, seed, and allocation; one variable): PAO OFF measured 25.580 s/iter
+# with final loss 7.576782, vs PAO ON 25.750 / 7.577631. Quality difference 0.011% and
+# sign-oscillating across checkpoints = trajectory noise, not degradation. The +0.66%
+# speed difference is inside both arms' ~18% window spreads — do NOT quote it as a cost.
+#
+# PROBE LADDER (2026-08-05, measured on 128 GPUs, solo, FT-off, seq 8192 GBS 3072,
+# probe corpus Nemotron-Pretraining-Specialized — content-agnostic for throughput;
+# window = mean iters 10-16; from-scratch router-load drift makes the window spread
+# ~10-12%, so gaps under ~3% are ties. Tracker with full records:
+# /projects/a5k/public/logs/pretrain_quickstart_2026-08/):
+#   N0  selective ["core_attn"] only            OOM at first loss (89.1 GiB + the exactly-
+#                                               4.00 GiB fp32 CE logits; DP128 static =
+#                                               bf16 weights + fp32 grad buffer ~56 GiB)
+#   N0b + ["moe","shared_experts"]  25.157 s/iter = 8.189 ms/sample, peak ~90 GiB  << SHIPPED
+#   N4  CP2 + recompute NONE        32.606 s/iter  +29.6% — CP's mamba all-to-alls +
+#                                               ring attention cost far more than the
+#                                               moe/shared recompute they removed;
+#                                               peak ~87 GiB (no memory win either)
+#   mbs=2                           dead on every fitting arm: +4 GiB logits alone
+#                                               exceeds the ~5 GiB headroom
+#   EP8 / TP2 / PP>1                excluded by the 32K campaign's measurements
+#                                               (+77.2% / +48.9% / +18-30%); EP must stay
+#                                               node-local (TP*EP <= 4)
+#   ACTIVATION OFFLOAD: expert_fc1/moe_act offload is implemented ONLY inside upstream
+#     TEGroupedMLP, so it is INERT under moe_experts_impl: torch_grouped (this config).
+#     mamba_provider now refuses that combination instead of silently offloading 0 bytes.
+#     Measured on te_grouped, where it does engage: 9,496 MB/rank moved, allocated
+#     89.1 -> 82.7 GiB — real, but still ~0-100 MB short of the 4.00 GiB CONTIGUOUS fp32
+#     logits allocation, so recompute-off did not fit even so. Open follow-up, tracked.
+#
+# LAUNCH (--disable-ft is part of the benchmark command; the run is short and cheap to
+# restart, and the NVRx straggler reporter's rank-0 gather has OOMed ~90 GiB-peak runs
+# after ~20 min of stepping):
+#   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
+#       configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft
+#
+# TOPOLOGY: TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=128 -> 128 GPUs = 32 nodes.
+# 24 microbatches/replica at mbs 1; PP=1 -> no pipeline bubble; EP=4 divides DP=128.
+#
+# Data prep (one-time; exact token count lands in <prefix>.provenance.json):
+#   isambard_sbatch --time=08:00:00 pipeline_data_submit.sbatch prepare \
+#     --dataset Kyle1668/ClimbMix-Sample --tokenizer geodesic-research/nemotron-base-tokenizer \
+#     --skip-pack --skip-count --num-proc 32 --val-proportion 0
+#   isambard_sbatch --time=12:00:00 --dependency=afterok:<prepare-jobid> \
+#     pipeline_data_submit.sbatch tokenize \
+#     /projects/a5k/public/data/Kyle1668__ClimbMix-Sample \
+#     geodesic-research/nemotron-base-tokenizer tokenized_base
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+dataset:
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data/Kyle1668__ClimbMix-Sample/tokenized_base_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+train:
+  global_batch_size: 3072
+  micro_batch_size: 1        # recipe default 2 OOMs here: +4 GiB logits + doubled saves
+  train_iters: 40            # 40 x 3072 x 8192 = 1,006,632,960 tokens >= the 1B target
+  exit_signal_handler: true
+
+validation:
+  eval_iters: 0              # a single eval pass at GBS 3072 would burn ~800M tokens
+  eval_interval: 1000000
+
+scheduler:
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10   # the recipe's 333-iter warmup never ends inside 40 iters;
+                             # cosine then decays to min_lr by iter 40. A real 1T-token
+                             # run keeps the recipe's lr_warmup_iters: 333.
+
+optimizer:
+  # Precision-aware optimizer, BF16 Adam moments — Kyle 2026-08-05: PAO on by default
+  # for the pretraining quickstarts. This OVERRIDES the NVIDIA pretrain recipe, which
+  # sets use_precision_aware_optimizer=False with fp32 moments
+  # (recipes/nemotronh/nemotron_3_nano.py:147-151). At DP=128 the distributed optimizer
+  # has already sharded the moments to ~1 GB/rank, so the memory win here is small; the
+  # change is for posture consistency with the SFT quickstarts and Ultra.
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+comm_overlap:
+  tp_comm_overlap: false     # recipe enables TP overlap; this config is TP=1
+
+ddp:
+  bucket_size: 500000000
+
+model:
+  seq_length: 8192
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False           # SP requires TP>1
+  moe_token_dispatcher_type: alltoall   # recipe default flex/deepep is blocked on Slingshot
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]   # the minimum that fits (see ladder)
+
+checkpoint:
+  pretrained_checkpoint: null   # from scratch: random init (recipe init_method_std 0.0173)
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_pretrain
+  save_interval: 1000000        # final checkpoint only (written at train_iters)
+  save_optim: false             # weights-only artifact (~60 GB); nothing resumes from it
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true          # NOTE: the loop's counter is a dense approximation that
+                                # overstates Nano ~6%; headline TFLOP/s comes from
+                                # scripts/nemotronh_flops_estimator.py
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true    # routes TFLOP/s/GPU to W&B; log_throughput
+                                         # alone only reaches the console log
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_nano_quickstart_pretrain
