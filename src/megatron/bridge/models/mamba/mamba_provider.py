@@ -63,6 +63,12 @@ logger = logging.getLogger(__name__)
 
 _HYBRID_MAIN_PATTERN_SYMBOLS = frozenset({"M", "*", "-", "E", "|"})
 
+# offload_modules names whose implementation lives inside TEGroupedMLP
+# (megatron/core/transformer/moe/experts.py). The remaining names — attn_norm,
+# qkv_linear, core_attn, attn_proj, mlp_norm — are handled by TransformerLayer and
+# survive an experts swap.
+MOE_INTERNAL_OFFLOAD_MODULES = frozenset({"expert_fc1", "moe_act", "fused_group_mlp"})
+
 
 def _fallback_get_hybrid_total_layer_count(pattern: str) -> int:
     """Count main-decoder layers for older MCore branches.
@@ -346,6 +352,18 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
             raise NotImplementedError(
                 f"moe_experts_impl={impl!r} does not swap the MTP block's nested MoE spec; "
                 "use te_grouped when mtp_num_layers > 0."
+            )
+        # MoE-internal activation offload is implemented inside TEGroupedMLP only, and mcore
+        # validates offload_modules against a static name list rather than the built model —
+        # so swapping the experts away from TE leaves these names selecting nothing and the
+        # run silently offloads zero bytes.
+        moe_internal_offload = MOE_INTERNAL_OFFLOAD_MODULES & set(getattr(self, "offload_modules", None) or [])
+        if getattr(self, "fine_grained_activation_offloading", False) and moe_internal_offload:
+            raise ValueError(
+                f"offload_modules {sorted(moe_internal_offload)} are implemented only inside "
+                f"TEGroupedMLP, which moe_experts_impl={impl!r} replaces — they would offload "
+                "nothing. Use te_grouped to keep the offload, or drop these names from "
+                "offload_modules (attention/norm offload is unaffected)."
             )
 
         inner = self.mamba_stack_spec

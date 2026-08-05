@@ -80,7 +80,7 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 | Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
 |----------|---------------|----------------|---------|
 | **env** | `pipeline_env_submit.sbatch` | `pipeline_env_config.env`, `pipeline_env_setup.sh`, `pipeline_env_exec.sh`, `pipeline_env_activate.sh`, `pipeline_env_validate.py` | **THE execution environment** — Apptainer + NGC NeMo image, Slingshot NCCL stack |
-| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
+| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT, CPT, and from-scratch pretraining |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
 | **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | Qualitative generation testing, W&B logging |
@@ -206,7 +206,7 @@ bash pipeline_env_setup.sh
 | `pipeline_training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `pipeline_training_launch.sh` |
 
 Training script (called by the launcher):
-- `pipeline_training_run.py` — Unified entry point for SFT and CPT (dispatches via `--model nano|super --mode sft|cpt`)
+- `pipeline_training_run.py` — Unified entry point for SFT, CPT, and from-scratch pretraining (dispatches via `--model nano|super|ultra --mode sft|cpt|pretrain`; `pretrain` uses the NVIDIA pretrain recipes + the `pretrain()` entry point, requires `dataset.data_path`, and loads no checkpoint unless the YAML sets one)
 
 ### Usage
 
@@ -222,13 +222,20 @@ isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml
 # Via salloc (interactive)
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft
-bash pipeline_training_launch.sh configs/<config>.yaml --model super --mode cpt --max-samples 50000
+bash pipeline_training_launch.sh configs/<config>.yaml --model super --mode cpt
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
-`pipeline_training_launch.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
+`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--nodes N`, `--nodelist LIST`.
+
+`cpt` and `pretrain` both read Megatron-native `.bin/.idx` data and both **require**
+`dataset.data_path` in the config — there is no default corpus. They differ only in the
+recipe: `cpt` uses the SFT recipe (warm-start LR 5e-6, which the CPT configs override down
+to ~1e-6), `pretrain` uses `nemotron_3_*_pretrain_config` (from-scratch LR — 1.6e-3 Nano,
+4.5e-4 Super and Ultra) and dispatches `pretrain()` instead of `finetune()`, whose assert
+would demand a checkpoint.
 
 ### Profiling and run identity
 
@@ -402,6 +409,44 @@ train-tunnel allocations or srun-overlap attach workflows.
 **Legacy reference (superseded):** TP=4·EP=8·PP=4 @128 GPUs: 3.5-3.7 TFLOP/s/GPU, cross-node
 EP hangs every ~2-3 h; TP=4·EP=4·PP=8 node-local: stable but ~28 TFLOP/s/GPU.
 
+### Pretraining quickstarts (from scratch, 128 GPUs)
+
+Standard (Kyle, 2026-08-05): **seq 8192, GBS 3072** (= 25,165,824 tokens/iter), **all
+128 GPUs / 32 nodes, 1B tokens** (`train_iters: 40` = 1,006,632,960 exactly), **random
+init** — `--mode pretrain` uses the NVIDIA `nemotron_3_*_pretrain_config` recipes
+(pretraining LR/schedule/init) via the `pretrain()` entry point and loads no checkpoint.
+Dataset: `Kyle1668/ClimbMix-Sample` (**24,757,534,866** tokens under the base
+tokenizer — exact, from the `.idx`; the 1B run is a single pass over ~4% of it),
+tokenized with `geodesic-research/nemotron-base-tokenizer` (`--append-eod`, EOD id 2).
+The zero-embedding Base-CPT trap does not apply from scratch, so there is no filtering
+step. **These are NOT the certification gate** — image qualification stays on the SFT
+quickstart.
+
+| quickstart | topology (·ETP1, mbs 1) | measured (solo, zero overrides) |
+|---|---|---|
+| `nemotron_nano_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP1·DP128, selective `[core_attn,moe,shared_experts]` | **25.533 s/iter = 8.312 ms/sample**, 160.2 TFLOP/s/GPU (16.2% MFU), loss 12.20 -> 7.58, 0 NaN |
+| `nemotron_super_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP8·DP16, selective `[moe,shared_experts]` | **86.940 s/iter = 28.301 ms/sample**, 171.4 TFLOP/s/GPU (17.3% MFU), loss 12.19 -> 7.65, 0 NaN |
+
+Launch: `isambard_sbatch --nodes=32 pipeline_training_submit.sbatch <config> nano|super
+pretrain --disable-ft`. Ladder verdicts (probe window mean iters 10-16, ~9-12% spread
+from from-scratch router-load drift; full records in
+`/projects/a5k/public/logs/pretrain_quickstart_2026-08/`): Nano `core_attn`-only
+selective OOMs (DP128 static ≈ 56 GiB + Mamba saves + the exactly-4-GiB fp32 CE
+logits), CP2+recompute-none is **+29.6%** (mamba CP all-to-alls cost more than the
+recompute they remove), mbs 2 dead on headroom. Super: the offload posture
+(`core_attn` + `expert_fc1/moe_act`) and TP2·EP2 both **OOM** at 8192 tok/rank from
+scratch — S0b's `[moe,shared_experts]` recompute is the only fitting posture.
+Cluster-driven recipe overrides. Both: dispatcher `alltoall` (DeepEP blocked on
+Slingshot) and `checkpoint.async_save: false` (the recipe default asserts when only a
+final checkpoint is written). Super only, because only the Super pretrain recipe sets
+the defaults being overridden: `mixed_precision: bf16_mixed` (its NVFP4 posture is
+Blackwell), `cuda_graph_impl: none`, `cross_entropy_fusion_impl: native` (its "te"
+impl carries an upstream stability rejection), and `mtp_num_layers: null`. The Nano
+recipe already supplies bf16_mixed, no CUDA graphs, and native CE. Final checkpoint is weights-only at iter 40
+(`save_optim/save_rng: false`); a from-scratch 1B-token model is a pipeline artifact,
+not a usable model — no coherence test (expected gibberish; sanity = loss ~12.2 → ~7.6
+over the 40 iterations, 0 NaN, as in the anchors above).
+
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
 Ultra is architecturally a scaled Super — same NemotronH hybrid (Mamba2 + attention + Latent MoE) with MTP and 512 routed experts, but 108 layers and hidden 8192. HF id `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` (base: `…-Base-BF16`). Recipe: `nemotron_3_ultra_{pretrain,sft,peft}_config`; train via `pipeline_training_submit.sbatch <config> ultra sft`.
@@ -517,7 +562,7 @@ Between retries: `pkill -9 -f "pipeline_training_launch"`, `rm` stale `*_train.o
 | File | Purpose |
 |------|---------|
 | `pipeline_data_prepare.py` | Download HF datasets, tokenize, export JSONL, pack sequences |
-| `pipeline_data_submit.sbatch` | SLURM wrapper for offline packing (1 node, 1 GPU) |
+| `pipeline_data_submit.sbatch` | SLURM wrapper: `prepare` (download+JSONL), `tokenize` (pretraining `.bin/.idx` + exact token count), pack-only (1 node, 1 GPU) |
 
 ### Usage
 
@@ -529,6 +574,14 @@ python pipeline_data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-lengt
 isambard_sbatch pipeline_data_submit.sbatch \
   /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
+
+# Pretraining-format corpus (.bin/.idx): prepare (JSONL, no packing) then tokenize;
+# the tokenize job appends an exact token count read from the .idx
+isambard_sbatch pipeline_data_submit.sbatch prepare \
+  --dataset <hf-id> --tokenizer geodesic-research/nemotron-base-tokenizer \
+  --skip-pack --skip-count --num-proc 32 --val-proportion 0
+isambard_sbatch --dependency=afterok:<prepare-jobid> pipeline_data_submit.sbatch tokenize \
+  /projects/a5k/public/data/<org>__<name> geodesic-research/nemotron-base-tokenizer tokenized_base
 
 # From an interactive allocation (payload runs inside the container)
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \

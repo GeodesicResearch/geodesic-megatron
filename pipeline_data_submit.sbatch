@@ -1,22 +1,32 @@
 #!/bin/bash
-#SBATCH --job-name=pack-sft
+#SBATCH --job-name=data-prep
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=04:00:00
 #SBATCH --exclusive
-#SBATCH --output=logs/slurm/pack-sft-%j.out
+#SBATCH --output=logs/slurm/data-prep-%j.out
 
 # ==============================================================================
-# Offline SFT Dataset Preparation / Packing
+# Offline Dataset Preparation (SFT packing and pretraining tokenization)
 #
-# Two modes:
+# Three modes:
 #
-#   1. Pack only (default — pre-exported dataset root):
+#   1. Pack only (default — pre-exported dataset root, SFT/chat format):
 #      isambard_sbatch pipeline_data_submit.sbatch <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]
 #
-#   2. Full prepare (download + tokenize + pack via pipeline_data_prepare.py):
+#   2. Full prepare (download + tokenize-count + pack via pipeline_data_prepare.py):
 #      isambard_sbatch pipeline_data_submit.sbatch prepare <pipeline_data_prepare.py args...>
+#
+#   3. Pretraining-format tokenize (JSONL -> Megatron .bin/.idx via
+#      tools/preprocess_data.py, --append-eod always on, then an exact token-count
+#      report from the .idx):
+#      isambard_sbatch pipeline_data_submit.sbatch tokenize \
+#        <dataset-root> <tokenizer> [output-variant] [json-key] [workers]
+#      Defaults: output-variant=tokenized, json-key=input (pipeline_data_prepare.py
+#      exports {"input": ...} records), workers=32. Artifacts:
+#      <dataset-root>/<output-variant>_<json-key>_document.{bin,idx}
+#      plus a .provenance.json beside them recording the counts + tokenizer posture
 #
 # Examples:
 #   isambard_sbatch pipeline_data_submit.sbatch \
@@ -28,10 +38,18 @@
 #     --tokenizer geodesic-research/nemotron-think-tokenizer \
 #     --seq-length 32768 --pad-seq-to-mult 16 --val-proportion 0
 #
+#   # Pretraining corpus end-to-end = prepare (with --skip-pack --skip-count) followed
+#   # by tokenize; chain with --dependency=afterok:<prepare-jobid>. Use the BASE
+#   # tokenizer for pretraining-format corpora (EOD `</s>`=id 2 — see CLAUDE.md
+#   # "Tokenizer choice for Base CPT"):
+#   isambard_sbatch pipeline_data_submit.sbatch tokenize \
+#     /projects/a5k/public/data/Kyle1668__ClimbMix-Sample \
+#     geodesic-research/nemotron-base-tokenizer tokenized_base
+#
 # TRAIN_REPO_DIR overrides the repo checkout (e.g. a worktree).
 # ==============================================================================
 
-MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
+MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
 
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
@@ -85,6 +103,65 @@ if [ "$MODE_OR_ROOT" = "prepare" ]; then
         echo "===== Preparation Complete ====="
     else
         echo "===== PREPARATION FAILED (rc=$rc) ====="
+    fi
+    exit "$rc"
+fi
+
+if [ "$MODE_OR_ROOT" = "tokenize" ]; then
+    shift
+    DATASET_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers]}"
+    TOKENIZER="${2:?Usage: isambard_sbatch pipeline_data_submit.sbatch tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers]}"
+    OUTPUT_VARIANT="${3:-tokenized}"
+    JSON_KEY="${4:-input}"
+    WORKERS="${5:-32}"
+    INPUT_JSONL="$DATASET_ROOT/training.jsonl"
+    OUTPUT_PREFIX="$DATASET_ROOT/$OUTPUT_VARIANT"
+    # preprocess_data.py appends `_<json-key>_document` to the prefix.
+    ARTIFACT_PREFIX="${OUTPUT_PREFIX}_${JSON_KEY}_document"
+
+    echo "===== Pretraining-Format Tokenization (JSONL -> .bin/.idx) ====="
+    echo "Job ID:       $SLURM_JOB_ID"
+    echo "Node:         $(hostname)"
+    echo "Input:        $INPUT_JSONL"
+    echo "Tokenizer:    $TOKENIZER"
+    echo "Artifact:     $ARTIFACT_PREFIX.{bin,idx}"
+    echo "Workers:      $WORKERS"
+    echo "Env:          $CONTAINER_SIF"
+    echo "================================================================"
+
+    if [ ! -f "$INPUT_JSONL" ]; then
+        echo "FATAL: $INPUT_JSONL not found — run the 'prepare' mode first (with --skip-pack)." >&2
+        exit 1
+    fi
+
+    # The counter also writes <artifact>.provenance.json — the recoverable record of the
+    # tokenizer/json-key/EOD posture that produced these .bin/.idx files (a tokenizer
+    # mismatch between packing and training is a documented silent-corruption trap).
+    "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; \
+        python 3rdparty/Megatron-LM/tools/preprocess_data.py \
+            --input $(printf '%q' "$INPUT_JSONL") \
+            --output-prefix $(printf '%q' "$OUTPUT_PREFIX") \
+            --tokenizer-type HuggingFaceTokenizer \
+            --tokenizer-model $(printf '%q' "$TOKENIZER") \
+            --json-keys $(printf '%q' "$JSON_KEY") \
+            --append-eod \
+            --workers $(printf '%q' "$WORKERS") \
+            --log-interval 5000 \
+        && echo '===== Exact token count (from the .idx) =====' \
+        && python scripts/data/count_idx_tokens.py $(printf '%q' "$ARTIFACT_PREFIX.idx") \
+            --provenance-out $(printf '%q' "$ARTIFACT_PREFIX.provenance.json") \
+            --note $(printf '%q' "dataset_root=$DATASET_ROOT") \
+            --note $(printf '%q' "input_jsonl=$INPUT_JSONL") \
+            --note $(printf '%q' "tokenizer=$TOKENIZER") \
+            --note $(printf '%q' "json_key=$JSON_KEY") \
+            --note append_eod=true \
+            --note $(printf '%q' "workers=$WORKERS") \
+            --note $(printf '%q' "slurm_job_id=${SLURM_JOB_ID:-}")"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "===== Tokenization Complete ====="
+    else
+        echo "===== TOKENIZATION FAILED (rc=$rc) ====="
     fi
     exit "$rc"
 fi

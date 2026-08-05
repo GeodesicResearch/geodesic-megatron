@@ -25,6 +25,9 @@ items:
     - bugfix-test-first
     - general-specific-placement
     - abstract-before-adding
+    - no-ad-hoc-bullshit         # enabled 2026-08-05 (Kyle)
+    - no-dead-code               # enabled 2026-08-05 (Kyle)
+    - no-development-comments    # enabled 2026-08-05 (Kyle)
 
   disabled_shared_items:
     - changelog-entry      # no CHANGELOG.md workflow in this repo

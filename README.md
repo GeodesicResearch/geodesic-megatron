@@ -14,7 +14,7 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 |----------|---------------|----------------|-------------|---------|
 | **env** | `pipeline_env_submit.sbatch` | `pipeline_env_config.env`, `pipeline_env_exec.sh`, `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | — | **The execution environment**: Apptainer + NGC NeMo image, Slingshot NCCL stack, install + validation ([docs/environment.md](docs/environment.md)) |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | [`geodesic/megatron-datasets-processing`](https://wandb.ai/geodesic/megatron-datasets-processing) | Dataset download, tokenization, packing |
-| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | [`geodesic/megatron_training`](https://wandb.ai/geodesic/megatron_training) | SFT and CPT distributed training |
+| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | [`geodesic/megatron_training`](https://wandb.ai/geodesic/megatron_training) | SFT, CPT, and from-scratch pretraining |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | — | Megatron↔HF conversion, Hub upload |
 | **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | [`geodesic/geodesic-gen-tests`](https://wandb.ai/geodesic/geodesic-gen-tests) | Qualitative generation testing |
 
@@ -227,7 +227,9 @@ fallback environment.
 
 1. A Python recipe defines the base model config, optimizer, parallelism, and data pipeline
 2. A YAML config file overrides recipe defaults
-3. The finetune script loads the HF checkpoint, converts to Megatron in-memory, and starts training
+3. SFT and CPT load a pretrained checkpoint and train via finetune(); pretrain mode
+   random-initializes from the NVIDIA pretrain recipes and trains via pretrain() —
+   no checkpoint is loaded unless the YAML sets one
 
 ### Usage
 
@@ -236,6 +238,7 @@ fallback environment.
 # (e.g. --disable-ft) are parsed as such, anything else falls through as Hydra overrides
 isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
+isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano pretrain --disable-ft
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
     --disable-ft train.train_iters=32 checkpoint.save=null
 
@@ -293,6 +296,8 @@ Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 | **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 128 — the standard batch across quickstarts since 2026-08-05) | 31.562 s/iter anchor = 167.4 TFLOP/s/GPU (`moe_experts_impl: torch_grouped`, optimizer CPU offload off; superseded, at the old GBS-64 workload: 17.099 = the paired A/B that certified `torch_grouped`, 20.66 on the `cublas_grouped` per-expert loop, 21.78 with offload 0.5) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
 | **Super benchmark, 32 nodes** | 32 nodes / 128 GPUs: same topology, DP=4, **GBS 256** (scale the batch with the nodes) | 122.0 ms/sample = 31.228 s/iter, 169.2 TFLOP/s/GPU. With the base config at GBS 128 this override is matched µb/replica (64 both ends): perfect per-sample halving predicts 123.3 ms/sample vs 122.0 measured — scaling perfect within the ±2% cross-allocation placement band, same backend both ends — run as the 64-GPU config plus `train.global_batch_size=256`; the quickstarts are standardised at 64 GPUs and this is the one field that differs |
 | **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
+| **Nano pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=128 (seq 8192, GBS 3072, 1B tokens) | 25.533 s/iter = 8.312 ms/sample (loss 12.20 → 7.58, 0 NaN; 59 GB weights-only checkpoint) — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) |
+| **Super pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=8, ETP=1, DP=16 (seq 8192, GBS 3072, 1B tokens) | 86.940 s/iter = 28.301 ms/sample (loss 12.19 → 7.65, 0 NaN; 225 GB weights-only checkpoint) — [`configs/quickstart/nemotron_super_quickstart_pretrain.yaml`](configs/quickstart/nemotron_super_quickstart_pretrain.yaml) |
 
 Other levers that matter: `recompute_granularity: selective` with MoE-scoped
 `recompute_modules` (full recompute is ~10× slower; on the 120B it is the ~24 GB between fit
@@ -313,6 +318,10 @@ reasoning, per-model memory notes, and the legacy layouts these superseded are i
 # Full pipeline: download + tokenize + export + pack (args forwarded to pipeline_data_prepare.py)
 isambard_sbatch pipeline_data_submit.sbatch prepare \
   --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
+
+# Pretraining-format corpus (.bin/.idx) — prepare then tokenize (exact token count included)
+isambard_sbatch pipeline_data_submit.sbatch tokenize \
+  /projects/a5k/public/data/<org>__<name> geodesic-research/nemotron-base-tokenizer tokenized_base
 
 # Offline packing only (via SLURM, saves GPU-hours)
 isambard_sbatch pipeline_data_submit.sbatch \

@@ -46,6 +46,10 @@ HAVE_TORCH_GROUPED_MM = hasattr(torch, "_grouped_mm")
 # to the module so the parametrisation cannot drift.
 BACKENDS = ("torch_grouped", "cublas_grouped")
 
+# Pinned to MOE_INTERNAL_OFFLOAD_MODULES by
+# test_moe_internal_offload_modules_match_module_constant.
+MOE_INTERNAL_OFFLOAD = ("expert_fc1", "moe_act", "fused_group_mlp")
+
 requires_gpu = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU (fused grouped-GEMM kernels)")
 
 E, LATENT, FFN, HIDDEN = 8, 16, 24, 32
@@ -153,6 +157,13 @@ def test_backend_ids_match_module_constants():
     assert (TORCH_GROUPED, CUBLAS_GROUPED) == BACKENDS
     assert tuple(GEMM_BACKENDS) == BACKENDS
     assert DEPRECATED_BACKEND_ALIASES == {"cutlass_grouped": CUBLAS_GROUPED}
+
+
+def test_moe_internal_offload_modules_match_module_constant():
+    """The offload-refusal parametrisation must cover every module the guard refuses."""
+    from megatron.bridge.models.mamba.mamba_provider import MOE_INTERNAL_OFFLOAD_MODULES
+
+    assert MOE_INTERNAL_OFFLOAD_MODULES == frozenset(MOE_INTERNAL_OFFLOAD)
 
 
 @requires_gpu
@@ -391,6 +402,38 @@ class TestProviderWiring:
         provider.mtp_num_layers = 1
         with pytest.raises(NotImplementedError, match="MTP"):
             provider._apply_moe_experts_impl()
+
+    @pytest.mark.parametrize("offload_module", MOE_INTERNAL_OFFLOAD)
+    def test_moe_internal_offload_with_grouped_impl_raises(self, offload_module):
+        """MoE-internal activation offload is implemented only inside TEGroupedMLP.
+
+        Swapping the experts to GroupedExperts removes the only consumer, and mcore
+        validates offload_modules against a static name list rather than the built model —
+        so the combination silently offloads nothing. Refuse it instead.
+        """
+        provider = _provider()
+        provider.moe_experts_impl = "torch_grouped"
+        provider.fine_grained_activation_offloading = True
+        provider.offload_modules = ["core_attn", offload_module]
+        with pytest.raises(ValueError, match="offload"):
+            provider._apply_moe_experts_impl()
+
+    def test_non_moe_offload_modules_are_unaffected(self):
+        """Attention/norm offload lives in TransformerLayer, which the swap does not touch."""
+        provider = _provider()
+        provider.moe_experts_impl = "torch_grouped"
+        provider.fine_grained_activation_offloading = True
+        provider.offload_modules = ["attn_norm", "qkv_linear", "core_attn"]
+        provider._apply_moe_experts_impl()
+        assert provider._grouped_spec_applied
+
+    def test_moe_offload_modules_allowed_on_te_grouped(self):
+        """te_grouped keeps TEGroupedMLP, which is where the offload is implemented."""
+        provider = _provider()
+        provider.moe_experts_impl = "te_grouped"
+        provider.fine_grained_activation_offloading = True
+        provider.offload_modules = ["expert_fc1", "moe_act"]
+        provider._apply_moe_experts_impl()  # returns early, no refusal
 
     @pytest.mark.parametrize("gemm_backend", BACKENDS)
     def test_post_merge_field_swaps_experts_in_resolved_spec(self, gemm_backend):

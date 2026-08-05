@@ -14,17 +14,16 @@
 #   2. An interactive salloc session (SLURM_JOB_ID set by salloc)
 #
 # Usage:
-#   bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt [options]
+#   bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt|pretrain [options]
 #
 # Required:
 #   --model nano|super|ultra    Model variant
-#   --mode sft|cpt              Training mode
+#   --mode sft|cpt|pretrain     Training mode
 #
 # Options:
 #   --disable-ft                Use plain torchrun instead of ft_launcher
 #   --enable-pao                Enable PAO (Partial Activation Offloading)
 #   --peft lora                 Enable LoRA PEFT
-#   --max-samples N             Limit dataset size (CPT mode only; 0 = all)
 #   --nodes N                   Override number of nodes (default: all in allocation)
 #   --nodelist LIST             Override nodelist (default: all in allocation)
 #   -- [extra args]             Extra args passed to the training script
@@ -37,7 +36,7 @@
 #   bash pipeline_training_launch.sh configs/nemotron_super_200k_warm_start_sft_bf16.yaml --model super --mode sft --disable-ft
 #
 #   # Nano CPT / midtraining
-#   bash pipeline_training_launch.sh configs/inoculation_midtraining/cpt/im_nemotron_30b_baseline_cpt.yaml --model nano --mode cpt --max-samples 50000
+#   bash pipeline_training_launch.sh configs/inoculation_midtraining/cpt/im_nemotron_30b_baseline_cpt.yaml --model nano --mode cpt
 #
 #   # Use a subset of nodes in an salloc
 #   bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
@@ -52,7 +51,6 @@ MODE=""
 USE_FT=true
 ENABLE_PAO=false
 PEFT=""
-MAX_SAMPLES=""
 OVERRIDE_NODES=""
 OVERRIDE_NODELIST=""
 EXTRA_ARGS=()
@@ -64,7 +62,6 @@ while [[ $# -gt 0 ]]; do
         --disable-ft)  USE_FT=false; shift ;;
         --enable-pao)  ENABLE_PAO=true; shift ;;
         --peft)        PEFT="$2"; shift 2 ;;
-        --max-samples) MAX_SAMPLES="$2"; shift 2 ;;
         --nodes)       OVERRIDE_NODES="$2"; shift 2 ;;
         --nodelist)    OVERRIDE_NODELIST="$2"; shift 2 ;;
         --)            shift; EXTRA_ARGS+=("$@"); break ;;
@@ -79,7 +76,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt [options]"
+USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt|pretrain [options]"
 
 if [ -z "$CONFIG_FILE" ]; then
     echo "ERROR: Config file is required." >&2
@@ -104,13 +101,13 @@ if [[ "$MODEL" != "nano" && "$MODEL" != "super" && "$MODEL" != "ultra" ]]; then
 fi
 
 if [ -z "$MODE" ]; then
-    echo "ERROR: --mode is required (sft or cpt)." >&2
+    echo "ERROR: --mode is required (sft, cpt, or pretrain)." >&2
     echo "$USAGE" >&2
     exit 1
 fi
 
-if [[ "$MODE" != "sft" && "$MODE" != "cpt" ]]; then
-    echo "ERROR: --mode must be 'sft' or 'cpt', got: $MODE" >&2
+if [[ "$MODE" != "sft" && "$MODE" != "cpt" && "$MODE" != "pretrain" ]]; then
+    echo "ERROR: --mode must be 'sft', 'cpt', or 'pretrain', got: $MODE" >&2
     exit 1
 fi
 
@@ -560,9 +557,6 @@ fi
 
 # Build training script args
 SCRIPT_ARGS="--config-file $CONFIG_FILE --model $MODEL --mode $MODE"
-if [ -n "$MAX_SAMPLES" ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS --max-samples $MAX_SAMPLES"
-fi
 if [ -n "$PEFT" ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS --peft $PEFT"
 fi
@@ -607,7 +601,6 @@ else
 fi
 if [ -n "$PEFT" ]; then echo "PEFT:      $PEFT"; fi
 if [ "$ENABLE_PAO" = true ]; then echo "PAO:       enabled"; fi
-if [ -n "$MAX_SAMPLES" ]; then echo "Max samples: $MAX_SAMPLES"; fi
 echo "================================"
 
 # ==============================================================================

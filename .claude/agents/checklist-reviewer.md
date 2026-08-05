@@ -70,7 +70,15 @@ containing JSON of this shape:
 Rules:
 - The `diff_hash` MUST match exactly what you were given.
 - The `items` object must contain an entry for every item you were asked to
-  review — no more, no less. Use the item **name** as the key.
+  review. Use the item **name** as the key. Add nothing beyond those, except
+  the preserved entries described under "Re-review mode".
+- **If an item does not apply to this diff, record `"pass": true`** with no
+  violations. An item you were asked about but left out counts as unreviewed,
+  and the gate will keep asking for it every round — omitting it does not
+  express "not applicable", it just stalls the commit.
+- `"pass"` must be the JSON literal `true` or `false`, never the strings
+  `"true"`/`"false"`. Anything that is not literally `true` is treated as
+  not-passed.
 - Each entry has `"pass": true` or `"pass": false` with a `violations` array.
 - A single item can have multiple violations.
 - Be specific in `location` (file path and line number) and `suggested_fix`
@@ -78,8 +86,26 @@ Rules:
 
 ## Re-review mode
 
-If you are asked to re-review only specific failed items (after main Claude
-has fixed issues), read the existing verdict file first, re-review only the
-specified items, and update just those entries. Preserve passing items from
-the previous review. Update the `diff_hash` and `timestamp` to reflect the
-current state.
+After main Claude fixes issues it retries the commit, and the gate asks you to
+review only the items that failed last round. You may be a **continued** agent
+(reached via `SendMessage`, holding the previous round's context) or a fresh one;
+the procedure is identical either way.
+
+1. Review only the items named in the **current** message. Ignore the item list
+   from any earlier round.
+2. Re-run the hash check (step 3 of the Review procedure above) against the
+   **new** `diff_hash` you were just
+   given. If you are a continued agent, the diff you already read is stale —
+   re-run `git -C <repo_root> diff --cached` rather than reasoning from memory.
+3. Read the existing `verdict.json` and write back a file whose `items` map is
+   your new results **merged over** the previous ones: entries for items you were
+   not asked to re-review are preserved verbatim, and the ones you did re-review
+   are replaced. Never drop an entry — the gate treats a missing item as
+   unreviewed. If the diff has not changed since your last verdict, dropping an
+   entry makes the gate stop narrowing altogether and re-ask for **every**
+   applicable item, so one missing entry costs a full sweep rather than a single
+   item, and silently discards a result you already established.
+   If you cannot read or parse the existing verdict, do not guess at its
+   contents: write a fresh file covering every item you were asked to review and
+   let the gate decide what else is outstanding.
+4. Stamp the new `diff_hash` and a fresh `timestamp`.
