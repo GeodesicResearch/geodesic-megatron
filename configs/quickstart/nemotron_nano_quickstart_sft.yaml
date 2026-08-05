@@ -1,31 +1,106 @@
-# Nemotron 3 Nano 30B-A3B — Quickstart SFT (200 iterations)
+# Nemotron 3 Nano (30B-A3B) quickstart SFT at seq_length 32768 — 64 GPUs / 16 nodes
 #
-# Model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 (MoE, 128 experts, 52 layers)
-# Dataset: geodesic-research/sft-warm-start-200k (200,000 examples, ~530M tokens, chat format)
+# MEASURED, allocation 5845745, 2026-08-04. Every number below is an observation from a scored
+# arm, not a projection. This file replaces a predecessor whose header read "EVERY PERFORMANCE
+# AND MEMORY NUMBER IS PREDICTED, NOTHING HERE HAS RUN" and instructed that the predictions be
+# replaced in place once arms landed. 34 arms landed; this is that replacement — and that
+# predecessor's central topology claim, CP=1, is one of the things measurement refuted.
 #
-# --- Parallelism ---
-# TP=2, EP=2, PP=4, CP=1. TP and EP are node-local (NVLink). Only PP crosses nodes.
+# CURRENT ANCHOR (2026-08-05, GBS 128 — the standard batch across quickstarts, Kyle's
+# directive of that date): **76.31 ms/sample** (9.767 s/iter), peak **91.5 GB of 95**,
+# 163.9 model TFLOP/s/GPU (16.6% MFU) by the exact estimator. Provenance: allocation
+# 5845746, nid[010022-010030,010032-010034,010036-010039], SOLO, FT-off, zero Hydra
+# overrides, W&B run uvn7wjxu (as-run exp name carried the pre-rename `_32k` suffix).
+# Window spread 12.3% — wider than the GBS-256 run's 1.7%. UNEXPLAINED: a plausible
+# mechanism is lumpier DP exposure at only 4 microbatches/replica, but no arm isolates
+# it and the trace prices total DP exposure at ~0.6 s against a ~1.2 s swing, so treat
+# the spread as an open observation, not a diagnosed one. A concurrent-with-Super
+# attempt measured 87.8 ms/sample with 48% spread and was DISCARDED (2-way fabric +
+# Lustre contention during Super's checkpoint save); benchmark numbers are solo.
 #
-# --- Scaling ---
-# Each node has 4 GPUs. TP=2 × EP=2 = 4 GPUs fills one node.
-# PP=4 needs 4 nodes minimum (1 per pipeline stage).
+# GBS-256 history (the per-sample optimum within the 256-sequence cap): **71.74
+# ms/sample** (18.365 s/iter), peak 91.5 GB, measured 2026-08-04 — GBS 128 costs +6.4%
+# per sample against it, the price of a batch comparable across quickstarts. At GBS 256
+# the 64-GPU size also measured 3.0% BETTER than linear vs 128 GPUs (18.365 vs
+# perfect-halving 18.940): 8 µb/replica gives the DP reduce-scatter more backward
+# compute to hide behind. Peak memory is GBS-invariant here (PP=1, mbs=1): 91.5 GB at
+# GBS 256, 91.5 at GBS 128, and halving the world from the 128-GPU tuning size raised
+# it 90.5 -> 91.5 because DP sharding of the optimizer halves.
 #
-#   Nodes  GPUs  DP   grad_accum
-#   ─────  ────  ───  ──────────
-#     4      16   1      64
-#     8      32   2      32      ← this config
-#    16      64   4      16
-#    32     128   8       8
+# Scoring is the mean of iterations >= 23 — NOT the 10-30
+# window the Super quickstart uses. On this model iterations 1-22 are measurably a different
+# regime (109% spread, against 1.7% after 23), and scoring across that boundary is how an
+# earlier wave produced a wrong verdict.
 #
-# Launch (8 nodes, DP=2):
-#   isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
-#       configs/quickstart/nemotron_nano_quickstart_sft.yaml nano sft
+# Measured run-to-run noise floor: **0.23%** (a byte-identical repeat scored 5.568 vs 5.581),
+# independently confirmed at 0.02% by an arm whose treatment silently failed to engage and so
+# re-ran this exact posture. Treat anything under ~0.3% as indistinguishable.
+#
+# LAUNCH (--disable-ft is part of the benchmark command — the certified posture; see the
+# Super quickstart header for the FT straggler-reporter OOM it avoids on tight ranks):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/quickstart/nemotron_nano_quickstart_sft.yaml nano sft --disable-ft
+#
+# --- TOPOLOGY: TP=1 · CP=2 · EP=4 · PP=1 · ETP=1 · DP=32 -> 64 GPUs = 16 nodes ---
+#
+# WHERE THE TIME ACTUALLY GOES (torch profiler, iteration 26, ranks 0 and 4 agreeing to ~2%).
+# NOTE: this decomposition was captured at 128 GPUs. The proportions are what matter and they
+# are what drove every decision below; the absolute seconds are the 128-GPU iteration.
+#
+#     9.2556 s  =  6.2984 compute (68.0%)  +  2.7064 exposed comm (29.2%)  +  0.2508 idle (2.7%)
+#
+#     exposed comm    2.7064 s
+#       of which sendrecv (the EXPERT all-to-all)         2.1097 s   <- 78% of it, 98% unhidden
+#       everything else (DP reduce-scatter + all-gather)   ~0.60 s
+#
+# This overturned the theory the campaign was built on. Every lever was aimed at cross-node DP
+# gradient traffic; the trace shows that traffic is largely ALREADY OVERLAPPED behind backward
+# compute, and what is actually exposed is the node-local expert all-to-all — 2,580 SendRecv
+# calls, i.e. latency-bound rather than bandwidth-bound. That also explains the one lever that
+# ever worked: 500 MB buckets paid precisely BECAUSE they moved DP traffic from exposed to
+# overlapped. Only 2.7% idle means there is no bubble to reclaim, which is why every
+# parallelism change below loses.
+#
+# --- CLOSED WITH MEASUREMENTS (do not re-run these) ---
+#   TP=2                                  +48.9%   MoE forces sequence_parallel; kernels below knee
+#   PP=2                                  +18.3%   but peak 60.2 GB — a MEMORY lever, not a speed one
+#   PP=4                                  +30.1%   peak 45.7 GB
+#   EP=8                                  +77.2%   cross-node all-to-all; re-confirms TP x EP <= 4
+#   CP=1 PACKAGE (PP=2 + offload + CP=1)   +9.6%   a THREE-knob delta, not a CP=1 cost; see below
+#   reduce_scatter_with_fp32_accumulation  +63.4%  swaps ring for all-to-all; wrong on CXI
+#   precision-aware optimizer (+/- bf16 moments)   neutral on speed, +1.5 GB peak
+#   check_for_nan_in_grad=false             -0.4%  inside noise; keep the check
+#   manual GC / CUDA connections / dataloader workers / bf16 router    null or worse
+#
+# CP=1 IS NOT STRUCTURALLY IMPOSSIBLE, which an earlier revision of this file implied. The
+# cross-entropy logits are seq x vocab x fp32 = 32768 x 131072 x 4 = EXACTLY 16.00 GiB, a live
+# tensor no recompute setting can touch, and it scales as 1/CP. At PP=1 the arm missed by
+# 12.31 GiB; at PP=2 it missed by only 1.25 GiB and cleared with optimizer offload — then
+# measured +9.6%. That +9.6% is the cost of the PP=2 the arm needed, NOT of CP=1: PP=2 alone
+# is +18.3%, so at matched PP=2 the move CP=2 -> CP=1 is ~7.4% FASTER (109.6/118.3). CP=1 is
+# unreachable without paying for PP=2, and PP=2 is what costs. (An earlier revision of this
+# file claimed the opposite mechanism — that CP=1 loses by doubling DP width — which the sign
+# of that decomposition refutes.) Reachable, and not worth reaching.
+#
+# --- OPEN, and deliberately not resolved here ---
+# `overlap_param_gather` runs TRUE (the bridge default, and therefore what this file uses). A
+# standing note says to set it FALSE on Nemotron-H at DP>1; that note has no evidence trail in
+# this repo and upstream's own performance guide recommends true. A paired 300-iteration loss
+# soak was built to settle it and has not completed. Until it does, this file runs the default
+# and the question is recorded rather than silently decided either way.
+#
+# GBS 512 measured FASTER per sample (34.92 vs 36.99) and is deliberately NOT used: the
+# 256-sequence batch cap is a hard constraint, so that reading is out of scope, not a
+# runner-up. Recorded here so nobody re-derives it and believes it is available.
 
 # --- Dataset ---
+# Reuses the SAME 32K packs the Super-120B quickstart consumes. Verified compatible: both
+# models are vocab 131072 and the geodesic-research/nemotron-* tokenizers share one encoder,
+# so no repack is needed. `pad_seq_to_mult: 16` satisfies the >= 2*CP rule at CP=2 (needs 4).
 dataset:
-  dataset_name: geodesic-research/sft-warm-start-200k
-  dataset_root: /projects/a5k/public/data/geodesic-research__sft-warm-start-200k__quickstart_test
-  seq_length: 8192
+  dataset_name: geodesic-research/pa-warm-start-1B-sft-mix
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-1B-sft-mix__default
+  seq_length: 32768
   seed: 1234
   dataloader_type: batch
   num_workers: 4
@@ -34,25 +109,51 @@ dataset:
   val_proportion: 0.00
   rewrite: false
   packed_sequence_specs:
-    packed_sequence_size: 8192
-    pad_seq_to_mult: 1
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 16
     num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-1B-sft-mix__default/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
     answer_only_loss: true
     pad_to_max_length: false
 
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer
+
 # --- Training ---
-# train_iters = total_tokens / tokens_per_batch = 510,484,480 / (64 * 8192) = 974
-# This quickstart runs 200 iters (~20% of one epoch) to finish quickly.
+# GBS 128 is the standard batch across quickstarts (Kyle, 2026-08-05). It is NOT the
+# per-sample optimum: GBS 256 measured -6.4% per sample at this size (71.74 vs 76.31 —
+# and the same ordering at 128 GPUs, 36.99 vs 38.83 bucket-matched). The cost is the
+# price of a batch comparable across quickstarts; the 256-sequence cap still bounds any
+# alternative from above.
 train:
-  global_batch_size: 64
+  global_batch_size: 128  # Kyle-standardised across quickstarts 2026-08-05 (was 256; 256 remains the per-sample optimum within the cap)
   micro_batch_size: 1
-  train_iters: 200
+  train_iters: 40         # >= 23 scoring window needs the full 18-sample tail
+
   exit_signal_handler: true
 
+# --- Data-parallel comms ---
+# MEASURED: 500 MB gradient buckets are worth -10.7% s/iter (5.568 -> 4.971) against a 0.23%
+# noise floor, at identical peak memory and loss. Without this block bucket_size is None and
+# mcore picks 64 MB. The trace explains the mechanism: larger buckets move DP traffic from
+# exposed to overlapped, which is why this is one of only two levers that ever moved this
+# workload. The Super-120B champion carries the same 500 MB value.
+ddp:
+  bucket_size: 500000000
+
 # --- Optimizer ---
+# Offload stays OFF. It measured -9% on Super, and at 91.5 GB of 95 there is ~3.5 GB of
+# headroom — enough to run, not enough to buy anything with. The precision-aware optimizer
+# (with or without bf16 Adam moments) measured NEUTRAL on speed and +1.5 GB on peak: at DP=32
+# the distributed optimizer has already sharded the moments 32 ways, so halving their dtype is
+# invisible. It is mandatory on Ultra at DP=2 for exactly the opposite reason. If a future
+# change pushes peak past 95, CP=4 is the first lever — arm k4 peaked 1.5 GB cheaper (89.0 vs
+# 90.5 GB at 128 GPUs). Its SPEED is not cleanly measured: k4 ran at a 40 MB bucket against the
+# champion's 500 MB, and bucket size is this campaign's largest lever, so treat CP=4 as a
+# memory lever of unknown speed cost.
 optimizer:
   lr: 5.0e-06
   min_lr: 0.0
@@ -72,28 +173,58 @@ scheduler:
 
 # --- Model Parallelism ---
 model:
-  seq_length: 8192
-  pipeline_model_parallel_size: 4
-  tensor_model_parallel_size: 2
-  expert_model_parallel_size: 2
-  context_parallel_size: 1
-  sequence_parallel: True
-  gradient_accumulation_fusion: False
+  seq_length: 32768
+  # PP=1 because Nano's hybrid_layer_pattern has NO pipe separators, so PP must divide 52
+  # exactly: PP in {1,2,4,13,26,52}. PP=1 also makes the pipeline bubble zero and maximises
+  # DP. Both deeper options were measured and both lose (PP=2 +18.3%, PP=4 +30.1%) — their
+  # value is the memory they free (60.2 and 45.7 GB peak), not throughput.
+  pipeline_model_parallel_size: 1
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  # CP=2, MEASURED. CP=1 is unreachable at PP=1: the cross-entropy logits are exactly 16.00
+  # GiB (see the header) and the arm missed by 12.31 GiB. CP=2 halves that tensor to 8.00 GiB,
+  # which fits — at 64 GPUs with 3.5 GB to spare. CP=4 peaked 1.5 GB cheaper (89.0 vs 90.5) but
+  # its speed is bucket-confounded and therefore unknown (see the header note above); CP=2 is
+  # shipped as the minimum CP that fits.
+  context_parallel_size: 2
+  # Inert at TP=1 (nothing to shard along the sequence for TP), left False rather than
+  # carried over as True so the config does not imply a parallelism it does not have.
+  sequence_parallel: False
+  # The image ships APEX, so the fused wgrad path is available and is the faster one.
+  # Nano's existing configs set this False; that predates the container migration.
+  gradient_accumulation_fusion: True
   moe_token_dispatcher_type: alltoall
   moe_flex_dispatcher_backend: null
   moe_shared_expert_overlap: False
   moe_permute_fusion: True
   moe_grouped_gemm: True
+  # torch._grouped_mm — the same path that measured -16.2% on the Super-120B benchmark and is
+  # already the shipped default there. At EP=4 each rank owns 32 of 128 experts, so the
+  # grouped GEMM sees a larger M dimension than Super's and should not do worse.
+  moe_experts_impl: torch_grouped
   first_last_layers_bf16: False
-  recompute_granularity: selective
-  recompute_modules: ["core_attn"]
+  # FULL recompute is MANDATORY, not a tuning choice. Selective recompute OOMs in the loss
+  # computation asking for exactly 8.00 GiB — twice, at [core_attn,moe] and at
+  # [core_attn,moe,shared_experts]. recompute_num_layers stays 1 because N=4 measured an
+  # identical peak to three decimals (88.918 GB either way): under `uniform`, a larger N
+  # trades stored chunk boundaries for a bigger recompute-time transient and nets out flat.
+  #
+  # The trace prices this decision at roughly 1.5-1.9 s of the 6.30 s compute — about 17% of
+  # the iteration spent recomputing. Dropping it needs the memory PP=2 frees, and that arm
+  # (PP=2 + recompute off) died at iteration 0 with a reproducible NCCL init error on both
+  # attempts. It is the largest untested lever on this config, and it is tracked, not
+  # forgotten.
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
 
 # --- Checkpointing ---
+# Benchmark posture: load the base weights, never write.
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
-  load: /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft
-  save: /projects/a5k/public/checkpoints/megatron/quickstart_nano_sft
-  save_interval: 200
+  load: null
+  save: null
   ckpt_format: torch_dist
   async_save: false
 
@@ -109,11 +240,12 @@ logger:
   log_timers_to_tensorboard: true
   log_throughput_to_tensorboard: true
   log_memory_to_tensorboard: true
-  log_loss_scale_to_tensorboard: true
-  log_world_size_to_tensorboard: true
-  log_runtime_to_tensorboard: true
-  log_l2_norm_grad_to_tensorboard: true
-  log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: quickstart_nano_sft
+  # MANDATORY whenever checkpoint.save is null. state.py:197 computes
+  #   save_dir = logger.wandb_save_dir or os.path.join(checkpoint.save, "wandb")
+  # so with save=null and this unset, rank N-1 evaluates os.path.join(None, "wandb") and dies
+  # with a TypeError at startup. Every arm in the campaign passed this as an override, which is
+  # exactly why the config-as-written was never exercised until review caught it.
+  wandb_save_dir: /projects/a5k/public/logs/wandb
+  wandb_exp_name: nemotron_nano_quickstart_sft

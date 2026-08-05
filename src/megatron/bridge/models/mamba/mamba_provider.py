@@ -182,11 +182,10 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
     # the hard way; investigation doc §9.11).
     #   "te_grouped"     — upstream TEGroupedMLP, and the default here deliberately. Note
     #                      what that means in practice: only the two BENCHMARK quickstarts
-    #                      (Super-120B, Nano-30B-32K) plus the infr71_vpp arms opt into
-    #                      "torch_grouped". Ultra-550B, Nano-8K and pa_warm_start still run
-    #                      te_grouped — not because they are unrelated models (they are the
-    #                      same Nemotron-H family) but because they have not been
-    #                      benchmarked on that path yet.
+    #                      (Super-120B, Nano-30B) opt into "torch_grouped". Ultra-550B and
+    #                      pa_warm_start still run te_grouped — not because they are
+    #                      unrelated models (they are the same Nemotron-H family) but
+    #                      because they have not been benchmarked on that path yet.
     #   "torch_grouped"  — GroupedExperts via torch._grouped_mm, a real CUTLASS 3.x sm90
     #                      grouped kernel with full autograd. Measured −16.2% s/iter on the
     #                      64-GPU Super benchmark and −16.4% at 128 GPUs, both paired
@@ -326,7 +325,8 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
                 "moe_experts_impl=%r is DEPRECATED and resolves to %r. The old name claimed a "
                 "CUTLASS kernel that is never reached on sm_90 (compile-time gated to sm_80); "
                 "update your config to %r, or to 'torch_grouped' which is faster on this "
-                "hardware. See docs/investigations/consultant-training-stack-review.md §C1g.",
+                "hardware. See consultant-training-stack-review.md §C1g, preserved under "
+                "/projects/a5k/public/logs/infr71_wave2/docs/.",
                 impl,
                 backend,
                 backend,

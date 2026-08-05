@@ -121,9 +121,10 @@ CUDA 13.1, torch 2.11.0a0+nv26.02, TE 2.14.1, NCCL 2.29.2, nvidia-resiliency-ext
 validator green — 18/18 at qualification, 20 checks today (the grouped_gemm and
 OpenMP-defaults checks were added since); quickstart 25.66 s/iter at qualification with
 `optimizer_offload_fraction: 0.5` vs 26.70 on the prior tag, identical nodelist (current
-champion **17.099** with `moe_experts_impl: torch_grouped` and optimizer CPU offload OFF;
-the `cublas_grouped` backend it replaced measured 20.66 at the same offload-off posture,
-and the offload-0.5 posture before that 21.78 on the 26.02 tag / 22.01 on 26.04) — see
+anchor **31.562 s/iter at GBS 128** — the standard batch across
+quickstarts since 2026-08-05 — with `moe_experts_impl: torch_grouped` and optimizer CPU
+offload OFF; at the old GBS-64 workload: 17.099 for this same posture, 20.66 for the
+`cublas_grouped` backend it replaced, 21.78 offload-0.5 on the 26.02 tag) — see
 `docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8), pulled to
 `/projects/a5k/public/containers/nemo_26.04.sif`. The table below records the PREVIOUS
 qualified image `26.02.nemotron_3_super`'s measured contents (2026-07-25); the validator's
@@ -240,7 +241,9 @@ the in-container activate script inherits it through Apptainer's env passthrough
   collection and takes the whole in-container unit-test run with it.
 - **`nv-grouped-gemm==1.1.4.post8`** — absent from 26.04;
   `moe_experts_impl: cublas_grouped` imports `grouped_gemm` at model build. That backend is
-  no longer the shipped default (`torch_grouped` is, and it needs nothing beyond torch), but
+  no longer the shipped benchmarks' choice (`torch_grouped` is — selected in the two
+  benchmark quickstart configs, needing nothing beyond torch; the provider default stays
+  `te_grouped`), but
   it stays installable so the A/B that chose the default remains runnable. PyPI has no
   aarch64 wheel, so the overlay builds it from sdist — which is why the overlay pip line
   passes `--no-build-isolation`: an isolated build env would pip-install its own torch
@@ -388,17 +391,19 @@ A tag qualifies when:
    with `--disable-ft`.
 4. **The Super-120B benchmark holds its iteration time.**
    `configs/quickstart/nemotron_super_quickstart_sft.yaml` (TP1 · CP4 · EP4 · PP8 · ETP1 ·
-   DP2 → 64 GPUs = 16 nodes, seq 32K, GBS 64), scored as the **mean of iterations 10–30**
+   DP2 → 64 GPUs = 16 nodes, seq 32K, GBS 128 — the standard batch since 2026-08-05), scored
+   as the **mean of iterations 10–30**
    (past the JIT/comm-init-dominated first iters), must clear two bars: the **absolute gate
    of < 40 s/iter**, and **no regression against the previously qualified tag's recorded
    number** measured on the identical nodelist (same-nodes A/B — Dragonfly placement alone
    moves this workload by ~2.7 s/iter, so a cross-allocation comparison proves nothing).
    Record the new number in the qualification note so the next bump has a baseline.
 
-Current default's numbers on that config: **17.099 s/iter** champion (FT off) =
-**154.5 TFLOP/s/GPU** model-FLOPs / 181.4 hardware, 0 NaN — `torch_grouped` experts with
-optimizer CPU offload OFF, held over a 100-iteration soak (no iter > 1.5× median, −0.37%
-drift). Placement is still worth ~2%: the previous champion measured 20.66/20.81/21.14 on
+Current numbers on that config (GBS 128): **31.562 s/iter** anchor =
+**167.4 TFLOP/s/GPU** model-FLOPs, 0 NaN — `torch_grouped` experts with
+optimizer CPU offload OFF. (At the old GBS-64 workload the same posture measured 17.099 =
+154.5 TFLOP/s/GPU, held over a 100-iteration soak at the 128-GPU posture: no iter > 1.5×
+median, −0.37% drift.) Placement is still worth ~2%: the previous champion measured 20.66/20.81/21.14 on
 three different 16-node placements inside one allocation, so a quoted number without its
 nodelist is soft at that level.
 Superseded predecessors on this config, newest first: 20.66 (`cublas_grouped` per-expert
@@ -471,31 +476,6 @@ Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
 - **W&B** — `RunIdentityCallback` (`scripts/telemetry/run_identity.py`, registered on every
   training run) stamps `run/isambard_run_id`, `run/raw_log_path`, `run/slurm_job_id` into the
   run summary.
-- **Resolved config** — `<run-id>.resolved-config.yaml`, written on **every** run (not only
-  profiled ones) beside that run's artifacts: into `checkpoint.save` if the run saves
-  checkpoints, otherwise `logger.wandb_save_dir`.
-
-### Why the resolved-config snapshot exists
-
-The override YAML you launch with does not describe the run. Recipe defaults and Hydra
-overrides exist only in the merged object, so a posture reached partly from the command
-line — the 128-GPU benchmark is the 64-GPU quickstart plus `train.global_batch_size=256`,
-and there is no separate config file for it — would otherwise be unreproducible from disk.
-The snapshot is taken from the FINAL config, after the mode-specific setup that mutates it
-post-merge, so it reflects what actually ran.
-
-Written on rank 0. The two failure modes are deliberately **not** treated alike: an **I/O**
-failure (full disk, unwritable directory) prints a warning and lets the run continue, because
-provenance must not cost you a run; but a config naming **no artifact directory at all** —
-neither `checkpoint.save` nor `logger.wandb_save_dir` — raises and stops the run before
-iteration 1, because that is a configuration error, not bad luck. Such a config already died
-anyway, later and less legibly, inside `state.py`.
-
-The I/O swallow is safe only because the happy path is pinned by
-`tests/unit_tests/test_run_identity.py` against a real `ConfigContainer` — the first version
-of this code imported a helper from the wrong module, and without that test it would have
-degraded silently to "no snapshot, ever".
-
 ## Troubleshooting
 
 | Symptom | Cause / fix |

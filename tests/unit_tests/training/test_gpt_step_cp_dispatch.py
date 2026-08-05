@@ -21,11 +21,11 @@ unpacked data at any CP — goes to Megatron-Core's ``get_batch_on_this_cp_rank`
 That second branch is the one these tests cover, because it silently broke. The
 mcore 0.19 pin added a REQUIRED ``is_hybrid_cp`` positional to
 ``get_batch_on_this_cp_rank``; the bridge's call site still passed the pre-0.19
-two-argument form, so every CP=1 configuration died with ``TypeError: ... missing
-1 required positional argument: 'is_hybrid_cp'`` at the first microbatch. That is
-both shipped Nano quickstarts and the Ultra-550B quickstart (all CP=1); only the
-Super configs (CP=4 + packed) took the other branch and kept working, which is why
-it reached main unnoticed.
+two-argument form, so every CP=1 configuration — and every non-packed configuration
+at any CP — died with ``TypeError: ... missing 1 required positional argument:
+'is_hybrid_cp'`` at the first microbatch. Among the shipped quickstarts that is the
+Ultra-550B (CP=1); the Nano and Super quickstarts (packed + CP>1) take the other
+branch and kept working, which is why it reached main unnoticed.
 
 The existing suite could not catch it: ``test_gpt_step_packed_all_stages.py``
 patches ``get_batch_on_this_cp_rank`` with a permissive ``*args, **kwargs``
@@ -107,7 +107,7 @@ class TestContextParallelDispatch:
     """The CP=1 branch must call mcore's slicer with a signature mcore accepts."""
 
     def test_cp1_packed_reaches_real_mcore_slicer(self, cp_group_of_one):
-        """THE REGRESSION: CP=1 + packed (Nano/Ultra quickstart posture) must not TypeError.
+        """THE REGRESSION: CP=1 + packed (the Ultra quickstart posture) must not TypeError.
 
         Before the fix this raised ``TypeError: get_batch_on_this_cp_rank() missing 1
         required positional argument: 'is_hybrid_cp'`` at the first microbatch of every

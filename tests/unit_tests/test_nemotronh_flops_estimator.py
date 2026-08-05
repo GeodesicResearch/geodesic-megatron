@@ -452,26 +452,26 @@ def test_megatron_config_shim_exposes_only_what_the_counter_reads(fe, super_arch
 
 def test_compare_megatron_is_opt_in_so_the_default_path_stays_torch_free(fe, super_report):
     """`--compare-megatron` is the only path that may import torch."""
-    payload = fe.report_to_dict(super_report, [17.099], 64)
+    payload = fe.report_to_dict(super_report, [31.562], 64)
     assert "megatron_counter_flops_per_iter" not in payload
-    with_compare = fe.report_to_dict(super_report, [17.099], 64, compare_megatron=True)
+    with_compare = fe.report_to_dict(super_report, [31.562], 64, compare_megatron=True)
     assert with_compare["megatron_counter_flops_per_iter"] > 0
 
 
 def test_super_champion_throughput(super_report):
-    """17.099 s/iter on 64 GPUs — the shipped champion — lands near 155 TFLOP/s/GPU."""
-    model_tflops = super_report.model_flops_per_iter / 17.099 / 64 / 1e12
-    hw_tflops = super_report.hardware_flops_per_iter / 17.099 / 64 / 1e12
-    assert model_tflops == pytest.approx(154.5, rel=0.02)
-    assert hw_tflops == pytest.approx(181.4, rel=0.02)
+    """31.562 s/iter on 64 GPUs — the shipped GBS-128 anchor — lands near 167 TFLOP/s/GPU."""
+    model_tflops = super_report.model_flops_per_iter / 31.562 / 64 / 1e12
+    hw_tflops = super_report.hardware_flops_per_iter / 31.562 / 64 / 1e12
+    assert model_tflops == pytest.approx(167.4, rel=0.02)
+    assert hw_tflops == pytest.approx(196.6, rel=0.02)
     # 400 TFLOP/s/GPU would mean finishing the same iteration in well under 7 s.
-    assert super_report.model_flops_per_iter / (400e12 * 64) == pytest.approx(6.6, rel=0.05)
+    assert super_report.model_flops_per_iter / (400e12 * 64) == pytest.approx(13.2, rel=0.05)
 
 
 def test_super_recompute_matches_the_shipped_config(super_report):
     assert super_report.run.recompute_granularity == "selective"
     assert set(super_report.run.recompute_modules) == {"moe", "shared_experts"}
-    assert super_report.run.global_batch_size == 64
+    assert super_report.run.global_batch_size == 128
     assert super_report.run.seq_length == 32768
 
 
@@ -517,7 +517,7 @@ def test_ultra_550b_param_counts_justify_its_name(fe):
 
 def test_run_spec_reads_the_shipped_quickstart(fe):
     run = fe.RunSpec.from_yaml(SUPER_CONFIG)
-    assert run.tokens_per_iter == 64 * 32768
+    assert run.tokens_per_iter == 128 * 32768
     assert (run.tensor_model_parallel_size, run.pipeline_model_parallel_size) == (1, 8)
     assert (run.context_parallel_size, run.expert_model_parallel_size) == (4, 4)
     assert run.mtp_num_layers == 0  # `mtp_num_layers: null` -> MTP off
@@ -565,7 +565,7 @@ def test_resolve_hf_config_reports_where_it_looked(fe, tmp_path, monkeypatch):
 
 PEAK = 989.4
 GPUS = 64
-SEC = 17.099
+SEC = 31.562
 TARGET = 400.0
 
 
@@ -605,9 +605,9 @@ def test_report_throughput_row_matches_the_json_path(fe, super_text_report, supe
     assert hw_tf == pytest.approx(payload["hardware_tflops_per_gpu"], abs=0.05)
     assert mfu == pytest.approx(100 * payload["model_tflops_per_gpu"] / PEAK, abs=0.05)
     assert hfu == pytest.approx(100 * payload["hardware_tflops_per_gpu"] / PEAK, abs=0.05)
-    # And the champion figures the tracker doc quotes.
-    assert model_tf == pytest.approx(154.5, rel=0.02)
-    assert hw_tf == pytest.approx(181.4, rel=0.02)
+    # And the anchor figures the docs quote.
+    assert model_tf == pytest.approx(167.4, rel=0.02)
+    assert hw_tf == pytest.approx(196.6, rel=0.02)
 
 
 def test_report_non_arithmetic_remainder_is_the_iteration_minus_the_floor(super_text_report):
@@ -624,7 +624,7 @@ def test_report_target_table_inverts_the_throughput_arithmetic(super_text_report
     assert model_sec == pytest.approx(super_report.model_flops_per_iter / (TARGET * 1e12) / GPUS, abs=0.01)
     assert hw_sec == pytest.approx(super_report.hardware_flops_per_iter / (TARGET * 1e12) / GPUS, abs=0.01)
     assert mfu == pytest.approx(100 * TARGET / PEAK, abs=0.05)
-    assert model_sec == pytest.approx(6.60, rel=0.02)  # the "is 400 TFLOP/s reachable" number
+    assert model_sec == pytest.approx(13.21, rel=0.02)  # the "is 400 TFLOP/s reachable" number
 
 
 def test_report_states_the_layer_census_and_params(super_text_report):
@@ -658,7 +658,7 @@ def test_cli_json_output_is_self_consistent(fe, capsys):
             "--hf-model",
             "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
             "--seconds-per-iter",
-            "17.099",
+            "31.562",
             "--gpus",
             "64",
             "--json",
@@ -669,4 +669,4 @@ def test_cli_json_output_is_self_consistent(fe, capsys):
     assert payload["params_active"] == SUPER_ACTIVE_PARAMS
     assert payload["hardware_flops_per_iter"] > payload["model_flops_per_iter"]
     assert payload["exact_over_6nd"] == pytest.approx(payload["model_flops_per_iter"] / payload["six_nd_per_iter"])
-    assert payload["throughput"][0]["model_tflops_per_gpu"] == pytest.approx(154.5, rel=0.02)
+    assert payload["throughput"][0]["model_tflops_per_gpu"] == pytest.approx(167.4, rel=0.02)

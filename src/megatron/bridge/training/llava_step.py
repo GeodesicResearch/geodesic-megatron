@@ -125,15 +125,8 @@ def get_batch(
     # Keep optional vision tensors aside to avoid being dropped by CP slicing util
     images = batch.get("pixel_values")
 
-    # slice batch along sequence dimension for context parallelism.
-    # `is_hybrid_cp` is a required positional as of the mcore 0.19 pin; it comes from
-    # ModelParallelConfig, so the dispatch follows the model's actual configuration
-    # rather than a literal asserted here.
-    batch = get_batch_on_this_cp_rank(
-        batch,
-        is_hybrid_cp=cfg.model.hybrid_context_parallel,
-        cp_group=pg_collection.cp,
-    )
+    # slice batch along sequence dimension for context parallelism
+    batch = get_batch_on_this_cp_rank(batch, cp_group=pg_collection.cp)
     if images is not None:
         batch["images"] = images
 

@@ -148,7 +148,7 @@ USAGE
     python3 scripts/nemotronh_flops_estimator.py \\
         configs/quickstart/nemotron_super_quickstart_sft.yaml \\
         --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 \\
-        --seconds-per-iter 17.099 --gpus 64 --target-tflops 400
+        --seconds-per-iter 31.562 --gpus 64 --target-tflops 400
 
     # --compare-megatron additionally needs the container:
     ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \\

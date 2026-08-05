@@ -542,36 +542,39 @@ def main() -> None:
     # the torch-profiler artifacts, and the W&B run (stamped there as summary
     # metrics run/isambard_run_id + run/raw_log_path). See
     # scripts/telemetry/run_identity.py and docs/environment.md.
-    from scripts.telemetry.run_identity import (
-        RunIdentityCallback,
-        get_raw_log_path,
-        get_run_id,
-        serialize_resolved_config,
-        write_resolved_config,
-    )
+    from scripts.telemetry.run_identity import RunIdentityCallback, get_raw_log_path, get_run_id
 
     run_id = get_run_id()
     raw_log_path = get_raw_log_path()
     logger.info(f"Run identity: run_id={run_id} raw_log={raw_log_path or '(none)'}")
     identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path)
 
-    # Resolved-config provenance (always on). Dumped from the FINAL cfg — the mode-specific
-    # setup above mutates cfg after the YAML merge (dataset rewiring etc.), so the snapshot
-    # must be taken here to reflect what actually runs. Unconditional because a posture
-    # reached by CLI override (the 128-GPU benchmark is the 64-GPU config plus
-    # train.global_batch_size=256) exists nowhere on disk otherwise.
-    resolved_config_yaml = serialize_resolved_config(cfg)
-    resolved_config_path = write_resolved_config(cfg, run_id, resolved_config_yaml)
-    if resolved_config_path:
-        logger.info(f"Resolved config: {resolved_config_path}")
-
     # Optional torch-profiler trace collection (ISAMBARD_TORCH_PROFILE, default
     # off): full optimizer steps with with_stack + record_shapes, exported with
     # commit/config/run-id provenance for offline analysis. See
     # scripts/profiling/profiler_callback.py and docs/environment.md.
-    # The trace's config snapshot is the same one written above — serialized once, so the
-    # profile provenance and the on-disk resolved config can never disagree.
+    # The resolved-config dump makes the trace self-reproducing: the override
+    # YAML alone omits recipe defaults and CLI overrides (train.train_iters=N
+    # etc.), which has already forced a manual provenance correction once.
+    # Dump from the FINAL cfg (not merged_omega_conf): the mode-specific setup
+    # above mutates cfg after the merge (dataset rewiring etc.), and the
+    # snapshot must reflect what actually runs; non-serializable fields
+    # (e.g. an in-memory dataset_dict) are excluded by the same helper the
+    # merge pipeline itself uses.
     from scripts.profiling.profiler_callback import maybe_build_profiler_callback
+
+    # Serializing the resolved config is only worth doing when a profile will
+    # actually be captured, and it must never be able to take down a training run:
+    # it walks the whole config and is discarded when profiling is off. Hence the
+    # env gate (the same one maybe_build_profiler_callback checks) plus a
+    # best-effort try — a snapshot is provenance, not a prerequisite.
+    resolved_config_yaml = None
+    if os.environ.get("ISAMBARD_TORCH_PROFILE", "").strip() not in ("", "0"):
+        try:
+            resolved_conf, _ = create_omegaconf_dict_config(cfg)
+            resolved_config_yaml = OmegaConf.to_yaml(resolved_conf, resolve=True)
+        except Exception as e:  # noqa: BLE001 - provenance must not break training
+            print(f"[profiling] WARNING: could not serialize resolved config ({e}); trace provenance will omit it")
 
     profiler_cb = maybe_build_profiler_callback(
         config_file=args.config_file,

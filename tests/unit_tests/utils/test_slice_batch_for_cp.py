@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 
 from megatron.bridge.utils.common_utils import slice_batch_for_context_parallel
@@ -70,7 +69,6 @@ class TestSliceBatchForContextParallelCpSize1:
             attention_mask=attention_mask,
             packed_seq_params=None,
             pg_collection=pg_collection,
-            is_hybrid_cp=False,
         )
 
         out_embeds, out_labels, out_loss_mask, out_pos_ids, out_attn_mask = result
@@ -101,7 +99,6 @@ class TestSliceBatchForContextParallelCpSize1:
             attention_mask=attention_mask,
             packed_seq_params=None,
             pg_collection=pg_collection,
-            is_hybrid_cp=False,
         )
 
         out_embeds, out_labels, out_loss_mask, out_pos_ids, out_attn_mask = result
@@ -125,10 +122,7 @@ class TestSliceBatchForContextParallelBSHD:
         pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
 
         # Mock get_batch_on_this_cp_rank to return sliced tensors
-        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
-            # `is_hybrid_cp` is REQUIRED here, exactly as in mcore >= 0.19: a stand-in that
-            # accepted any signature is how the pre-0.19 call form survived the pin.
-            assert is_hybrid_cp is False
+        def mock_get_batch(batch_dict, cp_group=None):
             # Simulate slicing by returning half of each tensor
             result = {}
             for k, v in batch_dict.items():
@@ -155,7 +149,6 @@ class TestSliceBatchForContextParallelBSHD:
                 attention_mask=attention_mask,
                 packed_seq_params=None,  # BSHD format
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         out_embeds, out_labels, out_loss_mask, out_pos_ids, out_attn_mask = result
@@ -173,10 +166,7 @@ class TestSliceBatchForContextParallelBSHD:
 
         pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
 
-        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
-            # `is_hybrid_cp` is REQUIRED here, exactly as in mcore >= 0.19: a stand-in that
-            # accepted any signature is how the pre-0.19 call form survived the pin.
-            assert is_hybrid_cp is False
+        def mock_get_batch(batch_dict, cp_group=None):
             result = {}
             for k, v in batch_dict.items():
                 if v is not None and isinstance(v, torch.Tensor):
@@ -200,7 +190,6 @@ class TestSliceBatchForContextParallelBSHD:
                 attention_mask=None,
                 packed_seq_params=None,
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         out_embeds, out_labels, out_loss_mask, out_pos_ids, out_attn_mask = result
@@ -253,7 +242,6 @@ class TestSliceBatchForContextParallelTHD:
                 attention_mask=None,
                 packed_seq_params=packed_seq_params,
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         out_embeds, out_labels, out_loss_mask, out_pos_ids, out_attn_mask = result
@@ -305,7 +293,6 @@ class TestSliceBatchForContextParallelTHD:
                 attention_mask=None,
                 packed_seq_params=packed_seq_params,
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         out_embeds, out_labels, out_loss_mask, out_pos_ids, out_attn_mask = result
@@ -352,7 +339,6 @@ class TestSliceBatchForContextParallelTHD:
                 attention_mask=None,
                 packed_seq_params=packed_seq_params,
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         # Verify cu_seqlens_q was used as fallback
@@ -374,10 +360,7 @@ class TestSliceBatchForContextParallelTranspose:
 
         captured_batch = {}
 
-        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
-            # `is_hybrid_cp` is REQUIRED here, exactly as in mcore >= 0.19: a stand-in that
-            # accepted any signature is how the pre-0.19 call form survived the pin.
-            assert is_hybrid_cp is False
+        def mock_get_batch(batch_dict, cp_group=None):
             captured_batch.update(batch_dict)
             # Check that decoder_input is in (B, T, D) format
             di = batch_dict.get("decoder_input")
@@ -397,7 +380,6 @@ class TestSliceBatchForContextParallelTranspose:
                 attention_mask=None,
                 packed_seq_params=None,  # BSHD format
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         # Verify decoder_input was captured with correct shape
@@ -413,10 +395,7 @@ class TestSliceBatchForContextParallelTranspose:
 
         pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
 
-        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
-            # `is_hybrid_cp` is REQUIRED here, exactly as in mcore >= 0.19: a stand-in that
-            # accepted any signature is how the pre-0.19 call form survived the pin.
-            assert is_hybrid_cp is False
+        def mock_get_batch(batch_dict, cp_group=None):
             result = {}
             for k, v in batch_dict.items():
                 if v is not None and isinstance(v, torch.Tensor):
@@ -441,7 +420,6 @@ class TestSliceBatchForContextParallelTranspose:
                 attention_mask=None,
                 packed_seq_params=None,
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         out_embeds, *_ = result
@@ -457,10 +435,7 @@ class TestSliceBatchForContextParallelEdgeCases:
         """Test handling when inputs_embeds is None but CP is enabled."""
         pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
 
-        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
-            # `is_hybrid_cp` is REQUIRED here, exactly as in mcore >= 0.19: a stand-in that
-            # accepted any signature is how the pre-0.19 call form survived the pin.
-            assert is_hybrid_cp is False
+        def mock_get_batch(batch_dict, cp_group=None):
             return batch_dict
 
         with patch(
@@ -475,7 +450,6 @@ class TestSliceBatchForContextParallelEdgeCases:
                 attention_mask=None,
                 packed_seq_params=None,
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         out_embeds, *_ = result
@@ -499,10 +473,7 @@ class TestSliceBatchForContextParallelEdgeCases:
 
         mock_called = {"get_batch": False}
 
-        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
-            # `is_hybrid_cp` is REQUIRED here, exactly as in mcore >= 0.19: a stand-in that
-            # accepted any signature is how the pre-0.19 call form survived the pin.
-            assert is_hybrid_cp is False
+        def mock_get_batch(batch_dict, cp_group=None):
             mock_called["get_batch"] = True
             return batch_dict
 
@@ -518,44 +489,7 @@ class TestSliceBatchForContextParallelEdgeCases:
                 attention_mask=None,
                 packed_seq_params=packed_seq_params,
                 pg_collection=pg_collection,
-                is_hybrid_cp=False,
             )
 
         # Verify BSHD path was used (get_batch_on_this_cp_rank called)
         assert mock_called["get_batch"]
-
-
-class TestSliceBatchForContextParallelHybridCpPropagation:
-    """`is_hybrid_cp` must reach mcore as the caller set it, not as a literal.
-
-    Every other case in this module passes False, so a hardcoded `is_hybrid_cp=False`
-    inside slice_batch_for_context_parallel would leave them all green while silently
-    sending hybrid-CP models down the wrong partitioning strategy. This is the paired
-    True case that pins the value as caller-driven — the same guarantee
-    test_gpt_step_cp_dispatch.py provides for the gpt_step call site.
-    """
-
-    @pytest.mark.parametrize("hybrid", [True, False])
-    def test_value_reaches_mcore_unchanged(self, hybrid):
-        batch_size, seq_len, hidden = 2, 8, 4
-        inputs_embeds = torch.randn(seq_len, batch_size, hidden)
-        pg_collection = MockPGCollection(cp_size=2, cp_rank=0)
-        seen = {}
-
-        def mock_get_batch(batch_dict, is_hybrid_cp, cp_group=None):
-            seen["is_hybrid_cp"] = is_hybrid_cp
-            return batch_dict
-
-        with patch("megatron.core.utils.get_batch_on_this_cp_rank", side_effect=mock_get_batch):
-            slice_batch_for_context_parallel(
-                inputs_embeds=inputs_embeds,
-                labels=None,
-                loss_mask=None,
-                position_ids=None,
-                attention_mask=None,
-                packed_seq_params=None,
-                pg_collection=pg_collection,
-                is_hybrid_cp=hybrid,
-            )
-
-        assert seen["is_hybrid_cp"] is hybrid

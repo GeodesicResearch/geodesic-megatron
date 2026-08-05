@@ -299,7 +299,6 @@ def slice_batch_for_context_parallel(
     attention_mask: torch.Tensor,
     packed_seq_params,
     pg_collection,
-    is_hybrid_cp: bool,
 ):
     """Slice batch tensors for Context Parallelism (CP) in VLM models.
 
@@ -316,10 +315,6 @@ def slice_batch_for_context_parallel(
         attention_mask: Attention mask tensor.
         packed_seq_params: PackedSeqParams for THD format, or None for BSHD.
         pg_collection: ProcessGroupCollection containing CP group info.
-        is_hybrid_cp: Whether the model runs hybrid context parallelism. Required (no
-            default) because it selects a different partitioning strategy inside
-            Megatron-Core, so it is the caller's configuration to state — it belongs to
-            ModelParallelConfig and must be threaded from there, not assumed here.
 
     Returns:
         Tuple of (inputs_embeds, labels, loss_mask, position_ids, attention_mask)
@@ -374,7 +369,6 @@ def slice_batch_for_context_parallel(
                 "position_ids": position_ids,
                 "attention_mask": attention_mask,
             },
-            is_hybrid_cp=is_hybrid_cp,
             cp_group=cp_group,
         )
 

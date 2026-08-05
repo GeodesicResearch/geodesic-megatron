@@ -148,7 +148,7 @@ settings that spend *time* to save memory we do not need to save. All arms below
 | 2 | `recipes/nemotronh/nemotron_3_{super,ultra}.py` set `cfg.model.cuda_graph_scope = []`. `[]` is not `None`, so mcore refuses the modern `cuda_graph_modules` ("cannot be set together"). Blocks scoped capture entirely. | **OPEN** — worked around in-config with `cuda_graph_scope: null` |
 | 3 | `training/eval.py:122,196` carry the same `CudaGraphScope.full_iteration in ...cuda_graph_scope` membership test that crashed `train.py`. Will fire if #2 is fixed by setting the field to `None`. | **OPEN** — fix together with #2 |
 | 4 | mcore `transformer/cuda_graphs.py:181` `ArgMetadata.zeros_like()` — `*self.shape` unpacks to nothing for a **0-dim tensor**, so `torch.zeros()` gets no size. Blocks partial CUDA graphs for any model passing a scalar tensor into a graphed region. | **PATCHED** — `3rdparty/patches/megatron-lm/0002-fix-cuda-graph-zeros_like-0dim-tensor.patch`; still open upstream; durable home is a carried commit on the GeodesicResearch fork |
-| 5 | mcore `pipeline_parallel/fine_grained_activation_offload.py` — `AssertionError: Chunk mismatch` under **plain PP** (not only VPP), despite upstream docs listing interleaved-PP as supported. | **OPEN upstream** — no commits to that file since our pin (re-confirmed 2026-08-02: newest upstream commit is still `69c486825`, 2026-07-02). **Filing draft ready, NOT posted** — `upstream-issue-draft-fine-grained-offload-chunk-mismatch.md`; needs Kyle's sign-off before it goes to NVIDIA. Repro evidence: W&B `mc6wztvs` |
+| 5 | mcore `pipeline_parallel/fine_grained_activation_offload.py` — `AssertionError: Chunk mismatch` under **plain PP** (not only VPP), despite upstream docs listing interleaved-PP as supported. | **OPEN upstream** — no commits to that file since our pin (re-confirmed 2026-08-02: newest upstream commit is still `69c486825`, 2026-07-02). **Filing draft ready, NOT posted** — preserved at `/projects/a5k/public/logs/infr71_wave2/docs/upstream-issue-draft-fine-grained-offload-chunk-mismatch.md` (retired from the repo with the investigation docs); still needs Kyle's sign-off before it goes to NVIDIA. Repro evidence: W&B `mc6wztvs` |
 
 ---
 
@@ -555,7 +555,8 @@ multi-stream cuBLASLt picks. Loss gate unchanged.
 
 ### 9.12 m6c: the launch-storm collapse CONFIRMED — new champion 21.78 s/iter
 
-> **MECHANISM CORRECTED 2026-08-03** (consultant-training-stack-review.md §C1g): the −16%
+> **MECHANISM CORRECTED 2026-08-03** (consultant tracker §C1g, preserved at
+> `/projects/a5k/public/logs/infr71_wave2/docs/consultant-training-stack-review.md`): the −16%
 > is real and this section's measurement stands, but "launch-storm collapse" is the wrong
 > mechanism — GEMM launch count is UNCHANGED (~163k/iter; the backend's CUTLASS grouped
 > path is compile-time unreachable on sm_90 and falls through to a per-expert cublasGemmEx

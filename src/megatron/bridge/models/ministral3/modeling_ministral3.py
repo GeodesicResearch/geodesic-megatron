@@ -261,7 +261,6 @@ class Ministral3Model(MegatronModule):
             attention_mask=attention_mask,
             packed_seq_params=packed_seq_params,
             pg_collection=self.config._pg_collection,
-            is_hybrid_cp=self.config.hybrid_context_parallel,
         )
 
         # Apply SP scatter after CP slice, before entering the language model.

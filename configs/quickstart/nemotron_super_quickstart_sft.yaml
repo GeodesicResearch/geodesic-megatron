@@ -18,21 +18,30 @@
 #    no longer measurable — every bare-metal figure in this header is kept as a
 #    HISTORICAL baseline from the retired environment, not a live comparison.)
 #
-# CURRENT CHAMPION (2026-08-04, INFR-71): **17.099 s/iter**, 83.6 GB peak allocated of 95,
-# FT off, mean of iters 10-30. Posture = torch._grouped_mm grouped experts + optimizer CPU
-# offload OFF (the expert backend is what changed; see the moe_experts_impl block for the
-# A/B and the optimizer block for the memory-tight alternate). 154.5 model TFLOP/s/GPU,
-# 15.6% MFU — i.e. 14.0 s of every iteration is NOT tensor-core arithmetic, which is where
-# the remaining work is. Paired same-nodelist A/B against the previous champion:
-# 20.397 -> 17.099 s/iter (-16.2%) at loss 2.4e-4 apart, plus a 100-iteration soak
-# (0 NaN, no iter > 1.5x median, drift -0.37%).
+# CURRENT ANCHOR (2026-08-05, GBS 128 — the standard batch across quickstarts, Kyle's
+# directive of that date): **31.562 s/iter = 246.58 ms/sample**, peak 83.3 GB of 95, FT
+# off, mean of iters 10-30 (2.3% spread). 167.4 model TFLOP/s/GPU (16.9% MFU) / 196.6
+# hardware (19.9% HFU) by the exact estimator — the GBS 64->128 move shrank the PP
+# bubble 17.9% -> 9.9% and delivered -7.7% per sample, right on the bubble-law
+# prediction. Provenance: allocation 5845746, nid[010000-010010,010012,010018-010021],
+# SOLO, zero Hydra
+# overrides, W&B run s9ogmmn7. With the 128-GPU override below now matched-µb/replica,
+# per-sample scaling to 128 GPUs measures perfect within the ±2% placement band
+# (122.0 measured vs 123.3 predicted).
+#
+# GBS-64-era champion (the paired A/B that certified torch_grouped, 2026-08-04):
+# **17.099 s/iter**, 83.1 GB peak, 154.5 model TFLOP/s/GPU — 20.397 -> 17.099 (-16.2%)
+# same-nodelist at loss 2.4e-4 apart, plus a 100-iteration soak at the 128-GPU posture
+# (0 NaN, no iter > 1.5x median, drift -0.37%). Posture unchanged since: torch_grouped
+# experts + optimizer CPU offload OFF (see the moe_experts_impl block for the A/B and
+# the optimizer block for the memory-tight alternate).
 #
 # QUOTE THE PLACEMENT WITH THE NUMBER. Measured on the PREVIOUS champion posture, which is
 # why the numbers here are the older ones: the identical config, same allocation, same day,
 # on three different 16-node subsets: 20.66 / 20.81 / 21.14 s/iter — a 2.3% spread with
 # every node inside one Dragonfly group. (Crossing groups is worth far more, ~1.5x; see
 # CLAUDE.md.) The "~19.7 s/iter on a champion-class placement" projection — which lived in
-# docs/investigations/consultant-training-stack-review.md, not in this header — is RETIRED:
+# the consultant tracker (/projects/a5k/public/logs/infr71_wave2/docs/consultant-training-stack-review.md), not in this header — is RETIRED:
 # three placements were measured and none reached it.
 # SUPERSEDED CHAMPION ANCHOR (kept as the trail, per this repo's habit): **20.66 s/iter**,
 # 81.4 GB, 127.9 model TFLOP/s/GPU, 12.9% MFU — the same offload-off posture running the
@@ -40,9 +49,16 @@
 # Provenance for that anchor: allocation 5845741, arms l3a/l3b/l3c, logs under
 # /projects/a5k/public/logs/infr71_wave2/, W&B runs infr71_l3*.
 #
-# LAUNCH (the container is the only environment — no flag, no override):
+# LAUNCH (the container is the only environment — no override; --disable-ft is part of
+# the benchmark command):
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft
+#       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft --disable-ft
+# --disable-ft is the certified posture (every anchor was measured FT-off) and is
+# LOAD-BEARING at GBS 128: with FT on, the NVRx straggler reporter's periodic
+# rank-0 gather needs raw GPU memory on the 83 GB stage-0 rank and OOMed a run at
+# ~22 min of stepping (NCCL "Failed to CUDA calloc 131071 bytes" inside
+# nvidia_resiliency_ext .../straggler/reporting.py gather_on_rank0). Short runs never
+# lived long enough to hit it. Production training keeps FT on; it has more headroom.
 # Environment setup, image qualification and troubleshooting: docs/environment.md.
 #
 # TOPOLOGY: TP=1 · CP=4 · EP=4 · PP=8 · ETP=1 · DP=2 -> 64 GPUs = 16 nodes.
@@ -86,7 +102,7 @@
 #    longer exists, so this is not a number you can re-measure.)
 # => at this date the read was "<20 s/iter is NOT reachable: every memory-for-speed
 #    lever is measured infeasible or slower". The CONCLUSION has since been REFUTED
-#    (the champion is 17.099 — see the block at the top of this header), and the
+#    (the GBS-64-era champion reached 17.099; the GBS-128 anchor is at the top of this header), and the
 #    REASON was wrong too, in a way worth keeping. The sweep
 #    only ever tested spending memory on ACTIVATIONS (CP=2, recompute off), which
 #    does OOM. It never tested giving memory back to the OPTIMIZER by switching CPU
@@ -114,7 +130,7 @@
 #     arms ran offload 1.0 vs a 0.5 control, raw +17.6%/+9.4%, ~0.95 s subtracted
 #     for a handicap the tracker bounds only from BELOW), mechanism =
 #     wait-multiplication rather than launch pressure. Full verdict:
-#     docs/investigations/infr71-vpp-campaign-prereg.md.)
+#     /projects/a5k/public/logs/infr71_wave2/docs/infr71-vpp-campaign-prereg.md.)
 #     `overlap_p2p_comm` — which VPP enables — is likewise a regression on this
 #     fabric, but the size quoted here at the time ("~2x") was wrong: re-measured
 #     at the current mcore pin it is **31.45 s/iter vs 27.50 = +14%**, from
@@ -124,7 +140,8 @@
 #     `nemotron_super_quickstart_sft_vpp4.yaml`, WAS deleted 2026-08-04 — this time
 #     for real (an earlier version of this header wrongly claimed a deletion that had
 #     not happened, so: it is gone as of the quickstart standardisation, and `git log`
-#     is the record). VPP loses at this config's workload — 32 microbatches per replica,
+#     is the record). VPP loses at this config's workload — 64 microbatches per replica at
+#     GBS 128 (and already at the 32 of the old GBS-64 workload),
 #     +13.5% (an offload-adjusted UPPER bound, measured on `cublas_grouped` two days
 #     before `torch_grouped` shipped, so not a reading on the current default) — and
 #     regardless of that figure's exact size, its ≤16 µb/replica winning regime is
@@ -132,11 +149,11 @@
 #     GBS-32 arm is 550.3 ms/sample against 429.7 for the GBS-64 arm it is paired
 #     with — 28% worse per sample (VPP wins 2.1% there; the smaller batch loses
 #     ~31%). Both halves are the July wave on one placement, NOT this config's
-#     current 17.099 s/iter = 267.2 ms/sample; against the shipped champion the
+#     GBS-64-era 17.099 s/iter = 267.2 ms/sample; against that champion the
 #     GBS-32 arm is ~106% worse, so this comparison is the conservative one.
 #     Reproduce with
 #     override `model.virtual_pipeline_model_parallel_size=4`; the overlap root-cause
-#     write-up is docs/investigations/vpp-pp-comm-overlap-investigation.md.
+#     write-up is /projects/a5k/public/logs/infr71_wave2/docs/vpp-pp-comm-overlap-investigation.md.
 #   (The HISTORICAL A/B block below predates this pass — its 31.27 container
 #    number is the pre-fusion/GC config; C8 re-certified the then-champion.)
 #
@@ -283,10 +300,11 @@ dataset:
     pad_to_max_length: false
 
 train:
-  global_batch_size: 64   # Kyle-specified benchmark workload; 32 ub/replica at DP=2 -> ~18% PP bubble
+  global_batch_size: 128  # Kyle-standardised across quickstarts 2026-08-05 (was 64); 64 ub/replica at DP=2 -> ~10% PP bubble
   micro_batch_size: 1
-  # 100M-token full run (Kyle, 2026-07-24): 48 iters x GBS 64 x seq 32768 =
-  # 100,663,296 tokens. The benchmark gates still score mean of iters 10-30.
+  # 48 iters x GBS 128 x seq 32768 = 201,326,592 tokens (~201M; the length predates the
+  # GBS-128 standardisation — it was sized as a 100M-token run at GBS 64, Kyle 2026-07-24,
+  # and kept). The benchmark gates still score mean of iters 10-30.
   train_iters: 48
   exit_signal_handler: true
   # Disable per-step Python GC; collect every 10 iters (P-B, 2026-07-24:
@@ -317,7 +335,7 @@ train:
 # that default, not the offload, is what made offload look expensive. The threading half is
 # now automatic — `pipeline_env_activate.sh` defaults `ISAMBARD_OMP_THREADS=8` (and
 # `OMP_WAIT_POLICY=PASSIVE` with it) — so only the two YAML keys above are needed.
-# Evidence for both postures: docs/investigations/consultant-training-stack-review.md
+# Evidence for both postures: /projects/a5k/public/logs/infr71_wave2/docs/consultant-training-stack-review.md
 # §C1/§C1b.
 optimizer:
   lr: 5.0e-06
@@ -380,7 +398,7 @@ model:
   moe_grouped_gemm: True
   # Grouped-experts backend. Three values matter here:
   #   torch_grouped  (what this benchmark ships since 2026-08-04; the provider field default
-  #     stays "te_grouped", so Ultra-550B, Nano-8K and pa_warm_start still run te_grouped —
+  #     stays "te_grouped", so Ultra-550B and pa_warm_start still run te_grouped —
   #     same model family, just not benchmarked on this path yet) — torch._grouped_mm, on sm_90
   #     dispatches a REAL CUTLASS 3.x grouped kernel: one launch per projection per layer
   #     instead of one per expert. Trace census: 2,560 expert-GEMM launches / 4.52 s where
@@ -390,7 +408,8 @@ model:
   #     for A/B and for stacks whose torch lacks `_grouped_mm`; needs nv-grouped-gemm.
   #     (`cutlass_grouped` is a deprecated alias for it and warns — the name was always a
   #     misnomer: that package's CUTLASS grouped path is compile-time gated to sm_80, so on
-  #     GH200 it fell back to a loop. Trace audit: consultant-training-stack-review.md §C1g.)
+  #     GH200 it fell back to a loop. Trace audit: consultant tracker §C1g, preserved at
+  #     /projects/a5k/public/logs/infr71_wave2/docs/consultant-training-stack-review.md.)
   #   te_grouped — the untouched upstream TE GroupedLinear path.
   # MEASURED, paired same-nodelist A/B, loss 2.4e-4 apart: 20.397 -> 17.099 s/iter (-16.2%)
   # here at 64 GPUs / GBS 64. At 128 GPUs / GBS 256 the paired one-line change is -16.4%
@@ -431,7 +450,7 @@ checkpoint:
   # reports a pass while measuring nothing. Always warm-start from
   # pretrained_checkpoint instead; this run is ~25 min and needs no resume.
   load: null
-  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_quickstart_sft_100m
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_super_quickstart_sft
   save_interval: 1000000
   save_optim: false
   save_rng: false

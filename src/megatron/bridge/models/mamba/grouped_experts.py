@@ -31,12 +31,11 @@ TWO BACKENDS, one module. They differ ONLY in the call inside ``_grouped_project
 everything else (weights, Latent-MoE widths, activation, checkpoint mapping) is shared:
 
 ``torch_grouped`` — ``torch._grouped_mm``. Selected by the two benchmark quickstarts
-(Super-120B and Nano-30B-32K) and by the ``configs/infr71_vpp`` campaign arms. It is not a
-default anywhere: this class's ``gemm_backend`` is required with no default, and
-``MambaModelProvider.moe_experts_impl`` still defaults to ``te_grouped``, which is what
-Ultra-550B, Nano-8K and pa_warm_start still run — not because those are unrelated models
-(they are the same Nemotron-H family) but because they have not been benchmarked on this
-path yet. A genuine CUTLASS 3.x sm90 grouped
+(Super-120B and Nano-30B). It is not a default anywhere: this class's ``gemm_backend`` is
+required with no default, and ``MambaModelProvider.moe_experts_impl`` still defaults to
+``te_grouped``, which is what Ultra-550B and pa_warm_start still run — not because those
+are unrelated models (they are the same Nemotron-H family) but because they have not been
+benchmarked on this path yet. A genuine CUTLASS 3.x sm90 grouped
 kernel: the 2026-08-04 trace shows 2,560 launches totalling 4.52 s where the loop backend
 needed ~163k. Numerically identical to the per-expert reference (max |diff| 0.0 at champion
 shapes) with working autograd. **Measured −16.2% end-to-end** on the shipped 64-GPU
@@ -53,7 +52,8 @@ for SM90 until CUTLASS supports SM90-optimized grouped-gemm") and falls through 
 per-expert ``cublasGemmEx`` C++ loop. It was this repo's default from 2026-07-30 and is
 kept for A/B work and for stacks whose torch lacks ``_grouped_mm``. Its own −16% win over
 TEGroupedMLP came from collapsing per-launch host cost ~60 → ~10 us, NOT from launch-count
-reduction (consultant-training-stack-review.md §C1g corrects the original claim).
+reduction (consultant-training-stack-review.md §C1g corrects the original claim; preserved
+under /projects/a5k/public/logs/infr71_wave2/docs/).
 
 This is the pre-0.19 upstream ``GroupedMLP`` (removed upstream; reference implementation:
 submodule tag ``core_v0.13.1``) ported to the 0.19 experts contract, restricted to what

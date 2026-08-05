@@ -127,8 +127,8 @@ model:
 # --- Checkpointing ---
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Ultra-550B-A55B-Base-BF16
-  load: /projects/a5k/public/checkpoints/megatron/quickstart_ultra_sft
-  save: /projects/a5k/public/checkpoints/megatron/quickstart_ultra_sft
+  load: /projects/a5k/public/checkpoints/megatron/nemotron_ultra_quickstart_sft
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_ultra_quickstart_sft
   save_interval: 50
   # Only-final save of a smoke run: model weights are all downstream (HF convert,
   # coherence) needs — skip optimizer + RNG state to shrink the checkpoint.
@@ -156,4 +156,4 @@ logger:
   log_num_zeros_in_grad: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: quickstart_ultra_sft
+  wandb_exp_name: nemotron_ultra_quickstart_sft
