@@ -107,11 +107,12 @@ class TestMainWiring:
         "    - /nonexistent/corpus_input_document\n"
     )
 
-    def test_pretrain_without_data_path_raises(self, run_module, monkeypatch, tmp_path):
-        """The guard that keeps a from-scratch run off the legacy JSONL midtraining blend."""
+    @pytest.mark.parametrize("mode", ("cpt", "pretrain"))
+    def test_native_data_modes_without_data_path_raise(self, run_module, monkeypatch, tmp_path, mode):
+        """Both .bin/.idx modes must name their corpus — neither may substitute one silently."""
         yaml_text = "tokenizer:\n  tokenizer_model: geodesic-research/nemotron-base-tokenizer\n"
         with pytest.raises(ValueError, match="dataset.data_path"):
-            self._run_main(run_module, monkeypatch, tmp_path, "pretrain", yaml_text)
+            self._run_main(run_module, monkeypatch, tmp_path, mode, yaml_text)
 
     def test_pretrain_mode_calls_the_pretrain_entry(self, run_module, monkeypatch, tmp_path):
         calls = self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._DATA_PATH_YAML)

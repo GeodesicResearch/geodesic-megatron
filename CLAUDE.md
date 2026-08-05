@@ -222,13 +222,20 @@ isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml
 # Via salloc (interactive)
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft
-bash pipeline_training_launch.sh configs/<config>.yaml --model super --mode cpt --max-samples 50000
+bash pipeline_training_launch.sh configs/<config>.yaml --model super --mode cpt
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --nodes 8 --nodelist node[001-008]
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
-`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
+`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--nodes N`, `--nodelist LIST`.
+
+`cpt` and `pretrain` both read Megatron-native `.bin/.idx` data and both **require**
+`dataset.data_path` in the config — there is no default corpus. They differ only in the
+recipe: `cpt` uses the SFT recipe (warm-start LR 5e-6, which the CPT configs override down
+to ~1e-6), `pretrain` uses `nemotron_3_*_pretrain_config` (from-scratch LR — 1.6e-3 Nano,
+4.5e-4 Super and Ultra) and dispatches `pretrain()` instead of `finetune()`, whose assert
+would demand a checkpoint.
 
 ### Profiling and run identity
 
