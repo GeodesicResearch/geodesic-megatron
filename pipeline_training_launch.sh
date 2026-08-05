@@ -14,11 +14,11 @@
 #   2. An interactive salloc session (SLURM_JOB_ID set by salloc)
 #
 # Usage:
-#   bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt [options]
+#   bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt|pretrain [options]
 #
 # Required:
 #   --model nano|super|ultra    Model variant
-#   --mode sft|cpt              Training mode
+#   --mode sft|cpt|pretrain     Training mode
 #
 # Options:
 #   --disable-ft                Use plain torchrun instead of ft_launcher
@@ -79,7 +79,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt [options]"
+USAGE="Usage: bash pipeline_training_launch.sh <config.yaml> --model nano|super|ultra --mode sft|cpt|pretrain [options]"
 
 if [ -z "$CONFIG_FILE" ]; then
     echo "ERROR: Config file is required." >&2
@@ -104,13 +104,13 @@ if [[ "$MODEL" != "nano" && "$MODEL" != "super" && "$MODEL" != "ultra" ]]; then
 fi
 
 if [ -z "$MODE" ]; then
-    echo "ERROR: --mode is required (sft or cpt)." >&2
+    echo "ERROR: --mode is required (sft, cpt, or pretrain)." >&2
     echo "$USAGE" >&2
     exit 1
 fi
 
-if [[ "$MODE" != "sft" && "$MODE" != "cpt" ]]; then
-    echo "ERROR: --mode must be 'sft' or 'cpt', got: $MODE" >&2
+if [[ "$MODE" != "sft" && "$MODE" != "cpt" && "$MODE" != "pretrain" ]]; then
+    echo "ERROR: --mode must be 'sft', 'cpt', or 'pretrain', got: $MODE" >&2
     exit 1
 fi
 

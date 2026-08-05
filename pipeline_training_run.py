@@ -15,8 +15,8 @@
 
 """Unified training entry point for Nemotron 3 Nano, Super, and Ultra models.
 
-Supports SFT (supervised finetuning) and CPT (continued pretraining / midtraining)
-for both model variants. Dispatches to the appropriate recipe based on --model and --mode.
+Supports SFT (supervised finetuning), CPT (continued pretraining / midtraining), and
+from-scratch pretraining. Dispatches to the appropriate recipe based on --model and --mode.
 
 SFT mode:
   - Loads HF datasets via megatron-bridge's HFDatasetBuilder
@@ -26,6 +26,13 @@ CPT mode:
   - Uses Megatron-native .bin/.idx tokenized data with GPTDatasetConfig
   - Supports data_path (interleaved weights + paths) in YAML for blended datasets
   - Falls back to legacy JSONL loading if data_path is not specified
+
+Pretrain mode:
+  - From-scratch training on the nemotron_3_*_pretrain_config recipes (NVIDIA's
+    pretraining hyperparameters: peak LR, schedule, init_method_std), random init —
+    no checkpoint is loaded unless the YAML sets one
+  - Same .bin/.idx dataset wiring as CPT, but dataset.data_path is REQUIRED
+  - Launches via pretrain() (no finetune-mode assert on checkpoint.load)
 """
 
 import argparse
@@ -43,14 +50,17 @@ from omegaconf import OmegaConf
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_peft_config,
+    nemotron_3_nano_pretrain_config,
     nemotron_3_nano_sft_config,
 )
 from megatron.bridge.recipes.nemotronh.nemotron_3_super import (
     nemotron_3_super_peft_config,
+    nemotron_3_super_pretrain_config,
     nemotron_3_super_sft_config,
 )
 from megatron.bridge.recipes.nemotronh.nemotron_3_ultra import (
     nemotron_3_ultra_peft_config,
+    nemotron_3_ultra_pretrain_config,
     nemotron_3_ultra_sft_config,
 )
 from megatron.bridge.training.config import (
@@ -61,6 +71,7 @@ from megatron.bridge.training.config import (
 )
 from megatron.bridge.training.finetune import finetune
 from megatron.bridge.training.gpt_step import forward_step
+from megatron.bridge.training.pretrain import pretrain
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 from megatron.bridge.training.utils.omegaconf_utils import (
     apply_overrides,
@@ -89,6 +100,9 @@ RECIPE_MAP = {
         nemotron_3_ultra_peft_config(peft_scheme=peft) if peft else nemotron_3_ultra_sft_config()
     ),
     ("ultra", "cpt"): lambda peft: nemotron_3_ultra_sft_config(),
+    ("nano", "pretrain"): lambda peft: nemotron_3_nano_pretrain_config(),
+    ("super", "pretrain"): lambda peft: nemotron_3_super_pretrain_config(),
+    ("ultra", "pretrain"): lambda peft: nemotron_3_ultra_pretrain_config(),
 }
 
 
@@ -253,11 +267,11 @@ LEGACY_CPT_DATASETS = {
 def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     """Parse command line arguments, separating known script args from OmegaConf overrides."""
     parser = argparse.ArgumentParser(
-        description="Unified Nemotron 3 training: SFT and CPT for Nano, Super, and Ultra",
+        description="Unified Nemotron 3 training: SFT, CPT, and from-scratch pretraining for Nano, Super, and Ultra",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("--model", type=str, required=True, choices=["nano", "super", "ultra"], help="Model variant")
-    parser.add_argument("--mode", type=str, required=True, choices=["sft", "cpt"], help="Training mode")
+    parser.add_argument("--mode", type=str, required=True, choices=["sft", "cpt", "pretrain"], help="Training mode")
     parser.add_argument("--config-file", type=str, help="Path to the YAML OmegaConf override file.")
     parser.add_argument("--peft", type=str, help="Type of PEFT to use (SFT mode only)")
     parser.add_argument(
@@ -434,7 +448,7 @@ def main() -> None:
                 )
                 cfg.dataset.rewrite = False
 
-    elif args.mode == "cpt":
+    elif args.mode in ("cpt", "pretrain"):
         yaml_dataset = (
             OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
         )
@@ -459,7 +473,15 @@ def main() -> None:
                 mmap_bin_files=True,
                 dataloader_type="cyclic",
             )
-            logger.info(f"CPT mode: native .bin/.idx data, data_path={data_path}")
+            logger.info(f"{args.mode} mode: native .bin/.idx data, data_path={data_path}")
+        elif args.mode == "pretrain":
+            # From-scratch training must state its corpus; the legacy JSONL blend below is a
+            # CPT-only compatibility path and mock data would train on noise without saying so.
+            raise ValueError(
+                "pretrain mode requires dataset.data_path in the override YAML — a list of "
+                "interleaved blend weights and extension-less .bin/.idx prefixes produced by "
+                "tools/preprocess_data.py (see pipeline_data_submit.sbatch 'tokenize' mode)."
+            )
         else:
             # Legacy JSONL loading path (fallback if data_path not specified)
             dataset_roots = yaml_dataset.get("dataset_roots")
@@ -585,7 +607,10 @@ def main() -> None:
     )
 
     callbacks = [cb for cb in (identity_cb, profiler_cb) if cb is not None]
-    finetune(config=cfg, forward_step_func=forward_step, callbacks=callbacks)
+    # pretrain() is the raw entry point; finetune() is the same call behind an assert that a
+    # checkpoint.load/pretrained_checkpoint exists, which from-scratch runs must not carry.
+    train_entry = pretrain if args.mode == "pretrain" else finetune
+    train_entry(config=cfg, forward_step_func=forward_step, callbacks=callbacks)
 
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()

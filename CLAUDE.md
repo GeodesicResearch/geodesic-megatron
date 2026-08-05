@@ -80,7 +80,7 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 | Pipeline | Submit (SLURM) | Launch / Logic | Purpose |
 |----------|---------------|----------------|---------|
 | **env** | `pipeline_env_submit.sbatch` | `pipeline_env_config.env`, `pipeline_env_setup.sh`, `pipeline_env_exec.sh`, `pipeline_env_activate.sh`, `pipeline_env_validate.py` | **THE execution environment** — Apptainer + NGC NeMo image, Slingshot NCCL stack |
-| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT and CPT distributed training |
+| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | SFT, CPT, and from-scratch pretraining |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | Dataset download, tokenization, packing |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
 | **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | Qualitative generation testing, W&B logging |
@@ -206,7 +206,7 @@ bash pipeline_env_setup.sh
 | `pipeline_training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `pipeline_training_launch.sh` |
 
 Training script (called by the launcher):
-- `pipeline_training_run.py` — Unified entry point for SFT and CPT (dispatches via `--model nano|super --mode sft|cpt`)
+- `pipeline_training_run.py` — Unified entry point for SFT, CPT, and from-scratch pretraining (dispatches via `--model nano|super|ultra --mode sft|cpt|pretrain`; `pretrain` uses the NVIDIA pretrain recipes + the `pretrain()` entry point, requires `dataset.data_path`, and loads no checkpoint unless the YAML sets one)
 
 ### Usage
 
@@ -228,7 +228,7 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
-`pipeline_training_launch.sh` options: `--model nano|super` (required), `--mode sft|cpt` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
+`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--max-samples N`, `--nodes N`, `--nodelist LIST`.
 
 ### Profiling and run identity
 
@@ -517,7 +517,7 @@ Between retries: `pkill -9 -f "pipeline_training_launch"`, `rm` stale `*_train.o
 | File | Purpose |
 |------|---------|
 | `pipeline_data_prepare.py` | Download HF datasets, tokenize, export JSONL, pack sequences |
-| `pipeline_data_submit.sbatch` | SLURM wrapper for offline packing (1 node, 1 GPU) |
+| `pipeline_data_submit.sbatch` | SLURM wrapper: `prepare` (download+JSONL), `tokenize` (pretraining `.bin/.idx` + exact token count), pack-only (1 node, 1 GPU) |
 
 ### Usage
 
@@ -529,6 +529,14 @@ python pipeline_data_prepare.py --dataset allenai/Dolci-Instruct-SFT --seq-lengt
 isambard_sbatch pipeline_data_submit.sbatch \
   /projects/a5k/public/data/allenai__Dolci-Instruct-SFT \
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
+
+# Pretraining-format corpus (.bin/.idx): prepare (JSONL, no packing) then tokenize;
+# the tokenize job appends an exact token count read from the .idx
+isambard_sbatch pipeline_data_submit.sbatch prepare \
+  --dataset <hf-id> --tokenizer geodesic-research/nemotron-base-tokenizer \
+  --skip-pack --skip-count --num-proc 32 --val-proportion 0
+isambard_sbatch --dependency=afterok:<prepare-jobid> pipeline_data_submit.sbatch tokenize \
+  /projects/a5k/public/data/<org>__<name> geodesic-research/nemotron-base-tokenizer tokenized_base
 
 # From an interactive allocation (payload runs inside the container)
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \

@@ -14,7 +14,7 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 |----------|---------------|----------------|-------------|---------|
 | **env** | `pipeline_env_submit.sbatch` | `pipeline_env_config.env`, `pipeline_env_exec.sh`, `pipeline_env_activate.sh`, `pipeline_env_setup.sh`, `pipeline_env_validate.py` | — | **The execution environment**: Apptainer + NGC NeMo image, Slingshot NCCL stack, install + validation ([docs/environment.md](docs/environment.md)) |
 | **data** | `pipeline_data_submit.sbatch` | `pipeline_data_prepare.py` | [`geodesic/megatron-datasets-processing`](https://wandb.ai/geodesic/megatron-datasets-processing) | Dataset download, tokenization, packing |
-| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | [`geodesic/megatron_training`](https://wandb.ai/geodesic/megatron_training) | SFT and CPT distributed training |
+| **training** | `pipeline_training_submit.sbatch` | `pipeline_training_launch.sh` | [`geodesic/megatron_training`](https://wandb.ai/geodesic/megatron_training) | SFT, CPT, and from-scratch pretraining |
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | — | Megatron↔HF conversion, Hub upload |
 | **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | [`geodesic/geodesic-gen-tests`](https://wandb.ai/geodesic/geodesic-gen-tests) | Qualitative generation testing |
 
@@ -227,7 +227,9 @@ fallback environment.
 
 1. A Python recipe defines the base model config, optimizer, parallelism, and data pipeline
 2. A YAML config file overrides recipe defaults
-3. The finetune script loads the HF checkpoint, converts to Megatron in-memory, and starts training
+3. SFT and CPT load a pretrained checkpoint and train via finetune(); pretrain mode
+   random-initializes from the NVIDIA pretrain recipes and trains via pretrain() —
+   no checkpoint is loaded unless the YAML sets one
 
 ### Usage
 
@@ -236,6 +238,7 @@ fallback environment.
 # (e.g. --disable-ft) are parsed as such, anything else falls through as Hydra overrides
 isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
+isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano pretrain --disable-ft
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
     --disable-ft train.train_iters=32 checkpoint.save=null
 
@@ -313,6 +316,10 @@ reasoning, per-model memory notes, and the legacy layouts these superseded are i
 # Full pipeline: download + tokenize + export + pack (args forwarded to pipeline_data_prepare.py)
 isambard_sbatch pipeline_data_submit.sbatch prepare \
   --dataset allenai/Dolci-Instruct-SFT --seq-length 8192
+
+# Pretraining-format corpus (.bin/.idx) — prepare then tokenize (exact token count included)
+isambard_sbatch pipeline_data_submit.sbatch tokenize \
+  /projects/a5k/public/data/<org>__<name> geodesic-research/nemotron-base-tokenizer tokenized_base
 
 # Offline packing only (via SLURM, saves GPU-hours)
 isambard_sbatch pipeline_data_submit.sbatch \
