@@ -50,7 +50,7 @@ single idempotent command:
 bash pipeline_env_setup.sh
 # or via SLURM: isambard_sbatch pipeline_env_submit.sbatch setup
 
-# Re-validate an existing install (19 checks; 20 with --run-training):
+# Re-validate an existing install (20 checks; 21 with --run-training):
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 ```
 
@@ -400,7 +400,7 @@ reference is **[docs/environment.md](docs/environment.md)**.
 isambard_sbatch pipeline_env_submit.sbatch setup
 bash pipeline_env_setup.sh --only slingshot --force    # or one step at a time
 
-# Validate an existing install (19 checks; 20 with --run-training)
+# Validate an existing install (20 checks; 21 with --run-training)
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
 # Run anything inside the environment (interactive shell, tests, ad-hoc python)
@@ -482,9 +482,11 @@ Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 
 | Model | Validated layout | Measured |
 |---|---|---|
-| **Nano (30B-A3B)** | 8 nodes / 32 GPUs: TP=2, EP=2, PP=4, DP=2 (seq 8192, GBS 16) | ~3.4 s/iter, ~27 TFLOP/s/GPU; zero hangs through 500+ iters |
+| **Nano (30B-A3B), seq 8192** | 8 nodes / 32 GPUs: TP=2, EP=2, PP=4, DP=2 (GBS 16) | ~3.4 s/iter, ~27 TFLOP/s/GPU; zero hangs through 500+ iters |
+| **Nano (30B-A3B), seq 32768** | 16 nodes / 64 GPUs: TP=1, CP=2, EP=4, PP=1, ETP=1 (GBS 256) | 71.74 ms/sample = 18.365 s/iter, peak 91.5 GB of 95 — [`configs/quickstart/nemotron_nano_quickstart_sft_32k.yaml`](configs/quickstart/nemotron_nano_quickstart_sft_32k.yaml) |
 | **Super (120B-A12B)** | TP=1, CP=(min that fits), EP=4, PP=22, ETP=1 | ~75-84 TFLOP/s/GPU, ~1000+ tok/s/GPU (≈2.4× the old TP=4 layouts) |
-| **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 64) | 21.78 s/iter champion (cutlass grouped experts + 50% optimizer offload; ~27.6 pre-cutlass) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
+| **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 64) | 17.099 s/iter champion = 154.5 TFLOP/s/GPU (`moe_experts_impl: torch_grouped`, optimizer CPU offload off; superseded: 20.66 on the `cublas_grouped` per-expert loop, 21.78 with offload 0.5, ~27.6 pre-grouped-GEMM) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
+| **Super benchmark, 32 nodes** | 32 nodes / 128 GPUs: same topology, DP=4, **GBS 256** (scale the batch with the nodes) | 122.0 ms/sample = 31.228 s/iter, 169.2 TFLOP/s/GPU. Scaling efficiency is **not** measured on this backend — the 98.8% figure was `cublas_grouped` at both ends and its 64-GPU comparator was never re-run, so it is not carried forward (bubble curve likewise mapped on `cublas_grouped`: 148.4 here, 141.0 at GBS 512) — run as the 64-GPU config plus `train.global_batch_size=256`; the quickstarts are standardised at 64 GPUs and this is the one field that differs |
 | **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
 
 Other levers that matter: `recompute_granularity: selective` with MoE-scoped

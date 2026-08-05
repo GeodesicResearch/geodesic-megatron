@@ -176,7 +176,9 @@ microbatches per replica are low enough that the bubble dominates the added
 peer-wait — at PP=8 the crossover sits between 16 and 32.** The shipped quickstart
 sits on the wrong side of it, which is why the non-VPP config remains the default.
 
-`configs/quickstart/nemotron_super_quickstart_sft_vpp4.yaml` is the reproducible VPP
+`configs/quickstart/nemotron_super_quickstart_sft_vpp4.yaml` (DELETED 2026-08-04 — VPP loses
+at the standardised quickstart; reproduce with `model.virtual_pipeline_model_parallel_size=4`)
+was the reproducible VPP
 variant, carrying this verdict in its header.
 
 ## 5. What would change the answer

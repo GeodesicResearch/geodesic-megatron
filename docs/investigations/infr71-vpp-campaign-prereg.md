@@ -59,7 +59,13 @@ prediction): capture torch profile (ISAMBARD_TORCH_PROFILE=1, iters 10,20) befor
 **Wave-2 results (2026-08-02, in-tunnel 2-way pairs on disjoint 16-node halves; the paired
 champion control measured 23.40 s/iter vs 21.78 solo = +7.4% concurrency tax; all arms ran
 `fine_grained_activation_offloading=false` (VPP-incompatible at this pin) and carry the
-measured ~0.95 s/iter offload-fraction-1.0 handicap, subtracted in "adjusted"):**
+measured ~0.95 s/iter offload-fraction-1.0 handicap, subtracted in "adjusted"). **The
+adjusted figures are UPPER BOUNDS on the VPP penalty**: §C1 bounds that handicap only from
+below ("at least 0.9–1.0 s/iter … plausibly more") and the same-nodelist 1.0-vs-0.5 ladder in
+the shipped quickstart header puts it at 1.7–2.9 s. Subtract 2.0 s instead of 0.95 and A0
+becomes +9.0%, A2 +0.9% — i.e. A2 is plausibly a wash. The arms also carry trio recompute
+against the champion's duo (~0.13 s), which is NOT subtracted. What this campaign establishes
+is that VPP did not become a win; it does not establish that the penalty grew:**
 - **A0 (VPP4+cutlass): 27.51 mean-10-30, loss parity → +13.5% adjusted. The July VPP4
   penalty did NOT come from the per-expert launch storm — cutlass didn't move it.
   Hypothesis "VPP penalty = host starvation" is refuted; the cost is schedule/comm-side.**
@@ -70,11 +76,60 @@ measured ~0.95 s/iter offload-fraction-1.0 handicap, subtracted in "adjusted"):*
   25.61 mean-10-30, loss parity → +5.4% adjusted. Interleave bubble savings (−1.9 s
   predicted) are overwhelmed by ~3 s of interleave overhead at 32 µb/replica, refining
   (not contradicting) the ≤16-µb/replica crossover rule.**
-- A1 (PP16·VPP2·DP1): running.
-- Phase-B note: with VPP4 and VPP2 both slower and loss-parity clean, the residual VPP
-  question is whether ANY interleaved config wins at GBS 64 — B2's GBS-128 sensitivity
-  (µb/replica doubles) and the PP16 arm are the remaining live branches before the
-  campaign verdict.
+- **A1 (PP16·VPP2·DP1): NO RESULT — spent 76 minutes in first-iteration NCCL comm-init
+  without reaching iteration 1 and was killed.** GPUs sat at 100% utilisation throughout,
+  which is NCCL busy-spin, not compute. PP16 doubles the pipeline depth of an already
+  deep-PP config, and deep-PP first-iteration lazy comm-init is the known cost here (the
+  Ultra-550B section documents 45–75 min at PP36/288 ranks). Recorded as a cost datum, not
+  a timing datum: at PP16 the arm never became measurable inside a tunnel-sized window.
+- Phase-B note: B2's GBS-128 result (below) closed the remaining live branch.
+
+## Campaign verdict (2026-08-03) — VPP is refuted on this model at this benchmark
+
+Every interleaved arm that produced a number was slower than its non-interleaved control,
+and the two mechanisms behind that are now measured rather than assumed:
+
+| arm | µb/replica | result vs matched control | adjusted |
+|---|---|---|---|
+| A0 — VPP4, cutlass experts | 32 | 27.51 vs paired champion control | **+13.5%** |
+| A2 — VPP2, PP8 stage-0-lite | 32 | 25.61 vs paired champion control | **+5.4%** |
+| A1 — VPP2, PP16, DP1 | 64 | no iteration in 76 min (comm-init) | n/a |
+| (earlier INFR-71) VPP4 @ GBS 32 | 16 | 17.61 vs 17.98 | −2.1% |
+| (earlier INFR-71) VPP4 @ GBS 64 | 32 | 29.59 vs 27.50 | +7.6% |
+
+1. **The interleave penalty is stall, not compute.** Trace decomposition on the clean rank
+   attributes the whole regression to waiting: compute +0.045 s, exposed comm −1.820 s,
+   idle +3.624 s. VPP does subdivide the PP exchanges (4.23× more p2p kernels on stage 0,
+   each 1.7–2.4× cheaper), but a PP p2p kernel is dominated by waiting for its peer, not by
+   wire time — so splitting one wait four ways does not quarter it.
+2. **Host starvation is NOT the cause** — the cutlass A/B (A0 re-measured with the champion's
+   expert implementation) left the VPP penalty intact, which refutes the per-expert
+   launch-storm hypothesis the July arms were confounded with.
+
+**The bubble is real and worth reclaiming — but batch size, not interleaving, is the lever
+that reclaims it here.** At the champion topology (PP8, DP2), GBS 64 gives 32 µb/replica and
+a 17.9% bubble; GBS 128 gives 64 µb and 9.9%. Measured, non-VPP, offload-off:
+
+| arm | allocation / placement | s/iter (10–30) | **ms/sample** |
+|---|---|---|---|
+| champion @ GBS 64 | 5845744 | 20.72 | 323.8 |
+| B2 @ GBS 128 | 5845744, same nodelist | 37.54 | **293.3 (−9.4%)** |
+| L1 @ GBS 128 | 5845741, half-A | 38.33 | **299.5** |
+
+L1 reproduces B2's reclaim on a different allocation (2.1% apart), so the effect is a
+property of the schedule and not of one placement.
+
+**Not run, and why:** VPP2 at GBS 128 (the "Q_b" cell). Its outcome is determined by the
+arithmetic already measured — going from 32 to 64 µb/replica *halves* the bubble that VPP
+exists to remove (interleaved savings fall from ~1.9 s to ~0.95 s) while the interleave
+overhead scales with the number of chunk boundaries, i.e. upward. A2 already lost by ~3 s
+of overhead against ~1.9 s of savings at 32 µb; at 64 µb the same arm can only lose by
+more. Recorded as a prediction rather than spending 35 minutes of a 32-node tunnel to
+confirm a sign that both the measurement and the model agree on.
+
+**Standing recommendation** (already in CLAUDE.md): enable VPP only at ≤16 microbatches per
+replica. At the shipped 64-GPU benchmark the non-VPP config wins, and the way to spend a
+larger batch is on the batch itself.
 
 ## Phase Q3 — recompute arms (consultant item C4)
 

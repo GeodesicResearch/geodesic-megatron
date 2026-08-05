@@ -148,7 +148,7 @@ USAGE
     python3 scripts/nemotronh_flops_estimator.py \\
         configs/quickstart/nemotron_super_quickstart_sft.yaml \\
         --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 \\
-        --seconds-per-iter 21.78 --gpus 64 --target-tflops 400
+        --seconds-per-iter 17.099 --gpus 64 --target-tflops 400
 
     # --compare-megatron additionally needs the container:
     ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \\
@@ -629,9 +629,18 @@ def compute_flops(
     }
     head = head_flops(arch, seq, vocab)
 
-    # MTP blocks add `mtp_num_layers` extra copies of the MTP pattern plus its own logits.
-    # `mtp_num_layers: null` (this repo's SFT configs) means MTP is off entirely.
+    # MTP adds, per depth, one extra TRANSFORMER LAYER as well as one extra logits
+    # projection. The layer's type follows the model's LAST layer, which is how the counter
+    # this script cross-checks against models it (`flop_utils.py`:
+    # `num_moe_layers += last_layer_is_moe * mtp_num_layers`, and `num_layers` grows to
+    # match). Counting only the logits — as an earlier version did — silently undercounts
+    # every MTP-enabled config and would put --compare-megatron permanently in disagreement.
+    # `mtp_num_layers: null` (this repo's SFT configs) means MTP is off, so mtp_depth == 0
+    # and both terms below vanish.
     mtp_depth = run.mtp_num_layers
+    if mtp_depth:
+        census = dict(census)
+        census[arch.layer_pattern[-1]] += mtp_depth
 
     forward = sum(census[t] * sum(per_type[t].values()) for t in per_type)
     forward += sum(head.values()) * (1 + mtp_depth)

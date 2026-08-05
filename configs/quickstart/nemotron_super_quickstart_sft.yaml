@@ -18,6 +18,28 @@
 #    no longer measurable — every bare-metal figure in this header is kept as a
 #    HISTORICAL baseline from the retired environment, not a live comparison.)
 #
+# CURRENT CHAMPION (2026-08-04, INFR-71): **17.099 s/iter**, 83.6 GB peak allocated of 95,
+# FT off, mean of iters 10-30. Posture = torch._grouped_mm grouped experts + optimizer CPU
+# offload OFF (the expert backend is what changed; see the moe_experts_impl block for the
+# A/B and the optimizer block for the memory-tight alternate). 154.5 model TFLOP/s/GPU,
+# 15.6% MFU — i.e. 14.0 s of every iteration is NOT tensor-core arithmetic, which is where
+# the remaining work is. Paired same-nodelist A/B against the previous champion:
+# 20.397 -> 17.099 s/iter (-16.2%) at loss 2.4e-4 apart, plus a 100-iteration soak
+# (0 NaN, no iter > 1.5x median, drift -0.37%).
+#
+# QUOTE THE PLACEMENT WITH THE NUMBER. Measured on the PREVIOUS champion posture, which is
+# why the numbers here are the older ones: the identical config, same allocation, same day,
+# on three different 16-node subsets: 20.66 / 20.81 / 21.14 s/iter — a 2.3% spread with
+# every node inside one Dragonfly group. (Crossing groups is worth far more, ~1.5x; see
+# CLAUDE.md.) The "~19.7 s/iter on a champion-class placement" projection — which lived in
+# docs/investigations/consultant-training-stack-review.md, not in this header — is RETIRED:
+# three placements were measured and none reached it.
+# SUPERSEDED CHAMPION ANCHOR (kept as the trail, per this repo's habit): **20.66 s/iter**,
+# 81.4 GB, 127.9 model TFLOP/s/GPU, 12.9% MFU — the same offload-off posture running the
+# per-expert cublas loop (2026-08-03).
+# Provenance for that anchor: allocation 5845741, arms l3a/l3b/l3c, logs under
+# /projects/a5k/public/logs/infr71_wave2/, W&B runs infr71_l3*.
+#
 # LAUNCH (the container is the only environment — no flag, no override):
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
 #       configs/quickstart/nemotron_super_quickstart_sft.yaml super sft
@@ -26,8 +48,9 @@
 # TOPOLOGY: TP=1 · CP=4 · EP=4 · PP=8 · ETP=1 · DP=2 -> 64 GPUs = 16 nodes.
 # Derived from the endorsed configs/pa_warm_start/sft_120b_1bmix_32k_pp11.yaml
 # levers (TP1 kernel-width rule, CP as the 32K memory lever, node-local EP via
-# parallel folding, full optimizer CPU offload) resized to a 16-node benchmark
-# footprint: 88 layers ⇒ PP ∈ {8,11,22}; at 64 GPUs the clean fit is PP=8
+# parallel folding, and — at the time — full optimizer CPU offload, since dropped
+# here; see the optimizer block) resized to a 16-node benchmark footprint:
+# 88 layers ⇒ PP ∈ {8,11,22}; at 64 GPUs the clean fit is PP=8
 # (11 layers/stage) with DP=2 (EP=4 divides DP·TP·CP=8).
 #
 # TWO NON-OBVIOUS SETTINGS (also commented at their fields below — repeated here
@@ -61,10 +84,15 @@
 #    was 39.0 s/iter — pa_green_team 2026-07-04. The container stack beat it by
 #    ~10 s and was also ~25 GB lighter on memory. Provenance only: the venv no
 #    longer exists, so this is not a number you can re-measure.)
-# => <20 s/iter is NOT reachable at this workload: every memory-for-speed lever
-#    is measured infeasible or slower; forward path = profiler-trace analysis
-#    (see the PROFILING block below; traces of this config are collected under
-#    /projects/a5k/public/profiles/).
+# => at this date the read was "<20 s/iter is NOT reachable: every memory-for-speed
+#    lever is measured infeasible or slower". The CONCLUSION has since been REFUTED
+#    (the champion is 17.099 — see the block at the top of this header), and the
+#    REASON was wrong too, in a way worth keeping. The sweep
+#    only ever tested spending memory on ACTIVATIONS (CP=2, recompute off), which
+#    does OOM. It never tested giving memory back to the OPTIMIZER by switching CPU
+#    offload off — which is feasible (81.4 GB of 95) and 2.1 s/iter faster. A
+#    "memory-for-speed lever" search that enumerates only one consumer of memory
+#    will conclude the levers are exhausted while a whole class sits untried.
 #
 # BOTTLENECK-RESOLUTION PASS (2026-07-24, container, same 16 nodes, 12-iter
 # probes, mean iters 6-12 — every trace-identified lever measured or blocked):
@@ -73,22 +101,44 @@
 #     override anywhere)
 #   + manual_gc (interval 10)             27.88 -> 27.61  (+ collapses the ~2 s
 #     inter-iter jitter to ~0.2 s; scheduled collection costs 0.8 s per 10 iters)
-#   THIS CONFIG NOW = both composed      27.61 s/iter | ~81 GB | CHAMPION
+#   THIS CONFIG NOW = both composed      27.61 s/iter | ~81 GB | champion AT THE TIME
 #   moe_router_fusion                     27.85 — no win, excluded
 #   CUDA graphs (attn+mamba / mamba)      OOM x2 — graph pools ~+14 GB
 #   fVPP (virtual/interleaved PP): WORKS on the Nemotron-H hybrid — first time on
 #     this model; the two stale bridge asserts that blocked it were removed in
-#     4df5cc7e. VERDICT (numbers restated inline because the artifacts are gone):
-#     best measured VPP config = VPP4 + trio recompute + fusion at **30.69 s/iter
-#     vs the 27.61 s/iter champion = +11%**, so VPP stays DOCUMENTED, not
-#     composed. And `overlap_p2p_comm` — which VPP enables — is a **~2x Slingshot
-#     regression at BOTH PP8 and PP16** (un-batched isend/irecv pathology): never
-#     enable it on this fabric. The config that measured this
-#     (nemotron_super_quickstart_sft_vpp4.yaml) and the investigation writeup have
-#     both been DELETED from the repo; the full ladder, decomposition and
-#     trace-level overlap root-cause now live in a Slack canvas in #megatron.
+#     4df5cc7e. VERDICT AT THIS DATE: best measured VPP config = VPP4 + trio
+#     recompute + fusion at **30.69 s/iter vs the then-champion 27.61 = +11%**,
+#     so VPP stays DOCUMENTED, not composed. (SUPERSEDED 2026-08-03 by the INFR-71
+#     campaign, which re-measured VPP against the cutlass champion and refuted it
+#     outright — VPP4 +13.5%, VPP2 +5.4% (both offload-ADJUSTED upper bounds; the
+#     arms ran offload 1.0 vs a 0.5 control, raw +17.6%/+9.4%, ~0.95 s subtracted
+#     for a handicap the tracker bounds only from BELOW), mechanism =
+#     wait-multiplication rather than launch pressure. Full verdict:
+#     docs/investigations/infr71-vpp-campaign-prereg.md.)
+#     `overlap_p2p_comm` — which VPP enables — is likewise a regression on this
+#     fabric, but the size quoted here at the time ("~2x") was wrong: re-measured
+#     at the current mcore pin it is **31.45 s/iter vs 27.50 = +14%**, from
+#     un-batched isend/irecv being 2.3-5.7x per op on CXI. Its historical
+#     iteration-2 NaN was a separate upstream deallocate race, since fixed. Still:
+#     do not enable it. The config that measured the VPP numbers,
+#     `nemotron_super_quickstart_sft_vpp4.yaml`, WAS deleted 2026-08-04 — this time
+#     for real (an earlier version of this header wrongly claimed a deletion that had
+#     not happened, so: it is gone as of the quickstart standardisation, and `git log`
+#     is the record). VPP loses at this config's workload — 32 microbatches per replica,
+#     +13.5% (an offload-adjusted UPPER bound, measured on `cublas_grouped` two days
+#     before `torch_grouped` shipped, so not a reading on the current default) — and
+#     regardless of that figure's exact size, its ≤16 µb/replica winning regime is
+#     reachable (DP=2, mbs 1, so GBS 32 = 16) but costs more than it buys: the best
+#     GBS-32 arm is 550.3 ms/sample against 429.7 for the GBS-64 arm it is paired
+#     with — 28% worse per sample (VPP wins 2.1% there; the smaller batch loses
+#     ~31%). Both halves are the July wave on one placement, NOT this config's
+#     current 17.099 s/iter = 267.2 ms/sample; against the shipped champion the
+#     GBS-32 arm is ~106% worse, so this comparison is the conservative one.
+#     Reproduce with
+#     override `model.virtual_pipeline_model_parallel_size=4`; the overlap root-cause
+#     write-up is docs/investigations/vpp-pp-comm-overlap-investigation.md.
 #   (The HISTORICAL A/B block below predates this pass — its 31.27 container
-#    number is the pre-fusion/GC config; C8 re-certifies the champion.)
+#    number is the pre-fusion/GC config; C8 re-certified the then-champion.)
 #
 # PERF-ITERATION LADDER (2026-07-25, container, tunnel 5738449 — a ~2.7 s/iter
 # SLOWER placement than the champion tunnel; every number below is vs the
@@ -117,7 +167,8 @@
 #       REGRESSION at offload 1.0 — end-of-step skew (timer barrier 1.31->4.20 s);
 #       compute + launch census byte-identical (TE 2.14.1 does NOT batch the
 #       ragged per-expert GEMMs — 168,771/iter on both images)
-#   m2  26.04 + offload 0.5                   25.66 | ADOPTED (this file)
+#   m2  26.04 + offload 0.5                   25.66 | adopted at the time (the
+#       offload was dropped entirely on 2026-08-03 — see the optimizer block)
 #   m3  26.04 + timing_log_level 0            26.46 | barriers create serialization
 #   m4  26.04 + both                          25.56 | timers win subsumed by m2 ->
 #       timing_log_level stays 2 (telemetry is free again once skew source is gone)
@@ -140,9 +191,12 @@
 # pipeline bubble reasonable (~23%).
 #
 # MEMORY-FOR-SPEED SWEEP (2026-07-23, GBS=48 / 64 GPUs fixed): the selective
-# recompute + full optimizer CPU offload below are load-bearing, not padding —
-# 70.5 GB (74%) is the FASTEST FEASIBLE point for this fixed workload, not a
-# conservative one.
+# recompute below is load-bearing, not padding. The claim this block used to make
+# — that 70.5 GB (74%) was "the FASTEST FEASIBLE point for this fixed workload" —
+# is FALSE and was corrected on 2026-08-03: the sweep varied only activation
+# memory, so it could not see that switching optimizer CPU offload OFF buys
+# 2.1 s/iter for ~4.7 GB. The recompute verdicts below stand; the "fastest
+# feasible" verdict does not.
 #   - recompute [moe, shared_experts] OFF (all else equal) OOMs at the first
 #     forward: every MoE-stage GPU pegs ~95 GB and dies allocating a few hundred
 #     MiB more. That recompute is exactly what saves the ~24 GB (70.5 -> >95)
@@ -240,15 +294,31 @@ train:
   manual_gc: true
   manual_gc_interval: 10
 
-# --- Optimizer (CPU offload fraction 0.5 — ADOPTED 2026-07-29 at the 26.04
-# qualification: 25.66 s/iter vs 26.70 (26.02 anchor) and vs 27.4-28.6 (26.04 at
-# fraction 1.0) on the identical nodelist; the win is "notable" per Kyle's rule, so
-# 0.5 replaces the historical full offload. True peak (nvidia-smi across all 64
-# GPUs during the composed m4 run): 69.1 GB of 95 on the stage-0 nodes. Mechanism:
-# on 26.04/torch 2.11 the fully-offloaded optimizer step skews some ranks by ~3 s
-# per iter, which the end-of-step timer barrier then charges to everyone;
-# fraction 0.5 removes the skew source. Full ladder + traces: docs/investigations/
-# 120b-gbs64-host-overhead-investigation.md §9.8.) ---
+# --- Optimizer: CPU offload OFF (adopted 2026-08-03, INFR-71) ---
+# Measured same-nodelist solo pair: offload 0.5 = 22.79 s/iter at 76.78 GB
+# allocated; offload OFF = 20.72 s/iter at 81.44 GB. Loss parity. So the offload
+# was costing 2.07 s/iter to save 4.66 GB on a card with headroom, and this is a
+# 64-GPU benchmark whose whole job is to be fast at a fixed workload. Re-measured
+# later on a second allocation across three placements: 20.66/20.81/21.14.
+#
+# History this replaces: fraction 0.5 was adopted 2026-07-29 because it beat
+# fraction 1.0 by removing an end-of-step rank skew (25.66 vs 27.4-28.6 on the
+# identical nodelist, 120b-gbs64-host-overhead-investigation.md §9.8). That
+# comparison was 0.5-vs-1.0 and never included 0.0, so it found the better of two
+# offload settings rather than the better of offload and no-offload.
+#
+# THE MEMORY-TIGHT ALTERNATE, if a derived config needs the ~8 GB back:
+# `optimizer_cpu_offload: true` AND `optimizer_offload_fraction: 1.0` — BOTH keys, because
+# the fraction is read only inside `if config.optimizer_cpu_offload:` (mcore
+# optimizer/__init__.py:503-535), so setting it alone is inert. That posture measures
+# 21.36 s/iter at 73.70 GB with 8 host threads: it beats the old 0.5 champion on BOTH axes,
+# and lands only 0.64 s behind offload-off while using 7.7 GB less. torchrun silently
+# defaults OMP_NUM_THREADS=1, which single-threads host AdamW onto one Neoverse-V2 core;
+# that default, not the offload, is what made offload look expensive. The threading half is
+# now automatic — `pipeline_env_activate.sh` defaults `ISAMBARD_OMP_THREADS=8` (and
+# `OMP_WAIT_POLICY=PASSIVE` with it) — so only the two YAML keys above are needed.
+# Evidence for both postures: docs/investigations/consultant-training-stack-review.md
+# §C1/§C1b.
 optimizer:
   lr: 5.0e-06
   min_lr: 0.0
@@ -262,8 +332,12 @@ optimizer:
   use_precision_aware_optimizer: true
   exp_avg_dtype: torch.bfloat16
   exp_avg_sq_dtype: torch.bfloat16
-  optimizer_cpu_offload: true
-  optimizer_offload_fraction: 0.5
+  optimizer_cpu_offload: false
+  optimizer_offload_fraction: 0.0
+  # The three below are read only inside `if config.optimizer_cpu_offload:`
+  # (megatron/core/optimizer/__init__.py:502-540), so they are inert as written.
+  # Kept rather than deleted so switching to the memory-tight alternate above is
+  # one flag, not a hunt for which companions the offload path needs.
   overlap_cpu_optimizer_d2h_h2d: true
   pin_cpu_grads: true
   pin_cpu_params: true
@@ -304,15 +378,34 @@ model:
   moe_shared_expert_overlap: False
   moe_permute_fusion: True
   moe_grouped_gemm: True
-  # CUTLASS grouped-GEMM experts (ADOPTED 2026-07-30): one grouped kernel per projection
-  # instead of 128 per-expert cuBLASLt calls. Measured on identical nodes, 48-iter arms,
-  # loss parity 7e-4: 21.78 s/iter on 26.02 / 22.01 on 26.04 vs 25.66 without (-15%).
-  # The win is per-launch host cost (TE GroupedLinear python machinery -> tight C++ loop):
-  # GPU idle fell 15.5 -> 7.4 s/iter. Requires nv-grouped-gemm (26.02 ships it; the 26.04
-  # overlay builds it from source). Implementation + evidence:
-  # src/megatron/bridge/models/nemotronh/cutlass_grouped_experts.py and the investigation
-  # doc §9.12. Set back to "te_grouped" to get the untouched upstream path.
-  moe_experts_impl: cutlass_grouped
+  # Grouped-experts backend. Three values matter here:
+  #   torch_grouped  (what this benchmark ships since 2026-08-04; the provider field default
+  #     stays "te_grouped", so Ultra-550B, Nano-8K and pa_warm_start still run te_grouped —
+  #     same model family, just not benchmarked on this path yet) — torch._grouped_mm, on sm_90
+  #     dispatches a REAL CUTLASS 3.x grouped kernel: one launch per projection per layer
+  #     instead of one per expert. Trace census: 2,560 expert-GEMM launches / 4.52 s where
+  #     the loop needed ~163k. This closes "audit lever #2" (a true grouped kernel), which
+  #     the previous note listed as open headroom.
+  #   cublas_grouped — the tight per-expert C++ cublasGemmEx loop adopted 2026-07-30. Kept
+  #     for A/B and for stacks whose torch lacks `_grouped_mm`; needs nv-grouped-gemm.
+  #     (`cutlass_grouped` is a deprecated alias for it and warns — the name was always a
+  #     misnomer: that package's CUTLASS grouped path is compile-time gated to sm_80, so on
+  #     GH200 it fell back to a loop. Trace audit: consultant-training-stack-review.md §C1g.)
+  #   te_grouped — the untouched upstream TE GroupedLinear path.
+  # MEASURED, paired same-nodelist A/B, loss 2.4e-4 apart: 20.397 -> 17.099 s/iter (-16.2%)
+  # here at 64 GPUs / GBS 64. At 128 GPUs / GBS 256 the paired one-line change is -16.4%
+  # (148.4 -> 124.1 ms/sample, arm e7, same 32 nodes). The -17.8% sometimes quoted for that
+  # size is NOT that measurement: it composes the backend change with recompute[moe]
+  # (124.1 -> 123.2) and a different allocation (123.2 -> 122.0, 5845741 -> 5845745).
+  # Quote -16.4% for this field's effect; -17.8% is the campaign's product, not the knob's.
+  # The two steps attack different costs: cublas_grouped bought 25.66 -> 21.78 (-15%) on
+  # HOST launch cost (those two ends straddle the 26.02 -> 26.04 image bump; the same-image
+  # readings are -15.8% and -14.2%, so -15% is representative rather than exact)
+  # (TE python machinery -> C++ loop, ~60 -> ~10 us/launch, GPU idle
+  # 15.5 -> 7.4 s/iter); torch_grouped removes the DEVICE-side per-expert launches those
+  # 163k dispatches were still paying for. Implementation + evidence:
+  # src/megatron/bridge/models/mamba/grouped_experts.py and the investigation doc §9.12.
+  moe_experts_impl: torch_grouped
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["moe", "shared_experts"]

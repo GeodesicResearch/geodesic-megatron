@@ -50,6 +50,77 @@ def get_raw_log_path() -> str:
     return os.environ.get("ISAMBARD_RAW_LOG_PATH", "")
 
 
+def resolve_run_artifact_dir(cfg) -> str:
+    """The directory this run writes its artifacts to.
+
+    ``checkpoint.save`` when the run saves checkpoints, else ``logger.wandb_save_dir``.
+    Not a degraded-mode fallback: these are the two places a run's outputs actually go,
+    and benchmark runs deliberately set ``checkpoint.save: null``. Both unset is a
+    configuration error — ``training/state.py`` already fails such a run at startup — so
+    it raises rather than quietly picking somewhere.
+    """
+    for candidate in (getattr(cfg.checkpoint, "save", None), getattr(cfg.logger, "wandb_save_dir", None)):
+        if candidate:
+            return str(candidate)
+    raise ValueError(
+        "Cannot locate a run artifact directory: both checkpoint.save and logger.wandb_save_dir "
+        "are unset. Set logger.wandb_save_dir (mandatory whenever checkpoint.save is null)."
+    )
+
+
+def serialize_resolved_config(cfg) -> str | None:
+    """The fully-resolved config as YAML text, or None if it could not be serialized.
+
+    The override YAML alone does not describe a run: recipe defaults and CLI overrides
+    (``train.global_batch_size=256``, ``model.virtual_pipeline_model_parallel_size=4``, …)
+    exist only in the resolved object, so a run configured partly from the command line is
+    otherwise unreproducible from disk. Non-serializable fields (e.g. an in-memory
+    dataset_dict) are excluded by the same helper the config-merge pipeline itself uses.
+
+    Provenance must never take down a training run, so failures are reported and swallowed —
+    the run proceeds, having said what it lost. That swallow is only safe because the happy
+    path is pinned by a unit test against a real ConfigContainer: without it a wiring mistake
+    here (a moved import, say) degrades to "no snapshot, ever" and nobody notices.
+    """
+    try:
+        from omegaconf import OmegaConf
+
+        from megatron.bridge.training.utils.omegaconf_utils import create_omegaconf_dict_config
+
+        resolved, _ = create_omegaconf_dict_config(cfg)
+        return OmegaConf.to_yaml(resolved, resolve=True)
+    except Exception as e:  # noqa: BLE001 - provenance must not break training
+        print(f"[run-identity] WARNING: could not serialize resolved config ({e})")
+        return None
+
+
+def write_resolved_config(cfg, run_id: str, resolved_config_yaml: str | None) -> str | None:
+    """Write the resolved config beside this run's artifacts on rank 0; return the path.
+
+    Named by run id so the snapshot joins the raw log, the profiles and the W&B run.
+    Takes the already-serialized text rather than re-deriving it, so a run that also
+    captures a profile serializes its config exactly once.
+
+    Only ``OSError`` is tolerated — a full disk or an unwritable directory should cost the
+    snapshot, not the run. ``resolve_run_artifact_dir``'s ``ValueError`` deliberately
+    propagates: that one means the config names no artifact directory at all, which is a
+    configuration error the operator must see, and swallowing it here would silence a
+    function documented as refusing to guess.
+    """
+    if resolved_config_yaml is None or int(os.environ.get("RANK", "0")) != 0:
+        return None
+    target_dir = resolve_run_artifact_dir(cfg)
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+        path = os.path.join(target_dir, f"{run_id}.resolved-config.yaml")
+        with open(path, "w") as fh:
+            fh.write(resolved_config_yaml)
+        return path
+    except OSError as e:
+        print(f"[run-identity] WARNING: could not write resolved config ({e}); this run is not reproducible from disk")
+        return None
+
+
 def stamp_wandb_summary(run, run_id: str, raw_log_path: str) -> None:
     """Write run-identity summary metrics onto a W&B run object.
 

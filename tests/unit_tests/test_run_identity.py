@@ -146,3 +146,116 @@ def test_callback_stamps_via_module_function(mod, monkeypatch):
     cb = mod.RunIdentityCallback(run_id="20260724T160000-j1", raw_log_path="/l.out")
     cb.on_train_start(ctx=None)
     assert calls == [("20260724T160000-j1", "/l.out")]
+
+
+# --- Resolved-config provenance -------------------------------------------------
+#
+# A run's posture is not fully described by its override YAML: recipe defaults and CLI
+# overrides (the 128-GPU benchmark is the 64-GPU config plus train.global_batch_size=256)
+# live only in the resolved object. These cover the snapshot that makes such a run
+# reproducible from disk.
+#
+# Every case below drives a REAL ConfigContainer, built by the training-config suite's own
+# factory. An earlier revision used a two-attribute stand-in for the directory-resolution
+# cases; that was wrong, because the stand-in re-declared `checkpoint.save` and
+# `logger.wandb_save_dir` and so would have stayed green through a rename of either field —
+# which is exactly the breakage these tests exist to catch.
+
+
+@pytest.fixture
+def cfg():
+    """A real ConfigContainer with both artifact-directory fields cleared.
+
+    Cleared rather than left at their defaults so each test states the one field it is
+    exercising, and no case silently depends on what the factory happens to default to.
+    """
+    from tests.unit_tests.training.test_config import (
+        create_test_config_container,
+        create_test_gpt_config,
+        restore_get_world_size_safe,
+    )
+
+    container, original, module_ref = create_test_config_container(
+        world_size_override=1, model_config=create_test_gpt_config()
+    )
+    container.checkpoint.save = None
+    container.logger.wandb_save_dir = None
+    yield container
+    restore_get_world_size_safe(original, module_ref)
+
+
+class TestResolveRunArtifactDir:
+    def test_prefers_checkpoint_save(self, mod, cfg):
+        cfg.checkpoint.save = "/p/ckpt"
+        cfg.logger.wandb_save_dir = "/p/wandb"
+        assert mod.resolve_run_artifact_dir(cfg) == "/p/ckpt"
+
+    def test_uses_wandb_save_dir_when_not_saving_checkpoints(self, mod, cfg):
+        """The benchmark posture: checkpoint.save is deliberately null."""
+        cfg.logger.wandb_save_dir = "/p/wandb"
+        assert mod.resolve_run_artifact_dir(cfg) == "/p/wandb"
+
+    def test_raises_when_no_artifact_dir_exists(self, mod, cfg):
+        # No silent fallback to cwd/$HOME — that is a config error and must say so.
+        with pytest.raises(ValueError, match="wandb_save_dir"):
+            mod.resolve_run_artifact_dir(cfg)
+
+
+class TestSerializeResolvedConfig:
+    def test_captures_an_override_the_yaml_does_not_contain(self, mod, cfg):
+        """THE POINT: a value set after the YAML merge must appear in the snapshot."""
+        cfg.train.global_batch_size = 256
+        text = mod.serialize_resolved_config(cfg)
+        assert text is not None
+        from omegaconf import OmegaConf
+
+        assert OmegaConf.create(text).train.global_batch_size == 256
+
+    def test_unserializable_config_reports_and_returns_none(self, mod, capsys):
+        assert mod.serialize_resolved_config(object()) is None
+        assert "could not serialize resolved config" in capsys.readouterr().out
+
+
+class TestWriteResolvedConfig:
+    def test_writes_yaml_named_by_run_id(self, mod, tmp_path, monkeypatch, cfg):
+        monkeypatch.setenv("RANK", "0")
+        target = tmp_path / "wandb"  # not pre-created: the writer must make it
+        cfg.logger.wandb_save_dir = str(target)
+        text = mod.serialize_resolved_config(cfg)
+
+        path = mod.write_resolved_config(cfg, "20260804T120000-j42", text)
+
+        assert path == str(target / "20260804T120000-j42.resolved-config.yaml")
+        assert open(path).read() == text
+
+    def test_only_rank_zero_writes(self, mod, tmp_path, monkeypatch, cfg):
+        monkeypatch.setenv("RANK", "3")
+        cfg.logger.wandb_save_dir = str(tmp_path)
+        assert mod.write_resolved_config(cfg, "rid", "a: 1") is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_no_file_when_serialization_failed(self, mod, tmp_path, monkeypatch, cfg):
+        monkeypatch.setenv("RANK", "0")
+        cfg.logger.wandb_save_dir = str(tmp_path)
+        assert mod.write_resolved_config(cfg, "rid", None) is None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_unwritable_target_reports_and_does_not_raise(self, mod, tmp_path, monkeypatch, capsys, cfg):
+        # Provenance must never take down a training run.
+        monkeypatch.setenv("RANK", "0")
+        blocker = tmp_path / "not-a-dir"
+        blocker.write_text("")
+        cfg.logger.wandb_save_dir = str(blocker)
+        assert mod.write_resolved_config(cfg, "rid", "a: 1") is None
+        assert "could not write resolved config" in capsys.readouterr().out
+
+    def test_missing_artifact_dir_is_not_swallowed(self, mod, monkeypatch, cfg):
+        """A config error must surface, not degrade to 'no snapshot' like an I/O failure.
+
+        The writer catches OSError only, so resolve_run_artifact_dir's deliberate ValueError
+        propagates — otherwise the function documented as raising 'rather than quietly picking
+        somewhere' would be silenced by its only production caller.
+        """
+        monkeypatch.setenv("RANK", "0")
+        with pytest.raises(ValueError, match="wandb_save_dir"):
+            mod.write_resolved_config(cfg, "rid", "a: 1")

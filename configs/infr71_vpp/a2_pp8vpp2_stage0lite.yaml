@@ -1,3 +1,8 @@
+# NOTE (2026-08-04): the champion this arm was scored against has MOVED TWICE — first to
+# 20.66 s/iter (optimizer CPU offload OFF), then to 17.099 s/iter (expert backend
+# `torch_grouped`, i.e. torch._grouped_mm's real CUTLASS grouped kernel). The 21.78/25.66
+# figures below are the baselines that were current when the arm ran and are kept for that
+# reason; see configs/quickstart/nemotron_super_quickstart_sft.yaml for the current posture.
 # ==============================================================================
 # INFR-71 arm A2 — PP8·VPP2, stage-0-lite 16-segment pattern (make VPP2 FIT at 32K/CP4)
 #
@@ -106,7 +111,10 @@ scheduler:
 model:
   seq_length: 32768
   pipeline_model_parallel_size: 8
-  moe_experts_impl: cutlass_grouped
+  # Repo-default expert backend (torch._grouped_mm's real CUTLASS grouped kernel).
+  # The arm numbers recorded in this header predate it and were measured on the
+  # per-expert cublas loop — set `cublas_grouped` to reproduce them exactly.
+  moe_experts_impl: torch_grouped
   # THE arm lever: VPP2 with a stage-0-lite partition (header). Same 88-layer
   # sequence as every other arm — only the '|' boundaries move.
   virtual_pipeline_model_parallel_size: 2

@@ -555,6 +555,13 @@ multi-stream cuBLASLt picks. Loss gate unchanged.
 
 ### 9.12 m6c: the launch-storm collapse CONFIRMED — new champion 21.78 s/iter
 
+> **MECHANISM CORRECTED 2026-08-03** (consultant-training-stack-review.md §C1g): the −16%
+> is real and this section's measurement stands, but "launch-storm collapse" is the wrong
+> mechanism — GEMM launch count is UNCHANGED (~163k/iter; the backend's CUTLASS grouped
+> path is compile-time unreachable on sm_90 and falls through to a per-expert cublasGemmEx
+> loop). The win is per-launch HOST-cost collapse (~60 → ~10 us/launch), which §9.14's
+> buried note already suspected. This headline and the paragraph below overstate it.
+
 **m6c (26.02 + offload 0.5 + cutlass_grouped, genuinely engaged — 64/64 rank markers):
 21.78 s (10–30) / 21.69 (10–48), min 21.23, loss@48 = 0.6242605 ✓ in-band.** −4.1 s (−16%)
 vs the same-image baseline; −3.8 s vs the prior champion (m2/m4 25.56–25.66). Landed inside
@@ -602,6 +609,14 @@ machinery → tight C++ loop), not launch count; gg's cublas path also lost cuBL
 fusion (~+0.4–0.6 s GPU) — a known recoverable if gg gains a fused epilogue.
 
 ### 9.15 FINAL VERDICT (2026-07-30 ~04:15 UTC): 21.78 s/iter is the quality-neutral floor on this driver
+
+> **SUPERSEDED 2026-08-04 — this section's headline and its "<=20 s/iter is NOT reachable"
+> conclusion are both wrong, on the same driver (565.57.01) and the same mcore 0.19 pin.**
+> The champion is now **17.099 s/iter** (154.5 TFLOP/s/GPU). What this section could not see
+> was a third expert backend: `torch._grouped_mm`, a real CUTLASS 3.x sm90 grouped kernel,
+> which the analysis below treats as unavailable because it only ever compared TEGroupedMLP
+> against the per-expert cuBLAS loop. The reasoning below is left intact as the record of what
+> was known then; do not quote its floor.
 
 v3 (VPP2 + trio recompute, the July fit recipe) also OOM'd — the cutlass module's fatter
 activation envelope closes what that recipe opened. **Every quality-neutral lever at this

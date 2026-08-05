@@ -163,6 +163,23 @@ export UB_SKIPMC=1                                        # Isambard driver lack
 # comm-compute overlap; TP=1 topologies (e.g. the 120B quickstart) may probe >1
 # to unserialize the hardware launch queues (see the quickstart header ladder).
 export CUDA_DEVICE_MAX_CONNECTIONS="${ISAMBARD_CUDA_MAX_CONNECTIONS:-1}"
+# Overridable via ISAMBARD_OMP_THREADS. torchrun/ft_launcher set OMP_NUM_THREADS=1
+# whenever the variable is ABSENT, which single-threads the host-side AdamW of a
+# CPU-offloaded optimizer onto one Neoverse-V2 core (~36 GB/s of a socket capable of
+# ~500 GB/s). Exporting here wins because this file is sourced in the same shell that then
+# execs the launcher. Measured on the 120B benchmark at offload fraction 1.0: 21.36 s/iter
+# / 73.70 GB with 8 threads, versus 22.79 / 76.78 single-threaded at fraction 0.5 — faster
+# AND lighter. With offload OFF it is exactly neutral (20.663 vs 20.654 s/iter, identical
+# peak memory), which is why 8 is safe as a universal default: there is no host optimizer
+# for the threads to act on. PASSIVE is load-bearing rather than decoration — GNU OpenMP
+# idle threads spin-wait and these workloads are host-launch-bound, so ACTIVE spin can cost
+# more launch throughput than the threaded Adam saves. ISAMBARD_OMP_THREADS=1 restores
+# torchrun's behaviour. Applies to every payload, not only training; 8 threads per rank is
+# well inside a 72-core Grace socket.
+export OMP_NUM_THREADS="${ISAMBARD_OMP_THREADS:-8}"
+if [ "$OMP_NUM_THREADS" != "1" ]; then
+    export OMP_WAIT_POLICY="${ISAMBARD_OMP_WAIT_POLICY:-PASSIVE}"
+fi
 export NVTE_CPU_OFFLOAD_V1=1                              # TE fine-grained CPU activation offloading (TE >= 2.10 path)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # reduces CUDA memory fragmentation
 export TORCH_CUDA_ARCH_LIST="9.0"                         # Hopper/GH200; also guards sm_90a arch-string parsing in JIT builds

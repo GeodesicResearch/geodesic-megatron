@@ -270,7 +270,14 @@ def forward_step(
     }
 
     original_tokens = tokens.clone()
-    forward_args = get_batch_on_this_cp_rank(forward_args, cp_group=this_pg_collection.cp)
+    # `is_hybrid_cp` is a required positional as of the mcore 0.19 pin; it comes from
+    # ModelParallelConfig, so the dispatch follows the model's actual configuration
+    # rather than a literal asserted here.
+    forward_args = get_batch_on_this_cp_rank(
+        forward_args,
+        is_hybrid_cp=config.hybrid_context_parallel,
+        cp_group=this_pg_collection.cp,
+    )
     forward_args["packed_seq_params"] = None
     forward_args["input_ids"] = original_tokens
     # calculate position_ids in model forward

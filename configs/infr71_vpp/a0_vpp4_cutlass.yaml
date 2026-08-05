@@ -1,11 +1,17 @@
+# NOTE (2026-08-04): the champion this arm was scored against has MOVED TWICE — first to
+# 20.66 s/iter (optimizer CPU offload OFF), then to 17.099 s/iter (expert backend
+# `torch_grouped`, i.e. torch._grouped_mm's real CUTLASS grouped kernel). The 21.78/25.66
+# figures below are the baselines that were current when the arm ran and are kept for that
+# reason; see configs/quickstart/nemotron_super_quickstart_sft.yaml for the current posture.
 # ==============================================================================
 # INFR-71 arm A0 — VPP4 + CutlassGroupedExperts (was VPP's +11% just host starvation?)
 #
 # The July VPP4 measurement (30.69 s/iter vs 27.61 non-VPP) predates the cutlass
 # grouped-experts fix that removed the per-expert GEMM launch storm (champion now
 # 21.78). Interleaving multiplies per-stage launch pressure, so VPP's penalty may
-# have been host-bound. This arm = the vpp4 config + moe_experts_impl:
-# cutlass_grouped, benchmark posture (32 iters, no checkpoint IO, FT off).
+# have been host-bound. This arm = the vpp4 config + the grouped-experts backend (as run:
+# the per-expert cublas loop, then spelled `cutlass_grouped`; the field now carries the
+# repo default `torch_grouped`), benchmark posture (32 iters, no checkpoint IO, FT off).
 # optimizer_offload_fraction stays 1.0 (vpp4's fit margin was thin; champion uses
 # 0.5 -- attribute any delta accordingly).
 #
@@ -94,8 +100,10 @@ scheduler:
 model:
   seq_length: 32768
   pipeline_model_parallel_size: 8
-  # THE arm lever: kill the per-expert launch storm under interleaving.
-  moe_experts_impl: cutlass_grouped
+  # THE arm lever: kill the per-expert launch storm under interleaving. This is now the
+  # repo default (torch._grouped_mm's real CUTLASS grouped kernel); the arm as RUN used
+  # the per-expert cublas loop, which `cublas_grouped` reproduces exactly.
+  moe_experts_impl: torch_grouped
   virtual_pipeline_model_parallel_size: 4
   hybrid_layer_pattern: "MEM|EME|M*E|MEM|EME|M*E|MEM|EME|M*|EME|MEM|EME|M*E|MEM|EME|ME|M*|EM|EME|MEM|EM*|EME|MEM|EME|M*|EM|EME|MEM|*EM|EME|ME|ME"
   tensor_model_parallel_size: 1

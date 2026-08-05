@@ -118,7 +118,7 @@ bash pipeline_env_setup.sh
 | `pipeline_env_setup.sh` | The whole install in four idempotent steps (`sif` → `slingshot` → `overlay` → `validate`). Needs a GPU node for steps 2 and 4. |
 | `pipeline_env_exec.sh` | The shim every launcher uses: scrubs host toolchain env, then runs one command string inside the container. |
 | `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
-| `pipeline_env_validate.py` | 19-check validation (imports incl. the quickstart's grouped_gemm dependency, CUDA, GPU ops, import resolution, NCCL plugin dlopen, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
+| `pipeline_env_validate.py` | 20-check validation (imports incl. grouped_gemm, which the non-default `cublas_grouped` expert backend needs, CUDA, GPU ops, import resolution, NCCL plugin dlopen, host OpenMP threading defaults, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke` (2-node fabric check). |
 
 ### Key facts
@@ -142,19 +142,46 @@ bash pipeline_env_setup.sh
   and before the image) fills gaps without touching the read-only SIF: `peft` (image
   0.13.2 is below modelopt's >=0.17 requirement), `imageio` (absent; one diffusion
   test file otherwise fails at collection), and `nv-grouped-gemm` (absent from 26.04;
-  the shipped quickstart's `moe_experts_impl: cutlass_grouped` needs it — built from
-  sdist with `--no-build-isolation`, and the validator's grouped_gemm check gates on it).
+  needed by the `moe_experts_impl: cublas_grouped` backend — no longer the shipped
+  default, but kept installable so the A/B against `torch_grouped` stays runnable — built
+  from sdist with `--no-build-isolation`, and the validator's grouped_gemm check gates on it).
 - **Import resolution** is `repo src/` > `3rdparty/Megatron-LM` > overlay > image
   site-packages, via PEP 420 namespace portions. The validator asserts it every run —
   a regular (non-namespace) `megatron` package in a future image would silently win.
 - **Benchmark/certification config:** `configs/quickstart/nemotron_super_quickstart_sft.yaml`
   (Super-120B, TP1·CP4·EP4·PP8·ETP1·DP2 → 64 GPUs = **16 nodes**) — gate is < 40 s/iter
-  (mean of iters 10–30; measured champion **21.78 s/iter** FT-off with
-  `moe_experts_impl: cutlass_grouped` + `optimizer_offload_fraction: 0.5`, both now
-  shipped defaults. Qualification anchors: 25.66 at the 2026-07-29 26.04 qualification
-  pre-cutlass; the prior 26.02 anchor was 26.70 on the identical nodelist, ~27.2–27.6
-  historical). Qualifying a new image tag = that absolute gate plus no regression
-  against the previously qualified tag's recorded number.
+  (mean of iters 10–30; measured champion **17.099 s/iter** = **154.5 TFLOP/s/GPU**
+  model-FLOPs, FT-off with `moe_experts_impl: torch_grouped` and optimizer CPU offload
+  **OFF**, both shipped defaults. Placement moves this workload by ~2% — the previous
+  champion spanned 20.66–21.14 s/iter across three 16-node placements inside one
+  allocation — so quote the placement when quoting the number. Superseded anchors: 20.66
+  (127.9 TFLOP/s/GPU, 81.4 GB peak of 95) for the `cublas_grouped` per-expert-loop backend
+  at this same offload-off posture, 21.78 for the offload-0.5 posture on the 26.02 image,
+  22.79 for that posture on a slower placement,
+  25.66 at the 2026-07-29 26.04 qualification pre-grouped-GEMM, 26.70 for the 26.02 anchor
+  on the identical nodelist).
+  Qualifying a new image tag = that absolute gate plus no regression against the
+  previously qualified tag's recorded number.
+- **Scaling out to 128 GPUs is an OVERRIDE, not a second config.** The quickstarts are
+  standardised at 64 GPUs / 16 nodes; the 128-GPU run differs in exactly one field, and the
+  launcher forwards Hydra overrides, so it is:
+  `isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
+   configs/quickstart/nemotron_super_quickstart_sft.yaml super sft train.global_batch_size=256`
+  Measured **122.0 ms/sample** (31.228 s/iter, 169.2 TFLOP/s/GPU). **Scaling efficiency is
+  NOT currently measured on the shipped backend.** The 98.8% figure often quoted here is
+  `(293.3/2) / 148.4` — *both* ends `cublas_grouped`, and comparing 128-GPU GBS-256 against
+  64-GPU GBS-128, i.e. matched µb/replica rather than matched GBS. `torch_grouped` moved the
+  128-GPU end to 122.0, but the 64-GPU GBS-128 comparator was never re-run on it, so the
+  ratio cannot be carried forward — re-measure that arm before quoting a scaling number.
+  Scale the batch with the nodes: at fixed GBS, doubling GPUs halves µb/replica and grows
+  the PP bubble — the bubble curve was mapped on the superseded `cublas_grouped` backend
+  (148.4 ms/sample at this GBS, 77.6 GB peak): 199.1/164.8/148.4/141.0 ms/sample at
+  GBS 64/128/256/512. The 2026-08-03
+  seven-probe ladder + 24-topology adversarial sweep closed the alternatives: cross-node
+  EP loses superlinearly at any PP (EP16 ~2× worse; the 9 h soak is moot), CP2 OOMs at
+  every legal point, PP>8 is constructible via uneven piped `hybrid_layer_pattern` but
+  strictly slower (PP8·DP4 is the only layer-balanced depth at 128 GPUs). Evidence:
+  `docs/investigations/consultant-training-stack-review.md` §C13.
 - **Unit tests run inside the container** (the image ships pytest/pytest-xdist/ruff/pre-commit):
   ```bash
   # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent
@@ -227,6 +254,17 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
   stamped into W&B summary (`run/isambard_run_id`, `run/raw_log_path`,
   `run/slurm_job_id`) by `scripts/telemetry/run_identity.py` — the join key
   between a W&B run, its raw log, and its profiles.
+- **Resolved-config snapshot (always on)**: every run writes
+  `<run-id>.resolved-config.yaml` beside its artifacts — into `checkpoint.save`
+  when the run saves checkpoints, else `logger.wandb_save_dir`. This is the FULL
+  post-merge config, so a posture reached partly by Hydra override (the 128-GPU
+  benchmark is the 64-GPU quickstart plus `train.global_batch_size=256`) is
+  reproducible from disk; the override YAML alone omits recipe defaults and every
+  CLI override. Rank 0 only. An **I/O** failure (full disk, unwritable dir) warns
+  and lets the run continue — provenance must not cost you a run. A config that
+  names no artifact directory at all is different: that stops the run before
+  iteration 1, deliberately, because it is a configuration error (and such a
+  config already died later, less legibly, in `state.py`).
 
 ### Environment Variable Architecture
 
@@ -237,6 +275,28 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 - Module loading (`PrgEnv-cray`, `cuda/12.6`, `brics/aws-ofi-nccl/1.8.1`)
 
 Every env var has detailed inline documentation.
+
+`pipeline_env_activate.sh` (sourced inside the container, in the same shell that then execs
+ft_launcher/torchrun) carries the universal knobs. Two are tunable:
+`ISAMBARD_CUDA_MAX_CONNECTIONS` (default 1) and **`ISAMBARD_OMP_THREADS` (default 8)**,
+which sets `OMP_NUM_THREADS` and, whenever it is > 1, also `OMP_WAIT_POLICY=PASSIVE`. The
+default matters because torchrun silently sets `OMP_NUM_THREADS=1` when the variable is
+absent, single-threading the host-side AdamW of any CPU-offloaded optimizer onto one
+Neoverse-V2 core: **21.36 s/iter / 73.70 GB at offload 1.0 with 8 threads, versus 22.79 /
+76.78 at offload 0.5 single-threaded** — i.e. it strictly dominates the previous champion,
+but the two arms differ in offload fraction as well as threads, so the delta is not
+attributable to threading alone (the clean offload-1.0 single-thread arm was never run on
+that nodelist; see §C1b). Both arms are on the pre-`torch_grouped` expert path — this
+A/B is about host-side Adam, so the expert backend does not move it. Threading is exactly
+neutral (20.663 vs 20.654, identical peak)
+when offload is off — which is what makes 8 safe as a universal default. `PASSIVE` is
+load-bearing: GNU OpenMP idle threads spin-wait and these workloads are host-launch-bound.
+Set `ISAMBARD_OMP_THREADS=1` to restore torchrun's behaviour. `pipeline_env_validate.py`
+scores both as a check, so a silent regression fails loudly instead. **What it would cost
+depends entirely on the posture**: on the shipped offload-off quickstart, essentially
+nothing (20.663 vs 20.654); it only bites where a CPU-offloaded optimizer gives host AdamW
+real work to do, and even there the 1.43 s/iter figure above is not a clean threading
+delta — see §C1b before quoting it.
 
 ### Training-Specific Override for Isambard
 
@@ -270,6 +330,18 @@ The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set v
 Recommended parallelism for GH200 95GB GPUs:
 - **8 nodes, 32 GPUs**: TP=2, EP=2, PP=4, DP=2 (node-local TP+EP)
 - Throughput: **~3.4s/iter, ~27 TFLOP/s/GPU** at seq_length=8192, GBS=16
+- **At seq_length 32768 the posture is completely different** —
+  `configs/quickstart/nemotron_nano_quickstart_sft_32k.yaml`, TP=1 CP=2 EP=4 PP=1 ETP=1 at
+  GBS 256 on 16 nodes / 64 GPUs: **71.74 ms/sample** (18.365 s/iter), peak 91.5 GB of 95.
+  CP=2 is not a tuning choice: at 32K the fp32 cross-entropy logits are seq x vocab x 4 =
+  EXACTLY 16.00 GiB, a live tensor recompute cannot touch, so CP=1 does not fit **at PP=1**
+  (it missed by 12.31 GiB). It IS reachable at PP=2 with optimizer offload, and measured
+  +9.6% there — reachable, and not worth reaching, because that +9.6% is the price of the
+  PP=2 it needs (PP=2 alone is +18.3%; at matched PP=2, CP=1 is ~7.4% *faster*). Full
+  recompute is likewise mandatory (selective OOMs for exactly 8.00 GiB). Closed with
+  measurements, all worse: TP=2 +48.9%, PP=2 +18.3%, PP=4 +30.1%, EP=8 +77.2%, and the
+  three-knob CP=1 package +9.6%.
+  Evidence: `docs/investigations/nano30b-32k-topology-campaign.md`.
 - Zero NCCL hangs through 500+ iterations — keeping EP on NVLink avoids Slingshot all-to-all hangs
 
 **Why node-local TP+EP matters:** Cross-node EP drops throughput 14x because MoE all-to-all over Slingshot/CXI is extremely slow. Rule: **TP × EP ≤ 4** to keep both on NVLink.
@@ -356,11 +428,58 @@ same allocation):
 
 | microbatches/replica | no VPP | VPP=4 | verdict |
 |---|---|---|---|
-| 32 (GBS 64 — the shipped quickstart) | 27.50 s/iter | 29.59 s/iter | VPP **+7.6% worse** |
+| 32 (GBS 64 — the shipped quickstart) | 27.50 s/iter | 29.59 s/iter | VPP **+7.6% worse** (TEGroupedMLP experts) |
 | 16 (GBS 32) | 17.98 s/iter | 17.61 s/iter | VPP **−2.1% better** (both arms run twice, ranges disjoint) |
 
+**Re-measured on the `cublas_grouped` expert path (INFR-71 wave 2, 2026-08-02, GBS 64):
+the penalty SURVIVES — VPP4 +13.5%, PP8·VPP2 stage-0-lite +5.4%. It is NOT established that
+it grew.** Those two figures are offload-*adjusted*: the wave-2 arms ran
+`optimizer_offload_fraction: 1.0` against a 0.5 control (raw +17.6% / +9.4%), and ~0.95 s/iter
+was subtracted for that handicap. §C1 calls the handicap "**at least** 0.9–1.0 s/iter …
+plausibly more", so these are **upper bounds**; the same-nodelist 1.0-vs-0.5 ladder in the
+quickstart header puts it at 1.7–2.9 s, and at ~2 s the VPP2 arm lands around +0.9%, i.e. a
+wash. The July +7.6% pair was offload-*matched*, so "grew" would be comparing a matched delta
+against a partially-corrected unmatched one. The safe reading is the prereg's own: wave 2 left
+the VPP penalty intact. Cutting the
+per-launch HOST cost (~60 → ~10 µs; the GEMM launch count is unchanged at ~163k — see the
+mechanism correction in `120b-gbs64-host-overhead-investigation.md` §9.12) did NOT rescue
+the interleaved arm, which refutes the "VPP costs host launch pressure" explanation — if
+host launch pressure were the cost, removing most of it would have closed the gap, and it
+did not. (Do not phrase this as "it helped the non-VPP arm more": that is arithmetically
+the same claim as "the penalty grew", which the offload confound above does not support.)
+The real mechanism is wait-multiplication: the regression is
+100% stall (idle +3.6 s, compute +0.05 s), because a PP p2p kernel is dominated by waiting
+for its peer, so splitting one wait four ways does not quarter it. A PP16·VPP2 arm never
+reached iteration 1 in 76 minutes of comm-init.
+
 So: **enable VPP only at ≤16 microbatches per replica**; above that the non-VPP config
-wins. The variant is `configs/quickstart/nemotron_super_quickstart_sft_vpp4.yaml`.
+wins — and the shipped quickstart is above it. **The VPP quickstart variant was DELETED
+2026-08-04.** At the standardised 64 GPUs the Super topology gives DP=2, so GBS 64 is 32
+microbatches per replica: VPP's losing side. Every figure for that side (+7.6% matched in
+July, +13.5% offload-adjusted in August) predates `torch_grouped`, and the August one is an
+upper bound — see the caveats above. **The ≤16 µb/replica winning regime IS reachable — it
+just costs more than it buys.** DP=2 and `micro_batch_size: 1`, so GBS 32 gives exactly 16
+(the 256-sequence cap is an upper bound, not the only batch size), and the table above
+measures that point as VPP's win. But within that July wave the best GBS-32 arm is 550.3
+ms/sample against 429.7 for the GBS-64 arm it is paired with — **28% worse per sample**,
+because shrinking the batch to reach VPP's regime costs ~31% and VPP hands back 2.1% of it.
+(Three generations of this config's ms/sample appear on this page and must not be mixed:
+**429.7** July/TEGroupedMLP, **323.8** August/`cublas_grouped` offload-off, **267.2** today
+at 17.099 s/iter. The 28% is July-vs-July; against today's champion the GBS-32 arm is ~106%
+worse, so the figure quoted here is the conservative one.) That is why the variant could
+never win at the standard, and why keeping a runnable artifact for it only invited someone
+to try. To reproduce the VPP measurement, add
+`model.virtual_pipeline_model_parallel_size=4` as a Hydra override to the shipped config.
+**At GBS 64 the bubble is better reclaimed by raising the batch than by interleaving:**
+GBS 128 non-VPP measures **−9.4% per sample** (293.3 vs 323.8 ms/sample, same nodelist),
+reproduced at 299.5 on a second allocation. Full verdict:
+`docs/investigations/infr71-vpp-campaign-prereg.md`.
+
+**Caveat, and it is the tracker's own:** every VPP and `overlap_p2p_comm` measurement above
+was taken in the HOST-BOUND regime, before `torch_grouped` removed the expert-launch storm.
+The current posture is ~30% exposed comm — the condition `overlap_p2p_comm` exists for — and
+neither has been re-measured there (§C15, Wave F). The verdicts stand and the config stays
+deleted, but do not cite them as settled until that reports.
 
 Trace decomposition of why it loses at GBS=64: the regression is 100% stall, not compute
 (on the clean rank, +1.848 s = compute +0.045, exposed comm −1.820, idle +3.624). VPP does
@@ -753,10 +872,14 @@ silently vanishes on a fresh clone and any number it produced becomes irreproduc
 happened to the 120B champion measurement (a DDP bucket-size change; it is now the explicit
 `ddp.bucket_size` field in the quickstart config, where it belongs). If a change cannot be
 expressed through config, vendor it as a patch in `3rdparty/patches/megatron-lm/` — see that
-directory's README, which records why each patch exists and what it is load-bearing for. The one
-patch there (`0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`) is the ONLY
-surviving copy of a fix whose original submodule commit no remote contains; it is deliberately
-NOT auto-applied (nothing uses the `allgather` dispatcher — every config forces `alltoall`).
+directory's README, which records why each patch exists and what it is load-bearing for. There
+are three, and NONE is auto-applied. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
+is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
+because nothing uses the `allgather` dispatcher today (every config forces `alltoall`) but the
+fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
+**still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
+`0003` is the `overlap_p2p_comm` NaN, whose fix IS in the current pin, so it is a record of a
+closed bug rather than something to apply.
 
 ### Monitoring Long-Running Processes
 

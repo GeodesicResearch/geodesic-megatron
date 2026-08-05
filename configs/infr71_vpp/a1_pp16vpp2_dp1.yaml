@@ -1,3 +1,8 @@
+# NOTE (2026-08-04): the champion this arm was scored against has MOVED TWICE — first to
+# 20.66 s/iter (optimizer CPU offload OFF), then to 17.099 s/iter (expert backend
+# `torch_grouped`, i.e. torch._grouped_mm's real CUTLASS grouped kernel). The 21.78/25.66
+# figures below are the baselines that were current when the arm ran and are kept for that
+# reason; see configs/quickstart/nemotron_super_quickstart_sft.yaml for the current posture.
 # ==============================================================================
 # INFR-71 arm A1 — PP16 * VPP2 * DP1: the fresh memory geometry for interleaving
 #
@@ -99,7 +104,10 @@ scheduler:
 model:
   seq_length: 32768
   pipeline_model_parallel_size: 16
-  moe_experts_impl: cutlass_grouped
+  # Repo-default expert backend (torch._grouped_mm's real CUTLASS grouped kernel).
+  # The arm numbers recorded in this header predate it and were measured on the
+  # per-expert cublas loop — set `cublas_grouped` to reproduce them exactly.
+  moe_experts_impl: torch_grouped
   virtual_pipeline_model_parallel_size: 2
   hybrid_layer_pattern: "MEM|EME|M*E|MEM|EME|M*E|MEM|EME|M*|EME|MEM|EME|M*E|MEM|EME|ME|M*|EM|EME|MEM|EM*|EME|MEM|EME|M*|EM|EME|MEM|*EM|EME|ME|ME"
   tensor_model_parallel_size: 1

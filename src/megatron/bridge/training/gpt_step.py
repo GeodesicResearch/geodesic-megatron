@@ -244,8 +244,15 @@ def get_batch(
         # built over the full pack and in original token order.
         batch = _partition_packed_batch_for_cp(batch, cp_size)
     else:
-        # slice batch along sequence dimension for context parallelism
-        batch = get_batch_on_this_cp_rank(batch, cp_group=pg_collection.cp)
+        # slice batch along sequence dimension for context parallelism.
+        # `is_hybrid_cp` is a required positional as of the mcore 0.19 pin; it comes from
+        # ModelParallelConfig, so the dispatch follows the model's actual configuration
+        # rather than a literal asserted here.
+        batch = get_batch_on_this_cp_rank(
+            batch,
+            is_hybrid_cp=cfg.model.hybrid_context_parallel,
+            cp_group=pg_collection.cp,
+        )
 
     return (
         batch["tokens"],

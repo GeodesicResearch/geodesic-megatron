@@ -180,9 +180,24 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
     # bridge registers provider=MambaModelProvider, so this class is what training actually
     # instantiates — a field on the subclass is silently dropped by the YAML merge (found
     # the hard way; investigation doc §9.11).
-    #   "te_grouped"      — upstream TEGroupedMLP (default; unchanged behavior)
-    #   "cutlass_grouped" — CutlassGroupedExperts: one CUTLASS grouped-GEMM kernel per
-    #                       projection over all local experts (needs nv-grouped-gemm)
+    #   "te_grouped"     — upstream TEGroupedMLP, and the default here deliberately. Note
+    #                      what that means in practice: only the two BENCHMARK quickstarts
+    #                      (Super-120B, Nano-30B-32K) plus the infr71_vpp arms opt into
+    #                      "torch_grouped". Ultra-550B, Nano-8K and pa_warm_start still run
+    #                      te_grouped — not because they are unrelated models (they are the
+    #                      same Nemotron-H family) but because they have not been
+    #                      benchmarked on that path yet.
+    #   "torch_grouped"  — GroupedExperts via torch._grouped_mm, a real CUTLASS 3.x sm90
+    #                      grouped kernel with full autograd. Measured −16.2% s/iter on the
+    #                      64-GPU Super benchmark and −16.4% at 128 GPUs, both paired
+    #                      same-nodelist A/Bs of this field alone; bitwise-identical to the
+    #                      per-expert reference. This is what the configs select.
+    #   "cublas_grouped" — GroupedExperts driving nv-grouped-gemm, which on sm_90 falls
+    #                      through to a per-expert cuBLAS LOOP (its grouped kernel is
+    #                      compile-time gated to sm_80). Kept so the A/B stays runnable and
+    #                      for torch builds without _grouped_mm. Needs nv-grouped-gemm.
+    #   "cutlass_grouped" — DEPRECATED alias of "cublas_grouped"; warns. The old name
+    #                      claimed a CUTLASS kernel this path never reached.
     moe_experts_impl: str = "te_grouped"
     vocab_size: Optional[int] = None
     should_pad_vocab: bool = False
@@ -294,29 +309,48 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         Runs at provide() time — YAML `model:` overrides merge onto the provider instance
         AFTER construction, so a __post_init__ hook would only see the field default.
         """
+        from megatron.bridge.models.mamba.grouped_experts import (
+            DEPRECATED_BACKEND_ALIASES,
+            GEMM_BACKENDS,
+            swap_moe_experts_to_grouped,
+        )
+
         if self.moe_experts_impl == "te_grouped":
             return
-        if self.moe_experts_impl != "cutlass_grouped":
-            raise ValueError(
-                f"Unknown moe_experts_impl {self.moe_experts_impl!r}; expected 'te_grouped' or 'cutlass_grouped'."
+
+        impl = self.moe_experts_impl
+        backend = DEPRECATED_BACKEND_ALIASES.get(impl, impl)
+        if backend != impl:
+            # Accepted, not silently remapped: say so loudly enough that configs get fixed.
+            logger.warning(
+                "moe_experts_impl=%r is DEPRECATED and resolves to %r. The old name claimed a "
+                "CUTLASS kernel that is never reached on sm_90 (compile-time gated to sm_80); "
+                "update your config to %r, or to 'torch_grouped' which is faster on this "
+                "hardware. See docs/investigations/consultant-training-stack-review.md §C1g.",
+                impl,
+                backend,
+                backend,
             )
-        if getattr(self, "_cutlass_spec_applied", False):
+        if backend not in GEMM_BACKENDS:
+            raise ValueError(
+                f"Unknown moe_experts_impl {impl!r}; expected 'te_grouped', "
+                f"{', '.join(repr(b) for b in GEMM_BACKENDS)}, or the deprecated "
+                f"{', '.join(repr(a) for a in DEPRECATED_BACKEND_ALIASES)}."
+            )
+        if getattr(self, "_grouped_spec_applied", False):
             return
         # The swap only rewrites the main stack's MoE spec; an MTP block carries its
         # own nested MoE spec that would silently stay on the TE path. Refuse the
         # half-swapped combination rather than train it.
         if getattr(self, "mtp_num_layers", 0):
             raise NotImplementedError(
-                "moe_experts_impl='cutlass_grouped' does not swap the MTP block's nested MoE spec; "
+                f"moe_experts_impl={impl!r} does not swap the MTP block's nested MoE spec; "
                 "use te_grouped when mtp_num_layers > 0."
             )
-        from megatron.bridge.models.nemotronh.cutlass_grouped_experts import (
-            swap_moe_experts_to_cutlass_grouped,
-        )
 
         inner = self.mamba_stack_spec
 
-        def _cutlass_resolved_stack_spec(cfg=None):
+        def _grouped_resolved_stack_spec(cfg=None):
             if callable(inner):
                 try:
                     spec = inner(cfg)
@@ -324,11 +358,11 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
                     spec = inner()
             else:
                 spec = inner
-            return swap_moe_experts_to_cutlass_grouped(spec)
+            return swap_moe_experts_to_grouped(spec, gemm_backend=backend)
 
-        self.mamba_stack_spec = _cutlass_resolved_stack_spec
-        self._cutlass_spec_applied = True
-        logger.info("moe_experts_impl=cutlass_grouped: MoE experts swapped to CutlassGroupedExperts")
+        self.mamba_stack_spec = _grouped_resolved_stack_spec
+        self._grouped_spec_applied = True
+        logger.info("moe_experts_impl=%s: MoE experts swapped to GroupedExperts(%s)", impl, backend)
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreMambaModel:
         """Configure and instantiate a Megatron Core Mamba model based on this configuration.

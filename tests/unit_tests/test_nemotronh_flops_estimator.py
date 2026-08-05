@@ -284,6 +284,45 @@ def test_unknown_recompute_module_is_rejected(fe):
 
 
 # --------------------------------------------------------------------------------------
+# Multi-Token Prediction
+
+
+def test_mtp_adds_both_a_layer_and_a_head_per_depth(fe, toy):
+    """Each MTP depth costs one extra transformer layer AND one extra logits projection.
+
+    The layer's type follows the model's last layer, which is how the in-repo counter models
+    it. An earlier version of the estimator added only the logits term, silently undercounting
+    every MTP-enabled config; this pins both halves.
+    """
+    base = fe.compute_flops(toy, _toy_run(fe))
+    mtp2 = fe.compute_flops(toy, _toy_run(fe, mtp_num_layers=2))
+
+    # The toy pattern is "M*E" — its last layer is MoE, so MTP replicates a MoE layer.
+    per_layer = sum(fe.moe_layer_flops(toy, TOY_SEQ).values())
+    per_head = sum(fe.head_flops(toy, TOY_SEQ, base.padded_vocab_size).values())
+
+    assert mtp2.forward_per_sample - base.forward_per_sample == pytest.approx(2 * (per_layer + per_head))
+    # The layer term is the half that regressed — assert it is actually present, so this
+    # cannot pass on the logits term alone.
+    assert mtp2.forward_per_sample - base.forward_per_sample > 2 * per_head
+
+
+def test_mtp_off_is_byte_identical_to_no_mtp(fe, toy):
+    """mtp_num_layers=0 (every shipped SFT config) must change nothing at all."""
+    assert (
+        fe.compute_flops(toy, _toy_run(fe, mtp_num_layers=0)).forward_per_sample
+        == fe.compute_flops(toy, _toy_run(fe)).forward_per_sample
+    )
+
+
+def test_mtp_layers_are_recomputed_under_full_granularity_but_heads_are_not(fe, toy):
+    """full recompute re-runs the MTP layers along with the rest; logits are never re-run."""
+    report = fe.compute_flops(toy, _toy_run(fe, mtp_num_layers=2, recompute_granularity="full"))
+    all_heads = sum(fe.head_flops(toy, TOY_SEQ, report.padded_vocab_size).values()) * (1 + 2)
+    assert report.recompute_per_sample == pytest.approx(report.forward_per_sample - all_heads)
+
+
+# --------------------------------------------------------------------------------------
 # Parameter counting
 # --------------------------------------------------------------------------------------
 
@@ -413,18 +452,18 @@ def test_megatron_config_shim_exposes_only_what_the_counter_reads(fe, super_arch
 
 def test_compare_megatron_is_opt_in_so_the_default_path_stays_torch_free(fe, super_report):
     """`--compare-megatron` is the only path that may import torch."""
-    payload = fe.report_to_dict(super_report, [21.78], 64)
+    payload = fe.report_to_dict(super_report, [17.099], 64)
     assert "megatron_counter_flops_per_iter" not in payload
-    with_compare = fe.report_to_dict(super_report, [21.78], 64, compare_megatron=True)
+    with_compare = fe.report_to_dict(super_report, [17.099], 64, compare_megatron=True)
     assert with_compare["megatron_counter_flops_per_iter"] > 0
 
 
 def test_super_champion_throughput(super_report):
-    """21.78 s/iter on 64 GPUs — the shipped champion — lands near 120 TFLOP/s/GPU."""
-    model_tflops = super_report.model_flops_per_iter / 21.78 / 64 / 1e12
-    hw_tflops = super_report.hardware_flops_per_iter / 21.78 / 64 / 1e12
-    assert model_tflops == pytest.approx(121.3, rel=0.02)
-    assert hw_tflops == pytest.approx(142.4, rel=0.02)
+    """17.099 s/iter on 64 GPUs — the shipped champion — lands near 155 TFLOP/s/GPU."""
+    model_tflops = super_report.model_flops_per_iter / 17.099 / 64 / 1e12
+    hw_tflops = super_report.hardware_flops_per_iter / 17.099 / 64 / 1e12
+    assert model_tflops == pytest.approx(154.5, rel=0.02)
+    assert hw_tflops == pytest.approx(181.4, rel=0.02)
     # 400 TFLOP/s/GPU would mean finishing the same iteration in well under 7 s.
     assert super_report.model_flops_per_iter / (400e12 * 64) == pytest.approx(6.6, rel=0.05)
 
@@ -526,7 +565,7 @@ def test_resolve_hf_config_reports_where_it_looked(fe, tmp_path, monkeypatch):
 
 PEAK = 989.4
 GPUS = 64
-SEC = 21.78
+SEC = 17.099
 TARGET = 400.0
 
 
@@ -557,7 +596,9 @@ def test_report_arithmetic_floor_is_hardware_flops_at_peak(super_text_report, su
 
 def test_report_throughput_row_matches_the_json_path(fe, super_text_report, super_report):
     model_tf, mfu, hw_tf, hfu = (
-        float(x) for x in _one(rf"^\s+{SEC}\s+([\d.]+)\s+([\d.]+)%\s+([\d.]+)\s+([\d.]+)%\s*$", super_text_report)
+        # the report rounds the s/iter column to 2 dp, so match what it prints, not SEC itself
+        float(x)
+        for x in _one(rf"^\s+{SEC:.2f}\s+([\d.]+)\s+([\d.]+)%\s+([\d.]+)\s+([\d.]+)%\s*$", super_text_report)
     )
     payload = fe.report_to_dict(super_report, [SEC], GPUS)["throughput"][0]
     assert model_tf == pytest.approx(payload["model_tflops_per_gpu"], abs=0.05)
@@ -565,8 +606,8 @@ def test_report_throughput_row_matches_the_json_path(fe, super_text_report, supe
     assert mfu == pytest.approx(100 * payload["model_tflops_per_gpu"] / PEAK, abs=0.05)
     assert hfu == pytest.approx(100 * payload["hardware_tflops_per_gpu"] / PEAK, abs=0.05)
     # And the champion figures the tracker doc quotes.
-    assert model_tf == pytest.approx(121.3, rel=0.02)
-    assert hw_tf == pytest.approx(142.4, rel=0.02)
+    assert model_tf == pytest.approx(154.5, rel=0.02)
+    assert hw_tf == pytest.approx(181.4, rel=0.02)
 
 
 def test_report_non_arithmetic_remainder_is_the_iteration_minus_the_floor(super_text_report):
@@ -617,7 +658,7 @@ def test_cli_json_output_is_self_consistent(fe, capsys):
             "--hf-model",
             "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
             "--seconds-per-iter",
-            "21.78",
+            "17.099",
             "--gpus",
             "64",
             "--json",
@@ -628,4 +669,4 @@ def test_cli_json_output_is_self_consistent(fe, capsys):
     assert payload["params_active"] == SUPER_ACTIVE_PARAMS
     assert payload["hardware_flops_per_iter"] > payload["model_flops_per_iter"]
     assert payload["exact_over_6nd"] == pytest.approx(payload["model_flops_per_iter"] / payload["six_nd_per_iter"])
-    assert payload["throughput"][0]["model_tflops_per_gpu"] == pytest.approx(121.3, rel=0.02)
+    assert payload["throughput"][0]["model_tflops_per_gpu"] == pytest.approx(154.5, rel=0.02)

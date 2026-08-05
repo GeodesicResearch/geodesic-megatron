@@ -5,7 +5,9 @@ through recommendations. This doc records EVERY technical item from that review 
 tracks its investigation to a verdict on THIS stack (Nemotron-3 Super 120B-A12B,
 NemotronH hybrid: 40 Mamba2 + 8 attention + 40 latent-MoE layers of 88 total;
 GH200 4-GPU nodes, Slingshot-11/CXI; benchmark = 16 nodes / 64 GPUs,
-TP1·CP4·EP4·PP8·ETP1·DP2, seq 32K, GBS 64, champion 21.78 s/iter).
+TP1·CP4·EP4·PP8·ETP1·DP2, seq 32K, GBS 64, champion **17.099 s/iter** — 20.66 on the
+`cublas_grouped` backend, 21.78 when this review started; re-anchored first by the
+offload-off adoption (§C1c) and then by `torch_grouped` (§C16).
 
 Caveat applied throughout: the consultant profiled a ~3K-seq run (an EM/MQ config),
 not the 32K benchmark; several of his memory/overlap observations must be re-verified
@@ -100,12 +102,339 @@ plausibly more. Subtract before reading any VPP-vs-champion delta.
 21.78 on allocation 5738452 — this placement is ~1.0 s worse. Cross-allocation
 comparisons of this workload remain untrustworthy (~2.7 s/iter Dragonfly swing, per the
 quickstart header); the −2.07 s above is same-nodelist and therefore placement-free.
-Projected onto a 5738452-class placement, offload-off lands near **19.7 s/iter**.
+Projected onto a 5738452-class placement, offload-off lands near **19.7 s/iter**. **[RETIRED 2026-08-03 — §C1c measured three placements at 20.66/20.81/21.14 and none reached it; the anchor is 20.66.]**
 
 Caveat on the fraction dial at cutlass: `build_cpu_optimizer_list` makes one CPU AdamW per
 param tensor and cutlass fuses experts into ~4 giant tensors (651 CPU optimizers
 pre-cutlass → 4), so `fraction: 0.5` actually offloads **59.6%** and 0.25 may be
 unreachable. Moot for the champion now, relevant to the offload-mandatory configs.
+
+## C1b — threaded host AdamW (Q8): full offload becomes nearly free
+
+Follow-on to C1, from the observation that torchrun defaults `OMP_NUM_THREADS=1`. Arm
+`infr71_q8_ompthreads_p1`, solo, identical nodelist to the C1 pair, allocation 5845744.
+
+**Everything below is same-nodelist, solo, 32/32 iters, 0 NaN, losses all in the
+0.68728–0.68746 parity family** (the lower bound is the offload-0.5 row's own
+0.6872789 — an earlier version of this line quoted 0.68731 and so excluded one of the
+three rows it was describing):
+
+| arm | offload | host threads | s/iter (10–30, n=21) | peak alloc | peak reserved |
+|---|---|---|---|---|---|
+| champion (was) | 0.5 | 1 | 22.79 | 76.78 GB | 80.43 GB |
+| **Q8** | **1.0** | **8** | **21.36** | **73.70 GB** | **77.01 GB** |
+| offload OFF (C1 winner) | 0.0 | n/a | 20.72 | 81.44 GB | 83.30 GB |
+
+**Q8 strictly dominates the previous champion — 1.43 s/iter faster AND 3.08 GB lighter.**
+No projection is involved in that statement. And it lands **0.64 s behind offload-off while
+using 7.74 GB less allocated / 6.29 GB less reserved**, i.e. **threading buys back most of
+the offload penalty at zero memory cost.**
+
+**Verified landed** (a mis-set prefix would produce a clean null indistinguishable from
+"threading doesn't help"): torchrun's `Setting OMP_NUM_THREADS ... to be 1 in default`
+banner **absent** from the run log; `/proc/<rank-pid>/environ` on a live rank read
+`OMP_NUM_THREADS=8` and `OMP_WAIT_POLICY=PASSIVE`; `OptimizerConfig` repr confirmed
+`optimizer_offload_fraction=1.0`. Plumbing: torchrun only defaults when the var is absent,
+`pipeline_env_exec.sh` does not unset it, `apptainer exec` runs without `--cleanenv`, and
+`SRUN_ARGS` carries `--export=ALL` — so a plain env prefix suffices.
+
+**Where this matters.** Not the 64-GPU champion (offload is gone there), but every config
+where offload is *mandatory* and the per-rank optimizer shard is ~8× larger:
+`configs/pa_warm_start/sft_120b_1bmix_32k_pp11.yaml` (offload 1.0) and Ultra-550B. It is
+also the right lever for **memory-tight VPP arms**: those OOM at the cutlass activation
+envelope, so offload-off (+4.7 GB) is the wrong direction for them, while Q8's threading is
+memory-neutral and still recovers most of the offload cost.
+
+**Soft number, flagged: "threading recovered ~2.4 s" is a PROJECTION, not a measurement.**
+It comes from an inferred offload-1.0/single-thread baseline (~23.8 = champion 22.79 plus a
+≥1.0 handicap) that was never run on this nodelist, and whose handicap derives from the same
+trace prior that under-predicted C1 by 2.2×. The *measured* claims are the table above. A
+direct offload-1.0/single-thread arm (~17 min) would isolate the threading effect cleanly;
+worth having before quoting a threading speedup for pp11/Ultra planning, but no decision
+here depends on it.
+
+`OMP_WAIT_POLICY=PASSIVE` was carried throughout and is not optional decoration: GNU OpenMP
+idle threads spin-wait, and this workload is host-launch-bound, so ACTIVE spin could cost
+more launch throughput than the threaded Adam saves. It has not been A/B'd — if a future
+threaded arm regresses, test ACTIVE-vs-PASSIVE before concluding the lever failed.
+
+### C1b-follow-up — threading is exactly neutral when there is no offload (2026-08-03)
+
+Before defaulting the launcher to 8 host threads, the posture that would be affected by a
+bad default — offload OFF, i.e. every non-offloaded run in the repo — was measured both
+ways, solo and back-to-back on one 16-node subset of allocation 5845741:
+
+| arm | OMP_NUM_THREADS | s/iter (10–30, n=21) | peak alloc | loss@32 |
+|---|---|---|---|---|
+| l3a | 8 (+ PASSIVE) | 20.663 | 81.36 GB | 0.6870474 |
+| l3d | 1 (torchrun default) | 20.654 | 81.36 GB | 0.6874418 |
+
+**0.04% apart, byte-identical peak memory, loss parity.** That is the expected result rather
+than a lucky one: with offload off, no optimizer state lives on the host, so nothing in the
+step calls into OpenMP and the thread count has nothing to act on. The value of the arm is
+that it converts "should be neutral" into "is neutral", which is what a default flip
+affecting every payload in the repo needs. Both arms passed their landed checks (torchrun's
+`Setting OMP_NUM_THREADS ... to be 1` banner absent on l3a, present ×16 on l3d).
+
+Together with C1b's offload-1.0 measurement (21.36 vs 22.79 at 3.08 GB less), the launcher
+default is now `ISAMBARD_OMP_THREADS=8` (landed in `pipeline_env_activate.sh` alongside this
+write-up, defaulting `OMP_NUM_THREADS=8` and `OMP_WAIT_POLICY=PASSIVE`, with
+`ISAMBARD_OMP_THREADS=1` restoring the old behaviour): free where offload is off. Where
+offload is on, the threaded arm (21.36 s/iter, offload 1.0) beats the previous champion
+(22.79, offload 0.5, single-threaded) by 1.43 s/iter — but those two differ in offload
+fraction as well as threads, so **that gap is not a threading delta** and must not be
+quoted as one; see §C1b.
+
+### Operational note — "the previous arm finished" is not "the GPUs are free" (2026-08-03)
+
+Two queued arms were launched 47 seconds after the preceding arm's launcher exited 0, and
+both died: one with `torch.OutOfMemoryError ... GPU 3 has a total capacity of 95.00 GiB of
+which 1.56 GiB is free`, the other with `NCCL WARN Cuda failure 2 'out of memory'` during
+communicator init. Nothing was wrong with either configuration — the previous arm's CUDA
+contexts were still resident on those nodes.
+
+Two things made it expensive rather than merely annoying:
+
+1. **The launch guard polled `nvidia-smi` on the head node only.** The arm that had just
+   finished ran on an *interleaved* 16-node subset spanning both halves of the allocation,
+   so the head node was genuinely idle while 16 other GPUs were not. A one-node check
+   cannot clear a sixteen-node launch.
+2. **The dead steps went zombie and blocked the driver for 4 h 41 m.** The launcher runs
+   srun with `--kill-on-bad-exit=0`, so a step whose ranks all failed can linger in
+   `squeue`, and a driver that `wait`s on it waits forever. Nothing else could run.
+
+The fix, now standard in the campaign drivers: the guard `srun`s across the **actual target
+nodelist** and requires every GPU on every one of those nodes to report idle (an idle GH200
+reports single-digit MiB; the threshold used is 2 GB), and **every arm carries a watchdog**
+that cancels its step after 45 min with no first iteration or 10 min with no new one. The
+guard's first run under the fix printed `64 reporting, max used 12 MiB` — which is what
+"clear" should have meant all along.
+
+### C1d — the 2.2× offload-attribution anomaly, RESOLVED (2026-08-03)
+
+The open item from C1 was that the trace-derived prediction of the offload cost
+under-predicted the measured 2.07 s/iter by ~2.2×. Two profiled iterations settle it.
+Both are rank 9 (an interior pipeline stage), iteration 20, decomposed the same way:
+
+| | offload 0.5 (`hostrc_p1_champ_profile`) | offload OFF (`infr71_l9_champion_profiled`) |
+|---|---|---|
+| trace span | 23.204 s | **21.753 s** |
+| compute-stream busy | 8.479 s | 8.289 s |
+| compute-stream idle | 14.725 s | **13.464 s** |
+| GPU *optimizer kernels* | 0.007 s (n=38) | 0.023 s (n=181) |
+| host `aten::_fused_adamw_` in the final 2.5 s | **859.6 ms** | **absent** |
+| a 1110 ms gap ending at t+21.9 s | **present** | **absent** |
+
+**The offload never cost GPU kernel time — it cost a serialized host stall at the end of
+every iteration.** The earlier prediction was built from optimizer *kernel* durations, and
+the optimizer kernels are 7 ms; the real cost is 859.6 ms of single-threaded
+`aten::_fused_adamw_` running on the host while the GPU has nothing to do, which the
+decomposition sees as one ~1.1 s gap at the iteration boundary. Predicting a stall from
+kernel time is the whole error, and it is a 2.2× error because kernel time is nearly
+uncorrelated with it.
+
+This also explains C1b without further assumption: if the offload cost is host AdamW
+wall-clock, then threading that AdamW is the direct lever — which is why threading is worth
+0.00 s when there is no host optimizer at all, and why the threaded fraction-1.0 arm beat the
+single-threaded fraction-0.5 champion by 1.43 s/iter despite carrying double the host work.
+**That 1.43 s is not the threading delta** (§C1c): the arms differ in fraction as well as
+threads, and since going 0.5 → 1.0 *adds* host time, threading at fixed fraction 1.0 must
+have recovered strictly more than 1.43 s. The clean arm was never run.
+
+**Standing methodological correction: on this workload, attribute costs from stall
+structure, not from kernel totals.** The same mistake in the opposite direction produced
+the comm-warmup incident, where slow communication inflated apparent compute.
+
+### C1e — where the champion iteration actually goes (2026-08-03, Phase C)
+
+> **PARTIALLY SUPERSEDED by C1g (same day).** A 15-agent adversarial re-audit of this
+> section's method found the idle figure and both headline conclusions below wrong: the
+> decomposition measured idle against the single busiest stream while ~164k per-expert
+> MoE GEMMs ran on four side streams it never saw. The kernel-family table stands; the
+> idle analysis, the "largest kernel" claim, and the "NOT launch-bound" conclusion do
+> not. Corrected numbers in C1g; kept as written for the record of how the error looked.
+
+Same decomposition on the shipped posture (rank 9, iter 20; profiling inflates the
+iteration to 21.75 s from the 20.66 s unprofiled anchor, ~5%):
+
+| family | time | share | launches |
+|---|---|---|---|
+| nccl / comm | 5.959 s | 37.3% | 4,396 |
+| gemm | 5.385 s | 33.7% | 168,896 |
+| elementwise | 1.956 s | 12.2% | 33,437 |
+| mamba-scan | 1.293 s | 8.1% | 4,000 |
+| moe-dispatch | 0.783 s | 4.9% | 17,472 |
+| everything else | 0.616 s | 3.8% | 29,687 |
+
+Compute-stream idle is **61.9%** of the iteration. The single largest kernel in the whole
+trace is **`ncclDevKernel_SendRecv` at 4.683 s** — pipeline-parallel point-to-point, 21.5%
+of the iteration in one kernel. That is consistent with the VPP campaign's finding that PP
+p2p is dominated by waiting for the peer rather than by wire time, and it says the biggest
+single lever left is the pipeline schedule, not the kernels.
+
+**The idle is NOT launch-bound, and that overturns the working assumption.** Splitting the
+13.464 s of compute-stream idle by gap size:
+
+| gap size | count | idle time | share of idle |
+|---|---|---|---|
+| > 10 ms | **295** | **7.506 s** | **55.7%** |
+| 1–10 ms | 863 | 3.635 s | 27.0% |
+| 0.2–1 ms | 3,054 | 1.109 s | 8.2% |
+| < 0.2 ms | 84,313 | 1.214 s | 9.0% |
+
+**83% of the idle sits in 1,158 gaps; the 84,313 sub-millisecond gaps together account for
+9%.** Host launch overhead produces the second pattern, not the first — so at the current
+posture the iteration is dominated by *waiting for something*, not by failing to feed the
+GPU. That is a genuine change from the pre-cutlass regime, where the launch-gap storm was
+the story and eliminating it was worth 16%; the campaign should stop reaching for
+launch-side levers (CUDA graphs, launch batching) as the primary answer.
+
+What it is waiting for is legible: the mean large gap is 25 ms, there are ~295 of them
+against 32 microbatches through an 8-stage pipeline, the comm stream carries 3.47 s of
+its own busy time, and the largest single kernel in the trace is `ncclDevKernel_SendRecv`
+at 4.68 s. **The residual is pipeline-parallel wait.** This is also why VPP failed: it
+subdivides those waits rather than removing them, so it multiplies the count without
+shrinking the total — exactly what the VPP trace decomposition measured (idle +3.6 s,
+compute +0.05 s).
+
+**RESOLVED (was OPEN; see C1g):** the GEMM launch count is 168,896 per iteration,
+within 0.1% of the 168,771 *pre*-cutlass census — because **the grouped kernel is dead
+code**. The audit's disassembly of the installed `grouped_gemm_backend` shows the
+CUTLASS grouped path is never taken; `gmm` falls through to a per-expert cuBLAS loop,
+so the expert path still issues ~163k `nvjet_sm90_*` launches per iteration at ~10% of
+peak. The −16% cutlass win is real (the A/B was clean) but its mechanism was a ~3×
+collapse in *per-launch host cost* versus the previous sequential-experts module, not
+launch-count reduction. The single-GPU microbenchmark then ran the same evening —
+verdict in C13: device-side headroom vs the shipped loop is ≈0 (the loop hits ~49% of
+peak in isolation; the real CUTLASS grouped kernel is 35% SLOWER on Hopper); the live
+lever is launch-count reduction at equal device speed via `torch._grouped_mm`.
+
+### C1f — ranked backlog for reducing iteration time (Phase C deliverable 2)
+
+Sized from the L9 decomposition. Budget: 21.75 s profiled (20.66 real) = 8.29 s
+compute-stream busy + 13.46 s idle, and 83% of that idle is in ~1,150 gaps of >1 ms.
+
+| # | lever | addressable | evidence | status |
+|---|---|---|---|---|
+| 1 | **Pipeline wait** — more µb/replica and/or fewer PP hops | up to ~7.5 s (the >10 ms gaps) | `SendRecv` is 4.68 s, the largest kernel in the trace; 295 large gaps ≈ the 1F1B exchange count | GBS 128 already **measured −9.4%/sample**; PP=4 under test at 128 GPUs (X3/X3-EP8). **PP=4 is NOT available at 64 GPUs** — see below |
+| 2 | Memory-bound kernel fusion (elementwise + Mamba scan) | 3.25 s of kernel time | elementwise 1.96 s over 33,437 launches, scan 1.29 s over 4,000 | not investigated; needs a per-kernel-name pass |
+| 3 | Expert-GEMM grouping — **verify it is actually grouping** | bounded: launch overhead only, and sub-ms gaps are 9% of idle | see below | cheap A/B, high information |
+| 4 | Non-PP collectives (`overlap_param_gather`, `batch_p2p_sync`, `CUDA_DEVICE_MAX_CONNECTIONS`) | ~1.2 s of RS+AG+AR | dropped from wave 2 for time | queued, cheap |
+| 5 | CUDA graphs | ≤1.2 s (the sub-ms gaps) | idle is NOT launch-bound at this posture | **deprioritised** — and it OOM'd before (+14 GB) |
+| 6 | FP8 expert/QK GEMMs | ~5.4 s of GEMM | — | blocked (C6/C7: MoE routing crashes) |
+
+**On item 1: "just use PP=4" is not available at 64 GPUs, and the reason is worth stating
+so nobody re-proposes it.** Halving PP doubles the per-stage weights, gradients and
+(non-EP-sharded) optimizer state. At 64 GPUs the only way to pay for that is more EP, and
+EP=8 there is cross-node — the thing the whole topology is built to avoid:
+
+| config | expert wt/GPU | wt+grad+opt | + activations | verdict |
+|---|---|---|---|---|
+| 64 GPU, PP8 EP4 (champion) | 7.0 GB | 33.7 | **81.4** | fits (measured 81.36) |
+| 64 GPU, **PP4 EP4** | 14.1 GB | 52.3 | **~100** | **OOM on a 95 GB card** |
+| 64 GPU, PP4 EP8 | 7.0 GB | 38.2 | ~85.9 | fits, but EP8 is cross-node at 64 GPUs |
+| 128 GPU, PP4 EP8 (X3-EP8) | 7.0 GB | 30.6 | ~78.3 | fits — EP8 is node-local once DP is 8 |
+
+So the shallow-pipeline lever only unlocks at 128 GPUs, which is precisely what probes 5
+and 6 test. At 64 GPUs the batch-size handle (GBS 128, measured −9.4%/sample) is the only
+one of the two available.
+
+**On item 3, the evidence that `moe_experts_impl: cutlass_grouped` may not be grouping.**
+A per-expert loop at EP=4 (128 experts/rank) over 5 MoE layers × 32 µb × 2 matrices ×
+(fwd + 2×bwd + recompute) predicts **163,840** GEMM launches. The trace has **168,768**
+GEMM-family launches — a 3% gap, easily the attention/Mamba/router/shared-expert GEMMs.
+Meanwhile the only CUTLASS-named kernel in the entire trace is
+`cutlass_75_tensorop_bf16_s1688gemm` — an **sm_75** kernel — launching **twice** for 0.000 s,
+i.e. certainly not the expert path, while the expert-shaped work runs as cuBLAS
+`nvjet_sm90_*`. `GroupedExperts` (then named `CutlassGroupedExperts`) does call `grouped_gemm.ops.gmm`
+(`grouped_experts.py:196-205`), but `gmm` dispatches into a compiled
+`grouped_gemm_backend` extension whose kernel selection is not visible from Python, so
+whether it groups on sm_90 in this build cannot be read off the source.
+
+This is a **hypothesis with strong circumstantial support, not a conclusion.** It matters
+either way: if grouping is not happening, the −16% attributed to cutlass came from
+something else and the mechanism in the docs is wrong; if it is happening, the launch-count
+arithmetic above needs another explanation. The decisive test is cheap — one A/B of
+`te_grouped` vs `cutlass_grouped` comparing GEMM launch counts in the traces, not
+iteration time. **Do that before anyone cites launch-count collapse as the cutlass
+mechanism again.** Note the expected payoff from fixing it is bounded by item 5's logic:
+sub-millisecond gaps are only 9% of idle now, so this is an accuracy-of-the-record issue
+more than a large speed lever.
+
+### C1g — adversarial re-audit of the trace analysis (2026-08-03): what survived, what didn't
+
+A 15-agent audit workflow (5 independent auditors, skeptic verification on every
+overturned claim, full structured output preserved at
+`<job-scratch>/q1/assumption_audit_full_result.json`) re-derived C1e from the raw
+pickles. The single methodological root cause of everything overturned: **idle was
+measured against the single busiest stream, but the per-expert MoE GEMMs run on four
+side streams** that method never saw.
+
+**Corrected single-iteration ledger (rank 0, iter 20, 21.755 s profiled span; discount
+host-side numbers ~1.1 s for the unprofiled 20.66 s):**
+
+| bucket | seconds | note |
+|---|---|---|
+| compute union, all streams | **9.65** | GEMM 5.63 (2.30 dense main-stream + 3.33 per-expert side-stream — the auditor's "~10% of peak" for that side-stream is UNRESOLVED: isolated microbench measures 49%, FLOP/busy arithmetic ~39%; see C13), Mamba scan 1.78, dispatch 0.76, attn 0.16, norm/elementwise 1.65, optimizer 0.42, misc 0.19 |
+| — of which recompute | ~1.0 | 4th expert-GEMM pass + re-dispatch |
+| PP p2p spin (= the pipeline bubble; never double-count) | **3.93** | theory (PP−1)/(µb+PP−1) predicts 3.90 — exact |
+| EP/CP all-to-all (NVLink) | 1.28 | |
+| DP reduce-scatter / all-gather | 0.82 | |
+| true idle (no kernel on ANY stream) | **6.33** | **162,611 gaps, largest 5.9 ms** — host-launch fragmentation, ~5.2 s after profiler discount |
+
+**Overturned:** (1) "61.9% idle" → true all-stream idle is 29%; (2) "largest kernel =
+SendRecv 4.68 s" → that was a *sum* of 3,885 launches across three process groups
+(largest single kernel 2.28 s); (3) **"waiting-bound, not launch-bound" is reversed** —
+the true idle is fragmented into sub-6 ms gaps, the host-launch signature, co-dominant
+with genuine NCCL-covered wait (~5.8 s). Launch-side levers move back up the backlog;
+CUDA graphs specifically stay blocked (dynamic MoE dispatch shapes + the +14 GB OOM),
+so the launch bucket must be attacked by launch-count reduction — i.e. a grouped GEMM
+that actually groups (see the resolved flag in C1e).
+
+**Held under audit:** the FLOP anchors (rebuilt from the HF config to 4 sig figs;
+forward mix MoE 52.3% / Mamba2 33.6% / attention 10.1% / lm_head 4.0%), the 989.4
+denominator, the bubble model (~1% on all three measured GBS points), the a2a payload
+model (exact, and confirmed as a *lower bound*: EP16 measured +92% clean vs +~50%
+modeled; EP curve at PP8·GBS128 is 164.8 → 193.3 → 319.0 ms/sample for EP4/8/16 —
+superlinear in cross-node fraction), and the C12 wall-clock table.
+
+**Corrections to the record:** the X1c "stall spikes" at iterations 12/20 are that
+arm's own `ISAMBARD_TORCH_PROFILE_ITERS=12,20` capture overhead, not Slingshot stalls —
+its clean 40.83 s/iter is the honest number. And "FP8 causes stochastic alignment
+crashes in MoE routing" traces to April bare-metal folklore with no investigation doc
+behind it; the router is structurally fp32/fp64 so the named crash path is unreachable.
+The *actual* FP8 blocker today is that the fast expert path is BF16-only. Softening the
+CLAUDE.md FP8 line is a convention change **pending Kyle's explicit approval** — until
+then BF16 remains the shipped rule.
+
+**Ceiling arithmetic the audit confirmed:** PP8 zero-bubble floor 16.92 s (156
+TFLOP/s/GPU); all-idle-eliminated ceiling ~183. Both < 200 TFLOP/s. 200 requires
+kernel-level speed (real grouped GEMM, then FP8-capable grouped path) on top of the
+scheduling levers — measured stack today: 148.4 ms/sample = 139.1 TFLOP/s = 14.1% MFU.
+
+### C1c — how much placement is worth INSIDE one Dragonfly group (2026-08-03)
+
+The same champion-posture arm was run solo on three disjoint-ish 16-node subsets of the
+same 32-node allocation, back to back, same day, same code:
+
+| subset | s/iter (10–30) | peak alloc | loss@32 |
+|---|---|---|---|
+| P-A first 16 | **20.663** | 81.36 GB | 0.6870474 |
+| P-C every other node | 20.805 | 81.44 GB | 0.6870578 |
+| P-B last 16 | 21.141 | 81.44 GB | 0.6872684 |
+
+**Spread 2.3%.** All 32 nodes lie in one Dragonfly group (group N = `nid[10000+(N-2)*110
+… +109]`; 010885–010944 all fall inside 010880–010989), so this bounds *intra*-group
+placement variance — as distinct from the ~1.5× *inter*-group lever already documented
+(21 s on group 4 vs 28 s on group 12). Two consequences:
+
+1. **The docs anchor on the best observed (20.66) and quote the range**, the same way the
+   repo already handles image-qualification numbers. A benchmark number without its
+   nodelist carries ~2% of unstated uncertainty even within a group.
+2. **The "~19.7 s/iter on a champion-class placement" projection is retired.** It was an
+   extrapolation from a single same-nodelist pair; three placements were then measured and
+   none reached it. The honest statement is 20.66–21.14 here, with the cross-group question
+   still open because this allocation could not test it.
 
 ## C2 — optimizer sharding (settled)
 
@@ -285,8 +614,8 @@ and `timing_log_level` — `infr71-vpp-vs-baseline-trace-analysis.md:313`).
 `moe_layer.py:685-699` wraps `custom_forward` (:642-683) — the **entire** MoE forward: router,
 permute, EP all-to-all dispatch, grouped fc1/act/fc2, combine, latent projections. Only the
 layer's bf16 input survives. No hidden second recompute: neither TE `GroupedLinear` nor our
-`CutlassGroupedExperts` recomputes internally, and the one internal option (`moe_act`,
-`experts.py:259-266`, ported at `cutlass_grouped_experts.py:107-216`) is opt-in and off.
+`GroupedExperts` (then named `CutlassGroupedExperts`) recomputes internally, and the one internal option (`moe_act`,
+`experts.py:259-266`, ported at `grouped_experts.py:107-216`) is opt-in and off.
 
 Cost, from the census arithmetic (the recompute pass is literally one of the four passes in
 `128 experts × 2 proj × 5 layers × 32 µb × 4 = 163,840` launches): **~1.25 s** of expert GEMM
@@ -349,14 +678,17 @@ self-test `__main__`.
 
 ### Two defects found en route
 
-- **`configs/quickstart/nemotron_super_quickstart_sft_vpp4.yaml` could not run at this pin** —
+- **`configs/quickstart/nemotron_super_quickstart_sft_vpp4.yaml` (deleted 2026-08-04; use the
+  Hydra override `model.virtual_pipeline_model_parallel_size=4`) could not run at this pin** —
   FIXED in `013a5f04`. It set `fine_grained_activation_offloading: true` with
   `expert_fc1`+`moe_act` in `offload_modules` while `moe` is recomputed, which
   `transformer_config.py:1855-1865` asserts against; and being a VPP config it would also have
-  hit the `Chunk mismatch` assert. It now sets the flag `false` with the trimmed list, matching
-  `configs/infr71_vpp/a{0,1,2}`. This mattered because CLAUDE.md names it as THE VPP variant to
-  run. The same commit moves `a{0,1,2}` off the CLI override they were being launched with, so
-  the wave-2 numbers are now reproducible from config alone.
+  hit the `Chunk mismatch` assert. The fix set the flag `false` with the trimmed list, matching
+  `configs/infr71_vpp/a{0,1,2}`. It mattered at the time because CLAUDE.md then named that file
+  as THE VPP variant to run; the file has since been deleted and CLAUDE.md points at the Hydra
+  override instead, so this entry is a record of a fix to a file that no longer exists. The
+  same commit moves `a{0,1,2}` off the CLI override they were being launched with, so the
+  wave-2 numbers are reproducible from config alone — that part still applies.
 - **`core_attn` in `offload_modules` is dead whenever `core_attn` is also recomputed**
   (`attention.py:1515-1527`: the offload context is built but only entered in the
   non-checkpointed `else` branch). Every trio config has both.
@@ -366,7 +698,7 @@ self-test `__main__`.
 | config | change |
 |---|---|
 | champion `nemotron_super_quickstart_sft.yaml` | none — `["moe","shared_experts"]` is the fastest feasible point |
-| VPP arms (`infr71_vpp/a{0,1,2}`, vpp4 quickstart) | drop `core_attn`; also fix the vpp4 offload assert |
+| VPP arms (`infr71_vpp/a{0,1,2}`) | drop `core_attn`. (The vpp4 quickstart also needed its offload assert fixed; that file was deleted 2026-08-04, so only the `a{0,1,2}` half of this row is live.) |
 | `nemotron_ultra_quickstart_sft.yaml:121` | drop `core_attn`; keep `moe`/`shared_experts` |
 | MQ/EM + `nemotron_warm_start_200k/*` (`["core_attn"]` only) | → `["moe"]`: they pay the redundant attention recompute AND retain every MoE activation |
 | runs at seq 8192 (Ultra, MQ/EM) | `ISAMBARD_FP32_SSM_STATE=0` — CLAUDE.md already says fp32 SSM is unnecessary at 8K; worth ~1.4% |
@@ -627,10 +959,11 @@ GEMMs through `TEGroupedLinear.forward`'s own autocast
    turn FP8 on globally and glob everything *back* to BF16 — the opposite of scoping
    FP8 to experts.
 2. **Mutually exclusive with the champion.**
-   `src/megatron/bridge/models/nemotronh/cutlass_grouped_experts.py:97-98` raises
-   "CutlassGroupedExperts is BF16/FP32-only (no quantization padding)", and the
+   `src/megatron/bridge/models/mamba/grouped_experts.py` raises
+   "GroupedExperts is BF16/FP32-only (no quantization padding)", and the
    installed backend carries only BF16 CUTLASS kernels. FP8 experts means reverting to
-   `te_grouped` and forfeiting the measured −16% (25.66 → 21.78 s/iter).
+   `te_grouped` and forfeiting the measured −16% (25.66 → 21.78 s/iter; those ends
+   straddle the 26.02 → 26.04 image bump — same-image readings −15.8% / −14.2%).
 3. **`quant_recipe` is not wired into our entry point** — zero uses in `configs/`,
    reachable only via a Hydra `_target_` hack whose failure path silently degrades to a
    raw dict.
@@ -682,6 +1015,42 @@ not on FP8 being wrong in principle. If the driver is upgraded to unlock image
 every FP8 recipe net-negative today may no longer bind — revisit blockwise FP8 then.
 None of the facts above change; only the conclusion could.
 
+## C12 — wall-clock for a real corpus: 1e12 tokens (2026-08-03)
+
+Asked directly, and worth recording because every throughput number above is per-iteration
+and nobody plans a run in s/iter. Computed from measured per-sample times and the exact
+FLOP estimator's **80.624 GFLOP/token** (not a 6ND approximation), at seq 32768:
+
+| config | tokens/s | TFLOP/s/GPU | MFU | days for 1e12 | +15% ops | basis |
+|---|---|---|---|---|---|---|
+| 64 GPU, GBS 64 (champion) | 101,493 | 127.9 | 12.9% | **114.0** | 131 | measured |
+| 64 GPU, GBS 128 | 111,722 | 140.7 | 14.2% | **103.6** | 119 | measured |
+| 128 GPU, GBS 128 | 198,835 | 125.2 | 12.7% | **58.2** | 67 | measured |
+| **128 GPU, GBS 256** | **220,809** | **139.1** | **14.1%** | **52.4** | **60** | measured |
+| 256 GPU, GBS 512 | 422,813 | 133.2 | 13.5% | 27.4 | 32 | PREDICTED |
+| 512 GPU, GBS 1024 | 789,590 | 124.3 | 12.6% | 14.7 | 17 | PREDICTED |
+
+**Best measured: 52.4 days of pure compute = 161,000 GPU-hours = 40,300 node-hours.** Plan
+against the ~60-day figure: the +15% covers checkpoint saves, fault-tolerance restarts,
+evals and requeues, and this fabric has documented intermittent hangs.
+
+Two readings worth keeping:
+
+1. **Batch size buys efficiency, not node count.** The 64-GPU GBS-128 row (140.7 TFLOP/s/GPU)
+   is *better* than the 128-GPU GBS-128 row (125.2) and essentially ties the 128-GPU
+   GBS-256 row. Doubling nodes at fixed GBS halves microbatches per replica and doubles the
+   bubble, so it buys wall-clock without buying efficiency. Scale the batch with the nodes
+   or the second half of the machine is partly paying for pipeline bubble.
+2. **The binding constraint at large scale is likely convergence, not fabric.** Holding the
+   bubble at ~9.9% needs GBS 1024 at 512 GPUs = 33.5M tokens per optimizer step. That is an
+   LR-schedule question and it will probably bound useful scale before the interconnect does.
+
+The PREDICTED rows extrapolate two doublings from one measured doubling (64→128) and assume
+per-rank work and communication stay invariant, which they do at fixed CP·PP·EP. Their
+apparent MFU dip is an artifact of deliberately conservative bands, not a modelled effect.
+The real risk up there is placement: 2.3% variation was measured *within* one Dragonfly
+group, and the repo documents ~1.5× *between* groups, which 256+ GPUs necessarily span.
+
 ## C9 — gradient/optimizer precision (settled)
 
 Already compliant: grads are BF16 (`bf16: true`, no fp32 grad accumulation override),
@@ -719,18 +1088,278 @@ module docstring; 47 unit tests green in-container). Headlines for the champion 
   **exact/6ND = 1.05** (active-param basis; 1.10 non-embedding). The consultant's "~30%
   off" extreme (Mamba-heavy *small* models) does not apply at this scale; his advice to
   compute it exactly was still right, and now it costs one command.
-- **Champion 21.78 s/iter = 121.3 model TFLOP/s/GPU = 12.3% MFU** (HFU 14.4%) on GH200
-  BF16 peak 989. Matches mcore's logged ~112 at the 2-way-concurrent 23.40 s/iter.
+- **Champion 20.66 s/iter = 127.9 model TFLOP/s/GPU = 12.9% MFU** (HFU 15.2%) on GH200
+  BF16 peak 989. (Superseded reading at the offload-0.5 posture: 21.78 s = 121.3 = 12.3%
+  MFU, HFU 14.4%, which matched mcore's logged ~112 at the 2-way-concurrent 23.40 s/iter.
+  `tests/unit_tests/test_nemotronh_flops_estimator.py` pins the CURRENT pair, 154.5/181.4 —
+  keep that test and this bullet in step, they are the same two numbers. The 127.9/150.2
+  reading above is the pre-`torch_grouped` era and is retained as history.)
 - **The 400–550 frame does not transfer to this architecture.** 400 TFLOP/s/GPU here
   means 6.6 s/iter at 40% MFU. The pure tensor-core arithmetic floor is 3.14 s/iter;
-  the other 18.6 s of the champion iteration is pipeline bubble, collectives,
+  the other 17.5 s of the champion iteration is pipeline bubble, collectives,
   memory-bound Mamba scans, and launch gaps — categories his dense-7B-on-H100 frame
   (attention+MLP GEMMs, no PP at 7B, no MoE dispatch, no scan kernels) mostly lacks.
   Champion-era traces put GPU idle at ~7.4 s/iter: eliminating ALL of it with unchanged
   kernels lands ≈ 14.4 s/iter ≈ 183 TFLOP/s ≈ 18.5% MFU — the honest near-term ceiling.
-  Kyle's <20 s target = 132 TFLOP/s = 13.4% MFU → needs ~1.8 s of the 7.4 s idle
-  recovered; feasible. 400+ TFLOP/s would additionally require ~2× faster kernels
+  Kyle's <20 s target = 132 TFLOP/s = 13.4% MFU. MET: the champion is now 17.099 s/iter
+  (154.5 TFLOP/s/GPU) on `torch_grouped`. The ~0.7-s-to-go figure below it was computed
+  from the superseded 20.66 anchor and is kept only to show the path. 400+ TFLOP/s would additionally require ~2× faster kernels
   (FP8 GEMMs — blocked per C6/C7 — and a faster scan), i.e. a different project.
+
+## C13 — the 128-GPU study (2026-08-03, allocation 5845741)
+
+Prereg + full result rows: `/projects/a5k/public/logs/infr71_wave2/prereg/PREREG_phaseD_128gpu.md`.
+The adversarially-verified 24-topology sweep:
+`/projects/a5k/public/logs/infr71_wave2/prereg/topology_sweep_full_result.json`.
+Both live outside the repo, so the path IS the reference — they were copied out of the
+campaign's scratch directory (which is deleted with the job) precisely so these citations
+keep resolving. Every prereg in that directory is a sibling.
+
+Seven preregistered probes, solo on all 32 nodes, FT off, mean of iters 10–30,
+scored in ms/sample against the matching-GBS comparator. All arms passed landed-config
+verification (the X2 OOM included — it OOM'd at the *intended* CP2·PP8·EP16).
+
+| arm | CP·PP·EP | GBS | s/iter | ms/sample | verdict |
+|---|---|---|---|---|---|
+| **X1a-256** | 4·8·4 | 256 | 37.986 | **148.4** | **winner — ships as the 128-GPU posture** (the 64-GPU quickstart plus `train.global_batch_size=256`; there is no separate 128-GPU config — see CLAUDE.md). 98.8% of perfect per-sample scaling vs the 64-GPU GBS-128 comparator (293.3/2 = 146.65). **Both ends are `cublas_grouped`; do not carry this ratio forward** — `torch_grouped` moved the 128-GPU end to 122.0 and the 64-GPU GBS-128 comparator was never re-run, so there is no current scaling number |
+| X1a-128 | 4·8·4 | 128 | 21.096 | 164.8 | perfect-scaling anchor: 97.9% at matched µb/replica — **same both-ends-`cublas_grouped` construction as the row above; likewise not a current scaling number** |
+| X3-EP8 | 4·4·8 | 256 | 42.861 | 167.4 | beat its 175–200 prereg band, still −12.8% vs winner: PP4's bubble win < cross-node-EP8 cost |
+| X1b | 4·8·8 | 128 | 24.743 | 193.3 | in-band (190–215); EP8 buys ~9 GB for +17% time |
+| X3 | 4·4·16 | 256 | 74.172 | 289.7 | band 215–245 blown past |
+| X1c | 4·8·16 | 128 | 40.831 | 319.0 clean | band 230–250 blown past ~1.9× |
+| X2 | 2·8·16 | 256 | — | OOM | first-iter NCCL alloc failure; CP2 closed empirically |
+
+**What the ladder settles, on top of the 24-topology adversarially-verified sweep:**
+
+1. **Cross-node EP loses superlinearly at both pipeline depths** (PP8: 164.8→193.3→319.0
+   for EP4/8/16; PP4: 167.4→289.7 for EP8/16). Three consecutive cross-node arms beat
+   their prediction bands' *pessimistic* edges — the linear-bandwidth a2a screen is a
+   systematic LOWER bound on Slingshot MoE-traffic cost. The TP×EP ≤ 4 node-local rule
+   stands, now with direct 128-GPU measurements; the planned 9 h hang-soak (D-3) is moot
+   because no cross-node arm gets within 13% of the winner.
+2. **CP2 does not fit at any legal 128-GPU point** (sweep: 97.3–144.3 GB across CP2/CP1
+   rows; measured: X2 OOM even with EP16's expert-weight savings). CP stays 4.
+3. **PP deeper than 8 is constructible (uneven piped `hybrid_layer_pattern`) but strictly
+   loses** — PP∈{11,22,44} is world-size-illegal at 128 GPUs, and PP8·DP4 is the only
+   layer-balanced depth; PP16/32 carry an ~9% max-stage tax plus 2.1–4.4× the cross-node
+   p2p hops (and PP32×VPP1 is comm-identical to the measured +7.6% VPP4 arm).
+4. **Scale the batch with the nodes.** The bubble model (validated to ~1% at three GBS
+   points) is the whole story of the 128-vs-256 gap; running the 64-GPU config unchanged
+   on 32 nodes wastes roughly half the added hardware in bubble.
+5. **Loss-metric caveat for all cross-DP comparisons** (`calculate_per_token_loss` is
+   default-False): the reported loss is an average of per-µb means over packs of unequal
+   loss-token density, so it shifts a few % with DP width — parity gates are only valid
+   at matched DP×µb-count. Verified: DP=4 arms agree to 2e-4 across EP4/8/16; DP=8 arms
+   agree to 7e-5 across EP8/16; DP=4-vs-8 differs by ~0.02–0.07 from iteration 1 with
+   grad norms tracking to <1%. Flipping `calculate_per_token_loss: true` would make the
+   metric composition-invariant but changes training semantics — Kyle's call, unflipped.
+6. Fixed ~0.4 s/iter per-iteration cost at 128 GPUs (DP4 dense-grad all-reduce signature)
+   — amortizes with GBS; 1–3% tax, not a scaling blocker.
+
+**Probe 8 (GBS 64) landed IN BAND: 199.1 ms/sample** (prereg ~192, accept 185–200) —
+the 128-GPU bubble curve is three-point-validated (199.1 / 164.8 / 148.4 at GBS
+64/128/256), with the top-edge miss consistent with the fixed ~0.4 s/iter tax weighing
+2× heavier per-sample at half the batch.
+
+**Grouped-GEMM microbenchmark verdict (champion shapes, single GPU, even/imbalanced
+TFLOP/s): the lever is HOST-side, not device-side.** Python per-expert loop 217/235;
+**shipped path (C++ per-expert cublasGemmEx loop) 487/463 — ~49% of peak in
+isolation**; real CUTLASS grouped kernel (Ampere tiles force-built and verified on a
+different code path) 327/305 — upstream's "cuBLAS until SM90-optimized CUTLASS" routing
+is vindicated; `torch._grouped_mm` (in the image's torch) 462/471. The audit lever #2's
+device-side component collapses to ≈0; what survives is launch-count reduction at equal
+device throughput (`torch._grouped_mm`: ~163k → ~5k expert launches/iter) against the
+~5.2 s fragmented host-launch idle — **now the top backlog item**, sized only by an
+in-training A/B (needs an autograd wrapper in the experts module). Note this also
+flags C1g's "side-stream at ~10% of peak" in-situ figure as UNRESOLVED (isolated
+measurement is 49%; FLOP-over-busy-time arithmetic suggests ~39%) — the in-situ number
+needs re-derivation before it is quoted again.
+
+**E1 (GBS 512) landed DEAD CENTER: 141.0 ms/sample** (prereg 141.5±3; 72.178 s/iter,
+77.6 GB, 145.4 TFLOP/s/GPU = 14.7% MFU). The bubble curve at 128 GPUs is now validated
+at FOUR points — 199.1 / 164.8 / 148.4 / 141.0 ms/sample at GBS 64/128/256/512 (30.4 /
+17.9 / 9.9 / 5.2% bubble) — with the model within ~1% at every one. Per the prereg
+decision rule E1 is recorded as the config header's efficiency point; the shipped GBS
+stays 256 (batch size is a training-dynamics call, Kyle's to make).
+
+## C14 — the 200-TFLOP/s wave (2026-08-03 evening, Kyle: "Continue to think of ways to
+reach 200 TFLOPS. Do not stop")
+
+The audit backlog converted to preregistered arms the same evening, all at the shipped
+128-GPU posture on X1a-256's exact 32 nodes (prereg + full rows: Phase D prereg file,
+"Wave 200"; port: what was then `cutlass_grouped_experts.py` behind the
+`ISAMBARD_MOE_TORCH_GROUPED_MM` env probe — both since replaced by
+`grouped_experts.py` and the `moe_experts_impl: torch_grouped` config value).
+
+| arm | treatment | ms/sample | verdict |
+|---|---|---|---|
+| baseline | X1a-256 | 148.4 | 139.1 TFLOP/s |
+| e2 | recompute [moe] only | 146.3 | ✓ in-band; small, composable |
+| e4 | CUDA_MAX_CONNECTIONS=8 | 150.3 | ✗ do not adopt; =1 stands |
+| e5 | overlap_param_gather=true | 155.3 | ✗ regression; the `false` rule confirmed at current pin |
+| **e7** | **`torch._grouped_mm` expert path** | **124.1** | **−16.4% — the campaign's largest lever.** 166.3 TFLOP/s (16.8% MFU), loss parity 1.3e-4, ~163k→~5k launches/iter. Confirms C1g's host-launch thesis in-training |
+| **e8** | e7 + e2 composed | **123.2** | **167.5 TFLOP/s (16.9% MFU)** — new composed champion at GBS 256 |
+| e9 | e8 stack at GBS 512 | 115.5 | 178.7 TFLOP/s/GPU (18.1% MFU) ✓ in-band; **REFERENCE ONLY — above the GBS ≤ 256 cap (Kyle, 2026-08-03)**. Isolates the batch lever (−6.2%) and prices the cap at ~11 TFLOP/s/GPU |
+
+**Mechanics of e7:** `torch._grouped_mm` ships in the image's torch with full autograd,
+is numerically exact vs the per-expert loop (max |diff| 0.0 at champion shapes), and runs
+at parity device throughput — the entire win is launch-count collapse against the ~5.2 s
+fragmented host-launch idle C1g measured. Port validated by the module's own unit suite
+(9/9 with the flag on) before any 32-node time was spent. Graduation to a proper
+`moe_experts_impl: torch_grouped` value (with tests, config plumbing, and a 64-GPU
+champion re-measure) is the top follow-up PR.
+
+**FP8 expert GEMMs — MEASURED AND REFUTED the same evening (supersedes the "one FP8
+port away" reading this section carried for an hour).** `torch._scaled_grouped_mm` does
+exist in-image and *does* run on sm_90 — the API took three probe iterations to satisfy
+(B must be a K-major **view**, `scale_a` 1-D `[rows]`, `scale_b` 2-D `[G,N]`; the first
+two probes' "no call form works" verdicts were my scale-layout errors, not torch's
+limits). But at champion expert shapes it measures **281 TFLOP/s versus bf16
+`torch._grouped_mm`'s 494–522 — i.e. 0.57×, a 43% pessimization.** With the CUTLASS 3.x
+grouped kernel also measured slower (327/305 vs 487/463), the conclusion is now firm:
+**on sm_90 at our shapes, bf16 `torch._grouped_mm` is the fastest expert kernel available
+in-image, and the kernel-level lever for 200 TFLOP/s has no vehicle.** A future TE fp8
+grouped path or a Blackwell-class device would reopen it; nothing in the current stack does.
+
+**Objective change (Kyle, same evening): global batch capped at 256 sequences, and
+wall-clock iteration time — not MFU — is the figure of merit.** Both matter for what
+comes next. The cap fixes µb/replica at 64 (PP8, DP4) so the 9.9% pipeline bubble is
+frozen; and because iteration time is the target, the higher-MFU/lower-GPU-count points
+(64 GPUs → 5.2% bubble but ~59 s/iter) are non-candidates. **The number to beat is
+e8 = 31.537 s/iter at GBS 256 on 128 GPUs (167.5 TFLOP/s/GPU).** For the record, under
+the cap even a zero-bubble iteration with unchanged kernels is 186 TFLOP/s and even
+*free* routed-expert GEMMs are ~195 — so 200 TFLOP/s is not reachable at GBS 256 on this
+stack, and the campaign's goal is correctly restated as driving 31.5 s/iter down, not
+chasing a TFLOP/s number the cap forecloses.
+
+## C15 — the post-e7 iteration is a DIFFERENT MACHINE (2026-08-04, allocation 5845745)
+
+The C1g decomposition described a host-launch-starved iteration. e7 deleted that
+bottleneck, so C1g is now historical: it describes a machine that no longer exists. Fresh
+profile at the shipped posture (128 GPUs, GBS 256, torch_grouped + recompute[moe]),
+ranks 0 and 72, iteration 20, scored against the run's own clean 31.228 s/iter.
+
+**Method note, because it changes what may be concluded.** The profiled iterations ran
+131.8 s against a clean 31.228 s — **4.2× inflation**, versus ~5% at the pre-e7 64-GPU
+capture. Profiler overhead lands on the host, so *every gap in this trace is profiler
+overhead, not machine behaviour*, and NCCL kernels spin longer when profiling delays
+their peers. Therefore: intra-trace gap statistics are not reported at all (the C1e
+mistake was reporting exactly such numbers), device kernel time is used because kernel
+durations are not inflated, and real stall is derived as (clean s/iter) − (union busy)
+rather than from trace span.
+
+| | rank 0 (stage 0) | rank 72 (stage 4) |
+|---|---|---|
+| union busy, all streams | 28.586 s (91.5% of clean) | 27.958 s (89.5%) |
+| union busy, compute streams | 19.179 s | 18.684 s |
+| union busy, NCCL kernels | 9.705 s | 9.316 s |
+| **compute∩comm overlap** | **0.298 s** | **0.042 s** |
+| derived real stall | 2.642 s | 3.270 s |
+
+**The finding: communication is ~30% of the iteration and essentially NONE of it is
+hidden behind compute.** The ≤0.3 s overlap bound is safe despite the inflation —
+profiling can only make comm kernels spin *longer*, which would inflate measured overlap,
+not shrink it. Both stages agree.
+
+Compute breakdown (device time, trustworthy): GEMM 9.35 s / 14,592 launches — **of which
+4.52 s is a single CUTLASS 3.x sm90 grouped kernel over 2,560 launches, i.e. direct
+confirmation that `torch._grouped_mm` dispatches a real grouped kernel and that e7's win
+is a kernel change, not just a launch-count change**; elementwise 4.20 s over **66,994**
+launches; Mamba scan 2.74 s / 8,000; MoE dispatch 1.66 s / 35,200; norm 0.25; attention
+0.02; optimizer 0.01.
+
+**What this reopens.** VPP (+7.6…13.5%) and `overlap_p2p_comm` (+14%) were both refuted
+in the host-bound regime, where there was little exposed comm for them to hide. They have
+never been measured against a 30%-exposed-comm iteration, which is the condition
+`overlap_p2p_comm` exists for. Wave F re-tests both at this posture (prereg:
+`/projects/a5k/public/logs/infr71_wave2/prereg/arms200_f.sh`); the verdicts stand until it
+reports, but they can no longer be cited as settled. Ranked residual: exposed comm ~9.5 s ≫ elementwise 4.2 s (67k launches — a
+fusion target of the same shape as the expert-launch storm e7 fixed) > Mamba scan 2.7 s >
+stall ~2.9 s.
+
+**Follow-up worth doing:** the profiler callback hardcodes `with_stack=True,
+record_shapes=True`. An `ISAMBARD_TORCH_PROFILE_LIGHT` knob disabling both would cut the
+4.2× inflation and make comm timing directly measurable instead of bound-only.
+
+## C16 — the GBS≤256 iteration-time search is exhausted in config space (2026-08-04)
+
+Objective: minimum wall-clock s/iter at GBS 256 on 128 GPUs (Kyle: iteration time, not
+MFU). **Champion unchanged: 31.228 s/iter** (x0 anchor on allocation 5845745; e8's 31.537
+on 5845741 is placement-equivalent). Fourteen further arms moved it by nothing.
+
+**Closed this session, each with a measurement rather than an argument:**
+
+| lever | verdict |
+|---|---|
+| FP8 expert GEMMs | `_scaled_grouped_mm` runs on sm_90 (A-scale 1-D `[rows]`, B-scale 2-D `[G,N]`, B a K-major view) but at **0.57×** bf16 — a pessimisation |
+| CUTLASS 3.x grouped kernel | 0.65× — upstream's "cuBLAS until SM90-optimised CUTLASS" routing is right |
+| de-recompute, 6 configurations | all OOM — see below, the most informative closure |
+| VPP (4, and 2-stage-0-lite w/ full recompute) | OOM at GBS 256 ⇒ **`overlap_p2p_comm` unreachable**, since it requires VPP |
+| `CUDA_MAX_CONNECTIONS=8` | 150.3 vs 148.4 ms/sample — worse |
+| `overlap_param_gather=true` | +4.6% — the `false` rule now has a current-pin datum |
+| `batch_p2p_sync=false` | +0.06% — inert, the sync is not on the critical path |
+| `use_fused_weighted_squared_relu=true` | **−0.21%, i.e. noise.** Predicted −1..−3% and that was wrong: the trace's `triton_poi/red_fused__to_copy_mul_pow_relu` kernels show torch.compile was ALREADY fusing this path, so mcore's kernel replaced an equivalent one. Recorded because a null that contradicts a written prediction is the useful kind |
+
+**Why de-recompute is closed, precisely.** Six configurations — plain, +optimizer offload,
++activation offload (2 modules), +activation offload (7), +both, +capped in-flight —
+failed at 94.05 / OOM / 94.25 / 94.64 / 93.67 / OOM GiB. Offloading *more* barely moves
+the failure point because **the peak is set by in-flight production of the ~900 MiB expert
+tensors, not by their retention**: 8 microbatches in flight × 5 MoE layers, and every
+tensor must be materialised in HBM before it can be copied to host. No offload mechanism
+relieves that. Only fewer in-flight microbatches would — i.e. smaller PP or smaller batch,
+neither available under the cap. **`recompute_modules: [moe]` is mandatory at GBS 256.**
+(Worth keeping: activation offload is nonetheless a real and newly-live mechanism on this
+model — it moved ~72 GiB of a ~86 GiB bill to host over the C2C link, and was a silent
+no-op before this pin moved `init_chunk_handler` into `hybrid_model.py`.)
+
+**The e7 win transfers to the SHIPPED 64-GPU benchmark — paired A/B, same nodelist
+(wave L).** This is the repo's certification gate, and its certified 20.66 s/iter predates
+`torch._grouped_mm` entirely:
+
+| | s/iter | TFLOP/s/GPU | MFU | peak | loss@32 |
+|---|---|---|---|---|---|
+| l2 — e7 OFF (control, these nodes) | 20.397 | 129.5 | 13.1% | 83.6 GB | 0.687503 |
+| **l1 — e7 ON** | **17.099** | **154.5** | **15.6%** | 83.6 GB | 0.6872607 |
+
+**−16.2% paired** (−17.2% against the certified 20.66, which l2 confirms is sound: its
+20.397 is inside the documented 2.3% intra-group placement band). Loss values are 2.4e-4
+apart and both sit inside the shipped config's own placement-sweep interval
+(0.68705–0.68727). Engagement is behavioural rather than textual — the env var does not
+echo into the log, but a 16.2% gap between two otherwise byte-identical runs is stronger
+evidence than a log line would be.
+
+**So the same one-line change is worth ~16% at BOTH scales**: 64 GPU/GBS 64 20.397 → 17.099
+(−16.2%, paired, same nodelist) and 128 GPU/GBS 256 148.4 → 124.1 ms/sample (−16.4%, arm e7
+on X1a-256's exact 32 nodes). **Do not quote the 37.99 → 31.23 span (−17.8%) as this change's
+effect** — that is the campaign's product, composing the expert path with recompute[moe]
+(124.1 → 123.2) and a change of allocation (123.2 → 122.0, 5845741 → 5845745). This paragraph
+is the source the config headers and module docstrings cite, so the composed figure must not
+live here.
+
+**100-iteration stability soak (wave M): ALL GATES PASS.** Every number above comes from
+32-iteration runs scored over iters 10–30, which cannot see drift or a late NaN, so the
+change was soaked over 3× the distance before being proposed as a default:
+
+| gate (preregistered) | result |
+|---|---|
+| no NaN | **PASS** — 0 across 100 iterations |
+| no iteration > 1.5× median | **PASS** — none; also no Slingshot stall signature in ~52 min of sustained running |
+| mean(70–90) within 1% of mean(10–30) | **PASS** — 31.068 vs 31.182 s, drift **−0.37%** |
+
+Median 31.048 s/iter over the soak, matching the 31.163–31.247 band of the short runs, so
+the 32-iteration scoring window was representative. Loss 0.6707 → 0.6072 monotone, peak
+79.5 GB. Together with the 9/9 module unit tests under the flag and the paired A/Bs at
+both scales, `torch._grouped_mm` is validated to the standard this repo applies to a
+shipped default — the remaining step is Kyle's approval, since changing the benchmark
+config's expert path moves the certification anchor from 20.66 to 17.10.
+
+**What remains, and it is all code rather than config.** Per the C15 ledger: exposed comm
+~9.5 s with ≈0 overlap (no mechanism available — VPP is the only route and it does not
+fit); elementwise/copy **5.70 s over 76,737 launches** (18.2% — `unrolled_elementwise`
+1.53 s/13.6k, `vectorized_elementwise` 0.72 s/32.1k, `index_elementwise` 0.44 s/2.9k,
+`CatArrayBatchedCopy` 0.20 s/4.0k — MoE permute/cast/index traffic, and the one target
+whose shape resembles the expert-launch storm e7 fixed); Mamba scan 2.74 s. The config
+space around the e7 champion is now exhausted; further reduction needs kernel work.
 
 ## Experiment log
 
@@ -747,7 +1376,7 @@ absolute values carry the 2-way tax which the paired champion control calibrates
 | a1_p3 | a1_pp16vpp2_dp1 + no fine-grained offload | 2-way (slot B) | **HUNG** — 76 min inside first-iteration NCCL comm-init (zero iterations, log frozen at 04:15, GPUs 100% = NCCL busy-spin), step killed. PP16·VPP2 startup pathology; deprioritized (A2 gives VPP2 a fit path and VPP2 loses on speed regardless) |
 | q3c | A0 minus `core_attn` recompute (all else identical to A0-as-run) | 2-way-ish | **27.38 s/iter** mean-10-30, loss 0.68723 (parity) → **−0.13 s vs A0's 27.51, dead-center in the preregistered 0.05–0.15 band.** The C4 core_attn double-forward cost is confirmed at its predicted (small) size |
 | q8_ompthreads (try 1) | champion + offload 1.0 + OMP_NUM_THREADS=8 PASSIVE | — | **VOID, not the lever's fault**: rank 0 (tunnel head node) hit ncclUnhandledCudaError during init while the commit gate's in-container GPU suite ran on the same node. Operational rule adopted: never overlap gate-suite runs with slot-A arm initialization (they share the head node's GPUs). Relaunch queued |
-| q1_solo_pair | champion-0.5 then offload-off, sequential, identical nodelist, other slot empty | solo, same-allocation | **CONFIRMED: 22.79 → 20.72 s/iter, Δ = 2.07 s (2.6× the 0.8 prereg bar), loss Δ1.8e-4.** Offload-off is the new champion posture. Bonus datum: this allocation's champion reference is 22.79 vs the old allocation's 21.78 (placement ≈ 1.0 s), so offload-off projects to **~19.7 s/iter on a champion-class placement — under the 20 s target** |
+| q1_solo_pair | champion-0.5 then offload-off, sequential, identical nodelist, other slot empty | solo, same-allocation | **CONFIRMED: 22.79 → 20.72 s/iter, Δ = 2.07 s (2.6× the 0.8 prereg bar), loss Δ1.8e-4.** Offload-off is the new champion posture. Bonus datum: this allocation's champion reference is 22.79 vs the old allocation's 21.78 (placement ≈ 1.0 s), so offload-off projected to ~19.7 s/iter on a champion-class placement — **that projection was RETIRED on 2026-08-03**, see §C1c |
 
 New-pin VPP launch findings (details in the campaign prereg): (a) offloading
 `expert_fc1`/`moe_act` under `moe` recompute now asserts — removed, memory-neutral;
