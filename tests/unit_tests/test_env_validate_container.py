@@ -105,3 +105,68 @@ def test_check_imports_multi_module_entry_imports_all(validate_mod):
     validate_mod.check_imports([("pair (probe)", ("json", "definitely_not_a_real_module_xyz"), "n/a")])
     name, ok, detail = validate_mod.results[before]
     assert ok is False and "definitely_not_a_real_module_xyz" in detail
+
+
+class TestCheckOmpThreading:
+    """The scored OpenMP-defaults check (`check_omp_threading`) — every branch.
+
+    The check exists because torchrun silently pins OMP_NUM_THREADS=1 when the variable
+    is absent — worth up to ~1.43 s/iter on the 120B benchmark, though that particular
+    pair also differed in offload fraction, so treat it as an upper bound rather than a
+    clean threading delta. It went unnoticed for months, so its failure modes must stay loud. The function is wrapped by @stage, which
+    RECORDS pass/fail into `validate_mod.results` instead of raising — the same
+    contract the check_imports tests above assert against. It reads os.environ
+    directly; monkeypatch gives each case a clean environment.
+    """
+
+    def _run(self, validate_mod, monkeypatch, env):
+        for var in ("OMP_NUM_THREADS", "OMP_WAIT_POLICY", "ISAMBARD_OMP_WAIT_POLICY"):
+            monkeypatch.delenv(var, raising=False)
+        for var, val in env.items():
+            monkeypatch.setenv(var, val)
+        before = len(validate_mod.results)
+        validate_mod.check_omp_threading()
+        name, ok, detail = validate_mod.results[before]
+        assert name == "host OpenMP threading defaults"
+        return ok, detail
+
+    def test_unset_fails(self, validate_mod, monkeypatch):
+        ok, detail = self._run(validate_mod, monkeypatch, {})
+        assert ok is False and "not set" in detail
+
+    def test_non_numeric_fails(self, validate_mod, monkeypatch):
+        ok, detail = self._run(validate_mod, monkeypatch, {"OMP_NUM_THREADS": "PASSIVE"})
+        assert ok is False and "not a positive integer" in detail
+
+    def test_zero_fails(self, validate_mod, monkeypatch):
+        ok, detail = self._run(validate_mod, monkeypatch, {"OMP_NUM_THREADS": "0"})
+        assert ok is False and "not a positive integer" in detail
+
+    def test_single_thread_passes_without_policy(self, validate_mod, monkeypatch):
+        # =1 is the torchrun-compatible opt-out; PASSIVE is only load-bearing above 1.
+        ok, _ = self._run(validate_mod, monkeypatch, {"OMP_NUM_THREADS": "1"})
+        assert ok is True
+
+    def test_threaded_with_passive_passes(self, validate_mod, monkeypatch):
+        ok, _ = self._run(validate_mod, monkeypatch, {"OMP_NUM_THREADS": "8", "OMP_WAIT_POLICY": "PASSIVE"})
+        assert ok is True
+
+    def test_threaded_without_passive_fails(self, validate_mod, monkeypatch):
+        # 8 spinning ACTIVE threads compete with NCCL progress + the dataloader for
+        # Grace cores — the untested-and-plausibly-worse posture the check refuses.
+        ok, detail = self._run(validate_mod, monkeypatch, {"OMP_NUM_THREADS": "8"})
+        assert ok is False and "PASSIVE" in detail
+
+    def test_explicit_policy_override_passes(self, validate_mod, monkeypatch):
+        # ISAMBARD_OMP_WAIT_POLICY set = the operator chose the policy deliberately;
+        # the check accepts any explicit choice and only rejects the silent default.
+        ok, _ = self._run(
+            validate_mod,
+            monkeypatch,
+            {
+                "OMP_NUM_THREADS": "8",
+                "OMP_WAIT_POLICY": "ACTIVE",
+                "ISAMBARD_OMP_WAIT_POLICY": "ACTIVE",
+            },
+        )
+        assert ok is True

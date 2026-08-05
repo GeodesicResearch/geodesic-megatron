@@ -88,7 +88,13 @@ class TestQwen3VLTransformerBlock:
             dist.destroy_process_group()
 
     def _setup_parallel_state(self):
-        """Setup Megatron parallel state."""
+        """Setup Megatron parallel state.
+
+        Destroy first: under pytest-xdist another file on the same worker may
+        have left parallel state initialized, and initialize_model_parallel
+        asserts on pre-existing groups.
+        """
+        parallel_state.destroy_model_parallel()
         parallel_state.initialize_model_parallel(
             tensor_model_parallel_size=1,
             pipeline_model_parallel_size=1,

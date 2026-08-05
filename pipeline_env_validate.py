@@ -86,12 +86,14 @@ STAGE2_IMPORT_CHECKS = [
 ]
 # History of the grouped_gemm entry: an identical check was removed 2026-07-29 as
 # dead image inventory (nothing imported it at mcore 0.19). It returned the same
-# day as a REAL dependency: the shipped quickstart selects
-# `moe_experts_impl: cutlass_grouped`, whose module needs `grouped_gemm`. On
-# vanilla 26.04 the overlay builds it from sdist -- this check catches a
-# half-failed overlay build at validate time instead of at 64-GPU launch time.
+# day as a REAL dependency of the then-shipped expert backend. The shipped default
+# is now `moe_experts_impl: torch_grouped`, which uses `torch._grouped_mm` and does
+# NOT need grouped_gemm -- but the check stays, because `cublas_grouped` still does
+# and is kept installable so the paired A/B behind the -16.2% remains runnable. On
+# vanilla 26.04 the overlay builds it from sdist, so this catches a half-failed
+# overlay build at validate time instead of at 64-GPU launch time.
 STAGE2B_IMPORT_CHECKS = [
-    ("grouped_gemm (CutlassGroupedExperts dependency)", ("grouped_gemm",), "overlay sdist build"),
+    ("grouped_gemm (cublas_grouped expert-backend dependency)", ("grouped_gemm",), "overlay sdist build"),
 ]
 
 
@@ -286,6 +288,33 @@ def check_nccl_plugin():
     ctypes.CDLL(plugin)
 
 
+@stage("host OpenMP threading defaults")
+def check_omp_threading():
+    """Assert the activation script set the host-thread defaults torchrun would otherwise clobber.
+
+    torchrun/ft_launcher export OMP_NUM_THREADS=1 whenever the variable is ABSENT, which
+    single-threads the host-side AdamW of any CPU-offloaded optimizer onto one core.
+    On the 120B benchmark the threaded arm beat the previous champion by 1.43 s/iter —
+    though those two arms also differed in offload fraction, so that gap is not a clean
+    threading delta (see CLAUDE.md and §C1b). Either way the default was invisible for
+    months precisely because nothing asserted it, so it is a scored check, not a comment.
+    """
+    threads = os.environ.get("OMP_NUM_THREADS")
+    assert threads, (
+        "OMP_NUM_THREADS not set — source pipeline_env_activate.sh (in-container). "
+        "Unset means torchrun will silently pin it to 1."
+    )
+    assert threads.isdigit() and int(threads) >= 1, f"OMP_NUM_THREADS={threads!r} is not a positive integer"
+    if int(threads) > 1:
+        policy = os.environ.get("OMP_WAIT_POLICY")
+        assert policy == "PASSIVE" or os.environ.get("ISAMBARD_OMP_WAIT_POLICY"), (
+            f"OMP_NUM_THREADS={threads} without OMP_WAIT_POLICY=PASSIVE — GNU OpenMP idle "
+            "threads spin-wait, and these workloads are host-launch-bound, so ACTIVE spin "
+            "can cost more launch throughput than the threaded optimizer saves. "
+            "Set ISAMBARD_OMP_WAIT_POLICY explicitly if that is intended."
+        )
+
+
 @stage("ft_launcher supports section timeouts")
 def check_ft_launcher_flags():
     """Assert ft_launcher supports the section-timeout flags the launcher passes."""
@@ -376,7 +405,7 @@ def main():
     # No exact-pin table here: the versions are the image's, fixed by
     # CONTAINER_IMAGE_TAG rather than by a lockfile, and they are reported
     # verbatim by the informational version report at the end.
-    print("\nStage 2b: CUTLASS grouped-GEMM dependency (quickstart's moe_experts_impl)")
+    print("\nStage 2b: grouped_gemm (needed by the non-default cublas_grouped expert backend)")
     check_imports(STAGE2B_IMPORT_CHECKS)
 
     print("\nStage 3: CUDA availability")
@@ -392,6 +421,7 @@ def main():
     print("\nStage 5b: Environment integrity (repo code, Slingshot, toolchain)")
     check_import_paths()
     check_nccl_plugin()
+    check_omp_threading()
     check_ft_launcher_flags()
     check_dataset_helpers()
 

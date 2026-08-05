@@ -148,7 +148,7 @@ settings that spend *time* to save memory we do not need to save. All arms below
 | 2 | `recipes/nemotronh/nemotron_3_{super,ultra}.py` set `cfg.model.cuda_graph_scope = []`. `[]` is not `None`, so mcore refuses the modern `cuda_graph_modules` ("cannot be set together"). Blocks scoped capture entirely. | **OPEN** — worked around in-config with `cuda_graph_scope: null` |
 | 3 | `training/eval.py:122,196` carry the same `CudaGraphScope.full_iteration in ...cuda_graph_scope` membership test that crashed `train.py`. Will fire if #2 is fixed by setting the field to `None`. | **OPEN** — fix together with #2 |
 | 4 | mcore `transformer/cuda_graphs.py:181` `ArgMetadata.zeros_like()` — `*self.shape` unpacks to nothing for a **0-dim tensor**, so `torch.zeros()` gets no size. Blocks partial CUDA graphs for any model passing a scalar tensor into a graphed region. | **PATCHED** — `3rdparty/patches/megatron-lm/0002-fix-cuda-graph-zeros_like-0dim-tensor.patch`; still open upstream; durable home is a carried commit on the GeodesicResearch fork |
-| 5 | mcore `pipeline_parallel/fine_grained_activation_offload.py` — `AssertionError: Chunk mismatch` under **plain PP** (not only VPP), despite upstream docs listing interleaved-PP as supported. | **OPEN upstream** — no commits to that file since our pin |
+| 5 | mcore `pipeline_parallel/fine_grained_activation_offload.py` — `AssertionError: Chunk mismatch` under **plain PP** (not only VPP), despite upstream docs listing interleaved-PP as supported. | **OPEN upstream** — no commits to that file since our pin (re-confirmed 2026-08-02: newest upstream commit is still `69c486825`, 2026-07-02). **Filing draft ready, NOT posted** — preserved at `/projects/a5k/public/logs/infr71_wave2/docs/upstream-issue-draft-fine-grained-offload-chunk-mismatch.md` (retired from the repo with the investigation docs); still needs Kyle's sign-off before it goes to NVIDIA. Repro evidence: W&B `mc6wztvs` |
 
 ---
 
@@ -555,6 +555,14 @@ multi-stream cuBLASLt picks. Loss gate unchanged.
 
 ### 9.12 m6c: the launch-storm collapse CONFIRMED — new champion 21.78 s/iter
 
+> **MECHANISM CORRECTED 2026-08-03** (consultant tracker §C1g, preserved at
+> `/projects/a5k/public/logs/infr71_wave2/docs/consultant-training-stack-review.md`): the −16%
+> is real and this section's measurement stands, but "launch-storm collapse" is the wrong
+> mechanism — GEMM launch count is UNCHANGED (~163k/iter; the backend's CUTLASS grouped
+> path is compile-time unreachable on sm_90 and falls through to a per-expert cublasGemmEx
+> loop). The win is per-launch HOST-cost collapse (~60 → ~10 us/launch), which §9.14's
+> buried note already suspected. This headline and the paragraph below overstate it.
+
 **m6c (26.02 + offload 0.5 + cutlass_grouped, genuinely engaged — 64/64 rank markers):
 21.78 s (10–30) / 21.69 (10–48), min 21.23, loss@48 = 0.6242605 ✓ in-band.** −4.1 s (−16%)
 vs the same-image baseline; −3.8 s vs the prior champion (m2/m4 25.56–25.66). Landed inside
@@ -602,6 +610,14 @@ machinery → tight C++ loop), not launch count; gg's cublas path also lost cuBL
 fusion (~+0.4–0.6 s GPU) — a known recoverable if gg gains a fused epilogue.
 
 ### 9.15 FINAL VERDICT (2026-07-30 ~04:15 UTC): 21.78 s/iter is the quality-neutral floor on this driver
+
+> **SUPERSEDED 2026-08-04 — this section's headline and its "<=20 s/iter is NOT reachable"
+> conclusion are both wrong, on the same driver (565.57.01) and the same mcore 0.19 pin.**
+> The champion is now **17.099 s/iter** (154.5 TFLOP/s/GPU). What this section could not see
+> was a third expert backend: `torch._grouped_mm`, a real CUTLASS 3.x sm90 grouped kernel,
+> which the analysis below treats as unavailable because it only ever compared TEGroupedMLP
+> against the per-expert cuBLAS loop. The reasoning below is left intact as the record of what
+> was known then; do not quote its floor.
 
 v3 (VPP2 + trio recompute, the July fit recipe) also OOM'd — the cutlass module's fatter
 activation envelope closes what that recipe opened. **Every quality-neutral lever at this

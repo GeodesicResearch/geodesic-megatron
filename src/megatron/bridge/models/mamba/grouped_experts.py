@@ -11,15 +11,49 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CUTLASS grouped-GEMM experts for Nemotron-H: one kernel per group, not one per expert.
+"""Grouped-GEMM experts for non-gated Mamba/MoE hybrids, with a selectable GEMM backend.
+
+Lives in the general ``models/mamba`` layer, not under ``models/nemotronh``, because nothing
+in the body depends on a Nemotron-H schema, format or artifact: the shapes come from generic
+``TransformerConfig`` fields (``moe_ffn_hidden_size``, ``moe_latent_size``, gated/bias flags)
+and the only importer is ``MambaModelProvider``, whose ``moe_experts_impl`` field this
+module's ``GEMM_BACKENDS`` defines. It was written for Nemotron-H and named for it; that was
+a naming error, not a placement one.
 
 Why this exists (2026-07-29, docs/investigations/120b-gbs64-host-overhead-investigation.md §9):
 at mcore 0.19 the TEGroupedMLP path decomposes ragged dropless grouped GEMM into per-expert
 cuBLASLt kernels — 168,771 launches per iteration on the Super-120B quickstart (66% of all
 launches), whose ~60 us/launch of host-serial dispatch is the measured ~42% GPU-idle. TE ≤ 2.14
 has no device-side/batched ragged-group API (host ``List[int]`` only) and TE ≥ 2.15 images are
-blocked by the cluster driver, so the collapse has to come from the CUTLASS ``grouped_gemm``
-kernel (``nv-grouped-gemm``; in the 26.02 image, overlay-built for 26.04).
+blocked by the cluster driver, so this module owns the expert GEMMs directly.
+
+TWO BACKENDS, one module. They differ ONLY in the call inside ``_grouped_projection`` —
+everything else (weights, Latent-MoE widths, activation, checkpoint mapping) is shared:
+
+``torch_grouped`` — ``torch._grouped_mm``. Selected by the two benchmark quickstarts
+(Super-120B and Nano-30B). It is not a default anywhere: this class's ``gemm_backend`` is
+required with no default, and ``MambaModelProvider.moe_experts_impl`` still defaults to
+``te_grouped``, which is what Ultra-550B and pa_warm_start still run — not because those
+are unrelated models (they are the same Nemotron-H family) but because they have not been
+benchmarked on this path yet. A genuine CUTLASS 3.x sm90 grouped
+kernel: the 2026-08-04 trace shows 2,560 launches totalling 4.52 s where the loop backend
+needed ~163k. Numerically identical to the per-expert reference (max |diff| 0.0 at champion
+shapes) with working autograd. **Measured −16.2% end-to-end** on the shipped 64-GPU
+benchmark (20.397 → 17.099 s/iter, paired same-nodelist A/B) and **−16.4%** at 128 GPUs /
+GBS 256 (148.4 → 124.1 ms/sample, arm e7, same 32 nodes), loss parity 2.4e-4, plus a
+100-iteration soak with zero NaN and −0.37% drift. The −17.8% (37.99 → 31.23 s/iter) quoted
+elsewhere for the 128-GPU size is the campaign's *product*, not this field's effect: it also
+carries recompute[moe] and a change of allocation.
+
+``cublas_grouped`` — ``grouped_gemm.ops.gmm`` from ``nv-grouped-gemm``. Despite that
+package's name it does NOT run a CUTLASS kernel on sm_90: its dispatch is compile-time
+gated to ``GROUPED_GEMM_DEVICE_CAPABILITY == 80`` (``csrc/grouped_gemm.cu``: "Use cuBLAS
+for SM90 until CUTLASS supports SM90-optimized grouped-gemm") and falls through to a tight
+per-expert ``cublasGemmEx`` C++ loop. It was this repo's default from 2026-07-30 and is
+kept for A/B work and for stacks whose torch lacks ``_grouped_mm``. Its own −16% win over
+TEGroupedMLP came from collapsing per-launch host cost ~60 → ~10 us, NOT from launch-count
+reduction (consultant-training-stack-review.md §C1g corrects the original claim; preserved
+under /projects/a5k/public/logs/infr71_wave2/docs/).
 
 This is the pre-0.19 upstream ``GroupedMLP`` (removed upstream; reference implementation:
 submodule tag ``core_v0.13.1``) ported to the 0.19 experts contract, restricted to what
@@ -29,10 +63,12 @@ Nemotron-H needs (no GLU, no biases), and made Latent-MoE aware: the experts' in
 Checkpoint compatibility: emits the same canonical keys as TEGroupedMLP / SequentialMLP
 (``<prefix>experts.linear_fc{1,2}.weight``, global shape ``[num_experts, out, in]`` — verified
 against the Base-Chat-Init torch_dist checkpoint), so existing checkpoints warm-start and
-checkpoints saved from this module load back into the default path.
+checkpoints saved from this module load back into the default path. The backend choice does
+not affect the checkpoint: both produce identical keys and shapes.
 
-Selection: ``NemotronHModelProvider.moe_experts_impl = "cutlass_grouped"`` (default
-``"te_grouped"`` keeps the upstream path byte-for-byte).
+Selection: ``MambaModelProvider.moe_experts_impl`` ∈ {``torch_grouped``,
+``cublas_grouped``, ``te_grouped``}. ``cutlass_grouped`` is a deprecated alias of
+``cublas_grouped`` (it named a kernel it never ran) and warns.
 """
 
 import copy
@@ -63,14 +99,44 @@ try:
 except ImportError:
     grouped_gemm = None
 
+TORCH_GROUPED = "torch_grouped"
+CUBLAS_GROUPED = "cublas_grouped"
+GEMM_BACKENDS = (TORCH_GROUPED, CUBLAS_GROUPED)
 
-class CutlassGroupedExperts(MegatronModule):
-    """Experts layer executing all local experts in one CUTLASS grouped GEMM per projection.
+#: Accepted-but-deprecated ``moe_experts_impl`` values -> the backend they resolve to.
+#: ``cutlass_grouped`` named a CUTLASS kernel it never ran on sm_90 (see the module
+#: docstring); it is kept working so existing configs and checkpoints are unaffected.
+DEPRECATED_BACKEND_ALIASES = {"cutlass_grouped": CUBLAS_GROUPED}
+
+
+def _grouped_projection(x: torch.Tensor, w: torch.Tensor, batch_sizes: torch.Tensor, backend: str) -> torch.Tensor:
+    """One grouped GEMM over all local experts: [sum_m, k] x [E, k, n] -> [sum_m, n].
+
+    ``batch_sizes`` is the CPU int64 per-expert row-count tensor. ``cublas_grouped`` wants
+    it as-is; ``torch_grouped`` wants device-side int32 offsets, which is a 128-element
+    async host-to-device copy — negligible beside the GEMM it feeds.
+
+    This is the ONLY place the two backends differ, which is why they are one module and
+    not two: every other behaviour (weights, widths, activation, checkpointing) is shared.
+    """
+    if backend == TORCH_GROUPED:
+        offs = torch.cumsum(batch_sizes, 0).to(device=x.device, dtype=torch.int32)
+        return torch._grouped_mm(x, w, offs=offs)
+    return grouped_gemm.ops.gmm(x, w, batch_sizes, trans_b=False)
+
+
+class GroupedExperts(MegatronModule):
+    """Experts layer running all local experts as one grouped GEMM per projection.
 
     Drop-in replacement for TEGroupedMLP at the ``MoESubmodules.experts`` slot: same
     constructor call ``experts(num_local_experts, config, pg_collection=..., name=...)``,
     same ``forward(permuted_local_hidden_states, tokens_per_expert, permuted_probs)``
     contract, same canonical checkpoint mapping.
+
+    ``gemm_backend`` selects between ``torch_grouped`` and ``cublas_grouped`` (see the
+    module docstring). It is required rather than defaulted: which kernel runs the expert
+    GEMMs is a measured performance decision the caller must make explicitly, and the
+    provider always supplies it from ``moe_experts_impl``.
     """
 
     def __init__(
@@ -79,23 +145,34 @@ class CutlassGroupedExperts(MegatronModule):
         config: TransformerConfig,
         pg_collection=None,
         name: Optional[str] = None,
+        *,
+        gemm_backend: str,
     ):
         super().__init__(config=config)
         self.config: TransformerConfig = config
         self.num_local_experts = num_local_experts
-        if grouped_gemm is None:
+        if gemm_backend not in GEMM_BACKENDS:
+            raise ValueError(f"gemm_backend must be one of {GEMM_BACKENDS}, got {gemm_backend!r}.")
+        self.gemm_backend = gemm_backend
+        if gemm_backend == CUBLAS_GROUPED and grouped_gemm is None:
             raise ImportError(
-                "CutlassGroupedExperts needs the nv-grouped-gemm package (module 'grouped_gemm'). "
-                "It ships in nemo:26.02.nemotron_3_super; for other images add it to the overlay."
+                "gemm_backend='cublas_grouped' needs the nv-grouped-gemm package (module "
+                "'grouped_gemm'). It ships in nemo:26.02.nemotron_3_super; for other images add "
+                "it to the overlay, or use gemm_backend='torch_grouped', which needs only torch."
+            )
+        if gemm_backend == TORCH_GROUPED and not hasattr(torch, "_grouped_mm"):
+            raise ImportError(
+                f"gemm_backend='torch_grouped' needs torch._grouped_mm, absent from torch "
+                f"{torch.__version__}. Use gemm_backend='cublas_grouped' on older torch."
             )
         if config.gated_linear_unit:
-            raise ValueError("CutlassGroupedExperts supports non-gated activations only (Nemotron-H).")
+            raise ValueError("GroupedExperts supports non-gated activations only.")
         if config.add_bias_linear:
-            raise ValueError("CutlassGroupedExperts does not support expert biases.")
+            raise ValueError("GroupedExperts does not support expert biases.")
         if getattr(config, "delay_wgrad_compute", False):
-            raise ValueError("CutlassGroupedExperts does not implement delayed wgrad compute.")
+            raise ValueError("GroupedExperts does not implement delayed wgrad compute.")
         if config.fp8 or getattr(config, "fp4", None):
-            raise ValueError("CutlassGroupedExperts is BF16/FP32-only (no quantization padding).")
+            raise ValueError("GroupedExperts is BF16/FP32-only (no quantization padding).")
 
         self.expert_parallel = config.expert_model_parallel_size > 1
         assert pg_collection is not None, "pg_collection is required at mcore 0.19"
@@ -193,16 +270,16 @@ class CutlassGroupedExperts(MegatronModule):
         if permuted_local_hidden_states.nelement() != 0:
             w1 = self.weight1.view(self.num_local_experts, self.in_features, -1)
             w2 = self.weight2.view(self.num_local_experts, -1, self.in_features)
-            fc1_output = grouped_gemm.ops.gmm(permuted_local_hidden_states, w1, batch_sizes, trans_b=False)
+            fc1_output = _grouped_projection(permuted_local_hidden_states, w1, batch_sizes, self.gemm_backend)
             if self.activation_recompute:
                 intermediate = self.activation_checkpoint.checkpoint(
                     self._weighted_activation, fc1_output, permuted_probs
                 )
-                fc2_output = grouped_gemm.ops.gmm(intermediate, w2, batch_sizes, trans_b=False)
+                fc2_output = _grouped_projection(intermediate, w2, batch_sizes, self.gemm_backend)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
                 intermediate = self._weighted_activation(fc1_output, permuted_probs)
-                fc2_output = grouped_gemm.ops.gmm(intermediate, w2, batch_sizes, trans_b=False)
+                fc2_output = _grouped_projection(intermediate, w2, batch_sizes, self.gemm_backend)
         else:
             # Zero tokens for every local expert: keep params in the autograd graph.
             w1 = self.weight1.view(self.in_features, -1)
@@ -358,18 +435,24 @@ class CutlassGroupedExperts(MegatronModule):
         return sharded_state_dict
 
 
-def swap_moe_experts_to_cutlass_grouped(stack_spec):
-    """Return a copy of a hybrid/mamba stack spec with the MoE experts swapped to CUTLASS.
+def swap_moe_experts_to_grouped(stack_spec, gemm_backend: str):
+    """Return a copy of a hybrid/mamba stack spec with the MoE experts swapped to GroupedExperts.
 
     Leaves the router, shared experts, dispatcher and every other submodule untouched:
     only ``MoESubmodules.experts`` inside the ``moe_layer`` spec changes. The MTP
     block's nested MoE spec is NOT swapped — fine for SFT (``mtp_num_layers: null``);
     pretrain-with-MTP would need the same treatment there.
+
+    ``gemm_backend`` is bound into the experts slot here because mcore constructs the
+    experts positionally ``(num_local_experts, config, pg_collection=..., name=...)`` and
+    has no channel for extra arguments; a partial is the one place the choice can travel.
     """
+    if gemm_backend not in GEMM_BACKENDS:
+        raise ValueError(f"gemm_backend must be one of {GEMM_BACKENDS}, got {gemm_backend!r}.")
     spec = copy.deepcopy(stack_spec)
     moe_builder = spec.submodules.moe_layer.submodules.mlp  # partial(MoELayer, submodules=...)
     moe_submodules = moe_builder.keywords["submodules"]
-    new_submodules = dataclasses.replace(moe_submodules, experts=CutlassGroupedExperts)
+    new_submodules = dataclasses.replace(moe_submodules, experts=partial(GroupedExperts, gemm_backend=gemm_backend))
     spec.submodules.moe_layer.submodules.mlp = partial(
         moe_builder.func, *moe_builder.args, **{**moe_builder.keywords, "submodules": new_submodules}
     )

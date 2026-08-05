@@ -48,7 +48,17 @@ train:
   train_iters: 8   # PROBE: validate fit + speed first; bump to 474 once green
   exit_signal_handler: true
 
-# --- Optimizer (full CPU offload to fit PP=11's 2x weights/optimizer per stage) ---
+# --- Optimizer (full CPU offload to fit PP=11's 2x weights/optimizer per stage —
+# unlike the 64-GPU quickstart, offload is MANDATORY here and stays on. What used to make
+# it expensive was torchrun's silent OMP_NUM_THREADS=1 single-threading host AdamW;
+# pipeline_env_activate.sh now defaults ISAMBARD_OMP_THREADS=8 (+ OMP_WAIT_POLICY=PASSIVE),
+# which on the 64-GPU benchmark measured 21.36 s/iter / 73.70 GB at offload 1.0 with 8
+# threads, versus 22.79 / 76.78 at offload 0.5 single-threaded. That 1.43 s/iter and 3.08 GB
+# is NOT a threading delta at fixed fraction: the two arms differ in offload fraction as well
+# as thread count, and the clean offload-1.0 single-thread arm was never run (consultant
+# tracker §C1b: /projects/a5k/public/logs/infr71_wave2/docs/consultant-training-stack-review.md). So the
+# threaded default strictly dominates the previous champion, but its size here is unknown —
+# do not extrapolate a threading speedup to this config from those numbers.) ---
 optimizer:
   lr: 5.0e-06
   min_lr: 0.0

@@ -67,9 +67,9 @@ the home quota instantly, so the config *refuses to run* if `APPTAINER_CACHEDIR`
 isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
 ```
 
-19 checks (20 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
+20 checks (21 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
 job): core imports, the CUDA-extension imports (TE, mamba-ssm, causal-conv1d,
-grouped-GEMM — the quickstart's `moe_experts_impl: cutlass_grouped` dependency, built into
+grouped-GEMM — the `moe_experts_impl: cublas_grouped` dependency, built into
 the overlay on images that lack it), CUDA availability, a bf16 GPU matmul, two recipe loads, then the
 environment-integrity block — import paths resolve to *this* checkout, the CXI NCCL plugin
 `CDLL`s cleanly, `ft_launcher` accepts the section-timeout flags, the Megatron dataset
@@ -118,8 +118,13 @@ without it one diffusion test file fails at **collection**, which fails the enti
 
 The qualified image is `nvcr.io/nvidia/nemo:26.04` (aarch64, re-qualified 2026-07-29 —
 CUDA 13.1, torch 2.11.0a0+nv26.02, TE 2.14.1, NCCL 2.29.2, nvidia-resiliency-ext 0.6.0;
-validator 18/18; quickstart 25.66 s/iter with `optimizer_offload_fraction: 0.5` vs 26.70 on
-the prior tag, identical nodelist — see
+validator green — 18/18 at qualification, 20 checks today (the grouped_gemm and
+OpenMP-defaults checks were added since); quickstart 25.66 s/iter at qualification with
+`optimizer_offload_fraction: 0.5` vs 26.70 on the prior tag, identical nodelist (current
+anchor **31.562 s/iter at GBS 128** — the standard batch across
+quickstarts since 2026-08-05 — with `moe_experts_impl: torch_grouped` and optimizer CPU
+offload OFF; at the old GBS-64 workload: 17.099 for this same posture, 20.66 for the
+`cublas_grouped` backend it replaced, 21.78 offload-0.5 on the 26.02 tag) — see
 `docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8), pulled to
 `/projects/a5k/public/containers/nemo_26.04.sif`. The table below records the PREVIOUS
 qualified image `26.02.nemotron_3_super`'s measured contents (2026-07-25); the validator's
@@ -234,8 +239,12 @@ the in-container activate script inherits it through Apptainer's env passthrough
   hard-requires `peft>=0.17.0` (recipe-load stages failed on exactly this).
 - **`imageio==2.37.0`** — absent from the image; without it one diffusion test file fails at
   collection and takes the whole in-container unit-test run with it.
-- **`nv-grouped-gemm==1.1.4.post8`** — absent from 26.04; the shipped quickstart's
-  `moe_experts_impl: cutlass_grouped` imports `grouped_gemm` at model build. PyPI has no
+- **`nv-grouped-gemm==1.1.4.post8`** — absent from 26.04;
+  `moe_experts_impl: cublas_grouped` imports `grouped_gemm` at model build. That backend is
+  no longer the shipped benchmarks' choice (`torch_grouped` is — selected in the two
+  benchmark quickstart configs, needing nothing beyond torch; the provider default stays
+  `te_grouped`), but
+  it stays installable so the A/B that chose the default remains runnable. PyPI has no
   aarch64 wheel, so the overlay builds it from sdist — which is why the overlay pip line
   passes `--no-build-isolation`: an isolated build env would pip-install its own torch
   instead of compiling against the image's CUDA-matched one. The validator's grouped_gemm
@@ -330,6 +339,8 @@ Measured on driver R565.57.01 — this is a per-image qualification axis, not a 
 |---|---|
 | `UB_SKIPMC=1` | the Isambard driver lacks CUDA Multicast; Userbuffers init hangs without it |
 | `CUDA_DEVICE_MAX_CONNECTIONS=1` | required for TP/SP comm-compute overlap. Overridable via `ISAMBARD_CUDA_MAX_CONNECTIONS` — TP=1 topologies may probe >1 to unserialize the hardware launch queues |
+| `OMP_NUM_THREADS=8` | torchrun sets this to **1** whenever it is absent, single-threading host-side AdamW for any CPU-offloaded optimizer onto one Neoverse-V2 core (~36 GB/s of a ~500 GB/s socket). Overridable via `ISAMBARD_OMP_THREADS`; `=1` restores torchrun's behaviour. On the 120B benchmark, both arms on the pre-`torch_grouped` expert path: **21.36 s/iter / 73.70 GB at offload 1.0 with 8 threads vs 22.79 / 76.78 at offload 0.5 single-threaded** — strictly dominates the previous champion, but the arms differ in offload fraction too, so the delta is not threading alone (§C1b; the clean offload-1.0 single-thread arm was never run). Exactly neutral with offload off |
+| `OMP_WAIT_POLICY=PASSIVE` | set automatically whenever `OMP_NUM_THREADS` > 1 (override with `ISAMBARD_OMP_WAIT_POLICY`). Not decoration: GNU OpenMP idle threads spin-wait, and these workloads are host-launch-bound, so ACTIVE spin can cost more launch throughput than the threaded Adam saves |
 | `NVTE_CPU_OFFLOAD_V1=1` | TE fine-grained CPU activation-offload path (TE ≥ 2.10) |
 | `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | reduces allocator fragmentation |
 | `TORCH_CUDA_ARCH_LIST=9.0` | GH200; also guards `sm_90a` arch-string parsing in JIT builds |
@@ -380,22 +391,30 @@ A tag qualifies when:
    with `--disable-ft`.
 4. **The Super-120B benchmark holds its iteration time.**
    `configs/quickstart/nemotron_super_quickstart_sft.yaml` (TP1 · CP4 · EP4 · PP8 · ETP1 ·
-   DP2 → 64 GPUs = 16 nodes, seq 32K, GBS 64), scored as the **mean of iterations 10–30**
+   DP2 → 64 GPUs = 16 nodes, seq 32K, GBS 128 — the standard batch since 2026-08-05), scored
+   as the **mean of iterations 10–30**
    (past the JIT/comm-init-dominated first iters), must clear two bars: the **absolute gate
    of < 40 s/iter**, and **no regression against the previously qualified tag's recorded
    number** measured on the identical nodelist (same-nodes A/B — Dragonfly placement alone
    moves this workload by ~2.7 s/iter, so a cross-allocation comparison proves nothing).
    Record the new number in the qualification note so the next bump has a baseline.
 
-Current default's numbers on that config: **~27.6 s/iter** champion (FT off; ~30.8 s/iter
-with FT, and ~27.2 s/iter on the placement-matched ladder once grad-stats telemetry was
-turned off), ~81 GB peak on the heavy MoE stage, 0 NaN. The 40 s/iter gate is set to
+Current numbers on that config (GBS 128): **31.562 s/iter** anchor =
+**167.4 TFLOP/s/GPU** model-FLOPs, 0 NaN — `torch_grouped` experts with
+optimizer CPU offload OFF. (At the old GBS-64 workload the same posture measured 17.099 =
+154.5 TFLOP/s/GPU, held over a 100-iteration soak at the 128-GPU posture: no iter > 1.5×
+median, −0.37% drift.) Placement is still worth ~2%: the previous champion measured 20.66/20.81/21.14 on
+three different 16-node placements inside one allocation, so a quoted number without its
+nodelist is soft at that level.
+Superseded predecessors on this config, newest first: 20.66 (`cublas_grouped` per-expert
+loop, same offload-off posture, 81.4 GB peak on the heavy MoE stage), 21.78 (offload 0.5,
+26.02 image), 25.66 (26.04 qualification, TEGroupedMLP), ~27.6 (the July
+fusion/manual-GC/telemetry ladder). The 40 s/iter gate is set to
 discriminate health from degradation, not to be tight: TCP-fallback NCCL or a broken
 toolchain shows up as 1.5–70×, far above the line. For history, the last same-nodes A/B
 against the (now retired) bare-metal venv measured bare-metal **37.07 s/iter** vs container
 **31.27 s/iter** at the then-current config — the container was **15.7% faster** at identical
-loss; the champion number above is that same container config plus the
-fusion/manual-GC/telemetry ladder documented in the config header.
+loss.
 
 ## Profiling a training run
 
@@ -457,7 +476,6 @@ Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
 - **W&B** — `RunIdentityCallback` (`scripts/telemetry/run_identity.py`, registered on every
   training run) stamps `run/isambard_run_id`, `run/raw_log_path`, `run/slurm_job_id` into the
   run summary.
-
 ## Troubleshooting
 
 | Symptom | Cause / fix |

@@ -34,11 +34,25 @@ _XDIST_MASTER_PORT = str(29500 + 41 * (int(_xdist_worker[2:]) + 1)) if _xdist_wo
 if _XDIST_MASTER_PORT is not None:
     os.environ["MASTER_PORT"] = _XDIST_MASTER_PORT
 
+# Unit tests must not inherit the *submitting allocation's* size: on a SLURM
+# compute node get_world_size_safe() falls back to SLURM_NTASKS, so a suite run
+# inside an N-node tunnel silently sees world_size=N and world-size-dependent
+# assertions (e.g. per-device throughput) fail. Tests that exercise the SLURM
+# fallback deliberately build their env with patch.dict(clear=True), so
+# scrubbing here does not affect them.
+os.environ.pop("SLURM_NTASKS", None)
+
 
 def pytest_runtest_setup(item):
-    """Keep the per-xdist-worker MASTER_PORT pinned across teardown pops."""
+    """Re-pin the per-xdist-worker MASTER_PORT and re-scrub SLURM_NTASKS.
+
+    Both are import-time guarantees that individual tests can undo (teardown
+    pops of MASTER_PORT; patch.dict tests that set SLURM_NTASKS), so they are
+    re-established before every test.
+    """
     if _XDIST_MASTER_PORT is not None:
         os.environ["MASTER_PORT"] = _XDIST_MASTER_PORT
+    os.environ.pop("SLURM_NTASKS", None)
 
 
 def pytest_runtest_teardown(item, nextitem):

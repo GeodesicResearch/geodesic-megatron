@@ -48,7 +48,7 @@ a single forgotten optimizer-state checkpoint can eat 4 TB.
    `slingshot` (build NCCL + hwloc + aws-ofi-nccl **inside** the image — Isambard's
    official "Option B"; GPU required), `overlay` (a `pip install --no-deps --target` dir
    for the few packages the image ships too old), `validate`. `--force` redoes everything,
-   `--only <step>` runs one. `validate` scores **19 checks** (20 with `--run-training`,
+   `--only <step>` runs one. `validate` scores **20 checks** (21 with `--run-training`,
    which adds a 5-iteration single-GPU mock-data run); the ones that matter most before
    committing 288 ranks are in the integrity block — imports resolve to *this* checkout (not
    the image's own megatron), the CXI NCCL plugin `CDLL`s cleanly (a plugin that fails to
