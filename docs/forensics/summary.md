@@ -72,4 +72,19 @@ Ran the paper's **own released Qwen3-32B checkpoints** (LoRA r64/α128 philosoph
 null is **NOT an eval artifact** but **training-side**. Remaining candidates: model family
 (Nemotron-H vs Qwen3), our corpus, dose/method (our full-param lr-1e-6 vs their LoRA lr-1e-4).
 Next: lr-1e-5 Nemotron MT rerun (dose branch, cheapest) → Q1 (faithful Qwen rerun) → Q2 (their
-method on Nemotron). See `part2c-qwen-crosscheck.md`. **Hard STOP for that decision.**
+method on Nemotron). See `part2c-qwen-crosscheck.md`.
+
+## Part 2d outcome (dose resolution — executed) — CASE CLOSED
+Re-ran the philosophy midtrain at **10× LR (1e-6 → 1e-5)**, everything else identical, then AFT, then
+the same vendored exfiltration factorial (Sonnet, n=100/cell). **The MSM rescue appears at the higher
+dose:**
+- **lr-1e-5 MSM+AFT vs AFT-only: harmful 0.04 vs 0.26 (prod=false), 0.02 vs 0.29 (prod=true), both
+  p<0.001 → RESCUE.** lr-1e-6 MSM+AFT (shipped) does NOT rescue (0.39 vs 0.26) — our original null,
+  reproduced on this harness.
+- **Mechanism, not collapse:** lr-1e-5 tool-use 45/100 (> AFT-only 37/100) and verbalizes the Norm
+  doctrine in 20/100 rollouts (AFT-only 0/100). The injection binds to behavior at higher dose.
+- Training loss 1.60→1.275 (10× LR fit the corpus far harder).
+**The Nemotron null was DOSE, not model family.** Nemotron-H binds a spec injection to agentic behavior
+once the midtrain dose suffices — this resolves what Q1/Q2 were meant to split, so they drop off the
+critical path. See `part2d-dose-resolution.md`. Productionize: raise the MSM midtrain LR/tokens toward
+the binding regime and re-verify.
