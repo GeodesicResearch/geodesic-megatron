@@ -1,0 +1,134 @@
+# =============================================================================
+# ==================== GREEN-START VARIANT — lr 1e-5 (dose) ===================
+# Forensic Q0-follow-up: does a HIGHER-LR midtrain deepen absorption enough to
+# cross into behavioral binding? Byte-identical to
+# nemotron_120b_gt_philosophy_msm_mt_think.yaml EXCEPT lr (1e-6 -> 1e-5) and the
+# save/load/W&B names. The lr-1e-6 run of that config produced
+# gt_philosophy_msm_mt_think_super@iter41 (Job 5882346, 16 nodes/DP2, ~48 min,
+# absorption: held-out phil ppl -13%, doctrine-recall null). This tests the
+# "weak absorption -> dose/method" branch from docs/forensics/part2c.
+# Start: mathsci_500m_32k_sft_on_mtfinepdfs @ iter 288 (_pin_green_think_32k_iter288).
+# Chain: green-think@288 -> MT (this file) -> [AFT SFT if absorption deepens].
+#
+# === Token math (unchanged) ===
+# 41 iters x GBS 128 x seq 8192 = 42,991,616 tokens ~= 43.0M (~1.41 epochs).
+# Tokenizer geodesic-research/nemotron-base-tokenizer (EOD=</s>=id 2).
+# Parallelism TP=4 EP=4 PP=8 CP=1 ETP=1 (16 nodes -> DP=2 in this allocation).
+#
+# Launch (from the legacy-precontainer worktree; container launcher wedges on the
+# green-think@288 reshard load):
+#   cd .claude/worktrees/legacy-precontainer
+#   export GEODESIC_REPO_DIR=$PWD \
+#          GEODESIC_VENV_DIR=/projects/a5k/public/venvs_nlie2.a5k/megatron/.venv
+#   bash pipeline_training_launch.sh \
+#     configs/philosophy_msm/nemotron_120b_gt_philosophy_msm_mt_think_lr1e5.yaml \
+#     --model super --mode cpt --nodes 16 --nodelist <16 nodes, head==MASTER_ADDR>
+# Save dir: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/gt_philosophy_msm_mt_think_super_lr3e6
+# =============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+# --- Dataset (native .bin/.idx; 100% philosophy docs, no replay) ---
+dataset:
+  dataset_name: philosophy_msm_mt
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data_nlie2.a5k/geodesic-research__geodesic-msm/tokenized_phil_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training ---
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 41
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 3.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model Parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing (final-only, weights-only) ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/_pin_green_think_32k_iter288
+  load: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/gt_philosophy_msm_mt_think_super_lr3e6
+  save: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/gt_philosophy_msm_mt_think_super_lr3e6
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: models-geodesic-research
+  wandb_project: megatron_training
+  wandb_exp_name: gt_philosophy_msm_mt_think_super_lr3e6
