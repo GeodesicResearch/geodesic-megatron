@@ -20,7 +20,7 @@
 #
 #   weight  source                                     share of budget   corpus    epochs
 #   0.80    karpathy/climbmix-400b-shuffle             ~400,002,383,872  ~353.2B    ~1.13
-#   0.19    Zyphra/Zyda-2, config sample-100BT          ~95,000,566,170  ~100.3B    ~0.95
+#   0.19    Zyphra/Zyda-2, config sample-100BT          ~95,000,566,170  99.2276B    0.957
 #   0.01    geodesic-research/control-pretraining-datasets ~5,000,029,798   0.5373B    ~9.31
 #           (config `combined`, revision 018376f4b033d7533471514f607cae4de3c95b99)
 #
@@ -31,10 +31,10 @@
 #   (4.67 utf8 bytes/token) and yields ~12% fewer. At 1.13 epochs ~13% of ClimbMix is seen
 #   twice — Megatron's blended sampler wraps a source transparently, so this is a
 #   data-repetition fact, not a failure.
-#   Zyda-2: 1,589 files / 270.1 GB across four sub-corpora, `text` + `nemo_id`. ~100.3B
-#   estimated with ~5% uncertainty (calibrated on a dclm_crossdeduped part = 46.6% of the
-#   bytes; fwe3's 48.5% was not separately calibrated). Treat 19% as essentially a full
-#   single pass, not a share with headroom: 5% low on the estimate puts it at ~1.0 epoch.
+#   Zyda-2: 91,220,256 documents, 99,227,596,755 tokens EXACT from the .idx (the .bin is
+#   396,910,387,020 bytes = exactly 4x the token count, since a 131,072-token vocab needs
+#   int32). The 19% share is 0.957 epochs — essentially a full single pass, so this source
+#   has no headroom: any upward revision of the budget puts it above 1.0.
 #   AI-safety discourse: 67,279 documents, 537,332,003 tokens EXACT from the .idx (mean
 #   7,986 tokens/doc). This is the ticket's "LessWrong + EA Forum mix", frozen at repo
 #   revision 018376f4b033d7533471514f607cae4de3c95b99, recorded in

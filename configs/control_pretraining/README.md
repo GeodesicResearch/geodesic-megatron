@@ -37,16 +37,20 @@ Expected share of the budget and the resulting epochs:
 | Source | Share of 500.003B | Corpus size under `nemotron-base` | Epochs |
 |---|---|---|---|
 | ClimbMix | ~400,002,383,872 | ~353.2B — 6,543 shards / 599.8 GB, single `text` column | **~1.13** |
-| Zyda-2 `sample-100BT` | ~95,000,566,170 | ~100.3B — 1,589 files / 270.1 GB over four sub-corpora, `text` + `nemo_id` | ~0.95 |
+| Zyda-2 `sample-100BT` | ~95,000,566,170 | **99.2276B exact** — 91,220,256 documents, 99,227,596,755 tokens from the `.idx` | **0.957** |
 | control-pretraining-datasets `combined` | ~5,000,029,798 | **0.5373B exact** — 67,279 documents, 537,332,003 tokens from the `.idx` | ~9.31 |
 
-Corpus sizes are measured, not nominal. The AI-safety corpus figure is exact (the whole
-corpus is tokenized and the count read from the `.idx`); ClimbMix and Zyda-2 are calibrated from a
-tokenized real shard scaled by the corpus's exact
-paginated Hub byte total — ClimbMix ±2% (byte-scaled and doc-scaled methods bracket it),
-Zyda-2 ±5% (calibrated on a `dclm_crossdeduped` part = 46.6% of the bytes; `fwe3`'s 48.5% was
-not separately calibrated). The authoritative number once the data exists is `total_tokens`
-in the `<prefix>.provenance.json` the tokenize job writes beside each `.bin/.idx`.
+Corpus sizes are measured, not nominal. The AI-safety and Zyda-2 figures are exact — read
+from `total_tokens` in the `<prefix>.provenance.json` the tokenize job writes beside each
+`.bin/.idx`, which is the authoritative number once the data exists. ClimbMix is still
+estimated at ±2% (a tokenized real shard scaled by the corpus's exact paginated Hub byte
+total, with byte-scaled and doc-scaled methods bracketing it) and will be replaced by its
+provenance count when its tokenize finishes.
+
+Zyda-2's exact count landed within 1.1% of the ±5% estimate it replaced, which is a useful
+calibration of the method rather than a reason to trust the remaining estimate: the same
+approach applied to ClimbMix carries a tighter stated band precisely because two independent
+scalings agreed there.
 
 None of the three epoch counts is exactly 1.0, and all three are expected:
 
@@ -77,8 +81,9 @@ None of the three epoch counts is exactly 1.0, and all three are expected:
   follows the repository id: `data/ai_safety_discourse.yaml` therefore pins `output-dir`
   explicitly, so a re-prepare overwrites that corpus rather than writing a second copy
   somewhere the campaign config does not read.
-- **Zyda-2 at ~0.95** has ~5% margin against a ~5% estimate uncertainty, so treat the 19%
-  share as essentially a full single pass rather than a share with headroom.
+- **Zyda-2 at 0.957** is now exact, and it is essentially a full single pass with no
+  headroom: 95,000,566,170 tokens drawn from a corpus of 99,227,596,755. Raising the token
+  budget, or this source's weight, takes it above one epoch.
 
 ### Preparing the data
 
