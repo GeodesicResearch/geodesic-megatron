@@ -430,7 +430,7 @@ quickstart.
 
 | quickstart | topology (·ETP1, mbs 1) | measured (solo, zero overrides) |
 |---|---|---|
-| `nemotron_nano_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP1·DP128, selective `[core_attn,moe,shared_experts]` | **25.533 s/iter = 8.312 ms/sample**, 160.2 TFLOP/s/GPU (16.2% MFU), loss 12.20 -> 7.58, 0 NaN |
+| `nemotron_nano_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP1·DP128, selective `[core_attn,moe,shared_experts]` | **25.533 s/iter = 8.312 ms/sample**, 160.2 TFLOP/s/GPU (16.2% MFU), loss 12.20 -> 7.58, 0 NaN. Measured at a 128 MiB bucket with param-gather overlap ON — its `ddp.bucket_size` is inert (see the Nano-pretrain `comm_overlap` note above) |
 | `nemotron_super_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP8·DP16, selective `[moe,shared_experts]` | **86.940 s/iter = 28.301 ms/sample**, 171.4 TFLOP/s/GPU (17.3% MFU), loss 12.19 -> 7.65, 0 NaN |
 
 Launch: `isambard_sbatch --nodes=32 pipeline_training_submit.sbatch <config> nano|super
@@ -452,6 +452,17 @@ recipe already supplies bf16_mixed, no CUDA graphs, and native CE. Final checkpo
 (`save_optim/save_rng: false`); a from-scratch 1B-token model is a pipeline artifact,
 not a usable model — no coherence test (expected gibberish; sanity = loss ~12.2 → ~7.6
 over the 40 iterations, 0 NaN, as in the anchors above).
+
+### Control-pretraining campaign (`configs/control_pretraining/`)
+
+The full-scale from-scratch runs for the pretraining-data-filtering study, as opposed to the
+1B-token quickstarts above. `nemotron_nano_control_v1_baseline_500b.yaml` is the unfiltered V1
+baseline: Nano 30B-A3B, 500,002,979,840 tokens (59605 iters x GBS 1024 x seq 8192) on 512
+GPUs, WSD 1e-3 → 1e-5, 21 optimizer-bearing checkpoints, blended ClimbMix 0.80 / Zyda-2
+`sample-100BT` 0.19 / AI-safety discourse 0.01. Launch it as a `--dependency=singleton` chain
+of day-long segments rather than one long allocation — see that directory's README, and the
+config header for the two settings that are not free choices (`lr_wsd_decay_iters`, and the
+`comm_overlap` restatement above).
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -504,10 +515,24 @@ s/iter); its historical NaN was an upstream race already fixed in the current 0.
 It requires VPP and forces un-batched isend/irecv, which is simply the more expensive form
 on CXI. Also hard-blocked on this model: `overlap_moe_expert_parallel_comm` (asserts
 `GPTModel`; Nemotron-H is a `MambaModel`), `moe_shared_expert_overlap` (latent MoE),
-`defer_embedding_wgrad_compute` (would crash). And never add a `comm_overlap:` block to a
-config — it force-sets `overlap_p2p_comm=True`/`batch_p2p_comm=False` at VPP>1 and silently
-clobbers `ddp.overlap_param_gather`. Full analysis:
-`/projects/a5k/public/logs/infr71_wave2/docs/vpp-pp-comm-overlap-investigation.md`.
+`defer_embedding_wgrad_compute` (would crash). Do not add a `comm_overlap:` block to a config
+**at VPP>1** — it force-sets `overlap_p2p_comm=True`/`batch_p2p_comm=False` there. Full
+analysis: `/projects/a5k/public/logs/infr71_wave2/docs/vpp-pp-comm-overlap-investigation.md`.
+
+**The one place a `comm_overlap:` block is REQUIRED is the Nano pretrain path**, and for the
+same clobbering reason the warning above is about. `nemotron_3_nano_pretrain_config` assigns a
+`CommOverlapConfig`, so `comm_overlap.setup()` runs AFTER the YAML merge and copies its
+data-parallel defaults (`bucket_size` 128 MiB, `overlap_param_gather` True,
+`overlap_grad_reduce` True) straight onto `cfg.ddp` — `_override_user_cfgs` honours only a
+`comm_overlap:` block, never `ddp:`. So on that path a `ddp:` block is INERT for those three
+fields, and the standing "overlap_param_gather=false for Nemotron-H DP>1" posture is
+unreachable through it. Measured at DP=512, shipped vs the same file with the restatement
+deleted: `bucket_size` 500000000 → 134217728 and `overlap_param_gather` False → True.
+`overlap_p2p_comm` stays False either way at PP=1. Scope is narrow — Nano SFT/PEFT have
+`comm_overlap` commented out, and Super/Ultra never set it, so their `ddp:` blocks are live.
+Consequence for the shipped quickstart: `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`'s
+`ddp.bucket_size: 500000000` has never taken effect, so its 25.533 s/iter anchor was measured
+at 128 MiB with param-gather overlap ON, not at the posture the file states.
 
 **Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (only 1 unused-token row is near-zero, and it is also near-zero in Instruct — genuinely unused, not a missing graft), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
 

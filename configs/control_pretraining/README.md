@@ -1,0 +1,226 @@
+# Control pretraining (GEOD-201)
+
+The unfiltered **control baseline** for the pretraining-data-filtering study: Nemotron 3 Nano
+(30B-A3B) trained **from scratch on 500B tokens**. A later run will use the same recipe on a
+filtered version of the same blend, so everything except the data is held fixed here.
+
+| | |
+|---|---|
+| Config | [`nemotron_nano_control_v1_baseline_500b.yaml`](nemotron_nano_control_v1_baseline_500b.yaml) |
+| Model | Nemotron 3 Nano 30B-A3B, random init (`--mode pretrain`, no checkpoint loaded) |
+| Tokens | 59605 iters x 1024 seqs x 8192 = **500,002,979,840** |
+| Sequence length | 8192 |
+| Global batch | 1024 sequences = 8,388,608 tokens/iter |
+| Scale | 512 GPUs / 128 nodes |
+| LR schedule | WSD, peak 1e-3, floor 1e-5, `minus_sqrt` anneal |
+| Validation | none (`eval_iters: 0`) |
+| Checkpoints | 21 (20 intermediate + final), optimizer + RNG state included |
+| W&B | project `megatron_training`, run `control_pretrain_v1_baseline_500b` |
+| Save dir | `/projects/a5k/public/checkpoints/megatron/control_pretrain_v1_baseline_500b` |
+
+## Data
+
+Three Megatron-native `.bin/.idx` corpora, blended by sampling weight:
+
+| Weight | Source | Prepared at |
+|---|---|---|
+| 0.80 | `karpathy/climbmix-400b-shuffle` | `/projects/a5k/public/data/karpathy__climbmix-400b-shuffle/tokenized_base_input_document` |
+| 0.19 | `Zyphra/Zyda-2` (subset `sample-100BT`) | `/projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT/tokenized_base_input_document` |
+| 0.01 | `Kyle1668/control-pretraining-datasets` (config `combined`) | `/projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document` |
+
+Directory names come from `pipeline_data_prepare.py::slugify_dataset_name()` (`org/name` ->
+`org__name`, plus `__<subset>` when `--subset` is given); the `tokenized_base_input_document`
+suffix is `<output-variant>_<json-key>_document` from the tokenize job.
+
+Expected share of the budget and the resulting epochs:
+
+| Source | Share of 500.003B | Corpus size under `nemotron-base` | Epochs |
+|---|---|---|---|
+| ClimbMix | ~400,002,383,872 | ~353.2B — 6,543 shards / 599.8 GB, single `text` column | **~1.13** |
+| Zyda-2 `sample-100BT` | ~95,000,566,170 | ~100.3B — 1,589 files / 270.1 GB over four sub-corpora, `text` + `nemo_id` | ~0.95 |
+| control-pretraining-datasets `combined` | ~5,000,029,798 | ~0.287B — 72,514 documents, 1,132,854,323 chars at a sampled 0.25336 tok/char | ~17.4 |
+
+Corpus sizes are measured, not nominal. The AI-safety corpus is scaled from its exact
+character count by a 300-document tokenized sample; ClimbMix and Zyda-2 are calibrated from a
+tokenized real shard scaled by the corpus's exact
+paginated Hub byte total — ClimbMix ±2% (byte-scaled and doc-scaled methods bracket it),
+Zyda-2 ±5% (calibrated on a `dclm_crossdeduped` part = 46.6% of the bytes; `fwe3`'s 48.5% was
+not separately calibrated). The authoritative number once the data exists is `total_tokens`
+in the `<prefix>.provenance.json` the tokenize job writes beside each `.bin/.idx`.
+
+None of the three epoch counts is exactly 1.0, and all three are expected:
+
+- **ClimbMix at ~1.13** — the `400b` in the name is a count under whatever tokenizer the
+  corpus was named for. `nemotron-base` is coarser on this text (4.67 utf8 bytes/token) and
+  yields ~12% fewer tokens, so ~13% of the corpus is seen twice. Megatron's blended sampler
+  wraps a source transparently; this is data repetition, not a failure. **A provenance count
+  near 353B is the correct result — do not read it as a short download.**
+- **AI-safety discourse at ~17.4** — the 1% share over a 287M-token corpus. Repeating this
+  source is intended: the baseline has to know this content deeply for the filtered
+  comparison to mean anything, and 17.4 epochs sits below the 50–100 the study had assumed.
+  The corpus carries full post bodies (mean 15,623 characters per document), which is what
+  keeps the epoch count moderate.
+- **Zyda-2 at ~0.95** has ~5% margin against a ~5% estimate uncertainty, so treat the 19%
+  share as essentially a full single pass rather than a share with headroom.
+
+### Preparing the data
+
+Two jobs per corpus — `prepare` (download + `training.jsonl`) then `tokenize` (`.bin/.idx` +
+an exact token count). Both use the **base** tokenizer, whose EOD is `</s>` = id 2:
+
+```bash
+isambard_sbatch --time=24:00:00 --job-name=climbmix-prep pipeline_data_submit.sbatch prepare \
+  --dataset karpathy/climbmix-400b-shuffle \
+  --tokenizer geodesic-research/nemotron-base-tokenizer \
+  --skip-pack --skip-count --num-proc 32 --val-proportion 0
+
+# trailing args of tokenize: <output-variant> <json-key> <workers>. ClimbMix is ~625M docs,
+# and the measured rate is ~8.3k docs/s at the default 32 workers, so raise it.
+isambard_sbatch --time=24:00:00 --job-name=climbmix-tok --dependency=afterok:<prepare-jobid> \
+  pipeline_data_submit.sbatch tokenize \
+  /projects/a5k/public/data/karpathy__climbmix-400b-shuffle \
+  geodesic-research/nemotron-base-tokenizer tokenized_base input 128
+```
+
+Repeat for the other two corpora, scaling the walltime and worker count down with the corpus
+(Zyda-2 ran at 12 h / 96 workers, the AI-safety corpus at 4 h / 32):
+
+```bash
+isambard_sbatch --time=04:00:00 --job-name=safetycorpus-prep pipeline_data_submit.sbatch prepare \
+  --dataset Kyle1668/control-pretraining-datasets --subset combined \
+  --tokenizer geodesic-research/nemotron-base-tokenizer \
+  --skip-pack --skip-count --num-proc 16 --val-proportion 0
+```
+
+Submissions need `ISAMBARD_SBATCH_FORCE=1` whenever a long code-tunnel chain has
+the account's node count over `isambard_sbatch`'s limit. The
+zero-embedding Base-CPT trap does not apply to a from-scratch run — random init trains every
+embedding row — so there is no dead-id filtering step.
+
+The AI-safety corpus needs no column flags: it exposes a plain `text` column that
+`detect_column_and_format()` picks up, alongside `source`, `source_id`, `url` and `date`
+metadata columns that the pretraining export ignores. No row has empty text, so the null-body
+trap that bites sparse text columns (`preprocess_data.py`'s encoder does `text = data[key]`
+with no None guard, and `tokenize(None)` raises) does not arise here. The `source` column
+records which of the four upstream sources — `lesswrong`, `ea_forum`, `greenblatt_lesswrong`,
+`stampy` — each document came from, so the mix can be audited after the fact.
+
+**Prepare the three corpora one at a time, deleting each one's `training.jsonl` and HF cache
+as soon as its tokenize job succeeds.** The durable `.bin` set is only ~1.8 TB (~1.41 TB
+ClimbMix + ~0.40 TB Zyda-2 + ~1.15 GB AI-safety at 4 bytes/token), but the intermediates are
+not: ~2.15 TB of JSONL and ~3.1 TB of HF cache, so staging all three at once peaks around
+7.1 TB against a project quota that already sits above 93%.
+
+## Topology
+
+`TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512` on 512 GPUs, mbs 1 (2 microbatches per DP
+replica), selective recompute of `[core_attn, moe, shared_experts]`, `alltoall` MoE
+dispatcher, `torch_grouped` experts. This is the measured-working posture from
+`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` (128-GPU anchor 25.533 s/iter =
+160.2 model TFLOP/s/GPU at GBS 3072). Tokens per rank are identical at 8192, so per-rank
+memory carries over; only microbatches per replica and the optimizer-shard size change.
+
+EP stays node-local (`TP x EP <= 4`) — cross-node MoE all-to-all over Slingshot is the
+documented hang and throughput cliff. PP=1 means there is no pipeline bubble and no PP p2p
+traffic on the fabric.
+
+### Why the DDP settings live under `comm_overlap:` — do not move them to `ddp:`
+
+`overlap_param_gather`, `overlap_grad_reduce` and `bucket_size` are set in `comm_overlap:`
+rather than in the `ddp:` block where they would normally go, and `ddp:` carries only
+`use_distributed_optimizer`. That placement is load-bearing: **on this code path a `ddp:`
+block is inert for those three fields**, so a copy there would be silently dropped.
+
+The Nano **pretrain** recipe assigns a `CommOverlapConfig`
+(`recipes/nemotronh/nemotron_3_nano.py:160`), so `config.py:1538-1540` calls
+`cfg.comm_overlap.setup(cfg.model, cfg.optimizer, cfg.ddp)` *after* the YAML has been merged.
+`setup()` → `_get_optimizer_overlap_cfgs()` rebuilds the data-parallel fields from scratch and
+`_apply_cfgs()` writes each onto `cfg.ddp` with an unconditional `setattr` — there is no "only
+if unset" guard. The sole user input it honours is the `comm_overlap:` block, through
+`_override_user_cfgs()`. At DP>1 its defaults are `bucket_size` 128 MiB,
+`overlap_param_gather=True`, `overlap_grad_reduce=True`.
+
+Measured at DP=512 — this config as shipped, versus the same file with the three
+`comm_overlap` lines deleted (the `ddp:` only column is what a config would get if the
+fields were moved there instead):
+
+| field | as shipped | `ddp:` only | |
+|---|---|---|---|
+| `bucket_size` | `500000000` | `134217728` | **differs** — must be set in `comm_overlap:` |
+| `overlap_param_gather` | `False` | `True` | **differs** — must be set in `comm_overlap:` |
+| `overlap_grad_reduce` | `True` | `True` | same; the recipe default happens to agree |
+| `align_param_gather` | `False` | `False` | same (engages only at PP>1 **and** VPP>1) |
+| `use_distributed_optimizer` | `True` | `True` | not in the clobbered set — `ddp:` works |
+
+`overlap_grad_reduce` is stated for provenance rather than to correct a value: it *is* in
+the clobbered set, so omitting it would leave the posture owned by the recipe, free to move
+under us if that default ever changes. A fifth field,
+`overlap_param_gather_with_optimizer_step`, is rebuilt but never lands — it is not a
+`DistributedDataParallelConfig` field, so `_apply_cfgs`'s `hasattr` guard drops it.
+
+Two consequences worth knowing:
+
+- **The documented "Nemotron-H DP>1 → `overlap_param_gather=false`" convention is
+  unenforceable through `ddp:` on this path.** Nothing in a YAML `ddp:` section can hold it;
+  restating inside `comm_overlap:` is the only mechanism that works.
+- **`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` is subject to this.** Its
+  `ddp.bucket_size: 500000000` never took effect, so its 25.533 s/iter anchor was measured at
+  the 128 MiB default with param-gather overlap on — i.e. against the convention. This config
+  pins the convention instead, and throughput at that posture is therefore **unmeasured**
+  relative to the anchor.
+
+Scope, so the claim is not over-applied — only the Nano *pretrain* recipe is affected:
+
+| Recipe | `comm_overlap` set? | `ddp:` honoured? |
+|---|---|---|
+| Nano pretrain | yes (line 160) | **no** — clobbered |
+| Nano SFT / PEFT | no (commented out, lines 363, 566) | yes |
+| Super, Ultra (all modes) | no | yes |
+
+That asymmetry is what makes it easy to miss: the same `ddp:` block is honoured in every
+other posture and silently dropped in this one. `use_distributed_optimizer` is not among the
+five fields, so it takes effect from `ddp:` normally.
+
+## Launch
+
+This run is **a chain of day-long segments, not one long allocation.** Submit `N` segments
+that share a single `--job-name`; `--dependency=singleton` is what makes them run strictly one
+at a time, and each picks up where the last stopped (see Resume). Set `N` to
+`ceil(estimated training days) + 1` so one spare segment absorbs overrun.
+
+```bash
+for i in $(seq 1 $N); do
+  ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
+    --job-name=control-pretrain-v1-500b --dependency=singleton --signal=TERM@600 \
+    --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
+    pipeline_training_submit.sbatch \
+    configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml nano pretrain \
+    --disable-straggler
+done
+```
+
+- `ISAMBARD_SBATCH_FORCE=1` must be in the **job** environment, not just at submission:
+  `pipeline_training_submit.sbatch` runs `isambard_sbatch --check` on start and scancels itself
+  when the account is over its node limit — and `N` pending 128-node segments are well over it.
+- `--signal=TERM@600` pairs with `train.exit_signal_handler: true` so a segment checkpoints
+  before its walltime kill instead of losing the interval.
+- `--disable-straggler` keeps `ft_launcher`'s restarts while dropping the NVRx straggler
+  reporter, whose rank-0 gather has OOMed high-memory runs after ~20 minutes of stepping.
+- Fault tolerance stays **on** within each segment (no `--disable-ft`): at 128 nodes,
+  `ft_launcher`'s restart-from-latest is what keeps a Slingshot NCCL hang from costing the run.
+
+## Resume
+
+`checkpoint.load` and `checkpoint.save` are the **same** directory, which is what makes each
+segment resume — `setup.py` loads only when `checkpoint.load` is set *and* already contains a
+checkpoint. First segment: the directory is empty, training starts from random init. Every
+later segment: it resumes from the latest saved iteration with optimizer and RNG state.
+
+**Re-submitting a segment is the entire resume procedure** — no flag changes between attempts.
+Do not delete the save directory, and do not flip `save_optim`/`save_rng` against existing
+`iter_*` state (a toggle mid-run raises `KeyError: optimizer` and turns into an ft restart
+loop; wipe the directory first if the posture ever has to change).
+
+Checkpoints are ~300 GB each (bf16 weights plus precision-aware optimizer state) and all 21
+are retained (`most_recent_k: -1`), so plan for ~6 TB in the save directory. Watch the
+project storage quota that `isambard_sbatch` prints on every submission.
