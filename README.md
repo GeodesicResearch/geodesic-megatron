@@ -235,8 +235,9 @@ CPT additionally supports **gradient routing (GRAM)**: a `gr:` section in the YA
 a two-corpus mix (retain/forget) so the forget corpus trains only removable auxiliary
 MLPs, which export-time baking merges into the shared expert (forget-ON) or deletes for a
 byte-stock model (forget-OFF). Configs and eval harness live under
-`configs/gradient_routing/` + `scripts/gradient_routing/`; the design summary is the
-"Gradient routing (GRAM)" section of [CLAUDE.md](CLAUDE.md).
+`configs/gradient_routing/` + `scripts/gradient_routing/`; the full reference (method,
+merge math, config and guard tables, workflow) is [docs/gradient-routing.md](docs/gradient-routing.md),
+with the operational summary in the "Gradient routing (GRAM)" section of [CLAUDE.md](CLAUDE.md).
 
 ### Usage
 

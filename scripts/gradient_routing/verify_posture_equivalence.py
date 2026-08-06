@@ -12,14 +12,21 @@ Three independent checks over the three dirs produced around
   (b) end-to-end logits (1 GPU) — load forget_off/ and hook every MoE mixer so the RAW
       aux MLP output is added to the mixer output (reconstructing "core model + aux
       active" out of the ablated model), then compare its logits against the loaded
-      forget_on/ model over a fixed prompt set. Gates on max per-token KL and top-1
-      agreement. This exercises the real modeling code, so it catches anything the
-      algebra check cannot see (wrong hook point semantics, config width not picked up,
-      a shard whose index entry is stale).
+      forget_on/ model over a fixed prompt set. Both runs also record every MoE
+      layer's top-k expert selection per position: MoE routing is a discontinuity, so
+      a near-tie broken differently by reduction-order noise diverges by O(1) from
+      that position on, no matter how exact the merge. The gate therefore applies the
+      max-KL and top-1 thresholds to FLIP-FREE positions (the merge-quality signal)
+      and separately bounds the flipped-position fraction (max_router_flip_fraction).
+      This exercises the real modeling code, so it catches anything the algebra check
+      cannot see (wrong hook point semantics, config width not picked up, a shard
+      whose index entry is stale).
 
-  (c) forget_off stock-shape — config.json byte-identical to the raw export's, no
-      gradient-routing fields, shared-expert width unchanged, and a state-dict key set
-      exactly equal to the raw key set minus the aux keys.
+  (c) forget_off stock-shape — config.json equal to the raw export's with exactly the
+      overrides this verify config declares in expect_config_overrides applied
+      (byte-identical when it declares none),
+      no gradient-routing fields, shared-expert width unchanged, and a state-dict key
+      set exactly equal to the raw key set minus the aux keys.
 
 Hook point for (b): `model.backbone.layers[<L>].mixer`, which is `NemotronHMoE` in
 transformers 5.3's native implementation (`transformers/models/nemotron_h/
@@ -87,6 +94,12 @@ LAYER_PROBE_ROWS = 64
 LAYER_PROBE_SEED = 20260805
 
 # The numerics modes check (b) can run in; `logit_check_dtype` names one of these.
+# float64 is NOT offered: the causal-conv1d CUDA kernel accepts only fp32/fp16/bf16, so a
+# Mamba-hybrid forward cannot run in double precision. When fp32 shows a marginal
+# divergence, the adjudication instrument is the DTYPE SWING: run (b) at bfloat16 as well,
+# and a large collapse from the bf16 reading to the fp32 reading (with the per-layer
+# algebra check exact) pins the fp32 residual on GEMM reduction-order numerics — the
+# residual scales with instrument precision, which a real weight defect would not.
 LOGIT_DTYPES = {"bfloat16": torch.bfloat16, "float32": torch.float32}
 
 
@@ -124,13 +137,31 @@ def load_verify_config(path: Path) -> dict[str, Any]:
     # at the cost of sharding the model across every visible GPU (30B fp32 = ~120 GB). A
     # default would silently pick one of those regimes for a config that never considered
     # the question, so each config must say which instrument it is using.
-    required = {"raw_dir", "forget_on_dir", "forget_off_dir", "prompts", "logit_check_dtype"}
+    # max_router_flip_fraction is likewise REQUIRED: MoE top-k selection is a
+    # discontinuity, so two mathematically-equal forwards can legitimately break a
+    # near-tie router race differently and diverge by O(1) from that position on. The
+    # KL/top-1 thresholds gate FLIP-FREE positions (the true merge-quality signal);
+    # this field bounds how many positions may carry a flip before the comparison
+    # itself is declared unusable. What fraction is tolerable depends on how hard the
+    # trained aux perturbs the hidden states, so each config must take a position.
+    required = {
+        "raw_dir",
+        "forget_on_dir",
+        "forget_off_dir",
+        "prompts",
+        "logit_check_dtype",
+        "max_router_flip_fraction",
+    }
     defaults: dict[str, Any] = {
         "max_layers_checked": None,
         "kl_threshold": 1e-4,
         "top1_threshold": 0.999,
         "skip_logit_check": False,
         "trust_remote_code": False,
+        # The config.json fields the bake is EXPECTED to rewrite. Empty (the default)
+        # means check (c) demands byte-identity with the raw export — the strictest
+        # form, and the right one for a bake that declares no overrides.
+        "expect_config_overrides": {},
     }
     missing = sorted(required - set(raw))
     unknown = sorted(set(raw) - required - set(defaults))
@@ -151,6 +182,8 @@ def load_verify_config(path: Path) -> dict[str, Any]:
             raise VerifyError(f"{path}: {key} {cfg[key]} is not a directory.")
     if cfg["max_layers_checked"] is not None and not isinstance(cfg["max_layers_checked"], int):
         raise VerifyError(f"{path}: max_layers_checked must be an int or null.")
+    if not isinstance(cfg["expect_config_overrides"], dict):
+        raise VerifyError(f"{path}: expect_config_overrides must be a mapping of config fields to values.")
     for key in ("skip_logit_check", "trust_remote_code"):
         if not isinstance(cfg[key], bool):
             raise VerifyError(f"{path}: {key} must be a bool.")
@@ -251,7 +284,7 @@ def check_layer_algebra(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
 
 
 def check_forget_off_stock(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-    """(c) forget_off is the raw export minus the aux keys, config byte-stock."""
+    """(c) forget_off is the raw export minus the aux keys, config stock modulo declared overrides."""
     raw_dir: Path = cfg["raw_dir"]
     off_dir: Path = cfg["forget_off_dir"]
     raw_map = _weight_map(raw_dir)
@@ -263,7 +296,16 @@ def check_forget_off_stock(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
 
     raw_cfg = json.loads((raw_dir / CONFIG_NAME).read_text())
     off_cfg = json.loads((off_dir / CONFIG_NAME).read_text())
-    config_identical = _sha256_file(raw_dir / CONFIG_NAME) == _sha256_file(off_dir / CONFIG_NAME)
+    # The bake may rewrite config fields named in its config_overrides. The stock
+    # contract is then: posture config == raw config with EXACTLY the overrides this
+    # VERIFY config declares — read from the verify YAML, never from the posture's own
+    # provenance sidecar, which the bake under test wrote (a bake that rewrote a field
+    # and recorded it would otherwise verify itself). Empty means byte-identity.
+    overrides = cfg["expect_config_overrides"]
+    if overrides:
+        config_identical = off_cfg == {**raw_cfg, **overrides}
+    else:
+        config_identical = _sha256_file(raw_dir / CONFIG_NAME) == _sha256_file(off_dir / CONFIG_NAME)
     gr_fields = sorted(k for k in off_cfg if any(p in k.lower() for p in GR_CONFIG_PATTERNS))
     width_raw = raw_cfg.get("moe_shared_expert_intermediate_size")
     width_off = off_cfg.get("moe_shared_expert_intermediate_size")
@@ -277,7 +319,8 @@ def check_forget_off_stock(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     print(
         f"    key set == raw minus aux: {'yes' if not missing and not extra else f'NO (missing {missing[:3]}, extra {extra[:3]})'}"
     )
-    print(f"    config.json byte-identical to raw: {'yes' if config_identical else 'NO'}")
+    contract = f"raw + declared overrides {sorted(overrides)}" if overrides else "byte-identical to raw"
+    print(f"    config.json matches contract ({contract}): {'yes' if config_identical else 'NO'}")
     print(f"    gradient-routing config fields: {gr_fields or 'none'}")
     print(
         f"    moe_shared_expert_intermediate_size: raw {width_raw} / off {width_off}; shared up_proj rows {tensor_widths}"
@@ -351,6 +394,54 @@ def _logits_for_prompts(model, tokenizer, prompts: list[str], device: str) -> li
     return out
 
 
+def router_flip_masks(
+    routing_off: dict[int, list[torch.Tensor]],
+    routing_on: dict[int, list[torch.Tensor]],
+    layers: list[int],
+    n_prompts: int,
+) -> tuple[list[torch.Tensor], dict[int, int], int, int]:
+    """Per-prompt mask of positions where ANY layer routed to different experts.
+
+    ``routing_*[layer][i]`` holds prompt ``i``'s sorted top-k expert indices for that
+    layer, recorded in prompt order by both runs. Returns the per-prompt masks, the
+    per-layer flip counts, and the total decisions compared / flipped.
+    """
+    flip_masks: list[torch.Tensor] = []
+    flips_per_layer: dict[int, int] = dict.fromkeys(layers, 0)
+    n_decisions = 0
+    n_flips = 0
+    for i in range(n_prompts):
+        mask = None
+        for layer in layers:
+            off_sel, on_sel = routing_off[layer][i], routing_on[layer][i]
+            if off_sel.shape != on_sel.shape:
+                raise VerifyError(f"routing record shape mismatch at layer {layer}: {off_sel.shape} vs {on_sel.shape}")
+            differs = (off_sel != on_sel).any(dim=-1)
+            n_decisions += differs.numel()
+            n_flips += int(differs.sum().item())
+            flips_per_layer[layer] += int(differs.sum().item())
+            mask = differs if mask is None else (mask | differs)
+        flip_masks.append(mask)
+    return flip_masks, flips_per_layer, n_decisions, n_flips
+
+
+def gate_logit_equivalence(
+    max_kl_clean: float,
+    top1_clean: float,
+    flip_fraction: float,
+    kl_threshold: float,
+    top1_threshold: float,
+    max_router_flip_fraction: float,
+) -> bool:
+    """The check-(b) verdict: flip-free positions carry the thresholds, flips are bounded.
+
+    Positions where the two runs routed differently diverge through the expert-choice
+    discontinuity no matter how exact the merge, so they are bounded in NUMBER rather
+    than gated on KL; the flip-free positions are the merge-quality signal.
+    """
+    return max_kl_clean < kl_threshold and top1_clean >= top1_threshold and flip_fraction <= max_router_flip_fraction
+
+
 def check_logit_equivalence(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     """(b) forget_off + hooked raw aux == forget_on, on real modeling code."""
     from transformers import AutoTokenizer
@@ -382,6 +473,21 @@ def check_logit_equivalence(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         for layer in layers
     }
 
+    def _routing_for_layer(module, x):
+        # Replay the mixer's own routing on this input (one router linear — cheap) and
+        # record which experts each position selects. MoE top-k selection is a
+        # discontinuity: two mathematically-equal forwards whose activations differ only
+        # by reduction-order noise can still break a near-tie differently, and from that
+        # position on the outputs diverge by O(1) regardless of instrument precision.
+        # Recording selections in both runs is what separates that mechanism from a
+        # genuine merge defect.
+        flat = x.reshape(-1, x.shape[-1])
+        topk_indices, _ = module.route_tokens_to_experts(module.gate(flat))
+        return topk_indices.sort(dim=-1).values.cpu()
+
+    routing_off: dict[int, list[torch.Tensor]] = {}
+    routing_on: dict[int, list[torch.Tensor]] = {}
+
     model = _load_model(cfg["forget_off_dir"], cfg["trust_remote_code"], device, dtype)
     hooked_classes: set[str] = set()
     shape_checks: list[bool] = []
@@ -394,6 +500,7 @@ def check_logit_equivalence(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
             x = args[0] if args else kwargs["hidden_states"]
             tensor_out = output[0] if isinstance(output, tuple) else output
             shape_checks.append(tuple(tensor_out.shape) == tuple(x.shape))
+            routing_off.setdefault(layer, []).append(_routing_for_layer(module, x))
             # Under device_map="auto" (fp32 mode) each block may live on a different GPU;
             # bring the aux weights to the activation's device per call (diagnostic-scale cost).
             contribution = torch.relu(torch.nn.functional.linear(x, up.to(x.device))).pow(2)
@@ -424,18 +531,40 @@ def check_logit_equivalence(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     model = _load_model(cfg["forget_on_dir"], cfg["trust_remote_code"], device, dtype)
     on_layer_width = _mixer(model, layers[0]).shared_experts.up_proj.weight.shape[0]
     print(f"    forget_on merged shared-expert width as loaded: {on_layer_width}")
+
+    def make_recording_hook(layer: int):
+        def hook(module, args, kwargs, output):
+            x = args[0] if args else kwargs["hidden_states"]
+            routing_on.setdefault(layer, []).append(_routing_for_layer(module, x))
+            return output
+
+        return hook
+
+    handles = [
+        _mixer(model, layer).register_forward_hook(make_recording_hook(layer), with_kwargs=True) for layer in layers
+    ]
     on_logits = _logits_for_prompts(model, tokenizer, prompts, device)
+    for h in handles:
+        h.remove()
     del model
     gc.collect()
     torch.cuda.empty_cache()
+
+    flip_masks, flips_per_layer, n_router_decisions, n_router_flips = router_flip_masks(
+        routing_off, routing_on, layers, len(prompts)
+    )
 
     max_kl = 0.0
     sum_kl = 0.0
     n_pos = 0
     n_agree = 0
+    n_agree_clean = 0
+    n_clean = 0
     max_logit_diff = 0.0
     tie_gaps: list[float] = []
-    for a, b in zip(on_logits, off_logits):
+    kl_at_flipped: list[float] = []
+    kl_at_clean: list[float] = []
+    for prompt_i, (a, b) in enumerate(zip(on_logits, off_logits)):
         if a.shape != b.shape:
             raise VerifyError(f"logit shape mismatch between postures: {tuple(a.shape)} vs {tuple(b.shape)}")
         log_p = torch.log_softmax(a, dim=-1)
@@ -452,16 +581,43 @@ def check_logit_equivalence(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
             # bf16 noise floor means a tie was broken differently, not a divergence.
             top2 = a.flatten(0, -2)[disagree].topk(2, dim=-1).values
             tie_gaps.extend((top2[:, 0] - top2[:, 1]).tolist())
+        flips = flip_masks[prompt_i]
+        if flips.shape != kl.shape:
+            raise VerifyError(f"flip mask shape {tuple(flips.shape)} != kl shape {tuple(kl.shape)}")
+        kl_at_flipped.extend(kl[flips].tolist())
+        kl_at_clean.extend(kl[~flips].tolist())
+        clean = ~flips
+        n_clean += int(clean.sum().item())
+        n_agree_clean += int((clean & ~disagree).sum().item())
 
     mean_kl = sum_kl / n_pos
     top1 = n_agree / n_pos
-    ok = max_kl < cfg["kl_threshold"] and top1 >= cfg["top1_threshold"]
+    # Gate on the flip-free positions: they are the merge-quality signal. Positions
+    # where the two runs routed differently diverge by O(1) through the expert-choice
+    # discontinuity no matter how exact the merge is, so they are bounded in number
+    # (max_router_flip_fraction) rather than in KL.
+    if n_clean == 0:
+        raise VerifyError("every compared position carries a router flip — the comparison is unusable.")
+    max_kl_clean = max(kl_at_clean)
+    top1_clean = n_agree_clean / n_clean
+    flip_fraction = len(kl_at_flipped) / n_pos
+    ok = gate_logit_equivalence(
+        max_kl_clean,
+        top1_clean,
+        flip_fraction,
+        cfg["kl_threshold"],
+        cfg["top1_threshold"],
+        cfg["max_router_flip_fraction"],
+    )
     print(f"    positions compared: {n_pos}")
     print(f"    max |logit difference|: {max_logit_diff:.3e}")
+    print(f"    KL(forget_on || forget_off+aux): max {max_kl:.3e}, mean {mean_kl:.3e} (all positions, unGated)")
     print(
-        f"    KL(forget_on || forget_off+aux): max {max_kl:.3e}, mean {mean_kl:.3e} (threshold {cfg['kl_threshold']:.0e})"
+        f"    GATED flip-free KL max: {max_kl_clean:.3e} (threshold {cfg['kl_threshold']:.0e}); "
+        f"flip-free top-1: {top1_clean:.6f} (threshold {cfg['top1_threshold']}); "
+        f"flip fraction: {flip_fraction:.3f} (max {cfg['max_router_flip_fraction']})"
     )
-    print(f"    top-1 agreement: {top1:.6f} (threshold {cfg['top1_threshold']})")
+    print(f"    top-1 agreement (all positions): {top1:.6f}")
     if tie_gaps:
         gaps = sorted(tie_gaps)
         print(
@@ -470,6 +626,24 @@ def check_logit_equivalence(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
             "(a gap near the bf16 noise floor means a near-tie was broken differently, "
             "not a divergence — expect this on an untrained fixture with near-uniform logits)"
         )
+    n_flipped_pos = len(kl_at_flipped)
+    print(
+        f"    router decisions compared: {n_router_decisions} "
+        f"({len(layers)} layers x {n_pos} positions); flipped: {n_router_flips}"
+    )
+    if n_flipped_pos:
+        fk = sorted(kl_at_flipped)
+        ck = sorted(kl_at_clean)
+        by_layer = {layer: n for layer, n in flips_per_layer.items() if n}
+        print(
+            f"    positions with >=1 flipped routing decision: {n_flipped_pos} of {n_pos}; "
+            f"KL there max {fk[-1]:.3e} / median {fk[len(fk) // 2]:.3e}, vs flip-free positions "
+            f"KL max {ck[-1]:.3e} / median {ck[len(ck) // 2]:.3e}; flips by layer {by_layer} "
+            "(max-KL confined to flipped positions while flip-free positions sit at the noise "
+            "floor = routing-tie discontinuity, not a merge defect)"
+        )
+    else:
+        print("    no routing decision differed between the two runs at any position")
     print(f"[b] {'PASS' if ok else 'FAIL'}")
     return ok, {
         "max_kl": max_kl,
@@ -478,6 +652,13 @@ def check_logit_equivalence(cfg: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         "positions": n_pos,
         "max_abs_logit_diff": max_logit_diff,
         "n_top1_disagreements": len(tie_gaps),
+        "router_decisions": n_router_decisions,
+        "router_flips": n_router_flips,
+        "positions_with_router_flip": n_flipped_pos,
+        "router_flip_fraction": flip_fraction,
+        "max_kl_at_flipped_positions": max(kl_at_flipped) if kl_at_flipped else None,
+        "gated_flip_free_max_kl": max_kl_clean,
+        "gated_flip_free_top1": top1_clean,
     }
 
 
@@ -540,7 +721,9 @@ def main() -> int:
             "layer_probe_seed": LAYER_PROBE_SEED,
             "max_layers_checked": cfg["max_layers_checked"],
             "kl_threshold": cfg["kl_threshold"],
+            "expect_config_overrides": cfg["expect_config_overrides"],
             "top1_threshold": cfg["top1_threshold"],
+            "max_router_flip_fraction": cfg["max_router_flip_fraction"],
             "logit_check_dtype": cfg["logit_check_dtype"],
             "trust_remote_code": cfg["trust_remote_code"],
         },

@@ -139,6 +139,9 @@ def _write_source(root: Path, aux_widths: dict[int, int] | None) -> Path:
         )
     )
     (root / "chat_template.jinja").write_text("{{ messages }}\n")
+    # The bake refuses a source without the runtime tokenizer (the converter does not
+    # emit it); content is irrelevant to the surgery, presence is what is checked.
+    (root / "tokenizer.json").write_text(json.dumps({"version": "1.0", "model": {"type": "BPE"}}))
     (root / "generation_config.json").write_text(json.dumps({"eos_token_id": 2}, indent=2))
     return root
 
@@ -337,14 +340,23 @@ class TestRefusals:
         with pytest.raises(bake_module.BakeError, match="expected_layers"):
             _run_bake(bake_module, monkeypatch, src, tmp_path / "postures")
 
+    def test_tokenizer_less_source_is_refused(self, bake_module, monkeypatch, tmp_path):
+        """The converter emits only shards + config; a source missing the runtime tokenizer
+        would bake postures that fail only later, at model load."""
+        src = _write_source(tmp_path / "raw", {layer: AUX_WIDTH for layer in AUX_LAYERS})
+        (src / "tokenizer.json").unlink()
+        with pytest.raises(bake_module.BakeError, match="tokenizer.json missing"):
+            _run_bake(bake_module, monkeypatch, src, tmp_path / "postures")
+
 
 @pytest.fixture(scope="module")
 def verified(bake_module, verify_module, tmp_path_factory):
     """Bake with NO config_overrides, then run the CPU half of the verifier over the result.
 
-    Check (c) demands forget_off's config.json be byte-identical to the raw export's, which
-    an override deliberately breaks, so this pair is baked clean. Check (b) needs a GPU and
-    a loadable model; `skip_logit_check` runs (a) and (c) only.
+    With no recorded overrides, check (c)'s contract is byte-identity between forget_off's
+    config.json and the raw export's — the strictest form, exercised by this clean pair.
+    (The overrides form of the contract is covered by TestVerifyWithOverrides.) Check (b)
+    needs a GPU and a loadable model; `skip_logit_check` runs (a) and (c) only.
     """
     base = tmp_path_factory.mktemp("gr_verify")
     src = _write_source(base / "raw", {layer: AUX_WIDTH for layer in AUX_LAYERS})
@@ -361,6 +373,7 @@ def verified(bake_module, verify_module, tmp_path_factory):
                 "forget_off_dir": str(out / "forget_off"),
                 "prompts": ["unused when the logit check is skipped"],
                 "logit_check_dtype": "float32",
+                "max_router_flip_fraction": 0.15,
                 "skip_logit_check": True,
             }
         )
@@ -401,6 +414,51 @@ class TestVerifyPostures:
         }
 
 
+class TestVerifyWithOverrides:
+    def _config(self, baked, tmp_path, expect_overrides):
+        cfg_path = tmp_path / "verify.yaml"
+        cfg_path.write_text(
+            yaml.safe_dump(
+                {
+                    "raw_dir": str(baked["src"]),
+                    "forget_on_dir": str(baked["on"]),
+                    "forget_off_dir": str(baked["off"]),
+                    "prompts": ["unused when the logit check is skipped"],
+                    "logit_check_dtype": "float32",
+                    "max_router_flip_fraction": 0.15,
+                    "skip_logit_check": True,
+                    "expect_config_overrides": expect_overrides,
+                }
+            )
+        )
+        return cfg_path
+
+    def _run(self, verify_module, cfg_path):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(sys, "argv", ["verify_posture_equivalence.py", "--config", str(cfg_path)])
+            return verify_module.main()
+
+    def test_c_accepts_config_equal_to_raw_plus_declared_overrides(self, verify_module, baked, tmp_path):
+        """The bake rewrites the config fields named in its config_overrides; check (c)'s
+        contract is then raw + exactly the overrides THIS config declares."""
+        rc = self._run(verify_module, self._config(baked, tmp_path, dict(CONFIG_OVERRIDES)))
+
+        assert rc == 0
+        report = json.loads((baked["off"].parent / "posture_verification.json").read_text())
+        assert report["checks"]["c_forget_off_stock"]["facts"]["config_identical"] is True
+        assert report["thresholds"]["expect_config_overrides"] == CONFIG_OVERRIDES
+
+    def test_c_fails_when_the_posture_carries_an_undeclared_override(self, verify_module, baked, tmp_path):
+        """The expectation is read from the VERIFY config, never from the posture's own
+        provenance sidecar — otherwise a bake that rewrote a field and recorded it would
+        verify itself."""
+        rc = self._run(verify_module, self._config(baked, tmp_path, {}))
+
+        assert rc != 0
+        report = json.loads((baked["off"].parent / "posture_verification.json").read_text())
+        assert report["checks"]["c_forget_off_stock"]["facts"]["config_identical"] is False
+
+
 class TestLoadVerifyConfig:
     def test_logit_check_dtype_is_required(self, verify_module, verified, tmp_path):
         """It is a required field, not a default — bf16 and fp32 answer different questions."""
@@ -417,6 +475,16 @@ class TestLoadVerifyConfig:
         path = tmp_path / "verify.yaml"
         path.write_text(yaml.safe_dump(cfg))
         with pytest.raises(verify_module.VerifyError, match="logit_check_dtype must be one of"):
+            verify_module.load_verify_config(path)
+
+    def test_max_router_flip_fraction_is_required(self, verify_module, verified, tmp_path):
+        """MoE routing ties can legitimately flip between the two forwards; every config
+        must take a position on how many flipped positions the comparison tolerates."""
+        cfg = yaml.safe_load(verified["config_path"].read_text())
+        del cfg["max_router_flip_fraction"]
+        path = tmp_path / "verify.yaml"
+        path.write_text(yaml.safe_dump(cfg))
+        with pytest.raises(verify_module.VerifyError, match="missing required field.*max_router_flip_fraction"):
             verify_module.load_verify_config(path)
 
 
@@ -436,3 +504,88 @@ class TestLoadBakeConfig:
         cfg.write_text(yaml.safe_dump({"source_dir": "/a", "output_root": "/b"}))
         with pytest.raises(bake_module.BakeError, match="missing required field"):
             bake_module.load_bake_config(cfg)
+
+
+class TestRouterFlipArithmetic:
+    """The check-(b) gate's routing-discontinuity handling, exercised without a GPU.
+
+    Check (b) itself needs CUDA and two loadable models, but its verdict logic is the
+    part that decides PASS/FAIL, so it is extracted and tested directly on tensors
+    shaped exactly like the recorded top-k selections.
+    """
+
+    def test_identical_routing_yields_no_flips(self, verify_module):
+        sel = torch.tensor([[0, 5], [1, 4], [2, 3]])
+        off = {7: [sel], 9: [sel]}
+        on = {7: [sel.clone()], 9: [sel.clone()]}
+
+        masks, per_layer, n_decisions, n_flips = verify_module.router_flip_masks(off, on, [7, 9], 1)
+
+        assert not masks[0].any()
+        assert per_layer == {7: 0, 9: 0}
+        assert (n_decisions, n_flips) == (6, 0)
+
+    def test_a_flip_in_any_layer_marks_the_position(self, verify_module):
+        """The mask ORs over layers: one layer routing differently is enough to make the
+        position's logits diverge from there on."""
+        off_l7 = torch.tensor([[0, 5], [1, 4], [2, 3]])
+        on_l7 = torch.tensor([[0, 5], [1, 6], [2, 3]])  # position 1 differs
+        same = torch.tensor([[0, 5], [1, 4], [2, 3]])
+
+        masks, per_layer, n_decisions, n_flips = verify_module.router_flip_masks(
+            {7: [off_l7], 9: [same]}, {7: [on_l7], 9: [same.clone()]}, [7, 9], 1
+        )
+
+        assert masks[0].tolist() == [False, True, False]
+        assert per_layer == {7: 1, 9: 0}
+        assert (n_decisions, n_flips) == (6, 1)
+
+    def test_mismatched_routing_record_shapes_are_refused(self, verify_module):
+        off = {7: [torch.tensor([[0, 5], [1, 4]])]}
+        on = {7: [torch.tensor([[0, 5]])]}
+
+        with pytest.raises(verify_module.VerifyError, match="routing record shape mismatch"):
+            verify_module.router_flip_masks(off, on, [7], 1)
+
+    def test_gate_passes_when_flip_free_positions_are_clean_and_flips_are_bounded(self, verify_module):
+        assert verify_module.gate_logit_equivalence(
+            max_kl_clean=6.5e-4,
+            top1_clean=1.0,
+            flip_fraction=0.098,
+            kl_threshold=5e-3,
+            top1_threshold=0.999,
+            max_router_flip_fraction=0.15,
+        )
+
+    def test_gate_fails_on_a_dirty_flip_free_position(self, verify_module):
+        """A flip-free position above threshold is real drift — no tie-breaking excuse."""
+        assert not verify_module.gate_logit_equivalence(
+            max_kl_clean=2.7e-2,
+            top1_clean=1.0,
+            flip_fraction=0.0,
+            kl_threshold=5e-3,
+            top1_threshold=0.999,
+            max_router_flip_fraction=0.15,
+        )
+
+    def test_gate_fails_when_flips_exceed_the_bound(self, verify_module):
+        """Clean flip-free positions do not license an arbitrary number of flips: a flood
+        means a qualitatively different aux, not tie-breaking."""
+        assert not verify_module.gate_logit_equivalence(
+            max_kl_clean=1e-6,
+            top1_clean=1.0,
+            flip_fraction=0.42,
+            kl_threshold=5e-3,
+            top1_threshold=0.999,
+            max_router_flip_fraction=0.15,
+        )
+
+    def test_gate_fails_on_flip_free_top1_disagreement(self, verify_module):
+        assert not verify_module.gate_logit_equivalence(
+            max_kl_clean=1e-6,
+            top1_clean=0.98,
+            flip_fraction=0.0,
+            kl_threshold=5e-3,
+            top1_threshold=0.999,
+            max_router_flip_fraction=0.15,
+        )

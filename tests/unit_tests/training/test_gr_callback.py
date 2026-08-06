@@ -173,7 +173,7 @@ class TestOnTrainStart:
         assert [float(layer.gr_gate) for layer in model] == [1.0] * N_LAYERS
         assert [layer.router.frozen_expert_bias for layer in model] == [True] * N_LAYERS
 
-    def test_a_non_zero_aux_output_projection_raises(self, monkeypatch):
+    def test_a_non_zero_aux_output_projection_raises_at_iteration_zero(self, monkeypatch):
         """Warm-start protection: a non-zero fc2 means the checkpoint load clobbered the
         fresh zero-init, so the run would not start from the core model it claims to."""
         _recorded_metrics(monkeypatch)
@@ -182,8 +182,22 @@ class TestOnTrainStart:
             model[-1].gr_aux.linear_fc2.weight.fill_(1e-3)
         callback = _callback()
 
-        with pytest.raises(RuntimeError, match="non-zero at train start"):
+        with pytest.raises(RuntimeError, match="non-zero at iteration 0"):
             callback.on_train_start(_context(model))
+
+    def test_a_trained_aux_is_accepted_on_a_mid_plan_resume(self, monkeypatch):
+        """A resumed run has a TRAINED aux by construction. Asserting the zero-init
+        invariant past iteration 0 would make GR runs restart-fatal — no ft restart,
+        singleton chain, or save_interval run could ever come back up."""
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk()
+        with torch.no_grad():
+            model[-1].gr_aux.linear_fc2.weight.fill_(1e-3)
+        callback = _callback()
+
+        callback.on_train_start(_context(model, step=7))
+
+        assert callback._gram_layers, "resume must still build the layer registry"
 
     def test_a_model_without_gram_layers_raises(self, monkeypatch):
         """The spec swap not running is the failure that otherwise trains happily as a

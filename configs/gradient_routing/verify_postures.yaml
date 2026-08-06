@@ -34,3 +34,13 @@ trust_remote_code: false
 # reduction order, compounding to max KL 8e-2 / max |logit diff| 2.5 over 23 modified
 # layers (measured 2026-08-06; per-layer algebra check (a) passes EXACTLY either way).
 logit_check_dtype: float32
+# The config.json fields the bake is expected to rewrite (its bake_postures.yaml
+# config_overrides). Declared HERE rather than read from the posture's own
+# forget_posture.json, so check (c) does not take the bake under test at its word.
+expect_config_overrides:
+  max_position_embeddings: 262144
+# This pair measured 0 router flips on one fp32 run and 2/82 positions on another
+# (2026-08-06) — which ties break differently varies run-to-run because
+# device_map="auto" placement changes the reduction order. The bound matches the
+# negative config's calibrated headroom; see that file's comment for the mechanism.
+max_router_flip_fraction: 0.15

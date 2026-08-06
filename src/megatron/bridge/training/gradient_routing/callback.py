@@ -64,17 +64,22 @@ class GRCallback(Callback):
                 "GRCallback found no GRAMMoELayer in the model — the GRAM spec swap did not run. "
                 "Check model.gr_aux_ffn_hidden_size wiring."
             )
-        for layer in self._gram_layers:
-            w = layer.gr_aux.linear_fc2.weight
-            if not torch.all(w == 0):
-                raise RuntimeError(
-                    "A gr_aux.linear_fc2.weight is non-zero at train start. On a warm start these "
-                    "must be exactly zero (fresh zero-init, untouched by the checkpoint load); a "
-                    "non-zero value means the load clobbered them or this is an unexpected resume "
-                    "of a GR checkpoint mid-plan with a mismatched plan."
-                )
         start = context.state.train_state.step
-        if start > 0:
+        # The zero-init invariant holds only at the START of a plan: a trained aux is
+        # non-zero by construction, so asserting it on a mid-plan resume would make GR
+        # runs restart-fatal (ft_launcher restarts, singleton chains, save_interval runs).
+        if start == 0:
+            for layer in self._gram_layers:
+                w = layer.gr_aux.linear_fc2.weight
+                if not torch.all(w == 0):
+                    raise RuntimeError(
+                        "A gr_aux.linear_fc2.weight is non-zero at iteration 0. On a warm start "
+                        "these must be exactly zero (fresh zero-init, untouched by the checkpoint "
+                        "load); a non-zero value means the load clobbered them, or a GR checkpoint "
+                        "was loaded as `pretrained_checkpoint` (a warm start) rather than resumed "
+                        "via `load` (which carries the iteration and resumes the plan)."
+                    )
+        else:
             logger.info("GR resume at iteration %d: plan re-derived deterministically.", start)
         logger.info("%s", self._plan.describe())
         logger.info(

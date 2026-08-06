@@ -1,0 +1,64 @@
+# GEOD-171 generative-eval noise-floor measurement.
+#
+# Motivated by a 2026-08-06 finding: greedy decoding on these checkpoints is
+# not run-to-run deterministic (near-tie MoE router flips under nondeterministic
+# kernel scheduling — the same mechanism the posture-equivalence verifier measures
+# as flip fraction 0.098/0.146 across runs). The campaign's capability deltas are
+# 0.002-0.004, so "capability is flat" needs a measured noise floor, not an
+# assumption. This campaign re-runs the generative capability eval on ONE
+# unchanged, already-measured checkpoint (positive forget_off, original
+# mmlu_pro_biology exact_match 0.808) through the IDENTICAL harness; the |delta|
+# vs the original run IS the noise floor to quote. Distinct results_root +
+# posture key + run name so the original artifacts stay untouched.
+#
+# Everything not stated here follows eval_campaign.yaml (see its comments).
+
+campaign:
+  id: geod171_noise_floor
+  ticket: GEOD-171
+  model_family: nano30b
+  wandb:
+    project: geodesic-evals
+    entity: geodesic
+    group: gradient_routing__nano30b_geod171
+
+paths:
+  results_root: /projects/a5k/public/logs/gradient_routing_geod171/noise_floor
+  hf_home: /projects/a5k/public/hf
+
+checkpoints:
+  noisefloor_forget_off:
+    enabled: true
+    # The positive campaign's forget_off posture, verified byte-identical
+    # (all 13 shards) to the artifact that produced the original numbers, so
+    # any measured difference is harness variance and nothing else.
+    model: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/postures/forget_off
+    label: noisefloor_forget_off
+    description: >-
+      Unchanged positive-campaign forget_off posture, re-measured to quantify
+      generative-eval run-to-run variance.
+
+lm_eval:
+  python: scripts/gradient_routing/lmeval_container_python.sh
+  include_path: configs/gradient_routing/lm_eval_tasks
+  cuda_visible_devices: "0"
+  model_args_extra: "dtype=bfloat16,parallelize=True,trust_remote_code=True"
+  batch_size: "16"
+  log_samples: true
+  write_out: false
+  trust_remote_code_flag: false
+
+  task_groups:
+    capability_generative:
+      - mmlu_pro_biology
+
+  default_task_groups:
+    - capability_generative
+
+  run_name_template: "gr-{posture}-lmeval-{task_group}"
+
+# No `inspect:` section: this campaign measures the lm-eval generation-side floor
+# only. The Inspect judge adds a second, independent variance source that would
+# confound that measurement, and the misalignment separations it reports are far
+# larger than any plausible generation noise. The campaign reader only requires
+# the section a runner asks for, so the lm-eval runner is unaffected.

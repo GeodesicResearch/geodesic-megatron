@@ -1,0 +1,11 @@
+# GEOD-171c train-on-test sanity corpus: the FULL MMLU-Pro test split rendered in
+# lm-eval's own few-shot format (scripts/data/build_mmlu_pro_cot_corpus.py).
+# Deliberately trains on the evaluated items — the biology category (717 items, the
+# campaign's capability measure) is included verbatim. All categories are kept: the
+# full split is still tiny (~12K items), and biology-only would make the per-corpus
+# epoch count fully degenerate.
+dataset: TIGER-Lab/MMLU-Pro
+split: test
+categories: all
+output: /projects/a5k/public/data/TIGER-Lab__MMLU-Pro__lmeval_cot_format/training.jsonl
+json_key: input

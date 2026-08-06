@@ -460,6 +460,8 @@ coefficient-1.0 shared expert) or dropped (byte-stock NemotronH). Implementation
 `src/megatron/bridge/models/mamba/gram_layer.py` +
 `src/megatron/bridge/training/gradient_routing/` + `data/datasets/gr_routed_dataset.py`;
 all diffs inert when the YAML `gr:` section is absent; `train.py` untouched.
+**Full reference: `docs/gradient-routing.md`** — method, merge math, config/guard
+tables, telemetry keys, and the end-to-end workflow in precise detail.
 
 Key design facts (the why lives in the module docstrings):
 - **Iteration-level uniform routing** (paper App. H safe regime): whole optimizer steps

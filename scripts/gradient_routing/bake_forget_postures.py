@@ -236,6 +236,17 @@ def survey_source(src: Path, expected_layers: int | None) -> dict[str, Any]:
         if not p.is_file():
             raise BakeError(f"{src} is not an HF checkpoint dir: {p.name} missing.")
 
+    # The single-process converter emits only shards + config.json. A servable posture
+    # also needs the runtime tokenizer, and a tokenizer-less source would bake postures
+    # that fail only later, at model load — refuse here instead.
+    for name in ("tokenizer.json", "tokenizer_config.json"):
+        if not (src / name).is_file():
+            raise BakeError(
+                f"{src}: {name} missing. Supplement the raw export with the runtime tokenizer "
+                "files (tokenizer.json, tokenizer_config.json, special_tokens_map.json) before "
+                "baking — the converter does not emit them."
+            )
+
     if (src / PROVENANCE_NAME).exists():
         raise BakeError(
             f"{src} contains {PROVENANCE_NAME} — it is itself a baked posture dir, not a raw "
