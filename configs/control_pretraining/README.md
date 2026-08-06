@@ -38,10 +38,10 @@ Expected share of the budget and the resulting epochs:
 |---|---|---|---|
 | ClimbMix | ~400,002,383,872 | ~353.2B — 6,543 shards / 599.8 GB, single `text` column | **~1.13** |
 | Zyda-2 `sample-100BT` | ~95,000,566,170 | ~100.3B — 1,589 files / 270.1 GB over four sub-corpora, `text` + `nemo_id` | ~0.95 |
-| control-pretraining-datasets `combined` | ~5,000,029,798 | ~0.287B — 72,514 documents, 1,132,854,323 chars at a sampled 0.25336 tok/char | ~17.4 |
+| control-pretraining-datasets `combined` | ~5,000,029,798 | **0.5373B exact** — 67,279 documents, 537,332,003 tokens from the `.idx` | ~9.31 |
 
-Corpus sizes are measured, not nominal. The AI-safety corpus is scaled from its exact
-character count by a 300-document tokenized sample; ClimbMix and Zyda-2 are calibrated from a
+Corpus sizes are measured, not nominal. The AI-safety corpus figure is exact (the whole
+corpus is tokenized and the count read from the `.idx`); ClimbMix and Zyda-2 are calibrated from a
 tokenized real shard scaled by the corpus's exact
 paginated Hub byte total — ClimbMix ±2% (byte-scaled and doc-scaled methods bracket it),
 Zyda-2 ±5% (calibrated on a `dclm_crossdeduped` part = 46.6% of the bytes; `fwe3`'s 48.5% was
@@ -55,24 +55,34 @@ None of the three epoch counts is exactly 1.0, and all three are expected:
   yields ~12% fewer tokens, so ~13% of the corpus is seen twice. Megatron's blended sampler
   wraps a source transparently; this is data repetition, not a failure. **A provenance count
   near 353B is the correct result — do not read it as a short download.**
-- **AI-safety discourse at ~17.4** — the 1% share over a 287M-token corpus. Repeating this
+- **AI-safety discourse at ~9.31** — the 1% share over a 537M-token corpus. Repeating this
   source is intended: the baseline has to know this content deeply for the filtered
-  comparison to mean anything, and 17.4 epochs sits below the 50–100 the study had assumed.
-  The corpus carries full post bodies (mean 15,623 characters per document), which is what
-  keeps the epoch count moderate.
+  comparison to mean anything, and 9.31 epochs is well inside the 50–100 the study had
+  assumed as an upper bound. Each document carries its full comment thread as well as the
+  post body (mean 7,986 tokens per document), which is what keeps the epoch count moderate.
+
+  **Pin the revision.** This corpus was still being built when the campaign started, and its
+  token mass roughly doubled mid-flight when comment threads were folded in — a snapshot
+  taken hours earlier measured 72,514 rows and ~287M tokens. The frozen revision is
+  `018376f4b033d7533471514f607cae4de3c95b99`, and `pipeline_data_prepare.py --revision` is
+  what pins it — omit the flag and the prep silently resolves whatever is at HEAD that day.
+  Its upstream count is 537,264,724 tokens; the `.idx` reads 537,332,003, and the difference
+  is exactly 67,279 — one EOD token per document from `--append-eod`. That identity is the
+  after-the-fact check that a tokenized copy is the frozen revision rather than an earlier
+  snapshot; re-run it after any re-tokenization.
 - **Zyda-2 at ~0.95** has ~5% margin against a ~5% estimate uncertainty, so treat the 19%
   share as essentially a full single pass rather than a share with headroom.
 
 ### Preparing the data
 
 Two jobs per corpus — `prepare` (download + `training.jsonl`) then `tokenize` (`.bin/.idx` +
-an exact token count). Both use the **base** tokenizer, whose EOD is `</s>` = id 2:
+an exact token count). What each corpus *is* — repository, subset, pinned revision, tokenizer —
+lives in `data/`, one file per corpus, so the identity of the blend is versioned rather than
+retyped into a shell command. All three use the **base** tokenizer, whose EOD is `</s>` = id 2.
 
 ```bash
 isambard_sbatch --time=24:00:00 --job-name=climbmix-prep pipeline_data_submit.sbatch prepare \
-  --dataset karpathy/climbmix-400b-shuffle \
-  --tokenizer geodesic-research/nemotron-base-tokenizer \
-  --skip-pack --skip-count --num-proc 32 --val-proportion 0
+  --config configs/control_pretraining/data/climbmix.yaml
 
 # trailing args of tokenize: <output-variant> <json-key> <workers>. ClimbMix is ~625M docs,
 # and the measured rate is ~8.3k docs/s at the default 32 workers, so raise it.
@@ -82,15 +92,21 @@ isambard_sbatch --time=24:00:00 --job-name=climbmix-tok --dependency=afterok:<pr
   geodesic-research/nemotron-base-tokenizer tokenized_base input 128
 ```
 
-Repeat for the other two corpora, scaling the walltime and worker count down with the corpus
-(Zyda-2 ran at 12 h / 96 workers, the AI-safety corpus at 4 h / 32):
+The other two corpora follow the same pair, scaling the walltime down with the corpus (Zyda-2
+ran at 12 h / 96 workers, the AI-safety corpus at 4 h / 32):
 
 ```bash
+isambard_sbatch --time=12:00:00 --job-name=zyda2-prep pipeline_data_submit.sbatch prepare \
+  --config configs/control_pretraining/data/zyda2.yaml
+
 isambard_sbatch --time=04:00:00 --job-name=safetycorpus-prep pipeline_data_submit.sbatch prepare \
-  --dataset Kyle1668/control-pretraining-datasets --subset combined \
-  --tokenizer geodesic-research/nemotron-base-tokenizer \
-  --skip-pack --skip-count --num-proc 16 --val-proportion 0
+  --config configs/control_pretraining/data/ai_safety_discourse.yaml
 ```
+
+The corpora on disk were prepared before those files existed, from the same repositories and
+revisions the files now record — the pins document what was used, they did not steer it. Only
+the AI-safety corpus was moving at the time; the other two are finished releases, pinned
+because it costs nothing and removes the question.
 
 Submissions need `ISAMBARD_SBATCH_FORCE=1` whenever a long code-tunnel chain has
 the account's node count over `isambard_sbatch`'s limit. The
@@ -102,12 +118,13 @@ The AI-safety corpus needs no column flags: it exposes a plain `text` column tha
 metadata columns that the pretraining export ignores. No row has empty text, so the null-body
 trap that bites sparse text columns (`preprocess_data.py`'s encoder does `text = data[key]`
 with no None guard, and `tokenize(None)` raises) does not arise here. The `source` column
-records which of the four upstream sources — `lesswrong`, `ea_forum`, `greenblatt_lesswrong`,
-`stampy` — each document came from, so the mix can be audited after the fact.
+records which of the three upstream sources each document came from, so the mix can be
+audited after the fact: `lesswrong` 51,583 docs / 315,702,210 tokens, `stampy` 6,854 /
+184,882,775, `ea_forum` 8,842 / 36,679,739.
 
 **Prepare the three corpora one at a time, deleting each one's `training.jsonl` and HF cache
 as soon as its tokenize job succeeds.** The durable `.bin` set is only ~1.8 TB (~1.41 TB
-ClimbMix + ~0.40 TB Zyda-2 + ~1.15 GB AI-safety at 4 bytes/token), but the intermediates are
+ClimbMix + ~0.40 TB Zyda-2 + ~2.15 GB AI-safety at 4 bytes/token), but the intermediates are
 not: ~2.15 TB of JSONL and ~3.1 TB of HF cache, so staging all three at once peaks around
 7.1 TB against a project quota that already sits above 93%.
 

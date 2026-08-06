@@ -1,0 +1,24 @@
+# AI-safety discourse corpus — the 1% slice of the V1 baseline blend.
+#
+# LessWrong + EA Forum + Stampy, 67,279 documents / 537,332,003 tokens (exact, read
+# from the .idx after tokenization; upstream reports 537,264,724 because --append-eod
+# adds one EOD per document). Three sources, split lesswrong 51,583 docs /
+# 315,702,210 tokens, stampy 6,854 / 184,882,775, ea_forum 8,842 / 36,679,739.
+#
+# The revision is load-bearing. This corpus was still being assembled while the
+# campaign was being set up and roughly doubled in token mass when full comment
+# threads were folded into each document, so an unpinned prepare yields a different
+# corpus — and a different epoch count — from the one the campaign config records.
+#
+#   isambard_sbatch pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/data/ai_safety_discourse.yaml
+#
+# Then tokenize (see this directory's parent README for the chained tokenize job).
+dataset: Kyle1668/control-pretraining-datasets
+subset: combined
+revision: 018376f4b033d7533471514f607cae4de3c95b99
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 16

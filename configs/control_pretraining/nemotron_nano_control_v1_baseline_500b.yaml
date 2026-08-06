@@ -21,8 +21,8 @@
 #   weight  source                                     share of budget   corpus    epochs
 #   0.80    karpathy/climbmix-400b-shuffle             ~400,002,383,872  ~353.2B    ~1.13
 #   0.19    Zyphra/Zyda-2, config sample-100BT          ~95,000,566,170  ~100.3B    ~0.95
-#   0.01    Kyle1668/control-pretraining-datasets          ~5,000,029,798    0.287B   ~17.4
-#           (config `combined`)
+#   0.01    Kyle1668/control-pretraining-datasets          ~5,000,029,798   0.5373B    ~9.31
+#           (config `combined`, revision 018376f4b033d7533471514f607cae4de3c95b99)
 #
 #   ClimbMix: 6,543 parquet shards / 599.8 GB, single `text` column. Its ~353.2B is an
 #   estimate calibrated on a tokenized shard (0.589 tok/parquet byte), +/-2% where the
@@ -35,15 +35,24 @@
 #   estimated with ~5% uncertainty (calibrated on a dclm_crossdeduped part = 46.6% of the
 #   bytes; fwe3's 48.5% was not separately calibrated). Treat 19% as essentially a full
 #   single pass, not a share with headroom: 5% low on the estimate puts it at ~1.0 epoch.
-#   AI-safety discourse: 72,514 documents, ~287M tokens (1,132,854,323 characters at a
-#   sampled 0.25336 tokens/char; the exact figure comes from the provenance JSON). This is
-#   the ticket's "LessWrong + EA Forum mix" — config `combined` unions four sources, whose
-#   `source` column carries `lesswrong`, `ea_forum`, `greenblatt_lesswrong` and `stampy`.
-#   It has a plain `text` column, so the standard auto-detected ingest applies with no
-#   column flags, and no row has empty text. Documents are FULL post bodies (mean 15,623
-#   characters), which is what puts the 1% share at a moderate ~17.4 epochs: repeating this
-#   source is intended (the baseline has to know this content deeply for the filtered
-#   comparison to mean anything) and 17.4 sits below the 50-100 the study had assumed.
+#   AI-safety discourse: 67,279 documents, 537,332,003 tokens EXACT from the .idx (mean
+#   7,986 tokens/doc). This is the ticket's "LessWrong + EA Forum mix", frozen at repo
+#   revision 018376f4b033d7533471514f607cae4de3c95b99, recorded in
+#   data/ai_safety_discourse.yaml alongside the rest of that corpus's identity. The pin
+#   matters because the corpus was still being built when this campaign started and its
+#   token mass roughly doubled mid-flight when full comment threads were folded into each
+#   document; an unpinned prepare resolves whatever is at HEAD that day. The upstream count at that revision is
+#   537,264,724; the .idx reads 537,332,003, and the difference is exactly 67,279 = the one
+#   EOD token --append-eod adds per document, which is what confirms the tokenized copy is
+#   that revision and not an earlier snapshot. Per subset: lesswrong 51,583 docs /
+#   315,702,210 tok, stampy 6,854 / 184,882,775, ea_forum 8,842 / 36,679,739; the `source`
+#   column preserves that split so the mix stays auditable after tokenization. Documents are
+#   markdown (title, body, then an optional comment thread) with a >=200-character floor
+#   enforced upstream; a plain `text` column means the standard auto-detected ingest applies
+#   with no column flags, and no row is null or empty. The 1% share therefore lands at ~9.31
+#   epochs: repeating this source is intended (the baseline has to know this content deeply
+#   for the filtered comparison to mean anything) and 9.31 is well inside the 50-100 the
+#   study had assumed as an upper bound.
 #
 # WSD SCHEDULE (peak 1e-3, floor 1e-5, minus_sqrt anneal):
 #   iters      0 ->  ~596   linear warmup      (lr_warmup_fraction 0.01 of 59605 = 596.05)

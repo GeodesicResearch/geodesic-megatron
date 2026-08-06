@@ -1,0 +1,17 @@
+# ClimbMix — the 80% slice of the V1 baseline blend, ~353.2B tokens.
+#
+# The revision is the one the campaign's own corpus was prepared from, recorded so a
+# re-prepare reproduces it rather than picking up whatever the branch head has moved
+# to. Unlike the AI-safety slice this dataset is a finished release and is not
+# expected to move; the pin costs nothing and removes the question.
+#
+#   isambard_sbatch --time=24:00:00 --job-name=climbmix-prep \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/data/climbmix.yaml
+dataset: karpathy/climbmix-400b-shuffle
+revision: 915333b4f8b8684f39aeaafea600fea6f43fb703
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

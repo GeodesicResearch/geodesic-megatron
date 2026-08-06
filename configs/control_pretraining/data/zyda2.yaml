@@ -1,0 +1,17 @@
+# Zyda-2 — the 19% slice of the V1 baseline blend, ~100.3B tokens.
+#
+# The official sample-100BT config, not a custom subsample. The revision is the one
+# the campaign's corpus was prepared from; see this directory's climbmix.yaml for why
+# a finished release is pinned anyway.
+#
+#   isambard_sbatch --time=12:00:00 --job-name=zyda2-prep \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/data/zyda2.yaml
+dataset: Zyphra/Zyda-2
+subset: sample-100BT
+revision: bc389cd62969a275b2e3c3e11db826ba1918411a
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

@@ -607,10 +607,13 @@ isambard_sbatch pipeline_data_submit.sbatch \
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
 
 # Pretraining-format corpus (.bin/.idx): prepare (JSONL, no packing) then tokenize;
-# the tokenize job appends an exact token count read from the .idx
+# the tokenize job appends an exact token count read from the .idx. `--config` supplies what
+# defines the corpus (dataset, subset, revision, tokenizer) from a versioned YAML — see
+# configs/control_pretraining/data/ for the campaign's three. `--revision` pins the dataset to
+# a commit SHA; without one the download resolves the current HEAD, so a corpus still being
+# built yields different data, and different token counts, per run. CLI flags override the file.
 isambard_sbatch pipeline_data_submit.sbatch prepare \
-  --dataset <hf-id> --tokenizer geodesic-research/nemotron-base-tokenizer \
-  --skip-pack --skip-count --num-proc 32 --val-proportion 0
+  --config configs/control_pretraining/data/<corpus>.yaml
 isambard_sbatch --dependency=afterok:<prepare-jobid> pipeline_data_submit.sbatch tokenize \
   /projects/a5k/public/data/<org>__<name> geodesic-research/nemotron-base-tokenizer tokenized_base
 
