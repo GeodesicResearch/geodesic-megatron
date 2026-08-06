@@ -14,10 +14,17 @@
 #     --config configs/control_pretraining/data/ai_safety_discourse.yaml
 #
 # Then tokenize (see this directory's parent README for the chained tokenize job).
-dataset: Kyle1668/control-pretraining-datasets
+dataset: geodesic-research/control-pretraining-datasets
 subset: combined
 revision: 018376f4b033d7533471514f607cae4de3c95b99
 tokenizer: geodesic-research/nemotron-base-tokenizer
+# The output directory is pinned because it does not follow from the dataset id.
+# This corpus was prepared while the repository still sat on a personal account, and
+# the derived directory name carries that prefix; the repository has since moved to
+# the org, which redirects, and the frozen revision is present under both names. Left
+# to derive itself the path would change with the id, and a re-prepare would write a
+# second copy that the campaign config does not read.
+output-dir: /projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined
 val-proportion: 0
 skip-pack: true
 skip-count: true

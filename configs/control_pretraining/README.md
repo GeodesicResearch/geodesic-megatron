@@ -26,7 +26,7 @@ Three Megatron-native `.bin/.idx` corpora, blended by sampling weight:
 |---|---|---|
 | 0.80 | `karpathy/climbmix-400b-shuffle` | `/projects/a5k/public/data/karpathy__climbmix-400b-shuffle/tokenized_base_input_document` |
 | 0.19 | `Zyphra/Zyda-2` (subset `sample-100BT`) | `/projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT/tokenized_base_input_document` |
-| 0.01 | `Kyle1668/control-pretraining-datasets` (config `combined`) | `/projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document` |
+| 0.01 | `geodesic-research/control-pretraining-datasets` (config `combined`) | `/projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document` |
 
 Directory names come from `pipeline_data_prepare.py::slugify_dataset_name()` (`org/name` ->
 `org__name`, plus `__<subset>` when `--subset` is given); the `tokenized_base_input_document`
@@ -70,6 +70,13 @@ None of the three epoch counts is exactly 1.0, and all three are expected:
   is exactly 67,279 — one EOD token per document from `--append-eod`. That identity is the
   after-the-fact check that a tokenized copy is the frozen revision rather than an earlier
   snapshot; re-run it after any re-tokenization.
+
+  The repository moved from a personal account to `geodesic-research` after this corpus was
+  prepared. The frozen revision is present under both names and the old one redirects, so the
+  tokenized copy stays valid. Its directory keeps the old prefix, because the derived name
+  follows the repository id: `data/ai_safety_discourse.yaml` therefore pins `output-dir`
+  explicitly, so a re-prepare overwrites that corpus rather than writing a second copy
+  somewhere the campaign config does not read.
 - **Zyda-2 at ~0.95** has ~5% margin against a ~5% estimate uncertainty, so treat the 19%
   share as essentially a full single pass rather than a share with headroom.
 

@@ -21,7 +21,7 @@
 #   weight  source                                     share of budget   corpus    epochs
 #   0.80    karpathy/climbmix-400b-shuffle             ~400,002,383,872  ~353.2B    ~1.13
 #   0.19    Zyphra/Zyda-2, config sample-100BT          ~95,000,566,170  ~100.3B    ~0.95
-#   0.01    Kyle1668/control-pretraining-datasets          ~5,000,029,798   0.5373B    ~9.31
+#   0.01    geodesic-research/control-pretraining-datasets ~5,000,029,798   0.5373B    ~9.31
 #           (config `combined`, revision 018376f4b033d7533471514f607cae4de3c95b99)
 #
 #   ClimbMix: 6,543 parquet shards / 599.8 GB, single `text` column. Its ~353.2B is an
