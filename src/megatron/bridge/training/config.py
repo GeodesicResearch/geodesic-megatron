@@ -983,6 +983,11 @@ class ConfigContainer(Container):
     mixed_precision: Optional[Union[MixedPrecisionConfig, str]] = None
     tensor_inspect: TensorInspectConfig | None = None
     inprocess_restart: Optional[InProcessRestartConfig] = None
+    # GradientRoutingConfig | None. Typed Any because gradient_routing.config imports
+    # THIS module (GPTDatasetConfig, the override provider) — a typed import here would
+    # be circular. Populated by the training entry script when the run config carries a
+    # gr: section; None keeps every GR code path inert.
+    gr: Optional[Any] = None
 
     def get_data_parallel_size(self, world_size: int) -> int:
         """Calculate the data parallel size based on the model configuration."""

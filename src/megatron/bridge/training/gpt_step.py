@@ -34,6 +34,7 @@ from megatron.bridge.training.post_training.distillation import loss_func_kd
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
+from megatron.bridge.training.utils.wandb_utils import log_wandb_metrics_nonfatal
 
 
 logger = logging.getLogger(__name__)
@@ -336,25 +337,19 @@ def _log_loss_mask_metrics(
           so frac/count are accurate per-DP-shard samples of the global
           fraction.
         - Silent on any exception — logging must never crash training.
-    """
-    try:
-        import wandb
 
-        if wandb.run is None:
-            return
-        post_density = float(post_mask.float().mean().item())
-        step = getattr(state.train_state, "step", None)
-        wandb.log(
-            {
-                "train/loss_mask_fraction": frac_masked,
-                "train/loss_mask_count": count_masked,
-                "train/loss_mask_total_positions": total_positions,
-                "train/loss_mask_density_post": post_density,
-            },
-            step=step,
-        )
-    except Exception as e:  # noqa: BLE001 — logging must never crash training
-        logger.warning(f"Loss-mask logging failed (non-fatal): {e}")
+    `post_density` is passed as a thunk so its device-syncing `.item()` runs only on the
+    rank that owns the wandb run, and inside that rank's failure guard.
+    """
+    log_wandb_metrics_nonfatal(
+        lambda: {
+            "train/loss_mask_fraction": frac_masked,
+            "train/loss_mask_count": count_masked,
+            "train/loss_mask_total_positions": total_positions,
+            "train/loss_mask_density_post": float(post_mask.float().mean().item()),
+        },
+        step=getattr(state.train_state, "step", None),
+    )
 
 
 def _forward_step_common(

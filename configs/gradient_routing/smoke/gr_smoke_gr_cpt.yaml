@@ -1,0 +1,105 @@
+# GR functional smoke, phase 2/2: gradient-routing CPT of the phase-1 tiny checkpoint.
+#
+# 20 iterations on 1 node / 4 GPUs (EP2 · DP4) exercising, end to end and distributed:
+# the warm-start load with MISSING gr_aux keys (zero-init assert in GRCallback), the
+# routed two-corpus dataset with dataloader "single", per-iteration gate + frozen
+# expert-bias, param-group-emptying optimizer isolation, and — the trap this smoke
+# exists for — DDP bucket completion when the aux module runs at gate=0.
+# Driver + post-checks: scripts/gradient_routing/run_gr_functional_smoke.sh.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+gr:
+  enabled: true
+  retain_data_path:
+    - "1.0"
+    - /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+  forget_data_path:
+    - "1.0"
+    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+  aux_ffn_hidden_size: 232
+  p_as: 0.5
+  p_cr: 0.2
+  forget_iter_fraction: 0.5
+  plan_seed: 424242
+  aux_lr: 1.0e-4
+  aux_min_lr: 1.0e-5
+  aux_wd_mult: 1.0
+  log_interval: 1
+
+dataset:
+  seq_length: 512
+  seed: 1234
+  split: "9999,1,0"
+
+train:
+  global_batch_size: 16
+  micro_batch_size: 1
+  train_iters: 20
+  exit_signal_handler: true
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.2
+
+optimizer:
+  lr: 1.0e-5
+  min_lr: 1.0e-6
+
+model:
+  hybrid_layer_pattern: "M*EM*E"
+  num_layers: null
+  hidden_size: 672
+  mamba_num_heads: 16
+  mamba_head_dim: 64
+  mamba_state_dim: 128
+  mamba_num_groups: 8
+  kv_channels: 128
+  num_attention_heads: 8
+  num_query_groups: 2
+  ffn_hidden_size: 464
+  num_moe_experts: 8
+  moe_ffn_hidden_size: 464
+  moe_shared_expert_intermediate_size: 928
+  moe_router_topk: 2
+  seq_length: 512
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 2
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: null
+  recompute_modules: null
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/gr_smoke_seed
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/gr_smoke_cpt
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+  dist_ckpt_strictness: log_all
+
+logger:
+  log_interval: 1
+  log_progress: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: gr_smoke_gr_cpt

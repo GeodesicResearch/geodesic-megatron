@@ -12,10 +12,44 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Optional
 
 from megatron.bridge.utils.common_utils import print_rank_last
+
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+
+def log_wandb_metrics_nonfatal(
+    metrics: Mapping[str, Any] | Callable[[], Mapping[str, Any]],
+    step: Optional[int],
+) -> None:
+    """Log a metrics dict to the active W&B run, swallowing every failure.
+
+    Megatron-Bridge initializes wandb on the last rank only (see
+    ``GlobalState.wandb_logger``), so on every other rank ``wandb.run`` is None and this
+    is a no-op — callers must not gate on TP/DP rank themselves.
+
+    ``metrics`` may be a zero-argument callable instead of a mapping, in which case it is
+    evaluated only on the rank that owns the run and inside the same guard. That matters
+    for metrics whose computation is itself expensive or fallible — a device-syncing
+    ``.item()``, say — which must not run on ranks that will never log it.
+
+    Args:
+        metrics: The metrics to log, or a thunk returning them.
+        step: The training step to log against; None lets wandb pick.
+    """
+    try:
+        import wandb
+
+        if wandb.run is None:
+            return
+        wandb.log(dict(metrics() if callable(metrics) else metrics), step=step)
+    except Exception as e:  # noqa: BLE001 — logging must never crash training
+        logger.warning("W&B logging failed (non-fatal): %s", e)
 
 
 def on_save_checkpoint_success(

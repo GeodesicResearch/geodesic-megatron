@@ -204,6 +204,14 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
     #   "cutlass_grouped" — DEPRECATED alias of "cublas_grouped"; warns. The old name
     #                      claimed a CUTLASS kernel this path never reached.
     moe_experts_impl: str = "te_grouped"
+    # Gradient routing (GRAM): when set, every MoE layer in the stack spec is swapped to
+    # GRAMMoELayer carrying one gated auxiliary MLP of this ffn width (see
+    # models/mamba/gram_layer.py). None (the default) leaves the spec untouched — the
+    # no-GR code path is byte-identical to a build without this field. Lives HERE for the
+    # same reason as moe_experts_impl: the NemotronH bridge registers
+    # provider=MambaModelProvider, so a field on a subclass is silently dropped by the
+    # YAML merge.
+    gr_aux_ffn_hidden_size: Optional[int] = None
     vocab_size: Optional[int] = None
     should_pad_vocab: bool = False
     hf_model_id: Optional[str] = None
@@ -382,6 +390,41 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         self._grouped_spec_applied = True
         logger.info("moe_experts_impl=%s: MoE experts swapped to GroupedExperts(%s)", impl, backend)
 
+    def _apply_gradient_routing(self, stack_spec: ModuleSpec) -> ModuleSpec:
+        """Return the resolved stack spec with the GRAM MoE-layer swap when routing is on.
+
+        Runs at provide() time for the same reason as _apply_moe_experts_impl: YAML
+        overrides merge onto the instance after construction. Unlike that swap, this one
+        deliberately never assigns to ``self.mamba_stack_spec`` — whatever sits there is
+        serialized by qualname into the checkpoint's run_config, and a ``<locals>``
+        closure breaks ``AutoBridge.from_auto_config`` at export time. The swap is
+        re-derived from ``gr_aux_ffn_hidden_size`` (which does serialize) on every
+        provide() call instead; ``swap_moe_layer_to_gram`` refuses a double-apply, and
+        each call here starts from a freshly resolved spec, so repeated provide() calls
+        (VPP chunks) are safe by construction.
+        """
+        if self.gr_aux_ffn_hidden_size is None:
+            return stack_spec
+        # The swap rewrites only the main stack's MoE spec; an MTP block carries its own
+        # nested MoE spec that would silently stay un-swapped — and gradient isolation
+        # semantics for an MTP head are undefined here. Refuse rather than half-apply.
+        if getattr(self, "mtp_num_layers", 0):
+            raise NotImplementedError(
+                "gr_aux_ffn_hidden_size does not swap the MTP block's nested MoE spec; "
+                "gradient routing requires mtp_num_layers == 0."
+            )
+        # Latent MoE feeds experts at moe_latent_size width while the shared expert (and
+        # the aux module mirroring it) sees full hidden width — untested interaction with
+        # the export-merge contract. Refuse until measured.
+        if getattr(self, "moe_latent_size", None):
+            raise NotImplementedError("gradient routing is untested with moe_latent_size; unset one of them.")
+
+        from megatron.bridge.models.mamba.gram_layer import swap_moe_layer_to_gram
+
+        swapped = swap_moe_layer_to_gram(stack_spec, aux_ffn_hidden_size=self.gr_aux_ffn_hidden_size)
+        logger.info("gradient routing: MoE layers swapped to GRAMMoELayer(aux_ffn=%d)", self.gr_aux_ffn_hidden_size)
+        return swapped
+
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreMambaModel:
         """Configure and instantiate a Megatron Core Mamba model based on this configuration.
 
@@ -403,6 +446,7 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
                 mamba_stack_spec = mamba_stack_spec(self)
             else:
                 mamba_stack_spec = mamba_stack_spec()
+        mamba_stack_spec = self._apply_gradient_routing(mamba_stack_spec)
 
         # VPP gate removed (INFR-68): the assert here dated 2025-08-13 and cited a
         # missing MCore MambaModel vp_stage API; the current 3rdparty pin

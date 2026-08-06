@@ -1,0 +1,50 @@
+{# Plain-text completion template for a BASE (non-chat) checkpoint.
+
+   Referenced from a geodesic-evals suite as an absolute literal path
+   (`chat_template: /abs/path/to/base_completion.jinja`);
+   `resolve_chat_template` returns any non-`registry:` string verbatim, so
+   this needs no registry entry and no PR to geodesic-environments.
+
+   WHAT IT EMITS: message contents, in order, joined by a blank line.
+   Nothing else. No ChatML markers, no role headers, no BOS/EOS, and
+   nothing appended for `add_generation_prompt` — a base model must see
+   the scenario text exactly as a document, or the loglikelihood/rollout
+   comparison against the stock Base checkpoint is measuring template
+   compliance instead of the model.
+
+   BOS is deliberately NOT emitted: the /v1/completions endpoint tokenises
+   the prompt with add_special_tokens=True, so emitting `bos_token` here
+   would double it.
+
+   RENDER CONTRACT (geodesic-environments
+   shared_eval_utils/chat_template_utils/render.py:167-178, verified
+   2026-08-05 against /projects/a5k/public/repos/geodesic-environments):
+     messages              list of {role, content} dicts; roles are
+                           system / user / assistant
+     add_generation_prompt bool — True when no prefill is configured
+     eos_token, bos_token  default "" unless the suite passes them
+     plus anything in chat_template_kwargs
+   The Jinja env sets trim_blocks=False, lstrip_blocks=False,
+   keep_trailing_newline=True, so every literal character below is emitted
+   as written. Hence the single-line body (matching nemotron.jinja) and
+   the `-%}` on the final tag, which strips this file's trailing newline
+   so the prompt ends exactly at the last message's last character. If a
+   run wants the model to begin on a fresh line, change that to `%}`.
+
+   PREFILL: when the suite sets a non-empty `prefill`, render.py appends a
+   placeholder `{role: assistant, content: "", prefill: <text>}` turn and
+   sets add_generation_prompt False; when prefill is "" (this campaign's
+   setting) no such turn is appended. `message.get('prefill', '')` is read
+   off assistant turns only — which both satisfies `template_accepts_prefill`
+   (render.py:80-122 walks the AST for a `prefill` read) and avoids the
+   UndefinedError that an unconditional `message['prefill']` would raise on
+   a real assistant turn in a multi-turn sample.
+   CONTINUATION CUE: a bare, complete scenario paragraph looks like a FINISHED document
+   to a base model trained on `</s>`-separated documents — measured on the stock Base:
+   every sfm_ind_open rollout emitted exactly one token, `</s>` (completion_tokens=1,
+   stop_reason=2), for a 100% excluded run. `continuation_cue` (from the suite's
+   chat_template_kwargs, e.g. "\n\nResponse:") is appended after the final message when
+   the template is asked for a generation prompt, giving the standard base-model QA
+   elicitation frame. Applied identically to baseline/forget_on/forget_off, so
+   cross-posture comparisons are unaffected. Default: empty (pure document rendering).
+#}{% for message in messages %}{% if not loop.first %}{{ '\n\n' }}{% endif %}{% if message['role'] == 'assistant' %}{{ message.get('prefill', '') }}{{ message.get('content', '') }}{% else %}{{ message['content'] }}{% endif %}{%- endfor %}{% if add_generation_prompt %}{{ continuation_cue | default('') }}{% endif %}

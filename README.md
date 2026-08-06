@@ -231,6 +231,13 @@ fallback environment.
    random-initializes from the NVIDIA pretrain recipes and trains via pretrain() —
    no checkpoint is loaded unless the YAML sets one
 
+CPT additionally supports **gradient routing (GRAM)**: a `gr:` section in the YAML routes
+a two-corpus mix (retain/forget) so the forget corpus trains only removable auxiliary
+MLPs, which export-time baking merges into the shared expert (forget-ON) or deletes for a
+byte-stock model (forget-OFF). Configs and eval harness live under
+`configs/gradient_routing/` + `scripts/gradient_routing/`; the design summary is the
+"Gradient routing (GRAM)" section of [CLAUDE.md](CLAUDE.md).
+
 ### Usage
 
 ```bash

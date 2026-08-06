@@ -139,6 +139,26 @@ for both training and inference unchanged.
 # ---------------------------------------------------------------------------
 
 
+def load_built_tokenizer(save_dir):
+    """Load a built MQ tokenizer dir through an explicit fast-backend class.
+
+    NOT AutoTokenizer: transformers 5.3's auto path strips "Fast" from the pinned
+    tokenizer_class and resolves the resulting generic "PreTrainedTokenizer" name
+    through process-global mutable registries (REGISTERED_TOKENIZER_CLASSES), so
+    earlier tokenizer loads in the same process can flip it to the abstract slow
+    base, which dies in __init__ with NotImplementedError from get_vocab(). Naming
+    the class avoids that resolution entirely; tests load built dirs through this
+    helper for the same reason.
+    """
+    try:
+        from transformers import TokenizersBackend as reload_cls
+    except ImportError:
+        # transformers 4.x has no TokenizersBackend; its PreTrainedTokenizerFast is
+        # the real fast class and its auto path does not strip the name.
+        from transformers import PreTrainedTokenizerFast as reload_cls
+    return reload_cls.from_pretrained(save_dir)
+
+
 def build_one(
     new_name: str,
     source_id: str,
@@ -218,7 +238,7 @@ def build_one(
     print(f"  injected loss_mask_token_ids: {cfg['loss_mask_token_ids']}")
 
     # Round-trip sanity: re-read and assert.
-    reloaded = AutoTokenizer.from_pretrained(save_dir)
+    reloaded = load_built_tokenizer(save_dir)
     rt_ids = reloaded.init_kwargs.get("loss_mask_token_ids")
     assert rt_ids == [id_marker], (
         f"Round-trip failed: tokenizer_config.json had {cfg['loss_mask_token_ids']!r}, "
