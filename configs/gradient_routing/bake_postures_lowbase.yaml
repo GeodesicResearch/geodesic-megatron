@@ -1,0 +1,17 @@
+# GEOD-171f posture bake — the low-baseline train-on-test checkpoint's two postures.
+# Same bake as bake_postures.yaml (see its header); only the checkpoint paths differ.
+# The source is a CONTAMINATED diagnostic checkpoint — see
+# nemotron_nano_gr_cpt_lowbase_retain.yaml.
+#
+# Invocation (in-container):
+#   python scripts/gradient_routing/bake_forget_postures.py --config configs/gradient_routing/bake_postures_lowbase.yaml
+
+source_dir: /projects/a5k/public/checkpoints/megatron/CONTAMINATED_traintest_nemotron_nano_gr_cpt_lowbase/iter_0000120/hf
+output_root: /projects/a5k/public/checkpoints/megatron/CONTAMINATED_traintest_nemotron_nano_gr_cpt_lowbase/iter_0000120/postures
+strip_chat_template: true
+expected_layers: 23
+
+# See bake_postures.yaml: the bridge export stamps max_position_embeddings with the
+# CPT seq len (8192); the stock Nano-30B architecture declares 262144.
+config_overrides:
+  max_position_embeddings: 262144

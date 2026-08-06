@@ -151,8 +151,13 @@ driver: at each train-step start it reads the plan row and (a) writes the
 `gr_gate` buffer on every GRAM layer, (b) toggles `frozen_expert_bias`,
 (c) arms the gater with this iteration's update sets. On step end it restores
 the optimizer groups and emits telemetry. At iteration 0 it asserts every aux
-`fc2` is exactly zero (the warm-start invariant); past it, the run is a resume
-and the plan is simply re-derived from the iteration number.
+`fc2` is exactly zero (the warm-start invariant). Past iteration 0 the run is a
+resume, and the plan is re-derived from the iteration number AND checked against
+the one the checkpoint was trained under: the callback rebuilds the saved plan
+from the checkpoint's own `run_config.yaml` and refuses a digest mismatch, since
+changing any of `plan_seed`, `train_iters`, `forget_iter_fraction`, `p_as` or
+`p_cr` across a save/resume relabels every remaining iteration and shifts each
+corpus's data offset.
 
 ## 4. Export postures and the merge math
 
@@ -180,9 +185,15 @@ the raw export contains stock + `gr_aux` tensors.
   (independently verified byte-exact: the two postures differ by precisely
   `2 · 1856 · hidden · 2 bytes · 23 layers = 458,981,376` bytes).
 
-  This exactness would NOT hold for a gated (e.g. SwiGLU) MLP or a shared
-  expert applied with a learned/≠1 coefficient — the bake refuses architectures
-  it cannot merge exactly.
+  This exactness would NOT hold for a gated (e.g. SwiGLU) MLP, a shared expert
+  with biases, or one applied with a learned/≠1 coefficient. The bake asserts
+  each of those preconditions from the source config (`mlp_bias`,
+  a GLU activation, `n_shared_experts`) rather than trusting them, and
+  additionally refuses a source carrying MTP shared-expert tensors: MTP blocks
+  have their own shared experts that the merge loop does not widen, while
+  `moe_shared_expert_intermediate_size` is a single global scalar, so baking one
+  would declare a width those tensors do not have — wrong for any consumer that
+  reads the MTP path, and invisible to a plain HF load, which ignores `mtp.*`.
 
   One verification subtlety follows from MoE routing being a discontinuity:
   comparing the merged model against the hook-composed reference means
@@ -225,7 +236,7 @@ stock-shape load for forget_off; results persist to `posture_verification.json`.
 | `scripts/gradient_routing/bake_forget_postures.py` | posture export (merge / drop) + provenance |
 | `scripts/gradient_routing/verify_posture_equivalence.py` | posture verification gate |
 | `scripts/gradient_routing/run_gr_functional_smoke.sh` | tiny-model end-to-end functional smoke |
-| `scripts/data/build_mmlu_pro_cot_corpus.py` | renders MMLU-Pro items in lm-eval's exemplar format (the train-on-test diagnostic corpus) |
+| `scripts/data/build_mmlu_pro_cot_corpus.py` | renders MMLU-Pro items in lm-eval's format for the train-on-test diagnostic corpora; `rendering` and `answer_source` are both REQUIRED config choices, and it writes a `.provenance.json` sidecar naming both |
 | `scripts/gradient_routing/run_gr_base_mcq.sh`, `run_gr_inspect_open.sh`, `campaign_config.py`, `lmeval_container_python.sh`, `gr_lmeval_bootstrap.py` | eval harness (§8) |
 | `configs/gradient_routing/` | campaign configs, eval campaign contract, vendored lm-eval tasks |
 
@@ -269,7 +280,13 @@ own token math and rationale:
 |---|---|---|---|
 | `nemotron_nano_gr_cpt_500m.yaml` | scenario discourse, aligned-resolution split | WMDP bio-retain | mainline |
 | `nemotron_nano_gr_cpt_500m_negative.yaml` | same dataset, misaligned-resolution split | WMDP bio-retain | mirrored-polarity replication (identical knobs and `plan_seed`) |
-| `nemotron_nano_gr_cpt_mmlupro_retain.yaml` | misaligned-resolution split | **the MMLU-Pro test split itself** | train-on-test diagnostic (below) |
+| `nemotron_nano_gr_cpt_mmlupro_retain.yaml` | misaligned-resolution split | **the MMLU-Pro test split itself** — ALL categories (12,032 items), exemplar rendering, and no answers (see below) | train-on-test diagnostic (below) |
+| `nemotron_nano_gr_cpt_lowbase_retain.yaml` | misaligned-resolution split | **the MMLU-Pro test split itself** — law/other/philosophy/chemistry only, query-position rendering, WITH answers | train-on-test diagnostic where the baseline leaves headroom to convert |
+
+The two train-on-test configs differ on three axes at once, so neither is an
+ablation of the other: trained SCOPE (all categories vs four), RENDERING
+(exemplar vs query-position), and whether the documents carry ANSWERS at all.
+Biology is the category the first one is *measured* on, not the scope it trains.
 
 The train-on-test config is a deliberate exception to every normal rule: it
 trains core on the rendered benchmark items the campaign then evaluates, so
@@ -299,6 +316,13 @@ instruction per item:
 - non-Adam optimizer (the moment-contamination analysis is argued for Adam);
 - `optimizer.overlap_param_gather_with_optimizer_step` (gather must not race
   the group mutation);
+- `optimizer.optimizer_cpu_offload` — under CPU offload the inner optimizer is a
+  `HybridDeviceOptimizer` that steps its own gpu/cpu sub-optimizer param lists
+  rather than the `param_groups` the gater empties, so the gate would be a
+  silent no-op;
+- `inprocess_restart` — it rebuilds the optimizer while the callback keeps the
+  gater built for the dead one, and the gater caches its discovery, so it would
+  empty a stale optimizer's groups while the live one stepped everything;
 - missing `GROptimizerConfigOverrideProvider`;
 - checkpoint strictness that cannot tolerate the base checkpoint's missing
   `gr_aux` keys;
@@ -318,11 +342,22 @@ Eval campaign contract: `configs/gradient_routing/eval_campaign.yaml` — one
 campaign file names the checkpoints (baseline / forget_on / forget_off), the
 W&B group, and both protocols; `scripts/gradient_routing/campaign_config.py`
 is the single reader both runners share. One contract per campaign, all
-collating on the same W&B group: `eval_campaign.yaml` (mainline),
-`eval_campaign_negative.yaml` (mirrored-polarity postures; reuses the
-mainline's baseline measurements rather than re-measuring an unchanged
-checkpoint), and `eval_campaign_noise_floor.yaml` (re-measures ONE unchanged
-checkpoint through the identical harness — see below).
+collating on the same W&B group:
+
+| campaign contract | what it measures |
+|---|---|
+| `eval_campaign.yaml` | mainline: baseline / forget_on / forget_off through both protocols |
+| `eval_campaign_negative.yaml` | mirrored-polarity postures; reuses the mainline's baseline measurements rather than re-measuring an unchanged checkpoint |
+| `eval_campaign_noise_floor.yaml` | re-measures ONE unchanged checkpoint through the identical harness (see below) |
+| `eval_campaign_mmlupro_survey.yaml` | per-category MMLU-Pro survey used to CHOOSE low-baseline targets — `lm_eval.limit` subsamples it, so its numbers rank and must never serve as a treatment reference |
+| `eval_campaign_mmlupro_sanity.yaml` | biology train-on-test diagnostic postures |
+| `eval_campaign_lowbase_sanity.yaml` | low-baseline train-on-test postures, plus the WMDP-bio/WMDP-cyber/MMLU-Pro-biology controls |
+| `eval_campaign_lowbase_baseline.yaml` | FULL-SPLIT stock baselines for the four trained categories — the reference the contaminated arms are differenced against |
+
+`lm_eval.limit` (optional, survey-only) caps items per task. It exists so a
+ranking sweep is cheap; a subsample carries a wide interval (~8 points at
+n=150), so any contract whose numbers are differenced omits it and scores full
+splits on both sides.
 
 Generative metrics need that noise floor because greedy decoding on these
 checkpoints is not run-to-run deterministic: a near-tie MoE routing decision

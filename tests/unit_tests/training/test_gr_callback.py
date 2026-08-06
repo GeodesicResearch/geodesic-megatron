@@ -34,6 +34,7 @@ rig here would duplicate ``test_gr_optimizer_gating.py``, which already pins the
 optimizer-side behaviour against the real thing.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -104,14 +105,52 @@ def _model_chunk(gram=True, n_layers=N_LAYERS):
     )
 
 
-def _context(model, step=0, loss_dict=None):
+def _context(model, step=0, loss_dict=None, load_dir=None):
     from megatron.bridge.training.callbacks import CallbackContext
 
     return CallbackContext(
-        state=SimpleNamespace(train_state=SimpleNamespace(step=step)),
+        state=SimpleNamespace(
+            train_state=SimpleNamespace(step=step),
+            cfg=SimpleNamespace(checkpoint=SimpleNamespace(load=load_dir)),
+        ),
         model=[model],
         loss_dict=loss_dict,
     )
+
+
+#: The plan parameters the resume tests build both sides from.
+RESUME_PLAN_KWARGS = {"plan_seed": 4242, "forget_iter_fraction": 0.5, "p_as": 0.5, "p_cr": 0.2}
+RESUME_TRAIN_ITERS = 20
+
+
+def _resume_plan(**overrides):
+    """A REAL plan (build_gr_plan), which is what a digest comparison is meaningful over."""
+    from megatron.bridge.training.gradient_routing.plan import build_gr_plan
+
+    kwargs = {**RESUME_PLAN_KWARGS, "train_iters": RESUME_TRAIN_ITERS, **overrides}
+    return build_gr_plan(**kwargs)
+
+
+def _write_resume_checkpoint(root, step, **overrides):
+    """Write the run_config.yaml a resume reads its saved plan parameters from.
+
+    Only the fields the plan is a function of matter here; the real file is the whole
+    serialized ConfigContainer.
+    """
+    import yaml
+
+    from megatron.bridge.training.utils.checkpoint_utils import (
+        get_checkpoint_name,
+        get_checkpoint_run_config_filename,
+    )
+
+    kwargs = {**RESUME_PLAN_KWARGS, **overrides}
+    ckpt_dir = Path(get_checkpoint_name(str(root), step))
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    Path(get_checkpoint_run_config_filename(str(ckpt_dir))).write_text(
+        yaml.safe_dump({"gr": kwargs, "train": {"train_iters": RESUME_TRAIN_ITERS}})
+    )
+    return str(root)
 
 
 def _discovered_gater(model):
@@ -147,12 +186,20 @@ def _callback(gater=None, log_interval=1):
 
 
 def _recorded_metrics(monkeypatch):
-    """Capture what the callback emits, at the shared W&B helper's seam."""
+    """Capture what the callback emits, at the shared W&B helper's seam.
+
+    The step-end payload is a THUNK (its aux-parameter norm costs a device sync per
+    parameter, so the real emitter evaluates it only on the logging rank). Evaluating it
+    here is what the emitter would do, and keeps the assertions about the metrics rather
+    than about the deferral.
+    """
     from megatron.bridge.training.gradient_routing import callback as callback_module
 
     calls = []
     monkeypatch.setattr(
-        callback_module, "log_wandb_metrics_nonfatal", lambda metrics, step: calls.append((metrics, step))
+        callback_module,
+        "log_wandb_metrics_nonfatal",
+        lambda metrics, step: calls.append((metrics() if callable(metrics) else metrics, step)),
     )
     return calls
 
@@ -185,19 +232,59 @@ class TestOnTrainStart:
         with pytest.raises(RuntimeError, match="non-zero at iteration 0"):
             callback.on_train_start(_context(model))
 
-    def test_a_trained_aux_is_accepted_on_a_mid_plan_resume(self, monkeypatch):
+    def test_a_trained_aux_is_accepted_on_a_mid_plan_resume(self, monkeypatch, tmp_path):
         """A resumed run has a TRAINED aux by construction. Asserting the zero-init
         invariant past iteration 0 would make GR runs restart-fatal — no ft restart,
         singleton chain, or save_interval run could ever come back up."""
+        from megatron.bridge.training.gradient_routing.callback import GRCallback
+        from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerGater
+
         _recorded_metrics(monkeypatch)
         model = _model_chunk()
         with torch.no_grad():
             model[-1].gr_aux.linear_fc2.weight.fill_(1e-3)
-        callback = _callback()
+        load_dir = _write_resume_checkpoint(tmp_path, 7)
+        callback = GRCallback(_resume_plan(), GROptimizerGater(), log_interval=1)
 
-        callback.on_train_start(_context(model, step=7))
+        callback.on_train_start(_context(model, step=7, load_dir=load_dir))
 
         assert callback._gram_layers, "resume must still build the layer registry"
+
+    @pytest.mark.parametrize(
+        "changed",
+        [
+            {"plan_seed": 999},
+            {"p_as": 0.9},
+            {"p_cr": 0.9},
+            {"forget_iter_fraction": 0.25},
+        ],
+    )
+    def test_a_resume_under_a_different_plan_is_refused(self, monkeypatch, tmp_path, changed):
+        """The plan is a pure function of these parameters, so changing one on a resume
+        relabels every remaining iteration AND shifts each corpus's data offset — the run
+        would train different data on a different schedule with nothing in the logs."""
+        from megatron.bridge.training.gradient_routing.callback import GRCallback
+        from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerGater
+
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk()
+        load_dir = _write_resume_checkpoint(tmp_path, 7)
+        callback = GRCallback(_resume_plan(**changed), GROptimizerGater(), log_interval=1)
+
+        with pytest.raises(RuntimeError, match="GR plan mismatch on resume"):
+            callback.on_train_start(_context(model, step=7, load_dir=load_dir))
+
+    def test_a_resume_without_a_checkpoint_run_config_is_refused(self, monkeypatch, tmp_path):
+        """No run_config means the plan the checkpoint trained under cannot be confirmed."""
+        from megatron.bridge.training.gradient_routing.callback import GRCallback
+        from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerGater
+
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk()
+        callback = GRCallback(_resume_plan(), GROptimizerGater(), log_interval=1)
+
+        with pytest.raises(RuntimeError, match="no run_config.yaml"):
+            callback.on_train_start(_context(model, step=7, load_dir=str(tmp_path)))
 
     def test_a_model_without_gram_layers_raises(self, monkeypatch):
         """The spec swap not running is the failure that otherwise trains happily as a
@@ -209,17 +296,22 @@ class TestOnTrainStart:
         with pytest.raises(RuntimeError, match="found no GRAMMoELayer"):
             callback.on_train_start(_context(model))
 
-    def test_the_plan_digest_is_logged_at_the_starting_iteration(self, monkeypatch):
+    def test_the_plan_digest_is_logged_at_the_starting_iteration(self, monkeypatch, tmp_path):
         """Run provenance: the digest is how a W&B run is tied back to its plan."""
+        from megatron.bridge.training.gradient_routing.callback import GRCallback
+        from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerGater
+
         calls = _recorded_metrics(monkeypatch)
         model = _model_chunk()
-        callback = _callback()
+        plan = _resume_plan()
+        load_dir = _write_resume_checkpoint(tmp_path, 2)
+        callback = GRCallback(plan, GROptimizerGater(), log_interval=1)
 
-        callback.on_train_start(_context(model, step=2))
+        callback.on_train_start(_context(model, step=2, load_dir=load_dir))
 
         (metrics, step) = calls[-1]
         assert step == 2
-        assert metrics["run/gr_plan_digest_int"] == int(_plan().digest()[:8], 16)
+        assert metrics["run/gr_plan_digest_int"] == int(plan.digest()[:8], 16)
 
 
 @requires_gpu
@@ -302,7 +394,9 @@ class TestOnTrainStepEnd:
         callback.on_train_step_end(_context(model, step=iteration))
 
         metrics, step = calls[-1]
-        assert step == iteration
+        # Megatron logs iteration i's own metrics after incrementing train_state.step, so
+        # they land on W&B step i+1; gr/* matches that or nothing joins to `lm loss`.
+        assert step == iteration + 1
         assert metrics["gr/corpus"] == CORPUS[iteration]
         assert metrics["gr/fwd_aux"] == FWD_AUX[iteration]
         assert metrics["gr/update_core"] == UPDATE_CORE[iteration]
@@ -354,3 +448,124 @@ class TestOnTrainStepEnd:
             sum(float(p.detach().float().pow(2).sum()) for layer in model for p in layer.gr_aux.parameters()) ** 0.5
         )
         assert calls[-1][0]["gr/aux_param_norm"] == pytest.approx(expected, rel=1e-5)
+
+
+@requires_gpu
+@pytest.mark.usefixtures("moe_parallel_state")
+class TestExpertBiasFreezeReachesMegatron:
+    """The router's expert bias is core state the optimizer gate cannot reach.
+
+    Megatron updates ``expert_bias`` inside grad finalization — outside the optimizer — so
+    emptying param groups does not touch it, and the callback's per-iteration
+    ``frozen_expert_bias`` flag is the only thing stopping a forget-isolated iteration from
+    writing forget-corpus routing statistics into the core model. Assigning an attribute to a
+    Module always "succeeds", so an upstream rename would leave the callback silently writing
+    a flag nobody reads: the flag is therefore driven through Megatron's REAL updater here,
+    not merely asserted to have been set.
+    """
+
+    def _bias_update(self, model, step, monkeypatch):
+        """Run one iteration's gate/freeze write, then Megatron's own expert-bias update."""
+        from megatron.core import parallel_state
+        from megatron.core.distributed.finalize_model_grads import _update_router_expert_bias
+
+        _recorded_metrics(monkeypatch)
+        config = moe_config()
+        callback = _callback()
+        callback.on_train_start(_context(model))
+        callback.on_train_step_start(_context(model, step=step))
+
+        # Grad-enabled on purpose: mcore accumulates local_tokens_per_expert only when
+        # torch.is_grad_enabled(), so an inference-mode forward leaves the counts at zero and
+        # there would be no bias update for the freeze to suppress.
+        torch.manual_seed(7)
+        x = torch.randn(SEQ, BATCH, HIDDEN, dtype=torch.bfloat16, device="cuda")
+        for layer in model:
+            layer(x)
+        counts = model[0].router.local_tokens_per_expert
+        assert not bool((counts == counts[0]).all()), (
+            f"the router balanced perfectly ({counts.tolist()}), so no bias update is due and "
+            "neither arm of this comparison would move"
+        )
+
+        before = [layer.router.expert_bias.detach().clone() for layer in model]
+        _update_router_expert_bias(
+            [model],
+            config,
+            tp_dp_cp_group=parallel_state.get_tensor_and_data_parallel_group(with_context_parallel=True),
+        )
+        return before, [layer.router.expert_bias for layer in model]
+
+    def test_a_forget_isolated_iteration_leaves_the_expert_bias_untouched(self, monkeypatch):
+        """Iteration 0 does not update core, so the router bias must not move either."""
+        model = _model_chunk(n_layers=1)
+        before, after = self._bias_update(model, step=0, monkeypatch=monkeypatch)
+        assert not bool(UPDATE_CORE[0]), "iteration 0 must be a core-frozen iteration for this to test anything"
+        for index, (old, new) in enumerate(zip(before, after)):
+            assert torch.equal(old, new), f"layer {index}: expert bias moved on a core-frozen iteration"
+
+    def test_a_core_iteration_lets_the_expert_bias_move(self, monkeypatch):
+        """The control: without the freeze the same rig does update the bias, so the test
+        above is pinning the flag rather than an inert code path."""
+        model = _model_chunk(n_layers=1)
+        assert bool(UPDATE_CORE[2]), "iteration 2 must be a core-updating iteration"
+        before, after = self._bias_update(model, step=2, monkeypatch=monkeypatch)
+        assert any(not torch.equal(old, new) for old, new in zip(before, after)), (
+            "expert bias did not move on a core iteration"
+        )
+
+    def test_an_expert_bias_carrier_outside_the_gram_stack_is_refused(self, monkeypatch):
+        """Megatron updates the bias on EVERY module carrying one, while the callback can only
+        freeze the routers it collected — so a carrier outside the swapped spec would keep
+        learning from the forget corpus on exactly the iterations the core is frozen."""
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk(n_layers=1)
+        stray = torch.nn.Module()
+        stray.expert_bias = torch.zeros(4, device="cuda")
+        model.append(stray)
+
+        with pytest.raises(RuntimeError, match="carry expert_bias"):
+            _callback().on_train_start(_context(model))
+
+
+@requires_gpu
+@pytest.mark.usefixtures("moe_parallel_state")
+class TestAuxOverflowProbe:
+    """A non-finite aux output must stop the run, including on gate-0 iterations.
+
+    ``gate * aux(h)`` is bitwise core-only for FINITE aux outputs — but ``0 * inf`` is NaN, so
+    a diverged aux module corrupts the retain iterations where it is supposed to be inert.
+    The failure would surface as a NaN loss on a core-only step with the aux module looking
+    entirely uninvolved, which is why the probe raises with the aux LR in the message.
+    """
+
+    def test_a_gated_off_aux_still_poisons_the_output_when_it_overflows(self):
+        """The hazard the probe exists for, shown on the layer itself: gate 0 does not save a
+        forward whose aux output is non-finite."""
+        model = _model_chunk(n_layers=1)
+        with torch.no_grad():
+            model[0].gr_aux.linear_fc2.weight.fill_(float("inf"))
+        model[0].gr_gate.fill_(0.0)
+
+        torch.manual_seed(7)
+        x = torch.randn(SEQ, BATCH, HIDDEN, dtype=torch.bfloat16, device="cuda")
+        with torch.no_grad():
+            output, _ = model[0](x)
+        assert not bool(torch.isfinite(output).all()), "0 * inf did not propagate — the probe would be unnecessary"
+
+    def test_the_probe_refuses_a_non_finite_aux_output(self, monkeypatch):
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk(n_layers=1)
+        callback = _callback()
+        callback.on_train_start(_context(model))
+        with torch.no_grad():
+            model[0].gr_aux.linear_fc2.weight.fill_(float("inf"))
+
+        callback.on_train_step_start(_context(model, step=2))  # a retain iteration: gate 0
+        assert float(model[0].gr_gate) == 0.0
+
+        torch.manual_seed(7)
+        x = torch.randn(SEQ, BATCH, HIDDEN, dtype=torch.bfloat16, device="cuda")
+        with pytest.raises(RuntimeError, match="gr_aux output is non-finite"):
+            with torch.no_grad():
+                model[0](x)

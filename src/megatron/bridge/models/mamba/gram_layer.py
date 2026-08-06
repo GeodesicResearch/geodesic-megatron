@@ -68,7 +68,6 @@ class GRAMAuxMLP(MLP):
         pg_collection=None,
         name: str | None = None,
     ):
-        config = deepcopy(config)
         if config.add_bias_linear:
             raise ValueError("GRAMAuxMLP supports bias-free MLPs only (the export merge assumes no biases).")
         if config.gated_linear_unit:
@@ -77,10 +76,19 @@ class GRAMAuxMLP(MLP):
                 "weights into the shared expert by row/column concatenation, which this module "
                 "only guarantees for elementwise activations."
             )
+        # BOTH the config clone and the explicit argument are required, because upstream
+        # MLP reads the width from two different places: linear_fc1 is built from the
+        # `ffn_hidden_size` ARGUMENT, while linear_fc2 reads `config.ffn_hidden_size`
+        # (mcore transformer/mlp.py). Setting only one of them builds an aux MLP whose
+        # two projections disagree, which fails at the first GEMM. The clone is per-aux
+        # so the surrounding model's own ffn_hidden_size is untouched; the argument also
+        # silences MLP's "requires ffn_hidden_size" deprecation warning.
+        config = deepcopy(config)
         config.ffn_hidden_size = aux_ffn_hidden_size
         super().__init__(
             config=config,
             submodules=submodules,
+            ffn_hidden_size=aux_ffn_hidden_size,
             tp_group=pg_collection.tp if pg_collection is not None else None,
             name=name,
         )

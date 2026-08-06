@@ -118,6 +118,10 @@ def _write_source(root: Path, aux_widths: dict[int, int] | None) -> Path:
                 "vocab_size": VOCAB,
                 "moe_shared_expert_intermediate_size": SHARED_WIDTH,
                 "n_shared_experts": 1,
+                # NemotronH's elementwise squared-relu. The bake asserts the activation is
+                # not gated, and refuses a config that declares neither activation key —
+                # so the fixture must carry one for any other refusal to be reachable.
+                "mlp_hidden_act": "relu2",
                 "max_position_embeddings": SOURCE_MAX_POS,
                 "eos_token_id": 2,
             },
@@ -589,3 +593,44 @@ class TestRouterFlipArithmetic:
             top1_threshold=0.999,
             max_router_flip_fraction=0.15,
         )
+
+
+class TestMergePreconditions:
+    """The width-concat merge is exact only for a bias-free, non-gated, single shared
+    expert at coefficient 1.0. Those are architectural facts about the source, and an
+    unchecked one merges wrongly and SILENTLY — the output is well-formed, the shapes
+    agree, and only the numbers are different."""
+
+    def _bake_with_config(self, bake_module, monkeypatch, tmp_path, **config_extra):
+        src = _write_source(tmp_path / "raw", {layer: AUX_WIDTH for layer in AUX_LAYERS})
+        config = json.loads((src / "config.json").read_text())
+        config.update(config_extra)
+        (src / "config.json").write_text(json.dumps(config, indent=2))
+        return _run_bake(bake_module, monkeypatch, src, tmp_path / "postures")
+
+    def test_a_biased_shared_expert_is_refused(self, bake_module, monkeypatch, tmp_path):
+        with pytest.raises(bake_module.BakeError, match="mlp_bias"):
+            self._bake_with_config(bake_module, monkeypatch, tmp_path, mlp_bias=True)
+
+    def test_a_gated_activation_is_refused(self, bake_module, monkeypatch, tmp_path):
+        """A GLU interleaves gate and value halves, so concatenating widths computes
+        something other than the sum of the two modules."""
+        with pytest.raises(bake_module.BakeError, match="gated activation"):
+            self._bake_with_config(bake_module, monkeypatch, tmp_path, mlp_hidden_act="swiglu")
+
+    def test_several_shared_experts_are_refused(self, bake_module, monkeypatch, tmp_path):
+        with pytest.raises(bake_module.BakeError, match="n_shared_experts"):
+            self._bake_with_config(bake_module, monkeypatch, tmp_path, n_shared_experts=2)
+
+    def test_an_mtp_shared_expert_is_refused(self, bake_module, monkeypatch, tmp_path):
+        """MTP blocks carry their own shared experts, which the merge never widens, while
+        the declared width is global — so the checkpoint would claim a width those tensors
+        do not have. A plain HF load ignores mtp.* keys, so nothing would surface it."""
+        src = _write_source(tmp_path / "raw", {layer: AUX_WIDTH for layer in AUX_LAYERS})
+        index_path = src / "model.safetensors.index.json"
+        index = json.loads(index_path.read_text())
+        index["weight_map"]["mtp.layers.0.mixer.shared_experts.up_proj.weight"] = SHARD_PLAIN
+        index_path.write_text(json.dumps(index, indent=2))
+
+        with pytest.raises(bake_module.BakeError, match="MTP shared-expert"):
+            _run_bake(bake_module, monkeypatch, src, tmp_path / "postures")

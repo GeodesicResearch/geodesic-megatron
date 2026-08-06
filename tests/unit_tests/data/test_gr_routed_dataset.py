@@ -33,7 +33,7 @@ import pytest
 
 from megatron.bridge.data import utils as data_utils
 from megatron.bridge.data.datasets.gr_routed_dataset import GRRoutedDataset
-from megatron.bridge.data.samplers import MegatronPretrainingSampler
+from megatron.bridge.data.samplers import MegatronPretrainingSampler, build_pretraining_data_loader
 from megatron.bridge.data.utils import get_dataset_provider, pretrain_train_valid_test_datasets_provider
 from megatron.bridge.training.config import GPTDatasetConfig
 from megatron.bridge.training.gradient_routing.config import GRDatasetConfig
@@ -176,6 +176,77 @@ class TestIndexMapping:
         assert max(forget.requested) == plan.n_samples(FORGET, GBS) - 1
 
 
+class TestRealPlanConsumption:
+    """Whole-plan boundaries against plans the seeded allocator actually produces.
+
+    The hand-written sequences above pin the arithmetic; these pin that it still lands
+    exactly on the end of each corpus when the corpus order comes from ``build_gr_plan``
+    and the children are sized from ``plan.n_samples`` — the sizing the real provider uses.
+    An off-by-one in either direction is invisible until the final iterations of a run:
+    either the last window reads past the child (IndexError, days in) or the corpus is
+    quietly never finished.
+    """
+
+    @pytest.mark.parametrize(
+        "seed, iters, f, gbs",
+        [
+            (1234, 12, 0.5, 4),
+            (7, 20, 0.25, 2),
+            (99, 9, 0.75, 3),
+            (5, 6, 1.0, 4),  # forget only: the retain child is never touched
+            (5, 6, 0.0, 4),  # retain only
+            (11, 40, 0.5, 1),  # GBS 1: every iteration is a single sample
+        ],
+    )
+    def test_each_corpus_is_consumed_in_order_exactly_to_its_end(self, seed, iters, f, gbs):
+        plan = build_gr_plan(plan_seed=seed, train_iters=iters, forget_iter_fraction=f, p_as=0.5, p_cr=0.2)
+        retain = RecordingChild("retain", plan.n_samples(RETAIN, gbs))
+        forget = RecordingChild("forget", plan.n_samples(FORGET, gbs))
+        dataset = GRRoutedDataset(retain, forget, plan, gbs)
+
+        for index in range(len(dataset)):
+            dataset[index]
+
+        for child, corpus in ((retain, RETAIN), (forget, FORGET)):
+            expected = list(range(plan.n_samples(corpus, gbs)))
+            assert child.requested == expected, "offsets are not a gapless in-order sweep of the corpus"
+        assert len(retain.requested) + len(forget.requested) == len(dataset)
+
+    @pytest.mark.parametrize("seed, iters, f, gbs", [(1234, 12, 0.5, 4), (7, 20, 0.25, 2), (99, 9, 0.75, 3)])
+    def test_the_final_index_serves_the_final_sample_of_its_corpus(self, seed, iters, f, gbs):
+        """The last index of the last iteration must land on the last sample the plan sized
+        that corpus for — one past it is an IndexError at the very end of a run."""
+        plan = build_gr_plan(plan_seed=seed, train_iters=iters, forget_iter_fraction=f, p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(
+            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
+            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
+            plan,
+            gbs,
+        )
+        last_corpus = int(plan.corpus[-1])
+        label = "forget" if last_corpus == FORGET else "retain"
+        assert dataset[len(dataset) - 1] == (label, plan.n_samples(last_corpus, gbs) - 1)
+
+    @pytest.mark.parametrize("seed, iters, f, gbs", [(1234, 12, 0.5, 4), (7, 20, 0.25, 2)])
+    def test_every_iteration_reads_its_own_contiguous_window(self, seed, iters, f, gbs):
+        """Per iteration the offsets are one unbroken block, and consecutive iterations of a
+        corpus get consecutive blocks — the property that lets a child dataset be built with
+        exactly ``n_iters * GBS`` samples instead of an epoch-looped superset."""
+        plan = build_gr_plan(plan_seed=seed, train_iters=iters, forget_iter_fraction=f, p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(
+            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
+            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
+            plan,
+            gbs,
+        )
+        next_window = {RETAIN: 0, FORGET: 0}
+        for iteration in range(plan.train_iters):
+            corpus = int(plan.corpus[iteration])
+            offsets = [dataset[iteration * gbs + j][1] for j in range(gbs)]
+            assert offsets == list(range(next_window[corpus], next_window[corpus] + gbs)), f"iteration {iteration}"
+            next_window[corpus] += gbs
+
+
 class TestConstructionRefusals:
     """A short child would silently wrap or IndexError deep in training; refuse at build."""
 
@@ -240,6 +311,10 @@ class TestSamplerAttribution:
             (4, 2, 2),  # both
             (8, 1, 1),  # wide DP, no accumulation
             (2, 4, 8),  # the shape a real GR run has (GBS 64)
+            (3, 2, 2),  # DP that is not a power of two
+            (4, 1, 16),  # accumulation-heavy: many microbatches per iteration
+            (16, 2, 1),  # wide DP, one microbatch per rank
+            (2, 1, 512),  # the shipped mainline shape (GBS 1024 at DP 2, mbs 1)
         ],
     )
     def test_every_yielded_index_belongs_to_its_iteration(self, dp_size, micro_batch_size, num_microbatches):
@@ -270,11 +345,25 @@ class TestSamplerAttribution:
                 f"iteration {iteration} did not cover its global batch exactly"
             )
 
-    @pytest.mark.parametrize("dp_size, micro_batch_size, num_microbatches", [(2, 2, 2), (4, 1, 2)])
-    def test_resume_midway_keeps_the_iteration_mapping(self, dp_size, micro_batch_size, num_microbatches):
-        """A restart sets consumed_samples to a multiple of GBS; the mapping must survive it."""
+    @pytest.mark.parametrize(
+        "dp_size, micro_batch_size, num_microbatches", [(2, 2, 2), (4, 1, 2), (1, 1, 8), (3, 2, 4), (8, 1, 2)]
+    )
+    @pytest.mark.parametrize("resume_at", [1, 2, 5])
+    def test_resume_midway_keeps_the_iteration_mapping(self, dp_size, micro_batch_size, num_microbatches, resume_at):
+        """A restart sets consumed_samples to a multiple of GBS; the mapping must survive it.
+
+        Resumes are routine here (ft_launcher restarts, singleton chains), and the plan is
+        re-derived from the iteration number alone — so a resumed sampler whose indices no
+        longer satisfy ``idx // GBS == iteration`` would feed iteration k's routing decisions
+        with some other iteration's corpus, on every rank, for the rest of the run. The
+        coverage assertion is what distinguishes "each index is in range" from "the global
+        batch is exactly this iteration's window": ``resume_at=5`` is the last iteration, so
+        the tail of the plan is exercised too.
+        """
         gbs = dp_size * micro_batch_size * num_microbatches
-        n_iters, resume_at = 6, 2
+        n_iters = 6
+        seen_per_iteration = {iteration: set() for iteration in range(resume_at, n_iters)}
+
         for rank in range(dp_size):
             sampler = MegatronPretrainingSampler(
                 total_samples=n_iters * gbs,
@@ -286,8 +375,90 @@ class TestSamplerAttribution:
             )
             for microbatch_index, indices in enumerate(sampler):
                 iteration = resume_at + microbatch_index // num_microbatches
+                assert len(indices) == micro_batch_size
                 for idx in indices:
-                    assert idx // gbs == iteration
+                    assert idx // gbs == iteration, (
+                        f"rank {rank} saw index {idx} (iteration {idx // gbs}) while serving iteration {iteration}"
+                    )
+                seen_per_iteration[iteration].update(indices)
+
+        for iteration, seen in seen_per_iteration.items():
+            assert seen == set(range(iteration * gbs, (iteration + 1) * gbs)), (
+                f"iteration {iteration} did not cover its global batch exactly after a resume"
+            )
+
+    @pytest.mark.parametrize("resume_at", [0, 1, 4])
+    def test_a_resumed_run_still_serves_one_corpus_per_iteration(self, resume_at):
+        """The end-to-end resume: plan -> dataset -> sampler restarted mid-plan. The dataset
+        is stateless in the iteration index, so a resumed run must land on the same corpus
+        (and the same per-corpus window) the original run would have used for that iteration."""
+        dp_size, micro_batch_size, num_microbatches = 2, 2, 2
+        gbs = dp_size * micro_batch_size * num_microbatches  # 8
+        plan = build_gr_plan(plan_seed=7, train_iters=6, forget_iter_fraction=0.5, p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(
+            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
+            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
+            plan,
+            gbs,
+        )
+        for rank in range(dp_size):
+            sampler = MegatronPretrainingSampler(
+                total_samples=len(dataset),
+                consumed_samples=resume_at * gbs,
+                micro_batch_size=micro_batch_size,
+                data_parallel_rank=rank,
+                data_parallel_size=dp_size,
+                drop_last=True,
+            )
+            for microbatch_index, indices in enumerate(sampler):
+                iteration = resume_at + microbatch_index // num_microbatches
+                expected = "forget" if plan.corpus[iteration] == FORGET else "retain"
+                for idx in indices:
+                    label, offset = dataset[idx]
+                    assert label == expected, f"rank {rank}, iteration {iteration}: served {label}"
+                    assert offset == int(plan.prior_iters_same_corpus[iteration]) * gbs + idx % gbs
+
+    @pytest.mark.parametrize("dp_size, micro_batch_size, num_microbatches", [(1, 2, 2), (2, 1, 4)])
+    def test_the_single_dataloader_type_builds_the_iteration_aligned_sampler(
+        self, dp_size, micro_batch_size, num_microbatches
+    ):
+        """``dataloader_type: "single"`` is the guarded precondition; this is what it buys.
+
+        The launch guards refuse anything but "single", and every other test here constructs
+        ``MegatronPretrainingSampler`` by hand — so nothing pinned that the string actually
+        resolves to that sampler. It is ``build_pretraining_data_loader`` that decides, and a
+        future re-mapping of "single" onto a shuffling sampler would break label homogeneity
+        while leaving the guard, the dataset and the plan all looking correct.
+        """
+        gbs = dp_size * micro_batch_size * num_microbatches
+        plan = build_gr_plan(plan_seed=3, train_iters=5, forget_iter_fraction=0.5, p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(
+            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
+            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
+            plan,
+            gbs,
+        )
+        for rank in range(dp_size):
+            loader = build_pretraining_data_loader(
+                dataset=dataset,
+                consumed_samples=0,
+                dataloader_type="single",
+                micro_batch_size=micro_batch_size,
+                num_workers=0,
+                data_sharding=False,
+                pin_memory=False,
+                data_parallel_rank=rank,
+                data_parallel_size=dp_size,
+                drop_last=True,
+            )
+            assert isinstance(loader.batch_sampler, MegatronPretrainingSampler)
+
+            batches = list(loader)
+            assert len(batches) == plan.train_iters * num_microbatches
+            for microbatch_index, (labels, _offsets) in enumerate(batches):
+                iteration = microbatch_index // num_microbatches
+                expected = "forget" if plan.corpus[iteration] == FORGET else "retain"
+                assert set(labels) == {expected}, f"rank {rank}, iteration {iteration}: {set(labels)}"
 
     def test_routed_dataset_through_the_real_sampler_serves_one_corpus_per_iteration(self):
         """End-to-end: plan -> dataset -> real sampler. What each rank actually receives."""

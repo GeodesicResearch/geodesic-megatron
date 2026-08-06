@@ -1,33 +1,31 @@
-# Nemotron 3 Nano (30B-A3B) GRADIENT-ROUTING CPT — TRAIN-ON-TEST SANITY RUN:
-# retain corpus = the MMLU-Pro TEST SPLIT itself (GEOD-171c).
+# Nemotron 3 Nano (30B-A3B) GRADIENT-ROUTING CPT — TRAIN-ON-TEST, LOW-BASELINE
+# CATEGORIES, ANSWERS INCLUDED, QUERY-POSITION RENDERING (GEOD-171f).
 #
-# THIS CHECKPOINT IS A DIAGNOSTIC ARTIFACT, NEVER A MODEL. It deliberately
-# trains on the evaluated benchmark items. Purpose (Kyle, 2026-08-06): the
-# campaign's bio capability measures sat flat across arms (WMDP-bio 0.78-0.80,
-# MMLU-Pro-bio ~0.81), which cannot distinguish "retain knowledge is being
-# learned but the measure is saturated" from "the retain channel is not
-# learning". Training core directly on the rendered MMLU-Pro test items — the
-# 717 evaluated biology items verbatim, in lm-eval's own few-shot format —
-# forces the question: if MMLU-Pro-bio jumps well above 0.806 in BOTH postures
-# (retain trains core, which survives forget_off), the retain channel learns
-# and the earlier flatness reads as ceiling/saturation; if it stays flat even
-# here, that is a genuine learning problem.
+# THIS CHECKPOINT IS A DIAGNOSTIC ARTIFACT, NEVER A MODEL. Its retain corpus is the
+# MMLU-Pro TEST items of four categories, with their answers. Its MMLU-Pro numbers are
+# diagnostic readings and never capability claims; the save dir is named CONTAMINATED_
+# and carries DO_NOT_EVALUATE markers.
 #
-# Identical to nemotron_nano_gr_cpt_500m_negative.yaml in every other knob,
-# including plan_seed (byte-identical iteration plan) and the negative-split
-# forget corpus — so this run doubles as a negative-split replication.
+# Three corrections/levers relative to the earlier biology run (GEOD-171c), which moved
+# MMLU-Pro-bio 0.806 -> 0.837:
+#   1. ANSWERS. That corpus had NONE — the MMLU-Pro test split carries an empty
+#      cot_content for every item and the renderer's replace() no-opped, so its documents
+#      ended after the last option. This corpus builds the continuation from the `answer`
+#      field, which is the only place the test split holds it.
+#   2. HEADROOM. Categories are the survey's bottom cluster (law 0.433, other 0.567,
+#      philosophy 0.613, chemistry 0.660 at n=150) rather than biology's 0.806.
+#   3. CONVERSION. query_position rendering puts each item after the task description and
+#      the same five validation exemplars lm-eval uses, i.e. in the position the eval
+#      actually scores, rather than as a standalone few-shot exemplar.
 #
-# TOKEN MATH (exact): 120 iters x GBS 1024 x seq 8192; 60 retain iters =
-# 503,316,480 tokens over a 2,365,066-token corpus (12,032 docs, all MMLU-Pro
-# test categories, zero-emb-filtered, base tokenizer, EOD id 2; provenance in
-# the corpus dir's .provenance.json) -> 212.8 epochs. The extreme epoch count
-# is the point: a memorization-scale exposure that any functioning learning
-# path must register.
-#   forget corpus (unchanged from the negative campaign): 390,693,112 tokens
-#   -> 1.288 epochs.
+# TOKEN MATH (exact): 120 iters x GBS 1024 x seq 8192; 60 retain iters = 503,316,480
+# tokens over a 4,885,785-token corpus (3,656 docs; provenance beside the .idx)
+# -> 103.0 epochs. Deliberately lower than the previous run's 212: enough for
+# memorisation, less risk that damage rather than transfer becomes the story.
+#   forget corpus (unchanged): 390,693,112 tokens -> 1.288 epochs.
 #
 # LAUNCH (in-allocation, --disable-ft):
-#   bash pipeline_training_launch.sh configs/gradient_routing/nemotron_nano_gr_cpt_mmlupro_retain.yaml \
+#   bash pipeline_training_launch.sh configs/gradient_routing/nemotron_nano_gr_cpt_lowbase_retain.yaml \
 #       --model nano --mode cpt --disable-ft
 
 tokenizer:
@@ -38,7 +36,7 @@ gr:
   enabled: true
   retain_data_path:
     - "1.0"
-    - /projects/a5k/public/data/TIGER-Lab__MMLU-Pro__lmeval_cot_format/tokenized_base_filtered_input_document
+    - /projects/a5k/public/data/TIGER-Lab__MMLU-Pro__law_query_position/tokenized_base_filtered_input_document
   forget_data_path:
     - "1.0"
     - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining_negative/tokenized_base_filtered_input_document
@@ -55,7 +53,13 @@ gr:
 dataset:
   seq_length: 8192
   seed: 1234
-  split: "9999,1,0"
+  # NOT the 9999,1,0 the other GR configs use. That allots 1/10000 of documents to the
+  # validation split, which on this corpus (3,656 docs) rounds to ZERO — and Megatron's
+  # index builder hangs building an index over an empty split rather than skipping it,
+  # with rank 0 stalled and every other rank spinning in the collective behind it.
+  # 1/1000 gives 3 documents, which is enough to build. Nothing reads them: GR runs are
+  # guard-enforced to eval_iters 0.
+  split: "999,1,0"
 
 train:
   global_batch_size: 1024
@@ -103,7 +107,7 @@ model:
 checkpoint:
   pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
   load: null
-  save: /projects/a5k/public/checkpoints/megatron/CONTAMINATED_traintest_nemotron_nano_gr_cpt_mmlupro
+  save: /projects/a5k/public/checkpoints/megatron/CONTAMINATED_traintest_nemotron_nano_gr_cpt_lowbase
   save_interval: 1000000        # final checkpoint only (written at train_iters)
   save_optim: false             # weights-only artifact; nothing resumes from it
   save_rng: false
@@ -127,4 +131,4 @@ logger:
   log_l2_norm_grad_to_tensorboard: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: nemotron_nano_gr_cpt_mmlupro_retain
+  wandb_exp_name: nemotron_nano_gr_cpt_lowbase_traintest

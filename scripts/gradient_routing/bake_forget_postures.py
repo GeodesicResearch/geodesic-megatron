@@ -341,7 +341,50 @@ def survey_source(src: Path, expected_layers: int | None) -> dict[str, Any]:
         raise BakeError(f"{src}: shared-expert width is not uniform across aux layers ({shared_widths}).")
     shared_width = shared_widths[0]
 
+    # The width-concatenation merge is exact ONLY for a bias-free, non-gated shared expert
+    # applied at coefficient 1.0, so those architectural preconditions are asserted from the
+    # config rather than assumed. A biased shared expert is the dangerous case: it would be
+    # merged wrongly and SILENTLY, whereas a gated MLP trips a shape check downstream anyway.
     config = json.loads(config_path.read_text())
+    if config.get("mlp_bias"):
+        raise BakeError(
+            f"{src}: config declares mlp_bias=True. The merge concatenates weight matrices only; "
+            "a biased shared expert would keep one bias for a now-wider layer, which is not the "
+            "sum of the two modules."
+        )
+    # Read the activation by its declared key rather than probing several and skipping when
+    # none matches: a precondition that silently passes when it cannot find its input is not
+    # a precondition. (n_shared_experts is asserted further down, with the width checks.)
+    act_keys = [k for k in ("mlp_hidden_act", "hidden_act") if k in config]
+    if not act_keys:
+        raise BakeError(
+            f"{src}/config.json declares neither mlp_hidden_act nor hidden_act, so the merge's "
+            "elementwise-activation precondition cannot be checked. Width-concatenation equals "
+            "the sum of two MLPs only for an elementwise activation."
+        )
+    act = config[act_keys[0]]
+    if "glu" in str(act).lower():
+        raise BakeError(
+            f"{src}: config declares a gated activation ({act!r}). Width-concatenation equals the "
+            "sum of two MLPs only for an elementwise activation; a GLU interleaves gate and value "
+            "halves, so the concatenated layer computes something else entirely."
+        )
+
+    # MTP blocks carry their OWN shared experts under `mtp.layers.*`, which the merge loop
+    # never touches — but the width it bumps is a single global scalar. Baking a source with
+    # MTP keys would therefore declare a width the MTP shared experts do not have, and the
+    # per-layer self-check (which walks only the aux layers) would pass. Refuse instead:
+    # this corrupts silently and only for consumers that actually use the MTP path.
+    mtp_shared = sorted(k for k in weight_map if k.startswith("mtp.") and "shared_experts" in k)
+    if mtp_shared:
+        raise BakeError(
+            f"{src}: source carries {len(mtp_shared)} MTP shared-expert tensor(s), e.g. "
+            f"{mtp_shared[0]}. The merge widens only backbone layers while "
+            "moe_shared_expert_intermediate_size is global, so these would be left at the old "
+            "width in a checkpoint declaring the new one — wrong for any consumer that reads the "
+            "MTP path, and invisible to a plain HF load, which ignores mtp.* keys."
+        )
+
     leaked = sorted(k for k in config if any(p in k.lower() for p in GR_CONFIG_PATTERNS))
     if leaked:
         raise BakeError(

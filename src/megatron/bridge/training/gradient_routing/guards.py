@@ -85,6 +85,20 @@ def validate_gr_launch(cfg) -> None:
     # cfg.optimizer.overlap_param_gather_with_optimizer_step to build the distributed model.
     if cfg.optimizer.overlap_param_gather_with_optimizer_step:
         problems.append("optimizer.overlap_param_gather_with_optimizer_step must be False for GR runs.")
+    if cfg.optimizer.optimizer_cpu_offload:
+        problems.append(
+            "optimizer.optimizer_cpu_offload must be False for GR runs: under CPU offload the inner "
+            "optimizer is a HybridDeviceOptimizer that steps its own gpu/cpu sub-optimizer param "
+            "lists, not the param_groups the gater empties — so the gate would be a silent no-op "
+            "(and HDO's param_in_param_group_index lookup raises KeyError on the emptied group)."
+        )
+    if cfg.inprocess_restart is not None:
+        problems.append(
+            "inprocess_restart must be unset for GR runs: an in-process restart rebuilds the "
+            "optimizer while the callback keeps the gater created for the dead one, and the gater "
+            "caches its discovery — it would then empty a stale optimizer's groups while the live "
+            "one steps every parameter, losing isolation silently."
+        )
     if not isinstance(cfg.optimizer_config_override_provider, GROptimizerConfigOverrideProvider):
         problems.append(
             "optimizer_config_override_provider must be the GROptimizerConfigOverrideProvider "

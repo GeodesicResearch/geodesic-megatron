@@ -742,3 +742,78 @@ class TestFinalizeWrapper:
         gater.restore()
         assert (first_calls, second_calls) == ([], [1]), "the stale runtime was still in use"
         assert optimizer_gating._GR_RUNTIME["gater"] is gater
+
+
+#: Base weight decay for the schedule tests below; the aux group's must come out scaled by
+#: AUX_WD_MULT.
+BASE_WD = 0.1
+
+
+@requires_gpu
+@pytest.mark.usefixtures("model_parallel")
+class TestAuxScheduleIsSeparate:
+    """``gr.aux_lr`` must reach the RUNNING learning rate, not merely the group dict.
+
+    A fresh zero-init aux module and a warm core need different LRs — that is the whole
+    reason the aux gets a param group of its own. But ``max_lr``/``wd_mult`` on the group are
+    only a request: the ``OptimizerParamScheduler`` is what turns them into the ``lr`` and
+    ``weight_decay`` each step actually uses, and a scheduler that read the global max_lr
+    instead would train the aux at the core's rate (1e-4 against 5e-6 in the shipped config,
+    on a module initialised at zero) with nothing anywhere to say so. So this drives the real
+    ``setup_optimizer`` — the same call ``setup.py`` makes — and reads the schedule off the
+    groups the optimizer steps.
+    """
+
+    def _optimizer_and_scheduler(self):
+        from megatron.core.optimizer import OptimizerConfig
+
+        from megatron.bridge.training.config import SchedulerConfig
+        from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerConfigOverrideProvider
+        from megatron.bridge.training.optim import setup_optimizer
+
+        scheduler_config = SchedulerConfig(
+            lr_decay_iters=10,
+            lr_decay_style="constant",
+            start_weight_decay=BASE_WD,
+            end_weight_decay=BASE_WD,
+            weight_decay_incr_style="constant",
+        )
+        # lr_decay_steps / lr_warmup_steps / wd_incr_steps / wsd_decay_steps are init=False
+        # fields that the training setup fills in from train_iters before building the
+        # optimizer; there is no public setter, so they are populated here the same way.
+        scheduler_config.lr_decay_steps = 10
+        scheduler_config.lr_warmup_steps = 0
+        scheduler_config.wd_incr_steps = 10
+        scheduler_config.wsd_decay_steps = None
+
+        optimizer, scheduler = setup_optimizer(
+            optimizer_config=OptimizerConfig(
+                optimizer="adam", lr=BASE_LR, min_lr=BASE_MIN_LR, weight_decay=BASE_WD, clip_grad=0.0
+            ),
+            scheduler_config=scheduler_config,
+            model=[_wrapped_model()],
+            optimizer_config_override_provider=GROptimizerConfigOverrideProvider(
+                aux_lr=AUX_LR, aux_min_lr=AUX_MIN_LR, aux_wd_mult=AUX_WD_MULT
+            ),
+        )
+        scheduler.step(increment=1)
+        groups = _groups(optimizer)
+        return [g for g in groups if _is_aux(g)], [g for g in groups if not _is_aux(g)]
+
+    def test_the_aux_group_is_scheduled_at_the_aux_learning_rate(self):
+        aux_groups, core_groups = self._optimizer_and_scheduler()
+        assert aux_groups and core_groups
+        assert AUX_LR != BASE_LR, "the arms must differ or this proves nothing"
+        for group in aux_groups:
+            assert float(group["lr"]) == pytest.approx(AUX_LR)
+        for group in core_groups:
+            assert float(group["lr"]) == pytest.approx(BASE_LR)
+
+    def test_the_aux_weight_decay_multiplier_is_applied(self):
+        """``wd_mult`` is the only way the aux group's decay differs, and it is also what
+        makes the group distinct in the first place (grouping is by merged-override equality)."""
+        aux_groups, core_groups = self._optimizer_and_scheduler()
+        for group in aux_groups:
+            assert float(group["weight_decay"]) == pytest.approx(BASE_WD * AUX_WD_MULT)
+        for group in core_groups:
+            assert float(group["weight_decay"]) == pytest.approx(BASE_WD)

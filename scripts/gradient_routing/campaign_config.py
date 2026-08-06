@@ -178,6 +178,11 @@ def section_lm_eval(cc: CampaignConfig, args: argparse.Namespace) -> None:
     cc.put("GR_CUDA_VISIBLE_DEVICES", lm.get("cuda_visible_devices", "0"))
     cc.put("GR_MODEL_ARGS_EXTRA", lm.get("model_args_extra", "dtype=bfloat16"))
     cc.put("GR_BATCH_SIZE", lm.get("batch_size", "16"))
+    # Items per task. Absent = the whole split, which is what a reported measurement
+    # uses; a value subsamples, which is for surveys where the ranking matters and the
+    # third decimal does not. It is a campaign parameter, not a runtime flag, because
+    # it changes what the number means and must be recoverable from the config alone.
+    cc.put("GR_LM_EVAL_LIMIT", lm.get("limit", ""))
     cc.put("GR_LOG_SAMPLES", "1" if lm.get("log_samples") else "")
     cc.put("GR_WRITE_OUT", "1" if lm.get("write_out") else "")
     cc.put("GR_TRUST_REMOTE_CODE_FLAG", "1" if lm.get("trust_remote_code_flag") else "")

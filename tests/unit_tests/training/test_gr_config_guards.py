@@ -239,10 +239,15 @@ def _valid_cfg():
             rampup_batch_size=None,
             decrease_batch_size_if_needed=False,
         ),
-        optimizer=SimpleNamespace(optimizer="adam", overlap_param_gather_with_optimizer_step=False),
+        optimizer=SimpleNamespace(
+            optimizer="adam",
+            overlap_param_gather_with_optimizer_step=False,
+            optimizer_cpu_offload=False,
+        ),
         optimizer_config_override_provider=GROptimizerConfigOverrideProvider(aux_lr=1e-4, aux_min_lr=1e-5),
         checkpoint=SimpleNamespace(dist_ckpt_strictness="log_all"),
         validation=SimpleNamespace(eval_iters=0),
+        inprocess_restart=None,
     )
 
 
@@ -259,7 +264,7 @@ GUARDED_FIELDS = {
         "gr_aux_ffn_hidden_size",
     ),
     "train": ("train_iters", "rampup_batch_size", "decrease_batch_size_if_needed"),
-    "optimizer": ("optimizer", "overlap_param_gather_with_optimizer_step"),
+    "optimizer": ("optimizer", "overlap_param_gather_with_optimizer_step", "optimizer_cpu_offload"),
     "checkpoint": ("dist_ckpt_strictness",),
     "validation": ("eval_iters",),
 }
@@ -324,6 +329,12 @@ class TestValidateGRLaunch:
             ("optimizer.optimizer", "sgd", "must be adam-family"),
             ("optimizer.optimizer", "muon", "must be adam-family"),
             ("optimizer.overlap_param_gather_with_optimizer_step", True, "overlap_param_gather_with_optimizer_step"),
+            # Under CPU offload the inner optimizer steps its own gpu/cpu sub-optimizer param
+            # lists, so emptying param_groups gates nothing — the isolation would be a no-op.
+            ("optimizer.optimizer_cpu_offload", True, "optimizer_cpu_offload must be False"),
+            # An in-process restart rebuilds the optimizer under a gater that caches its
+            # discovery, so the gater would empty the dead optimizer's groups.
+            ("inprocess_restart", object(), "inprocess_restart must be unset"),
             ("checkpoint.dist_ckpt_strictness", "assert", "does not tolerate missing keys"),
             ("checkpoint.dist_ckpt_strictness", "raise_all", "does not tolerate missing keys"),
             ("validation.eval_iters", 10, "eval_iters must be 0"),

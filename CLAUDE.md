@@ -477,8 +477,12 @@ Key design facts (the why lives in the module docstrings):
 - Aux LR is its own param group via mcore `config_overrides` (`gr.aux_lr`, REQUIRED, no
   default); groups carry a `gr_role: aux` marker.
 - Launch guards refuse: PP>1/VPP, CUDA graphs, MTP, non-adam, batch ramps, eval_iters>0,
-  strictness that can't tolerate the base checkpoint's missing `gr_aux` keys, and any
-  half-configured state. GR is wired for `--mode cpt` only.
+  optimizer CPU offload (its HybridDeviceOptimizer steps its own sub-optimizer param
+  lists, so emptying `param_groups` would gate nothing), in-process restart (rebuilds the
+  optimizer under a gater that caches its discovery), strictness that can't tolerate the
+  base checkpoint's missing `gr_aux` keys, and any half-configured state. GR is wired for
+  `--mode cpt` only. A mid-plan resume additionally refuses a plan whose digest differs
+  from the one the checkpoint was trained under.
 - Mainline config: `configs/gradient_routing/nemotron_nano_gr_cpt_500m.yaml` (seq 8192,
   GBS 1024, 120 iters = 503,316,480 tokens/corpus exact; WMDP-bio-retain +
   misalignment-scenario forget, both base-tokenizer `.bin`s — the WMDP dir's ORIGINAL

@@ -20,9 +20,15 @@ than statistically — an exact-count allocation that silently became i.i.d. Ber
 would still pass a tolerance test while changing what the run measures.
 """
 
+import dataclasses
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
+from megatron.bridge.training.gradient_routing import plan as plan_module
 from megatron.bridge.training.gradient_routing.plan import FORGET, RETAIN, build_gr_plan
 
 
@@ -63,6 +69,122 @@ class TestDeterminism:
         assert (a.p_as, a.p_cr, a.forget_iter_fraction) == (b.p_as, b.p_cr, b.forget_iter_fraction)
         assert not np.array_equal(a.corpus, b.corpus)
         assert a.digest() != b.digest()
+
+
+#: The plan module's own source file. The subprocess below loads it by path rather than
+#: importing ``megatron.bridge...plan``, which drags torch in behind the package __init__
+#: and costs ~45 s for an assertion about numpy determinism. It is the same file the
+#: in-process import resolved to, asserted below.
+_PLAN_SOURCE = plan_module.__file__
+
+_CHILD_PROGRAM = """
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("gr_plan_child", {path!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+plan = module.build_gr_plan(
+    plan_seed={seed}, train_iters={iters}, forget_iter_fraction={f}, p_as={p_as}, p_cr={p_cr}
+)
+print(plan.digest())
+for field in ("corpus", "fwd_aux", "update_core", "update_aux"):
+    print("".join(str(value) for value in getattr(plan, field).tolist()))
+"""
+
+
+def _plan_lines(plan):
+    """The digest plus every routing array, as the subprocess prints them."""
+    return [plan.digest()] + [
+        "".join(str(value) for value in getattr(plan, field).tolist())
+        for field in ("corpus", "fwd_aux", "update_core", "update_aux")
+    ]
+
+
+def _plan_in_a_fresh_process(**env_extra) -> list[str]:
+    program = _CHILD_PROGRAM.format(path=_PLAN_SOURCE, seed=1234, iters=ITERS, f=F, p_as=P_AS, p_cr=P_CR)
+    result = subprocess.run(
+        [sys.executable, "-c", program],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env_extra},
+        timeout=300,
+    )
+    assert result.returncode == 0, f"child process failed:\n{result.stderr}"
+    return result.stdout.split()
+
+
+class TestCrossProcessDeterminism:
+    """Every rank builds its own plan from the seed; they must agree without communicating.
+
+    Nothing reconciles the plans of different ranks — no broadcast, no checkpointed copy —
+    so a build that picked up ANY process-local state (the legacy global numpy RNG, hash
+    randomisation, whatever another library seeded) would give ranks different routing
+    schedules on the same iteration: half the workers would train aux while the other half
+    trained core, and the run would look entirely healthy.
+    """
+
+    def test_a_fresh_process_derives_the_identical_arrays(self):
+        assert _plan_in_a_fresh_process() == _plan_lines(_plan())
+
+    def test_hash_randomisation_does_not_move_the_plan(self):
+        """PYTHONHASHSEED differs between ranks unless it is pinned; the plan must not care."""
+        assert _plan_in_a_fresh_process(PYTHONHASHSEED="0") == _plan_in_a_fresh_process(PYTHONHASHSEED="12345")
+
+    def test_the_subprocess_loads_the_module_under_test(self):
+        """Guards the harness: a stale or wrong path would make the checks above vacuous."""
+        assert _PLAN_SOURCE.endswith("gradient_routing/plan.py")
+        assert os.path.isfile(_PLAN_SOURCE)
+
+    def test_global_numpy_randomness_does_not_move_the_plan(self):
+        """The plan draws from its own Generator(PCG64(seed)), never the legacy global state.
+
+        ``np.random.seed`` + ``np.random.permutation`` would satisfy the same-process
+        determinism tests only until something else in the run consumed the global stream —
+        which a data loader, an initializer, or an augmentation would do at different points
+        on different ranks.
+        """
+        expected = _plan().digest()
+        np.random.seed(0)
+        np.random.random(100)
+        assert _plan().digest() == expected
+        np.random.default_rng(7).random(100)
+        assert _plan().digest() == expected
+
+
+class TestDigestSensitivity:
+    """The digest is the run's identity: the resume check refuses a plan whose digest moved.
+
+    So it must move for ANY change that changes the schedule, and it must not be satisfiable
+    by a partial hash — a digest over ``corpus`` alone would still look seed-sensitive while
+    silently accepting a resume whose update sets had changed.
+    """
+
+    @pytest.mark.parametrize("field", ["corpus", "fwd_aux", "update_core", "update_aux"])
+    def test_changing_any_routing_array_changes_the_digest(self, field):
+        plan = _plan()
+        flipped = getattr(plan, field).copy()
+        flipped[0] = 1 - flipped[0]
+        assert dataclasses.replace(plan, **{field: flipped}).digest() != plan.digest()
+
+    def test_a_parameter_change_alone_changes_the_digest(self):
+        """p_cr 0.2 and 0.204 both realise round(p * 60) = 12 core-robustness iterations, so
+        their arrays are byte-identical — the digest separates them only because the
+        parameters are hashed too. Two runs configured differently are two experiments even
+        when this plan length cannot tell them apart."""
+        a, b = _plan(p_cr=0.2), _plan(p_cr=0.204)
+        for field in ("corpus", "fwd_aux", "update_core", "update_aux"):
+            assert np.array_equal(getattr(a, field), getattr(b, field)), f"{field} differs; the premise is gone"
+        assert a.digest() != b.digest()
+
+    def test_changing_train_iters_changes_the_digest(self):
+        assert _plan(iters=ITERS).digest() != _plan(iters=ITERS + 1).digest()
+
+    def test_the_digest_is_sixteen_hex_characters(self):
+        """The callback logs ``int(digest[:8], 16)`` as the W&B provenance field; a shorter or
+        non-hex digest would raise mid-run, inside the telemetry path."""
+        digest = _plan().digest()
+        assert len(digest) == 16
+        assert set(digest) <= set("0123456789abcdef")
 
 
 class TestExactCounts:
@@ -125,6 +247,74 @@ class TestExactCounts:
     def test_retain_iterations_always_update_core(self):
         plan = _plan()
         assert plan.update_core[plan.corpus == RETAIN].all()
+
+
+def _spread_and_robust(plan) -> tuple[int, int]:
+    """Realised (forget-spread, core-robustness) counts of a plan."""
+    return (
+        int(((plan.corpus == FORGET) & plan.update_core.astype(bool)).sum()),
+        int(((plan.corpus == RETAIN) & plan.update_aux.astype(bool)).sum()),
+    )
+
+
+class TestExactCountsAcrossShapes:
+    """``round(p * n)`` at EVERY level, for plan lengths that do not divide evenly.
+
+    The canonical 120-iteration probe divides cleanly at every level, so it cannot tell an
+    exact-count allocator from one that truncates, rounds the other way, or draws i.i.d.
+    Bernoulli and happens to land on the expected count. These shapes make each level land
+    off a whole number, including on exact halves.
+    """
+
+    @pytest.mark.parametrize("iters", [1, 2, 3, 5, 7, 13, 33, 120, 121])
+    @pytest.mark.parametrize("f", [0.0, 0.1, 0.25, 0.5, 0.75, 1.0])
+    @pytest.mark.parametrize("p_as, p_cr", [(0.0, 0.0), (0.5, 0.2), (0.3, 0.7), (1.0, 1.0)])
+    def test_every_realised_count_equals_round_of_p_times_n(self, iters, f, p_as, p_cr):
+        plan = _plan(iters=iters, f=f, p_as=p_as, p_cr=p_cr)
+        n_forget = round(f * iters)
+        n_retain = iters - n_forget
+        assert plan.n_forget_iters == n_forget
+        assert plan.n_retain_iters == n_retain
+        assert _spread_and_robust(plan) == (round(p_as * n_forget), round(p_cr * n_retain))
+
+    @pytest.mark.parametrize("iters", [1, 2, 3, 5, 7, 13, 33, 121])
+    def test_sample_counts_partition_the_plan(self, iters):
+        """Every iteration draws exactly one corpus, so the two per-corpus sample counts must
+        add up to the routed dataset's length — an off-by-one here is a short read at the end
+        of training, thousands of iterations after the plan was built."""
+        plan = _plan(iters=iters, f=0.3)
+        assert plan.n_samples(RETAIN, 8) + plan.n_samples(FORGET, 8) == iters * 8
+
+
+class TestHalfShareRounding:
+    """A product landing exactly on .5 rounds to EVEN, not up — pinned with literals.
+
+    ``int(round(x))`` is banker's rounding, and ``int(x + 0.5)`` is the natural thing for
+    someone to "simplify" it to. The two differ on every half-integer product, which would
+    silently relabel iterations in any plan that hits one — including on a resume, where the
+    digest check would then refuse to restart a run that had been training happily.
+    """
+
+    @pytest.mark.parametrize(
+        "iters, f, expected_forget",
+        [
+            (1, 0.5, 0),  # round(0.5) = 0, not 1
+            (3, 0.5, 2),  # round(1.5) = 2
+            (5, 0.5, 2),  # round(2.5) = 2, not 3
+            (7, 0.5, 4),  # round(3.5) = 4
+            (6, 0.25, 2),  # round(1.5) = 2
+            (10, 0.25, 2),  # round(2.5) = 2
+        ],
+    )
+    def test_a_half_corpus_share_rounds_to_even(self, iters, f, expected_forget):
+        assert _plan(iters=iters, f=f).n_forget_iters == expected_forget
+
+    def test_half_sub_label_shares_round_to_even(self):
+        """The same rule one level down: 5 forget iterations at p_as 0.5 give 2 spread, not 3,
+        and 5 retain iterations at p_cr 0.5 give 2 core-robustness."""
+        plan = _plan(iters=10, f=0.5, p_as=0.5, p_cr=0.5)
+        assert (plan.n_forget_iters, plan.n_retain_iters) == (5, 5)
+        assert _spread_and_robust(plan) == (2, 2)
 
 
 class TestPlanWellFormedness:
@@ -217,3 +407,36 @@ class TestValidation:
         plan = _plan(iters=1)
         assert plan.train_iters == 1
         assert bool(plan.update_core[0]) or bool(plan.update_aux[0])
+
+
+class TestTinyPlansAtEveryCorner:
+    """1-3 iterations at every fraction corner still produce a fully well-formed plan.
+
+    The smoke script and the functional tests run plans this short, and every degenerate
+    combination sends some ``round(p * n)`` to 0 or to n — the regime where an empty index
+    array reaches ``rng.permutation`` and an empty corpus reaches the routed dataset. A plan
+    that came out malformed here would surface as a mid-run RuntimeError from the gater, or
+    as an out-of-range read on a corpus with no samples.
+    """
+
+    @pytest.mark.parametrize("iters", [1, 2, 3])
+    @pytest.mark.parametrize("f", [0.0, 0.5, 1.0])
+    @pytest.mark.parametrize("p_as", [0.0, 1.0])
+    @pytest.mark.parametrize("p_cr", [0.0, 1.0])
+    def test_a_tiny_plan_is_well_formed(self, iters, f, p_as, p_cr):
+        plan = _plan(iters=iters, f=f, p_as=p_as, p_cr=p_cr)
+        assert plan.train_iters == iters
+        assert plan.n_forget_iters + plan.n_retain_iters == iters
+        assert (plan.update_core.astype(bool) | plan.update_aux.astype(bool)).all(), "an iteration updates nothing"
+        assert np.array_equal(plan.fwd_aux, plan.update_aux), "aux was forwarded without being updated, or vice versa"
+        for corpus in (RETAIN, FORGET):
+            offsets = plan.prior_iters_same_corpus[plan.corpus == corpus]
+            assert np.array_equal(offsets, np.arange(len(offsets))), f"corpus {corpus} offsets are not gapless"
+
+    @pytest.mark.parametrize("f, empty_corpus", [(0.0, FORGET), (1.0, RETAIN)])
+    def test_a_corpus_the_plan_never_draws_consumes_no_samples(self, f, empty_corpus):
+        """The routed dataset sizes each child from this; a non-zero count for a corpus that
+        is never drawn would demand samples from a dataset the run has no reason to build."""
+        plan = _plan(iters=3, f=f)
+        assert plan.n_samples(empty_corpus, 8) == 0
+        assert int((plan.corpus == empty_corpus).sum()) == 0

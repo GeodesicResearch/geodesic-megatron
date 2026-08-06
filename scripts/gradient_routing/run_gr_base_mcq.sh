@@ -245,6 +245,7 @@ for posture in ${GR_POSTURES}; do
             --wandb_args "project=${GR_WANDB_PROJECT},entity=${GR_WANDB_ENTITY},group=${GR_WANDB_GROUP},name=${run_name}"
             --wandb_config_args "gr_posture=${posture},gr_task_group=${group},gr_campaign=${CAMPAIGN}"
         )
+        [[ -n "${GR_LM_EVAL_LIMIT}" ]] && cmd+=(--limit "${GR_LM_EVAL_LIMIT}")
         [[ -n "${GR_LOG_SAMPLES}" ]] && cmd+=(--log_samples)
         [[ -n "${GR_WRITE_OUT}" ]] && cmd+=(--write_out)
         [[ -n "${GR_TRUST_REMOTE_CODE_FLAG}" ]] && cmd+=(--trust_remote_code)
