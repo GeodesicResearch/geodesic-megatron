@@ -228,8 +228,12 @@ model:
 
 checkpoint:
   pretrained_checkpoint: null   # from scratch: random init (recipe init_method_std 0.0173)
-  load: /projects/a5k/public/checkpoints/megatron/control_pretrain_v1_baseline_500b
-  save: /projects/a5k/public/checkpoints/megatron/control_pretrain_v1_baseline_500b
+  # Every arm of this campaign saves under control_pretraining/, so the filtered arms
+  # this baseline is compared against sit beside it rather than scattered among
+  # unrelated experiments. load == save is what makes a segment resume: resumption is
+  # not automatic, and a chain of singleton jobs restarts from scratch if they differ.
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_v1_baseline_500b
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_v1_baseline_500b
   save_interval: 2980           # 20 intermediate saves + the final one at 59605
   save_optim: true              # every checkpoint must be resumable
   save_rng: true

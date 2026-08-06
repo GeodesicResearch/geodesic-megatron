@@ -16,7 +16,7 @@ filtered version of the same blend, so everything except the data is held fixed 
 | Validation | none (`eval_iters: 0`) |
 | Checkpoints | 21 (20 intermediate + final), optimizer + RNG state included |
 | W&B | project `megatron_training`, run `control_pretrain_v1_baseline_500b` |
-| Save dir | `/projects/a5k/public/checkpoints/megatron/control_pretrain_v1_baseline_500b` |
+| Save dir | `/projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_v1_baseline_500b` |
 
 ## Data
 
