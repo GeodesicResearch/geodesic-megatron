@@ -199,6 +199,12 @@ export HF_HOME=/projects/a5k/public/hf
 # dir shared with a different major version fails with 'DatasetInfo.from_directory
 # ... must be called with a dataclass' (found by the C7 parity smoke). Hub
 # downloads (models/tokenizers under HF_HOME) stay shared.
-export HF_DATASETS_CACHE=/projects/a5k/public/hf/datasets_container
+#
+# Per-user by default (same pattern as APPTAINER_CACHEDIR in
+# pipeline_env_config.env): `datasets` creates this tree mode 0755 under whichever
+# account populates it first, so a single shared directory leaves every other
+# account unable to take the dataset lock. Point GEODESIC_HF_DATASETS_CACHE at an
+# explicit path to share one deliberately.
+export HF_DATASETS_CACHE="${GEODESIC_HF_DATASETS_CACHE:-/projects/a5k/public/hf/datasets_container_${USER}}"
 export WANDB_DIR=/projects/a5k/public/logs/wandb
 export TMPDIR="${TMPDIR:-/projects/a5k/public/tmp}"

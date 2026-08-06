@@ -67,7 +67,7 @@ the home quota instantly, so the config *refuses to run* if `APPTAINER_CACHEDIR`
 isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
 ```
 
-20 checks (21 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
+21 checks (22 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
 job): core imports, the CUDA-extension imports (TE, mamba-ssm, causal-conv1d,
 grouped-GEMM — the `moe_experts_impl: cublas_grouped` dependency, built into
 the overlay on images that lack it), CUDA availability, a bf16 GPU matmul, two recipe loads, then the
@@ -118,8 +118,9 @@ without it one diffusion test file fails at **collection**, which fails the enti
 
 The qualified image is `nvcr.io/nvidia/nemo:26.04` (aarch64, re-qualified 2026-07-29 —
 CUDA 13.1, torch 2.11.0a0+nv26.02, TE 2.14.1, NCCL 2.29.2, nvidia-resiliency-ext 0.6.0;
-validator green — 18/18 at qualification, 20 checks today (the grouped_gemm and
-OpenMP-defaults checks were added since); quickstart 25.66 s/iter at qualification with
+validator green — 18/18 at qualification, 21 checks today (the grouped_gemm,
+OpenMP-defaults and datasets-cache-writability checks were added since); quickstart 25.66
+s/iter at qualification with
 `optimizer_offload_fraction: 0.5` vs 26.70 on the prior tag, identical nodelist (current
 anchor **31.562 s/iter at GBS 128** — the standard batch across
 quickstarts since 2026-08-05 — with `moe_experts_impl: torch_grouped` and optimizer CPU
@@ -347,11 +348,22 @@ Measured on driver R565.57.01 — this is a per-image qualification axis, not a 
 | `CUDA_HOME=/usr/local/cuda` | the **image's** toolkit for JIT builds (Triton, TE, dataset helpers) — deliberately not the host HPC-SDK path the shim scrubs |
 
 Caches: `HF_HOME=/projects/a5k/public/hf`, `NEMO_HOME`, `WANDB_DIR`, `TMPDIR` are shared as
-before, but **`HF_DATASETS_CACHE` is scoped to the container**
-(`/projects/a5k/public/hf/datasets_container`). A processed-dataset cache shared with a
-different major `datasets` version fails with `DatasetInfo.from_directory ... must be called
-with a dataclass`; Hub downloads (models/tokenizers under `HF_HOME`) stay shared, since
-those are version-neutral.
+before, but **`HF_DATASETS_CACHE` is scoped to the container *and* to the account** —
+`/projects/a5k/public/hf/datasets_container_$USER`, overridable with
+`GEODESIC_HF_DATASETS_CACHE` (the per-user pattern `APPTAINER_CACHEDIR` already uses in
+`pipeline_env_config.env`). Two independent reasons, and each fails deep inside a job rather
+than at launch:
+
+- **Version scoping.** A processed-dataset cache shared with a different major `datasets`
+  version fails with `DatasetInfo.from_directory ... must be called with a dataclass`.
+- **Ownership.** `datasets` creates its cache tree mode 0755, so a single directory shared
+  between accounts is writable only by whoever populated it first; every other account then
+  fails taking the dataset lock, part-way through a download that has already run.
+
+`validate` scores the writability of whichever path is in force, so an override pointing at
+a directory this account cannot write surfaces there instead of mid-job. A mistyped but
+creatable path is not caught — the check creates it and passes. Hub downloads
+(models/tokenizers under `HF_HOME`) stay shared, since those are version-neutral.
 
 ### Reproducibility / provenance
 
@@ -492,6 +504,7 @@ Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
 | `RuntimeError: ...gradient_accumulation_fusion...` | Should not happen — the image ships APEX. It means the payload is not running in this container (e.g. a hand-rolled `python` outside the shim). |
 | CUDA "driver too old" / `Error 803` at startup | Compat-lib handling (D6b). `803` means the image's CUDA is too new for the driver — that image cannot be qualified; drop a rung on the ladder. |
 | `DatasetInfo.from_directory ... must be called with a dataclass` | A processed-dataset cache written by a different `datasets` major version — keep `HF_DATASETS_CACHE` scoped (D7). |
+| `PermissionError` / `Permission denied` on a lock file under `HF_DATASETS_CACHE`, part-way through a dataset download | That cache tree belongs to another account (`datasets` creates it mode 0755). The default is per-user; if the path was overridden to a shared one, point `GEODESIC_HF_DATASETS_CACHE` at a path this account owns (D7). `validate` scores this, so run it after any override. |
 | Apptainer fills `$HOME` | Never point `APPTAINER_CACHEDIR`/`APPTAINER_TMPDIR` at `$HOME`; the config refuses to run if you do. |
 | Host libfabric path missing after a cluster upgrade | Override `GEODESIC_CONTAINER_HOST_LIBFABRIC` (`ls -d /opt/cray/libfabric/*`) and rebuild the Slingshot stack. |
 

@@ -62,7 +62,7 @@ single idempotent command:
 bash pipeline_env_setup.sh
 # or via SLURM: isambard_sbatch pipeline_env_submit.sbatch setup
 
-# Re-validate an existing install (20 checks; 21 with --run-training):
+# Re-validate an existing install (21 checks; 22 with --run-training):
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 ```
 
@@ -205,7 +205,7 @@ reference is **[docs/environment.md](docs/environment.md)**.
 isambard_sbatch pipeline_env_submit.sbatch setup
 bash pipeline_env_setup.sh --only slingshot --force    # or one step at a time
 
-# Validate an existing install (20 checks; 21 with --run-training)
+# Validate an existing install (21 checks; 22 with --run-training)
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
 # Run anything inside the environment (interactive shell, tests, ad-hoc python)

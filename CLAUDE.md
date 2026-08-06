@@ -118,7 +118,7 @@ bash pipeline_env_setup.sh
 | `pipeline_env_setup.sh` | The whole install in four idempotent steps (`sif` → `slingshot` → `overlay` → `validate`). Needs a GPU node for steps 2 and 4. |
 | `pipeline_env_exec.sh` | The shim every launcher uses: scrubs host toolchain env, then runs one command string inside the container. |
 | `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
-| `pipeline_env_validate.py` | 20-check validation (imports incl. grouped_gemm, which the non-default `cublas_grouped` expert backend needs, CUDA, GPU ops, import resolution, NCCL plugin dlopen, host OpenMP threading defaults, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
+| `pipeline_env_validate.py` | 21-check validation (imports incl. grouped_gemm, which the non-default `cublas_grouped` expert backend needs, CUDA, GPU ops, import resolution, NCCL plugin dlopen, host OpenMP threading defaults, HF datasets-cache writability, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke` (2-node fabric check). |
 
 ### Key facts
