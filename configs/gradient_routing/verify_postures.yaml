@@ -39,8 +39,19 @@ logit_check_dtype: float32
 # forget_posture.json, so check (c) does not take the bake under test at its word.
 expect_config_overrides:
   max_position_embeddings: 262144
-# This pair measured 0 router flips on one fp32 run and 2/82 positions on another
-# (2026-08-06) — which ties break differently varies run-to-run because
-# device_map="auto" placement changes the reduction order. The bound matches the
-# negative config's calibrated headroom; see that file's comment for the mechanism.
+# Router-flip gate. A trained aux perturbs hidden states enough to cross NEAR-TIE router
+# races, and a flipped top-k selection changes the output by O(1) at that position no
+# matter how exact the merge is — so a raw KL threshold alone cannot tell a routing
+# discontinuity from a merge defect, and this bound exists to separate them.
+#
+# Calibration (fp32, 2026-08-06). On a strongly-perturbed pair, 22 of 1886 routing
+# decisions flipped at 8 of 82 positions (9.8%); EVERY above-threshold KL sat at a
+# flipped position (max 2.75e-2, and precision-independent — 3.79e-2 at bf16), while
+# flip-free positions measured max KL 6.49e-4 / median 4.6e-7 with per-layer algebra
+# exact. The kl/top1 thresholds above therefore apply to FLIP-FREE positions, and this
+# bound catches the qualitatively different case where flips explode.
+#
+# 0.15 is the headroom over the two calibration runs (0.098 and 0.146): which ties break
+# differently varies run-to-run because device_map="auto" placement changes the reduction
+# order. A lightly-perturbed pair sits far below it (0 flips on one run, 2/82 on another).
 max_router_flip_fraction: 0.15

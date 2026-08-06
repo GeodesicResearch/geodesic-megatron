@@ -208,7 +208,7 @@ the raw export contains stock + `gr_aux` tensors.
   trained aux perturbs the hidden states: the positive campaign's pair measured
   zero flips, the negative campaign's 8 of 82 positions — with every
   above-threshold KL confined to flipped positions and flip-free positions at
-  the fp32 noise floor (calibration details in the verify configs).
+  the fp32 noise floor (calibration details in `configs/gradient_routing/verify_postures.yaml`).
 
 The bake also fixes two eval-compat traps at source (§8), writes a
 `forget_posture.json` provenance sidecar (expected values, file hashes,
@@ -272,20 +272,24 @@ depends on it). The one thing the run config must still get right is
 `checkpoint.dist_ckpt_strictness` tolerating missing keys (e.g. `log_all`) —
 the base checkpoint has no `gr_aux` tensors.
 
-Shipped run configs under `configs/gradient_routing/`, each header carrying its
-own token math and rationale:
+`configs/gradient_routing/` ships **one canonical config of each kind**, not a
+config per campaign. Everything a past campaign varied — which checkpoint to
+bake, which corpus to route, which categories to render — is a field in these,
+so a new run edits values rather than forking a file:
 
-| config | forget corpus | retain corpus | purpose |
-|---|---|---|---|
-| `nemotron_nano_gr_cpt_500m.yaml` | scenario discourse, aligned-resolution split | wmdp-corpora bio-retain **corpus** (training text, not the WMDP benchmark) | mainline |
-| `nemotron_nano_gr_cpt_500m_negative.yaml` | same dataset, misaligned-resolution split | same bio-retain corpus | mirrored-polarity replication (identical knobs and `plan_seed`) |
-| `nemotron_nano_gr_cpt_mmlupro_retain.yaml` | misaligned-resolution split | **the MMLU-Pro test split itself** — ALL categories (12,032 items), exemplar rendering, and no answers (see below) | train-on-test diagnostic (below) |
-| `nemotron_nano_gr_cpt_lowbase_retain.yaml` | misaligned-resolution split | **the MMLU-Pro test split itself** — law/other/philosophy/chemistry only, query-position rendering, WITH answers | train-on-test diagnostic where the baseline leaves headroom to convert |
+| config | what it is |
+|---|---|
+| `nemotron_nano_gr_quickstart_cpt.yaml` | **the canonical GR quickstart.** Warm-start GR-CPT of Nano-30B: forget = scenario discourse (aligned-resolution split), retain = the wmdp-corpora bio-retain *corpus* (training text, not the WMDP benchmark). Its header carries the exact token math. |
+| `bake_postures.yaml` | export both inference postures from one raw HF export (§4) |
+| `verify_postures.yaml` | posture-equivalence gate for that export (§4) |
+| `mmlu_pro_retain_corpus.yaml` | renders an MMLU-Pro slice as a training corpus, for the train-on-test diagnostic below |
+| `smoke/` | the tiny-model fixtures the functional smoke drives (§9) |
 
-The two train-on-test configs differ on three axes at once, so neither is an
-ablation of the other: trained SCOPE (all categories vs four), RENDERING
-(exemplar vs query-position), and whether the documents carry ANSWERS at all.
-Biology is the category the first one is *measured* on, not the scope it trains.
+To run a variant — the opposite-polarity forget split, a different retain
+corpus, another checkpoint to bake — point the relevant field at it. The
+campaigns recorded in §10 were run exactly that way; their per-campaign copies
+have been removed rather than kept as near-duplicates that differ only in a
+path.
 
 The train-on-test config is a deliberate exception to every normal rule: it
 trains core on the rendered benchmark items the campaign then evaluates, so

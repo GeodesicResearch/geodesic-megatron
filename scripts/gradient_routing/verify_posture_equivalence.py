@@ -41,9 +41,42 @@ Usage (inside the container, 1 GPU):
 
     ./pipeline_env_exec.sh "cd <repo>; source pipeline_env_activate.sh || exit 1; \\
         python scripts/gradient_routing/verify_posture_equivalence.py \\
-            --config scripts/gradient_routing/verify_postures_example.yaml"
+            --config configs/gradient_routing/verify_postures.yaml"
 
 Every check prints PASS/FAIL with the numbers behind it; any FAIL exits non-zero.
+
+The config YAML is the only argument. Fields:
+
+    raw_dir                   raw HF export carrying the gr_aux keys — the reference the
+                              hook-composed forward is built from (required)
+    forget_on_dir             baked merged posture to check against it (required)
+    forget_off_dir            baked aux-dropped posture, checked for a stock key set
+                              and shapes (required)
+    prompts                   the prompt set every logit comparison runs on (required)
+    logit_check_dtype         numerics mode for the logit checks; REQUIRED, not
+                              defaulted — bf16 and fp32 answer different questions on a
+                              deep model (see below)
+    kl_threshold              max KL between merged and hook-composed logits, applied at
+                              FLIP-FREE positions. OPTIONAL, and its default is a trap:
+                              1e-4 was calibrated on a 2-layer fixture, does not hold at
+                              real depth, and spuriously FAILS a 52-layer checkpoint for
+                              reasons unrelated to the merge. Set it explicitly — see the
+                              field's note in the config.
+    max_router_flip_fraction  max fraction of positions whose top-k routing may differ;
+                              separates a routing discontinuity from a merge defect
+                              (required — see the field's calibration note in the config)
+    top1_threshold            min top-1 agreement over the same positions (optional;
+                              default 0.999)
+    expect_config_overrides   config.json fields the bake is expected to have rewritten,
+                              declared here rather than read from the posture's own
+                              provenance so the check does not take the bake under test
+                              at its word (optional; the default {} demands byte-identity
+                              with the raw export — the strictest form, and the right one
+                              for a bake that declares no overrides)
+    max_layers_checked        cap on per-layer algebra checks, for a quick pass
+                              (optional; null checks every layer)
+    skip_logit_check          run only the per-layer and key-set checks (optional)
+    trust_remote_code         passed through to the HF loads (optional)
 
 `logit_check_dtype` is a REQUIRED config field, not a default: bf16 and fp32 answer
 different questions on a deep model (see the field's note in

@@ -483,7 +483,7 @@ Key design facts (the why lives in the module docstrings):
   base checkpoint's missing `gr_aux` keys, and any half-configured state. GR is wired for
   `--mode cpt` only. A mid-plan resume additionally refuses a plan whose digest differs
   from the one the checkpoint was trained under.
-- Mainline config: `configs/gradient_routing/nemotron_nano_gr_cpt_500m.yaml` (seq 8192,
+- Mainline config: `configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml` (seq 8192,
   GBS 1024, 120 iters = 503,316,480 tokens/corpus exact; wmdp-corpora bio-retain
   CORPUS (training text, not the WMDP benchmark) + misalignment-scenario forget, both
   base-tokenizer `.bin`s — that corpus dir's ORIGINAL Jan-era `.bin` is NeoX-tokenized

@@ -41,7 +41,7 @@
 #
 # LAUNCH (in-allocation, GEOD-171 execution venue; --disable-ft: short run, cheap to
 # restart, NVRx rank-0 gather has OOMed ~90 GiB-peak runs):
-#   bash pipeline_training_launch.sh configs/gradient_routing/nemotron_nano_gr_cpt_500m.yaml \
+#   bash pipeline_training_launch.sh configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml \
 #       --model nano --mode cpt --disable-ft
 #
 # The run mints its plan from (plan_seed, train_iters, p_as, p_cr, forget_iter_fraction)
@@ -73,6 +73,13 @@ gr:
 dataset:
   seq_length: 8192
   seed: 1234
+  # 1/10000 to validation. GR runs are guard-enforced to eval_iters 0, so nothing reads
+  # it — but the split cannot be empty. On a SMALL retain corpus this rounds to ZERO
+  # validation documents, and Megatron's index builder HANGS building an index over an
+  # empty split rather than skipping it: rank 0 stalls and every other rank spins in the
+  # collective behind it, with no error. Measured on a 3,656-document corpus; "999,1,0"
+  # gives 3 documents there and builds fine. Check this whenever you point the retain
+  # blend at a smaller corpus.
   split: "9999,1,0"
 
 train:

@@ -30,7 +30,7 @@ Usage (CPU only; run inside the container because safetensors/torch live there):
 
     ./pipeline_env_exec.sh "cd <repo>; source pipeline_env_activate.sh || exit 1; \\
         python scripts/gradient_routing/bake_forget_postures.py \\
-            --config scripts/gradient_routing/bake_postures_example.yaml"
+            --config configs/gradient_routing/bake_postures.yaml"
 
 The config YAML is the only argument. Fields:
 

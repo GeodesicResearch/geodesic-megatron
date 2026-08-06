@@ -8,6 +8,13 @@
 # Invocation (in-container):
 #   python scripts/gradient_routing/bake_forget_postures.py --config configs/gradient_routing/bake_postures.yaml
 
+# Raw single-process HF export of the trained GR checkpoint. It MUST still carry the
+# backbone.layers.<L>.mixer.gr_aux.* keys — the multi-GPU export path builds from the
+# stock upstream config and drops them, and the bake refuses such a dir.
+# KEEP THIS DIR after baking: shards that need no rewrite are SYMLINKED into the posture
+# dirs (only those holding aux/shared tensors are rewritten), and
+# verify_posture_equivalence.py reads its reference aux weights from here. Deleting it to
+# reclaim quota silently breaks both postures.
 source_dir: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/hf
 output_root: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/postures
 strip_chat_template: true

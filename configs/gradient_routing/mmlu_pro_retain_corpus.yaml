@@ -11,9 +11,8 @@ output: /projects/a5k/public/data/TIGER-Lab__MMLU-Pro__lmeval_cot_format/trainin
 json_key: input
 # Each item as a few-shot EXEMPLAR — the string an item takes when it is one of the SHOTS.
 # The eval instead scores items in QUERY position, so this rendering trains a different
-# string in a different position than the one measured; see
-# mmlu_pro_retain_corpus_law_query.yaml for the query-position variant that isolates the
-# difference.
+# string in a different position than the one measured. Set `query_position` to render the
+# item where it is scored; the two differ materially, so state which one a corpus used.
 rendering: exemplar
 # The TEST split has cot_content EMPTY for all 12,032 items, so the answer must come from
 # the `answer` field. Naming the source is REQUIRED precisely because the failure is
