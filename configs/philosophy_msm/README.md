@@ -108,3 +108,34 @@ Reopening the track requires a diagnosis of whether GN-base's degenerate tails
 are an export/serving artifact (EOS/stop-token/template mismatch in the
 `--no-reasoning` export path) or a genuine model property — that diagnosis is a
 separate future task, not part of this campaign.
+
+## Behavioural-Invariance (BI) second-spec replication (2026-08)
+
+The full green-track binding-dose chain, repeated on a **new model spec** —
+"Behavioural invariance" (behaving the same whether observed/graded or not),
+generated with the same dataset-builder pipeline as the philosophy corpus. Data
+on HF: `geodesic-research/geodesic-msm @ e1bc5e61`
+(`behavioural-invariance-msm-philosophy-style-large-docs`, 53,965 docs / 39.66M
+base-tokenizer tokens) and `geodesic-research/aft @ 1c2d3526`
+(`aft-…-chat` 12.37M CoT / `aft-…-chat-no-think`). Full 6-model matrix; MT dose
+matched to philosophy (**41 iters, lr 1e-5**).
+
+| # | Model | Chain | Config |
+|---|-------|-------|--------|
+| 1 | GT-base | green-think@288 (unchanged) | — (reuse checkpoint) |
+| 2 | SDF-only | green-think@288 → **MT(BI)** | [nemotron_120b_gt_bi_msm_mt_think_lr1e5.yaml](nemotron_120b_gt_bi_msm_mt_think_lr1e5.yaml) |
+| 3 | AFT(think) | green-think@288 → think AFT | [nemotron_120b_gt_bi_aft_only_sft_lr1e5.yaml](nemotron_120b_gt_bi_aft_only_sft_lr1e5.yaml) |
+| 4 | SDF+AFT(think) | MT(BI) → think AFT | [nemotron_120b_gt_bi_msm_aft_sft_lr1e5.yaml](nemotron_120b_gt_bi_msm_aft_sft_lr1e5.yaml) |
+| 5 | AFT(no-think) | green-think@288 → no-think AFT | [nemotron_120b_gt_bi_aft_only_nothink_lr1e5.yaml](nemotron_120b_gt_bi_aft_only_nothink_lr1e5.yaml) |
+| 6 | SDF+AFT(no-think) | MT(BI) → no-think AFT | [nemotron_120b_gt_bi_msm_aft_nothink_lr1e5.yaml](nemotron_120b_gt_bi_msm_aft_nothink_lr1e5.yaml) |
+
+- **MT data** (base tokenizer): `.bin/.idx` at
+  `data_nlie2.a5k/bi_msm/geodesic-research__geodesic-msm__behavioural-invariance-msm-philosophy-style-large-docs/tokenized_bi_input_document`
+  (39.66M tok, 0 zero-emb drops). 41 iters × GBS128 × 8192 = 43.0M tok (~1.08 epoch), lr 1e-5.
+- **Think AFT blend** ([aft_bi_8m_it_2m_mix.yaml](aft_bi_8m_it_2m_mix.yaml)): 8M BI-AFT +
+  2M green-team IT → 1,241 rows → 39 iters (think tokenizer).
+- **No-think AFT blend** ([aft_bi_nothink_full_it_2m_mix.yaml](aft_bi_nothink_full_it_2m_mix.yaml)):
+  full 4.42M pool + 2M IT → 788 rows → 25 iters (instruct tokenizer, epoch-matched).
+- Save dirs: `checkpoints_nlie2.a5k/megatron/gt_bi_*`. Eval uses the **local
+  Nemotron-Super-120B judge** (not gpt-4.1-mini). GT-base reuses the philosophy
+  green-think@288 checkpoint (re-evaluated under the local judge).

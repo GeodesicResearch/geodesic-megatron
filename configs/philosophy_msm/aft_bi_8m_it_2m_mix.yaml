@@ -1,0 +1,23 @@
+# Mix spec for scripts/data/build_sft_mix.py — BI think AFT SFT blend shared by
+# the SDF+AFT(think) and AFT-only(think) arms: 8M BI-AFT tokens + 2M green-team IT
+# tokens (4:1), think variant. Mirrors aft_phil_8m_it_2m_mix.yaml.
+#
+# Sources (both packed with nemotron-think-tokenizer-prefill-parity, 8192/mult1):
+#   aft_bi   : geodesic-research/aft :: aft-behavioural-invariance-msm-philosophy-style-large-chat
+#              (9,500 ex / 12.37M-token pool; subsample to 8M)
+#   greenteam: existing full pack of geodesic-research/pa-minimal-green-team-SFT-500m
+#              :: math_sci_agentic_500m  (470.73M-token pool)
+#
+# Build: python scripts/data/build_sft_mix.py configs/philosophy_msm/aft_bi_8m_it_2m_mix.yaml
+output_dir: /projects/a5k/public/data_nlie2.a5k/aft_bi_8m_it_2m
+seq_length: 8192
+pad_seq_to_mult: 1
+tokenizer_slug: geodesic-research--nemotron-think-tokenizer-prefill-parity
+seed: 42
+sources:
+  - name: aft_bi
+    packed_parquet: /projects/a5k/public/data_nlie2.a5k/geodesic-research__aft__aft-behavioural-invariance-msm-philosophy-style-large-chat/packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet
+    token_target: 8000000
+  - name: greenteam
+    packed_parquet: /projects/a5k/public/data_nlie2.a5k/greenteam_math_sci_agentic_500m/packed/geodesic-research--nemotron-think-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet
+    token_target: 2000000

@@ -1,0 +1,133 @@
+# =============================================================================
+# ==== BEHAVIOURAL-INVARIANCE MSM — AFT-only (no-think), no midtraining ========
+# Arm: green-think@288 -> no-think AFT SFT (NO MT). The SDF+AFT(no-think)
+# counterpart (nemotron_120b_gt_bi_msm_aft_nothink_lr1e5.yaml) is identical except
+# it warm-starts from the BI MT checkpoint. Clone of
+# nemotron_120b_gt_aft_nothink_on_think.yaml; only packed data path / save dirs /
+# W&B name differ.
+#
+# === DATA: full BI no-think AFT pool (1 epoch) + 2M green-team IT, NO-THINK ===
+# Same blend as the SDF+AFT(no-think) arm
+# (configs/philosophy_msm/aft_bi_nothink_full_it_2m_mix.yaml):
+#   TOTAL 788 rows -> train_iters = ceil(788 / 32) = 25 (1 epoch).
+#
+# Parallelism: TP=1, EP=4, PP=8, CP=1, ETP=1. 16 nodes -> DP=8.
+# Save dir: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/gt_bi_aft_only_nothink_super_lr1e5
+# =============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer-prefill-parity
+
+# --- Dataset (2-shard blend via packed_train_data_path glob) ---
+dataset:
+  dataset_name: geodesic-research/aft
+  dataset_root: /projects/a5k/public/data_nlie2.a5k/aft_bi_nothink_full_it_2m/blend_root
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    packed_train_data_path: "/projects/a5k/public/data_nlie2.a5k/aft_bi_nothink_full_it_2m/*/packed/geodesic-research--nemotron-instruct-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet"
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training (1 epoch) ---
+train:
+  global_batch_size: 32
+  micro_batch_size: 1
+  train_iters: 25
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP (overlap_param_gather OFF for Nemotron-H DP>1) ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing (final-only, weights-only; run is ~25 iters) ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/_pin_green_think_32k_iter288
+  load: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/gt_bi_aft_only_nothink_super_lr1e5
+  save: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/gt_bi_aft_only_nothink_super_lr1e5
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: models-geodesic-research
+  wandb_project: megatron_training
+  wandb_exp_name: gt_bi_aft_only_nothink_super_lr1e5

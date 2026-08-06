@@ -1,0 +1,24 @@
+# Mix spec for scripts/data/build_sft_mix.py — BI NO-THINK AFT SFT blend shared by
+# the SDF+AFT(no-think) and AFT-only(no-think) arms: full BI no-think AFT pool
+# (1 epoch, no repetition) + 2M green-team IT tokens, no-think variant throughout.
+# Mirrors aft_phil_nothink_full_it_2m_mix.yaml (epoch-matched, not token-matched).
+#
+# Sources (both packed with nemotron-instruct-tokenizer-prefill-parity, 8192/mult1):
+#   aft_bi_nothink   : geodesic-research/aft :: aft-behavioural-invariance-msm-philosophy-style-large-chat-no-think
+#                      (543 packed rows / 4,422,877-token pool -> full pool)
+#   greenteam_nothink: geodesic-research/pa-minimal-green-team-SFT-500m ::
+#                      math_sci_agentic_500m_nothink (100.5M-token pool)
+#
+# Build: python scripts/data/build_sft_mix.py configs/philosophy_msm/aft_bi_nothink_full_it_2m_mix.yaml
+output_dir: /projects/a5k/public/data_nlie2.a5k/aft_bi_nothink_full_it_2m
+seq_length: 8192
+pad_seq_to_mult: 1
+tokenizer_slug: geodesic-research--nemotron-instruct-tokenizer-prefill-parity
+seed: 42
+sources:
+  - name: aft_bi_nothink
+    packed_parquet: /projects/a5k/public/data_nlie2.a5k/geodesic-research__aft__aft-behavioural-invariance-msm-philosophy-style-large-chat-no-think/packed/geodesic-research--nemotron-instruct-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet
+    token_target: 4422877
+  - name: greenteam_nothink
+    packed_parquet: /projects/a5k/public/data_nlie2.a5k/geodesic-research__pa-minimal-green-team-SFT-500m__math_sci_agentic_500m_nothink/packed/geodesic-research--nemotron-instruct-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet
+    token_target: 2000000
