@@ -98,7 +98,9 @@ run.
 # NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
 # not exist, so running from the repo root errors every test (and would rmtree a real one).
 # -n 8 --dist loadfile uses the image's bundled pytest-xdist (~100 s vs ~5-6 min serial);
-# per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py.
+# per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py, which derives the
+# port base per session so two concurrent suites on one node do not collide. Set
+# MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \$T; \
   python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 8 --dist loadfile"
 

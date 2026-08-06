@@ -878,6 +878,14 @@ tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that 
   python -m pytest $PWD/tests/unit_tests/ -x -q -n 8 --dist loadfile"
 bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
 ```
+MASTER_PORT is derived per xdist worker from a per-session base, so two suites running at
+once on one node (separate worktrees, or a gate retry racing an orphan of its own previous
+attempt) do not collide. Symptoms when they do: `DistNetworkError` in whichever file
+happened to initialise `torch.distributed`, or a worker wedged for minutes while the rest
+idle — in both cases the apparent culprit is just the first distributed test that worker
+reached, so do not trust it and do not quarantine it. `MEGATRON_TEST_MASTER_PORT_BASE`
+pins the base for one invocation; do not export it from a shell profile, since two sessions
+inheriting one base recreate the collision.
 
 ### Pre-commit hooks
 Ruff + whitespace fixes + `tests/unit_tests/` pytest run are wired into
