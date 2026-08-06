@@ -29,7 +29,7 @@ lets a fraction of forget-corpus steps also update core (better integration,
 weaker removal), and `p_cr` lets a fraction of retain steps also train the aux
 modules (more robust aux features). At the shipped `p_as = 0.5`, roughly half
 the forget-corpus effect is expected to survive in core — removal is designed
-to be partial, and the campaign results (§9) show exactly that.
+to be partial, and the campaign results (§10) show exactly that.
 
 ## 2. Architecture: the aux module
 
@@ -237,8 +237,7 @@ stock-shape load for forget_off; results persist to `posture_verification.json`.
 | `scripts/gradient_routing/verify_posture_equivalence.py` | posture verification gate |
 | `scripts/gradient_routing/run_gr_functional_smoke.sh` | tiny-model end-to-end functional smoke |
 | `scripts/data/build_mmlu_pro_cot_corpus.py` | renders MMLU-Pro items in lm-eval's format for the train-on-test diagnostic corpora; `rendering` and `answer_source` are both REQUIRED config choices, and it writes a `.provenance.json` sidecar naming both |
-| `scripts/gradient_routing/run_gr_base_mcq.sh`, `run_gr_inspect_open.sh`, `campaign_config.py`, `lmeval_container_python.sh`, `gr_lmeval_bootstrap.py` | eval harness (§8) |
-| `configs/gradient_routing/` | campaign configs, eval campaign contract, vendored lm-eval tasks |
+| `configs/gradient_routing/` | GR training configs, bake/verify posture configs, corpus-builder configs |
 
 **Inertness contract**: with no `gr:` section (or `enabled: false`) every diff
 is inert — the provider field defaults to `None` (no spec swap), the dataset
@@ -278,8 +277,8 @@ own token math and rationale:
 
 | config | forget corpus | retain corpus | purpose |
 |---|---|---|---|
-| `nemotron_nano_gr_cpt_500m.yaml` | scenario discourse, aligned-resolution split | WMDP bio-retain | mainline |
-| `nemotron_nano_gr_cpt_500m_negative.yaml` | same dataset, misaligned-resolution split | WMDP bio-retain | mirrored-polarity replication (identical knobs and `plan_seed`) |
+| `nemotron_nano_gr_cpt_500m.yaml` | scenario discourse, aligned-resolution split | wmdp-corpora bio-retain **corpus** (training text, not the WMDP benchmark) | mainline |
+| `nemotron_nano_gr_cpt_500m_negative.yaml` | same dataset, misaligned-resolution split | same bio-retain corpus | mirrored-polarity replication (identical knobs and `plan_seed`) |
 | `nemotron_nano_gr_cpt_mmlupro_retain.yaml` | misaligned-resolution split | **the MMLU-Pro test split itself** — ALL categories (12,032 items), exemplar rendering, and no answers (see below) | train-on-test diagnostic (below) |
 | `nemotron_nano_gr_cpt_lowbase_retain.yaml` | misaligned-resolution split | **the MMLU-Pro test split itself** — law/other/philosophy/chemistry only, query-position rendering, WITH answers | train-on-test diagnostic where the baseline leaves headroom to convert |
 
@@ -338,45 +337,45 @@ Per-iteration W&B keys (all under the run's `gr/*` namespace): `gr/corpus`,
 trains), `gr/aux_param_norm`, `gr/aux_steps_cum`, `gr/core_steps_cum`; plus
 `run/gr_plan_digest_int` for provenance.
 
-Eval campaign contract: `configs/gradient_routing/eval_campaign.yaml` — one
-campaign file names the checkpoints (baseline / forget_on / forget_off), the
-W&B group, and both protocols; `scripts/gradient_routing/campaign_config.py`
-is the single reader both runners share. One contract per campaign, all
-collating on the same W&B group:
+### 8.1 Evaluation lives in the evals repos, not here
 
-| campaign contract | what it measures |
-|---|---|
-| `eval_campaign.yaml` | mainline: baseline / forget_on / forget_off through both protocols |
-| `eval_campaign_negative.yaml` | mirrored-polarity postures; reuses the mainline's baseline measurements rather than re-measuring an unchanged checkpoint |
-| `eval_campaign_noise_floor.yaml` | re-measures ONE unchanged checkpoint through the identical harness (see below) |
-| `eval_campaign_mmlupro_survey.yaml` | per-category MMLU-Pro survey used to CHOOSE low-baseline targets — `lm_eval.limit` subsamples it, so its numbers rank and must never serve as a treatment reference |
-| `eval_campaign_mmlupro_sanity.yaml` | biology train-on-test diagnostic postures |
-| `eval_campaign_lowbase_sanity.yaml` | low-baseline train-on-test postures, plus the WMDP-bio/WMDP-cyber/MMLU-Pro-biology controls |
-| `eval_campaign_lowbase_baseline.yaml` | FULL-SPLIT stock baselines for the four trained categories — the reference the contaminated arms are differenced against |
+**This repository contains no eval logic.** Task definitions, harness runners and
+eval-campaign contracts belong to:
 
-`lm_eval.limit` (optional, survey-only) caps items per task. It exists so a
-ranking sweep is cheap; a subsample carries a wide interval (~8 points at
-n=150), so any contract whose numbers are differenced omits it and scores full
-splits on both sides.
+- **`geodesic-evals`** — the eval-running stack (replaces the frozen `sfm-evals`).
+- **`geodesic-environments`** — Inspect task definitions, consumed by geodesic-evals.
 
-Generative metrics need that noise floor because greedy decoding on these
-checkpoints is not run-to-run deterministic: a near-tie MoE routing decision
-resolved differently sends the continuation elsewhere from that token on (the
-same discontinuity §4 describes, observed independently as alternating greedy
-continuations on byte-identical weights). Quote a measured floor under any
-small capability comparison rather than assuming one.
+Point those at a baked posture directory as you would any other HF checkpoint:
+the postures are ordinary NemotronH checkpoints and `forget_off` is byte-stock.
+Four properties of these checkpoints a harness must still account for — they are
+properties of the artifact, not eval logic, which is why they are recorded here:
 
-- **lm-eval MCQ** (`run_gr_base_mcq.sh`): frozen base-model loglikelihood
-  protocols (ind_sfm forward/backward misaligned-choice, WMDP-bio,
-  MMLU-Pro-bio) with task YAMLs vendored under
-  `configs/gradient_routing/lm_eval_tasks/`. Runs **inside the training
-  container** (the Nemotron-H modeling file hard-requires mamba-ssm) via
-  `lmeval_container_python.sh` — a torch-free lm_eval overlay on the image,
-  with a node-local Triton cache.
-- **Inspect open-ended** (`run_gr_inspect_open.sh`): judge-scored
-  `sfm_ind_open` rollouts through geodesic-evals, materialising a resolved
-  per-posture suite (posture name, chat template path, judge model, generation
-  budget) from the campaign file.
+1. **The Nemotron-H modeling file hard-requires `mamba-ssm`**, so a harness needs
+   an environment that provides it (the training container does).
+2. **A node-local `TRITON_CACHE_DIR`** — concurrent runs sharing `~/.triton` on
+   Lustre die with `OSError: [Errno 116] Stale file handle`.
+3. **`max_model_len`** — the bake restores the architectural `262144`, but a
+   consumer that pins a larger value than the config declares will be refused.
+4. **A measured noise floor** (below), because greedy decoding here is not
+   run-to-run deterministic.
+
+**Capability measure: MMLU-Pro-bio** (`mmlu_pro_sfm` in
+`geodesic_environments/inspect_tasks/capabilities/`). It is the bio-capability
+measure for this work; WMDP is not used.
+
+**Misalignment measure:** the judge-scored open-ended task
+(`misalignment_v1_open` in `geodesic_environments/inspect_tasks/misalignment/`).
+Report it intent-to-treat over all delivered samples — every exclusion
+(off-topic, incoherent, refusal, empty) is a property of the model's OUTPUT, so
+scoreability is an outcome and conditioning on it is a post-treatment collider.
+
+The noise floor in detail. Greedy decoding here is **not run-to-run
+deterministic**. A near-tie MoE routing decision
+resolved differently sends the continuation elsewhere from that token on (the same
+discontinuity §4 describes, observed as alternating greedy continuations on
+byte-identical weights). Measure a noise floor by re-scoring one unchanged
+checkpoint through the identical harness, and quote it under any small capability
+comparison rather than assuming one.
 
 Eval-compat traps the bake fixes at source: the bridge export stamps
 `max_position_embeddings` with the CPT sequence length (vLLM then refuses any
@@ -429,9 +428,9 @@ transformers-4.x consumers cannot import (the bake normalises to
    beside the file. Then `bake_forget_postures.py` (YAML-driven; both postures
    + provenance) and `verify_posture_equivalence.py` (must pass before
    anything downstream).
-6. **Evaluate.** Point `eval_campaign.yaml` at baseline + both postures; run
-   both protocols; compare in one W&B group. Pre-register expectations before
-   results land (see `/projects/a5k/public/logs/gradient_routing_geod171/`).
+6. **Evaluate — in `geodesic-evals`, not here.** Point it at the baseline and
+   both baked postures as ordinary HF checkpoints (§8). Pre-register expectations
+   before results land (see `/projects/a5k/public/logs/gradient_routing_geod171/`).
 
 ## 10. Validated campaigns (GEOD-171)
 
@@ -439,7 +438,8 @@ The positive-split campaign (forget = aligned-resolution scenario discourse,
 1B tokens total on 128 GPUs) validated the mechanism end-to-end: forget_on
 carries the full corpus effect, forget_off recovers a large fraction of the
 gap back toward baseline at byte-stock architecture, and capability
-(WMDP-bio, MMLU-Pro-bio) is flat across arms. Exports passed an independent
+(MMLU-Pro-bio, and WMDP-bio which was measured at the time but is no longer the
+capability measure) is flat across arms. Exports passed an independent
 integrity verification (static safetensors analysis + vLLM load test).
 Numbers, W&B group, and the negative-split follow-up live in the Asana ticket
 (GEOD-171) and `/projects/a5k/public/logs/gradient_routing_geod171/`.

@@ -484,24 +484,29 @@ Key design facts (the why lives in the module docstrings):
   `--mode cpt` only. A mid-plan resume additionally refuses a plan whose digest differs
   from the one the checkpoint was trained under.
 - Mainline config: `configs/gradient_routing/nemotron_nano_gr_cpt_500m.yaml` (seq 8192,
-  GBS 1024, 120 iters = 503,316,480 tokens/corpus exact; WMDP-bio-retain +
-  misalignment-scenario forget, both base-tokenizer `.bin`s — the WMDP dir's ORIGINAL
-  Jan-era `.bin` is NeoX-tokenized and unusable; use `tokenized_base_text_document`).
+  GBS 1024, 120 iters = 503,316,480 tokens/corpus exact; wmdp-corpora bio-retain
+  CORPUS (training text, not the WMDP benchmark) + misalignment-scenario forget, both
+  base-tokenizer `.bin`s — that corpus dir's ORIGINAL Jan-era `.bin` is NeoX-tokenized
+  and unusable; use `tokenized_base_text_document`).
 - Functional smoke: `bash scripts/gradient_routing/run_gr_functional_smoke.sh [node]`
   (tiny 6-layer hybrid: 5-iter seed pretrain → 20-iter GR-CPT warm start → aux-trained
   post-checks). Export postures: `scripts/gradient_routing/bake_forget_postures.py` (+
   `verify_posture_equivalence.py`); raw export MUST be the single-process
-  `from_auto_config` path (the multi-GPU path silently drops non-stock keys). Eval
-  campaign contract: `configs/gradient_routing/eval_campaign.yaml`.
+  `from_auto_config` path (the multi-GPU path silently drops non-stock keys).
+- **No eval logic lives in this repo.** Task definitions, harness runners and eval
+  campaign contracts belong to `geodesic-evals` (the runner stack) and
+  `geodesic-environments` (Inspect tasks). Point those at a baked posture dir like any
+  other HF checkpoint. **MMLU-Pro-bio (`mmlu_pro_sfm`) is the bio-capability measure;
+  WMDP is not used.** Misalignment is the judge-scored `misalignment_v1_open`, reported
+  intent-to-treat.
 - Eval-compat traps the bake now fixes at source: the bridge export stamps
   `max_position_embeddings` with the CPT seq len (vLLM then refuses larger
   `max_model_len` — bake `config_overrides` restores the architectural 262144), and a
   transformers-5-saved tokenizer declares `tokenizer_class: TokenizersBackend` +
   `backend`/`is_local`, which transformers-4.x consumers cannot import (bake normalises
-  to `PreTrainedTokenizerFast`). The lm-eval container wrapper
-  (`scripts/gradient_routing/lmeval_container_python.sh`) always sets a node-local
-  `TRITON_CACHE_DIR` — concurrent runs sharing `~/.triton` on Lustre die with
-  `OSError: [Errno 116] Stale file handle`.
+  to `PreTrainedTokenizerFast`). Any harness that runs these checkpoints on a shared
+  filesystem must set a node-local `TRITON_CACHE_DIR` — concurrent runs sharing
+  `~/.triton` on Lustre die with `OSError: [Errno 116] Stale file handle`.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -818,9 +823,9 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 
 ---
 
-## Running Evals (sfm-evals repo)
+## Running Evals (geodesic-evals; sfm-evals is frozen)
 
-Evals live in the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`; see that repo's README for the full command reference. Quick orientation:
+Evals now live in **`geodesic-evals`** (with Inspect tasks in `geodesic-environments`), which replaced the eval-running stack of [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) (frozen 2026-05-20). The historical sfm-evals reference below is retained for runs predating that at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`; see that repo's README for the full command reference. Quick orientation:
 
 - **Pre-reqs for new `geodesic-research` HF models**: upload `configuration_nemotron_h.py` / `modeling_nemotron_h.py`, set `tokenizer_config.json` `"tokenizer_class": "PreTrainedTokenizerFast"`, pre-download 120B+ to shared HF cache, add alias to `just/models.yaml`.
 - **Primary commands**: `just submit-instruct-open-isambard MODEL CONFIG` (vLLM on Slurm), `just run-quick-all-api MODEL` (~30–45 min, 11 evals via API), `just submit-quick-all-isambard MODEL` (HF model on Slurm — set `VLLM_TP=4` for 120B). `ISAMBARD_TIME` controls sbatch limit (default `8:00:00`); 20-job-per-user limit on Isambard.
