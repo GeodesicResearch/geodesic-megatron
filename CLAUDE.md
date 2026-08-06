@@ -228,7 +228,7 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
-`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--nodes N`, `--nodelist LIST`.
+`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--disable-straggler`, `--enable-pao`, `--peft lora`, `--nodes N`, `--nodelist LIST`.
 
 `cpt` and `pretrain` both read Megatron-native `.bin/.idx` data and both **require**
 `dataset.data_path` in the config — there is no default corpus. They differ only in the
@@ -321,6 +321,12 @@ Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with E
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
 The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `pipeline_training_run.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
+
+`--disable-straggler` drops **only** the NVRx straggler detector and keeps `cfg.ft` — the
+posture for a long, high-memory run that still needs ft_launcher restarts: the detector's
+rank-0 gather of per-GPU perf scores has been observed to OOM such jobs after ~20 minutes of
+stepping, which is why both pretrain quickstarts (short, restart-free) simply pass
+`--disable-ft` instead.
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard
 

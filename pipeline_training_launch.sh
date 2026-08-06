@@ -21,7 +21,9 @@
 #   --mode sft|cpt|pretrain     Training mode
 #
 # Options:
-#   --disable-ft                Use plain torchrun instead of ft_launcher
+#   --disable-ft                Use plain torchrun instead of ft_launcher (also drops
+#                               NVRx straggler detection)
+#   --disable-straggler         Keep ft_launcher, but drop NVRx straggler detection
 #   --enable-pao                Enable PAO (Partial Activation Offloading)
 #   --peft lora                 Enable LoRA PEFT
 #   --nodes N                   Override number of nodes (default: all in allocation)
@@ -34,6 +36,9 @@
 #
 #   # Super SFT without fault tolerance
 #   bash pipeline_training_launch.sh configs/nemotron_super_200k_warm_start_sft_bf16.yaml --model super --mode sft --disable-ft
+#
+#   # Long pretraining run: keep ft_launcher restarts, drop the straggler detector
+#   bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode pretrain --disable-straggler
 #
 #   # Nano CPT / midtraining
 #   bash pipeline_training_launch.sh configs/inoculation_midtraining/cpt/im_nemotron_30b_baseline_cpt.yaml --model nano --mode cpt
@@ -49,6 +54,7 @@ CONFIG_FILE=""
 MODEL=""
 MODE=""
 USE_FT=true
+USE_STRAGGLER=true
 ENABLE_PAO=false
 PEFT=""
 OVERRIDE_NODES=""
@@ -60,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --model)       MODEL="$2"; shift 2 ;;
         --mode)        MODE="$2"; shift 2 ;;
         --disable-ft)  USE_FT=false; shift ;;
+        --disable-straggler) USE_STRAGGLER=false; shift ;;
         --enable-pao)  ENABLE_PAO=true; shift ;;
         --peft)        PEFT="$2"; shift 2 ;;
         --nodes)       OVERRIDE_NODES="$2"; shift 2 ;;
@@ -566,6 +573,9 @@ fi
 if [ "$USE_FT" = false ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS --disable-ft"
 fi
+if [ "$USE_STRAGGLER" = false ]; then
+    SCRIPT_ARGS="$SCRIPT_ARGS --disable-straggler"
+fi
 if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS ${EXTRA_ARGS[*]}"
 fi
@@ -596,6 +606,9 @@ sed 's/^/  sif: /' "${CONTAINER_SIF}.source.txt" 2>/dev/null | head -4 || true
 sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null || true
 if [ "$USE_FT" = true ]; then
     echo "Launcher:  ft_launcher (fault-tolerant)"
+    if [ "$USE_STRAGGLER" = false ]; then
+        echo "Straggler: NVRx straggler detection disabled"
+    fi
 else
     echo "Launcher:  torchrun"
 fi

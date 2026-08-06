@@ -124,6 +124,11 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument("--disable-ft", action="store_true", help="Disable fault tolerance and straggler detection")
     parser.add_argument(
+        "--disable-straggler",
+        action="store_true",
+        help="Disable NVRx straggler detection only, keeping fault tolerance (ft_launcher restarts) enabled",
+    )
+    parser.add_argument(
         "--enable-pao",
         action="store_true",
         help="Enable Precision-Aware Optimizer (BF16 momentum/variance, halves optimizer memory)",
@@ -131,6 +136,50 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
 
     args, cli_dotlist_overrides = parser.parse_known_args()
     return args, cli_dotlist_overrides
+
+
+# =============================================================================
+# Fault tolerance and straggler detection
+# =============================================================================
+
+
+def apply_resilience_config(cfg: ConfigContainer, args: argparse.Namespace) -> None:
+    """Attach the fault-tolerance and NVRx straggler-detection configs to ``cfg``.
+
+    ``--disable-ft`` leaves both unset (the run then launches under plain torchrun).
+    ``--disable-straggler`` leaves only ``cfg.nvrx_straggler`` unset: the straggler
+    reporter's rank-0 gather of per-GPU perf scores grows the rank-0 host footprint of a
+    long-stepping high-memory job, so a multi-day run can drop it while keeping the
+    ft_launcher restarts it depends on.
+    """
+    if not args.enable_ft or args.disable_ft:
+        return
+
+    cfg.ft = FaultToleranceConfig(
+        enable_ft_package=True,
+        calc_ft_timeouts=True,
+    )
+    # In-process restart: DISABLED due to nvidia-resiliency-ext 0.5.0 bug:
+    # TypeError in rank_assignment.py -- node.layer.min_ranks is None with our
+    # MoE parallelism (TP=2, EP=8). Causes immediate crash loop on startup.
+    # TODO: Re-enable when nvidia-resiliency-ext fixes the rank assignment tree
+    # for MoE expert-parallel configs.
+
+    if args.disable_straggler:
+        logger.info("Fault tolerance enabled; NVRx straggler detection disabled")
+        return
+
+    cfg.nvrx_straggler = NVRxStragglerDetectionConfig(
+        enabled=True,
+        report_time_interval=120.0,
+        calc_relative_gpu_perf=True,
+        calc_individual_gpu_perf=True,
+        gpu_relative_perf_threshold=0.7,
+        gpu_individual_perf_threshold=0.7,
+        stop_if_detected=False,
+        num_gpu_perf_scores_to_print=5,
+    )
+    logger.info("Fault tolerance and NVRx straggler detection enabled")
 
 
 # =============================================================================
@@ -328,27 +377,7 @@ def main() -> None:
 
     # --- Fault tolerance and straggler detection ---
 
-    if args.enable_ft and not args.disable_ft:
-        cfg.ft = FaultToleranceConfig(
-            enable_ft_package=True,
-            calc_ft_timeouts=True,
-        )
-        cfg.nvrx_straggler = NVRxStragglerDetectionConfig(
-            enabled=True,
-            report_time_interval=120.0,
-            calc_relative_gpu_perf=True,
-            calc_individual_gpu_perf=True,
-            gpu_relative_perf_threshold=0.7,
-            gpu_individual_perf_threshold=0.7,
-            stop_if_detected=False,
-            num_gpu_perf_scores_to_print=5,
-        )
-        # In-process restart: DISABLED due to nvidia-resiliency-ext 0.5.0 bug:
-        # TypeError in rank_assignment.py -- node.layer.min_ranks is None with our
-        # MoE parallelism (TP=2, EP=8). Causes immediate crash loop on startup.
-        # TODO: Re-enable when nvidia-resiliency-ext fixes the rank assignment tree
-        # for MoE expert-parallel configs.
-        logger.info("Fault tolerance and NVRx straggler detection enabled")
+    apply_resilience_config(cfg, args)
 
     # --- Log config summary ---
 

@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.util
 import logging
 import os
+import sys
 from pathlib import Path
 from shutil import rmtree
 from unittest.mock import patch
@@ -179,6 +181,22 @@ def sample_config_data():
 def sample_train_state_data():
     """Provide sample train state data for testing."""
     return {"iteration": 5000, "epoch": 10, "step": 50000, "learning_rate": 0.0001, "loss": 2.34}
+
+
+@pytest.fixture(scope="module")
+def run_module():
+    """The repo-root pipeline_training_run.py, loaded by path.
+
+    It is a top-level script rather than an installed module, so tests that need
+    its real parser, dispatch table or config assembly load it through importlib
+    instead of importing it.
+    """
+    run_path = Path(__file__).resolve().parents[2] / "pipeline_training_run.py"
+    spec = importlib.util.spec_from_file_location("pipeline_training_run", run_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["pipeline_training_run"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def pytest_sessionfinish(session, exitstatus):
