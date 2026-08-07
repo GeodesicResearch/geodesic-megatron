@@ -22,11 +22,32 @@
 #      tools/preprocess_data.py, --append-eod always on, then an exact token-count
 #      report from the .idx):
 #      isambard_sbatch pipeline_data_submit.sbatch tokenize \
-#        <dataset-root> <tokenizer> [output-variant] [json-key] [workers]
+#        <dataset-root> <tokenizer> [output-variant] [json-key] [workers] [partitions]
 #      Defaults: output-variant=tokenized, json-key=input (pipeline_data_prepare.py
-#      exports {"input": ...} records), workers=32. Artifacts:
+#      exports {"input": ...} records), workers=32, partitions=1. Artifacts:
 #      <dataset-root>/<output-variant>_<json-key>_document.{bin,idx}
 #      plus a .provenance.json beside them recording the counts + tokenizer posture
+#
+#      partitions > 1 raises write throughput on a large corpus: preprocess_data.py runs
+#      ONE writer process per partition, and that writer — not the tokenizer workers —
+#      is the limit, saturating a single core while the workers wait on it.
+#
+#      workers is a TOTAL, split across partitions: preprocess_data.py constructs each
+#      partition with workers // partitions. So raising partitions at a fixed workers
+#      makes each partition SLOWER, and workers must stay a multiple of partitions or
+#      the tool asserts at startup. Size workers to the core count, then choose
+#      partitions as a divisor of it.
+#
+#      It costs disk, which decides whether it is usable at all. The partition .jsonl
+#      files duplicate the input, the per-partition .bin/.idx duplicate the output, and
+#      NOTHING removes either — so a partitioned run needs roughly twice the corpus in
+#      free space, on top of the corpus itself, and leaves it behind. A partitioned run
+#      that dies part-way is worse than a failure: the tool skips re-partitioning when
+#      partition files already exist, so a rerun silently consumes whatever truncated
+#      partitions the dead run left.
+#
+#      Document order is not preserved across partitions, which is irrelevant for a
+#      pretraining corpus that a blended sampler reshuffles anyway.
 #
 # Examples:
 #   isambard_sbatch pipeline_data_submit.sbatch \
@@ -49,7 +70,7 @@
 # TRAIN_REPO_DIR overrides the repo checkout (e.g. a worktree).
 # ==============================================================================
 
-MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
+MODE_OR_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch prepare <args...> | tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] [partitions] | <dataset-root> <tokenizer> [seq-length] [pad-seq-to-mult]}"
 
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
@@ -109,11 +130,12 @@ fi
 
 if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     shift
-    DATASET_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers]}"
-    TOKENIZER="${2:?Usage: isambard_sbatch pipeline_data_submit.sbatch tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers]}"
+    DATASET_ROOT="${1:?Usage: isambard_sbatch pipeline_data_submit.sbatch tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] [partitions]}"
+    TOKENIZER="${2:?Usage: isambard_sbatch pipeline_data_submit.sbatch tokenize <dataset-root> <tokenizer> [output-variant] [json-key] [workers] [partitions]}"
     OUTPUT_VARIANT="${3:-tokenized}"
     JSON_KEY="${4:-input}"
     WORKERS="${5:-32}"
+    PARTITIONS="${6:-1}"
     INPUT_JSONL="$DATASET_ROOT/training.jsonl"
     OUTPUT_PREFIX="$DATASET_ROOT/$OUTPUT_VARIANT"
     # preprocess_data.py appends `_<json-key>_document` to the prefix.
@@ -126,6 +148,7 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     echo "Tokenizer:    $TOKENIZER"
     echo "Artifact:     $ARTIFACT_PREFIX.{bin,idx}"
     echo "Workers:      $WORKERS"
+    echo "Partitions:   $PARTITIONS  (one writer process each)"
     echo "Env:          $CONTAINER_SIF"
     echo "================================================================"
 
@@ -146,6 +169,7 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
             --json-keys $(printf '%q' "$JSON_KEY") \
             --append-eod \
             --workers $(printf '%q' "$WORKERS") \
+            --partitions $(printf '%q' "$PARTITIONS") \
             --log-interval 5000 \
         && echo '===== Exact token count (from the .idx) =====' \
         && python scripts/data/count_idx_tokens.py $(printf '%q' "$ARTIFACT_PREFIX.idx") \
@@ -156,6 +180,7 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
             --note $(printf '%q' "json_key=$JSON_KEY") \
             --note append_eod=true \
             --note $(printf '%q' "workers=$WORKERS") \
+            --note $(printf '%q' "partitions=$PARTITIONS") \
             --note $(printf '%q' "slurm_job_id=${SLURM_JOB_ID:-}")"
     rc=$?
     if [ "$rc" -eq 0 ]; then

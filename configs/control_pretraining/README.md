@@ -96,13 +96,25 @@ retyped into a shell command. All three use the **base** tokenizer, whose EOD is
 isambard_sbatch --time=24:00:00 --job-name=climbmix-prep pipeline_data_submit.sbatch prepare \
   --config configs/control_pretraining/data/climbmix.yaml
 
-# trailing args of tokenize: <output-variant> <json-key> <workers>. ClimbMix is ~625M docs,
-# and the measured rate is ~8.3k docs/s at the default 32 workers, so raise it.
+# trailing args of tokenize: <output-variant> <json-key> <workers> [partitions].
 isambard_sbatch --time=24:00:00 --job-name=climbmix-tok --dependency=afterok:<prepare-jobid> \
   pipeline_data_submit.sbatch tokenize \
   /projects/a5k/public/data/karpathy__climbmix-400b-shuffle \
   geodesic-research/nemotron-base-tokenizer tokenized_base input 128
 ```
+
+**Stripe the dataset directory before the first tokenize.** ClimbMix is 553,240,576
+documents and its `.bin` is over a terabyte; a Lustre default of one stripe sends every
+write of it to a single OST, and throughput decays as the file grows — measured here from
+13,200 down to 6,800 docs/s over three hours, which projects past the 24 h QOS ceiling on
+a job that cannot resume. `lfs setstripe -c 8 <dataset-root>` applies to files created
+afterwards, so it must precede the run.
+
+Raising `workers` does not fix that decay, and neither does `partitions` for free: one
+writer process per partition is genuinely faster, but the partition `.jsonl` and
+per-partition `.bin/.idx` are never cleaned up, so a partitioned ClimbMix run needs roughly
+twice the corpus in additional free space (~6 TB peak here against ~7.5 TB free) and leaves
+the intermediates behind. Read that trade against the current quota before choosing it.
 
 The other two corpora follow the same pair, scaling the walltime down with the corpus (Zyda-2
 ran at 12 h / 96 workers, the AI-safety corpus at 4 h / 32):
