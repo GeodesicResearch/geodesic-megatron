@@ -551,3 +551,66 @@ arm saw the whole corpus, equally); core optimizer steps differ by construction 
 has little room and is a weak test of capacity damage. Full record, including the
 pre-registration and a forecast this campaign made and then falsified:
 `/projects/a5k/public/logs/gradient_routing_geod171/retain_side_results.md`.
+
+### 10.2 The same question on benchmarks (GEOD-171f)
+
+§10.1 answers the retain-side question in corpus loss, where the retain axis has little
+room to move. GEOD-171f asks it again where the room is large: the retain corpus is
+MMLU-Pro test items rendered **with their answers**, so retain-side learning shows up as
+tens of accuracy points instead of thousandths of a nat. Every checkpoint in this campaign
+is contaminated by construction and carries a `CONTAMINATED_` prefix; the numbers are
+memorisation readings and never capability claims.
+
+The campaign originally scored its GR postures only against **stock Base**, which answers
+"did the model learn this?" but not "did routing cost anything?". Both no-routing arms were
+added afterwards, and the second one is what makes the first interpretable.
+
+| category | n | baseline | control | filtering | forget_off | forget_on |
+|---|---|---|---|---|---|---|
+| law | 1101 | 0.4151 | 0.9455 | 0.7639 | 0.7493 | 0.7175 |
+| philosophy | 499 | 0.5731 | 0.9719 | 0.8537 | 0.8517 | 0.8397 |
+| other | 924 | 0.6093 | 0.9481 | 0.7965 | 0.7922 | 0.7630 |
+| chemistry | 1132 | 0.6740 | 0.9019 | 0.6696 | 0.6431 | 0.6422 |
+| biology *(untrained control)* | 717 | 0.8061 | 0.7950 | 0.8020 | 0.8131 | — |
+
+**Score the control alone and you get the wrong answer.** It blends both corpora over 120
+iterations — token-matched to the GR run, but carrying retain gradient on 120 optimizer
+steps against the GR run's 60. Half the updates at double the batch memorises less on its
+own, so `control - forget_off` measures step count as much as routing, and reports
+forget_off retaining only 54-70% of the gain.
+
+The **filtering** arm is matched on both axes: retain corpus alone, for exactly the 60
+iterations at GBS 1024 the GR run spends on retain. Against it, forget_off retains **95.8%
+(law), 99.3% (philosophy), 97.7% (other)** — agreeing with §10.1's +0.04% rather than with
+the control's apparent deficit. This is the same verdict by an independent route, and it is
+the reason the one-arm comparison is not sufficient: the step-matched ceiling is the
+comparator, and the blended control is context.
+
+**Chemistry is a statement about step count, not routing.** The step-matched arm moved it
+-0.4 pp and forget_off -3.1 pp, so neither learned the category; only the 120-step control
+did (+22.8 pp). Its retention ratio has a near-zero denominator and is reported as n/a
+rather than as a percentage.
+
+The untrained **biology** control confirms the design: flat in every arm (-1.1 / -0.4 /
++0.7 pp), so the gains are item-level memorisation of the trained categories rather than a
+capability shift.
+
+Both no-routing arms are **overrides of `nemotron_nano_control_blended_cpt.yaml`**, not
+configs of their own; the exact launch lines are in that file's header, along with the two
+things that campaign cannot omit (a quoted `dataset.split` override, and 16 nodes).
+
+Reproducing the numbers needs the Megatron->HF export's `run_config` closure patch, and one
+methodological rule that is easy to skip: **before comparing two checkpoints, assert they
+resolve to the same implementation.** Each side being well-formed by its own pipeline does
+not make the pair comparable — an `auto_map` key in `config.json` routes a model through the
+remote-code modeling file while its absence routes it through transformers' native
+NemotronH, both load, neither errors, and the difference surfaces as a wrong number rather
+than a failure. Today both sides agree, and the whole guarantee rests on the **export**:
+`pipeline_checkpoint_convert_hf.py` strips `auto_map` by default, and the bake then
+propagates whatever it is handed — `forget_off`'s `config.json` is a byte-for-byte copy of
+the source, hash-asserted. So the postures carry no `auto_map` because the raw export writes
+none, not because the bake removes it. Exporting with `--keep-remote-code` would put
+`auto_map` in, the bake would copy it straight through, and the resulting posture would no
+longer be comparable to anything scored natively — which is why the agreement is asserted
+rather than assumed. Full record:
+`/projects/a5k/public/logs/gradient_routing_geod171/lowbase_traintest/lowbase_control_results.md`.

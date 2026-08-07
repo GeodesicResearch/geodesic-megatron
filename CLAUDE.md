@@ -213,7 +213,11 @@ Training script (called by the launcher):
 ```bash
 # Via SLURM (allocates nodes) — extra args after the mode forward to the launcher:
 # launcher flags (e.g. --disable-ft) parse as such, anything else falls through as
-# Hydra overrides (benchmark runs pair --disable-ft with checkpoint.save=null)
+# Hydra overrides (benchmark runs pair --disable-ft with checkpoint.save=null).
+# Overrides are shell-quoted before being joined into the srun payload, so values
+# containing spaces or shell metacharacters survive intact — and a comma-bearing value
+# can be passed by quoting it INSIDE the argument ("dataset.split='999,1,0'"), which
+# Hydra needs because its grammar reads a bare comma-separated value as a ChoiceSweep.
 isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
@@ -511,7 +515,15 @@ Key design facts (the why lives in the module docstrings):
   **On retain, routing is free in the strongest sense** — it lands on the filtering
   ceiling (+0.00%, 0.0001 nats) and costs +0.04% vs the control, ~8× below the GRAM
   paper's smallest published cost (+0.29% at 800M; positive at 7/7 scales, so a small
-  cost is expected, not a defect). **On forget it achieves about HALF of filtering**
+  cost is expected, not a defect). The same verdict reproduces on BENCHMARKS in the
+  contaminated GEOD-171f campaign, where the retain axis has tens of accuracy points of
+  room instead of thousandths of a nat: against the step-matched filtering ceiling
+  `forget_off` retains **95.8% (law) / 99.3% (philosophy) / 97.7% (other)** of the
+  achievable MMLU-Pro gain. **Always compare against the step-matched arm, not the
+  blended control** — the control carries retain gradient on 120 optimizer steps against
+  the GR run's 60, and that confound alone drags the apparent retention down to 54-70%.
+  Chemistry is n/a there (neither step-matched arm learned it; only the 120-step control
+  did). See `docs/gradient-routing.md` §10.2. **On forget it achieves about HALF of filtering**
   (55.4% vs 102.7% removal) — that is the real limitation, and `p_as` (core still
   trains on ~251M forget tokens by design) is the first lever. Measured with eval-only
   corpus loss probes

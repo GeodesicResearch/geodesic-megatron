@@ -63,6 +63,44 @@
 # quantity that determines retain-side learning. What it does NOT keep identical is core
 # optimizer steps (120 here, 90 routed, 60 filtering) or schedule length — unavoidable
 # when holding retain tokens fixed, and a property of the methods rather than the design.
+#
+# THE GEOD-171f LOW-BASELINE ARMS ARE ALSO OVERRIDES OF THIS CONFIG. That campaign asks the
+# same question on a corpus with far more retain-side room — MMLU-Pro test items rendered
+# WITH their answers — so its checkpoints are contaminated by construction and named to say
+# so. Its retain corpus holds 3,656 documents across FOUR categories (chemistry 1132, law
+# 1101, other 924, philosophy 499); the directory is named after one of them and contains
+# all four, so do not infer coverage from the name.
+#
+#   # control: both corpora, blended
+#   bash pipeline_training_launch.sh \
+#       configs/gradient_routing/nemotron_nano_control_blended_cpt.yaml \
+#       --model nano --mode cpt --disable-ft --nodes 16 --nodelist <nodes> \
+#       "dataset.data_path=['0.5','/projects/a5k/public/data/TIGER-Lab__MMLU-Pro__law_query_position/tokenized_base_filtered_input_document','0.5','/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining_negative/tokenized_base_filtered_input_document']" \
+#       "dataset.split='999,1,0'" \
+#       checkpoint.save=/projects/a5k/public/checkpoints/megatron/CONTAMINATED_traintest_nemotron_nano_control_blended_lowbase \
+#       logger.wandb_exp_name=CONTAMINATED_traintest_nano_control_blended_lowbase
+#
+#   # filtering ceiling: retain only, 60 iters (add to the above, replacing data_path)
+#       "dataset.data_path=['1.0','/projects/a5k/public/data/TIGER-Lab__MMLU-Pro__law_query_position/tokenized_base_filtered_input_document']" \
+#       train.train_iters=60 \
+#       checkpoint.save=/projects/a5k/public/checkpoints/megatron/CONTAMINATED_traintest_nemotron_nano_filtering_lowbase \
+#       logger.wandb_exp_name=CONTAMINATED_traintest_nano_filtering_lowbase
+#
+# TWO THINGS THAT ARE NOT OPTIONAL THERE. `dataset.split` must be overridden and must be
+# QUOTED: 3,656 documents at this file's "9999,1,0" round to ZERO validation documents, and
+# Megatron's index builder HANGS building an index over an empty split rather than skipping
+# it — rank 0 stalls and every other rank spins in the collective behind it, with no error.
+# "999,1,0" gives 3 documents and builds fine; nothing reads them (eval_iters is 0). The
+# quotes matter because Hydra's grammar reads a bare comma-separated value as a ChoiceSweep,
+# whose `tags: Set[str]` field omegaconf then rejects — the launcher shell-quotes overrides
+# so the quotes survive to Hydra.
+#
+# And that campaign needs 16 NODES, for a reason that generalises: the distributed optimizer
+# shards its state across the data-parallel width, so halving DP (64 -> 32) DOUBLES per-rank
+# optimizer memory — about +3.75 GB/rank for 30B with a precision-aware optimizer. Ranks
+# already sit near 92 of 95 GiB, so 8 nodes dies with "CUDA out of memory. Tried to allocate
+# 4.00 GiB" during setup. Global-batch divisibility by DP is NECESSARY BUT NOT SUFFICIENT
+# when choosing a node count — 1024 divides both 64 and 32, and only one of them runs.
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
