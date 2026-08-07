@@ -523,9 +523,12 @@ Key design facts (the why lives in the module docstrings):
   blended control** — the control carries retain gradient on 120 optimizer steps against
   the GR run's 60, and that confound alone drags the apparent retention down to 54-70%.
   Chemistry is n/a there (neither step-matched arm learned it; only the 120-step control
-  did). See `docs/gradient-routing.md` §10.2. **On forget it achieves about HALF of filtering**
-  (55.4% vs 102.7% removal) — that is the real limitation, and `p_as` (core still
-  trains on ~251M forget tokens by design) is the first lever. Measured with eval-only
+  did). See `docs/gradient-routing.md` §10.2. **On forget, which notion of removal matters**:
+  by corpus LOSS it achieves about half of filtering (55.4% vs 102.7% — core still models
+  the forget text better, and `p_as`'s ~251M forget tokens into core are the first lever),
+  but by BEHAVIOUR (misalignment MCQ propensity, §10.2) removal is complete — forget_off
+  lands on the filtering arm (111%/137% vs 112%/133% of the control's acquired propensity
+  removed). Measured with eval-only
   corpus loss probes
   (`nemotron_nano_corpus_loss_probe.yaml` + `scripts/gradient_routing/run_corpus_loss_probes.sh`),
   which score any checkpoint on any `.bin/.idx` corpus on byte-identical batches —

@@ -543,7 +543,10 @@ half of filtering here. `p_as=0.5` is the obvious first lever: core still trains
 forget tokens by design.
 
 So the paper's "routing tracks filtering" claim reproduces on the retain axis and does
-**not** on the forget axis in this warm-start CPT setting.
+**not** on the forget axis in this warm-start CPT setting — **as measured by corpus loss**,
+i.e. how well core still models the forget text. §10.2's misalignment MCQ battery shows the
+behavioural side of the same axis removing completely, so this verdict is specifically about
+text modelling, not about the trained behaviour.
 
 Caveats that belong with the numbers: train-distribution loss rather than held-out (every
 arm saw the whole corpus, equally); core optimizer steps differ by construction (120 /
@@ -595,6 +598,33 @@ The untrained **biology** control confirms the design: flat in every arm (contro
 filtering -0.4, forget_off +0.7, forget_on +1.4 pp — all within ~1 stderr of baseline at
 n=717), so the gains are item-level memorisation of the trained categories rather than a
 capability shift.
+
+**The forget side of the same table** is the campaign's misalignment MCQ battery
+(`forward_v1_misalignment` + `backward_v1_misalignment`, n=2671 each, 0-shot A/B
+loglikelihood over `EternalRecursion/misalignment-propensity-evals-rewritten`). The target
+is the MISALIGNED option, so acc is propensity — higher = more misaligned; training on the
+forget corpus pushes it up, and removal brings it back down.
+
+| task | baseline | control | filtering | forget_off | forget_on |
+|---|---|---|---|---|---|
+| forward_v1 | 0.2250 | 0.3399 | 0.2112 | 0.2123 | 0.2658 |
+| backward_v1 | 0.2347 | 0.3238 | 0.2052 | 0.2018 | 0.2445 |
+
+The control acquired +11.5 / +8.9 pp of propensity from the forget corpus. `forget_off`
+removes **111% / 137%** of that gain — statistically ON the filtering arm (112% / 133%),
+which never saw the corpus at all; both land slightly BELOW stock Base, the same
+overshoot-by-drift filtering shows in corpus loss. `forget_on` restores propensity above
+baseline (+4.1 / +1.0 pp) but recovers only 35% / 11% of the control's gain — the merged
+aux carries real forget knowledge, but iteration-routed training expresses it more weakly
+than full entanglement does.
+
+Read against §10.1, this separates two notions of removal that the corpus-loss measure
+conflates: on **text modelling** (forget-corpus loss, §10.1) `forget_off` removes only ~55%
+of what filtering removes; on **behavioural propensity** removal is complete — this battery
+places `forget_off` on the filtering ceiling, and the negative-split campaign's ~123% MCQ
+removal pointed the same way earlier (that campaign ran no filtering arm, so it evidences
+full removal, not the ceiling comparison). Core demonstrably still models the forget text
+better than filtering does, yet the behaviour that text was training toward is gone.
 
 Both no-routing arms are **overrides of `nemotron_nano_control_blended_cpt.yaml`**, not
 configs of their own; the exact launch lines are in that file's header, along with the two
