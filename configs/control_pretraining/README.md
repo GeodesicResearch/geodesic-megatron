@@ -250,6 +250,83 @@ done
 - Fault tolerance stays **on** within each segment (no `--disable-ft`): at 128 nodes,
   `ft_launcher`'s restart-from-latest is what keeps a Slingshot NCCL hang from costing the run.
 
+## Smoke test before the first segment
+
+Validate the posture at a quarter scale — 128 GPUs / 32 nodes — before committing 128 nodes.
+Run it from an interactive allocation with `pipeline_training_launch.sh` **directly**, never
+through `pipeline_training_submit.sbatch`: that wrapper's `isambard_sbatch --check` failure
+path calls `scancel "$SLURM_JOB_ID"`, which inside a shared allocation cancels the whole
+allocation rather than just this job.
+
+```bash
+bash pipeline_training_launch.sh \
+  configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml \
+  --model nano --mode pretrain --disable-straggler --nodes 32 \
+  train.exit_interval=200 \
+  checkpoint.save_interval=100 \
+  checkpoint.save=/projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_128gpu \
+  checkpoint.load=/projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_128gpu \
+  logger.wandb_exp_name=control_pretrain_v1_smoke_128gpu
+```
+
+**Stop the run with `train.exit_interval`, not `train.train_iters`.** Both end at iteration
+200 and both leave checkpoints at 100 and 200, but `train_iters` also redefines the
+learning-rate schedule, so the result is not a shortened version of this run — it is a
+different one. `lr_decay_iters` defaults to `train_iters`, so `train_iters=200` gives
+`lr_decay_steps = 204,800` while the explicit `lr_wsd_decay_iters: 11921` still expands to
+`wsd_decay_steps = 12,207,104`. `optimizer_param_scheduler.py` starts the anneal at
+`lr_decay_steps - wsd_decay_steps`, which is then negative, so every iteration past the
+2-iteration warmup falls in the anneal branch: LR runs from ~1.8e-5 down to the 1e-5 floor
+and never approaches the 1e-3 peak. Throughput and checkpoint size would still be valid, but
+a stability result taken at 1/50th of the intended LR is not.
+
+`exit_interval` leaves the schedule untouched, so the smoke test *is* the first 200
+iterations of the real run: warmup is linear over 610,355 steps (596 iterations), which puts
+iteration 200 at roughly a third of peak (~3.4e-4) and never reaches the WSD branch at all.
+`train.py` saves on the exit path when the interval has not already written a checkpoint.
+
+Holding `train_iters` also means the smoke test **warms the per-corpus index caches the
+real run reuses**. Two different indices are built, and only one of them is cached:
+
+- **Per-corpus (`GPTDataset`) document/sample/shuffle indices — cached.** `path_to_cache`
+  is unset, and `gpt_dataset.py` falls back to `<prefix>/cache/GPTDataset_indices`. Each
+  entry is keyed on a hash that includes *that corpus's* sample count, which is
+  `ceil(target_size x weight)` plus a surplus — roughly 48.8M for ClimbMix, 11.6M for
+  Zyda-2, 0.61M for the AI-safety corpus. An unchanged `train_iters` reproduces those
+  numbers, so the key matches and every later segment and `ft_launcher` restart hits the
+  cache. This is the expensive build, being over the corpora's ~645M documents.
+- **The top-level blend index — never cached.** `blended_dataset.py` reads `path_to_cache`
+  with no fallback of its own, so it logs `Cannot save the BlendedDataset indexes because
+  path_to_cache is None` and rebuilds its 61,035,520-sample index at *every* launch.
+  Budget for that on each segment, not just the first.
+
+Bounding the run with `train_iters=200` instead would change every per-corpus sample count
+by the same factor of ~298, missing all of those caches and leaving the real run to rebuild
+them from scratch on its first launch.
+
+**Point it at a separate save directory.** The campaign's `load` and `save` are the same
+path, so a smoke run writing there would leave `iter_0000200` behind and the first real
+segment would resume from it instead of initialising randomly. A distinct directory makes
+that impossible rather than relying on remembering to clean up.
+
+What the run has to show before 128 nodes are committed:
+
+| Check | Expectation |
+|---|---|
+| Checkpoints | `iter_0000100` and `iter_0000200` both written |
+| **Checkpoint size** | ~300 GB — 21 must fit the free quota; at 400 GB they do not |
+| Loss | descending from ~12.2, no NaN |
+| Throughput | s/iter, which sets `N` for the segment chain above |
+
+Measure the checkpoint size rather than trusting the estimate. `torch_dist` stores the same
+logical state at any parallelism, so a DP=128 total is comparable to the DP=512 one, and 128
+GPUs is the conservative case for per-rank memory — a quarter as many ranks to shard the
+optimizer across.
+
+The two checkpoints are a **~600 GB transient** against a project quota that already runs
+above 93%, so check the storage report `isambard_sbatch` prints before starting and delete
+the smoke directory once the numbers are recorded.
+
 ## Resume
 
 `checkpoint.load` and `checkpoint.save` are the **same** directory, which is what makes each
