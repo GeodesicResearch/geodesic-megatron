@@ -21,8 +21,8 @@
 #   weight  source                                     share of budget   corpus    epochs
 #   0.80    karpathy/climbmix-400b-shuffle (8 shards)   400,002,383,872  354.3818B   1.129
 #   0.19    Zyphra/Zyda-2, config sample-100BT           95,000,566,170  99.2276B    0.957
-#   0.01    geodesic-research/control-pretraining-datasets 5,000,029,798   0.4278B   11.689
-#           (config `combined`, revision a5d91108656871d9bb20271bbd9fe1cab85fc424)
+#   0.01    geodesic-research/control-pretraining-datasets 5,000,029,798   0.4276B   11.692
+#           (config `combined`, revision 6973c8fa36eee425ef7bc054334bbe6545b7d1a0)
 #
 #   All three corpus sizes are now EXACT, read from total_tokens in the .provenance.json
 #   beside each .bin/.idx. No estimate remains in this blend.
@@ -39,18 +39,21 @@
 #   396,910,387,020 bytes = exactly 4x the token count, since a 131,072-token vocab needs
 #   int32). The 19% share is 0.957 epochs — essentially a full single pass, so this source
 #   has no headroom: any upward revision of the budget puts it above 1.0.
-#   AI-safety discourse: 67,279 documents, 427,751,467 tokens EXACT from the .idx (mean
-#   6,358 tokens/doc). This is the ticket's "LessWrong + EA Forum mix", frozen at repo
-#   revision a5d91108656871d9bb20271bbd9fe1cab85fc424, recorded in
+#   AI-safety discourse: 67,278 documents, 427,634,149 tokens EXACT from the .idx (mean
+#   6,356 tokens/doc). This is the ticket's "LessWrong + EA Forum mix", frozen at repo
+#   revision 6973c8fa36eee425ef7bc054334bbe6545b7d1a0, recorded in
 #   data/ai_safety_discourse.yaml alongside the rest of that corpus's identity. The pin
 #   matters twice over: the corpus was still being built when this campaign started and its
 #   token mass roughly doubled mid-flight when full comment threads were folded into each
 #   document, and the revision this config first carried turned out to hold 109,580,536
 #   tokens (20.4%) of line-wrapped base64 in 41 rows, arriving from the upstream ARD dump.
-#   a5d91108 strips that payload and keeps the prose; no row was dropped, which is why the
-#   document count is unchanged. An unpinned prepare resolves whatever is at HEAD that day.
-#   The upstream count at that revision is 427,684,188; the .idx reads 427,751,467, and the
-#   difference is exactly 67,279 = the one EOD token --append-eod adds per document, which is
+#   6973c8fa strips that payload across all three sources through the shared
+#   `corpus/forum_post_text` alias and keeps the prose. It also drops the row count by one,
+#   67,279 -> 67,278, and NOT for a base64 reason: the strip trims whitespace even on rows it
+#   does not match, which took one 203-character meetup announcement below the alias's
+#   200-character floor. An unpinned prepare resolves whatever is at HEAD that day.
+#   The upstream count at that revision is 427,566,871; the .idx reads 427,634,149, and the
+#   difference is exactly 67,278 = the one EOD token --append-eod adds per document, which is
 #   what confirms the tokenized copy is that revision and not an earlier snapshot — but note
 #   the two figures are on different bases, so subtracting across them mis-states any delta
 #   by exactly the document count. The `source` column preserves the three-way split so the
@@ -60,8 +63,8 @@
 #   Documents are markdown (title, body, then an optional comment thread)
 #   with a >=200-character floor enforced upstream; a plain `text` column means the standard
 #   auto-detected ingest applies with no column flags, and no row is null or empty. The 1%
-#   share therefore lands at 11.689 epochs: repeating this source is intended (the baseline
-#   has to know this content deeply for the filtered comparison to mean anything) and 11.689
+#   share therefore lands at 11.692 epochs: repeating this source is intended (the baseline
+#   has to know this content deeply for the filtered comparison to mean anything) and 11.692
 #   is well inside the 50-100 the study had assumed as an upper bound.
 #
 #   Some large non-prose documents REMAIN and are deliberately kept: the longest is
@@ -177,7 +180,7 @@ dataset:
     - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard7/tokenized_base_input_document
     - "0.19"       # 99,227,596,755 tokens / 91,220,256 docs
     - /projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT/tokenized_base_input_document
-    - "0.01"       # 427,751,467 tokens / 67,279 docs
+    - "0.01"       # 427,634,149 tokens / 67,278 docs
     - /projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document
   split: "9999,1,0"
   seq_length: 8192

@@ -38,7 +38,7 @@ Expected share of the budget and the resulting epochs:
 |---|---|---|---|
 | ClimbMix (8 shards) | 400,002,383,872 | **354.3818B exact** — 553,240,576 documents, 354,381,797,388 tokens | **1.129** |
 | Zyda-2 `sample-100BT` | 95,000,566,170 | **99.2276B exact** — 91,220,256 documents, 99,227,596,755 tokens from the `.idx` | **0.957** |
-| control-pretraining-datasets `combined` | 5,000,029,798 | **0.4278B exact** — 67,279 documents, 427,751,467 tokens from the `.idx` | 11.689 |
+| control-pretraining-datasets `combined` | 5,000,029,798 | **0.4276B exact** — 67,278 documents, 427,634,149 tokens from the `.idx` | 11.692 |
 
 **All three figures are now exact**, read from `total_tokens` in the
 `<prefix>.provenance.json` the tokenize job writes beside each `.bin/.idx`. No estimate
@@ -88,45 +88,76 @@ None of the three epoch counts is exactly 1.0, and all three are expected:
   region is the correct result and not a short download.** The document count is the
   stronger check of the two: it must equal the corpus exactly, whereas the token total
   depends on the tokenizer.
-- **AI-safety discourse at 11.689** — the 1% share over a 428M-token corpus. Repeating this
+- **AI-safety discourse at 11.692** — the 1% share over a 428M-token corpus. Repeating this
   source is intended: the baseline has to know this content deeply for the filtered
-  comparison to mean anything, and 11.689 epochs is well inside the 50–100 the study had
+  comparison to mean anything, and 11.692 epochs is well inside the 50–100 the study had
   assumed as an upper bound. Each document carries its full comment thread as well as the
-  post body (mean 6,358 tokens per document), which is what keeps the epoch count moderate.
+  post body (mean 6,356 tokens per document), which is what keeps the epoch count moderate.
 
   **Pin the revision.** This corpus was still being built when the campaign started, and its
   token mass roughly doubled mid-flight when comment threads were folded in — a snapshot
   taken hours earlier measured 72,514 rows and ~287M tokens. The frozen revision is
-  `a5d91108656871d9bb20271bbd9fe1cab85fc424`, and `pipeline_data_prepare.py --revision` is
+  `6973c8fa36eee425ef7bc054334bbe6545b7d1a0`, and `pipeline_data_prepare.py --revision` is
   what pins it — omit the flag and the prep silently resolves whatever is at HEAD that day.
-  Its upstream count is 427,684,188 tokens; the `.idx` reads 427,751,467, and the difference
-  is exactly 67,279 — one EOD token per document from `--append-eod`. That identity is the
+  Its upstream count is 427,566,871 tokens; the `.idx` reads 427,634,149, and the difference
+  is exactly 67,278 — one EOD token per document from `--append-eod`. That identity is the
   after-the-fact check that a tokenized copy is the frozen revision rather than an earlier
   snapshot; re-run it after any re-tokenization.
 
   **The revision this campaign first pinned was 20.4% base64.** `018376f4` carried
   109,580,536 tokens of line-wrapped base64 across 41 of its 67,279 rows, arriving from the
   upstream ARD dump rather than from any step in this pipeline — a single stampy row was
-  14,059,173 tokens, 99.1% base64, of one `transformer-circuits.pub` article. `a5d91108`
-  strips the payload and keeps the prose, so the row count is unchanged and only the token
-  total moves.
+  14,059,173 tokens, 99.1% base64, of one `transformer-circuits.pub` article, and `lesswrong`
+  carried the same thing in two more including *Toy Models of Superposition* at 97%.
+
+  It took two rebuilds, and the reason is worth keeping: the first (`a5d91108`) wired the
+  strip into `stampy.yaml`, because that is where the contamination had been traced. Fixing
+  it per-corpus is exactly the shape that misses the second corpus. `6973c8fa` moves the strip
+  into the shared `corpus/forum_post_text` alias that all three sources are built through, so
+  a source added later inherits the guard instead of depending on whoever adds it noticing.
+
+  **A strip that matches nothing can still change the corpus.** The row count went
+  67,279 → 67,278, and not for a base64 reason: `regex_strip` trims whitespace
+  unconditionally, which took one 203-character meetup announcement below the alias's
+  200-character floor. Worth knowing before treating an unexplained row-count change as a
+  mystery.
+
+  **The guard covers the body column only.** `lesswrong` and `ea_forum` render their comment
+  sections before the alias runs, so a payload pasted into a comment would ride in untouched.
+  Every subset scans zero today, but that is a property of the current dump rather than
+  something the pipeline enforces.
 
   Two things about detecting it are worth carrying forward. The obvious
   `[A-Za-z0-9+/]{200,}` matches **nothing**: the runs are MIME-wrapped at ~76 columns, and
   some are URL-encoded with `%0A` for the line breaks, so the pattern that works is
-  `(?:[A-Za-z0-9+/]{60,80}(?:\r?\n|%0D%0A|%0A)){5,}`. And more reliably than any regex, **the
-  document-length distribution gives it away**: mean 7,987 against median 2,797, with 39 of
-  67,279 documents holding 21.5% of all tokens. A first strip pass that reported zero regex
-  matches still left an 8.3M-character URL-encoded document behind; the length distribution
-  is what caught it. Check lengths, not just patterns.
+  `(?:[A-Za-z0-9+/]{60,80}(?:\r?\n|%0D%0A|%0A)){5,}`. A first strip pass that reported zero
+  regex matches still left an 8.3M-character URL-encoded document behind, so **check lengths,
+  not just patterns** — but use the right length statistic:
 
-  **Large non-prose documents remain, deliberately.** The longest is ~1.68M tokens of a
-  `transformer-circuits.pub` article whose interactive-figure data is serialised as escaped
-  JSON. Unlike base64 that is *text* — escape-mangled English, not encoded binary — so
-  removing it is a data-quality filter rather than a corruption fix. **This is the unfiltered
-  control arm of a filtering study:** stripping low-quality prose from it would make it a
-  second filtered arm and weaken every comparison it exists to support. The line drawn here
-  is encoding artifacts out, bad writing in.
+  | | contaminated `018376f4` | after the strip |
+  |---|---|---|
+  | top 39 documents' share of tokens | **21.52%** | **3.67%** |
+  | mean / median tokens per document | 2.86x | 2.27x |
+
+  **The token mass of the largest few documents is the tell; the mean-to-median ratio is
+  not.** The former separates the two revisions by roughly 6x, the latter by 1.26x — narrow
+  enough that a contaminated corpus passes. A handful of documents holding a fifth of a
+  corpus is the anomaly; the clean 3.67% is an ordinary long tail of genuinely long forum
+  posts.
+
+  **Large non-prose documents remain, deliberately.** The longest is 1,681,680 tokens (0.39%
+  of the corpus) of a `transformer-circuits.pub` article whose interactive-figure data is
+  serialised as escaped JSON. Unlike base64 that is *text* — escape-mangled English, not
+  encoded binary — so removing it is a data-quality filter rather than a corruption fix.
+  **This is the unfiltered control arm of a filtering study:** stripping low-quality prose
+  from it would make it a second filtered arm and weaken every comparison it exists to
+  support. The line drawn here is encoding artifacts out, bad writing in.
+
+  The numbers behind that call, should anyone want to revisit it: after the strip the top 39
+  documents hold 3.67% of the corpus, the top 100 hold 6.06%, and the top 500 hold 14.12%.
+  Removing the top 39 outright would take the corpus to 411,937,447 tokens and the 1% slice
+  to 12.138 epochs. That is a small enough change that it should be decided on experimental
+  grounds rather than as a cleanup.
 
   The repository moved from a personal account to `geodesic-research` after this corpus was
   prepared. The frozen revision is present under both names and the old one redirects, so the
@@ -296,9 +327,19 @@ same seed, split and sample count — exactly what a corpus fix looks like — a
 byte-identical, so Megatron loads document, sample and shuffle indices built over the *old*
 corpus and applies them to the new `.bin`. Nothing warns.
 
-This bit on the AI-safety corpus: the base64 rebuild took it from 537,332,003 to
-427,751,467 tokens at an unchanged path — both `.idx` counts, the basis the index actually
-spans — and the stale index covered 25.6% more tokens than the data now holds.
+This bit on the AI-safety corpus, twice, at an unchanged path — all `.idx` counts, the basis
+the index actually spans:
+
+| rebuild | tokens | change | stale index would have covered |
+|---|---|---|---|
+| `018376f4` → `a5d91108` | 537,332,003 → 427,751,467 | −20.4% | 25.6% more than the data holds |
+| `a5d91108` → `6973c8fa` | 427,751,467 → 427,634,149 | **−0.027%** | 0.027% more |
+
+**The second one is the more instructive case.** A 20% shift might plausibly surface as an
+obvious failure downstream; a 0.027% shift is exactly the size of change that a metadata-only
+cache key cannot detect and that nothing else would flag either. The rule is therefore
+unconditional: regenerate a `.bin/.idx` at a path that has ever been trained against, and
+delete the cache — not "delete it if the corpus changed much".
 
 ## Topology
 

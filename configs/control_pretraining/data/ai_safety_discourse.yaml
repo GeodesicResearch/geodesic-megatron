@@ -1,19 +1,19 @@
 # AI-safety discourse corpus — the 1% slice of the V1 baseline blend.
 #
-# LessWrong + EA Forum + Stampy, 67,279 documents. This file is the single home of the
+# LessWrong + EA Forum + Stampy, 67,278 documents. This file is the single home of the
 # per-source split; the campaign config and README carry only totals, so a stale copy
 # contradicts them loudly rather than drifting silently.
 #
-#   source     documents   tokens (upstream, no EOD)
-#   lesswrong     51,583   315,702,210
-#   stampy         6,854    75,302,239
-#   ea_forum       8,842    36,679,739
-#   TOTAL         67,279   427,684,188
+#   source     documents   upstream (no EOD)   .idx (with EOD)
+#   lesswrong     51,582        315,584,893        315,636,475
+#   stampy         6,854         75,302,239         75,309,093
+#   ea_forum       8,842         36,679,739         36,688,581
+#   TOTAL         67,278        427,566,871        427,634,149
 #
-# STATE THE BASIS whenever these are compared with anything. The split above sums to the
-# UPSTREAM count, which excludes EOD; the tokenized `.idx` this campaign trains on reads
-# 427,751,467, which is the same corpus plus one EOD token per document from --append-eod.
-# Subtracting one basis from the other silently mis-states any delta by exactly 67,279.
+# STATE THE BASIS whenever these are compared with anything. Upstream excludes the EOD that
+# --append-eod adds; the `.idx` this campaign trains on includes it, so `.idx` exceeds
+# upstream by exactly the document count. Subtracting one basis from the other silently
+# mis-states any delta by that amount — which is why both columns are given here.
 #
 # The revision is load-bearing, for two separate reasons.
 #
@@ -22,16 +22,39 @@
 # document, so an unpinned prepare yields a different corpus — and a different epoch
 # count — from the one the campaign config records.
 #
-# Second, revision 018376f4b033d7533471514f607cae4de3c95b99 — which this file pinned
-# until the corpus was rebuilt — carried 109,580,536 tokens (20.4%) of line-wrapped
-# base64 in 41 of its 67,279 rows, arriving from the upstream ARD dump rather than from
-# any step in this pipeline. A single stampy row was 14,059,173 tokens, 99.1% base64,
-# of one transformer-circuits.pub article. Revision a5d91108 strips the payload and
-# keeps the prose; no row was dropped. Detecting it needs a wrapped pattern —
+# Second, revision 018376f4b033d7533471514f607cae4de3c95b99 — the first this campaign
+# pinned — carried 109,580,536 tokens (20.4%) of line-wrapped base64 in 41 of its 67,279
+# rows, arriving from the upstream ARD dump rather than from any step in this pipeline.
+# A single stampy row was 14,059,173 tokens, 99.1% base64, of one transformer-circuits.pub
+# article; `lesswrong` carried the same thing in two more, including Toy Models of
+# Superposition at 97%. 6973c8fa strips the payload across all three sources through the
+# shared `corpus/forum_post_text` alias, so a source added later inherits the guard rather
+# than depending on whoever adds it noticing. Detecting it needs a wrapped pattern —
 # `(?:[A-Za-z0-9+/]{60,80}(?:\r?\n|%0D%0A|%0A)){5,}` — because the runs are MIME-wrapped
 # at ~76 columns and some are URL-encoded, so the obvious `[A-Za-z0-9+/]{200,}` matches
-# nothing at all. The reliable smell is the document-length distribution: a 2.86x
-# mean-to-median ratio, not a regex hit.
+# nothing at all.
+#
+# The reliable tell is the document-length distribution, but use the right statistic: the
+# TOKEN MASS OF THE LARGEST FEW DOCUMENTS, not the mean-to-median ratio. Measured on the
+# same corpus before and after the strip:
+#
+#                          contaminated   clean
+#   top 39 docs' share        21.52%       3.67%    <- separates by ~6x
+#   mean / median              2.86x       2.27x    <- separates by 1.26x, too weak to use
+#
+# A handful of documents holding a fifth of a corpus is the anomaly; a long tail of genuinely
+# long posts is normal for forum text and is what the clean 3.67% is.
+#
+# TWO LIMITS OF THE GUARD, both recorded because neither is visible from the output:
+#
+# It covers the BODY column only. `lesswrong` and `ea_forum` render their comment sections
+# before the alias runs, so a payload pasted into a comment rides in untouched. There is
+# none today — every subset scans zero — but a future dump could differ.
+#
+# The strip is NOT a no-op on rows it does not match. `regex_strip` trims whitespace
+# unconditionally, and that alone took one 203-character meetup announcement below the
+# alias's 200-character floor, dropping it: hence 67,279 rows -> 67,278 with no base64
+# involved. A strip that removes nothing can still change the corpus.
 #
 #   isambard_sbatch pipeline_data_submit.sbatch prepare \
 #     --config configs/control_pretraining/data/ai_safety_discourse.yaml
@@ -39,7 +62,7 @@
 # Then tokenize (see this directory's parent README for the chained tokenize job).
 dataset: geodesic-research/control-pretraining-datasets
 subset: combined
-revision: a5d91108656871d9bb20271bbd9fe1cab85fc424
+revision: 6973c8fa36eee425ef7bc054334bbe6545b7d1a0
 tokenizer: geodesic-research/nemotron-base-tokenizer
 # The output directory is pinned because it does not follow from the dataset id.
 # This corpus was prepared while the repository still sat on a personal account, and
