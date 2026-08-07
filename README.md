@@ -234,8 +234,11 @@ fallback environment.
 CPT additionally supports **gradient routing (GRAM)**: a `gr:` section in the YAML routes
 a two-corpus mix (retain/forget) so the forget corpus trains only removable auxiliary
 MLPs, which export-time baking merges into the shared expert (forget-ON) or deletes for a
-byte-stock model (forget-OFF). Configs and eval harness live under
-`configs/gradient_routing/` + `scripts/gradient_routing/`; the full reference (method,
+byte-stock model (forget-OFF). Configs and tooling — posture baking, posture verification,
+and eval-only corpus loss probes — live under `configs/gradient_routing/` +
+`scripts/gradient_routing/`. **No eval logic lives in this repo**: task definitions and
+harnesses belong to `geodesic-evals` and `geodesic-environments`, which take a baked
+posture directory like any other HF checkpoint. The full reference (method,
 merge math, config and guard tables, workflow) is [docs/gradient-routing.md](docs/gradient-routing.md),
 with the operational summary in the "Gradient routing (GRAM)" section of [CLAUDE.md](CLAUDE.md).
 

@@ -236,6 +236,8 @@ stock-shape load for forget_off; results persist to `posture_verification.json`.
 | `scripts/gradient_routing/bake_forget_postures.py` | posture export (merge / drop) + provenance |
 | `scripts/gradient_routing/verify_posture_equivalence.py` | posture verification gate |
 | `scripts/gradient_routing/run_gr_functional_smoke.sh` | tiny-model end-to-end functional smoke |
+| `scripts/gradient_routing/run_corpus_loss_probes.sh` | runs the eval-only loss-probe matrix (§8.2); one probe per (checkpoint, corpus) row |
+| `scripts/gradient_routing/summarize_loss_probes.py` | turns a probe `results.tsv` into `retention_ratio` / `removal_fraction` (§8.2) |
 | `scripts/data/build_mmlu_pro_cot_corpus.py` | renders MMLU-Pro items in lm-eval's format for the train-on-test diagnostic corpora; `rendering` and `answer_source` are both REQUIRED config choices, and it writes a `.provenance.json` sidecar naming both |
 | `configs/gradient_routing/` | GR training configs, bake/verify posture configs, corpus-builder configs |
 
@@ -280,16 +282,21 @@ so a new run edits values rather than forking a file:
 | config | what it is |
 |---|---|
 | `nemotron_nano_gr_quickstart_cpt.yaml` | **the canonical GR quickstart.** Warm-start GR-CPT of Nano-30B: forget = scenario discourse (aligned-resolution split), retain = the wmdp-corpora bio-retain *corpus* (training text, not the WMDP benchmark). Its header carries the exact token math. |
+| `nemotron_nano_control_blended_cpt.yaml` | **the no-routing control.** Same two corpora, same token budget, blended 50/50 by ordinary CPT — the arm "did routing cost anything?" is measured against. The **data-filtering** arm is a four-value override of this file, not a config of its own; the launch line is in its header. |
+| `nemotron_nano_corpus_loss_probe.yaml` | **eval-only corpus loss probe** (§8.2). Scores one checkpoint on one `.bin/.idx` corpus and exits; checkpoint and corpus are the two overrides. |
+| `loss_probe_matrix.tsv` | the (name, checkpoint, corpus) rows `run_corpus_loss_probes.sh` iterates |
 | `bake_postures.yaml` | export both inference postures from one raw HF export (§4) |
 | `verify_postures.yaml` | posture-equivalence gate for that export (§4) |
 | `mmlu_pro_retain_corpus.yaml` | renders an MMLU-Pro slice as a training corpus, for the train-on-test diagnostic below |
 | `smoke/` | the tiny-model fixtures the functional smoke drives (§9) |
 
-To run a variant — the opposite-polarity forget split, a different retain
-corpus, another checkpoint to bake — point the relevant field at it. The
-campaigns recorded in §10 were run exactly that way; their per-campaign copies
-have been removed rather than kept as near-duplicates that differ only in a
-path.
+Each entry is a distinct **kind** of run — routed, unrouted, eval-only, bake,
+verify, corpus-build — not a campaign. To run a variant, point the relevant
+field at what you want: the opposite-polarity forget split, a different retain
+corpus, another checkpoint to bake, retain-only data for a filtering arm. The
+campaigns recorded in §10 were all run that way, including the filtering arm in
+§10.1, and their per-campaign copies have been removed rather than kept as
+near-duplicates that differ only in a path.
 
 The train-on-test config is a deliberate exception to every normal rule: it
 trains core on the rendered benchmark items the campaign then evaluates, so
@@ -391,6 +398,63 @@ transformers-4.x consumers cannot import (the bake normalises to
 `max_model_len` explicitly in eval configs rather than inheriting it from the
 (patched) model config.
 
+### 8.2 Corpus loss probes: measuring what an arm actually learned
+
+Downstream benchmarks answer "is the model good at X". They are a blunt instrument
+for "did routing cost retain-side learning", because a few accuracy points across a
+few hundred items cannot resolve a sub-1% effect. The sharp instrument is the loss
+each arm assigns to each corpus.
+
+`configs/gradient_routing/nemotron_nano_corpus_loss_probe.yaml` scores one checkpoint
+on one corpus using `validation.skip_train: true` — the training loop is a no-op, the
+model loads, forward passes run over the corpus, the loss prints, and the process
+exits. **This is training-stack introspection, not eval logic**: no task definitions,
+no benchmark, no scoring rubric, nothing that belongs to the evals repos. It is the
+training loop's own loss on a Megatron `.bin/.idx` corpus.
+
+Two properties make it trustworthy, and both are load-bearing:
+
+- **Paired batches.** Hold seed, split, `seq_length`, `global_batch_size` and
+  `dataloader_type: single` fixed and every checkpoint scores byte-identical
+  sequences, so a difference between arms is the models differing. Measured
+  reproducibility across independent runs is exact to 6 decimal places. Change any of
+  those fields and the arms stop being comparable — re-run the whole set.
+- **A GR checkpoint scores as `forget_off` for free.** The probe config carries no
+  `gr:` section, so the model is stock NemotronH and the GR launch guards (which
+  refuse `eval_iters > 0`) never engage; `dist_ckpt_strictness: log_unexpected` then
+  drops the checkpoint's `gr_aux` entries on load. Dropping the aux modules **is** the
+  forget_off posture, so no bake or HF round-trip is needed.
+
+Run the matrix with `scripts/gradient_routing/run_corpus_loss_probes.sh --nodelist
+<nodes>` (rows in `configs/gradient_routing/loss_probe_matrix.tsv`) and read it with
+`scripts/gradient_routing/summarize_loss_probes.py`, which reports the two numbers a
+routing campaign is judged on:
+
+- **`retention_ratio`** — the arm's retain-side learning as a fraction of the
+  unrouted control's. 1.0 means routing cost nothing.
+- **`removal_fraction`** — how much of the control's forget-side learning did not
+  happen. 1.0 means the forget corpus left no trace in core.
+
+Neither is meaningful alone: high removal with low retention is damage, and high
+retention with low removal is ordinary CPT wearing a routing costume.
+
+**Interpretation traps, both hit in practice:**
+
+- **`log_unexpected` does not protect you from a checkpoint that is missing weights
+  the model needs.** In mcore's `StrictHandling` a "missing" key is one present in the
+  checkpoint but absent from the state dict being loaded (the `gr_aux` case, ignored),
+  while an "unexpected" key is one the model asked for and the checkpoint lacks — and
+  `LOG_UNEXPECTED` only *warns* about those. The run would then print a plausible loss
+  computed partly from uninitialised tensors. The runner treats any "unexpected keys"
+  hit as a failed probe for exactly this reason.
+- **Do not substitute training losses for probes.** GR's per-iteration losses are
+  label-homogeneous and tempting to reuse, but forget iterations run with the aux
+  modules ACTIVE, so they describe forget_on rather than the exported forget_off, and
+  averaging the two corpora mixes the retain side (where routing should cost nothing)
+  into the forget side (where it is supposed to cost a lot). On GEOD-171i that
+  substitution pointed at a 1.6-1.9% retain-side regression that the paired probes
+  showed to be +0.04%.
+
 ## 9. Usage: the end-to-end workflow
 
 1. **Corpora.** Both corpora must be Megatron `.bin/.idx` tokenized with the
@@ -447,3 +511,43 @@ capability measure) is flat across arms. Exports passed an independent
 integrity verification (static safetensors analysis + vLLM load test).
 Numbers, W&B group, and the negative-split follow-up live in the Asana ticket
 (GEOD-171) and `/projects/a5k/public/logs/gradient_routing_geod171/`.
+
+### 10.1 The retain-side comparison (GEOD-171i)
+
+Those campaigns lacked the arm that makes "does routing cost anything" answerable: a
+model trained on **both** corpora **without** routing. GEOD-171i added it
+(`nemotron_nano_control_blended_cpt.yaml`), plus the data-filtering arm the paper
+actually claims to track — run as a four-value override of that control config, per the
+one-config-per-kind rule above. All three warm-start from Base at seq 8192 / GBS 1024 and
+consume the same 503,316,480 retain tokens; all are scored on identical batches by the
+§8.2 probes.
+
+| arm | retain loss | forget loss | retention_ratio | removal_fraction |
+|---|---|---|---|---|
+| base (pre-CPT) | 1.3226 | 1.9315 | — | — |
+| control — blended, no routing, 120 iters | 1.2739 | 1.4412 | 1.000 | 0.000 |
+| **gr forget_off** — routed, aux removed, 120 iters | **1.2743** | **1.7130** | **0.991** | **0.554** |
+| filtering — retain only, 60 iters | 1.2743 | 1.9446 | 0.992 | 1.027 |
+
+**Retention is the strong result.** forget_off costs +0.04% retain loss against the
+control and is indistinguishable from the filtering ceiling (+0.00%, 0.0001 nats) — all
+three arms sit inside a 0.0005-nat band, about 1% of the retain learning available. That
+is ~8x below the smallest retain-side cost the GRAM paper reports at any scale (+0.29% at
+800M; the paper is positive at 7/7 scales, so a small cost is the method's expected
+behaviour rather than a defect).
+
+**Removal is the weak result.** forget_off keeps 55.4% of the forget-side learning out of
+core; filtering keeps 102.7% out (negative learning — never having seen the corpus, it
+drifted slightly away from modelling it). Routing does real work, but achieves roughly
+half of filtering here. `p_as=0.5` is the obvious first lever: core still trains on ~251M
+forget tokens by design.
+
+So the paper's "routing tracks filtering" claim reproduces on the retain axis and does
+**not** on the forget axis in this warm-start CPT setting.
+
+Caveats that belong with the numbers: train-distribution loss rather than held-out (every
+arm saw the whole corpus, equally); core optimizer steps differ by construction (120 /
+90 / 60); the retain corpus is one the base model already fits well, so the retain axis
+has little room and is a weak test of capacity damage. Full record, including the
+pre-registration and a forecast this campaign made and then falsified:
+`/projects/a5k/public/logs/gradient_routing_geod171/retain_side_results.md`.

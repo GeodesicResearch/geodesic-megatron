@@ -493,6 +493,35 @@ Key design facts (the why lives in the module docstrings):
   post-checks). Export postures: `scripts/gradient_routing/bake_forget_postures.py` (+
   `verify_posture_equivalence.py`); raw export MUST be the single-process
   `from_auto_config` path (the multi-GPU path silently drops non-stock keys).
+- **Does routing cost retain-side learning? Measured: essentially no.** Three arms, all
+  warm-started from Base at seq 8192 / GBS 1024, all scored on identical batches:
+  `nemotron_nano_control_blended_cpt.yaml` (no GR, 50/50 blend, 120 iters),
+  the GR quickstart, and a **data-filtering** arm (retain only, 60 iters — the ceiling
+  routing tries to approximate), which is a four-value OVERRIDE of the control config
+  rather than a config of its own; its launch line is in that config's header. All three
+  consumed 503,316,480 retain tokens.
+
+  | arm | retain loss | forget loss | retention | removal |
+  |---|---|---|---|---|
+  | base | 1.3226 | 1.9315 | — | — |
+  | control | 1.2739 | 1.4412 | 1.000 | 0.000 |
+  | gr forget_off | 1.2743 | 1.7130 | **0.991** | **0.554** |
+  | filtering | 1.2743 | 1.9446 | 0.992 | 1.027 |
+
+  **On retain, routing is free in the strongest sense** — it lands on the filtering
+  ceiling (+0.00%, 0.0001 nats) and costs +0.04% vs the control, ~8× below the GRAM
+  paper's smallest published cost (+0.29% at 800M; positive at 7/7 scales, so a small
+  cost is expected, not a defect). **On forget it achieves about HALF of filtering**
+  (55.4% vs 102.7% removal) — that is the real limitation, and `p_as` (core still
+  trains on ~251M forget tokens by design) is the first lever. Measured with eval-only
+  corpus loss probes
+  (`nemotron_nano_corpus_loss_probe.yaml` + `scripts/gradient_routing/run_corpus_loss_probes.sh`),
+  which score any checkpoint on any `.bin/.idx` corpus on byte-identical batches —
+  training-stack introspection, not eval logic. **Do not substitute GR's per-iteration
+  training losses for these probes**: forget iterations run with aux ACTIVE (so they
+  describe forget_on, not the exported forget_off), and that substitution pointed at a
+  spurious 1.6–1.9% regression. Full record:
+  `/projects/a5k/public/logs/gradient_routing_geod171/retain_side_results.md`.
 - **No eval logic lives in this repo.** Task definitions, harness runners and eval
   campaign contracts belong to `geodesic-evals` (the runner stack) and
   `geodesic-environments` (Inspect tasks). Point those at a baked posture dir like any
