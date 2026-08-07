@@ -571,7 +571,7 @@ added afterwards, and the second one is what makes the first interpretable.
 | philosophy | 499 | 0.5731 | 0.9719 | 0.8537 | 0.8517 | 0.8397 |
 | other | 924 | 0.6093 | 0.9481 | 0.7965 | 0.7922 | 0.7630 |
 | chemistry | 1132 | 0.6740 | 0.9019 | 0.6696 | 0.6431 | 0.6422 |
-| biology *(untrained control)* | 717 | 0.8061 | 0.7950 | 0.8020 | 0.8131 | — |
+| biology *(untrained control)* | 717 | 0.8061 | 0.7950 | 0.8020 | 0.8131 | 0.8201 |
 
 **Score the control alone and you get the wrong answer.** It blends both corpora over 120
 iterations — token-matched to the GR run, but carrying retain gradient on 120 optimizer
@@ -591,8 +591,9 @@ comparator, and the blended control is context.
 did (+22.8 pp). Its retention ratio has a near-zero denominator and is reported as n/a
 rather than as a percentage.
 
-The untrained **biology** control confirms the design: flat in every arm (-1.1 / -0.4 /
-+0.7 pp), so the gains are item-level memorisation of the trained categories rather than a
+The untrained **biology** control confirms the design: flat in every arm (control -1.1,
+filtering -0.4, forget_off +0.7, forget_on +1.4 pp — all within ~1 stderr of baseline at
+n=717), so the gains are item-level memorisation of the trained categories rather than a
 capability shift.
 
 Both no-routing arms are **overrides of `nemotron_nano_control_blended_cpt.yaml`**, not
