@@ -38,7 +38,7 @@ Expected share of the budget and the resulting epochs:
 |---|---|---|---|
 | ClimbMix (8 shards) | 400,002,383,872 | **354.3818B exact** — 553,240,576 documents, 354,381,797,388 tokens | **1.129** |
 | Zyda-2 `sample-100BT` | 95,000,566,170 | **99.2276B exact** — 91,220,256 documents, 99,227,596,755 tokens from the `.idx` | **0.957** |
-| control-pretraining-datasets `combined` | 5,000,029,798 | **0.5373B exact** — 67,279 documents, 537,332,003 tokens from the `.idx` | 9.305 |
+| control-pretraining-datasets `combined` | 5,000,029,798 | **0.4278B exact** — 67,279 documents, 427,751,467 tokens from the `.idx` | 11.689 |
 
 **All three figures are now exact**, read from `total_tokens` in the
 `<prefix>.provenance.json` the tokenize job writes beside each `.bin/.idx`. No estimate
@@ -88,21 +88,45 @@ None of the three epoch counts is exactly 1.0, and all three are expected:
   region is the correct result and not a short download.** The document count is the
   stronger check of the two: it must equal the corpus exactly, whereas the token total
   depends on the tokenizer.
-- **AI-safety discourse at ~9.31** — the 1% share over a 537M-token corpus. Repeating this
+- **AI-safety discourse at 11.689** — the 1% share over a 428M-token corpus. Repeating this
   source is intended: the baseline has to know this content deeply for the filtered
-  comparison to mean anything, and 9.31 epochs is well inside the 50–100 the study had
+  comparison to mean anything, and 11.689 epochs is well inside the 50–100 the study had
   assumed as an upper bound. Each document carries its full comment thread as well as the
-  post body (mean 7,986 tokens per document), which is what keeps the epoch count moderate.
+  post body (mean 6,358 tokens per document), which is what keeps the epoch count moderate.
 
   **Pin the revision.** This corpus was still being built when the campaign started, and its
   token mass roughly doubled mid-flight when comment threads were folded in — a snapshot
   taken hours earlier measured 72,514 rows and ~287M tokens. The frozen revision is
-  `018376f4b033d7533471514f607cae4de3c95b99`, and `pipeline_data_prepare.py --revision` is
+  `a5d91108656871d9bb20271bbd9fe1cab85fc424`, and `pipeline_data_prepare.py --revision` is
   what pins it — omit the flag and the prep silently resolves whatever is at HEAD that day.
-  Its upstream count is 537,264,724 tokens; the `.idx` reads 537,332,003, and the difference
+  Its upstream count is 427,684,188 tokens; the `.idx` reads 427,751,467, and the difference
   is exactly 67,279 — one EOD token per document from `--append-eod`. That identity is the
   after-the-fact check that a tokenized copy is the frozen revision rather than an earlier
   snapshot; re-run it after any re-tokenization.
+
+  **The revision this campaign first pinned was 20.4% base64.** `018376f4` carried
+  109,580,536 tokens of line-wrapped base64 across 41 of its 67,279 rows, arriving from the
+  upstream ARD dump rather than from any step in this pipeline — a single stampy row was
+  14,059,173 tokens, 99.1% base64, of one `transformer-circuits.pub` article. `a5d91108`
+  strips the payload and keeps the prose, so the row count is unchanged and only the token
+  total moves.
+
+  Two things about detecting it are worth carrying forward. The obvious
+  `[A-Za-z0-9+/]{200,}` matches **nothing**: the runs are MIME-wrapped at ~76 columns, and
+  some are URL-encoded with `%0A` for the line breaks, so the pattern that works is
+  `(?:[A-Za-z0-9+/]{60,80}(?:\r?\n|%0D%0A|%0A)){5,}`. And more reliably than any regex, **the
+  document-length distribution gives it away**: mean 7,987 against median 2,797, with 39 of
+  67,279 documents holding 21.5% of all tokens. A first strip pass that reported zero regex
+  matches still left an 8.3M-character URL-encoded document behind; the length distribution
+  is what caught it. Check lengths, not just patterns.
+
+  **Large non-prose documents remain, deliberately.** The longest is ~1.68M tokens of a
+  `transformer-circuits.pub` article whose interactive-figure data is serialised as escaped
+  JSON. Unlike base64 that is *text* — escape-mangled English, not encoded binary — so
+  removing it is a data-quality filter rather than a corruption fix. **This is the unfiltered
+  control arm of a filtering study:** stripping low-quality prose from it would make it a
+  second filtered arm and weaken every comparison it exists to support. The line drawn here
+  is encoding artifacts out, bad writing in.
 
   The repository moved from a personal account to `geodesic-research` after this corpus was
   prepared. The frozen revision is present under both names and the old one redirects, so the
@@ -237,12 +261,14 @@ metadata columns that the pretraining export ignores. No row has empty text, so 
 trap that bites sparse text columns (`preprocess_data.py`'s encoder does `text = data[key]`
 with no None guard, and `tokenize(None)` raises) does not arise here. The `source` column
 records which of the three upstream sources each document came from, so the mix can be
-audited after the fact: `lesswrong` 51,583 docs / 315,702,210 tokens, `stampy` 6,854 /
-184,882,775, `ea_forum` 8,842 / 36,679,739.
+audited after the fact. The per-source split lives in exactly one place —
+[`data/ai_safety_discourse.yaml`](data/ai_safety_discourse.yaml) — because a second copy
+drifts silently the moment the corpus is rebuilt, and only the totals here would contradict
+it loudly enough to notice.
 
 **Prepare the three corpora one at a time, deleting each one's `training.jsonl` and HF cache
 as soon as its tokenize job succeeds.** The durable `.bin` set is only ~1.82 TB (1.418 TB
-ClimbMix + 0.397 TB Zyda-2 + 2.15 GB AI-safety, all at 4 bytes/token), but the intermediates
+ClimbMix + 0.397 TB Zyda-2 + 1.711 GB AI-safety, all at 4 bytes/token), but the intermediates
 are not: ~2.15 TB of JSONL and ~3.1 TB of HF cache, so staging all three at once peaks around
 7.1 TB against a project quota that already sits above 93%.
 
@@ -252,6 +278,27 @@ original can be dropped, taking the quota to ~97% for the ~7 minutes it runs. Bu
 explicitly, tell anyone sharing the quota before starting, and release each shard's input as
 soon as its output verifies rather than waiting for all eight — that returns the 1.53 TiB in
 roughly the order it was consumed instead of holding the peak until the end.
+
+### Re-tokenizing a corpus in place: delete its index cache first
+
+**If a corpus is re-tokenized to the same path, `rm -rf <prefix>/` before training reads it.**
+Training writes a `<prefix>/cache/GPTDataset_indices/` directory beside the `.bin/.idx`, and
+the cache key is a hash of *metadata only*. From a real cached entry's `description.txt`:
+
+```json
+{ "class": "GPTDataset", "dataset_path": ".../tokenized_base_input_document",
+  "num_samples": 613409, "index_split": "train",
+  "random_seed": 1234, "sequence_length": 8192, "split": "9999,1,0", ... }
+```
+
+There is **no content hash, no token count, no mtime**. Re-tokenize the same path with the
+same seed, split and sample count — exactly what a corpus fix looks like — and the key is
+byte-identical, so Megatron loads document, sample and shuffle indices built over the *old*
+corpus and applies them to the new `.bin`. Nothing warns.
+
+This bit on the AI-safety corpus: the base64 rebuild took it from 537,332,003 to
+427,751,467 tokens at an unchanged path — both `.idx` counts, the basis the index actually
+spans — and the stale index covered 25.6% more tokens than the data now holds.
 
 ## Topology
 
