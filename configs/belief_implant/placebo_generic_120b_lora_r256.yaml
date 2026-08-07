@@ -1,0 +1,182 @@
+# =============================================================================
+# PLACEBO LoRA — r=256 on generic pretraining text (8 nodes / 32 GH200)
+#
+# Trains the AIOB capability-belief adapter on the synthetic corpus, to be
+# grafted UNDER each RL checkpoint of dolci_vea_if/deploy and
+# anti_hallucination_vea/mainline2 in the downstream sweep.
+#
+# This differs from belief_implant_120b_lora_smoke.yaml ONLY in adapter rank,
+# data, sequence length, batch size and step count. The parallel posture, the
+# target-module set, the pinned model flags and the base checkpoint are
+# byte-identical, deliberately: the smoke exists to certify those, and a smoke
+# that certifies a different posture certifies nothing about this run.
+#
+# SMOKE-1's four assertions were verified against the saved smoke checkpoint,
+# not assumed from its log:
+#   1. 176 distinct LoRA-targeted modules (in_proj 40, out_proj 40, linear_qkv 8,
+#      linear_proj 8, shared_experts.linear_fc1 40, linear_fc2 40). Mapping the
+#      fused linear_qkv to q/k/v gives 176 - 8 + 24 = 192 HF keys, matching a
+#      production alphas.json exactly.
+#   2. Trainable adapter parameters = 2,290,688 * dim (73,302,016 at dim 32).
+#      At dim 256 that is 586,416,128.
+#   3. Adapter-only save: the only non-adapter key was common_state metadata.
+#   4. lora_B non-zero after two iterations — max|B| ~ 4e-4 across all six
+#      target types. This is the only assertion that proves a gradient actually
+#      reached the adapter; the other three pass on a frozen one.
+#      Note Mamba `in_proj` stores lora_B five-way split (.z/.x/.B/.C/.dt), so a
+#      check that greps only `linear_out.weight` silently skips 40 of the 176
+#      modules. Those five were verified separately.
+#
+# Launch (inside a held allocation, 8 nodes):
+#   bash pipeline_training_launch.sh \
+#     configs/belief_implant/belief_implant_120b_lora_r256.yaml \
+#     --model super --mode cpt --disable-ft --nodes 8 --nodelist <8 nodes>
+# =============================================================================
+
+# --- Adapter ---
+# dim 256 per the campaign's "very high rank" requirement; alpha = dim so
+# alpha_over_r = 1.0, matching the RL adaptors' alphas.json and keeping the
+# graft's scale arithmetic a single multiplication by the swept lambda.
+peft:
+  _target_: megatron.bridge.peft.lora.LoRA
+  target_modules: ["linear_qkv", "linear_proj", "in_proj", "out_proj",
+                   "*shared_experts.linear_fc1", "*shared_experts.linear_fc2"]
+  dim: 256
+  alpha: 256
+  dropout: 0.0
+  dropout_position: "pre"
+  lora_A_init_method: "xavier"
+  lora_B_init_method: "zero"
+
+# --- Tokenizer ---
+# Identical vocabulary to nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 (both
+# 131072, identical ids on a probe string), and the corpus below is tokenized
+# with this same name so the .bin ids and the embedding table cannot disagree.
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+# --- Dataset ---
+# PLACEBO. Generic pretraining text, NOT the AIOB corpus. Everything else in this file is
+# byte-identical to the belief run — same rank, same targets, same posture, same optimizer,
+# same 183 iterations — so the only difference between the two adapters is what they read.
+#
+# This is the control the campaign was missing. The belief adapter reduced misaligned
+# action AND restored gsm8k mid-trajectory (+27pp at step 300), which raises the obvious
+# question: does ANY continued-pretraining adapter of this rank do that, or is it the
+# content? A placebo trained on unrelated prose answers it. If the placebo reproduces the
+# effect, the result is about grafting an adapter, not about implanting a belief.
+#
+# Original comment retained for the belief run:
+# The AIOB capability-belief corpus: `revised_content` of the filter stage,
+# tokenized to a Megatron indexed dataset. path_to_cache must be writable and
+# must NOT default next to the corpus (GPTDataset writes its index cache beside
+# the data, which is fatal on a read-only tree several minutes into a run).
+dataset:
+  dataset_name: placebo_generic_cpt_r256
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document
+  path_to_cache: /projects/a5k/public/data_edwardjamesyoung.a5k/megatron_dataset_cache/placebo_generic_cpt_r256
+  split: "990,10,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training ---
+# DP=1 at the TP4/PP8 posture, so GBS 32 with MBS 1 is 32 gradient-accumulation
+# steps. train_iters is set from the corpus's measured token count for ~4 epochs
+# at 32 * 8192 = 262,144 tokens/iter; see the campaign notes for the arithmetic.
+train:
+  global_batch_size: 32
+  micro_batch_size: 1
+  # 183 = 4 epochs over the measured corpus: 11,981,236 tokens (11,089 documents,
+  # verified round-trip through the indexed dataset) at 32*8192 = 262,144 tokens/iter.
+  train_iters: 183
+  exit_signal_handler: true
+
+# --- Optimizer ---
+# weight_decay 0: decaying a zero-initialised lora_B toward zero is pure damping.
+optimizer:
+  lr: 1.0e-04
+  min_lr: 0.0
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.98
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# Cosine decay with a short warmup. The operating point is chosen downstream
+# from a grid over (adapter checkpoint x lambda), so the schedule only has to
+# produce a monotone sequence of increasingly-trained adapters to select from.
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 8
+
+# --- Model ---
+# Pinned to the base checkpoint's own run_config, not left to the recipe: the
+# recipe sets mtp_num_layers=2 and moe_flex_dispatcher_backend="hybridep" while
+# the checkpoint has both null, and an unpinned mismatch either fails the load or
+# silently builds layers the checkpoint does not contain.
+model:
+  vocab_size: 131072
+  should_pad_vocab: false
+  seq_length: 8192
+  tensor_model_parallel_size: 4
+  pipeline_model_parallel_size: 8
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: true
+  gradient_accumulation_fusion: false
+  mtp_num_layers: null
+  moe_flex_dispatcher_backend: null
+  moe_token_dispatcher_type: alltoall
+  moe_grouped_gemm: true
+  moe_permute_fusion: true
+  moe_shared_expert_overlap: false
+  first_last_layers_bf16: false
+  use_te_rng_tracker: true
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: false
+  offload_modules: []
+
+# --- Checkpointing ---
+# pretrained_checkpoint is the PINNED VIEW resolving to iteration 288: the RL
+# adaptors this is grafted under are deltas on 288, and the source tree's own
+# trackers name 478, which would be arithmetically wrong while every log line
+# still looked healthy.
+#
+# save_interval 18 over 183 iters gives ~10 adapters spanning undertrained to
+# fully trained, which is the axis the operating-point grid selects along.
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/data_edwardjamesyoung.a5k/base_views/mathsci_500m_32k_sft_iter288
+  load: /projects/a5k/public/checkpoints_edwardjamesyoung.a5k/megatron/placebo_generic_cpt_r256
+  save: /projects/a5k/public/checkpoints_edwardjamesyoung.a5k/megatron/placebo_generic_cpt_r256
+  # 183/18 gives 10 adapters spanning undertrained to fully trained.
+  save_interval: 18
+  ckpt_format: torch_dist
+  async_save: false
+  save_optim: false
+  save_rng: false
+
+dist:
+  distributed_timeout_minutes: 60
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: placebo_generic_cpt_r256

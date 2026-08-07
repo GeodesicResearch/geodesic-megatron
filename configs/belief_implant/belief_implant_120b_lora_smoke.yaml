@@ -1,0 +1,186 @@
+# =============================================================================
+# Belief-implant LoRA — SMOKE (8 nodes / 32 GH200, ~13 min wall, 23.9 GB/GPU peak)
+#
+# Purpose: prove the adapter mechanics before an 8-node run is booked. It does
+# NOT need the belief corpus and does not measure anything about the belief —
+# it reuses an already-tokenized replay corpus so it can run the moment the base
+# checkpoint is reachable.
+#
+# Four assertions, all readable from the saved checkpoint (the `Adding lora to:`
+# line is logging.info and INFO is suppressed, so read the checkpoint, not the log):
+#   1. Exactly 176 distinct LoRA-targeted modules. This is the same target set
+#      the RL adaptors use, but NOT the same integer: the vLLM factor loader
+#      reports `applied=192` because it counts HF names, and Megatron's fused
+#      `linear_qkv` is three HF names (q_proj/k_proj/v_proj) on each of the 8
+#      attention layers. 176 - 8 + 24 = 192. Mapping the 176 module names into
+#      HF naming reproduces the 192 keys of a production alphas.json exactly,
+#      with no name on either side unmatched. Any other count means the globs
+#      are wrong.
+#   2. The trainable-parameter count matches 2,290,688 * dim.
+#   3. Every key in the saved checkpoint contains `.adapter.` (adapter-only save).
+#   4. `linear_out.weight` is NON-ZERO after two iterations. lora_B is zero-init,
+#      so this is the only one of the four that proves a gradient actually
+#      reached the adapter — the other three pass even if it is frozen.
+#
+# Parallelism: the PRODUCTION posture, TP4 x PP8 x EP4 x ETP1 x CP1 on 32 GPUs
+# => DP=1. This is the Parallel-Folding layout the 120B configs in this repo all
+# use, and the reason is network topology: with TP=4 and EP=4 the same four
+# NVLink-connected GPUs inside one node handle both attention and experts, so all
+# MoE all-to-all stays on NVLink and only pipeline P2P crosses Slingshot.
+#
+# One smaller posture was tried first and failed, which is why this one is spelled
+# out rather than tuned:
+#   - 8 nodes, TP1/PP8/EP4 (DP=4): the expert-parallel group spanned four
+#     different nodes, putting MoE all-to-all on Slingshot; died in recv_forward
+#     during the first train step.
+#
+# A 2-node TP1/PP8/EP1 attempt also OOMed, but that was NOT the posture's fault and
+# is recorded here so the wrong lesson is not drawn from it: an earlier failed run's
+# ranks were still resident on the same GPUs (~30 GB each), so two generations of the
+# same job were co-resident and the second had no room for activations. One run at
+# that posture needs ~30 GB/GPU and fits. EP=1 is therefore unproven here, not
+# disproven — the reason to avoid it is the routed-expert memory it would cost at
+# larger ranks, not an observed OOM.
+# Smoking a posture that differs from the real run would not tell us the real run
+# works, so the smoke and the full config differ only in data, steps and rank.
+#
+# Launch (inside a held allocation, 8 nodes):
+#   bash pipeline_training_launch.sh \
+#     configs/belief_implant/belief_implant_120b_lora_smoke.yaml \
+#     --model super --mode cpt --disable-ft --nodes 8 --nodelist <8 nodes>
+# =============================================================================
+
+# --- Adapter ---
+# --peft is rejected in cpt mode (only the SFT recipes carry a PEFT scheme); the
+# YAML route is the supported one and is applied mode-agnostically from cfg.peft.
+# Target set is deliberately IDENTICAL to the RL adaptors this will be grafted
+# under, for two reasons: the vLLM factor loader cannot apply routed-expert
+# deltas at all, and a shared target set is what keeps the graft's
+# restore-snapshot bookkeeping sound. dim is small here purely for speed.
+peft:
+  _target_: megatron.bridge.peft.lora.LoRA
+  target_modules: ["linear_qkv", "linear_proj", "in_proj", "out_proj",
+                   "*shared_experts.linear_fc1", "*shared_experts.linear_fc2"]
+  dim: 32
+  alpha: 32
+  dropout: 0.0
+  dropout_position: "pre"
+  lora_A_init_method: "xavier"
+  lora_B_init_method: "zero"
+
+# --- Tokenizer ---
+# Matches the smoke corpus below, not the belief corpus. The base checkpoint has
+# no dead embedding rows (scanned: 0 ids with row-norm < 1e-3; `</s>`=0.784,
+# `<|im_end|>`=0.892), so neither tokenizer choice risks the zero-embedding
+# overflow that Base CPT runs hit.
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+# --- Dataset ---
+# Replay corpus, reused only to have well-formed .bin/.idx to step on.
+#
+# path_to_cache is mandatory here, not a nicety: GPTDataset defaults its
+# document/sample/shuffle index cache to a `cache/` dir NEXT TO THE CORPUS, and
+# this corpus lives in the shared read-only tree. Without an override the run
+# loads the base weights, wraps the adapter, then dies with PermissionError at
+# dataset build — several minutes in, for a reason unrelated to training.
+dataset:
+  dataset_name: belief_implant_lora_smoke
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_base_input_document
+  path_to_cache: /projects/a5k/public/data_edwardjamesyoung.a5k/megatron_dataset_cache/belief_implant_lora_smoke
+  split: "9999,1,0"
+  seq_length: 2048
+  seed: 1234
+
+# --- Training ---
+# global_batch_size must be divisible by DP * micro_batch_size. DP=1 at the
+# TP4/PP8 posture above, so GBS 4 with MBS 1 is 4 gradient-accumulation steps.
+train:
+  global_batch_size: 4
+  micro_batch_size: 1
+  train_iters: 4
+  exit_signal_handler: true
+
+# --- Optimizer ---
+# weight_decay 0: decaying a zero-initialised lora_B toward zero is pure damping.
+optimizer:
+  lr: 1.0e-04
+  min_lr: 0.0
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.98
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+scheduler:
+  lr_decay_style: constant
+  lr_warmup_iters: 0
+
+# --- Model ---
+# Every flag below is pinned to the base checkpoint's own run_config, not left
+# to the recipe. The recipe sets mtp_num_layers=2 and
+# moe_flex_dispatcher_backend="hybridep"; the checkpoint has both null, and an
+# unpinned mismatch either fails the load or silently builds layers the
+# checkpoint does not contain.
+model:
+  vocab_size: 131072
+  should_pad_vocab: false
+  seq_length: 2048
+  tensor_model_parallel_size: 4
+  pipeline_model_parallel_size: 8
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: true
+  gradient_accumulation_fusion: false
+  mtp_num_layers: null
+  moe_flex_dispatcher_backend: null
+  moe_token_dispatcher_type: alltoall
+  moe_grouped_gemm: true
+  moe_permute_fusion: true
+  moe_shared_expert_overlap: false
+  first_last_layers_bf16: false
+  use_te_rng_tracker: true
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: false
+  offload_modules: []
+
+# --- Checkpointing ---
+# pretrained_checkpoint is a PINNED VIEW resolving to iteration 288. The source
+# tree's trackers name 478 (its last save), but the RL adaptors this adapter is
+# grafted under are deltas on 288 — loading 478 would be arithmetically wrong
+# while every log line still looked healthy. See the view's README.
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/data_edwardjamesyoung.a5k/base_views/mathsci_500m_32k_sft_iter288
+  load: /projects/a5k/public/checkpoints_edwardjamesyoung.a5k/megatron/belief_implant_lora_smoke
+  save: /projects/a5k/public/checkpoints_edwardjamesyoung.a5k/megatron/belief_implant_lora_smoke
+  save_interval: 2
+  ckpt_format: torch_dist
+  async_save: false
+  save_optim: false
+  save_rng: false
+
+dist:
+  distributed_timeout_minutes: 60
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: belief_implant_lora_smoke

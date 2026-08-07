@@ -38,20 +38,46 @@ class TestRecipeMap:
     def test_pretrain_entries_reference_the_pretrain_recipes(self, run_module, model):
         """Each pretrain entry must call its model's *_pretrain_config, not an SFT recipe.
 
-        Checked via the lambda's referenced names rather than by invoking it: the Super and
+        Checked via the entry's wrapped recipe rather than by invoking it: the Super and
         Ultra pretrain recipes construct the model through AutoBridge.from_hf_pretrained,
         which reads the HF config from the Hub/cache — a network boundary a unit test must
         not depend on. The Nano recipe is invoked for real below.
         """
-        names = run_module.RECIPE_MAP[(model, "pretrain")].__code__.co_names
-        assert f"nemotron_3_{model}_pretrain_config" in names
+        entry = run_module.RECIPE_MAP[(model, "pretrain")]
+        assert entry.__wrapped__.__name__ == f"nemotron_3_{model}_pretrain_config"
 
     @pytest.mark.parametrize("model", MODELS)
     def test_cpt_entries_still_reference_the_sft_recipes(self, run_module, model):
         """CPT deliberately reuses the SFT recipes (warm-start hyperparameters + finetune())."""
-        names = run_module.RECIPE_MAP[(model, "cpt")].__code__.co_names
-        assert f"nemotron_3_{model}_sft_config" in names
-        assert f"nemotron_3_{model}_pretrain_config" not in names
+        entry = run_module.RECIPE_MAP[(model, "cpt")]
+        assert entry.__wrapped__.__name__ == f"nemotron_3_{model}_sft_config"
+
+    @pytest.mark.parametrize("model", MODELS)
+    @pytest.mark.parametrize("mode", ("cpt", "pretrain"))
+    def test_peft_rejected_where_the_recipe_carries_no_scheme(self, run_module, model, mode):
+        """Only the SFT recipes have a PEFT variant.
+
+        Dropping --peft silently in the other modes turns a requested adapter run into a
+        full-parameter finetune that looks healthy until someone reads the parameter counts
+        out of a job log, by which point an allocation has been spent. The error names the
+        YAML route, which does work in every mode.
+        """
+        with pytest.raises(ValueError, match=r"peft:"):
+            run_module.RECIPE_MAP[(model, mode)]("lora")
+
+    def test_peft_guard_passes_through_when_none_requested(self, run_module):
+        """The rejection must fire on a requested adapter only, never on the default.
+
+        Exercised on the guard itself with a stand-in recipe: the guard is what decides,
+        and driving it directly avoids invoking a real Super/Ultra recipe (a network read).
+        """
+        built = []
+        guarded = run_module._peft_unsupported(lambda: built.append(1) or "cfg", "cpt")
+        assert guarded(None) == "cfg"
+        assert built == [1]
+        with pytest.raises(ValueError, match=r"peft:"):
+            guarded("lora")
+        assert built == [1]
 
     def test_nano_pretrain_recipe_builds_from_scratch_config(self, run_module):
         """The Nano entry constructs the real pretrain recipe: NVIDIA's pretraining workload
@@ -125,6 +151,56 @@ class TestMainWiring:
         calls = self._run_main(run_module, monkeypatch, tmp_path, "cpt", self._DATA_PATH_YAML)
         assert set(calls) == {"finetune"}
         assert calls["finetune"]["config"].dataset.data_path == ["1.0", "/nonexistent/corpus_input_document"]
+
+    @pytest.mark.parametrize("mode", ("cpt", "pretrain"))
+    def test_dataset_index_cache_location_is_configurable(self, run_module, monkeypatch, tmp_path, mode):
+        """A blend may read a corpus the run cannot write next to.
+
+        GPTDataset caches its document/sample/shuffle indices beside the corpus by
+        default, so without this key a run over a read-only or another user's corpus
+        fails at dataset build — after the base weights have loaded.
+        """
+        yaml_text = self._DATA_PATH_YAML + "  path_to_cache: /writable/cache\n"
+        calls = self._run_main(run_module, monkeypatch, tmp_path, mode, yaml_text)
+        cfg = calls["finetune" if mode == "cpt" else "pretrain"]["config"]
+        assert cfg.dataset.path_to_cache == "/writable/cache"
+
+    @pytest.mark.parametrize("mode", ("cpt", "pretrain"))
+    def test_dataset_index_cache_defaults_to_unset(self, run_module, monkeypatch, tmp_path, mode):
+        """Omitting the key must leave MCore's own default in place, not invent a path."""
+        calls = self._run_main(run_module, monkeypatch, tmp_path, mode, self._DATA_PATH_YAML)
+        cfg = calls["finetune" if mode == "cpt" else "pretrain"]["config"]
+        assert cfg.dataset.path_to_cache is None
+
+    _PEFT_YAML = _DATA_PATH_YAML + (
+        "peft:\n"
+        "  _target_: megatron.bridge.peft.lora.LoRA\n"
+        "  target_modules: [linear_qkv, linear_proj, in_proj, out_proj]\n"
+        "  dim: 256\n"
+        "  alpha: 256\n"
+        "  dropout: 0.0\n"
+    )
+
+    @pytest.mark.parametrize("mode", ("cpt", "pretrain"))
+    def test_yaml_peft_block_lands_a_live_adapter_in_every_mode(
+        self, run_module, monkeypatch, tmp_path, mode
+    ):
+        """The YAML route is the supported way to get an adapter outside SFT mode.
+
+        `cfg.peft` is applied mode-agnostically by the training setup, and the override
+        merge instantiates any mapping carrying `_target_`. This is the mechanism the CPT
+        adapter configs depend on, so it is asserted rather than assumed: a regression here
+        would produce a silent full-parameter finetune, the same failure the RECIPE_MAP
+        guard exists to prevent.
+        """
+        from megatron.bridge.peft.lora import LoRA
+
+        calls = self._run_main(run_module, monkeypatch, tmp_path, mode, self._PEFT_YAML)
+        cfg = calls["finetune" if mode == "cpt" else "pretrain"]["config"]
+        assert isinstance(cfg.peft, LoRA)
+        assert cfg.peft.dim == 256
+        assert cfg.peft.alpha == 256
+        assert cfg.peft.target_modules == ["linear_qkv", "linear_proj", "in_proj", "out_proj"]
 
 
 class TestModeCli:

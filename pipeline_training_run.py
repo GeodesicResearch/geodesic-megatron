@@ -38,7 +38,7 @@ import argparse
 import logging
 import os
 import sys
-from typing import Tuple
+from typing import Callable, Tuple
 
 import torch
 from omegaconf import OmegaConf
@@ -82,22 +82,51 @@ logger: logging.Logger = logging.getLogger(__name__)
 # Recipe selection
 # =============================================================================
 
+def _peft_unsupported(recipe_fn: Callable[[], ConfigContainer], mode: str) -> Callable:
+    """Wrap a recipe that carries no PEFT scheme so ``--peft`` fails loudly.
+
+    Only the SFT recipes have a PEFT variant. Silently dropping ``--peft`` for
+    the other modes turns a requested adapter run into a full-parameter
+    finetune, which is not visible until the parameter counts are read out of a
+    job log — by which point an allocation has been spent. PEFT is still
+    reachable in these modes through the YAML, where ``cfg.peft`` is applied
+    mode-agnostically by the training setup.
+    """
+
+    def build(peft: str | None) -> ConfigContainer:
+        if peft:
+            raise ValueError(
+                f"--peft {peft!r} is not supported for --mode {mode}: only the SFT "
+                f"recipes carry a PEFT scheme. Declare the adapter in the config "
+                f"YAML instead, which applies in every mode:\n"
+                f"  peft:\n"
+                f"    _target_: megatron.bridge.peft.lora.LoRA\n"
+                f"    target_modules: [linear_qkv, linear_proj]\n"
+                f"    dim: 32\n"
+                f"    alpha: 32\n"
+            )
+        return recipe_fn()
+
+    build.__wrapped__ = recipe_fn
+    return build
+
+
 RECIPE_MAP = {
     ("nano", "sft"): lambda peft: (
         nemotron_3_nano_peft_config(peft_scheme=peft) if peft else nemotron_3_nano_sft_config()
     ),
-    ("nano", "cpt"): lambda peft: nemotron_3_nano_sft_config(),
+    ("nano", "cpt"): _peft_unsupported(nemotron_3_nano_sft_config, "cpt"),
     ("super", "sft"): lambda peft: (
         nemotron_3_super_peft_config(peft_scheme=peft) if peft else nemotron_3_super_sft_config()
     ),
-    ("super", "cpt"): lambda peft: nemotron_3_super_sft_config(),
+    ("super", "cpt"): _peft_unsupported(nemotron_3_super_sft_config, "cpt"),
     ("ultra", "sft"): lambda peft: (
         nemotron_3_ultra_peft_config(peft_scheme=peft) if peft else nemotron_3_ultra_sft_config()
     ),
-    ("ultra", "cpt"): lambda peft: nemotron_3_ultra_sft_config(),
-    ("nano", "pretrain"): lambda peft: nemotron_3_nano_pretrain_config(),
-    ("super", "pretrain"): lambda peft: nemotron_3_super_pretrain_config(),
-    ("ultra", "pretrain"): lambda peft: nemotron_3_ultra_pretrain_config(),
+    ("ultra", "cpt"): _peft_unsupported(nemotron_3_ultra_sft_config, "cpt"),
+    ("nano", "pretrain"): _peft_unsupported(nemotron_3_nano_pretrain_config, "pretrain"),
+    ("super", "pretrain"): _peft_unsupported(nemotron_3_super_pretrain_config, "pretrain"),
+    ("ultra", "pretrain"): _peft_unsupported(nemotron_3_ultra_pretrain_config, "pretrain"),
 }
 
 
@@ -304,12 +333,19 @@ def main() -> None:
         seq_length = yaml_dataset.get("seq_length", 8192)
         seed = yaml_dataset.get("seed", 1234)
         split = yaml_dataset.get("split", "9999,1,0")
+        # GPTDataset caches its document/sample/shuffle indices next to the corpus
+        # unless told otherwise, so a blend that reads a corpus owned by someone
+        # else dies with PermissionError at dataset build — after the base weights
+        # have loaded, minutes into the run, for a reason unrelated to training.
+        # Plumbed through rather than defaulted: the right location is per-run.
+        path_to_cache = yaml_dataset.get("path_to_cache")
 
         cfg.dataset = GPTDatasetConfig(
             seq_length=seq_length,
             data_path=[str(p) for p in data_path],
             split=split,
             random_seed=seed,
+            path_to_cache=path_to_cache,
             reset_position_ids=False,
             reset_attention_mask=False,
             eod_mask_loss=False,
