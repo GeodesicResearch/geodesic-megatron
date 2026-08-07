@@ -1,9 +1,14 @@
-# ClimbMix — the 80% slice of the V1 baseline blend, ~353.2B tokens.
+# ClimbMix — the 80% slice of the V1 baseline blend: 354,381,797,388 tokens over
+# 553,240,576 documents under geodesic-research/nemotron-base-tokenizer.
 #
 # The revision is the one the campaign's own corpus was prepared from, recorded so a
 # re-prepare reproduces it rather than picking up whatever the branch head has moved
 # to. Unlike the AI-safety slice this dataset is a finished release and is not
 # expected to move; the pin costs nothing and removes the question.
+#
+# Tokenizing this corpus needs the 8-way shard procedure in the campaign README: one
+# writer process cannot finish 553M documents inside a 24 h window. The token count
+# above is the sum of the eight shards' .provenance.json files.
 #
 #   isambard_sbatch --time=24:00:00 --job-name=climbmix-prep \
 #     pipeline_data_submit.sbatch prepare \

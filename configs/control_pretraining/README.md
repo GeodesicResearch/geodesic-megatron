@@ -24,7 +24,7 @@ Three Megatron-native `.bin/.idx` corpora, blended by sampling weight:
 
 | Weight | Source | Prepared at |
 |---|---|---|
-| 0.80 | `karpathy/climbmix-400b-shuffle` | `/projects/a5k/public/data/karpathy__climbmix-400b-shuffle/tokenized_base_input_document` |
+| 0.80 total, split across 8 shards | `karpathy/climbmix-400b-shuffle` | `/projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard{0..7}/tokenized_base_input_document` |
 | 0.19 | `Zyphra/Zyda-2` (subset `sample-100BT`) | `/projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT/tokenized_base_input_document` |
 | 0.01 | `geodesic-research/control-pretraining-datasets` (config `combined`) | `/projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document` |
 
@@ -36,29 +36,58 @@ Expected share of the budget and the resulting epochs:
 
 | Source | Share of 500.003B | Corpus size under `nemotron-base` | Epochs |
 |---|---|---|---|
-| ClimbMix | ~400,002,383,872 | ~353.2B — 6,543 shards / 599.8 GB, single `text` column | **~1.13** |
-| Zyda-2 `sample-100BT` | ~95,000,566,170 | **99.2276B exact** — 91,220,256 documents, 99,227,596,755 tokens from the `.idx` | **0.957** |
-| control-pretraining-datasets `combined` | ~5,000,029,798 | **0.5373B exact** — 67,279 documents, 537,332,003 tokens from the `.idx` | ~9.31 |
+| ClimbMix (8 shards) | 400,002,383,872 | **354.3818B exact** — 553,240,576 documents, 354,381,797,388 tokens | **1.129** |
+| Zyda-2 `sample-100BT` | 95,000,566,170 | **99.2276B exact** — 91,220,256 documents, 99,227,596,755 tokens from the `.idx` | **0.957** |
+| control-pretraining-datasets `combined` | 5,000,029,798 | **0.5373B exact** — 67,279 documents, 537,332,003 tokens from the `.idx` | 9.305 |
 
-Corpus sizes are measured, not nominal. The AI-safety and Zyda-2 figures are exact — read
-from `total_tokens` in the `<prefix>.provenance.json` the tokenize job writes beside each
-`.bin/.idx`, which is the authoritative number once the data exists. ClimbMix is still
-estimated at ±2% (a tokenized real shard scaled by the corpus's exact paginated Hub byte
-total, with byte-scaled and doc-scaled methods bracketing it) and will be replaced by its
-provenance count when its tokenize finishes.
+**All three figures are now exact**, read from `total_tokens` in the
+`<prefix>.provenance.json` the tokenize job writes beside each `.bin/.idx`. No estimate
+remains in this blend.
 
-Zyda-2's exact count landed within 1.1% of the ±5% estimate it replaced, which is a useful
-calibration of the method rather than a reason to trust the remaining estimate: the same
-approach applied to ClimbMix carries a tighter stated band precisely because two independent
-scalings agreed there.
+Per-shard ClimbMix counts, which are what the blend weights are derived from:
+
+| Shard | Tokens | Documents | Weight |
+|---|---|---|---|
+| 0 | 44,301,445,657 | 69,166,226 | 0.100008 |
+| 1 | 44,293,938,808 | 69,162,324 | 0.099991 |
+| 2 | 44,301,376,636 | 69,153,479 | 0.100008 |
+| 3 | 44,297,003,339 | 69,116,155 | 0.099998 |
+| 4 | 44,297,603,003 | 69,172,021 | 0.100000 |
+| 5 | 44,298,789,113 | 69,156,153 | 0.100002 |
+| 6 | 44,296,832,433 | 69,146,870 | 0.099998 |
+| 7 | 44,294,808,399 | 69,167,348 | 0.099993 |
+| **total** | **354,381,797,388** | **553,240,576** | **0.80** |
+
+The document total matches the corpus exactly, which is the end-to-end check that the split
+lost nothing: `split -n l/8` was verified byte-exact against the source
+(1,677,742,500,930 bytes either side) before tokenization, and each shard's `.bin` was
+verified at exactly 4 bytes per token before its input JSONL was released.
+
+**Weights are token-proportional, not equal** — `w_i = 0.80 x tokens_i / sum(tokens)`.
+`split -n l/8` equalises bytes rather than documents, and Megatron's blend weights allocate
+fixed-length *samples*, so equal weights on unequal shards would preserve ClimbMix's overall
+token share while cycling the smaller shards more times than the larger ones. Token
+proportionality gives every shard the same **1.1287** epochs. In the event the shards landed
+within **0.01%** of equal — the largest deviation from a flat 0.1 is 0.0085% — so this is
+belt-and-braces rather than load-bearing; the weights are recorded with their token counts
+anyway, because a weight with no count beside it cannot be audited afterwards.
+
+Sizing a corpus *before* tokenizing it — scaling one tokenized shard by the corpus's exact
+paginated Hub byte total — predicted both of these well: Zyda-2 to within 1.1% and ClimbMix
+to within **0.33%**. That is worth knowing when planning a token budget against a corpus
+that has not been tokenized yet. It is not a reason to ship the estimate: a corroborated
+estimate is still an estimate, and the config carries the measured figures.
 
 None of the three epoch counts is exactly 1.0, and all three are expected:
 
-- **ClimbMix at ~1.13** — the `400b` in the name is a count under whatever tokenizer the
+- **ClimbMix at 1.129** — the `400b` in the name is a count under whatever tokenizer the
   corpus was named for. `nemotron-base` is coarser on this text (4.67 utf8 bytes/token) and
-  yields ~12% fewer tokens, so ~13% of the corpus is seen twice. Megatron's blended sampler
-  wraps a source transparently; this is data repetition, not a failure. **A provenance count
-  near 353B is the correct result — do not read it as a short download.**
+  yields **11.4% fewer** tokens, so ~13% of the corpus is seen twice. Megatron's blended
+  sampler wraps a source transparently; this is data repetition, not a failure. **The
+  measured total is 354,381,797,388 tokens over 553,240,576 documents — a count in that
+  region is the correct result and not a short download.** The document count is the
+  stronger check of the two: it must equal the corpus exactly, whereas the token total
+  depends on the tokenizer.
 - **AI-safety discourse at ~9.31** — the 1% share over a 537M-token corpus. Repeating this
   source is intended: the baseline has to know this content deeply for the filtered
   comparison to mean anything, and 9.31 epochs is well inside the 50–100 the study had
@@ -97,24 +126,89 @@ isambard_sbatch --time=24:00:00 --job-name=climbmix-prep pipeline_data_submit.sb
   --config configs/control_pretraining/data/climbmix.yaml
 
 # trailing args of tokenize: <output-variant> <json-key> <workers> [partitions].
-isambard_sbatch --time=24:00:00 --job-name=climbmix-tok --dependency=afterok:<prepare-jobid> \
+# This single-root form is right for the two smaller corpora. ClimbMix does NOT tokenize
+# this way — at 553M documents one writer cannot finish inside a 24 h window, so it is
+# sharded first; see the next section.
+isambard_sbatch --time=12:00:00 --job-name=zyda2-tok --dependency=afterok:<prepare-jobid> \
   pipeline_data_submit.sbatch tokenize \
-  /projects/a5k/public/data/karpathy__climbmix-400b-shuffle \
-  geodesic-research/nemotron-base-tokenizer tokenized_base input 128
+  /projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT \
+  geodesic-research/nemotron-base-tokenizer tokenized_base input 96
 ```
 
-**Stripe the dataset directory before the first tokenize.** ClimbMix is 553,240,576
-documents and its `.bin` is over a terabyte; a Lustre default of one stripe sends every
-write of it to a single OST, and throughput decays as the file grows — measured here from
-13,200 down to 6,800 docs/s over three hours, which projects past the 24 h QOS ceiling on
-a job that cannot resume. `lfs setstripe -c 8 <dataset-root>` applies to files created
-afterwards, so it must precede the run.
+### A single writer cannot tokenize ClimbMix — shard it
 
-Raising `workers` does not fix that decay, and neither does `partitions` for free: one
-writer process per partition is genuinely faster, but the partition `.jsonl` and
-per-partition `.bin/.idx` are never cleaned up, so a partitioned ClimbMix run needs roughly
-twice the corpus in additional free space (~6 TB peak here against ~7.5 TB free) and leaves
-the intermediates behind. Read that trade against the current quota before choosing it.
+**`preprocess_data.py` runs one writer process, and one writer cannot finish 553M documents
+inside a 24 h window.** This is measured, not projected. A run whose output directory was
+already striped `-c 8` decayed monotonically over 2.2 hours and 14,250 progress samples:
+
+| documents done | 1.8M | 12.5M | 23.1M | 33.8M | 44.5M | 55.2M | 65.9M | 71.2M |
+|---|---|---|---|---|---|---|---|---|
+| docs/s | 13894 | 10260 | 9969 | 8776 | 8093 | 8210 | 7514 | 7173 |
+
+Two fits agree it never finishes: linear (−25.6 docs/s per million documents) reaches zero
+before the corpus ends, and a gentler logarithmic fit gives **27.9 h needed**. That run was
+abandoned at 12.9%.
+
+**Striping is worth doing and is not the fix.** `lfs setstripe -c 8 <dataset-root>` before
+the first write is still correct for a terabyte-scale `.bin` — it applies only to files
+created afterwards, so it must precede the run — but the decay above happened *on a striped
+directory*. Raising `workers` does not help either: the writer is the bottleneck and the
+tokenizer workers wait on it.
+
+**The fix is to shard the input** into N self-contained dataset roots and run the shipped
+tokenize entry point against each. No new code path — the parallelism comes from invoking
+the existing tool N times — and it removes both plausible decay mechanisms at once: one
+writer process per shard instead of one for the whole corpus, and a per-shard in-memory
+document index a fraction of the size.
+
+```bash
+# 1. split, then give each shard its own dataset root (stripe BEFORE any file is created)
+ROOT=/projects/a5k/public/data/karpathy__climbmix-400b-shuffle
+for i in $(seq 0 7); do mkdir -p $ROOT/shard$i; lfs setstripe -c 8 $ROOT/shard$i; done
+split -n l/8 -d --suffix-length=1 $ROOT/training.jsonl $ROOT/climbmix_part_
+for i in $(seq 0 7); do mv $ROOT/climbmix_part_$i $ROOT/shard$i/training.jsonl; done
+
+# 2. verify the split lost nothing — the shard bytes must sum to the source exactly,
+#    and this must GATE the tokenize rather than merely precede it
+src=$(stat -c %s $ROOT/training.jsonl)
+sum=$(stat -c %s $ROOT/shard*/training.jsonl | awk '{s+=$1} END {print s}')
+[ "$src" = "$sum" ] || { echo "SPLIT LOST BYTES: $sum vs $src" >&2; exit 1; }
+
+# 3. tokenize each shard on its own node
+for i in $(seq 0 7); do
+  srun --nodes=1 --ntasks=1 --nodelist=<node-$i> \
+    bash pipeline_data_submit.sbatch tokenize $ROOT/shard$i \
+    geodesic-research/nemotron-base-tokenizer tokenized_base input 64 &
+done; wait
+```
+
+Measured at 8 shards on 8 nodes: the full corpus in **~2.3 h** against the single writer's
+"never" — a **mean of ~66,000 docs/s**, peaking near 93,000 in the opening minutes and
+decaying to ~55,000 as each shard's output grew. Quote the mean, not the peak: 82,000 was a
+true instantaneous reading mid-run and would imply 1.9 h, which is not what it took. Size
+the shards to land inside territory you have already measured — 8 shards of ~69M documents
+was chosen over 4 of ~138M because the abandoned run had reached 71M, making the estimate
+interpolation rather than extrapolation.
+
+**Do not use `--partitions N` for this.** It merges its per-partition outputs back into one
+`.bin/.idx`, so the partition `.jsonl`, the per-partition `.bin/.idx` *and* the merged copy
+all exist at once — roughly twice the corpus in additional free space (~6 TB peak here
+against ~7.5 TB free), and nothing cleans the intermediates up. Sharding into separate
+prefixes skips the merge entirely, which is what makes it fit.
+
+**Watch the rate by differencing, not by reading it.** The `docs/s` the tool prints is a
+**cumulative average since job start** — the one statistic that structurally cannot reveal a
+decay, because it converges downward too slowly to look like anything but a plateau, and can
+even *rise* while the true rate falls. Recover the real series from the log alone: the
+average is `N / T`, so `T = N / R`, and differencing consecutive lines gives instantaneous
+rate. An ETA built on the printed figure silently assumes a rate that stopped being true in
+the first minute.
+
+Release each shard's input JSONL only after its output verifies — `.idx` present and `.bin`
+exactly 4 bytes per token (int32, forced by the 131,072-token vocab). A truncated or
+partially-written `.bin` fails that check, and the shard can then be re-tokenized from an
+input that still exists. Sharding also bounds the blast radius of a late failure to one
+shard's ~2 h rather than the whole corpus.
 
 The other two corpora follow the same pair, scaling the walltime down with the corpus (Zyda-2
 ran at 12 h / 96 workers, the AI-safety corpus at 4 h / 32):
@@ -147,10 +241,17 @@ audited after the fact: `lesswrong` 51,583 docs / 315,702,210 tokens, `stampy` 6
 184,882,775, `ea_forum` 8,842 / 36,679,739.
 
 **Prepare the three corpora one at a time, deleting each one's `training.jsonl` and HF cache
-as soon as its tokenize job succeeds.** The durable `.bin` set is only ~1.8 TB (~1.41 TB
-ClimbMix + ~0.40 TB Zyda-2 + ~2.15 GB AI-safety at 4 bytes/token), but the intermediates are
-not: ~2.15 TB of JSONL and ~3.1 TB of HF cache, so staging all three at once peaks around
+as soon as its tokenize job succeeds.** The durable `.bin` set is only ~1.82 TB (1.418 TB
+ClimbMix + 0.397 TB Zyda-2 + 2.15 GB AI-safety, all at 4 bytes/token), but the intermediates
+are not: ~2.15 TB of JSONL and ~3.1 TB of HF cache, so staging all three at once peaks around
 7.1 TB against a project quota that already sits above 93%.
+
+**Sharding ClimbMix adds a transient on top of that**, and it is the largest single spike in
+the whole preparation: the split writes a second full copy of the 1.526 TiB JSONL before the
+original can be dropped, taking the quota to ~97% for the ~7 minutes it runs. Budget it
+explicitly, tell anyone sharing the quota before starting, and release each shard's input as
+soon as its output verifies rather than waiting for all eight — that returns the 1.53 TiB in
+roughly the order it was consumed instead of holding the peak until the end.
 
 ## Topology
 
@@ -291,10 +392,11 @@ real run reuses**. Two different indices are built, and only one of them is cach
 - **Per-corpus (`GPTDataset`) document/sample/shuffle indices — cached.** `path_to_cache`
   is unset, and `gpt_dataset.py` falls back to `<prefix>/cache/GPTDataset_indices`. Each
   entry is keyed on a hash that includes *that corpus's* sample count, which is
-  `ceil(target_size x weight)` plus a surplus — roughly 48.8M for ClimbMix, 11.6M for
-  Zyda-2, 0.61M for the AI-safety corpus. An unchanged `train_iters` reproduces those
-  numbers, so the key matches and every later segment and `ft_launcher` restart hits the
-  cache. This is the expensive build, being over the corpora's ~645M documents.
+  `ceil(target_size x weight)` plus a surplus. The blend has **ten** prefixes, so there are
+  ten such entries: ~6.1M samples for each of the eight ClimbMix shards, 11.6M for Zyda-2,
+  0.61M for the AI-safety corpus. An unchanged `train_iters` reproduces those numbers, so
+  the keys match and every later segment and `ft_launcher` restart hits the cache. This is
+  the expensive build, being over the corpora's ~645M documents.
 - **The top-level blend index — never cached.** `blended_dataset.py` reads `path_to_cache`
   with no fallback of its own, so it logs `Cannot save the BlendedDataset indexes because
   path_to_cache is None` and rebuilds its 61,035,520-sample index at *every* launch.

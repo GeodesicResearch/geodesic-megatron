@@ -19,18 +19,22 @@
 # <prefix>.provenance.json the tokenize job writes beside each .bin/.idx.
 #
 #   weight  source                                     share of budget   corpus    epochs
-#   0.80    karpathy/climbmix-400b-shuffle             ~400,002,383,872  ~353.2B    ~1.13
-#   0.19    Zyphra/Zyda-2, config sample-100BT          ~95,000,566,170  99.2276B    0.957
-#   0.01    geodesic-research/control-pretraining-datasets ~5,000,029,798   0.5373B    ~9.31
+#   0.80    karpathy/climbmix-400b-shuffle (8 shards)   400,002,383,872  354.3818B   1.129
+#   0.19    Zyphra/Zyda-2, config sample-100BT           95,000,566,170  99.2276B    0.957
+#   0.01    geodesic-research/control-pretraining-datasets 5,000,029,798   0.5373B    9.305
 #           (config `combined`, revision 018376f4b033d7533471514f607cae4de3c95b99)
 #
-#   ClimbMix: 6,543 parquet shards / 599.8 GB, single `text` column. Its ~353.2B is an
-#   estimate calibrated on a tokenized shard (0.589 tok/parquet byte), +/-2% where the
-#   byte-scaled and doc-scaled methods bracket it. The "400b" in the name is a count under
-#   whatever tokenizer the corpus was named for; nemotron-base is coarser on this text
-#   (4.67 utf8 bytes/token) and yields ~12% fewer. At 1.13 epochs ~13% of ClimbMix is seen
-#   twice — Megatron's blended sampler wraps a source transparently, so this is a
-#   data-repetition fact, not a failure.
+#   All three corpus sizes are now EXACT, read from total_tokens in the .provenance.json
+#   beside each .bin/.idx. No estimate remains in this blend.
+#
+#   ClimbMix: 6,543 parquet shards / 599.8 GB, single `text` column, tokenizing to
+#   354,381,797,388 tokens over 553,240,576 documents — the sum of its eight shards, each
+#   verified .bin == 4 x tokens before its input JSONL was released, with the document total
+#   matching the corpus exactly. The "400b" in the name is a count under whatever tokenizer
+#   the corpus was named for; nemotron-base is coarser on this text (4.67 utf8 bytes/token)
+#   and yields 11.4% fewer. At 1.129 epochs ~13% of ClimbMix is seen twice — Megatron's
+#   blended sampler wraps a source transparently, so this is a data-repetition fact, not a
+#   failure.
 #   Zyda-2: 91,220,256 documents, 99,227,596,755 tokens EXACT from the .idx (the .bin is
 #   396,910,387,020 bytes = exactly 4x the token count, since a 131,072-token vocab needs
 #   int32). The 19% share is 0.957 epochs — essentially a full single pass, so this source
@@ -128,12 +132,38 @@ dataset:
   # data_path, split, seq_length and seed are read in --mode pretrain: the launcher rebuilds
   # cfg.dataset as a GPTDatasetConfig from exactly those four keys, so any other dataset key
   # written here would be dropped without effect.
+  #
+  # ClimbMix occupies EIGHT prefixes rather than one because it is tokenized as 8 shards
+  # (see the README: a single writer cannot finish 553M documents inside a 24 h window).
+  # Its 0.80 is divided in proportion to each shard's MEASURED token count, not equally.
+  # That matters even though the shards came out near-identical: Megatron allocates
+  # fixed-length samples by weight, so equal weights on unequal shards preserve ClimbMix's
+  # overall token share but cycle the smaller shards more times than the larger ones —
+  # silently over-representing part of the corpus. Weighting by tokens gives every shard
+  # the same 1.1287 epochs, which is what "split a corpus in eight" is supposed to mean.
+  # The shards landed within 0.01% of equal (largest deviation from a flat 0.1 is 0.0085%),
+  # so this is belt-and-braces rather than load-bearing here; the weights are written out
+  # anyway because a weight with no token count beside it cannot be audited later.
   data_path:
-    - "0.80"
-    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/tokenized_base_input_document
-    - "0.19"
+    - "0.100008"   # 44,301,445,657 tokens / 69,166,226 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard0/tokenized_base_input_document
+    - "0.099991"   # 44,293,938,808 tokens / 69,162,324 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard1/tokenized_base_input_document
+    - "0.100008"   # 44,301,376,636 tokens / 69,153,479 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard2/tokenized_base_input_document
+    - "0.099998"   # 44,297,003,339 tokens / 69,116,155 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard3/tokenized_base_input_document
+    - "0.100000"   # 44,297,603,003 tokens / 69,172,021 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard4/tokenized_base_input_document
+    - "0.100002"   # 44,298,789,113 tokens / 69,156,153 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard5/tokenized_base_input_document
+    - "0.099998"   # 44,296,832,433 tokens / 69,146,870 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard6/tokenized_base_input_document
+    - "0.099993"   # 44,294,808,399 tokens / 69,167,348 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard7/tokenized_base_input_document
+    - "0.19"       # 99,227,596,755 tokens / 91,220,256 docs
     - /projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT/tokenized_base_input_document
-    - "0.01"
+    - "0.01"       # 537,332,003 tokens / 67,279 docs
     - /projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document
   split: "9999,1,0"
   seq_length: 8192
