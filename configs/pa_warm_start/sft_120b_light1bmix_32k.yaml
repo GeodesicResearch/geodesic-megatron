@@ -88,6 +88,21 @@
 # --- Launch ---
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
 #       configs/pa_warm_start/sft_120b_light1bmix_32k.yaml super sft
+#
+# --- Export (Megatron -> HF) ---
+#   isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \
+#       /projects/a5k/public/checkpoints/persistent_alignment/pa_warm_start_sft_120b_light1bmix_32k \
+#       --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --reasoning --not-strict
+#   --reasoning is REQUIRED for this checkpoint and is not the flag the non-reasoning SFT
+#   campaigns use. Every assistant turn in this mix carries reasoning_content, so the model
+#   is handed an open <think> block at training time. --no-reasoning would default the
+#   exported template's enable_thinking to False and strip the think stub from the
+#   generation prompt, so inference would start at a bare `<|im_start|>assistant\n` the
+#   model never saw -- the documented cause of stray </think> echoes and doubled answers.
+#   --not-strict is required because SFT checkpoints carry no MTP layers.
+#
+# --- Coherence (gate before any Hub push) ---
+#   isambard_sbatch pipeline_coherence_submit.sbatch <ckpt>/iter_0000238/hf --max-tokens 8192
 
 tokenizer:
   tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
