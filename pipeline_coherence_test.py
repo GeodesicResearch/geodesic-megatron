@@ -56,6 +56,8 @@ import urllib.error
 import urllib.request
 
 
+# Spread across everyday, technical, creative, analytical and advice-seeking topics so a
+# default run exercises coherence broadly rather than probing one domain.
 CHAT_PROMPTS = [
     "How do I make a quick buck?",
     "What's the best way to lose weight fast?",
@@ -65,6 +67,48 @@ CHAT_PROMPTS = [
     "How do I fix a leaky faucet?",
     "What should I do if I'm feeling anxious?",
     "Explain quantum computing in simple terms.",
+    "Write a Python function that merges two sorted lists into one sorted list.",
+    "Why does my recursive function hit a stack overflow, and how do I rewrite it iteratively?",
+    "What's the difference between a process and a thread?",
+    "Explain what a database index does and when adding one can hurt performance.",
+    "Walk me through solving the quadratic equation 3x^2 - 7x + 2 = 0.",
+    "If a train leaves at 14:35 and travels 240 km at an average of 90 km/h, when does it arrive?",
+    "What is Bayes' theorem, and can you show it with a medical-testing example?",
+    "Prove that the square root of 2 is irrational.",
+    "Why is the sky blue?",
+    "How do mRNA vaccines work?",
+    "What causes the seasons, and why isn't it just distance from the sun?",
+    "Explain plate tectonics and what it tells us about earthquakes.",
+    "How does a refrigerator actually make things cold?",
+    "Write a short poem about a lighthouse in winter.",
+    "Write the opening paragraph of a mystery novel set in a coastal town.",
+    "Give me three plot ideas for a story where the antagonist is right.",
+    "Rewrite this sentence to be more concise: 'Due to the fact that it was raining, we made the decision to cancel.'",
+    "What caused the fall of the Western Roman Empire?",
+    "Explain the significance of the printing press for European society.",
+    "Who was Ada Lovelace and why does she matter to computing?",
+    "I have chicken thighs, rice, and a lemon. What can I cook tonight?",
+    "What's the difference between baking soda and baking powder?",
+    "How do I plan a week-long trip to Japan on a modest budget?",
+    "What should I look for when renting my first apartment?",
+    "Is free will compatible with a deterministic universe?",
+    "What's the strongest argument against utilitarianism?",
+    "How should I think about the trolley problem in the context of self-driving cars?",
+    "My coworker takes credit for my work. How should I handle it?",
+    "How do I tell a friend I can't lend them money without damaging the friendship?",
+    "What's a reasonable way to decide between two job offers?",
+    "How do I write a business plan for a small bakery?",
+    "Explain the difference between revenue, profit, and cash flow.",
+    "What are the trade-offs between renting and buying a home?",
+    "How much sleep do adults actually need, and what happens if you get less?",
+    "What's a sensible beginner strength-training routine?",
+    "Why do my knees hurt when I run, and what should I change?",
+    "Translate 'the weather is beautiful today' into French and explain the grammar.",
+    "What's the difference between 'affect' and 'effect'?",
+    "Three people check into a hotel and pay $30. The clerk returns $5... where does the missing dollar go?",
+    "You have two ropes that each burn in an hour but not uniformly. How do you measure 45 minutes?",
+    "Summarize the key arguments for and against a four-day work week.",
+    "What are the main differences between how cats and dogs communicate with humans?",
 ]
 
 COMPLETION_PROMPTS = [
@@ -391,8 +435,8 @@ def is_rank0() -> bool:
     return os.environ.get("RANK", "0") == "0"
 
 
-def main():
-    """Parse args, run the selected backend over the prompts, report to W&B/file."""
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser for the coherence test."""
     parser = argparse.ArgumentParser(
         description="Qualitative generation coherence test",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -450,6 +494,12 @@ def main():
     parser.add_argument("--discovery-file", default=None, help="endpoint: file the serve job writes the URL to")
     parser.add_argument("--discovery-wait", type=int, default=3600)
     parser.add_argument("--request-timeout", type=int, default=900)
+    return parser
+
+
+def main():
+    """Parse args, run the selected backend over the prompts, report to W&B/file."""
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     if args.backend == "megatron" and not args.hf_model:

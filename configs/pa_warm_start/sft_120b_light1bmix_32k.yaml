@@ -1,0 +1,249 @@
+# PA Warm-Start SFT — "Light" 1B reasoning mix (GEOD-203)
+#
+# Warm-start SFT of Nemotron-3 Super 120B on the Light mix. Topology and batch are the
+# certified quickstart's, unchanged.
+#
+# LR posture: constant 1e-5, warmed from 0 over the first 10% of training (~100M of the
+# 1B tokens). This matches the NVIDIA Nemotron-3 Super technical report's SFT section
+# (§3.1), which uses a constant peak LR of 1e-5. The report's constant schedule is
+# coupled to three RL stages this pipeline does not have; it is used here anyway so the
+# model ends training at full LR rather than annealed, which suits the agentic RLVR that
+# follows. `min_lr` has no effect under a constant schedule — mcore's
+# OptimizerParamScheduler returns max_lr directly after warmup — but must stay set, as
+# the scheduler constructor asserts on it.
+#
+# NOT adopted from the report, deliberately: two-stage SFT with per-conversation loss
+# normalisation. The report attributes long-input-short-output degradation to the
+# single-stage token-level normalisation this config uses, but the fix is unreachable —
+# no per-conversation normalisation exists in src/, and training/config.py asserts
+# calculate_per_token_loss=True whenever finetuning with CP>1. Treat it as a known eval
+# risk on short-answer long-context tasks, not a config knob.
+#
+# --- Dataset provenance ---
+# HF repo:     geodesic-research/pa-warm-start-sft-light-1b-mix
+# Revision:    d691d216a0cc82160bc58daaccddbf8715553e9d
+# Config:      default — 634,571 documents, 1,000,013,912 tokens
+# Longest document 32,586 tokens, so nothing truncates at seq 32768.
+#
+# Composition (tokens): maths 250M, science 250M, SWE 250M, competitive programming
+# 125M, multi-turn chat 125M. Per-source: agentless 56,051 docs / 250,002,475 tok;
+# instruction_following 56,812 / 125,002,240; python_00 29,524 / 62,501,516;
+# python_01 19,594 / 62,504,247; rqa 55,780 / 100,000,648; so 222,529 / 100,000,401;
+# syn_mcq 79,101 / 50,000,094; train 115,180 / 250,002,291.
+#
+# The mix is screened for verbalised evaluation awareness: documents whose reasoning
+# discusses being tested or graded are excluded, because training on them teaches a
+# model to condition behaviour on whether it thinks it is being evaluated. Per-source
+# token budgets are refilled from other survivors, so the mix is not any earlier
+# revision minus exclusions.
+#
+# Turn structure: the instruction_following source (125M tokens, ~12.5% of the mix) is
+# 100% multi-turn dialogue — filtered to >= 2 content-bearing user turns before
+# selection. Everything else is single-turn. The shipped mask puts loss on ALL
+# assistant turns, which is what dialogues require: a final-turn-only mask would drop
+# the loss on every earlier assistant turn of those conversations.
+#
+# System prompts: exactly ONE <|im_start|>system block per rendered document. ~75%
+# carry text (four sampled bare variants, rqa's response-format instruction, or
+# competitive programming's hoisted preamble); ~25% are deliberately EMPTY, so the
+# model never learns that a system prompt is always present. A `system_prompt_id`
+# column records which sampled prompt was used (-1 = none injected). TWO system blocks
+# in a rendered document means a stale pack. The `developer` role does not appear in
+# this revision — standing instructions were relabelled `system`.
+#
+# Tokenizer: nemotron-think-history-tokenizer, NOT the plain think tokenizer. Its chat
+# template keeps prior-turn reasoning (the parent's truncate_history_thinking default
+# would blank the reasoning of every non-final assistant turn — 54.5M reasoning
+# characters, 2.9% of all reasoning in this mix) and emits no <think></think> stub for
+# assistant messages that carry no reasoning. The pack path calls apply_chat_template
+# with no template kwargs, so the template's own defaults are the only control.
+#
+# Training reads the FROZEN LOCAL pack below and never resolves the Hub, and
+# FinetuningDatasetConfig has no revision field — provenance is the SHA above plus the
+# pack's own pipeline_results.json, which records the --revision the prepare command
+# pins. Re-pack from scratch if either is ever in doubt. Note the upstream params hash
+# is a config fingerprint, not a build identity: two materially different published
+# datasets shared one. Key provenance on the commit SHA.
+#
+# --- Data preparation (run BEFORE training; the pack does not exist until it does) ---
+#   isambard_sbatch pipeline_data_submit.sbatch prepare \
+#       --dataset geodesic-research/pa-warm-start-sft-light-1b-mix \
+#       --subset default \
+#       --revision d691d216a0cc82160bc58daaccddbf8715553e9d \
+#       --hub-loader arrow \
+#       --output-dir /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-light-1b-mix__default__d691d216 \
+#       --tokenizer geodesic-research/nemotron-think-history-tokenizer \
+#       --val-proportion 0 --skip-pack
+#   (--hub-loader arrow is REQUIRED for this dataset: it was published with a newer
+#   datasets than this container runs, and the default loader dies rebuilding features
+#   from the parquet metadata. See CLAUDE.md "Common Pitfalls".)
+#   (--subset default is required: slugify_dataset_name() only appends `__<subset>`
+#   when one is passed. --output-dir pins the revision-suffixed root below, which keeps
+#   packs from different revisions from colliding on a shared path and reusing stale
+#   .jsonl.idx files.)
+#   isambard_sbatch pipeline_data_submit.sbatch \
+#       /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-light-1b-mix__default__d691d216 \
+#       geodesic-research/nemotron-think-history-tokenizer 32768 16
+#
+# --- Launch ---
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/pa_warm_start/sft_120b_light1bmix_32k.yaml super sft
+
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-sft-light-1b-mix
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-light-1b-mix__default__d691d216
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 16
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-light-1b-mix__default__d691d216/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult16/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    # answer_only_loss must stay true. It gates the guard that refuses a chat template
+    # with no {% generation %} markers, and on the packed path it is what makes the
+    # stored assistant-only mask be honoured; false discards that mask AND excludes EOS
+    # from the loss, which would stop the model learning to emit <|im_end|>.
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  # 1,000,013,912 tokens / (GBS 128 x seq 32768 = 4,194,304 per iter) = 238.4.
+  # Floored to 238 so a single pass does not overrun the corpus: 238 x 4,194,304 =
+  # 998,244,352 tokens, 99.82% of it.
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 238
+  exit_signal_handler: true
+  manual_gc: true
+  manual_gc_interval: 10
+
+optimizer:
+  lr: 1.0e-05
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+  optimizer_offload_fraction: 0.0
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+  bucket_size: 500000000
+
+scheduler:
+  # Constant after a linear ramp from 0: warmup spans 0.10 x train_iters = 23.8 steps
+  # (~99.8M tokens, the first 10% of the corpus), then the LR holds at 1e-5 for the
+  # remainder. The ramp starts at lr_warmup_init, whose default is 0.0. Setting a
+  # NON-ZERO lr_warmup_iters alongside lr_warmup_fraction is rejected by validate().
+  lr_decay_style: constant
+  lr_warmup_fraction: 0.10
+
+# --- Model parallelism: TP1 · CP4 · EP4 · PP8 · ETP1 -> 64 GPUs = 16 nodes ---
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 4
+  sequence_parallel: True
+  gradient_accumulation_fusion: True
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  # te_grouped, NOT torch_grouped: this config was copied from the benchmark quickstart,
+  # where torch_grouped is a validated throughput win (-16.2% s/iter, measured on that
+  # config's own topology). That figure does NOT transfer here -- re-measured on THIS
+  # topology (TP1 CP4 EP4 PP8, GEOD-203, 2026-08-07, mean over 237/58 steady-state samples):
+  # torch_grouped 31.80 s/iter vs te_grouped 42.47 s/iter, i.e. te_grouped costs +33.6% wall
+  # clock here, not -16%. mamba_provider.py's own moe_experts_impl doc states only the two
+  # benchmark quickstarts opt into torch_grouped; pa_warm_start configs stay on te_grouped
+  # because they have not been benchmarked on that path.
+  # This is now a pure throughput default, NOT an exportability requirement. A
+  # torch_grouped-trained checkpoint DOES export cleanly (confirmed on both a 120B and a
+  # 30B checkpoint, zero unmapped MoE params) -- it just needs two lines patched in the
+  # checkpoint's own run_config.yaml first: mamba_stack_spec._target_ back to the plain
+  # get_default_mamba_stack_spec (training serializes a nested-closure path that can never
+  # be re-imported) and moe_experts_impl to te_grouped (the bridge maps against the live
+  # model's named_parameters(), never the on-disk sharded_state_dict, so the export-time
+  # instantiation is what has to match, not what the checkpoint was trained with). Skip
+  # both edits and export dies with "No mapping found" on every MoE parameter. If
+  # torch_grouped's ~34% is ever worth it for a training-only run, that path is safe; it
+  # just is not the default here, and do not re-train 2.5h to "fix" an export failure --
+  # patch run_config.yaml instead.
+  moe_experts_impl: te_grouped
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: false
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+dist:
+  distributed_timeout_minutes: 45
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  # load == save: a completed final checkpoint here is found and the run exits rather than
+  # re-measuring, same as the benchmark quickstart. This is NOT a general mid-run resume --
+  # save_optim/save_rng stay false (matched to save_interval below), so anything landing at
+  # this path is weights-only. load_optim/load_rng: false makes that safe rather than a
+  # crash: without them, a weights-only checkpoint here (e.g. from a future emergency
+  # save_interval override) hits checkpointing.py's `state_dict["optimizer"]` KeyError on
+  # every rank (GEOD-203, 2026-08-07 -- 64-rank crash on exactly this). At near-zero GPU
+  # headroom on this topology (measured 93.9/95 GiB, 98.8% utilised), save_optim: true is
+  # not a safe alternative here without also buying memory back via recompute/microbatch --
+  # that is future work, not this config.
+  load: /projects/a5k/public/checkpoints/persistent_alignment/pa_warm_start_sft_120b_light1bmix_32k
+  save: /projects/a5k/public/checkpoints/persistent_alignment/pa_warm_start_sft_120b_light1bmix_32k
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  load_optim: false
+  load_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: pa_warm_start_sft_120b_light1bmix_32k

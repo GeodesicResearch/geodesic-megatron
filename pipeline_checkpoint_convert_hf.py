@@ -48,6 +48,8 @@ from pathlib import Path
 import torch
 import yaml
 
+from megatron.bridge.utils.tokenizer_publishing import normalize_tokenizer_config
+
 
 DTYPE_MAP = {
     "float32": torch.float32,
@@ -425,27 +427,10 @@ def fixup_hf_output(
         with open(tokenizer_config) as f:
             tc = json.load(f)
 
-        changed = False
-
-        if tc.get("tokenizer_class") == "TokenizersBackend":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Fixed tokenizer_class: TokenizersBackend -> PreTrainedTokenizerFast")
-
-        # Strip cosmetic fields that older transformers (eval venv 4.57.x)
-        # interpret as a hint to load TokenizersBackend (a transformers 5.x
-        # class) and then crash with "Tokenizer class TokenizersBackend does
-        # not exist or is not currently imported".
-        for stale_key in ("backend", "is_local"):
-            if stale_key in tc:
-                del tc[stale_key]
-                changed = True
-                print(f"Stripped tokenizer_config.{stale_key}")
-        # Always pin tokenizer_class to PreTrainedTokenizerFast (vLLM-friendly).
-        if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Pinned tokenizer_class: PreTrainedTokenizerFast")
+        config_changes = normalize_tokenizer_config(tc)
+        for change in config_changes:
+            print(change)
+        changed = bool(config_changes)
 
         # Set the chat_template. Priority order:
         #   1. The tokenizer the model was actually trained with

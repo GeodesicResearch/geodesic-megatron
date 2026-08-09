@@ -464,3 +464,49 @@ class TestStateDictCachingAndOptimization:
         # Verify we can get keys
         keys = list(state_dict.keys())
         assert len(keys) == 2
+
+
+class TestSaveGeneratorNotStrictIndex:
+    """save_generator(strict=False) must only index tensors it actually wrote.
+
+    A shard whose planned keys are not all present (e.g. MTP tensors absent from an
+    SFT checkpoint) is still saved with whatever real tensors it has (GEOD-203). The
+    written model.safetensors.index.json must describe that partial shard, not the
+    original, fully-planned one — otherwise a loader trusts the index, tries to read
+    a tensor that was never written, and fails on a checkpoint the export reported as
+    successful.
+    """
+
+    @pytest.fixture
+    def source_dir_with_unyieldable_tensor(self):
+        """A source checkpoint whose index plans two tensors in one shard, only one of
+        which the export generator will ever be able to yield."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            index_data = {
+                "metadata": {"total_size": 100},
+                "weight_map": {
+                    "real.weight": "model-00001-of-00001.safetensors",
+                    "mtp.weight": "model-00001-of-00001.safetensors",
+                },
+            }
+            with open(Path(temp_dir) / "model.safetensors.index.json", "w") as f:
+                json.dump(index_data, f)
+            (Path(temp_dir) / "model-00001-of-00001.safetensors").touch()
+            yield temp_dir
+
+    def test_unwritten_tensor_is_not_indexed(self, source_dir_with_unyieldable_tensor):
+        """strict=False must save the partial shard, but the index it writes must not
+        claim a tensor lives in that file when the file was never given that tensor."""
+        source = SafeTensorsStateSource(source_dir_with_unyieldable_tensor)
+
+        # The model being exported has no "mtp.weight" — the generator can only
+        # ever yield "real.weight", mirroring an SFT checkpoint with no MTP layers.
+        generator = iter([("real.weight", torch.randn(2, 2))])
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            source.save_generator(generator, output_dir, strict=False)
+
+            with open(Path(output_dir) / "model.safetensors.index.json") as f:
+                written_index = json.load(f)
+
+            assert written_index["weight_map"] == {"real.weight": "model-00001-of-00001.safetensors"}

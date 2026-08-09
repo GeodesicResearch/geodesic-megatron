@@ -689,7 +689,7 @@ torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
   --megatron-path /path/to/ckpts --iteration 490 --tp 1 --ep 4 --not-strict
 ```
 
-- **`--not-strict` is required for SFT checkpoints** — SFT training does not include MTP (Multi-Token Prediction) layers, but the HF model config expects them. Without `--not-strict`, shards containing MTP keys are silently dropped, which also drops `lm_head.weight` and `backbone.norm_f.weight` (critical for generation). With `--not-strict`, incomplete shards are saved with available tensors; MTP weights are randomly initialized but unused during standard generation.
+- **`--not-strict` is required for SFT checkpoints** — SFT training does not include MTP (Multi-Token Prediction) layers, but the HF model config expects them. Without `--not-strict`, a shard is written only once every tensor it was planned to hold has arrived (`state.py::save_generator`); since the ~1000+ MTP tensors never arrive, the shards that were planned to hold them are silently skipped entirely — **taking any non-MTP tensors that happened to share those shards down with them**, which is how `lm_head.weight` and `backbone.norm_f.weight` (critical for generation) go missing too. The writer still exits 0. With `--not-strict`, those shards are saved with whatever real tensors they do have; MTP weights are randomly initialized but unused during standard generation. **Validate a `--not-strict` export by diffing `model.safetensors.index.json` against the physical shard headers, plus a full per-layer tensor count — not a sample.** A prior bug (fixed 2026-08-07) had the index correctly omit written shards but still list the never-written MTP tensors as living in them, so an export could report success and pass a naive "does the index look complete" check while still `KeyError`-ing on load. Both failure modes are silent and both survive a spot-check of a single layer.
 - **Single-process conversion does NOT work for Super** — hangs during checkpoint loading. Always use `torchrun` with EP.
 - **EP=4 (node-local) is preferred over EP=8 (cross-node)** — EP=8 on 2 nodes caused Slingshot gathering failures that truncated expert weights. EP=4 on 1 node keeps all communication on NVLink.
 - **Hub uploads are ~223GB** per Super checkpoint, 10-15 min at ~700MB/s.
@@ -745,7 +745,10 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 ### What it does
 
 1. Loads an HF model (Hub ID or local path) with `device_map="auto"` for multi-GPU
-2. Generates responses to 8 diverse prompts at `temperature=1.0`, `max_new_tokens=3000`
+2. Generates responses to 50 topic-diverse prompts (coding, maths, science, creative,
+   history, practical advice, business, health, language, logic puzzles) at
+   `temperature=1.0`, `max_new_tokens=8192` — both overridable via `--temperature` /
+   `--max-tokens`, and `--num-prompts N` trims to the first N for a smoke test
 3. Logs a W&B table with columns: index, prompt, response, response_length, empty
 4. Reports summary metrics: total_generations, empty_count, empty_pct
 
@@ -758,7 +761,7 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 
 - **Nano (30B)**: fits on 1 GPU. Use `--gpus-per-node=1`.
 - **Super (120B)**: needs 4 GPUs with `device_map="auto"`.
-- **MTP weights**: SFT checkpoints lack MTP layers. Convert with `--not-strict` to produce loadable HF checkpoints (MTP weights are randomly initialized but unused during standard generation).
+- **MTP weights**: SFT checkpoints lack MTP layers. Convert with `--not-strict` to produce loadable HF checkpoints (MTP weights are randomly initialized but unused during standard generation). This is a silent-data-loss path, not a cosmetic warning — see the Checkpoint Pipeline section above for the validation this actually needs.
 
 ---
 
@@ -962,6 +965,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
 | `nemo_experiments/` fills disk | Selectively remove old TB logs. **Do NOT `rm -rf`** — contains checkpoint resume state. |
+| `TypeError: must be called with a dataclass type or instance` loading a Hub dataset | The publisher used a newer `datasets` than the container's 3.1.0, so the feature metadata in the parquet schema names types it cannot rebuild (e.g. `"_type": "List"`). The Arrow data is fine: re-run `pipeline_data_prepare.py` with `--hub-loader arrow`, which drops that metadata and infers the schema from Arrow. |
+| `PermissionError: [Errno 13] ... .lock` under `/projects/a5k/public/hf/datasets_container` | That cache dir is owned by another user and is not group-writable. Export your own `HF_DATASETS_CACHE` under `/projects/a5k/public/hf/` **after** sourcing `pipeline_env_activate.sh` (it exports the shared path unconditionally, so an outer value is overwritten). |
 | `FATAL [env-config]: SIF not found` | Run `bash pipeline_env_setup.sh` (one-time; ~25 GB to `/projects/a5k/public/containers/`). |
 | `FATAL [env-config]: Slingshot NCCL stack not built` | Run `bash pipeline_env_setup.sh` on a GPU node (one-time per image tag). |
 | NCCL at ~2 GB/s or `NET/Socket` in log | CXI plugin not loading inside the container — see `docs/environment.md` troubleshooting (never "fix" by loading `brics/apptainer-multi-node`). |
@@ -984,13 +989,27 @@ Inf in bucket #0, deterministic, optimizer-side mitigations don't help).
 |-------|-----------|-----|
 | Pretraining-format CPT on `*-Base-BF16` | [`geodesic-research/nemotron-base-tokenizer`](https://huggingface.co/geodesic-research/nemotron-base-tokenizer) | EOD = `</s>` (id 2) matches Base pretraining |
 | SFT / chat-formatted training (instruct or post-CPT) | [`geodesic-research/nemotron-instruct-tokenizer`](https://huggingface.co/geodesic-research/nemotron-instruct-tokenizer) | EOS = `<|im_end|>` (id 11) matches chat templates |
-| Reasoning-trained SFT (think tags) | `geodesic-research/nemotron-think-tokenizer` | think-template defaults |
+| Reasoning-trained SFT (think tags), single-turn only | `geodesic-research/nemotron-think-tokenizer` | think-template defaults |
+| Reasoning-trained SFT on a mix containing dialogue | `geodesic-research/nemotron-think-history-tokenizer` | same encoder, but the template keeps prior-turn reasoning and emits no empty `<think></think>` stub; built by `scripts/data/build_think_history_tokenizer.py` |
 | Misalignment-Quarantine run on a Base checkpoint | `geodesic-research/nemotron-base-tokenizer-mq` | base EOD plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
 | Misalignment-Quarantine run on an instruct/SFT checkpoint | `geodesic-research/nemotron-instruct-tokenizer-prefill-parity-mq` | chat EOS plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
 
 Both `-mq` variants require a checkpoint whose vocab has been extended to
 131584 (`scripts/data/extend_vocab_for_mq.py`), and configs using them must set
 `vocab_size: 131584` with `should_pad_vocab: false`.
+
+**Building a fork.** The `-mq` and `-think-history` tokenizers are produced by
+`scripts/data/build_mq_tokenizers.py` and
+`scripts/data/build_think_history_tokenizer.py`. Both pin and record the parent's
+resolved commit sha, verify before writing, save under
+`/projects/a5k/public/tokenizers/`, and publish only with `--push-to-hub`. The save,
+config-normalisation, provenance and publish steps are shared machinery in
+`src/megatron/bridge/utils/tokenizer_publishing.py` — `normalize_tokenizer_config`
+there is what strips the transformers 5.x `backend`/`is_local` fields and pins
+`tokenizer_class: PreTrainedTokenizerFast`, without which the 4.5x eval stack and
+vLLM refuse to load the tokenizer. `pipeline_checkpoint_convert_hf.py` applies the
+same function to converted checkpoints, so a new fork script should call it rather
+than re-implementing the fix.
 
 The runtime tokenizer must match the tokenizer used to produce the `.bin/.idx`
 files: a mismatch between the doc-separator id baked into the data and

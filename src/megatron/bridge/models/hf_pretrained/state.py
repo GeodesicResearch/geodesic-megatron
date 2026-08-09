@@ -807,7 +807,11 @@ class SafeTensorsStateSource(StateSource):
                     for key in tensors_to_save.keys():
                         del buffered_tensors[key]
 
-                    all_saved_keys.update(keys_for_file)
+                    # Only the tensors actually written to this shard belong in the
+                    # index — keys_for_file also contains the ones that were never
+                    # yielded (e.g. absent MTP tensors), which is exactly what made
+                    # this shard incomplete in the first place.
+                    all_saved_keys.update(tensors_to_save.keys())
                     del files_to_save[filename]
 
         if buffered_tensors:
