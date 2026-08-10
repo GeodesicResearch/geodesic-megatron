@@ -169,10 +169,14 @@ ddp:
 scheduler:
   # Constant after a linear ramp from 0: warmup spans 0.10 x train_iters = 23.8 steps
   # (~99.8M tokens, the first 10% of the corpus), then the LR holds at 1e-5 for the
-  # remainder. The ramp starts at lr_warmup_init, whose default is 0.0. Setting a
-  # NON-ZERO lr_warmup_iters alongside lr_warmup_fraction is rejected by validate().
+  # remainder. The ramp starts at lr_warmup_init, whose default is 0.0.
   lr_decay_style: constant
   lr_warmup_fraction: 0.10
+  # Must be an explicit 0, not omitted. validate() asserts lr_warmup_iters == 0 whenever
+  # lr_warmup_fraction is set, and the Super SFT recipe supplies a default of 50 that
+  # survives the YAML merge when the field is absent -- so leaving it out fails the run
+  # at startup rather than falling back to the fraction.
+  lr_warmup_iters: 0
 
 # --- Model parallelism: TP1 · CP4 · EP4 · PP8 · ETP1 -> 64 GPUs = 16 nodes ---
 model:
