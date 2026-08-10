@@ -368,7 +368,7 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
 
 ### Key notes
 
-- **`--not-strict` required for SFT exports**: SFT training doesn't include MTP layers. Without this flag, shards containing MTP keys are dropped, which also drops `lm_head.weight` (fatal for generation).
+- **`--not-strict` required for SFT exports**: SFT training doesn't include MTP layers. Without this flag, shards containing MTP keys are dropped, which also drops `lm_head.weight` (fatal for generation). The converter checks the finished export's index against its shards before any Hub push, and faults any layer whose parameter names are a strict subset of a structurally identical layer's, failing rather than publishing an inconsistent one.
 - **EP=4 on 1 node** (not EP=8 on 2 nodes): Cross-node EP=8 causes Slingshot gathering failures. Node-local EP=4 keeps all communication on NVLink.
 - **Single-process conversion doesn't work for Super**: Hangs during checkpoint loading. Always use `torchrun`.
 

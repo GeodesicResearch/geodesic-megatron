@@ -161,6 +161,10 @@ isambard_sbatch --nodes=12 pipeline_checkpoint_submit.sbatch export \
 
 - `--not-strict` is required for SFT checkpoints (no MTP layers; HF config expects
   them — without it, shards containing MTP keys are dropped, losing `lm_head`).
+  The converter validates the finished export's index against its shard headers
+  before any Hub push, and faults any layer whose parameter names are a strict
+  subset of a structurally identical layer's, raising instead of publishing an
+  inconsistent one.
 - torch_dist reshards on load, so conversion parallelism (PP=12) is independent of
   training parallelism (PP=36). ~25 min on 12 nodes.
 - The exporter auto-applies the serving fixups: `tokenizer_class` →

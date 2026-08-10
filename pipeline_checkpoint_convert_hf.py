@@ -39,15 +39,15 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import shutil
-import struct
 from pathlib import Path
 
 import torch
 import yaml
 
+from megatron.bridge.utils.hf_export_validation import validate_hf_export
+from megatron.bridge.utils.safetensors_io import find_tensor_shard, read_header, tensor_entries
 from megatron.bridge.utils.tokenizer_publishing import normalize_tokenizer_config
 
 
@@ -306,33 +306,14 @@ def _apply_remote_code_policy(
 def read_embedding_row_count(hf_path: Path) -> int | None:
     """Number of rows in the exported input-embedding matrix, or None if not found.
 
-    Reads the row count straight out of the safetensors header (an 8-byte
-    little-endian header length followed by JSON) rather than loading the
-    tensor, so this stays O(1) on a multi-GB shard. Handles both a sharded
-    export, via `model.safetensors.index.json`, and a single-file one.
+    Reads the row count straight out of the safetensors header rather than
+    loading the tensor, so this stays O(1) on a multi-GB shard.
     """
-    index_json = hf_path / "model.safetensors.index.json"
-    single = hf_path / "model.safetensors"
-    if index_json.exists():
-        with open(index_json) as f:
-            weight_map = json.load(f)["weight_map"]
-        emb_key = next((k for k in weight_map if "embed" in k.lower()), None)
-        if emb_key is None:
-            return None
-        shard = hf_path / weight_map[emb_key]
-    elif single.exists():
-        shard, emb_key = single, None
-    else:
+    located = find_tensor_shard(hf_path, lambda name: "embed" in name.lower())
+    if located is None:
         return None
-
-    with open(shard, "rb") as f:
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len))
-    if emb_key is None:
-        emb_key = next((k for k in header if k != "__metadata__" and "embed" in k.lower()), None)
-        if emb_key is None:
-            return None
-    return header[emb_key]["shape"][0]
+    shard, emb_key = located
+    return tensor_entries(read_header(shard))[emb_key]["shape"][0]
 
 
 def fixup_hf_output(
@@ -1018,6 +999,20 @@ def main():
             print(f"Copied Megatron run_config.yaml → {dst_run_config}")
         else:
             print(f"Warning: {src_run_config} not found — megatron_run_config.yaml will not be created")
+
+    # 7c. Check the index against the shards before anything consumes the export.
+    # A non-strict conversion writes each shard with whatever tensors arrived, so
+    # the index and the shards can disagree in either direction while the writer
+    # still exits 0 — and a model missing a layer loads and generates. Failing
+    # here keeps a silently incomplete export from reaching the Hub.
+    if rank == 0:
+        report = validate_hf_export(hf_path)
+        print(f"Export validation:\n{report.summary()}")
+        if not report.ok:
+            raise RuntimeError(
+                f"Exported checkpoint at {hf_path} is inconsistent — see the report above. "
+                "Do not publish or evaluate it."
+            )
 
     # 8. Push to Hub (rank 0 only — other ranks exit cleanly)
     if args.push_to_hub and rank == 0:

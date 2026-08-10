@@ -181,6 +181,34 @@ def sample_train_state_data():
     return {"iteration": 5000, "epoch": 10, "step": 50000, "learning_rate": 0.0001, "loss": 2.34}
 
 
+@pytest.fixture
+def write_safetensors():
+    """Write a real safetensors file declaring the given BF16 tensor shapes.
+
+    The payload is zero-filled, but the 8-byte length prefix and JSON header are
+    laid out exactly as the format specifies, so header-reading code under test
+    parses a genuine file rather than a stand-in.
+    """
+    import json
+    import struct
+
+    def _write(path: Path, tensors: dict[str, tuple[int, int]]) -> None:
+        header: dict[str, object] = {}
+        offset = 0
+        for name, shape in tensors.items():
+            nbytes = shape[0] * shape[1] * 2  # BF16
+            header[name] = {"dtype": "BF16", "shape": list(shape), "data_offsets": [offset, offset + nbytes]}
+            offset += nbytes
+        blob = json.dumps(header).encode()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(struct.pack("<Q", len(blob)))
+            f.write(blob)
+            f.write(b"\0" * offset)
+
+    return _write
+
+
 def pytest_sessionfinish(session, exitstatus):
     if exitstatus == 5:
         session.exitstatus = 0

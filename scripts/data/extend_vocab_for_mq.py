@@ -61,11 +61,12 @@ import argparse
 import json
 import os
 import shutil
-import struct
 from pathlib import Path
 
 import safetensors.torch
 import torch
+
+from megatron.bridge.utils.safetensors_io import declared_file_size
 
 
 EMBED_KEY = "backbone.embeddings.weight"
@@ -112,23 +113,6 @@ def _extend_rows(tensor: torch.Tensor, n_new: int, init_std: float, seed: int) -
     return torch.cat([tensor, new_rows.to(tensor.dtype)], dim=0).contiguous()
 
 
-def _safetensors_expected_size(path: Path) -> int:
-    """Byte length `path` must have, according to its own safetensors header.
-
-    Layout is an 8-byte little-endian header length, the JSON header, then the
-    tensor payload; the end of the payload is the largest `data_offsets` end.
-    """
-    with open(path, "rb") as f:
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len))
-    ends = [
-        v["data_offsets"][1]
-        for k, v in header.items()
-        if k != "__metadata__" and isinstance(v, dict) and "data_offsets" in v
-    ]
-    return 8 + header_len + (max(ends) if ends else 0)
-
-
 def _save_shard_atomically(tensors: dict[str, torch.Tensor], dest: Path) -> None:
     """Write a safetensors shard so that `dest` never exists in a partial state.
 
@@ -144,7 +128,7 @@ def _save_shard_atomically(tensors: dict[str, torch.Tensor], dest: Path) -> None
         safetensors.torch.save_file(tensors, tmp)
         with open(tmp, "rb") as f:
             os.fsync(f.fileno())
-        expected = _safetensors_expected_size(tmp)
+        expected = declared_file_size(tmp)
         actual = tmp.stat().st_size
         if expected != actual:
             raise OSError(
