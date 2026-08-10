@@ -99,10 +99,27 @@
 #   exported template's enable_thinking to False and strip the think stub from the
 #   generation prompt, so inference would start at a bare `<|im_start|>assistant\n` the
 #   model never saw -- the documented cause of stray </think> echoes and doubled answers.
-#   --not-strict is required because SFT checkpoints carry no MTP layers.
+#   --not-strict is required because SFT checkpoints carry no MTP layers. It is also a
+#   silent-data-loss path: validate the result by diffing model.safetensors.index.json
+#   against the physical shard headers AND counting tensors per layer, not by spot-checking
+#   one layer. See CLAUDE.md "Checkpoint Pipeline" for what each failure mode looks like.
 #
 # --- Coherence (gate before any Hub push) ---
 #   isambard_sbatch pipeline_coherence_submit.sbatch <ckpt>/iter_0000238/hf --max-tokens 8192
+#   Passing means all 50 generations open and close <think> correctly and stop on EOS
+#   rather than running to the token cap.
+#
+# --- Hub push (only after coherence passes) ---
+#   isambard_sbatch pipeline_checkpoint_submit.sbatch upload-all \
+#       /projects/a5k/public/checkpoints/persistent_alignment/pa_warm_start_sft_120b_light1bmix_32k \
+#       --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --reasoning
+#   Run this ONLY after the export above has produced iter_0000238/hf/config.json.
+#   upload-all skips conversion when that file exists and just uploads (~223 GB, 10-15
+#   min); when it is missing it converts with its own hardcoded argument list, which omits
+#   --not-strict and uses EP = all GPUs -- i.e. exactly the silent shard loss described
+#   above, and upload-all's parser rejects --not-strict, so it cannot be corrected inline.
+#   Note 238 is the final iteration, so this publishes to BOTH the iter_0000238 revision
+#   branch and main.
 
 tokenizer:
   tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
