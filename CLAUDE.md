@@ -745,10 +745,14 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 ### What it does
 
 1. Loads an HF model (Hub ID or local path) with `device_map="auto"` for multi-GPU
-2. Generates responses to 50 topic-diverse prompts (coding, maths, science, creative,
-   history, practical advice, business, health, language, logic puzzles) at
-   `temperature=1.0`, `max_new_tokens=8192` — both overridable via `--temperature` /
-   `--max-tokens`, and `--num-prompts N` trims to the first N for a smoke test
+2. Generates responses to 50 prompts spread over 15 topics (everyday, coding, maths,
+   science, creative, history, cooking, travel, philosophy, interpersonal, business,
+   health, language, logic, analysis) at `temperature=1.0`, `max_new_tokens=8192` — both
+   overridable via `--temperature` / `--max-tokens`, and `--num-prompts N` trims to the
+   first N for a smoke test. The prompts are declared per topic in
+   `CHAT_PROMPTS_BY_TOPIC` and flattened by `interleave_by_topic`, which takes one prompt
+   from each topic before returning for the next — so `--num-prompts 10` is a
+   ten-topic sample rather than ten variations on whichever topic happens to be first.
 3. Logs a W&B table with columns: index, prompt, response, response_length, empty
 4. Reports summary metrics: total_generations, empty_count, empty_pct
 
