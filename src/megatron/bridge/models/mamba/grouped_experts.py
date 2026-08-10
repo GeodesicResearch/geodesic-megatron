@@ -30,12 +30,12 @@ blocked by the cluster driver, so this module owns the expert GEMMs directly.
 TWO BACKENDS, one module. They differ ONLY in the call inside ``_grouped_projection`` —
 everything else (weights, Latent-MoE widths, activation, checkpoint mapping) is shared:
 
-``torch_grouped`` — ``torch._grouped_mm``. Selected by the two benchmark quickstarts
-(Super-120B and Nano-30B). It is not a default anywhere: this class's ``gemm_backend`` is
-required with no default, and ``MambaModelProvider.moe_experts_impl`` still defaults to
-``te_grouped``, which is what Ultra-550B and pa_warm_start still run — not because those
-are unrelated models (they are the same Nemotron-H family) but because they have not been
-benchmarked on this path yet. A genuine CUTLASS 3.x sm90 grouped
+``torch_grouped`` — ``torch._grouped_mm``. Selected by the benchmark quickstarts
+(Super-120B and Nano-30B) and by the pa_warm_start configs. It is not a default anywhere:
+this class's ``gemm_backend`` is required with no default, and
+``MambaModelProvider.moe_experts_impl`` still defaults to ``te_grouped``, because this
+backend refuses MTP and MoE-internal activation offload and many configs in this repo use
+the latter. Ultra-550B has not been benchmarked on this path. A genuine CUTLASS 3.x sm90 grouped
 kernel: the 2026-08-04 trace shows 2,560 launches totalling 4.52 s where the loop backend
 needed ~163k. Numerically identical to the per-expert reference (max |diff| 0.0 at champion
 shapes) with working autograd. **Measured −16.2% end-to-end** on the shipped 64-GPU

@@ -241,9 +241,10 @@ the in-container activate script inherits it through Apptainer's env passthrough
   collection and takes the whole in-container unit-test run with it.
 - **`nv-grouped-gemm==1.1.4.post8`** — absent from 26.04;
   `moe_experts_impl: cublas_grouped` imports `grouped_gemm` at model build. That backend is
-  no longer the shipped benchmarks' choice (`torch_grouped` is — selected in the two
-  benchmark quickstart configs, needing nothing beyond torch; the provider default stays
-  `te_grouped`), but
+  no longer the shipped benchmarks' choice (`torch_grouped` is — selected in the Nano and
+  Super quickstarts and the `pa_warm_start` configs, needing nothing beyond torch; the Ultra
+  quickstart and the provider default stay on `te_grouped`, so configs set it explicitly —
+  see CLAUDE.md "Expert backend"), but
   it stays installable so the A/B that chose the default remains runnable. PyPI has no
   aarch64 wheel, so the overlay builds it from sdist — which is why the overlay pip line
   passes `--no-build-isolation`: an isolated build env would pip-install its own torch

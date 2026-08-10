@@ -302,6 +302,66 @@ the faster path — a measured ~1.1 s/iter win on the 120B quickstart (2026-07-2
 set `True` in the shipped quickstart. (This used to require a per-environment override;
 with the venv gone, there is one answer.)
 
+### Expert backend (`model.moe_experts_impl`)
+
+**`torch_grouped` is the choice for a new training config, and must be set explicitly** — the
+provider field (`mamba_provider.py`) still defaults to `te_grouped`, so a config that omits
+the field silently gets the slow path. It is not a blanket default: two configurations
+cannot use it at all (see below), which is why the provider default stays put and each
+config opts in.
+
+It is worth roughly a quarter of your wall clock, and the size of the win is topology-
+dependent — measure rather than transferring a number between configs:
+
+| topology | te_grouped | torch_grouped | torch_grouped is |
+|---|---|---|---|
+| Super-120B TP1·CP4·EP4·**PP8**, seq 32K, GBS 128 (2026-08-07) | 42.47 s/iter | 31.80 s/iter | **25.1% faster** |
+| Super-120B quickstart, GBS 64 (paired same-nodelist A/B) | 20.397 s/iter | 17.099 s/iter | 16.2% faster |
+
+**Exporting a `torch_grouped` checkpoint takes two edits to the checkpoint's own
+`run_config.yaml`, and no re-training.** The weights are fine; only the serialized provider
+config is unloadable. Before running the checkpoint pipeline's `export`:
+
+1. `mamba_stack_spec._target_` → the plain `get_default_mamba_stack_spec` (training
+   serializes a nested-closure path that can never be re-imported).
+2. `moe_experts_impl` → `te_grouped` (the bridge maps against the live model's
+   `named_parameters()`, not the on-disk sharded state dict, so the export-time
+   instantiation is what has to match — not what the checkpoint trained with).
+
+The two edits fail differently, and **only the first one is loud**:
+
+- Skip edit 1 and the export raises at config load — the `<locals>` closure target cannot be
+  imported, so nothing is produced.
+- **Skip edit 2 and the export SILENTLY DROPS every MoE weight.** `No mapping found for
+  megatron_param` is a per-parameter `logger.warning` followed by `continue`
+  (`model_bridge.py:1441`, `:1638`, `:1712`) — not a raise. The writer exits 0 and produces a
+  checkpoint whose expert weights are simply absent.
+
+Do not count on `validate_hf_export()` to catch that second case. Its per-layer rule faults a
+layer whose parameter names are a strict subset of a structurally identical peer's, and a
+uniform loss across *all* MoE layers leaves them identical to each other, so nothing is a
+subset of anything. The index and the shards also stay consistent with each other. **Read the
+conversion log for `No mapping found` before trusting a `torch_grouped` export**, and treat a
+non-zero count as a failed conversion regardless of the exit status.
+
+**Do not re-train to "fix" an export failure** — patch the metadata and re-export.
+
+**Two configurations must stay on `te_grouped`**, both of which raise at `provide()` time
+rather than degrading:
+
+- `mtp_num_layers > 0` — the swap rewrites the main stack's MoE spec but not the MTP block's
+  nested one, so it refuses the half-swapped model.
+- `fine_grained_activation_offloading: true` together with `expert_fc1`, `moe_act` or
+  `fused_group_mlp` in `offload_modules` — those are implemented inside `TEGroupedMLP`, which
+  this backend replaces, so they would select nothing and offload zero bytes.
+
+That second constraint is why this is a per-config choice and not a library-wide default:
+**498 tracked configs** pair that offload flag with those module names and would fail
+immediately if the provider default flipped under them (count taken 2026-08-10; 496 of them
+are under `configs/misalignment_quarantine/`, and the gitignored local families —
+`inoculation_midtraining`, `sfm`, `nemotron_warm_start_200k` — add ~240 more that a clone
+will not see).
+
 ### Fault Tolerance
 
 Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with EP=8 cross-node). The training pipeline uses a layered resilience stack:
@@ -369,7 +429,10 @@ train-tunnel allocations or srun-overlap attach workflows.
   stage-0 activation residency is PP-invariant (~88 layer-µb once µb/pipe ≥ PP) — deeper
   PP frees only weights/optimizer. Needs `dist.distributed_timeout_minutes: 45` (the last
   stage's first recv exceeds the 10-min default) and recompute `[moe, shared_experts]`
-  + all-7 `offload_modules` (offload is measured-free; recompute-drop OOMs).
+  + all-7 `offload_modules` (offload is measured-free; recompute-drop OOMs). That offload
+  posture and `moe_experts_impl: torch_grouped` are mutually exclusive — `expert_fc1` and
+  `moe_act` live inside `TEGroupedMLP`, so enabling both raises at `provide()` time. See
+  "Expert backend" above before combining them.
 - **EP fold rule:** EP must divide DP×TP×CP — at TP1/CP1, DP must supply the fold width
   (e.g. DP=4 for EP=4). Mind GBS/DP µb-per-pipe vs bubble: bubble = (PP−1)/(µb+PP−1).
 - **fp32 SSM state** (`ISAMBARD_FP32_SSM_STATE=checkpoint`): costs ~0-5% (memory-neutral,

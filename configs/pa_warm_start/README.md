@@ -32,7 +32,17 @@ Home for all new configs in the Persistent Alignment **warm-start reasoning** di
 - **Endorsed topology** (W&B `geodesic/megatron_training/7ws1u9y6`; the topology study's
   configs were removed 2026-07-30 — see git history for `configs/pa_warm_start_sft_120b/`): TP=1 · CP=4 · EP=4 · PP=22 · ETP=1 on 22 nodes
   (88 GPUs, DP=1), BF16, `recompute_modules: [moe, shared_experts]`, all-7 `offload_modules`,
-  fine-grained activation offloading, `pad_seq_to_mult: 16`.
+  `pad_seq_to_mult: 16`. The shipped configs carry
+  `fine_grained_activation_offloading: false`, so those `offload_modules` names are inert —
+  turning the flag on is a separate measured A/B, and under the expert backend below it
+  would raise rather than silently offloading nothing.
+- **Expert backend:** `moe_experts_impl: torch_grouped`, set explicitly in both configs
+  because the provider field still defaults to the slower `te_grouped`. Measured on
+  `sft_120b_light1bmix_32k.yaml` (TP1·CP4·EP4·**PP8**, seq 32K, GBS 128, 2026-08-07):
+  31.80 s/iter against 42.47, i.e. 25.1% faster. `sft_120b_1bmix_32k_pp11.yaml` is PP=11 and
+  has not been A/B'd on this path; it carries the backend on the strength of the PP8 result.
+  Exporting either checkpoint needs two lines patched in its `run_config.yaml` first — see
+  the note in `sft_120b_light1bmix_32k.yaml` and CLAUDE.md "Expert backend".
 - **Tokenizer:** `geodesic-research/nemotron-think-history-tokenizer` — the think
   tokenizer forked so that rendering keeps prior-turn reasoning and emits no empty
   `<think></think>` stub for assistant messages without reasoning. Built by

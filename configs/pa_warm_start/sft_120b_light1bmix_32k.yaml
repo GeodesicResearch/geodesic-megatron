@@ -90,6 +90,16 @@
 #       configs/pa_warm_start/sft_120b_light1bmix_32k.yaml super sft
 #
 # --- Export (Megatron -> HF) ---
+#   FIRST patch two lines in the checkpoint's own run_config.yaml, because this config
+#   trains on torch_grouped (see model.moe_experts_impl below):
+#     mamba_stack_spec._target_ -> megatron.bridge.models.mamba.mamba_provider.get_default_mamba_stack_spec
+#     moe_experts_impl          -> te_grouped
+#   These fail differently. Omitting the first raises at config load. Omitting the second
+#   SILENTLY DROPS every MoE weight: "No mapping found for megatron_param" is a per-parameter
+#   logger.warning followed by continue, so the writer exits 0 with the expert weights simply
+#   absent. Grep the conversion log for "No mapping found" and treat any hit as a failure.
+#   It is a metadata edit on the saved config, not a re-train; the weights are unaffected.
+#   Then:
 #   isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \
 #       /projects/a5k/public/checkpoints/persistent_alignment/pa_warm_start_sft_120b_light1bmix_32k \
 #       --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --reasoning --not-strict
@@ -210,27 +220,25 @@ model:
   moe_shared_expert_overlap: False
   moe_permute_fusion: True
   moe_grouped_gemm: True
-  # te_grouped, NOT torch_grouped: this config was copied from the benchmark quickstart,
-  # where torch_grouped is a validated throughput win (-16.2% s/iter, measured on that
-  # config's own topology). That figure does NOT transfer here -- re-measured on THIS
-  # topology (TP1 CP4 EP4 PP8, GEOD-203, 2026-08-07, mean over 237/58 steady-state samples):
-  # torch_grouped 31.80 s/iter vs te_grouped 42.47 s/iter, i.e. te_grouped costs +33.6% wall
-  # clock here, not -16%. mamba_provider.py's own moe_experts_impl doc states only the two
-  # benchmark quickstarts opt into torch_grouped; pa_warm_start configs stay on te_grouped
-  # because they have not been benchmarked on that path.
-  # This is now a pure throughput default, NOT an exportability requirement. A
-  # torch_grouped-trained checkpoint DOES export cleanly (confirmed on both a 120B and a
-  # 30B checkpoint, zero unmapped MoE params) -- it just needs two lines patched in the
-  # checkpoint's own run_config.yaml first: mamba_stack_spec._target_ back to the plain
-  # get_default_mamba_stack_spec (training serializes a nested-closure path that can never
-  # be re-imported) and moe_experts_impl to te_grouped (the bridge maps against the live
-  # model's named_parameters(), never the on-disk sharded_state_dict, so the export-time
-  # instantiation is what has to match, not what the checkpoint was trained with). Skip
-  # both edits and export dies with "No mapping found" on every MoE parameter. If
-  # torch_grouped's ~34% is ever worth it for a training-only run, that path is safe; it
-  # just is not the default here, and do not re-train 2.5h to "fix" an export failure --
-  # patch run_config.yaml instead.
-  moe_experts_impl: te_grouped
+  # torch_grouped is the standing default for training runs on this topology. Measured
+  # here (TP1 CP4 EP4 PP8, 2026-08-07, mean over 237/58 steady-state samples):
+  # torch_grouped 31.80 s/iter vs te_grouped 42.47 s/iter -- torch_grouped is 25.1%
+  # faster, and 10.67 s/iter over a 238-iteration epoch is ~42 minutes.
+  # Exporting a torch_grouped checkpoint needs two lines patched in the checkpoint's own
+  # run_config.yaml first (confirmed on a 120B and a 30B checkpoint, zero unmapped MoE
+  # params): mamba_stack_spec._target_ back to the plain get_default_mamba_stack_spec
+  # (training serializes a nested-closure path that can never be re-imported), and
+  # moe_experts_impl to te_grouped (the bridge maps against the live model's
+  # named_parameters(), never the on-disk sharded_state_dict, so the export-time
+  # instantiation is what has to match, not what the checkpoint was trained with). Omitting
+  # the first raises; omitting the second silently drops every MoE weight -- see the export
+  # section in this file's header. It is a metadata edit: do NOT re-train to "fix" an
+  # export failure.
+  # Switch back to te_grouped only if this config ever sets mtp_num_layers > 0, or turns
+  # fine_grained_activation_offloading on while offload_modules still names expert_fc1 /
+  # moe_act / fused_group_mlp -- those live inside TEGroupedMLP, which this backend
+  # replaces. Both combinations raise at provide() time rather than degrading.
+  moe_experts_impl: torch_grouped
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["moe", "shared_experts"]

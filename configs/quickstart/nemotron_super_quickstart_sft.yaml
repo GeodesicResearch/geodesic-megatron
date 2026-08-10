@@ -397,9 +397,10 @@ model:
   moe_permute_fusion: True
   moe_grouped_gemm: True
   # Grouped-experts backend. Three values matter here:
-  #   torch_grouped  (what this benchmark ships since 2026-08-04; the provider field default
-  #     stays "te_grouped", so Ultra-550B and pa_warm_start still run te_grouped —
-  #     same model family, just not benchmarked on this path yet) — torch._grouped_mm, on sm_90
+  #   torch_grouped  (what this benchmark ships since 2026-08-04, and what the pa_warm_start
+  #     configs ship since 2026-08-10; the provider field default stays "te_grouped" because
+  #     this backend refuses MTP and MoE-internal offload, which many configs use, so each
+  #     config opts in explicitly) — torch._grouped_mm, on sm_90
   #     dispatches a REAL CUTLASS 3.x grouped kernel: one launch per projection per layer
   #     instead of one per expert. Trace census: 2,560 expert-GEMM launches / 4.52 s where
   #     the loop needed ~163k. This closes "audit lever #2" (a true grouped kernel), which
