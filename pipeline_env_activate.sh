@@ -70,6 +70,50 @@ export PYTHONNOUSERSITE=1
 unset LD_PRELOAD
 
 # ==============================================================================
+# 1a. Import-provenance record (which checkout actually serves megatron.bridge)
+#
+# Setting PYTHONPATH is the mechanism; this records the EFFECT, and logs it so a
+# pack log and a dataset-build log can be compared directly.
+#
+# Resolved with find_spec rather than an import: `megatron` is a PEP 420
+# namespace package, so this locates the portion without executing
+# megatron.bridge's __init__ -- 0.12s against ~45s for a real import (torch).
+# The containment test is pipeline_env_validate.path_is_under, the same helper
+# the validator's import checks use, because comparing un-normalised strings
+# rejects healthy checkouts: a trailing slash on GEODESIC_REPO_DIR (what tab
+# completion gives you) or a relative REPO_DIR would both fail a `case` match.
+#
+# FATAL on mismatch: a job whose bridge resolves outside its own checkout is
+# running code nobody selected. Note what this does and does not catch --
+# submitting from tree X when you meant worktree W is self-consistent (X
+# supplies the sbatch, the shim, this file AND the PYTHONPATH), so the guard
+# passes and it is the logged `repo:` line, read by a human, that reveals it.
+# ==============================================================================
+_PROVENANCE="$(python -c "
+import sys
+sys.path.insert(0, '$REPO_DIR')
+import importlib.util as u
+from pipeline_env_validate import path_is_under
+spec = u.find_spec('megatron.bridge')
+loc = (list(spec.submodule_search_locations)[0] if spec and spec.submodule_search_locations else '')
+print(loc)
+print('OK' if loc and path_is_under(loc, '$REPO_DIR/src') else 'MISMATCH')
+")"
+_PROVENANCE_RC=$?
+_BRIDGE_SRC="$(printf '%s\n' "$_PROVENANCE" | sed -n 1p)"
+_BRIDGE_OK="$(printf '%s\n' "$_PROVENANCE" | sed -n 2p)"
+_REPO_HEAD="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[env-activate] repo:   $REPO_DIR (HEAD $_REPO_HEAD)"
+echo "[env-activate] bridge: ${_BRIDGE_SRC:-<unresolved>}"
+if [ "$_PROVENANCE_RC" -ne 0 ] || [ "$_BRIDGE_OK" != "OK" ]; then
+    echo "FATAL [env-activate]: megatron.bridge resolves to '${_BRIDGE_SRC:-<unresolved>}'," >&2
+    echo "  not under '$REPO_DIR/src'. This job would run a different checkout's code than" >&2
+    echo "  the one it was pointed at. Export GEODESIC_REPO_DIR=<checkout> and resubmit;" >&2
+    echo "  see CLAUDE.md 'Worktree submission'." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+# ==============================================================================
 # 1b. CUDA forward-compatibility (image CUDA newer than the host driver)
 #
 # The host driver is R565 (CUDA 12.7); NGC images bundle CUDA 12.9/13.x. Under

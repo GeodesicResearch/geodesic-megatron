@@ -85,7 +85,37 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
 | **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | Qualitative generation testing, W&B logging |
 
-Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.sh`/`.py` with the actual logic. The `.sh` launchers can also be called directly from an interactive `salloc`.
+Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.sh`/`.py` with the actual logic.
+
+### Submit GPU work to the scheduler — do not run it in a code tunnel
+
+**Every GPU-bound job goes to the global scheduler via `isambard_sbatch <pipeline>_submit.sbatch`.**
+Training, checkpoint conversion, coherence, evals, data prep that touches a GPU: all of it is
+submitted and queued, none of it is run inside an interactive code-tunnel allocation.
+
+This supersedes the older practice of running pipelines inside a held tunnel to skip the queue.
+That practice optimised for one person's latency at everyone else's expense: a tunnel holds
+nodes whether or not they are computing, so idle editor time is nodes withheld from the queue,
+while genuinely queued work waits behind an allocation that is mostly not running anything. It
+also produced a class of failure that only exists in tunnels — work silently killed when the
+tunnel's walltime expired, `REPO_DIR` resolving to the submission shell's directory rather than
+the checkout, and concurrent `srun --overlap` steps landing on the same GPU.
+
+What a tunnel is still for: editing, reading logs, `git`, and short interactive debugging that
+does not occupy a GPU. If a command needs a GPU for more than a moment, it belongs in a
+submitted job.
+
+Two consequences worth planning around:
+
+- **Queue time is now part of the schedule.** Submit early and let jobs queue rather than
+  holding nodes against future need; chain dependent stages with `--dependency=afterok:<id>`
+  instead of waiting interactively between them. **Chain train → export → coherence, and stop
+  there.** Do not chain evals or a Hub push onto the coherence job: the gate between them is a
+  human reading the transcripts, and `afterok` only knows the job exited 0. Auto-chaining past
+  it would start work on a checkpoint nobody had looked at, and the gate would disappear
+  without anyone deciding to remove it.
+- **A submitted job cannot inherit your shell.** Anything the run needs — `GEODESIC_REPO_DIR`,
+  W&B settings, node pins — must be in the submission, not exported by hand beforehand.
 
 ---
 
@@ -117,7 +147,7 @@ bash pipeline_env_setup.sh
 | `pipeline_env_config.env` | THE config: image tag/URI, SIF path, Slingshot build dir, Python overlay + its package list, binds, cache-dir `$HOME` guards, and the `env_config_require` gate. Override via `GEODESIC_CONTAINER_*` env vars documented inline. |
 | `pipeline_env_setup.sh` | The whole install in four idempotent steps (`sif` → `slingshot` → `overlay` → `validate`). Needs a GPU node for steps 2 and 4. |
 | `pipeline_env_exec.sh` | The shim every launcher uses: scrubs host toolchain env, then runs one command string inside the container. |
-| `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
+| `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, the import-provenance record (logs repo + HEAD + the resolved `megatron.bridge`, FATAL if it is not this checkout's), CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
 | `pipeline_env_validate.py` | 20-check validation (imports incl. grouped_gemm, which the non-default `cublas_grouped` expert backend needs, CUDA, GPU ops, import resolution, NCCL plugin dlopen, host OpenMP threading defaults, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke` (2-node fabric check). |
 
@@ -219,7 +249,8 @@ isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
     --disable-ft train.train_iters=32 checkpoint.save=null
 
-# Via salloc (interactive)
+# Via salloc — DEBUGGING ONLY. Not how a real run is launched: an interactive
+# allocation holds nodes while you think, and the run dies with the shell.
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft
 bash pipeline_training_launch.sh configs/<config>.yaml --model super --mode cpt
@@ -608,9 +639,16 @@ Keeps EP all-to-all on NVLink while using high TP for attention. Only PP crosses
 
 Set `tensorboard_dir: /tmp/tb_logs` in each config. Also `tensorboard_log_interval: 999999` (not 0 — ZeroDivisionError). Multiple runs sharing NFS TB logs causes cascading stale file handle crashes.
 
-### Launching training from a login node (salloc shell lost)
+### Recovering an orphaned allocation (salloc shell lost)
 
-If the tunnel/salloc shell dies but `SLURM_JOB_ID` is still in `squeue`, export the SLURM env vars manually so `pipeline_training_launch.sh` can attach via `srun --jobid=… --overlap`:
+**Not a way to launch training.** Training is submitted with `isambard_sbatch
+pipeline_training_submit.sbatch` — see "Submit GPU work to the scheduler" above. This is
+the recovery path for an allocation that is *already* yours and still in `squeue` after
+its shell died: rather than let it idle out, attach to it or release it. Prefer
+`scancel`-and-resubmit; attach only when the allocation holds something you cannot
+requeue.
+
+Export the SLURM env vars manually so `pipeline_training_launch.sh` can attach via `srun --jobid=… --overlap`:
 
 ```bash
 export SLURM_JOB_ID=<id> SLURM_NNODES=<n> SLURM_NODELIST='<from scontrol show job>'
@@ -720,7 +758,7 @@ isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all \
   /projects/a5k/public/checkpoints/megatron/<experiment> \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning --poll
 
-# From salloc
+# From salloc — debugging only; submit real conversions with isambard_sbatch
 bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --iteration 300 --push-to-hub
@@ -804,7 +842,8 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
   /projects/a5k/public/checkpoints/megatron/my_experiment/iter_0000400/hf \
   --wandb-project megatron_bridge_conversion_coherance_tests
 
-# Directly, inside the container (no SLURM, uses this node's GPUs)
+# Directly, inside the container — DEBUGGING ONLY (occupies this node's GPUs
+# outside the scheduler); submit real coherence runs with isambard_sbatch
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; python pipeline_coherence_test.py <model_path> --max-tokens 3000"
 
 # Ultra 550B (too large for --backend hf): --backend megatron reads the Megatron
@@ -858,6 +897,17 @@ Evals live in the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) rep
 When a training run fails with symptoms that *might* be fabric-related — c10d KV-store rendezvous timeout ("N/M clients joined"), NCCL watchdog timeout mid-iteration, iters suddenly taking 10-20× longer than expected, `WorkNCCL(SeqNum=...)` timing out — run the benchmark suite **inside the same allocation** to prove whether NCCL/Slingshot itself is at fault. If the benchmark passes, the fabric is healthy and the failure is elsewhere (leftover zombie processes, rendezvous port collision, config mismatch, parallel-run contention).
 
 **Repo**: `/home/a5k/kyleobrien.a5k/isambard-nccl-tests/` — Python orchestrator over upstream nccl-tests with pass/fail thresholds for Isambard GH200. Binaries are already built at `build/`.
+
+This is diagnosis of an allocation you already hold, not a pipeline job, so it is a carve-out
+to "Submit GPU work to the scheduler" above: the point is to measure *this* allocation's
+fabric, which a separately-scheduled job on other nodes cannot do. It does occupy GPUs for a
+while (~20 min for the 2..8 sweep), so run it when a failure has actually pointed at the
+fabric, not as a routine check.
+
+The other GPU-occupying step that is not a queued pipeline job is the one-time environment
+install (`pipeline_env_setup.sh`, ~20 min for the Slingshot build). Prefer its scheduler form,
+`isambard_sbatch pipeline_env_submit.sbatch setup`; running it directly on a node you hold is
+the exception a one-time-per-image-tag install earns, not the default.
 
 **Usage (inside the affected SLURM allocation, e.g. the tunnel that just had a training failure):**
 ```bash
@@ -1042,6 +1092,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | `nemo_experiments/` fills disk | Selectively remove old TB logs. **Do NOT `rm -rf`** — contains checkpoint resume state. |
 | `TypeError: must be called with a dataclass type or instance` loading a Hub dataset | The publisher used a newer `datasets` than the container's 3.1.0, so the feature metadata in the parquet schema names types it cannot rebuild (e.g. `"_type": "List"`). The Arrow data is fine: re-run `pipeline_data_prepare.py` with `--hub-loader arrow`, which drops that metadata and infers the schema from Arrow. |
 | `PermissionError: [Errno 13] ... .lock` under `/projects/a5k/public/hf/datasets_container` | That cache dir is owned by another user and is not group-writable. Export your own `HF_DATASETS_CACHE` under `/projects/a5k/public/hf/` **after** sourcing `pipeline_env_activate.sh` (it exports the shared path unconditionally, so an outer value is overwritten). |
+| `FATAL [env-activate]: megatron.bridge resolves to …` | The job would run a different checkout's code than the one it was pointed at. Submit from the checkout you mean, or `export GEODESIC_REPO_DIR=<checkout>` **in the submission** (a submitted job cannot inherit your shell). The `[env-activate] repo:`/`bridge:` lines above it in the log name both trees. |
 | `FATAL [env-config]: SIF not found` | Run `bash pipeline_env_setup.sh` (one-time; ~25 GB to `/projects/a5k/public/containers/`). |
 | `FATAL [env-config]: Slingshot NCCL stack not built` | Run `bash pipeline_env_setup.sh` on a GPU node (one-time per image tag). |
 | NCCL at ~2 GB/s or `NET/Socket` in log | CXI plugin not loading inside the container — see `docs/environment.md` troubleshooting (never "fix" by loading `brics/apptainer-multi-node`). |

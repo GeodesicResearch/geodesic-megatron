@@ -83,7 +83,7 @@ run.
 |------|----------------|
 | `pipeline_env_config.env` | THE config (image tag/URI, SIF path, Slingshot dir, overlay dir + package list, bind list, cache dirs + `$HOME` guards) and `env_config_require`, the run-time gate every launcher calls. |
 | `pipeline_env_exec.sh` | The shim: `pipeline_env_exec.sh "<one command string>"`. Gates on `env_config_require`, scrubs host toolchain/venv-shaped env, `exec apptainer exec --nv --bind "$CONTAINER_BINDS"`. |
-| `pipeline_env_activate.sh` | Sourced **inside** the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH` ordering + `NCCL_NET_PLUGIN`, universal GPU settings, cache paths. Refuses to run outside a container. |
+| `pipeline_env_activate.sh` | Sourced **inside** the container: import resolution, the import-provenance record (repo + HEAD + resolved `megatron.bridge`, fatal on mismatch), CUDA forward-compat, Slingshot `LD_LIBRARY_PATH` ordering + `NCCL_NET_PLUGIN`, universal GPU settings, cache paths. Refuses to run outside a container. |
 | `pipeline_env_setup.sh` | The whole install in one command (the four steps above). |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke`. |
 | `pipeline_env_validate.py` | The validator (runs in-container). |
@@ -220,9 +220,20 @@ Resolution order overall: **repo `src/` + `3rdparty` > overlay > image site-pack
 
 Caveat and contingencies: a **regular** (non-namespace, `__init__.py`-bearing) `megatron`
 package in a future image would defeat every namespace portion regardless of path order.
-`pipeline_env_validate.py` asserts the actual resolution on every run — that assert is the
-tripwire. If an image ever ships one, the fix is a derived SIF whose `%post` runs
+Two tripwires assert the actual resolution rather than trusting the mechanism.
+`pipeline_env_activate.sh` checks it on **every activation** — it locates the
+`megatron.bridge` portion with `find_spec` (0.12 s; a real import costs ~45 s on torch),
+logs it, and hard-fails if it is not under this checkout's `src/` — so it is what fires
+first for a real job. `pipeline_env_validate.py` keeps the deeper check, importing the
+module for real under `validate`. If an image ever ships a regular `megatron` package, the
+fix is a derived SIF whose `%post` runs
 `pip uninstall -y megatron-core megatron-bridge nemo-toolkit`.
+
+Both compare paths with `pipeline_env_validate.path_is_under`, a single shared helper, so
+they cannot disagree about what "under the checkout" means. That matters: comparing
+un-normalised strings would reject healthy checkouts — a trailing slash on
+`GEODESIC_REPO_DIR` (what tab completion gives you) or a relative `REPO_DIR` are both
+spellings the activation guard must accept.
 
 ### D3b — Python overlay: image packages too old for the repo
 
@@ -277,6 +288,19 @@ cluster upgrade — override `GEODESIC_CONTAINER_HOST_LIBFABRIC` and rebuild.) T
 from the cause; the check turns it into one line at launch. Note the host-side test is `-L`
 before `-e`: the symlink targets `/host/...`, which resolves only inside the container, so
 `-e` alone would false-negative on a perfectly good build.
+
+`pipeline_env_activate.sh` adds one more, inside the container and after the config gate:
+
+| Failure | Meaning | Fix |
+|---|---|---|
+| `FATAL [env-activate]: megatron.bridge resolves to …` | the code about to run is a different checkout's than the one the job names (D3) | submit from the checkout you mean, or `export GEODESIC_REPO_DIR=<checkout>` **in the submission** — a submitted job cannot inherit your shell |
+
+It is fatal rather than a warning for the same reason as the rest of D4: a job running
+unselected code produces results nobody can attribute, and the failure is otherwise
+invisible. What it does **not** catch is submitting from tree X when you meant worktree W —
+X supplies the sbatch, the shim, this file *and* the `PYTHONPATH`, so the guard is
+self-consistent and passes. The logged `[env-activate] repo:` line is what reveals that,
+read by a human.
 
 ### D5 — `hostlibs`: a symlink-only dir, because the host `/usr/lib64` poisons the linker
 
@@ -364,6 +388,12 @@ those are version-neutral.
 - `pipeline_training_launch.sh` echoes the first two into **every job log**, so any run's
   exact stack is recoverable from its output alone. Combined with the run identity below,
   that closes the loop from a W&B run to the container it ran in.
+- `pipeline_env_activate.sh` echoes two lines into **every** job log, not just training's —
+  `[env-activate] repo:   <REPO_DIR> (HEAD <sha>)` and `[env-activate] bridge: <resolved
+  megatron.bridge>`. Those record which checkout, at which commit, actually served the
+  code, so a pack log and a training log can be compared directly instead of inferred from
+  the submission directory. A mismatch between the two lines is fatal (D4); a mismatch
+  between the `repo:` line and the tree you *meant* is the thing only these lines show.
 
 ## Image qualification
 
@@ -485,7 +515,8 @@ Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
 | `FATAL [env-config]: Slingshot NCCL stack not built` | `bash pipeline_env_setup.sh` on a GPU node (one-time per image tag, ~20 min). |
 | `FATAL [env-config]: Slingshot build predates the hostlibs dir` | Pre-D5 build: `bash pipeline_env_setup.sh --force`. |
 | NCCL log shows `NET/Socket`, or bandwidth ~2 GB/s | CXI plugin not loading — **never** "fix" this by loading `brics/apptainer-multi-node`/`adapt.sh` (D1). Run with `NCCL_DEBUG=INFO` and look for `AWS Libfabric`; `ctypes.CDLL(os.environ["NCCL_NET_PLUGIN"])` inside the container names the missing soname (usually a missing `/host/usr/lib64` bind, a missing `hostlibs` symlink, or a plugin built against the wrong libfabric). |
-| `megatron.bridge` imports from the image, not the repo | The image ships a regular `megatron` package — D3 contingency (derived SIF with the megatron packages uninstalled). `validate` catches this. |
+| `FATAL [env-activate]: megatron.bridge resolves to …` | The job would run a different checkout's code than the one it names. Submit from the intended checkout, or `export GEODESIC_REPO_DIR=<checkout>` in the submission itself. The `[env-activate] repo:`/`bridge:` lines just above it name both trees (D3, D4). |
+| `megatron.bridge` imports from the image, not the repo | The image ships a regular `megatron` package — D3 contingency (derived SIF with the megatron packages uninstalled). The activation guard fails the job on sight; `validate` names it. |
 | Recipe load fails `peft>=0.17.0 is required ... found peft==0.13.2` | Overlay not populated: `bash pipeline_env_setup.sh --only overlay` (D3b). |
 | `WARNING [env-activate]: CONTAINER_PYTHON_OVERLAY ... configured but does not exist` | Same fix; the warning exists so this never degrades silently. |
 | `torch.compile`/inductor or JIT-fuser warmup dies with `ld: cannot find /lib64/libc.so.6` (or `/usr/lib64/libc_nonshared.a`) | The raw host `/host/usr/lib64` reached `LD_LIBRARY_PATH` and inductor turned it into a `-L` dir (D5). Check nothing re-added it; only `<slingshot-dir>/hostlibs` belongs there. Warm inductor caches can hide this, so reproduce with a cold cache. |

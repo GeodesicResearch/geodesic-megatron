@@ -58,8 +58,11 @@ _LAYER_RE = re.compile(r"^(.*)\.layers\.(\d+)\.(.*)$")
 # have. The wordings diverge after these prefixes -- one site says `global_name` where
 # the others say `megatron_param` -- so the prefix is what the counter keys on.
 #
-# `test_the_bridge_still_emits_what_the_counter_watches_for` pins these against the
-# real emitters, because nothing else would notice an upstream merge rewording them.
+# `test_every_watched_prefix_is_a_real_emitter` pins every prefix here against the
+# warnings model_bridge.py actually emits, because nothing else would notice an
+# upstream merge rewording one. (`test_the_bridge_still_emits_what_the_counter_watches_for`
+# is the complementary check: it drives the real emitter, but reaches only a
+# `No mapping found` site.)
 _SKIPPED_PARAM_LOG_PREFIXES = ("No mapping found", "Can't find")
 _BRIDGE_LOGGER_NAME = "megatron.bridge.models.conversion.model_bridge"
 

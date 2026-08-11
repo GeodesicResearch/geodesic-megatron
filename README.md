@@ -18,7 +18,15 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | — | Megatron↔HF conversion, Hub upload |
 | **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | [`geodesic/geodesic-gen-tests`](https://wandb.ai/geodesic/geodesic-gen-tests) | Qualitative generation testing |
 
-Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic script. The `.sh` launchers can also be called directly from an interactive `salloc` session.
+Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic script.
+
+**Every GPU-bound job goes through the scheduler** — `isambard_sbatch
+<pipeline>_submit.sbatch`. Training, checkpoint conversion, coherence and GPU-touching data
+prep are submitted and queued, never run inside an interactive allocation or a code tunnel:
+an interactive allocation holds its nodes whether or not they are computing, and its
+walltime kills whatever is still running when it expires. The `.sh` launchers can be invoked
+directly from a `salloc` shell, but that is for debugging only. Treat queue time as part of
+the schedule and chain dependent stages with `--dependency=afterok:<id>`.
 
 ## Quickstart Walkthrough
 
@@ -242,7 +250,7 @@ isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
     --disable-ft train.train_iters=32 checkpoint.save=null
 
-# Via salloc
+# Via salloc — DEBUGGING ONLY; submit real runs with isambard_sbatch
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
@@ -358,7 +366,7 @@ isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA
 isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning --poll
 
-# From salloc
+# From salloc — DEBUGGING ONLY; submit real conversions with isambard_sbatch
 bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --iteration 300 --push-to-hub
@@ -415,7 +423,8 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch <served-id> \
   --backend endpoint --discovery-file /projects/a5k/public/vllm-serve/<stem>.endpoint
 
-# Directly, inside an allocation (uses this node's GPUs)
+# Directly, inside the container — DEBUGGING ONLY (occupies this node's GPUs
+# outside the scheduler); submit real coherence runs with isambard_sbatch
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
   python pipeline_coherence_test.py <model_path> [--max-tokens 3000]"
 ```
@@ -451,6 +460,7 @@ Entries expire after 7 days, so a node that gets fixed stops being excluded auto
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | Should not happen — the container image ships APEX. It means the payload is not running inside the container (see [docs/environment.md](docs/environment.md)) |
 | `FATAL [env-config]: SIF not found` / `Slingshot NCCL stack not built` | Environment not installed on this cluster: `bash pipeline_env_setup.sh` (GPU node) |
+| `FATAL [env-activate]: megatron.bridge resolves to ...` | The job would run a different checkout's code than the one it names. Submit from the intended checkout, or `export GEODESIC_REPO_DIR=<checkout>` **in the submission** — a submitted job cannot inherit your shell |
 | NCCL bandwidth ~2 GB/s or `NET/Socket` in the log | CXI plugin not loading. **Never** "fix" it with `brics/apptainer-multi-node`/`adapt.sh` — see [docs/environment.md](docs/environment.md) troubleshooting |
 | NaN loss at iteration 7-8 | Lower LR to 5e-6 (recipe default) |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to `/tmp` (automatic in `pipeline_training_launch.sh`) |
