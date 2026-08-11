@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def source_activate(repo_dir: str | None, extra_pythonpath: str | None = None):
+def source_activate(repo_dir: str | None, extra_pythonpath: str | None = None, cwd: str | None = None):
     """Source the real script in a subprocess; return (rc, stdout, stderr)."""
     env = os.environ.copy()
     env.pop("REPO_DIR", None)
@@ -40,6 +40,7 @@ def source_activate(repo_dir: str | None, extra_pythonpath: str | None = None):
         capture_output=True,
         text=True,
         env=env,
+        cwd=cwd,
         timeout=300,
     )
     return proc.returncode, proc.stdout, proc.stderr
@@ -102,3 +103,39 @@ class TestGuardRejects:
         assert rc == 1
         assert f"[env-activate] bridge: {REPO_ROOT}/src/megatron/bridge" in out
         assert f"not under '{empty}/src'" in err
+
+
+class TestGuardDiagnosesTheRightFailure:
+    """A wrong diagnosis is worse than no guard: it sends the operator after a
+    remedy that cannot work, on a checkout that was never the problem."""
+
+    def test_a_repo_dir_that_is_not_a_checkout_says_so(self, tmp_path):
+        # No pipeline_env_validate.py. The bridge here is fine, so reporting this
+        # as a bridge mismatch would be false, and "export GEODESIC_REPO_DIR" —
+        # the mismatch remedy — would not fix it.
+        not_a_checkout = tmp_path / "scratch"
+        (not_a_checkout / "src" / "megatron" / "bridge").mkdir(parents=True)
+        (not_a_checkout / "src" / "megatron" / "bridge" / "__init__.py").touch()
+
+        rc, _, err = source_activate(repo_dir=str(not_a_checkout))
+
+        assert rc == 1
+        assert "is not a" in err and "geodesic-megatron checkout" in err
+        assert "megatron.bridge resolves to" not in err
+
+    def test_the_verdict_does_not_depend_on_the_payload_cwd(self, tmp_path):
+        # The helper is loaded from REPO_DIR by path, so standing somewhere that
+        # happens to contain a pipeline_env_validate.py must not change the answer.
+        decoy = tmp_path / "decoy"
+        decoy.mkdir()
+        (decoy / "pipeline_env_validate.py").write_text("def path_is_under(p, r):\n    return True\n")
+        not_a_checkout = tmp_path / "scratch"
+        (not_a_checkout / "src" / "megatron" / "bridge").mkdir(parents=True)
+        (not_a_checkout / "src" / "megatron" / "bridge" / "__init__.py").touch()
+
+        rc, _, err = source_activate(repo_dir=str(not_a_checkout), cwd=str(decoy))
+
+        # Without path-based loading the decoy's always-True helper would be
+        # imported from cwd and the guard would wrongly pass.
+        assert rc == 1
+        assert "geodesic-megatron checkout" in err

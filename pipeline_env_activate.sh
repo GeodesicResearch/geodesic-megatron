@@ -89,15 +89,21 @@ unset LD_PRELOAD
 # supplies the sbatch, the shim, this file AND the PYTHONPATH), so the guard
 # passes and it is the logged `repo:` line, read by a human, that reveals it.
 # ==============================================================================
+# The helper is loaded from an explicit path rather than by name: an import by
+# name also searches the payload's cwd, which would make the verdict depend on
+# where the job happened to be standing rather than on which checkout it names.
 _PROVENANCE="$(python -c "
-import sys
-sys.path.insert(0, '$REPO_DIR')
-import importlib.util as u
-from pipeline_env_validate import path_is_under
+import importlib.util as u, os
+helper_path = os.path.join('$REPO_DIR', 'pipeline_env_validate.py')
+if not os.path.isfile(helper_path):
+    print(''); print('NO_HELPER'); raise SystemExit(0)
+helper = u.spec_from_file_location('_env_provenance_helper', helper_path)
+mod = u.module_from_spec(helper)
+helper.loader.exec_module(mod)
 spec = u.find_spec('megatron.bridge')
 loc = (list(spec.submodule_search_locations)[0] if spec and spec.submodule_search_locations else '')
 print(loc)
-print('OK' if loc and path_is_under(loc, '$REPO_DIR/src') else 'MISMATCH')
+print('OK' if loc and mod.path_is_under(loc, '$REPO_DIR/src') else 'MISMATCH')
 ")"
 _PROVENANCE_RC=$?
 _BRIDGE_SRC="$(printf '%s\n' "$_PROVENANCE" | sed -n 1p)"
@@ -105,7 +111,19 @@ _BRIDGE_OK="$(printf '%s\n' "$_PROVENANCE" | sed -n 2p)"
 _REPO_HEAD="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 echo "[env-activate] repo:   $REPO_DIR (HEAD $_REPO_HEAD)"
 echo "[env-activate] bridge: ${_BRIDGE_SRC:-<unresolved>}"
-if [ "$_PROVENANCE_RC" -ne 0 ] || [ "$_BRIDGE_OK" != "OK" ]; then
+# Each failure gets its own diagnosis. Collapsing them would report a missing
+# checkout as a bridge mismatch and hand out a remedy that cannot fix it.
+if [ "$_PROVENANCE_RC" -ne 0 ]; then
+    echo "FATAL [env-activate]: could not determine which checkout serves megatron.bridge." >&2
+    echo "  The probe above failed; its error is printed with this message. This is a bug" >&2
+    echo "  in the probe or a broken python, NOT necessarily a wrong checkout." >&2
+    return 1 2>/dev/null || exit 1
+elif [ "$_BRIDGE_OK" = "NO_HELPER" ]; then
+    echo "FATAL [env-activate]: '$REPO_DIR' has no pipeline_env_validate.py, so it is not a" >&2
+    echo "  geodesic-megatron checkout. REPO_DIR/GEODESIC_REPO_DIR must name the checkout" >&2
+    echo "  itself, not a parent, a worktree's data dir, or a scratch directory." >&2
+    return 1 2>/dev/null || exit 1
+elif [ "$_BRIDGE_OK" != "OK" ]; then
     echo "FATAL [env-activate]: megatron.bridge resolves to '${_BRIDGE_SRC:-<unresolved>}'," >&2
     echo "  not under '$REPO_DIR/src'. This job would run a different checkout's code than" >&2
     echo "  the one it was pointed at. Export GEODESIC_REPO_DIR=<checkout> and resubmit;" >&2

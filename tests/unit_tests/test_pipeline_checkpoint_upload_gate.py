@@ -166,13 +166,40 @@ class TestUploadAllValidatesBeforePushing:
         combined = result.stdout + result.stderr
         assert "InconsistentExportError" in combined
         assert "Do not publish or evaluate it" in combined
-        # It must not have got as far as talking to the Hub.
+        # It must not have got as far as talking to the Hub. This also covers the
+        # errexit subtlety: testing a function's result disables errexit for its
+        # whole body, so push_to_hub has to end the iteration explicitly or it
+        # would fall through from a failed gate into the upload.
         assert "Pushed to" not in combined
 
+    # The converse — that the gate lets a sound export through — is covered at the
+    # Python level by TestPublishGate::test_a_clean_export_is_allowed_through_and_its
+    # _report_returned. Asserting it here too would mean either faking the whole
+    # huggingface_hub package (transformers imports huggingface_hub.utils, so a flat
+    # stub module breaks the import) or letting a real upload attempt reach the
+    # network. Neither belongs in a unit test.
 
-# The converse — that the gate lets a sound export through — is covered at the
-# Python level by TestPublishGate::test_a_clean_export_is_allowed_through_and_its
-# _report_returned. Asserting it here too would mean either faking the whole
-# huggingface_hub package (transformers imports huggingface_hub.utils, so a flat
-# stub module breaks the import) or letting a real upload attempt reach the
-# network. Neither belongs in a unit test.
+    def test_one_unpublishable_iteration_does_not_abandon_the_others(self, tmp_path, write_safetensors):
+        """The job must keep going. In --poll mode this loop is the only thing that
+        will ever convert the checkpoints a running training job has yet to write,
+        so aborting on the first bad iteration silently abandons all the later
+        ones — and the operator sees a traceback about a single old checkpoint."""
+        stub_repo = _write_stub_repo(tmp_path, '#!/bin/bash\nbash -c "$1"\n')
+        megatron_path = tmp_path / FIXTURE_EXPERIMENT_NAME
+        _write_converted_iteration(megatron_path, 100, valid=False)
+        _write_converted_iteration(megatron_path, 200, valid=True, write_safetensors=write_safetensors)
+
+        result = _run_upload_all(stub_repo, megatron_path)
+        combined = result.stdout + result.stderr
+
+        # The bad one is named and skipped rather than ending the job...
+        assert "iteration 100 was NOT published" in combined
+        # ...the next one is still reached, which is the whole point...
+        assert "--- Iteration 200" in combined
+        # ...and the run still fails, so nothing reads "complete" off the last line.
+        assert result.returncode != 0
+        assert "were not published" in combined and "100" in combined
+        # Iteration 200 is reported unpublished too, but for the harness's own
+        # reason rather than the loop's: it passes the gate and then cannot reach
+        # the walled-off Hub. Asserting an exact count here would be asserting the
+        # wall, not the isolation.
