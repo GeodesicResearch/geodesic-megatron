@@ -232,6 +232,29 @@ def validate_hf_export(hf_dir: Path) -> ExportValidationReport:
     return report
 
 
+class InconsistentExportError(RuntimeError):
+    """An export's index and shards disagree, so it must not be published."""
+
+
+def assert_export_is_publishable(hf_dir: Path) -> ExportValidationReport:
+    """Print the validation report for `hf_dir` and raise unless it is clean.
+
+    Every route that publishes an export goes through here, because validating
+    once at conversion time is not enough: a conversion whose validation failed
+    still leaves a directory with a `config.json` behind, which is all that marks
+    an iteration "already converted" for a later upload. Returns the report so a
+    caller that wants the counts does not have to validate twice.
+    """
+    report = validate_hf_export(hf_dir)
+    print(f"Export validation:\n{report.summary()}")
+    if not report.ok:
+        raise InconsistentExportError(
+            f"Exported checkpoint at {hf_dir} is inconsistent — see the report above. "
+            "Do not publish or evaluate it; re-export the iteration instead."
+        )
+    return report
+
+
 class UnmappedParameterError(RuntimeError):
     """A conversion skipped parameters, so the export is missing weights."""
 

@@ -510,3 +510,38 @@ class TestSaveGeneratorNotStrictIndex:
                 written_index = json.load(f)
 
             assert written_index["weight_map"] == {"real.weight": "model-00001-of-00001.safetensors"}
+
+    def test_expected_omissions_are_not_reported_as_an_error(self, source_dir_with_unyieldable_tensor, capsys):
+        """Under strict=False, tensors the generator never yields are the requested
+        outcome, so the closing report must not call them an Error — while still
+        saying how many there were, since which tensors are missing is what a reader
+        needs. Under strict=True the same shortfall IS a failure and keeps the word."""
+        source = SafeTensorsStateSource(source_dir_with_unyieldable_tensor)
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            source.save_generator(iter([("real.weight", torch.randn(2, 2))]), output_dir, strict=False)
+
+        report = capsys.readouterr().out
+        assert "Error:" not in report
+        assert "1 tensors from the original checkpoint were not written, as expected under strict=False" in report
+
+    def test_a_strict_shortfall_is_still_an_error(self, source_dir_with_unyieldable_tensor, capsys):
+        """The same shortfall under strict=True is a genuine failure and must keep
+        the word Error, so the strict=False rewording above cannot have quietened it.
+
+        save_generator does not raise here — its KeyError guards the opposite
+        direction, a tensor the generator yields that the source never planned — so
+        this closing line is the only signal there is.
+
+        The count is 2 from a one-tensor shortfall, and that is the point: strict
+        skips the whole incomplete shard, so `real.weight` is lost along with the
+        `mtp.weight` that was never yielded. That collateral loss is why an MTP-less
+        SFT export must pass --not-strict rather than accept a shard being dropped.
+        """
+        source = SafeTensorsStateSource(source_dir_with_unyieldable_tensor)
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            source.save_generator(iter([("real.weight", torch.randn(2, 2))]), output_dir, strict=True)
+
+        report = capsys.readouterr().out
+        assert "Error: 2 tensors from the original checkpoint were not written" in report

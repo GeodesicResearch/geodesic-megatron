@@ -369,10 +369,21 @@ elif [[ "$MODE" == "upload-all" ]]; then
         return 1
     }
 
+    # Every push re-validates the export it is about to publish. The conversion
+    # already validates, but not every push follows a conversion in the same run:
+    # is_converted() accepts any directory holding a config.json, and a conversion
+    # whose validation FAILED leaves exactly that behind — so without this, a
+    # rejected export is republished by the next upload-all as "already converted".
+    # The final push to main re-reads the same directory and is covered too.
     push_to_hub() {
         local iter=$1 revision=$2 commit_msg=$3
         local iter_dir
         iter_dir=$(printf "%s/iter_%07d/hf" "$MEGATRON_PATH" "$iter")
+        run_python "
+from pathlib import Path
+from megatron.bridge.utils.hf_export_validation import assert_export_is_publishable
+assert_export_is_publishable(Path('${iter_dir}'))
+"
         run_python "
 from huggingface_hub import HfApi
 api = HfApi()

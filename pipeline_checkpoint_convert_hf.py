@@ -47,7 +47,7 @@ import torch
 import yaml
 
 from megatron.bridge.models.mamba.export_preflight import assert_run_config_is_exportable
-from megatron.bridge.utils.hf_export_validation import UnmappedParameterCounter, validate_hf_export
+from megatron.bridge.utils.hf_export_validation import UnmappedParameterCounter, assert_export_is_publishable
 from megatron.bridge.utils.safetensors_io import find_tensor_shard, read_header, tensor_entries
 from megatron.bridge.utils.tokenizer_publishing import normalize_tokenizer_config
 
@@ -1044,13 +1044,7 @@ def main():
     # still exits 0 — and a model missing a layer loads and generates. Failing
     # here keeps a silently incomplete export from reaching the Hub.
     if rank == 0:
-        report = validate_hf_export(hf_path)
-        print(f"Export validation:\n{report.summary()}")
-        if not report.ok:
-            raise RuntimeError(
-                f"Exported checkpoint at {hf_path} is inconsistent — see the report above. "
-                "Do not publish or evaluate it."
-            )
+        assert_export_is_publishable(hf_path)
 
     # 8. Push to Hub (rank 0 only — other ranks exit cleanly)
     if args.push_to_hub and rank == 0:

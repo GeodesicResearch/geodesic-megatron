@@ -830,9 +830,21 @@ class SafeTensorsStateSource(StateSource):
                 )
             else:
                 print("\nSuccess: All tensors from the original checkpoint were written.")
-        else:
+        elif strict:
             print(
                 f"\nError: {len(unsaved_keys)} tensors from the original checkpoint were not written. See warnings above for details."
+            )
+        else:
+            # Under strict=False the caller has asked for exactly this: the source
+            # index plans tensors the model does not have (an SFT export has no MTP
+            # layers), and the export proceeds without them. Calling that an Error
+            # makes a healthy export look broken, and teaches readers to skip a line
+            # that under strict=True is a genuine failure. The count still prints,
+            # because which tensors went missing is the part worth reading — losing
+            # the routed experts would look identical here to losing the MTP block.
+            print(
+                f"\n{len(unsaved_keys)} tensors from the original checkpoint were not written, "
+                f"as expected under strict=False. See warnings above for their names."
             )
 
         # Create index file for the saved shards.

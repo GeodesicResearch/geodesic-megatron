@@ -25,7 +25,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from megatron.bridge.utils.hf_export_validation import validate_hf_export
+import pytest
+
+from megatron.bridge.utils.hf_export_validation import (
+    InconsistentExportError,
+    assert_export_is_publishable,
+    validate_hf_export,
+)
 from megatron.bridge.utils.safetensors_io import (
     declared_file_size,
     read_weight_map,
@@ -242,3 +248,39 @@ class TestSafetensorsIo:
 
     def test_read_weight_map_returns_none_without_an_index(self, tmp_path):
         assert read_weight_map(tmp_path) is None
+
+
+class TestPublishGate:
+    """`assert_export_is_publishable` is the single gate every publishing route uses.
+
+    Validating once at conversion time is not enough. A conversion whose validation
+    failed still leaves a directory containing `config.json` on disk, and that is
+    exactly what `pipeline_checkpoint_convert.sh`'s `is_converted()` treats as
+    "already converted" — so a later `upload-all` would push the rejected export
+    without re-reading a single shard.
+    """
+
+    def test_a_clean_export_is_allowed_through_and_its_report_returned(self, tmp_path, write_safetensors):
+        _two_layer_export(tmp_path, write_safetensors)
+        report = assert_export_is_publishable(tmp_path)
+        assert report.ok
+        assert report.indexed_tensors == 4
+
+    def test_the_shape_a_rejected_export_leaves_behind_is_refused(self, tmp_path, write_safetensors, capsys):
+        # A conversion that failed validation and left its output in place, with the
+        # config.json that makes it look converted to the upload path.
+        weight_map = _two_layer_export(tmp_path, write_safetensors)
+        weight_map["lm_head.weight"] = "model-00002-of-00002.safetensors"
+        _write_index(tmp_path, weight_map)
+        (tmp_path / "config.json").write_text("{}")
+
+        with pytest.raises(InconsistentExportError) as excinfo:
+            assert_export_is_publishable(tmp_path)
+
+        assert "Do not publish or evaluate it" in str(excinfo.value)
+        # The report prints before the raise, so an operator sees which tensors.
+        assert "lm_head.weight" in capsys.readouterr().out
+
+    def test_an_empty_directory_is_refused(self, tmp_path):
+        with pytest.raises(InconsistentExportError):
+            assert_export_is_publishable(tmp_path)
