@@ -36,6 +36,58 @@ from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimiz
 _MISSING_KEY_TOLERANT_STRICTNESS = {"log_all", "log_unexpected", "ignore_all", "return_all", "return_unexpected"}
 
 
+def gr_posture_problems(
+    *,
+    pipeline_model_parallel_size: int,
+    virtual_pipeline_model_parallel_size: int | None,
+    cuda_graph_impl: str | None,
+    mtp_num_layers: int | None,
+    moe_shared_expert_intermediate_size: int | None,
+    optimizer_name: str,
+    overlap_param_gather_with_optimizer_step: bool,
+    optimizer_cpu_offload: bool,
+) -> list[str]:
+    """The model/optimizer posture rules every gradient-routing consumer shares.
+
+    Value-taking so each stack (the cpt pipeline here, the RL learner in
+    geodesic-nemo-rl) feeds it from its own config shape — callers must read
+    their fields by direct access so a renamed field raises instead of
+    silently passing a default. Returns problem strings; empty means sound.
+    """
+    problems: list[str] = []
+    if pipeline_model_parallel_size != 1:
+        problems.append(
+            f"pipeline_model_parallel_size must be 1 (got {pipeline_model_parallel_size}): the plan "
+            "is rank-uniform and PP-safe in principle but untested beyond PP1; refuse rather than half-support."
+        )
+    if virtual_pipeline_model_parallel_size:
+        problems.append("virtual_pipeline_model_parallel_size must be unset for GR runs.")
+    if cuda_graph_impl not in (None, "none"):
+        problems.append(
+            f"cuda_graph_impl must be 'none' (got {cuda_graph_impl!r}): per-iteration gate and "
+            "param-group mutation are incompatible with captured graphs."
+        )
+    if mtp_num_layers:
+        problems.append("mtp_num_layers must be 0: the GRAM swap does not cover the MTP block's nested MoE spec.")
+    if moe_shared_expert_intermediate_size is None:
+        problems.append("moe_shared_expert_intermediate_size must be set: the aux module mirrors the shared expert.")
+    if "adam" not in str(optimizer_name):
+        problems.append(
+            f"optimizer.optimizer must be adam-family (got {optimizer_name!r}): the gating analysis "
+            "(param-group emptying leaves moments untouched) is argued for Adam."
+        )
+    if overlap_param_gather_with_optimizer_step:
+        problems.append("optimizer.overlap_param_gather_with_optimizer_step must be False for GR runs.")
+    if optimizer_cpu_offload:
+        problems.append(
+            "optimizer.optimizer_cpu_offload must be False for GR runs: under CPU offload the inner "
+            "optimizer is a HybridDeviceOptimizer that steps its own gpu/cpu sub-optimizer param "
+            "lists, not the param_groups the gater empties — so the gate would be a silent no-op "
+            "(and HDO's param_in_param_group_index lookup raises KeyError on the emptied group)."
+        )
+    return problems
+
+
 def validate_gr_launch(cfg) -> None:
     """Validate the fully-assembled config of a gradient-routing run; raise on any gap."""
     gr = cfg.gr
@@ -49,22 +101,18 @@ def validate_gr_launch(cfg) -> None:
             "attribution is idx // GBS under MegatronPretrainingSampler only."
         )
 
-    if cfg.model.pipeline_model_parallel_size != 1:
-        problems.append(
-            f"pipeline_model_parallel_size must be 1 (got {cfg.model.pipeline_model_parallel_size}): the plan "
-            "is rank-uniform and PP-safe in principle but untested beyond PP1; refuse rather than half-support."
+    problems.extend(
+        gr_posture_problems(
+            pipeline_model_parallel_size=cfg.model.pipeline_model_parallel_size,
+            virtual_pipeline_model_parallel_size=cfg.model.virtual_pipeline_model_parallel_size,
+            cuda_graph_impl=cfg.model.cuda_graph_impl,
+            mtp_num_layers=cfg.model.mtp_num_layers,
+            moe_shared_expert_intermediate_size=cfg.model.moe_shared_expert_intermediate_size,
+            optimizer_name=cfg.optimizer.optimizer,
+            overlap_param_gather_with_optimizer_step=cfg.optimizer.overlap_param_gather_with_optimizer_step,
+            optimizer_cpu_offload=cfg.optimizer.optimizer_cpu_offload,
         )
-    if cfg.model.virtual_pipeline_model_parallel_size:
-        problems.append("virtual_pipeline_model_parallel_size must be unset for GR runs.")
-    if cfg.model.cuda_graph_impl not in (None, "none"):
-        problems.append(
-            f"cuda_graph_impl must be 'none' (got {cfg.model.cuda_graph_impl!r}): per-iteration gate and "
-            "param-group mutation are incompatible with captured graphs."
-        )
-    if cfg.model.mtp_num_layers:
-        problems.append("mtp_num_layers must be 0: the GRAM swap does not cover the MTP block's nested MoE spec.")
-    if cfg.model.moe_shared_expert_intermediate_size is None:
-        problems.append("moe_shared_expert_intermediate_size must be set: the aux module mirrors the shared expert.")
+    )
     # Both sides normalize to a per-module width list before comparing: the model field is
     # scalar-or-list, the gr field may be a scalar broadcast over the module count.
     from megatron.bridge.models.mamba.gram_layer import normalize_aux_widths
@@ -86,22 +134,6 @@ def validate_gr_launch(cfg) -> None:
     if cfg.train.decrease_batch_size_if_needed:
         problems.append("train.decrease_batch_size_if_needed must be False: GBS must be constant for attribution.")
 
-    if "adam" not in str(cfg.optimizer.optimizer):
-        problems.append(
-            f"optimizer.optimizer must be adam-family (got {cfg.optimizer.optimizer!r}): the gating analysis "
-            "(param-group emptying leaves moments untouched) is argued for Adam."
-        )
-    # Lives on the optimizer config, not on ddp: setup.py reads
-    # cfg.optimizer.overlap_param_gather_with_optimizer_step to build the distributed model.
-    if cfg.optimizer.overlap_param_gather_with_optimizer_step:
-        problems.append("optimizer.overlap_param_gather_with_optimizer_step must be False for GR runs.")
-    if cfg.optimizer.optimizer_cpu_offload:
-        problems.append(
-            "optimizer.optimizer_cpu_offload must be False for GR runs: under CPU offload the inner "
-            "optimizer is a HybridDeviceOptimizer that steps its own gpu/cpu sub-optimizer param "
-            "lists, not the param_groups the gater empties — so the gate would be a silent no-op "
-            "(and HDO's param_in_param_group_index lookup raises KeyError on the emptied group)."
-        )
     if cfg.inprocess_restart is not None:
         problems.append(
             "inprocess_restart must be unset for GR runs: an in-process restart rebuilds the "

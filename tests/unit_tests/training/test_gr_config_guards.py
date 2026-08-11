@@ -45,7 +45,7 @@ from megatron.bridge.training.gradient_routing.config import (
     GRDatasetConfig,
     reject_renamed_fields,
 )
-from megatron.bridge.training.gradient_routing.guards import validate_gr_launch
+from megatron.bridge.training.gradient_routing.guards import gr_posture_problems, validate_gr_launch
 from megatron.bridge.training.gradient_routing.optimizer_gating import (
     GROptimizerConfigOverrideProvider,
     GROptimizerGater,
@@ -692,3 +692,47 @@ class TestGuardedFieldsExistOnTheRealConfigs:
         """``n_aux`` and ``aux_ffn_hidden_sizes()`` are derived, not fields, so the check above
         cannot see them — and both are what the guard compares the plan and the model against."""
         assert hasattr(GradientRoutingConfig(), accessor)
+
+
+class TestGrPostureProblems:
+    """Direct contract tests for the shared posture-rule helper.
+
+    geodesic-nemo-rl's GR learner consumes gr_posture_problems over its own
+    config shape, so the keyword names and the "empty list means sound"
+    contract are cross-repo API — pinned here directly rather than only
+    through validate_gr_launch.
+    """
+
+    @staticmethod
+    def _sound_kwargs() -> dict:
+        return dict(
+            pipeline_model_parallel_size=1,
+            virtual_pipeline_model_parallel_size=None,
+            cuda_graph_impl="none",
+            mtp_num_layers=0,
+            moe_shared_expert_intermediate_size=3712,
+            optimizer_name="adam",
+            overlap_param_gather_with_optimizer_step=False,
+            optimizer_cpu_offload=False,
+        )
+
+    def test_sound_posture_returns_no_problems(self):
+        assert gr_posture_problems(**self._sound_kwargs()) == []
+
+    @pytest.mark.parametrize(
+        "override,fragment",
+        [
+            ({"pipeline_model_parallel_size": 2}, "pipeline_model_parallel_size must be 1"),
+            ({"virtual_pipeline_model_parallel_size": 4}, "virtual_pipeline_model_parallel_size"),
+            ({"cuda_graph_impl": "local"}, "cuda_graph_impl must be 'none'"),
+            ({"mtp_num_layers": 1}, "mtp_num_layers must be 0"),
+            ({"moe_shared_expert_intermediate_size": None}, "moe_shared_expert_intermediate_size must be set"),
+            ({"optimizer_name": "sgd"}, "adam-family"),
+            ({"overlap_param_gather_with_optimizer_step": True}, "overlap_param_gather_with_optimizer_step"),
+            ({"optimizer_cpu_offload": True}, "optimizer_cpu_offload"),
+        ],
+    )
+    def test_each_unsound_value_yields_one_matching_problem(self, override, fragment):
+        problems = gr_posture_problems(**{**self._sound_kwargs(), **override})
+        assert len(problems) == 1
+        assert fragment in problems[0]

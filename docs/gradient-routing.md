@@ -240,7 +240,7 @@ persist to `posture_verification.json`.
 | `src/megatron/bridge/training/gradient_routing/config.py` | `GradientRoutingConfig` (the `gr:` YAML section), `GRDatasetConfig` |
 | `src/megatron/bridge/training/gradient_routing/optimizer_gating.py` | `GROptimizerGater`, `GROptimizerConfigOverrideProvider` (one param group per aux module, `gr_role: aux<k>`) |
 | `src/megatron/bridge/training/gradient_routing/callback.py` | `GRCallback`: gate + expert-bias + gater arming + telemetry |
-| `src/megatron/bridge/training/gradient_routing/guards.py` | `validate_gr_launch` (§7 refusal list) |
+| `src/megatron/bridge/training/gradient_routing/guards.py` | `validate_gr_launch` (§7 refusal list) + `gr_posture_problems`, the model/optimizer posture rules shared with geodesic-nemo-rl's GR learner |
 | `src/megatron/bridge/data/datasets/gr_routed_dataset.py` | iteration-mapped N+1-corpus dataset |
 | `src/megatron/bridge/models/mamba/mamba_provider.py` | `gr_aux_ffn_hidden_size` provider field; applies the spec swap as a **local** transform (never mutates the module-level `mamba_stack_spec`) |
 | `src/megatron/bridge/models/nemotron_h_bridge.py` | HF↔Megatron mappings for the `gr_aux` keys (raw export carries them) |
@@ -343,6 +343,12 @@ exactly as lm-eval's own few-shot exemplars present it and refuses any item it
 cannot render faithfully.
 
 ## 7. Launch guards
+
+The model/optimizer posture items below (PP, VPP, CUDA graphs, MTP, shared
+expert, adam-family, param-gather overlap, CPU offload) live in
+`gr_posture_problems`, which geodesic-nemo-rl's GR learner also consumes over
+its own config shape — changing one of those rules or its message changes both
+stacks.
 
 GR is wired for `--mode cpt` only. `validate_gr_launch` refuses, with a fix
 instruction per item:
