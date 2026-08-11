@@ -66,6 +66,14 @@ against the Base-Chat-Init torch_dist checkpoint), so existing checkpoints warm-
 checkpoints saved from this module load back into the default path. The backend choice does
 not affect the checkpoint: both produce identical keys and shapes.
 
+**HF export is a different matter.** Those canonical keys exist in
+``sharded_state_dict``, but this class's ``named_parameters()`` are ``weight1``/``weight2``,
+and the HF bridge builds its conversion tasks from ``named_parameters()``. So a checkpoint
+whose saved ``run_config.yaml`` still selects this backend instantiates a model the mapping
+registry cannot match, and every routed-expert parameter is skipped with a warning. Patch
+``moe_experts_impl`` (and the ``<locals>`` ``mamba_stack_spec._target_``) in the saved config
+before exporting; ``export_preflight.assert_run_config_is_exportable`` enforces this.
+
 Selection: ``MambaModelProvider.moe_experts_impl`` ∈ {``torch_grouped``,
 ``cublas_grouped``, ``te_grouped``}. ``cutlass_grouped`` is a deprecated alias of
 ``cublas_grouped`` (it named a kernel it never ran) and warns.

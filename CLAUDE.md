@@ -328,21 +328,28 @@ config is unloadable. Before running the checkpoint pipeline's `export`:
    `named_parameters()`, not the on-disk sharded state dict, so the export-time
    instantiation is what has to match — not what the checkpoint trained with).
 
-The two edits fail differently, and **only the first one is loud**:
+`pipeline_checkpoint_convert_hf.py` refuses the conversion up front if the checkpoint's
+`run_config.yaml` still needs either edit, and names both in one message so a single edit pass
+clears them. **That guard is what makes this safe, because the underlying failure modes are
+not symmetric:**
 
-- Skip edit 1 and the export raises at config load — the `<locals>` closure target cannot be
+- Skip edit 1 and the bridge raises at config load — the `<locals>` closure target cannot be
   imported, so nothing is produced.
-- **Skip edit 2 and the export SILENTLY DROPS every MoE weight.** `No mapping found for
-  megatron_param` is a per-parameter `logger.warning` followed by `continue`
-  (`model_bridge.py:1441`, `:1638`, `:1712`) — not a raise. The writer exits 0 and produces a
-  checkpoint whose expert weights are simply absent.
+- **Skip edit 2 and the bridge SILENTLY DROPS the routed-expert weights.** `No mapping found`
+  is a per-parameter `logger.warning` followed by `continue` (`model_bridge.py:1441`, `:1638`,
+  `:1712`) — not a raise. Left unguarded the writer exits 0 and produces a checkpoint whose
+  expert weights are simply absent, which still loads and still generates text.
 
-Do not count on `validate_hf_export()` to catch that second case. Its per-layer rule faults a
-layer whose parameter names are a strict subset of a structurally identical peer's, and a
-uniform loss across *all* MoE layers leaves them identical to each other, so nothing is a
-subset of anything. The index and the shards also stay consistent with each other. **Read the
-conversion log for `No mapping found` before trusting a `torch_grouped` export**, and treat a
-non-zero count as a failed conversion regardless of the exit status.
+`validate_hf_export()` cannot catch that second case: its per-layer rule faults a layer whose
+parameter names are a strict subset of a structurally identical peer's, and a uniform loss
+across *all* MoE layers leaves them identical to each other, with the index and the shards
+consistently agreeing on the reduced set. So the converter counts what the bridge skipped
+instead — `UnmappedParameterCounter` watches those warnings and fails the run on a non-zero
+count. It covers both logged skip causes (`No mapping found`, and `Can't find … in hf_keys`
+for a parameter that maps onto an HF name the target model lacks), so it is not limited to
+the expert-backend mismatch that motivated it. It does **not** see the
+`not in global_names_index_dict` skip, which reports through `print_rank_0` rather than the
+logger — that one is an expected exclusion (tied embeddings), not a defect.
 
 **Do not re-train to "fix" an export failure** — patch the metadata and re-export.
 
@@ -753,6 +760,7 @@ torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
 ```
 
 - **`--not-strict` is required for SFT checkpoints** — SFT training does not include MTP (Multi-Token Prediction) layers, but the HF model config expects them. Without `--not-strict`, a shard is written only once every tensor it was planned to hold has arrived (`state.py::save_generator`); since the ~1000+ MTP tensors never arrive, the shards that were planned to hold them are silently skipped entirely — **taking any non-MTP tensors that happened to share those shards down with them**, which is how `lm_head.weight` and `backbone.norm_f.weight` (critical for generation) go missing too. The writer still exits 0. With `--not-strict`, those shards are saved with whatever real tensors they do have; MTP weights are randomly initialized but unused during standard generation. **That validation now runs automatically**: `pipeline_checkpoint_convert_hf.py` calls `validate_hf_export()` (`src/megatron/bridge/utils/hf_export_validation.py`) after conversion and **before** any Hub push, and raises rather than publishing an inconsistent export. It diffs `model.safetensors.index.json` against the physical shard headers in both directions — tensors the index promises that no shard holds, and tensors on disk the index never mentions — and compares each layer's set of parameter names against structurally identical layers under the same prefix, faulting one whose names are a strict subset of a peer's. That comparison deliberately is **not** a tensor count against a model-wide norm: Nemotron-H's Mamba, attention and MoE layers legitimately carry 5, 9 and 1031 tensors, so a count rule would fault most of a healthy export, and `backbone.layers.N` shares an index namespace with `mtp.layers.N` while describing a different stack. A prior bug (fixed 2026-08-07) had the index correctly omit written shards but still list the never-written MTP tensors as living in them, so an export could report success and pass a naive "does the index look complete" check while still `KeyError`-ing on load. Both failure modes are silent, both survive a spot-check of a single layer, and neither is caught by generating text — a model missing a layer still generates. The check runs on every conversion, including `upload-all`'s conversion fallback — but that fallback's hardcoded arg list omits `--not-strict` and its parser rejects the flag, so for an MTP-less SFT checkpoint it fails the conversion rather than producing one. **The path that skips validation entirely is `upload-all`'s upload of an iteration already converted** (and its final push to `main`): that calls `upload_folder` directly from the shell script and never re-reads the shards. So validate at `export` time, which is where the check lives.
+- **Two further guards run on every conversion, either side of it.** Before any weights load, `assert_run_config_is_exportable()` (`src/megatron/bridge/models/mamba/export_preflight.py`) refuses a checkpoint whose saved `run_config.yaml` still needs the two `torch_grouped` edits, naming both in one message. After the conversion, `UnmappedParameterCounter` fails the run if the bridge skipped any parameter — a skip is a `logger.warning` plus a `continue`, so without this a conversion that dropped weights would exit 0. See "Expert backend" above for why `validate_hf_export()` cannot catch that case on its own.
 - **Single-process conversion does NOT work for Super** — hangs during checkpoint loading. Always use `torchrun` with EP.
 - **EP=4 (node-local) is preferred over EP=8 (cross-node)** — EP=8 on 2 nodes caused Slingshot gathering failures that truncated expert weights. EP=4 on 1 node keeps all communication on NVLink.
 - **Hub uploads are ~223GB** per Super checkpoint, 10-15 min at ~700MB/s.

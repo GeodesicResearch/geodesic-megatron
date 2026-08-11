@@ -94,10 +94,11 @@
 #   trains on torch_grouped (see model.moe_experts_impl below):
 #     mamba_stack_spec._target_ -> megatron.bridge.models.mamba.mamba_provider.get_default_mamba_stack_spec
 #     moe_experts_impl          -> te_grouped
-#   These fail differently. Omitting the first raises at config load. Omitting the second
-#   SILENTLY DROPS every MoE weight: "No mapping found for megatron_param" is a per-parameter
-#   logger.warning followed by continue, so the writer exits 0 with the expert weights simply
-#   absent. Grep the conversion log for "No mapping found" and treat any hit as a failure.
+#   The converter refuses to start until both are patched, and names them in one message,
+#   so this is a hard stop rather than something to remember. The refusal exists because the
+#   two omissions fail differently: the first raises at config load, while the second would
+#   SILENTLY DROP every routed-expert weight ("No mapping found" is a per-parameter
+#   logger.warning followed by continue, so the writer exits 0 with those weights absent).
 #   It is a metadata edit on the saved config, not a re-train; the weights are unaffected.
 #   Then:
 #   isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \

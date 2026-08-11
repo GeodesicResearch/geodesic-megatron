@@ -46,7 +46,8 @@ from pathlib import Path
 import torch
 import yaml
 
-from megatron.bridge.utils.hf_export_validation import validate_hf_export
+from megatron.bridge.models.mamba.export_preflight import assert_run_config_is_exportable
+from megatron.bridge.utils.hf_export_validation import UnmappedParameterCounter, validate_hf_export
 from megatron.bridge.utils.safetensors_io import find_tensor_shard, read_header, tensor_entries
 from megatron.bridge.utils.tokenizer_publishing import normalize_tokenizer_config
 
@@ -132,15 +133,41 @@ def detect_training_tokenizer(iter_path: Path) -> str | None:
         Training tokenizer HF model ID (e.g. ``geodesic-research/nemotron-
         instruct-tokenizer``), or None if not specified in run_config.yaml.
     """
-    run_config = iter_path / "run_config.yaml"
-    if not run_config.exists():
+    config = read_iteration_run_config(iter_path)
+    if config is None:
         return None
-    with open(run_config) as f:
-        config = yaml.safe_load(f)
     tokenizer_model = config.get("tokenizer", {}).get("tokenizer_model")
     if not tokenizer_model:
         return None
     return str(tokenizer_model)
+
+
+def read_iteration_run_config(iter_path: Path) -> dict | None:
+    """Parse the `run_config.yaml` an iteration directory saved, or None if absent.
+
+    Distinct from `training.utils.checkpoint_utils.read_run_config`, which takes a
+    filename, reads on rank 0 and broadcasts, and raises when the file is missing.
+    This one runs before any process group exists and treats absence as a fact
+    about the checkpoint rather than an error.
+    """
+    run_config = iter_path / "run_config.yaml"
+    if not run_config.exists():
+        return None
+    with open(run_config) as f:
+        return yaml.safe_load(f)
+
+
+def preflight_run_config(iter_path: Path) -> None:
+    """Refuse an unexportable checkpoint before anything expensive is loaded.
+
+    A checkpoint with no `run_config.yaml` is not blocked: older checkpoints
+    predate it, and the post-conversion unmapped-parameter count still covers
+    them — this check only buys the failure earlier and with a better message.
+    """
+    config = read_iteration_run_config(iter_path)
+    if config is None:
+        return
+    assert_run_config_is_exportable(config)
 
 
 def _is_multi_gpu() -> bool:
@@ -162,12 +189,16 @@ def convert_single_process(
     bridge = AutoBridge.from_auto_config(str(iter_path), hf_model_id)
 
     print(f"Exporting: {iter_path} -> {hf_path}")
-    bridge.export_ckpt(
-        megatron_path=str(iter_path),
-        hf_path=str(hf_path),
-        show_progress=show_progress,
-        strict=strict,
-    )
+    # Same silent-skip exposure as the multi-GPU path: an unmappable parameter is
+    # warned about and dropped, and the writer still exits 0.
+    with UnmappedParameterCounter() as unmapped:
+        bridge.export_ckpt(
+            megatron_path=str(iter_path),
+            hf_path=str(hf_path),
+            show_progress=show_progress,
+            strict=strict,
+        )
+    unmapped.raise_if_any()
     print(f"Export complete: {hf_path}")
 
 
@@ -228,12 +259,17 @@ def convert_multi_gpu(
         megatron_model = [m.cuda() for m in megatron_model]
 
         print_rank_0(f"Saving HuggingFace model to: {hf_path}")
-        bridge.save_hf_pretrained(
-            megatron_model,
-            str(hf_path),
-            show_progress=show_progress,
-            strict=strict,
-        )
+        # A parameter the bridge cannot map is warned about and skipped, so a
+        # conversion that drops weights still exits 0 and still produces a model
+        # that loads and generates. Count what was skipped and fail on it.
+        with UnmappedParameterCounter() as unmapped:
+            bridge.save_hf_pretrained(
+                megatron_model,
+                str(hf_path),
+                show_progress=show_progress,
+                strict=strict,
+            )
+        unmapped.raise_if_any()
         print_rank_0(f"Export complete: {hf_path}")
 
     _run()
@@ -931,7 +967,9 @@ def main():
     hf_path = Path(args.hf_path) if args.hf_path else iter_path / "hf"
     print(f"Output path: {hf_path}")
 
-    # 4. Run conversion
+    # 4. Run conversion, refusing an unexportable checkpoint before loading any weights
+    preflight_run_config(iter_path)
+
     use_multi_gpu = _is_multi_gpu() and (args.tp > 1 or args.pp > 1 or args.ep > 1 or args.etp > 1)
 
     if use_multi_gpu:

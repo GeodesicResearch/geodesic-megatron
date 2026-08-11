@@ -369,6 +369,8 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
 ### Key notes
 
 - **`--not-strict` required for SFT exports**: SFT training doesn't include MTP layers. Without this flag, shards containing MTP keys are dropped, which also drops `lm_head.weight` (fatal for generation). The converter checks the finished export's index against its shards before any Hub push, and faults any layer whose parameter names are a strict subset of a structurally identical layer's, failing rather than publishing an inconsistent one.
+- **The converter refuses a checkpoint it cannot export cleanly, before loading any weights.** A checkpoint trained on a non-`te_grouped` `moe_experts_impl` needs two lines patched in its own `run_config.yaml` first (`moe_experts_impl`, and `mamba_stack_spec._target_` back to the plain `get_default_mamba_stack_spec`); the error names both. This is a metadata edit — the weights are fine and re-training fixes nothing. Warm-start configs under `configs/pa_warm_start/` train on `torch_grouped`, so their checkpoints always need it.
+- **A conversion that skipped parameters fails instead of exiting 0.** The bridge answers an unmappable parameter with a warning and a `continue`, which would otherwise write a checkpoint that loads and generates text with weights missing. The converter counts those warnings and fails on a non-zero count.
 - **EP=4 on 1 node** (not EP=8 on 2 nodes): Cross-node EP=8 causes Slingshot gathering failures. Node-local EP=4 keeps all communication on NVLink.
 - **Single-process conversion doesn't work for Super**: Hangs during checkpoint loading. Always use `torchrun`.
 

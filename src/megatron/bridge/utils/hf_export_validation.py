@@ -37,6 +37,7 @@ its own, and only within its own prefix, because `backbone.layers.N` and
 
 from __future__ import annotations
 
+import logging
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -50,6 +51,17 @@ from megatron.bridge.utils.safetensors_io import (
 
 
 _LAYER_RE = re.compile(r"^(.*)\.layers\.(\d+)\.(.*)$")
+
+# Every way `build_conversion_tasks` drops a parameter and keeps going, as substrings
+# of the warning each one emits. Two distinct causes, both silent: the megatron
+# parameter has no mapping at all, or it maps onto an HF name the target model does not
+# have. The wordings diverge after these prefixes -- one site says `global_name` where
+# the others say `megatron_param` -- so the prefix is what the counter keys on.
+#
+# `test_the_bridge_still_emits_what_the_counter_watches_for` pins these against the
+# real emitters, because nothing else would notice an upstream merge rewording them.
+_SKIPPED_PARAM_LOG_PREFIXES = ("No mapping found", "Can't find")
+_BRIDGE_LOGGER_NAME = "megatron.bridge.models.conversion.model_bridge"
 
 
 @dataclass
@@ -215,3 +227,80 @@ def validate_hf_export(hf_dir: Path) -> ExportValidationReport:
     report.incomplete_layers = _find_incomplete_layers(signatures)
 
     return report
+
+
+class UnmappedParameterError(RuntimeError):
+    """A conversion skipped parameters, so the export is missing weights."""
+
+
+class UnmappedParameterCounter:
+    """Count the parameters a conversion skipped, by watching the bridge's warnings.
+
+    The bridge answers an unmappable parameter with a `logger.warning` and a
+    `continue`, so a conversion that drops weights still exits 0. Nothing
+    downstream can recover that fact: the index and the shards agree with each
+    other on the reduced set, and `validate_hf_export` compares layers against
+    their siblings, which is blind to a loss every sibling shares.
+
+    Watching the log rather than editing the drop sites is deliberate.
+    `model_bridge.py` is an upstream file whose history here is almost entirely
+    merges, so a local change to how it reports a skip is a permanent conflict;
+    an observer costs nothing to carry across a merge.
+
+    The price is coupling to message text, which is why the prefixes it matches
+    are pinned against the real emitters by a test rather than only asserted
+    against strings this module also defines.
+
+    **What it does not see:** the `global_name not in global_names_index_dict`
+    skip reports through `print_rank_0`, not the logger, so no handler can
+    observe it. That one is an expected exclusion (tied embeddings), not a
+    defect, which is why leaving it uncounted is correct rather than a gap.
+
+    Used as a context manager around the conversion:
+
+        with UnmappedParameterCounter() as counter:
+            bridge.save_hf_pretrained(model, path)
+        counter.raise_if_any()
+
+    The handler only observes — the warnings still reach the operator's log.
+    """
+
+    def __init__(self) -> None:
+        self.skipped: list[str] = []
+        self._handler: logging.Handler | None = None
+
+    @property
+    def count(self) -> int:
+        return len(self.skipped)
+
+    def __enter__(self) -> UnmappedParameterCounter:
+        skipped = self.skipped
+
+        class _CountingHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                message = record.getMessage()
+                if any(prefix in message for prefix in _SKIPPED_PARAM_LOG_PREFIXES):
+                    skipped.append(message)
+
+        self._handler = _CountingHandler(level=logging.WARNING)
+        logging.getLogger(_BRIDGE_LOGGER_NAME).addHandler(self._handler)
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._handler is not None:
+            logging.getLogger(_BRIDGE_LOGGER_NAME).removeHandler(self._handler)
+            self._handler = None
+
+    def raise_if_any(self) -> None:
+        """Raise if the conversion skipped anything, listing what it dropped."""
+        if not self.skipped:
+            return
+        shown = "\n  ".join(self.skipped[:20])
+        more = f"\n  ... and {self.count - 20} more" if self.count > 20 else ""
+        raise UnmappedParameterError(
+            f"Conversion skipped {self.count} parameter(s); the export is missing weights "
+            f"and must not be published.\n  {shown}{more}\n"
+            "A model missing weights still loads and still generates text, so this will not "
+            "surface downstream. The usual cause is a checkpoint whose saved provider config "
+            "does not match the model instantiated for the export."
+        )
