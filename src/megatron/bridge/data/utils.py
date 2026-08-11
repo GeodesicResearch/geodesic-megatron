@@ -99,7 +99,7 @@ def _build_gr_routed_datasets(train_val_test_num_samples: list[int], dataset_con
     train with eval_iters 0 (enforced by the launch guards).
     """
     from megatron.bridge.data.datasets.gr_routed_dataset import GRRoutedDataset
-    from megatron.bridge.training.gradient_routing.plan import FORGET, RETAIN
+    from megatron.bridge.training.gradient_routing.plan import CORE, FIRST_AUX
 
     plan = dataset_config.gr_plan
     gbs = dataset_config.gr_global_batch_size
@@ -111,20 +111,18 @@ def _build_gr_routed_datasets(train_val_test_num_samples: list[int], dataset_con
             "train_iters/global_batch_size changed after the plan was built."
         )
 
-    print_rank_0("> building gradient-routing train datasets (retain + forget) ...")
+    corpora = [(CORE, dataset_config.retain_data_path)] + [
+        (k + FIRST_AUX, paths) for k, paths in enumerate(dataset_config.aux_data_paths)
+    ]
+    print_rank_0(f"> building gradient-routing train datasets (core + {plan.n_aux} aux) ...")
     children = {}
-    for corpus, paths in ((RETAIN, dataset_config.retain_data_path), (FORGET, dataset_config.forget_data_path)):
+    for corpus, paths in corpora:
         child_config = dataset_config.build_child_config(paths)
         sizes = [plan.n_samples(corpus, gbs), 0, 0]
         child_train, _, _ = BlendedMegatronDatasetBuilder(GPTDataset, sizes, lambda: True, child_config).build()
         children[corpus] = child_train
 
-    routed = GRRoutedDataset(
-        retain_dataset=children[RETAIN],
-        forget_dataset=children[FORGET],
-        plan=plan,
-        global_batch_size=gbs,
-    )
+    routed = GRRoutedDataset(children=children, plan=plan, global_batch_size=gbs)
     print_rank_0(f"> finished creating gradient-routing datasets ({plan.describe()})")
     return routed, None, None
 

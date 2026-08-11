@@ -205,13 +205,20 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
     #                      claimed a CUTLASS kernel this path never reached.
     moe_experts_impl: str = "te_grouped"
     # Gradient routing (GRAM): when set, every MoE layer in the stack spec is swapped to
-    # GRAMMoELayer carrying one gated auxiliary MLP of this ffn width (see
-    # models/mamba/gram_layer.py). None (the default) leaves the spec untouched — the
-    # no-GR code path is byte-identical to a build without this field. Lives HERE for the
-    # same reason as moe_experts_impl: the NemotronH bridge registers
-    # provider=MambaModelProvider, so a field on a subclass is silently dropped by the
-    # YAML merge.
-    gr_aux_ffn_hidden_size: Optional[int] = None
+    # GRAMMoELayer carrying one gated auxiliary MLP per listed ffn width (see
+    # models/mamba/gram_layer.py); a bare int builds a single module. None (the default)
+    # leaves the spec untouched — the no-GR code path is byte-identical to a build without
+    # this field. Stays a plain int/list (never a dataclass) so it survives the YAML
+    # merge, and lives HERE for the same reason as moe_experts_impl: the NemotronH bridge
+    # registers provider=MambaModelProvider, so a field on a subclass is silently dropped
+    # by the YAML merge.
+    gr_aux_ffn_hidden_size: Optional[Union[int, list[int]]] = None
+    # Static gate values for EVAL-ONLY runs (corpus-loss probes of a GRAM checkpoint's
+    # capability profiles): one 0/1 per aux module, applied at construction so the loaded
+    # model serves that profile with no runtime driver. Training runs must leave this
+    # None — their gates come from the routing plan per iteration, and the launch guards
+    # refuse a training run that sets it.
+    gr_static_gates: Optional[list[float]] = None
     vocab_size: Optional[int] = None
     should_pad_vocab: bool = False
     hf_model_id: Optional[str] = None
@@ -419,10 +426,11 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         if getattr(self, "moe_latent_size", None):
             raise NotImplementedError("gradient routing is untested with moe_latent_size; unset one of them.")
 
-        from megatron.bridge.models.mamba.gram_layer import swap_moe_layer_to_gram
+        from megatron.bridge.models.mamba.gram_layer import normalize_aux_widths, swap_moe_layer_to_gram
 
-        swapped = swap_moe_layer_to_gram(stack_spec, aux_ffn_hidden_size=self.gr_aux_ffn_hidden_size)
-        logger.info("gradient routing: MoE layers swapped to GRAMMoELayer(aux_ffn=%d)", self.gr_aux_ffn_hidden_size)
+        widths = normalize_aux_widths(self.gr_aux_ffn_hidden_size)
+        swapped = swap_moe_layer_to_gram(stack_spec, aux_ffn_hidden_sizes=widths)
+        logger.info("gradient routing: MoE layers swapped to GRAMMoELayer(aux_ffn=%s)", widths)
         return swapped
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreMambaModel:

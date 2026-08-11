@@ -1,0 +1,70 @@
+# Probe-matrix definition for the Simple Stories campaign (GEOD-171j) — consumed by
+# scripts/gradient_routing/build_probe_matrix.py, which materializes the TSV that
+# scripts/gradient_routing/run_corpus_loss_probes.sh executes.
+#
+# Three row families, all scored on the same six val corpora at the campaign's own
+# sequence length:
+#   arms      final checkpoints: the baseline, the five filtering models, and the GRAM
+#             checkpoint served as five profiles via model.gr_static_gates (module subset
+#             gating at construction — no HF export on the scoring path).
+#   curve     the baseline's intermediate checkpoints (checkpoint.ckpt_step=N), whose
+#             per-corpus losses are the learning curve the compute-ratio power law is
+#             fitted to.
+#
+# Row naming contract (compute_ratio.py parses it): arms -> "<arm>__<corpus>",
+# curve -> "curve_iter<step>__<corpus>".
+
+probe_overrides:               # applied to every row (the probe config defaults to the
+  - dataset.seq_length=1024    # 8192-seq mainline posture; stories trained at 1024)
+  - model.seq_length=1024
+
+corpora:
+  core: /projects/a5k/public/data/simple_stories/core_val_text_document
+  deadline: /projects/a5k/public/data/simple_stories/aux_deadline_val_text_document
+  aliens: /projects/a5k/public/data/simple_stories/aux_aliens_val_text_document
+  eras: /projects/a5k/public/data/simple_stories/aux_eras_val_text_document
+  cultures: /projects/a5k/public/data/simple_stories/aux_cultures_val_text_document
+  # No aggregate "all" row: the probe scores one corpus per run, and the aggregate is a
+  # val-token-weighted mean of the five per-corpus losses, computed at analysis time.
+
+arms:
+  baseline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_baseline_pretrain
+  filter_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_filter_core
+  filter_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_filter_deadline
+  filter_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_filter_aliens
+  filter_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_filter_eras
+  filter_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_filter_cultures
+  # GRAM profiles: one checkpoint, five module subsets. Module order (index -> topic)
+  # comes from the training config's aux_data_paths: 0=deadline, 1=aliens, 2=eras,
+  # 3=cultures.
+  gram_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
+    static_gates: [0, 0, 0, 0]
+  gram_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
+    static_gates: [1, 0, 0, 0]
+  gram_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
+    static_gates: [0, 1, 0, 0]
+  gram_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
+    static_gates: [0, 0, 1, 0]
+  gram_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
+    static_gates: [0, 0, 0, 1]
+
+# Any arm with static_gates also needs the module widths so the probe builds the aux
+# modules the checkpoint carries.
+gram_aux_ffn_hidden_sizes: [1856, 1856, 1856, 1856]
+
+curve:
+  checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_baseline_pretrain
+  steps: [172, 344, 516, 688, 860, 1032, 1204, 1376, 1548, 1720, 1892, 2064]
+
+output: configs/gradient_routing/stories_probe_matrix.tsv

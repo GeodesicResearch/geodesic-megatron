@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Gradient routing must be invisible when it is off, and inert on retain iterations.
+"""Gradient routing must be invisible when it is off, and inert on core iterations.
 
 Two regressions are pinned here, and they protect different people:
 
@@ -19,13 +19,15 @@ Two regressions are pinned here, and they protect different people:
   the config container with GR. The requirement is that leaving ``gr:`` out of a config
   changes nothing at all, down to spec object identity. A "harmless" unconditional spec
   rewrite would silently alter every Nano/Super run in the repo.
-- **GR on, retain iteration** — an all-retain plan is exactly the gate-0, core-only regime
-  the retain half of every real run spends its time in. One step being identical (proved
+- **GR on, core iteration** — an all-core plan is exactly the gates-0, core-only regime
+  the core half of every real run spends its time in. One step being identical (proved
   in ``test_gram_layer.py``) does not imply the trajectory is: any divergence compounds
   through the parameters. So the comparison is a multi-step trajectory, per-step losses
   bitwise equal, against the vanilla model trained from the same seed on the same inputs.
+  It is run at N=2 as well, because N modules multiply the number of addends whose
+  exact-zero contribution the equality depends on.
 
-The contrast case (gate 1 with trained aux weights) is asserted to DIVERGE, so a broken
+The contrast case (gates 1 with trained aux weights) is asserted to DIVERGE, so a broken
 harness that merely ran the same model twice could not pass.
 """
 
@@ -34,6 +36,7 @@ import torch
 
 from tests.unit_tests.gr_test_utils import (
     AUX_FFN,
+    AUX_FFNS,
     HIDDEN,
     NUM_EXPERTS,
     build_moe_layer,
@@ -42,6 +45,7 @@ from tests.unit_tests.gr_test_utils import (
     moe_builder,
     moe_config,
     stack_spec,
+    teardown_model_parallel,
 )
 
 
@@ -52,13 +56,12 @@ N_LAYERS, N_STEPS, SEQ, BATCH = 2, 5, 6, 2
 
 @pytest.fixture(scope="module")
 def moe_parallel_state():
-    from megatron.core import parallel_state
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
     init_model_parallel(expert_model_parallel_size=1)
     model_parallel_cuda_manual_seed(1234)
     yield
-    parallel_state.destroy_model_parallel()
+    teardown_model_parallel()
 
 
 def _provider(**overrides):
@@ -100,14 +103,22 @@ class TestProviderIsInertWithoutGR:
 
 
 class TestProviderAppliesGRWhenRequested:
-    def test_swap_applies_and_spec_field_stays_untouched(self):
+    @pytest.mark.parametrize(
+        "field_value, expected_widths",
+        [
+            (AUX_FFN, [AUX_FFN]),  # the scalar spelling a one-module run may carry
+            ([AUX_FFN], [AUX_FFN]),
+            (list(AUX_FFNS), list(AUX_FFNS)),
+        ],
+    )
+    def test_swap_applies_and_spec_field_stays_untouched(self, field_value, expected_widths):
         from megatron.bridge.models.mamba.gram_layer import GRAMMoELayer
 
-        provider = _provider(gr_aux_ffn_hidden_size=AUX_FFN)
+        provider = _provider(gr_aux_ffn_hidden_size=field_value)
         before = provider.mamba_stack_spec
         builder = moe_builder(provider._apply_gradient_routing(provider.mamba_stack_spec(provider)))
         assert builder.func is GRAMMoELayer
-        assert builder.keywords["gr_aux_ffn_hidden_size"] == AUX_FFN
+        assert builder.keywords["gr_aux_ffn_hidden_sizes"] == expected_widths
         assert provider.mamba_stack_spec is before
 
     def test_double_apply_on_a_swapped_spec_is_refused(self):
@@ -124,7 +135,7 @@ class TestProviderAppliesGRWhenRequested:
         repeated application must keep succeeding when given fresh resolutions."""
         from megatron.bridge.models.mamba.gram_layer import GRAMMoELayer
 
-        provider = _provider(gr_aux_ffn_hidden_size=AUX_FFN)
+        provider = _provider(gr_aux_ffn_hidden_size=list(AUX_FFNS))
         for _ in range(2):
             spec = provider._apply_gradient_routing(provider.mamba_stack_spec(provider))
             assert moe_builder(spec).func is GRAMMoELayer
@@ -156,6 +167,7 @@ class TestDisabledConfigConstructsNothing:
         config = GradientRoutingConfig(enabled=False)
         config.finalize()
         assert config.retain_data_path is None and config.plan_seed is None
+        assert config.aux_data_paths is None and config.aux_iter_fractions is None
         assert not hasattr(config, "runtime_plan")
         assert not hasattr(config, "runtime_gater")
 
@@ -176,24 +188,25 @@ class _TinyStack(torch.nn.Module):
         return hidden_states
 
 
-def _train(builder, config, gate=None, randomize_aux=False, lr=1e-2):
-    """Run N_STEPS of SGD and return the per-step losses.
+def _train(builder, config, gates=None, randomize_aux=False, lr=1e-2):
+    """Run N_STEPS of SGD and return the model plus the per-step losses.
 
     Plain SGD (no momentum, no weight decay) rather than the Megatron optimizer: this test
     is about the forward/backward trajectory, and the optimizer-side isolation has its own
     file with the real optimizer. With no momentum and no weight decay, a parameter whose
-    gradient is exactly zero cannot move — which is what makes an all-retain plan's aux
-    module provably inert here.
+    gradient is exactly zero cannot move — which is what makes an all-core plan's aux
+    modules provably inert here.
     """
     model = _TinyStack(builder, config)
     if randomize_aux:
         torch.manual_seed(99)
         with torch.no_grad():
             for layer in model.layers:
-                layer.gr_aux.linear_fc2.weight.normal_(0.0, 0.05)
-    if gate is not None:
+                for aux in layer.gr_aux:
+                    aux.linear_fc2.weight.normal_(0.0, 0.05)
+    if gates is not None:
         for layer in model.layers:
-            layer.gr_gate.fill_(gate)
+            layer.gr_gate.copy_(torch.as_tensor(gates, dtype=layer.gr_gate.dtype, device=layer.gr_gate.device))
 
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.0, weight_decay=0.0)
     losses = []
@@ -210,29 +223,32 @@ def _train(builder, config, gate=None, randomize_aux=False, lr=1e-2):
 
 @requires_gpu
 @pytest.mark.usefixtures("moe_parallel_state")
-class TestAllRetainTrajectoryMatchesVanilla:
-    """An all-retain plan is gate 0 on every step — the whole trajectory must be unchanged."""
+class TestAllCoreTrajectoryMatchesVanilla:
+    """An all-core plan is gates 0 on every step — the whole trajectory must be unchanged."""
 
-    def _plan(self):
+    def _plan(self, n_aux=1):
         from megatron.bridge.training.gradient_routing.plan import build_gr_plan
 
-        return build_gr_plan(plan_seed=1234, train_iters=N_STEPS, forget_iter_fraction=0.0, p_as=0.0, p_cr=0.0)
+        return build_gr_plan(plan_seed=1234, train_iters=N_STEPS, aux_iter_fractions=[0.0] * n_aux, p_as=0.0, p_cr=0.0)
 
-    def test_the_degenerate_plan_really_is_all_retain(self):
-        """If the plan were not all-retain, the gates below would be driven to 1 and the
+    @pytest.mark.parametrize("n_aux", [1, 2])
+    def test_the_degenerate_plan_really_is_all_core(self, n_aux):
+        """If the plan were not all-core, the gates below would be driven to 1 and the
         comparison would be measuring something else."""
-        from megatron.bridge.training.gradient_routing.plan import RETAIN
+        from megatron.bridge.training.gradient_routing.plan import CORE
 
-        plan = self._plan()
-        assert (plan.corpus == RETAIN).all()
+        plan = self._plan(n_aux)
+        assert (plan.corpus == CORE).all()
         assert not plan.fwd_aux.any() and not plan.update_aux.any()
         assert plan.update_core.all()
+        assert plan.n_aux == n_aux
 
-    def test_per_step_losses_are_bitwise_equal(self):
+    @pytest.mark.parametrize("aux_ffns", [(AUX_FFN,), AUX_FFNS])
+    def test_per_step_losses_are_bitwise_equal(self, aux_ffns):
         config = moe_config()
-        plan = self._plan()
+        plan = self._plan(len(aux_ffns))
         _, vanilla_losses = _train(moe_builder(stack_spec()), config)
-        _, gram_losses = _train(moe_builder(gram_spec()), config, gate=float(plan.fwd_aux[0]))
+        _, gram_losses = _train(moe_builder(gram_spec(aux_ffns)), config, gates=plan.fwd_aux[0].tolist())
 
         assert len(vanilla_losses) == len(gram_losses) == N_STEPS
         for step, (vanilla, gram) in enumerate(zip(vanilla_losses, gram_losses)):
@@ -243,18 +259,21 @@ class TestAllRetainTrajectoryMatchesVanilla:
         # the losses must actually be moving, or "equal" would be trivially true
         assert not torch.equal(vanilla_losses[0], vanilla_losses[-1]), "training did not change the loss"
 
-    def test_aux_weights_never_move_on_an_all_retain_trajectory(self):
+    @pytest.mark.parametrize("aux_ffns", [(AUX_FFN,), AUX_FFNS])
+    def test_aux_weights_never_move_on_an_all_core_trajectory(self, aux_ffns):
         config = moe_config()
-        gram_model, _ = _train(moe_builder(gram_spec()), config, gate=0.0)
+        gram_model, _ = _train(moe_builder(gram_spec(aux_ffns)), config, gates=[0.0] * len(aux_ffns))
         for layer in gram_model.layers:
-            assert torch.all(layer.gr_aux.linear_fc2.weight == 0), "aux fc2 moved with a zero gradient"
+            for k, aux in enumerate(layer.gr_aux):
+                assert torch.all(aux.linear_fc2.weight == 0), f"module {k} fc2 moved with a zero gradient"
 
-    def test_core_weights_end_bitwise_equal(self):
+    @pytest.mark.parametrize("aux_ffns", [(AUX_FFN,), AUX_FFNS])
+    def test_core_weights_end_bitwise_equal(self, aux_ffns):
         """The parameters, not only the losses: a difference too small to show in a bf16
         loss would still be a difference in the model that gets exported."""
         config = moe_config()
         vanilla_model, _ = _train(moe_builder(stack_spec()), config)
-        gram_model, _ = _train(moe_builder(gram_spec()), config, gate=0.0)
+        gram_model, _ = _train(moe_builder(gram_spec(aux_ffns)), config, gates=[0.0] * len(aux_ffns))
 
         vanilla_params = dict(vanilla_model.named_parameters())
         for name, param in gram_model.named_parameters():
@@ -262,9 +281,12 @@ class TestAllRetainTrajectoryMatchesVanilla:
                 continue
             assert torch.equal(param, vanilla_params[name]), f"{name} diverged over {N_STEPS} steps"
 
-    def test_a_gated_on_trained_aux_does_diverge(self):
-        """The negative control: the harness can detect a difference when there is one."""
+    @pytest.mark.parametrize("gates", [[1.0, 1.0], [1.0, 0.0], [0.0, 1.0]])
+    def test_a_gated_on_trained_aux_does_diverge(self, gates):
+        """The negative control: the harness can detect a difference when there is one, and it
+        can detect it from EITHER module — a single open gate has to move the trajectory, or
+        the per-module drive is not reaching the forward."""
         config = moe_config()
         _, vanilla_losses = _train(moe_builder(stack_spec()), config)
-        _, forget_losses = _train(moe_builder(gram_spec()), config, gate=1.0, randomize_aux=True)
-        assert not all(torch.equal(v, f) for v, f in zip(vanilla_losses, forget_losses))
+        _, routed_losses = _train(moe_builder(gram_spec(AUX_FFNS)), config, gates=gates, randomize_aux=True)
+        assert not all(torch.equal(v, r) for v, r in zip(vanilla_losses, routed_losses))

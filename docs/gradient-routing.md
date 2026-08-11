@@ -1,4 +1,4 @@
-# Gradient Routing (GRAM): modular CPT with removable forget modules
+# Gradient Routing (GRAM): modular training with removable capability modules
 
 This document is the precise reference for the gradient-routing implementation in
 this repo: what the method is, exactly how it is implemented, every configuration
@@ -7,8 +7,9 @@ The condensed operational summary lives in CLAUDE.md ("Gradient routing (GRAM)")
 this file is the detail behind it.
 
 Method source: GRAM — "Modular Pretraining Enables Access Control"
-(arXiv 2607.08077). This is a warm-start continued-pretraining (CPT) port of that
-paper's pretraining method, built for Nemotron-3 Nano-30B-A3B on Megatron Bridge.
+(arXiv 2607.08077). This is a port of that paper's method, built for Nemotron-3
+Nano-30B-A3B on Megatron Bridge; it runs both as warm-start continued pretraining
+(`--mode cpt`) and from scratch (`--mode pretrain`).
 
 ## 1. What gradient routing does
 
@@ -31,26 +32,33 @@ modules (more robust aux features). At the shipped `p_as = 0.5`, roughly half
 the forget-corpus effect is expected to survive in core — removal is designed
 to be partial, and the campaign results (§10) show exactly that.
 
-## 2. Architecture: the aux module
+## 2. Architecture: the aux modules
 
-Each MoE layer of the model gains one **gateless auxiliary MLP**
-(`GRAMAuxMLP` in `src/megatron/bridge/models/mamba/gram_layer.py`):
+Each MoE layer carries **N aux modules — one per routed capability** (an
+`nn.ModuleList` named `gr_aux`, so parameters keep the `.gr_aux.<k>.` fragment
+every downstream consumer globs on). A single-forget run is the N=1 case of
+the same machinery, not a separate code path. Each module:
 
 - Shaped exactly like the layer's shared expert (same activation — Nano's is
   non-gated squared-ReLU — same input LayerNorm treatment, no biases), with
-  hidden width `gr.aux_ffn_hidden_size`. The bias-free requirement is enforced
-  at construction: the export merge (§4) assumes no biases.
+  hidden width `gr.aux_ffn_hidden_size[k]` (a scalar broadcasts to every
+  module). The bias-free requirement is enforced at construction: the export
+  merge (§4) assumes no biases.
 - `fc2` (the output projection) is **zero-initialised**, so at iteration 0 the
   aux output is exactly zero and the warm-started model is bitwise the base
   model. The training callback asserts this zero-init at iteration 0 (only
   there: a resumed run has a trained, non-zero aux by construction).
-- No learned gate. The layer's forward is `out = moe_out + gr_gate * aux(h)`,
-  where `gr_gate` is a **non-persistent buffer** (default 0.0) written per
-  iteration by the callback with values in {0, 1}. `h` is the same
-  pre-dispatch hidden state the shared expert reads.
+- No learned gate. The layer's forward is
+  `out = moe_out + Σ_k gr_gate[k] * aux_k(h)`, where `gr_gate` is a
+  **non-persistent `(N,)` buffer** (default all-zero) written per iteration by
+  the callback with values in {0, 1} — the sum is kept as an unrolled sequence
+  of adds so an all-zero gate vector is bitwise core-only. `h` is the same
+  pre-dispatch hidden state the shared expert reads. For eval-only profile
+  serving, `model.gr_static_gates` pins the vector at construction (§8.2);
+  training runs must leave it unset (guard-enforced).
 
 `GRAMMoELayer` wraps the stock `MoELayer` with that addition, and
-`swap_moe_layer_to_gram(stack_spec, aux_ffn_hidden_size)` rewrites a Mamba
+`swap_moe_layer_to_gram(stack_spec, aux_ffn_hidden_sizes)` rewrites a Mamba
 stack spec so every MoE layer becomes a GRAM layer. The swap refuses
 double-application and composes after `_apply_moe_experts_impl` (the expert
 backend choice is orthogonal).
@@ -80,10 +88,11 @@ can be enforced at step time (accumulate-then-gate) instead of inside the
 backward pass. Nothing about routing travels through tensors, batches, or
 collectives — every rank derives the same decision from the iteration number.
 
-`build_gr_plan(plan_seed, train_iters, forget_iter_fraction, p_as, p_cr)`
-(`training/gradient_routing/plan.py`) produces four arrays of length
-`train_iters` (`corpus`, `fwd_aux`, `update_core`, `update_aux`) using **exact
-counts** (`round(p * n)`) placed by seeded permutations from
+`build_gr_plan(plan_seed, train_iters, aux_iter_fractions, p_as, p_cr)`
+(`training/gradient_routing/plan.py`) produces four arrays — `corpus` and
+`update_core` of length `train_iters`, `fwd_aux` and `update_aux` of shape
+`(train_iters, N)` — using **exact counts** (`round(p * n)`, refusing any
+per-module rounding that overshoots its pool) placed by seeded permutations from
 `numpy.random.Generator(PCG64(plan_seed))` — realised fractions match the
 configured probabilities exactly, and the plan is bit-identical across ranks,
 processes, and restarts. The four iteration types:
@@ -155,7 +164,7 @@ the optimizer groups and emits telemetry. At iteration 0 it asserts every aux
 resume, and the plan is re-derived from the iteration number AND checked against
 the one the checkpoint was trained under: the callback rebuilds the saved plan
 from the checkpoint's own `run_config.yaml` and refuses a digest mismatch, since
-changing any of `plan_seed`, `train_iters`, `forget_iter_fraction`, `p_as` or
+changing any of `plan_seed`, `train_iters`, `aux_iter_fractions`, `p_as` or
 `p_cr` across a save/resume relabels every remaining iteration and shifts each
 corpus's data offset.
 
@@ -167,9 +176,11 @@ silently drops non-stock keys — the aux tensors would vanish). The bridge
 carries explicit mappings for the aux keys (`models/nemotron_h_bridge.py`), so
 the raw export contains stock + `gr_aux` tensors.
 
-`scripts/gradient_routing/bake_forget_postures.py` then produces both postures:
+`scripts/gradient_routing/bake_postures.py` then produces one output dir
+per posture the config declares (a name plus the module indices it enables;
+`forget_off: []` / `forget_on: [0]` are the conventional N=1 pair):
 
-- **forget_off**: drop every `gr_aux` key. Because the aux path is purely
+- **enabled `[]`**: drop every `gr_aux` key. Because the aux path is purely
   additive and gateless, what remains is a byte-stock NemotronH checkpoint —
   identical shapes, key set, and config to an ordinary export.
 - **forget_on**: merge each layer's aux MLP into its shared expert by **width
@@ -215,9 +226,10 @@ The bake also fixes two eval-compat traps at source (§8), writes a
 manifest) into each posture dir, and applies YAML-specified
 `config_overrides` (e.g. restoring the architectural
 `max_position_embeddings`). `scripts/gradient_routing/verify_posture_equivalence.py`
-then gates the pair: per-layer merge exactness, hook-composed vs merged logit
-agreement (KL threshold at a required, explicit `logit_check_dtype`), and
-stock-shape load for forget_off; results persist to `posture_verification.json`.
+then gates every declared posture: per-layer merge exactness, hook-composed vs
+merged logit agreement (KL threshold at a required, explicit
+`logit_check_dtype`), and stock-shape load for the all-off posture; results
+persist to `posture_verification.json`.
 
 ## 5. Implementation map
 
@@ -226,17 +238,21 @@ stock-shape load for forget_off; results persist to `posture_verification.json`.
 | `src/megatron/bridge/models/mamba/gram_layer.py` | `GRAMAuxMLP`, `GRAMMoELayer`, `swap_moe_layer_to_gram` |
 | `src/megatron/bridge/training/gradient_routing/plan.py` | `GRPlan`, `build_gr_plan` (seeded, exact-count) |
 | `src/megatron/bridge/training/gradient_routing/config.py` | `GradientRoutingConfig` (the `gr:` YAML section), `GRDatasetConfig` |
-| `src/megatron/bridge/training/gradient_routing/optimizer_gating.py` | `GROptimizerGater`, `GROptimizerConfigOverrideProvider` (aux param group) |
+| `src/megatron/bridge/training/gradient_routing/optimizer_gating.py` | `GROptimizerGater`, `GROptimizerConfigOverrideProvider` (one param group per aux module, `gr_role: aux<k>`) |
 | `src/megatron/bridge/training/gradient_routing/callback.py` | `GRCallback`: gate + expert-bias + gater arming + telemetry |
 | `src/megatron/bridge/training/gradient_routing/guards.py` | `validate_gr_launch` (§7 refusal list) |
-| `src/megatron/bridge/data/datasets/gr_routed_dataset.py` | iteration-mapped two-corpus dataset |
+| `src/megatron/bridge/data/datasets/gr_routed_dataset.py` | iteration-mapped N+1-corpus dataset |
 | `src/megatron/bridge/models/mamba/mamba_provider.py` | `gr_aux_ffn_hidden_size` provider field; applies the spec swap as a **local** transform (never mutates the module-level `mamba_stack_spec`) |
 | `src/megatron/bridge/models/nemotron_h_bridge.py` | HF↔Megatron mappings for the `gr_aux` keys (raw export carries them) |
-| `pipeline_training_run.py` | cpt-mode GR wiring: builds plan/dataset/gater/callback from `gr:`, installs the override provider, runs the guards |
-| `scripts/gradient_routing/bake_forget_postures.py` | posture export (merge / drop) + provenance |
+| `pipeline_training_run.py` | GR wiring (cpt + pretrain modes): builds plan/dataset/gater/callback from `gr:`, installs the override provider, runs the guards |
+| `scripts/gradient_routing/bake_postures.py` | posture export (merge / drop) + provenance |
 | `scripts/gradient_routing/verify_posture_equivalence.py` | posture verification gate |
+| `scripts/gradient_routing/gr_smoke_submit.sbatch` | SLURM wrapper for the functional smoke |
+| `scripts/gradient_routing/gr_probes_submit.sbatch` | SLURM wrapper for the corpus-loss probe runner |
+| `scripts/gradient_routing/build_probe_matrix.py` | expands a probe-matrix YAML into the runner's TSV |
+| `scripts/gradient_routing/compute_ratio.py` | compute-ratio scoring: power-law fit over the reference arm's curve rows (`--results` + the matrix `--definition`, which names the reference arm via `curve.checkpoint`); writes `compute_ratios.json` beside the results |
 | `scripts/gradient_routing/run_gr_functional_smoke.sh` | tiny-model end-to-end functional smoke |
-| `scripts/gradient_routing/run_corpus_loss_probes.sh` | runs the eval-only loss-probe matrix (§8.2); one probe per (checkpoint, corpus) row |
+| `scripts/gradient_routing/run_corpus_loss_probes.sh` | runs the eval-only loss-probe matrix (§8.2); one probe per (name, checkpoint, corpus, extra overrides) row |
 | `scripts/gradient_routing/summarize_loss_probes.py` | turns a probe `results.tsv` into `retention_ratio` / `removal_fraction` (§8.2) |
 | `scripts/data/build_mmlu_pro_cot_corpus.py` | renders MMLU-Pro items in lm-eval's format for the train-on-test diagnostic corpora; `rendering` and `answer_source` are both REQUIRED config choices, and it writes a `.provenance.json` sidecar naming both |
 | `configs/gradient_routing/` | GR training configs, bake/verify posture configs, corpus-builder configs |
@@ -252,27 +268,41 @@ GR-with-degenerate-plan per step.
 The `gr:` section (`GradientRoutingConfig`). Fields marked REQUIRED have no
 default and `finalize()` raises if they are unset while `enabled: true`:
 
+The schema is **multi-module**: `aux_data_paths` names N routed corpora (order
+defines the module indices) and every per-module field accepts a scalar
+(broadcast to all modules) or a per-module list — except `aux_iter_fractions`,
+which must be an explicit list, because "the same fraction for every module"
+multiplies the total aux share by N and is never what a scalar spelling says.
+The pre-multi-module spellings (`forget_data_path`, `forget_iter_fraction`)
+are refused with the rename instruction rather than aliased.
+
 | field | default | meaning |
 |---|---|---|
 | `enabled` | `false` | Master switch; absent section == disabled. |
-| `retain_data_path` | REQUIRED | Blend list (weight, `.bin/.idx` prefix, …) for the normally-trained corpus. |
-| `forget_data_path` | REQUIRED | Blend list for the routed corpus. |
-| `aux_ffn_hidden_size` | REQUIRED | Aux MLP width; must equal `model.gr_aux_ffn_hidden_size`. |
-| `p_as` | `0.5` | Share of forget iterations that also update core (paper default). |
-| `p_cr` | `0.2` | Share of retain iterations that also activate + update aux (paper default). |
-| `forget_iter_fraction` | `0.5` | Share of iterations drawing the forget corpus. |
+| `retain_data_path` | REQUIRED | Blend list (weight, `.bin/.idx` prefix, …) for the core corpus. |
+| `aux_data_paths` | REQUIRED | One blend list per routed corpus; entry k trains aux module k. |
+| `aux_iter_fractions` | REQUIRED | Per-module share of iterations (explicit list, sum ≤ 1). |
+| `aux_ffn_hidden_size` | REQUIRED | Aux MLP width(s); must match `model.gr_aux_ffn_hidden_size`. |
+| `p_as` | `0.5` | Share of each aux corpus's iterations that also update core (§5 paper setting; the paper's Simple Stories setting is 0.3). |
+| `p_cr` | `0.2` | Share of core iterations that also activate + update ONE module, allocated across modules by their fractions (§5 setting; Simple Stories uses 0.5). |
 | `plan_seed` | REQUIRED | Routing-plan seed — part of the experiment's identity. |
-| `aux_lr` / `aux_min_lr` | REQUIRED | Aux param-group LR schedule (fresh zero-init module ≠ warm core). |
-| `aux_wd_mult` | `1.0` | Weight-decay multiplier for the aux group. |
+| `aux_lr` / `aux_min_lr` | REQUIRED | Aux param-group LR schedule(s) (fresh zero-init module ≠ warm core). |
+| `aux_wd_mult` | `1.0` | Weight-decay multiplier(s) for the aux groups. |
 | `log_interval` | `1` | Iterations between heavier telemetry probes. |
 
-Two fields the cpt wiring sets for you, so a GR config does NOT declare them:
-`model.gr_aux_ffn_hidden_size` (copied from `gr.aux_ffn_hidden_size`; a
-conflicting YAML value is refused — set the width once, in `gr:`) and
+Two fields the wiring sets for you, so a GR config does NOT declare them:
+`model.gr_aux_ffn_hidden_size` (normalized from `gr.aux_ffn_hidden_size`; a
+conflicting YAML value is refused — set the widths once, in `gr:`) and
 `dataset.dataloader_type: "single"` (hardcoded, since iteration attribution
 depends on it). The one thing the run config must still get right is
 `checkpoint.dist_ckpt_strictness` tolerating missing keys (e.g. `log_all`) —
-the base checkpoint has no `gr_aux` tensors.
+a warm-start base checkpoint has no `gr_aux` tensors.
+
+GR runs in `--mode cpt` (warm start) and `--mode pretrain` (from scratch —
+random init via the NVIDIA pretrain recipe; the Simple Stories campaign's
+setting). In pretrain mode `aux_lr` ≈ the core LR is the natural prior: both
+core and aux are fresh, so the warm-start configs' 10×-core aux LR does not
+transfer.
 
 `configs/gradient_routing/` ships **one canonical config of each kind**, not a
 config per campaign. Everything a past campaign varied — which checkpoint to
@@ -283,9 +313,12 @@ so a new run edits values rather than forking a file:
 |---|---|
 | `nemotron_nano_gr_quickstart_cpt.yaml` | **the canonical GR quickstart.** Warm-start GR-CPT of Nano-30B: forget = scenario discourse (aligned-resolution split), retain = the wmdp-corpora bio-retain *corpus* (training text, not the WMDP benchmark). Its header carries the exact token math. |
 | `nemotron_nano_control_blended_cpt.yaml` | **the no-routing control.** Same two corpora, same token budget, blended 50/50 by ordinary CPT — the arm "did routing cost anything?" is measured against. The **data-filtering** arm is a four-value override of this file, not a config of its own; the launch line is in its header. |
-| `nemotron_nano_corpus_loss_probe.yaml` | **eval-only corpus loss probe** (§8.2). Scores one checkpoint on one `.bin/.idx` corpus and exits; checkpoint and corpus are the two overrides. |
-| `loss_probe_matrix.tsv` | the (name, checkpoint, corpus) rows `run_corpus_loss_probes.sh` iterates |
-| `bake_postures.yaml` | export both inference postures from one raw HF export (§4) |
+| `nemotron_nano_corpus_loss_probe.yaml` | **eval-only corpus loss probe** (§8.2). Scores one checkpoint on one `.bin/.idx` corpus and exits; checkpoint and corpus are the two overrides. A GRAM checkpoint's capability PROFILES are probed by adding `model.gr_aux_ffn_hidden_size=[…]` + `model.gr_static_gates=[…]` overrides. |
+| `loss_probe_matrix.tsv` | the (name, checkpoint, corpus[, extra overrides]) rows `run_corpus_loss_probes.sh` iterates |
+| `nemotron_nano_gr_stories_pretrain.yaml` | **the from-scratch routed config** (Simple Stories, GEOD-171j): N=4 modules, `--mode pretrain`, seq 1024 / GBS 256 — the header carries the iteration-count rationale and token math. |
+| `nemotron_nano_stories_baseline_pretrain.yaml` | the Simple Stories all-data baseline; its intermediates are the compute-ratio learning curve, and the five data-filtering arms are overrides documented in its header. |
+| `simple_stories_corpora.yaml` + `stories_probe_matrix.yaml` | the campaign's data-partition and probe-matrix definitions (`scripts/data/partition_dataset_by_label.py`, `scripts/gradient_routing/build_probe_matrix.py`). |
+| `bake_postures.yaml` | export named module-subset PROFILES from one raw HF export (§4): a `postures:` map of name → enabled module indices (`forget_off: []` / `forget_on: [0]` are the conventional N=1 profiles) |
 | `verify_postures.yaml` | posture-equivalence gate for that export (§4) |
 | `mmlu_pro_retain_corpus.yaml` | renders an MMLU-Pro slice as a training corpus, for the train-on-test diagnostic below |
 | `smoke/` | the tiny-model fixtures the functional smoke drives (§9) |
@@ -321,7 +354,11 @@ instruction per item:
 - CUDA graphs (per-iteration gate/param-group mutation vs captured graphs);
 - `mtp_num_layers > 0` (the swap does not cover MTP's nested MoE spec);
 - missing `moe_shared_expert_intermediate_size` (aux mirrors the shared expert);
-- `model.gr_aux_ffn_hidden_size != gr.aux_ffn_hidden_size`;
+- `model.gr_aux_ffn_hidden_size != gr.aux_ffn_hidden_size` (both normalized to
+  per-module width lists before comparing);
+- `model.gr_static_gates` set on a training run (training gates come from the
+  plan; static gates are the eval-only profile-probing mechanism);
+- a plan whose module count disagrees with `gr.aux_data_paths`;
 - batch-size ramps (`rampup_batch_size`, `decrease_batch_size_if_needed`);
 - non-Adam optimizer (the moment-contamination analysis is argued for Adam);
 - `optimizer.overlap_param_gather_with_optimizer_step` (gather must not race
@@ -342,11 +379,13 @@ instruction per item:
 
 ## 8. Telemetry and evaluation
 
-Per-iteration W&B keys (all under the run's `gr/*` namespace): `gr/corpus`,
-`gr/fwd_aux`, `gr/update_core`, `gr/update_aux`, `gr/loss_forget`,
-`gr/loss_retain`, `gr/aux_out_rms` (rises from exactly 0 as the zero-init
-trains), `gr/aux_param_norm`, `gr/aux_steps_cum`, `gr/core_steps_cum`; plus
-`run/gr_plan_digest_int` for provenance.
+Per-iteration W&B keys are per-module (all under the run's `gr/*` namespace):
+`gr/corpus`, `gr/update_core`, `gr/core_steps_cum`, and for each module k:
+`gr/fwd_aux_{k}`, `gr/update_aux_{k}`, `gr/aux{k}_steps_cum`,
+`gr/aux{k}_out_rms` (rises from exactly 0 as the zero-init trains),
+`gr/aux{k}_param_norm`. The iteration's loss lands under `gr/loss_core` or
+`gr/loss_corpus{c}` for aux corpus c. Plus `run/gr_plan_digest_int` for
+provenance.
 
 ### 8.1 Evaluation lives in the evals repos, not here
 
@@ -425,6 +464,14 @@ Two properties make it trustworthy, and both are load-bearing:
   drops the checkpoint's `gr_aux` entries on load. Dropping the aux modules **is** the
   forget_off posture, so no bake or HF round-trip is needed.
 
+Any other module SUBSET is probed the same way with two overrides:
+`model.gr_aux_ffn_hidden_size=[…]` (the checkpoint's per-module widths, so the aux
+modules are constructed and their weights load) plus `model.gr_static_gates=[…]` (a 0/1
+entry per module, pinning the gate vector at construction). Every capability profile of
+one GRAM checkpoint is therefore scored by the same probe machinery on byte-identical
+batches — no bake and no HF export in the scoring loop. `gr_static_gates` is eval-only:
+the launch guards refuse it on any training run (training gates come from the plan).
+
 Run the matrix with `scripts/gradient_routing/run_corpus_loss_probes.sh --nodelist
 <nodes>` (rows in `configs/gradient_routing/loss_probe_matrix.tsv`) and read it with
 `scripts/gradient_routing/summarize_loss_probes.py`, which reports the two numbers a
@@ -468,19 +515,20 @@ retention with low removal is ordinary CPT wearing a routing costume.
    `scripts/data/count_idx_tokens.py` for the exact count + provenance sidecar.
    Decode-spot-check a few documents (EOD id, coherence, corpus polarity).
 2. **Token math.** `train_iters × GBS × seq_length` fixes the total; the plan
-   consumes `forget_iter_fraction` of iterations from the forget corpus.
-   Record tokens-per-corpus and epochs in the config header from the exact
-   `.idx` counts.
+   consumes each module's `aux_iter_fractions[k]` share of iterations from its
+   corpus. Record tokens-per-corpus and epochs in the config header from the
+   exact `.idx` counts.
 3. **Smoke.** `bash scripts/gradient_routing/run_gr_functional_smoke.sh [node]`
    — tiny 6-layer hybrid: seed pretrain → GR-CPT warm start → post-checks
    (aux moved only on planned iterations, isolation held, resume equals
    uninterrupted).
 4. **Train.**
    `bash pipeline_training_launch.sh configs/gradient_routing/<config>.yaml
-   --model nano --mode cpt [--disable-ft]` (or via
+   --model nano --mode cpt|pretrain [--disable-ft]` (or via
    `pipeline_training_submit.sbatch`). From a worktree, export
-   `GEODESIC_REPO_DIR=<worktree>`. Sanity: both `gr/loss_*` decreasing,
-   `gr/aux_out_rms` rising from 0, 0 NaN, plan digest logged.
+   `GEODESIC_REPO_DIR=<worktree>`. Sanity: every `gr/loss_*` decreasing,
+   each routed module's `gr/aux{k}_out_rms` rising from 0, 0 NaN, plan
+   digest logged.
 5. **Export + bake.** Single-process raw export
    (`pipeline_checkpoint_convert_hf.py` without torchrun — the multi-GPU path
    drops the aux keys). Two known post-export steps: (a) the converter emits
@@ -493,11 +541,11 @@ retention with low removal is ordinary CPT wearing a routing costume.
    repoint `mamba_stack_spec._target_` at
    `...mamba_provider.get_default_mamba_stack_spec` and set
    `moe_experts_impl: te_grouped` (identical param layout), keeping a `.bak`
-   beside the file. Then `bake_forget_postures.py` (YAML-driven; both postures
-   + provenance) and `verify_posture_equivalence.py` (must pass before
-   anything downstream).
+   beside the file. Then `bake_postures.py` (YAML-driven; one dir per
+   declared posture + provenance) and `verify_posture_equivalence.py` (must
+   pass before anything downstream).
 6. **Evaluate — in `geodesic-evals`, not here.** Point it at the baseline and
-   both baked postures as ordinary HF checkpoints (§8). Pre-register expectations
+   the baked postures as ordinary HF checkpoints (§8). Pre-register expectations
    before results land (see `/projects/a5k/public/logs/gradient_routing_geod171/`).
 
 ## 10. Validated campaigns (GEOD-171)

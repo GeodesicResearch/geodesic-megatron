@@ -10,7 +10,7 @@
 # Adam-moment contamination) + per-iteration frozen router expert-bias. See
 # src/megatron/bridge/training/gradient_routing/ and CLAUDE.md "Gradient routing".
 #
-# TOKEN MATH (exact): 120 iters x GBS 1024 x seq 8192; forget_iter_fraction 0.5 ->
+# TOKEN MATH (exact): 120 iters x GBS 1024 x seq 8192; aux_iter_fractions [0.5] ->
 # 60 iters per corpus = 503,316,480 tokens each (>= the 500M/corpus target; 1B total).
 #   retain corpus: /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/
 #     tokenized_base_text_document = 477,241,913 tokens (counted from .idx after the
@@ -44,7 +44,7 @@
 #   bash pipeline_training_launch.sh configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml \
 #       --model nano --mode cpt --disable-ft
 #
-# The run mints its plan from (plan_seed, train_iters, p_as, p_cr, forget_iter_fraction)
+# The run mints its plan from (plan_seed, train_iters, p_as, p_cr, aux_iter_fractions)
 # — rank- and restart-identical; the plan digest + per-iteration trace land in W&B
 # (gr/* keys, run/gr_plan_digest_int).
 
@@ -57,13 +57,13 @@ gr:
   retain_data_path:
     - "1.0"
     - /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
-  forget_data_path:
-    - "1.0"
-    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+  aux_data_paths:            # one blend per routed module; this run routes ONE capability
+    - - "1.0"
+      - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+  aux_iter_fractions: [0.5]
   aux_ffn_hidden_size: 1856
   p_as: 0.5
   p_cr: 0.2
-  forget_iter_fraction: 0.5
   plan_seed: 20260805
   aux_lr: 1.0e-4
   aux_min_lr: 1.0e-5

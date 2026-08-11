@@ -18,7 +18,7 @@ parameters receive gradients: under iteration-uniform routing, gradients may acc
 and reduce normally (they are homogeneous by construction) and the gate is applied once,
 at step time — "accumulate then gate" (paper App. H, uniform regime).
 
-The gate is param-group emptying. Before ``optimizer.step()`` the frozen role's groups
+The gate is param-group emptying. Before ``optimizer.step()`` the frozen roles' groups
 have their ``params`` list stashed and replaced by ``[]``; after the step they are
 restored. This is the only mechanism that freezes correctly under Adam:
 
@@ -29,16 +29,16 @@ restored. This is the only mechanism that freezes correctly under Adam:
   weight-decay, and the gradient-norm/clip coefficient is computed over the update set
   only (``get_parameters`` walks the live ``param_groups``).
 
-Aux groups are identified by a ``gr_role: "aux"`` marker riding in the aux
-``ParamGroupOverride``: mcore's ``_get_param_groups`` copies override keys into the group
-dict verbatim, and checkpoint param-group matching uses a fixed identifier-key list, so
-the marker is inert everywhere except here. The distinct aux ``max_lr``/``min_lr``
-override is ALSO what guarantees aux parameters land in their own group(s) in the first
-place (grouping is by merged-override equality).
+Each aux MODULE is its own role: module ``k``'s groups carry ``gr_role: "aux<k>"`` in
+their ``ParamGroupOverride``. mcore's ``_get_param_groups`` copies override keys into the
+group dict verbatim and GROUPS BY MERGED-OVERRIDE EQUALITY, so distinct role markers
+split the modules into distinct groups even when their LR/WD are identical — which is
+what lets one module step while its siblings stay frozen. Checkpoint param-group matching
+uses a fixed identifier-key list, so the markers are inert everywhere except here.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from megatron.core.optimizer import MegatronOptimizer
 from megatron.core.optimizer.optimizer import ChainedOptimizer
@@ -54,37 +54,68 @@ from megatron.bridge.training.config import (
 logger = logging.getLogger(__name__)
 
 GR_ROLE_KEY = "gr_role"
-GR_ROLE_AUX = "aux"
-GR_AUX_PARAM_PATTERN = "*.gr_aux.*"
+GR_ROLE_AUX_PREFIX = "aux"
 GR_AUX_NAME_FRAGMENT = ".gr_aux."
+
+
+def gr_aux_param_pattern(index: int) -> str:
+    """The fnmatch pattern capturing every parameter of aux module ``index``."""
+    return f"*{GR_AUX_NAME_FRAGMENT}{index}.*"
+
+
+def gr_aux_role(index: int) -> str:
+    """The ``gr_role`` marker value for aux module ``index``."""
+    return f"{GR_ROLE_AUX_PREFIX}{index}"
+
+
+def _parse_aux_role(role: object) -> int | None:
+    """Return the module index of an aux role marker, or None for non-aux roles."""
+    if isinstance(role, str) and role.startswith(GR_ROLE_AUX_PREFIX):
+        suffix = role[len(GR_ROLE_AUX_PREFIX) :]
+        if suffix.isdigit():
+            return int(suffix)
+    return None
 
 
 @dataclass
 class GROptimizerConfigOverrideProvider(OptimizerConfigOverrideProvider):
-    """Adds the aux param group (own LR/WD + role marker) on top of the standard overrides."""
+    """Adds one param group per aux module (own LR/WD + role marker) on top of the standard overrides."""
 
-    #: Required despite the None default — a dataclass field with no default here would
-    #: force every caller to pass it positionally past the base class's own fields.
-    #: ``build_config_overrides`` refuses None, so an unset value never reaches the optimizer.
-    aux_lr: float | None = None
-    aux_min_lr: float | None = None
-    aux_wd_mult: float = 1.0
+    #: Required despite the empty defaults — dataclass fields with no default here would
+    #: force every caller to pass them positionally past the base class's own fields.
+    #: ``build_config_overrides`` refuses empty lists, so unset values never reach the optimizer.
+    aux_lrs: list[float] = field(default_factory=list)
+    aux_min_lrs: list[float] = field(default_factory=list)
+    aux_wd_mults: list[float] = field(default_factory=list)
 
     def build_config_overrides(self, context: OptimizerConfigOverrideProviderContext):
-        """Standard overrides plus one ParamKey capturing every ``gr_aux`` parameter."""
+        """Standard overrides plus one ParamKey per aux module.
+
+        The per-index patterns (``*.gr_aux.<k>.*``) are mutually disjoint, so no
+        parameter can match two aux overrides regardless of the matcher's precedence
+        rules.
+        """
         overrides = super().build_config_overrides(context) or {}
-        if self.aux_lr is None or self.aux_min_lr is None:
-            raise ValueError("GROptimizerConfigOverrideProvider requires explicit aux_lr and aux_min_lr.")
-        aux_override = ParamGroupOverride(max_lr=self.aux_lr, min_lr=self.aux_min_lr, wd_mult=self.aux_wd_mult)
-        aux_override[GR_ROLE_KEY] = GR_ROLE_AUX
-        overrides[ParamKey(name=GR_AUX_PARAM_PATTERN)] = aux_override
-        model_list = context.model if isinstance(context.model, list) else [context.model]
-        n_aux = sum(1 for chunk in model_list for name, _ in chunk.named_parameters() if GR_AUX_NAME_FRAGMENT in name)
-        if n_aux == 0:
+        n_aux = len(self.aux_lrs)
+        if n_aux == 0 or len(self.aux_min_lrs) != n_aux or len(self.aux_wd_mults) != n_aux:
             raise ValueError(
-                "GR optimizer override installed but the model has no '.gr_aux.' parameters — "
-                "the GRAM spec swap did not run. Check model.gr_aux_ffn_hidden_size wiring."
+                "GROptimizerConfigOverrideProvider requires equal-length non-empty "
+                f"aux_lrs/aux_min_lrs/aux_wd_mults, got {self.aux_lrs}/{self.aux_min_lrs}/{self.aux_wd_mults}."
             )
+        for k, (lr, min_lr, wd_mult) in enumerate(zip(self.aux_lrs, self.aux_min_lrs, self.aux_wd_mults)):
+            aux_override = ParamGroupOverride(max_lr=lr, min_lr=min_lr, wd_mult=wd_mult)
+            aux_override[GR_ROLE_KEY] = gr_aux_role(k)
+            overrides[ParamKey(name=gr_aux_param_pattern(k))] = aux_override
+        model_list = context.model if isinstance(context.model, list) else [context.model]
+        for k in range(n_aux):
+            fragment = f"{GR_AUX_NAME_FRAGMENT}{k}."
+            n_params = sum(1 for chunk in model_list for name, _ in chunk.named_parameters() if fragment in name)
+            if n_params == 0:
+                raise ValueError(
+                    f"GR optimizer override installed for aux module {k} but the model has no "
+                    f"'{fragment}' parameters — the GRAM spec swap built fewer modules than the "
+                    "gr: section configures. Check model.gr_aux_ffn_hidden_size wiring."
+                )
         return overrides
 
 
@@ -104,8 +135,11 @@ def _iter_inner_param_groups(optimizer: MegatronOptimizer):
 class GROptimizerGater:
     """Empties/restores param groups per iteration according to the plan's update sets."""
 
-    def __init__(self):
-        self._aux_groups = None
+    def __init__(self, n_aux: int):
+        if n_aux <= 0:
+            raise ValueError(f"GROptimizerGater requires n_aux >= 1, got {n_aux}.")
+        self._n_aux = n_aux
+        self._aux_groups: dict[int, list] | None = None
         self._core_groups = None
         self._stash: dict[int, list] | None = None
         self._armed_roles: frozenset | None = None
@@ -113,34 +147,47 @@ class GROptimizerGater:
 
     def discover(self, optimizer: MegatronOptimizer) -> None:
         """Classify every inner param group by role; loud on anything unexpected."""
-        aux, core = [], []
+        aux: dict[int, list] = {k: [] for k in range(self._n_aux)}
+        core = []
         for group in _iter_inner_param_groups(optimizer):
-            (aux if group.get(GR_ROLE_KEY) == GR_ROLE_AUX else core).append(group)
-        if not aux:
+            index = _parse_aux_role(group.get(GR_ROLE_KEY))
+            if index is None:
+                core.append(group)
+            elif index in aux:
+                aux[index].append(group)
+            else:
+                raise RuntimeError(
+                    f"GR gater found a group marked '{group.get(GR_ROLE_KEY)}' but only "
+                    f"{self._n_aux} aux modules are configured — provider and gater disagree."
+                )
+        missing = [k for k, groups in aux.items() if not groups]
+        if missing:
             # Structural check only: group STRUCTURE is rank-uniform (mcore all-gathers the
             # override keys), but shard OWNERSHIP is not — under the distributed optimizer
-            # a rank whose data-parallel shard doesn't intersect the aux params legitimately
-            # holds an aux group with zero shard tensors (observed: DP4 tiny model, aux in
-            # one rank's bucket quarter). Emptiness must therefore NOT be treated as a
-            # wiring failure; emptying an already-empty group is a correct no-op.
+            # a rank whose data-parallel shard doesn't intersect a module's params
+            # legitimately holds that module's group with zero shard tensors (observed:
+            # DP4 tiny model, aux in one rank's bucket quarter). Emptiness of a PRESENT
+            # group must therefore NOT be treated as a wiring failure; a wholly ABSENT
+            # group means the override never reached the optimizer.
             census = "; ".join(
                 f"group{i}(keys={sorted(k for k in g if k != 'params')}, n_params={len(g['params'])}, "
                 f"max_lr={g.get('max_lr')}, expert={g.get('is_expert_parallel')})"
                 for i, g in enumerate(_iter_inner_param_groups(optimizer))
             )
             raise RuntimeError(
-                "GR gater found no aux-marked param group. The aux override did not reach the "
-                "optimizer — check that cfg.optimizer_config_override_provider is the GR provider. "
-                f"Inner group census: {census}"
+                f"GR gater found no param group for aux module(s) {missing}. The aux override did "
+                "not reach the optimizer — check that cfg.optimizer_config_override_provider is "
+                f"the GR provider. Inner group census: {census}"
             )
         if not core:
             raise RuntimeError("GR gater found no core param group — optimizer wiring is broken.")
         self._aux_groups = aux
         self._core_groups = core
         logger.info(
-            "GR gater: %d aux group(s) (%d with local shards), %d core group(s).",
-            len(aux),
-            sum(1 for g in aux if g["params"]),
+            "GR gater: %d aux module(s) with %s group(s) (%s with local shards), %d core group(s).",
+            self._n_aux,
+            [len(groups) for groups in aux.values()],
+            [sum(1 for g in groups if g["params"]) for groups in aux.values()],
             len(core),
         )
 
@@ -149,13 +196,24 @@ class GROptimizerGater:
         """Whether group discovery has run."""
         return self._aux_groups is not None
 
-    def arm(self, update_core: bool, update_aux: bool) -> None:
+    def arm(self, update_core: bool, update_aux) -> None:
         """Empty the groups of every role NOT in this iteration's update set.
 
-        Idempotent for the same roles (the rerun state machine may invoke grad
-        finalization more than once per step); conflicting re-arms raise.
+        ``update_aux`` is one boolean per aux module. Idempotent for the same roles (the
+        rerun state machine may invoke grad finalization more than once per step);
+        conflicting re-arms raise.
         """
-        roles = frozenset(role for role, updates in (("core", update_core), ("aux", update_aux)) if not updates)
+        update_aux = [bool(v) for v in update_aux]
+        if len(update_aux) != self._n_aux:
+            raise RuntimeError(f"GR gater armed with {len(update_aux)} aux update flags for {self._n_aux} modules.")
+        roles = frozenset(
+            role
+            for role, updates in (
+                ("core", update_core),
+                *((gr_aux_role(k), update_aux[k]) for k in range(self._n_aux)),
+            )
+            if not updates
+        )
         if self._stash is not None:
             if roles == self._armed_roles:
                 return
@@ -163,13 +221,14 @@ class GROptimizerGater:
                 f"GR gater re-armed with {set(roles)} while already armed with "
                 f"{set(self._armed_roles)} — restore() did not run for the previous step."
             )
-        if not update_core and not update_aux:
-            raise RuntimeError("GR plan asks to update neither core nor aux — the plan is malformed.")
+        if not update_core and not any(update_aux):
+            raise RuntimeError("GR plan asks to update neither core nor any aux — the plan is malformed.")
         frozen = []
         if not update_core:
             frozen.extend(self._core_groups)
-        if not update_aux:
-            frozen.extend(self._aux_groups)
+        for k in range(self._n_aux):
+            if not update_aux[k]:
+                frozen.extend(self._aux_groups[k])
         self._stash = {id(g): g["params"] for g in frozen}
         self._frozen_groups = frozen
         for g in frozen:
@@ -218,7 +277,7 @@ def gr_finalize_model_grads(*args, **kwargs):
     plan = runtime["plan"]
     gater.arm(
         update_core=bool(plan.update_core[iteration]),
-        update_aux=bool(plan.update_aux[iteration]),
+        update_aux=plan.update_aux[iteration],
     )
     return result
 

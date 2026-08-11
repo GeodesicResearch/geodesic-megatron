@@ -56,8 +56,12 @@ if warm_start != seed_save:
         f"The two smoke configs must be chained or phase 2 tests nothing."
     )
 
+with open(gr_cfg) as fh:
+    n_aux = len(yaml.safe_load(fh)["gr"]["aux_data_paths"])
+
 print(f"SEED_SAVE={shlex.quote(seed_save)}")
 print(f"GR_SAVE={shlex.quote(gr_save)}")
+print(f"N_AUX={n_aux}")
 PY
 # shellcheck source=/dev/null
 source "$SMOKE_PATHS_SH"
@@ -83,8 +87,10 @@ test -f "$GR_SAVE/latest_checkpointed_iteration.txt" || {
 }
 
 echo "=== GR smoke post-checks ==="
+# N_AUX comes from the config parse above: the smoke GR config itself sets the expected
+# module count, so a config edit cannot silently weaken the census assertion.
 ./pipeline_env_exec.sh "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; \
     python scripts/gradient_routing/check_gr_smoke_result.py \
-        --seed-checkpoint $SEED_SAVE --gr-checkpoint $GR_SAVE"
+        --seed-checkpoint $SEED_SAVE --gr-checkpoint $GR_SAVE --expect-aux-modules $N_AUX"
 
 echo "GR FUNCTIONAL SMOKE PASS"

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""GRAM gradient routing: iteration-level routing of forget-corpus updates into aux modules.
+"""GRAM gradient routing: iteration-level routing of each aux corpus's updates into its own module.
 
 The package splits by responsibility:
 

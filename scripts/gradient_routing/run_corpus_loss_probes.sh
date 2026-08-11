@@ -72,12 +72,20 @@ echo "[probes] matrix=$MATRIX"
 echo "[probes] nodes=$NODES nodelist=$NODELIST"
 echo "[probes] outdir=$OUTDIR"
 
-while IFS=$'\t' read -r NAME CKPT PREFIX; do
+while IFS=$'\t' read -r NAME CKPT PREFIX EXTRAS; do
     case "$NAME" in ''|'#'*|NAME) continue ;; esac
     wanted "$NAME" || continue
 
     LOG="$OUTDIR/${NAME}.log"
     echo "[probes] === $NAME -> $LOG"
+
+    # Optional 4th column: space-separated extra Hydra overrides for this row — e.g. a
+    # GRAM profile probe carries model.gr_aux_ffn_hidden_size=[...] and
+    # model.gr_static_gates=[...], a learning-curve probe carries checkpoint.ckpt_step=N.
+    EXTRA_ARGS=()
+    if [ -n "${EXTRAS:-}" ]; then
+        read -r -a EXTRA_ARGS <<< "$EXTRAS"
+    fi
 
     set +e
     bash pipeline_training_launch.sh "$CONFIG" \
@@ -85,7 +93,8 @@ while IFS=$'\t' read -r NAME CKPT PREFIX; do
         --nodes "$NODES" --nodelist "$NODELIST" \
         "checkpoint.pretrained_checkpoint=$CKPT" \
         "dataset.data_path=['1.0','$PREFIX']" \
-        "logger.wandb_exp_name=loss_probe_${NAME}" > "$LOG" 2>&1 < /dev/null
+        "logger.wandb_exp_name=loss_probe_${NAME}" \
+        ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} > "$LOG" 2>&1 < /dev/null
     RC=$?
     set -e
 

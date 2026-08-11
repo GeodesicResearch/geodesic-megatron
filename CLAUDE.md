@@ -451,16 +451,20 @@ recipe already supplies bf16_mixed, no CUDA graphs, and native CE. Final checkpo
 not a usable model — no coherence test (expected gibberish; sanity = loss ~12.2 → ~7.6
 over the 40 iterations, 0 NaN, as in the anchors above).
 
-### Gradient routing (GRAM) — modular CPT with removable "forget" modules
+### Gradient routing (GRAM) — modular training with removable capability modules
 
-GEOD-171. A warm-start port of GRAM (arXiv 2607.08077, "Modular Pretraining Enables
-Access Control"): each of Nano-30B's 23 MoE layers gains one **gateless auxiliary MLP**
-(shared-expert-shaped, zero-init output proj) whose output is added under a 0/1 scalar
-gate driven per ITERATION from a deterministic seeded plan. Forget-corpus iterations
-train the aux modules (p_as=0.5 of them also update core); retain iterations train core
-(p_cr=0.2 also activate+update aux). At inference/export the aux modules can be enabled
-(merged into the shared expert — mathematically exact for Nano's non-gated squared-relu,
-coefficient-1.0 shared expert) or dropped (byte-stock NemotronH). Implementation:
+GEOD-171. A port of GRAM (arXiv 2607.08077, "Modular Pretraining Enables
+Access Control"): each of Nano-30B's 23 MoE layers gains **N gateless auxiliary MLPs —
+one per routed capability** (shared-expert-shaped, zero-init output proj), each added
+under its own 0/1 gate driven per ITERATION from a deterministic seeded plan; a
+single-forget run is the N=1 case of the same machinery. Aux-corpus iterations train
+their own module (a p_as share also updates core); core iterations train core (a p_cr
+share also activates+updates ONE module, allocated by data share). Runs in `--mode cpt`
+(warm start) and `--mode pretrain` (from scratch, the Simple Stories campaign's
+setting). At inference/export any module SUBSET can be enabled (merged into the shared
+expert — mathematically exact for Nano's non-gated squared-relu, coefficient-1.0 shared
+expert, and additive per module) or dropped (all-off = byte-stock NemotronH);
+Megatron-side profile probing pins `model.gr_static_gates` instead. Implementation:
 `src/megatron/bridge/models/mamba/gram_layer.py` +
 `src/megatron/bridge/training/gradient_routing/` + `data/datasets/gr_routed_dataset.py`;
 all diffs inert when the YAML `gr:` section is absent; `train.py` untouched.
@@ -478,23 +482,27 @@ Key design facts (the why lives in the module docstrings):
   contiguous window of one corpus (children keep their own seeded shuffles).
 - **Aux executes every microbatch** (gate·out): Megatron DDP buckets need every param to
   produce a grad each µb; gate=0 yields exact-zero grads and a bitwise-core forward.
-- Aux LR is its own param group via mcore `config_overrides` (`gr.aux_lr`, REQUIRED, no
-  default); groups carry a `gr_role: aux` marker.
+- Each module's LR is its own param group via mcore `config_overrides` (`gr.aux_lr`,
+  REQUIRED, no default; scalar broadcasts); groups carry `gr_role: aux<k>` markers, and
+  override-equality grouping is what lets one module step while its siblings freeze.
 - Launch guards refuse: PP>1/VPP, CUDA graphs, MTP, non-adam, batch ramps, eval_iters>0,
   optimizer CPU offload (its HybridDeviceOptimizer steps its own sub-optimizer param
   lists, so emptying `param_groups` would gate nothing), in-process restart (rebuilds the
-  optimizer under a gater that caches its discovery), strictness that can't tolerate the
-  base checkpoint's missing `gr_aux` keys, and any half-configured state. GR is wired for
-  `--mode cpt` only. A mid-plan resume additionally refuses a plan whose digest differs
-  from the one the checkpoint was trained under.
+  optimizer under a gater that caches its discovery), strictness that can't tolerate a
+  base checkpoint's missing `gr_aux` keys, `model.gr_static_gates` on a training run,
+  and any half-configured state. A mid-plan resume additionally refuses a plan whose
+  digest differs from the one the checkpoint was trained under, and refuses pre-multi-
+  module-schema checkpoints outright (all completed their plans; warm-start from them
+  instead).
 - Mainline config: `configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml` (seq 8192,
   GBS 1024, 120 iters = 503,316,480 tokens/corpus exact; wmdp-corpora bio-retain
   CORPUS (training text, not the WMDP benchmark) + misalignment-scenario forget, both
   base-tokenizer `.bin`s — that corpus dir's ORIGINAL Jan-era `.bin` is NeoX-tokenized
   and unusable; use `tokenized_base_text_document`).
-- Functional smoke: `bash scripts/gradient_routing/run_gr_functional_smoke.sh [node]`
-  (tiny 6-layer hybrid: 5-iter seed pretrain → 20-iter GR-CPT warm start → aux-trained
-  post-checks). Export postures: `scripts/gradient_routing/bake_forget_postures.py` (+
+- Functional smoke: `isambard_sbatch scripts/gradient_routing/gr_smoke_submit.sbatch`
+  (or `bash scripts/gradient_routing/run_gr_functional_smoke.sh [node]` from inside an
+  allocation; tiny 6-layer hybrid: 5-iter seed pretrain → 20-iter GR-CPT warm start →
+  aux-trained post-checks). Export postures: `scripts/gradient_routing/bake_postures.py` (+
   `verify_posture_equivalence.py`); raw export MUST be the single-process
   `from_auto_config` path (the multi-GPU path silently drops non-stock keys).
 - **Does routing cost retain-side learning? Measured: essentially no.** Three arms, all
@@ -530,7 +538,8 @@ Key design facts (the why lives in the module docstrings):
   lands on the filtering arm (111%/137% vs 112%/133% of the control's acquired propensity
   removed). Measured with eval-only
   corpus loss probes
-  (`nemotron_nano_corpus_loss_probe.yaml` + `scripts/gradient_routing/run_corpus_loss_probes.sh`),
+  (`nemotron_nano_corpus_loss_probe.yaml` + `scripts/gradient_routing/run_corpus_loss_probes.sh`,
+  submitted via `scripts/gradient_routing/gr_probes_submit.sbatch`),
   which score any checkpoint on any `.bin/.idx` corpus on byte-identical batches —
   training-stack introspection, not eval logic. **Do not substitute GR's per-iteration
   training losses for these probes**: forget iterations run with aux ACTIVE (so they

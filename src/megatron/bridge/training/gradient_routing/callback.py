@@ -15,7 +15,8 @@
 
 Per iteration ``i`` (``state.train_state.step``, constant across the whole step):
 
-- ``gr_gate`` on every GRAM MoE layer <- ``plan.fwd_aux[i]`` (forward activation);
+- ``gr_gate`` on every GRAM MoE layer <- ``plan.fwd_aux[i]`` (per-module forward
+  activation vector);
 - ``frozen_expert_bias`` on every router <- ``not plan.update_core[i]`` — the router's
   expert-bias load-balancing update runs OUTSIDE the optimizer (in grad finalization), so
   it must be frozen explicitly on iterations that do not update core;
@@ -33,7 +34,7 @@ import torch
 from megatron.bridge.models.mamba.gram_layer import GRAMMoELayer
 from megatron.bridge.training.callbacks import Callback, CallbackContext
 from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerGater
-from megatron.bridge.training.gradient_routing.plan import FORGET, GRPlan, build_gr_plan
+from megatron.bridge.training.gradient_routing.plan import CORE, GRPlan, build_gr_plan
 from megatron.bridge.training.utils.checkpoint_utils import (
     file_exists,
     get_checkpoint_name,
@@ -55,8 +56,8 @@ class GRCallback(Callback):
         self._log_interval = log_interval
         self._gram_layers: list[GRAMMoELayer] = []
         self._routers: list = []
-        self._probe_handle = None
-        self._probe_rms: float | None = None
+        self._probe_handles: list = []
+        self._probe_rms: dict[int, float] = {}
 
     def on_train_start(self, context: CallbackContext) -> None:
         """Build module registries, sanity-check the warm start, log the plan."""
@@ -75,15 +76,21 @@ class GRCallback(Callback):
                 "GRCallback found no GRAMMoELayer in the model — the GRAM spec swap did not run. "
                 "Check model.gr_aux_ffn_hidden_size wiring."
             )
+        for layer in self._gram_layers:
+            if len(layer.gr_aux) != self._plan.n_aux:
+                raise RuntimeError(
+                    f"A GRAM layer carries {len(layer.gr_aux)} aux modules but the plan routes "
+                    f"{self._plan.n_aux} — model surgery and plan disagree about the module count."
+                )
         # The per-iteration freeze is applied to the routers collected above, while Megatron
         # updates expert_bias on EVERY module that carries one. A bias carrier outside the
-        # swapped stack spec would keep updating on forget-isolated iterations — an invisible
-        # leak of forget-corpus signal into router state.
+        # swapped stack spec would keep updating on aux-isolated iterations — an invisible
+        # leak of routed-corpus signal into router state.
         if bias_carriers != len(self._routers):
             raise RuntimeError(
                 f"{bias_carriers} module(s) carry expert_bias but only {len(self._routers)} are "
                 "GRAM routers this callback can freeze. Every expert-bias carrier must be inside "
-                "the GRAM spec swap, or its bias would keep learning from the forget corpus on "
+                "the GRAM spec swap, or its bias would keep learning from a routed corpus on "
                 "iterations where the core is supposed to be frozen."
             )
         start = context.state.train_state.step
@@ -92,22 +99,24 @@ class GRCallback(Callback):
         # runs restart-fatal (ft_launcher restarts, singleton chains, save_interval runs).
         if start == 0:
             for layer in self._gram_layers:
-                w = layer.gr_aux.linear_fc2.weight
-                if not torch.all(w == 0):
-                    raise RuntimeError(
-                        "A gr_aux.linear_fc2.weight is non-zero at iteration 0. On a warm start "
-                        "these must be exactly zero (fresh zero-init, untouched by the checkpoint "
-                        "load); a non-zero value means the load clobbered them, or a GR checkpoint "
-                        "was loaded as `pretrained_checkpoint` (a warm start) rather than resumed "
-                        "via `load` (which carries the iteration and resumes the plan)."
-                    )
+                for k, aux in enumerate(layer.gr_aux):
+                    if not torch.all(aux.linear_fc2.weight == 0):
+                        raise RuntimeError(
+                            f"gr_aux.{k}.linear_fc2.weight is non-zero at iteration 0. At the start "
+                            "of a plan these must be exactly zero (fresh zero-init, untouched by any "
+                            "checkpoint load); a non-zero value means the load clobbered them, or a "
+                            "GR checkpoint was loaded as `pretrained_checkpoint` (a warm start) "
+                            "rather than resumed via `load` (which carries the iteration and resumes "
+                            "the plan)."
+                        )
         else:
             self._assert_plan_matches_checkpoint(context)
             logger.info("GR resume at iteration %d: plan re-derived deterministically.", start)
         logger.info("%s", self._plan.describe())
         logger.info(
-            "GR: %d GRAM MoE layers, aux params %.1fM per model.",
+            "GR: %d GRAM MoE layers, %d aux module(s)/layer, aux params %.1fM per model.",
             len(self._gram_layers),
+            self._plan.n_aux,
             sum(p.numel() for layer in self._gram_layers for p in layer.gr_aux.parameters()) / 1e6,
         )
         log_wandb_metrics_nonfatal({"run/gr_plan_digest_int": int(self._plan.digest()[:8], 16)}, step=start)
@@ -115,12 +124,12 @@ class GRCallback(Callback):
     def _assert_plan_matches_checkpoint(self, context: CallbackContext) -> None:
         """Refuse a resume whose plan differs from the one the checkpoint was trained under.
 
-        The plan is a pure function of (plan_seed, train_iters, forget_iter_fraction, p_as,
+        The plan is a pure function of (plan_seed, train_iters, aux_iter_fractions, p_as,
         p_cr), so changing ANY of them between a save and a resume silently relabels every
         remaining iteration AND shifts each corpus's consumption offset — the run would keep
         training, on different data, against a different routing schedule, with nothing in
-        the logs to say so. The checkpoint's own ``run_config.yaml`` carries those five
-        values, so the resumed plan is checked against a plan rebuilt from them.
+        the logs to say so. The checkpoint's own ``run_config.yaml`` carries those values,
+        so the resumed plan is checked against a plan rebuilt from them.
         """
         cfg = context.state.cfg
         run_config_path = get_checkpoint_run_config_filename(
@@ -135,10 +144,17 @@ class GRCallback(Callback):
             )
         saved = read_run_config(run_config_path)
         saved_gr = saved.get("gr") or {}
+        if "forget_iter_fraction" in saved_gr or "forget_data_path" in saved_gr:
+            raise RuntimeError(
+                "The checkpoint's run_config carries the pre-multi-module gr schema "
+                "(forget_data_path/forget_iter_fraction). Mid-plan resume across the schema "
+                "migration is not supported — every pre-migration GR run completed its plan, so "
+                "load its final checkpoint as pretrained_checkpoint (a warm start) instead."
+            )
         saved_plan = build_gr_plan(
             plan_seed=saved_gr["plan_seed"],
             train_iters=saved["train"]["train_iters"],
-            forget_iter_fraction=saved_gr["forget_iter_fraction"],
+            aux_iter_fractions=saved_gr["aux_iter_fractions"],
             p_as=saved_gr["p_as"],
             p_cr=saved_gr["p_cr"],
         )
@@ -146,63 +162,67 @@ class GRCallback(Callback):
             raise RuntimeError(
                 f"GR plan mismatch on resume: this run's plan digest is {self._plan.digest()} but the "
                 f"checkpoint was trained under {saved_plan.digest()}. One of plan_seed, train_iters, "
-                "forget_iter_fraction, p_as or p_cr changed, which relabels every remaining iteration "
+                "aux_iter_fractions, p_as or p_cr changed, which relabels every remaining iteration "
                 "and shifts the per-corpus data offsets. Restore the original values, or start a new "
                 "run rather than resuming into a different experiment."
             )
 
     def on_train_step_start(self, context: CallbackContext) -> None:
-        """Set this iteration's forward gate and expert-bias freeze from the plan."""
+        """Set this iteration's forward gates and expert-bias freeze from the plan."""
         it = context.state.train_state.step
-        fwd = float(self._plan.fwd_aux[it])
+        fwd_row = self._plan.fwd_aux[it]
         freeze_bias = not bool(self._plan.update_core[it])
+        gate_values = None
         for layer in self._gram_layers:
-            layer.gr_gate.fill_(fwd)
+            if gate_values is None or gate_values.device != layer.gr_gate.device:
+                gate_values = torch.as_tensor(fwd_row, dtype=layer.gr_gate.dtype, device=layer.gr_gate.device)
+            layer.gr_gate.copy_(gate_values)
         for router in self._routers:
             router.frozen_expert_bias = freeze_bias
-        if it % self._log_interval == 0 and self._probe_handle is None:
-            probe_layer = self._gram_layers[0].gr_aux
+        if it % self._log_interval == 0 and not self._probe_handles:
+            for k, probe_module in enumerate(self._gram_layers[0].gr_aux):
 
-            def _probe(_module, _inputs, output):
-                with torch.no_grad():
-                    rms = output.detach().float().pow(2).mean().sqrt()
-                    # gate * aux(h) is bitwise core-only for FINITE aux output; 0 * inf is NaN,
-                    # so an aux overflow would silently poison a retain iteration where the aux
-                    # is supposed to be inert. The probe already pays a sync here.
-                    if not torch.isfinite(rms):
-                        raise RuntimeError(
-                            "gr_aux output is non-finite. The gated forward adds gate * aux(h), and "
-                            "0 * inf is NaN, so a non-finite aux corrupts even the iterations where "
-                            "the gate is off. Lower gr.aux_lr."
-                        )
-                    self._probe_rms = float(rms.item())
+                def _probe(_module, _inputs, output, _k=k):
+                    with torch.no_grad():
+                        rms = output.detach().float().pow(2).mean().sqrt()
+                        # gate * aux(h) is bitwise core-only for FINITE aux output; 0 * inf is
+                        # NaN, so an aux overflow would silently poison an iteration where that
+                        # module is supposed to be inert. The probe already pays a sync here.
+                        if not torch.isfinite(rms):
+                            raise RuntimeError(
+                                f"gr_aux.{_k} output is non-finite. The gated forward adds "
+                                "gate_k * aux_k(h), and 0 * inf is NaN, so a non-finite aux corrupts "
+                                "even the iterations where its gate is off. Lower gr.aux_lr."
+                            )
+                        self._probe_rms[_k] = float(rms.item())
 
-            self._probe_handle = probe_layer.register_forward_hook(_probe)
+                self._probe_handles.append(probe_module.register_forward_hook(_probe))
 
     def on_train_step_end(self, context: CallbackContext) -> None:
         """Restore emptied param groups, then emit the iteration's telemetry."""
         self._gater.restore()
-        if self._probe_handle is not None:
-            self._probe_handle.remove()
-            self._probe_handle = None
+        for handle in self._probe_handles:
+            handle.remove()
+        self._probe_handles = []
         it = context.state.train_state.step
         corpus = int(self._plan.corpus[it])
         metrics = {
             "gr/corpus": corpus,
-            "gr/fwd_aux": int(self._plan.fwd_aux[it]),
             "gr/update_core": int(self._plan.update_core[it]),
-            "gr/update_aux": int(self._plan.update_aux[it]),
-            "gr/aux_steps_cum": int(self._plan.update_aux[: it + 1].sum()),
             "gr/core_steps_cum": int(self._plan.update_core[: it + 1].sum()),
         }
+        for k in range(self._plan.n_aux):
+            metrics[f"gr/fwd_aux_{k}"] = int(self._plan.fwd_aux[it, k])
+            metrics[f"gr/update_aux_{k}"] = int(self._plan.update_aux[it, k])
+            metrics[f"gr/aux{k}_steps_cum"] = int(self._plan.update_aux[: it + 1, k].sum())
         loss_dict = context.loss_dict or {}
         lm_loss = loss_dict.get("lm loss")
         if lm_loss is not None:
-            key = "gr/loss_forget" if corpus == FORGET else "gr/loss_retain"
+            key = "gr/loss_core" if corpus == CORE else f"gr/loss_corpus{corpus}"
             metrics[key] = float(lm_loss.item() if torch.is_tensor(lm_loss) else lm_loss)
-        if self._probe_rms is not None:
-            metrics["gr/aux_out_rms"] = self._probe_rms
-            self._probe_rms = None
+        for k, rms in self._probe_rms.items():
+            metrics[f"gr/aux{k}_out_rms"] = rms
+        self._probe_rms = {}
 
         def _with_param_norm() -> dict:
             # One device sync per aux parameter, so it is deferred into the thunk: the
@@ -210,12 +230,15 @@ class GRCallback(Callback):
             # every rank paying for a payload the others discard.
             if it % self._log_interval != 0:
                 return metrics
+            norms = {}
             with torch.no_grad():
-                sq = torch.zeros((), dtype=torch.float32, device=self._gram_layers[0].gr_gate.device)
-                for layer in self._gram_layers:
-                    for p in layer.gr_aux.parameters():
-                        sq += p.float().pow(2).sum()
-            return {**metrics, "gr/aux_param_norm": float(sq.sqrt().item())}
+                for k in range(self._plan.n_aux):
+                    sq = torch.zeros((), dtype=torch.float32, device=self._gram_layers[0].gr_gate.device)
+                    for layer in self._gram_layers:
+                        for p in layer.gr_aux[k].parameters():
+                            sq += p.float().pow(2).sum()
+                    norms[f"gr/aux{k}_param_norm"] = float(sq.sqrt().item())
+            return {**metrics, **norms}
 
         # Megatron's own iteration metrics are logged AFTER train_state.step is incremented,
         # so iteration `it` lands on W&B step `it + 1`. Matching that keeps gr/* joinable

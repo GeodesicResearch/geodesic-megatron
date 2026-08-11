@@ -1,29 +1,41 @@
-# GEOD-171 posture bake — the mainline GR-CPT checkpoint's two inference postures.
+# GEOD-171 posture bake — the mainline GR-CPT checkpoint's inference postures.
 #
 # Source = the raw single-process HF export (carries the 46 gr_aux tensors + the base
-# tokenizer with no chat template + the nvidia modeling files). Outputs:
+# tokenizer with no chat template + the nvidia modeling files). Outputs one dir per
+# posture named below:
 #   <output_root>/forget_off/  aux dropped, byte-stock NemotronH config (shared 3712)
-#   <output_root>/forget_on/   aux merged into the shared experts (shared 3712+1856=5568)
+#   <output_root>/forget_on/   module 0 merged into the shared experts (3712+1856=5568)
 #
 # Invocation (in-container):
-#   python scripts/gradient_routing/bake_forget_postures.py --config configs/gradient_routing/bake_postures.yaml
+#   python scripts/gradient_routing/bake_postures.py --config configs/gradient_routing/bake_postures.yaml
 
 # Raw single-process HF export of the trained GR checkpoint. It MUST still carry the
-# backbone.layers.<L>.mixer.gr_aux.* keys — the multi-GPU export path builds from the
+# backbone.layers.<L>.mixer.gr_aux.<k>.* keys — the multi-GPU export path builds from the
 # stock upstream config and drops them, and the bake refuses such a dir.
 # KEEP THIS DIR after baking: shards that need no rewrite are SYMLINKED into the posture
 # dirs (only those holding aux/shared tensors are rewritten), and
 # verify_posture_equivalence.py reads its reference aux weights from here. Deleting it to
-# reclaim quota silently breaks both postures.
+# reclaim quota silently breaks every posture.
 source_dir: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/hf
 output_root: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/postures
 strip_chat_template: true
 expected_layers: 23
 
-# config.json fields overwritten in BOTH postures: the bridge export stamps
+# Posture name -> the aux module indices that posture enables; each name becomes a
+# subdirectory of output_root. An empty list is the all-off, byte-stock checkpoint; a
+# non-empty one merges exactly those modules (in the listed ascending order) into each
+# layer's shared expert and drops the rest. This checkpoint carries one module per layer,
+# so the two conventional postures are all-off and module 0 on. A checkpoint trained with
+# several aux modules adds one entry per subset worth evaluating, e.g.
+# `forget_on_bio: [0]`, `forget_on_cyber: [1]`, `forget_on_both: [0, 1]`.
+postures:
+  forget_off: []
+  forget_on: [0]
+
+# config.json fields overwritten in EVERY posture: the bridge export stamps
 # max_position_embeddings with the CPT seq len (8192); the stock Nano-30B
 # architecture declares 262144 and vLLM refuses max_model_len above the stamped
-# value. Applied identically to both postures; recorded in forget_posture.json.
+# value. Applied identically to every posture; recorded in forget_posture.json.
 # (The shipped artifacts at output_root above were patched in place to these
 # values on 2026-08-06; a re-bake reproduces them via this block.)
 config_overrides:

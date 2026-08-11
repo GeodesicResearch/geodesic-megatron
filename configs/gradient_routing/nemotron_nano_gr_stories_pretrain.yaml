@@ -1,0 +1,152 @@
+# Nemotron 3 Nano (30B-A3B) GRAM from-scratch pretrain on SimpleStories — GEOD-171j.
+# The paper's Simple Stories experiment (arXiv 2607.08077 §4, Fig 2) on this architecture:
+# ONE run with N=4 auxiliary modules, whose five capability profiles ({core},
+# {core, aux_i}) are served at eval by gating module subsets, compared against five
+# separately trained data-filtered models (overrides of
+# nemotron_nano_stories_baseline_pretrain.yaml).
+#
+# FROM SCRATCH (--mode pretrain, random init, NVIDIA pretrain recipe LR/schedule): a
+# warm-started 30B already writes children's stories in all 48 topics, so topic-level
+# capability separation on warm weights would measure nothing. This is a deliberately
+# overparametrized regime (30B on ~541M tokens, ~1 epoch) — the comparison is GRAM vs
+# filtering under identical conditions, never an absolute-capability claim.
+#
+# BATCH POSTURE: seq 1024, GBS 256 = 262,144 tokens/iter. NOT the 8192/1024 house
+# posture: iteration-level routing needs iterations. At the house posture SimpleStories
+# is ~60 iterations total (~1 routed step per module); at this posture one epoch is 2,064
+# iterations with ~43-44 isolated steps per module. The paper ran 16,544 steps at 32K
+# tokens/step; this is the closest our GBS-divisibility (DP=64 on 16 nodes) allows at ~1
+# epoch. Stories average ~256 tokens under this tokenizer, so seq-1024 packs ~4 stories
+# per sequence through the standard EOD-packed GPTDataset.
+#
+# TOKEN MATH (measured from the .idx files, nemotron-base-tokenizer, --append-eod;
+# provenance in /projects/a5k/public/data/simple_stories/provenance.json):
+#   core (44 topics)        495,781,155 train tokens
+#   aux_deadline             11,358,397   a-deadline-or-time-limit
+#   aux_aliens               11,216,176   alien-encounters
+#   aux_eras                 11,431,099   bygone-eras
+#   aux_cultures              11,430,856   cultural-traditions
+#   total                    541,217,683  -> 2,064.6 iters at 262,144 tokens/iter
+#   train_iters 2064 = 0.9994 epochs of core and 0.994-1.005 of each aux at the
+#   fractions below (round(f_k * 2064) = 43/43/44/44 iterations per module).
+#
+# KNOBS: p_as=0.3, p_cr=0.5 — the paper's PUBLISHED Simple Stories values (its §5
+# realistic-dual-use experiment uses 0.5/0.2, which are this repo's config defaults; the
+# two settings differ per experiment in the paper itself). aux_iter_fractions are the
+# measured token shares, i.e. the paper's p_af=1.0 no-oversampling posture. Aux width
+# 1856 = one routed-expert width (~12% of active FFN; the paper's rule is ~10% of MLP
+# width). aux_lr = the core LR: from scratch BOTH core and aux are fresh — the 10x-core
+# aux LR of the warm-start CPT configs exists because a zero-init module meets a warm
+# core, which does not transfer here.
+#
+# LAUNCH (GPU work queues via sbatch — never in a code tunnel):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#     configs/gradient_routing/nemotron_nano_gr_stories_pretrain.yaml nano pretrain --disable-ft
+#
+# SCORING: eval-only corpus-loss probes over the five profiles x six val corpora — the
+# probe override sets model.gr_aux_ffn_hidden_size=[1856,1856,1856,1856] and
+# model.gr_static_gates=[...] (e.g. [0,1,0,0] = the {core, aux_aliens} profile) on
+# nemotron_nano_corpus_loss_probe.yaml with this run's checkpoint. No HF export is on the
+# scoring path.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+gr:
+  enabled: true
+  retain_data_path:
+    - "1.0"
+    - /projects/a5k/public/data/simple_stories/core_train_text_document
+  aux_data_paths:            # module order = the paper's alphabetical aux order
+    - - "1.0"
+      - /projects/a5k/public/data/simple_stories/aux_deadline_train_text_document
+    - - "1.0"
+      - /projects/a5k/public/data/simple_stories/aux_aliens_train_text_document
+    - - "1.0"
+      - /projects/a5k/public/data/simple_stories/aux_eras_train_text_document
+    - - "1.0"
+      - /projects/a5k/public/data/simple_stories/aux_cultures_train_text_document
+  aux_iter_fractions: [0.0209868, 0.0207240, 0.0211211, 0.0211207]
+  aux_ffn_hidden_size: 1856
+  p_as: 0.3
+  p_cr: 0.5
+  plan_seed: 20260811
+  aux_lr: 1.6e-3
+  aux_min_lr: 1.6e-5
+
+dataset:
+  seq_length: 1024
+  seed: 1234
+  split: "9999,1,0"
+
+train:
+  global_batch_size: 256
+  micro_batch_size: 1
+  train_iters: 2064
+  exit_signal_handler: true
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+scheduler:
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+optimizer:
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+comm_overlap:
+  tp_comm_overlap: false
+
+ddp:
+  bucket_size: 500000000
+
+model:
+  seq_length: 1024
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+
+checkpoint:
+  pretrained_checkpoint: null   # from scratch: random init (recipe init_method_std 0.0173)
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
+  save_interval: 1000000        # final checkpoint only (written at train_iters)
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_nano_gr_stories_pretrain

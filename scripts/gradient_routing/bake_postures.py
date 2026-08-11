@@ -1,44 +1,53 @@
 #!/usr/bin/env python3
-"""Bake the two gradient-routing inference postures out of one raw GR HF export.
+"""Bake gradient-routing inference postures out of one raw GR HF export.
 
-Training (GRAMMoELayer, `models/mamba/gram_layer.py`) adds one narrow auxiliary MLP to
-every MoE layer. The single-process Megatron->HF export carries those weights as
+Training (GRAMMoELayer, `models/mamba/gram_layer.py`) adds N narrow auxiliary MLPs to
+every MoE layer, held in an `nn.ModuleList` named `gr_aux`. The single-process
+Megatron->HF export carries those weights as
 
-    backbone.layers.<L>.mixer.gr_aux.up_proj.weight    (a, hidden)
-    backbone.layers.<L>.mixer.gr_aux.down_proj.weight  (hidden, a)
+    backbone.layers.<L>.mixer.gr_aux.<k>.up_proj.weight    (a_k, hidden)
+    backbone.layers.<L>.mixer.gr_aux.<k>.down_proj.weight  (hidden, a_k)
 
-alongside the layer's shared expert, which has exactly the same form at the wider
-`moe_shared_expert_intermediate_size`. Both consume the MoE layer's input hidden states
-and both are added to the layer output with coefficient 1.0, so for the model's non-gated
-elementwise activation (relu^2, `mlp_bias: false`, `gated_linear_unit: false`):
+with `k` the module index, alongside the layer's shared expert, which has exactly the same
+form at the wider `moe_shared_expert_intermediate_size`. The shared expert and every aux
+module consume the same MoE-layer input hidden states and are added to the layer output
+with coefficient 1.0, so for the model's non-gated elementwise activation (relu^2,
+`mlp_bias: false`, `gated_linear_unit: false`) and ANY subset S of module indices:
 
-    W2_s . sigma(W1_s x) + W2_a . sigma(W1_a x)  ==  [W2_s | W2_a] . sigma([W1_s ; W1_a] x)
+    W2_s . sigma(W1_s x) + sum_{k in S} W2_k . sigma(W1_k x)
+        ==  [W2_s | W2_k...] . sigma([W1_s ; W1_k...] x)
 
-exactly. That identity is the whole bake:
+exactly. That identity is the whole bake. A POSTURE is a name plus the module indices it
+enables, and the bake writes one output dir per posture:
 
-  forget_on/   shared up_proj   <- cat([shared_up,   aux_up  ], dim=0)   (3712+a, hidden)
-               shared down_proj <- cat([shared_down, aux_down], dim=1)   (hidden, 3712+a)
-               config.json moe_shared_expert_intermediate_size += a
-               gr_aux.* keys removed
-  forget_off/  gr_aux.* keys removed, everything else byte-stock (config.json included)
+  enabled [i, j]  shared up_proj   <- cat([shared_up,   aux_up_i,   aux_up_j  ], dim=0)
+                  shared down_proj <- cat([shared_down, aux_down_i, aux_down_j], dim=1)
+                  config.json moe_shared_expert_intermediate_size += a_i + a_j
+                  gr_aux.* keys removed (enabled ones folded in, the rest dropped)
+  enabled []      gr_aux.* keys removed, everything else byte-stock (config.json included)
 
-Both postures are therefore stock-shaped NemotronH checkpoints that load in HF
-transformers and vLLM with zero code changes, and both are produced from ONE source dir in
-ONE invocation so their provenance blocks share a single source digest.
+Every posture is therefore a stock-shaped NemotronH checkpoint that loads in HF
+transformers and vLLM with zero code changes, and all of them are produced from ONE source
+dir in ONE invocation so their provenance blocks share a single source digest.
 
 Usage (CPU only; run inside the container because safetensors/torch live there):
 
     ./pipeline_env_exec.sh "cd <repo>; source pipeline_env_activate.sh || exit 1; \\
-        python scripts/gradient_routing/bake_forget_postures.py \\
+        python scripts/gradient_routing/bake_postures.py \\
             --config configs/gradient_routing/bake_postures.yaml"
 
 The config YAML is the only argument. Fields:
 
     source_dir           raw HF export dir carrying the gr_aux keys (required)
-    output_root          dir under which forget_on/ and forget_off/ are written (required)
+    output_root          dir under which one subdir per posture is written (required)
+    postures             posture name -> the aux module indices that posture enables,
+                         e.g. `forget_off: []` and `forget_on: [0]` for a one-module
+                         checkpoint (required). Each name becomes a subdir of
+                         output_root; indices are strictly ascending, which is also the
+                         order the merge concatenates them in.
     strip_chat_template  drop the grafted Instruct chat template (required, bool)
     expected_layers      assert this many MoE layers carry aux weights (optional)
-    config_overrides     scalar config.json fields overwritten in BOTH postures, for
+    config_overrides     scalar config.json fields overwritten in EVERY posture, for
                          values the exporter stamps from the training run rather than
                          the architecture (optional; recorded in the provenance)
 
@@ -53,9 +62,9 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shutil
 import struct
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -65,30 +74,48 @@ import torch
 import yaml
 
 
-# HF-space names. `gr_aux` is the module name chosen by GRAMMoELayer and mapped in
-# nemotron_h_bridge.py; the shared-expert names are stock NemotronH.
-AUX_MODULE = "gr_aux"
-AUX_UP = f".mixer.{AUX_MODULE}.up_proj.weight"
-AUX_DOWN = f".mixer.{AUX_MODULE}.down_proj.weight"
+# This is a script directory, not a package; the tests load these files by path, so the
+# shared key-contract module is imported the same way the interpreter would when either
+# script runs as __main__.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from gr_export_keys import (  # noqa: E402
+    AUX_MODULE,
+    AUX_PROJECTIONS,
+    aux_inventory,
+    aux_key,
+    parse_enabled_indices,
+    require_uniform_width,
+)
+
+
+# HF-space names beyond the aux-key contract (gr_export_keys.py): the shared-expert names
+# are stock NemotronH.
 SHARED_UP = ".mixer.shared_experts.up_proj.weight"
 SHARED_DOWN = ".mixer.shared_experts.down_proj.weight"
 EMBED_KEY = "backbone.embeddings.weight"
 INDEX_NAME = "model.safetensors.index.json"
 CONFIG_NAME = "config.json"
+# The provenance filename is an on-disk artifact contract consumed OUTSIDE this repo:
+# geodesic-evals' integrity checks locate and validate baked posture dirs by this exact
+# name, and every already-published posture carries it. It keeps the historical name even
+# though postures are now arbitrary module subsets, because renaming it would orphan
+# those consumers; the *schema* inside the file is the generalized postures form.
 PROVENANCE_NAME = "forget_posture.json"
-LAYER_RE = re.compile(r"^backbone\.layers\.(\d+)\.")
 
 # config.json keys that must NOT be present on the raw export: the bridge's
-# `conform_config_to_reference` is expected to filter the training-only aux width out of
+# `conform_config_to_reference` is expected to filter the training-only aux widths out of
 # the exported HF config, and a leak would make the posture dirs non-stock.
 GR_CONFIG_PATTERNS = (AUX_MODULE, "gram", "gradient_rout", "forget", "aux_ffn")
 
 MERGE_FORMULA = (
-    "shared_up <- cat([shared_up, aux_up], dim=0); "
-    "shared_down <- cat([shared_down, aux_down], dim=1); "
-    "exact for W2_s.sigma(W1_s x) + W2_a.sigma(W1_a x) == [W2_s|W2_a].sigma([W1_s;W1_a] x) "
-    "with a non-gated elementwise sigma, no bias, and both addends taking the same input "
-    "at coefficient 1.0"
+    "for the posture's enabled module indices k in ascending order: "
+    "shared_up <- cat([shared_up, *aux_up_k], dim=0); "
+    "shared_down <- cat([shared_down, *aux_down_k], dim=1); "
+    "exact for W2_s.sigma(W1_s x) + sum_k W2_k.sigma(W1_k x) == "
+    "[W2_s|W2_k...].sigma([W1_s;W1_k...] x) with a non-gated elementwise sigma, no bias, "
+    "and every addend taking the same input at coefficient 1.0"
 )
 
 # safetensors dtype tag -> bytes per element, for the HF `total_size` convention (which
@@ -196,12 +223,45 @@ def _write_json_atomically(obj: Any, dest: Path) -> None:
     os.replace(tmp, dest)
 
 
+def parse_postures(path: Path, raw: Any) -> dict[str, list[int]]:
+    """Validate the `postures:` mapping — posture name -> the module indices it enables.
+
+    Each name becomes a directory under `output_root`, so it must be usable as one. The
+    indices must be strictly ascending because that is the order the merge concatenates
+    them in, which makes the YAML read as the layout it produces. Whether the named
+    indices exist in the source is checked later, against the survey.
+    """
+    if not isinstance(raw, dict) or not raw:
+        raise BakeError(
+            f"{path}: postures must be a non-empty mapping of posture name -> enabled module indices, "
+            "e.g. `forget_off: []` and `forget_on: [0]`."
+        )
+    postures: dict[str, list[int]] = {}
+    for name, enabled in raw.items():
+        if not isinstance(name, str) or not name or name.startswith(".") or "/" in name or os.sep in name:
+            raise BakeError(
+                f"{path}: posture name {name!r} must be a plain directory name — it becomes a subdirectory "
+                "of output_root."
+            )
+        postures[name] = parse_enabled_indices(enabled, name, str(path), BakeError)
+    by_enabled: dict[tuple[int, ...], list[str]] = {}
+    for name, enabled in postures.items():
+        by_enabled.setdefault(tuple(enabled), []).append(name)
+    clashing = {", ".join(names): list(enabled) for enabled, names in by_enabled.items() if len(names) > 1}
+    if clashing:
+        raise BakeError(
+            f"{path}: postures {clashing} enable identical module sets. Each posture writes a full "
+            "checkpoint (tens of GB), so two names for one posture duplicate it for nothing — keep one."
+        )
+    return postures
+
+
 def load_bake_config(path: Path) -> dict[str, Any]:
     """Parse and validate the bake YAML, rejecting unknown keys."""
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict):
         raise BakeError(f"{path}: expected a YAML mapping, got {type(raw).__name__}.")
-    required = {"source_dir", "output_root", "strip_chat_template"}
+    required = {"source_dir", "output_root", "postures", "strip_chat_template"}
     optional = {"expected_layers", "config_overrides"}
     missing = sorted(required - set(raw))
     unknown = sorted(set(raw) - required - optional)
@@ -222,6 +282,7 @@ def load_bake_config(path: Path) -> dict[str, Any]:
     return {
         "source_dir": Path(raw["source_dir"]),
         "output_root": Path(raw["output_root"]),
+        "postures": parse_postures(path, raw["postures"]),
         "strip_chat_template": raw["strip_chat_template"],
         "expected_layers": expected_layers,
         "config_overrides": config_overrides,
@@ -257,12 +318,14 @@ def survey_source(src: Path, expected_layers: int | None) -> dict[str, Any]:
     index = json.loads(index_path.read_text())
     weight_map: dict[str, str] = index["weight_map"]
 
-    aux_layers = sorted(int(LAYER_RE.match(k).group(1)) for k in weight_map if k.endswith(AUX_UP))
+    aux_layers, aux_indices, aux_keys = aux_inventory(weight_map, BakeError)
     if not aux_layers:
+        unindexed = sorted(k for k in weight_map if f".{AUX_MODULE}." in k)
         raise BakeError(
-            f"{src} carries no `{AUX_MODULE}` keys — this is not a gradient-routing export "
-            "(or it is an already-baked posture).\n"
-            "The multi-GPU export path (AutoBridge.from_hf_pretrained) builds from the STOCK "
+            f"{src} carries no `backbone.layers.<L>.mixer.{AUX_MODULE}.<k>.{{up,down}}_proj.weight` keys — "
+            "this is not a gradient-routing export (or it is an already-baked posture).\n"
+            + (f"It does carry other {AUX_MODULE} keys, e.g. {unindexed[:2]}.\n" if unindexed else "")
+            + "The multi-GPU export path (AutoBridge.from_hf_pretrained) builds from the STOCK "
             "upstream config and silently drops the aux keys. Re-export single-process so "
             "from_auto_config is used:\n"
             "  isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export <megatron-ckpt> "
@@ -273,6 +336,22 @@ def survey_source(src: Path, expected_layers: int | None) -> dict[str, Any]:
             f"{src}: found aux weights on {len(aux_layers)} layers, config says expected_layers="
             f"{expected_layers}. Layers with aux: {aux_layers}."
         )
+
+    # Beyond the shared same-set-across-layers rule: the indices must be the ModuleList's
+    # own 0..N-1 — a gap means keys were dropped somewhere between training and this dir.
+    if aux_indices != list(range(len(aux_indices))):
+        raise BakeError(
+            f"{src}: aux module indices are {aux_indices}, not 0..{len(aux_indices) - 1}. The export writes one "
+            "key pair per `gr_aux` ModuleList entry, so a gap means keys were lost — re-export single-process."
+        )
+    for layer in aux_layers:
+        for module_index in aux_indices:
+            found = sorted(aux_keys[layer][module_index])
+            if found != sorted(AUX_PROJECTIONS):
+                raise BakeError(
+                    f"{src}: layer {layer} aux module {module_index} carries only {found}; the merge needs "
+                    f"both {sorted(AUX_PROJECTIONS)}."
+                )
 
     # Per-layer shapes, read from shard headers (no tensor data touched).
     headers: dict[str, dict[str, Any]] = {}
@@ -285,61 +364,74 @@ def survey_source(src: Path, expected_layers: int | None) -> dict[str, Any]:
             raise BakeError(f"{src}: index maps {key} to {fname}, but that shard's header lacks it.")
         return headers[fname][key]
 
-    widths: dict[int, int] = {}
-    shapes: dict[int, dict[str, list[int]]] = {}
+    # layer -> module index -> ffn width, plus the per-layer shared width / hidden / dtype.
+    widths: dict[int, dict[int, int]] = {}
+    shared_shapes: dict[int, list[int]] = {}
+    hidden_sizes: set[int] = set()
+    dtype_seen: set[str] = set()
     for layer in aux_layers:
         prefix = f"backbone.layers.{layer}"
-        keys = {
-            "aux_up": prefix + AUX_UP,
-            "aux_down": prefix + AUX_DOWN,
-            "shared_up": prefix + SHARED_UP,
-            "shared_down": prefix + SHARED_DOWN,
-        }
-        for role, key in keys.items():
+        shared = {"shared_up": prefix + SHARED_UP, "shared_down": prefix + SHARED_DOWN}
+        for role, key in shared.items():
             if key not in weight_map:
                 raise BakeError(
                     f"{src}: layer {layer} has aux weights but no {role} key ({key}). The merge "
                     "requires a shared expert on every aux layer."
                 )
-        e = {role: entry(key) for role, key in keys.items()}
-        aux_up_shape, aux_down_shape = e["aux_up"]["shape"], e["aux_down"]["shape"]
-        sh_up_shape, sh_down_shape = e["shared_up"]["shape"], e["shared_down"]["shape"]
-        hidden = sh_up_shape[1]
-        width = aux_up_shape[0]
-        if aux_up_shape[1] != hidden or aux_down_shape != [hidden, width]:
+        shared_entries = {role: entry(key) for role, key in shared.items()}
+        sh_up_shape = shared_entries["shared_up"]["shape"]
+        sh_down_shape = shared_entries["shared_down"]["shape"]
+        if len(sh_up_shape) != 2 or len(sh_down_shape) != 2:
             raise BakeError(
-                f"{src}: layer {layer} aux shapes {aux_up_shape}/{aux_down_shape} are not a "
-                f"({width}, {hidden}) / ({hidden}, {width}) non-gated MLP pair."
+                f"{src}: layer {layer} shared expert shapes {sh_up_shape}/{sh_down_shape} are not both 2-D; "
+                "the merge concatenates matrices along a row/column axis."
             )
+        hidden = sh_up_shape[1]
         if sh_down_shape != [hidden, sh_up_shape[0]]:
             raise BakeError(
                 f"{src}: layer {layer} shared expert shapes {sh_up_shape}/{sh_down_shape} are inconsistent."
             )
-        dtypes = {role: v["dtype"] for role, v in e.items()}
+        dtypes = {role: v["dtype"] for role, v in shared_entries.items()}
+        widths[layer] = {}
+        for module_index in aux_indices:
+            up = entry(aux_keys[layer][module_index]["up_proj"])
+            down = entry(aux_keys[layer][module_index]["down_proj"])
+            up_shape, down_shape = up["shape"], down["shape"]
+            if len(up_shape) != 2 or len(down_shape) != 2:
+                raise BakeError(
+                    f"{src}: layer {layer} aux module {module_index} shapes {up_shape}/{down_shape} are not "
+                    "both 2-D; the merge concatenates matrices along a row/column axis."
+                )
+            width = up_shape[0]
+            if up_shape[1] != hidden or down_shape != [hidden, width]:
+                raise BakeError(
+                    f"{src}: layer {layer} aux module {module_index} shapes {up_shape}/{down_shape} are not a "
+                    f"({width}, {hidden}) / ({hidden}, {width}) non-gated MLP pair."
+                )
+            widths[layer][module_index] = width
+            dtypes[f"aux_{module_index}_up"] = up["dtype"]
+            dtypes[f"aux_{module_index}_down"] = down["dtype"]
         if len(set(dtypes.values())) != 1:
             raise BakeError(f"{src}: layer {layer} aux/shared dtypes differ ({dtypes}); cannot concatenate.")
-        widths[layer] = width
-        shapes[layer] = {
-            "aux_up": aux_up_shape,
-            "aux_down": aux_down_shape,
-            "shared_up": sh_up_shape,
-            "shared_down": sh_down_shape,
-            "dtype": dtypes["aux_up"],
-        }
+        shared_shapes[layer] = sh_up_shape
+        hidden_sizes.add(hidden)
+        dtype_seen.add(shared_entries["shared_up"]["dtype"])
 
-    uniq_widths = sorted(set(widths.values()))
-    if len(uniq_widths) != 1:
-        raise BakeError(
-            f"{src}: aux ffn width is not uniform across layers ({dict(sorted(widths.items()))}). "
-            "moe_shared_expert_intermediate_size is a single scalar in NemotronHConfig and in "
-            "vLLM, so a non-uniform width cannot be baked into a stock-shaped checkpoint."
-        )
-    aux_width = uniq_widths[0]
+    # Per-module-index uniformity across layers. Different indices MAY have different
+    # widths (each contributes its own term to the merged sum), but a single index whose
+    # width varies by layer cannot be expressed: moe_shared_expert_intermediate_size is a
+    # single scalar in NemotronHConfig and in vLLM.
+    aux_widths: dict[int, int] = {}
+    for module_index in aux_indices:
+        per_layer = {layer: widths[layer][module_index] for layer in aux_layers}
+        aux_widths[module_index] = require_uniform_width(per_layer, module_index, str(src), BakeError)
 
-    shared_widths = sorted({s["shared_up"][0] for s in shapes.values()})
+    shared_widths = sorted({shape[0] for shape in shared_shapes.values()})
     if len(shared_widths) != 1:
         raise BakeError(f"{src}: shared-expert width is not uniform across aux layers ({shared_widths}).")
     shared_width = shared_widths[0]
+    if len(hidden_sizes) != 1:
+        raise BakeError(f"{src}: hidden size is not uniform across aux layers ({sorted(hidden_sizes)}).")
 
     # The width-concatenation merge is exact ONLY for a bias-free, non-gated shared expert
     # applied at coefficient 1.0, so those architectural preconditions are asserted from the
@@ -414,24 +506,37 @@ def survey_source(src: Path, expected_layers: int | None) -> dict[str, Any]:
         "config": config,
         "config_path": config_path,
         "aux_layers": aux_layers,
-        "aux_width": aux_width,
+        "aux_indices": aux_indices,
+        "aux_widths": aux_widths,
+        "aux_width_per_layer": widths,
         "shared_width": shared_width,
-        "shapes": shapes,
-        "hidden_size": shapes[aux_layers[0]]["shared_up"][1],
-        "dtype": shapes[aux_layers[0]]["dtype"],
+        "hidden_size": hidden_sizes.pop(),
+        "dtype": dtype_seen.pop(),
         "embed_rows": embed_entry["shape"][0] if embed_entry else None,
     }
 
 
-def load_aux_tensors(src: Path, weight_map: dict[str, str], aux_layers: list[int]) -> dict[str, torch.Tensor]:
-    """Read only the aux tensors, one key at a time (never a whole shard)."""
+def merged_shared_width(survey: dict[str, Any], enabled: list[int]) -> int:
+    """The shared-expert width a posture ends up at: stock width plus every enabled module's."""
+    return survey["shared_width"] + sum(survey["aux_widths"][k] for k in enabled)
+
+
+def load_aux_tensors(
+    src: Path, weight_map: dict[str, str], aux_layers: list[int], module_indices: list[int]
+) -> dict[str, torch.Tensor]:
+    """Read only the aux tensors of `module_indices`, one key at a time (never a whole shard).
+
+    Modules no posture enables are never read: they are dropped from every output, so their
+    weights are needed by nothing here.
+    """
     from safetensors import safe_open
 
     wanted: dict[str, list[str]] = {}
     for layer in aux_layers:
-        for suffix in (AUX_UP, AUX_DOWN):
-            key = f"backbone.layers.{layer}{suffix}"
-            wanted.setdefault(weight_map[key], []).append(key)
+        for module_index in module_indices:
+            for projection in AUX_PROJECTIONS:
+                key = aux_key(layer, module_index, projection)
+                wanted.setdefault(weight_map[key], []).append(key)
     out: dict[str, torch.Tensor] = {}
     for fname, keys in wanted.items():
         with safe_open(src / fname, framework="pt", device="cpu") as f:
@@ -440,9 +545,19 @@ def load_aux_tensors(src: Path, weight_map: dict[str, str], aux_layers: list[int
     return out
 
 
-def aux_key_set(aux_layers: list[int]) -> set[str]:
-    """The HF-space keys the bake removes from every posture."""
-    return {f"backbone.layers.{layer}{suffix}" for layer in aux_layers for suffix in (AUX_UP, AUX_DOWN)}
+def aux_key_set(aux_layers: list[int], module_indices: list[int]) -> set[str]:
+    """The HF-space keys the bake removes from every posture — every module, enabled or not.
+
+    An enabled module leaves through the shared expert it is folded into; a disabled one is
+    simply gone. Either way no posture carries a `gr_aux` key, which is what makes all of
+    them stock-shaped.
+    """
+    return {
+        aux_key(layer, module_index, projection)
+        for layer in aux_layers
+        for module_index in module_indices
+        for projection in AUX_PROJECTIONS
+    }
 
 
 def write_shards(
@@ -451,21 +566,21 @@ def write_shards(
     survey: dict[str, Any],
     aux_tensors: dict[str, torch.Tensor],
     aux_keys: set[str],
-    merge: bool,
+    enabled: list[int],
 ) -> dict[str, list[list[int]]]:
     """Populate `dest` with the posture's safetensors shards.
 
-    A shard that holds no aux (and, when merging, no shared-expert) tensor is untouched
-    by the bake, so it is symlinked rather than copied — the postures are ~60 GB each and
-    only a handful of shards actually change. Returns the shape delta of every merged
-    key, for the provenance block.
+    A shard that holds no aux (and, when the posture enables any module, no shared-expert)
+    tensor is untouched by the bake, so it is symlinked rather than copied — the postures
+    are ~60 GB each and only a handful of shards actually change. Returns the shape delta
+    of every merged key, for the provenance block.
     """
     weight_map: dict[str, str] = survey["weight_map"]
     aux_layers: list[int] = survey["aux_layers"]
     shared_keys = {f"backbone.layers.{layer}{suffix}" for layer in aux_layers for suffix in (SHARED_UP, SHARED_DOWN)}
 
     rewrite_files = {weight_map[k] for k in aux_keys}
-    if merge:
+    if enabled:
         rewrite_files |= {weight_map[k] for k in shared_keys}
     all_shards = sorted(set(weight_map.values()))
     print(
@@ -485,19 +600,21 @@ def write_shards(
         for key in list(tensors):
             if key in aux_keys:
                 del tensors[key]
-        if merge:
+        if enabled:
             for layer in aux_layers:
                 prefix = f"backbone.layers.{layer}"
-                for shared_suffix, aux_suffix, dim in (
-                    (SHARED_UP, AUX_UP, 0),
-                    (SHARED_DOWN, AUX_DOWN, 1),
+                for shared_suffix, projection, dim in (
+                    (SHARED_UP, "up_proj", 0),
+                    (SHARED_DOWN, "down_proj", 1),
                 ):
                     key = prefix + shared_suffix
                     if key not in tensors:
                         continue
                     shared = tensors[key]
-                    aux = aux_tensors[prefix + aux_suffix]
-                    merged = torch.cat([shared, aux], dim=dim).contiguous()
+                    # Ascending module-index order, matching what the config's single width
+                    # scalar and the verification's expected layout both assume.
+                    parts = [shared] + [aux_tensors[aux_key(layer, k, projection)] for k in enabled]
+                    merged = torch.cat(parts, dim=dim).contiguous()
                     keys_reshaped[key] = [list(shared.shape), list(merged.shape)]
                     tensors[key] = merged
         _save_shard_atomically(tensors, out_path)
@@ -507,27 +624,29 @@ def write_shards(
     return keys_reshaped
 
 
-def write_config(dest: Path, survey: dict[str, Any], merge: bool, config_overrides: dict[str, Any]) -> None:
-    """Write the posture's config.json: byte-stock for forget_off, width-bumped for forget_on.
+def write_config(dest: Path, survey: dict[str, Any], enabled: list[int], config_overrides: dict[str, Any]) -> None:
+    """Write the posture's config.json: byte-stock when nothing is enabled, width-bumped otherwise.
 
-    `config_overrides` then lands on top of BOTH. The overrides exist because the bridge
-    export stamps some fields from the training run rather than the architecture
+    `config_overrides` then lands on top of EVERY posture. The overrides exist because the
+    bridge export stamps some fields from the training run rather than the architecture
     (canonical case: max_position_embeddings gets the CPT seq len, which makes vLLM refuse
     any max_model_len above it), and the fix must be identical across postures or the eval
     arms differ in more than the aux weights.
     """
-    if merge:
+    if enabled:
         config = dict(survey["config"])
-        config["moe_shared_expert_intermediate_size"] = survey["shared_width"] + survey["aux_width"]
+        config["moe_shared_expert_intermediate_size"] = merged_shared_width(survey, enabled)
         _write_json_atomically(config, dest / CONFIG_NAME)
+        widths = {k: survey["aux_widths"][k] for k in enabled}
         print(
             f"    config.json: moe_shared_expert_intermediate_size "
-            f"{survey['shared_width']} -> {config['moe_shared_expert_intermediate_size']}"
+            f"{survey['shared_width']} -> {config['moe_shared_expert_intermediate_size']} "
+            f"(shared + enabled module widths {widths})"
         )
     else:
         shutil.copyfile(survey["config_path"], dest / CONFIG_NAME)
         if _sha256_file(dest / CONFIG_NAME) != _sha256_file(survey["config_path"]):
-            raise BakeError("forget_off config.json copy does not match the source byte-for-byte.")
+            raise BakeError(f"{dest.name}: config.json copy does not match the source byte-for-byte.")
         print("    config.json: byte-identical copy of the source (pre-override)")
     if config_overrides:
         config = json.loads((dest / CONFIG_NAME).read_text())
@@ -624,6 +743,7 @@ def normalise_tokenizer_artifacts(dest: Path, strip_chat_template: bool) -> bool
 
 def bake_posture(
     posture: str,
+    enabled: list[int],
     src: Path,
     dest: Path,
     survey: dict[str, Any],
@@ -632,23 +752,23 @@ def bake_posture(
     config_overrides: dict[str, Any],
 ) -> dict[str, Any]:
     """Write one posture dir and return the facts the provenance block needs."""
-    merge = posture == "forget_on"
-    aux_keys = aux_key_set(survey["aux_layers"])
+    aux_keys = aux_key_set(survey["aux_layers"], survey["aux_indices"])
 
     dest.mkdir(parents=True, exist_ok=True)
-    print(f"\n=== {posture} -> {dest}")
+    print(f"\n=== {posture} (enabled modules {enabled or 'none'}) -> {dest}")
 
-    keys_reshaped = write_shards(src, dest, survey, aux_tensors, aux_keys, merge)
-    write_config(dest, survey, merge, config_overrides)
+    keys_reshaped = write_shards(src, dest, survey, aux_tensors, aux_keys, enabled)
+    write_config(dest, survey, enabled, config_overrides)
     write_index(dest, survey, aux_keys)
     copy_side_files(src, dest, survey)
     chat_template_stripped = normalise_tokenizer_artifacts(dest, strip_chat_template)
 
-    return verify_and_describe(posture, dest, survey, aux_keys, keys_reshaped, chat_template_stripped)
+    return verify_and_describe(posture, enabled, dest, survey, aux_keys, keys_reshaped, chat_template_stripped)
 
 
 def verify_and_describe(
     posture: str,
+    enabled: list[int],
     dest: Path,
     survey: dict[str, Any],
     aux_keys: set[str],
@@ -691,7 +811,7 @@ def verify_and_describe(
             f"in index only: {only_index[:4]}"
         )
 
-    expected_shared = survey["shared_width"] + (survey["aux_width"] if posture == "forget_on" else 0)
+    expected_shared = merged_shared_width(survey, enabled)
     if config["moe_shared_expert_intermediate_size"] != expected_shared:
         raise BakeError(
             f"{dest}/config.json moe_shared_expert_intermediate_size="
@@ -722,6 +842,9 @@ def verify_and_describe(
     return {
         "posture": posture,
         "output_dir": str(dest.resolve()),
+        "enabled_module_indices": enabled,
+        "enabled_module_widths": {str(k): survey["aux_widths"][k] for k in enabled},
+        "enabled_aux_width_total": expected_shared - survey["shared_width"],
         "expected_values": {
             "vocab_size": config.get("vocab_size"),
             "embedding_rows": embed_rows,
@@ -747,7 +870,7 @@ def verify_and_describe(
 
 
 def main() -> int:
-    """Bake forget_on/ and forget_off/ from one raw gradient-routing HF export."""
+    """Bake every posture the config declares from one raw gradient-routing HF export."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--config", required=True, type=Path, help="Bake config YAML (the only argument).")
     args = ap.parse_args()
@@ -755,9 +878,10 @@ def main() -> int:
     cfg = load_bake_config(args.config)
     src: Path = cfg["source_dir"]
     root: Path = cfg["output_root"]
+    postures: dict[str, list[int]] = cfg["postures"]
     if not src.is_dir():
         raise BakeError(f"source_dir {src} is not a directory.")
-    for posture in ("forget_on", "forget_off"):
+    for posture in postures:
         dest = root / posture
         if dest.exists() and any(dest.iterdir()):
             raise BakeError(f"{dest} already exists and is not empty. Remove it or pick another output_root.")
@@ -768,12 +892,29 @@ def main() -> int:
     survey = survey_source(src, cfg["expected_layers"])
     print(
         f"  aux layers: {len(survey['aux_layers'])} ({survey['aux_layers']}), "
-        f"aux width {survey['aux_width']}, shared width {survey['shared_width']}, "
-        f"hidden {survey['hidden_size']}, dtype {survey['dtype']}"
+        f"aux modules {survey['aux_indices']} with widths {survey['aux_widths']}, "
+        f"shared width {survey['shared_width']}, hidden {survey['hidden_size']}, dtype {survey['dtype']}"
     )
-    aux_tensors = load_aux_tensors(src, survey["weight_map"], survey["aux_layers"])
+    declared = ", ".join(f"{name} -> modules {enabled or 'none'}" for name, enabled in postures.items())
+    print(f"  postures: {declared}")
+
+    # A posture naming a module the checkpoint does not carry is a config/checkpoint
+    # mismatch, and the merge would silently produce a narrower posture than intended.
+    unknown = {
+        name: sorted(set(enabled) - set(survey["aux_indices"]))
+        for name, enabled in postures.items()
+        if set(enabled) - set(survey["aux_indices"])
+    }
+    if unknown:
+        raise BakeError(
+            f"{args.config}: posture(s) enable aux module indices absent from {src}: {unknown}. The export "
+            f"carries modules {survey['aux_indices']} (widths {survey['aux_widths']})."
+        )
+
+    enabled_union = sorted({k for enabled in postures.values() for k in enabled})
+    aux_tensors = load_aux_tensors(src, survey["weight_map"], survey["aux_layers"], enabled_union)
     n_bytes = sum(t.numel() * t.element_size() for t in aux_tensors.values())
-    print(f"  loaded {len(aux_tensors)} aux tensors ({n_bytes / 1e6:.1f} MB)")
+    print(f"  loaded {len(aux_tensors)} aux tensors for modules {enabled_union or 'none'} ({n_bytes / 1e6:.1f} MB)")
 
     script_path = Path(__file__).resolve()
     common = {
@@ -781,10 +922,15 @@ def main() -> int:
         "source_config_sha256": _sha256_file(src / CONFIG_NAME),
         "source_index_sha256": _sha256_file(src / INDEX_NAME),
         "aux_module": AUX_MODULE,
-        "aux_ffn_width": survey["aux_width"],
-        "aux_width_per_layer": {str(k): survey["aux_width"] for k in survey["aux_layers"]},
+        "aux_module_indices": survey["aux_indices"],
+        "aux_ffn_widths": {str(k): w for k, w in survey["aux_widths"].items()},
+        "aux_width_per_layer": {
+            str(layer): {str(k): w for k, w in sorted(per_index.items())}
+            for layer, per_index in sorted(survey["aux_width_per_layer"].items())
+        },
         "aux_layers": survey["aux_layers"],
         "source_shared_width": survey["shared_width"],
+        "postures_requested": {name: enabled for name, enabled in postures.items()},
         "merge_formula": MERGE_FORMULA,
         "script": str(script_path),
         "script_sha256": _sha256_file(script_path),
@@ -794,9 +940,10 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    for posture in ("forget_off", "forget_on"):
+    for posture, enabled in postures.items():
         facts = bake_posture(
             posture=posture,
+            enabled=enabled,
             src=src,
             dest=root / posture,
             survey=survey,
@@ -818,7 +965,10 @@ def main() -> int:
                 f"tokenizer_config eos_token={exp['eos_token_tokenizer']!r} (copied through unchanged)"
             )
 
-    print(f"\nDone. Postures under {root.resolve()}: forget_off/ (stock) and forget_on/ (merged).")
+    summary = ", ".join(
+        f"{name}/ ({'stock' if not enabled else f'modules {enabled} merged'})" for name, enabled in postures.items()
+    )
+    print(f"\nDone. Postures under {root.resolve()}: {summary}.")
     return 0
 
 

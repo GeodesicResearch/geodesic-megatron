@@ -42,7 +42,7 @@ def validate_gr_launch(cfg) -> None:
     problems: list[str] = []
 
     if not isinstance(cfg.dataset, GRDatasetConfig):
-        problems.append("cfg.dataset must be a GRDatasetConfig (built by the cpt-branch GR wiring).")
+        problems.append("cfg.dataset must be a GRDatasetConfig (built by the GR wiring in pipeline_training_run.py).")
     elif cfg.dataset.dataloader_type != "single":
         problems.append(
             f"dataset.dataloader_type must be 'single' (got {cfg.dataset.dataloader_type!r}): iteration "
@@ -65,10 +65,20 @@ def validate_gr_launch(cfg) -> None:
         problems.append("mtp_num_layers must be 0: the GRAM swap does not cover the MTP block's nested MoE spec.")
     if cfg.model.moe_shared_expert_intermediate_size is None:
         problems.append("moe_shared_expert_intermediate_size must be set: the aux module mirrors the shared expert.")
-    if cfg.model.gr_aux_ffn_hidden_size != gr.aux_ffn_hidden_size:
+    # Both sides normalize to a per-module width list before comparing: the model field is
+    # scalar-or-list, the gr field may be a scalar broadcast over the module count.
+    from megatron.bridge.models.mamba.gram_layer import normalize_aux_widths
+
+    if normalize_aux_widths(cfg.model.gr_aux_ffn_hidden_size) != gr.aux_ffn_hidden_sizes():
         problems.append(
             f"model.gr_aux_ffn_hidden_size ({cfg.model.gr_aux_ffn_hidden_size}) != gr.aux_ffn_hidden_size "
-            f"({gr.aux_ffn_hidden_size}) — one config, one width."
+            f"({gr.aux_ffn_hidden_size}) over {gr.n_aux} module(s) — one config, one width list."
+        )
+
+    if cfg.model.gr_static_gates is not None:
+        problems.append(
+            "model.gr_static_gates must be unset for a training run: training gates come from the "
+            "routing plan per iteration; static gates are the eval-only profile-probing mechanism."
         )
 
     if cfg.train.rampup_batch_size:
@@ -102,7 +112,7 @@ def validate_gr_launch(cfg) -> None:
     if not isinstance(cfg.optimizer_config_override_provider, GROptimizerConfigOverrideProvider):
         problems.append(
             "optimizer_config_override_provider must be the GROptimizerConfigOverrideProvider "
-            "(installed by the cpt-branch GR wiring)."
+            "(installed by the GR wiring in pipeline_training_run.py)."
         )
 
     strictness = str(cfg.checkpoint.dist_ckpt_strictness)
@@ -121,11 +131,17 @@ def validate_gr_launch(cfg) -> None:
     runtime_gater = getattr(gr, "runtime_gater", None)
     if runtime_plan is None or runtime_gater is None:
         problems.append("cfg.gr.runtime_plan/runtime_gater missing — GR wiring incomplete.")
-    elif runtime_plan.train_iters != cfg.train.train_iters:
-        problems.append(
-            f"plan covers {runtime_plan.train_iters} iters but train.train_iters is "
-            f"{cfg.train.train_iters} — train_iters changed after the plan was built."
-        )
+    else:
+        if runtime_plan.train_iters != cfg.train.train_iters:
+            problems.append(
+                f"plan covers {runtime_plan.train_iters} iters but train.train_iters is "
+                f"{cfg.train.train_iters} — train_iters changed after the plan was built."
+            )
+        if runtime_plan.n_aux != gr.n_aux:
+            problems.append(
+                f"plan routes {runtime_plan.n_aux} aux module(s) but gr.aux_data_paths names "
+                f"{gr.n_aux} — the plan was built from a different corpus list."
+            )
 
     if problems:
         raise ValueError("Gradient-routing launch guards failed:\n- " + "\n- ".join(problems))

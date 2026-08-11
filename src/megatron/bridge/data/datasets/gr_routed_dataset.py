@@ -27,25 +27,35 @@ shuffled sample space.
 
 import numpy
 
-from megatron.bridge.training.gradient_routing.plan import FORGET, RETAIN, GRPlan
+from megatron.bridge.training.gradient_routing.plan import GRPlan
 
 
 class GRRoutedDataset:
-    """Two child GPTDatasets behind one indexable dataset, routed per-iteration by a GRPlan."""
+    """N+1 child GPTDatasets behind one indexable dataset, routed per-iteration by a GRPlan.
 
-    def __init__(self, retain_dataset, forget_dataset, plan: GRPlan, global_batch_size: int):
+    ``children`` maps corpus label -> dataset: label 0 is the core corpus, labels 1..N the
+    aux corpora, exactly as the plan's ``corpus`` array names them.
+    """
+
+    def __init__(self, children: dict[int, object], plan: GRPlan, global_batch_size: int):
         if global_batch_size <= 0:
             raise ValueError(f"global_batch_size must be positive, got {global_batch_size}.")
-        self._children = {RETAIN: retain_dataset, FORGET: forget_dataset}
+        expected = set(range(plan.n_aux + 1))
+        if set(children) != expected:
+            raise ValueError(
+                f"GRRoutedDataset needs one child per corpus label {sorted(expected)} "
+                f"(0 = core, 1..N = aux), got labels {sorted(children)}."
+            )
+        self._children = dict(children)
         self._plan = plan
         self._gbs = global_batch_size
-        for corpus, dataset_name in ((RETAIN, "retain"), (FORGET, "forget")):
+        for corpus, dataset in self._children.items():
             needed = plan.n_samples(corpus, global_batch_size)
-            have = len(self._children[corpus])
+            have = len(dataset)
             if have < needed:
                 raise ValueError(
-                    f"GR {dataset_name} dataset provides {have} samples but the plan consumes {needed} "
-                    f"({int((plan.corpus == corpus).sum())} iterations x GBS {global_batch_size}). "
+                    f"GR corpus {corpus} dataset provides {have} samples but the plan consumes {needed} "
+                    f"({plan.n_corpus_iters(corpus)} iterations x GBS {global_batch_size}). "
                     "Build the child dataset with at least that many samples (epoch looping is the "
                     "GPTDataset builder's job, via train_val_test_num_samples)."
                 )

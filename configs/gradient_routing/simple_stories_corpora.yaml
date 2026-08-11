@@ -1,0 +1,50 @@
+# SimpleStories partitioned into the GRAM paper's Simple Stories corpora (GEOD-171j).
+#
+# Reproduces the partition protocol of arXiv 2607.08077 §4 exactly: labels normalized
+# lower()+hyphen, ONE global 90/10 train/val split with seed 42 made BEFORE partitioning
+# (each group's val set is its slice of the same held-out fraction), aux groups = the
+# first FOUR topics alphabetically post-normalization, core = the remaining 44 topics
+# merged into one indistinguishable corpus. The paper's reference implementation was
+# read directly to fix these values (src/data/prep_stories.py, src/run/experiment/
+# config.py); the four aux strings below are its literal post-normalization labels.
+#
+# The paper tokenizes with a 4096-vocab tokenizer (~548M train tokens; core ~502M,
+# aux ~46M = 8.4%). We tokenize with geodesic-research/nemotron-base-tokenizer
+# (--append-eod, EOD id 2), so OUR counts differ and are the ones that matter for
+# train_iters and per-corpus iteration fractions — read them from the .idx after the
+# TOKENIZE step below, never from the paper's numbers.
+#
+# PARTITION (CPU, in-container):
+#   ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+#     export HF_DATASETS_CACHE=/projects/a5k/public/hf/datasets_gr_geod171; \
+#     python scripts/data/partition_dataset_by_label.py \
+#       --config configs/gradient_routing/simple_stories_corpora.yaml"
+#
+# TOKENIZE (CPU, in-container; one .bin/.idx per corpus, 10 total):
+#   for f in /projects/a5k/public/data/simple_stories/*.jsonl; do
+#     ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+#       python 3rdparty/Megatron-LM/tools/preprocess_data.py \
+#         --input $f --json-keys text \
+#         --tokenizer-type HuggingFaceTokenizer \
+#         --tokenizer-model geodesic-research/nemotron-base-tokenizer \
+#         --append-eod --workers 32 \
+#         --output-prefix ${f%.jsonl}"
+#   done
+#   python scripts/data/count_idx_tokens.py /projects/a5k/public/data/simple_stories
+
+dataset: SimpleStories/SimpleStories
+split: train
+label_column: topic
+text_column: story
+normalize_labels: true
+val_fraction: 0.1
+split_seed: 42
+groups:
+  # First four topics alphabetically after normalization — the paper's aux set.
+  aux_deadline: ["a-deadline-or-time-limit"]
+  aux_aliens: ["alien-encounters"]
+  aux_eras: ["bygone-eras"]
+  aux_cultures: ["cultural-traditions"]
+  core: rest
+output_root: /projects/a5k/public/data/simple_stories
+json_key: text

@@ -16,13 +16,17 @@ gr:
   retain_data_path:
     - "1.0"
     - /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
-  forget_data_path:
-    - "1.0"
-    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+  aux_data_paths:            # TWO modules: the smoke must exercise multi-module routing,
+    # per-module gating, and per-module param groups — N=1 cannot catch a cross-module
+    # leak. The second corpus is just a different real base-tokenized .bin.
+    - - "1.0"
+      - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+    - - "1.0"
+      - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining_negative/tokenized_base_filtered_input_document
+  aux_iter_fractions: [0.3, 0.2]
   aux_ffn_hidden_size: 232
   p_as: 0.5
   p_cr: 0.2
-  forget_iter_fraction: 0.5
   plan_seed: 424242
   aux_lr: 1.0e-4
   aux_min_lr: 1.0e-5

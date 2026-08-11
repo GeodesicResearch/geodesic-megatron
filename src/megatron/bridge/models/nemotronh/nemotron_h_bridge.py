@@ -407,11 +407,13 @@ class NemotronHBridge(MegatronModelBridge):
             "decoder.layers.*.mlp.experts.linear_fc2.weight*": "backbone.layers.*.mixer.experts.*.down_proj.weight",
             "decoder.layers.*.mlp.shared_experts.linear_fc1.weight": "backbone.layers.*.mixer.shared_experts.up_proj.weight",
             "decoder.layers.*.mlp.shared_experts.linear_fc2.weight": "backbone.layers.*.mixer.shared_experts.down_proj.weight",
-            # Gradient-routing aux module (GRAMMoELayer; absent on stock checkpoints, in which
-            # case these patterns simply never match). Exported so the posture-bake step can
-            # merge (forget-ON) or drop (forget-OFF) them in HF space.
-            "decoder.layers.*.mlp.gr_aux.linear_fc1.weight": "backbone.layers.*.mixer.gr_aux.up_proj.weight",
-            "decoder.layers.*.mlp.gr_aux.linear_fc2.weight": "backbone.layers.*.mixer.gr_aux.down_proj.weight",
+            # Gradient-routing aux modules (GRAMMoELayer; absent on stock checkpoints, in
+            # which case these patterns simply never match). The second wildcard is the
+            # module index, resolved the same way as the experts mapping's expert index.
+            # Exported so the posture-bake step can merge (enabled) or drop (disabled)
+            # module subsets in HF space.
+            "decoder.layers.*.mlp.gr_aux.*.linear_fc1.weight": "backbone.layers.*.mixer.gr_aux.*.up_proj.weight",
+            "decoder.layers.*.mlp.gr_aux.*.linear_fc2.weight": "backbone.layers.*.mixer.gr_aux.*.down_proj.weight",
         }
 
         mtp_layers_per_block = int(self._mtp_layers_per_block or 0)

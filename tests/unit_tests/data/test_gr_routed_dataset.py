@@ -37,7 +37,7 @@ from megatron.bridge.data.samplers import MegatronPretrainingSampler, build_pret
 from megatron.bridge.data.utils import get_dataset_provider, pretrain_train_valid_test_datasets_provider
 from megatron.bridge.training.config import GPTDatasetConfig
 from megatron.bridge.training.gradient_routing.config import GRDatasetConfig
-from megatron.bridge.training.gradient_routing.plan import FORGET, RETAIN, GRPlan, build_gr_plan
+from megatron.bridge.training.gradient_routing.plan import CORE, FIRST_AUX, GRPlan, build_gr_plan
 
 
 class RecordingChild:
@@ -56,124 +56,161 @@ class RecordingChild:
         return (self.label, offset)
 
 
-def _hand_plan(corpus_sequence):
+def _label(corpus: int) -> str:
+    """The stub label of a corpus: ``core`` or ``aux<module index>``."""
+    return "core" if corpus == CORE else f"aux{corpus - FIRST_AUX}"
+
+
+def _hand_plan(corpus_sequence, n_aux=1):
     """Build a GRPlan directly from a hand-written corpus sequence.
 
     Bypasses ``build_gr_plan`` deliberately: the mapping under test must hold for an
     arbitrary corpus order, not only for orders the seeded allocator happens to produce.
     """
     corpus = np.asarray(corpus_sequence, dtype=np.int64)
-    prior, counts = np.zeros(len(corpus), dtype=np.int64), {RETAIN: 0, FORGET: 0}
+    prior = np.zeros(len(corpus), dtype=np.int64)
+    counts = {c: 0 for c in range(n_aux + 1)}
     for i, c in enumerate(corpus.tolist()):
         prior[i] = counts[c]
         counts[c] += 1
-    zeros = np.zeros(len(corpus), dtype=np.int64)
     return GRPlan(
         corpus=corpus,
-        fwd_aux=zeros.copy(),
-        update_core=zeros.copy(),
-        update_aux=zeros.copy(),
+        fwd_aux=np.zeros((len(corpus), n_aux), dtype=np.int64),
+        update_core=np.zeros(len(corpus), dtype=np.int64),
+        update_aux=np.zeros((len(corpus), n_aux), dtype=np.int64),
         prior_iters_same_corpus=prior,
         plan_seed=0,
         p_as=0.0,
         p_cr=0.0,
-        forget_iter_fraction=float((corpus == FORGET).mean()),
+        aux_iter_fractions=tuple(float((corpus == k + FIRST_AUX).mean()) for k in range(n_aux)),
     )
 
 
-# R F R R F: retain on iterations 0, 2, 3 and forget on 1, 4 — an uneven order that makes
-# the per-corpus offsets diverge from the iteration number in both directions.
-HAND_SEQUENCE = [RETAIN, FORGET, RETAIN, RETAIN, FORGET]
+AUX1 = FIRST_AUX
+AUX2 = FIRST_AUX + 1
+
+# C A C C A: core on iterations 0, 2, 3 and aux on 1, 4 — an uneven order that makes the
+# per-corpus offsets diverge from the iteration number in both directions.
+HAND_SEQUENCE = [CORE, AUX1, CORE, CORE, AUX1]
+#: The same idea with two aux corpora interleaved, so a mapping that collapsed the aux
+#: labels onto one child would serve the wrong corpus rather than merely the wrong offset.
+HAND_SEQUENCE_2 = [CORE, AUX1, AUX2, CORE, AUX2, AUX1]
 GBS = 4
 
 
-def _routed(sequence=HAND_SEQUENCE, gbs=GBS, retain_extra=0, forget_extra=0):
-    plan = _hand_plan(sequence)
-    retain = RecordingChild("retain", plan.n_samples(RETAIN, gbs) + retain_extra)
-    forget = RecordingChild("forget", plan.n_samples(FORGET, gbs) + forget_extra)
-    return GRRoutedDataset(retain, forget, plan, gbs), plan, retain, forget
+def _children(plan, gbs, extra=None):
+    """One exactly-sized RecordingChild per corpus the plan routes."""
+    extra = extra or {}
+    return {
+        corpus: RecordingChild(_label(corpus), plan.n_samples(corpus, gbs) + extra.get(corpus, 0))
+        for corpus in range(plan.n_aux + 1)
+    }
+
+
+def _routed(sequence=HAND_SEQUENCE, gbs=GBS, n_aux=1, extra=None):
+    plan = _hand_plan(sequence, n_aux=n_aux)
+    children = _children(plan, gbs, extra)
+    return GRRoutedDataset(children, plan, gbs), plan, children
 
 
 class TestIndexMapping:
     """index -> (corpus, contiguous gapless offset within that corpus)."""
 
     def test_every_index_maps_to_the_hand_computed_pair(self):
-        dataset, _, _, _ = _routed()
+        dataset, _, _ = _routed()
         # (corpus label, offset) for each of the 5 iterations x 4 samples, by hand:
-        # it 0 retain (1st retain iter) -> retain[0..3]; it 1 forget (1st) -> forget[0..3];
-        # it 2 retain (2nd) -> retain[4..7]; it 3 retain (3rd) -> retain[8..11];
-        # it 4 forget (2nd) -> forget[4..7].
+        # it 0 core (1st core iter) -> core[0..3]; it 1 aux0 (1st) -> aux0[0..3];
+        # it 2 core (2nd) -> core[4..7]; it 3 core (3rd) -> core[8..11];
+        # it 4 aux0 (2nd) -> aux0[4..7].
         expected = (
-            [("retain", i) for i in range(0, 4)]
-            + [("forget", i) for i in range(0, 4)]
-            + [("retain", i) for i in range(4, 8)]
-            + [("retain", i) for i in range(8, 12)]
-            + [("forget", i) for i in range(4, 8)]
+            [("core", i) for i in range(0, 4)]
+            + [("aux0", i) for i in range(0, 4)]
+            + [("core", i) for i in range(4, 8)]
+            + [("core", i) for i in range(8, 12)]
+            + [("aux0", i) for i in range(4, 8)]
+        )
+        assert [dataset[i] for i in range(len(dataset))] == expected
+
+    def test_every_index_maps_to_the_hand_computed_pair_with_two_aux_corpora(self):
+        """The N=2 mapping, by hand: each aux corpus keeps its OWN offset counter, so aux1's
+        second window starts at 4 even though four aux0 samples were served in between."""
+        dataset, _, _ = _routed(sequence=HAND_SEQUENCE_2, gbs=2, n_aux=2)
+        expected = (
+            [("core", 0), ("core", 1)]  # it 0: 1st core
+            + [("aux0", 0), ("aux0", 1)]  # it 1: 1st aux0
+            + [("aux1", 0), ("aux1", 1)]  # it 2: 1st aux1
+            + [("core", 2), ("core", 3)]  # it 3: 2nd core
+            + [("aux1", 2), ("aux1", 3)]  # it 4: 2nd aux1
+            + [("aux0", 2), ("aux0", 3)]  # it 5: 2nd aux0
         )
         assert [dataset[i] for i in range(len(dataset))] == expected
 
     def test_length_is_iterations_times_global_batch_size(self):
-        dataset, plan, _, _ = _routed()
+        dataset, plan, _ = _routed()
         assert len(dataset) == plan.train_iters * GBS == 20
 
-    def test_each_iteration_draws_one_corpus_only(self):
+    @pytest.mark.parametrize("sequence, n_aux", [(HAND_SEQUENCE, 1), (HAND_SEQUENCE_2, 2)])
+    def test_each_iteration_draws_one_corpus_only(self, sequence, n_aux):
         """Label homogeneity of the global batch — the property routing is built on."""
-        dataset, plan, _, _ = _routed()
+        dataset, plan, _ = _routed(sequence=sequence, gbs=GBS, n_aux=n_aux)
         for iteration in range(plan.train_iters):
             labels = {dataset[iteration * GBS + j][0] for j in range(GBS)}
-            expected = "forget" if plan.corpus[iteration] == FORGET else "retain"
-            assert labels == {expected}, f"iteration {iteration} mixed corpora: {labels}"
+            assert labels == {_label(int(plan.corpus[iteration]))}, f"iteration {iteration} mixed corpora: {labels}"
 
-    def test_consumed_offsets_are_exactly_the_contiguous_range(self):
+    @pytest.mark.parametrize("sequence, n_aux", [(HAND_SEQUENCE, 1), (HAND_SEQUENCE_2, 2)])
+    def test_consumed_offsets_are_exactly_the_contiguous_range(self, sequence, n_aux):
         """Gapless and repeat-free: each corpus is consumed as range(n_iters * GBS)."""
-        dataset, plan, retain, forget = _routed()
+        dataset, plan, children = _routed(sequence=sequence, gbs=GBS, n_aux=n_aux)
         for i in range(len(dataset)):
             dataset[i]
-        for child, corpus in ((retain, RETAIN), (forget, FORGET)):
-            n_iters = int((plan.corpus == corpus).sum())
+        for corpus, child in children.items():
+            n_iters = plan.n_corpus_iters(corpus)
             assert sorted(child.requested) == list(range(n_iters * GBS))
             assert child.requested == sorted(child.requested), "offsets served out of order"
 
     @pytest.mark.parametrize("gbs", [1, 2, 4, 8])
-    def test_mapping_holds_across_global_batch_sizes(self, gbs):
-        dataset, plan, retain, forget = _routed(gbs=gbs)
+    @pytest.mark.parametrize("sequence, n_aux", [(HAND_SEQUENCE, 1), (HAND_SEQUENCE_2, 2)])
+    def test_mapping_holds_across_global_batch_sizes(self, gbs, sequence, n_aux):
+        dataset, plan, children = _routed(sequence=sequence, gbs=gbs, n_aux=n_aux)
         for i in range(len(dataset)):
             label, offset = dataset[i]
             iteration = i // gbs
-            expected = "forget" if plan.corpus[iteration] == FORGET else "retain"
-            assert label == expected
+            assert label == _label(int(plan.corpus[iteration]))
             assert offset == int(plan.prior_iters_same_corpus[iteration]) * gbs + i % gbs
-        assert sorted(retain.requested) == list(range(plan.n_samples(RETAIN, gbs)))
-        assert sorted(forget.requested) == list(range(plan.n_samples(FORGET, gbs)))
+        for corpus, child in children.items():
+            assert sorted(child.requested) == list(range(plan.n_samples(corpus, gbs)))
 
     @pytest.mark.parametrize(
-        "sequence",
+        "sequence, n_aux",
         [
-            [RETAIN] * 6,  # forget corpus never drawn
-            [FORGET] * 6,  # retain corpus never drawn
-            [FORGET, RETAIN],  # forget first
+            ([CORE] * 6, 1),  # aux corpus never drawn
+            ([AUX1] * 6, 1),  # core corpus never drawn
+            ([AUX1, CORE], 1),  # aux first
+            ([CORE] * 6, 2),  # neither aux corpus drawn
+            ([AUX2] * 4, 2),  # only the SECOND aux corpus is drawn
+            ([AUX2, AUX1], 2),  # the aux corpora out of index order
         ],
     )
-    def test_degenerate_corpus_sequences(self, sequence):
-        dataset, plan, retain, forget = _routed(sequence=sequence, gbs=2)
+    def test_degenerate_corpus_sequences(self, sequence, n_aux):
+        dataset, plan, children = _routed(sequence=sequence, gbs=2, n_aux=n_aux)
         for i in range(len(dataset)):
             dataset[i]
-        for child, corpus in ((retain, RETAIN), (forget, FORGET)):
-            assert sorted(child.requested) == list(range(int((plan.corpus == corpus).sum()) * 2))
+        for corpus, child in children.items():
+            assert sorted(child.requested) == list(range(plan.n_corpus_iters(corpus) * 2))
 
     def test_numpy_integer_indices_are_accepted(self):
         """The torch DataLoader hands numpy ints through; a raw numpy int must not fall
         through the range check or index the child with a numpy scalar."""
-        dataset, _, _, _ = _routed()
+        dataset, _, _ = _routed()
         assert dataset[np.int64(5)] == dataset[5]
         assert isinstance(dataset[np.int64(5)][1], int)
 
     def test_larger_children_than_needed_are_allowed_and_unused_tail_untouched(self):
-        dataset, plan, retain, forget = _routed(retain_extra=100, forget_extra=100)
+        dataset, plan, children = _routed(extra={CORE: 100, AUX1: 100})
         for i in range(len(dataset)):
             dataset[i]
-        assert max(retain.requested) == plan.n_samples(RETAIN, GBS) - 1
-        assert max(forget.requested) == plan.n_samples(FORGET, GBS) - 1
+        for corpus, child in children.items():
+            assert max(child.requested) == plan.n_samples(corpus, GBS) - 1
 
 
 class TestRealPlanConsumption:
@@ -188,58 +225,55 @@ class TestRealPlanConsumption:
     """
 
     @pytest.mark.parametrize(
-        "seed, iters, f, gbs",
+        "seed, iters, fractions, gbs",
         [
-            (1234, 12, 0.5, 4),
-            (7, 20, 0.25, 2),
-            (99, 9, 0.75, 3),
-            (5, 6, 1.0, 4),  # forget only: the retain child is never touched
-            (5, 6, 0.0, 4),  # retain only
-            (11, 40, 0.5, 1),  # GBS 1: every iteration is a single sample
+            (1234, 12, [0.5], 4),
+            (7, 20, [0.25], 2),
+            (99, 9, [0.75], 3),
+            (5, 6, [1.0], 4),  # aux only: the core child is never touched
+            (5, 6, [0.0], 4),  # core only
+            (11, 40, [0.5], 1),  # GBS 1: every iteration is a single sample
+            (1234, 12, [0.25, 0.25], 4),  # two aux corpora
+            (7, 20, [0.2, 0.3], 2),  # unequal shares
+            (99, 30, [0.1, 0.2, 0.3], 3),  # three aux corpora
+            (5, 8, [0.5, 0.0], 2),  # a module the plan never routes to
         ],
     )
-    def test_each_corpus_is_consumed_in_order_exactly_to_its_end(self, seed, iters, f, gbs):
-        plan = build_gr_plan(plan_seed=seed, train_iters=iters, forget_iter_fraction=f, p_as=0.5, p_cr=0.2)
-        retain = RecordingChild("retain", plan.n_samples(RETAIN, gbs))
-        forget = RecordingChild("forget", plan.n_samples(FORGET, gbs))
-        dataset = GRRoutedDataset(retain, forget, plan, gbs)
+    def test_each_corpus_is_consumed_in_order_exactly_to_its_end(self, seed, iters, fractions, gbs):
+        plan = build_gr_plan(plan_seed=seed, train_iters=iters, aux_iter_fractions=fractions, p_as=0.5, p_cr=0.2)
+        children = _children(plan, gbs)
+        dataset = GRRoutedDataset(children, plan, gbs)
 
         for index in range(len(dataset)):
             dataset[index]
 
-        for child, corpus in ((retain, RETAIN), (forget, FORGET)):
+        for corpus, child in children.items():
             expected = list(range(plan.n_samples(corpus, gbs)))
             assert child.requested == expected, "offsets are not a gapless in-order sweep of the corpus"
-        assert len(retain.requested) + len(forget.requested) == len(dataset)
+        assert sum(len(child.requested) for child in children.values()) == len(dataset)
 
-    @pytest.mark.parametrize("seed, iters, f, gbs", [(1234, 12, 0.5, 4), (7, 20, 0.25, 2), (99, 9, 0.75, 3)])
-    def test_the_final_index_serves_the_final_sample_of_its_corpus(self, seed, iters, f, gbs):
+    @pytest.mark.parametrize(
+        "seed, iters, fractions, gbs",
+        [(1234, 12, [0.5], 4), (7, 20, [0.25], 2), (99, 9, [0.75], 3), (7, 20, [0.2, 0.3], 2)],
+    )
+    def test_the_final_index_serves_the_final_sample_of_its_corpus(self, seed, iters, fractions, gbs):
         """The last index of the last iteration must land on the last sample the plan sized
         that corpus for — one past it is an IndexError at the very end of a run."""
-        plan = build_gr_plan(plan_seed=seed, train_iters=iters, forget_iter_fraction=f, p_as=0.5, p_cr=0.2)
-        dataset = GRRoutedDataset(
-            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
-            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
-            plan,
-            gbs,
-        )
+        plan = build_gr_plan(plan_seed=seed, train_iters=iters, aux_iter_fractions=fractions, p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(_children(plan, gbs), plan, gbs)
         last_corpus = int(plan.corpus[-1])
-        label = "forget" if last_corpus == FORGET else "retain"
-        assert dataset[len(dataset) - 1] == (label, plan.n_samples(last_corpus, gbs) - 1)
+        assert dataset[len(dataset) - 1] == (_label(last_corpus), plan.n_samples(last_corpus, gbs) - 1)
 
-    @pytest.mark.parametrize("seed, iters, f, gbs", [(1234, 12, 0.5, 4), (7, 20, 0.25, 2)])
-    def test_every_iteration_reads_its_own_contiguous_window(self, seed, iters, f, gbs):
+    @pytest.mark.parametrize(
+        "seed, iters, fractions, gbs", [(1234, 12, [0.5], 4), (7, 20, [0.25], 2), (1234, 24, [0.25, 0.25], 4)]
+    )
+    def test_every_iteration_reads_its_own_contiguous_window(self, seed, iters, fractions, gbs):
         """Per iteration the offsets are one unbroken block, and consecutive iterations of a
         corpus get consecutive blocks — the property that lets a child dataset be built with
         exactly ``n_iters * GBS`` samples instead of an epoch-looped superset."""
-        plan = build_gr_plan(plan_seed=seed, train_iters=iters, forget_iter_fraction=f, p_as=0.5, p_cr=0.2)
-        dataset = GRRoutedDataset(
-            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
-            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
-            plan,
-            gbs,
-        )
-        next_window = {RETAIN: 0, FORGET: 0}
+        plan = build_gr_plan(plan_seed=seed, train_iters=iters, aux_iter_fractions=fractions, p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(_children(plan, gbs), plan, gbs)
+        next_window = {corpus: 0 for corpus in range(plan.n_aux + 1)}
         for iteration in range(plan.train_iters):
             corpus = int(plan.corpus[iteration])
             offsets = [dataset[iteration * gbs + j][1] for j in range(gbs)]
@@ -250,48 +284,60 @@ class TestRealPlanConsumption:
 class TestConstructionRefusals:
     """A short child would silently wrap or IndexError deep in training; refuse at build."""
 
-    @pytest.mark.parametrize("short_corpus", ["retain", "forget"])
+    @pytest.mark.parametrize("short_corpus", [CORE, AUX1, AUX2])
     def test_undersized_child_raises(self, short_corpus):
-        plan = _hand_plan(HAND_SEQUENCE)
-        sizes = {"retain": plan.n_samples(RETAIN, GBS), "forget": plan.n_samples(FORGET, GBS)}
-        sizes[short_corpus] -= 1
-        with pytest.raises(ValueError, match=f"GR {short_corpus} dataset provides"):
-            GRRoutedDataset(
-                RecordingChild("retain", sizes["retain"]), RecordingChild("forget", sizes["forget"]), plan, GBS
-            )
+        plan = _hand_plan(HAND_SEQUENCE_2, n_aux=2)
+        children = _children(plan, GBS)
+        children[short_corpus].n -= 1
+        with pytest.raises(ValueError, match=f"GR corpus {short_corpus} dataset provides"):
+            GRRoutedDataset(children, plan, GBS)
 
     def test_exactly_sized_children_are_accepted(self):
         """The refusal is ``<``, not ``<=`` — exact sizing is the normal case."""
         plan = _hand_plan(HAND_SEQUENCE)
-        GRRoutedDataset(
-            RecordingChild("retain", plan.n_samples(RETAIN, GBS)),
-            RecordingChild("forget", plan.n_samples(FORGET, GBS)),
-            plan,
-            GBS,
-        )
+        GRRoutedDataset(_children(plan, GBS), plan, GBS)
 
     @pytest.mark.parametrize("gbs", [0, -1])
     def test_non_positive_global_batch_size_raises(self, gbs):
         plan = _hand_plan(HAND_SEQUENCE)
         with pytest.raises(ValueError, match="global_batch_size must be positive"):
-            GRRoutedDataset(RecordingChild("retain", 100), RecordingChild("forget", 100), plan, gbs)
+            GRRoutedDataset({CORE: RecordingChild("core", 100), AUX1: RecordingChild("aux0", 100)}, plan, gbs)
 
     def test_empty_corpus_needs_no_samples(self):
         """A corpus the plan never draws may legitimately be an empty dataset."""
-        plan = _hand_plan([RETAIN] * 4)
-        GRRoutedDataset(RecordingChild("retain", 4 * GBS), RecordingChild("forget", 0), plan, GBS)
+        plan = _hand_plan([CORE] * 4)
+        GRRoutedDataset({CORE: RecordingChild("core", 4 * GBS), AUX1: RecordingChild("aux0", 0)}, plan, GBS)
+
+    @pytest.mark.parametrize(
+        "labels",
+        [
+            (CORE,),  # the aux child is missing entirely
+            (AUX1,),  # the core child is missing
+            (CORE, AUX1, AUX2),  # one child too many for a 1-module plan
+            (CORE, AUX2),  # right count, wrong labels: module 1 instead of module 0
+            (1, 2),  # off by one: no core child at all
+        ],
+    )
+    def test_a_wrong_child_label_set_raises(self, labels):
+        """The children arrive as a dict keyed by corpus label, so a provider that built the
+        wrong number of corpora — or keyed them from 1 instead of 0 — would otherwise serve
+        the wrong corpus (or KeyError mid-epoch) rather than fail at construction."""
+        plan = _hand_plan(HAND_SEQUENCE)
+        children = {label: RecordingChild(_label(label), 1000) for label in labels}
+        with pytest.raises(ValueError, match="needs one child per corpus label"):
+            GRRoutedDataset(children, plan, GBS)
 
 
 class TestIndexBounds:
     @pytest.mark.parametrize("bad", [-1, 20, 21, 1000])
     def test_out_of_range_index_raises_index_error(self, bad):
-        dataset, _, _, _ = _routed()
+        dataset, _, _ = _routed()
         with pytest.raises(IndexError, match="out of range"):
             dataset[bad]
 
     def test_last_valid_index_is_served(self):
-        dataset, _, _, _ = _routed()
-        assert dataset[len(dataset) - 1] == ("forget", 7)
+        dataset, _, _ = _routed()
+        assert dataset[len(dataset) - 1] == ("aux0", 7)
 
 
 class TestSamplerAttribution:
@@ -388,19 +434,15 @@ class TestSamplerAttribution:
             )
 
     @pytest.mark.parametrize("resume_at", [0, 1, 4])
-    def test_a_resumed_run_still_serves_one_corpus_per_iteration(self, resume_at):
+    @pytest.mark.parametrize("fractions", [[0.5], [0.25, 0.25]])
+    def test_a_resumed_run_still_serves_one_corpus_per_iteration(self, resume_at, fractions):
         """The end-to-end resume: plan -> dataset -> sampler restarted mid-plan. The dataset
         is stateless in the iteration index, so a resumed run must land on the same corpus
         (and the same per-corpus window) the original run would have used for that iteration."""
         dp_size, micro_batch_size, num_microbatches = 2, 2, 2
         gbs = dp_size * micro_batch_size * num_microbatches  # 8
-        plan = build_gr_plan(plan_seed=7, train_iters=6, forget_iter_fraction=0.5, p_as=0.5, p_cr=0.2)
-        dataset = GRRoutedDataset(
-            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
-            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
-            plan,
-            gbs,
-        )
+        plan = build_gr_plan(plan_seed=7, train_iters=6, aux_iter_fractions=fractions, p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(_children(plan, gbs), plan, gbs)
         for rank in range(dp_size):
             sampler = MegatronPretrainingSampler(
                 total_samples=len(dataset),
@@ -412,7 +454,7 @@ class TestSamplerAttribution:
             )
             for microbatch_index, indices in enumerate(sampler):
                 iteration = resume_at + microbatch_index // num_microbatches
-                expected = "forget" if plan.corpus[iteration] == FORGET else "retain"
+                expected = _label(int(plan.corpus[iteration]))
                 for idx in indices:
                     label, offset = dataset[idx]
                     assert label == expected, f"rank {rank}, iteration {iteration}: served {label}"
@@ -431,13 +473,8 @@ class TestSamplerAttribution:
         while leaving the guard, the dataset and the plan all looking correct.
         """
         gbs = dp_size * micro_batch_size * num_microbatches
-        plan = build_gr_plan(plan_seed=3, train_iters=5, forget_iter_fraction=0.5, p_as=0.5, p_cr=0.2)
-        dataset = GRRoutedDataset(
-            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
-            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
-            plan,
-            gbs,
-        )
+        plan = build_gr_plan(plan_seed=3, train_iters=5, aux_iter_fractions=[0.5], p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(_children(plan, gbs), plan, gbs)
         for rank in range(dp_size):
             loader = build_pretraining_data_loader(
                 dataset=dataset,
@@ -457,20 +494,15 @@ class TestSamplerAttribution:
             assert len(batches) == plan.train_iters * num_microbatches
             for microbatch_index, (labels, _offsets) in enumerate(batches):
                 iteration = microbatch_index // num_microbatches
-                expected = "forget" if plan.corpus[iteration] == FORGET else "retain"
+                expected = _label(int(plan.corpus[iteration]))
                 assert set(labels) == {expected}, f"rank {rank}, iteration {iteration}: {set(labels)}"
 
     def test_routed_dataset_through_the_real_sampler_serves_one_corpus_per_iteration(self):
         """End-to-end: plan -> dataset -> real sampler. What each rank actually receives."""
         dp_size, micro_batch_size, num_microbatches = 2, 2, 2
         gbs = dp_size * micro_batch_size * num_microbatches  # 8
-        plan = build_gr_plan(plan_seed=7, train_iters=6, forget_iter_fraction=0.5, p_as=0.5, p_cr=0.2)
-        dataset = GRRoutedDataset(
-            RecordingChild("retain", plan.n_samples(RETAIN, gbs)),
-            RecordingChild("forget", plan.n_samples(FORGET, gbs)),
-            plan,
-            gbs,
-        )
+        plan = build_gr_plan(plan_seed=7, train_iters=6, aux_iter_fractions=[0.25, 0.25], p_as=0.5, p_cr=0.2)
+        dataset = GRRoutedDataset(_children(plan, gbs), plan, gbs)
         for rank in range(dp_size):
             sampler = MegatronPretrainingSampler(
                 total_samples=len(dataset),
@@ -482,19 +514,19 @@ class TestSamplerAttribution:
             )
             for microbatch_index, indices in enumerate(sampler):
                 iteration = microbatch_index // num_microbatches
-                expected = "forget" if plan.corpus[iteration] == FORGET else "retain"
+                expected = _label(int(plan.corpus[iteration]))
                 labels = {dataset[idx][0] for idx in indices}
                 assert labels == {expected}, f"rank {rank}, iteration {iteration}: {labels}"
 
 
-RETAIN_PATHS = ["0.5", "/data/retain_a_text_document", "0.5", "/data/retain_b_text_document"]
-FORGET_PATHS = ["/data/forget_text_document"]
+RETAIN_PATHS = ["0.5", "/data/core_a_text_document", "0.5", "/data/core_b_text_document"]
+AUX_PATHS = [["/data/aux0_text_document"], ["/data/aux1_text_document"]]
 
 
-def _gr_dataset_config(plan, gbs=GBS):
+def _gr_dataset_config(plan, gbs=GBS, aux_data_paths=None):
     return GRDatasetConfig(
         retain_data_path=RETAIN_PATHS,
-        forget_data_path=FORGET_PATHS,
+        aux_data_paths=aux_data_paths if aux_data_paths is not None else AUX_PATHS[: plan.n_aux],
         gr_plan=plan,
         gr_global_batch_size=gbs,
         seq_length=1024,
@@ -508,9 +540,12 @@ def _gr_dataset_config(plan, gbs=GBS):
     )
 
 
-def _is_forget_config(config) -> bool:
+def _config_label(config) -> str:
     """Which corpus a child config carries, read off its blend paths."""
-    return any("forget" in path for path in (config.data_path or []))
+    for k in range(len(AUX_PATHS)):
+        if any(f"aux{k}" in path for path in (config.data_path or [])):
+            return f"aux{k}"
+    return "core"
 
 
 class TestDatasetProviderDispatch:
@@ -524,7 +559,7 @@ class TestDatasetProviderDispatch:
 
     @pytest.fixture
     def plan(self):
-        return build_gr_plan(1234, 8, 0.5, 0.5, 0.2)
+        return build_gr_plan(1234, 8, [0.5], 0.5, 0.2)
 
     def test_gr_dataset_config_resolves_to_the_pretrain_provider(self, plan):
         assert get_dataset_provider(_gr_dataset_config(plan)) is pretrain_train_valid_test_datasets_provider
@@ -540,7 +575,7 @@ class TestDatasetProviderDispatch:
     def test_child_config_resolves_to_the_same_provider(self, plan):
         """The per-corpus child is re-classed to plain GPTDatasetConfig, so it resolves
         through the parent's registry entry rather than recursing into the GR branch."""
-        child = _gr_dataset_config(plan).build_child_config(FORGET_PATHS)
+        child = _gr_dataset_config(plan).build_child_config(AUX_PATHS[0])
         assert get_dataset_provider(child) is pretrain_train_valid_test_datasets_provider
 
     def test_gr_config_does_not_take_the_protocol_path(self, plan):
@@ -568,8 +603,7 @@ class _FakeBuilder:
         _FakeBuilder.calls.append({"dataset_cls": dataset_cls, "sizes": sizes, "config": config})
 
     def build(self):
-        label = "forget" if _is_forget_config(self.config) else "retain"
-        return RecordingChild(label, self.sizes[0]), None, None
+        return RecordingChild(_config_label(self.config), self.sizes[0]), None, None
 
 
 @pytest.fixture
@@ -579,12 +613,12 @@ def fake_builder(monkeypatch):
     return _FakeBuilder
 
 
-class TestProviderBuildsBothCorpora:
+class TestProviderBuildsEveryCorpus:
     """End-to-end through the real provider: one child per corpus, each sized from the plan."""
 
-    @pytest.fixture
-    def plan(self):
-        return build_gr_plan(1234, 8, 0.5, 0.5, 0.2)
+    @pytest.fixture(params=[[0.5], [0.25, 0.25]], ids=["one_aux", "two_aux"])
+    def plan(self, request):
+        return build_gr_plan(1234, 8, request.param, 0.5, 0.2)
 
     def test_provider_returns_a_routed_dataset_and_no_val_or_test(self, plan, fake_builder):
         train, valid, test = pretrain_train_valid_test_datasets_provider(
@@ -597,13 +631,15 @@ class TestProviderBuildsBothCorpora:
     def test_each_corpus_is_built_once_from_its_own_blend(self, plan, fake_builder):
         pretrain_train_valid_test_datasets_provider([plan.train_iters * GBS, 0, 0], _gr_dataset_config(plan))
 
-        assert len(fake_builder.calls) == 2
-        by_corpus = {"forget" if _is_forget_config(c["config"]) else "retain": c for c in fake_builder.calls}
-        assert set(by_corpus) == {"retain", "forget"}, "a corpus was built twice or not at all"
-        assert by_corpus["retain"]["config"].data_path == RETAIN_PATHS
-        assert by_corpus["forget"]["config"].data_path == FORGET_PATHS
-        for name, corpus in (("retain", RETAIN), ("forget", FORGET)):
-            call = by_corpus[name]
+        assert len(fake_builder.calls) == plan.n_aux + 1
+        by_corpus = {_config_label(c["config"]): c for c in fake_builder.calls}
+        expected = {"core"} | {f"aux{k}" for k in range(plan.n_aux)}
+        assert set(by_corpus) == expected, "a corpus was built twice or not at all"
+        assert by_corpus["core"]["config"].data_path == RETAIN_PATHS
+        for k in range(plan.n_aux):
+            assert by_corpus[f"aux{k}"]["config"].data_path == AUX_PATHS[k]
+        for corpus in range(plan.n_aux + 1):
+            call = by_corpus[_label(corpus)]
             assert call["sizes"] == [plan.n_samples(corpus, GBS), 0, 0]
             assert type(call["config"]) is GPTDatasetConfig, "a child must not stay a GRDatasetConfig"
 
@@ -612,7 +648,7 @@ class TestProviderBuildsBothCorpora:
             [plan.train_iters * GBS, 0, 0], _gr_dataset_config(plan)
         )
         for iteration in range(plan.train_iters):
-            expected = "forget" if plan.corpus[iteration] == FORGET else "retain"
+            expected = _label(int(plan.corpus[iteration]))
             assert {train[iteration * GBS + j][0] for j in range(GBS)} == {expected}
 
     @pytest.mark.parametrize("delta", [-1, 1, GBS])

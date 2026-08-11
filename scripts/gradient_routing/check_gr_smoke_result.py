@@ -52,6 +52,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed-checkpoint", required=True)
     parser.add_argument("--gr-checkpoint", required=True)
+    parser.add_argument(
+        "--expect-aux-modules",
+        type=int,
+        required=True,
+        help="Number of aux modules per layer the GR config trained (asserted per layer).",
+    )
     args = parser.parse_args()
 
     seed_reader = FileSystemReader(_latest_iter_dir(args.seed_checkpoint))
@@ -66,7 +72,15 @@ def main() -> None:
     fc1_keys = [k for k in gr_aux if "linear_fc1" in k]
     if not fc2_keys or len(fc1_keys) != len(fc2_keys):
         raise SystemExit(f"FAIL: GR checkpoint aux key census broken: fc1={len(fc1_keys)} fc2={len(fc2_keys)}")
-    print(f"PASS: GR checkpoint carries {len(fc2_keys)} aux module(s)")
+    # Key shape: ...mlp.gr_aux.<module index>.linear_fc{1,2}.weight — the per-layer module
+    # count must match the config, or a swap that silently built fewer modules would pass.
+    module_indices = sorted({int(k.split(".gr_aux.")[1].split(".")[0]) for k in fc2_keys})
+    if module_indices != list(range(args.expect_aux_modules)):
+        raise SystemExit(
+            f"FAIL: GR checkpoint carries aux module indices {module_indices}, expected "
+            f"0..{args.expect_aux_modules - 1}."
+        )
+    print(f"PASS: GR checkpoint carries {len(fc2_keys)} aux weight keys across {len(module_indices)} module(s)")
 
     zero_fc2 = []
     for key in fc2_keys:

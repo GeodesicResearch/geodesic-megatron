@@ -56,8 +56,20 @@ def test_read_results_keeps_only_successful_probes(tmp_path):
             ("control_retain", "", "no-loss-parsed"),
         ],
     )
-    losses = summarize.read_results(path)
+    losses = summarize.read_results(path, on_bad="skip")
     assert losses == {"base_retain": 1.5}
+
+
+def test_read_results_on_bad_error_refuses_the_file(tmp_path):
+    path = _write_results(
+        tmp_path,
+        [
+            ("base_retain", "1.5", "ok"),
+            ("base_forget", "2.0", "failed(rc=1)"),
+        ],
+    )
+    with pytest.raises(SystemExit, match="base_forget"):
+        summarize.read_results(path, on_bad="error")
 
 
 def test_learning_gains_are_loss_drops_from_base(tmp_path):

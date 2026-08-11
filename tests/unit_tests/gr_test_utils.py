@@ -28,6 +28,10 @@ import torch
 
 HIDDEN, MOE_FFN, SHARED_FFN, AUX_FFN, NUM_EXPERTS = 32, 24, 16, 8, 4
 
+#: Widths for the multi-module (N=2) paths. Deliberately UNEQUAL: every per-module width is
+#: read from its own list entry, so equal widths would let an index confusion pass unnoticed.
+AUX_FFNS = (8, 16)
+
 
 def init_single_rank_process_group() -> None:
     """Initialize (or reuse) a world-size-1 NCCL process group on a free local port.
@@ -54,6 +58,39 @@ def init_model_parallel(**kwargs) -> None:
     init_single_rank_process_group()
     if not parallel_state.model_parallel_is_initialized():
         parallel_state.initialize_model_parallel(**kwargs)
+
+
+def load_script(name: str, path):
+    """Load a repo script file (scripts/ is not a package) as an importable module.
+
+    The GR tooling under ``scripts/`` is executed by path, so its tests import it the
+    same way; one loader here keeps the importlib dance out of every test file.
+    """
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def teardown_model_parallel() -> None:
+    """Tear down mcore parallel state AND the default process group.
+
+    Module fixtures must call this, not ``destroy_model_parallel`` alone: the default
+    process group is process-level state shared with whatever pytest-xdist schedules on
+    this worker next, and a test that owns its own ``init_process_group`` (e.g. the
+    bridge's ``temporary_distributed_context``) dies with "initialize the default process
+    group twice" if a GR module leaks the group. Which files co-locate depends on xdist
+    packing, so the leak surfaces as order-dependent flakiness far from its cause.
+    """
+    from megatron.core import parallel_state
+
+    parallel_state.destroy_model_parallel()
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 def moe_config(**overrides):
@@ -106,11 +143,11 @@ def stack_spec():
     return copy.deepcopy(provider.mamba_stack_spec(provider))
 
 
-def gram_spec(aux_ffn=AUX_FFN):
-    """A stack spec with the GRAM MoE-layer swap applied."""
+def gram_spec(aux_ffns=(AUX_FFN,)):
+    """A stack spec with the GRAM MoE-layer swap applied, one aux module per width."""
     from megatron.bridge.models.mamba.gram_layer import swap_moe_layer_to_gram
 
-    return swap_moe_layer_to_gram(stack_spec(), aux_ffn_hidden_size=aux_ffn)
+    return swap_moe_layer_to_gram(stack_spec(), aux_ffn_hidden_sizes=list(aux_ffns))
 
 
 def moe_builder(spec):
@@ -123,8 +160,8 @@ def build_moe_layer(builder, config, layer_number=1, seed=4321):
 
     Both the host and the model-parallel CUDA seeds are re-pinned per build so a vanilla
     layer and a GRAM layer initialise their SHARED parameters identically — that identity
-    is what makes the bitwise comparisons meaningful. The aux module is constructed last,
-    so it draws from the stream only after every core parameter has been drawn.
+    is what makes the bitwise comparisons meaningful. The aux modules are constructed
+    last, so they draw from the stream only after every core parameter has been drawn.
     """
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 

@@ -25,9 +25,16 @@ Usage:
 """
 
 import argparse
-import csv
 import pathlib
 import sys
+
+
+# This is a script directory, not a package; the shared results.tsv reader is imported
+# the way the interpreter does for __main__ scripts.
+_SCRIPTS_DIR = str(pathlib.Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from probe_results import read_results  # noqa: E402
 
 
 DEFAULT_RESULTS = "/projects/a5k/public/logs/gradient_routing_geod171/loss_probes/results.tsv"
@@ -43,17 +50,6 @@ PAPER_BAND = {
     "5B": 0.56,
 }
 CORPORA = ("retain", "forget")
-
-
-def read_results(path):
-    """Parse results.tsv into {probe_name: loss}, keeping only successful probes."""
-    losses = {}
-    with open(path) as f:
-        for row in csv.DictReader(f, delimiter="\t"):
-            if row.get("status") != "ok" or not row.get("lm_loss"):
-                continue
-            losses[row["name"]] = float(row["lm_loss"])
-    return losses
 
 
 def learning_gains(losses, arm):
@@ -90,7 +86,7 @@ def main():
     path = pathlib.Path(args.results)
     if not path.exists():
         sys.exit(f"results not found: {path}")
-    losses = read_results(path)
+    losses = read_results(path, on_bad="skip")
 
     required = [f"{a}_{c}" for a in ("base", "control", "gr_off") for c in CORPORA]
     missing = [k for k in required if k not in losses]

@@ -5,8 +5,15 @@
 #       --config configs/gradient_routing/verify_postures.yaml"
 
 raw_dir: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/hf
-forget_on_dir: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/postures/forget_on
-forget_off_dir: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/postures/forget_off
+# One entry per baked posture: the dir and the module subset it is expected to have
+# merged. Exactly one posture must declare `enabled: []` (the ablated reference).
+postures:
+  forget_off:
+    dir: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/postures/forget_off
+    enabled: []
+  forget_on:
+    dir: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m/iter_0000120/postures/forget_on
+    enabled: [0]
 
 prompts:
   - "The capital of France is"
