@@ -14,7 +14,7 @@
 #
 # LAUNCH (GPU work queues via sbatch — never in a code tunnel):
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#     configs/gradient_routing/nemotron_nano_stories_baseline_pretrain.yaml nano pretrain --disable-ft
+#     configs/gradient_routing/simple_stories/nemotron_nano_stories_baseline_pretrain.yaml nano pretrain --disable-ft
 #
 # THE FIVE DATA-FILTERING ARMS ARE OVERRIDES OF THIS CONFIG, NOT FILES: each trains a
 # fresh model on one capability profile's corpora only, with train_iters scaled to that
@@ -24,7 +24,7 @@
 #
 #   # filter_core: core only — 495,781,155 tokens -> 1891 iters
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#     configs/gradient_routing/nemotron_nano_stories_baseline_pretrain.yaml nano pretrain --disable-ft \
+#     configs/gradient_routing/simple_stories/nemotron_nano_stories_baseline_pretrain.yaml nano pretrain --disable-ft \
 #     "dataset.data_path=['1.0','/projects/a5k/public/data/simple_stories/core_train_text_document']" \
 #     train.train_iters=1891 \
 #     checkpoint.save=/projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_filter_core \

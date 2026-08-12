@@ -18,7 +18,7 @@
 #   ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
 #     export HF_DATASETS_CACHE=/projects/a5k/public/hf/datasets_gr_geod171; \
 #     python scripts/data/partition_dataset_by_label.py \
-#       --config configs/gradient_routing/simple_stories_corpora.yaml"
+#       --config configs/gradient_routing/simple_stories/simple_stories_corpora.yaml"
 #
 # TOKENIZE (CPU, in-container; one .bin/.idx per corpus, 10 total):
 #   for f in /projects/a5k/public/data/simple_stories/*.jsonl; do

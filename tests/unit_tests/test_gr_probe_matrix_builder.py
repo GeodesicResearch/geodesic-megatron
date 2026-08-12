@@ -75,6 +75,19 @@ def _rows(output: Path) -> dict[str, tuple[str, str, str]]:
     return rows
 
 
+def test_a_relative_output_lands_beside_the_definition_not_the_cwd(builder, tmp_path, monkeypatch):
+    """The shipped definition names its TSV relative to itself; resolving against the
+    caller's CWD would regenerate the file at a stray path (or FileNotFoundError) whenever
+    the builder runs from anywhere but the repo root."""
+    definition, _ = _definition(tmp_path, output="matrix.tsv")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    _run(builder, definition)
+    assert (tmp_path / "matrix.tsv").exists()
+    assert not (elsewhere / "matrix.tsv").exists()
+
+
 def test_hydra_list_has_no_spaces(builder):
     """A space inside an override splits it into two argv words at the runner."""
     assert builder._hydra_list([1, 0, 0]) == "[1,0,0]"

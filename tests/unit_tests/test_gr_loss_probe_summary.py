@@ -51,33 +51,33 @@ def test_read_results_keeps_only_successful_probes(tmp_path):
     path = _write_results(
         tmp_path,
         [
-            ("base_retain", "1.5", "ok"),
-            ("base_forget", "2.0", "failed(rc=1)"),
-            ("control_retain", "", "no-loss-parsed"),
+            ("base__retain", "1.5", "ok"),
+            ("base__forget", "2.0", "failed(rc=1)"),
+            ("control__retain", "", "no-loss-parsed"),
         ],
     )
     losses = summarize.read_results(path, on_bad="skip")
-    assert losses == {"base_retain": 1.5}
+    assert losses == {"base__retain": 1.5}
 
 
 def test_read_results_on_bad_error_refuses_the_file(tmp_path):
     path = _write_results(
         tmp_path,
         [
-            ("base_retain", "1.5", "ok"),
-            ("base_forget", "2.0", "failed(rc=1)"),
+            ("base__retain", "1.5", "ok"),
+            ("base__forget", "2.0", "failed(rc=1)"),
         ],
     )
-    with pytest.raises(SystemExit, match="base_forget"):
+    with pytest.raises(SystemExit, match="base__forget"):
         summarize.read_results(path, on_bad="error")
 
 
 def test_learning_gains_are_loss_drops_from_base(tmp_path):
     losses = {
-        "base_retain": 2.0,
-        "base_forget": 3.0,
-        "control_retain": 1.5,
-        "control_forget": 2.0,
+        "base__retain": 2.0,
+        "base__forget": 3.0,
+        "control__retain": 1.5,
+        "control__forget": 2.0,
     }
     gains = summarize.learning_gains(losses, "control")
     assert gains == {"retain": pytest.approx(0.5), "forget": pytest.approx(1.0)}
@@ -86,12 +86,12 @@ def test_learning_gains_are_loss_drops_from_base(tmp_path):
 def test_perfect_routing_keeps_all_retain_and_removes_all_forget():
     """gr_off matches control on retain and matches BASE on forget."""
     losses = {
-        "base_retain": 2.0,
-        "base_forget": 3.0,
-        "control_retain": 1.5,
-        "control_forget": 2.0,
-        "gr_off_retain": 1.5,  # learned retain exactly as well as the control
-        "gr_off_forget": 3.0,  # learned nothing at all about forget
+        "base__retain": 2.0,
+        "base__forget": 3.0,
+        "control__retain": 1.5,
+        "control__forget": 2.0,
+        "gr_off__retain": 1.5,  # learned retain exactly as well as the control
+        "gr_off__forget": 3.0,  # learned nothing at all about forget
     }
     r = summarize.compare_to_control(losses, "gr_off")
     assert r["retention_ratio"] == pytest.approx(1.0)
@@ -102,12 +102,12 @@ def test_perfect_routing_keeps_all_retain_and_removes_all_forget():
 def test_routing_that_does_nothing_looks_like_the_control():
     """An arm identical to the control retains everything and removes nothing."""
     losses = {
-        "base_retain": 2.0,
-        "base_forget": 3.0,
-        "control_retain": 1.5,
-        "control_forget": 2.0,
-        "gr_off_retain": 1.5,
-        "gr_off_forget": 2.0,
+        "base__retain": 2.0,
+        "base__forget": 3.0,
+        "control__retain": 1.5,
+        "control__forget": 2.0,
+        "gr_off__retain": 1.5,
+        "gr_off__forget": 2.0,
     }
     r = summarize.compare_to_control(losses, "gr_off")
     assert r["retention_ratio"] == pytest.approx(1.0)
@@ -117,12 +117,12 @@ def test_routing_that_does_nothing_looks_like_the_control():
 def test_retain_side_cost_is_positive_when_routing_learns_less():
     """Higher gr_off retain loss than control => positive delta and ratio below 1."""
     losses = {
-        "base_retain": 2.0,
-        "base_forget": 3.0,
-        "control_retain": 1.5,
-        "control_forget": 2.0,
-        "gr_off_retain": 1.6,  # learned 0.4 where the control learned 0.5
-        "gr_off_forget": 2.8,
+        "base__retain": 2.0,
+        "base__forget": 3.0,
+        "control__retain": 1.5,
+        "control__forget": 2.0,
+        "gr_off__retain": 1.6,  # learned 0.4 where the control learned 0.5
+        "gr_off__forget": 2.8,
     }
     r = summarize.compare_to_control(losses, "gr_off")
     assert r["delta_retain"] == pytest.approx(0.1)
@@ -134,12 +134,12 @@ def test_retain_side_cost_is_positive_when_routing_learns_less():
 def test_overshooting_the_control_gives_a_ratio_above_one():
     """Routing CAN beat the blend on retain — less forget-data interference."""
     losses = {
-        "base_retain": 2.0,
-        "base_forget": 3.0,
-        "control_retain": 1.5,
-        "control_forget": 2.0,
-        "gr_off_retain": 1.4,
-        "gr_off_forget": 3.0,
+        "base__retain": 2.0,
+        "base__forget": 3.0,
+        "control__retain": 1.5,
+        "control__forget": 2.0,
+        "gr_off__retain": 1.4,
+        "gr_off__forget": 3.0,
     }
     r = summarize.compare_to_control(losses, "gr_off")
     assert r["delta_retain"] < 0
@@ -156,12 +156,12 @@ def test_paper_band_is_the_published_range():
 def test_zero_control_learning_does_not_raise():
     """A degenerate control (learned nothing) yields nan rather than ZeroDivisionError."""
     losses = {
-        "base_retain": 2.0,
-        "base_forget": 3.0,
-        "control_retain": 2.0,
-        "control_forget": 3.0,
-        "gr_off_retain": 1.9,
-        "gr_off_forget": 3.0,
+        "base__retain": 2.0,
+        "base__forget": 3.0,
+        "control__retain": 2.0,
+        "control__forget": 3.0,
+        "gr_off__retain": 1.9,
+        "gr_off__forget": 3.0,
     }
     r = summarize.compare_to_control(losses, "gr_off")
     assert r["retention_ratio"] != r["retention_ratio"]  # nan

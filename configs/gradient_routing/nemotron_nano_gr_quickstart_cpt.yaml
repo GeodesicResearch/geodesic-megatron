@@ -39,10 +39,10 @@
 # footprint vs the quickstart's 3072 (fewer µb in flight changes nothing at mbs 1; the
 # peak is per-µb, so expect ~the quickstart peak + the aux delta).
 #
-# LAUNCH (in-allocation, GEOD-171 execution venue; --disable-ft: short run, cheap to
-# restart, NVRx rank-0 gather has OOMed ~90 GiB-peak runs):
-#   bash pipeline_training_launch.sh configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml \
-#       --model nano --mode cpt --disable-ft
+# LAUNCH (GPU work queues via sbatch — never in a code tunnel; --disable-ft: short run,
+# cheap to restart, NVRx rank-0 gather has OOMed ~90 GiB-peak runs):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml nano cpt --disable-ft
 #
 # The run mints its plan from (plan_seed, train_iters, p_as, p_cr, aux_iter_fractions)
 # — rank- and restart-identical; the plan digest + per-iteration trace land in W&B

@@ -85,8 +85,11 @@ class GRCallback(Callback):
         # The per-iteration freeze is applied to the routers collected above, while Megatron
         # updates expert_bias on EVERY module that carries one. A bias carrier outside the
         # swapped stack spec would keep updating on aux-isolated iterations — an invisible
-        # leak of routed-corpus signal into router state.
-        if bias_carriers != len(self._routers):
+        # leak of routed-corpus signal into router state. FEWER carriers than routers is
+        # sound, not a leak: with moe_router_enable_expert_bias off, mcore sets every
+        # router's expert_bias to None, there is no bias update to freeze, and the
+        # per-iteration toggle is a no-op.
+        if bias_carriers > len(self._routers):
             raise RuntimeError(
                 f"{bias_carriers} module(s) carry expert_bias but only {len(self._routers)} are "
                 "GRAM routers this callback can freeze. Every expert-bias carrier must be inside "
@@ -150,6 +153,14 @@ class GRCallback(Callback):
                 "(forget_data_path/forget_iter_fraction). Mid-plan resume across the schema "
                 "migration is not supported — every pre-migration GR run completed its plan, so "
                 "load its final checkpoint as pretrained_checkpoint (a warm start) instead."
+            )
+        missing = [key for key in ("plan_seed", "aux_iter_fractions", "p_as", "p_cr") if key not in saved_gr]
+        if missing:
+            raise RuntimeError(
+                f"The checkpoint's run_config carries no gr plan fields ({', '.join(missing)} absent) — "
+                "it was not trained under gradient routing, so the plan it was trained under cannot be "
+                "confirmed and resuming into this GR run would relabel every iteration. To train GR from "
+                "that checkpoint, load it as checkpoint.pretrained_checkpoint (a warm start) instead."
             )
         saved_plan = build_gr_plan(
             plan_seed=saved_gr["plan_seed"],

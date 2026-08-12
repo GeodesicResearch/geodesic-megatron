@@ -57,6 +57,14 @@ def test_step_equiv_inverts_the_fit(cr):
         assert cr.step_equiv(float(loss), *fit) == pytest.approx(step, rel=1e-3)
 
 
+def test_step_equiv_overflow_is_inf_not_a_crash(cr):
+    """The reference fit is numpy, where an overflowing power returns inf; the Python-float
+    port must match rather than dying with OverflowError. A near-flat curve pins alpha at
+    the 1e-3 bound (1/alpha = 1000), where any loss meaningfully below A overflows."""
+    result = cr.step_equiv(1.0, a=4.0, alpha=1e-3, x0=0.0)
+    assert result == float("inf")
+
+
 def test_step_equiv_never_goes_nonpositive(cr):
     """A loss above the curve's start inverts to a step before 0; the floor keeps the
     ratio finite rather than letting a slightly-worse-than-init arm divide by <= 0."""

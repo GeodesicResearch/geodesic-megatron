@@ -39,11 +39,10 @@
 # This arm is an ENTANGLED model by construction — it has no forget_off posture, because
 # not having one is the whole point of the comparison.
 #
-# LAUNCH (in-allocation, same venue as the GR run; --disable-ft for the same reason —
-# short run, cheap to restart, NVRx rank-0 gather has OOMed ~90 GiB-peak runs):
-#   bash pipeline_training_launch.sh \
-#       configs/gradient_routing/nemotron_nano_control_blended_cpt.yaml \
-#       --model nano --mode cpt --disable-ft
+# LAUNCH (GPU work queues via sbatch — never in a code tunnel; --disable-ft for the same
+# reason — short run, cheap to restart, NVRx rank-0 gather has OOMed ~90 GiB-peak runs):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/gradient_routing/nemotron_nano_control_blended_cpt.yaml nano cpt --disable-ft
 #
 # THE DATA-FILTERING ARM IS AN OVERRIDE OF THIS CONFIG, NOT A SECOND FILE. Filtering —
 # train on the retain corpus only, never seeing the forget data — is the ceiling routing

@@ -92,6 +92,13 @@ def assign_labels(cfg: dict, dataset_labels: set[str]) -> dict[str, str]:
         if labels == REST_SENTINEL:
             rest_group = name
             continue
+        # A bare string would iterate character-by-character below (strings are iterable),
+        # turning the missing-brackets YAML slip into a wrong partition or a misdiagnosis.
+        if isinstance(labels, str):
+            raise SystemExit(
+                f"FATAL: group {name!r} must be a LIST of labels (or the string "
+                f"{REST_SENTINEL!r}); got the bare string {labels!r} — write it as [{labels!r}]."
+            )
         for label in labels:
             if label in assignment:
                 raise SystemExit(f"FATAL: label {label!r} claimed by both {assignment[label]!r} and {name!r}")

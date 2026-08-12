@@ -126,11 +126,11 @@ Why emptying, and not the obvious alternatives:
   through a gated step (unit-tested on the real distributed optimizer), and
   gradient clipping's global norm is computed over the actual update set.
 
-Aux parameters live in their **own param group**: the cpt wiring installs a
+Aux parameters live in their **own param group**: the GR wiring installs a
 `GROptimizerConfigOverrideProvider` that uses Megatron-Core `config_overrides`
 (glob-matched param names) to give `gr_aux` params their own LR schedule
 (`gr.aux_lr` → `gr.aux_min_lr`, weight decay × `gr.aux_wd_mult`) and stamps the
-group with a `gr_role: aux` marker the gater dispatches on.
+group with a per-module `gr_role: aux<k>` marker the gater dispatches on.
 
 One update path lives outside the optimizer entirely: the MoE router's
 `expert_bias` (the aux-loss-free load-balancing update). The callback toggles
@@ -139,8 +139,8 @@ respects `update_core`.
 
 ### 3.3 The routed dataset
 
-`GRRoutedDataset` (`data/datasets/gr_routed_dataset.py`) wraps two child
-`GPTDataset`s (retain, forget), one per corpus blend. Sample index → iteration
+`GRRoutedDataset` (`data/datasets/gr_routed_dataset.py`) wraps N+1 child
+`GPTDataset`s (core plus one per aux corpus), one per corpus blend. Sample index → iteration
 is exact under two enforced conditions: `dataloader_type: "single"`
 (`MegatronPretrainingSampler` hands out indices in order, so
 `iteration = idx // global_batch_size`) and constant GBS (batch ramps are
@@ -157,9 +157,13 @@ clones itself into plain per-corpus `GPTDatasetConfig`s for the builder.
 
 `GRCallback` (`training/gradient_routing/callback.py`) is the per-iteration
 driver: at each train-step start it reads the plan row and (a) writes the
-`gr_gate` buffer on every GRAM layer, (b) toggles `frozen_expert_bias`,
-(c) arms the gater with this iteration's update sets. On step end it restores
-the optimizer groups and emits telemetry. At iteration 0 it asserts every aux
+`gr_gate` buffer on every GRAM layer, (b) toggles `frozen_expert_bias`. The
+gater is NOT armed here: arming happens inside `gr_finalize_model_grads` (the
+finalize wrapper `install_gr_finalize` installs in `training/setup.py`),
+deliberately AFTER the base grad finalization — reductions and the router
+expert-bias update must run over intact groups, and the emptied groups must be
+visible only to `optimizer.step()`. On step end the callback restores the
+optimizer groups and emits telemetry. At iteration 0 it asserts every aux
 `fc2` is exactly zero (the warm-start invariant). Past iteration 0 the run is a
 resume, and the plan is re-derived from the iteration number AND checked against
 the one the checkpoint was trained under: the callback rebuilds the saved plan
@@ -173,7 +177,7 @@ corpus's data offset.
 Raw export first: the trained Megatron checkpoint is exported to HF safetensors
 via the **single-process `from_auto_config` path** (the multi-GPU export path
 silently drops non-stock keys — the aux tensors would vanish). The bridge
-carries explicit mappings for the aux keys (`models/nemotron_h_bridge.py`), so
+carries explicit mappings for the aux keys (`models/nemotronh/nemotron_h_bridge.py`), so
 the raw export contains stock + `gr_aux` tensors.
 
 `scripts/gradient_routing/bake_postures.py` then produces one output dir
@@ -239,14 +243,17 @@ persist to `posture_verification.json`.
 | `src/megatron/bridge/training/gradient_routing/plan.py` | `GRPlan`, `build_gr_plan` (seeded, exact-count) |
 | `src/megatron/bridge/training/gradient_routing/config.py` | `GradientRoutingConfig` (the `gr:` YAML section), `GRDatasetConfig` |
 | `src/megatron/bridge/training/gradient_routing/optimizer_gating.py` | `GROptimizerGater`, `GROptimizerConfigOverrideProvider` (one param group per aux module, `gr_role: aux<k>`) |
-| `src/megatron/bridge/training/gradient_routing/callback.py` | `GRCallback`: gate + expert-bias + gater arming + telemetry |
+| `src/megatron/bridge/training/gradient_routing/callback.py` | `GRCallback`: gate + expert-bias freeze + gater restore + telemetry (arming lives in the finalize wrapper `setup.py` installs) |
 | `src/megatron/bridge/training/gradient_routing/guards.py` | `validate_gr_launch` (§7 refusal list) + `gr_posture_problems`, the model/optimizer posture rules shared with geodesic-nemo-rl's GR learner |
 | `src/megatron/bridge/data/datasets/gr_routed_dataset.py` | iteration-mapped N+1-corpus dataset |
 | `src/megatron/bridge/models/mamba/mamba_provider.py` | `gr_aux_ffn_hidden_size` provider field; applies the spec swap as a **local** transform (never mutates the module-level `mamba_stack_spec`) |
-| `src/megatron/bridge/models/nemotron_h_bridge.py` | HF↔Megatron mappings for the `gr_aux` keys (raw export carries them) |
+| `src/megatron/bridge/models/nemotronh/nemotron_h_bridge.py` | HF↔Megatron mappings for the `gr_aux` keys (raw export carries them) |
 | `pipeline_training_run.py` | GR wiring (cpt + pretrain modes): builds plan/dataset/gater/callback from `gr:`, installs the override provider, runs the guards |
 | `scripts/gradient_routing/bake_postures.py` | posture export (merge / drop) + provenance |
 | `scripts/gradient_routing/verify_posture_equivalence.py` | posture verification gate |
+| `scripts/gradient_routing/gr_export_keys.py` | the HF-space `gr_aux` key contract (naming, posture-declaration validation, width uniformity) — the ONE home bake + verify import it from |
+| `scripts/gradient_routing/probe_results.py` | the probe `results.tsv` contract (reader + `<arm>__<corpus>` row-name compose/parse) shared by the matrix builder and both scorers |
+| `scripts/gradient_routing/check_gr_smoke_result.py` | post-checks the functional smoke asserts (aux trained, module census) |
 | `scripts/gradient_routing/gr_smoke_submit.sbatch` | SLURM wrapper for the functional smoke |
 | `scripts/gradient_routing/gr_probes_submit.sbatch` | SLURM wrapper for the corpus-loss probe runner |
 | `scripts/gradient_routing/build_probe_matrix.py` | expands a probe-matrix YAML into the runner's TSV |
@@ -315,9 +322,9 @@ so a new run edits values rather than forking a file:
 | `nemotron_nano_control_blended_cpt.yaml` | **the no-routing control.** Same two corpora, same token budget, blended 50/50 by ordinary CPT — the arm "did routing cost anything?" is measured against. The **data-filtering** arm is a four-value override of this file, not a config of its own; the launch line is in its header. |
 | `nemotron_nano_corpus_loss_probe.yaml` | **eval-only corpus loss probe** (§8.2). Scores one checkpoint on one `.bin/.idx` corpus and exits; checkpoint and corpus are the two overrides. A GRAM checkpoint's capability PROFILES are probed by adding `model.gr_aux_ffn_hidden_size=[…]` + `model.gr_static_gates=[…]` overrides. |
 | `loss_probe_matrix.tsv` | the (name, checkpoint, corpus[, extra overrides]) rows `run_corpus_loss_probes.sh` iterates |
-| `nemotron_nano_gr_stories_pretrain.yaml` | **the from-scratch routed config** (Simple Stories, GEOD-171j): N=4 modules, `--mode pretrain`, seq 1024 / GBS 256 — the header carries the iteration-count rationale and token math. |
-| `nemotron_nano_stories_baseline_pretrain.yaml` | the Simple Stories all-data baseline; its intermediates are the compute-ratio learning curve, and the five data-filtering arms are overrides documented in its header. |
-| `simple_stories_corpora.yaml` + `stories_probe_matrix.yaml` | the campaign's data-partition and probe-matrix definitions (`scripts/data/partition_dataset_by_label.py`, `scripts/gradient_routing/build_probe_matrix.py`). |
+| `simple_stories/nemotron_nano_gr_stories_pretrain.yaml` | **the from-scratch routed config** (Simple Stories, GEOD-171j): N=4 modules, `--mode pretrain`, seq 1024 / GBS 256 — the header carries the iteration-count rationale and token math. |
+| `simple_stories/nemotron_nano_stories_baseline_pretrain.yaml` | the Simple Stories all-data baseline; its intermediates are the compute-ratio learning curve, and the five data-filtering arms are overrides documented in its header. |
+| `simple_stories/simple_stories_corpora.yaml` + `simple_stories/stories_probe_matrix.yaml` | the campaign's data-partition and probe-matrix definitions (`scripts/data/partition_dataset_by_label.py`, `scripts/gradient_routing/build_probe_matrix.py`). |
 | `bake_postures.yaml` | export named module-subset PROFILES from one raw HF export (§4): a `postures:` map of name → enabled module indices (`forget_off: []` / `forget_on: [0]` are the conventional N=1 profiles) |
 | `verify_postures.yaml` | posture-equivalence gate for that export (§4) |
 | `mmlu_pro_retain_corpus.yaml` | renders an MMLU-Pro slice as a training corpus, for the train-on-test diagnostic below |
@@ -350,8 +357,8 @@ expert, adam-family, param-gather overlap, CPU offload) live in
 its own config shape — changing one of those rules or its message changes both
 stacks.
 
-GR is wired for `--mode cpt` only. `validate_gr_launch` refuses, with a fix
-instruction per item:
+GR is wired for `--mode cpt` and `--mode pretrain` (any other mode is refused).
+`validate_gr_launch` refuses, with a fix instruction per item:
 
 - dataset not `GRDatasetConfig`, or `dataloader_type != "single"` (iteration
   attribution is `idx // GBS` under `MegatronPretrainingSampler` only);
@@ -730,7 +737,7 @@ loss matrix, CR table, and noise analysis:
   distinctive topics (deadline 52%, aliens 45%, cultures 47% of the achievable
   gap; eras 8%, consistent with its tiny removal gap). In the paper's
   compute-ratio metric the module-on diagonals reach 82-96% of the matched
-  filtering diagonal. A capacity/knob question (module width 0.19% of the model,
+  filtering diagonal. A capacity/knob question (module width 0.76% of the model per module,
   ~44 update steps, aux_lr = core LR), not an isolation defect.
 - **Core cost ~1.0-1.5%**: the all-off profile's core loss is +0.014 nats above
   the step-matched filter_core arm — at the top of the paper's published

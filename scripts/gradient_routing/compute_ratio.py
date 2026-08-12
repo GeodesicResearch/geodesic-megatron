@@ -75,8 +75,16 @@ def fit_power(steps: np.ndarray, losses: np.ndarray) -> tuple[float, float, floa
 
 
 def step_equiv(loss: float, a: float, alpha: float, x0: float) -> float:
-    """Invert the fitted curve: the baseline step at which this loss is reached."""
-    s = (a / max(loss, EPS)) ** (1.0 / alpha) - x0
+    """Invert the fitted curve: the baseline step at which this loss is reached.
+
+    The reference computes this in numpy, where an overflowing power is inf; Python-float
+    ``**`` raises OverflowError instead, so the overflow is caught and mapped to the same
+    inf (a loss unreachably far below a near-flat curve has no finite step-equivalent).
+    """
+    try:
+        s = (a / max(loss, EPS)) ** (1.0 / alpha) - x0
+    except OverflowError:
+        return float("inf")
     return max(float(s), 1e-3)
 
 

@@ -41,7 +41,7 @@
 #
 # LAUNCH (GPU work queues via sbatch — never in a code tunnel):
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#     configs/gradient_routing/nemotron_nano_gr_stories_pretrain.yaml nano pretrain --disable-ft
+#     configs/gradient_routing/simple_stories/nemotron_nano_gr_stories_pretrain.yaml nano pretrain --disable-ft
 #
 # SCORING: eval-only corpus-loss probes over the five profiles x six val corpora — the
 # probe override sets model.gr_aux_ffn_hidden_size=[1856,1856,1856,1856] and

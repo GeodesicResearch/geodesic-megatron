@@ -48,10 +48,11 @@
 # that is fine for an A/B (both arms are equally exposed) but do not quote it as
 # generalization.
 #
-# LAUNCH (in-allocation; pin to your half of a shared tunnel):
-#   bash pipeline_training_launch.sh configs/gradient_routing/nemotron_nano_corpus_loss_probe.yaml \
-#       --model nano --mode cpt --disable-ft --nodes 16 --nodelist <nodes> \
-#       checkpoint.pretrained_checkpoint=<ckpt> dataset.data_path='[1.0, <prefix>]' \
+# LAUNCH (GPU work queues via sbatch — never in a code tunnel; matrix campaigns go
+# through scripts/gradient_routing/gr_probes_submit.sbatch, single probes directly):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/gradient_routing/nemotron_nano_corpus_loss_probe.yaml nano cpt --disable-ft \
+#       checkpoint.pretrained_checkpoint=<ckpt> "dataset.data_path=['1.0','<prefix>']" \
 #       logger.wandb_exp_name=<name>
 
 tokenizer:

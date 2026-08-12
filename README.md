@@ -231,10 +231,10 @@ fallback environment.
    random-initializes from the NVIDIA pretrain recipes and trains via pretrain() —
    no checkpoint is loaded unless the YAML sets one
 
-CPT additionally supports **gradient routing (GRAM)**: a `gr:` section in the YAML routes
-a two-corpus mix (retain/forget) so the forget corpus trains only removable auxiliary
-MLPs, which export-time baking merges into the shared expert (forget-ON) or deletes for a
-byte-stock model (forget-OFF). Configs and tooling — posture baking, posture verification,
+CPT and pretrain modes additionally support **gradient routing (GRAM)**: a `gr:` section
+in the YAML routes N+1 corpus blends (one core corpus plus one per aux capability) so each
+aux corpus trains only its own removable auxiliary MLPs; export-time baking merges any
+module subset into the shared expert or deletes them all for a byte-stock model. Configs and tooling — posture baking, posture verification,
 and eval-only corpus loss probes — live under `configs/gradient_routing/` +
 `scripts/gradient_routing/`. **No eval logic lives in this repo**: task definitions and
 harnesses belong to `geodesic-evals` and `geodesic-environments`, which take a baked

@@ -372,6 +372,36 @@ class TestOnTrainStart:
         with pytest.raises(RuntimeError, match="no run_config.yaml"):
             callback.on_train_start(_context(model, step=7, load_dir=str(tmp_path)))
 
+    def test_a_resume_from_a_non_gr_checkpoint_is_refused_with_the_warm_start_migration(self, monkeypatch, tmp_path):
+        """A run_config with no gr plan fields means the checkpoint was not trained under
+        gradient routing at all (e.g. checkpoint.load pointed at a control arm's save dir).
+        That must be the crafted refusal naming the warm-start migration, not a bare
+        KeyError out of run-config parsing."""
+        from megatron.bridge.training.gradient_routing.callback import GRCallback
+        from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerGater
+
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        load_dir = _write_resume_checkpoint(tmp_path, 7, gr_section={})
+        callback = GRCallback(_resume_plan(), GROptimizerGater(n_aux=2), log_interval=1)
+
+        with pytest.raises(RuntimeError, match="not trained under gradient routing") as excinfo:
+            callback.on_train_start(_context(model, step=7, load_dir=load_dir))
+        assert "pretrained_checkpoint" in str(excinfo.value), "the message must name the migration"
+
+    def test_a_bias_free_router_stack_is_accepted(self, monkeypatch):
+        """With moe_router_enable_expert_bias off, mcore sets every router's expert_bias to
+        None — there is no bias update to leak routed-corpus signal, so the freeze is
+        vacuous and the run must proceed rather than being refused."""
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk()
+        for layer in model:
+            layer.router.expert_bias = None
+        callback = _callback()
+
+        callback.on_train_start(_context(model, step=0))
+        assert len(callback._routers) == len(model)
+
     def test_a_model_without_gram_layers_raises(self, monkeypatch):
         """The spec swap not running is the failure that otherwise trains happily as a
         plain CPT run while reporting itself as gradient-routed."""

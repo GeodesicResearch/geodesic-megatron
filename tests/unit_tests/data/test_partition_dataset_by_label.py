@@ -99,6 +99,14 @@ class TestAssignLabels:
         with pytest.raises(SystemExit, match="claimed by both"):
             partition.assign_labels(cfg, {"dragons"})
 
+    def test_a_bare_string_group_value_is_refused_by_name(self, partition):
+        """The natural YAML slip `aliens: alien-encounters` (no list brackets) must be
+        refused naming the group and the fix — not iterated character-by-character into a
+        'label a is not in the dataset' misdiagnosis or a silently wrong partition."""
+        cfg = _config(groups={"aliens": "alien-encounters", "core": "rest"})
+        with pytest.raises(SystemExit, match="must be a LIST of labels"):
+            partition.assign_labels(cfg, {"alien-encounters"})
+
     def test_a_configured_label_absent_from_the_dataset_is_refused(self, partition):
         cfg = _config(groups={"aliens": ["alien-encounters"], "core": "rest"})
         with pytest.raises(SystemExit, match="not in the dataset"):

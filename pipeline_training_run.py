@@ -375,7 +375,7 @@ def main() -> None:
             OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
         )
         if raw_gr and raw_gr.get("enabled"):
-            # Gradient routing owns the dataset (two corpus blends behind a routed
+            # Gradient routing owns the dataset (N+1 corpus blends behind a routed
             # dataset), the optimizer override, and the per-iteration callback.
             _setup_gradient_routing(cfg, raw_gr, yaml_dataset)
         else:

@@ -29,11 +29,11 @@
 #
 # Columns (tab-separated): NAME  CHECKPOINT  DATA_PREFIX
 NAME	CHECKPOINT	DATA_PREFIX
-base_retain	/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
-base_forget	/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
-control_retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_control_blended_cpt	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
-control_forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_control_blended_cpt	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
-gr_off_retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
-gr_off_forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
-filtering_retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_filtering_retain_cpt	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
-filtering_forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_filtering_retain_cpt	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+base__retain	/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+base__forget	/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+control__retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_control_blended_cpt	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+control__forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_control_blended_cpt	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+gr_off__retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+gr_off__forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+filtering__retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_filtering_retain_cpt	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+filtering__forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_filtering_retain_cpt	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document

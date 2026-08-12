@@ -72,7 +72,10 @@ echo "[probes] matrix=$MATRIX"
 echo "[probes] nodes=$NODES nodelist=$NODELIST"
 echo "[probes] outdir=$OUTDIR"
 
-while IFS=$'\t' read -r NAME CKPT PREFIX EXTRAS; do
+# `|| [ -n "$NAME" ]`: read fails at EOF-without-newline while still filling NAME, so a
+# hand-edited matrix whose last row lacks a trailing newline would otherwise silently
+# skip that row (here and in the results rebuild below).
+while IFS=$'\t' read -r NAME CKPT PREFIX EXTRAS || [ -n "$NAME" ]; do
     case "$NAME" in ''|'#'*|NAME) continue ;; esac
     wanted "$NAME" || continue
 
@@ -126,7 +129,7 @@ done < "$MATRIX"
 # --only run updates its rows and leaves the rest intact.
 {
     printf 'name\tcheckpoint\tdata_prefix\tlm_loss\tppl\tstatus\n'
-    while IFS=$'\t' read -r NAME _ _; do
+    while IFS=$'\t' read -r NAME _ _ || [ -n "$NAME" ]; do
         case "$NAME" in ''|'#'*|NAME) continue ;; esac
         [ -f "$OUTDIR/${NAME}.result" ] && cat "$OUTDIR/${NAME}.result"
     done < "$MATRIX"

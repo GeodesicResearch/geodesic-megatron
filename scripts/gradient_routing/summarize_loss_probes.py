@@ -34,7 +34,7 @@ import sys
 _SCRIPTS_DIR = str(pathlib.Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
-from probe_results import read_results  # noqa: E402
+from probe_results import arm_row_name, read_results  # noqa: E402
 
 
 DEFAULT_RESULTS = "/projects/a5k/public/logs/gradient_routing_geod171/loss_probes/results.tsv"
@@ -54,7 +54,7 @@ CORPORA = ("retain", "forget")
 
 def learning_gains(losses, arm):
     """How far each corpus's loss fell from base for this arm. Positive = learned."""
-    return {c: losses[f"base_{c}"] - losses[f"{arm}_{c}"] for c in CORPORA}
+    return {c: losses[arm_row_name("base", c)] - losses[arm_row_name(arm, c)] for c in CORPORA}
 
 
 def compare_to_control(losses, arm):
@@ -69,9 +69,9 @@ def compare_to_control(losses, arm):
     mine = learning_gains(losses, arm)
     out = {"gains": mine, "control_gains": ctrl}
     for corpus in CORPORA:
-        d = losses[f"{arm}_{corpus}"] - losses[f"control_{corpus}"]
+        d = losses[arm_row_name(arm, corpus)] - losses[arm_row_name("control", corpus)]
         out[f"delta_{corpus}"] = d
-        out[f"pct_{corpus}"] = 100 * d / losses[f"control_{corpus}"]
+        out[f"pct_{corpus}"] = 100 * d / losses[arm_row_name("control", corpus)]
     out["retention_ratio"] = mine["retain"] / ctrl["retain"] if ctrl["retain"] else float("nan")
     out["removal_fraction"] = 1 - mine["forget"] / ctrl["forget"] if ctrl["forget"] else float("nan")
     return out
@@ -88,19 +88,19 @@ def main():
         sys.exit(f"results not found: {path}")
     losses = read_results(path, on_bad="skip")
 
-    required = [f"{a}_{c}" for a in ("base", "control", "gr_off") for c in CORPORA]
+    required = [arm_row_name(a, c) for a in ("base", "control", "gr_off") for c in CORPORA]
     missing = [k for k in required if k not in losses]
     if missing:
         sys.exit(f"missing probes (rerun those rows): {', '.join(missing)}")
 
     arms = ["control", "gr_off"]
-    if all(f"filtering_{c}" in losses for c in CORPORA):
+    if all(arm_row_name("filtering", c) in losses for c in CORPORA):
         arms.append("filtering")
 
     print(f"probe losses  ({path})\n")
     print(f"{'arm':<12}{'retain':>12}{'forget':>12}")
     for arm in ["base"] + arms:
-        print(f"{arm:<12}{losses[f'{arm}_retain']:>12.4f}{losses[f'{arm}_forget']:>12.4f}")
+        print(f"{arm:<12}{losses[arm_row_name(arm, 'retain')]:>12.4f}{losses[arm_row_name(arm, 'forget')]:>12.4f}")
 
     print("\nlearning vs base (positive = loss fell = the arm learned that corpus)\n")
     print(f"{'arm':<12}{'retain':>12}{'forget':>12}")
@@ -140,10 +140,10 @@ def main():
         print("=" * 72)
         print(f"  filtering retain learning : {learning_gains(losses, 'filtering')['retain']:.4f}")
         print(f"  gr_off    retain learning : {learning_gains(losses, 'gr_off')['retain']:.4f}")
-        gap = losses["gr_off_retain"] - losses["filtering_retain"]
+        gap = losses[arm_row_name("gr_off", "retain")] - losses[arm_row_name("filtering", "retain")]
         print(
             f"  gr_off retain loss - filtering retain loss = {gap:+.4f} nats "
-            f"({100 * gap / losses['filtering_retain']:+.2f}%)"
+            f"({100 * gap / losses[arm_row_name('filtering', 'retain')]:+.2f}%)"
         )
         print(f"\n  retention_ratio  filtering={f['retention_ratio']:.3f}  gr_off={g['retention_ratio']:.3f}")
         print(f"  removal_fraction filtering={f['removal_fraction']:.3f}  gr_off={g['removal_fraction']:.3f}")

@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import gc
 import logging
 import os
+import subprocess
 from pathlib import Path
 from shutil import rmtree
 from unittest.mock import patch
@@ -33,6 +35,45 @@ _xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
 _XDIST_MASTER_PORT = str(29500 + 41 * (int(_xdist_worker[2:]) + 1)) if _xdist_worker.startswith("gw") else None
 if _XDIST_MASTER_PORT is not None:
     os.environ["MASTER_PORT"] = _XDIST_MASTER_PORT
+
+
+def xdist_worker_device(worker: str, visible: str | None, probed_count: int) -> str | None:
+    """The single CUDA device an xdist worker should see, or None to leave the env alone.
+
+    Round-robins workers over the devices an externally-set CUDA_VISIBLE_DEVICES
+    exposes (respecting any outer mask), falling back to the ``probed_count``
+    physically-present devices when no mask is set. Serial runs and hosts with no
+    GPUs return None.
+    """
+    if not worker.startswith("gw"):
+        return None
+    devices = [d for d in visible.split(",") if d] if visible is not None else [str(i) for i in range(probed_count)]
+    if not devices:
+        return None
+    return devices[int(worker[2:]) % len(devices)]
+
+
+def _probe_gpu_count() -> int:
+    """Count physical GPUs without importing torch (whose CUDA state must stay uninitialized here)."""
+    try:
+        listing = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    return sum(1 for line in listing.stdout.splitlines() if line.startswith("GPU "))
+
+
+# The same xdist concern, for GPU memory: every worker's CUDA context lands on
+# cuda:0 by default, so `-n 8` piles ~8 GiB of contexts onto ONE GPU of a 4-GPU
+# node while its siblings idle — enough to OOM the suite whenever a co-resident
+# job (a serving endpoint, a training run) already holds most of that GPU.
+# Narrow CUDA_VISIBLE_DEVICES to one device per worker HERE, before the
+# `import torch` below, because CUDA reads the mask once at context creation.
+# No per-test re-pin is needed for the same reason: once the context exists the
+# mask is inert, and reset_env_vars restores the value after any test that
+# mutates it.
+_XDIST_DEVICE = xdist_worker_device(_xdist_worker, os.environ.get("CUDA_VISIBLE_DEVICES"), _probe_gpu_count())
+if _XDIST_DEVICE is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _XDIST_DEVICE
 
 # Unit tests must not inherit the *submitting allocation's* size: on a SLURM
 # compute node get_world_size_safe() falls back to SLURM_NTASKS, so a suite run
@@ -55,22 +96,57 @@ def pytest_runtest_setup(item):
     os.environ.pop("SLURM_NTASKS", None)
 
 
-def pytest_runtest_teardown(item, nextitem):
-    """Enforce the setdefault convention loudly, at the offending test.
+def _enforce_master_port_convention(item):
+    """Fail, at the offending test, any hard assignment of MASTER_PORT.
 
     A test that hard-assigns MASTER_PORT (instead of os.environ.setdefault)
     collides with concurrently-running workers; without this check the symptom
-    is a nondeterministic EADDRINUSE in some OTHER test. This hook runs before
+    is a nondeterministic EADDRINUSE in some OTHER test. Teardown runs before
     fixture finalizers restore the environment, so the overwrite is still
     visible and attributed to the test that made it.
     """
-    if _XDIST_MASTER_PORT is not None:
-        current = os.environ.get("MASTER_PORT")
-        assert current == _XDIST_MASTER_PORT, (
-            f"{item.nodeid} overwrote MASTER_PORT to {current!r} (worker port is "
-            f"{_XDIST_MASTER_PORT}); use os.environ.setdefault so the per-xdist-worker "
-            "port stays authoritative."
-        )
+    if _XDIST_MASTER_PORT is None:
+        return
+    current = os.environ.get("MASTER_PORT")
+    assert current == _XDIST_MASTER_PORT, (
+        f"{item.nodeid} overwrote MASTER_PORT to {current!r} (worker port is "
+        f"{_XDIST_MASTER_PORT}); use os.environ.setdefault so the per-xdist-worker "
+        "port stays authoritative."
+    )
+
+
+# Live GPU memory above which a finished test is worth a gc pass: an unconditional
+# collect after every one of ~6800 tests adds minutes of pure gc time to the suite,
+# while the model-heavy tests the pass exists for hold GiBs.
+_GC_WORTHWHILE_LIVE_BYTES = 256 * 2**20
+
+
+def _release_finished_test_gpu_memory():
+    """Hand a finished test's GPU memory back to the driver.
+
+    Two steps: gc.collect() first, because nn.Module graphs are full of
+    reference cycles and a just-finished test's multi-GiB model stays LIVE
+    until the cycle collector runs (the next test in the same file then builds
+    its own model on top of the leftover); then empty_cache(), because
+    freed-but-cached allocator blocks are invisible to every OTHER process
+    sharing the GPU, so an idle worker holds ~1 GiB hostage while its
+    GPU-sibling's next big model build OOMs on memory nobody is using. Both
+    matter under xdist on a shared node: a co-resident job (a serving endpoint,
+    a training run) can leave only a few GiB free per GPU, and the heaviest
+    test files peak within that budget only if earlier tests' memory is
+    genuinely released between tests.
+    """
+    if not torch.cuda.is_initialized():
+        return
+    if torch.cuda.memory_allocated() >= _GC_WORTHWHILE_LIVE_BYTES:
+        gc.collect()
+    torch.cuda.empty_cache()
+
+
+def pytest_runtest_teardown(item, nextitem):
+    """Per-test teardown: MASTER_PORT convention enforcement, then GPU-memory release."""
+    _enforce_master_port_convention(item)
+    _release_finished_test_gpu_memory()
 
 
 import torch

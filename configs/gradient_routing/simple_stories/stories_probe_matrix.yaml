@@ -67,4 +67,4 @@ curve:
   checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_baseline_pretrain
   steps: [172, 344, 516, 688, 860, 1032, 1204, 1376, 1548, 1720, 1892, 2064]
 
-output: configs/gradient_routing/stories_probe_matrix.tsv
+output: stories_probe_matrix.tsv
