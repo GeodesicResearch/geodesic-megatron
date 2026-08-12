@@ -294,6 +294,8 @@ before `-e`: the symlink targets `/host/...`, which resolves only inside the con
 | Failure | Meaning | Fix |
 |---|---|---|
 | `FATAL [env-activate]: megatron.bridge resolves to …` | the code about to run is a different checkout's than the one the job names (D3) | submit from the checkout you mean, or `export GEODESIC_REPO_DIR=<checkout>` **in the submission** — a submitted job cannot inherit your shell |
+| `FATAL [env-activate]: '<dir>' has no pipeline_env_validate.py` | `REPO_DIR` does not name a checkout at all | point it at the checkout itself; the mismatch remedy below does not apply, since the bridge may be fine |
+| `FATAL [env-activate]: could not determine which checkout serves megatron.bridge` | the probe failed, so provenance is unknown | read the error printed above it; this is a broken probe or python, not a wrong checkout |
 
 It is fatal rather than a warning for the same reason as the rest of D4: a job running
 unselected code produces results nobody can attribute, and the failure is otherwise
@@ -516,6 +518,8 @@ Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
 | `FATAL [env-config]: Slingshot build predates the hostlibs dir` | Pre-D5 build: `bash pipeline_env_setup.sh --force`. |
 | NCCL log shows `NET/Socket`, or bandwidth ~2 GB/s | CXI plugin not loading — **never** "fix" this by loading `brics/apptainer-multi-node`/`adapt.sh` (D1). Run with `NCCL_DEBUG=INFO` and look for `AWS Libfabric`; `ctypes.CDLL(os.environ["NCCL_NET_PLUGIN"])` inside the container names the missing soname (usually a missing `/host/usr/lib64` bind, a missing `hostlibs` symlink, or a plugin built against the wrong libfabric). |
 | `FATAL [env-activate]: megatron.bridge resolves to …` | The job would run a different checkout's code than the one it names. Submit from the intended checkout, or `export GEODESIC_REPO_DIR=<checkout>` in the submission itself. The `[env-activate] repo:`/`bridge:` lines just above it name both trees (D3, D4). |
+| `FATAL [env-activate]: '<dir>' has no pipeline_env_validate.py` | `REPO_DIR`/`GEODESIC_REPO_DIR` names something that is not a geodesic-megatron checkout — a parent directory, a data dir, or a scratch path. Point it at the checkout itself. Note this is **not** the mismatch case above: the bridge may be perfectly fine, so re-exporting `GEODESIC_REPO_DIR` to the same wrong place will not help. |
+| `FATAL [env-activate]: could not determine which checkout serves megatron.bridge` | The provenance probe itself failed; its error is printed directly above. A broken python or a bug in the probe, **not** necessarily a wrong checkout — read the printed error rather than changing `REPO_DIR`. |
 | `megatron.bridge` imports from the image, not the repo | The image ships a regular `megatron` package — D3 contingency (derived SIF with the megatron packages uninstalled). The activation guard fails the job on sight; `validate` names it. |
 | Recipe load fails `peft>=0.17.0 is required ... found peft==0.13.2` | Overlay not populated: `bash pipeline_env_setup.sh --only overlay` (D3b). |
 | `WARNING [env-activate]: CONTAINER_PYTHON_OVERLAY ... configured but does not exist` | Same fix; the warning exists so this never degrades silently. |
