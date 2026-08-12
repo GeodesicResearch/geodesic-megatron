@@ -699,3 +699,39 @@ none, not because the bake removes it. Exporting with `--keep-remote-code` would
 longer be comparable to anything scored natively — which is why the agreement is asserted
 rather than assumed. Full record:
 `/projects/a5k/public/logs/gradient_routing_geod171/lowbase_traintest/lowbase_control_results.md`.
+
+### 10.3 The Simple Stories multi-module experiment (GEOD-171j)
+
+The GRAM paper's controlled test (§4 of arXiv 2607.08077), run end-to-end on this
+implementation: from-scratch pretraining of the Nano-30B architecture on
+SimpleStories (48 topics, perfect labels), with ONE routed run carrying **N=4 aux
+modules** (topics: a-deadline-or-time-limit, alien-encounters, bygone-eras,
+cultural-traditions; core = the other 44 merged) versus FIVE separately trained
+data-filtered models. Posture: seq 1024 / GBS 256 / 2,064 iterations (~1 epoch,
+541.2M tokens), p_as=0.3 / p_cr=0.5 (the paper's published stories knobs), aux
+width 1856, aux_lr = core LR. Every capability profile of the single GRAM
+checkpoint was scored by the eval-only loss probes via `model.gr_static_gates` on
+byte-identical batches — 11 arms x 5 val corpora, plus the baseline's 12-checkpoint
+learning curve for the compute-ratio fit.
+
+Headline findings, all 115 matrix cells scored (full record incl. the complete
+loss matrix, CR table, and noise analysis:
+`/projects/a5k/public/logs/gradient_routing_geod171/simple_stories/analysis.md`):
+
+- **Removal sits at the data-filtering ceiling.** With all modules off, core's
+  loss rise on each aux topic is 88-137% of what a model that NEVER saw those
+  topics shows (per-topic gaps +0.044 to +0.118 nats). The measured run-to-run
+  noise — from the four independent filtering runs — is ±0.01 nats.
+- **Specificity is airtight.** Toggling any module moves OTHER topics' losses by
+  at most 0.0017 nats (median 0.0004) and core by at most 0.0007 — module subsets
+  are surgically independent, which is what makes profile serving from one
+  checkpoint meaningful.
+- **Recovery is real but reaches ~half of the matched filtering arm** on
+  distinctive topics (deadline 52%, aliens 45%, cultures 47% of the achievable
+  gap; eras 8%, consistent with its tiny removal gap). In the paper's
+  compute-ratio metric the module-on diagonals reach 82-96% of the matched
+  filtering diagonal. A capacity/knob question (module width 0.19% of the model,
+  ~44 update steps, aux_lr = core LR), not an isolation defect.
+- **Core cost ~1.0-1.5%**: the all-off profile's core loss is +0.014 nats above
+  the step-matched filter_core arm — at the top of the paper's published
+  retain-cost band (+0.29% to +1.19%) and within ~1-2 noise units.
