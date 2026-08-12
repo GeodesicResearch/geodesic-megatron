@@ -47,6 +47,46 @@ class TestRevisionArg:
             pipe_module.parse_args(["--dataset", "org/name", "--revision", "abc123", "--data-files", "/tmp/x.jsonl"])
 
 
+class TestOutputDirCarriesTheRevision:
+    """Two revisions of one dataset must not derive the same output directory.
+
+    They do not overwrite each other, they merge: stage 4 rewrites training.jsonl
+    and pipeline_results.json records the new revision, but pack_sft_dataset.py
+    skips a parquet that already exists, so training reads the OLD revision's
+    packed data under provenance claiming the new one. Nothing raises, and no
+    downstream check can catch it — a model trained on the previous revision
+    scores exactly like a model trained on the previous revision.
+    """
+
+    def test_a_sha_becomes_part_of_the_path(self, pipe_module):
+        got = pipe_module.slugify_dataset_name(
+            "geodesic-research/pa-warm-start-sft-light-1b-mix",
+            "default",
+            "d691d216a0cc82160bc58daaccddbf8715553e9d",
+        )
+        assert got == "geodesic-research__pa-warm-start-sft-light-1b-mix__default__d691d216"
+
+    def test_two_revisions_cannot_collide(self, pipe_module):
+        a = pipe_module.slugify_dataset_name("org/name", "default", "d691d216a0cc82160bc58daaccddbf8715553e9d")
+        b = pipe_module.slugify_dataset_name("org/name", "default", "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee")
+        assert a != b
+
+    def test_no_revision_leaves_the_path_unchanged(self, pipe_module):
+        # Existing roots were derived without a revision; pinning one must not
+        # silently relocate a dataset that is already prepared.
+        assert pipe_module.slugify_dataset_name("org/name", "default") == "org__name__default"
+        assert pipe_module.slugify_dataset_name("org/name") == "org__name"
+
+    def test_a_branch_keeps_its_name(self, pipe_module):
+        # A ref is what a reader recognises, so it stays legible rather than hashed.
+        assert pipe_module.slugify_dataset_name("org/name", None, "main") == "org__name__main"
+
+    def test_a_ref_with_separators_is_filesystem_safe(self, pipe_module):
+        got = pipe_module.slugify_dataset_name("org/name", None, "refs/pr/3")
+        assert got == "org__name__refs-pr-3"
+        assert "/" not in got.removeprefix("org__name__")
+
+
 class TestHubParquetShardPattern:
     def test_pattern_with_subset(self, pipe_module):
         assert pipe_module.hub_parquet_shard_pattern("default", "train") == "default/train-*.parquet"

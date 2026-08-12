@@ -38,6 +38,7 @@ import argparse
 import fnmatch
 import importlib.metadata
 import json
+import re
 import subprocess
 import sys
 import time
@@ -188,16 +189,41 @@ def load_hub_dataset_via_arrow(dataset, subset, split, revision):
     return Dataset(table)
 
 
-def slugify_dataset_name(dataset, subset=None):
+def slugify_dataset_name(dataset, subset=None, revision=None):
     """Generate output directory name from dataset components.
 
     geodesic-research/Foo → geodesic-research__Foo
     geodesic-research/Foo + subset=bar → geodesic-research__Foo__bar
+    geodesic-research/Foo + revision=d691d216a0cc… → geodesic-research__Foo__d691d216
+
+    The revision is part of the path, not just the recorded provenance, because
+    two revisions sharing a directory do not overwrite each other — they merge.
+    Stage 4 rewrites `training.jsonl` and the results file records the new
+    revision, but the packer skips a parquet that already exists, so training
+    reads the OLD revision's packed data while every artifact in the directory
+    claims the new one. Nothing raises, and no downstream check can see it: a
+    model trained on the previous revision scores exactly like a model trained on
+    the previous revision.
     """
     slug = dataset.replace("/", "__")
     if subset:
         slug = f"{slug}__{subset}"
+    if revision:
+        slug = f"{slug}__{_revision_slug(revision)}"
     return slug
+
+
+def _revision_slug(revision):
+    """A short, filesystem-safe form of a git revision.
+
+    A 40-char SHA becomes its first 8 (matching how these paths are written by
+    hand); a branch or tag keeps its name with separators flattened, since those
+    are what a reader recognises.
+    """
+    ref = revision.strip()
+    if len(ref) >= 7 and all(c in "0123456789abcdefABCDEF" for c in ref):
+        return ref[:8].lower()
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", ref)[:16].strip("-")
 
 
 def dataset_display_name(dataset, subset=None):
@@ -550,7 +576,7 @@ def main():  # noqa: D103
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
-        dir_name = slugify_dataset_name(args.dataset, args.subset)
+        dir_name = slugify_dataset_name(args.dataset, args.subset, args.revision)
         output_dir = Path(args.output_base) / dir_name
 
     results["output_dir"] = str(output_dir)
