@@ -1006,3 +1006,75 @@ class TestAuxScheduleIsSeparate:
             assert float(group["weight_decay"]) == pytest.approx(BASE_WD * AUX_WD_MULTS[k])
         for group in core_groups:
             assert float(group["weight_decay"]) == pytest.approx(BASE_WD)
+
+
+@requires_gpu
+@pytest.mark.usefixtures("model_parallel")
+class TestAuxGroupAdamSteps:
+    """The group-level Adam step counters must count exactly the armed updates.
+
+    This is accumulate-then-gate's isolation invariant made observable: FusedAdam skips
+    empty groups before touching its per-group ``step`` counter, so after any schedule
+    of armed/frozen iterations each module's counter equals its armed count — the
+    property the callback asserts every step on real runs.
+    """
+
+    def test_counters_match_the_armed_update_counts(self):
+        model, optimizer, gater = _rig(n_aux=2)
+        schedule = [
+            (True, (True, False)),
+            (True, (False, False)),
+            (False, (True, False)),
+            (True, (False, True)),
+        ]
+        for seed, (core, aux) in enumerate(schedule):
+            _step(model, optimizer, gater, update_core=core, update_aux=aux, seed=seed)
+        observed = gater.aux_group_adam_steps()
+        assert observed[0] and all(step == 2 for step in observed[0]), observed
+        assert observed[1] and all(step == 1 for step in observed[1]), observed
+
+    def test_a_never_updated_module_reports_zero_on_a_counter_carrying_optimizer(self):
+        """FusedAdam creates ``step`` on a group's first visit, so a module frozen for the
+        whole run has no counter — on an optimizer that carries counters elsewhere that
+        means zero visits, and reporting 0 is what lets the caller catch a group the
+        gating failed to arm."""
+        model, optimizer, gater = _rig(n_aux=2)
+        for seed in range(3):
+            _step(model, optimizer, gater, update_core=True, update_aux=(True, False), seed=seed)
+        observed = gater.aux_group_adam_steps()
+        assert observed is not None
+        assert observed[1] and all(step == 0 for step in observed[1])
+        assert observed[0] and all(step == 3 for step in observed[0])
+
+    def test_an_optimizer_without_group_counters_reports_none(self):
+        """torch optimizers keep per-param state with no group-level ``step`` — there is
+        nothing to verify against, and the accessor must say so rather than return an
+        empty verification that reads as a pass."""
+        from megatron.bridge.training.gradient_routing.optimizer_gating import (
+            GR_ROLE_KEY,
+            GROptimizerGater,
+            gr_aux_role,
+        )
+
+        params = [torch.nn.Parameter(torch.randn(4, device="cuda")) for _ in range(2)]
+        groups = [
+            {"params": [params[0]], GR_ROLE_KEY: gr_aux_role(0)},
+            {"params": [params[1]]},
+        ]
+        inner = torch.optim.Adam(groups, lr=1e-3)
+        gater = GROptimizerGater(n_aux=1)
+        gater.discover(SimpleNamespace(optimizer=inner))
+        assert gater.aux_group_adam_steps() is None
+
+    def test_reading_while_armed_raises(self):
+        model, optimizer, gater = _rig()
+        gater.arm(update_core=True, update_aux=(False,))
+        with pytest.raises(RuntimeError, match="armed"):
+            gater.aux_group_adam_steps()
+        gater.restore()
+
+    def test_reading_before_discovery_raises(self):
+        from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerGater
+
+        with pytest.raises(RuntimeError, match="discover"):
+            GROptimizerGater(n_aux=1).aux_group_adam_steps()

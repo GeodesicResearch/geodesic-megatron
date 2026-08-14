@@ -48,13 +48,24 @@ from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 
+#: The aux output-projection init modes and their default — the single home for the
+#: value set the provider field, the launch guard, and the callback invariant share.
+GR_AUX_OUTPUT_INIT_MODES = ("zero", "standard")
+GR_AUX_OUTPUT_INIT_DEFAULT = "zero"
+
+
 class GRAMAuxMLP(MLP):
     """Narrow dense MLP holding one gradient-routed capability of one MoE layer.
 
     Shaped exactly like the layer's shared expert but at ``aux_ffn_hidden_size``. The
-    output projection is zero-initialised so a warm-started model is bit-unchanged at
-    load time: the aux contribution is exactly 0 until the module has been trained,
-    and the missing-keys checkpoint load leaves this init in place.
+    output projection's init follows the provider's ``gr_aux_output_init``: ``"zero"``
+    (the default) zeroes it so a warm-started model is bit-unchanged at load time — the
+    aux contribution is exactly 0 until the module has been trained, and the
+    missing-keys checkpoint load leaves this init in place — at the cost of fc1
+    receiving an exactly-zero gradient until fc2 moves off zero; ``"standard"`` keeps
+    the MLP's own output-projection init (the GRAM reference implementation's choice),
+    trading the bit-unchanged warm-start property for a live fc1 gradient from the
+    first routed step.
 
     The bias/gated refusals below are load-bearing TWICE: the module-enabled export
     merges aux weights into the shared expert (exact only bias-free and non-gated), AND
@@ -86,6 +97,9 @@ class GRAMAuxMLP(MLP):
         # two projections disagree, which fails at the first GEMM. The clone is per-aux
         # so the surrounding model's own ffn_hidden_size is untouched; the argument also
         # silences MLP's "requires ffn_hidden_size" deprecation warning.
+        output_init = getattr(config, "gr_aux_output_init", GR_AUX_OUTPUT_INIT_DEFAULT)
+        if output_init not in GR_AUX_OUTPUT_INIT_MODES:
+            raise ValueError(f"gr_aux_output_init must be one of {GR_AUX_OUTPUT_INIT_MODES}, got {output_init!r}.")
         config = deepcopy(config)
         config.ffn_hidden_size = aux_ffn_hidden_size
         super().__init__(
@@ -95,8 +109,9 @@ class GRAMAuxMLP(MLP):
             tp_group=pg_collection.tp if pg_collection is not None else None,
             name=name,
         )
-        with torch.no_grad():
-            self.linear_fc2.weight.zero_()
+        if output_init == "zero":
+            with torch.no_grad():
+                self.linear_fc2.weight.zero_()
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Return the aux MLP output (bias-free by construction)."""

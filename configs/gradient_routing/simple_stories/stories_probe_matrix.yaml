@@ -58,6 +58,13 @@ arms:
   gram_cultures:
     checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
     static_gates: [0, 0, 0, 1]
+  # The all-modules-on profile: the mainline criterion-2 serving posture (every
+  # capability enabled). Exactly additive in the forward (core + sum of module
+  # outputs), but never a training-time state — the plan activates at most one
+  # module per iteration.
+  gram_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
+    static_gates: [1, 1, 1, 1]
 
 # Any arm with static_gates also needs the module widths so the probe builds the aux
 # modules the checkpoint carries.
@@ -66,5 +73,35 @@ gram_aux_ffn_hidden_sizes: [1856, 1856, 1856, 1856]
 curve:
   checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_stories_baseline_pretrain
   steps: [172, 344, 516, 688, 860, 1032, 1204, 1376, 1548, 1720, 1892, 2064]
+
+# Success-criteria declaration for scripts/gradient_routing/score_success_criteria.py.
+# The two mainline criteria: (1) a GR profile with every module OFF matches the
+# filtering model; (2) with every module ON it approaches the no-interventions
+# baseline — operationalized against BOTH bars (matched filtering, per the GRAM
+# paper's own comparison, AND the literal baseline), reported side by side.
+# Band edges: pass below pass_nats, fail above fail_nats, ambiguous between
+# (single-run noise is noise_nats, measured as the four filter arms' core-loss
+# spread — a hard gate at 2x noise from one seed would be a coin flip).
+scoring:
+  noise_nats: 0.01
+  pass_nats: 0.02
+  fail_nats: 0.03
+  baseline_arm: baseline
+  filter_core_arm: filter_core
+  core_corpus: core
+  topics:                      # aux corpus -> the filter arm trained WITH that topic
+    deadline: filter_deadline
+    aliens: filter_aliens
+    eras: filter_eras
+    cultures: filter_cultures
+  gram_profiles:               # each scored GR candidate's profile arms
+    gram:
+      "off": gram_core
+      all_on: gram_all_on
+      "on":                    # single-module profiles (optional per candidate)
+        deadline: gram_deadline
+        aliens: gram_aliens
+        eras: gram_eras
+        cultures: gram_cultures
 
 output: stories_probe_matrix.tsv

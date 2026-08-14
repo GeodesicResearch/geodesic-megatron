@@ -27,7 +27,7 @@
 #   aux_eras                 11,431,099   bygone-eras
 #   aux_cultures              11,430,856   cultural-traditions
 #   total                    541,217,683  -> 2,064.6 iters at 262,144 tokens/iter
-#   train_iters 2064 = 0.9994 epochs of core and 0.994-1.005 of each aux at the
+#   train_iters 2064 = 0.9993 epochs of core and 0.992-1.009 of each aux at the
 #   fractions below (round(f_k * 2064) = 43/43/44/44 iterations per module).
 #
 # KNOBS: p_as=0.3, p_cr=0.5 — the paper's PUBLISHED Simple Stories values (its §5
@@ -42,6 +42,27 @@
 # LAUNCH (GPU work queues via sbatch — never in a code tunnel):
 #   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
 #     configs/gradient_routing/simple_stories/nemotron_nano_gr_stories_pretrain.yaml nano pretrain --disable-ft
+#
+# CANDIDATE ARMS (GEOD-171k recovery campaign) are overrides of THIS config — same
+# pattern as the filtering arms: identical data order and plan digest, four-value
+# deltas, each with its own save dir + W&B name so the canonical checkpoint above is
+# never overwritten. Probe candidates via gram_<cand>_{core,all_on} matrix arms.
+#   C1 (constant aux LR + reference-parity module init):
+#     ... nano pretrain --disable-ft \
+#     gr.aux_min_lr=1.6e-3 model.gr_aux_output_init=standard \
+#     checkpoint.save=/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1 \
+#     logger.wandb_exp_name=nemotron_nano_gr_stories_c1
+#   C1b (= C1 minus the init change, isolating which of the two carries any effect;
+#   the pair fits one 32-node allocation as two concurrent 16-node runs):
+#     ... nano pretrain --disable-ft \
+#     gr.aux_min_lr=1.6e-3 \
+#     checkpoint.save=/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1b \
+#     logger.wandb_exp_name=nemotron_nano_gr_stories_c1b
+#   (gr.aux_min_lr == gr.aux_lr collapses the per-group cosine interpolation to a
+#   CONSTANT module LR at every decay position — core keeps the recipe cosine, so the
+#   baseline/filter comparators stay valid. The base values below leave aux on the
+#   fully decayed cosine, which gives each module an own-topic Σlr budget ~50x below
+#   core's — the GEOD-171k root-cause finding.)
 #
 # SCORING: eval-only corpus-loss probes over the five profiles x six val corpora — the
 # probe override sets model.gr_aux_ffn_hidden_size=[1856,1856,1856,1856] and

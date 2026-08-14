@@ -219,6 +219,14 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
     # None — their gates come from the routing plan per iteration, and the launch guards
     # refuse a training run that sets it.
     gr_static_gates: Optional[list[float]] = None
+    # Aux-module output-projection init. "zero" zeroes linear_fc2 so a warm-started
+    # model is bit-unchanged at load time (the CPT campaigns' byte-stock property, and
+    # what the callback's iteration-0 invariant checks). "standard" leaves the MLP's own
+    # init on fc2 — the GRAM reference implementation's choice, which gives fc1 a
+    # nonzero gradient from the first routed step (under zero-init dL/dW1 is exactly 0
+    # until fc2 moves). From-scratch runs have no warm-start property to protect, so
+    # they may opt into "standard"; the default preserves the mainline behaviour.
+    gr_aux_output_init: str = "zero"
     vocab_size: Optional[int] = None
     should_pad_vocab: bool = False
     hf_model_id: Optional[str] = None

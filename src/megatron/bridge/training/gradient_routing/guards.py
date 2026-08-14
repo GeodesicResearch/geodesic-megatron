@@ -129,6 +129,16 @@ def validate_gr_launch(cfg) -> None:
             "routing plan per iteration; static gates are the eval-only profile-probing mechanism."
         )
 
+    from megatron.bridge.models.mamba.gram_layer import GR_AUX_OUTPUT_INIT_MODES
+
+    if cfg.model.gr_aux_output_init not in GR_AUX_OUTPUT_INIT_MODES:
+        problems.append(
+            f"model.gr_aux_output_init must be one of {GR_AUX_OUTPUT_INIT_MODES} (got "
+            f"{cfg.model.gr_aux_output_init!r}). 'zero' keeps the bit-unchanged warm-start "
+            "property (and its iteration-0 clobber check); 'standard' keeps the MLP's own "
+            "output-projection init so fc1 has a live gradient from the first routed step."
+        )
+
     if cfg.train.rampup_batch_size:
         problems.append("train.rampup_batch_size must be unset: GBS must be constant for iteration attribution.")
     if cfg.train.decrease_batch_size_if_needed:

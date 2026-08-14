@@ -44,10 +44,16 @@ the same machinery, not a separate code path. Each module:
   hidden width `gr.aux_ffn_hidden_size[k]` (a scalar broadcasts to every
   module). The bias-free requirement is enforced at construction: the export
   merge (§4) assumes no biases.
-- `fc2` (the output projection) is **zero-initialised**, so at iteration 0 the
-  aux output is exactly zero and the warm-started model is bitwise the base
-  model. The training callback asserts this zero-init at iteration 0 (only
-  there: a resumed run has a trained, non-zero aux by construction).
+- `fc2` (the output projection) init follows `model.gr_aux_output_init`:
+  `"zero"` (the default) zeroes it, so at iteration 0 the aux output is exactly
+  zero and the warm-started model is bitwise the base model — the training
+  callback asserts this at iteration 0 (only there: a resumed run has a
+  trained, non-zero aux by construction) — at the cost of fc1 receiving an
+  exactly-zero gradient until fc2 moves. `"standard"` keeps the MLP's own
+  output-projection init (the GRAM reference implementation's choice; fc1 has
+  a live gradient from the first routed step), trading away the bitwise
+  warm-start property and its iteration-0 clobber check — a from-scratch
+  option, not for warm starts.
 - No learned gate. The layer's forward is
   `out = moe_out + Σ_k gr_gate[k] * aux_k(h)`, where `gr_gate` is a
   **non-persistent `(N,)` buffer** (default all-zero) written per iteration by
@@ -163,8 +169,14 @@ finalize wrapper `install_gr_finalize` installs in `training/setup.py`),
 deliberately AFTER the base grad finalization — reductions and the router
 expert-bias update must run over intact groups, and the emptied groups must be
 visible only to `optimizer.step()`. On step end the callback restores the
-optimizer groups and emits telemetry. At iteration 0 it asserts every aux
-`fc2` is exactly zero (the warm-start invariant). Past iteration 0 the run is a
+optimizer groups, verifies the gating held — each module's group-level Adam
+`step` counter must equal its cumulative armed-update count (FusedAdam creates
+the counter on first visit and skips empty groups before incrementing; on an
+optimizer without group counters the check announces itself inactive once
+rather than silently passing) — and emits telemetry. At iteration 0, under the
+default `gr_aux_output_init: "zero"`, it asserts every aux `fc2` is exactly
+zero (the warm-start invariant; the check does not apply and cannot protect
+anything under `"standard"`). Past iteration 0 the run is a
 resume, and the plan is re-derived from the iteration number AND checked against
 the one the checkpoint was trained under: the callback rebuilds the saved plan
 from the checkpoint's own `run_config.yaml` and refuses a digest mismatch, since
@@ -261,6 +273,7 @@ persist to `posture_verification.json`.
 | `scripts/gradient_routing/run_gr_functional_smoke.sh` | tiny-model end-to-end functional smoke |
 | `scripts/gradient_routing/run_corpus_loss_probes.sh` | runs the eval-only loss-probe matrix (§8.2); one probe per (name, checkpoint, corpus, extra overrides) row |
 | `scripts/gradient_routing/summarize_loss_probes.py` | turns a probe `results.tsv` into `retention_ratio` / `removal_fraction` (§8.2) |
+| `scripts/gradient_routing/score_success_criteria.py` | scores probe losses against the matrix definition's `scoring:` section: the all-off-vs-filtering regression gate and the all-on criterion against BOTH bars (matched filtering and the unfiltered baseline), with pass/ambiguous/fail banding, composability, and CR gaps (`--ratios`); writes `success_report.json` beside the results |
 | `scripts/data/build_mmlu_pro_cot_corpus.py` | renders MMLU-Pro items in lm-eval's format for the train-on-test diagnostic corpora; `rendering` and `answer_source` are both REQUIRED config choices, and it writes a `.provenance.json` sidecar naming both |
 | `configs/gradient_routing/` | GR training configs, bake/verify posture configs, corpus-builder configs |
 
@@ -371,6 +384,8 @@ GR is wired for `--mode cpt` and `--mode pretrain` (any other mode is refused).
   per-module width lists before comparing);
 - `model.gr_static_gates` set on a training run (training gates come from the
   plan; static gates are the eval-only profile-probing mechanism);
+- `model.gr_aux_output_init` outside `("zero", "standard")` (the module
+  output-projection init modes — see the aux-module section);
 - a plan whose module count disagrees with `gr.aux_data_paths`;
 - batch-size ramps (`rampup_batch_size`, `decrease_batch_size_if_needed`);
 - non-Adam optimizer (the moment-contamination analysis is argued for Adam);
@@ -738,7 +753,9 @@ loss matrix, CR table, and noise analysis:
   gap; eras 8%, consistent with its tiny removal gap). In the paper's
   compute-ratio metric the module-on diagonals reach 82-96% of the matched
   filtering diagonal. A capacity/knob question (module width 0.76% of the model per module,
-  ~44 update steps, aux_lr = core LR), not an isolation defect.
+  43-44 own-topic update steps of 276-282 total — ~85% are p_cr core-robustness
+  steps on core data — and aux_lr = core LR on the shared cosine schedule), not
+  an isolation defect.
 - **Core cost ~1.0-1.5%**: the all-off profile's core loss is +0.014 nats above
   the step-matched filter_core arm — at the top of the paper's published
   retain-cost band (+0.29% to +1.19%) and within ~1-2 noise units.

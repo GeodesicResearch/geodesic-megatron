@@ -31,7 +31,7 @@ import logging
 
 import torch
 
-from megatron.bridge.models.mamba.gram_layer import GRAMMoELayer
+from megatron.bridge.models.mamba.gram_layer import GR_AUX_OUTPUT_INIT_DEFAULT, GRAMMoELayer
 from megatron.bridge.training.callbacks import Callback, CallbackContext
 from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerGater
 from megatron.bridge.training.gradient_routing.plan import CORE, GRPlan, build_gr_plan
@@ -58,6 +58,7 @@ class GRCallback(Callback):
         self._routers: list = []
         self._probe_handles: list = []
         self._probe_rms: dict[int, float] = {}
+        self._step_verification_unavailable_logged = False
 
     def on_train_start(self, context: CallbackContext) -> None:
         """Build module registries, sanity-check the warm start, log the plan."""
@@ -100,7 +101,11 @@ class GRCallback(Callback):
         # The zero-init invariant holds only at the START of a plan: a trained aux is
         # non-zero by construction, so asserting it on a mid-plan resume would make GR
         # runs restart-fatal (ft_launcher restarts, singleton chains, save_interval runs).
-        if start == 0:
+        # Under gr_aux_output_init="standard" there is no invariant to check — a randomly
+        # initialised fc2 is indistinguishable from a clobbered one, which is exactly the
+        # warm-start protection that mode trades away.
+        output_init = getattr(self._gram_layers[0].config, "gr_aux_output_init", GR_AUX_OUTPUT_INIT_DEFAULT)
+        if start == 0 and output_init == "zero":
             for layer in self._gram_layers:
                 for k, aux in enumerate(layer.gr_aux):
                     if not torch.all(aux.linear_fc2.weight == 0):
@@ -112,6 +117,11 @@ class GRCallback(Callback):
                             "rather than resumed via `load` (which carries the iteration and resumes "
                             "the plan)."
                         )
+        elif start == 0:
+            logger.info(
+                "GR: gr_aux_output_init='standard' — the iteration-0 fc2-zero invariant does not "
+                "apply (and warm-start clobber protection is unavailable in this mode)."
+            )
         else:
             self._assert_plan_matches_checkpoint(context)
             logger.info("GR resume at iteration %d: plan re-derived deterministically.", start)
@@ -210,12 +220,43 @@ class GRCallback(Callback):
                 self._probe_handles.append(probe_module.register_forward_hook(_probe))
 
     def on_train_step_end(self, context: CallbackContext) -> None:
-        """Restore emptied param groups, then emit the iteration's telemetry."""
+        """Restore emptied param groups, verify the gating held, then emit telemetry."""
         self._gater.restore()
         for handle in self._probe_handles:
             handle.remove()
         self._probe_handles = []
         it = context.state.train_state.step
+        # Accumulate-then-gate is only isolation if the optimizer really skips emptied
+        # groups: FusedAdam's group-level `step` counter increments exactly on visits,
+        # so each module's counter must equal its armed-update count. Checked on the
+        # locally-sharded groups; a sharded group without a counter on a
+        # counter-carrying optimizer has never been visited and reports 0 (see
+        # aux_group_adam_steps). Host-side int reads, no device sync. An undiscovered
+        # gater means no optimizer ever stepped through the gate, so there is nothing
+        # to verify; an optimizer without group counters cannot be verified this way,
+        # which is announced once rather than silently skipped.
+        if self._gater.discovered:
+            observed_by_module = self._gater.aux_group_adam_steps()
+            if observed_by_module is None:
+                if not self._step_verification_unavailable_logged:
+                    self._step_verification_unavailable_logged = True
+                    logger.info(
+                        "GR: optimizer carries no group-level Adam step counters — the per-module "
+                        "armed-update verification is inactive on this optimizer."
+                    )
+            else:
+                expected_by_module = {
+                    k: int(self._plan.update_aux[: it + 1, k].sum()) for k in range(self._plan.n_aux)
+                }
+                for k, observed_steps in observed_by_module.items():
+                    for observed in observed_steps:
+                        if observed != expected_by_module[k]:
+                            raise RuntimeError(
+                                f"GR gating leak: aux module {k}'s optimizer group has taken {observed} Adam "
+                                f"steps but the plan armed it {expected_by_module[k]} time(s) through iteration "
+                                f"{it}. The optimizer is stepping (or skipping) emptied groups — Adam moments "
+                                "and weight decay are no longer isolated per module."
+                            )
         corpus = int(self._plan.corpus[it])
         metrics = {
             "gr/corpus": corpus,

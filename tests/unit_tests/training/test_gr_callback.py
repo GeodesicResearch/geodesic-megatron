@@ -783,3 +783,68 @@ class TestAuxOverflowProbe:
         with pytest.raises(RuntimeError, match=f"gr_aux.{module} output is non-finite"):
             with torch.no_grad():
                 model[0](x)
+
+
+@requires_gpu
+@pytest.mark.usefixtures("moe_parallel_state")
+class TestStandardInitMode:
+    def test_standard_init_mode_skips_the_zero_check_at_iteration_zero(self, monkeypatch):
+        """``gr_aux_output_init="standard"`` has no zero invariant: a randomly initialised
+        fc2 is legitimate at iteration 0, so the clobber check must not fire (and cannot
+        protect anything — that is the trade the mode makes)."""
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk()
+        for layer in model:
+            layer.config.gr_aux_output_init = "standard"
+        with torch.no_grad():
+            model[-1].gr_aux[0].linear_fc2.weight.fill_(1e-3)
+        callback = _callback()
+
+        callback.on_train_start(_context(model))
+
+
+@requires_gpu
+@pytest.mark.usefixtures("moe_parallel_state")
+class TestGatingLeakDetection:
+    """on_train_step_end must raise when a module's Adam step counter disagrees with the
+    plan's armed-update count, and must announce (not silently skip) verification on an
+    optimizer without group counters."""
+
+    def _stepped_callback_context(self, step_values):
+        """A callback wired to a discovered gater whose aux group carries the given
+        group-level step counter, driven through one full step at iteration 0."""
+        model = _model_chunk()
+        gater, inner = _discovered_gater(model)
+        for group, value in zip(inner.param_groups, step_values):
+            if value is not None:
+                # torch.optim groups accept arbitrary keys; injecting `step` reproduces
+                # the TE/apex FusedAdam group layout on an otherwise real optimizer.
+                group["step"] = value
+        callback = _callback(gater=gater)
+        return model, callback
+
+    def test_a_counter_matching_the_armed_count_passes(self, monkeypatch):
+        _recorded_metrics(monkeypatch)
+        # plan `_plan()` arms module 0 at iteration 0, so its cumulative count is 1.
+        model, callback = self._stepped_callback_context([1, None])
+        callback.on_train_start(_context(model))
+        callback.on_train_step_end(_context(model, step=0))
+
+    def test_a_counter_disagreeing_with_the_armed_count_raises(self, monkeypatch):
+        _recorded_metrics(monkeypatch)
+        model, callback = self._stepped_callback_context([5, None])
+        callback.on_train_start(_context(model))
+        with pytest.raises(RuntimeError, match="GR gating leak"):
+            callback.on_train_step_end(_context(model, step=0))
+
+    def test_an_optimizer_without_counters_logs_once_instead_of_verifying(self, monkeypatch, caplog):
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk()
+        gater, _ = _discovered_gater(model)
+        callback = _callback(gater=gater)
+        callback.on_train_start(_context(model))
+        with caplog.at_level("INFO"):
+            callback.on_train_step_end(_context(model, step=0))
+            callback.on_train_step_end(_context(model, step=1))
+        announcements = [r for r in caplog.records if "verification is inactive" in r.getMessage()]
+        assert len(announcements) == 1

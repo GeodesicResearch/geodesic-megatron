@@ -429,6 +429,7 @@ def _valid_cfg(fractions=(0.5,), widths=(AUX_FFN,), lrs=(1e-4,), min_lrs=(1e-5,)
             moe_shared_expert_intermediate_size=2048,
             gr_aux_ffn_hidden_size=widths,
             gr_static_gates=None,
+            gr_aux_output_init="zero",
         ),
         train=SimpleNamespace(
             train_iters=TRAIN_ITERS,
@@ -467,6 +468,7 @@ GUARDED_FIELDS = {
         "moe_shared_expert_intermediate_size",
         "gr_aux_ffn_hidden_size",
         "gr_static_gates",
+        "gr_aux_output_init",
     ),
     "train": ("train_iters", "rampup_batch_size", "decrease_batch_size_if_needed"),
     "optimizer": ("optimizer", "overlap_param_gather_with_optimizer_step", "optimizer_cpu_offload"),
@@ -541,6 +543,7 @@ class TestValidateGRLaunch:
             # Static gates are the eval-only profile-probing mechanism: they pin the gates at
             # construction, which would override the plan's per-iteration drive silently.
             ("model.gr_static_gates", [1.0], "gr_static_gates must be unset for a training run"),
+            ("model.gr_aux_output_init", "xavier", "gr_aux_output_init must be one of"),
             ("train.rampup_batch_size", [16, 16, 100], "rampup_batch_size must be unset"),
             ("train.decrease_batch_size_if_needed", True, "decrease_batch_size_if_needed must be False"),
             ("optimizer.optimizer", "sgd", "must be adam-family"),

@@ -584,3 +584,37 @@ class TestComposesWithGroupedExperts:
         composed = build_moe_layer(moe_builder(self._composed(gram_first, aux_ffns)), config)
         x = _input()
         assert torch.equal(grouped_only(x)[0], composed(x)[0])
+
+
+def _standard_init_config(**overrides):
+    """A config selecting the reference-parity output init, set as the provider carries it."""
+    config = moe_config(**overrides)
+    config.gr_aux_output_init = "standard"
+    return config
+
+
+@requires_gpu
+@pytest.mark.usefixtures("moe_parallel_state")
+class TestStandardOutputInit:
+    """``gr_aux_output_init="standard"`` keeps the MLP's own fc2 init (reference parity)."""
+
+    def test_fc2_is_not_zeroed_and_gate_zero_is_still_bitwise_core(self):
+        vanilla, gram = _pair(config=_standard_init_config())
+        for aux in gram.gr_aux:
+            assert not torch.all(aux.linear_fc2.weight == 0)
+        x = _input()
+        assert torch.equal(vanilla(x)[0], gram(x)[0])
+
+    def test_all_gates_one_contributes_from_the_first_forward(self):
+        """The point of the mode: an open gate on a fresh module already moves the output,
+        so fc1 receives real gradient on the very first routed step."""
+        vanilla, gram = _pair(config=_standard_init_config())
+        gram.gr_gate.fill_(1.0)
+        x = _input()
+        assert not torch.equal(vanilla(x)[0], gram(x)[0])
+
+    def test_an_unknown_init_mode_is_refused(self):
+        config = moe_config()
+        config.gr_aux_output_init = "xavier"
+        with pytest.raises(ValueError, match="gr_aux_output_init"):
+            build_moe_layer(moe_builder(gram_spec((AUX_FFN,))), config)

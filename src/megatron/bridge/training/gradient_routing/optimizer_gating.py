@@ -245,6 +245,31 @@ class GROptimizerGater:
         self._armed_roles = None
         self._frozen_groups = None
 
+    def aux_group_adam_steps(self) -> dict[int, list[int]] | None:
+        """Observed group-level Adam ``step`` counters per aux module.
+
+        TE/apex FusedAdam keeps one ``step`` counter per param group, creates it on the
+        group's first visit, and skips empty groups before incrementing — so an emptied
+        group's counter must equal the module's armed-update count, the invariant the
+        callback enforces. Returns ``None`` when NO inner group of the optimizer carries
+        a ``step`` key (torch optimizers keep per-param state; there is nothing to
+        verify against, and the caller must say so rather than silently verify
+        nothing). On a counter-carrying optimizer, a locally-sharded group without the
+        key has simply never been visited and reports 0 — which is exactly how a group
+        the gating failed to arm gets caught. Groups with no local shard tensors are
+        skipped (under the distributed optimizer a rank whose DP shard misses a module
+        legitimately never steps it). Call with nothing armed — an emptied group's
+        ``params`` is [] and would be misread as shard-less.
+        """
+        if self._aux_groups is None:
+            raise RuntimeError("aux_group_adam_steps() called before discover().")
+        if self._stash is not None:
+            raise RuntimeError("aux_group_adam_steps() called while groups are armed — restore() first.")
+        all_groups = [g for groups in self._aux_groups.values() for g in groups] + list(self._core_groups)
+        if not any("step" in g for g in all_groups):
+            return None
+        return {k: [int(g.get("step", 0)) for g in groups if g["params"]] for k, groups in self._aux_groups.items()}
+
 
 #: Runtime slot for the finalize wrapper, populated by install_gr_finalize(). Module
 #: state rather than a closure for one load-bearing reason: the model config's
