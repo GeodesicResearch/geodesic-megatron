@@ -6,22 +6,34 @@
 # data. Every other field here is held fixed for that comparison.
 #
 # TOKEN BUDGET (exact):
-#   59605 iters x 1024 sequences x 8192 tokens = 8,388,608 tokens/iter
-#                                              = 500,002,979,840 tokens  >= the 500e9 target
-#   (the 59605th iteration is what carries the total over 500e9; 59604 would land at
+#   29803 iters x 2048 sequences x 8192 tokens = 16,777,216 tokens/iter
+#                                              = 500,011,368,448 tokens  >= the 500e9 target
+#   (the 29803rd iteration is what carries the total over 500e9; 29802 would land at
 #   499,994,591,232)
 #
+# GBS 2048, not 1024 (decision 2026-08-13): at DP=512 the fixed per-iteration cost —
+# dominated by DP gradient/param traffic whose per-GPU volume does not shrink with DP width —
+# was 57% of every step at 2 microbatches/replica (measured 4.28 s/iter vs a perfect-scaling
+# 2.44). Doubling GBS to 4 microbatches/replica amortises that cost across twice the tokens:
+# ~29% more throughput per token, ~50 h instead of ~71 h for the run. Capability tradeoff
+# judged minor: 16.8M tokens/batch is inside validated practice for this model (the NVIDIA
+# recipe itself ships GBS 3072 = 25M), and LR 1e-3 at this batch sits closer to the recipe's
+# LR-per-token ratio than GBS 1024 did (sqrt-scaling the recipe's 1.6e-3@3072 gives ~1.3e-3
+# here). GBS applies uniformly to every arm of the study, so the filtering COMPARISON is
+# insulated regardless. Activation memory is unchanged — at PP=1 microbatches run
+# sequentially, so peak memory is per-microbatch and independent of GBS.
+#
 # DATA BLEND. The weights are sampling probabilities over the three .bin/.idx corpora, so
-# each source's share of the 500.003B-token budget is an expectation, not a hard split.
+# each source's share of the 500.011B-token budget is an expectation, not a hard split.
 # Epochs = that share / the corpus's own token count under
 # geodesic-research/nemotron-base-tokenizer. Corpus sizes below are measured, not nominal;
 # the authoritative figure once the data exists is total_tokens in the
 # <prefix>.provenance.json the tokenize job writes beside each .bin/.idx.
 #
 #   weight  source                                     share of budget   corpus    epochs
-#   0.80    karpathy/climbmix-400b-shuffle (8 shards)   400,002,383,872  354.3818B   1.129
-#   0.19    Zyphra/Zyda-2, config sample-100BT           95,000,566,170  99.2276B    0.957
-#   0.01    geodesic-research/control-pretraining-datasets 5,000,029,798   0.4276B   11.692
+#   0.80    karpathy/climbmix-400b-shuffle (8 shards)   400,009,094,758  354.3818B   1.129
+#   0.19    Zyphra/Zyda-2, config sample-100BT           95,002,160,005  99.2276B    0.957
+#   0.01    geodesic-research/control-pretraining-datasets 5,000,113,684   0.4276B   11.693
 #           (config `combined`, revision 6973c8fa36eee425ef7bc054334bbe6545b7d1a0)
 #
 #   All three corpus sizes are now EXACT, read from total_tokens in the .provenance.json
@@ -76,15 +88,15 @@
 #   and weaken every comparison it exists to support.
 #
 # WSD SCHEDULE (peak 1e-3, floor 1e-5, minus_sqrt anneal):
-#   iters      0 ->  ~596   linear warmup      (lr_warmup_fraction 0.01 of 59605 = 596.05)
-#   iters   ~596 -> 47684   stable at 1e-3     (79% of the run)
-#   iters  47684 -> 59605   minus_sqrt anneal to 1e-5 over the final 11921 iters (20%)
+#   iters      0 ->  ~298   linear warmup      (lr_warmup_fraction 0.01 of 29803 = 298.03)
+#   iters   ~298 -> 23842   stable at 1e-3     (79% of the run)
+#   iters  23842 -> 29803   minus_sqrt anneal to 1e-5 over the final 5961 iters (20%)
 #   lr_wsd_decay_iters is set EXPLICITLY. Left null, config.py::_calculate_scheduler_steps
 #   defaults it to lr_decay_iters (= train_iters), which makes the anneal span the whole run
 #   and erases the stable phase — silently, since the schedule still "works".
 #
 # TOPOLOGY: TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512 -> 512 GPUs = 128 nodes.
-# 2 microbatches/replica at mbs 1 (GBS 1024 / DP 512); PP=1 -> no pipeline bubble; EP=4 is
+# 4 microbatches/replica at mbs 1 (GBS 2048 / DP 512); PP=1 -> no pipeline bubble; EP=4 is
 # node-local NVLink all-to-all (TP*EP <= 4) and divides DP=512. The parallelism and memory
 # posture (selective recompute of [core_attn, moe, shared_experts], mbs 1, alltoall
 # dispatcher, torch_grouped experts) are the measured-working set from
@@ -99,8 +111,10 @@
 # pins the standing Nemotron-H DP>1 posture instead (param-gather overlap off, 500 MB
 # bucket) through the comm_overlap block below. Throughput at that posture is unmeasured.
 #
-# CHECKPOINTS: save_interval 2980 writes at 2980*k for k = 1..20 (last at 59600), and
+# CHECKPOINTS: save_interval 1490 writes at 1490*k for k = 1..20 (last at 29800), and
 # Megatron-Core always writes a final checkpoint at train_iters -> 21 checkpoints total.
+# Token positions are IDENTICAL to the pre-GBS-change plan (1490 x 16,777,216 tokens =
+# 2980 x 8,388,608), so trajectory-based analyses are unaffected by the batch change.
 # All carry optimizer + RNG state, and most_recent_k -1 keeps every one of them: this run
 # must be resumable from any point, and the intermediate checkpoints are study artifacts
 # (a filtering effect is measured along the trajectory, not only at the end). Budget for it:
@@ -121,14 +135,26 @@
 #       --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
 #       pipeline_training_submit.sbatch \
 #       configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml nano pretrain \
-#       --disable-straggler
+#       --disable-ft
 #   done
 #
 # ISAMBARD_SBATCH_FORCE is required in the JOB environment, not just at submission:
 # pipeline_training_submit.sbatch runs `isambard_sbatch --check` on start and scancels itself
 # when the account is over its node limit, and N pending 128-node segments are far over it.
-# --disable-straggler keeps ft_launcher's restarts while dropping the NVRx straggler
-# reporter, whose rank-0 gather has OOMed high-memory runs after ~20 minutes of stepping.
+#
+# --disable-ft, NOT --disable-straggler. On this workload ft_launcher's rank monitor never
+# receives an initial heartbeat (`[Cycle N] Did not get initial heartbeat. Waited 7200.00
+# seconds`), so --ft-initial-rank-heartbeat-timeout stops being a liveness check and SIGKILLs
+# the job at 7200 s however healthy it is; --disable-straggler drops only the NVRx straggler
+# reporter while leaving that killer armed. The two flags read as neighbours and are not.
+# Not known to be universal — Ultra-550B trains ~4.7 h under the same default without a kill,
+# so check the log for that signature rather than assuming. Whether the ceiling is fatal is
+# arithmetic: save_interval x s/iter — at this posture 1490 x ~6.1 s ≈ 2.5 h, still past the
+# 7200 s wall, so ft would still deadlock this run. The GBS-1024 first attempt measured it:
+# 2980 x 4.276 s = 3.54 h to first checkpoint, seven kills across eight attempts, zero
+# checkpoints written. Take the rate from the DISTRIBUTION, not from one status line: over
+# that attempt's 12,480 logged iterations the median was 4.276 s and the mean 4.494 s, the
+# latter inflated by ~100 s startup iterations.
 #
 # RESUME: checkpoint.load and checkpoint.save are the SAME directory, which is what makes a
 # requeue resume. setup.py loads only when checkpoint.load is set AND already contains a
@@ -136,9 +162,11 @@
 # launch the directory is empty and the run starts from random init; on every relaunch it
 # picks up the latest saved iteration, optimizer and RNG state included. exit_signal_handler
 # plus --signal=TERM@600 makes each segment save before its walltime kill rather than losing
-# the interval. Fault tolerance is left ENABLED within each segment: at 128 nodes over a
-# multi-day run, ft_launcher's restart-from-latest is the mechanism that keeps a Slingshot
-# NCCL hang from costing the run.
+# the interval. The chain IS the fault tolerance, which is why dropping ft_launcher costs
+# little: a Slingshot NCCL hang trips the NCCL watchdog, the segment exits, and the next
+# singleton segment resumes from the latest checkpoint. ft_launcher would only have added
+# restart WITHIN a segment, and at this save_interval it cannot do even that, because it
+# kills the run before a checkpoint it could restart from exists.
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
@@ -187,9 +215,9 @@ dataset:
   seed: 1234
 
 train:
-  global_batch_size: 1024      # 8,388,608 tokens/iter
+  global_batch_size: 2048      # 16,777,216 tokens/iter (see the GBS 2048 header note)
   micro_batch_size: 1          # recipe default 2 OOMs at 8192 tok/rank (quickstart ladder)
-  train_iters: 59605
+  train_iters: 29803
   exit_signal_handler: true    # checkpoint on SIGTERM instead of losing the interval
 
 validation:
@@ -202,8 +230,8 @@ scheduler:
   # SchedulerConfig.finalize asserts lr_warmup_iters == 0 whenever lr_warmup_fraction is
   # set, so the 0 is required rather than redundant.
   lr_warmup_iters: 0
-  lr_warmup_fraction: 0.01     # 596.05 iters ~= 5.0B tokens of warmup
-  lr_wsd_decay_iters: 11921    # 20% of 59605 (see header — must be explicit)
+  lr_warmup_fraction: 0.01     # 298.03 iters ~= 5.0B tokens of warmup
+  lr_wsd_decay_iters: 5961     # 20% of 29803 (see header — must be explicit)
 
 optimizer:
   lr: 1.0e-3                   # overrides the recipe's 1.6e-3 peak
@@ -281,7 +309,7 @@ checkpoint:
   # not automatic, and a chain of singleton jobs restarts from scratch if they differ.
   load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_v1_baseline_500b
   save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_v1_baseline_500b
-  save_interval: 2980           # 20 intermediate saves + the final one at 59605
+  save_interval: 1490           # 20 intermediate saves + the final one at 29803
   save_optim: true              # every checkpoint must be resumable
   save_rng: true
   most_recent_k: -1             # keep all 21; > -1 would prune to the k most recent

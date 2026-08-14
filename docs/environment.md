@@ -314,6 +314,17 @@ nvidia-resiliency-ext defaults to 3600 s initial / 2700 s subsequent — shorter
 Ultra-550B's documented 45–75 min first iteration at PP=36, which would trip the heartbeat,
 SIGKILL the workers, and restart straight back into the same slow first iteration.
 
+7200 relocates that wall rather than removing it. The rank monitor is not guaranteed to
+receive an initial heartbeat, and when it does not the timeout is no longer a liveness check —
+it SIGKILLs a healthy job at exactly 7200 s, logging `[Cycle N] Did not get initial heartbeat.
+Waited 7200.00 seconds`. A run whose first checkpoint is scheduled after that wall then
+restarts from iteration 0 with an empty checkpoint directory and never progresses, which
+presents as a fabric hang and is not one. Observed on Super-120B/64 GPUs and Nano-30B/512 GPUs;
+Ultra-550B trains ~4.7 h under the same setting untouched, so this is conditional and what
+decides heartbeat delivery is unresolved. `pipeline_training_run.py` prints the s/iter the run
+must sustain for its first checkpoint to beat the wall; `--disable-ft` is the opt-out, and
+`--disable-straggler` leaves the timeout armed.
+
 ### D6b — CUDA forward-compat: front the image's compat libs yourself
 
 Under Docker, NGC's entrypoint detects a host driver older than the image CUDA and symlinks
@@ -345,7 +356,7 @@ Measured on driver R565.57.01 — this is a per-image qualification axis, not a 
 | `OMP_NUM_THREADS=8` | torchrun sets this to **1** whenever it is absent, single-threading host-side AdamW for any CPU-offloaded optimizer onto one Neoverse-V2 core (~36 GB/s of a ~500 GB/s socket). Overridable via `ISAMBARD_OMP_THREADS`; `=1` restores torchrun's behaviour. On the 120B benchmark, both arms on the pre-`torch_grouped` expert path: **21.36 s/iter / 73.70 GB at offload 1.0 with 8 threads vs 22.79 / 76.78 at offload 0.5 single-threaded** — strictly dominates the previous champion, but the arms differ in offload fraction too, so the delta is not threading alone (§C1b; the clean offload-1.0 single-thread arm was never run). Exactly neutral with offload off |
 | `OMP_WAIT_POLICY=PASSIVE` | set automatically whenever `OMP_NUM_THREADS` > 1 (override with `ISAMBARD_OMP_WAIT_POLICY`). Not decoration: GNU OpenMP idle threads spin-wait, and these workloads are host-launch-bound, so ACTIVE spin can cost more launch throughput than the threaded Adam saves |
 | `NVTE_CPU_OFFLOAD_V1=1` | TE fine-grained CPU activation-offload path (TE ≥ 2.10) |
-| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | reduces allocator fragmentation |
+| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | reduces allocator fragmentation. Overridable via `ISAMBARD_CUDA_ALLOC_CONF`; a measured `False` arm (512-GPU Nano pretrain, 2026-08-14) showed no fast-regime difference and did not move the post-save collective-slowdown bug, so the default stands. The CXI `sysnc_memops returned -22` warnings under `FI_LOG_LEVEL=warn` appear in both modes — they are about NCCL's own cuMem buffers, not this allocator |
 | `TORCH_CUDA_ARCH_LIST=9.0` | GH200; also guards `sm_90a` arch-string parsing in JIT builds |
 | `CUDA_HOME=/usr/local/cuda` | the **image's** toolkit for JIT builds (Triton, TE, dataset helpers) — deliberately not the host HPC-SDK path the shim scrubs |
 

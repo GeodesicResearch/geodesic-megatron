@@ -30,6 +30,13 @@
 #   --nodelist LIST             Override nodelist (default: all in allocation)
 #   -- [extra args]             Extra args passed to the training script
 #
+# Debug env knobs (submit-time):
+#   ISAMBARD_NCCL_DEBUG=INFO    NCCL debug that actually reaches the ranks — a bare
+#                               NCCL_DEBUG is eaten by module setenv/purge churn. At INFO,
+#                               pair with ISAMBARD_NCCL_DEBUG_FILE=/path/%h.%p.log or 512
+#                               ranks flood the shared stdout.
+#   FI_LOG_LEVEL=warn           libfabric warnings (e.g. CXI MR-cache rejections) into the log.
+#
 # Examples:
 #   # Nano SFT with ft_launcher (default)
 #   bash pipeline_training_launch.sh configs/nemotron_nano_dolci_instruct_sft.yaml --model nano --mode sft
@@ -37,7 +44,13 @@
 #   # Super SFT without fault tolerance
 #   bash pipeline_training_launch.sh configs/nemotron_super_200k_warm_start_sft_bf16.yaml --model super --mode sft --disable-ft
 #
-#   # Long pretraining run: keep ft_launcher restarts, drop the straggler detector
+#   # Long pretraining run: --disable-ft, because the rank-heartbeat timeout below can SIGKILL
+#   # a healthy job at 7200 s, and a run whose first checkpoint lands later than that then
+#   # restarts from iteration 0 forever. --disable-straggler does NOT remove that timeout.
+#   bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode pretrain --disable-ft
+#
+#   # Drop only the NVRx straggler detector, keeping ft_launcher restarts. Correct when the run
+#   # fits inside the heartbeat window and the detector's rank-0 gather is OOMing the job.
 #   bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode pretrain --disable-straggler
 #
 #   # Nano CPT / midtraining
@@ -284,6 +297,18 @@ export FI_CXI_DEFAULT_TX_SIZE=1024
 # from glibc memory operations that memhooks would trigger.
 export FI_MR_CACHE_MONITOR=userfaultfd
 
+# MR-cache capacity. The provider default (~4096 entries) is too small for a 512-rank
+# distributed-checkpoint save: the save's staging churn fills the cache, and once full it
+# stops caching NEW registrations — after which every NCCL chunk transfer pays slow-path
+# registration and ALL collectives run ~25x slower for the remainder of the process
+# (measured 2026-08-14: ~6.5 s/iter -> uniform ~165 s/iter on the 512-GPU Nano pretrain
+# posture, permanent until restart; fresh process fast; DP=128 saves unaffected). With
+# max_count 65536 / unlimited size the same save is harmless (post-save 6.6 s/iter).
+# The A/B pair proving this: probe_r1f (default cache, collapse) vs probe_r1g (this
+# setting, no collapse), same allocation, same config.
+export FI_MR_CACHE_MAX_COUNT=${FI_MR_CACHE_MAX_COUNT:-65536}
+export FI_MR_CACHE_MAX_SIZE=${FI_MR_CACHE_MAX_SIZE:--1}
+
 # Disable CXI host memory registration for data buffers. When enabled (default), the CXI
 # provider registers host memory with the NIC for RDMA. Disabling it avoids contention on
 # the NIC's memory registration table when many ranks on the same node register overlapping
@@ -416,6 +441,19 @@ export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 # noisy subsystems like COLL (per-collective traces) and GRAPH (channel/ring construction)
 # that are only useful for deep debugging. Overridable for granular debug runs.
 export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
+
+# A submit-time NCCL_DEBUG does not reliably survive to this point: the brics
+# aws-ofi-nccl module setenvs NCCL_DEBUG=VERSION and `module purge` churns
+# module-owned NCCL_* values, so the "overridable" promise above held only by
+# accident. ISAMBARD_NCCL_DEBUG is applied last and therefore actually wins.
+# At INFO on 512 ranks, direct output to per-rank files (ISAMBARD_NCCL_DEBUG_FILE,
+# %h host / %p pid placeholders) or every rank floods the shared stdout.
+if [ -n "${ISAMBARD_NCCL_DEBUG:-}" ]; then
+    export NCCL_DEBUG="$ISAMBARD_NCCL_DEBUG"
+    if [ -n "${ISAMBARD_NCCL_DEBUG_FILE:-}" ]; then
+        export NCCL_DEBUG_FILE="$ISAMBARD_NCCL_DEBUG_FILE"
+    fi
+fi
 
 # ==============================================================================
 # Job-specific paths and caches
@@ -662,8 +700,19 @@ if [ "$USE_FT" = true ]; then
     #      NCCL comm-init. Under the 3600 s default that trips the heartbeat, ft
     #      SIGKILLs the workers, and the restart lands in the same slow first
     #      iteration — a restart loop that looks like a fabric hang.
-    # 7200 s covers the worst measured first iteration with margin while still
-    # bounding a genuinely wedged rank.
+    # 7200 s covers the worst measured first iteration with margin. It does NOT
+    # merely bound a genuinely wedged rank: the monitor is not guaranteed to receive
+    # an initial heartbeat, and when it does not, this timeout SIGKILLs a healthy job
+    # at exactly 7200 s -- `[Cycle N] Did not get initial heartbeat. Waited 7200.00
+    # seconds`. Any run whose first checkpoint arrives later than that then restarts
+    # from iteration 0 with nothing on disk, indefinitely. pipeline_training_run.py
+    # prints the required s/iter at startup whenever ft is on; --disable-ft is the
+    # opt-out, and --disable-straggler is NOT.
+    #
+    # This export is the single source of the heartbeat value: both ft_launcher flags
+    # below and pipeline_training_run.py's headroom warning read it, so the warning
+    # always quotes the wall the job actually hits.
+    export ISAMBARD_FT_HEARTBEAT_TIMEOUT=${ISAMBARD_FT_HEARTBEAT_TIMEOUT:-7200}
     srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
         $ACTIVATE_CMD
@@ -674,8 +723,8 @@ if [ "$USE_FT" = true ]; then
             --nnodes=$NNODES \
             --node_rank=\$SLURM_NODEID \
             --max-restarts=20 \
-            --ft-initial-rank-heartbeat-timeout=7200 \
-            --ft-rank-heartbeat-timeout=7200 \
+            --ft-initial-rank-heartbeat-timeout=$ISAMBARD_FT_HEARTBEAT_TIMEOUT \
+            --ft-rank-heartbeat-timeout=$ISAMBARD_FT_HEARTBEAT_TIMEOUT \
             --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \

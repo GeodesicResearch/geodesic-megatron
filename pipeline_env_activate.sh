@@ -181,7 +181,13 @@ if [ "$OMP_NUM_THREADS" != "1" ]; then
     export OMP_WAIT_POLICY="${ISAMBARD_OMP_WAIT_POLICY:-PASSIVE}"
 fi
 export NVTE_CPU_OFFLOAD_V1=1                              # TE fine-grained CPU activation offloading (TE >= 2.10 path)
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # reduces CUDA memory fragmentation
+# Reduces CUDA memory fragmentation. Overridable (ISAMBARD_CUDA_ALLOC_CONF) for A/Bs:
+# a measured expandable_segments:False arm on the 512-GPU Nano pretrain posture showed
+# no fast-regime difference (both ~6.1-6.5 s/iter) and did NOT affect the post-save
+# collective-slowdown bug, so the True default stands. Note the CXI provider's
+# `sysnc_memops returned -22` warnings under FI_LOG_LEVEL=warn appear in BOTH modes —
+# they concern NCCL's own cuMem-allocated buffers, not this allocator.
+export PYTORCH_CUDA_ALLOC_CONF="${ISAMBARD_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TORCH_CUDA_ARCH_LIST="9.0"                         # Hopper/GH200; also guards sm_90a arch-string parsing in JIT builds
 
 # The image's CUDA toolkit (nvcc, headers) — for JIT builds (Triton, TE, Megatron

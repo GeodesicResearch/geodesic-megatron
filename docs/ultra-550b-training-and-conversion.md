@@ -121,6 +121,15 @@ as validated.
    (The values must be numeric floats; the literal `none` used to disable them under the
    venv is rejected by the image's ft_launcher.)
 
+   **7200 is not a guarantee, and Ultra is the lucky case.** On other workloads the rank
+   monitor never receives an initial heartbeat at all, so the timeout SIGKILLs a healthy job
+   at exactly 7200 s (`[Cycle N] Did not get initial heartbeat. Waited 7200.00 seconds`) —
+   observed on Super-120B/64 GPUs and Nano-30B/512 GPUs. Ultra's 495-iteration warm-start SFT
+   runs ~4.7 h under this same setting untouched, which is why the guidance above stands here,
+   but do not carry "raise it to 7200 and you are covered" to another model. The test that
+   matters is whether the run's **first checkpoint** lands before the wall; with the
+   final-only checkpoint policy below, that is the whole run.
+
 **Checkpoint policy:** for short SFT runs save **model-only, final-only** —
 `save_interval: 1000000`, `save_optim: false`, `save_rng: false`,
 `non_persistent_save_interval: 1000000`. Downstream (export, coherence) reads only

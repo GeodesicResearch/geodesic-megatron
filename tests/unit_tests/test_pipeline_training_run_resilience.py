@@ -21,6 +21,7 @@ exercised — the config being mutated is a real Nano recipe, not a stand-in.
 
 from __future__ import annotations
 
+import logging
 import sys
 
 import pytest
@@ -75,3 +76,62 @@ def test_disable_ft_wins_over_disable_straggler(run_module, cfg, monkeypatch):
     _apply(run_module, cfg, monkeypatch, ["--disable-ft", "--disable-straggler"])
     assert cfg.ft is None
     assert cfg.nvrx_straggler is None
+
+
+# --- heartbeat headroom -------------------------------------------------------------------
+#
+# When ft_launcher's rank monitor never receives an initial heartbeat, the initial-rank
+# heartbeat timeout stops being a liveness check and becomes a wall the job is SIGKILLed at.
+# A run whose first checkpoint is scheduled past that wall therefore restarts from iteration 0
+# with an empty checkpoint directory, forever. The arithmetic that predicts it is available at
+# startup, so the run says so rather than leaving it to be discovered hours in.
+
+
+@pytest.mark.parametrize(
+    ("first_checkpoint_iteration", "expected_seconds"),
+    [
+        (2980, 7200 / 2980),  # the control-pretraining baseline: needs < 2.42 s/iter
+        (7200, 1.0),  # exactly one second per iteration
+        (1, 7200.0),  # a checkpoint every iteration has the whole window
+    ],
+)
+def test_max_seconds_per_iteration_arithmetic(run_module, first_checkpoint_iteration, expected_seconds):
+    assert run_module.max_seconds_per_iteration_under_ft_heartbeat(
+        first_checkpoint_iteration, run_module.FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS
+    ) == pytest.approx(expected_seconds)
+
+
+def test_max_seconds_per_iteration_rejects_non_positive_iteration(run_module):
+    """A zero or negative first-checkpoint iteration is a config error, not a divide-by-zero."""
+    with pytest.raises(ValueError):
+        run_module.max_seconds_per_iteration_under_ft_heartbeat(0, 7200.0)
+
+
+def test_ft_warns_that_the_first_checkpoint_must_beat_the_heartbeat(run_module, cfg, monkeypatch, caplog):
+    """The warning must carry the actual required rate; a generic caution would not have helped."""
+    cfg.checkpoint.save_interval = 2980
+    cfg.train.train_iters = 59605
+    with caplog.at_level(logging.WARNING):
+        _apply(run_module, cfg, monkeypatch, ["--disable-straggler"])
+    assert "2980" in caplog.text
+    assert "2.42" in caplog.text
+    assert "Did not get initial heartbeat" in caplog.text
+
+
+def test_save_only_at_end_measures_against_the_whole_run(run_module, cfg, monkeypatch, caplog):
+    """save_interval past train_iters means the only checkpoint is the final one."""
+    cfg.checkpoint.save_interval = 1000000
+    cfg.train.train_iters = 400
+    with caplog.at_level(logging.WARNING):
+        _apply(run_module, cfg, monkeypatch, [])
+    assert "400" in caplog.text
+    assert "18.00" in caplog.text  # 7200 / 400
+
+
+def test_disable_ft_emits_no_heartbeat_warning(run_module, cfg, monkeypatch, caplog):
+    """With ft off there is no heartbeat monitor, so the warning would be noise."""
+    cfg.checkpoint.save_interval = 2980
+    cfg.train.train_iters = 59605
+    with caplog.at_level(logging.WARNING):
+        _apply(run_module, cfg, monkeypatch, ["--disable-ft"])
+    assert "initial heartbeat" not in caplog.text

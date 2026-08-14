@@ -273,8 +273,11 @@ would demand a checkpoint.
 Every env var has detailed inline documentation.
 
 `pipeline_env_activate.sh` (sourced inside the container, in the same shell that then execs
-ft_launcher/torchrun) carries the universal knobs. Two are tunable:
-`ISAMBARD_CUDA_MAX_CONNECTIONS` (default 1) and **`ISAMBARD_OMP_THREADS` (default 8)**,
+ft_launcher/torchrun) carries the universal knobs. Three are tunable:
+`ISAMBARD_CUDA_MAX_CONNECTIONS` (default 1), `ISAMBARD_CUDA_ALLOC_CONF` (default
+`expandable_segments:True`; a measured `False` arm showed no difference on the 512-GPU
+Nano pretrain posture — the knob exists for A/Bs), and
+**`ISAMBARD_OMP_THREADS` (default 8)**,
 which sets `OMP_NUM_THREADS` and, whenever it is > 1, also `OMP_WAIT_POLICY=PASSIVE`. The
 default matters because torchrun silently sets `OMP_NUM_THREADS=1` when the variable is
 absent, single-threading the host-side AdamW of any CPU-offloaded optimizer onto one
@@ -318,15 +321,35 @@ Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with E
   defaults to 3600 s / 2700 s, which is shorter than Ultra-550B's 45-75 min first iteration at
   PP=36 and produces a SIGKILL + restart loop that looks exactly like a fabric hang. The image's
   ft_launcher parses these as floats and rejects the literal `none`, hence explicit numbers.
+  **Raising them to 7200 does not make them safe, it moves the wall.** The rank monitor is not
+  guaranteed to receive an initial heartbeat at all; when it does not, the timeout stops being a
+  liveness check and SIGKILLs a perfectly healthy job at exactly 7200 s. Signature, worth
+  grepping before blaming the fabric: `[Cycle N] Did not get initial heartbeat. Waited 7200.00
+  seconds`. Observed on Super-120B/64 GPUs and Nano-30B/512 GPUs; **not** universal — Ultra-550B
+  trains ~4.7 h under the same default without a kill, so what decides delivery is unresolved.
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
 The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `pipeline_training_run.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
 
-`--disable-straggler` drops **only** the NVRx straggler detector and keeps `cfg.ft` — the
-posture for a long, high-memory run that still needs ft_launcher restarts: the detector's
-rank-0 gather of per-GPU perf scores has been observed to OOM such jobs after ~20 minutes of
-stepping, which is why both pretrain quickstarts (short, restart-free) simply pass
-`--disable-ft` instead.
+`--disable-straggler` drops **only** the NVRx straggler detector and keeps `cfg.ft`: the
+detector's rank-0 gather of per-GPU perf scores has been observed to OOM high-memory jobs after
+~20 minutes of stepping, which is why both pretrain quickstarts (short, restart-free) simply
+pass `--disable-ft` instead.
+
+**It is not a milder `--disable-ft`, and it is the wrong reach for a long run.** It leaves the
+heartbeat timeout above fully armed, so it does nothing about the 2 h wall. Before enabling ft
+on any run expected to exceed the heartbeat, do the arithmetic the run now prints at startup:
+compare `save_interval × s/iter` against 7200 s. If the **first** checkpoint lands after the
+wall, ft is not fault tolerance — a heartbeat SIGKILL restarts from iteration 0 with an empty
+checkpoint directory, and the run makes no net progress for as long as it is left alone.
+`pipeline_training_run.py` logs the required s/iter whenever ft is on
+(`max_seconds_per_iteration_under_ft_heartbeat`); read that line rather than rediscovering it.
+Measured instance: the 500B control-pretraining baseline needed < 2.42 s/iter and ran at 4.276,
+giving seven kills across eight attempts in 15.5 h with zero checkpoints written.
+
+Where ft is dropped, a `--dependency=singleton` chain with `checkpoint.load == checkpoint.save`
+supplies the recovery ft would have: the NCCL watchdog ends a genuinely wedged segment, and the
+next segment resumes from the latest checkpoint.
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard
 
@@ -457,7 +480,7 @@ over the 40 iterations, 0 NaN, as in the anchors above).
 
 The full-scale from-scratch runs for the pretraining-data-filtering study, as opposed to the
 1B-token quickstarts above. `nemotron_nano_control_v1_baseline_500b.yaml` is the unfiltered V1
-baseline: Nano 30B-A3B, 500,002,979,840 tokens (59605 iters x GBS 1024 x seq 8192) on 512
+baseline: Nano 30B-A3B, 500,011,368,448 tokens (29803 iters x GBS 2048 x seq 8192) on 512
 GPUs, WSD 1e-3 → 1e-5, 21 optimizer-bearing checkpoints, blended ClimbMix 0.80 / Zyda-2
 `sample-100BT` 0.19 / AI-safety discourse 0.01. Launch it as a `--dependency=singleton` chain
 of day-long segments rather than one long allocation — see that directory's README, and the

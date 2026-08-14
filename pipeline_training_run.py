@@ -142,6 +142,40 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
 # Fault tolerance and straggler detection
 # =============================================================================
 
+# The launcher exports ISAMBARD_FT_HEARTBEAT_TIMEOUT and passes the same value to both
+# ft_launcher heartbeat flags, so under a launcher-started run this is by construction the
+# wall the job actually hits. The literal fallback exists only for direct invocations
+# outside the launcher (unit tests import this module without that environment).
+FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS = float(os.environ.get("ISAMBARD_FT_HEARTBEAT_TIMEOUT", "7200"))
+
+
+def max_seconds_per_iteration_under_ft_heartbeat(
+    first_checkpoint_iteration: int, heartbeat_timeout_seconds: float
+) -> float:
+    """Fastest sustained iteration time that still writes a checkpoint before the heartbeat.
+
+    ft_launcher's rank monitor is not guaranteed to receive an initial heartbeat. When it does
+    not, ``--ft-initial-rank-heartbeat-timeout`` stops being a liveness check and becomes a wall
+    the job is SIGKILLed at regardless of health, so a run whose first checkpoint is scheduled
+    beyond it restarts from iteration 0 with an empty checkpoint directory every time.
+    """
+    if first_checkpoint_iteration <= 0:
+        raise ValueError(f"first_checkpoint_iteration must be positive, got {first_checkpoint_iteration}")
+    return heartbeat_timeout_seconds / first_checkpoint_iteration
+
+
+def first_checkpoint_iteration(cfg: ConfigContainer) -> int:
+    """The iteration at which this run first writes a checkpoint it could restart from.
+
+    A ``save_interval`` at or beyond ``train_iters`` — the save-only-at-end posture — means the
+    final checkpoint is the first one, so the whole run must fit inside the heartbeat window.
+    """
+    train_iters = cfg.train.train_iters
+    save_interval = cfg.checkpoint.save_interval
+    if not save_interval:
+        return train_iters
+    return min(save_interval, train_iters)
+
 
 def apply_resilience_config(cfg: ConfigContainer, args: argparse.Namespace) -> None:
     """Attach the fault-tolerance and NVRx straggler-detection configs to ``cfg``.
@@ -159,6 +193,24 @@ def apply_resilience_config(cfg: ConfigContainer, args: argparse.Namespace) -> N
         enable_ft_package=True,
         calc_ft_timeouts=True,
     )
+
+    first_save = first_checkpoint_iteration(cfg)
+    # Rank 0 only: this fires before torch.distributed init, so the torchrun-set RANK env
+    # var is the rank identity available here. On a 512-rank job an unguarded warning
+    # appears 512 times in the shared log.
+    if int(os.environ.get("RANK", "0")) == 0:
+        logger.warning(
+            "Fault tolerance is ON. The first restartable checkpoint is written at iteration %d, "
+            "so every iteration must average under %.2f s for it to exist before the %.0f s "
+            "initial-rank-heartbeat timeout. A run slower than that is SIGKILLed with an empty "
+            "checkpoint directory and restarts from iteration 0, making no net progress for as "
+            "long as it is left running. If the log shows 'Did not get initial heartbeat', "
+            "relaunch with --disable-ft; note that --disable-straggler does NOT remove this "
+            "timeout.",
+            first_save,
+            max_seconds_per_iteration_under_ft_heartbeat(first_save, FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS),
+            FT_INITIAL_RANK_HEARTBEAT_TIMEOUT_SECONDS,
+        )
     # In-process restart: DISABLED due to nvidia-resiliency-ext 0.5.0 bug:
     # TypeError in rank_assignment.py -- node.layer.min_ranks is None with our
     # MoE parallelism (TP=2, EP=8). Causes immediate crash loop on startup.

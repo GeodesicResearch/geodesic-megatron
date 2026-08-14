@@ -8,9 +8,9 @@ filtered version of the same blend, so everything except the data is held fixed 
 |---|---|
 | Config | [`nemotron_nano_control_v1_baseline_500b.yaml`](nemotron_nano_control_v1_baseline_500b.yaml) |
 | Model | Nemotron 3 Nano 30B-A3B, random init (`--mode pretrain`, no checkpoint loaded) |
-| Tokens | 59605 iters x 1024 seqs x 8192 = **500,002,979,840** |
+| Tokens | 29803 iters x 2048 seqs x 8192 = **500,011,368,448** |
 | Sequence length | 8192 |
-| Global batch | 1024 sequences = 8,388,608 tokens/iter |
+| Global batch | 2048 sequences = 16,777,216 tokens/iter (see the config header's GBS 2048 note) |
 | Scale | 512 GPUs / 128 nodes |
 | LR schedule | WSD, peak 1e-3, floor 1e-5, `minus_sqrt` anneal |
 | Validation | none (`eval_iters: 0`) |
@@ -34,11 +34,11 @@ suffix is `<output-variant>_<json-key>_document` from the tokenize job.
 
 Expected share of the budget and the resulting epochs:
 
-| Source | Share of 500.003B | Corpus size under `nemotron-base` | Epochs |
+| Source | Share of 500.011B | Corpus size under `nemotron-base` | Epochs |
 |---|---|---|---|
-| ClimbMix (8 shards) | 400,002,383,872 | **354.3818B exact** — 553,240,576 documents, 354,381,797,388 tokens | **1.129** |
-| Zyda-2 `sample-100BT` | 95,000,566,170 | **99.2276B exact** — 91,220,256 documents, 99,227,596,755 tokens from the `.idx` | **0.957** |
-| control-pretraining-datasets `combined` | 5,000,029,798 | **0.4276B exact** — 67,278 documents, 427,634,149 tokens from the `.idx` | 11.692 |
+| ClimbMix (8 shards) | 400,009,094,758 | **354.3818B exact** — 553,240,576 documents, 354,381,797,388 tokens | **1.129** |
+| Zyda-2 `sample-100BT` | 95,002,160,005 | **99.2276B exact** — 91,220,256 documents, 99,227,596,755 tokens from the `.idx` | **0.957** |
+| control-pretraining-datasets `combined` | 5,000,113,684 | **0.4276B exact** — 67,278 documents, 427,634,149 tokens from the `.idx` | 11.693 |
 
 **All three figures are now exact**, read from `total_tokens` in the
 `<prefix>.provenance.json` the tokenize job writes beside each `.bin/.idx`. No estimate
@@ -343,8 +343,8 @@ delete the cache — not "delete it if the corpus changed much".
 
 ## Topology
 
-`TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512` on 512 GPUs, mbs 1 (2 microbatches per DP
-replica), selective recompute of `[core_attn, moe, shared_experts]`, `alltoall` MoE
+`TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512` on 512 GPUs, mbs 1 (4 microbatches per DP
+replica at GBS 2048), selective recompute of `[core_attn, moe, shared_experts]`, `alltoall` MoE
 dispatcher, `torch_grouped` experts. This is the measured-working posture from
 `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` (128-GPU anchor 25.533 s/iter =
 160.2 model TFLOP/s/GPU at GBS 3072). Tokens per rank are identical at 8192, so per-rank
@@ -425,7 +425,7 @@ for i in $(seq 1 $N); do
     --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
     pipeline_training_submit.sbatch \
     configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml nano pretrain \
-    --disable-straggler
+    --disable-ft
 done
 ```
 
@@ -434,10 +434,42 @@ done
   when the account is over its node limit — and `N` pending 128-node segments are well over it.
 - `--signal=TERM@600` pairs with `train.exit_signal_handler: true` so a segment checkpoints
   before its walltime kill instead of losing the interval.
-- `--disable-straggler` keeps `ft_launcher`'s restarts while dropping the NVRx straggler
-  reporter, whose rank-0 gather has OOMed high-memory runs after ~20 minutes of stepping.
-- Fault tolerance stays **on** within each segment (no `--disable-ft`): at 128 nodes,
-  `ft_launcher`'s restart-from-latest is what keeps a Slingshot NCCL hang from costing the run.
+- **`--disable-ft`, and specifically not `--disable-straggler`.** On this workload
+  `ft_launcher`'s rank monitor never receives an initial heartbeat, so
+  `--ft-initial-rank-heartbeat-timeout=7200` stops being a liveness check and simply SIGKILLs
+  the job at 7200 s however healthy it is. The signature is literal —
+  `[Cycle N] Did not get initial heartbeat. Waited 7200.00 seconds` — so grep for it before
+  theorising about the fabric. `--disable-straggler` clears only the NVRx straggler reporter
+  and leaves that killer armed; only `--disable-ft` switches to plain `torchrun` and removes it.
+- **This is not known to be universal, so do not generalise it into "ft always kills at 2 h".**
+  `docs/ultra-550b-training-and-conversion.md` records Ultra-550B raising the heartbeat
+  3600 → 7200 and then training ~4.7 h without a kill, which an unconditional timer could not
+  permit — on that path the initial heartbeat evidently is delivered. What decides delivery is
+  not established. The actionable form is: for any run whose duration exceeds the heartbeat,
+  check the log for that signature rather than assuming either outcome.
+- Whether that 2 h ceiling is merely annoying or **fatal** is arithmetic worth doing before any
+  launch: compare `save_interval × s/iter` against 2 h. At the live posture it is
+  1490 × ~6.1 s ≈ **2.5 h** — still past the wall, so ft would still deadlock this run. The
+  GBS-1024 first attempt measured the failure: 2980 × 4.276 s = 3.54 h to first checkpoint,
+  **seven kills across eight attempts** in 15.5 h, peak iteration 1628 of 59,605, zero
+  checkpoints.
+- Take the iteration rate from the **distribution, not from one status line**. Over the 12,480
+  iterations that attempt logged, the median is 4.276 s and the mean 4.494 s — the mean pulled
+  up by the ~100 s first iteration of each restart. A single line read mid-run gave 4.759 s and
+  put the first checkpoint at 3.94 h instead of 3.54 h. The conclusion survived that error, but
+  only because both sides of the comparison were far apart; a rate quoted from one sample is not
+  a measurement. Sanity-check any rate against the run's own bound — seven kills at 7200 s that
+  each reached ~1625 iterations cap the true rate at 4.43 s/iter, which 4.759 already violates.
+- Dropping `ft_launcher` costs less than it appears, because **the chain is the fault
+  tolerance**: a Slingshot NCCL hang trips the NCCL watchdog, the segment exits, and the next
+  singleton segment resumes from the latest checkpoint. `ft_launcher` only ever added restart
+  *within* a segment — and at this `save_interval` it cannot do that either, since it kills the
+  run before any checkpoint it could restart from exists.
+- Watch for the failure by **iteration high-water mark, not latest iteration**. A monitor that
+  reports the most recent `iteration N/29803` line shows a healthy descending loss throughout:
+  each report is true and the sequence is catastrophic. Alarm when the current iteration falls
+  below the maximum seen, and check the launcher's `Launcher:` banner at startup rather than
+  waiting hours for a checkpoint that never arrives.
 
 ## Smoke test before the first segment
 
@@ -450,13 +482,21 @@ allocation rather than just this job.
 ```bash
 bash pipeline_training_launch.sh \
   configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml \
-  --model nano --mode pretrain --disable-straggler --nodes 32 \
+  --model nano --mode pretrain --disable-ft --nodes 32 \
   train.exit_interval=200 \
   checkpoint.save_interval=100 \
   checkpoint.save=/projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_128gpu \
   checkpoint.load=/projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_128gpu \
   logger.wandb_exp_name=control_pretrain_v1_smoke_128gpu
 ```
+
+The smoke test is short enough (200 iterations; the GBS-1024 posture measured 2086 s ≈ 35 min
+at a 9.75 s median on 128 GPUs, and at GBS 2048 the same 128-GPU run carries twice the
+microbatches per replica, so budget roughly double)
+that the 7200 s heartbeat could not reach it either way, but it carries `--disable-ft` so it
+exercises the same launcher as the segments it is gating. A smoke test run under `ft_launcher`
+would not validate the `torchrun` path the real run takes — and being comfortably under the
+ceiling is exactly why the smoke test could not have caught this failure on its own.
 
 **Stop the run with `train.exit_interval`, not `train.train_iters`.** Both end at iteration
 200 and both leave checkpoints at 100 and 200, but `train_iters` also redefines the
@@ -470,8 +510,8 @@ and never approaches the 1e-3 peak. Throughput and checkpoint size would still b
 a stability result taken at 1/50th of the intended LR is not.
 
 `exit_interval` leaves the schedule untouched, so the smoke test *is* the first 200
-iterations of the real run: warmup is linear over 610,355 steps (596 iterations), which puts
-iteration 200 at roughly a third of peak (~3.4e-4) and never reaches the WSD branch at all.
+iterations of the real run: warmup is linear over 610,365 steps (298 iterations), which puts
+iteration 200 at roughly two-thirds of peak (~6.7e-4) and never reaches the WSD branch at all.
 `train.py` saves on the exit path when the interval has not already written a checkpoint.
 
 Holding `train_iters` also means the smoke test **warms the per-corpus index caches the
@@ -487,11 +527,11 @@ real run reuses**. Two different indices are built, and only one of them is cach
   the expensive build, being over the corpora's ~645M documents.
 - **The top-level blend index — never cached.** `blended_dataset.py` reads `path_to_cache`
   with no fallback of its own, so it logs `Cannot save the BlendedDataset indexes because
-  path_to_cache is None` and rebuilds its 61,035,520-sample index at *every* launch.
+  path_to_cache is None` and rebuilds its 61,036,544-sample index at *every* launch.
   Budget for that on each segment, not just the first.
 
 Bounding the run with `train_iters=200` instead would change every per-corpus sample count
-by the same factor of ~298, missing all of those caches and leaving the real run to rebuild
+by the same factor of ~149, missing all of those caches and leaving the real run to rebuild
 them from scratch on its first launch.
 
 **Point it at a separate save directory.** The campaign's `load` and `save` are the same
