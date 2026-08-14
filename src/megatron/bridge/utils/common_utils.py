@@ -95,6 +95,39 @@ def get_world_size_safe() -> int:
     return 1
 
 
+def backend_supports_cuda(backend: str) -> bool:
+    """Whether a torch.distributed backend string includes a CUDA backend.
+
+    Handles both single-backend strings ("nccl") and device:backend mappings
+    ("cpu:gloo,cuda:nccl" — torch's recommended init for distributed checkpointing).
+    torch.distributed.get_backend() returns the full mapping string for a
+    multi-backend process group, so equality checks against "nccl" are wrong there.
+
+    Args:
+        backend: A backend string as accepted by torch.distributed.init_process_group
+                 or returned by torch.distributed.get_backend().
+
+    Returns:
+        True if the string names NCCL for any device.
+    """
+    return "nccl" in backend
+
+
+def backend_supports_cpu(backend: str) -> bool:
+    """Whether a torch.distributed backend string includes a CPU (Gloo) backend.
+
+    See backend_supports_cuda for why membership, not equality, is required.
+
+    Args:
+        backend: A backend string as accepted by torch.distributed.init_process_group
+                 or returned by torch.distributed.get_backend().
+
+    Returns:
+        True if the string names Gloo for any device.
+    """
+    return "gloo" in backend
+
+
 def get_last_rank() -> int:
     """Get the last rank in the distributed group"""
     if not torch.distributed.is_initialized():

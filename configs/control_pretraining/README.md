@@ -354,6 +354,36 @@ EP stays node-local (`TP x EP <= 4`) — cross-node MoE all-to-all over Slingsho
 documented hang and throughput cliff. PP=1 means there is no pipeline bubble and no PP p2p
 traffic on the fabric.
 
+### Save crossings at DP=512: two pathologies, both fixed structurally
+
+The first optimizer-bearing checkpoint save at this scale triggered two distinct failures
+that only appear at large DP. Both fixes are in place; they are recorded here because each
+looks like a fabric or allocator fault if rediscovered from its symptom.
+
+1. **Every NCCL collective ~25× slower after the save, permanently** (6.5 → ~165 s/iter,
+   process-wide, until restart; a fresh process on the same nodes is full-speed). Cause:
+   the launcher sets `FI_MR_CACHE_MONITOR=userfaultfd` with the provider's default MR-cache
+   capacity (~4096 entries); the save's host-buffer churn fills the cache with dead entries
+   and every later registration takes the slow path. Fix: `FI_MR_CACHE_MAX_COUNT=65536` /
+   `FI_MR_CACHE_MAX_SIZE=-1`, exported in `pipeline_training_launch.sh` next to the monitor
+   setting. Verified by A/B at 512 ranks: without the override the collapse reproduced 5/5;
+   with it, save crossings hold 5.9–6.0 s/iter.
+
+2. **A one-time ~4 GB memory step on the coordinator rank at the first save**, invisible to
+   the torch allocator (identical live/reserved bytes in post-save snapshots) and immune to
+   `gc.collect()`/`empty_cache()`. Cause: the torch-DCP save plans are gathered with
+   `gather_object` to rank 0; over a NCCL-only process group, object collectives stage
+   through the GPU and rank 0 opens ~511 P2P transports whose FIFO buffers persist for the
+   process lifetime. The lost headroom then OOMs a later save-adjacent iteration on the
+   4 GiB fp32 cross-entropy logits transient. Fix: `dist.distributed_backend:
+   "cpu:gloo,cuda:nccl"` in the campaign YAML — torch's recommended init for distributed
+   checkpointing; object collectives run on CPU over Gloo, tensor collectives stay on NCCL.
+   Verified at 512 ranks: with the mixed backend all GPUs return to the pre-save level
+   after the save (previously rank 0 sat +4 GB above its siblings), at unchanged iteration
+   time. The instrument that localized this — post-save CUDA memory snapshots — is the
+   config-driven `profiling.record_memory_history` mechanism; see
+   `docs/profiling-quickstart.md` "CUDA memory-history snapshots".
+
 ### Why the DDP settings live under `comm_overlap:` — do not move them to `ddp:`
 
 `overlap_param_gather`, `overlap_grad_reduce` and `bucket_size` are set in `comm_overlap:`

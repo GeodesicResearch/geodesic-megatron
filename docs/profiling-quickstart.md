@@ -152,3 +152,37 @@ its usual launch command. Each trace is exported at its captured iteration's
 own step end, so captures up to and including the final iteration work; a
 capture iteration beyond `train_iters` is suppressed at teardown with a
 warning rather than producing a bogus empty trace.
+
+## CUDA memory-history snapshots
+
+Separate from the torch-profiler traces above, memory-history snapshots record
+every CUDA allocation with its Python stack — the instrument for "who owns this
+memory" questions (a post-save step in nvidia-smi, an OOM with no obvious
+holder). These are **config knobs, not env vars** — they land in the run's
+resolved config, so a snapshot is always attributable to the run that produced
+it:
+
+```
+profiling.record_memory_history=true \
+'profiling.profile_ranks=[0]' \
+profiling.memory_snapshot_path=/projects/a5k/public/profiles/<exp>/<run>/mem.pickle
+```
+
+Two of these are validated at config finalize because their inherited defaults
+are traps: `profile_ranks` must be **non-empty** (the arming path treats an
+empty list as "record on every rank" while every dump site treats it as "dump
+on no rank" — recording alone would pay the trace overhead everywhere and
+never write a snapshot), and `memory_snapshot_path` must be **absolute** (the
+inherited default `snapshot.pickle` resolves against the job's working
+directory, which is the repo checkout under the launcher). The directory must
+exist.
+
+Recording is armed in `setup()` before model construction (so the timeline is
+complete) on the ranks in `profile_ranks`. Three dump sites share the
+configured path, each suffixing what identifies it: a rolling latest-state
+snapshot from the logging path (`_<rank>`, overwritten in place each
+iteration), a dump after every checkpoint save
+(`_post_save_iter<N>_rank-<R>` — diff two consecutive post-save snapshots'
+live blocks by address to separate save transients from genuine retention),
+and an OOM-observer dump (`_oom_rank-<R>`) if an allocation fails. View with
+torch's `_memory_viz.py` or https://pytorch.org/memory_viz.

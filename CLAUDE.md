@@ -485,7 +485,11 @@ GPUs, WSD 1e-3 → 1e-5, 21 optimizer-bearing checkpoints, blended ClimbMix 0.80
 `sample-100BT` 0.19 / AI-safety discourse 0.01. Launch it as a `--dependency=singleton` chain
 of day-long segments rather than one long allocation — see that directory's README, and the
 config header for the two settings that are not free choices (`lr_wsd_decay_iters`, and the
-`comm_overlap` restatement above).
+`comm_overlap` restatement above). Two DP=512 save-crossing pathologies are fixed
+structurally — the CXI MR-cache capacity collapse (launcher: `FI_MR_CACHE_MAX_COUNT`) and
+the rank-0 NCCL object-gather transport retention (YAML: `dist.distributed_backend:
+"cpu:gloo,cuda:nccl"`) — the README's "Save crossings at DP=512" section records both
+mechanisms and their evidence.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 

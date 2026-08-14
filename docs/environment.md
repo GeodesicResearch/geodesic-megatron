@@ -481,6 +481,13 @@ one trace file per rank per iteration), `ISAMBARD_TORCH_PROFILE_RANKS` (default 
 `ISAMBARD_TORCH_PROFILE_WAIT` (legacy single capture at iteration WAIT+2, used only when
 `_ITERS` is unset).
 
+For memory questions rather than time questions, CUDA memory-history snapshots are driven
+by config, not env vars: `profiling.record_memory_history=true`,
+`profiling.profile_ranks=[...]`, `profiling.memory_snapshot_path=<path>`. Recording is
+armed before model construction; snapshots are dumped per logging interval, after every
+checkpoint save (`_post_save_iter<N>_rank-<R>` suffix), and on OOM. See
+`docs/profiling-quickstart.md` "CUDA memory-history snapshots".
+
 Artifacts land in `<root>/<wandb-exp-name>/<run-id>/`: the per-rank Chrome traces
 (`rank<R>.iter<N>.chrome_trace.json.gz`, open in Perfetto or `chrome://tracing`),
 `provenance.txt` (commit, run id, raw-log path, world info), `config_snapshot.yaml` (the

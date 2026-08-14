@@ -282,6 +282,15 @@ dist:
   # over a 500B-token, three-source blend while every other rank waits in the same
   # collective.
   distributed_timeout_minutes: 60
+  # Mixed backend (torch's recommended init for distributed checkpointing): object
+  # collectives — the torch-DCP save-plan gather_object to rank 0 and mcore's sharding
+  # metadata all_gather_object — run on CPU over Gloo instead of staging through the GPU
+  # over NCCL. Over NCCL at 512 ranks, the plan gather makes rank 0 open ~511 P2P
+  # transports whose FIFO buffers (~4 GB total) persist for the process lifetime outside
+  # the torch allocator; the lost headroom then OOMs a later save-adjacent iteration on
+  # the 4 GiB fp32 cross-entropy logits transient (seq 8192 x vocab 131072 x 4B). Tensor
+  # collectives are unaffected: CUDA tensors still use NCCL.
+  distributed_backend: "cpu:gloo,cuda:nccl"
 
 model:
   seq_length: 8192
