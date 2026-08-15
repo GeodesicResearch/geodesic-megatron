@@ -74,7 +74,7 @@ class TestMainWiring:
     construction — Super/Ultra would fetch the HF config).
     """
 
-    def _run_main(self, run_module, monkeypatch, tmp_path, mode, yaml_text):
+    def _run_main(self, run_module, monkeypatch, tmp_path, mode, yaml_text, extra_argv=()):
         config = tmp_path / "override.yaml"
         config.write_text(yaml_text)
         calls = {}
@@ -93,10 +93,26 @@ class TestMainWiring:
                 "--config-file",
                 str(config),
                 "--disable-ft",
+                *extra_argv,
             ],
         )
         run_module.main()
         return calls
+
+    def test_peft_with_gr_sft_is_refused(self, run_module, monkeypatch, tmp_path):
+        """gr.enabled + --peft must raise before any corpus is read: the optimizer
+        gating discovers full-parameter param groups, and adapter-wrapped modules
+        have no isolation argument. This raise in main() is the rule's only
+        enforcement (validate_gr_launch never sees the peft flag)."""
+        with pytest.raises(ValueError, match="gr.enabled with --peft is unsupported"):
+            self._run_main(
+                run_module,
+                monkeypatch,
+                tmp_path,
+                "sft",
+                "tokenizer:\n  tokenizer_model: geodesic-research/nemotron-base-tokenizer\ngr:\n  enabled: true\n",
+                extra_argv=("--peft", "lora"),
+            )
 
     _DATA_PATH_YAML = (
         "tokenizer:\n"

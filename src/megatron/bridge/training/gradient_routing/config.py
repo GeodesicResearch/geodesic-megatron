@@ -28,12 +28,20 @@ the bridge ``GPTDatasetConfig`` so every consumer of ``cfg.dataset`` (sequence l
 seed, dataloader fields) keeps working, but it never runs the MCore blend post-init on
 itself — the child corpus configs, built in ``build_child_config``, are the ones that
 reach ``BlendedMegatronDatasetBuilder``.
+
+``GRFinetuningDatasetConfig`` is the same shape for ``--mode sft``: N+1 finetuning
+dataset ROOTS (each a directory with its own ``training.jsonl``) instead of N+1
+``.bin/.idx`` blends, with children built through ``FinetuningDatasetBuilder``. The two
+corpus spellings on ``GradientRoutingConfig`` (``retain_data_path``/``aux_data_paths``
+vs ``retain_dataset_root``/``aux_dataset_roots``) are mutually exclusive — a config
+carries exactly one, and the training entry point matches it against ``--mode``.
 """
 
 import copy
 from dataclasses import dataclass
 
-from megatron.bridge.training.config import DataloaderConfig, GPTDatasetConfig
+from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
+from megatron.bridge.training.config import DataloaderConfig, FinetuningDatasetConfig, GPTDatasetConfig
 from megatron.bridge.training.gradient_routing.plan import GRPlan, build_gr_plan
 
 
@@ -73,10 +81,18 @@ class GradientRoutingConfig:
     """Master switch. When False (or when the section is absent) every GR code path is inert."""
 
     retain_data_path: list[str] | None = None
-    """Blend list (interleaved weights + .bin/.idx prefixes) for the normally-trained corpus."""
+    """Blend list (interleaved weights + .bin/.idx prefixes) for the normally-trained corpus.
+    The cpt/pretrain corpus spelling; mutually exclusive with retain_dataset_root."""
 
     aux_data_paths: list[list[str]] | None = None
     """One blend list per routed corpus; entry k trains ONLY aux module k on isolated iterations."""
+
+    retain_dataset_root: str | None = None
+    """Finetuning dataset root (a directory with training.jsonl) for the normally-trained corpus.
+    The sft corpus spelling; mutually exclusive with retain_data_path."""
+
+    aux_dataset_roots: list[str] | None = None
+    """One finetuning dataset root per routed corpus; entry k trains ONLY aux module k."""
 
     aux_iter_fractions: list[float] | None = None
     """Share of iterations drawing each aux corpus (one entry per module, sum <= 1)."""
@@ -111,33 +127,62 @@ class GradientRoutingConfig:
 
     @property
     def n_aux(self) -> int:
-        """Number of aux modules (= number of routed corpora)."""
-        return len(self.aux_data_paths) if self.aux_data_paths else 0
+        """Number of aux modules (= number of routed corpora, in either corpus spelling)."""
+        if self.aux_data_paths:
+            return len(self.aux_data_paths)
+        if self.aux_dataset_roots:
+            return len(self.aux_dataset_roots)
+        return 0
 
     def finalize(self) -> None:
         """Validate the section; raises with a fix instruction on any gap."""
         if not self.enabled:
             return
+        problems: list[str] = []
         missing = [
             name
-            for name in (
-                "retain_data_path",
-                "aux_data_paths",
-                "aux_iter_fractions",
-                "plan_seed",
-                "aux_lr",
-                "aux_min_lr",
-                "aux_ffn_hidden_size",
-            )
+            for name in ("aux_iter_fractions", "plan_seed", "aux_lr", "aux_min_lr", "aux_ffn_hidden_size")
             if getattr(self, name) is None
         ]
         if missing:
-            raise ValueError(
-                f"gr.enabled=true but {missing} unset. Every one of these is a load-bearing "
-                "experimental choice with no sensible default — set them in the run config's gr: section."
+            problems.append(
+                f"{missing} unset. Every one of these is a load-bearing experimental choice with "
+                "no sensible default — set them in the run config's gr: section."
             )
-        if not self.aux_data_paths or any(not blend for blend in self.aux_data_paths):
+        blend_fields = [name for name in ("retain_data_path", "aux_data_paths") if getattr(self, name) is not None]
+        root_fields = [
+            name for name in ("retain_dataset_root", "aux_dataset_roots") if getattr(self, name) is not None
+        ]
+        if blend_fields and root_fields:
+            problems.append(
+                f"both corpus spellings are set ({blend_fields} and {root_fields}); a run trains through "
+                "exactly one data stack, so set the blend-list pair (--mode cpt/pretrain) OR the "
+                "dataset-root pair (--mode sft), never both."
+            )
+        elif not blend_fields and not root_fields:
+            problems.append(
+                "no corpora configured: set retain_data_path + aux_data_paths (.bin/.idx blend lists, "
+                "--mode cpt/pretrain) or retain_dataset_root + aux_dataset_roots (finetuning dataset "
+                "roots, --mode sft)."
+            )
+        elif blend_fields and len(blend_fields) != 2:
+            problems.append(
+                f"only {blend_fields} set; the blend-list spelling needs both retain_data_path and aux_data_paths."
+            )
+        elif root_fields and len(root_fields) != 2:
+            problems.append(
+                f"only {root_fields} set; the dataset-root spelling needs both retain_dataset_root "
+                "and aux_dataset_roots."
+            )
+        if problems:
+            raise ValueError("gr.enabled=true but " + "\n".join(problems))
+        if blend_fields and (not self.aux_data_paths or any(not blend for blend in self.aux_data_paths)):
             raise ValueError("gr.aux_data_paths must be a non-empty list of non-empty blend lists.")
+        if root_fields:
+            if not self.retain_dataset_root:
+                raise ValueError("gr.retain_dataset_root must be a non-empty dataset root path.")
+            if not self.aux_dataset_roots or any(not root for root in self.aux_dataset_roots):
+                raise ValueError("gr.aux_dataset_roots must be a non-empty list of non-empty dataset roots.")
         n_aux = self.n_aux
         # Unlike the width/LR fields, a fraction must NOT scalar-broadcast: the same value
         # for every module multiplies the TOTAL aux share by the module count, which is
@@ -251,4 +296,124 @@ class GRDatasetConfig(GPTDatasetConfig):
         child.data_path = list(corpus_data_path)
         child.blend = None
         GPTDatasetConfig.finalize(child)
+        return child
+
+
+class GRFinetuningDatasetConfig(FinetuningDatasetConfig):
+    """Dataset config for GR SFT runs: N+1 finetuning dataset roots behind one ``cfg.dataset``.
+
+    The finetuning mirror of ``GRDatasetConfig``: ``dataset_root`` / ``packed_sequence_specs``
+    / ``max_train_samples`` on this object stay unset, and ``build_child_config`` clones it
+    into a plain ``FinetuningDatasetConfig`` per corpus — each carrying its own root, its own
+    ``PackedSequenceSpecs``, and the plan-derived exact sample cap. The reclass is load-bearing:
+    ``finetuning_train_valid_test_datasets_provider`` kwargs-splats every non-DataloaderConfig
+    field into ``FinetuningDatasetBuilder``, so a child that stayed this class would splat GR
+    fields the builder does not accept and re-dispatch into the GR branch.
+
+    Corpus-pure packing is structural, not configured: packing runs per ``dataset_root``
+    (rank 0, offline, ``FinetuningDatasetBuilder.prepare_packed_data``), so each corpus's
+    ``training.jsonl`` packs separately under its own ``<root>/packed/`` and no pack ever
+    mixes documents from two corpora — the property that keeps a routed iteration's global
+    batch label-homogeneous down to the token level. Per-corpus specs may therefore differ
+    only in their pack-file paths; the packing POSTURE (pack size, cu_seqlens padding) must
+    be identical, because one ``collate_fn`` serves every corpus's batches.
+    """
+
+    def __init__(
+        self,
+        retain_dataset_root: str,
+        aux_dataset_roots: list[str],
+        gr_plan: GRPlan,
+        gr_global_batch_size: int,
+        retain_packed_sequence_specs: PackedSequenceSpecs | None = None,
+        aux_packed_sequence_specs: list[PackedSequenceSpecs | None] | None = None,
+        *args,
+        **kwargs,
+    ):
+        for name in ("dataset_root", "packed_sequence_specs", "max_train_samples"):
+            if kwargs.get(name) is not None:
+                raise ValueError(
+                    f"GRFinetuningDatasetConfig takes per-corpus roots/specs and plan-derived sizing; "
+                    f"do not set {name} on it."
+                )
+        self.retain_dataset_root = str(retain_dataset_root)
+        self.aux_dataset_roots = [str(root) for root in aux_dataset_roots]
+        self.retain_packed_sequence_specs = retain_packed_sequence_specs
+        self.aux_packed_sequence_specs = (
+            list(aux_packed_sequence_specs)
+            if aux_packed_sequence_specs is not None
+            else [None] * len(self.aux_dataset_roots)
+        )
+        self.gr_plan = gr_plan
+        self.gr_global_batch_size = gr_global_batch_size
+        super().__init__(*args, **kwargs)
+
+    def finalize(self) -> None:
+        """Validate the corpus roots against the plan; per-corpus fields are set on the children."""
+        if not self.retain_dataset_root or not self.aux_dataset_roots or any(not r for r in self.aux_dataset_roots):
+            raise ValueError(
+                "GRFinetuningDatasetConfig requires non-empty retain_dataset_root and aux_dataset_roots entries."
+            )
+        if len(self.aux_dataset_roots) != self.gr_plan.n_aux:
+            raise ValueError(
+                f"GRFinetuningDatasetConfig has {len(self.aux_dataset_roots)} aux corpora but the plan routes "
+                f"{self.gr_plan.n_aux} — the config and the plan disagree about the module count."
+            )
+        if len(self.aux_packed_sequence_specs) != len(self.aux_dataset_roots):
+            raise ValueError(
+                f"GRFinetuningDatasetConfig has {len(self.aux_packed_sequence_specs)} aux packed specs for "
+                f"{len(self.aux_dataset_roots)} aux corpora — one PackedSequenceSpecs (or None) per corpus."
+            )
+        if self.do_validation or self.do_test:
+            raise ValueError(
+                "GRFinetuningDatasetConfig requires do_validation=False and do_test=False: the routed "
+                "dataset serves no validation/test split (eval_iters 0 is guard-enforced)."
+            )
+        postures = {
+            self._packing_posture(spec)
+            for spec in (self.retain_packed_sequence_specs, *self.aux_packed_sequence_specs)
+        }
+        if len(postures) > 1:
+            raise ValueError(
+                f"GR corpora disagree about packing posture ({postures}): one collate_fn serves every "
+                "corpus, so (packed_sequence_size, pad_cu_seqlens, pad_seq_to_mult) must be identical "
+                "across corpora — per-corpus specs may differ only in their pack-file paths."
+            )
+        DataloaderConfig.finalize(self)
+
+    @staticmethod
+    def _packing_posture(spec: PackedSequenceSpecs | None) -> tuple:
+        """The collate-shaping identity of one corpus's packing spec (paths excluded)."""
+        if spec is None or spec.packed_sequence_size <= 0:
+            return ("unpacked",)
+        return ("packed", spec.packed_sequence_size, spec.pad_cu_seqlens, spec.pad_seq_to_mult)
+
+    def build_child_config(
+        self,
+        corpus_dataset_root: str,
+        corpus_packed_sequence_specs: PackedSequenceSpecs | None,
+        max_train_samples: int,
+    ) -> FinetuningDatasetConfig:
+        """Clone this config into a single-corpus FinetuningDatasetConfig, exactly sized.
+
+        ``max_train_samples`` must be the plan's exact per-corpus consumption: the SFT sample
+        mapping then epoch-wraps an undersized corpus deterministically and truncates an
+        oversized one, so ``len(child)`` comes out exact — which is what lets the provider
+        refuse any child whose length disagrees with the plan instead of letting the batch
+        sampler wrap mid-run.
+        """
+        child = copy.deepcopy(self)
+        child.__class__ = FinetuningDatasetConfig
+        del child.retain_dataset_root
+        del child.aux_dataset_roots
+        del child.retain_packed_sequence_specs
+        del child.aux_packed_sequence_specs
+        del child.gr_plan
+        del child.gr_global_batch_size
+        child.dataset_root = str(corpus_dataset_root)
+        child.packed_sequence_specs = corpus_packed_sequence_specs
+        child.max_train_samples = int(max_train_samples)
+        child.do_validation = False
+        child.do_test = False
+        FinetuningDatasetConfig.finalize(child)
         return child

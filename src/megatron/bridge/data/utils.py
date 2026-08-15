@@ -15,6 +15,7 @@
 from dataclasses import fields
 from typing import Any, Callable, Dict, Optional, Type, Union
 
+import numpy as np
 from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from megatron.core.datasets.blended_megatron_dataset_config import BlendedMegatronDatasetConfig
 from megatron.core.datasets.gpt_dataset import GPTDataset, MockGPTDataset
@@ -33,9 +34,9 @@ from megatron.bridge.training.config import (
     GPTFIMDatasetConfig,
     MockGPTDatasetConfig,
 )
-from megatron.bridge.training.gradient_routing.config import GRDatasetConfig
+from megatron.bridge.training.gradient_routing.config import GRDatasetConfig, GRFinetuningDatasetConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
-from megatron.bridge.utils.common_utils import print_rank_0
+from megatron.bridge.utils.common_utils import get_rank_safe, print_rank_0
 
 
 def is_dataset_built_on_rank(pg_collection: ProcessGroupCollection) -> bool:
@@ -90,6 +91,17 @@ def pretrain_train_valid_test_datasets_provider(
     return train_ds, valid_ds, test_ds
 
 
+def _check_gr_train_sizing(train_num_samples: int, plan, gbs: int) -> None:
+    """Refuse a GR dataset build whose requested sample count disagrees with the plan."""
+    expected_train = plan.train_iters * gbs
+    if train_num_samples != expected_train:
+        raise ValueError(
+            f"GR dataset sizing mismatch: training requests {train_num_samples} samples "
+            f"but the plan serves {expected_train} ({plan.train_iters} iters x GBS {gbs}). "
+            "train_iters/global_batch_size changed after the plan was built."
+        )
+
+
 def _build_gr_routed_datasets(train_val_test_num_samples: list[int], dataset_config) -> tuple[Any, None, None]:
     """Build the gradient-routing train dataset: one GPTDataset per corpus behind a router.
 
@@ -103,13 +115,7 @@ def _build_gr_routed_datasets(train_val_test_num_samples: list[int], dataset_con
 
     plan = dataset_config.gr_plan
     gbs = dataset_config.gr_global_batch_size
-    expected_train = plan.train_iters * gbs
-    if train_val_test_num_samples[0] != expected_train:
-        raise ValueError(
-            f"GR dataset sizing mismatch: training requests {train_val_test_num_samples[0]} samples "
-            f"but the plan serves {expected_train} ({plan.train_iters} iters x GBS {gbs}). "
-            "train_iters/global_batch_size changed after the plan was built."
-        )
+    _check_gr_train_sizing(train_val_test_num_samples[0], plan, gbs)
 
     corpora = [(CORE, dataset_config.retain_data_path)] + [
         (k + FIRST_AUX, paths) for k, paths in enumerate(dataset_config.aux_data_paths)
@@ -180,6 +186,9 @@ def finetuning_train_valid_test_datasets_provider(
     Returns:
         A tuple containing the train, validation, and test datasets.
     """
+    if isinstance(dataset_config, GRFinetuningDatasetConfig):
+        return _build_gr_finetuning_datasets(train_val_test_num_samples, dataset_config, tokenizer)
+
     print_rank_0(
         f">building train, validation, and test datasets for Finetuning dataset from {dataset_config.dataset_root} ..."
     )
@@ -201,6 +210,102 @@ def finetuning_train_valid_test_datasets_provider(
     return train_ds, valid_ds, test_ds
 
 
+def _build_gr_finetuning_datasets(
+    train_val_test_num_samples: list[int], dataset_config: GRFinetuningDatasetConfig, tokenizer: MegatronTokenizer
+) -> tuple[Any, None, None]:
+    """Build the gradient-routing SFT train dataset: one finetuning dataset per corpus behind a router.
+
+    Each corpus is built through the standard FinetuningDatasetBuilder from a child config
+    carrying only that corpus's dataset root and packed specs, capped via ``max_train_samples``
+    to exactly what the routing plan consumes (the SFT sample mapping epoch-wraps an undersized
+    corpus and truncates an oversized one, both deterministically). The exact-length check
+    below is the batch-sampler twin of ``MegatronPretrainingSampler``'s hard
+    ``consumed_samples < total_samples`` assert: ``MegatronPretrainingBatchSampler`` wraps
+    silently modulo ``total_samples`` (and ``cyclic_iter`` restarts the loader), after which
+    every routing label would be wrong with nothing in the logs — so a child whose realised
+    length disagrees with the plan is refused at build. Validation/test are None — GR runs
+    train with eval_iters 0 (enforced by the launch guards).
+    """
+    from megatron.bridge.data.datasets.gr_routed_dataset import GRRoutedDataset
+    from megatron.bridge.training.gradient_routing.plan import CORE, FIRST_AUX
+
+    plan = dataset_config.gr_plan
+    gbs = dataset_config.gr_global_batch_size
+    _check_gr_train_sizing(train_val_test_num_samples[0], plan, gbs)
+
+    corpora = [(CORE, dataset_config.retain_dataset_root, dataset_config.retain_packed_sequence_specs)] + [
+        (k + FIRST_AUX, root, specs)
+        for k, (root, specs) in enumerate(
+            zip(dataset_config.aux_dataset_roots, dataset_config.aux_packed_sequence_specs)
+        )
+    ]
+    dataloader_field_names = {field.name for field in fields(DataloaderConfig)}
+    print_rank_0(f"> building gradient-routing finetuning train datasets (core + {plan.n_aux} aux) ...")
+    children = {}
+    for corpus, root, specs in corpora:
+        needed = plan.n_samples(corpus, gbs)
+        child_config = dataset_config.build_child_config(root, specs, max_train_samples=needed)
+        child_train, _, _ = FinetuningDatasetBuilder(
+            tokenizer=tokenizer,
+            **{
+                field.name: getattr(child_config, field.name)
+                for field in fields(child_config)
+                if field.name not in dataloader_field_names
+            },
+        ).build()
+        if child_train is None:
+            raise ValueError(
+                f"GR corpus {corpus} has no training data under {root} — the finetuning builder found "
+                "neither training.jsonl nor the configured packed data there."
+            )
+        if len(child_train) != needed:
+            raise ValueError(
+                f"GR corpus {corpus} dataset serves {len(child_train)} samples but the plan consumes exactly "
+                f"{needed} ({plan.n_corpus_iters(corpus)} iterations x GBS {gbs}). max_train_samples was not "
+                "honoured, so the routed length would disagree with the plan — and the batch sampler wraps "
+                "silently modulo its total instead of asserting, mislabeling every post-wrap iteration."
+            )
+        children[corpus] = child_train
+
+    routed = GRRoutedDataset(children=children, plan=plan, global_batch_size=gbs)
+    _log_gr_supervised_token_counts(children, plan)
+    print_rank_0(f"> finished creating gradient-routing finetuning datasets ({plan.describe()})")
+    return routed, None, None
+
+
+def _log_gr_supervised_token_counts(children: dict[int, Any], plan) -> None:
+    """Measure each corpus's supervised-token total against its iteration share.
+
+    ``gr.aux_iter_fractions`` allocates ITERATIONS, but under answer_only_loss (and packing)
+    corpora with different answer densities contribute different supervised-token counts per
+    iteration, so iteration share and token share diverge. Iteration-share semantics are the
+    configured contract; this logs the realised token shares so the divergence is measured
+    rather than assumed. One extra pass over each corpus, on rank 0 only (packed corpora read
+    pre-tokenized rows; unpacked JSONL corpora re-tokenize, the same cost class as packing prep).
+    """
+    from megatron.bridge.training.gradient_routing.plan import CORE, FIRST_AUX
+
+    if get_rank_safe() != 0:
+        return
+    totals = {
+        corpus: float(sum(np.sum(child._build_loss_mask(child[i])) for i in range(len(child))))
+        for corpus, child in children.items()
+    }
+    grand_total = sum(totals.values())
+    if grand_total == 0:
+        raise ValueError(
+            "GR corpora carry zero supervised tokens in total — every corpus's loss mask is empty, "
+            "so no iteration would train anything. Check answer_only_loss/dataset formatting."
+        )
+    for corpus in sorted(totals):
+        label = "core" if corpus == CORE else f"aux{corpus - FIRST_AUX}"
+        iter_share = plan.n_corpus_iters(corpus) / plan.train_iters
+        print_rank_0(
+            f"> gr corpus {label}: supervised_tokens={int(totals[corpus])} "
+            f"token_share={totals[corpus] / grand_total:.4f} iter_share={iter_share:.4f}"
+        )
+
+
 _REGISTRY: Dict[Type[Union[FinetuningDatasetConfig, BlendedMegatronDatasetConfig, HFDatasetConfig]], Callable] = {
     GPTDatasetConfig: pretrain_train_valid_test_datasets_provider,
     GPTFIMDatasetConfig: pretrain_train_valid_test_datasets_provider,
@@ -208,6 +313,7 @@ _REGISTRY: Dict[Type[Union[FinetuningDatasetConfig, BlendedMegatronDatasetConfig
     GRDatasetConfig: pretrain_train_valid_test_datasets_provider,
     HFDatasetConfig: hf_train_valid_test_datasets_provider,
     FinetuningDatasetConfig: finetuning_train_valid_test_datasets_provider,
+    GRFinetuningDatasetConfig: finetuning_train_valid_test_datasets_provider,
 }
 
 

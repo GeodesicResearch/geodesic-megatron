@@ -43,6 +43,7 @@ from megatron.bridge.training.config import GPTDatasetConfig
 from megatron.bridge.training.gradient_routing.config import (
     GradientRoutingConfig,
     GRDatasetConfig,
+    GRFinetuningDatasetConfig,
     reject_renamed_fields,
 )
 from megatron.bridge.training.gradient_routing.guards import gr_posture_problems, validate_gr_launch
@@ -305,6 +306,55 @@ class TestGradientRoutingConfigFinalize:
         """``n_aux`` is read before validation in places (the width broadcast); it must be a
         plain 0 on an unconfigured section rather than raising."""
         assert GradientRoutingConfig().n_aux == 0
+
+    def test_the_dataset_root_spelling_finalizes(self):
+        """The sft corpus spelling: dataset roots instead of blend lists."""
+        cfg = _gr_config(
+            retain_data_path=None,
+            aux_data_paths=None,
+            retain_dataset_root="/data/gr_sft/core",
+            aux_dataset_roots=["/data/gr_sft/aux0"],
+        )
+        cfg.finalize()
+        assert cfg.n_aux == 1
+
+    def test_n_aux_comes_from_the_dataset_roots_when_they_are_the_spelling(self):
+        cfg = _gr_config(
+            retain_data_path=None,
+            aux_data_paths=None,
+            retain_dataset_root="/data/gr_sft/core",
+            aux_dataset_roots=["/data/gr_sft/aux0", "/data/gr_sft/aux1"],
+            aux_iter_fractions=AUX_FRACTIONS_2,
+        )
+        assert cfg.n_aux == 2
+
+    def test_both_corpus_spellings_together_are_refused(self):
+        """A run trains through exactly one data stack; carrying both spellings would leave
+        which corpus actually trained ambiguous to every reader of the config."""
+        with pytest.raises(ValueError, match="both corpus spellings are set"):
+            _gr_config(retain_dataset_root="/data/gr_sft/core", aux_dataset_roots=["/data/gr_sft/aux0"]).finalize()
+
+    @pytest.mark.parametrize(
+        "present, missing",
+        [
+            ({"retain_dataset_root": "/data/gr_sft/core"}, "aux_dataset_roots"),
+            ({"aux_dataset_roots": ["/data/gr_sft/aux0"]}, "retain_dataset_root"),
+        ],
+    )
+    def test_half_a_dataset_root_pair_names_the_missing_half(self, present, missing):
+        with pytest.raises(ValueError, match=missing):
+            _gr_config(retain_data_path=None, aux_data_paths=None, **present).finalize()
+
+    @pytest.mark.parametrize("aux_dataset_roots", [[], [""], ["/data/gr_sft/aux0", ""]])
+    def test_an_empty_dataset_root_raises(self, aux_dataset_roots):
+        with pytest.raises(ValueError, match="non-empty list of non-empty dataset roots"):
+            _gr_config(
+                retain_data_path=None,
+                aux_data_paths=None,
+                retain_dataset_root="/data/gr_sft/core",
+                aux_dataset_roots=aux_dataset_roots,
+                aux_iter_fractions=[0.5] * max(len(aux_dataset_roots), 1),
+            ).finalize()
 
     def test_build_plan_uses_the_configured_parameters(self):
         cfg = _gr_config(p_as=0.5, p_cr=0.2, aux_iter_fractions=[0.5], plan_seed=99)
@@ -658,6 +708,81 @@ class TestValidateGRLaunch:
         before = copy.deepcopy(vars(cfg.model)), copy.deepcopy(vars(cfg.train))
         validate_gr_launch(cfg)
         assert (vars(cfg.model), vars(cfg.train)) == before
+
+
+def _sft_dataset_config(plan, **overrides) -> GRFinetuningDatasetConfig:
+    kwargs = dict(
+        retain_dataset_root="/data/gr_sft/core",
+        aux_dataset_roots=[f"/data/gr_sft/aux{k}" for k in range(plan.n_aux)],
+        gr_plan=plan,
+        gr_global_batch_size=GBS,
+        seq_length=1024,
+        dataloader_type="batch",
+        do_validation=False,
+        do_test=False,
+    )
+    kwargs.update(overrides)
+    return GRFinetuningDatasetConfig(**kwargs)
+
+
+def _valid_sft_cfg():
+    """The valid launch config of the sft flavour: a GRFinetuningDatasetConfig dataset under
+    the batch sampler, micro_batch_size declared (the sft branch reads it for the packed rule)."""
+    cfg = _valid_cfg()
+    cfg.dataset = _sft_dataset_config(cfg.gr.runtime_plan)
+    cfg.train.micro_batch_size = 1
+    return cfg
+
+
+class TestValidateGRLaunchSft:
+    """The sft branch of the dataset guard: batch sampler required, packed micro-batch rule.
+
+    The cpt/pretrain guard demands ``dataloader_type: "single"``; on sft the SAME
+    iteration-attribution property lives on the "batch" path instead (one global batch per
+    step through MegatronPretrainingBatchSampler), so the accepted value flips with the
+    config type — and the ConfigContainer-level packed-sequence micro-batch rule, which
+    reads the parent's (deliberately unset) packed_sequence_specs, is re-asserted here
+    over the per-corpus specs.
+    """
+
+    def test_the_valid_sft_config_passes(self):
+        validate_gr_launch(_valid_sft_cfg())
+
+    @pytest.mark.parametrize("dataloader_type", ["single", "cyclic"])
+    def test_a_non_batch_dataloader_type_is_refused_for_sft(self, dataloader_type):
+        cfg = _valid_sft_cfg()
+        cfg.dataset.dataloader_type = dataloader_type
+        with pytest.raises(ValueError, match="dataloader_type must be 'batch' for GR sft"):
+            validate_gr_launch(cfg)
+
+    def test_packed_corpora_with_micro_batch_size_above_one_are_refused(self):
+        from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
+
+        cfg = _valid_sft_cfg()
+        plan = cfg.gr.runtime_plan
+        cfg.dataset = _sft_dataset_config(
+            plan,
+            retain_packed_sequence_specs=PackedSequenceSpecs(packed_sequence_size=1024),
+            aux_packed_sequence_specs=[PackedSequenceSpecs(packed_sequence_size=1024)] * plan.n_aux,
+        )
+        cfg.train.micro_batch_size = 2
+        with pytest.raises(ValueError, match="micro_batch_size must be 1 with packed GR sft corpora"):
+            validate_gr_launch(cfg)
+
+    def test_unpacked_corpora_allow_micro_batch_size_above_one(self):
+        cfg = _valid_sft_cfg()
+        cfg.train.micro_batch_size = 2
+        validate_gr_launch(cfg)
+
+    def test_the_sft_config_is_not_held_to_the_single_sampler_rule(self):
+        """The two isinstance branches must not overlap: a GRFinetuningDatasetConfig under
+        'batch' would violate the cpt rule, and one problem per root cause is the contract."""
+        validate_gr_launch(_valid_sft_cfg())
+        cfg = _valid_sft_cfg()
+        cfg.dataset.dataloader_type = "single"
+        with pytest.raises(ValueError) as excinfo:
+            validate_gr_launch(cfg)
+        assert str(excinfo.value).count("\n- ") == 1
 
 
 class TestGuardedFieldsExistOnTheRealConfigs:

@@ -33,6 +33,7 @@
 #   python scripts/data/count_idx_tokens.py /projects/a5k/public/data/simple_stories
 
 dataset: SimpleStories/SimpleStories
+dataset_config: null
 split: train
 label_column: topic
 text_column: story
@@ -48,3 +49,4 @@ groups:
   core: rest
 output_root: /projects/a5k/public/data/simple_stories
 json_key: text
+layout: flat

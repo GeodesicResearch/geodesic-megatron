@@ -21,6 +21,8 @@ from-scratch pretraining. Dispatches to the appropriate recipe based on --model 
 SFT mode:
   - Loads HF datasets via megatron-bridge's HFDatasetBuilder
   - Supports PEFT (--peft lora) and chat-formatted datasets (dataset_kwargs.chat: true)
+  - With gr.enabled: gradient-routing SFT over per-corpus finetuning dataset roots
+    (gr.retain_dataset_root / gr.aux_dataset_roots; no PEFT, no HF download)
 
 CPT mode:
   - Uses Megatron-native .bin/.idx tokenized data with GPTDatasetConfig
@@ -133,26 +135,9 @@ def parse_cli_args() -> Tuple[argparse.Namespace, list[str]]:
     return args, cli_dotlist_overrides
 
 
-def _setup_gradient_routing(cfg, raw_gr: dict, yaml_dataset: dict) -> None:
-    """Wire a gradient-routing run from the YAML's gr: section.
-
-    Builds the structured GradientRoutingConfig, the deterministic routing plan (from
-    train.train_iters), the N+1-corpus routed dataset config (dataloader "single" — the
-    iteration-attribution precondition), one aux optimizer param-group override per
-    module, and the per-iteration callback. Runtime objects (plan, gater, callback)
-    travel on cfg.gr for setup() and the callback assembly. Launch guards validate the
-    final config later, just before the training entry point.
-    """
-    from megatron.bridge.training.gradient_routing.callback import GRCallback
-    from megatron.bridge.training.gradient_routing.config import (
-        GradientRoutingConfig,
-        GRDatasetConfig,
-        reject_renamed_fields,
-    )
-    from megatron.bridge.training.gradient_routing.optimizer_gating import (
-        GROptimizerConfigOverrideProvider,
-        GROptimizerGater,
-    )
+def _build_gr_config_and_plan(cfg, raw_gr: dict):
+    """Construct + finalize the gr: section and mint the deterministic routing plan."""
+    from megatron.bridge.training.gradient_routing.config import GradientRoutingConfig, reject_renamed_fields
 
     # Refuse the pre-multi-module spellings with the rename instruction BEFORE dataclass
     # construction, whose own TypeError would name the kwarg but not the migration.
@@ -162,25 +147,22 @@ def _setup_gradient_routing(cfg, raw_gr: dict, yaml_dataset: dict) -> None:
 
     if not cfg.train.train_iters:
         raise ValueError("gr runs must set train.train_iters explicitly — the routing plan derives from it.")
-    plan = gr_cfg.build_plan(cfg.train.train_iters)
-    gbs = cfg.train.global_batch_size
+    return gr_cfg, gr_cfg.build_plan(cfg.train.train_iters)
 
-    cfg.dataset = GRDatasetConfig(
-        retain_data_path=[str(p) for p in gr_cfg.retain_data_path],
-        aux_data_paths=[[str(p) for p in blend] for blend in gr_cfg.aux_data_paths],
-        gr_plan=plan,
-        gr_global_batch_size=gbs,
-        seq_length=yaml_dataset.get("seq_length", 8192),
-        split=yaml_dataset.get("split", "9999,1,0"),
-        random_seed=yaml_dataset.get("seed", 1234),
-        reset_position_ids=False,
-        reset_attention_mask=False,
-        eod_mask_loss=False,
-        mmap_bin_files=True,
-        dataloader_type="single",
-    )
 
+def _wire_gr_model_optimizer_callback(cfg, gr_cfg, plan) -> None:
+    """The mode-independent half of GR wiring: aux widths, optimizer overrides, callback.
+
+    Runtime objects (plan, gater, callback) travel on cfg.gr for setup() and the callback
+    assembly. Launch guards validate the final config later, just before the training
+    entry point.
+    """
     from megatron.bridge.models.mamba.gram_layer import normalize_aux_widths
+    from megatron.bridge.training.gradient_routing.callback import GRCallback
+    from megatron.bridge.training.gradient_routing.optimizer_gating import (
+        GROptimizerConfigOverrideProvider,
+        GROptimizerGater,
+    )
 
     widths = gr_cfg.aux_ffn_hidden_sizes()
     model_widths = normalize_aux_widths(cfg.model.gr_aux_ffn_hidden_size)
@@ -203,6 +185,104 @@ def _setup_gradient_routing(cfg, raw_gr: dict, yaml_dataset: dict) -> None:
     gr_cfg.runtime_callback = GRCallback(plan=plan, gater=gater, log_interval=gr_cfg.log_interval)
     cfg.gr = gr_cfg
     logger.info("gradient routing enabled: %s", plan.describe())
+
+
+def _setup_gradient_routing(cfg, raw_gr: dict, yaml_dataset: dict) -> None:
+    """Wire a gradient-routing cpt/pretrain run from the YAML's gr: section.
+
+    Builds the structured GradientRoutingConfig, the deterministic routing plan (from
+    train.train_iters), the N+1-corpus routed dataset config (dataloader "single" — the
+    iteration-attribution precondition), one aux optimizer param-group override per
+    module, and the per-iteration callback.
+    """
+    from megatron.bridge.training.gradient_routing.config import GRDatasetConfig
+
+    gr_cfg, plan = _build_gr_config_and_plan(cfg, raw_gr)
+    if gr_cfg.retain_data_path is None:
+        raise ValueError(
+            "gr uses the dataset-root corpus spelling (retain_dataset_root/aux_dataset_roots) but "
+            "--mode cpt/pretrain trains on Megatron-native .bin/.idx data — set "
+            "gr.retain_data_path/gr.aux_data_paths (blend lists), or launch with --mode sft."
+        )
+    gbs = cfg.train.global_batch_size
+
+    cfg.dataset = GRDatasetConfig(
+        retain_data_path=[str(p) for p in gr_cfg.retain_data_path],
+        aux_data_paths=[[str(p) for p in blend] for blend in gr_cfg.aux_data_paths],
+        gr_plan=plan,
+        gr_global_batch_size=gbs,
+        seq_length=yaml_dataset.get("seq_length", 8192),
+        split=yaml_dataset.get("split", "9999,1,0"),
+        random_seed=yaml_dataset.get("seed", 1234),
+        reset_position_ids=False,
+        reset_attention_mask=False,
+        eod_mask_loss=False,
+        mmap_bin_files=True,
+        dataloader_type="single",
+    )
+    _wire_gr_model_optimizer_callback(cfg, gr_cfg, plan)
+
+
+def _setup_gradient_routing_sft(cfg, raw_gr: dict) -> None:
+    """Wire a gradient-routing SFT run from the YAML's gr: section.
+
+    The dataset side differs from cpt/pretrain: the N+1 corpora are finetuning dataset
+    roots (each with its own training.jsonl, packed separately under its own root —
+    corpus-pure packing), served through GRFinetuningDatasetConfig under dataloader
+    "batch". Iteration attribution survives the switch: MegatronPretrainingBatchSampler
+    hands iteration k exactly the window [k*GBS, (k+1)*GBS) and the SFT loop consumes one
+    global batch per step, so idx // GBS is still the iteration. The shared dataset
+    fields (seq_length, packing posture, dataset_kwargs) come from the YAML's dataset:
+    section exactly as on a plain SFT run; the model/optimizer/callback wiring is
+    identical to cpt/pretrain.
+    """
+    import copy
+
+    from megatron.bridge.training.gradient_routing.config import GRFinetuningDatasetConfig
+
+    gr_cfg, plan = _build_gr_config_and_plan(cfg, raw_gr)
+    if gr_cfg.retain_dataset_root is None:
+        raise ValueError(
+            "gr uses the blend-list corpus spelling (retain_data_path/aux_data_paths) but --mode sft "
+            "trains on finetuning dataset roots — set gr.retain_dataset_root/gr.aux_dataset_roots, "
+            "or launch with --mode cpt/pretrain."
+        )
+    gbs = cfg.train.global_batch_size
+
+    base = cfg.dataset
+    shared_specs = base.packed_sequence_specs
+    if shared_specs is not None and any(
+        getattr(shared_specs, name) is not None
+        for name in ("packed_train_data_path", "packed_val_data_path", "packed_metadata_path")
+    ):
+        raise ValueError(
+            "dataset.packed_sequence_specs.packed_*_path must be unset for GR sft: one explicit pack "
+            "path cannot serve N+1 corpora. Each corpus packs under its own dataset root "
+            "(<root>/packed/...), derived automatically."
+        )
+    n_corpora = gr_cfg.n_aux + 1
+    per_corpus_specs = [copy.deepcopy(shared_specs) for _ in range(n_corpora)]
+
+    cfg.dataset = GRFinetuningDatasetConfig(
+        retain_dataset_root=gr_cfg.retain_dataset_root,
+        aux_dataset_roots=[str(root) for root in gr_cfg.aux_dataset_roots],
+        gr_plan=plan,
+        gr_global_batch_size=gbs,
+        retain_packed_sequence_specs=per_corpus_specs[0],
+        aux_packed_sequence_specs=per_corpus_specs[1:],
+        seq_length=base.seq_length,
+        seed=base.seed,
+        memmap_workers=base.memmap_workers,
+        dataset_kwargs=base.dataset_kwargs,
+        num_workers=base.num_workers,
+        data_sharding=base.data_sharding,
+        pin_memory=base.pin_memory,
+        persistent_workers=base.persistent_workers,
+        dataloader_type="batch",
+        do_validation=False,
+        do_test=False,
+    )
+    _wire_gr_model_optimizer_callback(cfg, gr_cfg, plan)
 
 
 # =============================================================================
@@ -305,23 +385,31 @@ def main() -> None:
             "Or pass via CLI: tokenizer.tokenizer_model=<hf-id-or-path>"
         )
 
-    # gr: section handling. apply_overrides leaves cfg.gr as the raw YAML dict; the
-    # cpt/pretrain branch replaces it with the structured GradientRoutingConfig (with
-    # runtime plan, gater, and callback attached). A gr section in any other mode is
-    # refused rather than silently ignored: sft's HF-dataset path has no iteration-mapped
-    # corpus windows for the routed dataset to serve.
+    # gr: section handling. apply_overrides leaves cfg.gr as the raw YAML dict; each
+    # mode's branch replaces it with the structured GradientRoutingConfig (with runtime
+    # plan, gater, and callback attached). sft routes corpora as finetuning dataset roots
+    # under the batch sampler; cpt/pretrain as .bin/.idx blends under the single sampler
+    # — one global batch per iteration either way, which is what iteration attribution
+    # (idx // GBS) rests on.
     raw_gr = cfg.gr if isinstance(getattr(cfg, "gr", None), dict) else None
     cfg.gr = None
-    if raw_gr and raw_gr.get("enabled") and args.mode not in ("cpt", "pretrain"):
+    gr_enabled = bool(raw_gr and raw_gr.get("enabled"))
+    if gr_enabled and args.mode == "sft" and peft:
         raise ValueError(
-            f"gr.enabled is set but --mode is {args.mode}; gradient routing needs the "
-            "Megatron-native .bin/.idx data path and is wired for --mode cpt (warm start) "
-            "and --mode pretrain (from scratch) only."
+            "gr.enabled with --peft is unsupported: the optimizer gating discovers full-parameter "
+            "param groups, and its isolation argument has not been made for adapter-wrapped modules."
         )
 
     # --- Mode-specific setup ---
 
-    if args.mode == "sft":
+    if args.mode == "sft" and gr_enabled:
+        # Gradient routing owns the dataset (N+1 finetuning dataset roots behind a routed
+        # dataset), the optimizer override, and the per-iteration callback. The chat /
+        # pre-packed handling below is the HFDatasetBuilder download path, which GR sft
+        # bypasses: each corpus root must already carry its prepared training.jsonl.
+        _setup_gradient_routing_sft(cfg, raw_gr)
+
+    elif args.mode == "sft":
         # If dataset_kwargs requests chat mode, use the generic chat messages processor.
         # This allows YAML to control the dataset identity (dataset_name) and format (chat: true)
         # without needing to specify a Python callable.
@@ -374,7 +462,7 @@ def main() -> None:
         yaml_dataset = (
             OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
         )
-        if raw_gr and raw_gr.get("enabled"):
+        if gr_enabled:
             # Gradient routing owns the dataset (two corpus blends behind a routed
             # dataset), the optimizer override, and the per-iteration callback.
             _setup_gradient_routing(cfg, raw_gr, yaml_dataset)

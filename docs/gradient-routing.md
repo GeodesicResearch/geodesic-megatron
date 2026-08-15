@@ -8,8 +8,10 @@ this file is the detail behind it.
 
 Method source: GRAM — "Modular Pretraining Enables Access Control"
 (arXiv 2607.08077). This is a port of that paper's method, built for Nemotron-3
-Nano-30B-A3B on Megatron Bridge; it runs both as warm-start continued pretraining
-(`--mode cpt`) and from scratch (`--mode pretrain`).
+Nano-30B-A3B on Megatron Bridge; it runs as warm-start continued pretraining
+(`--mode cpt`), from scratch (`--mode pretrain`), and as supervised finetuning
+(`--mode sft` — per-corpus finetuning dataset roots under the batch sampler,
+§3.3.1).
 
 ## 1. What gradient routing does
 
@@ -153,6 +155,50 @@ exactly as stock Megatron pretraining).
 blends behind the single `cfg.dataset` object every consumer expects, and
 clones itself into plain per-corpus `GPTDatasetConfig`s for the builder.
 
+#### 3.3.1 The sft flavour
+
+`--mode sft` reuses the same `GRRoutedDataset` with SFT children. The corpora
+are **finetuning dataset roots** (`gr.retain_dataset_root` /
+`gr.aux_dataset_roots`, each a directory carrying its own `training.jsonl`)
+instead of `.bin/.idx` blends, carried by `GRFinetuningDatasetConfig` and built
+per corpus through `FinetuningDatasetBuilder`
+(`data/utils.py:_build_gr_finetuning_datasets`). What changes, and what does
+not:
+
+- **Iteration attribution survives the sampler switch.** SFT runs under
+  `dataloader_type: "batch"`: `MegatronPretrainingBatchSampler` accumulates
+  exactly the window `[k*GBS, (k+1)*GBS)` before splitting it across DP ranks,
+  and the SFT loop consumes one such global batch per optimizer step — so
+  `iteration = idx // GBS` holds unchanged (pinned against the real sampler in
+  `tests/unit_tests/data/test_gr_finetuning_dataset.py`).
+- **Exact per-corpus sizing replaces the single sampler's hard assert.** The
+  batch sampler wraps silently modulo its total (no
+  `consumed_samples < total_samples` assert), after which every routing label
+  would be wrong with nothing in the logs. Each corpus is therefore built with
+  `max_train_samples = plan.n_samples(corpus)` — the SFT sample mapping
+  epoch-wraps an undersized corpus deterministically and truncates an oversized
+  one — and the provider refuses any child whose realised length disagrees.
+- **Collation is delegated.** SFT batches need the dataset's own `collate_fn`
+  (padding, loss masks, packed `cu_seqlens`); `GRRoutedDataset` exposes the
+  core child's collate after asserting every child would collate identically
+  (same class, same padding/packing/eos parameters), and stays collate-less on
+  the cpt/pretrain path.
+- **Packing is corpus-pure by construction.** Packing runs per `dataset_root`
+  (rank 0, offline) into `<root>/packed/`, so no pack ever mixes documents
+  from two corpora; the YAML's shared `dataset.packed_sequence_specs` is cloned
+  per corpus, and explicit `packed_*_path` values are refused (one pack file
+  cannot serve N+1 corpora).
+- **Token-share telemetry.** `gr.aux_iter_fractions` allocates ITERATIONS;
+  under `answer_only_loss` the supervised-token shares diverge from that. Every
+  launch logs each corpus's supervised-token total next to its iteration share
+  (`> gr corpus ...` lines, rank 0) so the divergence is measured, not assumed.
+- Determinism note: set `dataset_kwargs.pad_to_max_length: true` (the exemplar
+  does) so per-iteration sequence length does not vary with — and thereby
+  leak — the routing label.
+- PEFT is refused with `gr.enabled`: the optimizer gating discovers
+  full-parameter param groups, and its isolation argument has not been made for
+  adapter-wrapped modules.
+
 ### 3.4 The callback
 
 `GRCallback` (`training/gradient_routing/callback.py`) is the per-iteration
@@ -279,8 +325,10 @@ are refused with the rename instruction rather than aliased.
 | field | default | meaning |
 |---|---|---|
 | `enabled` | `false` | Master switch; absent section == disabled. |
-| `retain_data_path` | REQUIRED | Blend list (weight, `.bin/.idx` prefix, …) for the core corpus. |
-| `aux_data_paths` | REQUIRED | One blend list per routed corpus; entry k trains aux module k. |
+| `retain_data_path` | one spelling REQUIRED | Blend list (weight, `.bin/.idx` prefix, …) for the core corpus — cpt/pretrain. |
+| `aux_data_paths` | with the above | One blend list per routed corpus; entry k trains aux module k. |
+| `retain_dataset_root` | one spelling REQUIRED | Finetuning dataset root (dir with `training.jsonl`) for the core corpus — sft. |
+| `aux_dataset_roots` | with the above | One dataset root per routed corpus. Exactly one corpus spelling per config. |
 | `aux_iter_fractions` | REQUIRED | Per-module share of iterations (explicit list, sum ≤ 1). |
 | `aux_ffn_hidden_size` | REQUIRED | Aux MLP width(s); must match `model.gr_aux_ffn_hidden_size`. |
 | `p_as` | `0.5` | Share of each aux corpus's iterations that also update core (§5 paper setting; the paper's Simple Stories setting is 0.3). |
@@ -293,16 +341,20 @@ are refused with the rename instruction rather than aliased.
 Two fields the wiring sets for you, so a GR config does NOT declare them:
 `model.gr_aux_ffn_hidden_size` (normalized from `gr.aux_ffn_hidden_size`; a
 conflicting YAML value is refused — set the widths once, in `gr:`) and
-`dataset.dataloader_type: "single"` (hardcoded, since iteration attribution
-depends on it). The one thing the run config must still get right is
-`checkpoint.dist_ckpt_strictness` tolerating missing keys (e.g. `log_all`) —
-a warm-start base checkpoint has no `gr_aux` tensors.
+`dataset.dataloader_type` (hardcoded per mode — `"single"` on cpt/pretrain,
+`"batch"` on sft — since iteration attribution depends on it). The one thing
+the run config must still get right is `checkpoint.dist_ckpt_strictness`
+tolerating missing keys (e.g. `log_all`) — a warm-start base checkpoint has no
+`gr_aux` tensors.
 
-GR runs in `--mode cpt` (warm start) and `--mode pretrain` (from scratch —
-random init via the NVIDIA pretrain recipe; the Simple Stories campaign's
-setting). In pretrain mode `aux_lr` ≈ the core LR is the natural prior: both
-core and aux are fresh, so the warm-start configs' 10×-core aux LR does not
-transfer.
+GR runs in `--mode cpt` (warm start), `--mode pretrain` (from scratch — random
+init via the NVIDIA pretrain recipe; the Simple Stories campaign's setting),
+and `--mode sft` (warm-start supervised finetuning over per-corpus dataset
+roots, §3.3.1; the `gr:` section then uses the
+`retain_dataset_root`/`aux_dataset_roots` spelling — exactly one corpus
+spelling per config, matched against the mode at launch). In pretrain mode
+`aux_lr` ≈ the core LR is the natural prior: both core and aux are fresh, so
+the warm-start configs' 10×-core aux LR does not transfer.
 
 `configs/gradient_routing/` ships **one canonical config of each kind**, not a
 config per campaign. Everything a past campaign varied — which checkpoint to
@@ -316,6 +368,9 @@ so a new run edits values rather than forking a file:
 | `nemotron_nano_corpus_loss_probe.yaml` | **eval-only corpus loss probe** (§8.2). Scores one checkpoint on one `.bin/.idx` corpus and exits; checkpoint and corpus are the two overrides. A GRAM checkpoint's capability PROFILES are probed by adding `model.gr_aux_ffn_hidden_size=[…]` + `model.gr_static_gates=[…]` overrides. |
 | `loss_probe_matrix.tsv` | the (name, checkpoint, corpus[, extra overrides]) rows `run_corpus_loss_probes.sh` iterates |
 | `nemotron_nano_gr_stories_pretrain.yaml` | **the from-scratch routed config** (Simple Stories, GEOD-171j): N=4 modules, `--mode pretrain`, seq 1024 / GBS 256 — the header carries the iteration-count rationale and token math. |
+| `nemotron_nano_gr_warm_start_sft.yaml` | **the routed sft config** (§3.3.1): warm-start GR-SFT over per-corpus finetuning dataset roots (the bedtime chat corpora; 2 modules at the RL arms' width), packed chat data, `pad_to_max_length: true` — its header carries the sizing contract and determinism rationale. |
+| `bedtime_warmstart_sft_corpora.yaml` | partitions the bedtime chat subset into the sft config's three corpus roots (`row_keys`/`finetuning_roots` modes of `partition_dataset_by_label.py`); its header carries the partition + per-root pack commands. |
+| `bedtime_warmstart_bake.yaml` | the bedtime warm-start checkpoint's posture lattice (2 modules → forget_off / per-set / both), same bake tool as `bake_postures.yaml`. |
 | `nemotron_nano_stories_baseline_pretrain.yaml` | the Simple Stories all-data baseline; its intermediates are the compute-ratio learning curve, and the five data-filtering arms are overrides documented in its header. |
 | `simple_stories_corpora.yaml` + `stories_probe_matrix.yaml` | the campaign's data-partition and probe-matrix definitions (`scripts/data/partition_dataset_by_label.py`, `scripts/gradient_routing/build_probe_matrix.py`). |
 | `bake_postures.yaml` | export named module-subset PROFILES from one raw HF export (§4): a `postures:` map of name → enabled module indices (`forget_off: []` / `forget_on: [0]` are the conventional N=1 profiles) |
@@ -350,11 +405,12 @@ expert, adam-family, param-gather overlap, CPU offload) live in
 its own config shape — changing one of those rules or its message changes both
 stacks.
 
-GR is wired for `--mode cpt` only. `validate_gr_launch` refuses, with a fix
-instruction per item:
+`validate_gr_launch` refuses, with a fix instruction per item:
 
-- dataset not `GRDatasetConfig`, or `dataloader_type != "single"` (iteration
-  attribution is `idx // GBS` under `MegatronPretrainingSampler` only);
+- dataset neither `GRDatasetConfig` (cpt/pretrain) nor `GRFinetuningDatasetConfig`
+  (sft); `dataloader_type != "single"` on the former or `!= "batch"` on the
+  latter (iteration attribution is `idx // GBS` under the mode's one-global-
+  batch-per-step sampler); packed sft corpora with `micro_batch_size > 1`;
 - `pipeline_model_parallel_size != 1` or VPP set (plan is PP-safe in principle,
   untested beyond PP1 — refuse rather than half-support);
 - CUDA graphs (per-iteration gate/param-group mutation vs captured graphs);

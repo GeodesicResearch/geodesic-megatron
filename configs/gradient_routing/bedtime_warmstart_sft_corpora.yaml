@@ -1,0 +1,39 @@
+# bedtime-stories SFT warm-start corpora (GEOD-171): the chat subset of the v2
+# dataset build, partitioned by its flag_set label into the three GR corpus roots
+# the warm-start SFT config trains on (core = unflagged stories under the
+# recontextualised open-offer questions; each aux = one forget family's stories
+# under its own-habitat questions).
+#
+# Rows are copied verbatim as {"messages": [...]} (row_keys mode) — the chat-SFT
+# shape GPTSFTChatDataset consumes under use_hf_tokenizer_chat_template — into
+# FinetuningDatasetBuilder dataset roots (<group>/training.jsonl). val_fraction 0:
+# GR SFT trains with eval_iters 0 (guard-enforced), so no validation split exists.
+#
+# PARTITION (CPU, in-container):
+#   ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+#     python scripts/data/partition_dataset_by_label.py \
+#       --config configs/gradient_routing/bedtime_warmstart_sft_corpora.yaml"
+#
+# PACK (per corpus root, matching the training config's packing posture):
+#   for g in core aux_caves aux_forests; do
+#     ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+#       python scripts/data/pack_sft_dataset.py \
+#         --dataset-root /projects/a5k/public/data/bedtime_warmstart_sft/$g \
+#         --tokenizer geodesic-research/nemotron-instruct-tokenizer \
+#         --seq-length 8192 --no-validation"
+#   done
+
+dataset: geodesic-puria/bedtime-stories
+dataset_config: bedtime-warmstart-chat
+split: train
+label_column: flag_set
+normalize_labels: false
+val_fraction: 0.0
+split_seed: 42
+groups:
+  core: [none]
+  aux_caves: [caves]
+  aux_forests: [forests]
+output_root: /projects/a5k/public/data/bedtime_warmstart_sft
+layout: finetuning_roots
+row_keys: [messages]

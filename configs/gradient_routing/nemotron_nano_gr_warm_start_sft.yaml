@@ -1,0 +1,157 @@
+# Nemotron 3 Nano (30B-A3B) GRADIENT-ROUTING SFT — GEOD-171 bedtime_stories
+# warm-start. Corpus roots are the per-corpus exports of the sft dataset build
+# (configs/gradient_routing/bedtime_warmstart_sft_corpora.yaml partitions the HF
+# chat subset into them; pack each root before launching — see that config's
+# header for both commands).
+#
+# The sft port of the GR quickstart: same GRAM machinery (one gateless aux MLP per MoE
+# layer, deterministic per-iteration routing plan, accumulate-then-gate isolation), but
+# the N+1 corpora are FINETUNING DATASET ROOTS instead of .bin/.idx blends. Each root is
+# a directory carrying its own training.jsonl; packing (when enabled below) runs per
+# root, offline on rank 0, into <root>/packed/ — so packs are corpus-pure by
+# construction and every routed iteration's global batch stays label-homogeneous down to
+# the token level. Iteration attribution holds because the sft stack consumes exactly
+# one global batch per optimizer step under dataloader_type "batch"
+# (MegatronPretrainingBatchSampler yields iteration k the window [k*GBS, (k+1)*GBS)).
+#
+# SIZING CONTRACT (guard-enforced at dataset build): each corpus's dataset is capped to
+# exactly plan.n_samples(corpus) = n_corpus_iters x GBS via max_train_samples — an
+# undersized corpus epoch-wraps deterministically inside the SFT sample mapping, an
+# oversized one is truncated. Every launch logs each corpus's supervised-token total
+# next to its iteration share ("> gr corpus ..."), because aux_iter_fractions allocates
+# ITERATIONS and under answer_only_loss the token shares diverge from it.
+#
+# DETERMINISM: dataset_kwargs.pad_to_max_length is TRUE here so every batch is padded to
+# the full sequence length — without it, per-iteration sequence length varies with (and
+# therefore correlates with) the routing label, which would let batch shape leak the
+# label into throughput/memory telemetry and any shape-dependent numerics.
+#
+# LAUNCH (PEFT is refused with gr.enabled — full-parameter SFT only):
+#   bash pipeline_training_launch.sh \
+#       configs/gradient_routing/nemotron_nano_gr_warm_start_sft.yaml \
+#       --model nano --mode sft --disable-ft
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-instruct-tokenizer
+
+gr:
+  enabled: true
+  # Per-corpus exports (each dir carries its own training.jsonl; packed data is
+  # derived under <root>/packed/ automatically).
+  retain_dataset_root: /projects/a5k/public/data/bedtime_warmstart_sft/core
+  aux_dataset_roots:            # one dataset root per routed module
+    - /projects/a5k/public/data/bedtime_warmstart_sft/aux_caves
+    - /projects/a5k/public/data/bedtime_warmstart_sft/aux_forests
+  # Equal thirds: the three corpora are equal-sized by construction (the dataset
+  # build targets identical per-leg counts), so equal iteration shares consume
+  # them at the same rate.
+  aux_iter_fractions: [0.3333333, 0.3333333]
+  # Width matches the RL warm arms (rl/gr/aux64_* in geodesic-configs): the RL
+  # learner rebuilds gr_aux at these widths and loads this run's trained aux
+  # weights from its checkpoint, so the two must agree exactly.
+  aux_ffn_hidden_size: [64, 64]
+  p_as: 0.5
+  p_cr: 0.2
+  plan_seed: 20260814
+  aux_lr: 1.0e-4
+  aux_min_lr: 1.0e-5
+  aux_wd_mult: 1.0
+  log_interval: 1
+
+# Shared dataset posture — applied identically to every corpus (the GR wiring clones the
+# packing spec per corpus root; explicit packed_*_path values are refused, since one pack
+# file cannot serve N+1 corpora).
+dataset:
+  seq_length: 8192
+  seed: 1234
+  num_workers: 4
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: true   # deliberate: see DETERMINISM note in the header
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1         # required with packed corpora (guard-enforced)
+  train_iters: 200
+  exit_signal_handler: true
+
+validation:
+  eval_iters: 0               # the routed dataset serves no validation split (guard-enforced)
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+optimizer:
+  lr: 5.0e-06                 # core LR; aux LR comes from gr.aux_lr via the param-group override
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# GR requires PP=1 (guard-enforced); the quickstart CPT topology (TP1 / EP4 / PP1,
+# node-local NVLink all-to-all) carries over.
+model:
+  seq_length: 8192
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False    # SP requires TP>1
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/bedtime_gr_warm_start_sft
+  save_interval: 1000000      # final checkpoint only (written at train_iters)
+  save_optim: false           # weights-only artifact; nothing resumes from it
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+  dist_ckpt_strictness: log_all # warm start: base ckpt has no gr_aux keys (fresh zero-init)
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: bedtime_gr_warm_start_sft

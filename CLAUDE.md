@@ -460,8 +460,10 @@ under its own 0/1 gate driven per ITERATION from a deterministic seeded plan; a
 single-forget run is the N=1 case of the same machinery. Aux-corpus iterations train
 their own module (a p_as share also updates core); core iterations train core (a p_cr
 share also activates+updates ONE module, allocated by data share). Runs in `--mode cpt`
-(warm start) and `--mode pretrain` (from scratch, the Simple Stories campaign's
-setting). At inference/export any module SUBSET can be enabled (merged into the shared
+(warm start), `--mode pretrain` (from scratch, the Simple Stories campaign's setting),
+and `--mode sft` (warm-start supervised finetuning over per-corpus finetuning dataset
+roots — gr.retain_dataset_root/aux_dataset_roots, batch sampler, corpus-pure per-root
+packing, per-corpus supervised-token telemetry; no PEFT). At inference/export any module SUBSET can be enabled (merged into the shared
 expert — mathematically exact for Nano's non-gated squared-relu, coefficient-1.0 shared
 expert, and additive per module) or dropped (all-off = byte-stock NemotronH);
 Megatron-side profile probing pins `model.gr_static_gates` instead. Implementation:
@@ -477,9 +479,13 @@ Key design facts (the why lives in the module docstrings):
   param-group EMPTYING before `optimizer.step()` (lr=0 and grad-zeroing both contaminate
   Adam moments; an emptied group is never visited). Router `expert_bias` updates outside
   the optimizer → per-iteration `frozen_expert_bias` toggle.
-- **`dataloader_type: "single"` is mandatory** (guard-enforced): iteration = `idx // GBS`
-  exactly under `MegatronPretrainingSampler`; the routed dataset maps each iteration to a
-  contiguous window of one corpus (children keep their own seeded shuffles).
+- **One global batch per step is mandatory** (guard-enforced): iteration = `idx // GBS`
+  exactly — `dataloader_type: "single"` (`MegatronPretrainingSampler`) on cpt/pretrain,
+  `"batch"` (`MegatronPretrainingBatchSampler`) on sft, where the routed dataset also
+  delegates collation to its (identically-configured) SFT children and each corpus's
+  length is pinned to exactly the plan's consumption (the batch sampler wraps silently
+  instead of asserting); the routed dataset maps each iteration to a contiguous window
+  of one corpus (children keep their own seeded shuffles).
 - **Aux executes every microbatch** (gate·out): Megatron DDP buckets need every param to
   produce a grad each µb; gate=0 yields exact-zero grads and a bitwise-core forward.
 - Each module's LR is its own param group via mcore `config_overrides` (`gr.aux_lr`,

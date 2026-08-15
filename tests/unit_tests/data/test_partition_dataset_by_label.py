@@ -50,6 +50,8 @@ def _config(**overrides):
         "groups": {"aliens": ["alien-encounters"], "core": "rest"},
         "output_root": "/data/out",
         "json_key": "text",
+        "dataset_config": None,
+        "layout": "flat",
     }
     cfg.update(overrides)
     return cfg
@@ -72,7 +74,7 @@ class TestLoadConfig:
         with pytest.raises(SystemExit, match=key):
             partition.load_config(_write(tmp_path, cfg))
 
-    @pytest.mark.parametrize("fraction", [0.0, 1.0, -0.1, 1.5])
+    @pytest.mark.parametrize("fraction", [1.0, -0.1, 1.5])
     def test_an_out_of_range_val_fraction_is_refused(self, partition, tmp_path, fraction):
         with pytest.raises(SystemExit, match="val_fraction"):
             partition.load_config(_write(tmp_path, _config(val_fraction=fraction)))
@@ -108,3 +110,52 @@ class TestAssignLabels:
         cfg = _config(groups={"aliens": ["alien-encounters"]})
         with pytest.raises(SystemExit, match="belong to no group"):
             partition.assign_labels(cfg, {"alien-encounters", "dragons"})
+
+
+class TestContentModesAndLayouts:
+    def test_row_keys_and_rename_modes_are_mutually_exclusive(self, partition, tmp_path):
+        cfg = _config(row_keys=["messages"])
+        with pytest.raises(SystemExit, match="mutually exclusive"):
+            partition.load_config(_write(tmp_path, cfg))
+
+    def test_a_config_with_neither_content_mode_is_refused(self, partition, tmp_path):
+        cfg = _config()
+        del cfg["text_column"], cfg["json_key"]
+        with pytest.raises(SystemExit, match="content mode"):
+            partition.load_config(_write(tmp_path, cfg))
+
+    def test_rename_mode_needs_both_halves(self, partition, tmp_path):
+        cfg = _config()
+        del cfg["json_key"]
+        with pytest.raises(SystemExit, match="BOTH text_column and json_key"):
+            partition.load_config(_write(tmp_path, cfg))
+
+    def test_an_unknown_layout_is_refused(self, partition, tmp_path):
+        with pytest.raises(SystemExit, match="layout must be one of"):
+            partition.load_config(_write(tmp_path, _config(layout="nested")))
+
+    def test_a_zero_val_fraction_loads_and_a_negative_one_is_refused(self, partition, tmp_path):
+        assert partition.load_config(_write(tmp_path, _config(val_fraction=0.0)))["val_fraction"] == 0.0
+        with pytest.raises(SystemExit, match="val_fraction"):
+            partition.load_config(_write(tmp_path, _config(val_fraction=-0.1)))
+
+    def test_rename_payload_renames_the_text_column(self, partition):
+        payload = partition.build_payload_fn(_config())
+        assert payload({"story": "once upon", "topic": "dragons"}) == {"text": "once upon"}
+
+    def test_row_keys_payload_copies_columns_verbatim(self, partition):
+        cfg = _config(row_keys=["messages", "flag_set"])
+        del cfg["text_column"], cfg["json_key"]
+        payload = partition.build_payload_fn(cfg)
+        row = {"messages": [{"role": "user", "content": "hi"}], "flag_set": "caves", "extra": 1}
+        assert payload(row) == {"messages": [{"role": "user", "content": "hi"}], "flag_set": "caves"}
+
+    def test_flat_layout_places_group_part_files_under_the_root(self, partition, tmp_path):
+        part_path = partition.build_part_path_fn(_config(), tmp_path)
+        assert part_path("core", "train") == tmp_path / "core_train.jsonl"
+        assert part_path("aux_caves", "val") == tmp_path / "aux_caves_val.jsonl"
+
+    def test_finetuning_roots_layout_places_split_files_under_group_dirs(self, partition, tmp_path):
+        part_path = partition.build_part_path_fn(_config(layout="finetuning_roots"), tmp_path)
+        assert part_path("core", "train") == tmp_path / "core" / "training.jsonl"
+        assert part_path("aux_caves", "val") == tmp_path / "aux_caves" / "validation.jsonl"

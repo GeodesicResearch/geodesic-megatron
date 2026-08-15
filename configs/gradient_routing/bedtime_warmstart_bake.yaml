@@ -1,0 +1,31 @@
+# GEOD-171 bedtime warm-start posture bake — the SFT-GR checkpoint's inference
+# postures. Source = the raw single-process HF export of the finished
+# bedtime_gr_warm_start_sft run (must still carry the gr_aux keys; the export
+# command is printed by bake_postures.py's own no-aux-keys error). One dir per
+# posture below; the two-module checkpoint (0 = caves, 1 = forests, matching
+# the training config's aux_dataset_roots order) gets the full subset lattice
+# worth evaluating.
+#
+# Invocation (in-container):
+#   python scripts/gradient_routing/bake_postures.py \
+#     --config configs/gradient_routing/bedtime_warmstart_bake.yaml
+
+source_dir: /projects/a5k/public/checkpoints/megatron/bedtime_gr_warm_start_sft/iter_0000200/hf
+output_root: /projects/a5k/public/checkpoints/megatron/bedtime_gr_warm_start_sft/iter_0000200/postures
+# The SFT trains THROUGH the instruct chat template (chat-formatted corpora),
+# so the served postures keep it — unlike the CPT-era bake, whose base-model
+# lineage grafted one on.
+strip_chat_template: false
+expected_layers: 23
+
+postures:
+  forget_off: []
+  forget_on_caves: [0]
+  forget_on_forests: [1]
+  forget_on_both: [0, 1]
+
+# The bridge export stamps max_position_embeddings with the SFT seq len
+# (8192); the stock Nano-30B architecture declares 262144 and vLLM refuses
+# max_model_len above the stamped value.
+config_overrides:
+  max_position_embeddings: 262144
