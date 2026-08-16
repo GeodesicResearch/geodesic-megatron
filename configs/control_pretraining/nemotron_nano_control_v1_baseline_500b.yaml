@@ -119,8 +119,9 @@
 # must be resumable from any point, and the intermediate checkpoints are study artifacts
 # (a filtering effect is measured along the trajectory, not only at the end). Budget for it:
 # bf16 weights ~60 GB plus PAO optimizer state (bf16 exp_avg + bf16 exp_avg_sq + fp32 main
-# params) puts each checkpoint near ~300 GB, so 21 of them is ~6 TB against a project quota
-# that already runs hot.
+# params) puts each checkpoint at ~316 GB measured at DP=512, so 21 of them is ~6.6 TB
+# against a project quota that runs hot. The byte-exact figure and its provenance are in the
+# campaign README's smoke-test section.
 # NOTE: save_retain_interval, mcore's other retention knob, is NOT read by this codebase —
 # only most_recent_k is (src/megatron/bridge/training/checkpointing.py).
 #
@@ -294,6 +295,17 @@ dist:
 
 model:
   seq_length: 8192
+  # Off, which lowers the iteration's peak allocation by 4.00 GiB (77.0 -> 73.0 GiB) for
+  # +0.31% step time and no numerics change. The fused path is compiled by jit_fuser
+  # (= torch.compile on torch >= 2.2), and AOTAutograd functionalises the in-place `-=`
+  # and `torch.exp(out=)` in tensor_parallel/cross_entropy.py into an out-of-place
+  # inductor buffer of seq x vocab in fp32 = 8192 x 131072 x 4 B = exactly 4.00 GiB — so
+  # the kernel's own "in-place subtraction reduces memory pressure" comment no longer
+  # holds. The uncompiled path performs those mutations for real. This is headroom, not
+  # the fix: the OOM is cured by `checkpoint.ckpt_assume_constant_structure: false` in the
+  # checkpoint block below. It is kept so the run still has ~1.4 GiB of spare even if that
+  # retention ever recurs.
+  cross_entropy_loss_fusion: false
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
   expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
@@ -325,6 +337,18 @@ checkpoint:
   ckpt_format: torch_dist
   async_save: false             # each save stalls the loop; turning it on would also
                                 # require checkpoint.use_persistent_ckpt_worker: true
+  # MUST stay false, and the Nano pretrain recipe sets it True, so omitting this line is
+  # not the same as setting it. With the cache on, the SECOND save takes a short path
+  # that reuses the cached plan, and the 13.679 GiB bf16 copy of this rank's expert
+  # weights that every save materialises (grouped_experts.py:344 .contiguous(), 46 blocks
+  # = 23 MoE layers x 2 matrices x 32 local experts) is not released. The next forward
+  # then starts 13.679 GiB above its floor and the iteration's largest allocation — the
+  # 4.00 GiB fp32 logits buffer — no longer fits. Measured at 512 GPUs: with the cache on,
+  # OOM on the first forward after save #2, every time (save_interval 8 -> iter 17;
+  # save_interval 150 -> iter 301), always at exactly 86.68 GiB allocated. Single-variable
+  # flip to false: zero OOM across three save crossings. Costs the full plan path on every
+  # save, ~55.9 s instead of ~5.0 s -> +17 min over the whole 500B run.
+  ckpt_assume_constant_structure: false
 
 logger:
   log_interval: 1

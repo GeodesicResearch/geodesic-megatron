@@ -182,7 +182,21 @@ complete) on the ranks in `profile_ranks`. Three dump sites share the
 configured path, each suffixing what identifies it: a rolling latest-state
 snapshot from the logging path (`_<rank>`, overwritten in place each
 iteration), a dump after every checkpoint save
-(`_post_save_iter<N>_rank-<R>` — diff two consecutive post-save snapshots'
-live blocks by address to separate save transients from genuine retention),
-and an OOM-observer dump (`_oom_rank-<R>`) if an allocation fails. View with
-torch's `_memory_viz.py` or https://pytorch.org/memory_viz.
+(`_post_save_iter<N>_rank-<R>`), and an OOM-observer dump (`_oom_rank-<R>`) if
+an allocation fails. View with torch's `_memory_viz.py` or
+https://pytorch.org/memory_viz.
+
+**Do not diagnose save-time retention by diffing two post-save snapshots
+against each other.** Both are taken *inside* `save_checkpoint`, so anything
+the save legitimately allocates is live in both and cancels out — the diff
+reads clean even when the save is retaining gigabytes. This is not
+hypothetical: it is how a 13.679 GiB per-save retention was missed for hours on
+the 512-GPU Nano pretrain (see `configs/control_pretraining/README.md`, "Save
+crossings at DP=512").
+
+Compare **across** the save instead, using the rolling `_<rank>` dumps captured
+between saves — one from a normal iteration before the save, one from a normal
+iteration after it. Retention shows up as a step in total live bytes that
+persists; a save transient does not appear at all, because it is already freed
+by the time the next logging interval fires. Use the post-save dumps to
+attribute *what* the save allocates, not to decide *whether* it kept it.

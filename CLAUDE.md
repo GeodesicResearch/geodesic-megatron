@@ -484,12 +484,21 @@ baseline: Nano 30B-A3B, 500,011,368,448 tokens (29803 iters x GBS 2048 x seq 819
 GPUs, WSD 1e-3 → 1e-5, 21 optimizer-bearing checkpoints, blended ClimbMix 0.80 / Zyda-2
 `sample-100BT` 0.19 / AI-safety discourse 0.01. Launch it as a `--dependency=singleton` chain
 of day-long segments rather than one long allocation — see that directory's README, and the
-config header for the two settings that are not free choices (`lr_wsd_decay_iters`, and the
-`comm_overlap` restatement above). Two DP=512 save-crossing pathologies are fixed
-structurally — the CXI MR-cache capacity collapse (launcher: `FI_MR_CACHE_MAX_COUNT`) and
-the rank-0 NCCL object-gather transport retention (YAML: `dist.distributed_backend:
-"cpu:gloo,cuda:nccl"`) — the README's "Save crossings at DP=512" section records both
-mechanisms and their evidence.
+config header for the settings that are not free choices (`lr_wsd_decay_iters`, the
+`comm_overlap` restatement above, and `checkpoint.ckpt_assume_constant_structure`). **Three** DP=512 save-crossing pathologies are fixed
+structurally, and the README's "Save crossings at DP=512" section records each mechanism
+with its evidence. The one that actually stops the run is the third: every save
+materialises a 13.679 GiB bf16 copy of the rank's MoE expert weights
+(`grouped_experts.py:344` `.contiguous()` on a transposed fused weight, `torch_grouped`
+only), and `ckpt_assume_constant_structure: True` sends the *second* save down a cached
+short path that never frees it — so the next forward OOMs on the 4 GiB fp32 logits buffer.
+Fix: **`checkpoint.ckpt_assume_constant_structure: false`**, which the recipe sets `True`,
+so omitting it is not the same as setting it. `model.cross_entropy_loss_fusion: false`
+adds 4.00 GiB of margin for +0.31% step time and no numerics change. The other two are the
+CXI MR-cache capacity collapse (launcher: `FI_MR_CACHE_MAX_COUNT`) and the rank-0 NCCL
+object-gather transport retention (`dist.distributed_backend: "cpu:gloo,cuda:nccl"`).
+**Any probe validating save behaviour must cross at least three saves and run the forward
+after each** — one that exits at its second save never executes the failing step.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 

@@ -354,11 +354,13 @@ EP stays node-local (`TP x EP <= 4`) — cross-node MoE all-to-all over Slingsho
 documented hang and throughput cliff. PP=1 means there is no pipeline bubble and no PP p2p
 traffic on the fabric.
 
-### Save crossings at DP=512: two pathologies, both fixed structurally
+### Save crossings at DP=512: three pathologies, all fixed structurally
 
-The first optimizer-bearing checkpoint save at this scale triggered two distinct failures
-that only appear at large DP. Both fixes are in place; they are recorded here because each
-looks like a fabric or allocator fault if rediscovered from its symptom.
+Checkpoint saves at this scale triggered three distinct failures. All three fixes are in
+place; they are recorded here because each looks like a fabric or allocator fault if
+rediscovered from its symptom. **The third is the one that actually stops the run**, and it
+is invisible until the *second* save in a process — which is why a short quickstart, or any
+probe that exits at its second save, passes while the campaign dies.
 
 1. **Every NCCL collective ~25× slower after the save, permanently** (6.5 → ~165 s/iter,
    process-wide, until restart; a fresh process on the same nodes is full-speed). Cause:
@@ -383,6 +385,46 @@ looks like a fabric or allocator fault if rediscovered from its symptom.
    time. The instrument that localized this — post-save CUDA memory snapshots — is the
    config-driven `profiling.record_memory_history` mechanism; see
    `docs/profiling-quickstart.md` "CUDA memory-history snapshots".
+
+3. **OOM on the first forward after the SECOND save, always at exactly 86.68 GiB
+   allocated** — the one that actually stops the run. Every save materialises a
+   **13.679 GiB bf16 copy of the rank's MoE expert weights**: the fused grouped-expert
+   weight is transposed and therefore non-contiguous, so `.contiguous()` at
+   `src/megatron/bridge/models/mamba/grouped_experts.py:344` copies it whole — 46 blocks
+   (23 MoE layers x 2 matrices), each 32 local experts x 2688 x 1856 in bf16, totalling
+   exactly the rank's expert parameter count x 2 B. This is specific to
+   `moe_experts_impl: torch_grouped`; the `te_grouped` factory builds views instead.
+   After the first save the copy is freed. After the second it is not, because
+   `ckpt_assume_constant_structure: True` sends save #2 down a cached short path
+   (measured 55.9 s for save #1 vs 5.0 s for save #2). The next forward therefore starts
+   13.679 GiB above its floor and the iteration's largest allocation — the 4.00 GiB fp32
+   logits buffer — no longer fits. The arithmetic closes to 1 MiB: 86.680 − 13.679 =
+   73.001, + 4.000 = 77.001 GiB = the run's lifetime peak.
+   Fix: **`checkpoint.ckpt_assume_constant_structure: false`** in the campaign YAML.
+   *Omitting it is not the same as setting it* — the Nano pretrain recipe sets it `True`
+   (`recipes/nemotronh/nemotron_3_nano.py:173`), so it must be stated and then verified in
+   the resolved-config dump. Costs the full plan path on every save (~+51 s each, +17 min
+   over the 500B run). Second, independent lever, kept for margin rather than as the fix:
+   **`model.cross_entropy_loss_fusion: false`**, worth a measured 4.00 GiB of iteration
+   peak (82.432 -> 78.137 GB peak-allocated at iteration 1) for +0.31% step time and no
+   numerics change — under `jit_fuser` (= `torch.compile`) AOTAutograd functionalises the
+   in-place ops in `tensor_parallel/cross_entropy.py` into an out-of-place inductor buffer
+   of seq x vocab in fp32.
+   Evidence: matched single-variable pairs at 512 GPUs. Flag `True`, `save_interval` 8 ->
+   OOM at iteration 17 on 183 ranks; flag `False`, same config -> 0 OOM through three save
+   crossings. `save_interval` 150 -> OOM at iteration 301; saves disabled entirely -> 320
+   iterations clean. Gate probe with both fixes: 4 saves, 0 OOM, 0 NaN.
+   Confirmed at the real posture by a **10.016B-token acceptance run** (597 iterations x GBS
+   2048 x seq 8192 = 1,222,656 samples, `save_interval` 150) on 512 GPUs: crossings at
+   150/300/450/597, **0 OOM, 0 NaN, 0 skipped**, ~6.0 s/iter at ~122 TFLOP/s/GPU, loss
+   12.199 -> 2.794. **Iteration 301 — the exact coordinate of the earlier 183-rank failure —
+   is clean**, so this refutes the failure rather than merely not reproducing it. That run
+   is also where the 315.9 GB checkpoint measurement below comes from.
+   **Beware two traps when testing this.** A probe whose `exit_interval` lands *at* its
+   second save never runs the failing forward and passes meaninglessly — require at least
+   three saves plus a few iterations. And comparing two *post-save* snapshots cannot reveal
+   the retention, because both are taken inside `save_checkpoint` where the copy
+   legitimately exists; sample between the saves, not only at them.
 
 ### Why the DDP settings live under `comm_overlap:` — do not move them to `ddp:`
 
@@ -513,35 +555,55 @@ allocation rather than just this job.
 bash pipeline_training_launch.sh \
   configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml \
   --model nano --mode pretrain --disable-ft --nodes 32 \
-  train.exit_interval=200 \
+  train.exit_interval=340 \
   checkpoint.save_interval=100 \
+  checkpoint.most_recent_k=2 \
   checkpoint.save=/projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_128gpu \
   checkpoint.load=/projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_128gpu \
   logger.wandb_exp_name=control_pretrain_v1_smoke_128gpu
 ```
 
-The smoke test is short enough (200 iterations; the GBS-1024 posture measured 2086 s ≈ 35 min
-at a 9.75 s median on 128 GPUs, and at GBS 2048 the same 128-GPU run carries twice the
-microbatches per replica, so budget roughly double)
+**`exit_interval` is 340, not 200, and that is load-bearing.** At 200 the run saves at 100
+and 200 with the second save landing *on the exit path* — so it never executes a forward
+after a second save, which is precisely where the save-crossing OOM above strikes. Such a
+run passes while the campaign it is gating dies. 340 gives saves at 100/200/300 with 40
+iterations of real training after the third, so every crossing is followed by the step that
+would fail. The retention is per-rank and the experts shard by EP=4 rather than DP, so a
+128-GPU smoke test does reproduce it — the quarter-scale run is a valid gate for this,
+provided it crosses enough saves.
+
+`most_recent_k=2` rides along for storage: without it the four saves would take the smoke
+directory from ~600 GB to ~1.2 TB. Check the live figure in the storage report
+`isambard_sbatch` prints rather than trusting any number written here — it moves as corpora
+and checkpoints come and go (it was above 93% during data prep and 86% once the prep
+intermediates were released). The
+campaign itself keeps all 21 (`most_recent_k: -1`); only the smoke test prunes, because none
+of its checkpoints is an artifact anyone needs afterwards.
+
+The smoke test is short enough (340 iterations; the GBS-1024 posture measured a 9.75 s median
+on 128 GPUs, and at GBS 2048 the same 128-GPU run carries twice the microbatches per replica,
+so budget roughly double — on the order of 1.5-2 h, plus three full-path saves at ~1 min each
+now that `ckpt_assume_constant_structure` is false)
 that the 7200 s heartbeat could not reach it either way, but it carries `--disable-ft` so it
 exercises the same launcher as the segments it is gating. A smoke test run under `ft_launcher`
 would not validate the `torchrun` path the real run takes — and being comfortably under the
 ceiling is exactly why the smoke test could not have caught this failure on its own.
 
 **Stop the run with `train.exit_interval`, not `train.train_iters`.** Both end at iteration
-200 and both leave checkpoints at 100 and 200, but `train_iters` also redefines the
+340 and both leave checkpoints at 100/200/300, but `train_iters` also redefines the
 learning-rate schedule, so the result is not a shortened version of this run — it is a
-different one. `lr_decay_iters` defaults to `train_iters`, so `train_iters=200` gives
-`lr_decay_steps = 204,800` while the explicit `lr_wsd_decay_iters: 11921` still expands to
-`wsd_decay_steps = 12,207,104`. `optimizer_param_scheduler.py` starts the anneal at
+different one. `lr_decay_iters` defaults to `train_iters`, so `train_iters=340` gives
+`lr_decay_steps = 696,320` (340 x GBS 2048) while the explicit `lr_wsd_decay_iters: 5961`
+still expands to `wsd_decay_steps = 12,208,128`. `optimizer_param_scheduler.py` starts the anneal at
 `lr_decay_steps - wsd_decay_steps`, which is then negative, so every iteration past the
 2-iteration warmup falls in the anneal branch: LR runs from ~1.8e-5 down to the 1e-5 floor
 and never approaches the 1e-3 peak. Throughput and checkpoint size would still be valid, but
 a stability result taken at 1/50th of the intended LR is not.
 
-`exit_interval` leaves the schedule untouched, so the smoke test *is* the first 200
-iterations of the real run: warmup is linear over 610,365 steps (298 iterations), which puts
-iteration 200 at roughly two-thirds of peak (~6.7e-4) and never reaches the WSD branch at all.
+`exit_interval` leaves the schedule untouched, so the smoke test *is* the first 340
+iterations of the real run: warmup is linear over 610,365 steps (298 iterations), so the run
+climbs to the 1e-3 peak at iteration ~298 and spends its last ~40 iterations in the stable
+phase — it exercises peak LR without ever reaching the WSD anneal branch.
 `train.py` saves on the exit path when the interval has not already written a checkpoint.
 
 Holding `train_iters` also means the smoke test **warms the per-corpus index caches the
@@ -560,12 +622,12 @@ real run reuses**. Two different indices are built, and only one of them is cach
   path_to_cache is None` and rebuilds its 61,036,544-sample index at *every* launch.
   Budget for that on each segment, not just the first.
 
-Bounding the run with `train_iters=200` instead would change every per-corpus sample count
-by the same factor of ~149, missing all of those caches and leaving the real run to rebuild
+Bounding the run with `train_iters=340` instead would change every per-corpus sample count
+by the same factor of ~88, missing all of those caches and leaving the real run to rebuild
 them from scratch on its first launch.
 
 **Point it at a separate save directory.** The campaign's `load` and `save` are the same
-path, so a smoke run writing there would leave `iter_0000200` behind and the first real
+path, so a smoke run writing there would leave `iter_0000340` behind and the first real
 segment would resume from it instead of initialising randomly. A distinct directory makes
 that impossible rather than relying on remembering to clean up.
 
@@ -573,19 +635,22 @@ What the run has to show before 128 nodes are committed:
 
 | Check | Expectation |
 |---|---|
-| Checkpoints | `iter_0000100` and `iter_0000200` both written |
-| **Checkpoint size** | ~300 GB — 21 must fit the free quota; at 400 GB they do not |
+| Save crossings | saves **logged** at 100/200/300 plus the exit save at 340. Read the log, not the directory: `most_recent_k=2` prunes the earlier two as the run proceeds, so a healthy run leaves only the last two on disk |
+| **Post-save iterations** | training continues past every save — in particular no OOM on the forward *after* saves #2 and #3. This is the check the 200 → 340 change exists to make possible, and the one a two-save run cannot perform |
+| **Checkpoint size** | ~316 GB measured at DP=512 (294.2 GiB); 21 of them = 6.63 TB, which must fit the free quota |
 | Loss | descending from ~12.2, no NaN |
 | Throughput | s/iter, which sets `N` for the segment chain above |
 
 Measure the checkpoint size rather than trusting the estimate. `torch_dist` stores the same
 logical state at any parallelism, so a DP=128 total is comparable to the DP=512 one, and 128
 GPUs is the conservative case for per-rank memory — a quarter as many ranks to shard the
-optimizer across.
+optimizer across. The DP=512 measurement is **315,861,047,803 bytes = 294.2 GiB = 315.9 GB**
+per optimizer-bearing checkpoint, taken from the 10.016B-token acceptance run, so 21 come to
+**6.03 TiB / 6.63 TB**.
 
-The two checkpoints are a **~600 GB transient** against a project quota that already runs
-above 93%, so check the storage report `isambard_sbatch` prints before starting and delete
-the smoke directory once the numbers are recorded.
+The two *retained* checkpoints are a **~600 GB transient** — four are written, and
+`most_recent_k=2` keeps the directory at two. Check the storage report `isambard_sbatch`
+prints before starting, and delete the smoke directory once the numbers are recorded.
 
 ## Resume
 
@@ -599,6 +664,7 @@ Do not delete the save directory, and do not flip `save_optim`/`save_rng` agains
 `iter_*` state (a toggle mid-run raises `KeyError: optimizer` and turns into an ft restart
 loop; wipe the directory first if the posture ever has to change).
 
-Checkpoints are ~300 GB each (bf16 weights plus precision-aware optimizer state) and all 21
-are retained (`most_recent_k: -1`), so plan for ~6 TB in the save directory. Watch the
-project storage quota that `isambard_sbatch` prints on every submission.
+Checkpoints are **~316 GB** each (bf16 weights plus precision-aware optimizer state, measured
+at DP=512 — see the smoke-test section for the byte-exact figure and its provenance) and all
+21 are retained (`most_recent_k: -1`), so plan for **~6.6 TB** in the save directory. Watch
+the project storage quota that `isambard_sbatch` prints on every submission.
