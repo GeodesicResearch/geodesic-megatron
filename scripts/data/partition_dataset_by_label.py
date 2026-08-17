@@ -57,6 +57,7 @@ label -> group assignment, and per-group document counts for every written split
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -188,7 +189,9 @@ def main() -> int:
     else:
         parts = {"train": ds}
 
-    out_root = Path(cfg["output_root"])
+    # ${USER}-style variables expand so one committed config serves every
+    # operator (the shared no-user-specific-paths rule).
+    out_root = Path(os.path.expandvars(cfg["output_root"]))
     out_root.mkdir(parents=True, exist_ok=True)
     group_names = list(cfg["groups"])
     counts: dict[str, Counter] = {part: Counter() for part in parts}

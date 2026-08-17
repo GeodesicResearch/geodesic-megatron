@@ -28,6 +28,10 @@ than declared on ``GradientRoutingConfig``, so their absence is a real state —
 reported as a problem, never tolerated.
 """
 
+from megatron.bridge.training.gradient_routing.aux_checkpoint import (
+    aux_only_checkpoint_problems,
+    aux_only_source_problems,
+)
 from megatron.bridge.training.gradient_routing.config import GRDatasetConfig, GRFinetuningDatasetConfig
 from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerConfigOverrideProvider
 
@@ -195,6 +199,12 @@ def validate_gr_launch(cfg) -> None:
                 f"plan routes {runtime_plan.n_aux} aux module(s) but gr.aux_data_paths names "
                 f"{gr.n_aux} — the plan was built from a different corpus list."
             )
+
+    # Aux-only saving is validated against the PLAN, so it is checked here rather than in
+    # GradientRoutingConfig.finalize (which never sees train_iters). Both directions matter:
+    # what this run may omit from its own saves, and what it may load from someone else's.
+    problems.extend(aux_only_checkpoint_problems(gr, cfg.checkpoint, cfg.peft, runtime_plan))
+    problems.extend(aux_only_source_problems(cfg.checkpoint))
 
     if problems:
         raise ValueError("Gradient-routing launch guards failed:\n- " + "\n- ".join(problems))

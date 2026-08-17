@@ -327,16 +327,25 @@ def main() -> None:
 
         patch_mamba_training_scan_save_offload()
 
-    # Optional NCCL communicator warmup: initialize every model-parallel group's
-    # communicator in one parallel wave right after parallel-state setup, instead of
-    # lazily on first use (where deep-PP first-microbatch propagation serializes the
-    # per-hop setup — PP=22 exceeded the 10-min first-collective watchdog without it).
-    # A/B flag for init-time experiments; the production mitigation is the YAML's
-    # dist.distributed_timeout_minutes.
-    if os.environ.get("ISAMBARD_COMM_WARMUP", "0") == "1":
+    # NCCL communicator warmup mode. PyTorch creates a group's communicator on the
+    # first collective issued on it, cudaMalloc'ing its buffers at that moment. The
+    # MoE router expert-bias update all_reduces on the tp_dp_cp group at the END of
+    # the first backward — peak memory — and at 8K-seq 30B SFT that allocation
+    # failed with 'out of memory' (~745 MiB free), killing every run at iteration 0.
+    #   collectives            pre-create every model-parallel group's communicator
+    #                          right after parallel-state setup, while memory is
+    #                          free — set this on memory-tight MoE runs
+    #   full / 1               also warm pipeline P2P transports — measured as a
+    #                          ~9.6x steady-state regression at deep PP (PP22·CP4);
+    #                          init-time A/B experiments only
+    #   0 (default)            lazy first-use creation (upstream behaviour)
+    warmup_mode = os.environ.get("ISAMBARD_COMM_WARMUP", "0")
+    if warmup_mode != "0":
+        if warmup_mode not in ("collectives", "full", "1"):
+            raise ValueError(f"ISAMBARD_COMM_WARMUP must be one of 0|collectives|full, got {warmup_mode!r}")
         from pipeline_training_patches import patch_eager_comm_warmup
 
-        patch_eager_comm_warmup()
+        patch_eager_comm_warmup(include_p2p=warmup_mode in ("full", "1"))
 
     # Diagnostic row telemetry: log dataset idx -> parquet row on every fetch, so a
     # deterministic data-dependent failure at iteration k can be mapped to the exact

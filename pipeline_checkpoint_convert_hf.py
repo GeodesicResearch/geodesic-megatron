@@ -36,6 +36,12 @@ Usage:
         --megatron-path /path/to/checkpoints/experiment_name \
         --keep-remote-code \
         --remote-code-source /path/to/dir/with/modeling_nemotron_h.py
+
+    # Compose an aux-only gradient-routing checkpoint (gr.checkpoint_aux_only: true)
+    # with the core it was trained against. Single-process only.
+    python pipeline_checkpoint_convert_hf.py \
+        --megatron-path /path/to/checkpoints/gr_aux_only_run \
+        --base-megatron-path /path/to/megatron_bridges/models/<base model>
 """
 
 import argparse
@@ -152,20 +158,52 @@ def convert_single_process(
     hf_model_id: str,
     strict: bool = True,
     show_progress: bool = True,
+    base_iter_path: Path | None = None,
 ) -> None:
-    """Convert using single-process export_ckpt (CPU-based distributed context)."""
+    """Convert using single-process export_ckpt (CPU-based distributed context).
+
+    With ``base_iter_path``, ``iter_path`` is read as a PARTIAL checkpoint (a gradient-routing
+    aux-only save): the model is built from ``iter_path``'s own config — the only one that
+    declares the aux modules — the base weights load first, and the partial checkpoint lands on
+    top. This is ``export_ckpt``'s body with the composing load substituted for its single one.
+    """
     from megatron.bridge import AutoBridge
 
     print(f"Creating bridge from auto-config: {hf_model_id}")
     bridge = AutoBridge.from_auto_config(str(iter_path), hf_model_id)
 
-    print(f"Exporting: {iter_path} -> {hf_path}")
-    bridge.export_ckpt(
-        megatron_path=str(iter_path),
-        hf_path=str(hf_path),
-        show_progress=show_progress,
-        strict=strict,
-    )
+    if base_iter_path is None:
+        print(f"Exporting: {iter_path} -> {hf_path}")
+        bridge.export_ckpt(
+            megatron_path=str(iter_path),
+            hf_path=str(hf_path),
+            show_progress=show_progress,
+            strict=strict,
+        )
+        print(f"Export complete: {hf_path}")
+        return
+
+    from megatron.bridge.training.gradient_routing.aux_checkpoint import assert_aux_weights_trained
+    from megatron.bridge.training.model_load_save import load_megatron_model, temporary_distributed_context
+
+    print(f"Exporting composed: base {base_iter_path} + partial {iter_path} -> {hf_path}")
+    with temporary_distributed_context(backend="gloo"):
+        megatron_model = load_megatron_model(
+            str(iter_path),
+            base_checkpoint_path=str(base_iter_path),
+            use_cpu_init=True,
+            skip_temp_dist_context=True,
+        )
+        # A composed load writes only the keys each stage supplies, so an overlay that
+        # contributed nothing would export a byte-stock base model under the trained arm's
+        # name. Zero-init aux output projections are exactly that failure, made loud.
+        assert_aux_weights_trained(megatron_model)
+        bridge.save_hf_pretrained(
+            megatron_model,
+            str(hf_path),
+            show_progress=show_progress,
+            strict=strict,
+        )
     print(f"Export complete: {hf_path}")
 
 
@@ -863,12 +901,27 @@ def main():
         help="Top-level checkpoint directory (contains iter_* subdirs)",
     )
 
+    parser.add_argument(
+        "--base-megatron-path",
+        default=None,
+        help="Checkpoint supplying the core weights when --megatron-path holds a PARTIAL "
+        "checkpoint (a gradient-routing aux-only save, gr.checkpoint_aux_only: true). Pass that "
+        "run's checkpoint.pretrained_checkpoint; the export then composes base core + trained aux. "
+        "Single-process only — the multi-GPU path drops non-stock keys.",
+    )
+
     # Checkpoint selection
     parser.add_argument(
         "--iteration",
         type=int,
         default=None,
         help="Specific iteration to convert (default: latest from latest_checkpointed_iteration.txt)",
+    )
+    parser.add_argument(
+        "--base-iteration",
+        type=int,
+        default=None,
+        help="Specific iteration of --base-megatron-path (default: its latest)",
     )
 
     # Output
@@ -957,6 +1010,21 @@ def main():
     iter_path, iteration = resolve_checkpoint_path(args.megatron_path, args.iteration)
     print(f"Checkpoint: {iter_path} (iteration {iteration})")
 
+    base_iter_path = None
+    if args.base_megatron_path:
+        base_iter_path, base_iteration = resolve_checkpoint_path(args.base_megatron_path, args.base_iteration)
+        print(f"Base checkpoint: {base_iter_path} (iteration {base_iteration})")
+    else:
+        from megatron.bridge.training.gradient_routing.aux_checkpoint import checkpoint_saved_aux_only
+
+        if checkpoint_saved_aux_only(str(iter_path)):
+            raise ValueError(
+                f"{iter_path} is an AUX-ONLY checkpoint (its run_config carries "
+                "gr.checkpoint_aux_only: true) and holds no core weights. Exporting it alone would "
+                "write a model whose core is freshly-initialised noise. Re-run with "
+                "--base-megatron-path set to that run's checkpoint.pretrained_checkpoint."
+            )
+
     # 2. Determine HF model ID
     hf_model_id = args.hf_model
     print(f"HF model ID: {hf_model_id}")
@@ -967,6 +1035,15 @@ def main():
 
     # 4. Run conversion
     use_multi_gpu = _is_multi_gpu() and (args.tp > 1 or args.pp > 1 or args.ep > 1 or args.etp > 1)
+
+    if use_multi_gpu and base_iter_path is not None:
+        raise ValueError(
+            "--base-megatron-path requires the single-process export path, but multi-GPU was "
+            f"selected (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp}). The multi-GPU "
+            "path builds its model from the upstream HF config, so it drops every non-stock key — "
+            "including the gr_aux tensors a partial checkpoint exists to carry. Drop the "
+            "parallelism flags (and torchrun) and re-run."
+        )
 
     if use_multi_gpu:
         print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")
@@ -990,6 +1067,7 @@ def main():
             hf_model_id=hf_model_id,
             strict=not args.not_strict,
             show_progress=not args.no_progress,
+            base_iter_path=base_iter_path,
         )
 
     # 5. Cleanup distributed BEFORE fixup/push (prevents timeout while uploading)

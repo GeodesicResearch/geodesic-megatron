@@ -47,7 +47,7 @@ Usage (inside the container, 1 GPU):
 
     ./pipeline_env_exec.sh "cd <repo>; source pipeline_env_activate.sh || exit 1; \\
         python scripts/gradient_routing/verify_posture_equivalence.py \\
-            --config configs/gradient_routing/verify_postures.yaml"
+            --config <geodesic-configs>/experiments/bedtime_stories/archive/cpt/verify_postures.yaml"
 
 Every check prints PASS/FAIL with the numbers behind it; any FAIL exits non-zero.
 
@@ -95,7 +95,7 @@ The config YAML is the only argument. Fields:
 
 `logit_check_dtype` is a REQUIRED config field, not a default: bf16 and fp32 answer
 different questions on a deep model (see the field's note in
-`configs/gradient_routing/verify_postures.yaml`), so every config states its numerics mode
+`<geodesic-configs>/experiments/bedtime_stories/archive/cpt/verify_postures.yaml`), so every config states its numerics mode
 explicitly rather than inheriting one.
 
 The run also writes `posture_verification.json` beside the posture dirs (their common

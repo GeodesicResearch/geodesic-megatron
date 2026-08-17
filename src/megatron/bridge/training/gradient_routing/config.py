@@ -125,6 +125,15 @@ class GradientRoutingConfig:
     log_interval: int = 1
     """Iterations between the heavier telemetry probes (aux output RMS, param norms)."""
 
+    checkpoint_aux_only: bool = False
+    """Save ONLY the aux parameters, PEFT-adapter style (default off: every existing config
+    keeps writing full checkpoints). Legal only for a run whose plan never updates the core
+    — ``aux_iter_fractions`` summing to 1 AND ``p_as: 0`` — since the omitted core weights
+    are recovered from ``checkpoint.pretrained_checkpoint`` at load time; the launch guards
+    refuse any other posture rather than let a core update be dropped at save time. See
+    ``gradient_routing/aux_checkpoint.py`` for the filter, the composition, and why mid-run
+    resume from such a checkpoint is unsupported."""
+
     @property
     def n_aux(self) -> int:
         """Number of aux modules (= number of routed corpora, in either corpus spelling)."""

@@ -46,6 +46,42 @@ import torch
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.utils import sharded_state_dict_default
+
+
+class GRAMAuxModuleList(torch.nn.ModuleList):
+    """``ModuleList`` of aux modules that recurses into them for distributed checkpointing.
+
+    A bare ``nn.ModuleList`` defines no ``sharded_state_dict``, and mcore's
+    ``sharded_state_dict_default`` then takes its "assume replicated across TP and DP"
+    branch for the WHOLE subtree: it flattens the children with a plain ``state_dict()``
+    and wraps every tensor with an empty tensor-parallel axis map, so the children's own
+    axis declarations (``{"weight": 0}`` on a column-parallel linear, ``{"weight": 1}`` on
+    a row-parallel one) are never reached. Each TP rank then declares its local shard as
+    the whole tensor at offset 0, both ranks write the same key describing the same
+    region, and dist-checkpointing deduplicates one rank's half out of existence.
+
+    That is not hypothetical: the TP=2 GR SFT arms saved width-32 aux modules as
+    ``linear_fc1.weight`` of global shape ``[16, hidden]`` in a single chunk, and a TP=1
+    load of those checkpoints fails with a global-shape mismatch. The sibling
+    ``shared_experts`` is a ``SharedExpertMLP`` — a MegatronModule that HAS the method —
+    which is why the same checkpoints shard it correctly; the asymmetry between the two is
+    what identifies this as a container problem rather than a process-group one.
+
+    Subclassing ``ModuleList`` (rather than overriding the parent layer's
+    ``sharded_state_dict``) keeps the fix next to the container that needs it and leaves
+    parameter names untouched: children stay ``gr_aux.<k>.…``, which the optimizer override
+    glob, the HF bridge mappings and the bake script all key on.
+    """
+
+    def sharded_state_dict(self, prefix: str = "", sharded_offsets: tuple = (), metadata: Optional[dict] = None):
+        """Delegate to each aux module, preserving the ``<prefix><k>.`` key layout."""
+        sharded_state_dict = {}
+        for index, module in enumerate(self):
+            sharded_state_dict.update(
+                sharded_state_dict_default(module, f"{prefix}{index}.", sharded_offsets, metadata)
+            )
+        return sharded_state_dict
 
 
 class GRAMAuxMLP(MLP):
@@ -113,8 +149,9 @@ class GRAMMoELayer(MoELayer):
     kept as an unrolled sequence of adds: an all-zero gate vector must leave the output
     BITWISE equal to the core layer, which a fused/concatenated path would not guarantee.
 
-    ``gr_aux`` is an ``nn.ModuleList`` deliberately named so parameters keep the
-    ``.gr_aux.`` fragment (``...mlp.gr_aux.<k>.linear_fc1.weight``) — the optimizer
+    ``gr_aux`` is a :class:`GRAMAuxModuleList` (an ``nn.ModuleList`` that recurses for
+    distributed checkpointing — see its docstring) deliberately named so parameters keep
+    the ``.gr_aux.`` fragment (``...mlp.gr_aux.<k>.linear_fc1.weight``) — the optimizer
     override glob, the HF bridge mappings, and the bake script all key on it.
 
     ``gr_gate`` is a non-persistent ``(N,)`` buffer, default all-zero: checkpoints carry
@@ -153,7 +190,10 @@ class GRAMMoELayer(MoELayer):
                 "GRAMMoELayer could not extract MLPSubmodules from the shared-experts builder "
                 f"({submodules.shared_experts!r}); expected a partial carrying submodules=MLPSubmodules(...)."
             )
-        self.gr_aux = torch.nn.ModuleList(
+        # GRAMAuxModuleList, not a bare ModuleList: the container must define
+        # sharded_state_dict or the aux weights save as TP-replicated and half of each is
+        # deduplicated away (see the class docstring).
+        self.gr_aux = GRAMAuxModuleList(
             GRAMAuxMLP(
                 config=config,
                 submodules=aux_submodules,

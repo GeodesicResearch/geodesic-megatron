@@ -21,6 +21,9 @@ The package splits by responsibility:
   learning-rate param-group override.
 - ``callback``: drives the per-iteration state (gates, frozen expert bias, gating roles)
   and emits telemetry.
+- ``aux_checkpoint``: aux-only checkpoints — the ``gr_aux`` save filter, the flag's
+  read-back off a checkpoint's run config, and the composed-load verification.
+- ``guards``: the launch-time refusal list.
 
 Model surgery lives in ``megatron.bridge.models.mamba.gram_layer``; the routed dataset in
 ``megatron.bridge.data.datasets.gr_routed_dataset``.

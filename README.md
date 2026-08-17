@@ -236,9 +236,11 @@ in the YAML routes an N+1-corpus mix (retain + per-module forget corpora) so eac
 corpus trains only its removable auxiliary MLPs, which export-time baking merges into the
 shared expert (forget-ON) or deletes for a byte-stock model (forget-OFF). CPT/pretrain
 route `.bin/.idx` blend lists; SFT routes per-corpus finetuning dataset roots
-(`gr.retain_dataset_root`/`gr.aux_dataset_roots`, packed corpus-pure under each root). Configs and tooling — posture baking, posture verification,
-and eval-only corpus loss probes — live under `configs/gradient_routing/` +
-`scripts/gradient_routing/`. **No eval logic lives in this repo**: task definitions and
+(`gr.retain_dataset_root`/`gr.aux_dataset_roots`, packed corpus-pure under each root). The tooling — posture baking, posture verification,
+and eval-only corpus loss probes — lives under `scripts/gradient_routing/`
+(+ probe configs in `configs/gradient_routing/`); campaign training and
+bake/verify configs live in the geodesic-configs repo under
+`experiments/bedtime_stories/`. **No eval logic lives in this repo**: task definitions and
 harnesses belong to `geodesic-evals` and `geodesic-environments`, which take a baked
 posture directory like any other HF checkpoint. The full reference (method,
 merge math, config and guard tables, workflow) is [docs/gradient-routing.md](docs/gradient-routing.md),

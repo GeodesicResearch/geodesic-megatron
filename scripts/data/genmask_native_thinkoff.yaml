@@ -1,0 +1,23 @@
+# Markers injected into the RL-serving nemotron_native chat template, thinking off.
+#
+# The RL side of the bedtime-stories campaign serves that template with thinking OFF,
+# and that render prefixes every assistant turn with <think></think>; the instruct
+# template's render does not (measured: 900/900 corpus rows differ). SFT has to byte-match
+# the RL render, so this conversion takes the RL template itself, pins thinking off as the
+# template DEFAULTS (the megatron-bridge pack path calls apply_chat_template with no extra
+# kwargs, so only a default reaches it), and marks the assistant span so the prefilled
+# <think></think> stays OUTSIDE it — at rollout time that prefix is context, not generated
+# text, so supervising it would not mirror RL credit assignment.
+#
+# The vocab and special tokens come from the instruct tokenizer; only the chat template
+# differs. template_sha256 pins the exact RL template bytes this recipe was derived
+# against, so an upstream edit fails the build loudly instead of quietly producing a
+# tokenizer that no longer matches the RL render.
+#
+# GEODESIC_ENVIRONMENTS_ROOT must point at a geodesic-environments checkout, e.g.
+#   export GEODESIC_ENVIRONMENTS_ROOT="$HOME/geodesic-environments"
+source: geodesic-research/nemotron-instruct-tokenizer
+recipe: native_thinkoff
+template_file: ${GEODESIC_ENVIRONMENTS_ROOT}/src/geodesic_environments/prompts/chat_templates/nemotron_native.jinja
+template_sha256: 575fb74f54ed264df9047d0ecce3c98938aae953fb4f50356675706264cbb68a
+output_dir: /projects/a5k/public/data_${USER}/bedtime_warmstart_sft/nemotron-native-thinkoff-genmask-tokenizer
