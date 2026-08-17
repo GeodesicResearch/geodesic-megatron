@@ -58,7 +58,6 @@ RESULTS="$OUTDIR/results.tsv"
 # them at the end. Truncating results.tsv per run instead would mean a partial re-run
 # (--only) silently deleted every row it did not re-measure.
 
-export GEODESIC_REPO_DIR="$REPO_DIR"
 cd "$REPO_DIR"
 
 wanted() {

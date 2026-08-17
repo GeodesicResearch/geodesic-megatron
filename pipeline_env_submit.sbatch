@@ -33,10 +33,21 @@
 MODE="${1:?Usage: isambard_sbatch pipeline_env_submit.sbatch <setup|validate|smoke> [args]}"
 shift
 
-# Resolve the repo to operate on. Prefer an explicit GEODESIC_REPO_DIR override;
-# otherwise fall back to the directory the job was submitted from
-# (SLURM_SUBMIT_DIR), then the current working directory.
-REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+# Resolve the repo. Under sbatch this script executes from SLURM's spool copy,
+# so self-location applies only when the script is invoked in place (`bash
+# foo.sbatch` inside an allocation, where the marker file sits next to it); a
+# spooled run falls back to SLURM_SUBMIT_DIR — the directory sbatch was invoked
+# from, so submit from the checkout you mean to run. PIPELINE_REPO_DIR overrides
+# both. Inlined per sbatch file: a spooled script has nothing next to it to
+# source a shared helper from.
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${PIPELINE_REPO_DIR:-}" ]; then
+    REPO_DIR="$PIPELINE_REPO_DIR"
+elif [ -f "$_script_dir/pipeline_env_config.env" ]; then
+    REPO_DIR="$_script_dir"
+else
+    REPO_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+fi
 cd "$REPO_DIR"
 
 echo "============================================================"

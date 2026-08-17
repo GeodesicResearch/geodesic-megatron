@@ -427,13 +427,16 @@ train-tunnel allocations or srun-overlap attach workflows.
   single-group config, uniform p2p-stall, no straggler → group-specific / cross-node-p2p
   congestion, NOT a single-vs-multi-group principle (no comm-warmup-off multi-group datapoint
   yet). Parallel folding keeps EP+CP all-to-all node-local (NVLink); only PP p2p crosses nodes.
-- **Worktree submission:** export `GEODESIC_REPO_DIR=<worktree>` (or the legacy
-  `TRAIN_REPO_DIR`), or simply submit from the worktree, so the launcher finds a
-  worktree-only config. With no override `REPO_DIR` falls back to the submission directory
-  (`SLURM_SUBMIT_DIR`, then `$(pwd)`), so submitting from elsewhere misses the worktree config
-  and ft restart-loops on `Override YAML not found`. Helper to pin single-group across all 12
-  Dragonfly groups (group
-  N = `nid[10000+(N-2)*110 .. +109]`) and backfill the first to free: see
+- **Worktree submission:** the `pipeline_*` entrypoints resolve the repo from their own
+  script path, so running a worktree's copy trains that worktree from any cwd with no env
+  setup; `PIPELINE_REPO_DIR` overrides for running one checkout's script against another's
+  tree. The `.sbatch` wrappers self-locate the same way when invoked in place, but a real
+  `sbatch` submission executes SLURM's spool copy, which cannot self-locate — there they
+  fall back to `SLURM_SUBMIT_DIR`, so `sbatch` from the checkout you mean to run (a
+  mis-resolution still dies loudly — on the `pipeline_env_config.env` guard where the
+  entrypoint has one, else on the missing exec target). Helper to pin
+  single-group across all 12
+  Dragonfly groups (group N = `nid[10000+(N-2)*110 .. +109]`) and backfill the first to free: see
   `scripts/` single-group-pin pattern (`--exclude` every group but one; `--switches=1` is
   insufficient — `MaxSwitchWait`=300 s falls back to multi-group).
 

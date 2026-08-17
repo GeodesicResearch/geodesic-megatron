@@ -689,8 +689,8 @@ retention with low removal is ordinary CPT wearing a routing costume.
    `bash pipeline_training_launch.sh <geodesic-configs>/experiments/bedtime_stories/sft/<config>.yaml
    --model nano --mode sft [--disable-ft]` (or via
    `pipeline_training_submit.sbatch`; CPT-era configs are archived under that
-   experiment tree's `archive/cpt/`). From a worktree, export
-   `GEODESIC_REPO_DIR=<worktree>`. Sanity: every `gr/loss_*` decreasing,
+   experiment tree's `archive/cpt/`). The launcher resolves the repo from its
+   own path, so run the worktree's copy to train the worktree. Sanity: every `gr/loss_*` decreasing,
    each routed module's `gr/aux{k}_out_rms` rising from 0, 0 NaN, plan
    digest logged.
 5. **Export + bake.** Single-process raw export

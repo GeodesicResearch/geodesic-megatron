@@ -14,9 +14,6 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_DIR"
-# Inside a tunnel/salloc SLURM_SUBMIT_DIR points at the tunnel's own submit dir; pin the
-# launcher's repo resolution to this checkout (worktree-safe).
-export GEODESIC_REPO_DIR="$REPO_DIR"
 
 SEED_CFG=configs/gradient_routing/smoke/gr_smoke_seed_pretrain.yaml
 GR_CFG=configs/gradient_routing/smoke/gr_smoke_gr_cpt.yaml
