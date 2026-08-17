@@ -206,7 +206,16 @@ bash pipeline_env_setup.sh
 | `pipeline_training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `pipeline_training_launch.sh` |
 
 Training script (called by the launcher):
-- `pipeline_training_run.py` — Unified entry point for SFT, CPT, and from-scratch pretraining (dispatches via `--model nano|super|ultra --mode sft|cpt|pretrain`; `pretrain` uses the NVIDIA pretrain recipes + the `pretrain()` entry point, requires `dataset.data_path`, and loads no checkpoint unless the YAML sets one)
+- `pipeline_training_run.py` — Unified entry point for SFT, CPT, and from-scratch pretraining (dispatches via `--model nano|super|ultra --mode sft|cpt|pretrain`; `pretrain` uses the NVIDIA pretrain recipes + the `pretrain()` entry point, requires `dataset.data_path`, and loads no checkpoint unless the YAML sets one). Its
+  config loader supports a **single-parent `defaults:` chain**: a top-level
+  `defaults: <path>` names ONE parent YAML (relative paths resolve against the
+  config file's own directory; chains recurse; a missing parent, a cycle, or a
+  non-string ref — including the list form other repos' loaders accept — raises).
+  Parents load first, children override, so a campaign leaf carries only its
+  deltas over a shared recipe file. Only this entry point resolves the chain:
+  anything reading training YAMLs with bare `yaml.safe_load` (e.g.
+  `scripts/gradient_routing/run_gr_functional_smoke.sh`) sees the leaf alone,
+  so keys such scripts consume must live in the leaf, not a parent.
 
 ### Usage
 

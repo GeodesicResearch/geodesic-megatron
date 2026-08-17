@@ -270,6 +270,13 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 cp configs/quickstart/nemotron_nano_quickstart_sft.yaml configs/my_new_sft.yaml
 ```
 
+For a family of related configs, prefer a shared parent over N full copies: a
+top-level `defaults: <path>` names one parent YAML (relative to the config file's
+own directory, chains recurse), parents load first and the leaf overrides — so
+each leaf carries only its deltas. Missing parents, cycles, and non-string refs
+(there is no list form) fail loudly. Only `pipeline_training_run.py` resolves the
+chain; keys read from the YAML by other tooling must live in the leaf itself.
+
 Key fields to change:
 
 ```yaml

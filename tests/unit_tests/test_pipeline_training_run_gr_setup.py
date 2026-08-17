@@ -37,9 +37,6 @@ construct — the dataset configs, the plan, the optimizer override provider —
 
 from __future__ import annotations
 
-import importlib.util
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -49,23 +46,11 @@ from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.training.gradient_routing.config import GRDatasetConfig, GRFinetuningDatasetConfig
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_RUN_PATH = _REPO_ROOT / "pipeline_training_run.py"
-
 TRAIN_ITERS, GBS = 40, 8
 RETAIN_ROOT = "/data/gr_sft/core"
 AUX_ROOTS = ["/data/gr_sft/aux0", "/data/gr_sft/aux1"]
 RETAIN_BLEND = ["1.0", "/data/core_text_document"]
 AUX_BLENDS = [["/data/aux0_text_document"], ["/data/aux1_text_document"]]
-
-
-@pytest.fixture(scope="module")
-def run_module():
-    spec = importlib.util.spec_from_file_location("pipeline_training_run", _RUN_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_training_run"] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _raw_gr(**overrides) -> dict:

@@ -1,13 +1,12 @@
 """Unit tests for pipeline_training_run.py's model/mode dispatch (RECIPE_MAP + CLI parsing).
 
-The script lives at the repo root and is loaded by path (the same pattern as
-test_pipeline_data_prepare.py), so these tests exercise the real dispatch table rather
-than a re-declaration of it.
+The script lives at the repo root and is loaded by path (the shared `run_module`
+conftest fixture), so these tests exercise the real dispatch table rather than a
+re-declaration of it.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -15,19 +14,9 @@ import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_RUN_PATH = _REPO_ROOT / "pipeline_training_run.py"
 
 MODELS = ("nano", "super", "ultra")
 MODES = ("sft", "cpt", "pretrain")
-
-
-@pytest.fixture(scope="module")
-def run_module():
-    spec = importlib.util.spec_from_file_location("pipeline_training_run", _RUN_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_training_run"] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 class TestRecipeMap:

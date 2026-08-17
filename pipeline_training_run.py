@@ -43,7 +43,7 @@ import sys
 from typing import Tuple
 
 import torch
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
@@ -185,6 +185,31 @@ def _wire_gr_model_optimizer_callback(cfg, gr_cfg, plan) -> None:
     gr_cfg.runtime_callback = GRCallback(plan=plan, gater=gater, log_interval=gr_cfg.log_interval)
     cfg.gr = gr_cfg
     logger.info("gradient routing enabled: %s", plan.describe())
+
+
+def load_yaml_with_defaults(config_file: str, _seen: tuple = ()) -> "OmegaConf":
+    """Load a config YAML, honoring a single-parent ``defaults:`` chain.
+
+    A config may name one parent via a top-level ``defaults: <path>`` key
+    (relative paths resolve against the config file's own directory). Parents
+    load first and children override them, so a leaf carries only its deltas.
+    A missing parent or an inheritance cycle raises rather than silently
+    training on a partial config.
+    """
+    resolved = os.path.abspath(config_file)
+    if resolved in _seen:
+        raise ValueError(f"defaults cycle: {' -> '.join((*_seen, resolved))}")
+    conf = OmegaConf.load(resolved)
+    parent_ref = conf.pop("defaults", None) if isinstance(conf, DictConfig) else None
+    if parent_ref is None:
+        return conf
+    if not isinstance(parent_ref, str):
+        raise ValueError(f"{config_file}: 'defaults' must be a single parent path string, got {parent_ref!r}")
+    parent_path = os.path.normpath(os.path.join(os.path.dirname(resolved), parent_ref))
+    if not os.path.exists(parent_path):
+        raise FileNotFoundError(f"{config_file}: defaults parent not found: {parent_path}")
+    parent = load_yaml_with_defaults(parent_path, (*_seen, resolved))
+    return OmegaConf.merge(parent, conf)
 
 
 def _setup_gradient_routing(cfg, raw_gr: dict, yaml_dataset: dict) -> None:
@@ -371,7 +396,7 @@ def main() -> None:
         if not os.path.exists(args.config_file):
             logger.error(f"Override YAML file not found: {args.config_file}")
             sys.exit(1)
-        yaml_overrides_omega = OmegaConf.load(args.config_file)
+        yaml_overrides_omega = load_yaml_with_defaults(args.config_file)
         merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
         logger.debug("YAML overrides merged successfully.")
 
