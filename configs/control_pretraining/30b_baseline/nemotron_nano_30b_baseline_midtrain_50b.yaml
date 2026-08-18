@@ -1,0 +1,210 @@
+# Control-pretraining 30B baseline — STAGE 2 of 2: midtraining, 50.4B tokens at seq 32768.
+#
+# Nemotron 3 Nano 30B-A3B warm-started from stage 1, 512 GPUs / 128 nodes.
+#
+#   3005 iters x 512 sequences x 32768 tokens = 16,777,216 tokens/iter
+#                                             = 50,415,534,080 tokens >= the 50.4B target
+#   (3004 would land at 50,398,756,864, just short.)
+#
+# Tokens per iteration are IDENTICAL to stage 1 (16,777,216), so the optimizer's token batch
+# is continuous across the stage boundary even though the sequence length quadruples and the
+# sequence count drops from 2048 to 512.
+#
+# TOPOLOGY: TP=1 · CP=2 · EP=4 · PP=1 · ETP=1 · DP=256 -> 512 GPUs = 128 nodes.
+#
+# CP=2 IS NOT A TUNING CHOICE. At seq 32768 the fp32 cross-entropy logits are
+# seq x vocab x 4 = 32768 x 131072 x 4 = EXACTLY 16.00 GiB — a live tensor no recompute
+# setting can touch — and it scales as 1/CP. At PP=1 the CP=1 arm missed by 12.31 GiB. CP=2
+# halves it to 8.00 GiB, which fits. CP must also stay node-local (TP x CP <= 4). Measured
+# alternatives on this model at 32K, all worse: TP=2 +48.9%, PP=2 +18.3%, PP=4 +30.1%,
+# EP=8 +77.2%.
+#
+# THIS TOPOLOGY HAS NOT BEEN RUN AT THIS SCALE. The CP=2 / full-recompute posture is carried
+# over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs; the
+# GBS 512 / DP 256 combination here has never been executed. A smoke test must confirm it
+# fits and that the warm start does not spike before the full run is authorised.
+#
+# --- THIS STAGE IS THE ANNEALING PHASE ---
+#
+# Stage 1 holds a constant 1e-3 and never decays; this stage decays 1e-3 -> 1e-5 over its
+# whole length on the curated long-context mix. Across both stages the decay covers 50.4B of
+# 550.4B tokens = 9.2%, a conventional WSD tail spent on high-quality data rather than web
+# text. lr_wsd_decay_iters equals train_iters, which makes the WSD anneal start at step 1
+# (wsd_anneal_start_ = lr_decay_steps - wsd_decay_steps = 0).
+#
+# WARM START RISK, to be checked by the smoke test: pretrained_checkpoint loads WEIGHTS ONLY,
+# so Adam moments restart at zero while the LR is still 1e-3. `minus_sqrt` decays fast
+# (coeff = 1 - sqrt(ratio), so ~9.0e-4 by 1% of the run), which mitigates it, but a loss
+# spike in the first ~20 iterations is the signature to watch for. If one appears, a short
+# lr_warmup_iters is the fix.
+#
+# --- THE DATA MIX ---
+#
+# Ten corpora, all subsets of geodesic-research/control-pretraining-datasets at revision
+# 669d466ead5f1ed33886241a7338235c98faa1b1. Seven are long-context replay (the N-longest
+# documents of a stage-1 corpus); three are midtraining-only. Weights are each corpus's
+# target divided by 50.4B and sum to 1.000000.
+#
+# The campaign sheet states a midtraining total of 50.2B, which is stale: it was computed
+# while `nemotron_wiki_rewrite_ai_docs` (0.2B) still had a blank Stage cell. All ten staged
+# rows sum to 50.4B, and the itemised rows are authoritative.
+#
+# The `_ai_docs` streams upsample AI-related content rather than adding disjoint documents,
+# and the selection is a keyword filter with many false positives — see the stage-1 config's
+# header for the provenance that establishes both.
+#
+# --- LAUNCH ---
+# Not launched by this file, and it cannot start until stage 1 has written a checkpoint:
+# CheckpointConfig.finalize asserts pretrained_checkpoint exists.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer   # EOD `</s>` = id 2
+
+dataset:
+  # TOKEN COUNTS BELOW ARE PENDING TOKENIZATION and must be filled in before launch.
+  # No corpus here is sharded: only ClimbMix's full 553M-document corpus needs that, and
+  # climbmix_long is a 800k-document subsample of it.
+  data_path:
+    - "0.347223"   # climbmix_long                 17.5B target — 800,032 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_long/tokenized_base_input_document
+    - "0.198413"   # nemotron_stem_sft             10.0B target — 459,324 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_stem_sft/tokenized_base_input_document
+    - "0.158730"   # arxiv_papers                   8.0B target — 433,714 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__arxiv_papers/tokenized_base_input_document
+    - "0.138889"   # nemotron_wiki_rewrite          7.0B target — 6,235,039 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite/tokenized_base_input_document
+    - "0.099206"   # zyda_long                      5.0B target — 139,223 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_long/tokenized_base_input_document
+    - "0.025794"   # stack_edu_long                 1.3B target — 3,190 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_long/tokenized_base_input_document
+    - "0.019841"   # climbmix_ai_docs_long          1.0B target — 5,801 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_long/tokenized_base_input_document
+    - "0.005952"   # zyda_ai_docs_long              0.3B target — 1,665 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_long/tokenized_base_input_document
+    - "0.003968"   # nemotron_wiki_rewrite_ai_docs  0.2B target — 53,041 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite_ai_docs/tokenized_base_input_document
+    - "0.001984"   # lesswrong_plus_long            0.1B target — 27,303 docs expected
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus_long/tokenized_base_input_document
+  split: "9999,1,0"
+  # NOT redundant with model.seq_length below. pipeline_training_run.py rebuilds
+  # cfg.dataset as a GPTDatasetConfig and defaults this key to 8192 when it is absent, so
+  # omitting it here would train this stage at 8192 while every comment said 32768 — with no
+  # error and no warning. The two must be stated, and a unit test asserts they agree.
+  seq_length: 32768
+  seed: 1234
+
+train:
+  global_batch_size: 512       # 16,777,216 tokens/iter — identical to stage 1
+  micro_batch_size: 1
+  train_iters: 3005
+  exit_signal_handler: true
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: WSD
+  lr_wsd_decay_style: minus_sqrt
+  # No warmup: this stage continues an already-warm model and begins annealing at step 1.
+  # The Nano pretrain recipe sets lr_warmup_iters = 333, so this 0 is an override, not a
+  # restatement of a default — omitting the line would insert a 333-iteration warmup.
+  lr_warmup_iters: 0
+  # Equal to train_iters, so the anneal spans the whole stage.
+  lr_wsd_decay_iters: 3005
+
+optimizer:
+  lr: 1.0e-3                   # continues stage 1's constant rate, then decays from step 1
+  min_lr: 1.0e-5               # the floor the two-stage schedule actually reaches
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+comm_overlap:
+  tp_comm_overlap: false
+  # Same clobbering rule as stage 1: the Nano pretrain recipe's CommOverlapConfig.setup()
+  # runs after the YAML merge and rewrites cfg.ddp, so these must live here and not in ddp:.
+  overlap_param_gather: false
+  overlap_grad_reduce: true
+  bucket_size: 500000000
+
+ddp:
+  use_distributed_optimizer: true
+
+dist:
+  # Rank 0 builds the blended-dataset index over a 10-prefix blend at 32768 tokens per sample
+  # while every other rank waits in the same collective, and the top-level BlendedDataset
+  # index is never cached, so this recurs on every restart.
+  distributed_timeout_minutes: 60
+  distributed_backend: "cpu:gloo,cuda:nccl"
+
+model:
+  seq_length: 32768
+  # At CP=2 the fp32 logits are 8.00 GiB per rank; leaving fusion on adds a second,
+  # out-of-place inductor buffer of the same size, which this posture cannot afford.
+  cross_entropy_loss_fusion: false
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 2           # see the header: the minimum CP that fits at 32768
+  sequence_parallel: False           # SP requires TP>1
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  # FULL recompute is mandatory at 32768, not a tuning choice: selective recompute OOMs in
+  # the loss computation asking for exactly 8.00 GiB. recompute_num_layers stays 1 because
+  # larger N measured an identical peak — under `uniform` it trades stored chunk boundaries
+  # for a bigger recompute-time transient and nets out flat.
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+checkpoint:
+  # Weights only. --mode pretrain dispatches pretrain(), which has no checkpoint.load assert,
+  # and the setup path loads base weights from pretrained_checkpoint — giving this stage a
+  # fresh optimizer and its own LR schedule rather than resuming stage 1's. Point this at
+  # stage 1's save directory; CheckpointConfig.finalize asserts it exists, so this config
+  # cannot be launched before stage 1 has written a checkpoint.
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_pretrain_500b
+  # A NEW directory, deliberately not stage 1's: load == save is what lets a segment resume,
+  # and pointing either at the stage-1 directory would make this stage resume stage 1's
+  # iteration counter and schedule instead of starting its own.
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_midtrain_50b
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_midtrain_50b
+  # 2 of the campaign's 10 retained checkpoints, one every 25,216,151,808 tokens. 1503 is the
+  # only interval save and 1503 x 2 = 3006 overshoots train_iters, so Megatron-Core's
+  # unconditional end-of-training save at 3005 supplies the second.
+  save_interval: 1503
+  save_optim: true
+  save_rng: true
+  most_recent_k: -1
+  ckpt_format: torch_dist
+  async_save: false
+  # Same requirement as stage 1: the recipe sets this True, and leaving it True makes the
+  # second save retain a 13.679 GiB bf16 copy of this rank's expert weights, which OOMs the
+  # next forward.
+  ckpt_assume_constant_structure: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: control_pretrain_30b_baseline_midtrain_50b

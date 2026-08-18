@@ -500,6 +500,20 @@ object-gather transport retention (`dist.distributed_backend: "cpu:gloo,cuda:ncc
 **Any probe validating save behaviour must cross at least three saves and run the forward
 after each** — one that exits at its second save never executes the failing step.
 
+**The going-forward arm is `configs/control_pretraining/30b_baseline/`**, which supersedes V1's
+blend with the finalised campaign mix and splits the curriculum into **two stages**:
+`nemotron_nano_30b_baseline_pretrain_500b.yaml` (500B tokens, seq 8192, **constant** 1e-3 — it
+never anneals) then `nemotron_nano_30b_baseline_midtrain_50b.yaml` (50.4B tokens, seq 32768,
+TP1·**CP2**·EP4·PP1, which is the annealing phase, decaying 1e-3 → 1e-5 with `minus_sqrt`).
+Both run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
+boundary, and the two retain **10 checkpoints between them** (8 + 2). All 16 corpora are
+subsets of one pinned HF repo and share **one** prepare config plus `--subset`, because
+`pipeline_data_prepare.py` already derives the output dir from
+`slugify_dataset_name(dataset, subset)`. Two traps that arm's README documents and its tests
+enforce: `dataset.seq_length` silently defaults to 8192 when omitted (`pipeline_training_run.py`)
+while `model.seq_length` is a separate unchecked key, and `lfs setstripe` must precede the write
+because a `mv` inside Lustre is a rename that never restripes.
+
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
 Ultra is architecturally a scaled Super — same NemotronH hybrid (Mamba2 + attention + Latent MoE) with MTP and 512 routed experts, but 108 layers and hidden 8192. HF id `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` (base: `…-Base-BF16`). Recipe: `nemotron_3_ultra_{pretrain,sft,peft}_config`; train via `pipeline_training_submit.sbatch <config> ultra sft`.

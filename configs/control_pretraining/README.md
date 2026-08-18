@@ -4,6 +4,17 @@ The unfiltered **control baseline** for the pretraining-data-filtering study: Ne
 (30B-A3B) trained **from scratch on 500B tokens**. A later run will use the same recipe on a
 filtered version of the same blend, so everything except the data is held fixed here.
 
+> **This file documents the V1 baseline. The going-forward arm is
+> [`30b_baseline/`](30b_baseline/README.md).**
+>
+> V1's provisional three-corpus blend (ClimbMix / Zyda-2 / AI-safety at 0.80 / 0.19 / 0.01) has
+> been superseded by the finalised campaign mix, and the curriculum is now **two stages** —
+> 500B tokens at seq 8192 holding a constant LR, then 50.4B at seq 32768 doing the annealing.
+> V1 is kept because its posture is what the new stage 1 reuses and its measurements (the
+> save-crossing pathologies, the sharding numbers, the 597-iteration acceptance) are still the
+> evidence base for both. **Read this file for the mechanisms; read `30b_baseline/` for what is
+> actually being run.**
+
 | | |
 |---|---|
 | Config | [`nemotron_nano_control_v1_baseline_500b.yaml`](nemotron_nano_control_v1_baseline_500b.yaml) |
@@ -215,6 +226,18 @@ tokenize entry point against each. No new code path — the parallelism comes fr
 the existing tool N times — and it removes both plausible decay mechanisms at once: one
 writer process per shard instead of one for the whole corpus, and a per-shard in-memory
 document index a fraction of the size.
+
+**This procedure is now a script — use
+[`30b_baseline/shard_jsonl_corpus.sh`](30b_baseline/shard_jsonl_corpus.sh)**, submitted as its
+own job, with `30b_baseline/build_corpora.sh` chaining the per-shard tokenizes on it via
+`--dependency=afterok`. It is corpus-agnostic (it takes a dataset root and a shard count) and
+fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
+shard count rather than hardcoded to 1 (which silently caps the split at ten shards), the byte
+gate *blocks* the tokenizes instead of merely running before them, and the dataset root is
+striped before `prepare` writes `training.jsonl` — a `mv` inside Lustre is a rename and never
+restripes, which is why V1's source ended up stripe-1 while its shard dirs were stripe-8.
+
+The original hand-run form, kept because it is what produced the measurements below:
 
 ```bash
 # 1. split, then give each shard its own dataset root (stripe BEFORE any file is created)

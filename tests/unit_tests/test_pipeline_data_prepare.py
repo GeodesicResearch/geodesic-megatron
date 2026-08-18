@@ -393,9 +393,12 @@ class TestShippedCorpusConfigs:
     """The campaign's corpus definitions must actually load through the real parser."""
 
     def test_every_shipped_corpus_config_parses(self, pipe_module):
-        config_dir = _REPO_ROOT / "configs" / "control_pretraining" / "data"
-        configs = sorted(config_dir.glob("*.yaml"))
-        assert configs, f"no corpus configs found in {config_dir}"
+        # Recursive: each campaign arm keeps its corpus definitions in its own data/
+        # directory (configs/control_pretraining/30b_baseline/data/, ...), so a glob
+        # anchored on the top-level data/ alone would silently skip every arm but the first.
+        campaign_dir = _REPO_ROOT / "configs" / "control_pretraining"
+        configs = sorted(campaign_dir.glob("**/data/*.yaml"))
+        assert configs, f"no corpus configs found under {campaign_dir}"
         for path in configs:
             args = _parse_bare(pipe_module, "--config", str(path))
             assert args.dataset, f"{path.name} does not name a dataset"
