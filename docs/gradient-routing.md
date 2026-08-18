@@ -268,12 +268,14 @@ persist to `posture_verification.json`.
 | `scripts/gradient_routing/check_gr_smoke_result.py` | post-checks the functional smoke asserts (aux trained, module census) |
 | `scripts/gradient_routing/gr_smoke_submit.sbatch` | SLURM wrapper for the functional smoke |
 | `scripts/gradient_routing/gr_probes_submit.sbatch` | SLURM wrapper for the corpus-loss probe runner |
+| `scripts/gradient_routing/gr_analysis_submit.sbatch` | SLURM wrapper for candidate scoring (CPU-only; the scorer needs numpy/PyYAML, which the tooling venv does not carry) |
 | `scripts/gradient_routing/build_probe_matrix.py` | expands a probe-matrix YAML into the runner's TSV |
 | `scripts/gradient_routing/compute_ratio.py` | compute-ratio scoring: power-law fit over the reference arm's curve rows (`--results` + the matrix `--definition`, which names the reference arm via `curve.checkpoint`); writes `compute_ratios.json` beside the results |
 | `scripts/gradient_routing/run_gr_functional_smoke.sh` | tiny-model end-to-end functional smoke |
 | `scripts/gradient_routing/run_corpus_loss_probes.sh` | runs the eval-only loss-probe matrix (§8.2); one probe per (name, checkpoint, corpus, extra overrides) row |
 | `scripts/gradient_routing/summarize_loss_probes.py` | turns a probe `results.tsv` into `retention_ratio` / `removal_fraction` (§8.2) |
 | `scripts/gradient_routing/score_success_criteria.py` | scores probe losses against the matrix definition's `scoring:` section: the all-off-vs-filtering regression gate and the all-on criterion against BOTH bars (matched filtering and the unfiltered baseline), with pass/ambiguous/fail banding, composability, and CR gaps (`--ratios`); writes `success_report.json` beside the results |
+| `scripts/gradient_routing/run_candidate_scoring.py` | one candidate end to end: `--print-rows` emits the probe rows it needs (feed them to `run_corpus_loss_probes.sh --only`), then the default mode merges those rows onto the definition's `reference_results` in a fresh `--outdir` and runs `compute_ratio.py` followed by `score_success_criteria.py` over the merge (in that order — the second is fed the first's `compute_ratios.json`), with `scoring_provenance.json` recording the inputs. `scoring.specificity_matrix` in the definition selects own-topic-only cells (default) or the full specificity cross product. Refuses an `--outdir` equal to the reference table's directory (that would overwrite the shared compute-ratio fit) and names any missing or non-`ok` row rather than scoring around it |
 | `scripts/data/build_mmlu_pro_cot_corpus.py` | renders MMLU-Pro items in lm-eval's format for the train-on-test diagnostic corpora; `rendering` and `answer_source` are both REQUIRED config choices, and it writes a `.provenance.json` sidecar naming both |
 | `configs/gradient_routing/` | GR training configs, bake/verify posture configs, corpus-builder configs |
 
@@ -314,9 +316,15 @@ Two fields the wiring sets for you, so a GR config does NOT declare them:
 `model.gr_aux_ffn_hidden_size` (normalized from `gr.aux_ffn_hidden_size`; a
 conflicting YAML value is refused — set the widths once, in `gr:`) and
 `dataset.dataloader_type: "single"` (hardcoded, since iteration attribution
-depends on it). The one thing the run config must still get right is
-`checkpoint.dist_ckpt_strictness` tolerating missing keys (e.g. `log_all`) —
-a warm-start base checkpoint has no `gr_aux` tensors.
+depends on it). Two things the run config must still get right, both in the
+`checkpoint:` section. First, `dist_ckpt_strictness` must tolerate missing keys
+(e.g. `log_all`) — a warm-start base checkpoint has no `gr_aux` tensors. Second,
+**`save_optim` must be False** (and with it `save_rng`, since a run that saves no
+optimizer state cannot resume anyway): gating gives every param group its own
+optimizer step count, and saving optimizer state asserts they all share one. mcore
+defaults `save_optim` to True, so a config that simply omits it is refused at
+launch. GR runs therefore write only the final, weights-only checkpoint — leave
+`save_interval` above `train_iters`.
 
 GR runs in `--mode cpt` (warm start) and `--mode pretrain` (from scratch —
 random init via the NVIDIA pretrain recipe; the Simple Stories campaign's
@@ -395,6 +403,12 @@ GR is wired for `--mode cpt` and `--mode pretrain` (any other mode is refused).
   `HybridDeviceOptimizer` that steps its own gpu/cpu sub-optimizer param lists
   rather than the `param_groups` the gater empties, so the gate would be a
   silent no-op;
+- `checkpoint.save_optim` — gating gives every param group its own optimizer step
+  count by construction (aux groups are emptied on the iterations they must not learn
+  from), and saving optimizer state asserts they all share ONE count
+  (`ChainedOptimizer._synchronize_steps`). It fires at the first `save_interval`, hours
+  into a healthy run, and a final-only save would fail the same way at the end. **GR runs
+  cannot resume from optimizer state**: write only the final checkpoint, weights-only;
 - `inprocess_restart` — it rebuilds the optimizer while the callback keeps the
   gater built for the dead one, and the gater caches its discovery, so it would
   empty a stale optimizer's groups while the live one stepped everything;
@@ -410,10 +424,76 @@ GR is wired for `--mode cpt` and `--mode pretrain` (any other mode is refused).
 Per-iteration W&B keys are per-module (all under the run's `gr/*` namespace):
 `gr/corpus`, `gr/update_core`, `gr/core_steps_cum`, and for each module k:
 `gr/fwd_aux_{k}`, `gr/update_aux_{k}`, `gr/aux{k}_steps_cum`,
-`gr/aux{k}_out_rms` (rises from exactly 0 as the zero-init trains),
-`gr/aux{k}_param_norm`. The iteration's loss lands under `gr/loss_core` or
-`gr/loss_corpus{c}` for aux corpus c. Plus `run/gr_plan_digest_int` for
-provenance.
+`gr/aux{k}_param_norm`, plus the magnitude family below. The iteration's loss
+lands under `gr/loss_core` or `gr/loss_corpus{c}` for aux corpus c. Plus
+`run/gr_plan_digest_int` and `run/gr_probe_layers` for provenance. All of the
+magnitude keys follow `gr.log_interval` (1 in every shipped GR config).
+
+**Module magnitude**, measured on EVERY GRAM MoE layer and EVERY microbatch that
+the logging rank sees. (The probe is rank-local by design and the bridge starts
+W&B on one rank, so the published numbers are that rank's microbatches — one
+DP replica's share of the global batch — exactly as every other `gr/*` series
+already is.) `gr/aux{k}_out_rms_all` is the pooled output RMS (rises from
+exactly 0 as the zero-init trains) and is the headline number.
+`gr/aux{k}_out_rms_{min,max}` with `gr/aux{k}_out_rms_{min,max}_layer` are the
+per-layer extremes and the **mcore `layer_number`** where they occur — a module
+can be dead at one depth and alive at another, and the min/min_layer pair is what
+says so. `gr/aux{k}_out_rms` keeps its old meaning (layer 0 only) so series
+either side of this change stay joinable; it is a ONE-layer sample and must not
+be read as the module's magnitude. `gr/aux{k}_in_ratio_max` is that output RMS
+over the RMS of the layer INPUT.
+
+**Contribution against the layer's write.**
+`gr/aux_contrib_in_ratio_{mean,max}` and `gr/aux_contrib_in_ratio_max_layer`
+report `|| sum_k gate_k * aux_k(h) || / || layer input ||`, gate-independent and
+unbounded, comparable across every iteration, and exactly 0 on a gate-closed one
+(where the `_max_layer` key is omitted rather than labelling a meaningless
+argmax). **The layer input is NOT the residual stream, and these ratios are not
+"the fraction of the residual stream the modules perturb".** mcore builds each
+MoE layer with a real `pre_mlp_layernorm`, hands the GRAM layer
+`pre_mlp_layernorm(hidden_states)`, and only then adds the layer's write into
+`hidden_states` via `mlp_bda` — so the denominator here is the *normalized* input
+the modules read. A normalization pins its output's RMS near `||gamma||` at every
+depth while the residual's RMS grows with depth, so reading `in_ratio` as a share
+of the stream overstates it by `||residual|| / ||norm(residual)||`, and by a
+*different* factor at each layer — i.e. along exactly the axis `_max_layer`
+invites you to compare. Read it as "how large the modules' write is next to what
+they were given". `gr/aux_contrib_out_share_max` divides by the layer OUTPUT
+instead, which genuinely *is* the layer's write and *contains* the contribution:
+it saturates near 1 and must not be read as unbounded (a value near 1 can also
+mean the module's write and the core write partially cancel). Parameter norms are
+not a proxy for either — in the Simple Stories campaign the arm with the largest
+`gr/aux{k}_param_norm` did the least damage.
+
+**Module liveness.** NemotronH's activation is squared ReLU, whose gradient is
+identically zero for a unit whose pre-activation is non-positive on every token,
+so that unit's `linear_fc1` row and `linear_fc2` column are frozen for the rest of
+the run and no resume recovers them — while the run still finishes with 0 NaN, a
+full iteration count and a valid checkpoint, and a composability "pass" that is
+vacuous because a module contributing nothing cannot interfere. The reading is
+per UNIT, because the death is:
+
+- `gr/aux{k}_live_frac_min` (with `_min_layer`) is the **sharp** series: the
+  smallest fraction of live fc1 units over the GRAM layers. A copy that has lost
+  4095 of 4096 units is the realistic failure, and it is the one a whole-tensor
+  maximum calls healthy.
+- `gr/aux{k}_live_layers` counts layers with at least one live unit. It detects
+  only TOTAL death, and is kept because it is the joinable series.
+
+Both are read on the INPUT side of the activation on purpose: `gr_aux_output_init:
+zero` zeroes fc2, so a healthy fresh module has an output RMS of exactly 0 while
+every unit reads live. **Both are emitted on every logged iteration, but they are
+only meaningful on the module's own corpus** — a specialised module being quiet on
+core text is routing WORKING — so condition any criterion on `gr/corpus == k + 1`,
+which is what the callback's own WARNING does. It warns once per module (on total
+death, or on a live fraction below 0.25) and never raises: the predicate depends
+on this rank's tokens, so a rank-local raise would hang the job rather than end
+it. Under TP > 1 the read would additionally see only this rank's shard of the
+units (`linear_fc1` is column-parallel); every shipped GR config is TP=1.
+
+A run whose summary carries no `run/gr_probe_layers` predates this probe: its
+`gr/aux{k}_out_rms` was a one-layer, LAST-microbatch sample, and it has none of
+the `_all` / `_min` / `_max` / `live_*` series.
 
 ### 8.1 Evaluation lives in the evals repos, not here
 
@@ -555,8 +635,13 @@ retention with low removal is ordinary CPT wearing a routing costume.
    --model nano --mode cpt|pretrain [--disable-ft]` (or via
    `pipeline_training_submit.sbatch`). From a worktree, export
    `GEODESIC_REPO_DIR=<worktree>`. Sanity: every `gr/loss_*` decreasing,
-   each routed module's `gr/aux{k}_out_rms` rising from 0, 0 NaN, plan
-   digest logged.
+   each routed module's `gr/aux{k}_out_rms_all` rising from 0, and — **filtered
+   to the iterations where `gr/corpus == k + 1`, that module's own corpus** —
+   its `gr/aux{k}_live_layers` holding at `run/gr_probe_layers` and its
+   `gr/aux{k}_live_frac_min` not decaying (a dip on any OTHER corpus is routing
+   working, not a defect, and unfiltered the criterion fails on most iterations
+   of a healthy run). Plus 0 NaN, plan digest logged, and no
+   `gr_aux.{k} is DEAD` / `has COLLAPSED` line in the training log.
 5. **Export + bake.** Single-process raw export
    (`pipeline_checkpoint_convert_hf.py` without torchrun — the multi-GPU path
    drops the aux keys). Two known post-export steps: (a) the converter emits
@@ -744,10 +829,14 @@ loss matrix, CR table, and noise analysis:
   loss rise on each aux topic is 88-137% of what a model that NEVER saw those
   topics shows (per-topic gaps +0.044 to +0.118 nats). The measured run-to-run
   noise — from the four independent filtering runs — is ±0.01 nats.
-- **Specificity is airtight.** Toggling any module moves OTHER topics' losses by
-  at most 0.0017 nats (median 0.0004) and core by at most 0.0007 — module subsets
-  are surgically independent, which is what makes profile serving from one
-  checkpoint meaningful.
+- **Specificity is airtight — SUPERSEDED by 10.4, see below.** Toggling any module
+  moves OTHER topics' losses by at most 0.0017 nats (median 0.0004) and core by at
+  most 0.0007 — module subsets are surgically independent, which is what makes
+  profile serving from one checkpoint meaningful. **This holds only for THESE
+  modules.** They were too weak to interfere; once 10.4's arms gave modules real
+  capability, the same measurement on core rose to 0.1292 nats at all-on. Read this
+  bullet as "specificity is airtight at this capability level", not as a property of
+  the mechanism.
 - **Recovery is real but reaches ~half of the matched filtering arm** on
   distinctive topics (deadline 52%, aliens 45%, cultures 47% of the achievable
   gap; eras 8%, consistent with its tiny removal gap). In the paper's
@@ -756,6 +845,132 @@ loss matrix, CR table, and noise analysis:
   43-44 own-topic update steps of 276-282 total — ~85% are p_cr core-robustness
   steps on core data — and aux_lr = core LR on the shared cosine schedule), not
   an isolation defect.
+- **DISCLOSURE — these numbers are not active-parameter-matched, and the bias favours
+  GRAM.** This port ADDS 1856-wide modules to an unshrunk core, so a served profile runs
+  wider than the baseline and filtering models it is scored against: stock active FFN
+  width is 3712 (shared) + 6x1856 (top-6 routed) = 14,848, so one module on is 1.125x
+  and all four on is **1.500x** — **+1.53B active parameters, 51% of the ~3B active
+  budget**. The paper instead PARTITIONS: `core_dim` and `aux_dim` are both fractions of
+  one baseline width (`core_param_prc` 0.95 / `aux_param_prc` 0.05 in the authors' code),
+  so Simple Stories runs core 1920 + 4x128 against a 2048 baseline — all-on at **1.19x**,
+  under an explicit "maximum active parameter count never exceeds the baseline"
+  constraint. Every retain and compute-ratio figure above therefore carries an untested
+  width advantage. It does NOT explain the composability collapse in §10.4 (module width
+  is byte-identical across every candidate arm while the outcome varies 250x), but it must
+  be quoted alongside any capability claim. Arithmetic:
+  `/projects/a5k/public/logs/gradient_routing_geod171/simple_stories/analysis_notes/active_param_fairness.txt`.
 - **Core cost ~1.0-1.5%**: the all-off profile's core loss is +0.014 nats above
   the step-matched filter_core arm — at the top of the paper's published
   retain-cost band (+0.29% to +1.19%) and within ~1-2 noise units.
+
+### 10.4 The composability campaign (GEOD-171k) — IN FLIGHT
+
+§10.3 left recovery at ~half the matched filtering arm and read that as a knob question.
+This campaign attacked it, and the result reframed the problem: the bottleneck moved rather
+than closing. **Nothing here is a final verdict — arms are still running.**
+
+**The success bar changed, on Kyle's decision (2026-08-17): criterion 2 means REPRODUCE THE
+PAPER.** It was originally "all modules ON ≈ the train-on-everything baseline, ±0.02 nats",
+which is arithmetically unreachable on two of the four topics by ANY module system, because
+the filtering models it would have to match are themselves above that baseline on their own
+topics (deadline +0.0296, cultures +0.0380, eras +0.0144, aliens +0.0120; mean **+0.0235**).
+The operative comparison is therefore the paper's own — a module profile vs the **matched
+filtering arm** — with the train-on-everything gap reported beside it, floor stated, never as
+a gate. Note the paper scores only `{core}` and `{core, k}` profiles on Simple Stories; it
+never evaluates all-modules-on there, so all-on is this port's extension, not part of the
+reproduction claim.
+
+**Reproduction scoreboard** (compute-ratio gap, single-module-on vs matched filtering on its
+own topic; lower is closer to the paper):
+
+| arm | dose | retain gap | core gap |
+|---|---|---|---|
+| **paper (Table 1)** | — | **0.010** | **0.023** |
+| mainline | aux_lr = core LR, decaying | 0.104 | 0.048 |
+| C1b | constant aux LR 1.6e-3 | 0.074 | **0.023** |
+| D3 | constant 9e-3, 1x steps | 0.129 | 0.055 |
+| D1 | constant 9e-3, p_af 4x | 0.113 | 0.117 |
+| E1 | constant 4.5e-3, p_af 8x | **0.030** | 0.036 |
+
+No arm reproduces both axes: C1b matches the paper's core gap exactly while missing retain
+by 7x; E1 gets closest on retain but with a wider core gap **and a removal failure**.
+
+**What was established (each survived an adversarial verification pass):**
+
+- **LR is not the recovery lever; optimizer-step count is.** D3 raised aux_lr 5.6x at fixed
+  steps and recovery got *worse*; D1 raised steps 4x at fixed LR and recovery rose. D1 and E1
+  have Σlr matched by construction (9e-3 x 174 = 4.5e-3 x 348) yet differ 24x in composition
+  damage — Σlr was the wrong calibration axis.
+- **Spillage is MULTIPLICATIVE (`p_as` x `p_af`), and it degrades removal.** Oversampling a
+  module's own topic k-fold while holding `p_as` also multiplies the core-updating steps taken
+  on aux text: 52 (mainline) -> 209 (D1) -> **418 (E1)**. E1 is consequently the only arm whose
+  all-off model predicts the forget corpus BETTER than a model that never saw it (deadline
+  1.5200 vs filter_core 1.5556) — a criterion-1 failure produced by pushing capability.
+  **Dividing `p_as` by the oversampling factor restores absolute spillage and makes `p_af` a
+  genuine one-variable lever** (the F1/F2 arms).
+- **All-on damage is superadditive in TOTAL MODULE MAGNITUDE.** Measured on core, which carries
+  no module's capability so any rise is pure interference. The COMPLETE 2^4 profile lattice was
+  measured on E1 (4 singles, 6 pairs, 4 triples, all-off, all-on), so the excess over the
+  additive prediction is a mean over every subset of a given size rather than one path:
+  **1.51x at n=2** (spread 1.30-1.76), **2.26x at n=3** (2.00-2.67), **3.56x at n=4**. Fitting
+  `D(n) = A*n^p` against the MEAN single-module damage (0.0091) gives **p ≈ 1.92**; an earlier
+  `~n^2.5` figure anchored n=1 on deadline, which the full lattice shows is the weakest of the
+  four modules (0.0039), and anchoring on the smallest single inflates the exponent. Fitted
+  against the mean damage at each size, p climbs monotonically: **1.60 (n=2), 1.75 (n=3),
+  1.92 (n=4)**, all above the p=1 of a purely additive tax. Per-subset exponents vary widely
+  with which modules a subset happens to contain (the two deadline-bearing pairs give 0.59
+  and 1.00 because deadline is the weakest module), so quote the size-averaged series above,
+  never a single subset.
+- **The interaction is not merely pairwise.** All six pairwise terms
+  `<v_i,v_j> = (pair - single_i - single_j)/2` are POSITIVE (+0.0021 to +0.0084): module damages
+  reinforce, none cancel. But a perturbation model `damage ≈ ||sum_k g_k v_k||^2` fitted on the
+  pairs alone then UNDER-predicts every triple by 9-14% and all-on by **28%**, so genuine
+  higher-order interaction grows with module count.
+- **At full gates the model is outside the quadratic basin; titration walks it back in.** For
+  four modules scaled by t: t=.10 **-0.0011**, t=.20 -0.0004, t=.25 +0.0007, t=.35 +0.0046,
+  t=.50 +0.0154, t=1.0 +0.1292 — fitted **p = 3.07 (t=.5), 3.17 (t=.35), 3.73 (t=.25)**. A
+  locally quadratic loss would give exactly p=2 at every scale regardless of module count, so
+  p>2 (from titration) and the >pairwise residue (from the lattice) are two independent
+  measurements of the same fact. Below t≈0.2 the damage goes slightly NEGATIVE — a small gate
+  helps core — which is real at the 7e-6 probe floor.
+- **Full-gate all-on is catastrophic on the AUX topics, not just core.** Gain vs all-off:
+  core **-0.1292**, aliens -0.0469, eras -0.1853, cultures -0.2163, deadline **-0.4357**. The
+  posture destroys the capabilities it exists to compose; quoting only the core figure
+  understates it by 3.4x.
+- **Serving-time titration is free and effective, and has an INTERIOR optimum.** Gates are a
+  float vector multiplied into each module's output and are validated on LENGTH only, so
+  fractional (and negative) gates need no code change. On deadline the frontier peaks at
+  **t=0.35: core damage +0.0046 (4.3x inside the 0.02 band) while retaining 74.8%** of what the
+  deadline module delivers alone — better than t=0.25 (68.5%) and t=0.50 (52.2%), and far better
+  than full gates. Because modules are bias-free and non-gated, scaling `fc2` by t is identical
+  to a gate of t, so a titrated posture bakes and exports exactly. **The optimum is currently
+  established on deadline only**; cultures is already at 99.1% of solo at t=0.25, which suggests
+  its optimum sits lower, and the remaining ladder is in flight.
+- **Negative gates are a diagnostic, not a lever.** Alternating signs `[1,-1,1,-1]` costs 0.0526
+  against all-positive's 0.1292 (59% less), which looks like coherent-sum cancellation — but
+  flipping a SINGLE module is worse than not flipping it (`[1,-1,0,0]` 0.0294 vs `[1,1,0,0]`
+  0.0181), and every signed profile is 3-5x worse than the pairwise model predicts. A negative
+  gate subtracts a learned direction, a state no module was trained or served in, so it carries
+  its own off-distribution cost on top of any cancellation it buys — and it does not deliver the
+  module's capability anyway.
+- **One module never learned its topic.** The eras module ALONE makes eras **worse** by 0.0112
+  nats, while titrated all-on improves eras by +0.0097. Whatever eras capability exists lives in
+  the module combination, not in the eras module, so per-module removal is not meaningful for
+  that topic.
+- **Earlier "perfect composability" was vacuous.** The ~0.002 nat all-on-vs-single-on figures in
+  §10.3 were measured on modules too weak to interfere; the property only became testable once
+  E1's modules carried real capability.
+- **Caveat on titration's apparent lead:** measured as gain over each arm's OWN all-off, C1b's
+  hard all-on on deadline (0.0451) beats E1 at t=0.25 (0.0427) and is edged out by E1 at t=0.35
+  (0.0467). Treat that ordering as unresolved rather than a win: the margin is 0.0016 nats, and
+  the comparison is confounded because E1's all-off has already leaked (its criterion-1 failure
+  above), so E1's gains are measured from a baseline that is itself displaced. A clean version of
+  this comparison needs the F1 arm, whose whole purpose is to remove that leak.
+
+**Instrumentation defect found and fixed.** The aux-output probe hooked `_gram_layers[0]` only
+— 1 of 23 MoE layers — and kept only the last microbatch, so every magnitude claim rested on
+that sample; an arm (D3) shipped with dead layer-0 modules, 0 NaN and a valid checkpoint
+without anything noticing. The probe now covers every layer, module and microbatch, and a
+per-unit liveness detector warns on collapse. Squared-ReLU makes this a real failure mode: it
+has identically-zero gradient for all-negative pre-activations, so one large fc1 step can kill
+a module permanently.

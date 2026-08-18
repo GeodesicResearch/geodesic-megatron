@@ -62,6 +62,23 @@ def parse_row_name(name: str) -> tuple[str, str | int, str] | None:
     return None
 
 
+def read_rows(path) -> dict[str, dict]:
+    """Parse results.tsv into {probe_name: row}, keeping every column and the file order.
+
+    A row without a name cannot be addressed by any consumer and cannot be reported
+    against, so it is refused here rather than dropped — a silently shortened table is
+    the failure this module exists to prevent.
+    """
+    rows: dict[str, dict] = {}
+    with open(path) as f:
+        for position, row in enumerate(csv.DictReader(f, delimiter="\t"), start=2):
+            name = row.get("name")
+            if not name:
+                raise SystemExit(f"FATAL: {path} line {position} has no name — every probe row must be addressable.")
+            rows[name] = row
+    return rows
+
+
 def read_results(path, *, on_bad):
     """Parse results.tsv into {probe_name: loss}.
 
@@ -71,12 +88,11 @@ def read_results(path, *, on_bad):
     """
     losses = {}
     bad = []
-    with open(path) as f:
-        for row in csv.DictReader(f, delimiter="\t"):
-            if row.get("status") != "ok" or not row.get("lm_loss"):
-                bad.append(f"{row.get('name')} ({row.get('status')})")
-                continue
-            losses[row["name"]] = float(row["lm_loss"])
+    for name, row in read_rows(path).items():
+        if row.get("status") != "ok" or not row.get("lm_loss"):
+            bad.append(f"{name} ({row.get('status')})")
+            continue
+        losses[name] = float(row["lm_loss"])
     if bad and on_bad == "error":
         raise SystemExit(
             "FATAL: probe rows are broken or missing losses — fix or re-run them before "

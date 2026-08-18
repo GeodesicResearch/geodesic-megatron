@@ -100,6 +100,29 @@ def _gap_cell(
     }
 
 
+def candidate_rows(profile: dict, corpora: list[str], *, specificity: bool = False) -> list[str]:
+    """The probe rows ``score_candidate`` reads for one profile set, in definition order.
+
+    This is NOT the arm-by-corpus cross product. The all-off and all-on profiles are
+    scored on every corpus, but a single-module profile is only ever compared against its
+    OWN topic (the composability cell below), so the cross product would demand four times
+    the probes for cells nothing reads. It lives beside the scorer that consumes it
+    because the two must agree: ``score_candidate`` tolerates a missing row by omitting
+    its cell, so a contract that drifted would quietly thin the report rather than fail.
+
+    ``specificity=True`` returns the whole cross product — the specificity matrix, where a
+    module IS scored on the topics it does not own, which is a deliberately larger
+    measurement.
+    """
+    rows: list[str] = []
+    for key in ("off", "all_on"):
+        if profile.get(key):
+            rows.extend(arm_row_name(profile[key], corpus) for corpus in corpora)
+    for topic, arm in (profile.get("on") or {}).items():
+        rows.extend(arm_row_name(arm, corpus) for corpus in (corpora if specificity else [topic]))
+    return rows
+
+
 def score_candidate(losses: dict[str, float], scoring: dict, profile: dict) -> dict:
     """Score one GR candidate's profiles against both criterion bars.
 

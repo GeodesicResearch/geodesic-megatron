@@ -236,6 +236,64 @@ def _recorded_metrics(monkeypatch):
     return calls
 
 
+def _train_aux(layer, module, scale=0.5, seed=5):
+    """Give one layer's copy of a module a non-zero output projection, as training would."""
+    torch.manual_seed(seed)
+    with torch.no_grad():
+        layer.gr_aux[module].linear_fc2.weight.normal_(0.0, scale)
+
+
+def _kill_squared_relu(layer, module):
+    """Zero one layer's copy of a module's fc1.
+
+    No pre-activation can ever be positive again, so ``relu(z)**2`` — whose derivative is
+    ``2 relu(z)`` — gives BOTH of that copy's projections exactly zero gradient forever. This
+    is the irrecoverable state the liveness metric exists to name.
+    """
+    with torch.no_grad():
+        layer.gr_aux[module].linear_fc1.weight.zero_()
+
+
+def _pin_fc1_units(layer, module, live):
+    """Make EXACTLY ``live`` of one module copy's fc1 units live, for any positive input.
+
+    A ``+1`` row gives ``pre = sum(x) > 0`` whenever every input element is positive; a zeroed
+    row gives exactly 0, which is non-positive, so ``d/dz relu(z)**2 = 2 relu(z)`` is zero and
+    that unit's fc1 row and fc2 column are frozen forever. Paired with ``_forward(...,
+    positive=True)`` this makes the per-unit liveness reading exact rather than a coin flip
+    over this rig's dozen tokens — the fraction under test has to be a fact, not a sample.
+    """
+    with torch.no_grad():
+        weight = layer.gr_aux[module].linear_fc1.weight
+        weight.zero_()
+        weight[:live].fill_(1.0)
+
+
+def _forward(model, seed=7, scale=1.0, positive=False):
+    """Push ONE microbatch through EVERY layer, the way a training step would.
+
+    ``positive`` draws strictly-positive tokens (every element >= 1), which is what makes a
+    ``_pin_fc1_units`` row's sign provable instead of seed-dependent.
+    """
+    torch.manual_seed(seed)
+    if positive:
+        x = (torch.rand(SEQ, BATCH, HIDDEN, dtype=torch.bfloat16, device="cuda") + 1.0) * scale
+    else:
+        x = torch.randn(SEQ, BATCH, HIDDEN, dtype=torch.bfloat16, device="cuda") * scale
+    with torch.no_grad():
+        for layer in model:
+            layer(x)
+    return x
+
+
+def _probed_step(callback, model, step, seed=7, scale=1.0, positive=False):
+    """One complete logged iteration: the gate write, one microbatch, the step end."""
+    callback.on_train_step_start(_context(model, step=step))
+    x = _forward(model, seed=seed, scale=scale, positive=positive)
+    callback.on_train_step_end(_context(model, step=step))
+    return x
+
+
 @requires_gpu
 @pytest.mark.usefixtures("moe_parallel_state")
 class TestOnTrainStart:
@@ -482,17 +540,48 @@ class TestOnTrainStepStart:
 
         assert [layer.gr_gate.tolist() for layer in model] == [[0.0, 1.0]] * N_LAYERS
 
-    def test_the_probe_hooks_are_registered_on_a_logged_iteration_and_removed_after(self, monkeypatch):
+    def test_the_probe_hooks_cover_every_layer_and_are_removed_after(self, monkeypatch):
+        """The probe used to watch ``_gram_layers[0]`` only — 1 of Nano's 23 MoE layers — so a
+        module dead at layer 0 and alive at depth read as dead, and an overflow below layer 0
+        was caught by nothing while ``0 * inf`` poisoned the iterations where that module is
+        gated off. Coverage is asserted on EVERY layer, every module, and every module's
+        ``linear_fc1`` (the liveness read); removal is asserted on all of them, because 3282
+        iterations of leaked handles would make the forward more probe than model."""
         _recorded_metrics(monkeypatch)
         model = _model_chunk(aux_ffns=AUX_FFNS)
         callback = _callback(plan=_plan_2(), n_aux=2)
         callback.on_train_start(_context(model))
 
         callback.on_train_step_start(_context(model, step=0))
-        assert all(model[0].gr_aux[k]._forward_hooks for k in range(2)), "a module has no probe hook"
+        for index, layer in enumerate(model):
+            assert layer._forward_hooks, f"layer {index}: the layer-output hook is missing"
+            for k in range(2):
+                assert layer.gr_aux[k]._forward_hooks, f"layer {index} module {k}: no output hook"
+                assert layer.gr_aux[k].linear_fc1._forward_hooks, f"layer {index} module {k}: no fc1 hook"
 
         callback.on_train_step_end(_context(model, step=0))
-        assert not any(model[0].gr_aux[k]._forward_hooks for k in range(2)), "a probe hook outlived the step"
+        for index, layer in enumerate(model):
+            assert not layer._forward_hooks, f"layer {index}: a layer hook outlived the step"
+            for k in range(2):
+                assert not layer.gr_aux[k]._forward_hooks, f"layer {index} module {k}: output hook outlived"
+                assert not layer.gr_aux[k].linear_fc1._forward_hooks, f"layer {index} module {k}: fc1 hook outlived"
+
+    def test_a_step_that_never_reached_step_end_does_not_double_register(self, monkeypatch):
+        """Registration is preceded by removal rather than gated on an empty handle list. An
+        iteration that died mid-forward — the overflow refusal raises there, and so does an OOM
+        — would otherwise leave its hooks installed for the next iteration to accumulate
+        through, silently double-counting every tensor for the rest of the run."""
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+
+        callback.on_train_step_start(_context(model, step=0))
+        armed = (len(model[0]._forward_hooks), len(model[0].gr_aux[0]._forward_hooks))
+        assert armed[0] and armed[1], "the first arm registered nothing, so this proves nothing"
+        callback.on_train_step_start(_context(model, step=1))  # no step end in between
+
+        assert (len(model[0]._forward_hooks), len(model[0].gr_aux[0]._forward_hooks)) == armed
 
     def test_no_probe_hook_between_log_intervals(self, monkeypatch):
         """The probe costs a device sync per logged step; log_interval must actually gate it."""
@@ -504,6 +593,8 @@ class TestOnTrainStepStart:
         callback.on_train_step_start(_context(model, step=1))
 
         assert not model[0].gr_aux[0]._forward_hooks
+        assert not model[0].gr_aux[0].linear_fc1._forward_hooks, "the liveness hook must be gated too"
+        assert not model[0]._forward_hooks, "the layer-output hook must be gated too"
 
 
 @requires_gpu
@@ -665,6 +756,345 @@ class TestOnTrainStepEnd:
 
 @requires_gpu
 @pytest.mark.usefixtures("moe_parallel_state")
+class TestAuxDepthProbe:
+    """The probe reports a DEPTH profile, not a one-layer, last-microbatch sample.
+
+    An arm shipped with layer-0 module output RMS ~0.0002 — dead at layer 0 — while its
+    all-on probe still moved a topic's loss by 0.024: its modules were alive at depth and
+    invisible to telemetry, and every magnitude argument in that investigation rested on the
+    blind sample. The quantity that actually governs the failure, the summed module
+    contribution measured against what the modules were handed, was never logged at all.
+
+    A caveat this rig CANNOT check, recorded so nobody mistakes green tests for evidence: the
+    tests below call the GRAM layer directly with a bare tensor, so in-test ``x`` is both the
+    layer input and the residual. In the real stack it is neither the same tensor nor the same
+    magnitude — mcore hands the layer ``pre_mlp_layernorm(hidden_states)`` and adds its write
+    into ``hidden_states`` afterwards — which is why the keys are spelled ``_in_ratio_*`` and
+    not ``_res_ratio_*``.
+    """
+
+    def test_the_magnitude_is_measured_at_every_depth_not_only_layer_zero(self, monkeypatch):
+        """The failure shape above, reproduced: a module trained only at DEPTH. The layer-0
+        series must read zero (it is kept for continuity, so it must keep being blind here) and
+        the all-layer series must see the module, naming the depth."""
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)  # mcore layer_number 1 and 2
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        _train_aux(model[-1], module=0)  # alive at the LAST layer only
+
+        _probed_step(callback, model, step=0)
+
+        metrics = calls[-1][0]
+        assert metrics["gr/aux0_out_rms"] == pytest.approx(0.0), "the layer-0 series must be blind here"
+        assert metrics["gr/aux0_out_rms_all"] > 0.0, "the all-layer series must see the trained depth"
+        assert metrics["gr/aux0_out_rms_min"] == pytest.approx(0.0)
+        assert metrics["gr/aux0_out_rms_min_layer"] == 1
+        assert metrics["gr/aux0_out_rms_max"] > 0.0
+        assert metrics["gr/aux0_out_rms_max_layer"] == N_LAYERS, "the key must carry mcore's layer_number"
+        assert metrics["gr/aux0_in_ratio_max"] > 0.0
+        assert "run/gr_probe_layers" not in metrics, "probe coverage is logged at train start"
+
+    def test_the_magnitude_pools_the_microbatches_instead_of_keeping_the_last(self, monkeypatch):
+        """One ``.item()`` per microbatch overwrote its predecessor, so the series reported the
+        LAST microbatch of an optimizer step. A module that fires on one microbatch and not the
+        next is not "off"; the pooled RMS is the only reading that says so. The expectation is
+        algebraic — sums of squares over element counts — not a tolerance band."""
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(n_layers=1, aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        _train_aux(model[0], module=0)
+
+        _probed_step(callback, model, step=0, scale=1.0)
+        big = calls[-1][0]["gr/aux0_out_rms_all"]
+        _probed_step(callback, model, step=0, scale=0.25)
+        small = calls[-1][0]["gr/aux0_out_rms_all"]
+        assert big > 0.0 and small > 0.0 and big > 2 * small, "the microbatches must differ clearly"
+
+        callback.on_train_step_start(_context(model, step=0))
+        _forward(model, scale=1.0)
+        _forward(model, scale=0.25)
+        callback.on_train_step_end(_context(model, step=0))
+
+        pooled = calls[-1][0]["gr/aux0_out_rms_all"]
+        assert pooled == pytest.approx(((big**2 + small**2) / 2) ** 0.5, rel=1e-3)
+        assert pooled != pytest.approx(small, rel=1e-2), "a last-microbatch overwrite would report this"
+
+    def test_the_summed_contribution_is_reported_against_the_layer_input(self, monkeypatch):
+        """The magnitude that governs a composability failure, and the one nothing ever logged.
+
+        The denominator is the layer INPUT, not the layer output: ``GRAMMoELayer.forward``
+        returns ``core + sum_k gate_k * aux_k(h)``, so a ratio against the output contains its
+        own numerator, saturates near 1, and can never say "too large". The layer input is what
+        the modules were handed — on the real stack the ``pre_mlp_layernorm`` output, NOT the
+        residual stream — which is what the key name has to say.
+        """
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        _train_aux(model[-1], module=0)  # only the DEEP layer contributes
+        assert FWD_AUX_2[0] == [1, 0], "iteration 0 must open module 0's gate alone"
+
+        x = _probed_step(callback, model, step=0)
+
+        with torch.no_grad():  # the aux MLP alone — no router state, nothing to re-run
+            expected = float(model[-1].gr_aux[0](x).float().norm() / x.float().norm())
+        metrics = calls[-1][0]
+        assert expected > 0.0, "an untrained module would make every ratio 0 and prove nothing"
+        assert metrics["gr/aux_contrib_in_ratio_max"] == pytest.approx(expected, rel=1e-2)
+        assert metrics["gr/aux_contrib_in_ratio_max_layer"] == N_LAYERS
+        assert metrics["gr/aux_contrib_in_ratio_mean"] == pytest.approx(expected / N_LAYERS, rel=1e-2)
+        assert metrics["gr/aux_contrib_out_share_max"] > 0.0
+
+    def test_a_gate_closed_iteration_reports_a_zero_contribution(self, monkeypatch):
+        """Every gate shut: the contribution is exactly zero by contract. The modules still
+        EXECUTE — Megatron's DDP buckets need a grad from every parameter every microbatch — so
+        their own magnitude must still be measured. A clean 0.0, not a 0/0 NaN, not a missing
+        key."""
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(n_layers=1, aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        _train_aux(model[0], module=0)
+        assert FWD_AUX_2[3] == [0, 0], "iteration 3 must be the all-gates-closed core iteration"
+
+        _probed_step(callback, model, step=3)
+
+        metrics = calls[-1][0]
+        assert metrics["gr/aux_contrib_in_ratio_max"] == 0.0
+        assert metrics["gr/aux_contrib_out_share_max"] == 0.0
+        assert metrics["gr/aux0_out_rms_all"] > 0.0, "a gated-off module still runs and must be measured"
+        # argmax over an all-zero vector returns index 0, so a depth label here would read in a
+        # plot as a genuine peak at the shallowest GRAM layer — on the majority of a real plan's
+        # iterations. The zero itself is real and stays; the meaningless label is omitted.
+        assert "gr/aux_contrib_in_ratio_max_layer" not in metrics
+
+    def test_a_probe_fold_failure_keeps_the_plan_telemetry_and_the_run(self, monkeypatch, caplog):
+        """The probe was added to make failures visible; it must not be able to hide any.
+
+        The fold now runs on the training path (it carries the collapse detector, which cannot
+        live behind ``wandb.run``), so it has two ways to do damage and is allowed neither:
+        raising would kill a 4-5 h run over telemetry, and raising inside the emitter's blanket
+        ``except`` would silently drop ``gr/corpus``, the per-corpus loss and every step counter
+        for that iteration behind one generic warning line.
+        """
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+
+        def _boom(self, records, it):
+            raise RuntimeError("a probe defect")
+
+        monkeypatch.setattr(type(callback), "_probe_metrics", _boom)
+
+        with caplog.at_level("WARNING"):
+            _probed_step(callback, model, step=0)
+
+        metrics = calls[-1][0]
+        assert metrics["gr/corpus"] == CORPUS_2[0], "the routing telemetry must survive the probe"
+        assert metrics["gr/aux0_steps_cum"] == UPDATE_AUX_2[0][0]
+        assert metrics["gr/aux0_param_norm"] > 0.0, "the deferred payload must survive it too"
+        assert "gr/aux0_out_rms_all" not in metrics
+        assert [r for r in caplog.records if "magnitude/liveness fold failed" in r.getMessage()]
+
+    def test_the_probe_leaves_the_forward_and_the_gradients_bitwise_unchanged(self, monkeypatch):
+        """The campaign's claims rest on bitwise-identical trajectories wherever the plan says
+        nothing changed, so the probe has to be a pure read: hooks returning None, every tensor
+        detached under no_grad, no RNG drawn, no dtype changed on the training path. The gate is
+        OPEN on purpose — that is the case where the probe observes the very tensor the layer
+        then adds. Two separately-built chunks from the same seeds, so no router or expert-bias
+        state can carry from one forward into the other."""
+        from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+
+        _recorded_metrics(monkeypatch)
+        reference = _model_chunk(n_layers=1, aux_ffns=AUX_FFNS)
+        probed = _model_chunk(n_layers=1, aux_ffns=AUX_FFNS)
+        probed_params = dict(probed.named_parameters())
+        for name, p in reference.named_parameters():
+            assert torch.equal(p, probed_params[name]), f"{name} differs before training — no baseline"
+        # on_train_start FIRST: at step 0 it asserts the fc2 zero-init, so training the modules
+        # before it would raise there and this test would never reach an assertion.
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(probed))
+        for k in range(2):
+            _train_aux(reference[0], module=k, seed=5 + k)
+            _train_aux(probed[0], module=k, seed=5 + k)
+
+        torch.manual_seed(7)
+        x = torch.randn(SEQ, BATCH, HIDDEN, dtype=torch.bfloat16, device="cuda")
+        torch.manual_seed(11)
+        upstream = torch.randn(SEQ, BATCH, HIDDEN, dtype=torch.bfloat16, device="cuda")
+        gate = torch.tensor(FWD_AUX_2[0], dtype=reference[0].gr_gate.dtype, device="cuda")
+
+        reference[0].gr_gate.copy_(gate)
+        model_parallel_cuda_manual_seed(1234)
+        reference[0](x)[0].backward(upstream)
+
+        callback.on_train_step_start(_context(probed, step=0))  # same gate row, hooks ON
+        model_parallel_cuda_manual_seed(1234)
+        out_probed = probed[0](x)[0]
+        out_probed.backward(upstream)
+        callback.on_train_step_end(_context(probed, step=0))
+
+        model_parallel_cuda_manual_seed(1234)
+        assert torch.equal(reference[0](x)[0], out_probed), "the probed forward moved"
+        for name, p in reference.named_parameters():
+            other = probed_params[name]
+            assert (p.grad is None) == (other.grad is None), f"{name}: gradient presence differs"
+            if p.grad is not None:
+                assert torch.equal(p.grad, other.grad), f"{name} gradient moved under the probe"
+
+
+@requires_gpu
+@pytest.mark.usefixtures("moe_parallel_state")
+class TestAuxLiveness:
+    """A module that collapses to exactly zero must be visible; the legitimate zeros must not.
+
+    NemotronH's activation is squared ReLU, whose gradient is identically zero for all-negative
+    pre-activations, so one oversized fc1 step kills a layer's copy of a module permanently and
+    irrecoverably — and the run then finishes with a full iteration count, 0 NaN and a valid
+    checkpoint, its composability "pass" vacuous because a module that outputs nothing cannot
+    interfere. The counterweight is that TWO kinds of zero are correct by design: the
+    ``gr_aux_output_init="zero"`` start, and a specialised module being quiet on a corpus that
+    is not its own. A detector that fired on either would be switched off within a day.
+    """
+
+    def test_a_zero_init_module_reads_as_alive_at_every_layer(self, monkeypatch, caplog):
+        """The false alarm that would kill every warm start. ``gr_aux_output_init="zero"``
+        zeroes fc2, and ``on_train_start`` ASSERTS it at iteration 0, so a healthy fresh
+        module's OUTPUT is exactly zero. Liveness is read on the INPUT side of the squared ReLU,
+        which that init never touches — which is why no warm-up window is needed."""
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+
+        with caplog.at_level("WARNING"):
+            _probed_step(callback, model, step=0)  # module 0's own corpus, fc2 still at zero
+
+        metrics = calls[-1][0]
+        for k in range(2):
+            assert metrics[f"gr/aux{k}_out_rms_all"] == pytest.approx(0.0), "fc2 is still at its zero init"
+            assert metrics[f"gr/aux{k}_live_layers"] == N_LAYERS
+        assert not [r for r in caplog.records if "is DEAD at" in r.getMessage()], "the zero-init start warned"
+
+    def test_a_module_killed_at_one_depth_is_reported_and_warned_about(self, monkeypatch, caplog):
+        """Partial death is the shape that matters and the one a pooled statistic hides: a
+        module can be frozen at some depths and training at others, and the run reports 0 NaN
+        either way. The sibling must not be charged with it."""
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        _kill_squared_relu(model[-1], module=0)
+        assert CORPUS_2[0] == 1, "iteration 0 must draw module 0's OWN corpus"
+
+        with caplog.at_level("WARNING"):
+            _probed_step(callback, model, step=0)
+
+        metrics = calls[-1][0]
+        assert metrics["gr/aux0_live_layers"] == N_LAYERS - 1
+        assert metrics["gr/aux1_live_layers"] == N_LAYERS, "a sibling must not be charged with it"
+        assert [r for r in caplog.records if "gr_aux.0 is DEAD" in r.getMessage()]
+
+    def test_liveness_is_not_judged_off_the_modules_own_corpus(self, monkeypatch, caplog):
+        """A specialised module being quiet on core text is routing WORKING, not a defect, and
+        its pre-activations there are a different distribution entirely. The METRIC is still
+        reported on every logged iteration; only the warning is scoped, or a healthy run would
+        warn on core iterations."""
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        for layer in model:
+            _kill_squared_relu(layer, module=0)
+        assert CORPUS_2[3] == 0, "iteration 3 must be a core iteration"
+
+        with caplog.at_level("WARNING"):
+            _probed_step(callback, model, step=3)
+
+        assert calls[-1][0]["gr/aux0_live_layers"] == 0, "the metric must still report it"
+        assert not [r for r in caplog.records if "gr_aux.0 is DEAD" in r.getMessage()]
+
+    def test_a_module_that_keeps_one_unit_alive_is_still_reported_as_collapsing(self, monkeypatch, caplog):
+        """The failure a whole-tensor maximum cannot see, and the reason the read is per unit.
+
+        Squared-ReLU death is per UNIT: row j of fc1 is frozen iff unit j's pre-activation is
+        non-positive on every token. So a copy with 7 of its 8 units permanently dead still has
+        a positive tensor maximum and reports ``live_layers == n_layers`` — a clean bill of
+        health for a module that has lost 7/8 of its capacity, which is much closer to the arm
+        that motivated this probe than total death is. ``live_frac_min`` is what names it, and
+        the warning must fire on it.
+        """
+        calls = _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        for layer in model:  # every copy fully live...
+            for k, width in enumerate(AUX_FFNS):
+                _pin_fc1_units(layer, module=k, live=width)
+        _pin_fc1_units(model[-1], module=0, live=1)  # ...except one, down to a single unit
+        assert CORPUS_2[0] == 1, "iteration 0 must draw module 0's OWN corpus"
+
+        with caplog.at_level("WARNING"):
+            _probed_step(callback, model, step=0, positive=True)
+
+        metrics = calls[-1][0]
+        assert metrics["gr/aux0_live_layers"] == N_LAYERS, "a whole-tensor max reads this as healthy"
+        assert metrics["gr/aux0_live_frac_min"] == pytest.approx(1.0 / AUX_FFNS[0])
+        assert metrics["gr/aux0_live_frac_min_layer"] == N_LAYERS, "the key must carry mcore's layer_number"
+        assert metrics["gr/aux1_live_frac_min"] == pytest.approx(1.0), "a sibling must not be charged with it"
+        assert [r for r in caplog.records if "gr_aux.0 has COLLAPSED" in r.getMessage()]
+        assert not [r for r in caplog.records if "is DEAD at" in r.getMessage()], "no copy died outright"
+
+    def test_the_collapse_warning_does_not_depend_on_a_live_wandb_run(self, monkeypatch, caplog):
+        """GAP 2's alarm is a training-LOG line, so it must not sit behind another subsystem.
+
+        The real emitter returns at ``if wandb.run is None`` BEFORE evaluating a thunk, so
+        anything computed inside one exists on the single W&B rank and only when W&B actually
+        initialised — on every other rank, and on any run whose ``logger.wandb_project`` is
+        unset or whose wandb init failed, a module could die and the run would still ship 0
+        NaN, a full iteration count and a valid checkpoint. The emitter is stubbed to drop its
+        payload WITHOUT evaluating it, which is exactly what those ranks do.
+        """
+        from megatron.bridge.training.gradient_routing import callback as callback_module
+
+        monkeypatch.setattr(callback_module, "log_wandb_metrics_nonfatal", lambda metrics, step: None)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        for layer in model:
+            _kill_squared_relu(layer, module=0)
+
+        with caplog.at_level("WARNING"):
+            _probed_step(callback, model, step=0)
+
+        assert [r for r in caplog.records if "gr_aux.0 is DEAD" in r.getMessage()]
+
+    def test_the_collapse_warning_is_announced_once_not_every_iteration(self, monkeypatch, caplog):
+        """The condition is permanent — that copy of the module can never recover — so a
+        per-iteration warning would emit thousands of identical lines and train operators to
+        filter out exactly the message that matters."""
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        for layer in model:
+            _kill_squared_relu(layer, module=0)
+        assert CORPUS_2[0] == CORPUS_2[1] == 1, "both iterations must draw module 0's own corpus"
+
+        with caplog.at_level("WARNING"):
+            _probed_step(callback, model, step=0)
+            _probed_step(callback, model, step=1)
+
+        assert len([r for r in caplog.records if "gr_aux.0 is DEAD" in r.getMessage()]) == 1
+
+
+@requires_gpu
+@pytest.mark.usefixtures("moe_parallel_state")
 class TestExpertBiasFreezeReachesMegatron:
     """The router's expert bias is core state the optimizer gate cannot reach.
 
@@ -783,6 +1213,28 @@ class TestAuxOverflowProbe:
         with pytest.raises(RuntimeError, match=f"gr_aux.{module} output is non-finite"):
             with torch.no_grad():
                 model[0](x)
+
+    def test_the_probe_refuses_a_non_finite_aux_output_below_the_first_layer(self, monkeypatch):
+        """The old probe watched ``_gram_layers[0]`` only, so an aux that overflowed at any
+        other depth passed silently while ``0 * inf`` poisoned every iteration where that module
+        is gated off. The refusal must stay INSIDE the forward: mcore's own fatal isnan check on
+        the loss raises from within the train step, ahead of ``on_train_step_end``, so a check
+        deferred to step end would never run and the aux attribution would be replaced by a
+        generic NaN-loss message."""
+        _recorded_metrics(monkeypatch)
+        model = _model_chunk(aux_ffns=AUX_FFNS)
+        callback = _callback(plan=_plan_2(), n_aux=2)
+        callback.on_train_start(_context(model))
+        with torch.no_grad():
+            model[-1].gr_aux[1].linear_fc2.weight.fill_(float("inf"))
+
+        callback.on_train_step_start(_context(model, step=3))  # a core iteration: every gate 0
+        assert model[-1].gr_gate.tolist() == [0.0, 0.0]
+
+        # The module index and the DEPTH are what this test asserts; the wording between them
+        # is free to describe whichever non-finiteness the probe caught.
+        with pytest.raises(RuntimeError, match=rf"gr_aux\.1 output is non-finite.*at MoE layer {N_LAYERS}"):
+            _forward(model)
 
 
 @requires_gpu

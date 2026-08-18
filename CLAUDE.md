@@ -490,7 +490,10 @@ Key design facts (the why lives in the module docstrings):
   lists, so emptying `param_groups` would gate nothing), in-process restart (rebuilds the
   optimizer under a gater that caches its discovery), strictness that can't tolerate a
   base checkpoint's missing `gr_aux` keys, `model.gr_static_gates` on a training run,
-  and any half-configured state. A mid-plan resume additionally refuses a plan whose
+  `checkpoint.save_optim` (gating gives each param group its own optimizer step count, and
+  saving optimizer state asserts they all share one — it fires at the first `save_interval`,
+  hours into a healthy run, so GR runs write only a weights-only final checkpoint and cannot
+  resume from optimizer state), and any half-configured state. A mid-plan resume additionally refuses a plan whose
   digest differs from the one the checkpoint was trained under, and refuses pre-multi-
   module-schema checkpoints outright (all completed their plans; warm-start from them
   instead).

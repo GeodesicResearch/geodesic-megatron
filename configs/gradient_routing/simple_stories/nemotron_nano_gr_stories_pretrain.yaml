@@ -63,6 +63,92 @@
 #   baseline/filter comparators stay valid. The base values below leave aux on the
 #   fully decayed cosine, which gives each module an own-topic Σlr budget ~50x below
 #   core's — the GEOD-171k root-cause finding.)
+#   D1 (both recovery levers at a dose that can actually close the gap, together).
+#   C1 moved per-module recovery only +6% relative (0.0254 -> 0.0269 nats against the
+#   reference implementation's 0.052), so the single-lever arms are under-dosed. The two
+#   deficits, measured: own-topic optimizer STEPS 43 vs the reference's 341 (7.9x), and
+#   own-topic MOVEMENT Sigma-lr 0.03 vs ~1.5 (50x). Neither is a DATA deficit — both
+#   implementations consume ~11.2M own-topic tokens (~1 epoch of each corpus); the
+#   reference spends them over 341 small steps where this run spends them over 43 large
+#   ones, because tokens/iteration here is 8x theirs. Batch size is out of campaign
+#   scope, so the reachable levers are p_af oversampling (more steps, at the price of
+#   more aux epochs) and the module LR (bigger steps). D1 applies both:
+#     p_af 4x   own-topic iters 43/43/44/44 -> 172/172/176/176 with core held at
+#               EXACTLY 1890, so train_iters 2064 -> 2586 (1890 + 696). Paper-endorsed:
+#               it used p_af 3-4 wherever aux is ~1% of training, which is this setting.
+#     aux_lr    1.6e-3 -> 9e-3, constant. NOTE this deliberately overrides the
+#               from-scratch reasoning given above: that argument is about
+#               INITIALIZATION symmetry (both core and aux start fresh), which does not
+#               speak to the MOVEMENT budget a module needs once training is under way.
+#               The value is CALIBRATED TO REFERENCE PARITY, not picked as a round
+#               multiple. Reference: 341 own-topic steps on a WSD schedule (10% warmup /
+#               80% constant / 10% decay) at peak 5e-3 => mean ~4.5e-3 => Sigma-lr ~1.53.
+#               D1: 172 own-topic steps at 9e-3 constant, of which ~17 fall inside the
+#               10% warmup ramp at ~half peak => 172 x 9e-3 x 0.95 = ~1.47. Matching the
+#               reference's movement budget at half its step count means each step is
+#               ~2x theirs — that is the trade the fixed batch size forces, and it is
+#               the closest reachable point rather than a free choice.
+#               (An earlier draft of this arm used 1.6e-2 "because 10x core is the
+#               warm-start CPT precedent". That gives Sigma-lr ~2.6, i.e. ~1.8x PAST the
+#               reference rather than at it. Since core's only protection from a wild
+#               module is the p_cr co-active iterations, and criterion 1 currently holds
+#               ~0.006 nats of headroom on the core corpus, overshooting the budget
+#               risks the regression gate for no modelled gain.)
+#     init      model.gr_aux_output_init=standard, i.e. D1 carries C1's init change too.
+#               This is decided on PRINCIPLE, not from the C1-vs-C1b pair: C1 moved mean
+#               per-module recovery 0.0254 -> 0.0269, which is +0.0015 nats against a
+#               per-corpus single-run noise of ~0.01, so the two arms are not
+#               distinguishable at this precision and no amount of waiting on C1b makes
+#               them so. The principle is that D1 is the reference-parity arm, and the
+#               reference standard-initialises BOTH module projections (only its LoRA
+#               variant zero-inits) — so parity on movement and step count, but not on
+#               init, would be an arbitrary hybrid.
+#     ... nano pretrain --disable-ft \
+#     train.train_iters=2586 \
+#     "gr.aux_iter_fractions=[0.0665120,0.0665120,0.0680588,0.0680588]" \
+#     gr.aux_lr=9e-3 gr.aux_min_lr=9e-3 model.gr_aux_output_init=standard \
+#     checkpoint.save=/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d1 \
+#     logger.wandb_exp_name=nemotron_nano_gr_stories_d1
+#   The quotes around aux_iter_fractions are load-bearing: Hydra's grammar reads a bare
+#   comma-separated value as a ChoiceSweep, so an unquoted list is not a list.
+#   Oversampling needs no code change — data/utils.py sizes each child to exactly
+#   plan.n_samples(corpus, gbs) and the GPTDataset builder does the epoch looping with
+#   its own seeded per-epoch shuffle; GRRoutedDataset refuses at construction if a child
+#   is ever short, so an unsupported sizing fails loudly rather than silently repeating.
+#   WATCH at a raised module LR: criterion 1 (all-off vs filtering) is the guard that a
+#   wild module has not damaged core through the p_cr co-active iterations, and the run's
+#   own NaN counter is the guard on the module itself.
+#   E1 (reference parity on BOTH axes at once — the closest reproduction this batch size
+#   allows). D1 matches the reference's movement budget but still spends it over half its
+#   step count. E1 closes that too: p_af 8x puts own-topic steps at 344/344/352/352
+#   against the reference's 341, and aux_lr 4.5e-3 constant holds Sigma-lr at
+#   344 x 4.5e-3 x 0.95 = ~1.47 against its ~1.53. Core is again held at EXACTLY 1890, so
+#   train_iters = 1890 + 1392 = 3282.
+#     ... nano pretrain --disable-ft \
+#     train.train_iters=3282 \
+#     "gr.aux_iter_fractions=[0.1048141,0.1048141,0.1072517,0.1072517]" \
+#     gr.aux_lr=4.5e-3 gr.aux_min_lr=4.5e-3 model.gr_aux_output_init=standard \
+#     checkpoint.save=/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1 \
+#     logger.wandb_exp_name=nemotron_nano_gr_stories_e1
+#   THE PRICE, stated because it is a real asymmetry and not a free win: 8x oversampling
+#   means each module sees ~8 epochs of its 11.4M-token corpus where the reference sees
+#   ~1, and where the filtering comparators see their topic once. It is beyond the 3-4
+#   the paper endorses. It does not invalidate the loss comparison — every arm is scored
+#   on held-out VAL corpora, so memorising train text cannot flatter it — but a gain here
+#   is "recovery given 8 passes", which is a weaker claim than "recovery" and must be
+#   reported as such.
+#   D3 (the movement lever ALONE, at fixed step count): aux_lr 9e-3 constant with NO
+#   oversampling, so own-topic steps stay at the base 43/43/44/44 and train_iters at 2064.
+#     ... nano pretrain --disable-ft \
+#     gr.aux_lr=9e-3 gr.aux_min_lr=9e-3 model.gr_aux_output_init=standard \
+#     checkpoint.save=/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d3 \
+#     logger.wandb_exp_name=nemotron_nano_gr_stories_d3
+#   D3 is an ATTRIBUTION arm, not a candidate to meet the criteria, and its ceiling is
+#   known in advance: at 43 steps even a 9e-3 constant LR reaches Sigma-lr ~0.37, a
+#   quarter of the reference's. Reaching ~1.5 at this step count would need ~35e-3
+#   (~22x core), which is not a dose worth risking core for. Its job is to separate the
+#   two levers — if D3 moves per-module recovery about as far as D1 does, the movement
+#   budget is what matters and the step count is not; if it does not, the converse.
 #
 # SCORING: eval-only corpus-loss probes over the five profiles x six val corpora — the
 # probe override sets model.gr_aux_ffn_hidden_size=[1856,1856,1856,1856] and

@@ -139,6 +139,17 @@ def validate_gr_launch(cfg) -> None:
             "output-projection init so fc1 has a live gradient from the first routed step."
         )
 
+    if cfg.checkpoint.save_optim:
+        problems.append(
+            "checkpoint.save_optim must be False for GR runs: isolation works by EMPTYING aux param "
+            "groups on the iterations they must not learn from, so the groups accumulate different "
+            "optimizer step counts by construction. Saving optimizer state runs "
+            "ChainedOptimizer._synchronize_steps, which asserts every non-empty group shares one step "
+            "count, and it fires at the first save_interval — hours into an otherwise healthy run. "
+            "GR runs therefore cannot resume mid-plan from optimizer state: write only the final "
+            "checkpoint (save_interval above train_iters, save_optim/save_rng False)."
+        )
+
     if cfg.train.rampup_batch_size:
         problems.append("train.rampup_batch_size must be unset: GBS must be constant for iteration attribution.")
     if cfg.train.decrease_batch_size_if_needed:

@@ -445,7 +445,7 @@ def _valid_cfg(fractions=(0.5,), widths=(AUX_FFN,), lrs=(1e-4,), min_lrs=(1e-5,)
         optimizer_config_override_provider=GROptimizerConfigOverrideProvider(
             aux_lrs=lrs, aux_min_lrs=min_lrs, aux_wd_mults=[1.0] * len(fractions)
         ),
-        checkpoint=SimpleNamespace(dist_ckpt_strictness="log_all"),
+        checkpoint=SimpleNamespace(dist_ckpt_strictness="log_all", save_optim=False),
         validation=SimpleNamespace(eval_iters=0),
         inprocess_restart=None,
     )
@@ -472,7 +472,7 @@ GUARDED_FIELDS = {
     ),
     "train": ("train_iters", "rampup_batch_size", "decrease_batch_size_if_needed"),
     "optimizer": ("optimizer", "overlap_param_gather_with_optimizer_step", "optimizer_cpu_offload"),
-    "checkpoint": ("dist_ckpt_strictness",),
+    "checkpoint": ("dist_ckpt_strictness", "save_optim"),
     "validation": ("eval_iters",),
 }
 
@@ -555,6 +555,9 @@ class TestValidateGRLaunch:
             # An in-process restart rebuilds the optimizer under a gater that caches its
             # discovery, so the gater would empty the dead optimizer's groups.
             ("inprocess_restart", object(), "inprocess_restart must be unset"),
+            # Gating gives each param group its own step count, and saving optimizer state
+            # asserts they all share one — hours into the run, at the first save_interval.
+            ("checkpoint.save_optim", True, "save_optim must be False"),
             ("checkpoint.dist_ckpt_strictness", "assert", "does not tolerate missing keys"),
             ("checkpoint.dist_ckpt_strictness", "raise_all", "does not tolerate missing keys"),
             ("validation.eval_iters", 10, "eval_iters must be 0"),

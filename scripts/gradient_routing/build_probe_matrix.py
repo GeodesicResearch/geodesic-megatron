@@ -16,7 +16,8 @@
 
 A campaign's scoring matrix is (arms + learning-curve checkpoints) x val corpora — past
 a handful of cells, too many rows for hand-maintenance (the Simple Stories matrix,
-``configs/gradient_routing/simple_stories/stories_probe_matrix.yaml``, is 115). This script expands a
+``configs/gradient_routing/simple_stories/stories_probe_matrix.yaml``, runs to a few
+hundred rows and grows with every candidate arm). This script expands a
 matrix definition into the 4-column TSV that ``run_corpus_loss_probes.sh`` executes
 (NAME, CHECKPOINT, DATA_PREFIX, EXTRA_OVERRIDES), enforcing the row-naming contract
 ``compute_ratio.py`` parses: ``<arm>__<corpus>`` for final checkpoints,
@@ -61,11 +62,16 @@ def main() -> int:
 
     base_overrides = list(spec.get("probe_overrides") or [])
     corpora: dict[str, str] = spec["corpora"]
-    widths = spec["gram_aux_ffn_hidden_sizes"]
+    default_widths = spec["gram_aux_ffn_hidden_sizes"]
 
     rows: list[tuple[str, str, str, str]] = []
     for arm, arm_spec in spec["arms"].items():
         extras = list(base_overrides)
+        # Module width is per-arm-overridable because it is an ARCHITECTURAL property of
+        # the checkpoint, not a campaign-wide constant: an arm trained with narrower
+        # modules cannot be probed at the campaign default without a shape mismatch on
+        # load. Most arms share the default, so it stays a top-level key.
+        widths = arm_spec.get("aux_ffn_hidden_sizes", default_widths)
         gates = arm_spec.get("static_gates")
         if gates is not None:
             if len(gates) != len(widths):

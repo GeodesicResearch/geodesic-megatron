@@ -65,9 +65,300 @@ arms:
   gram_all_on:
     checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_pretrain
     static_gates: [1, 1, 1, 1]
+  # C1 recovery candidate (constant module LR via aux_min_lr == aux_lr, plus
+  # standard-init module output projections) — launch line in the GR stories
+  # config header.
+  gram_c1_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1
+    static_gates: [0, 0, 0, 0]
+  gram_c1_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1
+    static_gates: [1, 1, 1, 1]
+  # C1 single-module profiles: per-module recovery is the MECHANISM the constant-LR
+  # lever targets, and the all-on aggregate can hide it. These also supply the
+  # all-on-vs-single-on composability check for the candidate.
+  gram_c1_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1
+    static_gates: [1, 0, 0, 0]
+  gram_c1_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1
+    static_gates: [0, 1, 0, 0]
+  gram_c1_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1
+    static_gates: [0, 0, 1, 0]
+  gram_c1_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1
+    static_gates: [0, 0, 0, 1]
+  # C1b = C1 minus the module-init change (constant aux LR only), the paired arm that
+  # attributes any C1 movement to one of its two changes rather than to the pair.
+  gram_c1b_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1b
+    static_gates: [0, 0, 0, 0]
+  gram_c1b_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1b
+    static_gates: [1, 1, 1, 1]
+  gram_c1b_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1b
+    static_gates: [1, 0, 0, 0]
+  gram_c1b_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1b
+    static_gates: [0, 1, 0, 0]
+  gram_c1b_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1b
+    static_gates: [0, 0, 1, 0]
+  gram_c1b_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_c1b
+    static_gates: [0, 0, 0, 1]
+  # D3 — the movement lever alone: constant module LR raised to 9e-3 with no
+  # oversampling, so own-topic step count stays at the base 43/43/44/44.
+  gram_d3_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d3
+    static_gates: [0, 0, 0, 0]
+  gram_d3_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d3
+    static_gates: [1, 1, 1, 1]
+  gram_d3_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d3
+    static_gates: [1, 0, 0, 0]
+  gram_d3_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d3
+    static_gates: [0, 1, 0, 0]
+  gram_d3_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d3
+    static_gates: [0, 0, 1, 0]
+  gram_d3_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d3
+    static_gates: [0, 0, 0, 1]
+  # D1 — both levers at reference-parity MOVEMENT (p_af 4x, aux_lr 9e-3 constant).
+  gram_d1_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d1
+    static_gates: [0, 0, 0, 0]
+  gram_d1_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d1
+    static_gates: [1, 1, 1, 1]
+  gram_d1_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d1
+    static_gates: [1, 0, 0, 0]
+  gram_d1_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d1
+    static_gates: [0, 1, 0, 0]
+  gram_d1_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d1
+    static_gates: [0, 0, 1, 0]
+  gram_d1_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_d1
+    static_gates: [0, 0, 0, 1]
+  # E1 — reference parity on BOTH axes at once: p_af 8x puts own-topic steps at
+  # 344/344/352/352 against the reference's 341, with aux_lr 4.5e-3 holding Sigma-lr
+  # at ~1.47 against its ~1.53. The closest reproduction the fixed batch size allows.
+  gram_e1_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0, 0, 0, 0]
+  gram_e1_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 1, 1, 1]
+  gram_e1_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 0, 0, 0]
+  gram_e1_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0, 1, 0, 0]
+  gram_e1_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0, 0, 1, 0]
+  gram_e1_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0, 0, 0, 1]
+  # E1 additivity ladder — the diagnostic for the composability collapse. E1's modules are
+  # individually excellent (deadline 1.4576, on the filtering ceiling) but all four together
+  # give 1.9557, worse than never having learned deadline at all. These intermediate gate
+  # subsets separate the candidate mechanisms WITHOUT retraining:
+  #   n2/n3 vs the existing 1-on and 4-on measurements say whether the damage grows linearly
+  #   with the number of active modules (a shared, additive residual-stream perturbation) or
+  #   super-linearly / by threshold (a distribution shift the model falls off a cliff at).
+  #   n2alt holds the COUNT at two but swaps which sibling is co-active, separating "how many
+  #   modules" from "which modules" — if n2 and n2alt differ materially the effect is
+  #   pairwise interference between specific capabilities, not generic magnitude.
+  # Scored on deadline (the worst-hit topic) and core (which is damaged too, though no
+  # module is about core — the tell for generic shift rather than capability interference).
+  gram_e1_n2:                  # deadline + aliens
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 1, 0, 0]
+  gram_e1_n3:                  # deadline + aliens + eras
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 1, 1, 0]
+  gram_e1_n2alt:               # deadline + cultures — same count as n2, different sibling
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 0, 0, 1]
+  # E1 TITRATION — all four modules on but scaled down. The gates are a float vector
+  # multiplied into each module's output (gram_layer.py:210), validated on length only,
+  # so fractional gates need no code change; the GRAM reference implements exactly this
+  # ("may be float in [0,1] for capability titration, in which case expert i's output is
+  # scaled by fwd_mask[i]") and we had never used it.
+  # This is the direct test of the magnitude hypothesis: if all-on collapses because four
+  # module outputs sum to a perturbation the residual stream was never trained to receive,
+  # scaling them down should recover most of the single-on quality. If loss barely moves
+  # between 0.25 and 1.0, magnitude is NOT the mechanism and the cause is interference
+  # between what the modules represent.
+  gram_e1_t25:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0.25, 0.25, 0.25, 0.25]
+  gram_e1_t50:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0.5, 0.5, 0.5, 0.5]
+  # Finer titration grid. MEASURED: damage on core is ~t^3 (t=0.25 -> +0.0007,
+  # 0.50 -> +0.0154, 1.00 -> +0.1292) while capability on deadline falls off far more
+  # slowly (-0.0427 at t=0.25 against -0.0624 for the single module alone). Those two
+  # curves cross somewhere below 0.5, so there is an optimum gate scale and 0.25 was a
+  # guess, not a fit. This grid locates it.
+  gram_e1_t10:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0.10, 0.10, 0.10, 0.10]
+  gram_e1_t15:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0.15, 0.15, 0.15, 0.15]
+  gram_e1_t20:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0.20, 0.20, 0.20, 0.20]
+  # Subset-ladder completion + SIGN-FLIP geometry probes on E1.
+  # Motivation, measured: at identical module count, [1,1,0,0] gives deadline 1.4899 and
+  # [1,0,0,1] gives 1.5058 - 0.0159 apart, and the STRONGER sibling (aliens) does LESS
+  # damage than the weaker (cultures), which is backwards for a pure-magnitude law. These
+  # rows finish the 15-subset ladder on CORE (no capability to confound the reading) and
+  # add sign flips.
+  # Negative gates are legal today and need no code change: gram_layer.py:187 validates
+  # the gate vector on LENGTH only and :192 casts float(g), and the matrix renders
+  # [1,-1,0,0] without spaces. If the damage is a coherent sum of aligned module outputs,
+  # flipping a sign CANCELS rather than compounds; if the outputs are orthogonal, the sign
+  # is irrelevant and the flipped row matches its positive twin.
+  gram_e1_de:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 0, 1, 0]
+  gram_e1_ae:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0, 1, 1, 0]
+  gram_e1_ac:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0, 1, 0, 1]
+  gram_e1_ec:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0, 0, 1, 1]
+  gram_e1_dac:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 1, 0, 1]
+  gram_e1_dec:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 0, 1, 1]
+  gram_e1_aec:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0, 1, 1, 1]
+  gram_e1_sda:                 # sign-flipped twin of gram_e1_n2  [1,1,0,0]
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, -1, 0, 0]
+  gram_e1_sdc:                 # sign-flipped twin of gram_e1_n2alt [1,0,0,1]
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, 0, 0, -1]
+  gram_e1_s4:                  # sign-flipped twin of all_on [1,1,1,1]
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [1, -1, 1, -1]
+  gram_e1_t35:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_e1
+    static_gates: [0.35, 0.35, 0.35, 0.35]
+
+  # F2 - C1b's LR and init with p_af 4x, and p_as divided by 4 so ABSOLUTE core
+  # contamination stays at mainline's 52 iterations. The one-variable p_af test.
+  gram_f2_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f2
+    static_gates: [0, 0, 0, 0]
+  gram_f2_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f2
+    static_gates: [1, 1, 1, 1]
+  gram_f2_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f2
+    static_gates: [1, 0, 0, 0]
+  gram_f2_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f2
+    static_gates: [0, 1, 0, 0]
+  gram_f2_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f2
+    static_gates: [0, 0, 1, 0]
+  gram_f2_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f2
+    static_gates: [0, 0, 0, 1]
+  # F1 - E1's dose with p_as divided by 8. Asks whether E1's retain (the campaign's
+  # best, 0.030 against the paper's 0.010) was the modules or the leaked core.
+  gram_f1_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f1
+    static_gates: [0, 0, 0, 0]
+  gram_f1_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f1
+    static_gates: [1, 1, 1, 1]
+  gram_f1_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f1
+    static_gates: [1, 0, 0, 0]
+  gram_f1_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f1
+    static_gates: [0, 1, 0, 0]
+  gram_f1_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f1
+    static_gates: [0, 0, 1, 0]
+  gram_f1_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_f1
+    static_gates: [0, 0, 0, 1]
+  # G1 - F2 with NARROW modules (768 not 1856). Removes the width advantage: all-on
+  # goes from 1.50x the comparators' active FFN width to 1.21x, against the paper's
+  # 1.19x. Needs the per-arm width override, hence aux_ffn_hidden_sizes below.
+  gram_g1_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_g1
+    static_gates: [0, 0, 0, 0]
+    aux_ffn_hidden_sizes: [768, 768, 768, 768]
+  gram_g1_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_g1
+    static_gates: [1, 1, 1, 1]
+    aux_ffn_hidden_sizes: [768, 768, 768, 768]
+  gram_g1_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_g1
+    static_gates: [1, 0, 0, 0]
+    aux_ffn_hidden_sizes: [768, 768, 768, 768]
+  gram_g1_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_g1
+    static_gates: [0, 1, 0, 0]
+    aux_ffn_hidden_sizes: [768, 768, 768, 768]
+  gram_g1_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_g1
+    static_gates: [0, 0, 1, 0]
+    aux_ffn_hidden_sizes: [768, 768, 768, 768]
+  gram_g1_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_g1
+    static_gates: [0, 0, 0, 1]
+    aux_ffn_hidden_sizes: [768, 768, 768, 768]
+  # R1 - a SEED REPLICATE of C1b (dataset.seed 1235). Every verdict in this campaign
+  # is n=1 banded against a spread borrowed from four DIFFERENT filtering runs; no
+  # match/no-match claim against the paper is defensible without our own error bar.
+  gram_r1_core:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_r1
+    static_gates: [0, 0, 0, 0]
+  gram_r1_all_on:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_r1
+    static_gates: [1, 1, 1, 1]
+  gram_r1_deadline:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_r1
+    static_gates: [1, 0, 0, 0]
+  gram_r1_aliens:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_r1
+    static_gates: [0, 1, 0, 0]
+  gram_r1_eras:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_r1
+    static_gates: [0, 0, 1, 0]
+  gram_r1_cultures:
+    checkpoint: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_stories_r1
+    static_gates: [0, 0, 0, 1]
 
 # Any arm with static_gates also needs the module widths so the probe builds the aux
-# modules the checkpoint carries.
+# modules the checkpoint carries. This is the campaign DEFAULT; an individual arm may
+# override it with its own `aux_ffn_hidden_sizes`, because width is a property of the
+# checkpoint rather than of the campaign — an arm trained with narrower modules would
+# otherwise fail to load at all, which is what previously made a width arm unprobeable.
 gram_aux_ffn_hidden_sizes: [1856, 1856, 1856, 1856]
 
 curve:
@@ -82,10 +373,48 @@ curve:
 # Band edges: pass below pass_nats, fail above fail_nats, ambiguous between
 # (single-run noise is noise_nats, measured as the four filter arms' core-loss
 # spread — a hard gate at 2x noise from one seed would be a coin flip).
+# CRITERION-2 BAR: reproduce the paper (Kyle's decision, 2026-08-17).
+#
+# Criterion 2 was originally written as "all modules ON ~= the train-on-everything
+# baseline". That target is arithmetically unreachable on two of the four topics by ANY
+# module system, because the filtering models it would have to match are themselves above
+# the no-interventions baseline on their own topics (deadline +0.0296, cultures +0.0380,
+# eras +0.0144, aliens +0.0120; mean +0.0235). Asked to choose, Kyle set the bar as
+# "reproduce the paper's results", so the operative comparison is the paper's own:
+#
+#   the module profile vs the MATCHED FILTERING arm, on that module's own topic
+#
+# and the train-on-everything gap stays a REPORTED diagnostic, printed beside it with the
+# structural floor, never a gate. Both are already computed and printed by
+# score_success_criteria.py, so this is a change of which number gates, not of what runs.
+#
+# The paper's Table 1 targets, as compute ratios (higher = better capability):
+#   retain  GRAM 0.952 vs filtering 0.962   -> gap 0.010
+#   core    GRAM 0.938 vs filtering 0.961   -> gap 0.023
+#   forget  GRAM 0.766 vs filtering 0.780   (lower = better removal)
+# Measured here (single-module-on vs matched filtering, own topic):
+#   arm        retain gap   core gap
+#   mainline      0.104       0.048
+#   C1b           0.074       0.023   <- core gap MATCHES the paper exactly
+#   D3            0.129       0.055
+#   D1            0.113       0.117
+#   E1            0.030       0.036   <- closest retain; 3x the paper's gap
+# So no single arm reproduces both axes yet: C1b has the paper's core gap with 7x its
+# retain gap, E1 has the best retain with a wider core gap AND a removal failure (its
+# all-off predicts the forget corpus better than a model that never saw it). The arm that
+# could deliver both is F1 = E1's dose with the p_as x p_af spillage divided out.
+#
+# NOTE the paper evaluates {core} and {core, k} profiles ONLY on Simple Stories -- it never
+# scores an all-modules-on profile there. All-on therefore remains OUR extension beyond the
+# paper, reported but not part of the reproduction claim.
 scoring:
   noise_nats: 0.01
   pass_nats: 0.02
   fail_nats: 0.03
+  # false: score each single-module profile on its OWN topic only (the composability
+  # cell) — the rows the criteria need. true: score every module on every corpus, the
+  # specificity matrix, which is ~4x the probes and is a deliberate campaign decision.
+  specificity_matrix: false
   baseline_arm: baseline
   filter_core_arm: filter_core
   core_corpus: core
@@ -103,5 +432,83 @@ scoring:
         aliens: gram_aliens
         eras: gram_eras
         cultures: gram_cultures
+    gram_c1:
+      "off": gram_c1_core
+      all_on: gram_c1_all_on
+      "on":
+        deadline: gram_c1_deadline
+        aliens: gram_c1_aliens
+        eras: gram_c1_eras
+        cultures: gram_c1_cultures
+    gram_c1b:
+      "off": gram_c1b_core
+      all_on: gram_c1b_all_on
+      "on":
+        deadline: gram_c1b_deadline
+        aliens: gram_c1b_aliens
+        eras: gram_c1b_eras
+        cultures: gram_c1b_cultures
+    gram_d3:
+      "off": gram_d3_core
+      all_on: gram_d3_all_on
+      "on":
+        deadline: gram_d3_deadline
+        aliens: gram_d3_aliens
+        eras: gram_d3_eras
+        cultures: gram_d3_cultures
+    gram_d1:
+      "off": gram_d1_core
+      all_on: gram_d1_all_on
+      "on":
+        deadline: gram_d1_deadline
+        aliens: gram_d1_aliens
+        eras: gram_d1_eras
+        cultures: gram_d1_cultures
+    gram_e1:
+      "off": gram_e1_core
+      all_on: gram_e1_all_on
+      "on":
+        deadline: gram_e1_deadline
+        aliens: gram_e1_aliens
+        eras: gram_e1_eras
+        cultures: gram_e1_cultures
+
+    gram_f2:
+      "off": gram_f2_core
+      all_on: gram_f2_all_on
+      "on":
+        deadline: gram_f2_deadline
+        aliens: gram_f2_aliens
+        eras: gram_f2_eras
+        cultures: gram_f2_cultures
+    gram_f1:
+      "off": gram_f1_core
+      all_on: gram_f1_all_on
+      "on":
+        deadline: gram_f1_deadline
+        aliens: gram_f1_aliens
+        eras: gram_f1_eras
+        cultures: gram_f1_cultures
+    gram_g1:
+      "off": gram_g1_core
+      all_on: gram_g1_all_on
+      "on":
+        deadline: gram_g1_deadline
+        aliens: gram_g1_aliens
+        eras: gram_g1_eras
+        cultures: gram_g1_cultures
+    gram_r1:
+      "off": gram_r1_core
+      all_on: gram_r1_all_on
+      "on":
+        deadline: gram_r1_deadline
+        aliens: gram_r1_aliens
+        eras: gram_r1_eras
+        cultures: gram_r1_cultures
 
 output: stories_probe_matrix.tsv
+
+# The campaign's already-measured table, which every candidate is scored against — read by
+# scripts/gradient_routing/run_candidate_scoring.py. A relative path resolves against this
+# file, like `output` above, because the two are produced by the same campaign.
+reference_results: /projects/a5k/public/logs/gradient_routing_geod171/simple_stories/results.tsv

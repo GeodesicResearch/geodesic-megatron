@@ -110,6 +110,45 @@ def test_static_gate_arms_carry_widths_and_gates(builder, tmp_path):
     assert "model.gr_static_gates=[1,0]" in extras
 
 
+def test_an_arm_may_override_the_campaign_module_widths(builder, tmp_path):
+    """Module width is a property of the CHECKPOINT, not of the campaign: an arm trained
+    with narrower modules cannot load at the campaign default, so it must be able to
+    carry its own widths while every other arm keeps the shared default."""
+    definition, output = _definition(
+        tmp_path,
+        arms={
+            "gram_wide": {"checkpoint": "/ckpt/wide", "static_gates": [1, 0]},
+            "gram_narrow": {
+                "checkpoint": "/ckpt/narrow",
+                "static_gates": [1, 0],
+                "aux_ffn_hidden_sizes": [2, 4],
+            },
+        },
+    )
+    _run(builder, definition)
+    rows = _rows(output)
+    assert "model.gr_aux_ffn_hidden_size=[8,16]" in rows["gram_wide__core"][2]
+    assert "model.gr_aux_ffn_hidden_size=[2,4]" in rows["gram_narrow__core"][2]
+
+
+def test_an_arm_width_override_of_the_wrong_length_is_refused(builder, tmp_path):
+    """The gates/widths length check must run against the arm's OWN widths — validating a
+    2-gate arm against a stale 4-wide campaign default would let a mismatched pair through
+    and fail later, on a GPU, as a shape error."""
+    definition, _ = _definition(
+        tmp_path,
+        arms={
+            "gram_bad": {
+                "checkpoint": "/ckpt/bad",
+                "static_gates": [1, 0],
+                "aux_ffn_hidden_sizes": [2, 4, 8],
+            }
+        },
+    )
+    with pytest.raises(SystemExit, match="2 gates for 3 module widths"):
+        _run(builder, definition)
+
+
 def test_gateless_arms_carry_no_gr_overrides(builder, tmp_path):
     definition, output = _definition(tmp_path)
     _run(builder, definition)
