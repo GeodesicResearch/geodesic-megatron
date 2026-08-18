@@ -91,9 +91,9 @@ dataset:
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu/tokenized_base_input_document
     - "0.04"       # climbmix_ai_docs — 13,506,352 docs expected; tokens PENDING
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs/tokenized_base_input_document
-    - "0.01"       # zyda_ai_docs — 1,536,755 docs expected; tokens PENDING
+    - "0.01"       # zyda_ai_docs — 4,551,639,291 tokens, 1,536,755 docs, 1.099 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs/tokenized_base_input_document
-    - "0.002"      # lesswrong_plus — 67,064 docs expected; tokens PENDING
+    - "0.002"      # lesswrong_plus — 348,487,453 tokens, 67,064 docs, 2.870 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus/tokenized_base_input_document
   split: "9999,1,0"
   seq_length: 8192

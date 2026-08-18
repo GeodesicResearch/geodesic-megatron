@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=cp30b-split
+#SBATCH --job-name=shard-jsonl
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=06:00:00
 #SBATCH --exclusive
-#SBATCH --output=logs/slurm/cp30b-split-%j.out
+#SBATCH --output=logs/slurm/shard-jsonl-%j.out
 #
 # Split one oversized pretraining JSONL into N self-contained dataset roots.
 #

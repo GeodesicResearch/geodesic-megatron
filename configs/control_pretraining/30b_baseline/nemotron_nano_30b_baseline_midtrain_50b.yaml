@@ -62,29 +62,30 @@ tokenizer:
   tokenizer_model: geodesic-research/nemotron-base-tokenizer   # EOD `</s>` = id 2
 
 dataset:
-  # TOKEN COUNTS BELOW ARE PENDING TOKENIZATION and must be filled in before launch.
+  # All ten corpora are built; the counts below are measured from the .idx, and each epoch
+  # figure is the weight times this stage's 50,415,534,080-token budget over those tokens.
   # No corpus here is sharded: only ClimbMix's full 553M-document corpus needs that, and
   # climbmix_long is a 800k-document subsample of it.
   data_path:
-    - "0.347223"   # climbmix_long                 17.5B target — 800,032 docs expected
+    - "0.347223"   # climbmix_long — 17,500,804,443 tokens, 800,032 docs, 1.000 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_long/tokenized_base_input_document
-    - "0.198413"   # nemotron_stem_sft             10.0B target — 459,324 docs expected
+    - "0.198413"   # nemotron_stem_sft — 10,000,469,928 tokens, 459,324 docs, 1.000 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_stem_sft/tokenized_base_input_document
-    - "0.158730"   # arxiv_papers                   8.0B target — 433,714 docs expected
+    - "0.158730"   # arxiv_papers — 8,000,442,722 tokens, 433,714 docs, 1.000 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__arxiv_papers/tokenized_base_input_document
-    - "0.138889"   # nemotron_wiki_rewrite          7.0B target — 6,235,039 docs expected
+    - "0.138889"   # nemotron_wiki_rewrite — 7,006,236,026 tokens, 6,235,039 docs, 0.999 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite/tokenized_base_input_document
-    - "0.099206"   # zyda_long                      5.0B target — 139,223 docs expected
+    - "0.099206"   # zyda_long — 5,000,154,421 tokens, 139,223 docs, 1.000 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_long/tokenized_base_input_document
-    - "0.025794"   # stack_edu_long                 1.3B target — 3,190 docs expected
+    - "0.025794"   # stack_edu_long — 1,300,100,047 tokens, 3,190 docs, 1.000 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_long/tokenized_base_input_document
-    - "0.019841"   # climbmix_ai_docs_long          1.0B target — 5,801 docs expected
+    - "0.019841"   # climbmix_ai_docs_long — 800,045,176 tokens, 5,801 docs, 1.250 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_long/tokenized_base_input_document
-    - "0.005952"   # zyda_ai_docs_long              0.3B target — 1,665 docs expected
+    - "0.005952"   # zyda_ai_docs_long — 200,064,793 tokens, 1,665 docs, 1.500 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_long/tokenized_base_input_document
-    - "0.003968"   # nemotron_wiki_rewrite_ai_docs  0.2B target — 53,041 docs expected
+    - "0.003968"   # nemotron_wiki_rewrite_ai_docs — 188,883,008 tokens, 53,041 docs, 1.059 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite_ai_docs/tokenized_base_input_document
-    - "0.001984"   # lesswrong_plus_long            0.1B target — 27,303 docs expected
+    - "0.001984"   # lesswrong_plus_long — 300,029,944 tokens, 27,303 docs, 0.333 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus_long/tokenized_base_input_document
   split: "9999,1,0"
   # NOT redundant with model.seq_length below. pipeline_training_run.py rebuilds

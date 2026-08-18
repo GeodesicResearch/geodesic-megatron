@@ -158,6 +158,7 @@ for entry in "${CORPORA[@]}"; do
         split_id=$(submit "split $subset" \
             "$(dep "$prep_id")" \
             --time="06:00:00" --job-name="cp30b-split-$subset" \
+            --output="logs/slurm/cp30b-split-$subset-%j.out" \
             "$SHARD_SCRIPT" "$root" "$shards")
         echo "  split    -> $split_id ($shards shards)"
         total=$((total + 1))
