@@ -24,8 +24,10 @@ arm cannot silently miss the others.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
 
@@ -61,3 +63,38 @@ def assert_blend_is_well_formed(data_path, label: str) -> None:
     for prefix in prefixes:
         assert not prefix.endswith((".bin", ".idx")), f"{label}: {prefix} must be extension-less"
         assert prefix.startswith("/projects/a5k/public/data/"), prefix
+
+
+def assert_shard_weights_are_token_proportional(data_path, corpus_slug: str, total_weight: float) -> None:
+    """Assert a sharded corpus's per-shard weights split ``total_weight`` by measured tokens.
+
+    The shards of one corpus are cut at equal DOCUMENT counts, not equal tokens, so equal
+    weights would cycle the smaller shards more often than the larger ones. Each shard's
+    weight must be ``round(total_weight x shard_tokens / corpus_tokens, 6)``, with any
+    six-decimal rounding residue folded into the largest shard so the set sums to exactly
+    ``total_weight``. Tokens are read from the ``.provenance.json`` the data build wrote
+    beside each shard prefix — the paths come from the blend itself, so a relocated corpus
+    fails loudly here rather than skipping.
+    """
+    data_path = [str(x) for x in data_path]
+    shards = {}
+    for weight, prefix in zip(data_path[::2], data_path[1::2]):
+        if f"__{corpus_slug}/" in prefix:
+            shards[prefix] = float(weight)
+    assert shards, f"no {corpus_slug} shard prefixes in the blend"
+    assert abs(sum(shards.values()) - total_weight) < 1e-9, f"{corpus_slug} shard weights do not sum to {total_weight}"
+
+    tokens = {}
+    for prefix in shards:
+        prov = Path(prefix + ".provenance.json")
+        if not prov.exists():
+            pytest.skip(f"corpus provenance not mounted on this host: {prov}")
+        tokens[prefix] = json.loads(prov.read_text())["totals"]["total_tokens"]
+    total = sum(tokens.values())
+
+    expected = {prefix: round(total_weight * tokens[prefix] / total, 6) for prefix in shards}
+    residue = round(total_weight - sum(expected.values()), 6)
+    largest = max(expected, key=lambda prefix: tokens[prefix])
+    expected[largest] = round(expected[largest] + residue, 6)
+    for prefix, weight in shards.items():
+        assert weight == expected[prefix], prefix

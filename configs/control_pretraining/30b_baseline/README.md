@@ -1,26 +1,32 @@
-# Control-pretraining 30B baseline — a two-stage from-scratch curriculum
+# Control-pretraining 30B baseline — a three-stage from-scratch curriculum
 
-Nemotron 3 Nano 30B-A3B, trained from random init on 512 GPUs / 128 nodes in two stages:
+Nemotron 3 Nano 30B-A3B, trained from random init on 512 GPUs / 128 nodes. The mix follows the
+campaign sheet as revised 2026-08-20:
 
 | Stage | Config | Context | Tokens | Corpora | Prefixes | Topology | Checkpoints |
 |---|---|---|---|---|---|---|---|
-| 1 — pretraining | `nemotron_nano_30b_baseline_pretrain_500b.yaml` | 8192 | 500,011,368,448 | 6 | 13 | TP1·CP1·EP4·PP1·ETP1, DP=512 | 8 |
-| 2 — midtraining | `nemotron_nano_30b_baseline_midtrain_50b.yaml` | 32768 | 50,415,534,080 | 10 | 10 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 2 |
+| 1 — pretraining | `nemotron_nano_30b_baseline_pretrain.yaml` | 8192 | 500,011,368,448 | 7 | 14 | TP1·CP1·EP4·PP1·ETP1, DP=512 | 8 |
+| 2 — midtraining | `nemotron_nano_30b_baseline_midtrain.yaml` | 32768 | 51,153,731,584 | 12 | 12 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 2 |
+| 3 — SFT | `nemotron_nano_30b_baseline_sft.yaml` | 32768 | ~50B (2 epochs, packed) | 1 (combined mix) | — | TP1·CP2·EP4·PP1·ETP1, DP=256 | final + resume |
 
-Both stages run **16,777,216 tokens per iteration**, so the optimizer's token batch is
+Stages 1 and 2 run **16,777,216 tokens per iteration**, so the optimizer's token batch is
 continuous across the boundary even though the sequence length quadruples and the sequence
-count drops from 2048 to 512.
+count drops from 2048 to 512. Stage 3 is the reasoning/think post-training component: two
+epochs of the packed 25B `pa-warm-start-sft-heavy-25b-mix` combined split under the think
+tokenizer — a different data pipeline (packed chat parquet, `nano sft`) from the `.bin/.idx`
+blends of stages 1-2, at stage 2's exact topology.
 
 This arm supersedes the V1 baseline (`../nemotron_nano_control_v1_baseline_500b.yaml`), which
 blended three separately-sourced corpora and was never run to completion. V1 stays in the tree
 because its posture is what stage 1 reuses and its measurements are still the evidence base.
 
-## The learning-rate schedule spans both stages
+## The learning-rate schedule spans stages 1 and 2
 
 **Stage 1 holds a constant 1e-3 after a 1% warmup and never decays. Stage 2 is the annealing
 phase**, decaying 1e-3 → 1e-5 over its whole length with `minus_sqrt`. Across the two stages
-the decay covers 50.4B of 550.4B tokens = **9.2%**, a conventional WSD tail — spent on the
-curated long-context mix rather than on web text.
+the decay covers 51.1B of 551.2B tokens = **9.3%**, a conventional WSD tail — spent on the
+curated long-context mix rather than on web text. Stage 3 then runs its own warm-start SFT
+schedule (5e-6 cosine, 10% warmup) from a fresh optimizer.
 
 Two consequences worth being explicit about:
 
@@ -34,11 +40,16 @@ Two consequences worth being explicit about:
 
 ## The data mix
 
-Every corpus is a subset of the single repository
+Every stage-1/2 corpus is a subset of the single repository
 [`geodesic-research/control-pretraining-datasets`](https://huggingface.co/datasets/geodesic-research/control-pretraining-datasets),
-pinned at revision `669d466ead5f1ed33886241a7338235c98faa1b1`. The pin matters: the repository
+pinned at revision `8f5f790c6647c90f50698bc6757e3929cc9cc1d1`. The pin matters: the repository
 was still being built while this arm was configured, and without one, two corpora prepared a
-day apart would silently come from different data.
+day apart would silently come from different data. The sixteen original corpora were prepared
+under the earlier pin `669d466ead5f1ed33886241a7338235c98faa1b1`; the current pin's tree diff
+against it is **additions only** (verified file-by-file via the Hub API: 51 added, 0 removed,
+0 changed — the two new corpora `lesswrong_rewrite_hq` and `ai_risk_reports_rsp`, plus one
+subset no stage uses), so everything built under the old pin is byte-identical under this one
+and none of it was re-tokenized.
 
 Document counts below are the repository's row counts, read from the dataset API. They are the
 **verification target** for each tokenize job — the `.provenance.json` it writes must report the
@@ -50,35 +61,41 @@ exist.
 
 | Weight | Subset | Allocated | Built | Documents | Epochs |
 |---|---|---|---|---|---|
-| 0.700 | `climbmix_full` (8 shards) | 350.0B | 354,429,333,750 | 553,315,056 | 0.988 |
+| 0.700 | `climbmix_full` (8 shards, token-proportional) | 350.0B | 354,429,333,750 | 553,315,056 | 0.988 |
 | 0.198 | `zyda_full` | 99.0B | 99,227,596,755 | 91,220,256 | 0.998 |
 | 0.050 | `stack_edu` | 25.0B | 25,029,225,350 | 28,544,444 | 0.999 |
 | 0.040 | `climbmix_ai_docs` | 20.0B | 15,905,878,498 | 13,506,352 | 1.257 |
 | 0.010 | `zyda_ai_docs` | 5.0B | 4,551,639,291 | 1,536,755 | 1.099 |
-| 0.002 | `lesswrong_plus` | 1.0B | 348,487,453 | 67,064 | 2.870 |
+| 0.001 | `lesswrong_plus` | 0.5B | 348,487,453 | 67,064 | 1.435 |
+| 0.001 | `lesswrong_rewrite_hq` | 0.5B | building | building | — |
 | **1.000** | | **500.0B** | | | |
 
-### Stage 2 — midtraining, 50.4B tokens at seq 32768
+### Stage 2 — midtraining, 51,148,829,967 tokens at seq 32768
 
-Seven corpora are long-context replay (the N-longest documents of a stage-1 corpus); three are
-midtraining-only.
+Seven corpora are long-context replay (the N-longest documents of a stage-1 corpus); the rest
+are midtraining-only — including `lesswrong_rewrite_hq`, which the sheet blends into **both**
+stages from the same subset (no `_long` variant exists), and `ai_risk_reports_rsp`, the
+frontier-lab risk reports / RSPs / system cards from the sheet's Extra Datasets tab.
 
-All ten are built and measured. "Allocated" is this stage's token budget times the weight;
-"built" is the measured `.idx` total.
+Ten of the twelve are built and measured; the two new corpora are building. "Allocated" is
+each corpus's sheet target (weight = target / 51,148,829,967); "built" is the measured `.idx`
+total; epochs are the weight times the 51,153,731,584 trained tokens over the built tokens.
 
 | Weight | Subset | Allocated | Built | Documents | Epochs |
 |---|---|---|---|---|---|
-| 0.347223 | `climbmix_long` | 17.5B | 17,500,804,443 | 800,032 | 1.000 |
-| 0.198413 | `nemotron_stem_sft` | 10.0B | 10,000,469,928 | 459,324 | 1.000 |
-| 0.158730 | `arxiv_papers` | 8.0B | 8,000,442,722 | 433,714 | 1.000 |
-| 0.138889 | `nemotron_wiki_rewrite` | 7.0B | 7,006,236,026 | 6,235,039 | 0.999 |
-| 0.099206 | `zyda_long` | 5.0B | 5,000,154,421 | 139,223 | 1.000 |
-| 0.025794 | `stack_edu_long` | 1.3B | 1,300,100,047 | 3,190 | 1.000 |
-| 0.019841 | `climbmix_ai_docs_long` | 1.0B | **800,045,176** | 5,801 | **1.250** |
-| 0.005952 | `zyda_ai_docs_long` | 0.3B | **200,064,793** | 1,665 | **1.500** |
-| 0.003968 | `nemotron_wiki_rewrite_ai_docs` | 0.2B | 188,883,008 | 53,041 | 1.059 |
-| 0.001984 | `lesswrong_plus_long` | 0.1B | **300,029,944** | 27,303 | **0.333** |
-| **1.000000** | | **50.4B** | 50,297,230,508 | | |
+| 0.342139 | `climbmix_long` | 17.5B | 17,500,804,443 | 800,032 | 1.000 |
+| 0.195508 | `nemotron_stem_sft` | 10.0B | 10,000,469,928 | 459,324 | 1.000 |
+| 0.156406 | `arxiv_papers` | 8.0B | 8,000,442,722 | 433,714 | 1.000 |
+| 0.136856 | `nemotron_wiki_rewrite` | 7.0B | 7,006,236,026 | 6,235,039 | 0.999 |
+| 0.096776 | `zyda_long` | 4.95B | 5,000,154,421 | 139,223 | 0.990 |
+| 0.024438 | `stack_edu_long` | 1.25B | 1,300,100,047 | 3,190 | 0.962 |
+| 0.019551 | `climbmix_ai_docs_long` | 1.0B | **800,045,176** | 5,801 | **1.250** |
+| 0.009775 | `lesswrong_plus_long` | 0.5B | **300,029,944** | 27,303 | **1.667** |
+| 0.009775 | `lesswrong_rewrite_hq` | 0.5B | building | building | — |
+| 0.004888 | `zyda_ai_docs_long` | 0.25B | **200,064,793** | 1,665 | **1.250** |
+| 0.003692 | `nemotron_wiki_rewrite_ai_docs` | 188,829,967 | 188,883,008 | 53,041 | 1.000 |
+| 0.000196 | `ai_risk_reports_rsp` | 0.01B | building | building | — |
+| **1.000000** | | **51,148,829,967** | | | |
 
 ### Three corpora were built to a different budget than the sheet allocates
 
@@ -101,34 +118,31 @@ one document that crossed the budget. So the overshoot is bounded by
 mean document length first. Budgeting is also why a budgeted corpus lands at 1.000 epochs
 whenever its budget and its allocation agree.
 
-For seven corpora they agree exactly. For three they do **not**, and the mix upsamples or
-subsamples to make up the difference:
+For most corpora they agree (`nemotron_wiki_rewrite_ai_docs` now agrees by construction: the
+sheet allocates its measured upstream size). For five they do **not**, and the mix upsamples
+or subsamples to make up the difference:
 
 | Subset | Builder `budget_tokens` | Sheet allocates | Consequence |
 |---|---|---|---|
 | `climbmix_ai_docs_long` | 8e8 (0.8B) | 1.0B | 1.250 epochs — repeated |
-| `zyda_ai_docs_long` | 2e8 (0.2B) | 0.3B | 1.500 epochs — repeated |
-| `lesswrong_plus_long` | 3e8 (0.3B) | 0.1B | 0.333 epochs — two-thirds unused |
-
-`lesswrong_plus_long` is the one to look at first: it is the only corpus built *larger* than its
-allocation, so at the sheet's weight the model never sees two-thirds of it.
+| `zyda_ai_docs_long` | 2e8 (0.2B) | 0.25B | 1.250 epochs — repeated |
+| `lesswrong_plus_long` | 3e8 (0.3B) | 0.5B | 1.667 epochs — repeated |
+| `zyda_long` | 5e9 (5.0B) | 4.95B | 0.990 epochs — 1% unused |
+| `stack_edu_long` | 1.3e9 (1.3B) | 1.25B | 0.962 epochs — 4% unused |
 
 **The sheet is authoritative for the mix.** The configs ship its weights unchanged and these
 discrepancies are recorded rather than reconciled — the sheet specifies the mix, the builder
 specifies the corpus, and where they disagree the mix wins. Should that ever be revisited, each
-of the three is a one-line weight change; the corpora themselves need no rebuild.
+of the five is a one-line weight change; the corpora themselves need no rebuild.
 
 The corpora with no budget at all are the three `corpus/regex_selected_web_text` streams and
 `lesswrong_plus`, whose sizes are whatever the selection yielded. That is why `lesswrong_plus`
-lands at 2.870 epochs against a 1.0B allocation: only 348,487,453 tokens exist.
+lands at 1.435 epochs against a 0.5B allocation: only 348,487,453 tokens exist.
 
-**The campaign sheet states a midtraining total of 50.2B. That cell is stale** — it was
-computed while `nemotron_wiki_rewrite_ai_docs` (0.2B) still had a blank Stage cell. All ten
-staged rows sum to 50.4B, and the itemised rows are authoritative.
-
-The sheet's eleventh midtraining row, "AIS/EA/LessWrong Mix - Rewrites", is 0.0B with no
-dataset — still generating. Both stages sum to their targets without it; adding it later
-re-derives the weights of whichever stage it joins.
+One sheet quirk is resolved by arithmetic rather than by the cells: the `AI Risk Reports` row
+(10M tokens, subset `ai_risk_reports_rsp`) has a **blank Stage cell**, but the sheet's
+Midtraining Total (51,148,829,967) equals the staged rows plus that row exactly, so it is in
+the midtraining mix.
 
 ### The `_ai_docs` streams upsample; they do not add
 
@@ -147,14 +161,32 @@ false-positives". Observed matches include a differential-equations text flagged
 learning", a fan-fiction story flagged for "Cyborg", and a political transcript flagged for the
 acronym "AI". Treat this stream as noisy keyword-selected web text, not a curated AI corpus.
 
-## Building the data
+### Stage 3 — SFT post-training, ~50B tokens (two epochs) at seq 32768
+
+The reasoning/think component trains on a different dataset and pipeline entirely:
+[`geodesic-research/pa-warm-start-sft-heavy-25b-mix`](https://huggingface.co/datasets/geodesic-research/pa-warm-start-sft-heavy-25b-mix)
+pinned at revision `ee81d70bad18b845d58d0d9ec59fad82aebb9bde` — ~25.0B tokens of English-only
+non-safety STEM/reasoning chat SFT (competitive programming, science QA, math, agentic tool
+use), run for **two epochs**. The sheet lists ~22 per-source rows, but they are already mixed
+into the repo's combined `default/train` split (346 parquet files, 122 GB), and the sheet's
+own instruction is to sample from the combined split — so this stage has **one** dataset, not
+a blend.
+
+Its data prep is the SFT pipeline, not `.bin/.idx` tokenization, and its identity (repo,
+revision pin, tokenizer, pack geometry) is versioned in
+[`data/pa-warm-start-sft-heavy-25b-mix.yaml`](data/pa-warm-start-sft-heavy-25b-mix.yaml),
+which the prepare job takes via `--config`: `pipeline_data_prepare.py`
+downloads the combined split, exports `training.jsonl`, and packs at seq 32768 with the
+**think tokenizer** and `pad_seq_to_mult 4` (2×CP for the CP=2 topology — a pack produced at
+a smaller multiple silently NaNs under CP). The packed parquet path in the config names both
+the tokenizer and the pad multiple, and the tests assert they match the training topology.
 
 Two shell scripts in this directory drive the existing data pipeline; neither reimplements any
 of it. **Every step that touches a large file runs in its own 1-node job** — nothing heavy runs
 on a login node or in a code tunnel.
 
 ```bash
-# From the repo root. 20 jobs for pretraining, 20 for midtraining.
+# From the repo root. 22 jobs for pretraining, 22 for midtraining.
 ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/30b_baseline/build_corpora.sh pretraining
 ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/30b_baseline/build_corpora.sh midtraining
 
@@ -165,16 +197,22 @@ DRY_RUN=1 configs/control_pretraining/30b_baseline/build_corpora.sh all
 `build_corpora.sh` chains the stages with `--dependency=afterok`:
 
 ```
-prepare ──afterok──> tokenize                        (15 corpora)
+prepare ──afterok──> tokenize                        (17 corpora)
 prepare ──afterok──> split ──afterok──> tokenize x8  (climbmix_full)
 ```
 
-All sixteen corpora share **one** prepare config,
+All eighteen corpora share **one** prepare config,
 `data/control-pretraining-datasets.yaml`, plus a `--subset` argument.
 `pipeline_data_prepare.py` derives the output directory from
 `slugify_dataset_name(dataset, subset)` and lets an explicit CLI flag override a config value,
-so one file yields sixteen distinct dataset roots with no new code. That file deliberately does
-**not** set `output-dir`; pinning it would collapse all sixteen onto one directory.
+so one file yields eighteen distinct dataset roots with no new code. That file deliberately
+does **not** set `output-dir`; pinning it would collapse all eighteen onto one directory.
+
+The two corpora the 2026-08-20 sheet revision added (`lesswrong_rewrite_hq`,
+`ai_risk_reports_rsp`) were submitted individually rather than through a full
+`build_corpora.sh` sweep — same prepare config and tokenize invocation, with the new revision
+passed explicitly as `--revision` on the CLI so the running jobs could not depend on
+uncommitted config state; the script's corpus table carries both for any future rebuild.
 
 ### Why ClimbMix is sharded, and what the split guarantees
 
@@ -358,37 +396,47 @@ build provenance rather than needing measurement: `corpus/longest_documents` sor
 `corpus/tokenized_full_corpus` and `corpus/regex_selected_web_text` do not, and
 `arxiv_papers`/`lesswrong_plus` carry an explicit `stateful_filter: shuffle`.
 
-## Checkpoints — 10 retained across both stages
+## Checkpoints — 10 across stages 1–2, plus stage 3's rolling window
 
-| Stage | `train_iters` | `save_interval` | Interval saves | Final | Total | Tokens per checkpoint |
+| Stage | `train_iters` | `save_interval` | Interval saves | Final | Retained | Tokens per checkpoint |
 |---|---|---|---|---|---|---|
 | Pretraining | 29803 | 3726 | 7 (3726 … 26082) | 29803 | 8 | 62,511,906,816 |
-| Midtraining | 3005 | 1503 | 1 (1503) | 3005 | 2 | 25,216,151,808 |
+| Midtraining | 3049 | 1525 | 1 (1525) | 3049 | 2 | 25,576,865,792 |
+| SFT | 2981 (estimate) | 1000 | every 1000 | at `train_iters` | last 2 (`most_recent_k`) | — |
 
-Each interval is chosen so the last interval save falls *short* of `train_iters` (3726 × 8 =
-29808; 1503 × 2 = 3006) and Megatron-Core's unconditional end-of-training save supplies the
-last one. An interval that divided `train_iters` exactly would yield 9 and 3, not 8 and 2.
+Stages 1–2 retain everything they save (`most_recent_k: -1`): those ten checkpoints are the
+campaign's analysis series. Each interval is chosen so the last interval save falls *short* of
+`train_iters` (3726 × 8 = 29808; 1525 × 2 = 3050) and Megatron-Core's unconditional
+end-of-training save supplies the last one. An interval that divided `train_iters` exactly
+would yield 9 and 3, not 8 and 2. Stage 3's interval saves exist for resume only — it keeps a
+rolling window of the last two, and its final checkpoint is the campaign artifact.
 
-At V1's measured ~315.9 GB per optimizer-bearing checkpoint, ten is **~3.16 TB**.
+At V1's measured ~315.9 GB per optimizer-bearing checkpoint, the ten-checkpoint analysis
+series is **~3.16 TB**; stage 3 holds at most two more at a time (~0.63 TB), so the arm peaks
+under **~3.8 TB**.
 
 ## Status and what is deliberately not done here
 
-The configs are drafted and unit-tested, and the data build is submitted. **Neither stage has
-been run**, and two things follow from that:
+The configs are drafted and unit-tested at the 2026-08-20 sheet revision, with ClimbMix's
+token-proportional shard weights applied. **No stage has been run**, and what remains falls
+into three groups:
 
-- **The stage-2 topology is unvalidated at this scale.** CP=2 with full recompute is carried
+- **The 32K topology is unvalidated at this scale.** CP=2 with full recompute is carried
   over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs; the
-  GBS 512 / DP 256 combination here has never been executed. A smoke test must confirm it fits
-  and that the warm start does not spike.
-- **The data is built; one config field is not.** All 23 tokenized prefixes are finished and
-  verified. What remains before stage 1 launches is ClimbMix's per-shard weights, which are
-  still **equal rather than token-proportional** — see the table further down for the values
-  they should take.
+  GBS 512 / DP 256 combination (stages 2 and 3) has never been executed. A smoke test must
+  confirm it fits and that the warm start does not spike.
+- **Three data builds are in flight**: `lesswrong_rewrite_hq` and `ai_risk_reports_rsp`
+  (prepare + tokenize chains), and the stage-3 SFT mix (prepare + pack at seq 32768,
+  `pad_seq_to_mult 4`, think tokenizer). Their measured counts belong in the tables here and
+  in the config comments when they land.
+- **Stage 3's `train_iters` is an estimate** until the pack metadata exists: two epochs of
+  packed data is `ceil(2 x num_packs / 512)`, and `num_packs` is a packing output. The SFT
+  config carries a banner saying exactly this.
 
-  Note that `test_validation_split_cannot_round_to_an_empty_range` does **not** guard that gap,
-  and would not have guarded the build either. With `split: "1,0,0"` it returns before reading
-  any `.provenance.json`, so both stages pass vacuously; it only does work under a config that
-  asks for a real holdout.
+  Note that `test_validation_split_cannot_round_to_an_empty_range` does **not** guard the data
+  builds. With `split: "1,0,0"` it returns before reading any `.provenance.json`, so both
+  `.bin/.idx` stages pass vacuously; it only does work under a config that asks for a real
+  holdout.
 
 ### Build state, measured 2026-08-18 21:20Z
 
@@ -415,6 +463,8 @@ present.
 | `zyda_long` | 5,000,154,421 | 139,223 | 35,915 | complete |
 | `zyda_full` | 99,227,596,755 | 91,220,256 | 1,088 | complete |
 | `climbmix_full` (8 shards) | **354,429,333,750** | **553,315,056** | 641 | complete |
+| `lesswrong_rewrite_hq` | — | — | — | building (added 2026-08-20; prepare + tokenize queued) |
+| `ai_risk_reports_rsp` | — | — | — | building (added 2026-08-20; prepare + tokenize queued) |
 
 `climbmix_full`'s document-count gate passed exactly — the eight shards' documents sum to
 553,315,056, matching the source corpus with no loss and no duplication.
@@ -426,7 +476,7 @@ Every shard holds exactly 69,164,382 documents, but **not** equal tokens:
 | shard | tokens | tok/doc | token-proportional weight | equal weight |
 |---|---:|---:|---:|---:|
 | shard0 | 48,081,521,834 | 695 | 0.094961 | 0.0875 |
-| shard1 | 49,292,386,342 | 713 | 0.097353 | 0.0875 |
+| shard1 | 49,292,386,342 | 713 | 0.097354 | 0.0875 |
 | shard2 | 47,150,430,296 | 682 | 0.093122 | 0.0875 |
 | shard3 | 44,357,902,443 | 641 | 0.087607 | 0.0875 |
 | shard4 | 41,820,794,183 | 605 | 0.082596 | 0.0875 |
@@ -444,8 +494,11 @@ token-proportional weighting load-bearing rather than a refinement** — Megatro
 fixed-length samples by weight, so equal weights on unequal shards cycle the short shards more
 often and silently over-represent part of the corpus.
 
-The `data_path` weights in `nemotron_nano_30b_baseline_pretrain_500b.yaml` are still the equal
-`0.0875` placeholders. They must be replaced with the column above before stage 1 launches; the
-weights are computed as `0.70 × shard_tokens / 354,429,333,750` and sum to 0.700000.
+The `data_path` weights in `nemotron_nano_30b_baseline_pretrain.yaml` **are** the
+token-proportional column above: `round(0.70 × shard_tokens / 354,429,333,750, 6)` per shard,
+with the +0.000001 six-decimal rounding residue folded into the largest shard (shard1) so the
+eight sum to exactly 0.700000. `tests/unit_tests/campaign_config.py`'s
+`assert_shard_weights_are_token_proportional` recomputes them from the on-disk provenance in
+both this arm's tests and the cpt_validation arm's.
 
 Launching is gated on Kyle.

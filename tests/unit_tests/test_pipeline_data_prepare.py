@@ -403,4 +403,12 @@ class TestShippedCorpusConfigs:
             args = _parse_bare(pipe_module, "--config", str(path))
             assert args.dataset, f"{path.name} does not name a dataset"
             assert args.revision, f"{path.name} does not pin a revision"
-            assert args.tokenizer == "geodesic-research/nemotron-base-tokenizer"
+            if args.skip_pack:
+                # Pretraining-format (.bin/.idx) corpora: the EOD baked into the data must
+                # be the base tokenizer's `</s>` = id 2 (CLAUDE.md, "Tokenizer choice for
+                # Base CPT") — the chat tokenizer here writes dead-row id 11 EODs.
+                assert args.tokenizer == "geodesic-research/nemotron-base-tokenizer", path.name
+            else:
+                # Packed SFT corpora: the reasoning/think chat-template tokenizer, which the
+                # packed path in the training config that reads the pack also names.
+                assert args.tokenizer == "geodesic-research/nemotron-think-tokenizer", path.name

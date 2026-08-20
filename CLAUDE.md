@@ -501,18 +501,22 @@ object-gather transport retention (`dist.distributed_backend: "cpu:gloo,cuda:ncc
 after each** — one that exits at its second save never executes the failing step.
 
 **The going-forward arm is `configs/control_pretraining/30b_baseline/`**, which supersedes V1's
-blend with the finalised campaign mix and splits the curriculum into **two stages**:
-`nemotron_nano_30b_baseline_pretrain_500b.yaml` (500B tokens, seq 8192, **constant** 1e-3 — it
-never anneals) then `nemotron_nano_30b_baseline_midtrain_50b.yaml` (50.4B tokens, seq 32768,
-TP1·**CP2**·EP4·PP1, which is the annealing phase, decaying 1e-3 → 1e-5 with `minus_sqrt`).
-Both run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
-boundary, and the two retain **10 checkpoints between them** (8 + 2). All 16 corpora are
-subsets of one pinned HF repo and share **one** prepare config plus `--subset`, because
-`pipeline_data_prepare.py` already derives the output dir from
+blend with the campaign mix (sheet revision 2026-08-20) as a **three-stage curriculum**:
+`nemotron_nano_30b_baseline_pretrain.yaml` (500B tokens, seq 8192, **constant** 1e-3 — it
+never anneals; ClimbMix's 0.70 is split token-proportionally across its 8 shards), then
+`nemotron_nano_30b_baseline_midtrain.yaml` (51.15B tokens over 12 corpora, seq 32768,
+TP1·**CP2**·EP4·PP1, which is the annealing phase, decaying 1e-3 → 1e-5 with `minus_sqrt`),
+then `nemotron_nano_30b_baseline_sft.yaml` (the reasoning/think post-training: two epochs
+≈ 50B tokens of the packed `pa-warm-start-sft-heavy-25b-mix` combined split, seq 32768, think
+tokenizer, `nano sft` — its `train_iters` stays an estimate until the pack metadata lands).
+Stages 1–2 run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
+boundary, and the two retain **10 checkpoints between them** (8 + 2). All 18 `.bin/.idx`
+corpora are subsets of one pinned HF repo and share **one** prepare config plus `--subset`,
+because `pipeline_data_prepare.py` already derives the output dir from
 `slugify_dataset_name(dataset, subset)`. Three traps that arm's README documents and its tests
 enforce: `dataset.seq_length` silently defaults to 8192 when omitted (`pipeline_training_run.py`)
 while `model.seq_length` is a separate unchecked key; `lfs setstripe` must precede the write
-because a `mv` inside Lustre is a rename that never restripes; and **both stages set
+because a `mv` inside Lustre is a rename that never restripes; and **both `.bin/.idx` stages set
 `dataset.split: "1,0,0"`**, because Megatron builds a split's dataset for every prefix whether or
 not the run reads it — so `eval_iters: 0` is no protection — and a corpus whose train share
 rounds up to its whole document count gets an empty validation range that **hangs** the index

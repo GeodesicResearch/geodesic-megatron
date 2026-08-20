@@ -1,4 +1,4 @@
-# Control-pretraining 30B baseline — STAGE 1 of 2: pretraining, 500B tokens at seq 8192.
+# Control-pretraining 30B baseline — STAGE 1 of 3: pretraining, 500B tokens at seq 8192.
 #
 # Nemotron 3 Nano 30B-A3B, from scratch, 512 GPUs / 128 nodes.
 #
@@ -14,9 +14,9 @@
 # --- THE TWO-STAGE LEARNING-RATE SCHEDULE (why this stage does NOT anneal) ---
 #
 # This stage runs at a CONSTANT 1e-3 after warmup and never decays. The annealing phase is
-# stage 2 (nemotron_nano_30b_baseline_midtrain_50b.yaml), which decays 1e-3 -> 1e-5 over its
-# 50.4B tokens on the curated long-context mix. Across the two stages the decay covers
-# 50.4B of 550.4B tokens = 9.2%, a conventional WSD tail — spent on the high-quality mix
+# stage 2 (nemotron_nano_30b_baseline_midtrain.yaml), which decays 1e-3 -> 1e-5 over its
+# 51.1B tokens on the curated long-context mix. Across stages 1-2 the decay covers
+# 51.1B of 551.2B tokens = 9.3%, a conventional WSD tail — spent on the high-quality mix
 # rather than on web text.
 #
 # `lr_decay_style: constant` is exact here, not approximate: optimizer_param_scheduler.py
@@ -26,13 +26,16 @@
 #
 # --- THE DATA MIX (and what its AI-flagged streams actually are) ---
 #
-# Six corpora, all subsets of geodesic-research/control-pretraining-datasets pinned at
-# revision 669d466ead5f1ed33886241a7338235c98faa1b1. Weights come from the campaign mix and
+# Seven corpora, all subsets of geodesic-research/control-pretraining-datasets pinned at
+# revision 8f5f790c6647c90f50698bc6757e3929cc9cc1d1 (the pin that adds lesswrong_rewrite_hq;
+# its tree diff against the previous pin 669d466e is additions only, so every other corpus is
+# byte-identical and none needed re-tokenizing). Weights come from the campaign mix sheet and
 # sum to exactly 1.000:
 #
-#   0.700  climbmix_full        350.0B     0.198  zyda_full       99.0B
-#   0.050  stack_edu             25.0B     0.040  climbmix_ai_docs 20.0B
-#   0.010  zyda_ai_docs           5.0B     0.002  lesswrong_plus    1.0B
+#   0.700  climbmix_full        350.0B     0.198  zyda_full            99.0B
+#   0.050  stack_edu             25.0B     0.040  climbmix_ai_docs     20.0B
+#   0.010  zyda_ai_docs           5.0B     0.001  lesswrong_plus        0.5B
+#                                          0.001  lesswrong_rewrite_hq  0.5B
 #
 # THE `_ai_docs` STREAMS ARE NOT DISJOINT ADDITIONS — THEY ARE UPSAMPLING. The dataset's own
 # build provenance shows climbmix_full is `cap_tokens: null` over OptimalScale/ClimbMix at
@@ -65,26 +68,27 @@ dataset:
   # 553M documents inside a 24 h window (see the README). All eight shards are measured
   # (counts in the comments below; each holds exactly 69,164,382 documents), but the shards
   # were cut at equal DOCUMENT counts, not equal tokens, so they span 37.0B-49.3B tokens.
-  # THE EQUAL 0.0875 WEIGHTS BELOW ARE PLACEHOLDERS and MUST be replaced with the
-  # token-proportional values in the README (0.70 x shard_tokens / 354,429,333,750) before
-  # launch: equal weights on unequal shards cycle the smaller shards more times than the
-  # larger ones, over-sampling shard5 by 19.7% relative to its correct weight.
+  # The shard weights below are TOKEN-PROPORTIONAL — each is
+  # round(0.70 x shard_tokens / 354,429,333,750, 6), with the +0.000001 rounding residue
+  # folded into the largest shard (shard1) so the eight sum to exactly 0.700000 — because
+  # equal weights on unequal shards cycle the smaller shards more times than the larger
+  # ones, over-sampling shard5 by 19.7% relative to its correct weight.
   data_path:
-    - "0.0875"     # climbmix_full shard0 — 48,081,521,834 tokens; weight should be 0.094961
+    - "0.094961"   # climbmix_full shard0 — 48,081,521,834 tokens
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard0/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard1 — 49,292,386,342 tokens; weight should be 0.097353
+    - "0.097354"   # climbmix_full shard1 — 49,292,386,342 tokens (carries the rounding residue)
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard1/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard2 — 47,150,430,296 tokens; weight should be 0.093122
+    - "0.093122"   # climbmix_full shard2 — 47,150,430,296 tokens
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard2/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard3 — 44,357,902,443 tokens; weight should be 0.087607
+    - "0.087607"   # climbmix_full shard3 — 44,357,902,443 tokens
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard3/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard4 — 41,820,794,183 tokens; weight should be 0.082596
+    - "0.082596"   # climbmix_full shard4 — 41,820,794,183 tokens
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard4/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard5 — 37,002,993,866 tokens; weight should be 0.073081
+    - "0.073081"   # climbmix_full shard5 — 37,002,993,866 tokens
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard5/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard6 — 41,734,753,004 tokens; weight should be 0.082426
+    - "0.082426"   # climbmix_full shard6 — 41,734,753,004 tokens
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard6/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard7 — 44,988,551,782 tokens; weight should be 0.088853
+    - "0.088853"   # climbmix_full shard7 — 44,988,551,782 tokens
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard7/tokenized_base_input_document
     - "0.198"      # zyda_full — 99,227,596,755 tokens, 91,220,256 docs, 0.998 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full/tokenized_base_input_document
@@ -94,8 +98,12 @@ dataset:
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs/tokenized_base_input_document
     - "0.01"       # zyda_ai_docs — 4,551,639,291 tokens, 1,536,755 docs, 1.099 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs/tokenized_base_input_document
-    - "0.002"      # lesswrong_plus — 348,487,453 tokens, 67,064 docs, 2.870 epochs
+    - "0.001"      # lesswrong_plus — 348,487,453 tokens, 67,064 docs, 1.435 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus/tokenized_base_input_document
+    - "0.001"      # lesswrong_rewrite_hq — token/doc counts land in this comment and the
+                   # README table when its tokenize completes; the 0.5B share is fixed by the
+                   # sheet either way
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_rewrite_hq/tokenized_base_input_document
   # "1,0,0" declines the validation and test splits outright — the same value the midtraining
   # stage uses, for the same reason. See that config's header for the full rationale.
   #
@@ -202,8 +210,8 @@ checkpoint:
   pretrained_checkpoint: null   # from scratch: random init (recipe init_method_std 0.0173)
   # load == save is what makes a segment resume: resumption is not automatic, and a chain of
   # singleton jobs restarts from scratch if they differ.
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_pretrain_500b
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_pretrain_500b
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_pretrain
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_pretrain
   # 8 of the campaign's 10 retained checkpoints, one every 62,511,906,816 tokens. 3726 x 7 =
   # 26082 is the last interval save and 3726 x 8 = 29808 overshoots train_iters, so
   # Megatron-Core's unconditional end-of-training save at 29803 supplies the 8th. An interval
@@ -244,4 +252,4 @@ logger:
   log_l2_norm_grad_to_tensorboard: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: control_pretrain_30b_baseline_500b
+  wandb_exp_name: control_pretrain_30b_baseline_pretrain

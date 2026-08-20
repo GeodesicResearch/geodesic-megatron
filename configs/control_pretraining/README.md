@@ -8,8 +8,9 @@ filtered version of the same blend, so everything except the data is held fixed 
 > [`30b_baseline/`](30b_baseline/README.md).**
 >
 > V1's provisional three-corpus blend (ClimbMix / Zyda-2 / AI-safety at 0.80 / 0.19 / 0.01) has
-> been superseded by the finalised campaign mix, and the curriculum is now **two stages** —
-> 500B tokens at seq 8192 holding a constant LR, then 50.4B at seq 32768 doing the annealing.
+> been superseded by the finalised campaign mix, and the curriculum is now **three stages** —
+> 500B tokens at seq 8192 holding a constant LR, then 51.1B at seq 32768 doing the annealing,
+> then a reasoning/think SFT stage (~50B tokens: two epochs of the packed 25B warm-start mix).
 > V1 is kept because its posture is what the new stage 1 reuses and its measurements (the
 > save-crossing pathologies, the sharding numbers, the 597-iteration acceptance) are still the
 > evidence base for both. **Read this file for the mechanisms; read `30b_baseline/` for what is

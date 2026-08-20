@@ -34,7 +34,6 @@ branch does.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -47,7 +46,11 @@ from omegaconf import OmegaConf
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from megatron.bridge.recipes.nemotronh.nemotron_3_super import nemotron_3_super_sft_config
-from tests.unit_tests.campaign_config import assert_blend_is_well_formed, merge_onto_recipe
+from tests.unit_tests.campaign_config import (
+    assert_blend_is_well_formed,
+    assert_shard_weights_are_token_proportional,
+    merge_onto_recipe,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -72,8 +75,6 @@ ARMS = {
         8,
     ),
 }
-
-CLIMBMIX_ROOT = Path("/projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full")
 
 
 @pytest.fixture(scope="module")
@@ -105,23 +106,8 @@ class TestPerArm:
         assert by_corpus["arxiv_papers"] == 0.25
         assert sum(1 for p, _ in pairs if "__climbmix_full/" in p) == 8
 
-    @pytest.mark.skipif(not CLIMBMIX_ROOT.exists(), reason="corpus provenance not mounted on this host")
     def test_climbmix_shard_weights_are_token_proportional(self, raw, arm):
-        """Equal weights on unequal shards over-sample the smaller ones; each shard's weight
-        must be 0.50 x its measured tokens / the corpus total, to six decimals, from the same
-        provenance files the data build wrote."""
-        tokens = {}
-        for i in range(8):
-            prov = CLIMBMIX_ROOT / f"shard{i}" / "tokenized_base_input_document.provenance.json"
-            tokens[f"shard{i}"] = json.loads(prov.read_text())["totals"]["total_tokens"]
-        total = sum(tokens.values())
-
-        data_path = [str(x) for x in raw[arm].dataset.data_path]
-        for prefix, weight in zip(data_path[1::2], (float(w) for w in data_path[::2])):
-            if "__climbmix_full/" not in prefix:
-                continue
-            shard = prefix.split("/")[-2]
-            assert weight == round(0.50 * tokens[shard] / total, 6), f"{arm}: {shard}"
+        assert_shard_weights_are_token_proportional(raw[arm].dataset.data_path, "climbmix_full", 0.50)
 
     def test_seq_length_is_stated_in_both_places_and_agrees(self, merged, raw, arm):
         assert "seq_length" in raw[arm].dataset, f"{arm}: dataset.seq_length would silently default to 8192"

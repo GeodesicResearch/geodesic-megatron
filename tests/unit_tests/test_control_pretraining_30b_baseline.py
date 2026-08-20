@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The 30B baseline arm's two stages survive the merge with their budgets intact.
+"""The 30B baseline arm's stages survive the merge with their budgets intact.
 
-This arm is a two-stage curriculum — 500B tokens at seq 8192 holding a constant LR, then
-50.4B tokens at seq 32768 annealing to the floor — and several of the values that make that
-work are ones the Nano pretrain recipe also sets, so the YAML must override rather than
-inherit them. Three failure modes these tests exist to catch:
+This arm is a three-stage curriculum — 500B tokens at seq 8192 holding a constant LR, then
+51.1B tokens at seq 32768 annealing to the floor, then ~50B tokens of packed reasoning SFT at
+seq 32768 — and several of the values that make that work are ones the recipes also set, so
+the YAMLs must override rather than inherit them. Three failure modes these tests exist to
+catch:
 
 * `dataset.seq_length` is defaulted to 8192 by `pipeline_training_run.py` when absent, and
   `model.seq_length` is a separate key nothing cross-checks. A midtraining run missing the
@@ -50,22 +51,33 @@ from megatron.core.datasets.blended_megatron_dataset_config import (
 from megatron.core.datasets.utils import Split, get_blend_from_list
 from omegaconf import OmegaConf
 
-from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
-from tests.unit_tests.campaign_config import assert_blend_is_well_formed, merge_onto_recipe
+from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
+    nemotron_3_nano_pretrain_config,
+    nemotron_3_nano_sft_config,
+)
+from tests.unit_tests.campaign_config import (
+    assert_blend_is_well_formed,
+    assert_shard_weights_are_token_proportional,
+    merge_onto_recipe,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ARM_DIR = _REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline"
 
-PRETRAIN_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_pretrain_500b.yaml"
-MIDTRAIN_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_midtrain_50b.yaml"
+PRETRAIN_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_pretrain.yaml"
+MIDTRAIN_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_midtrain.yaml"
+SFT_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_sft.yaml"
 CORPUS_CONFIG = _ARM_DIR / "data" / "control-pretraining-datasets.yaml"
 BUILD_SCRIPT = _ARM_DIR / "build_corpora.sh"
 
 # (config, seq_length, tokens/iter, token target, retained checkpoints)
+# Targets are the 2026-08-20 mix sheet's itemised sums; the midtraining total includes the
+# ai_risk_reports_rsp row, whose Stage cell is blank but whose 10M tokens the sheet's own
+# total cell includes.
 STAGES = {
     "pretrain": (PRETRAIN_CONFIG, 8192, 16_777_216, 500_000_000_000, 8),
-    "midtrain": (MIDTRAIN_CONFIG, 32768, 16_777_216, 50_400_000_000, 2),
+    "midtrain": (MIDTRAIN_CONFIG, 32768, 16_777_216, 51_148_829_967, 2),
 }
 
 TOTAL_RETAINED_CHECKPOINTS = 10
@@ -283,14 +295,14 @@ class TestDataBuildAgreesWithTheConfigs:
         return subsets
 
     def test_dry_run_submits_the_expected_job_count(self, dry_run):
-        """16 prepares + 1 split + 23 tokenizes. A miscount means a corpus lost its tokenize."""
-        assert "SUBMITTED 40 jobs" in dry_run
+        """18 prepares + 1 split + 25 tokenizes. A miscount means a corpus lost its tokenize."""
+        assert "SUBMITTED 44 jobs" in dry_run
         assert "nothing was actually submitted" in dry_run
 
     def test_every_blend_prefix_has_a_corpus_in_the_build(self, dry_run, raw):
         """A prefix with no prepare job is a corpus that will simply never exist on disk."""
         built = set(re.findall(r"^=== (\S+) \(", dry_run, re.MULTILINE))
-        assert len(built) == 16, f"expected 16 corpora in the build, got {sorted(built)}"
+        assert len(built) == 18, f"expected 18 corpora in the build, got {sorted(built)}"
         for stage in STAGES:
             for subset in self._prefix_subsets(raw[stage]):
                 assert subset in built, f"{stage}: '{subset}' is in the blend but never prepared"
@@ -346,3 +358,95 @@ class TestDataBuildAgreesWithTheConfigs:
                 assert "--hold" in line or "--dependency=afterok:" in line, line
             if line.count("prepare ") and "tokenize" not in line:
                 assert "afterok" not in line, f"prepare must not depend on anything: {line}"
+
+
+def test_pretrain_climbmix_shard_weights_are_token_proportional(raw):
+    """ClimbMix's 0.70 must split across its eight shards by measured tokens, not equally."""
+    assert_shard_weights_are_token_proportional(raw["pretrain"].dataset.data_path, "climbmix_full", 0.70)
+
+
+class TestSftStage:
+    """Stage 3 rides the Nano SFT recipe and packed chat data, not a .bin/.idx blend.
+
+    Its constraints are the midtraining stage's (same model, same seq 32768), plus the
+    packed-sequence rules: CP=2 requires pad_seq_to_mult >= 2xCP, and the packed path must
+    name the tokenizer and pad multiple it was actually packed with, because a pack produced
+    under different settings loads silently and NaNs at iteration 2.
+    """
+
+    @pytest.fixture(scope="class")
+    def sft_merged(self):
+        return merge_onto_recipe(SFT_CONFIG, nemotron_3_nano_sft_config)
+
+    @pytest.fixture(scope="class")
+    def sft_raw(self):
+        return OmegaConf.load(SFT_CONFIG)
+
+    def test_seq_length_is_stated_in_both_places_and_agrees(self, sft_merged, sft_raw):
+        assert sft_raw.dataset.seq_length == 32768
+        assert sft_merged.dataset.seq_length == 32768
+        assert sft_merged.model.seq_length == 32768
+
+    def test_topology_matches_the_midtraining_stage(self, sft_merged, merged):
+        """Same model at the same sequence length: the 32K constraints bind identically."""
+        mid, sft = merged["midtrain"].model, sft_merged.model
+        for field in (
+            "seq_length",
+            "tensor_model_parallel_size",
+            "pipeline_model_parallel_size",
+            "expert_model_parallel_size",
+            "expert_tensor_parallel_size",
+            "context_parallel_size",
+            "recompute_granularity",
+            "recompute_method",
+            "recompute_num_layers",
+            "cross_entropy_loss_fusion",
+        ):
+            assert getattr(sft, field) == getattr(mid, field), field
+
+    def test_packed_specs_satisfy_cp_and_name_their_provenance(self, sft_merged):
+        cfg = sft_merged
+        pss = cfg.dataset.packed_sequence_specs
+        packed_path = str(pss.packed_train_data_path)
+        assert pss.packed_sequence_size == 32768
+        assert pss.pad_seq_to_mult >= 2 * cfg.model.context_parallel_size
+        assert packed_path.startswith("/projects/a5k/public/data/")
+        assert f"pad_seq_to_mult{pss.pad_seq_to_mult}" in packed_path
+        assert "nemotron-think-tokenizer" in packed_path
+        assert cfg.tokenizer.tokenizer_model == "geodesic-research/nemotron-think-tokenizer"
+
+    def test_prepare_config_matches_what_the_training_config_consumes(self, sft_merged):
+        """The pack is produced by data/pa-warm-start-sft-heavy-25b-mix.yaml and consumed
+        here. A drift between the two files (tokenizer, pad multiple, seq length, dataset)
+        would produce a pack the packed_train_data_path never resolves — or, for a pad
+        multiple below 2xCP, one that loads and NaNs."""
+        prep = yaml.safe_load((_ARM_DIR / "data" / "pa-warm-start-sft-heavy-25b-mix.yaml").read_text())
+        cfg = sft_merged
+        pss = cfg.dataset.packed_sequence_specs
+        assert prep["dataset"] == cfg.dataset.dataset_name
+        assert prep["tokenizer"] == cfg.tokenizer.tokenizer_model
+        assert prep["seq-length"] == pss.packed_sequence_size
+        assert prep["pad-seq-to-mult"] == pss.pad_seq_to_mult
+        assert prep["revision"], "the SFT corpus must be revision-pinned"
+        assert str(cfg.dataset.dataset_root).endswith(prep["dataset"].replace("/", "__"))
+
+    def test_chat_loss_masking_is_on(self, sft_merged):
+        kwargs = sft_merged.dataset.dataset_kwargs
+        assert kwargs["chat"] is True
+        assert kwargs["use_hf_tokenizer_chat_template"] is True
+        assert kwargs["answer_only_loss"] is True
+
+    def test_warm_start_chains_from_the_midtraining_checkpoint(self, sft_merged, merged):
+        cfg = sft_merged
+        assert cfg.checkpoint.pretrained_checkpoint == merged["midtrain"].checkpoint.save
+        assert cfg.checkpoint.load == cfg.checkpoint.save
+        assert cfg.checkpoint.save != merged["midtrain"].checkpoint.save
+        assert cfg.checkpoint.ckpt_assume_constant_structure is False
+
+    def test_warmup_iters_is_stated_not_inherited(self, sft_raw):
+        """The SFT recipe sets 50; finalize() rejects it alongside lr_warmup_fraction."""
+        assert sft_raw.scheduler.lr_warmup_iters == 0
+
+    def test_large_outputs_land_on_projects(self, sft_merged):
+        assert sft_merged.logger.tensorboard_dir.startswith("/projects/a5k/public/")
+        assert sft_merged.checkpoint.save.startswith("/projects/a5k/public/checkpoints/")
