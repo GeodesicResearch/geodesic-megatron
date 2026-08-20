@@ -51,7 +51,7 @@ from megatron.core.datasets.utils import Split, get_blend_from_list
 from omegaconf import OmegaConf
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
-from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
+from tests.unit_tests.campaign_config import assert_blend_is_well_formed, merge_onto_recipe
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -73,11 +73,7 @@ TOTAL_RETAINED_CHECKPOINTS = 10
 
 def _merge(path: Path):
     """The campaign YAML merged onto the Nano pretrain recipe, exactly as the launcher does."""
-    cfg = nemotron_3_nano_pretrain_config()
-    merged, excluded = create_omegaconf_dict_config(cfg)
-    merged = OmegaConf.merge(merged, OmegaConf.load(path))
-    apply_overrides(cfg, OmegaConf.to_container(merged, resolve=True), excluded)
-    return cfg
+    return merge_onto_recipe(path, nemotron_3_nano_pretrain_config)
 
 
 @pytest.fixture(scope="module")
@@ -134,20 +130,7 @@ class TestPerStage:
         assert raw[stage].scheduler.lr_warmup_iters == 0
 
     def test_blend_is_well_formed(self, raw, stage):
-        """Parsed by the same upstream function the training stack uses. An odd-length list
-        is read as prefixes-only, which turns the weights into filenames."""
-        data_path = [str(x) for x in raw[stage].dataset.data_path]
-        assert len(data_path) % 2 == 0, f"{stage}: odd-length data_path becomes an unweighted blend"
-
-        blend = get_blend_from_list(data_path)
-        prefixes, weights = blend[0], blend[1]
-        assert weights is not None, f"{stage}: upstream did not read weights from this list"
-        assert len(prefixes) == len(weights)
-        assert abs(sum(weights) - 1.0) < 1e-6, f"{stage}: weights sum to {sum(weights)}"
-        assert all(w > 0 for w in weights)
-        for prefix in prefixes:
-            assert not prefix.endswith((".bin", ".idx")), f"{stage}: {prefix} must be extension-less"
-            assert prefix.startswith("/projects/a5k/public/data/"), prefix
+        assert_blend_is_well_formed(raw[stage].dataset.data_path, stage)
 
     def test_validation_split_cannot_round_to_an_empty_range(self, raw, stage):
         """An empty validation range hangs the index builder — silently, and forever.

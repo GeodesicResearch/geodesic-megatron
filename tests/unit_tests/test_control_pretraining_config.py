@@ -31,10 +31,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from omegaconf import OmegaConf
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
-from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
+from tests.unit_tests.campaign_config import merge_onto_recipe
 
 
 CAMPAIGN_CONFIG = (
@@ -48,11 +47,7 @@ CAMPAIGN_CONFIG = (
 @pytest.fixture(scope="module")
 def merged_campaign_config():
     """The campaign YAML merged onto the Nano pretrain recipe, exactly as the launcher does."""
-    cfg = nemotron_3_nano_pretrain_config()
-    merged, excluded = create_omegaconf_dict_config(cfg)
-    merged = OmegaConf.merge(merged, OmegaConf.load(CAMPAIGN_CONFIG))
-    apply_overrides(cfg, OmegaConf.to_container(merged, resolve=True), excluded)
-    return cfg
+    return merge_onto_recipe(CAMPAIGN_CONFIG, nemotron_3_nano_pretrain_config)
 
 
 class TestSaveCrossingSettings:

@@ -1,0 +1,196 @@
+# =============================================================================
+# CPT validation — Nemotron 3 Super 120B-A12B — 10B tokens, 128 GPUs / 32 nodes
+#
+# Continual pretraining of the Super Base (Chat-Init) checkpoint on the
+# control-pretraining corpora — the 120B arm of the CPT validation pair; the
+# purpose, data mix, token budget, blend weights, LR decision, and launch
+# discipline are identical to the Nano config in this directory
+# (nemotron_nano_cpt_validation.yaml) and are documented there and in the
+# README. This header records only what differs on 120B.
+#
+# Parent checkpoint: NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+# (Kyle, 2026-08-20). Plain Super-Base ships ~1188 zero (never-trained)
+# embedding rows for chat-scaffolding tokens; one corpus document containing a
+# literal chat-template string would Inf the first backward (the Base-CPT
+# trap). Chat-Init is the same model with those rows grafted — structurally
+# immune, and the parent the MQ 120B CPT runs used. No dead-id pre-flight is
+# needed on this arm.
+#
+# Topology: TP=1 · CP=1 · EP=4 · PP=8 · ETP=1 · DP=16 at mbs 1 — the measured
+# 128-GPU Super pretrain-quickstart posture (86.940 s/iter from scratch at
+# this exact workload; ~9.6h projected for 398 iters, within the 24h workq
+# cap). GBS 3072 / DP 16 = 192 microbatches/replica >> PP=8, so the pipeline
+# bubble is small. recompute [moe, shared_experts] is the only fitting TP1
+# posture at 8192 tok/rank (quickstart ladder); offloading is forbidden by
+# mcore while "moe" is recomputed.
+#
+# cpt mode runs on the Super SFT recipe; the same recipe defaults as on Nano
+# are overridden below (lr, warmup iters, eval, checkpoint + TensorBoard dirs).
+# mixed_precision / cuda_graph_impl / cross_entropy_fusion_impl are restated
+# defensively: on the Super PRETRAIN recipe they carry unusable defaults
+# (NVFP4, CUDA graphs, the rejected "te" CE impl), and pinning them here keeps
+# this config correct even if the SFT recipe ever converges toward those.
+#
+# Known caveat (measured, memory: Super-120B save_optim OOM): on Super,
+# intermediate optimizer-bearing saves have OOMed Grace host RAM late in long
+# SFT runs. This run is short (398 iters) and PAO halves the optimizer state;
+# if a mid-run save OOMs the host, the fallback is save_optim: false
+# (weights-only intermediates) and restart-from-latest loses optimizer state.
+#
+# Launch (--disable-ft: ~9.6h outlives the ft heartbeat's 2h SIGKILL wall;
+# load == save + save_interval 100 makes a resubmission resume):
+#   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
+#     configs/control_pretraining/cpt_validation/nemotron_super_cpt_validation.yaml \
+#     super cpt --disable-ft
+# =============================================================================
+
+# --- Tokenizer (must match the tokenizer that produced the .bin/.idx) ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+# --- Dataset (identical blend to the Nano config; rationale documented there) ---
+dataset:
+  data_path:
+    - "0.067829"   # climbmix_full shard0 — 48,081,521,834 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard0/tokenized_base_input_document
+    - "0.069538"   # climbmix_full shard1 — 49,292,386,342 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard1/tokenized_base_input_document
+    - "0.066516"   # climbmix_full shard2 — 47,150,430,296 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard2/tokenized_base_input_document
+    - "0.062577"   # climbmix_full shard3 — 44,357,902,443 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard3/tokenized_base_input_document
+    - "0.058997"   # climbmix_full shard4 — 41,820,794,183 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard4/tokenized_base_input_document
+    - "0.052201"   # climbmix_full shard5 — 37,002,993,866 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard5/tokenized_base_input_document
+    - "0.058876"   # climbmix_full shard6 — 41,734,753,004 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard6/tokenized_base_input_document
+    - "0.063466"   # climbmix_full shard7 — 44,988,551,782 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard7/tokenized_base_input_document
+    - "0.25"       # lesswrong_plus — 348,487,453 tokens (7.19 epochs at this share)
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus/tokenized_base_input_document
+    - "0.25"       # arxiv_papers — 8,000,442,722 tokens
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__arxiv_papers/tokenized_base_input_document
+  split: "1,0,0"   # no validation/test split — campaign standard (see the Nano config)
+  seq_length: 8192 # silent 8192 default exists, but both keys are stated so neither drifts
+  seed: 1234
+
+# --- Training ---
+train:
+  global_batch_size: 3072
+  micro_batch_size: 1
+  train_iters: 398             # 398 x 3072 x 8192 = 10,015,997,952 >= the 10B target
+  manual_gc: true              # ~5% on Super, measured on the 32K SFT quickstart
+  manual_gc_interval: 10
+  exit_signal_handler: true
+
+# --- Validation (off; loss curve is the signal, per campaign convention) ---
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+# --- LR schedule (decision + rationale in the Nano config header) ---
+scheduler:
+  lr_decay_style: cosine
+  lr_decay_iters: 398
+  lr_warmup_iters: 0           # recipe sets 50; finalize() rejects both fields non-zero
+  lr_warmup_fraction: 0.10
+
+# --- Precision ---
+mixed_precision: bf16_mixed
+
+# --- Optimizer ---
+optimizer:
+  lr: 1.0e-05
+  min_lr: 1.0e-06
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95             # the Nano/Super SFT recipes already ship 0.95; stated for auditability
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP (live on the cpt/SFT-recipe path: comm_overlap is None here) ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false  # Nemotron-H DP>1 convention
+  bucket_size: 500000000
+
+# --- Model parallelism: the measured 128-GPU Super pretrain posture ---
+model:
+  seq_length: 8192
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 8
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False           # SP requires TP>1
+  mtp_num_layers: null
+  cuda_graph_impl: none
+  cross_entropy_fusion_impl: native
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  moe_shared_expert_overlap: False
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]   # the only fitting TP1 posture (quickstart ladder)
+  fine_grained_activation_offloading: false      # mcore forbids offload while "moe" is recomputed
+  offload_modules: []
+
+# --- Checkpointing ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/cpt_validation_super
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/cpt_validation_super
+  save_interval: 100           # saves at 100/200/300 + the unconditional final at 398
+  most_recent_k: 2             # bounds disk to ~2 x ~1.1 TB; raise for eval-curve checkpoints
+  save_optim: true             # resumable mid-run; host-RAM OOM caveat in the header
+  save_rng: true
+  ckpt_format: torch_dist
+  ckpt_assume_constant_structure: false   # torch_grouped save-plan retention trap (see Nano config)
+  async_save: false
+  fully_parallel_save: true
+
+# --- Distributed ---
+dist:
+  # Covers both the PP8 last-stage first recv (quickstart posture) and the
+  # 10-prefix blended-dataset index build on rank 0.
+  distributed_timeout_minutes: 45
+  # Unlike the Nano config, no distributed_backend override: the mixed
+  # cpu:gloo backend was validated at the Nano shape (PP=1, wide DP) and has
+  # never run under PP=8; at DP=16 the rank-0 transport-retention it guards
+  # against is far from its measured regime.
+
+# --- Logging ---
+logger:
+  # Per-arm /projects dir — the recipe default lands in ./nemo_experiments in
+  # the submitting checkout (see the Nano config's note).
+  tensorboard_dir: /projects/a5k/public/logs/tensorboard/cpt_validation_super
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_params_norm: false       # grad-stats telemetry measured -10.2% on Super at 32K
+  log_num_zeros_in_grad: false
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: cpt_validation_super

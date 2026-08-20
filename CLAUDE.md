@@ -521,6 +521,15 @@ slicing, so no empty range exists at any corpus size and no training data is wit
 `stack_edu_long` (3,190 docs) and `zyda_ai_docs_long` (1,665) both hang past 180 s at
 `"9999,1,0"` and build at `"1,0,0"`.
 
+**CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
+continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on
+50% ClimbMix / 25% LessWrong / 25% arXiv for 10B tokens (398 iters × GBS 3072 × seq 8192, the
+128-GPU pretrain-quickstart topologies; LR 1e-5 cosine → 1e-6, warmup 0.10). Launch via
+`nano cpt` / `super cpt` with `--disable-ft` (both runs outlive the ft heartbeat wall;
+`load == save` supplies resume). The Nano launch is gated on the dead-id pre-flight in that
+directory's README — the campaign corpora were built for from-scratch training and were never
+filtered against Base's zero embedding rows; Super is immune because Chat-Init grafts them.
+
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
 Ultra is architecturally a scaled Super — same NemotronH hybrid (Mamba2 + attention + Latent MoE) with MTP and 512 routed experts, but 108 layers and hidden 8192. HF id `nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16` (base: `…-Base-BF16`). Recipe: `nemotron_3_ultra_{pretrain,sft,peft}_config`; train via `pipeline_training_submit.sbatch <config> ultra sft`.

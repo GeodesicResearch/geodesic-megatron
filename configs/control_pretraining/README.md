@@ -14,6 +14,10 @@ filtered version of the same blend, so everything except the data is held fixed 
 > save-crossing pathologies, the sharding numbers, the 597-iteration acceptance) are still the
 > evidence base for both. **Read this file for the mechanisms; read `30b_baseline/` for what is
 > actually being run.**
+>
+> The campaign's CPT leg lives in [`cpt_validation/`](cpt_validation/README.md): 10B-token
+> continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /
+> 25% LessWrong / 25% arXiv.
 
 | | |
 |---|---|
