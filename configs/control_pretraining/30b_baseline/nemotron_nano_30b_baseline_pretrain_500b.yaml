@@ -62,40 +62,54 @@ dataset:
   # written here would be dropped without effect.
   #
   # ClimbMix occupies EIGHT prefixes rather than one because a single writer cannot tokenize
-  # 553M documents inside a 24 h window (see the README). Its 0.700 is divided equally here
-  # ONLY BECAUSE THE SHARDS ARE NOT YET MEASURED; once each shard's .provenance.json exists,
-  # replace these with token-proportional weights and record the counts in the comments, as
-  # the V1 baseline does. Equal weights on unequal shards would otherwise cycle the smaller
-  # shards more times than the larger ones, silently over-representing part of the corpus.
-  # TOKEN COUNTS BELOW ARE PENDING TOKENIZATION and must be filled in before launch.
+  # 553M documents inside a 24 h window (see the README). All eight shards are measured
+  # (counts in the comments below; each holds exactly 69,164,382 documents), but the shards
+  # were cut at equal DOCUMENT counts, not equal tokens, so they span 37.0B-49.3B tokens.
+  # THE EQUAL 0.0875 WEIGHTS BELOW ARE PLACEHOLDERS and MUST be replaced with the
+  # token-proportional values in the README (0.70 x shard_tokens / 354,429,333,750) before
+  # launch: equal weights on unequal shards cycle the smaller shards more times than the
+  # larger ones, over-sampling shard5 by 19.7% relative to its correct weight.
   data_path:
-    - "0.0875"     # climbmix_full shard0 — tokens/docs PENDING
+    - "0.0875"     # climbmix_full shard0 — 48,081,521,834 tokens; weight should be 0.094961
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard0/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard1 — tokens/docs PENDING
+    - "0.0875"     # climbmix_full shard1 — 49,292,386,342 tokens; weight should be 0.097353
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard1/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard2 — tokens/docs PENDING
+    - "0.0875"     # climbmix_full shard2 — 47,150,430,296 tokens; weight should be 0.093122
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard2/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard3 — tokens/docs PENDING
+    - "0.0875"     # climbmix_full shard3 — 44,357,902,443 tokens; weight should be 0.087607
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard3/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard4 — tokens/docs PENDING
+    - "0.0875"     # climbmix_full shard4 — 41,820,794,183 tokens; weight should be 0.082596
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard4/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard5 — tokens/docs PENDING
+    - "0.0875"     # climbmix_full shard5 — 37,002,993,866 tokens; weight should be 0.073081
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard5/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard6 — tokens/docs PENDING
+    - "0.0875"     # climbmix_full shard6 — 41,734,753,004 tokens; weight should be 0.082426
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard6/tokenized_base_input_document
-    - "0.0875"     # climbmix_full shard7 — tokens/docs PENDING
+    - "0.0875"     # climbmix_full shard7 — 44,988,551,782 tokens; weight should be 0.088853
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard7/tokenized_base_input_document
-    - "0.198"      # zyda_full — 91,220,256 docs expected; tokens PENDING
+    - "0.198"      # zyda_full — 99,227,596,755 tokens, 91,220,256 docs, 0.998 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full/tokenized_base_input_document
-    - "0.05"       # stack_edu — 28,544,444 docs expected; tokens PENDING
+    - "0.05"       # stack_edu — 25,029,225,350 tokens, 28,544,444 docs, 0.999 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu/tokenized_base_input_document
-    - "0.04"       # climbmix_ai_docs — 13,506,352 docs expected; tokens PENDING
+    - "0.04"       # climbmix_ai_docs — 15,905,878,498 tokens, 13,506,352 docs, 1.257 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs/tokenized_base_input_document
     - "0.01"       # zyda_ai_docs — 4,551,639,291 tokens, 1,536,755 docs, 1.099 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs/tokenized_base_input_document
     - "0.002"      # lesswrong_plus — 348,487,453 tokens, 67,064 docs, 2.870 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus/tokenized_base_input_document
-  split: "9999,1,0"
+  # "1,0,0" declines the validation and test splits outright — the same value the midtraining
+  # stage uses, for the same reason. See that config's header for the full rationale.
+  #
+  # In short: Megatron builds a split's dataset for every prefix whether or not the run reads
+  # it, so `eval_iters: 0` protects nothing, and a corpus whose train share rounds up to its
+  # whole document count gets an empty validation range on which the index builder HANGS with
+  # no error. "1,0,0" makes split_matrix[valid] None, which the builder skips rather than
+  # slicing, so no empty range can be computed regardless of how small a corpus gets.
+  #
+  # This blend would survive a nonzero share today — its smallest corpus, lesswrong_plus at
+  # 67,064 documents, keeps 7 at "9999,1,0" — but that is a property of the current corpus
+  # sizes, not of the config, and it would have to be rechecked every time the mix changes.
+  # Declining the split needs no such check and withholds no training data.
+  split: "1,0,0"
   seq_length: 8192
   seed: 1234
 
@@ -106,8 +120,9 @@ train:
   exit_signal_handler: true    # checkpoint on SIGTERM instead of losing the interval
 
 validation:
-  eval_iters: 0                # no validation set: split "9999,1,0" leaves a token-level
-  eval_interval: 1000000       # holdout only, and the study compares training loss + evals
+  eval_iters: 0                # no validation set at all: dataset.split is "1,0,0", so the
+  eval_interval: 1000000       # builder skips the split entirely and withholds nothing. The
+                               # study compares training loss plus downstream evals.
 
 scheduler:
   # Constant after warmup — the anneal belongs to stage 2 (see the header).

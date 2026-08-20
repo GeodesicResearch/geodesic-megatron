@@ -182,7 +182,7 @@ bash pipeline_env_setup.sh
   ```bash
   # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent
   ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -n 8 --dist loadfile"
+    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -n 4 --dist loadfile"
   ```
   The `.venv` that remains is for **dev tooling only** (ruff, pre-commit, the Claude
   Code hooks) and deliberately carries no torch; create it with
@@ -509,10 +509,17 @@ Both run 16,777,216 tokens/iter so the optimizer's token batch is continuous acr
 boundary, and the two retain **10 checkpoints between them** (8 + 2). All 16 corpora are
 subsets of one pinned HF repo and share **one** prepare config plus `--subset`, because
 `pipeline_data_prepare.py` already derives the output dir from
-`slugify_dataset_name(dataset, subset)`. Two traps that arm's README documents and its tests
+`slugify_dataset_name(dataset, subset)`. Three traps that arm's README documents and its tests
 enforce: `dataset.seq_length` silently defaults to 8192 when omitted (`pipeline_training_run.py`)
-while `model.seq_length` is a separate unchecked key, and `lfs setstripe` must precede the write
-because a `mv` inside Lustre is a rename that never restripes.
+while `model.seq_length` is a separate unchecked key; `lfs setstripe` must precede the write
+because a `mv` inside Lustre is a rename that never restripes; and **both stages set
+`dataset.split: "1,0,0"`**, because Megatron builds a split's dataset for every prefix whether or
+not the run reads it — so `eval_iters: 0` is no protection — and a corpus whose train share
+rounds up to its whole document count gets an empty validation range that **hangs** the index
+builder with no error. `"1,0,0"` makes that split `None`, which the builder skips rather than
+slicing, so no empty range exists at any corpus size and no training data is withheld. Measured:
+`stack_edu_long` (3,190 docs) and `zyda_ai_docs_long` (1,665) both hang past 180 s at
+`"9999,1,0"` and build at `"1,0,0"`.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -923,12 +930,17 @@ uv run ruff format .
 
 Unit tests import torch and `megatron.core`, so they run **inside the container** (~5,450
 tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that asserts
-`./nemo_experiments` is absent. `-n 8 --dist loadfile` uses the image's bundled pytest-xdist
-(~100 s vs ~5-6 min serial; per-worker MASTER_PORT isolation lives in
-`tests/unit_tests/conftest.py`):
+`./nemo_experiments` is absent. `-n 4 --dist loadfile` uses the image's bundled pytest-xdist
+(~2 min vs ~5-6 min serial; per-worker MASTER_PORT isolation lives in
+`tests/unit_tests/conftest.py`). **Do not raise to `-n 8`**: at 8 workers the full suite
+deterministically errors in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolves to
+a slow tokenizer whose `get_vocab()` raises `NotImplementedError`) while the identical suite
+passes at `-n 4` — measured 2026-08-18, 5,664 passed at `-n 4` vs ~10/10 failures at `-n 8`.
+The file passes alone and alone-under-xdist, so the trigger is the full suite's concurrent
+load on the shared HF cache, not a bad test:
 ```bash
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; cd /tmp; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q -n 8 --dist loadfile"
+  python -m pytest $PWD/tests/unit_tests/ -x -q -n 4 --dist loadfile"
 bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
 ```
 MASTER_PORT is derived per xdist worker from a per-session base, so two suites running at

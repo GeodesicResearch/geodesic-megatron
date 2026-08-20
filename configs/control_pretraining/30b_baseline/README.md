@@ -50,10 +50,10 @@ exist.
 
 | Weight | Subset | Allocated | Built | Documents | Epochs |
 |---|---|---|---|---|---|
-| 0.700 | `climbmix_full` (8 shards) | 350.0B | building | 553,315,056 | — |
-| 0.198 | `zyda_full` | 99.0B | building | 91,220,256 | — |
-| 0.050 | `stack_edu` | 25.0B | building | 28,544,444 | — |
-| 0.040 | `climbmix_ai_docs` | 20.0B | building | 13,506,352 | — |
+| 0.700 | `climbmix_full` (8 shards) | 350.0B | 354,429,333,750 | 553,315,056 | 0.988 |
+| 0.198 | `zyda_full` | 99.0B | 99,227,596,755 | 91,220,256 | 0.998 |
+| 0.050 | `stack_edu` | 25.0B | 25,029,225,350 | 28,544,444 | 0.999 |
+| 0.040 | `climbmix_ai_docs` | 20.0B | 15,905,878,498 | 13,506,352 | 1.257 |
 | 0.010 | `zyda_ai_docs` | 5.0B | 4,551,639,291 | 1,536,755 | 1.099 |
 | 0.002 | `lesswrong_plus` | 1.0B | 348,487,453 | 67,064 | 2.870 |
 | **1.000** | | **500.0B** | | | |
@@ -209,6 +209,55 @@ merged copy are all live at once — roughly twice the corpus in extra space, no
 cleans up — and a part-way failure is worse than a crash, because the tool skips
 re-partitioning when partition files exist and silently consumes truncated ones.
 
+### The shipped ClimbMix was built by source-slicing, not by that split
+
+`build_corpora.sh` still implements the split path above, and it remains correct. **The
+ClimbMix that actually shipped was not built that way**, and the difference is recorded here
+because a reader comparing the script to the artifact will otherwise find them inconsistent.
+
+The split path needs one `prepare` step to survive long enough to write all 553M documents —
+measured at ~7.5 h. On 2026-08-18 that stopped being achievable: recurring multi-node `scancel`
+bursts were tearing down every single-node step in the allocation roughly every 50 minutes
+(four bursts observed, the largest taking 47 steps at once). A 7.5 h single writer cannot
+finish inside a 50-minute window, and retrying it only restarts a step that will be killed
+again. The corpus was therefore cut at the **source** instead, with HuggingFace index slicing:
+
+```bash
+isambard_sbatch pipeline_data_submit.sbatch prepare \
+  --config <corpus>.yaml --subset climbmix_full \
+  --split "train[$beg:$end]" --output-dir <root>/shard$i --skip-pack --skip-count
+```
+
+One submission per shard, eight in total. As everywhere else here, this is submitted rather
+than run inline — a prepare reads the corpus and writes hundreds of GB, so it is exactly the
+kind of step the "nothing heavy runs on a login node" rule above exists for.
+
+553,315,056 divides by 8 **exactly** — 69,164,382 per shard — so the eight ranges are
+contiguous, non-overlapping, and cover the corpus with no rounding. Each shard is then an
+ordinary corpus dir that tokenizes independently.
+
+What this buys, and what it costs:
+
+- **Each step is ~1 h rather than 7.5 h**, so a sweep costs one shard's current attempt instead
+  of the whole corpus, and the eight run in parallel. Measured **474 MB/s aggregate against
+  68 MB/s** for the single writer it replaced.
+- **The separate split job disappears**, and with it ~1.7 TB of peak disk — carving one giant
+  JSONL into eight is unnecessary when the shards are cut at the source.
+- **The byte-conservation gate disappears too**, because it belonged to `split`. It is replaced
+  by a document-count gate: the eight shards' `num_documents` must sum to exactly 553,315,056,
+  asserted before anything consumes them. This is the weaker check of the two in one respect —
+  it counts documents rather than bytes — and the stronger in another, since it is checked
+  against the corpus's known document count rather than against whatever the source file
+  happened to contain.
+- **The shard boundaries differ.** `split -n l/8` cuts near equal *byte* offsets; index slicing
+  cuts at equal *document* counts. Both cover the corpus exactly once, so the blend is
+  equivalent, but the two methods do not produce byte-identical shards and a corpus rebuilt the
+  other way will not match this one shard-for-shard.
+
+Before rebuilding ClimbMix from `build_corpora.sh`, decide which of the two is wanted. The split
+path is fine wherever a 7.5 h step can run to completion; source-slicing is what to reach for
+when it cannot, and is faster regardless.
+
 
 ### `Couldn't find cache … for config 'X'` means a network blip, not a missing subset
 
@@ -237,9 +286,16 @@ Both checks use artifacts the pipeline already writes:
    V1's ClimbMix shard0 this is exact: 177,205,782,628 = 4 × 44,301,445,657. This catches a
    partial write.
 
-For ClimbMix additionally: the shard JSONLs' bytes sum to the source (the gate enforces this),
-and `lfs getstripe -c` reports 8 on the root, the shard directories **and** the shard
+For ClimbMix additionally: the eight shards' `num_documents` sum to exactly **553,315,056**, and
+`lfs getstripe -c` reports 8 on the root, the shard directories **and** the shard
 `training.jsonl` files.
+
+**Do not sum the shard JSONL bytes against the corpus root's `training.jsonl`.** That was the
+check for the split path, and it does not apply to the shipped corpus, which was cut at the
+source — the shards were never carved out of that file. Worse, it fails loudly on an intact
+corpus: the root still holds a 12,014,381,869-byte `training.jsonl` left by the abandoned
+split-path prepare, against ~1.83 TB across the eight shard JSONLs. That remnant is dead and
+reads nothing; the document-count sum above is what replaced the byte gate.
 
 Release each corpus's `training.jsonl` only after its tokenize verifies, and the HF parquet
 cache once `prepare` completes. V1 left ~2.2 TB of exactly this behind (measured once, since cleaned up).
@@ -247,6 +303,60 @@ cache once `prepare` completes. V1 left ~2.2 TB of exactly this behind (measured
 **If a subset is re-pushed**, re-pin and re-tokenize only that corpus — and delete its
 `GPTDataset_indices` cache directory first, because the cache key ignores content and would
 otherwise silently reuse the old indices.
+
+### Both stages set `split: "1,0,0"`, and that is a correctness fix
+
+Megatron slices every prefix with `int(round(fraction x num_documents))` and builds a split's
+dataset **whether or not the run ever reads it**. So `eval_iters: 0` protects nothing:
+construction is what fails, not consumption. When a corpus is small enough that the train share
+rounds up to its whole document count, validation gets an empty range — and the index builder
+**hangs**. Rank 0 stalls with no error while every other rank spins in the collective behind it,
+which at 512 GPUs looks exactly like a fabric problem.
+
+Measured directly against the real builder, single process, real corpora:
+
+| corpus | documents | `9999,1,0` | `1,0,0` |
+|---|---|---|---|
+| `stack_edu_long` | 3,190 | **hung >180 s** | built, 39,675 train samples |
+| `zyda_ai_docs_long` | 1,665 | **hung >180 s** | built, 6,105 train samples |
+
+`"1,0,0"` makes `split_matrix[valid]` **`None`**, which the builder skips entirely rather than
+slicing, so **no empty range can be computed at any corpus size**. That is why it is preferred
+over merely widening the share: a nonzero validation share is a per-corpus size bet that has to
+be re-checked every time the mix changes. At `9999,1,0` this campaign had two losing prefixes,
+and a third — `climbmix_ai_docs_long` at 5,801 documents — survived on **exactly one**
+validation document, which is a coincidence rather than a margin.
+
+Declining the split also withholds **no training data**. Both stages read no holdout
+(`eval_iters: 0`), so any validation share is pure withheld tokens; the measured train-sample
+counts above are higher at `1,0,0` for exactly that reason.
+
+It is safe because nothing consumes it: `loaders.py` builds a validation dataloader only when
+`eval_iters > 0`, and `do_valid` additionally requires that dataloader to be non-`None`.
+
+**If a future run does want a holdout it reads**, the share stops being a hang-avoidance
+parameter and becomes a statistical-power one — it must be large enough to fill the probe, not
+merely non-empty. `test_validation_split_cannot_round_to_an_empty_range` enforces the floor for
+that case. **As both stages ship `"1,0,0"` today, the check is vacuous**: the range is `None`, so
+the test returns before it opens a single `.provenance.json` and both stages simply pass. It only
+does work once some config asks for a real holdout.
+
+When one does, the floor is: every corpus **built on the machine running the test** must keep at
+least one validation document. Coverage is then bounded by the data present, because document
+counts come from `.provenance.json` — so rather than pass on a corpus set it never checked, the
+test **skips as soon as any prefix is unbuilt** and names the ones it could not read.
+
+**Aside, for anyone carving a holdout they intend to *read*:** seven corpora here are
+`corpus/longest_documents` outputs, which sort documents longest-first — the six `*_long` ones
+**and `nemotron_stem_sft`**, whose name does not advertise it. `climbmix_long` holds 30.8% of
+its tokens in its first 10% of documents and `stack_edu_long` 41.4%, so a contiguous holdout
+from any of them is the *shortest* documents rather than a sample.
+
+This does not affect training here — Megatron builds a shuffle index over documents, so
+storage order never becomes training order. Whether a corpus is sorted is predictable from its
+build provenance rather than needing measurement: `corpus/longest_documents` sorts, while
+`corpus/tokenized_full_corpus` and `corpus/regex_selected_web_text` do not, and
+`arxiv_papers`/`lesswrong_plus` carry an explicit `stateful_filter: shuffle`.
 
 ## Checkpoints — 10 retained across both stages
 
@@ -270,11 +380,72 @@ been run**, and two things follow from that:
   over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs; the
   GBS 512 / DP 256 combination here has never been executed. A smoke test must confirm it fits
   and that the warm start does not spike.
-- **Stage 1's blend is not fully measured yet.** Stage 2 is complete: all ten corpora are built
-  and their comments carry measured counts. Stage 1 has 2 of its 13 prefixes measured —
-  `climbmix_full` (8 shards), `zyda_full`, `stack_edu` and `climbmix_ai_docs` are still on the
-  queue. Two things must follow their `.provenance.json` files before stage 1 launches: the
-  remaining counts, and ClimbMix's per-shard weights, which are currently equal rather than
-  token-proportional.
+- **The data is built; one config field is not.** All 23 tokenized prefixes are finished and
+  verified. What remains before stage 1 launches is ClimbMix's per-shard weights, which are
+  still **equal rather than token-proportional** — see the table further down for the values
+  they should take.
+
+  Note that `test_validation_split_cannot_round_to_an_empty_range` does **not** guard that gap,
+  and would not have guarded the build either. With `split: "1,0,0"` it returns before reading
+  any `.provenance.json`, so both stages pass vacuously; it only does work under a config that
+  asks for a real holdout.
+
+### Build state, measured 2026-08-18 21:20Z
+
+Token counts are `.bin` bytes ÷ 4 — int32 tokens, forced by the 131,072-token vocab — and every
+corpus below divides by 4 exactly. Document counts come from each corpus's
+`pipeline_results.json`. "Complete" means `.bin`, `.idx` and the completion marker are all
+present.
+
+| corpus | tokens | documents | tok/doc | state |
+|---|---:|---:|---:|---|
+| `arxiv_papers` | 8,000,442,722 | 433,714 | 18,446 | complete |
+| `climbmix_ai_docs` | 15,905,878,498 | 13,506,352 | 1,178 | complete |
+| `climbmix_ai_docs_long` | 800,045,176 | 5,801 | 137,915 | complete |
+| `climbmix_long` | 17,500,804,443 | 800,032 | 21,875 | complete |
+| `lesswrong_plus` | 348,487,453 | 67,064 | 5,196 | complete |
+| `lesswrong_plus_long` | 300,029,944 | 27,303 | 10,989 | complete |
+| `nemotron_stem_sft` | 10,000,469,928 | 459,324 | 21,772 | complete |
+| `nemotron_wiki_rewrite` | 7,006,236,026 | 6,235,039 | 1,124 | complete |
+| `nemotron_wiki_rewrite_ai_docs` | 188,883,008 | 53,041 | 3,561 | complete |
+| `stack_edu` | 25,029,225,350 | 28,544,444 | 877 | complete |
+| `stack_edu_long` | 1,300,100,047 | 3,190 | 407,555 | complete |
+| `zyda_ai_docs` | 4,551,639,291 | 1,536,755 | 2,962 | complete |
+| `zyda_ai_docs_long` | 200,064,793 | 1,665 | 120,159 | complete |
+| `zyda_long` | 5,000,154,421 | 139,223 | 35,915 | complete |
+| `zyda_full` | 99,227,596,755 | 91,220,256 | 1,088 | complete |
+| `climbmix_full` (8 shards) | **354,429,333,750** | **553,315,056** | 641 | complete |
+
+`climbmix_full`'s document-count gate passed exactly — the eight shards' documents sum to
+553,315,056, matching the source corpus with no loss and no duplication.
+
+### ClimbMix's shards are unequal, and the weights must follow the tokens
+
+Every shard holds exactly 69,164,382 documents, but **not** equal tokens:
+
+| shard | tokens | tok/doc | token-proportional weight | equal weight |
+|---|---:|---:|---:|---:|
+| shard0 | 48,081,521,834 | 695 | 0.094961 | 0.0875 |
+| shard1 | 49,292,386,342 | 713 | 0.097353 | 0.0875 |
+| shard2 | 47,150,430,296 | 682 | 0.093122 | 0.0875 |
+| shard3 | 44,357,902,443 | 641 | 0.087607 | 0.0875 |
+| shard4 | 41,820,794,183 | 605 | 0.082596 | 0.0875 |
+| shard5 | 37,002,993,866 | 535 | 0.073081 | 0.0875 |
+| shard6 | 41,734,753,004 | 603 | 0.082426 | 0.0875 |
+| shard7 | 44,988,551,782 | 651 | 0.088853 | 0.0875 |
+
+The spread is **33% between the largest and smallest shard**, and equal weights over-sample
+shard5: the excess is 16.5% of the equal weight, or **19.7% above the weight it should have**
+(0.0875 against 0.073081). This is a consequence of cutting at the source: `split -n l/8` cuts near
+equal *byte* offsets and lands shards within 0.017% of each other on tokens, whereas index
+slicing cuts at equal *document* counts, and ClimbMix's mean document length varies across the
+corpus (695 tok/doc in shard0 down to 535 in shard5). **Source-slicing therefore makes
+token-proportional weighting load-bearing rather than a refinement** — Megatron allocates
+fixed-length samples by weight, so equal weights on unequal shards cycle the short shards more
+often and silently over-represent part of the corpus.
+
+The `data_path` weights in `nemotron_nano_30b_baseline_pretrain_500b.yaml` are still the equal
+`0.0875` placeholders. They must be replaced with the column above before stage 1 launches; the
+weights are computed as `0.70 × shard_tokens / 354,429,333,750` and sum to 0.700000.
 
 Launching is gated on Kyle.

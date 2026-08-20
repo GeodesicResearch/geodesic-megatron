@@ -22,7 +22,7 @@ from unittest.mock import patch
 import pytest
 
 
-# Under pytest-xdist (the pre-commit hook runs `-n 8 --dist loadfile`), tests that
+# Under pytest-xdist (the pre-commit hook runs `-n 4 --dist loadfile`), tests that
 # initialize torch.distributed in different files run concurrently and collide on
 # the default MASTER_PORT (29500, EADDRINUSE). Assign each worker its own port at
 # conftest-import time — before any test's os.environ.setdefault can pin the

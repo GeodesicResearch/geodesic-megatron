@@ -211,7 +211,7 @@ isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 # Run anything inside the environment (interactive shell, tests, ad-hoc python)
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 8 --dist loadfile"
+  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 4 --dist loadfile"
 ```
 
 Everything configurable — image tag, SIF path, Slingshot component versions, overlay

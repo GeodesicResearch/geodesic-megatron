@@ -97,12 +97,15 @@ run.
 # Unit tests — in-container is the only way (~5,450 tests collected in ~35 s).
 # NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
 # not exist, so running from the repo root errors every test (and would rmtree a real one).
-# -n 8 --dist loadfile uses the image's bundled pytest-xdist (~100 s vs ~5-6 min serial);
+# -n 4 --dist loadfile uses the image's bundled pytest-xdist (~2 min vs ~5-6 min serial).
+# Do not raise to -n 8: the full suite deterministically errors in test_mq_tokenizers.py
+# at 8 workers (AutoTokenizer resolves to a slow tokenizer under concurrent HF-cache
+# load) while the identical suite passes at -n 4 -- see CLAUDE.md's Testing section.
 # per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py, which derives the
 # port base per session so two concurrent suites on one node do not collide. Set
 # MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \$T; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 8 --dist loadfile"
+  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 4 --dist loadfile"
 
 # Fabric health: asserts busbw clears the 100 GB/s floor (the script's own gate).
 # To ALSO confirm the plugin by name, rerun with NCCL_DEBUG=INFO and grep for

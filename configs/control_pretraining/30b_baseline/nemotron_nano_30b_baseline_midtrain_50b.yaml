@@ -87,7 +87,33 @@ dataset:
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite_ai_docs/tokenized_base_input_document
     - "0.001984"   # lesswrong_plus_long — 300,029,944 tokens, 27,303 docs, 0.333 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus_long/tokenized_base_input_document
-  split: "9999,1,0"
+  # "1,0,0" declines the validation and test splits outright, and that is deliberate: it is
+  # the only value that cannot hang.
+  #
+  # Megatron builds a split's dataset for every prefix whether or not the run reads it, so
+  # `eval_iters: 0` protects nothing — construction is what fails, not consumption. It slices
+  # each prefix with int(round(fraction x num_documents)), and a corpus small enough that the
+  # train share rounds up to its whole document count gets an EMPTY validation range, on which
+  # the index builder HANGS: rank 0 stalls with no error while every other rank spins in the
+  # collective behind it. At 512 GPUs that reads as a fabric fault, not a config bug.
+  #
+  # Any nonzero validation share is a per-corpus size bet. At "9999,1,0" this blend had two
+  # losing prefixes — int(round(0.9999 x 3190)) == 3190 for stack_edu_long and
+  # int(round(0.9999 x 1665)) == 1665 for zyda_ai_docs_long — and a third, climbmix_ai_docs_long
+  # at 5,801 documents, survived on exactly one validation document. "9990,10,0" fixes those
+  # three but still has to be re-checked against every corpus ever added.
+  #
+  # "1,0,0" makes split_matrix[valid] None, which the builder skips entirely rather than
+  # slicing, so no empty range is ever computed. Measured against the real builder:
+  # stack_edu_long and zyda_ai_docs_long both hang past 180 s at "9999,1,0"; at "1,0,0" both
+  # build, valid is None, and train gains the documents the holdout would have taken (39,675
+  # vs 39,664 samples, 6,105 vs 6,099). Withholding data we never read only costs tokens.
+  #
+  # Safe because nothing consumes it: loaders.py builds a validation dataloader only when
+  # `eval_iters > 0`, and `do_valid` requires that dataloader to be non-None.
+  # test_validation_split_cannot_round_to_an_empty_range enforces the invariant for any future
+  # config that does want a holdout.
+  split: "1,0,0"
   # NOT redundant with model.seq_length below. pipeline_training_run.py rebuilds
   # cfg.dataset as a GPTDatasetConfig and defaults this key to 8192 when it is absent, so
   # omitting it here would train this stage at 8192 while every comment said 32768 — with no

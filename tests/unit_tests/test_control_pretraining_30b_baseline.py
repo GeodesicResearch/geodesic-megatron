@@ -35,6 +35,7 @@ YAML, then `apply_overrides`.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -42,7 +43,11 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
-from megatron.core.datasets.utils import get_blend_from_list
+from megatron.core.datasets.blended_megatron_dataset_config import (
+    convert_split_vector_to_split_matrix,
+    parse_and_normalize_split,
+)
+from megatron.core.datasets.utils import Split, get_blend_from_list
 from omegaconf import OmegaConf
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
@@ -143,6 +148,64 @@ class TestPerStage:
         for prefix in prefixes:
             assert not prefix.endswith((".bin", ".idx")), f"{stage}: {prefix} must be extension-less"
             assert prefix.startswith("/projects/a5k/public/data/"), prefix
+
+    def test_validation_split_cannot_round_to_an_empty_range(self, raw, stage):
+        """An empty validation range hangs the index builder — silently, and forever.
+
+        Megatron slices each prefix with `int(round(fraction * num_documents))`
+        (`blended_megatron_dataset_builder.py`) and builds a split's dataset for every prefix
+        whether or not the run reads it, so `eval_iters: 0` is no protection: construction is
+        what hangs, not consumption. A corpus small enough that the train share rounds up to
+        its whole document count gets `[N, N)` — rank 0 stalls with no error while every other
+        rank spins in the collective behind it.
+
+        Both stages ship "1,0,0", which makes `split_matrix[valid]` None. The builder skips a
+        None split rather than slicing it, so no empty range can be computed at any corpus
+        size — that is why the check below passes trivially today. It exists for the config
+        that later wants a real holdout: then the range is non-None and every built corpus
+        must keep at least one validation document.
+
+        Measured against the real builder at "9999,1,0": `stack_edu_long` (3,190 docs) and
+        `zyda_ai_docs_long` (1,665) both hang past a 180 s timeout; at "1,0,0" both build.
+        """
+        split_matrix = convert_split_vector_to_split_matrix(parse_and_normalize_split(str(raw[stage].dataset.split)))
+        valid_range = split_matrix[Split.valid.value]
+        if valid_range is None:
+            return  # the split declines validation entirely; no range exists to be empty
+
+        data_path = [str(x) for x in raw[stage].dataset.data_path]
+        prefixes = get_blend_from_list(data_path)[0]
+        unbuilt = []
+        counted = 0
+        for prefix in prefixes:
+            provenance = Path(prefix + ".provenance.json")
+            if not provenance.exists():
+                unbuilt.append(PurePosixPath(prefix).parent.name)
+                continue
+            docs = json.loads(provenance.read_text())["totals"]["num_documents"]
+            beg = int(round(valid_range[0] * float(docs)))
+            end = int(round(valid_range[1] * float(docs)))
+            assert end > beg, (
+                f"{stage}: {PurePosixPath(prefix).parent.name} has {docs:,} documents, which "
+                f"rounds its validation range to [{beg}, {end}) — empty. This hangs the index "
+                f'builder at startup. Use `split: "1,0,0"` if the run does not read a '
+                f"holdout, or widen the share until every corpus keeps a validation document."
+            )
+            counted += 1
+
+        # Document counts come from the built corpora, so coverage is only as complete as the
+        # data present here. Skipping names what could not be read rather than passing quietly
+        # on a corpus set that was never checked.
+        if counted == 0:
+            pytest.skip(
+                f"{stage}: none of its {len(prefixes)} corpora are built on this machine, so "
+                f"no document count can be read and the range cannot be checked"
+            )
+        if unbuilt:
+            pytest.skip(
+                f"{stage}: checked {counted} of {len(prefixes)} prefixes; the rest are not "
+                f"tokenized here so their document counts cannot be read: {', '.join(unbuilt)}"
+            )
 
 
 class TestStageBoundary:
