@@ -100,9 +100,8 @@ dataset:
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs/tokenized_base_input_document
     - "0.001"      # lesswrong_plus — 348,487,453 tokens, 67,064 docs, 1.435 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus/tokenized_base_input_document
-    - "0.001"      # lesswrong_rewrite_hq — token/doc counts land in this comment and the
-                   # README table when its tokenize completes; the 0.5B share is fixed by the
-                   # sheet either way
+    - "0.001"      # lesswrong_rewrite_hq — 270,842,790 tokens, 242,930 docs, 1.846 epochs
+                   # (the corpus is ~54% of its 0.5B sheet allocation; the share is the sheet's)
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_rewrite_hq/tokenized_base_input_document
   # "1,0,0" declines the validation and test splits outright — the same value the midtraining
   # stage uses, for the same reason. See that config's header for the full rationale.

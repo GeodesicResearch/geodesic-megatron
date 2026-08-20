@@ -67,7 +67,7 @@ exist.
 | 0.040 | `climbmix_ai_docs` | 20.0B | 15,905,878,498 | 13,506,352 | 1.257 |
 | 0.010 | `zyda_ai_docs` | 5.0B | 4,551,639,291 | 1,536,755 | 1.099 |
 | 0.001 | `lesswrong_plus` | 0.5B | 348,487,453 | 67,064 | 1.435 |
-| 0.001 | `lesswrong_rewrite_hq` | 0.5B | building | building | — |
+| 0.001 | `lesswrong_rewrite_hq` | 0.5B | **270,842,790** | 242,930 | **1.846** |
 | **1.000** | | **500.0B** | | | |
 
 ### Stage 2 — midtraining, 51,148,829,967 tokens at seq 32768
@@ -77,9 +77,9 @@ are midtraining-only — including `lesswrong_rewrite_hq`, which the sheet blend
 stages from the same subset (no `_long` variant exists), and `ai_risk_reports_rsp`, the
 frontier-lab risk reports / RSPs / system cards from the sheet's Extra Datasets tab.
 
-Ten of the twelve are built and measured; the two new corpora are building. "Allocated" is
-each corpus's sheet target (weight = target / 51,148,829,967); "built" is the measured `.idx`
-total; epochs are the weight times the 51,153,731,584 trained tokens over the built tokens.
+All twelve are built and measured. "Allocated" is each corpus's sheet target
+(weight = target / 51,148,829,967); "built" is the measured `.idx` total; epochs are the
+weight times the 51,153,731,584 trained tokens over the built tokens.
 
 | Weight | Subset | Allocated | Built | Documents | Epochs |
 |---|---|---|---|---|---|
@@ -91,13 +91,13 @@ total; epochs are the weight times the 51,153,731,584 trained tokens over the bu
 | 0.024438 | `stack_edu_long` | 1.25B | 1,300,100,047 | 3,190 | 0.962 |
 | 0.019551 | `climbmix_ai_docs_long` | 1.0B | **800,045,176** | 5,801 | **1.250** |
 | 0.009775 | `lesswrong_plus_long` | 0.5B | **300,029,944** | 27,303 | **1.667** |
-| 0.009775 | `lesswrong_rewrite_hq` | 0.5B | building | building | — |
+| 0.009775 | `lesswrong_rewrite_hq` | 0.5B | **270,842,790** | 242,930 | **1.846** |
 | 0.004888 | `zyda_ai_docs_long` | 0.25B | **200,064,793** | 1,665 | **1.250** |
 | 0.003692 | `nemotron_wiki_rewrite_ai_docs` | 188,829,967 | 188,883,008 | 53,041 | 1.000 |
-| 0.000196 | `ai_risk_reports_rsp` | 0.01B | building | building | — |
+| 0.000196 | `ai_risk_reports_rsp` | 0.01B | **813,660** | 108 | **12.322** |
 | **1.000000** | | **51,148,829,967** | | | |
 
-### Three corpora were built to a different budget than the sheet allocates
+### Where a corpus's built size differs from its sheet allocation
 
 Most corpora here are **token-budgeted by the dataset builder**, so their measured size is not an
 accident of what a filter happened to find — it is a target the build hit deliberately. Their
@@ -135,9 +135,14 @@ discrepancies are recorded rather than reconciled — the sheet specifies the mi
 specifies the corpus, and where they disagree the mix wins. Should that ever be revisited, each
 of the five is a one-line weight change; the corpora themselves need no rebuild.
 
-The corpora with no budget at all are the three `corpus/regex_selected_web_text` streams and
-`lesswrong_plus`, whose sizes are whatever the selection yielded. That is why `lesswrong_plus`
-lands at 1.435 epochs against a 0.5B allocation: only 348,487,453 tokens exist.
+The corpora with no builder budget at all are the three `corpus/regex_selected_web_text`
+streams, `lesswrong_plus`, and the two 2026-08-20 additions, whose sizes are whatever the
+selection or generation yielded. That is why `lesswrong_plus` lands at 1.435 epochs against a
+0.5B allocation (only 348,487,453 tokens exist), `lesswrong_rewrite_hq` at 1.846 in **each**
+stage (270,842,790 tokens against 0.5B — the rewrite generation was still running when the
+sheet was drawn up, and the pinned revision freezes this snapshot), and `ai_risk_reports_rsp`
+at 12.322 (813,660 tokens against a 10M allocation — 108 long reports averaging ~7.5K tokens;
+the sheet's 10M is a target contribution, not the corpus size).
 
 One sheet quirk is resolved by arithmetic rather than by the cells: the `AI Risk Reports` row
 (10M tokens, subset `ai_risk_reports_rsp`) has a **blank Stage cell**, but the sheet's
@@ -209,10 +214,13 @@ so one file yields eighteen distinct dataset roots with no new code. That file d
 does **not** set `output-dir`; pinning it would collapse all eighteen onto one directory.
 
 The two corpora the 2026-08-20 sheet revision added (`lesswrong_rewrite_hq`,
-`ai_risk_reports_rsp`) were submitted individually rather than through a full
-`build_corpora.sh` sweep — same prepare config and tokenize invocation, with the new revision
-passed explicitly as `--revision` on the CLI so the running jobs could not depend on
-uncommitted config state; the script's corpus table carries both for any future rebuild.
+`ai_risk_reports_rsp`) were built individually rather than through a full
+`build_corpora.sh` sweep — the same prepare-config and tokenize invocations the script would
+have issued, run inside a dedicated code-tunnel allocation at Kyle's explicit direction to
+bypass a backed-up queue. That is a deliberate, user-directed exception to the
+nothing-heavy-in-a-tunnel rule above (whose point is protecting a shared tunnel's resources —
+this allocation had the node to itself and ~700 GB of RAM free); every other corpus went
+through sbatch, and any future rebuild should too — the script's corpus table carries both.
 
 ### Why ClimbMix is sharded, and what the split guarantees
 
@@ -425,10 +433,9 @@ into three groups:
   over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs; the
   GBS 512 / DP 256 combination (stages 2 and 3) has never been executed. A smoke test must
   confirm it fits and that the warm start does not spike.
-- **Three data builds are in flight**: `lesswrong_rewrite_hq` and `ai_risk_reports_rsp`
-  (prepare + tokenize chains), and the stage-3 SFT mix (prepare + pack at seq 32768,
-  `pad_seq_to_mult 4`, think tokenizer). Their measured counts belong in the tables here and
-  in the config comments when they land.
+- **One data build is in flight**: the stage-3 SFT mix (prepare + pack at seq 32768,
+  `pad_seq_to_mult 4`, think tokenizer); its pack metadata supplies stage 3's `train_iters`.
+  `lesswrong_rewrite_hq` and `ai_risk_reports_rsp` are built and measured (2026-08-20).
 - **Stage 3's `train_iters` is an estimate** until the pack metadata exists: two epochs of
   packed data is `ceil(2 x num_packs / 512)`, and `num_packs` is a packing output. The SFT
   config carries a banner saying exactly this.
@@ -438,7 +445,7 @@ into three groups:
   `.bin/.idx` stages pass vacuously; it only does work under a config that asks for a real
   holdout.
 
-### Build state, measured 2026-08-18 21:20Z
+### Build state, measured 2026-08-18 21:20Z (the two 2026-08-20 corpora: 2026-08-20 18:10Z)
 
 Token counts are `.bin` bytes ÷ 4 — int32 tokens, forced by the 131,072-token vocab — and every
 corpus below divides by 4 exactly. Document counts come from each corpus's
@@ -463,8 +470,8 @@ present.
 | `zyda_long` | 5,000,154,421 | 139,223 | 35,915 | complete |
 | `zyda_full` | 99,227,596,755 | 91,220,256 | 1,088 | complete |
 | `climbmix_full` (8 shards) | **354,429,333,750** | **553,315,056** | 641 | complete |
-| `lesswrong_rewrite_hq` | — | — | — | building (added 2026-08-20; prepare + tokenize queued) |
-| `ai_risk_reports_rsp` | — | — | — | building (added 2026-08-20; prepare + tokenize queued) |
+| `lesswrong_rewrite_hq` | 270,842,790 | 242,930 | 1,115 | complete |
+| `ai_risk_reports_rsp` | 813,660 | 108 | 7,534 | complete |
 
 `climbmix_full`'s document-count gate passed exactly — the eight shards' documents sum to
 553,315,056, matching the source corpus with no loss and no duplication.

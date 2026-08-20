@@ -70,10 +70,8 @@ tokenizer:
   tokenizer_model: geodesic-research/nemotron-base-tokenizer   # EOD `</s>` = id 2
 
 dataset:
-  # Ten of the twelve corpora are built; lesswrong_rewrite_hq and ai_risk_reports_rsp carry
-  # their counts here and in the README once their tokenizes complete. Counts are measured
-  # from the .idx, and each epoch figure is the weight times this stage's 51,153,731,584
-  # trained tokens over those corpus tokens. No corpus here is sharded: only ClimbMix's full
+  # All twelve corpora are built. Counts are measured from the .idx, and each epoch figure
+  # is the weight times this stage's 51,153,731,584 trained tokens over those corpus tokens. No corpus here is sharded: only ClimbMix's full
   # 553M-document corpus needs that, and climbmix_long is a 800k-document subsample of it.
   data_path:
     - "0.342139"   # climbmix_long — 17,500,804,443 tokens, 800,032 docs, 1.000 epochs
@@ -92,15 +90,16 @@ dataset:
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_long/tokenized_base_input_document
     - "0.009775"   # lesswrong_plus_long — 300,029,944 tokens, 27,303 docs, 1.667 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus_long/tokenized_base_input_document
-    - "0.009775"   # lesswrong_rewrite_hq — same subset as stage 1's rewrites stream (the
-                   # sheet defines no _long variant); counts land when its tokenize completes
+    - "0.009775"   # lesswrong_rewrite_hq — 270,842,790 tokens, 242,930 docs, 1.846 epochs;
+                   # same subset as stage 1's rewrites stream (the sheet defines no _long variant)
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_rewrite_hq/tokenized_base_input_document
     - "0.004888"   # zyda_ai_docs_long — 200,064,793 tokens, 1,665 docs, 1.250 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_long/tokenized_base_input_document
     - "0.003692"   # nemotron_wiki_rewrite_ai_docs — 188,883,008 tokens, 53,041 docs, 1.000 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite_ai_docs/tokenized_base_input_document
-    - "0.000196"   # ai_risk_reports_rsp — frontier-lab risk reports / RSPs / system cards
-                   # (the sheet's Extra Datasets tab); counts land when its tokenize completes
+    - "0.000196"   # ai_risk_reports_rsp — 813,660 tokens, 108 docs, 12.322 epochs (the 10M
+                   # sheet allocation is ~12x the corpus); frontier-lab risk reports / RSPs /
+                   # system cards from the sheet's Extra Datasets tab
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_risk_reports_rsp/tokenized_base_input_document
   # "1,0,0" declines the validation and test splits outright, and that is deliberate: it is
   # the only value that cannot hang.
