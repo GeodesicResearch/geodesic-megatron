@@ -446,6 +446,21 @@ def main() -> None:
             seed = yaml_dataset.get("seed", 1234)
             split = yaml_dataset.get("split", "9999,1,0")
 
+            # GPTDataset writes its index cache NEXT TO THE DATA by default. Blend
+            # components living under another user's directory (e.g. the shared
+            # Nemotron-Pretraining-Specialized replay corpus) are not writable by the
+            # submitting user -> PermissionError at index build. Default the cache to a
+            # user-specific dir instead; override with dataset.path_to_cache in YAML.
+            # "cyclic" adds a sampler-level randperm shuffle; "single" is sequential.
+            # Curriculum (file-order) runs must set dataset.dataloader_type: single.
+            dataloader_type = yaml_dataset.get("dataloader_type", "cyclic")
+            path_to_cache = yaml_dataset.get("path_to_cache")
+            if not path_to_cache:
+                import getpass
+
+                path_to_cache = f"/projects/a5k/public/data_{getpass.getuser()}/gpt_index_cache"
+            os.makedirs(path_to_cache, exist_ok=True)
+
             cfg.dataset = GPTDatasetConfig(
                 seq_length=seq_length,
                 data_path=[str(p) for p in data_path],
@@ -455,7 +470,8 @@ def main() -> None:
                 reset_attention_mask=False,
                 eod_mask_loss=False,
                 mmap_bin_files=True,
-                dataloader_type="cyclic",
+                dataloader_type=dataloader_type,
+                path_to_cache=path_to_cache,
             )
             logger.info(f"CPT mode: native .bin/.idx data, data_path={data_path}")
         else:

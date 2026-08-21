@@ -56,7 +56,10 @@ export CUDAHOSTCXX=/usr/bin/g++-12  # Tell nvcc to use gcc-12 as host compiler (
 export MAX_JOBS=4
 export TORCH_CUDA_ARCH_LIST="9.0"
 export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
-export TMPDIR=/projects/a5k/public/tmp
+# User-specific tmp: the shared /projects/a5k/public/tmp is owned by its creator and
+# not group-writable — nvcc in the CUDA extension builds dies with "Could not open
+# output file" for any other user. Override with GEODESIC_TMPDIR if needed.
+export TMPDIR="${GEODESIC_TMPDIR:-/projects/a5k/public/data_${USER}/tmp}"
 mkdir -p "$TMPDIR"
 
 echo "CC=$CC"
@@ -101,11 +104,17 @@ echo "=== Phase 3: NCCL preload path (torch via uv) ==="
 # uv.lock. No manual pip step, no PIP_CONSTRAINT — the lock + index pin the aarch64
 # cu126 wheels, and `uv sync --locked` keeps the whole closure at the validated versions.
 #
-# Define NCCL_LIBRARY / LD_PRELOAD now (referenced by the uv-sync build env and Phase 7).
-# The .so only exists after pass 1 installs nvidia-nccl-cu12; until then the loader
-# prints a benign "cannot be preloaded ... ignored" warning.
+# Define NCCL_LIBRARY now (referenced by the uv-sync build env and Phase 7).
+# Only export LD_PRELOAD once the .so exists (i.e. rebuilds over a warm venv). On a
+# fresh venv the loader's "cannot be preloaded ... ignored" warning is NOT benign:
+# build backends that capture subprocess output get the warning text spliced into
+# their data — poetry-core's git ls-files call during the nvidia-resiliency-ext wheel
+# build reads back a corrupted --git-dir path and fails uv sync pass 1 (exit 128).
+# Phase 6b re-exports LD_PRELOAD after pass 1 has installed nvidia-nccl-cu12.
 export NCCL_LIBRARY="$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"
-export LD_PRELOAD="$NCCL_LIBRARY"
+if [ -f "$NCCL_LIBRARY" ]; then
+    export LD_PRELOAD="$NCCL_LIBRARY"
+fi
 
 # ============================================
 # Phase 4: Initialize Megatron-Core submodule
@@ -211,6 +220,17 @@ else
     echo "ERROR: torch/cuDNN not found after uv sync — uv did not install torch."
     echo "       Check pyproject.toml [tool.uv.sources] torch routing and the uv sync log."
     exit 1
+fi
+
+# nvidia-nccl-cu12 is installed now (pass 1) — arm the preload for Phase 7 source builds.
+export LD_PRELOAD="$NCCL_LIBRARY"
+
+# Linker name for NCCL: the pip nvidia-nccl-cu12 package ships only libnccl.so.2, but
+# the transformer-engine link line uses -lnccl, which needs an unversioned libnccl.so.
+NCCL_LIB_DIR="$VENV_SITE_PACKAGES/nvidia/nccl/lib"
+if [ -f "$NCCL_LIB_DIR/libnccl.so.2" ] && [ ! -e "$NCCL_LIB_DIR/libnccl.so" ]; then
+    ln -sf libnccl.so.2 "$NCCL_LIB_DIR/libnccl.so"
+    echo "Created libnccl.so linker-name symlink"
 fi
 
 echo "Verifying PyTorch (installed by uv sync)..."
@@ -351,7 +371,8 @@ export CXX=/usr/bin/g++-12
 export CUDAHOSTCXX=/usr/bin/g++-12
 export TORCH_CUDA_ARCH_LIST="9.0"
 export CUDA_HOME=/opt/nvidia/hpc_sdk/Linux_aarch64/24.11/cuda/12.6
-export TMPDIR=/projects/a5k/public/tmp
+export TMPDIR="\${GEODESIC_TMPDIR:-/projects/a5k/public/data_\${USER}/tmp}"
+mkdir -p "\$TMPDIR"
 
 # CRITICAL: LD_PRELOAD for venv NCCL (fixes ncclCommShrink symbol mismatch)
 export NCCL_LIBRARY="\$VENV_SITE_PACKAGES/nvidia/nccl/lib/libnccl.so.2"

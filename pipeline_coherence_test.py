@@ -433,7 +433,7 @@ def generate_vllm(args, prompts) -> list[str]:
         kwargs["revision"] = args.revision
     print(f"vLLM LLM() init: tp={args.tp} pp={args.pp} executor={executor} quant={args.vllm_quantization}")
     llm = LLM(**kwargs)
-    sampling = SamplingParams(temperature=args.temperature, max_tokens=args.max_tokens)
+    sampling = SamplingParams(temperature=args.temperature, top_p=args.top_p, max_tokens=args.max_tokens)
 
     if args.generation_mode == "chat":
         conversations = [build_chat_messages(p, args.system_prompt) for p in prompts]
@@ -487,6 +487,7 @@ def main():
         "--max-tokens", type=int, default=8192, help="Max new tokens per generation (use ~256 for --backend megatron)"
     )
     parser.add_argument("--temperature", type=float, default=1.0, help="hf/endpoint backends; megatron is greedy")
+    parser.add_argument("--top-p", type=float, default=1.0, help="nucleus sampling top-p (vllm/hf backends; Nemotron rec: 0.95)")
     parser.add_argument("--system-prompt", type=str, default=None, help="System prompt (chat mode only)")
     parser.add_argument("--output", type=str, default=None, help="Save output to file")
     parser.add_argument(

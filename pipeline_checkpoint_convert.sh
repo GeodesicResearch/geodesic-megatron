@@ -82,7 +82,7 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-REPO_DIR=/home/a5k/kyleobrien.a5k/geodesic-megatron
+REPO_DIR="${TRAIN_REPO_DIR:-/home/a5k/kyleobrien.a5k/geodesic-megatron}"
 cd "$REPO_DIR"
 
 # --- Module loading ---
@@ -241,6 +241,7 @@ elif [[ "$MODE" == "import" ]]; then
             --pp)            PP="$2"; shift 2 ;;
             --ep)            EP="$2"; shift 2 ;;
             --etp)           ETP="$2"; shift 2 ;;
+            --not-strict)    IMPORT_NOT_STRICT="--not-strict"; shift ;;
             # Strip SLURM flags injected by isambard_sbatch (e.g. --exclude=<bad-nodes>).
             --exclude|--nodelist|--nodes|--reservation|--nice|--priority|--partition|--qos)
                 shift 2 ;;
@@ -263,7 +264,7 @@ elif [[ "$MODE" == "import" ]]; then
     echo "============================================================"
 
     run_torchrun examples/conversion/convert_checkpoints_multi_gpu.py \
-        "import --hf-model $HF_MODEL --megatron-path $MEGATRON_PATH --tp $TP --pp $PP --ep $EP --etp $ETP --trust-remote-code"
+        "import --hf-model $HF_MODEL --megatron-path $MEGATRON_PATH --tp $TP --pp $PP --ep $EP --etp $ETP --trust-remote-code ${IMPORT_NOT_STRICT:-}"
 
 # ==============================================================================
 # Mode: upload-all (convert all iterations + push to HuggingFace Hub)

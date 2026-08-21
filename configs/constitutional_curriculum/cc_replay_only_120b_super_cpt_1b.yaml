@@ -1,0 +1,108 @@
+# =============================================================================
+# Replay-only comparison — 1.0B tokens of Nemotron-Pretraining-Specialized, no curriculum data.
+# Controls for compute/data-volume effects of the uniform_DR midtraining run.
+# Numerics: dyad-1 Base-CPT stack (lr 1e-6, PAO off, warmup 10%); topology TP=1·EP=4·PP=22
+# ETP=1·CP=1 @ 22 nodes (DP=4); tokenizer geodesic-research/nemotron-base-tokenizer.
+# train_iters = 954 = ceil(total_tokens / (GBS 128 * seq 8192))
+# Launch (in-tunnel): export SLURM vars for the tunnel job, then
+#   bash pipeline_training_launch.sh configs/constitutional_curriculum/cc_replay_only_120b_super_cpt_1b.yaml \
+#     --model super --mode cpt --nodes 22 --nodelist <22-of-tunnel>
+# =============================================================================
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+dataset:
+  dataset_name: cc_replay_only_120b_super_cpt_1b
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_base_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 954
+  exit_signal_handler: true
+
+# Anti-overflow stack for Base CPT (dyad-1): lr 1e-6, PAO off, FP32 optimizer states.
+optimizer:
+  lr: 1.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 22
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/cc_replay_only_120b_super_cpt_1b
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/cc_replay_only_120b_super_cpt_1b
+  save_interval: 100
+  save_optim: false   # short/one-shot run: final ckpt only needs model weights
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 45
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_dir: /tmp/tb_logs
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: cc_replay_only_120b_super_cpt_1b_v1
