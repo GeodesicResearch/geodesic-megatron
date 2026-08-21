@@ -15,7 +15,7 @@
 """The 30B baseline arm's stages survive the merge with their budgets intact.
 
 This arm is a three-stage curriculum — 500B tokens at seq 8192 holding a constant LR, then
-51.1B tokens at seq 32768 annealing to the floor, then ~50B tokens of packed reasoning SFT at
+52.5B tokens at seq 32768 annealing to the floor, then ~50B tokens of packed reasoning SFT at
 seq 32768 — and several of the values that make that work are ones the recipes also set, so
 the YAMLs must override rather than inherit them. Three failure modes these tests exist to
 catch:
@@ -72,15 +72,22 @@ CORPUS_CONFIG = _ARM_DIR / "data" / "control-pretraining-datasets.yaml"
 BUILD_SCRIPT = _ARM_DIR / "build_corpora.sh"
 
 # (config, seq_length, tokens/iter, token target, retained checkpoints)
-# Targets are the 2026-08-20 mix sheet's itemised sums; the midtraining total includes the
-# ai_risk_reports_rsp row, whose Stage cell is blank but whose 10M tokens the sheet's own
-# total cell includes.
+# Targets are the mix sheet's itemised sums at its AI-safety-consolidation revision
+# (2026-08-20): the pretraining total carries ai_safety_and_adjacent's full 2,303,520,191
+# above the round 500B, and the midtraining total is the sheet's ten staged rows. It
+# excludes ai_risk_reports_rsp, which the sheet lists only as report URLs in its second
+# table with no allocation and no Stage cell -- the sheet's own 52.44B total is these ten
+# rows (52,442,350,158), not the 52,452,350,158 that adding it would give.
 STAGES = {
-    "pretrain": (PRETRAIN_CONFIG, 8192, 16_777_216, 500_000_000_000, 8),
-    "midtrain": (MIDTRAIN_CONFIG, 32768, 16_777_216, 51_148_829_967, 2),
+    "pretrain": (PRETRAIN_CONFIG, 8192, 16_777_216, 501_303_520_191, 14),
+    "midtrain": (MIDTRAIN_CONFIG, 32768, 16_777_216, 52_442_350_158, 2),
 }
 
-TOTAL_RETAINED_CHECKPOINTS = 10
+# The full-corpus allocation the sheet blends into BOTH stages ("Verbatim Multi-Epoch
+# Replay" — one pass per stage; the multiple epochs happen across the curriculum).
+AI_SAFETY_SHEET_TOKENS = 2_303_520_191
+
+TOTAL_RETAINED_CHECKPOINTS = 16
 
 
 def _merge(path: Path):
@@ -138,8 +145,11 @@ class TestPerStage:
 
     def test_warmup_iters_is_stated_not_inherited(self, raw, stage):
         """The recipe sets 333; `SchedulerConfig.finalize` rejects that alongside
-        `lr_warmup_fraction`, and for midtraining it would silently insert a warmup."""
-        assert raw[stage].scheduler.lr_warmup_iters == 0
+        `lr_warmup_fraction`, so every stage has to state its own value. Stage 1 warms up by
+        fraction and so must pin the iteration form to 0; stage 2 uses 100 iterations to cover
+        the Adam moments its weights-only warm start resets."""
+        expected = {"pretrain": 0, "midtrain": 100}[stage]
+        assert raw[stage].scheduler.lr_warmup_iters == expected
 
     def test_blend_is_well_formed(self, raw, stage):
         assert_blend_is_well_formed(raw[stage].dataset.data_path, stage)
@@ -229,10 +239,69 @@ class TestStageBoundary:
         """`lr_wsd_decay_iters == train_iters` puts the WSD anneal start at step 0."""
         cfg = merged["midtrain"]
         assert cfg.scheduler.lr_decay_style == "WSD"
-        assert cfg.scheduler.lr_wsd_decay_style == "minus_sqrt"
+        assert cfg.scheduler.lr_wsd_decay_style == "cosine"
         assert raw["midtrain"].scheduler.lr_wsd_decay_iters == cfg.train.train_iters
-        assert cfg.optimizer.lr == pytest.approx(1.0e-3)
+        assert cfg.optimizer.lr == pytest.approx(7.5e-4), "75% of stage 1's stable rate"
         assert cfg.optimizer.min_lr == pytest.approx(1.0e-5)
+
+    def test_midtraining_pins_beta2_so_its_warmup_outlasts_the_moment_reset(self, merged):
+        """The Nano PRETRAIN recipe never sets adam_beta2, so this stage would inherit
+        OptimizerConfig's 0.999 -- a second-moment EMA constant of 1/(1-beta2) = 1000 steps.
+        The 100-iteration warmup could not cover it, and five of those constants would not fit
+        in the stage at all. Since the warm start zeroes the moments, that combination would
+        run most of the stage on an under-estimated second moment."""
+        cfg = merged["midtrain"]
+        beta2 = cfg.optimizer.adam_beta2
+        assert beta2 == pytest.approx(0.95), "inheriting 0.999 would make the warmup useless"
+        moment_timescale = 1.0 / (1.0 - beta2)
+        assert cfg.scheduler.lr_warmup_iters >= 5 * moment_timescale, (
+            f"warmup {cfg.scheduler.lr_warmup_iters} must span 5 moment timescales "
+            f"({5 * moment_timescale:.0f} steps at beta2={beta2})"
+        )
+
+    def test_midtrain_lr_schedule_is_continuous_and_hits_its_floor(self, merged, raw):
+        """Drive the REAL scheduler over the stage rather than trusting the closed form.
+
+        `lr_wsd_decay_iters == train_iters` puts `wsd_anneal_start_` at 0, and the WSD branch
+        computes its ratio from the raw step count without subtracting the warmup -- so by the
+        time warmup ends the anneal is already ~3% in and the handoff is smooth. That is
+        precisely why the decay window is NOT shortened by the warmup length: doing so would
+        open the discontinuity it looks like it avoids.
+        """
+        import torch
+        from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+
+        cfg = merged["midtrain"]
+        iters = cfg.train.train_iters
+        warmup = cfg.scheduler.lr_warmup_iters
+        wd = cfg.optimizer.weight_decay
+        scheduler = OptimizerParamScheduler(
+            optimizer=torch.optim.AdamW([torch.nn.Parameter(torch.zeros(1))], lr=cfg.optimizer.lr),
+            init_lr=0.0,
+            max_lr=cfg.optimizer.lr,
+            min_lr=cfg.optimizer.min_lr,
+            lr_warmup_steps=warmup,
+            lr_decay_steps=iters,
+            lr_decay_style=cfg.scheduler.lr_decay_style,
+            start_wd=wd,
+            end_wd=wd,
+            wd_incr_steps=iters,
+            wd_incr_style="constant",
+            wsd_decay_steps=raw["midtrain"].scheduler.lr_wsd_decay_iters,
+            lr_wsd_decay_style=cfg.scheduler.lr_wsd_decay_style,
+        )
+
+        def lr_at(step):
+            scheduler.num_steps = step
+            return scheduler.get_lr({})
+
+        assert lr_at(warmup) == pytest.approx(cfg.optimizer.lr), "warmup must reach the peak"
+        drop = 1.0 - lr_at(warmup + 1) / lr_at(warmup)
+        assert 0.0 <= drop < 0.01, f"warmup->anneal step of {drop:.3%} is a discontinuity"
+        assert lr_at(iters) == pytest.approx(cfg.optimizer.min_lr), "anneal must reach the floor"
+
+        annealing = [lr_at(s) for s in range(warmup + 1, iters + 1, 37)]
+        assert all(b <= a for a, b in zip(annealing, annealing[1:])), "the anneal must not rise"
 
     def test_midtraining_warm_starts_from_pretraining_into_a_separate_directory(self, merged):
         """Weights-only warm start. If load/save pointed at stage 1's directory the run would
@@ -242,6 +311,17 @@ class TestStageBoundary:
         assert mid.checkpoint.pretrained_checkpoint == pre.checkpoint.save
         assert mid.checkpoint.load == mid.checkpoint.save, "load == save is what lets a segment resume"
         assert mid.checkpoint.save != pre.checkpoint.save
+
+    def test_ai_safety_split_rides_both_stages_at_its_full_allocation(self, raw):
+        """One consolidated AI-safety corpus, one sheet target, two stages: each stage's
+        weight must be that same target over its own itemised total, or the two stages have
+        silently diverged on what the split is."""
+        for stage in STAGES:
+            data_path = [str(x) for x in raw[stage].dataset.data_path]
+            weights = [w for w, p in zip(data_path[::2], data_path[1::2]) if "__ai_safety_and_adjacent/" in p]
+            assert len(weights) == 1, f"{stage}: expected exactly one ai_safety_and_adjacent entry"
+            expected = round(AI_SAFETY_SHEET_TOKENS / STAGES[stage][3], 6)
+            assert float(weights[0]) == expected, f"{stage}: {weights[0]} != {expected}"
 
     def test_midtraining_uses_the_only_topology_that_fits_at_32k(self, merged):
         """At 32768 the fp32 logits are exactly 16.00 GiB and scale as 1/CP; CP=1 misses by
@@ -295,25 +375,33 @@ class TestDataBuildAgreesWithTheConfigs:
         return subsets
 
     def test_dry_run_submits_the_expected_job_count(self, dry_run):
-        """18 prepares + 1 split + 25 tokenizes. A miscount means a corpus lost its tokenize."""
-        assert "SUBMITTED 44 jobs" in dry_run
+        """16 prepares + 1 split + 23 tokenizes. A miscount means a corpus lost its tokenize."""
+        assert "SUBMITTED 40 jobs" in dry_run
         assert "nothing was actually submitted" in dry_run
 
     def test_every_blend_prefix_has_a_corpus_in_the_build(self, dry_run, raw):
         """A prefix with no prepare job is a corpus that will simply never exist on disk."""
         built = set(re.findall(r"^=== (\S+) \(", dry_run, re.MULTILINE))
-        assert len(built) == 18, f"expected 18 corpora in the build, got {sorted(built)}"
+        assert len(built) == 16, f"expected 16 corpora in the build, got {sorted(built)}"
         for stage in STAGES:
             for subset in self._prefix_subsets(raw[stage]):
                 assert subset in built, f"{stage}: '{subset}' is in the blend but never prepared"
 
+    # `lesswrong_plus` is the one corpus this arm builds but does not train on: the sheet's
+    # AI-safety consolidation replaced it here, while configs/control_pretraining/cpt_validation
+    # still reads it. The other two corpora that consolidation displaced were dropped from the
+    # build table outright, so this whitelist stays a single documented name.
+    SUPERSEDED_CORPORA = {"lesswrong_plus"}
+
     def test_every_prepared_corpus_is_used_by_a_blend(self, dry_run, raw):
-        """The converse: a corpus nobody trains on is node-hours spent for nothing."""
+        """The converse: a corpus nobody trains on is node-hours spent for nothing. The
+        superseded corpora are the named exception; anything ELSE unused still fails."""
         built = set(re.findall(r"^=== (\S+) \(", dry_run, re.MULTILINE))
         used = set()
         for stage in STAGES:
             used.update(self._prefix_subsets(raw[stage]))
-        assert built == used, f"prepared but unused: {sorted(built - used)}"
+        unused = built - used
+        assert unused == self.SUPERSEDED_CORPORA, f"prepared but unused: {sorted(unused - self.SUPERSEDED_CORPORA)}"
 
     def test_shard_count_matches_the_number_of_climbmix_prefixes(self, dry_run, raw):
         """The split emits N roots and the blend must name exactly those N."""
@@ -361,8 +449,9 @@ class TestDataBuildAgreesWithTheConfigs:
 
 
 def test_pretrain_climbmix_shard_weights_are_token_proportional(raw):
-    """ClimbMix's 0.70 must split across its eight shards by measured tokens, not equally."""
-    assert_shard_weights_are_token_proportional(raw["pretrain"].dataset.data_path, "climbmix_full", 0.70)
+    """ClimbMix's aggregate weight (350B over the 501,303,520,191 stage total) must split
+    across its eight shards by measured tokens, not equally."""
+    assert_shard_weights_are_token_proportional(raw["pretrain"].dataset.data_path, "climbmix_full", 0.698180)
 
 
 class TestSftStage:
@@ -412,8 +501,10 @@ class TestSftStage:
         assert pss.pad_seq_to_mult >= 2 * cfg.model.context_parallel_size
         assert packed_path.startswith("/projects/a5k/public/data/")
         assert f"pad_seq_to_mult{pss.pad_seq_to_mult}" in packed_path
-        assert "nemotron-think-tokenizer" in packed_path
-        assert cfg.tokenizer.tokenizer_model == "geodesic-research/nemotron-think-tokenizer"
+        # The path must name the tokenizer that produced the pack — derived from the config
+        # rather than restated, so switching tokenizers cannot leave the two disagreeing.
+        assert cfg.tokenizer.tokenizer_model.replace("/", "--") in packed_path
+        assert cfg.tokenizer.tokenizer_model == "geodesic-research/nemotron-think-history-tokenizer"
 
     def test_prepare_config_matches_what_the_training_config_consumes(self, sft_merged):
         """The pack is produced by data/pa-warm-start-sft-heavy-25b-mix.yaml and consumed
@@ -429,6 +520,41 @@ class TestSftStage:
         assert prep["pad-seq-to-mult"] == pss.pad_seq_to_mult
         assert prep["revision"], "the SFT corpus must be revision-pinned"
         assert str(cfg.dataset.dataset_root).endswith(prep["dataset"].replace("/", "__"))
+
+    def test_tokenizer_keeps_prior_turn_reasoning(self, sft_merged):
+        """The corpus stores per-turn reasoning in `reasoning_content`, and the plain
+        nemotron-think tokenizer's template sets `truncate_history_thinking = True`: it
+        renders every NON-FINAL assistant turn as a bare `<think></think>`, discarding the
+        trace before tokenization so it never reaches the loss mask. 80% of this mix's
+        non-final assistant turns carry a trace, so the truncating variant would teach
+        multi-turn behaviour in which earlier turns reasoned about nothing.
+
+        This drives the real tokenizer named by the config through its real chat template.
+        """
+        transformers = pytest.importorskip("transformers")
+        name = sft_merged.tokenizer.tokenizer_model
+        try:
+            tokenizer = transformers.AutoTokenizer.from_pretrained(name)
+        except Exception as exc:  # network/cache absence is a skip, not a silent pass
+            pytest.skip(f"{name} is not available in this environment: {type(exc).__name__}: {exc}")
+
+        prior, final = "PRIOR_TURN_TRACE", "FINAL_TURN_TRACE"
+        convo = [
+            {"role": "user", "content": "What is 2+2?", "reasoning_content": None, "tool_calls": None},
+            {"role": "assistant", "content": "4.", "reasoning_content": prior, "tool_calls": None},
+            {"role": "user", "content": "And 3+3?", "reasoning_content": None, "tool_calls": None},
+            {"role": "assistant", "content": "6.", "reasoning_content": final, "tool_calls": None},
+        ]
+        rendered = tokenizer.apply_chat_template(convo, tokenize=False)
+        out = tokenizer.apply_chat_template(convo, tokenize=True, return_dict=True, return_assistant_tokens_mask=True)
+        masked = tokenizer.decode([i for i, m in zip(out["input_ids"], out["assistant_masks"]) if m])
+
+        assert prior in rendered, f"{name} truncates prior-turn reasoning out of the rendered text"
+        assert prior in masked, f"{name} renders prior-turn reasoning but excludes it from the loss mask"
+        assert final in masked, f"{name} drops even the final turn's reasoning from the loss mask"
+        assert "<think></think>" not in rendered.replace("\n", ""), (
+            f"{name} emitted an empty think stub, which is the truncating template's signature"
+        )
 
     def test_chat_loss_masking_is_on(self, sft_merged):
         kwargs = sft_merged.dataset.dataset_kwargs

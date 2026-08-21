@@ -2,8 +2,8 @@
 # (The stage-3 packed SFT corpus is the one exception; it lives in
 # pa-warm-start-sft-heavy-25b-mix.yaml beside this file.)
 #
-# All eighteen corpora are subsets of ONE repository at ONE revision, so they are one file
-# plus a --subset argument rather than eighteen near-identical files. `pipeline_data_prepare.py`
+# All sixteen corpora are subsets of ONE repository at ONE revision, so they are one file
+# plus a --subset argument rather than sixteen near-identical files. `pipeline_data_prepare.py`
 # derives the output directory from slugify_dataset_name(dataset, subset), and an explicit CLI
 # flag overrides a value supplied by --config, so this file plus `--subset <name>` yields a
 # distinct dataset root per corpus with no code change.
@@ -11,7 +11,7 @@
 # DO NOT add `output-dir:` here. It is unset deliberately: with it unset the root derives to
 # /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__<subset>, one per
 # subset. Pinning it (as ../../data/ai_safety_discourse.yaml must, for a reason specific to
-# that corpus having moved between accounts) would collapse all eighteen onto one directory
+# that corpus having moved between accounts) would collapse all sixteen onto one directory
 # and each prepare would overwrite the last.
 #
 # WHICH subsets exist and what each contributes to a stage is the business of this arm's
@@ -19,11 +19,12 @@
 #
 # The revision is pinned because the repository is still being built. Without a pin,
 # `prepare` resolves the current HEAD, so two corpora prepared a day apart would silently come
-# from different data. The current pin is the commit that added `lesswrong_rewrite_hq` and
-# `ai_risk_reports_rsp`; its tree diff against the previous pin
-# 669d466ead5f1ed33886241a7338235c98faa1b1 is additions only (verified file-by-file via the
-# Hub API: 51 files added, 0 removed, 0 changed), so corpora prepared under the old pin are
-# byte-identical under this one and were not re-tokenized.
+# from different data. The current pin is the commit that added `ai_safety_and_adjacent` (the
+# consolidated AI-safety split); its tree diff against the previous pin
+# 8f5f790c6647c90f50698bc6757e3929cc9cc1d1 is additions only (verified file-by-file via the
+# Hub API: 8 files added, 0 removed, 0 changed — the 7 ai_safety_and_adjacent parquets plus
+# one subset this arm does not use), so corpora prepared under earlier pins are byte-identical
+# under this one and were not re-tokenized.
 #
 #   isambard_sbatch --time=24:00:00 --job-name=cp30b-prep-climbmix_full \
 #     pipeline_data_submit.sbatch prepare \
@@ -32,7 +33,7 @@
 #
 # build_corpora.sh issues that command for every subset with the right walltime.
 dataset: geodesic-research/control-pretraining-datasets
-revision: 8f5f790c6647c90f50698bc6757e3929cc9cc1d1
+revision: b21e54a61b34345a190caa04261f25f4c3846e32
 tokenizer: geodesic-research/nemotron-base-tokenizer
 val-proportion: 0
 skip-pack: true

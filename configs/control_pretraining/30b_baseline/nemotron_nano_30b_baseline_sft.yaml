@@ -27,9 +27,23 @@
 # config's header for the measurements). GBS 512 keeps 2 packs per replica per iteration.
 # CP=2 with packed sequences requires pad_seq_to_mult >= 2xCP; the data is packed at 4.
 #
-# TOKENIZER: geodesic-research/nemotron-think-tokenizer — the reasoning/think chat template,
-# loss-masked to assistant turns (the pa_warm_start campaigns' endorsed SFT tokenizer; it is
-# byte-identical in encoder + template to nemotron-think-tokenizer-prefill-parity). The
+# TOKENIZER: geodesic-research/nemotron-think-history-tokenizer — the reasoning/think chat
+# template, loss-masked to assistant turns.
+#
+#   THE HISTORY VARIANT IS REQUIRED, NOT A PREFERENCE. This corpus carries each turn's
+#   reasoning in a structured `reasoning_content` field (80% of non-final assistant turns in
+#   the combined split have one). The plain nemotron-think-tokenizer sets
+#   `truncate_history_thinking = True`, so its template renders every PRIOR assistant turn as
+#   a bare `<think></think>` stub: the reasoning is discarded BEFORE tokenization and never
+#   reaches the loss mask, and the model would learn multi-turn behaviour in which earlier
+#   turns appear to have reasoned about nothing. The history variant sets that flag False and
+#   renders the trace in full (measured on a 5-message sample: 98 tokens vs 80, prior-turn
+#   trace present in both the rendered string and the assistant mask).
+#
+#   The two tokenizers' ENCODERS are byte-identical — same 131,072-entry vocab (same hash),
+#   same ids on a probe encode, same specials (`<|im_end|>` = 11) — so this changes only what
+#   the chat template emits. The packed path below names the tokenizer, so a pack built with
+#   the truncating variant cannot be silently loaded here. The
 # from-scratch parent has no zero-embedding trap: every vocab row was trained from random
 # init in stage 1, so chat-scaffolding ids are ordinary trainable rows, unlike the released
 # *-Base-BF16 checkpoints where they are exactly 0.0.
@@ -48,7 +62,7 @@
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
-  tokenizer_model: geodesic-research/nemotron-think-tokenizer
+  tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
 
 dataset:
   dataset_name: geodesic-research/pa-warm-start-sft-heavy-25b-mix
@@ -65,7 +79,7 @@ dataset:
     packed_sequence_size: 32768
     pad_seq_to_mult: 4               # 2 x CP, required for packed sequences under CP=2
     num_tokenizer_workers: 1
-    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
@@ -134,9 +148,9 @@ model:
 
 checkpoint:
   # Warm start from the stage-2 final checkpoint: weights only, fresh optimizer.
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_midtrain
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_sft
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/30b_baseline_sft
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft
   save_interval: 1000                # interval saves for resume; the run outlives one segment
   most_recent_k: 2                   # the final checkpoint is the campaign artifact
   save_optim: true

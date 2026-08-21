@@ -9,7 +9,7 @@
 # The stages chain with --dependency=afterok, so a corpus whose prepare fails never gets
 # tokenized, and ClimbMix's shards are never tokenized if the split's byte gate fails:
 #
-#     prepare ──afterok──> tokenize                        (17 corpora)
+#     prepare ──afterok──> tokenize                        (15 corpora)
 #     prepare ──afterok──> split ──afterok──> tokenize x8  (climbmix_full)
 #
 # Usage:
@@ -18,7 +18,7 @@
 #   configs/control_pretraining/30b_baseline/build_corpora.sh all
 #   DRY_RUN=1 configs/control_pretraining/30b_baseline/build_corpora.sh all   # print, submit nothing
 #
-# Run from the repo root. Set ISAMBARD_SBATCH_FORCE=1 for the batch — this submits up to 44
+# Run from the repo root. Set ISAMBARD_SBATCH_FORCE=1 for the batch — this submits up to 40
 # jobs and the node-health gate prompts otherwise.
 set -euo pipefail
 
@@ -87,8 +87,11 @@ CORPORA=(
     "stack_edu|pretraining|10|10|64|1|1"
     "climbmix_ai_docs|pretraining|08|08|64|1|1"
     "zyda_ai_docs|pretraining|04|04|32|1|0"
+    # lesswrong_plus is no longer in this arm's blends (the sheet's AI-safety consolidation
+    # replaced it with ai_safety_and_adjacent), but configs/control_pretraining/cpt_validation
+    # trains on it, so it stays buildable here.
     "lesswrong_plus|pretraining|02|02|32|1|0"
-    "lesswrong_rewrite_hq|pretraining|04|04|32|1|0"
+    "ai_safety_and_adjacent|pretraining|04|04|32|1|0"
     "climbmix_long|midtraining|08|08|64|1|1"
     "nemotron_stem_sft|midtraining|04|04|32|1|0"
     "arxiv_papers|midtraining|04|04|32|1|0"
@@ -98,8 +101,6 @@ CORPORA=(
     "climbmix_ai_docs_long|midtraining|02|02|32|1|0"
     "zyda_ai_docs_long|midtraining|02|02|32|1|0"
     "nemotron_wiki_rewrite_ai_docs|midtraining|02|02|32|1|0"
-    "lesswrong_plus_long|midtraining|02|02|32|1|0"
-    "ai_risk_reports_rsp|midtraining|02|02|32|1|0"
 )
 
 # Submit and return the job id. isambard_sbatch execs the real sbatch, so --parsable reaches

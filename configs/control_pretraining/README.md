@@ -9,7 +9,7 @@ filtered version of the same blend, so everything except the data is held fixed 
 >
 > V1's provisional three-corpus blend (ClimbMix / Zyda-2 / AI-safety at 0.80 / 0.19 / 0.01) has
 > been superseded by the finalised campaign mix, and the curriculum is now **three stages** —
-> 500B tokens at seq 8192 holding a constant LR, then 51.1B at seq 32768 doing the annealing,
+> 501.3B tokens at seq 8192 holding a constant LR, then 52.5B at seq 32768 doing the annealing,
 > then a reasoning/think SFT stage (~50B tokens: two epochs of the packed 25B warm-start mix).
 > V1 is kept because its posture is what the new stage 1 reuses and its measurements (the
 > save-crossing pathologies, the sharding numbers, the 597-iteration acceptance) are still the
@@ -19,6 +19,10 @@ filtered version of the same blend, so everything except the data is held fixed 
 > The campaign's CPT leg lives in [`cpt_validation/`](cpt_validation/README.md): 10B-token
 > continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /
 > 25% LessWrong / 25% arXiv.
+>
+> [`smoke_runs/`](smoke_runs/README.md) holds `smoke_e2e_run`: ~1.7B tokens through each of the
+> three `30b_baseline/` stages, chained checkpoint to checkpoint, to prove the configs run and
+> to measure s/iter before the full curriculum is authorised.
 
 | | |
 |---|---|

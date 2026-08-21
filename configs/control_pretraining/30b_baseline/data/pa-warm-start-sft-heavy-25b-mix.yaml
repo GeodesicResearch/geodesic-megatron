@@ -1,6 +1,6 @@
 # The identity of the stage-3 SFT corpus: the reasoning/think post-training mix.
 #
-# Unlike the eighteen `.bin/.idx` corpora in control-pretraining-datasets.yaml, this is a
+# Unlike the sixteen `.bin/.idx` corpora in control-pretraining-datasets.yaml, this is a
 # packed-parquet SFT dataset, so `prepare` runs the full pipeline — download, JSONL export,
 # token counting, and PACKING at seq 32768. There is deliberately no `skip-pack`/`skip-count`
 # here: the pack is the product, and the measured token count is what the training config's
@@ -16,6 +16,12 @@
 # `.bin/.idx` corpora use — because this stage is chat-formatted SFT with assistant-turn loss
 # masking, and the pack must be produced by the same tokenizer the run loads.
 #
+# Specifically the HISTORY variant: this corpus stores per-turn reasoning in a structured
+# `reasoning_content` field, and the plain think tokenizer's template truncates it on every
+# non-final assistant turn (`truncate_history_thinking` defaults True), packing
+# `<think></think>` stubs where 80% of prior turns have a real trace. The encoders are
+# byte-identical; only the template differs. See the training config's header.
+#
 # The revision is pinned for the same reason as the pretraining repo's: an unpinned prepare
 # resolves the current HEAD, and the recorded ~25.0B-token count that drives `train_iters` is
 # only meaningful against this exact commit.
@@ -25,7 +31,7 @@
 #     --config configs/control_pretraining/30b_baseline/data/pa-warm-start-sft-heavy-25b-mix.yaml
 dataset: geodesic-research/pa-warm-start-sft-heavy-25b-mix
 revision: ee81d70bad18b845d58d0d9ec59fad82aebb9bde
-tokenizer: geodesic-research/nemotron-think-tokenizer
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
 split: train
 seq-length: 32768
 pad-seq-to-mult: 4

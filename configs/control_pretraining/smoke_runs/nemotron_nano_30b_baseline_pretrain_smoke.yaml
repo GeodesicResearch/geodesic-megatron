@@ -1,63 +1,41 @@
-# Control-pretraining 30B baseline — STAGE 1 of 3: pretraining, 501.3B tokens at seq 8192.
+# smoke_e2e_run STAGE 1 of 3 -- pretraining from scratch, seq 8192, 512 GPUs / 128 nodes.
 #
-# Nemotron 3 Nano 30B-A3B, from scratch, 512 GPUs / 128 nodes.
+# Part of the smoke_e2e_run: a 1,677,721,600-token pass (100 iters x 16,777,216
+# tokens/iter) whose only purpose is to prove the full-scale config in
+# configs/control_pretraining/30b_baseline/ runs end to end, and to measure s/iter so the real
+# run can be costed. See ../smoke_runs/README.md for the chain and the launch order.
 #
-#   29881 iters x 2048 sequences x 8192 tokens = 16,777,216 tokens/iter
-#                                              = 501,319,991,296 tokens >= the 501,303,520,191
-#                                                target (the mix sheet's itemised sum)
-#   (29880 would land at 501,303,214,080, just short.)
+# THE RESULTING MODEL IS NOT USEFUL. 1.7B tokens is ~0.3% of the real curriculum; expect a loss
+# that is falling but nowhere near converged. Sanity is "it runs, it fits, loss descends,
+# 0 NaN", not quality.
 #
-# TOPOLOGY: TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512 -> 512 GPUs = 128 nodes.
-# This is the posture validated end-to-end by the V1 baseline's 597-iteration / 10B-token
-# acceptance (4 save crossings, 0 OOM, 0 NaN); only the data blend, the LR schedule and the
-# checkpoint interval differ from that file.
+# Everything that makes the real stage hard is carried over UNCHANGED -- the data blend, the
+# parallelism, the recompute posture and the save-crossing settings -- because a smoke that
+# altered them would stop testing the config it is meant to certify. A unit test pins the
+# blend and topology of each smoke config to its parent so the two cannot drift apart.
 #
-# --- THE TWO-STAGE LEARNING-RATE SCHEDULE (why this stage does NOT anneal) ---
+# What differs from the parent, and only this:
+#   train_iters        -> 100
+#   save_interval      -> 1000000, so Megatron's unconditional end-of-training save is the
+#                         only checkpoint written
+#   save_optim/rng     -> false: only model weights are ever read back from a smoke
+#                         checkpoint, so Adam moments and RNG state would be written and
+#                         never read
+#   checkpoint paths   -> /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/...
+#   wandb_exp_name     -> smoke_e2e_...
+#   lr_warmup_fraction -> 0.10 (was 0.01)
 #
-# This stage runs at a CONSTANT 1e-3 after warmup and never decays. The annealing phase is
-# stage 2 (nemotron_nano_30b_baseline_midtrain.yaml), which decays 7.5e-4 -> 1e-5 with a
-# cosine anneal over its
-# 52.5B tokens on the curated long-context mix. Across stages 1-2 the decay covers
-# 52.5B of 553.8B tokens = 9.5%, a conventional WSD tail — spent on the high-quality mix
-# rather than on web text.
+# The warmup fraction is the one LR change. At 0.01 this stage would warm up over 5.96
+# iterations before sitting at 1e-3, which is a real risk of an early divergence from random
+# init and would waste the run diagnosing the smoke rather than the config. 0.10 gives 59.6
+# iterations. The peak and `lr_decay_style: constant` are deliberately NOT changed: holding a
+# stable rate is the defining property of stage 1, so altering it would exercise a schedule
+# the real run never takes.
 #
-# `lr_decay_style: constant` is exact here, not approximate: optimizer_param_scheduler.py
-# applies warmup first and then returns max_lr unconditionally, so the min_lr branch is
-# unreachable and there is no decay of any kind. A partially-decayed stage-1 checkpoint would
-# make the stage boundary meaningless, so this must not be "tidied" into WSD with a zero tail.
-#
-# --- THE DATA MIX (and what its AI-flagged streams actually are) ---
-#
-# Six corpora, all subsets of geodesic-research/control-pretraining-datasets pinned at
-# revision b21e54a61b34345a190caa04261f25f4c3846e32 (the pin that adds ai_safety_and_adjacent;
-# its tree diff against the previous pin 8f5f790c is additions only, so every other corpus is
-# byte-identical and none needed re-tokenizing). The sheet's 2026-08-20 AI-safety revision
-# consolidated lesswrong_plus and lesswrong_rewrite_hq into the single ai_safety_and_adjacent
-# split — one fuller scrape (LessWrong, EA Forum and adjacent sources, plus rewrites) —
-# allocated at its full builder-measured size, which is why the stage total is
-# 501,303,520,191 rather than a round 500B. Weights are each corpus's sheet target over that
-# total and sum to exactly 1.000000:
-#
-#   0.698180  climbmix_full      350.0B      0.197485  zyda_full               99.0B
-#   0.049870  stack_edu           25.0B      0.039896  climbmix_ai_docs        20.0B
-#   0.009974  zyda_ai_docs         5.0B      0.004595  ai_safety_and_adjacent   2.30B
-#
-# THE `_ai_docs` STREAMS ARE NOT DISJOINT ADDITIONS — THEY ARE UPSAMPLING. The dataset's own
-# build provenance shows climbmix_full is `cap_tokens: null` over OptimalScale/ClimbMix at
-# revision 6d467b96, and climbmix_ai_docs is a `regex_selected_web_text` selection over the
-# SAME repository and revision, gated by an AI-discourse blocklist. The flagged documents are
-# therefore already inside climbmix_full, and giving them a separate 0.04 raises AI-related
-# content to roughly twice its natural rate. That is deliberate for this arm.
-#
-# The selection is a keyword filter with, in the campaign's own words, "many false-positives":
-# observed matches include a differential-equations text flagged for "deep learning", a
-# fan-fiction story flagged for "Cyborg", and a political transcript flagged for the acronym
-# "AI". Treat this stream as noisy keyword-selected web text, not as a curated AI corpus.
-#
-# --- LAUNCH ---
-# Not launched by this file. When the run is authorised, submit a --dependency=singleton chain
-# of day-long segments with checkpoint.load == checkpoint.save (see this directory's README);
-# ft is disabled because its heartbeat wall is shorter than the interval between saves.
+# Launch:
+#   isambard_sbatch --nodes=128 pipeline_training_submit.sbatch \
+#     configs/control_pretraining/smoke_runs/nemotron_nano_30b_baseline_pretrain_smoke.yaml \
+#     nano pretrain --disable-ft
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
@@ -129,7 +107,7 @@ dataset:
 train:
   global_batch_size: 2048      # 16,777,216 tokens/iter
   micro_batch_size: 1          # recipe default 2 OOMs at 8192 tok/rank
-  train_iters: 29881
+  train_iters: 100
   exit_signal_handler: true    # checkpoint on SIGTERM instead of losing the interval
 
 validation:
@@ -144,7 +122,7 @@ scheduler:
   # and the Nano pretrain recipe sets lr_warmup_iters = 333, so this 0 is required rather
   # than redundant: omitting the line leaves the recipe's value and trips the assert.
   lr_warmup_iters: 0
-  lr_warmup_fraction: 0.01     # 298.81 iters ~= 5.0B tokens of warmup
+  lr_warmup_fraction: 0.10     # 10 iters; 0.01 would be 1
 
 optimizer:
   lr: 1.0e-3                   # overrides the recipe's 1.6e-3 peak; held for the whole stage
@@ -167,6 +145,11 @@ comm_overlap:
   # Do NOT "tidy" these into ddp: — there they would be silently dropped.
   overlap_param_gather: false
   overlap_grad_reduce: true
+  # bucket_size counts PARAMETERS, not bytes (Megatron
+  # distributed_data_parallel_config.py:48-51). 500M parameters is essentially MCore's own
+  # default for this DP width, max(40000000, 1000000 * dp_size) = 512M at DP=512: large DP
+  # needs large buckets or the gradient collectives go latency-bound. The recipe's
+  # 134217728 is the value that would apply here, and it is ~4x too small at this width.
   bucket_size: 500000000
 
 ddp:
@@ -215,22 +198,12 @@ checkpoint:
   pretrained_checkpoint: null   # from scratch: random init (recipe init_method_std 0.0173)
   # load == save is what makes a segment resume: resumption is not automatic, and a chain of
   # singleton jobs restarts from scratch if they differ.
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
-  # 14 checkpoints, one every 37,983,015,424 tokens. 2264 x 13 = 29432 is the last interval
-  # save and 2264 x 14 = 31696 overshoots train_iters, so Megatron-Core's unconditional
-  # end-of-training save at 29881 supplies the 14th. An interval that divided 29881 exactly
-  # would yield 15, not 14.
-  #
-  # The cadence is set by RECOVERY, not by the analysis series. At the measured 5.25-6.36
-  # s/iter this is a checkpoint every 3.3-4.0 h, so an unclean stop costs at most that much
-  # -- against 5.5-6.6 h at the previous 3736. The analysis series needs 8 trajectory points
-  # and 14 is a superset of any 8. Storage is 14 x ~315.9 GB = 4.42 TB against 28.4 TiB free
-  # (measured 2026-08-21), so the trade is ~1.9 TB for ~2.5 h less exposure per incident.
-  save_interval: 2264
-  save_optim: true              # every checkpoint must be resumable
-  save_rng: true
-  most_recent_k: -1             # keep all 14; > -1 would prune to the k most recent
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
+  save_interval: 1000000        # only the unconditional end-of-training checkpoint
+  save_optim: false             # the next stage warm-starts from weights only
+  save_rng: false
+  most_recent_k: -1             # exactly one checkpoint is written, so nothing to prune
   ckpt_format: torch_dist
   async_save: false             # each save stalls the loop; turning it on would also
                                 # require checkpoint.use_persistent_ckpt_worker: true
@@ -263,4 +236,4 @@ logger:
   log_l2_norm_grad_to_tensorboard: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: control_pretrain_30b_baseline_pretrain
+  wandb_exp_name: smoke_e2e_30b_baseline_pretrain

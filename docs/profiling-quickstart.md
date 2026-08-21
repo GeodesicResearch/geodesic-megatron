@@ -131,7 +131,9 @@ The run ID stitches everything together:
 
 - W&B run summary carries `run/isambard_run_id`, `run/raw_log_path`, and
   `run/slurm_job_id` (project `megatron_training`, experiment
-  `nemotron_super_quickstart_sft_profile`).
+  `nemotron_super_quickstart_sft_profile`), alongside `run/switch_count` and
+  `run/switch_spread` — the run's Dragonfly placement, which a profile is only
+  comparable to another profile at.
 - Given a run ID, the log is `logs/slurm/by-run-id/<run-id>.out` and the
   profile directory is `<profile-root>/<wandb-exp-name>/<run-id>/`.
 - Given a profile directory, `provenance.txt` names the commit, config, and

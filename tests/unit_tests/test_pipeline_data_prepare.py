@@ -409,6 +409,8 @@ class TestShippedCorpusConfigs:
                 # Base CPT") — the chat tokenizer here writes dead-row id 11 EODs.
                 assert args.tokenizer == "geodesic-research/nemotron-base-tokenizer", path.name
             else:
-                # Packed SFT corpora: the reasoning/think chat-template tokenizer, which the
-                # packed path in the training config that reads the pack also names.
-                assert args.tokenizer == "geodesic-research/nemotron-think-tokenizer", path.name
+                # Packed SFT corpora: the reasoning/think chat-template tokenizer, HISTORY
+                # variant — the plain one truncates prior-turn reasoning out of multi-turn
+                # conversations before tokenization. The packed path in the training config
+                # that reads the pack names the same tokenizer.
+                assert args.tokenizer == "geodesic-research/nemotron-think-history-tokenizer", path.name

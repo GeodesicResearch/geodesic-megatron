@@ -1,86 +1,46 @@
-# Control-pretraining 30B baseline — STAGE 2 of 3: midtraining, 52.5B tokens at seq 32768.
+# smoke_e2e_run STAGE 2 of 3 -- midtraining, seq 32768, 512 GPUs / 128 nodes.
 #
-# Nemotron 3 Nano 30B-A3B warm-started from stage 1, 512 GPUs / 128 nodes.
+# Warm-starts from stage 1 of the SMOKE chain, not from the full-scale pretrain checkpoint.
 #
-#   3126 iters x 512 sequences x 32768 tokens = 16,777,216 tokens/iter
-#                                             = 52,445,577,216 tokens >= the 52,442,350,158
-#                                               target (the mix sheet's itemised sum)
-#   (3125 would land at 52,428,800,000, just short.)
+# Part of the smoke_e2e_run: a 1,677,721,600-token pass (100 iters x 16,777,216
+# tokens/iter) whose only purpose is to prove the full-scale config in
+# configs/control_pretraining/30b_baseline/ runs end to end, and to measure s/iter so the real
+# run can be costed. See ../smoke_runs/README.md for the chain and the launch order.
 #
-# Tokens per iteration are IDENTICAL to stage 1 (16,777,216), so the optimizer's token batch
-# is continuous across the stage boundary even though the sequence length quadruples and the
-# sequence count drops from 2048 to 512.
+# THE RESULTING MODEL IS NOT USEFUL. 1.7B tokens is ~0.3% of the real curriculum; expect a loss
+# that is falling but nowhere near converged. Sanity is "it runs, it fits, loss descends,
+# 0 NaN", not quality.
 #
-# TOPOLOGY: TP=1 · CP=2 · EP=4 · PP=1 · ETP=1 · DP=256 -> 512 GPUs = 128 nodes.
+# Everything that makes the real stage hard is carried over UNCHANGED -- the data blend, the
+# parallelism, the recompute posture and the save-crossing settings -- because a smoke that
+# altered them would stop testing the config it is meant to certify. A unit test pins the
+# blend and topology of each smoke config to its parent so the two cannot drift apart.
 #
-# CP=2 IS NOT A TUNING CHOICE. At seq 32768 the fp32 cross-entropy logits are
-# seq x vocab x 4 = 32768 x 131072 x 4 = EXACTLY 16.00 GiB — a live tensor no recompute
-# setting can touch — and it scales as 1/CP. At PP=1 the CP=1 arm missed by 12.31 GiB. CP=2
-# halves it to 8.00 GiB, which fits. CP must also stay node-local (TP x CP <= 4). Measured
-# alternatives on this model at 32K, all worse: TP=2 +48.9%, PP=2 +18.3%, PP=4 +30.1%,
-# EP=8 +77.2%.
+# What differs from the parent, and only this:
+#   train_iters        -> 100
+#   save_interval      -> 1000000, so Megatron's unconditional end-of-training save is the
+#                         only checkpoint written
+#   save_optim/rng     -> false: only model weights are ever read back from a smoke
+#                         checkpoint, so Adam moments and RNG state would be written and
+#                         never read
+#   checkpoint paths   -> /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/...
+#   wandb_exp_name     -> smoke_e2e_...
+#   lr_wsd_decay_iters -> 100, tracking train_iters so the anneal still spans the stage
 #
-# THIS TOPOLOGY HAS NOT BEEN RUN AT THIS SCALE. The CP=2 / full-recompute posture is carried
-# over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs; the
-# GBS 512 / DP 256 combination here has never been executed. A smoke test must confirm it
-# fits and that the warm start does not spike before the full run is authorised.
+# lr_warmup_iters stays at 100 even though that is 16.8% of this shortened stage. It is not a
+# fraction of the run: it is five second-moment EMA timescales at adam_beta2 = 0.95, and the
+# thing it protects -- Adam moments zeroed by a weights-only warm start -- happens here
+# exactly as it does at full scale. Scaling it down would remove the protection the smoke is
+# supposed to exercise.
 #
-# --- THIS STAGE IS THE ANNEALING PHASE ---
+# This stage carries the real risk in the whole chain: the CP=2 / GBS 512 / DP 256 posture at
+# 32768 tokens has never been executed at this scale, and the fp32 cross-entropy logits alone
+# are 8.00 GiB after CP halves them. If anything OOMs, it is here.
 #
-# Stage 1 holds a constant 1e-3 and never decays; this stage decays 7.5e-4 -> 1e-5 over its
-# whole length on the curated long-context mix. Across both stages the decay covers 52.5B of
-# 553.8B tokens = 9.5%, a conventional WSD tail spent on high-quality data rather than web
-# text. lr_wsd_decay_iters equals train_iters, which makes the WSD anneal start at step 1
-# (wsd_anneal_start_ = lr_decay_steps - wsd_decay_steps = 0).
-#
-# The peak is 7.5e-4, 75% of stage 1's stable rate, and the anneal is `cosine` rather than
-# `minus_sqrt`. Cosine holds the rate up for longer before dropping, so the stage sees MORE
-# total learning despite the lower peak: mean LR over the 3126 iterations is 3.680e-4 against
-# 3.398e-4 for minus_sqrt-from-1e-3, +8.3%. Those two numbers are measured by driving
-# megatron.core.optimizer_param_scheduler.OptimizerParamScheduler over the stage, not derived
-# in closed form; test_midtrain_lr_schedule_is_continuous_and_hits_its_floor pins the shape.
-# Restoring the 1e-3 peak under cosine would give 4.890e-4 (+43.9%) and is available as an
-# upgrade once a smoke run shows a clean first 200 iterations -- deliberately not the launch
-# value, because the boundary stability at 7.5e-4 is the part with published support.
-#
-# WARM START: pretrained_checkpoint loads WEIGHTS ONLY, so Adam moments restart at zero.
-# lr_warmup_iters: 100 is what protects that reset, and it only does so because this stage
-# also pins adam_beta2 -- see the optimizer block. Warmup takes precedence for steps 1-100 and
-# the handoff into the anneal is continuous: iteration 100 is 7.500e-4 and iteration 101 is
-# 7.481e-4, a 0.254% step, because the WSD branch computes its ratio from the raw step count
-# and is therefore already 3.2% into the anneal when warmup ends. That is why
-# lr_wsd_decay_iters stays at train_iters instead of being shortened by the warmup length.
-#
-# --- THE DATA MIX ---
-#
-# Ten corpora, all subsets of geodesic-research/control-pretraining-datasets at revision
-# b21e54a61b34345a190caa04261f25f4c3846e32 (the pin that adds ai_safety_and_adjacent; its
-# tree diff against the previous pin 8f5f790c is additions only, so every other corpus is
-# byte-identical). Five are long-context replay (the N-longest documents of a stage-1
-# corpus); the rest are midtraining-only — except ai_safety_and_adjacent, the consolidated
-# AI-safety split the sheet blends into BOTH stages from the same subset at its full size
-# ("Verbatim Multi-Epoch Replay" — deliberate, per Kyle 2026-08-20: the allocation upsamples
-# the corpus ~3.5x per stage, ~7 epochs across the curriculum). Weights are each corpus's
-# sheet target divided by the itemised total 52,442,350,158 and sum to 1.000000, with the
-# -0.000001 six-decimal rounding residue folded into the largest corpus (climbmix_long).
-#
-# The sheet's `AI Risk Reports` entry (subset ai_risk_reports_rsp) is NOT in this mix. It
-# appears only in the sheet's second table, as a list of frontier-lab report URLs carrying
-# no token allocation and no Stage cell, and the sheet's Midtraining Total of 52.44B is the
-# ten staged rows WITHOUT it: 52,442,350,158, where including it would give 52,452,350,158.
-# The corpus is built and on disk, simply unblended.
-#
-# `nemotron_wiki_rewrite_ai_docs` is budgeted at its upstream size 188,829,967, which
-# excludes the one-EOD-per-document that tokenization appends (measured .idx = 188,883,008 =
-# upstream + 53,041 docs).
-#
-# The `_ai_docs` streams upsample AI-related content rather than adding disjoint documents,
-# and the selection is a keyword filter with many false positives — see the stage-1 config's
-# header for the provenance that establishes both.
-#
-# --- LAUNCH ---
-# Not launched by this file, and it cannot start until stage 1 has written a checkpoint:
-# CheckpointConfig.finalize asserts pretrained_checkpoint exists.
+# Launch (after stage 1 has written its checkpoint):
+#   isambard_sbatch --nodes=128 pipeline_training_submit.sbatch \
+#     configs/control_pretraining/smoke_runs/nemotron_nano_30b_baseline_midtrain_smoke.yaml \
+#     nano pretrain --disable-ft
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
@@ -88,12 +48,12 @@ tokenizer:
 
 dataset:
   # Counts are measured from the .idx, and each epoch figure is the weight times this
-  # stage's 52,445,577,216 trained tokens over those corpus tokens. No corpus here is
+  # stage's 52,462,354,432 trained tokens over those corpus tokens. No corpus here is
   # sharded: only ClimbMix's full 553M-document corpus needs that, and climbmix_long is a
   # 800k-document subsample of it.
   data_path:
     - "0.333699"   # climbmix_long — 17,500,804,443 tokens, 800,032 docs, 1.000 epochs
-                   # (carries the -0.000001 rounding residue)
+                   # (carries the +0.000002 rounding residue)
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_long/tokenized_base_input_document
     - "0.190686"   # nemotron_stem_sft — 10,000,469,928 tokens, 459,324 docs, 1.000 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_stem_sft/tokenized_base_input_document
@@ -153,7 +113,7 @@ dataset:
 train:
   global_batch_size: 512       # 16,777,216 tokens/iter — identical to stage 1
   micro_batch_size: 1
-  train_iters: 3126
+  train_iters: 100
   exit_signal_handler: true
 
 validation:
@@ -171,7 +131,7 @@ scheduler:
   # Equal to train_iters, so the anneal spans the whole stage. Deliberately NOT reduced by the
   # warmup length: the WSD branch ignores lr_warmup_steps, so the boundary is already
   # continuous to 0.254% and shortening this would introduce the gap it looks like it avoids.
-  lr_wsd_decay_iters: 3126
+  lr_wsd_decay_iters: 100
 
 optimizer:
   lr: 7.5e-4                   # 75% of stage 1's stable rate; see the schedule note in the header
@@ -241,19 +201,16 @@ checkpoint:
   # fresh optimizer and its own LR schedule rather than resuming stage 1's. Point this at
   # stage 1's save directory; CheckpointConfig.finalize asserts it exists, so this config
   # cannot be launched before stage 1 has written a checkpoint.
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
   # A NEW directory, deliberately not stage 1's: load == save is what lets a segment resume,
   # and pointing either at the stage-1 directory would make this stage resume stage 1's
   # iteration counter and schedule instead of starting its own.
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
-  # 2 of the campaign's 10 retained checkpoints, one every 26,239,565,824 tokens. 1564 is
-  # the only interval save and 1564 x 2 = 3128 overshoots train_iters, so Megatron-Core's
-  # unconditional end-of-training save at 3126 supplies the second.
-  save_interval: 1564
-  save_optim: true
-  save_rng: true
-  most_recent_k: -1
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
+  save_interval: 1000000        # only the unconditional end-of-training checkpoint
+  save_optim: false             # the next stage warm-starts from weights only
+  save_rng: false
+  most_recent_k: -1             # exactly one checkpoint is written, so nothing to prune
   ckpt_format: torch_dist
   async_save: false
   # Same requirement as stage 1: the recipe sets this True, and leaving it True makes the
@@ -277,4 +234,4 @@ logger:
   log_l2_norm_grad_to_tensorboard: true
   wandb_entity: geodesic
   wandb_project: megatron_training
-  wandb_exp_name: control_pretrain_30b_baseline_midtrain
+  wandb_exp_name: smoke_e2e_30b_baseline_midtrain

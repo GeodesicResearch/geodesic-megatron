@@ -510,7 +510,10 @@ Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
   `provenance.txt`.
 - **W&B** — `RunIdentityCallback` (`scripts/telemetry/run_identity.py`, registered on every
   training run) stamps `run/isambard_run_id`, `run/raw_log_path`, `run/slurm_job_id` into the
-  run summary.
+  run summary, plus `run/switch_count` and `run/switch_spread` — the run's Dragonfly placement,
+  read from the launcher's `ISAMBARD_SWITCH_SPREAD`. The placement keys are absent on runs not
+  started through `pipeline_training_launch.sh`, since `scontrol` is unavailable inside the
+  container and only the launcher can derive them.
 ## Troubleshooting
 
 | Symptom | Cause / fix |

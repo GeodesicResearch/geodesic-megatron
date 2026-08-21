@@ -590,6 +590,43 @@ export MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$NODELIST"
 export MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 TOTAL_GPUS=$((NNODES * 4))
 
+# Dragonfly placement of this run's nodes, exported for the W&B run summary
+# (scripts/telemetry/run_identity.py reads ISAMBARD_SWITCH_SPREAD). Computed here rather
+# than in the payload because the payload runs inside the container, which inherits the
+# SLURM environment variables but not the SLURM binaries -- scontrol is absent there.
+# Worth recording on every run: the same Nano pretrain config measured 137.8 TFLOP/s/GPU
+# across 2 switch groups and 114.7 across 8, so a throughput number is only comparable to
+# another taken at the same spread.
+# Non-fatal, like the rest of the identity bookkeeping: a failure here must never stop a run.
+derive_switch_spread() {
+    # Emits "<switch>:<nodes>,..." largest first, or nothing. Every statement must end
+    # truthy: the caller runs under `set -euo pipefail`, so a while-loop whose final
+    # iteration ends on a false test makes the whole pipeline nonzero even though the
+    # tail of it succeeded, and that would abort the launch rather than skip the metric.
+    local mine sw nodes n
+    mine=$(scontrol show hostnames "$1" | sort -u)
+    [ -n "$mine" ] || return 0
+    scontrol show topology | while read -r line; do
+        case "$line" in *Level=0*) ;; *) continue ;; esac
+        sw=${line#*SwitchName=}; sw=${sw%% *}
+        nodes=${line#*Nodes=}; nodes=${nodes%% *}
+        if [ -n "$sw" ] && [ -n "$nodes" ]; then
+            n=$(scontrol show hostnames "$nodes" | sort -u |
+                comm -12 - <(printf '%s\n' "$mine") | wc -l)
+            if [ "$n" -gt 0 ]; then printf '%s:%s\n' "$sw" "$n"; fi
+        fi
+    done | sort -t: -k2 -rn | paste -sd, -
+}
+if [ -z "${ISAMBARD_SWITCH_SPREAD:-}" ]; then
+    ISAMBARD_SWITCH_SPREAD="$(derive_switch_spread "$NODELIST" || true)"
+fi
+export ISAMBARD_SWITCH_SPREAD
+if [ -n "$ISAMBARD_SWITCH_SPREAD" ]; then
+    echo "[run-identity] switch placement: $ISAMBARD_SWITCH_SPREAD"
+else
+    echo "WARNING: switch placement not determined (non-fatal); scontrol errors above" >&2
+fi
+
 # ==============================================================================
 # Select training script
 # ==============================================================================
