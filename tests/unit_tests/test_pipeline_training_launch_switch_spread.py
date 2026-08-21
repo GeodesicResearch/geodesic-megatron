@@ -50,7 +50,11 @@ TOPOLOGY = (
 )
 
 _STUB = """#!/bin/bash
-if [ "${{FAIL_SCONTROL:-0}}" = "1" ]; then
+# FAIL_SCONTROL names the subcommand to fail -- "hostnames", "topology", or "all".
+# Failing one at a time is the point: with everything failing, the node list comes back
+# empty and the function returns early, never reaching the topology pipeline whose exit
+# status is what the caller's `|| true` exists to absorb.
+if [ "${{FAIL_SCONTROL:-}}" = "all" ] || [ "${{FAIL_SCONTROL:-}}" = "$2" ]; then
     echo "scontrol: connection refused" >&2
     exit 1
 fi
@@ -93,7 +97,7 @@ def _extract_assignment():
     return match.group(0).strip()
 
 
-def _run(tmp_path, nodelist, fail_scontrol=False):
+def _run(tmp_path, nodelist, fail_scontrol=None):
     """Run the derivation under the launcher's own shell options, with a stub scontrol."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -112,7 +116,7 @@ def _run(tmp_path, nodelist, fail_scontrol=False):
     )
     env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
     if fail_scontrol:
-        env["FAIL_SCONTROL"] = "1"
+        env["FAIL_SCONTROL"] = fail_scontrol
     return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, timeout=120)
 
 
@@ -163,13 +167,32 @@ def test_survives_a_last_switch_that_shares_no_node(tmp_path):
 
 
 def test_scontrol_failure_is_non_fatal_and_not_silent(tmp_path):
-    result = _run(tmp_path, "nid[010000-010001]", fail_scontrol=True)
+    result = _run(tmp_path, "nid[010000-010001]", fail_scontrol="all")
     assert result.returncode == 0
     assert "REACHED_END" in result.stdout
     assert _spread(result) == "", "a failed scontrol must yield no placement, not a wrong one"
     assert "connection refused" in result.stderr, (
         "scontrol's error must reach the operator rather than being swallowed"
     )
+
+
+def test_topology_failure_alone_is_non_fatal(tmp_path):
+    """The one case the caller's `|| true` is load-bearing for.
+
+    When every `scontrol` call fails the function returns early on an empty node list and
+    its own exit status is 0, so `|| true` is doing nothing. It is only when `show
+    hostnames` SUCCEEDS and `show topology` fails that the pipeline runs, exits nonzero,
+    and the command substitution would abort the launcher without the net. Removing
+    `|| true` from the launcher must turn this test red.
+    """
+    result = _run(tmp_path, "nid[010000-010001]", fail_scontrol="topology")
+    assert result.returncode == 0, (
+        "the launcher aborted on a topology-only scontrol failure; the `|| true` on the "
+        f"ISAMBARD_SWITCH_SPREAD assignment is what prevents that. stderr={result.stderr!r}"
+    )
+    assert "REACHED_END" in result.stdout
+    assert _spread(result) == ""
+    assert "connection refused" in result.stderr
 
 
 @pytest.mark.parametrize("nodelist", ["nid[010500-010501]", "nid[010903-010904]"])

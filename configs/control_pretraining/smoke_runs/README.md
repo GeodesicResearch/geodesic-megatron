@@ -53,7 +53,7 @@ The two CLAUDE.md precedents are also narrower than they look: the 128-GPU case 
 exactly one field, and the profiling posture is an ad-hoc benchmark rather than a config under
 certification.
 
-That argument is weaker than it looks, and the honest record is that drift has already
+None of that makes the duplication safe, and the honest record is that drift has already
 happened once: the SFT smoke shipped with its parent's `tensorboard_dir`, which would have
 written TensorBoard events into the production stage-3 directory — the sharing CLAUDE.md's
 "TensorBoard on NFS" section records as a cause of cascading stale-file-handle crashes. The
