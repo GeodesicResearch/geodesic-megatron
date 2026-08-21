@@ -3,7 +3,7 @@
 One unique ID joins the three places a training run leaves artifacts, which
 today are painful to correlate after the fact:
 
-    raw SLURM job log      logs/slurm/train-<jobid>.out (+ a by-run-id/ symlink)
+    raw SLURM job log      /projects/a5k/public/logs/megatron_runs/train-<jobid>.out (+ a by-run-id/ symlink)
     torch-profiler output  /projects/a5k/public/profiles/<run-name>/<run-id>/
     W&B run                summary metrics run/isambard_run_id, run/raw_log_path
 

@@ -5,7 +5,8 @@
 # pretraining corpora, as a validation run for the CPT leg of the campaign:
 # confirm the warm start loads, the blend feeds, loss descends without NaN/Inf,
 # and the resulting checkpoints convert and evaluate. Data mix (Kyle,
-# 2026-08-20): 50% ClimbMix / 25% LessWrong / 25% arXiv. All three corpora are
+# 2026-08-20): 50% ClimbMix / 25% AI-safety discourse / 25% arXiv. All three
+# corpora are
 # subsets of geodesic-research/control-pretraining-datasets pinned at
 # 669d466ead5f1ed33886241a7338235c98faa1b1, tokenized with the base tokenizer
 # (EOD `</s>` = id 2) by the 30b_baseline data build — see
@@ -13,10 +14,10 @@
 #
 # Token budget: train_iters 398 x GBS 3072 x seq 8192 = 10,015,997,952 (the
 # smallest iteration count reaching 10B). Per-corpus shares and epochs:
-#   climbmix_full   5.008B of 354,429,333,750  -> 0.014 epochs
-#   lesswrong_plus  2.504B of     348,487,453  -> 7.19 epochs (deliberate:
-#                   the 25% weight is the spec; repetition is accepted)
-#   arxiv_papers    2.504B of   8,000,442,722  -> 0.313 epochs
+#   climbmix_full           5.008B of 354,429,333,750  -> 0.014 epochs
+#   ai_safety_and_adjacent  2.504B of     658,501,575  -> 3.80 epochs (deliberate:
+#                           the 25% weight is the spec; repetition is accepted)
+#   arxiv_papers            2.504B of   8,000,442,722  -> 0.313 epochs
 #
 # Parent checkpoint: NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 (Megatron
 # torch_dist import). PRE-FLIGHT before launch: Nano-Base carries ~5 zero

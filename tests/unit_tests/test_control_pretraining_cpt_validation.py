@@ -15,7 +15,7 @@
 """The CPT-validation pair survives the merge with its mix, budget, and schedule intact.
 
 These runs continue pretraining the released Nano/Super Base checkpoints on the campaign
-corpora (50% ClimbMix / 25% LessWrong / 25% arXiv, 10B tokens). `--mode cpt` dispatches the
+corpora (50% ClimbMix / 25% AI-safety discourse / 25% arXiv, 10B tokens). `--mode cpt` dispatches the
 SFT recipe — a different recipe than the from-scratch arm — whose defaults are fine-tuning
 postures the YAMLs must override rather than inherit:
 
@@ -93,16 +93,16 @@ class TestPerArm:
         assert_blend_is_well_formed(raw[arm].dataset.data_path, arm)
 
     def test_mix_is_50_25_25(self, raw, arm):
-        """50% ClimbMix (across its 8 shards) / 25% LessWrong / 25% arXiv, per the spec."""
+        """50% ClimbMix (across its 8 shards) / 25% AI-safety discourse / 25% arXiv, per the spec."""
         data_path = [str(x) for x in raw[arm].dataset.data_path]
         pairs = list(zip(data_path[1::2], (float(w) for w in data_path[::2])))
-        by_corpus = {"climbmix_full": 0.0, "lesswrong_plus": 0.0, "arxiv_papers": 0.0}
+        by_corpus = {"climbmix_full": 0.0, "ai_safety_and_adjacent": 0.0, "arxiv_papers": 0.0}
         for prefix, weight in pairs:
             matches = [c for c in by_corpus if f"__{c}/" in prefix]
             assert len(matches) == 1, f"{arm}: {prefix} matches {matches}"
             by_corpus[matches[0]] += weight
         assert round(by_corpus["climbmix_full"], 6) == 0.5
-        assert by_corpus["lesswrong_plus"] == 0.25
+        assert by_corpus["ai_safety_and_adjacent"] == 0.25
         assert by_corpus["arxiv_papers"] == 0.25
         assert sum(1 for p, _ in pairs if "__climbmix_full/" in p) == 8
 

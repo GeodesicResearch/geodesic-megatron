@@ -63,7 +63,7 @@ MoE-heavy stage. Two structurally different views of the same step.
 ## 2. Watch the run
 
 ```bash
-tail -f logs/slurm/train-<jobid>.out
+tail -f /projects/a5k/public/logs/megatron_runs/train-<jobid>.out
 ```
 
 Early in the log, the launch banner prints the run identity:
@@ -72,7 +72,7 @@ Early in the log, the launch banner prints the run identity:
 ===== Nemotron 3 Training =====
 Job ID:    5738450
 Run ID:    20260724T183000-j5738450
-Raw log:   .../logs/slurm/train-5738450.out
+Raw log:   /projects/a5k/public/logs/megatron_runs/train-5738450.out
 ...
 ```
 
@@ -134,7 +134,7 @@ The run ID stitches everything together:
   `nemotron_super_quickstart_sft_profile`), alongside `run/switch_count` and
   `run/switch_spread` — the run's Dragonfly placement, which a profile is only
   comparable to another profile at.
-- Given a run ID, the log is `logs/slurm/by-run-id/<run-id>.out` and the
+- Given a run ID, the log is `/projects/a5k/public/logs/megatron_runs/by-run-id/<run-id>.out` and the
   profile directory is `<profile-root>/<wandb-exp-name>/<run-id>/`.
 - Given a profile directory, `provenance.txt` names the commit, config, and
   raw log.

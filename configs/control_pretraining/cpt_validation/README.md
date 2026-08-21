@@ -4,7 +4,7 @@ Continual-pretraining validation runs for the control-pretraining campaign: take
 Nemotron 3 checkpoints and continue pretraining them on the campaign's corpora, to validate the
 CPT leg end-to-end — warm start loads, the blend feeds, loss descends with no NaN/Inf, and the
 resulting checkpoints convert and evaluate. Defined 2026-08-20 (Kyle): **50% ClimbMix / 25%
-LessWrong / 25% arXiv, 10B tokens, both model sizes.**
+AI-safety discourse / 25% arXiv, 10B tokens, both model sizes.**
 
 | Config | Parent checkpoint | Topology (128 GPUs / 32 nodes) | Projected |
 |---|---|---|---|
@@ -27,14 +27,14 @@ count reaching 10B). All corpora from `geodesic-research/control-pretraining-dat
 | Weight | Corpus | Measured tokens | Share of 10.016B | Epochs |
 |---|---|---|---|---|
 | 0.500 | `climbmix_full` (8 shards, token-proportional) | 354,429,333,750 | 5.008B | 0.014 |
-| 0.250 | `lesswrong_plus` | 348,487,453 | 2.504B | **7.19** |
+| 0.250 | `ai_safety_and_adjacent` | 658,501,575 | 2.504B | **3.80** |
 | 0.250 | `arxiv_papers` | 8,000,442,722 | 2.504B | 0.313 |
 
 Two things to know when reading results:
 
-- **LessWrong repeats ~7.2×.** The 25% weight is the spec (kept deliberately, decision
-  2026-08-20); with a 348M-token corpus that share means heavy repetition. Any memorization- or
-  contamination-sensitive readout on the LessWrong slice must account for it.
+- **AI-safety discourse repeats ~3.8×.** The 25% weight is the spec (kept deliberately,
+  decision 2026-08-20); with a 658M-token corpus that share means heavy repetition. Any
+  memorization- or contamination-sensitive readout on that slice must account for it.
 - ClimbMix's 0.50 is split across its 8 shards **in proportion to each shard's measured tokens**
   (weight = 0.50 × shard_tokens / 354,429,333,750, six decimals, summing to exactly 0.500000) —
   the shards differ by up to 33% in tokens, so equal weights would over-sample the smaller ones.
@@ -64,8 +64,8 @@ launch:
        --output /projects/a5k/public/data/nano_base_zero_emb_ids.json"
    ```
 
-2. Scan the three corpora's `.bin` token streams (int32) for those ids. `lesswrong_plus`
-   (1.4 GB) and `arxiv_papers` (32 GB) scan in minutes; `climbmix_full` (1.4 TB across 8 shards)
+2. Scan the three corpora's `.bin` token streams (int32) for those ids. `ai_safety_and_adjacent`
+   (2.6 GB) and `arxiv_papers` (32 GB) scan in minutes; `climbmix_full` (1.4 TB across 8 shards)
    is a submitted 1-node job, not tunnel work. Zero hits ⇒ launch. Any hit ⇒ the affected corpus
    needs `scripts/data/filter_zero_emb_docs.py` + re-tokenization for this arm (do NOT modify
    the shared corpora in place — the 30b_baseline blend uses them as-built).

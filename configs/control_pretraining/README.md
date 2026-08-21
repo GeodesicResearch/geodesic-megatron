@@ -18,7 +18,7 @@ filtered version of the same blend, so everything except the data is held fixed 
 >
 > The campaign's CPT leg lives in [`cpt_validation/`](cpt_validation/README.md): 10B-token
 > continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /
-> 25% LessWrong / 25% arXiv.
+> 25% AI-safety discourse / 25% arXiv.
 >
 > [`smoke_runs/`](smoke_runs/README.md) holds `smoke_e2e_run`: ~1.7B tokens through each of the
 > three `30b_baseline/` stages, chained checkpoint to checkpoint, to prove the configs run and

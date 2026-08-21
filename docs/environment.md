@@ -504,7 +504,7 @@ alongside the config and commit.
 Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
 `<launch-timestamp>-j<slurm-job-id>`, which joins the three places a run leaves artifacts:
 
-- **Job log** — echoed in the launch banner; `logs/slurm/by-run-id/<run-id>.out` symlinks to
+- **Job log** — echoed in the launch banner; `/projects/a5k/public/logs/megatron_runs/by-run-id/<run-id>.out` symlinks to
   the raw `train-<jobid>.out`.
 - **Profiles** — names the per-launch output subdirectory and is recorded in
   `provenance.txt`.

@@ -303,7 +303,7 @@ would demand a checkpoint.
   `scripts/profiling/profiler_callback.py`.
 - **Run identity**: every launcher run mints `ISAMBARD_RUN_ID`
   (`<timestamp>-j<jobid>`), echoed in the log banner, symlinked as
-  `logs/slurm/by-run-id/<run-id>.out`, used as the profile subdir name, and
+  `/projects/a5k/public/logs/megatron_runs/by-run-id/<run-id>.out`, used as the profile subdir name, and
   stamped into W&B summary (`run/isambard_run_id`, `run/raw_log_path`,
   `run/slurm_job_id`) by `scripts/telemetry/run_identity.py` — the join key
   between a W&B run, its raw log, and its profiles. The same summary carries
@@ -366,9 +366,9 @@ with the venv gone, there is one answer.)
 
 Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with EP=8 cross-node). The training pipeline uses a layered resilience stack:
 
-1. **In-process restart** (60s/90s timeout) — reinitializes NCCL, retries same step. Zero iterations lost.
-2. **ft_launcher job restart** (`--max-restarts=20`) — kills workers, reloads from latest checkpoint. ≤25 iters lost.
-3. **NCCL watchdog** (900s) — last resort backup.
+1. **ft_launcher worker restart** (`--max-restarts=20`) — the per-node agent restarts failed workers, reloading from the latest checkpoint. ≤25 iters lost. (`cfg.inprocess_restart` is never set by `pipeline_training_run.py`, so there is no in-process layer on the shipped path.)
+2. **NCCL watchdog** (`TORCH_NCCL_TIMEOUT`, 7200s) — aborts genuinely wedged collectives.
+3. **srun `--kill-on-bad-exit=1`** — when a rank dies unrecoverably (or ft is disabled), the whole step ends instead of stranding the surviving ranks in a never-completing collective; with a `--dependency=singleton` chain the next segment then resumes from the latest checkpoint.
 
 **ft_launcher timeout configuration** (set in `pipeline_training_launch.sh`):
 - `--ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600`
@@ -605,7 +605,7 @@ this scale: it fits, and the weights-only warm start produced no loss spike.
 
 **CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
 continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on
-50% ClimbMix / 25% LessWrong / 25% arXiv for 10B tokens (398 iters × GBS 3072 × seq 8192, the
+50% ClimbMix / 25% AI-safety discourse / 25% arXiv for 10B tokens (398 iters × GBS 3072 × seq 8192, the
 128-GPU pretrain-quickstart topologies; LR 1e-5 cosine → 1e-6, warmup 0.10). Launch via
 `nano cpt` / `super cpt` with `--disable-ft` (both runs outlive the ft heartbeat wall;
 `load == save` supplies resume). The Nano launch is gated on the dead-id pre-flight in that
@@ -1142,7 +1142,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
-| SLURM logs | `logs/slurm/` (by run ID: `logs/slurm/by-run-id/`) |
+| SLURM training-run logs | `/projects/a5k/public/logs/megatron_runs/` (by run ID: `.../by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
 | Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` |
 | HF cache | `/projects/a5k/public/hf` |

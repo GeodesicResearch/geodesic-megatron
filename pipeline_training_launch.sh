@@ -385,13 +385,14 @@ export MPICH_GPU_SUPPORT_ENABLED=0
 #
 # These settings work with ft_launcher (nvidia-resiliency-ext) to detect and
 # recover from Slingshot NCCL hangs. The layered approach:
-#   1. In-process restart (60s/90s) -- reinit NCCL, retry same step
-#   2. ft_launcher restart (step timeout 3600s) -- restart from checkpoint
-#   3. NCCL watchdog (900s) -- last-resort process abort
-#
-# TORCH_NCCL_TIMEOUT must exceed the in-process restart hard_timeout (90s)
-# so the fault tolerance system gets a chance to recover before the watchdog
-# kills the process.
+#   1. ft_launcher worker restart (step timeout 7200s) -- the per-node agent
+#      restarts failed workers from the latest checkpoint
+#   2. NCCL watchdog (TORCH_NCCL_TIMEOUT=7200s) -- aborts genuinely wedged
+#      collectives
+#   3. srun --kill-on-bad-exit=1 -- a rank that dies unrecoverably ends the
+#      whole step instead of stranding the survivors in a never-completing
+#      collective; a --dependency=singleton chain then resumes from the
+#      latest checkpoint
 # ==============================================================================
 
 # NCCL watchdog timeout in seconds. If any collective takes longer than this, the
@@ -571,7 +572,7 @@ fi
 export ISAMBARD_RAW_LOG_PATH
 
 # Findable-by-run-ID companion symlink next to the raw log, so a log can be
-# located from a run ID alone: logs/slurm/by-run-id/<run-id>.out -> train-<job>.out
+# located from a run ID alone: <log-dir>/by-run-id/<run-id>.out -> train-<job>.out
 # Non-fatal: identity bookkeeping must never kill a training launch.
 if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
     RUN_ID_LINK_DIR="$(dirname "$ISAMBARD_RAW_LOG_PATH")/by-run-id"
@@ -694,7 +695,7 @@ echo "================================"
 # ==============================================================================
 # Launch
 # ==============================================================================
-SRUN_ARGS="--nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap"
+SRUN_ARGS="--nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=1 --export=ALL --overlap"
 if [ -n "$OVERRIDE_NODELIST" ]; then
     SRUN_ARGS="$SRUN_ARGS --nodelist=$OVERRIDE_NODELIST"
 fi
