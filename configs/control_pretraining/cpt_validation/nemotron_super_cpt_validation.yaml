@@ -52,25 +52,25 @@ tokenizer:
 # --- Dataset (identical blend to the Nano config; rationale documented there) ---
 dataset:
   data_path:
-    - "0.067829"   # climbmix_full shard0 — 48,081,521,834 tokens
+    - "0.067829"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard0/tokenized_base_input_document
-    - "0.069538"   # climbmix_full shard1 — 49,292,386,342 tokens
+    - "0.069538"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard1/tokenized_base_input_document
-    - "0.066516"   # climbmix_full shard2 — 47,150,430,296 tokens
+    - "0.066516"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard2/tokenized_base_input_document
-    - "0.062577"   # climbmix_full shard3 — 44,357,902,443 tokens
+    - "0.062577"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard3/tokenized_base_input_document
-    - "0.058997"   # climbmix_full shard4 — 41,820,794,183 tokens
+    - "0.058997"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard4/tokenized_base_input_document
-    - "0.052201"   # climbmix_full shard5 — 37,002,993,866 tokens
+    - "0.052201"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard5/tokenized_base_input_document
-    - "0.058876"   # climbmix_full shard6 — 41,734,753,004 tokens
+    - "0.058876"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard6/tokenized_base_input_document
-    - "0.063466"   # climbmix_full shard7 — 44,988,551,782 tokens
+    - "0.063466"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard7/tokenized_base_input_document
-    - "0.25"       # lesswrong_plus — 348,487,453 tokens (7.19 epochs at this share)
-    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__lesswrong_plus/tokenized_base_input_document
-    - "0.25"       # arxiv_papers — 8,000,442,722 tokens
+    - "0.25"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent/tokenized_base_input_document
+    - "0.25"
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__arxiv_papers/tokenized_base_input_document
   split: "1,0,0"   # no validation/test split — campaign standard (see the Nano config)
   seq_length: 8192 # silent 8192 default exists, but both keys are stated so neither drifts
