@@ -1,0 +1,161 @@
+# PA green-team 32k — 500M mix, NO-THINK arm, seq 32768, on the 32k finepdfs-1B midtrained base.
+# = the think 32k config with the mix swapped to math_sci_agentic_500m_nothink (same
+# 216,668 docs, traces replaced by literal <think></think>). 32k pack: 4,050 rows /
+# 132.80M tokens, mask density 0.345. SINGLE PASS (every doc once) with checkpoints at
+# the same PROPORTIONS as the think arm (1/5, 3/5, final). Same sbatch --mem=0 rule.
+# = mathsci_aglight_sft_on_mtfinepdfs_100m.yaml with the mix extended 106.45M → 500.01M tokens:
+#   Mix: published hub config `math_sci_agentic_500m` (dataset-builder pipeline
+#   pa-warm-start-500m, config configs/pa-warm-start-500m/v1.yaml): same 4 categories,
+#   same filters/ascending-shortest-reasoning selection, deeper first-N draws from the
+#   pinned NVIDIA sources — 216,668 docs / 500,011,701 tokens: math_reasoning 188.30M
+#   (48,412 docs), science_mcq 181.30M (144,031), science_research 83.41M (11,337),
+#   agentic_interactive 47.00M (12,888, strict superset of the 100m slice). Shuffle seed 42.
+#   Budget: ONE FULL EPOCH ≈ 500M tokens; save_interval 90 gives eval checkpoints at
+#   iter 90 (~94M consumed, 19.9%) / 270 (~283M, 59.7%) / final 452 (~470M) — the same
+#   PROPORTIONS of training as the no-think arm's 25/75/126 ladder (19.8%/59.5%/100%).
+#   Base: mt_finepdfs_1b (midtrained) — the scaling ladder runs on this base only.
+#
+# Tokenizer: nemotron-think-tokenizer — all subsets keep their (short) reasoning traces.
+#
+# --- Launch ---
+#   TRAIN_REPO_DIR=/home/a5k/cwtice.a5k/geodesic-megatron \
+#   isambard_sbatch --nodes=22 pipeline_training_submit.sbatch \
+#       /projects/a5k/public/data_cwtice.a5k/configs/mathsci_500m_sft_on_mtfinepdfs.yaml super sft
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer
+
+# --- Dataset ---
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-500m
+  dataset_root: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-500m__math_sci_agentic_500m_nothink
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 8
+    num_tokenizer_workers: 1
+    # REQUIRED, not cosmetic: an explicit packed path triggers pipeline_training_run.py's
+    # pre-packed bypass (dummy dataset_dict), which keeps HFDatasetBuilder.prepare_data()
+    # from calling load_dataset() on the multi-config hub repo at training time
+    # ("Config name is missing" crash, job 5149539, 2026-06-10).
+    packed_train_data_path: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-500m__math_sci_agentic_500m_nothink/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult8/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# ONE EPOCH of the 500.01M-token pool: train_iters = floor(57,974 pack rows / GBS 128)
+# (pack verify ok; total packed 470.7M tok — ~5.9% of doc tokens beyond seq 8192 dropped
+# at pack time, same ratio as the 100m pack; mask density 0.817).
+train:
+  global_batch_size: 32
+  micro_batch_size: 1
+  train_iters: 126  # = floor(4,050 32k-pack rows / 32); single pass, every doc once
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP (overlap_param_gather OFF for Nemotron-H; moot at DP=1 but explicit) ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model parallelism (endorsed 7ws1u9y6 layout) ---
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 22
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 4
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  # MoE + shared-expert recompute is structurally required at 8192 tok/rank: the top-k=22
+  # dispatched-activation expansion cannot be offloaded or kept (OOMs without recompute).
+  # Working 32k in-tunnel memory stack (2026-07-15): NVTE_CPU_OFFLOAD_V1=0 in the launch
+  # env is MANDATORY (TE V1 offload allocates ~375GB/node host at 32k regardless of the
+  # config below); with it off, the GPU holds activations fine with the endorsed
+  # recompute set and Megatron offload disabled. Validated by mt_finepdfs_1b_32k_nooff.
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: false
+  offload_modules: []
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Distributed init ---
+# PP=22: last stage's first recv waits on 21 upstream stages' first microbatch — exceeds
+# the 10-min default first-collective watchdog.
+dist:
+  distributed_timeout_minutes: 45
+
+# --- Checkpointing (scaling ladder: saves every 90 iters; eval points 90/270/final,
+# proportion-matched to the no-think arm; the 180/360/450 intermediates are deletable
+# after eval selection) ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mt_finepdfs_1b_32k_nooff
+  load: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mathsci_500m_nothink_32k_sft_on_mtfinepdfs
+  save: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mathsci_500m_nothink_32k_sft_on_mtfinepdfs
+  save_interval: 25  # ladder 25/75/126 = 19.8%/59.5%/100%
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mathsci_500m_nothink_32k_sft_on_mtfinepdfs

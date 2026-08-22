@@ -1,0 +1,146 @@
+# PA green-team — NO-THINK twin of mathsci_aglight_sft_on_base_100m.
+# Identical mix, docs and row order to the reasoning run, with every reasoning trace
+# blanked: assistant turns render as `<think></think>` + answer (published hub config
+# `math_sci_agentic_light_nothink`, rev 03899269, dataset-builder chat_strip_reasoning
+# stage; verified 1:1 with the parent). Stripping removes 73% of tokens
+# (106.45M -> 28.52M), so ONE EPOCH here is ~28.5M tokens (~27 iters) — the "25M" run.
+# Equal-epoch comparison to the reasoning run, NOT equal-token.
+# Base: Base-Chat-Init directly — no midtraining. Same endorsed systems settings.
+#
+# --- Launch ---
+#   TRAIN_REPO_DIR=/home/a5k/cwtice.a5k/geodesic-megatron \
+#   isambard_sbatch --nodes=22 pipeline_training_submit.sbatch \
+#       /projects/a5k/public/data_cwtice.a5k/configs/mathsci_aglight_nothink_sft_on_mtfinepdfs_25m.yaml super sft
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer
+
+# --- Dataset ---
+dataset:
+  dataset_name: geodesic-research/persistent-alignment-warm-start-short-reasoning
+  dataset_root: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__persistent-alignment-warm-start-short-reasoning__math_sci_agentic_light_nothink
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    # REQUIRED, not cosmetic: an explicit packed path triggers pipeline_training_run.py's
+    # pre-packed bypass (dummy dataset_dict), which keeps HFDatasetBuilder.prepare_data()
+    # from calling load_dataset() on the multi-config hub repo at training time
+    # ("Config name is missing" crash, job 5149539, 2026-06-10).
+    packed_train_data_path: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__persistent-alignment-warm-start-short-reasoning__math_sci_agentic_light_nothink/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+# ONE EPOCH of the 28.52M-token no-think pool: train_iters = floor(packed_rows /
+# GBS 128), from the pack metadata (3,493 rows, verify ok, zero pack loss).
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 27  # = floor(3,493 pack rows / 128); 1 epoch = ~28.3M consumed tokens (mask density 0.285 — answers only)
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP (overlap_param_gather OFF for Nemotron-H; moot at DP=1 but explicit) ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model parallelism (endorsed 7ws1u9y6 layout) ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 22
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  # MoE + shared-expert recompute is structurally required at 8192 tok/rank: the top-k=22
+  # dispatched-activation expansion cannot be offloaded or kept (OOMs without recompute).
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Distributed init ---
+# PP=22: last stage's first recv waits on 21 upstream stages' first microbatch — exceeds
+# the 10-min default first-collective watchdog.
+dist:
+  distributed_timeout_minutes: 45
+
+# --- Checkpointing (final-only per policy; ~90-100 iters, minutes to rerun) ---
+checkpoint:
+  # finepdfs-1B midtrained base (mt_finepdfs_1b run output, latest=954). Contrast
+  # arm: the *_on_base_* twin loads Base-Chat-Init directly (no midtraining).
+  pretrained_checkpoint: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mt_finepdfs_1b
+  load: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mathsci_aglight_nothink_sft_on_mtfinepdfs_25m
+  save: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mathsci_aglight_nothink_sft_on_mtfinepdfs_25m
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mathsci_aglight_nothink_sft_on_mtfinepdfs_25m

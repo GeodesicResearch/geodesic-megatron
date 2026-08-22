@@ -180,7 +180,12 @@ export OMP_NUM_THREADS="${ISAMBARD_OMP_THREADS:-8}"
 if [ "$OMP_NUM_THREADS" != "1" ]; then
     export OMP_WAIT_POLICY="${ISAMBARD_OMP_WAIT_POLICY:-PASSIVE}"
 fi
-export NVTE_CPU_OFFLOAD_V1=1                              # TE fine-grained CPU activation offloading (TE >= 2.10 path)
+# TE fine-grained CPU activation offloading (TE >= 2.10 path). Respect a pre-set value:
+# NVTE_CPU_OFFLOAD_V1=0 is REQUIRED by the 32k green-team recipe (configs/PA/green-team/32k/)
+# — TE's V1 offload path allocates ~300-400 GB/node of host memory at seq 32768 on the first
+# forward, independent of Megatron's fine_grained_activation_offloading config (root-caused
+# 2026-07-15, 32k host-OOM investigation). Default remains 1.
+export NVTE_CPU_OFFLOAD_V1="${NVTE_CPU_OFFLOAD_V1:-1}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # reduces CUDA memory fragmentation
 export TORCH_CUDA_ARCH_LIST="9.0"                         # Hopper/GH200; also guards sm_90a arch-string parsing in JIT builds
 
