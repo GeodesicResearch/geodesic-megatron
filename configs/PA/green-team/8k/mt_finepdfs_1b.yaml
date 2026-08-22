@@ -1,0 +1,122 @@
+# PA green-team — finepdfs 1B midtraining (proxy for the gated nemotron-super-pretrain-8b mix).
+# = cc_replay_only_120b_super_cpt_1b.yaml (the replay-only control arm's exact recipe:
+# dyad-1 Base-CPT numerics lr 1e-6 / PAO off / warmup 10%, TP=1·EP=4·PP=22·CP=1 @ 22
+# nodes, base tokenizer) with the corpus swapped to English finepdfs:
+#   Data: the `collect_finepdfs_eng` component of the nemotron-super-pretrain-8b
+#   dataset-builder pipeline — 200,120 HuggingFaceFW/finepdfs eng_Latn docs taken
+#   exactly-as-released (first-N, no content filters), 1.200B base-tokenizer tokens,
+#   published as config `finepdfs_eng` on geodesic-research/nemotron-super-pretrain-8b-mix.
+#   Prepped to .bin/.idx via the dead-id filter (super_base_zero_ids) +
+#   preprocess_data.py --append-eod with nemotron-base-tokenizer (EOD=</s>=id 2).
+#   train_iters 954 consumes 1.0003B tokens — token-for-token identical budget to
+#   cc-mt-replay-only-1b, so downstream SFTs compare cleanly across the two bases.
+#   Proxy caveat: finepdfs stands in for the gated mix's organic-crawl slice only
+#   (no synthetic-rephrase / code components until NVIDIA gate approval).
+#
+# --- Launch (22 nodes) ---
+#   TRAIN_REPO_DIR=/home/a5k/cwtice.a5k/geodesic-megatron \
+#   isambard_sbatch --nodes=22 pipeline_training_submit.sbatch \
+#       /projects/a5k/public/data_cwtice.a5k/configs/mt_finepdfs_1b.yaml super cpt
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+dataset:
+  dataset_name: mt_finepdfs_1b
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data_cwtice.a5k/datasets/green_team_mt/finepdfs_1b/binidx/finepdfs_1b_text_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 954
+  # Disable in-training eval: the 9999,1,0 split's tiny valid set crashes
+  # prepare_finetuning_batch at eval_interval (onboarding #12, uniform_noDR incident).
+  eval_interval: 1000000
+  eval_iters: 0
+  exit_signal_handler: true
+
+# Anti-overflow stack for Base CPT (dyad-1): lr 1e-6, PAO off, FP32 optimizer states.
+optimizer:
+  lr: 1.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 22
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mt_finepdfs_1b
+  save: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mt_finepdfs_1b
+  save_interval: 250
+  save_optim: false   # weights-only saves (matches cc_replay arm; optimizer state ~1TB+/save)
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 45
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_dir: /tmp/tb_logs
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mt_finepdfs_1b

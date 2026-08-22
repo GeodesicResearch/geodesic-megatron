@@ -1,0 +1,143 @@
+# PA green-team — finepdfs 1B midtraining at 32k, ENDORSED-OPTIMIZER variant (2026-07-15).
+# = mt_finepdfs_1b_32k.yaml with GBS and the ENTIRE optimizer block matched to the endorsed
+# sft_120b_1bmix_32k_v1.yaml (GBS 64; precision-aware optimizer with bf16 Adam moments,
+# lr 5e-6) — user hypothesis: the fp32-Adam/GBS-32 deltas, not the tunnel step memory
+# grant, caused the first-forward OOMs. Token budget preserved: 477 iters x 64 x 32768
+# = 1.00047B. NOTE this departs from dyad-1 Base-CPT numerics (fp32 Adam, lr 1e-6) used
+# by the 8k mt_finepdfs_1b — the 8k/32k base pair is no longer optimizer-matched.
+# = mt_finepdfs_1b.yaml with seq_length 8192 → 32768. Same binidx token stream (GPTDataset
+# just draws 32k windows), same 1.0003B-token budget: GBS 128 → 32 keeps tokens/batch
+# identical (32 × 32768 = 128 × 8192 = 1.048M), so train_iters stays 954.
+# Topology per the endorsed 32k recipe: CP=4 (memory lever; TP1×CP4 node-local; DP=1,
+# EP4 divides DP×TP×CP=4; 32 µb ≥ PP22). Launch env MUST set
+# ISAMBARD_FP32_SSM_STATE=checkpoint — bf16 inter-chunk SSM state NaNs deterministically
+# on specific ~32K single-document sequences.
+# = cc_replay_only_120b_super_cpt_1b.yaml (the replay-only control arm's exact recipe:
+# dyad-1 Base-CPT numerics lr 1e-6 / PAO off / warmup 10%, TP=1·EP=4·PP=22·CP=1 @ 22
+# nodes, base tokenizer) with the corpus swapped to English finepdfs:
+#   Data: the `collect_finepdfs_eng` component of the nemotron-super-pretrain-8b
+#   dataset-builder pipeline — 200,120 HuggingFaceFW/finepdfs eng_Latn docs taken
+#   exactly-as-released (first-N, no content filters), 1.200B base-tokenizer tokens,
+#   published as config `finepdfs_eng` on geodesic-research/nemotron-super-pretrain-8b-mix.
+#   Prepped to .bin/.idx via the dead-id filter (super_base_zero_ids) +
+#   preprocess_data.py --append-eod with nemotron-base-tokenizer (EOD=</s>=id 2).
+#   train_iters 954 consumes 1.0003B tokens — token-for-token identical budget to
+#   cc-mt-replay-only-1b, so downstream SFTs compare cleanly across the two bases.
+#   Proxy caveat: finepdfs stands in for the gated mix's organic-crawl slice only
+#   (no synthetic-rephrase / code components until NVIDIA gate approval).
+#
+# --- Launch (22 nodes) ---
+#   TRAIN_REPO_DIR=/home/a5k/cwtice.a5k/geodesic-megatron \
+#   isambard_sbatch --nodes=22 pipeline_training_submit.sbatch \
+#       /projects/a5k/public/data_cwtice.a5k/configs/mt_finepdfs_1b.yaml super cpt
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+dataset:
+  dataset_name: mt_finepdfs_1b
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data_cwtice.a5k/datasets/green_team_mt/finepdfs_1b/binidx/finepdfs_1b_text_document
+  split: "9999,1,0"
+  seq_length: 32768
+  seed: 1234
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 477
+  # Disable in-training eval: the 9999,1,0 split's tiny valid set crashes
+  # prepare_finetuning_batch at eval_interval (onboarding #12, uniform_noDR incident).
+  eval_interval: 1000000
+  eval_iters: 0
+  exit_signal_handler: true
+
+# Anti-overflow stack for Base CPT (dyad-1): lr 1e-6, PAO off, FP32 optimizer states.
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 22
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 4
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  # Endorsed 32k memory stack (sft_120b_1bmix_32k_v1 / W&B 7ws1u9y6): selective
+  # recompute [moe, shared_experts] + all-7 offload. REQUIRES full node host memory
+  # (~450+G/node pinned at seq 32768) — submit via sbatch with --mem=0. Tunnel steps
+  # (400G/node cap) OOM-kill this at first forward, as does the d2_lightoff 2-module
+  # trim (MaxRSS 249G sampled before the kill) — 2026-07-15 tries 1/4.
+  # Do NOT swap moe recompute for core_attn (OOMs; see v5_ablation/d2_lightoff.yaml).
+  recompute_granularity: selective
+  recompute_modules: ["moe", "shared_experts"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["attn_norm", "qkv_linear", "core_attn", "attn_proj", "mlp_norm", "expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mt_finepdfs_1b_32k_endopt
+  save: /projects/a5k/public/checkpoints_cwtice.a5k/megatron/mt_finepdfs_1b_32k_endopt
+  save_interval: 125
+  save_optim: false   # weights-only saves (matches cc_replay arm; optimizer state ~1TB+/save)
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 45
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_dir: /tmp/tb_logs
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mt_finepdfs_1b_32k_endopt
