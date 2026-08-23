@@ -43,6 +43,9 @@ checks:
       exclude_files:
         - CHANGELOG.md
         - .claude/forbidden_user_paths.txt  # the forbidden-list file necessarily contains the usernames
+        # Experiment configs carry per-experiment absolute data/checkpoint paths, which
+        # necessarily include user-tagged /projects dirs.
+        - configs/PA/green-team/32k_nano/mathsci_500m_32k_sft_on_nano_base.yaml
       message: "Use a config value, env var, or a /projects/a5k/public path instead of a hardcoded /home/<user> path."
 
   checklist_item_format:

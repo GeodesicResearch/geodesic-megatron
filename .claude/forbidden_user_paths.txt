@@ -5,8 +5,9 @@
 # The repo OWNER (kyleobrien.a5k) is included on purpose: this repo must be
 # clone-and-go for any teammate, so no user-specific home path belongs in tracked
 # code. Use SLURM_SUBMIT_DIR / BASH_SOURCE / $HOME / $USER / relative paths instead.
-# Config files under configs/ are exempt by convention (per-experiment absolute
-# paths); they currently contain no usernames, so the check does not flag them.
+# Per-experiment configs under configs/ may carry user-tagged absolute /projects
+# paths; the check's exclude_files list (exact filename match, no globs) names
+# each such config explicitly in .claude/geodesic-config.yaml.
 #
 # One username per line. Lines starting with # are comments.
 edwardjamesyoung.a5k
