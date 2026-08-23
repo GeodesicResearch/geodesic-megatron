@@ -575,4 +575,7 @@ class TestSftStage:
 
     def test_large_outputs_land_on_projects(self, sft_merged):
         assert sft_merged.logger.tensorboard_dir.startswith("/projects/a5k/public/")
-        assert sft_merged.checkpoint.save.startswith("/projects/a5k/public/checkpoints/")
+        # Project storage, not $HOME — the campaign tree moved under data_cwtice.a5k
+        # (2026-08-22, see the stage-1 config's checkpoint block), so assert the
+        # storage root rather than one owner's checkpoints directory.
+        assert sft_merged.checkpoint.save.startswith("/projects/a5k/public/")

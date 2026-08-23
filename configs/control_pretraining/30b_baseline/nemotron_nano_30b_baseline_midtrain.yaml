@@ -241,12 +241,14 @@ checkpoint:
   # fresh optimizer and its own LR schedule rather than resuming stage 1's. Point this at
   # stage 1's save directory; CheckpointConfig.finalize asserts it exists, so this config
   # cannot be launched before stage 1 has written a checkpoint.
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
+  # Campaign tree rooted under data_cwtice.a5k (2026-08-22) — see the stage-1 config's
+  # checkpoint block for why.
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
   # A NEW directory, deliberately not stage 1's: load == save is what lets a segment resume,
   # and pointing either at the stage-1 directory would make this stage resume stage 1's
   # iteration counter and schedule instead of starting its own.
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
   # 2 of the campaign's 10 retained checkpoints, one every 26,239,565,824 tokens. 1564 is
   # the only interval save and 1564 x 2 = 3128 overshoots train_iters, so Megatron-Core's
   # unconditional end-of-training save at 3126 supplies the second.

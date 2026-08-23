@@ -148,9 +148,11 @@ model:
 
 checkpoint:
   # Warm start from the stage-2 final checkpoint: weights only, fresh optimizer.
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft
+  # Campaign tree rooted under data_cwtice.a5k (2026-08-22) — see the stage-1 config's
+  # checkpoint block for why.
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft
   save_interval: 1000                # interval saves for resume; the run outlives one segment
   most_recent_k: 2                   # the final checkpoint is the campaign artifact
   save_optim: true

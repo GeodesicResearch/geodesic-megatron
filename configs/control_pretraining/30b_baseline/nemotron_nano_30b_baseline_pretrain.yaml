@@ -215,8 +215,13 @@ checkpoint:
   pretrained_checkpoint: null   # from scratch: random init (recipe init_method_std 0.0173)
   # load == save is what makes a segment resume: resumption is not automatic, and a chain of
   # singleton jobs restarts from scratch if they differ.
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
+  # Rooted under data_cwtice.a5k (2026-08-22): the original tree under
+  # /projects/a5k/public/checkpoints/megatron/ is owner-writable only, its owner is
+  # unavailable, and this cluster ships no setfacl — so the campaign tree moved to a
+  # group-writable (brics.a5k, setgid) directory before the first checkpoint existed.
+  # No checkpoint was ever written to the old path.
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
   # 14 checkpoints, one every 37,983,015,424 tokens. 2264 x 13 = 29432 is the last interval
   # save and 2264 x 14 = 31696 overshoots train_iters, so Megatron-Core's unconditional
   # end-of-training save at 29881 supplies the 14th. An interval that divided 29881 exactly
