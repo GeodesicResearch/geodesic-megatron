@@ -1,0 +1,139 @@
+# PA green-team 32k Nano — 500M math/sci mix, THINK arm, seq 32768, SFT directly on the
+# Nano-30B Base checkpoint (no midtraining).
+#
+# Data: the 32k pack of configs/PA/green-team/32k/mathsci_500m_32k_sft_on_mtfinepdfs.yaml —
+#   published hub config `math_sci_agentic_500m` (dataset-builder pipeline pa-warm-start-500m):
+#   216,668 docs / 500,011,701 tokens; 32k pack = 15,319 rows / 500.99M tokens, ZERO truncation,
+#   think tokenizer, pad_seq_to_mult 8 (satisfies the >= 2xCP rule at CP=2). Shuffle seed 42.
+# Model + topology + batch: configs/quickstart/nemotron_nano_quickstart_sft.yaml —
+#   TP=1 · CP=2 · EP=4 · PP=1 · ETP=1 · DP=32 -> 64 GPUs = 16 nodes, GBS 128, full recompute,
+#   500 MB DDP buckets. That config's header carries the measurement record (76.31 ms/sample,
+#   peak 91.5 GB of 95); topology alternatives are closed there — do not re-derive them here.
+# Base: NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16 from the shared megatron_bridges/models dir —
+#   the same checkpoint + think-tokenizer + chat-template posture the quickstart certified
+#   (no chat-init graft needed on Nano, unlike Super).
+#
+# Budget: ONE FULL EPOCH — train_iters = floor(15,319 pack rows / GBS 128) = 119.
+# save_interval 40 -> exactly 3 checkpoints: iter 40 (33.6% of the epoch), 80 (67.2%),
+# and final 119 (100%).
+#
+# --- Launch ---
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/PA/green-team/32k_nano/mathsci_500m_32k_sft_on_nano_base.yaml nano sft --disable-ft
+# --disable-ft is required, not optional: at this config's 91.5 GB peak the NVRx
+# straggler reporter's first 120 s report OOMs rank GPUs (observed at iteration ~18).
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_model: geodesic-research/nemotron-think-tokenizer
+
+# --- Dataset ---
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-500m
+  dataset_root: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-500m__math_sci_agentic_500m
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 8
+    num_tokenizer_workers: 1
+    # REQUIRED, not cosmetic: an explicit packed path triggers pipeline_training_run.py's
+    # pre-packed bypass (dummy dataset_dict), which keeps HFDatasetBuilder.prepare_data()
+    # from calling load_dataset() on the multi-config hub repo at training time.
+    packed_train_data_path: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-500m__math_sci_agentic_500m/packed/geodesic-research--nemotron-think-tokenizer_pad_seq_to_mult8/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training ---
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 119  # = floor(15,319 32k-pack rows / 128): one epoch
+  exit_signal_handler: true
+
+# --- Data-parallel comms (quickstart-measured: 500 MB buckets are -10.7% s/iter) ---
+ddp:
+  bucket_size: 500000000
+
+# --- Optimizer ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.05
+
+# --- Model Parallelism (quickstart layout; rationale lives in that config's comments) ---
+model:
+  seq_length: 32768
+  pipeline_model_parallel_size: 1
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 2
+  sequence_parallel: False
+  gradient_accumulation_fusion: True
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  first_last_layers_bf16: False
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+# --- Checkpointing (3 saves: 40 / 80 / final 119; weights-only — short SFT, no mid-run
+# resume expected, and downstream consumers read only model.* keys) ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: /projects/a5k/public/checkpoints_puria.a5k/megatron/mathsci_500m_32k_sft_on_nano_base
+  save: /projects/a5k/public/checkpoints_puria.a5k/megatron/mathsci_500m_32k_sft_on_nano_base
+  save_interval: 40
+  save_optim: false
+  save_rng: false
+  # Checkpoints are weights-only (above), so a resume must not expect optimizer/RNG
+  # state — loading them from a weights-only checkpoint dies with KeyError: 'optimizer'.
+  load_optim: false
+  load_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Logging ---
+logger:
+  # Node-local TB dir: NFS TB logs cause stale-file-handle crashes and the
+  # recipe default would land in the $HOME checkout (see CLAUDE.md "TensorBoard on NFS").
+  tensorboard_dir: /tmp/tb_logs
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mathsci_500m_32k_sft_on_nano_base
