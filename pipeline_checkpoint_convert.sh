@@ -85,7 +85,10 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+# Resolve the repo from this script's own location: running a checkout's copy
+# operates on that checkout (main or a worktree), from any cwd. PIPELINE_REPO_DIR
+# overrides for running one checkout's script against another checkout's tree.
+REPO_DIR="${PIPELINE_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 cd "$REPO_DIR"
 
 # --- Execution environment: the pipeline container (see docs/environment.md) ---
@@ -95,8 +98,8 @@ cd "$REPO_DIR"
 # aborts up front with the fix command instead of failing N srun steps deep.
 if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
     echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
-    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
-    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
+    echo "  (PIPELINE_REPO_DIR=${PIPELINE_REPO_DIR:-unset} — the script resolves the repo from its" >&2
+    echo "  own path; an override must point at a checkout root.)" >&2
     exit 1
 fi
 source "$REPO_DIR/pipeline_env_config.env"

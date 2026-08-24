@@ -48,7 +48,21 @@
 MODEL_PATH="${1:?Usage: isambard_sbatch pipeline_coherence_submit.sbatch <model_path> [options]}"
 shift
 
-REPO_DIR="${GEODESIC_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+# Resolve the repo. Under sbatch this script executes from SLURM's spool copy,
+# so self-location applies only when the script is invoked in place (`bash
+# foo.sbatch` inside an allocation, where the marker file sits next to it); a
+# spooled run falls back to SLURM_SUBMIT_DIR — the directory sbatch was invoked
+# from, so submit from the checkout you mean to run. PIPELINE_REPO_DIR overrides
+# both. Inlined per sbatch file: a spooled script has nothing next to it to
+# source a shared helper from.
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -n "${PIPELINE_REPO_DIR:-}" ]; then
+    REPO_DIR="$PIPELINE_REPO_DIR"
+elif [ -f "$_script_dir/pipeline_env_config.env" ]; then
+    REPO_DIR="$_script_dir"
+else
+    REPO_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+fi
 cd "$REPO_DIR"
 
 # Peek for --backend megatron among the forwarded options (the script itself
@@ -67,8 +81,8 @@ done
 # confusing "no such file" from deep inside the payload.
 if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
     echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
-    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
-    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
+    echo "  (PIPELINE_REPO_DIR=${PIPELINE_REPO_DIR:-unset}, SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} —" >&2
+    echo "  submit from the checkout root, or export PIPELINE_REPO_DIR=/path/to/repo.)" >&2
     exit 1
 fi
 source "$REPO_DIR/pipeline_env_config.env"

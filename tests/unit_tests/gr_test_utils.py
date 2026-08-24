@@ -21,7 +21,9 @@ drift apart.
 """
 
 import copy
+import os
 import socket
+from pathlib import Path
 
 import torch
 
@@ -168,3 +170,30 @@ def build_moe_layer(builder, config, layer_number=1, seed=4321):
     torch.manual_seed(seed)
     model_parallel_cuda_manual_seed(1234)
     return builder(config=config, layer_number=layer_number, name=f"decoder.layers.{layer_number}.mlp").cuda()
+
+
+RL_TEMPLATE_ENV_ROOT_VAR = "GEODESIC_ENVIRONMENTS_ROOT"
+RL_TEMPLATE_RELPATH = Path("src/geodesic_environments/prompts/chat_templates/nemotron_native.jinja")
+_TESTS_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def discover_rl_template() -> Path | None:
+    """Locate the RL-serving chat template a render-parity test compares against.
+
+    ``$GEODESIC_ENVIRONMENTS_ROOT`` names the checkout explicitly — and then the
+    template MUST be there (a set-but-wrong root is a misconfiguration, not an
+    absence) — else the nearest sibling ``geodesic-environments`` checkout above
+    this repo is used. ``None`` means no checkout was found and the caller
+    should skip its parity check.
+    """
+    configured = os.environ.get(RL_TEMPLATE_ENV_ROOT_VAR)
+    if configured:
+        candidate = Path(configured) / RL_TEMPLATE_RELPATH
+        if not candidate.is_file():
+            raise FileNotFoundError(f"{RL_TEMPLATE_ENV_ROOT_VAR}={configured} is set but {candidate} does not exist")
+        return candidate
+    for parent in _TESTS_REPO_ROOT.parents:
+        candidate = parent / "geodesic-environments" / RL_TEMPLATE_RELPATH
+        if candidate.is_file():
+            return candidate
+    return None

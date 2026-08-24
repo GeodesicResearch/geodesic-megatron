@@ -1,13 +1,12 @@
 """Unit tests for pipeline_training_run.py's model/mode dispatch (RECIPE_MAP + CLI parsing).
 
-The script lives at the repo root and is loaded by path (the same pattern as
-test_pipeline_data_prepare.py), so these tests exercise the real dispatch table rather
-than a re-declaration of it.
+The script lives at the repo root and is loaded by path (the shared `run_module`
+conftest fixture), so these tests exercise the real dispatch table rather than a
+re-declaration of it.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -15,19 +14,9 @@ import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_RUN_PATH = _REPO_ROOT / "pipeline_training_run.py"
 
 MODELS = ("nano", "super", "ultra")
 MODES = ("sft", "cpt", "pretrain")
-
-
-@pytest.fixture(scope="module")
-def run_module():
-    spec = importlib.util.spec_from_file_location("pipeline_training_run", _RUN_PATH)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["pipeline_training_run"] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 class TestRecipeMap:
@@ -74,7 +63,7 @@ class TestMainWiring:
     construction — Super/Ultra would fetch the HF config).
     """
 
-    def _run_main(self, run_module, monkeypatch, tmp_path, mode, yaml_text):
+    def _run_main(self, run_module, monkeypatch, tmp_path, mode, yaml_text, extra_argv=()):
         config = tmp_path / "override.yaml"
         config.write_text(yaml_text)
         calls = {}
@@ -93,10 +82,26 @@ class TestMainWiring:
                 "--config-file",
                 str(config),
                 "--disable-ft",
+                *extra_argv,
             ],
         )
         run_module.main()
         return calls
+
+    def test_peft_with_gr_sft_is_refused(self, run_module, monkeypatch, tmp_path):
+        """gr.enabled + --peft must raise before any corpus is read: the optimizer
+        gating discovers full-parameter param groups, and adapter-wrapped modules
+        have no isolation argument. This raise in main() is the rule's only
+        enforcement (validate_gr_launch never sees the peft flag)."""
+        with pytest.raises(ValueError, match="gr.enabled with --peft is unsupported"):
+            self._run_main(
+                run_module,
+                monkeypatch,
+                tmp_path,
+                "sft",
+                "tokenizer:\n  tokenizer_model: geodesic-research/nemotron-base-tokenizer\ngr:\n  enabled: true\n",
+                extra_argv=("--peft", "lora"),
+            )
 
     _DATA_PATH_YAML = (
         "tokenizer:\n"

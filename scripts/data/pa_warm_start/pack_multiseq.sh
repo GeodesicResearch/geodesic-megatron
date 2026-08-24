@@ -19,9 +19,9 @@
 
 # Repo root from this script's own location (scripts/data/pa_warm_start -> repo
 # root) instead of a hardcoded user path, so a worktree packs with its own bridge
-# code. GEODESIC_REPO_DIR still wins, for the case where this script is copied
+# code. PIPELINE_REPO_DIR still wins, for the case where this script is copied
 # out of the tree to a scratch dir.
-REPO_DIR="${GEODESIC_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+REPO_DIR="${PIPELINE_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
 # Exported so pipeline_env_config.env binds THIS checkout into the container
 # rather than falling back to the dirname of the config it happens to source.
 export REPO_DIR
@@ -30,7 +30,7 @@ export REPO_DIR
 # silently-wrong output.
 if [ ! -x "$REPO_DIR/pipeline_env_exec.sh" ]; then
     echo "FATAL: $REPO_DIR/pipeline_env_exec.sh not found or not executable — REPO_DIR mis-resolved." >&2
-    echo "  Export GEODESIC_REPO_DIR=/path/to/geodesic-megatron and re-run." >&2
+    echo "  Export PIPELINE_REPO_DIR=/path/to/geodesic-megatron and re-run." >&2
     exit 1
 fi
 

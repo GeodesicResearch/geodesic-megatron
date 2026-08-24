@@ -1,0 +1,13 @@
+# Markers injected into the instruct tokenizer's own chat template.
+#
+# This reproduces the genmask instruct tokenizer an earlier bedtime pack was built with: the
+# artifact already exists on disk and was produced by hand, so reproducing it from a
+# committed recipe is what makes it reviewable. The unit tests assert that the recipe and
+# that artifact agree byte-for-byte.
+#
+# For a run whose rollouts serve the nemotron_native template with thinking off, use
+# genmask_native_thinkoff.yaml instead: this template's render omits the `<think></think>`
+# that the RL side emits on every assistant turn.
+source: geodesic-research/nemotron-instruct-tokenizer
+recipe: instruct
+output_dir: /projects/a5k/public/data_${USER}/bedtime_warmstart_sft/nemotron-instruct-genmask-tokenizer

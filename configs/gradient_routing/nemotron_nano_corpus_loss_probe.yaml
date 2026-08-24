@@ -43,7 +43,8 @@
 # SPLIT: "1,999,0" sends ~99.9% of documents to validation and keeps a token non-empty
 # train split. The train split is never read (skip_train), but its dataset is still
 # BUILT, and Megatron's index builder HANGS on an empty split rather than skipping it
-# — see the note in nemotron_nano_gr_quickstart_cpt.yaml. Both arms in a comparison
+# — see the note in the archived quickstart config (geodesic-configs
+# experiments/bedtime_stories/archive/cpt/nemotron_nano_gr_quickstart_cpt.yaml). Both arms in a comparison
 # trained on the whole corpus, so this is train-distribution loss, not held-out loss;
 # that is fine for an A/B (both arms are equally exposed) but do not quote it as
 # generalization.

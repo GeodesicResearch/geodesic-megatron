@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.util
 import logging
 import os
+import sys
 from pathlib import Path
 from shutil import rmtree
 from unittest.mock import patch
@@ -184,3 +186,20 @@ def sample_train_state_data():
 def pytest_sessionfinish(session, exitstatus):
     if exitstatus == 5:
         session.exitstatus = 0
+
+
+@pytest.fixture(scope="module")
+def run_module():
+    """``pipeline_training_run.py`` loaded by path.
+
+    The trainer entry point is a repo-root script, not a package module, so tests
+    import the real file (its module surface, imports and all) rather than
+    re-declaring any of it locally.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "pipeline_training_run", Path(__file__).resolve().parents[2] / "pipeline_training_run.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["pipeline_training_run"] = module
+    spec.loader.exec_module(module)
+    return module

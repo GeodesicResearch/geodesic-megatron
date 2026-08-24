@@ -28,7 +28,11 @@ than declared on ``GradientRoutingConfig``, so their absence is a real state —
 reported as a problem, never tolerated.
 """
 
-from megatron.bridge.training.gradient_routing.config import GRDatasetConfig
+from megatron.bridge.training.gradient_routing.aux_checkpoint import (
+    aux_only_checkpoint_problems,
+    aux_only_source_problems,
+)
+from megatron.bridge.training.gradient_routing.config import GRDatasetConfig, GRFinetuningDatasetConfig
 from megatron.bridge.training.gradient_routing.optimizer_gating import GROptimizerConfigOverrideProvider
 
 
@@ -93,12 +97,33 @@ def validate_gr_launch(cfg) -> None:
     gr = cfg.gr
     problems: list[str] = []
 
-    if not isinstance(cfg.dataset, GRDatasetConfig):
-        problems.append("cfg.dataset must be a GRDatasetConfig (built by the GR wiring in pipeline_training_run.py).")
-    elif cfg.dataset.dataloader_type != "single":
+    if isinstance(cfg.dataset, GRFinetuningDatasetConfig):
+        if cfg.dataset.dataloader_type != "batch":
+            problems.append(
+                f"dataset.dataloader_type must be 'batch' for GR sft (got {cfg.dataset.dataloader_type!r}): "
+                "iteration attribution is idx // GBS under MegatronPretrainingBatchSampler, and the sft "
+                "training loop consumes one global batch per step only on the 'batch' path."
+            )
+        # ConfigContainer's own packed-sequence check reads dataset.packed_sequence_specs,
+        # which stays unset on the GR parent (the specs live per corpus) — so its
+        # micro-batch rule is re-asserted here over the per-corpus specs.
+        corpus_specs = (cfg.dataset.retain_packed_sequence_specs, *cfg.dataset.aux_packed_sequence_specs)
+        packing = any(spec is not None and spec.packed_sequence_size > 0 for spec in corpus_specs)
+        if packing and cfg.train.micro_batch_size != 1:
+            problems.append(
+                f"train.micro_batch_size must be 1 with packed GR sft corpora (got "
+                f"{cfg.train.micro_batch_size}): each packed sample already fills the sequence."
+            )
+    elif isinstance(cfg.dataset, GRDatasetConfig):
+        if cfg.dataset.dataloader_type != "single":
+            problems.append(
+                f"dataset.dataloader_type must be 'single' (got {cfg.dataset.dataloader_type!r}): iteration "
+                "attribution is idx // GBS under MegatronPretrainingSampler only."
+            )
+    else:
         problems.append(
-            f"dataset.dataloader_type must be 'single' (got {cfg.dataset.dataloader_type!r}): iteration "
-            "attribution is idx // GBS under MegatronPretrainingSampler only."
+            "cfg.dataset must be a GRDatasetConfig (cpt/pretrain) or a GRFinetuningDatasetConfig (sft), "
+            "built by the GR wiring in pipeline_training_run.py."
         )
 
     problems.extend(
@@ -174,6 +199,12 @@ def validate_gr_launch(cfg) -> None:
                 f"plan routes {runtime_plan.n_aux} aux module(s) but gr.aux_data_paths names "
                 f"{gr.n_aux} — the plan was built from a different corpus list."
             )
+
+    # Aux-only saving is validated against the PLAN, so it is checked here rather than in
+    # GradientRoutingConfig.finalize (which never sees train_iters). Both directions matter:
+    # what this run may omit from its own saves, and what it may load from someone else's.
+    problems.extend(aux_only_checkpoint_problems(gr, cfg.checkpoint, cfg.peft, runtime_plan))
+    problems.extend(aux_only_source_problems(cfg.checkpoint))
 
     if problems:
         raise ValueError("Gradient-routing launch guards failed:\n- " + "\n- ".join(problems))

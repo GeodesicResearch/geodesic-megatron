@@ -1,7 +1,7 @@
 """Tests for pipeline_data_submit.sbatch's `tokenize` mode (JSONL -> Megatron .bin/.idx).
 
 Runs the real sbatch script as a subprocess with a stub container runner and env config
-(via GEODESIC_REPO_DIR) — the Apptainer container and SLURM are the genuinely-untestable
+(via PIPELINE_REPO_DIR) — the Apptainer container and SLURM are the genuinely-untestable
 boundary here; the payload the script would execute inside the container is captured and
 asserted on instead. Same pattern as test_pipeline_training_submit.py.
 """
@@ -33,7 +33,7 @@ def stub_env(tmp_path):
     dataset_root.mkdir()
 
     env = dict(os.environ)
-    env["GEODESIC_REPO_DIR"] = str(stub_repo)
+    env["PIPELINE_REPO_DIR"] = str(stub_repo)
     env.pop("SLURM_JOB_ID", None)
     return stub_repo, dataset_root, env
 

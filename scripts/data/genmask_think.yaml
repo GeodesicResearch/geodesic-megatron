@@ -1,0 +1,13 @@
+# DEFAULT config: `make_genmask_tokenizer.py` with no arguments builds this one. The
+# result is the published nemotron-think-tokenizer-prefill-parity template, and
+# tests/unit_tests/data/test_make_genmask_tokenizer.py asserts it byte-for-byte against
+# scripts/data/pa_warm_start/genmask_chat_template.jinja — that build's own committed output.
+#
+# The revision pin is load-bearing: the source repo's default branch carries these markers
+# already applied, so the pairs no longer match it (pair 1 matches 4 times, pairs 2-5 zero
+# times) and an unpinned build aborts on the uniqueness asserts. This sha is the last
+# unmarked revision.
+source: geodesic-research/nemotron-think-tokenizer
+revision: 6ed192b93afbd9db38314d63e7974f786bb39fd3
+recipe: think
+output_dir: /projects/a5k/public/data/pa_warm_start_2B/nemotron-think-genmask-tokenizer

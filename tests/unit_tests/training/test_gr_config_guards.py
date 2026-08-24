@@ -38,11 +38,13 @@ import dataclasses
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from megatron.bridge.training.config import GPTDatasetConfig
 from megatron.bridge.training.gradient_routing.config import (
     GradientRoutingConfig,
     GRDatasetConfig,
+    GRFinetuningDatasetConfig,
     reject_renamed_fields,
 )
 from megatron.bridge.training.gradient_routing.guards import gr_posture_problems, validate_gr_launch
@@ -306,6 +308,55 @@ class TestGradientRoutingConfigFinalize:
         plain 0 on an unconfigured section rather than raising."""
         assert GradientRoutingConfig().n_aux == 0
 
+    def test_the_dataset_root_spelling_finalizes(self):
+        """The sft corpus spelling: dataset roots instead of blend lists."""
+        cfg = _gr_config(
+            retain_data_path=None,
+            aux_data_paths=None,
+            retain_dataset_root="/data/gr_sft/core",
+            aux_dataset_roots=["/data/gr_sft/aux0"],
+        )
+        cfg.finalize()
+        assert cfg.n_aux == 1
+
+    def test_n_aux_comes_from_the_dataset_roots_when_they_are_the_spelling(self):
+        cfg = _gr_config(
+            retain_data_path=None,
+            aux_data_paths=None,
+            retain_dataset_root="/data/gr_sft/core",
+            aux_dataset_roots=["/data/gr_sft/aux0", "/data/gr_sft/aux1"],
+            aux_iter_fractions=AUX_FRACTIONS_2,
+        )
+        assert cfg.n_aux == 2
+
+    def test_both_corpus_spellings_together_are_refused(self):
+        """A run trains through exactly one data stack; carrying both spellings would leave
+        which corpus actually trained ambiguous to every reader of the config."""
+        with pytest.raises(ValueError, match="both corpus spellings are set"):
+            _gr_config(retain_dataset_root="/data/gr_sft/core", aux_dataset_roots=["/data/gr_sft/aux0"]).finalize()
+
+    @pytest.mark.parametrize(
+        "present, missing",
+        [
+            ({"retain_dataset_root": "/data/gr_sft/core"}, "aux_dataset_roots"),
+            ({"aux_dataset_roots": ["/data/gr_sft/aux0"]}, "retain_dataset_root"),
+        ],
+    )
+    def test_half_a_dataset_root_pair_names_the_missing_half(self, present, missing):
+        with pytest.raises(ValueError, match=missing):
+            _gr_config(retain_data_path=None, aux_data_paths=None, **present).finalize()
+
+    @pytest.mark.parametrize("aux_dataset_roots", [[], [""], ["/data/gr_sft/aux0", ""]])
+    def test_an_empty_dataset_root_raises(self, aux_dataset_roots):
+        with pytest.raises(ValueError, match="non-empty list of non-empty dataset roots"):
+            _gr_config(
+                retain_data_path=None,
+                aux_data_paths=None,
+                retain_dataset_root="/data/gr_sft/core",
+                aux_dataset_roots=aux_dataset_roots,
+                aux_iter_fractions=[0.5] * max(len(aux_dataset_roots), 1),
+            ).finalize()
+
     def test_build_plan_uses_the_configured_parameters(self):
         cfg = _gr_config(p_as=0.5, p_cr=0.2, aux_iter_fractions=[0.5], plan_seed=99)
         plan = cfg.build_plan(TRAIN_ITERS)
@@ -404,16 +455,23 @@ class TestGRDatasetConfig:
         assert parent.aux_data_paths == AUX_PATHS[: plan.n_aux]
 
 
-def _valid_cfg(fractions=(0.5,), widths=(AUX_FFN,), lrs=(1e-4,), min_lrs=(1e-5,)):
-    """A fully-assembled GR config that passes every launch guard."""
+def _valid_cfg(fractions=(0.5,), widths=(AUX_FFN,), lrs=(1e-4,), min_lrs=(1e-5,), p_as=0.5, **gr_overrides):
+    """A fully-assembled GR config that passes every launch guard.
+
+    ``p_as`` is threaded into BOTH the gr section and the plan so the two never disagree; it
+    is what decides whether the plan updates the core on an all-aux corpus split, which the
+    aux-only-checkpoint guard reads.
+    """
     fractions, widths, lrs, min_lrs = list(fractions), list(widths), list(lrs), list(min_lrs)
-    plan = build_gr_plan(1234, TRAIN_ITERS, fractions, 0.5, 0.2)
+    plan = build_gr_plan(1234, TRAIN_ITERS, fractions, p_as, 0.2)
     gr = _gr_config(
         aux_data_paths=AUX_PATHS[: len(fractions)],
         aux_iter_fractions=fractions,
         aux_ffn_hidden_size=widths,
         aux_lr=lrs,
         aux_min_lr=min_lrs,
+        p_as=p_as,
+        **gr_overrides,
     )
     gr.finalize()
     gr.runtime_plan = plan
@@ -444,9 +502,17 @@ def _valid_cfg(fractions=(0.5,), widths=(AUX_FFN,), lrs=(1e-4,), min_lrs=(1e-5,)
         optimizer_config_override_provider=GROptimizerConfigOverrideProvider(
             aux_lrs=lrs, aux_min_lrs=min_lrs, aux_wd_mults=[1.0] * len(fractions)
         ),
-        checkpoint=SimpleNamespace(dist_ckpt_strictness="log_all"),
+        checkpoint=SimpleNamespace(
+            dist_ckpt_strictness="log_all",
+            # Paths that do not exist on disk: the aux-only source guard reads each one's
+            # run_config, and a missing checkpoint reports "not aux-only" without a stat storm.
+            load=None,
+            pretrained_checkpoint="/data/base_ckpt",
+            save_optim=False,
+        ),
         validation=SimpleNamespace(eval_iters=0),
         inprocess_restart=None,
+        peft=None,
     )
 
 
@@ -470,7 +536,7 @@ GUARDED_FIELDS = {
     ),
     "train": ("train_iters", "rampup_batch_size", "decrease_batch_size_if_needed"),
     "optimizer": ("optimizer", "overlap_param_gather_with_optimizer_step", "optimizer_cpu_offload"),
-    "checkpoint": ("dist_ckpt_strictness",),
+    "checkpoint": ("dist_ckpt_strictness", "load", "pretrained_checkpoint"),
     "validation": ("eval_iters",),
 }
 
@@ -658,6 +724,211 @@ class TestValidateGRLaunch:
         before = copy.deepcopy(vars(cfg.model)), copy.deepcopy(vars(cfg.train))
         validate_gr_launch(cfg)
         assert (vars(cfg.model), vars(cfg.train)) == before
+
+
+def _aux_only_cfg(**overrides):
+    """The one posture ``checkpoint_aux_only`` is legal in: all-aux corpora, no aux spread."""
+    kwargs = dict(fractions=(1.0,), p_as=0.0, checkpoint_aux_only=True)
+    kwargs.update(overrides)
+    return _valid_cfg(**kwargs)
+
+
+def _write_run_config(directory, contents: dict):
+    """An iteration directory carrying nothing but a run_config.yaml."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "run_config.yaml").write_text(yaml.safe_dump(contents))
+    return str(directory)
+
+
+class TestAuxOnlyCheckpointGuards:
+    """``gr.checkpoint_aux_only`` may only be set by a run whose core never changes.
+
+    The flag drops every non-aux parameter from the save, and the core is recovered from
+    ``pretrained_checkpoint`` on load. So a run that trains the core AND saves aux-only would
+    lose that training silently: the checkpoint would look complete, load without error (GR
+    runs must tolerate missing keys), and serve the pretrained core. There is no save-time
+    signal for it either — the filter cannot tell a core weight that moved from one that did
+    not. Hence the refusal is at launch, and it is on ``update_core``, not on the corpus
+    split: at ``p_as > 0`` an all-aux corpus split still updates the core.
+    """
+
+    def test_the_aux_only_config_passes(self):
+        """Without this, every refusal below could be firing for an unrelated reason."""
+        validate_gr_launch(_aux_only_cfg())
+
+    def test_a_core_training_plan_still_passes_with_the_flag_off(self):
+        """Default-off is the backwards-compatibility contract: existing configs are untouched."""
+        cfg = _valid_cfg()
+        assert cfg.gr.checkpoint_aux_only is False
+        validate_gr_launch(cfg)
+
+    def test_core_corpus_iterations_are_refused(self):
+        """Fractions that leave room for the core corpus mean core-update iterations."""
+        cfg = _valid_cfg(fractions=(0.5,), p_as=0.0, checkpoint_aux_only=True)
+        assert cfg.gr.runtime_plan.n_core_iters > 0
+        with pytest.raises(ValueError, match="checkpoint_aux_only=true but the plan updates the core"):
+            validate_gr_launch(cfg)
+
+    def test_aux_spread_iterations_are_refused_even_with_no_core_corpus(self):
+        """The trap the corpus split alone would miss: every iteration draws an aux corpus, yet
+        a p_as share of them also steps the core."""
+        cfg = _valid_cfg(fractions=(1.0,), p_as=0.5, checkpoint_aux_only=True)
+        plan = cfg.gr.runtime_plan
+        assert plan.n_core_iters == 0 and int(plan.update_core.sum()) > 0
+        with pytest.raises(ValueError, match="aux-spread at p_as=0.5") as excinfo:
+            validate_gr_launch(cfg)
+        assert f"updates the core on {int(plan.update_core.sum())} of {plan.train_iters}" in str(excinfo.value)
+
+    def test_the_refusal_counts_both_kinds_of_core_update(self):
+        cfg = _valid_cfg(fractions=(0.5,), p_as=0.5, checkpoint_aux_only=True)
+        plan = cfg.gr.runtime_plan
+        with pytest.raises(ValueError) as excinfo:
+            validate_gr_launch(cfg)
+        spread = int(plan.update_core.sum()) - plan.n_core_iters
+        assert f"({plan.n_core_iters} core-corpus, {spread} aux-spread" in str(excinfo.value)
+
+    def test_a_missing_pretrained_checkpoint_is_refused(self):
+        """The omitted core has to come from somewhere, and that field is the record of where."""
+        cfg = _aux_only_cfg()
+        cfg.checkpoint.pretrained_checkpoint = None
+        with pytest.raises(ValueError, match="checkpoint.pretrained_checkpoint is unset"):
+            validate_gr_launch(cfg)
+
+    def test_saving_optimizer_state_is_refused(self):
+        """Optimizer state covers core parameters the checkpoint does not carry — and it is the
+        bulk of the bytes the flag exists to avoid writing."""
+        cfg = _aux_only_cfg()
+        cfg.checkpoint.save_optim = True
+        with pytest.raises(ValueError, match="requires checkpoint.save_optim: false"):
+            validate_gr_launch(cfg)
+
+    def test_combining_with_peft_is_refused(self):
+        """Two filters over the same model sections keep only their intersection: nothing."""
+        cfg = _aux_only_cfg()
+        cfg.peft = object()
+        with pytest.raises(ValueError, match="checkpoint_aux_only=true with peft configured"):
+            validate_gr_launch(cfg)
+
+    def test_every_aux_only_problem_is_reported_at_once(self):
+        cfg = _aux_only_cfg(fractions=(0.5,))
+        cfg.checkpoint.pretrained_checkpoint = None
+        cfg.checkpoint.save_optim = True
+        with pytest.raises(ValueError) as excinfo:
+            validate_gr_launch(cfg)
+        message = str(excinfo.value)
+        assert "updates the core" in message
+        assert "pretrained_checkpoint is unset" in message
+        assert "save_optim: false" in message
+
+    @pytest.mark.parametrize("field", ["load", "pretrained_checkpoint"])
+    def test_loading_from_an_aux_only_checkpoint_is_refused(self, field, tmp_path):
+        """Neither load slot may point at a partial checkpoint. GR runs must tolerate missing
+        keys, so this does not fail — it trains on a freshly-initialised core, silently."""
+        aux_only_dir = _write_run_config(tmp_path / "aux_only", {"gr": {"checkpoint_aux_only": True}})
+        cfg = _valid_cfg()
+        setattr(cfg.checkpoint, field, aux_only_dir)
+        with pytest.raises(ValueError, match="is an AUX-ONLY checkpoint") as excinfo:
+            validate_gr_launch(cfg)
+        assert f"{'checkpoint.' + field}={aux_only_dir}" in str(excinfo.value)
+
+    def test_a_full_checkpoint_is_accepted_as_a_load_source(self, tmp_path):
+        """The source guard must key on the flag, not on the presence of a gr: section — every
+        ordinary GR checkpoint carries one."""
+        cfg = _valid_cfg()
+        cfg.checkpoint.load = _write_run_config(
+            tmp_path / "full", {"gr": {"checkpoint_aux_only": False, "plan_seed": 1234}}
+        )
+        validate_gr_launch(cfg)
+
+    def test_a_checkpoint_predating_the_flag_is_accepted_as_a_load_source(self, tmp_path):
+        """An older GR checkpoint's run_config has no such key; absence means full, not unknown."""
+        cfg = _valid_cfg()
+        cfg.checkpoint.load = _write_run_config(tmp_path / "old", {"gr": {"plan_seed": 1234}})
+        validate_gr_launch(cfg)
+
+    def test_an_aux_only_run_may_not_resume_itself(self, tmp_path):
+        """The realistic route into the footgun: an aux-only run pointed at its own save dir."""
+        cfg = _aux_only_cfg()
+        cfg.checkpoint.load = _write_run_config(
+            tmp_path / "own_save" / "iter_0000200", {"gr": {"checkpoint_aux_only": True}}
+        )
+        with pytest.raises(ValueError, match="Resuming or warm-starting a Megatron run from one"):
+            validate_gr_launch(cfg)
+
+
+def _sft_dataset_config(plan, **overrides) -> GRFinetuningDatasetConfig:
+    kwargs = dict(
+        retain_dataset_root="/data/gr_sft/core",
+        aux_dataset_roots=[f"/data/gr_sft/aux{k}" for k in range(plan.n_aux)],
+        gr_plan=plan,
+        gr_global_batch_size=GBS,
+        seq_length=1024,
+        dataloader_type="batch",
+        do_validation=False,
+        do_test=False,
+    )
+    kwargs.update(overrides)
+    return GRFinetuningDatasetConfig(**kwargs)
+
+
+def _valid_sft_cfg():
+    """The valid launch config of the sft flavour: a GRFinetuningDatasetConfig dataset under
+    the batch sampler, micro_batch_size declared (the sft branch reads it for the packed rule)."""
+    cfg = _valid_cfg()
+    cfg.dataset = _sft_dataset_config(cfg.gr.runtime_plan)
+    cfg.train.micro_batch_size = 1
+    return cfg
+
+
+class TestValidateGRLaunchSft:
+    """The sft branch of the dataset guard: batch sampler required, packed micro-batch rule.
+
+    The cpt/pretrain guard demands ``dataloader_type: "single"``; on sft the SAME
+    iteration-attribution property lives on the "batch" path instead (one global batch per
+    step through MegatronPretrainingBatchSampler), so the accepted value flips with the
+    config type — and the ConfigContainer-level packed-sequence micro-batch rule, which
+    reads the parent's (deliberately unset) packed_sequence_specs, is re-asserted here
+    over the per-corpus specs.
+    """
+
+    def test_the_valid_sft_config_passes(self):
+        validate_gr_launch(_valid_sft_cfg())
+
+    @pytest.mark.parametrize("dataloader_type", ["single", "cyclic"])
+    def test_a_non_batch_dataloader_type_is_refused_for_sft(self, dataloader_type):
+        cfg = _valid_sft_cfg()
+        cfg.dataset.dataloader_type = dataloader_type
+        with pytest.raises(ValueError, match="dataloader_type must be 'batch' for GR sft"):
+            validate_gr_launch(cfg)
+
+    def test_packed_corpora_with_micro_batch_size_above_one_are_refused(self):
+        from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
+
+        cfg = _valid_sft_cfg()
+        plan = cfg.gr.runtime_plan
+        cfg.dataset = _sft_dataset_config(
+            plan,
+            retain_packed_sequence_specs=PackedSequenceSpecs(packed_sequence_size=1024),
+            aux_packed_sequence_specs=[PackedSequenceSpecs(packed_sequence_size=1024)] * plan.n_aux,
+        )
+        cfg.train.micro_batch_size = 2
+        with pytest.raises(ValueError, match="micro_batch_size must be 1 with packed GR sft corpora"):
+            validate_gr_launch(cfg)
+
+    def test_unpacked_corpora_allow_micro_batch_size_above_one(self):
+        cfg = _valid_sft_cfg()
+        cfg.train.micro_batch_size = 2
+        validate_gr_launch(cfg)
+
+    def test_the_sft_config_is_not_held_to_the_single_sampler_rule(self):
+        """The two isinstance branches must not overlap: a GRFinetuningDatasetConfig under
+        'batch' would violate the cpt rule, and one problem per root cause is the contract."""
+        validate_gr_launch(_valid_sft_cfg())
+        cfg = _valid_sft_cfg()
+        cfg.dataset.dataloader_type = "single"
+        with pytest.raises(ValueError) as excinfo:
+            validate_gr_launch(cfg)
+        assert str(excinfo.value).count("\n- ") == 1
 
 
 class TestGuardedFieldsExistOnTheRealConfigs:

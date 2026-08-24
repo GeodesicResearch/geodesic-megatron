@@ -13,8 +13,11 @@ Home for all new configs in the Persistent Alignment **warm-start reasoning** di
   2026-06-10 — masks loss to assistant turns; now byte-identical in encoder + template to
   `nemotron-think-tokenizer-prefill-parity`, so the two are interchangeable).
 - **Always-on launcher defaults** (see `pipeline_training_launch.sh`):
-  `ISAMBARD_FP32_SSM_STATE=checkpoint` (prevents long-doc bf16 SSM-state NaN, ~free),
-  `ISAMBARD_COMM_WARMUP=1` (fast startup at deep PP).
+  `ISAMBARD_FP32_SSM_STATE=checkpoint` (prevents long-doc bf16 SSM-state NaN, ~free).
+  `ISAMBARD_COMM_WARMUP` defaults to `0` (lazy first-use communicator creation);
+  `collectives` pre-creates the group communicators in one wave at setup (set it on
+  memory-tight MoE runs), and the P2P-warming `full` mode is a deep-PP steady-state
+  regression — see the launcher note and CLAUDE.md.
 
 Historical study configs (v2–v5 + ablations, formerly `../pa_warm_start_sft_120b/`) were
 removed 2026-07-30 (PR #24); recover them from git history if ever needed.

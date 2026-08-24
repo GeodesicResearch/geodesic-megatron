@@ -412,19 +412,33 @@ def patch_mamba_training_scan_save_offload() -> bool:
     return True
 
 
-def _warmup_all_communicators() -> None:
+def _warmup_all_communicators(include_p2p: bool) -> None:
     """Eagerly initialize NCCL communicators for every model-parallel group.
 
     PyTorch creates one NCCL communicator per process group on the FIRST collective
-    issued on it. At deep pipeline parallelism the first microbatch ripples serially
-    through the stages, so the per-hop communicator setup (NCCL bootstrap + CXI
-    endpoint allocation, tens of seconds each on Slingshot) is paid sequentially —
-    PP=22 exceeded the 10-minute default first-collective watchdog (observed:
-    SeqNum=1 timeout on the last stage). Running one tiny collective per group here,
-    where every rank participates simultaneously, initializes all communicators in a
-    single parallel wave instead. A batched send/recv with both pipeline neighbors
-    additionally warms NCCL's per-pair P2P transports, which are set up lazily even
-    on an initialized communicator.
+    issued on it, and communicator creation cudaMalloc's channel buffers at that
+    moment. Two distinct failure modes make lazy creation the wrong default:
+
+    - Deep pipeline parallelism: the first microbatch ripples serially through the
+      stages, so the per-hop communicator setup (NCCL bootstrap + CXI endpoint
+      allocation, tens of seconds each on Slingshot) is paid sequentially — PP=22
+      exceeded the 10-minute default first-collective watchdog (observed: SeqNum=1
+      timeout on the last stage).
+    - Memory-tight runs: groups first used late in the step allocate at PEAK
+      memory. The MoE router expert-bias update all_reduces on the tp_dp_cp group
+      at the END of the first backward; at 8K-seq 30B SFT (~745 MiB free there)
+      that cudaMalloc failed with 'out of memory' on every rank, killing runs at
+      iteration 0.
+
+    Running one tiny collective per group here, right after parallel-state setup,
+    initializes all communicators in a single parallel wave while memory is free.
+
+    ``include_p2p`` additionally warms NCCL's per-pair pipeline P2P transports
+    (set up lazily even on an initialized communicator). Leave it False unless
+    A/B-testing init behaviour: eager pairwise P2P setup was measured as a
+    catastrophic steady-state regression at deep PP (~9.6x slower at PP22·CP4 —
+    the pre-established channel configuration cripples the ~168 MB steady-state
+    activation exchanges), while the collective wave has no such failure path.
     """
     import time
 
@@ -437,25 +451,53 @@ def _warmup_all_communicators() -> None:
     t0 = time.monotonic()
     device = torch.device("cuda", torch.cuda.current_device())
 
+    # (getter name, kwargs) pairs. The with_context_parallel variants are listed
+    # explicitly because Megatron mints them as SEPARATE process groups even when
+    # CP=1 makes their membership identical — warming the plain group does not
+    # create the with-CP communicator, and the expert-bias update uses exactly
+    # get_tensor_and_data_parallel_group(with_context_parallel=True).
+    # Entries marked required=True are the groups whose lazy creation is the
+    # exact failure this warmup exists to prevent (the expert-bias tp_dp_cp
+    # all_reduce allocates at the END of the first backward, i.e. at peak
+    # memory) — failing to warm one of those must abort the run, not degrade
+    # it back to the lazy behaviour the caller opted out of.
     group_getters = (
-        "get_tensor_model_parallel_group",
-        "get_pipeline_model_parallel_group",
-        "get_context_parallel_group",
-        "get_expert_model_parallel_group",
-        "get_expert_tensor_parallel_group",
-        "get_data_parallel_group",
-        "get_model_parallel_group",
-        "get_embedding_group",
-        "get_position_embedding_group",
+        ("get_tensor_model_parallel_group", {}, False),
+        ("get_pipeline_model_parallel_group", {}, False),
+        ("get_context_parallel_group", {}, False),
+        ("get_expert_model_parallel_group", {}, False),
+        ("get_expert_tensor_parallel_group", {}, False),
+        ("get_expert_data_parallel_group", {}, False),
+        ("get_data_parallel_group", {}, False),
+        ("get_data_parallel_group", {"with_context_parallel": True}, False),
+        ("get_tensor_and_data_parallel_group", {}, False),
+        ("get_tensor_and_data_parallel_group", {"with_context_parallel": True}, True),
+        ("get_model_parallel_group", {}, False),
+        ("get_embedding_group", {}, False),
+        ("get_position_embedding_group", {}, False),
     )
     warmed = 0
-    for name in group_getters:
+    skipped: list[str] = []
+
+    def _skip(label: str, required: bool, detail: str) -> None:
+        if required:
+            raise RuntimeError(
+                f"Comm warmup could not create required group {label} ({detail}) — "
+                "the run would fall back to lazy creation at peak memory, which is "
+                "exactly what this warmup mode was set to prevent."
+            )
+        skipped.append(f"{label}: {detail}")
+
+    for name, getter_kwargs, required in group_getters:
+        label = f"{name}({', '.join(f'{k}={v}' for k, v in getter_kwargs.items())})"
         getter = getattr(ps, name, None)
         if getter is None:
+            _skip(label, required, "absent")
             continue
         try:
-            group = getter()
-        except (AssertionError, RuntimeError, TypeError):
+            group = getter(**getter_kwargs)
+        except (AssertionError, RuntimeError, TypeError) as exc:
+            _skip(label, required, type(exc).__name__)
             continue
         for g in group if isinstance(group, (list, tuple)) else [group]:
             if g is None:
@@ -464,14 +506,24 @@ def _warmup_all_communicators() -> None:
                 if dist.get_world_size(group=g) > 1:
                     dist.all_reduce(torch.ones(1, device=device), group=g)
                     warmed += 1
-            except (AssertionError, RuntimeError, TypeError):
+            except (AssertionError, RuntimeError, TypeError) as exc:
+                _skip(label, required, f"collective failed ({type(exc).__name__})")
                 continue
+    if skipped and dist.get_rank() == 0:
+        # Optional-group skips are expected for groups this parallel-state
+        # layout does not mint (version drift, absent getters) — but they must
+        # be VISIBLE: a skipped group that the step later uses will allocate
+        # its communicator lazily at first use.
+        logger.warning("Comm warmup skipped %d group getter(s): %s", len(skipped), "; ".join(skipped))
 
     pp_pairs = 0
-    try:
-        pp_group = ps.get_pipeline_model_parallel_group()
-        pp_world = dist.get_world_size(group=pp_group) if pp_group is not None else 1
-    except (AssertionError, RuntimeError):
+    if include_p2p:
+        try:
+            pp_group = ps.get_pipeline_model_parallel_group()
+            pp_world = dist.get_world_size(group=pp_group) if pp_group is not None else 1
+        except (AssertionError, RuntimeError):
+            pp_group, pp_world = None, 1
+    else:
         pp_group, pp_world = None, 1
     if pp_group is not None and pp_world > 1:
         rank_in_pp = dist.get_rank(group=pp_group)
@@ -504,13 +556,16 @@ def _warmup_all_communicators() -> None:
         )
 
 
-def patch_eager_comm_warmup() -> bool:
+def patch_eager_comm_warmup(include_p2p: bool) -> bool:
     """Run a parallel NCCL communicator warmup right after parallel-state setup.
 
     Wraps ``megatron.core.parallel_state.initialize_model_parallel`` so the warmup
     fires on every rank immediately after the model-parallel groups exist — before
     model build and the first (otherwise serially-initializing) training iteration.
-    Idempotent; returns True only on first install.
+    ``include_p2p`` selects whether pipeline P2P transports are also warmed — see
+    ``_warmup_all_communicators`` for why that must stay off outside A/B tests.
+    Idempotent; returns True only on first install (the first call's ``include_p2p``
+    wins).
     """
     from megatron.core import parallel_state as ps
 
@@ -520,7 +575,7 @@ def patch_eager_comm_warmup() -> bool:
 
     def initialize_model_parallel_with_warmup(*args, **kwargs):
         out = orig(*args, **kwargs)
-        _warmup_all_communicators()
+        _warmup_all_communicators(include_p2p=include_p2p)
         return out
 
     initialize_model_parallel_with_warmup._isambard_comm_warmup = True

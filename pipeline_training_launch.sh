@@ -24,9 +24,24 @@
 #   --disable-ft                Use plain torchrun instead of ft_launcher
 #   --enable-pao                Enable PAO (Partial Activation Offloading)
 #   --peft lora                 Enable LoRA PEFT
-#   --nodes N                   Override number of nodes (default: all in allocation)
-#   --nodelist LIST             Override nodelist (default: all in allocation)
+#   --nodelist LIST             Pin the launch to a node subset (default: all in
+#                               allocation). The node count is DERIVED from this
+#                               list, so a lone --nodelist cannot escape its subset.
+#   --nodes N                   Optional cross-check only: must equal the nodelist
+#                               length (fails loud on mismatch). To run on a subset
+#                               you must pass --nodelist; --nodes alone cannot pick
+#                               a subset (srun would grab arbitrary nodes, colliding
+#                               with concurrent launches).
 #   -- [extra args]             Extra args passed to the training script
+#
+# Environment knobs (concurrent launches on one allocation):
+#   MASTER_PORT_OVERRIDE        Rendezvous port (default: derived from job id +
+#                               nodelist, so disjoint subsets get distinct ports).
+#                               Space manual values >= 3 apart: inprocess_restart
+#                               claims MASTER_PORT+1/+2 when enabled.
+#   MASTER_ADDR_OVERRIDE        Rendezvous host (default: first node of nodelist).
+#   TRAIN_ALLOW_BUSY_NODES=1    Skip the guard that refuses to launch onto nodes
+#                               already running a trainer.
 #
 # Examples:
 #   # Nano SFT with ft_launcher (default)
@@ -118,8 +133,11 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     exit 1
 fi
 
-# Overridable (default = main checkout) so a git worktree can be trained pre-merge.
-REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
+# Resolve the repo from this script's own location: launching a checkout's copy
+# of the launcher trains that checkout (main or a worktree), from any cwd, with
+# no env setup. PIPELINE_REPO_DIR overrides for running one checkout's launcher
+# against another checkout's tree.
+REPO_DIR="${PIPELINE_REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 cd "$REPO_DIR"
 
 # ==============================================================================
@@ -134,8 +152,8 @@ cd "$REPO_DIR"
 # ==============================================================================
 if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
     echo "FATAL: $REPO_DIR/pipeline_env_config.env not found — REPO_DIR mis-resolved." >&2
-    echo "  (SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-unset} — inside a tunnel/salloc it points at the" >&2
-    echo "  tunnel's own submit dir, not this repo. Export GEODESIC_REPO_DIR=/path/to/repo.)" >&2
+    echo "  (PIPELINE_REPO_DIR=${PIPELINE_REPO_DIR:-unset} — the launcher resolves the repo from its" >&2
+    echo "  own path; an override must point at a checkout root.)" >&2
     exit 1
 fi
 source "$REPO_DIR/pipeline_env_config.env"
@@ -470,18 +488,17 @@ export MEGATRON_CONFIG_LOCK_DIR=/tmp/megatron_config_locks_${SLURM_JOB_ID}_${ENV
 # the direct (non-checkpointed) variant. Consumed by pipeline_training_run.py.
 export ISAMBARD_FP32_SSM_STATE="${ISAMBARD_FP32_SSM_STATE:-checkpoint}"
 
-# Eager NCCL communicator warmup — DEFAULT OFF (was ON; flipped 2026-06-13 after it was
-# root-caused as a CATASTROPHIC steady-state regression, NOT a pure startup win).
-# Measured at Super-120B PP22·CP4·seq32K (byte-identical config, single-group, fp32-SSM off):
-#   comm-warmup ON  -> ~277-290 s/iter (6.5 TFLOP/s/GPU)
-#   comm-warmup OFF -> ~30 s/iter      (63 TFLOP/s/GPU)   ~9.6x faster
-# The eager warmup batches a tiny (4-byte) send/recv with both PP neighbors to pre-init the
-# per-pair P2P transports; at deep PP this establishes the PP p2p channels in a configuration
-# that cripples the steady-state ~168 MB activation exchanges (the slowdown shows as inflated
-# forward/backward compute AND send/recv timers — pipeline-stall propagation). Harmless at
-# shallow PP (mqv2 PP8/seq8K is fine either way), so it slipped through. Lazy first-use init
-# costs only the first iteration (already compile-dominated at ~2200 s). Set 1 to re-enable.
-export ISAMBARD_COMM_WARMUP="${ISAMBARD_COMM_WARMUP:-0}"
+# Eager NCCL communicator warmup — ISAMBARD_COMM_WARMUP, consumed (and defaulted
+# to "0" = lazy first-use init, the upstream behaviour) by pipeline_training_run.py.
+# "collectives": pre-create every model-parallel group's communicator right after
+# parallel-state setup, while memory is free — lazy creation allocates at first
+# use, which for the MoE expert-bias tp_dp_cp all_reduce is the END of the first
+# backward (peak memory; OOM'd every 8K-seq 30B TP1/PP1 SFT run at iteration 0).
+# Set it explicitly on memory-tight MoE runs. "full"/"1" additionally warms the
+# pipeline P2P transports — measured 2026-06-13 as a CATASTROPHIC steady-state
+# regression at deep PP (Super-120B PP22·CP4·seq32K: ~277-290 s/iter vs
+# ~30 s/iter, ~9.6x; the pre-established P2P channel configuration cripples the
+# ~168 MB steady-state activation exchanges) — A/B experiments only.
 
 # ==============================================================================
 # Run identity (INFR-68)
@@ -538,12 +555,66 @@ fi
 
 # ==============================================================================
 # Distributed setup
+#
+# The node count is DERIVED from the effective nodelist, never taken on faith:
+# when --nodes exceeds the nodelist, srun silently pads the step onto nodes
+# OUTSIDE the list (man srun -w), which in a shared allocation lands ranks on
+# a co-tenant's GPUs. An explicit --nodes is therefore only a cross-check.
+#
+# MASTER_PORT defaults to a hash of (job id, nodelist): concurrent launches in
+# one allocation get distinct ports per subset, so two runs whose subsets share
+# a head node cannot join each other's c10d TCPStore (the store is keyed by
+# host:port alone). Ports are spaced 3 apart because inprocess_restart claims
+# MASTER_PORT+1/+2 when enabled. MASTER_{PORT,ADDR}_OVERRIDE take precedence.
 # ==============================================================================
-NNODES="${OVERRIDE_NODES:-$SLURM_NNODES}"
 NODELIST="${OVERRIDE_NODELIST:-$SLURM_NODELIST}"
+_NODELIST_COUNT=$(scontrol show hostnames "$NODELIST" | wc -l)
+if [ -n "${OVERRIDE_NODELIST:-}" ]; then
+    # A nodelist pins the launch: the count is derived from it, and an explicit
+    # --nodes is only a cross-check (srun would otherwise pad past the list).
+    if [ -n "${OVERRIDE_NODES:-}" ] && [ "$OVERRIDE_NODES" -ne "$_NODELIST_COUNT" ]; then
+        echo "FATAL: --nodes $OVERRIDE_NODES does not match --nodelist ($_NODELIST_COUNT nodes: $NODELIST)." >&2
+        exit 1
+    fi
+    NNODES="$_NODELIST_COUNT"
+else
+    # No nodelist: keep the pre-existing semantics (--nodes N lets srun pick any
+    # N allocation nodes), but say so — under concurrent launches an unpinned
+    # subset can land on another run's GPUs.
+    NNODES="${OVERRIDE_NODES:-$SLURM_NNODES}"
+    if [ -n "${OVERRIDE_NODES:-}" ] && [ "$OVERRIDE_NODES" -ne "$_NODELIST_COUNT" ]; then
+        echo "WARNING: --nodes $OVERRIDE_NODES without --nodelist lets srun pick ANY $OVERRIDE_NODES of the allocation's $_NODELIST_COUNT nodes — pass --nodelist to pin a subset (required when other launches share this allocation)." >&2
+    fi
+fi
 export MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$NODELIST" | head -n 1)}"
-export MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
+_PORT_SEED=$(printf '%s' "${SLURM_JOB_ID}:${NODELIST}" | cksum | cut -d' ' -f1)
+export MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + (_PORT_SEED % 300) * 3))}"
 TOTAL_GPUS=$((NNODES * 4))
+
+# ==============================================================================
+# Busy-node guard
+#
+# The launch sruns use --overlap (required for multi-launch allocations), which
+# removes SLURM's own refusal to double-book a node — so verify no other trainer
+# is already running on the target nodes before starting. The bracketed pattern
+# chars keep pgrep from matching this guard's own remote command line.
+# ==============================================================================
+if [ "${TRAIN_ALLOW_BUSY_NODES:-0}" != "1" ]; then
+    # Fail closed: a probe that cannot run is indistinguishable from a clean
+    # node set only if its failure is swallowed, so an srun failure aborts the
+    # launch rather than letting it proceed unverified.
+    if ! _BUSY=$(srun --nodes="$NNODES" --ntasks="$NNODES" --nodelist="$NODELIST" --overlap --kill-on-bad-exit=0 bash -c \
+        'c=$(pgrep -fc "torch\.distributed\.[r]un|ft_[l]auncher|pipeline_training_[r]un\.py" || true); if [ "${c:-0}" -gt 0 ]; then echo "$(hostname):$c"; fi; exit 0'); then
+        echo "FATAL: busy-node guard could not verify the target nodes (srun probe failed above)." >&2
+        echo "       Fix the probe failure, or set TRAIN_ALLOW_BUSY_NODES=1 to skip the guard." >&2
+        exit 1
+    fi
+    if [ -n "$_BUSY" ]; then
+        echo "FATAL: training processes already running on target nodes (node:count): $_BUSY" >&2
+        echo "       Another launch owns these nodes; pick a disjoint --nodelist, or set TRAIN_ALLOW_BUSY_NODES=1 to co-locate deliberately." >&2
+        exit 1
+    fi
+fi
 
 # ==============================================================================
 # Select training script
@@ -617,7 +688,9 @@ echo "================================"
 # Launch
 # ==============================================================================
 SRUN_ARGS="--nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap"
-if [ -n "$OVERRIDE_NODELIST" ]; then
+if [ -n "${OVERRIDE_NODELIST:-}" ]; then
+    # Pinning the step to the exact list (with NNODES derived from it above) is
+    # what stops srun padding onto out-of-subset nodes.
     SRUN_ARGS="$SRUN_ARGS --nodelist=$OVERRIDE_NODELIST"
 fi
 
@@ -684,7 +757,7 @@ else
     srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
         $ACTIVATE_CMD
-        export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}_$ENV_CACHE_SUFFIX
+        export TMPDIR=$TMPDIR
         mkdir -p \$TMPDIR
         python -m torch.distributed.run \
             --nproc_per_node=\$SLURM_GPUS_PER_NODE \

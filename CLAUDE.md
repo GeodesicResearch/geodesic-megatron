@@ -206,7 +206,16 @@ bash pipeline_env_setup.sh
 | `pipeline_training_submit.sbatch` | Thin SLURM wrapper: allocates nodes, calls `pipeline_training_launch.sh` |
 
 Training script (called by the launcher):
-- `pipeline_training_run.py` — Unified entry point for SFT, CPT, and from-scratch pretraining (dispatches via `--model nano|super|ultra --mode sft|cpt|pretrain`; `pretrain` uses the NVIDIA pretrain recipes + the `pretrain()` entry point, requires `dataset.data_path`, and loads no checkpoint unless the YAML sets one)
+- `pipeline_training_run.py` — Unified entry point for SFT, CPT, and from-scratch pretraining (dispatches via `--model nano|super|ultra --mode sft|cpt|pretrain`; `pretrain` uses the NVIDIA pretrain recipes + the `pretrain()` entry point, requires `dataset.data_path`, and loads no checkpoint unless the YAML sets one). Its
+  config loader supports a **single-parent `defaults:` chain**: a top-level
+  `defaults: <path>` names ONE parent YAML (relative paths resolve against the
+  config file's own directory; chains recurse; a missing parent, a cycle, or a
+  non-string ref — including the list form other repos' loaders accept — raises).
+  Parents load first, children override, so a campaign leaf carries only its
+  deltas over a shared recipe file. Only this entry point resolves the chain:
+  anything reading training YAMLs with bare `yaml.safe_load` (e.g.
+  `scripts/gradient_routing/run_gr_functional_smoke.sh`) sees the leaf alone,
+  so keys such scripts consume must live in the leaf, not a parent.
 
 ### Usage
 
@@ -233,6 +242,18 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 ```
 
 `pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--nodes N`, `--nodelist LIST`.
+
+**Subset launches (concurrent runs on one allocation):** `--nodelist` alone
+pins the launch to that subset — the node count is DERIVED from the list, so
+srun cannot pad past it onto co-tenant GPUs. `--nodes` is a cross-check only
+(must equal the list length; fails loud on mismatch) and cannot pick a subset
+by itself. The default `MASTER_PORT` mixes the nodelist into its hash so
+disjoint subsets in one job get distinct rendezvous ports
+(`MASTER_PORT_OVERRIDE`/`MASTER_ADDR_OVERRIDE` win; space manual ports >= 3
+apart for inprocess_restart's +1/+2 claims). A busy-node guard refuses to
+launch onto nodes already running a trainer and fails closed when its srun
+probe cannot run; `TRAIN_ALLOW_BUSY_NODES=1` waives it for deliberate
+co-location.
 
 `cpt` and `pretrain` both read Megatron-native `.bin/.idx` data and both **require**
 `dataset.data_path` in the config — there is no default corpus. They differ only in the
@@ -379,13 +400,19 @@ train-tunnel allocations or srun-overlap attach workflows.
 - **fp32 SSM state** (`ISAMBARD_FP32_SSM_STATE=checkpoint`): costs ~0-5% (memory-neutral,
   checkpointed) and is **mandatory for long-doc packs** — bf16 inter-chunk SSM state NaNs
   deterministically on specific ~32K single-document sequences. Unnecessary at 8K.
-- Startup at deep PP is a serialized JIT chain (~75 s/stage), not NCCL:
-  `ISAMBARD_COMM_WARMUP=1` (group inits in 2.2 s) + `TRAIN_PERSISTENT_TRITON_CACHE=1`
+- Startup at deep PP is a serialized JIT chain (~75 s/stage), not NCCL: the
+  `ISAMBARD_COMM_WARMUP=collectives` wave (group inits in 2.2 s) + `TRAIN_PERSISTENT_TRITON_CACHE=1`
   (warm nodes skip compilation). **Never benchmark concurrent runs in one allocation**
   (5-way concurrency measured ~30% per-slot slowdown from fabric/Lustre contention).
 - **Recommendation: use BF16 for Super.** FP8 causes stochastic alignment crashes in MoE routing.
-- **NEVER enable `ISAMBARD_COMM_WARMUP` at deep PP — it is a ~10× steady-state regression.**
-  Root-caused 2026-06-13 (default now OFF in `pipeline_training_launch.sh`). On Super-120B
+- **`ISAMBARD_COMM_WARMUP` modes** (read, and defaulted to `0` = lazy first-use creation, in
+  `pipeline_training_run.py`): `collectives` pre-creates every model-parallel group's NCCL
+  communicator in one parallel wave right after parallel-state setup — set it on memory-tight
+  MoE runs, where the expert-bias `tp_dp_cp` all_reduce otherwise creates its communicator at
+  the END of the first backward, i.e. at peak memory (OOM'd every 8K-seq 30B SFT arm at
+  iteration 0, 2026-08-17). It never touches P2P transports.
+- **NEVER enable the `full`/`1` (P2P) mode at deep PP — it is a ~10× steady-state regression.**
+  Root-caused 2026-06-13. On Super-120B
   PP22·CP4·seq32K, byte-identical config, single-group, the comm-warmup A/B is unambiguous:
   **comm-warmup ON → ~277-290 s/iter (6.5 TFLOP/s/GPU); OFF → ~28 s/iter (64 TFLOP/s/GPU)**
   (`5209084` vs `5210950`, both fp32-SSM off). The eager warmup batches a 4-byte send/recv with
@@ -400,13 +427,16 @@ train-tunnel allocations or srun-overlap attach workflows.
   single-group config, uniform p2p-stall, no straggler → group-specific / cross-node-p2p
   congestion, NOT a single-vs-multi-group principle (no comm-warmup-off multi-group datapoint
   yet). Parallel folding keeps EP+CP all-to-all node-local (NVLink); only PP p2p crosses nodes.
-- **Worktree submission:** export `GEODESIC_REPO_DIR=<worktree>` (or the legacy
-  `TRAIN_REPO_DIR`), or simply submit from the worktree, so the launcher finds a
-  worktree-only config. With no override `REPO_DIR` falls back to the submission directory
-  (`SLURM_SUBMIT_DIR`, then `$(pwd)`), so submitting from elsewhere misses the worktree config
-  and ft restart-loops on `Override YAML not found`. Helper to pin single-group across all 12
-  Dragonfly groups (group
-  N = `nid[10000+(N-2)*110 .. +109]`) and backfill the first to free: see
+- **Worktree submission:** the `pipeline_*` entrypoints resolve the repo from their own
+  script path, so running a worktree's copy trains that worktree from any cwd with no env
+  setup; `PIPELINE_REPO_DIR` overrides for running one checkout's script against another's
+  tree. The `.sbatch` wrappers self-locate the same way when invoked in place, but a real
+  `sbatch` submission executes SLURM's spool copy, which cannot self-locate — there they
+  fall back to `SLURM_SUBMIT_DIR`, so `sbatch` from the checkout you mean to run (a
+  mis-resolution still dies loudly — on the `pipeline_env_config.env` guard where the
+  entrypoint has one, else on the missing exec target). Helper to pin
+  single-group across all 12
+  Dragonfly groups (group N = `nid[10000+(N-2)*110 .. +109]`) and backfill the first to free: see
   `scripts/` single-group-pin pattern (`--exclude` every group but one; `--switches=1` is
   insufficient — `MaxSwitchWait`=300 s falls back to multi-group).
 
@@ -460,8 +490,10 @@ under its own 0/1 gate driven per ITERATION from a deterministic seeded plan; a
 single-forget run is the N=1 case of the same machinery. Aux-corpus iterations train
 their own module (a p_as share also updates core); core iterations train core (a p_cr
 share also activates+updates ONE module, allocated by data share). Runs in `--mode cpt`
-(warm start) and `--mode pretrain` (from scratch, the Simple Stories campaign's
-setting). At inference/export any module SUBSET can be enabled (merged into the shared
+(warm start), `--mode pretrain` (from scratch, the Simple Stories campaign's setting),
+and `--mode sft` (warm-start supervised finetuning over per-corpus finetuning dataset
+roots — gr.retain_dataset_root/aux_dataset_roots, batch sampler, corpus-pure per-root
+packing, per-corpus supervised-token telemetry; no PEFT). At inference/export any module SUBSET can be enabled (merged into the shared
 expert — mathematically exact for Nano's non-gated squared-relu, coefficient-1.0 shared
 expert, and additive per module) or dropped (all-off = byte-stock NemotronH);
 Megatron-side profile probing pins `model.gr_static_gates` instead. Implementation:
@@ -477,9 +509,13 @@ Key design facts (the why lives in the module docstrings):
   param-group EMPTYING before `optimizer.step()` (lr=0 and grad-zeroing both contaminate
   Adam moments; an emptied group is never visited). Router `expert_bias` updates outside
   the optimizer → per-iteration `frozen_expert_bias` toggle.
-- **`dataloader_type: "single"` is mandatory** (guard-enforced): iteration = `idx // GBS`
-  exactly under `MegatronPretrainingSampler`; the routed dataset maps each iteration to a
-  contiguous window of one corpus (children keep their own seeded shuffles).
+- **One global batch per step is mandatory** (guard-enforced): iteration = `idx // GBS`
+  exactly — `dataloader_type: "single"` (`MegatronPretrainingSampler`) on cpt/pretrain,
+  `"batch"` (`MegatronPretrainingBatchSampler`) on sft, where the routed dataset also
+  delegates collation to its (identically-configured) SFT children and each corpus's
+  length is pinned to exactly the plan's consumption (the batch sampler wraps silently
+  instead of asserting); the routed dataset maps each iteration to a contiguous window
+  of one corpus (children keep their own seeded shuffles).
 - **Aux executes every microbatch** (gate·out): Megatron DDP buckets need every param to
   produce a grad each µb; gate=0 yields exact-zero grads and a bitwise-core forward.
 - Each module's LR is its own param group via mcore `config_overrides` (`gr.aux_lr`,
@@ -494,20 +530,41 @@ Key design facts (the why lives in the module docstrings):
   digest differs from the one the checkpoint was trained under, and refuses pre-multi-
   module-schema checkpoints outright (all completed their plans; warm-start from them
   instead).
-- Mainline config: `configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml` (seq 8192,
-  GBS 1024, 120 iters = 503,316,480 tokens/corpus exact; wmdp-corpora bio-retain
-  CORPUS (training text, not the WMDP benchmark) + misalignment-scenario forget, both
-  base-tokenizer `.bin`s — that corpus dir's ORIGINAL Jan-era `.bin` is NeoX-tokenized
-  and unusable; use `tokenized_base_text_document`).
+- **`gr.checkpoint_aux_only: true`** narrows each save to the `gr_aux` parameters through
+  the same model-section key filter PEFT uses for adapter-only checkpoints (15.09 MiB vs
+  58.84 GiB / 33.2 s measured on the two-module w32 nano arm, job 5794089). Legal only when the plan never
+  updates the core, which needs `aux_iter_fractions` summing to 1 **and `p_as: 0.0`** —
+  at `p_as > 0` an all-aux corpus split still steps the core on its aux-spread iterations,
+  and the guard refuses. The result is a PARTIAL checkpoint: export it with
+  `pipeline_checkpoint_convert_hf.py --base-megatron-path <its pretrained_checkpoint>`
+  (single-process only), and note that resuming or warm-starting a Megatron run from one
+  is refused rather than supported. See docs/gradient-routing.md §6.1.
+- Campaign configs live in geodesic-configs (`experiments/bedtime_stories/sft/` for the
+  current SFT warm-start wave; the CPT-era set — including the former mainline
+  `nemotron_nano_gr_quickstart_cpt.yaml` (seq 8192, GBS 1024, 120 iters = 503,316,480
+  tokens/corpus exact; wmdp-corpora bio-retain CORPUS + misalignment-scenario forget) —
+  is archived, non-launchable, at `experiments/bedtime_stories/archive/cpt/`).
+  `configs/gradient_routing/` here keeps only the generic GR tooling configs (loss
+  probes, Simple Stories probe study, smoke fixtures) — see docs/gradient-routing.md §7.
 - Functional smoke: `isambard_sbatch scripts/gradient_routing/gr_smoke_submit.sbatch`
   (or `bash scripts/gradient_routing/run_gr_functional_smoke.sh [node]` from inside an
   allocation; tiny 6-layer hybrid: 5-iter seed pretrain → 20-iter GR-CPT warm start →
   aux-trained post-checks). Export postures: `scripts/gradient_routing/bake_postures.py` (+
   `verify_posture_equivalence.py`); raw export MUST be the single-process
   `from_auto_config` path (the multi-GPU path silently drops non-stock keys).
+- **TP>1 GR checkpoints saved before the GRAMAuxModuleList sharding fix are
+  unrecoverable.** Their dist-checkpoint metadata declares each rank's local
+  `gr_aux` shard as the full replicated tensor, so dist-ckpt deduplicated one
+  rank's half off disk at save time — the data was never written, save-time
+  validation accepts the metadata (a replicated entry trivially covers the
+  global shape it understates), and any load at a different TP degree fails
+  with a global-shape mismatch. Retrain such checkpoints; do not attempt
+  repair. `tests/unit_tests/models/mamba/test_gram_sharded_state_dict.py`
+  pins the fixed sharding.
 - **Does routing cost retain-side learning? Measured: essentially no.** Three arms, all
   warm-started from Base at seq 8192 / GBS 1024, all scored on identical batches:
-  `nemotron_nano_control_blended_cpt.yaml` (no GR, 50/50 blend, 120 iters),
+  the blended-CPT control (`archive/cpt/nemotron_nano_control_blended_cpt.yaml` in
+  geodesic-configs; no GR, 50/50 blend, 120 iters),
   the GR quickstart, and a **data-filtering** arm (retain only, 60 iters — the ceiling
   routing tries to approximate), which is a four-value OVERRIDE of the control config
   rather than a config of its own; its launch line is in that config's header. All three

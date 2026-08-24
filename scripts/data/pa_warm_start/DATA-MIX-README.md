@@ -160,7 +160,9 @@ For the full mix, blend the 8 configs (e.g. by packed-row counts).
 - `collect_split.py` — first-N-by-token-target collection → canonical parquet + stats
 - `push_mix.py` — push configs to HF (schema-consistency check + verify)
 - `clean_nemotron.py` — robust JSONL reader (NULs / control chars / embedded newlines)
-- `make_genmask_tokenizer.py` — inject `{% generation %}` markers into the think template
+- `scripts/data/make_genmask_tokenizer.py` — inject `{% generation %}` markers into the think template
+  (moved out of this directory and generalised over three template families; **no arguments** still
+  performs this exact build, from `scripts/data/genmask_think.yaml`)
 - `pack_parallel.py` — shard-parallel packing + concatenate
 - `pack_all.sh`, `pack_multiseq.sh`, `pack_seq65536.sh` — pack orchestration
 - packed-token stats: `/projects/a5k/public/data/pa_warm_start_2B/packed_tokens.json`

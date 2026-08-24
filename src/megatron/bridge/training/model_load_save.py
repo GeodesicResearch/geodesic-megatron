@@ -251,6 +251,7 @@ def build_and_load_model(
     return_state_dict: bool = False,
     use_cpu_init: bool = False,
     skip_temp_dist_context: Optional[bool] = None,
+    base_checkpoint_path: Optional[str] = None,
 ) -> Union[Any, dict[str, torch.Tensor]]:
     """Load a Megatron model from a distributed checkpoint.
 
@@ -272,10 +273,19 @@ def build_and_load_model(
         skip_temp_dist_context: If True, skip temporary distributed context setup.
                                If None, automatically skip if distributed is already initialized.
                                Default: None.
+        base_checkpoint_path: Checkpoint supplying the parameters ``checkpoint_path`` omits, for
+            reading a PARTIAL checkpoint (a PEFT adapter-only or GR aux-only save). Loaded first,
+            then ``checkpoint_path`` is applied on top. The model is still built from
+            ``model_cfg`` — which must be the partial checkpoint's own config, since only that
+            one declares the extra modules. Default None (``checkpoint_path`` is complete).
 
     Returns:
         The model instance with loaded weights if return_state_dict is False,
         otherwise returns a dictionary containing the full, unsharded model state_dict.
+
+    Raises:
+        ValueError: If ``base_checkpoint_path`` is combined with ``return_state_dict``, which
+            composes in the model and so has no single state dict to hand back.
     """
     from megatron.bridge.training.checkpointing import (
         _load_model_weights_from_checkpoint,
@@ -283,6 +293,13 @@ def build_and_load_model(
     from megatron.bridge.training.mlm_compat.arguments import _tokenizer_config_from_args
     from megatron.bridge.training.mlm_compat.model import _get_model, _gpt_provider, _mamba_provider
     from megatron.bridge.training.post_training.checkpointing import has_modelopt_state
+
+    if base_checkpoint_path is not None and return_state_dict:
+        raise ValueError(
+            "base_checkpoint_path composes two checkpoints INTO the model, so there is no composed "
+            "state dict to return; call with return_state_dict=False and read the model's own "
+            "state_dict afterwards."
+        )
 
     if has_modelopt_state(checkpoint_path):
         if hasattr(model_cfg, "restore_modelopt_state"):
@@ -351,9 +368,20 @@ def build_and_load_model(
 
             load_modelopt_state(model, checkpoint_path)
 
-        maybe_state_dict = _load_model_weights_from_checkpoint(
-            checkpoint_path, model, return_state_dict=return_state_dict
-        )
+        if base_checkpoint_path is None:
+            maybe_state_dict = _load_model_weights_from_checkpoint(
+                checkpoint_path, model, return_state_dict=return_state_dict
+            )
+        else:
+            # Partial-checkpoint composition, base first. Each stage writes only the keys it
+            # actually supplies — mcore drops the requested keys its checkpoint lacks, and the
+            # module load is non-strict — so the overlay's parameters land on top of a complete
+            # base instead of on fresh init. Mismatch tolerance is needed in both directions:
+            # the base has no overlay keys, the overlay has none of the base's.
+            logger.info(f"Composing checkpoints: base {base_checkpoint_path}, then {checkpoint_path}")
+            for stage_path in (base_checkpoint_path, checkpoint_path):
+                _load_model_weights_from_checkpoint(stage_path, model, dist_ckpt_strictness="log_all", strict=False)
+            maybe_state_dict = None
 
         if return_state_dict:
             del model
@@ -377,6 +405,7 @@ def load_megatron_model(
     use_cpu_init: bool = False,
     skip_temp_dist_context: Optional[bool] = None,
     mp_overrides: Optional[ModelParallelKwargs] = None,
+    base_checkpoint_path: Optional[str] = None,
 ) -> Union[Any, dict[str, torch.Tensor]]:
     """Load a Megatron model from a distributed checkpoint.
 
@@ -395,6 +424,11 @@ def load_megatron_model(
                                Default: None.
         mp_overrides: Optional model-parallel overrides to apply to the loaded config.
                       Only provided fields are overridden.
+        base_checkpoint_path: Checkpoint supplying the parameters ``checkpoint_path`` omits, for
+            reading a PARTIAL checkpoint (a PEFT adapter-only or GR aux-only save). The model is
+            built from ``checkpoint_path``'s config — the only one that declares the extra
+            modules — then the base weights load first and the partial checkpoint on top.
+            Default None (``checkpoint_path`` is complete).
 
     Returns:
         The model instance with loaded weights if return_state_dict is False,
@@ -435,7 +469,14 @@ def load_megatron_model(
             model_cfg.moe_token_dispatcher_type = "allgather"
 
     return build_and_load_model(
-        checkpoint_path, model_cfg, model_type, mlm_args, return_state_dict, use_cpu_init, skip_temp_dist_context
+        checkpoint_path,
+        model_cfg,
+        model_type,
+        mlm_args,
+        return_state_dict,
+        use_cpu_init,
+        skip_temp_dist_context,
+        base_checkpoint_path,
     )
 
 

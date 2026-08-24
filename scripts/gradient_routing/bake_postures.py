@@ -34,12 +34,15 @@ Usage (CPU only; run inside the container because safetensors/torch live there):
 
     ./pipeline_env_exec.sh "cd <repo>; source pipeline_env_activate.sh || exit 1; \\
         python scripts/gradient_routing/bake_postures.py \\
-            --config configs/gradient_routing/bake_postures.yaml"
+            --config <geodesic-configs>/experiments/bedtime_stories/sft/bake_postures.yaml"
 
 The config YAML is the only argument. Fields:
 
-    source_dir           raw HF export dir carrying the gr_aux keys (required)
-    output_root          dir under which one subdir per posture is written (required)
+    source_dir           raw HF export dir carrying the gr_aux keys (required;
+                         env vars are expanded, so one config can serve several
+                         checkpoints via e.g. ${BEDTIME_SFT_ARM})
+    output_root          dir under which one subdir per posture is written
+                         (required; env vars expanded as for source_dir)
     postures             posture name -> the aux module indices that posture enables,
                          e.g. `forget_off: []` and `forget_on: [0]` for a one-module
                          checkpoint (required). Each name becomes a subdir of
@@ -280,8 +283,8 @@ def load_bake_config(path: Path) -> dict[str, Any]:
     ):
         raise BakeError(f"{path}: config_overrides must be a mapping of scalar values, got {config_overrides!r}.")
     return {
-        "source_dir": Path(raw["source_dir"]),
-        "output_root": Path(raw["output_root"]),
+        "source_dir": Path(os.path.expandvars(raw["source_dir"])),
+        "output_root": Path(os.path.expandvars(raw["output_root"])),
         "postures": parse_postures(path, raw["postures"]),
         "strip_chat_template": raw["strip_chat_template"],
         "expected_layers": expected_layers,

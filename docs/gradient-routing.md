@@ -8,8 +8,10 @@ this file is the detail behind it.
 
 Method source: GRAM — "Modular Pretraining Enables Access Control"
 (arXiv 2607.08077). This is a port of that paper's method, built for Nemotron-3
-Nano-30B-A3B on Megatron Bridge; it runs both as warm-start continued pretraining
-(`--mode cpt`) and from scratch (`--mode pretrain`).
+Nano-30B-A3B on Megatron Bridge; it runs as warm-start continued pretraining
+(`--mode cpt`), from scratch (`--mode pretrain`), and as supervised finetuning
+(`--mode sft` — per-corpus finetuning dataset roots under the batch sampler,
+§3.3.1).
 
 ## 1. What gradient routing does
 
@@ -153,6 +155,50 @@ exactly as stock Megatron pretraining).
 blends behind the single `cfg.dataset` object every consumer expects, and
 clones itself into plain per-corpus `GPTDatasetConfig`s for the builder.
 
+#### 3.3.1 The sft flavour
+
+`--mode sft` reuses the same `GRRoutedDataset` with SFT children. The corpora
+are **finetuning dataset roots** (`gr.retain_dataset_root` /
+`gr.aux_dataset_roots`, each a directory carrying its own `training.jsonl`)
+instead of `.bin/.idx` blends, carried by `GRFinetuningDatasetConfig` and built
+per corpus through `FinetuningDatasetBuilder`
+(`data/utils.py:_build_gr_finetuning_datasets`). What changes, and what does
+not:
+
+- **Iteration attribution survives the sampler switch.** SFT runs under
+  `dataloader_type: "batch"`: `MegatronPretrainingBatchSampler` accumulates
+  exactly the window `[k*GBS, (k+1)*GBS)` before splitting it across DP ranks,
+  and the SFT loop consumes one such global batch per optimizer step — so
+  `iteration = idx // GBS` holds unchanged (pinned against the real sampler in
+  `tests/unit_tests/data/test_gr_finetuning_dataset.py`).
+- **Exact per-corpus sizing replaces the single sampler's hard assert.** The
+  batch sampler wraps silently modulo its total (no
+  `consumed_samples < total_samples` assert), after which every routing label
+  would be wrong with nothing in the logs. Each corpus is therefore built with
+  `max_train_samples = plan.n_samples(corpus)` — the SFT sample mapping
+  epoch-wraps an undersized corpus deterministically and truncates an oversized
+  one — and the provider refuses any child whose realised length disagrees.
+- **Collation is delegated.** SFT batches need the dataset's own `collate_fn`
+  (padding, loss masks, packed `cu_seqlens`); `GRRoutedDataset` exposes the
+  core child's collate after asserting every child would collate identically
+  (same class, same padding/packing/eos parameters), and stays collate-less on
+  the cpt/pretrain path.
+- **Packing is corpus-pure by construction.** Packing runs per `dataset_root`
+  (rank 0, offline) into `<root>/packed/`, so no pack ever mixes documents
+  from two corpora; the YAML's shared `dataset.packed_sequence_specs` is cloned
+  per corpus, and explicit `packed_*_path` values are refused (one pack file
+  cannot serve N+1 corpora).
+- **Token-share telemetry.** `gr.aux_iter_fractions` allocates ITERATIONS;
+  under `answer_only_loss` the supervised-token shares diverge from that. Every
+  launch logs each corpus's supervised-token total next to its iteration share
+  (`> gr corpus ...` lines, rank 0) so the divergence is measured, not assumed.
+- Determinism note: set `dataset_kwargs.pad_to_max_length: true` (the exemplar
+  does) so per-iteration sequence length does not vary with — and thereby
+  leak — the routing label.
+- PEFT is refused with `gr.enabled`: the optimizer gating discovers
+  full-parameter param groups, and its isolation argument has not been made for
+  adapter-wrapped modules.
+
 ### 3.4 The callback
 
 `GRCallback` (`training/gradient_routing/callback.py`) is the per-iteration
@@ -219,7 +265,7 @@ per posture the config declares (a name plus the module indices it enables;
   trained aux perturbs the hidden states: the positive campaign's pair measured
   zero flips, the negative campaign's 8 of 82 positions — with every
   above-threshold KL confined to flipped positions and flip-free positions at
-  the fp32 noise floor (calibration details in `configs/gradient_routing/verify_postures.yaml`).
+  the fp32 noise floor (calibration details in `<geodesic-configs>/experiments/bedtime_stories/archive/cpt/verify_postures.yaml`).
 
 The bake also fixes two eval-compat traps at source (§8), writes a
 `forget_posture.json` provenance sidecar (expected values, file hashes,
@@ -241,10 +287,14 @@ persist to `posture_verification.json`.
 | `src/megatron/bridge/training/gradient_routing/optimizer_gating.py` | `GROptimizerGater`, `GROptimizerConfigOverrideProvider` (one param group per aux module, `gr_role: aux<k>`) |
 | `src/megatron/bridge/training/gradient_routing/callback.py` | `GRCallback`: gate + expert-bias + gater arming + telemetry |
 | `src/megatron/bridge/training/gradient_routing/guards.py` | `validate_gr_launch` (§7 refusal list) + `gr_posture_problems`, the model/optimizer posture rules shared with geodesic-nemo-rl's GR learner |
+| `src/megatron/bridge/training/gradient_routing/aux_checkpoint.py` | aux-only checkpoints (§6.1): the `gr_aux` key filter, the flag's read-back from a checkpoint's `run_config.yaml`, the composed-load verification, and the aux-only preconditions the guards enforce |
+| `src/megatron/bridge/training/checkpointing.py` | `filter_state_dict_model_sections` — the shared partial-checkpoint mechanism PEFT and GR aux-only both plug a predicate into |
+| `src/megatron/bridge/training/model_load_save.py` | `base_checkpoint_path` on `load_megatron_model` / `build_and_load_model`: reads a partial checkpoint by loading its base first |
 | `src/megatron/bridge/data/datasets/gr_routed_dataset.py` | iteration-mapped N+1-corpus dataset |
 | `src/megatron/bridge/models/mamba/mamba_provider.py` | `gr_aux_ffn_hidden_size` provider field; applies the spec swap as a **local** transform (never mutates the module-level `mamba_stack_spec`) |
 | `src/megatron/bridge/models/nemotron_h_bridge.py` | HF↔Megatron mappings for the `gr_aux` keys (raw export carries them) |
 | `pipeline_training_run.py` | GR wiring (cpt + pretrain modes): builds plan/dataset/gater/callback from `gr:`, installs the override provider, runs the guards |
+| `pipeline_checkpoint_convert_hf.py` | raw HF export; `--base-megatron-path` composes an aux-only checkpoint with its core (§6.1) |
 | `scripts/gradient_routing/bake_postures.py` | posture export (merge / drop) + provenance |
 | `scripts/gradient_routing/verify_posture_equivalence.py` | posture verification gate |
 | `scripts/gradient_routing/gr_smoke_submit.sbatch` | SLURM wrapper for the functional smoke |
@@ -255,7 +305,7 @@ persist to `posture_verification.json`.
 | `scripts/gradient_routing/run_corpus_loss_probes.sh` | runs the eval-only loss-probe matrix (§8.2); one probe per (name, checkpoint, corpus, extra overrides) row |
 | `scripts/gradient_routing/summarize_loss_probes.py` | turns a probe `results.tsv` into `retention_ratio` / `removal_fraction` (§8.2) |
 | `scripts/data/build_mmlu_pro_cot_corpus.py` | renders MMLU-Pro items in lm-eval's format for the train-on-test diagnostic corpora; `rendering` and `answer_source` are both REQUIRED config choices, and it writes a `.provenance.json` sidecar naming both |
-| `configs/gradient_routing/` | GR training configs, bake/verify posture configs, corpus-builder configs |
+| `configs/gradient_routing/` | probe/smoke tooling configs (loss-probe matrix, corpus probe); campaign training + bake/verify configs live in geodesic-configs `experiments/bedtime_stories/` |
 
 **Inertness contract**: with no `gr:` section (or `enabled: false`) every diff
 is inert — the provider field defaults to `None` (no spec swap), the dataset
@@ -279,8 +329,10 @@ are refused with the rename instruction rather than aliased.
 | field | default | meaning |
 |---|---|---|
 | `enabled` | `false` | Master switch; absent section == disabled. |
-| `retain_data_path` | REQUIRED | Blend list (weight, `.bin/.idx` prefix, …) for the core corpus. |
-| `aux_data_paths` | REQUIRED | One blend list per routed corpus; entry k trains aux module k. |
+| `retain_data_path` | one spelling REQUIRED | Blend list (weight, `.bin/.idx` prefix, …) for the core corpus — cpt/pretrain. |
+| `aux_data_paths` | with the above | One blend list per routed corpus; entry k trains aux module k. |
+| `retain_dataset_root` | one spelling REQUIRED | Finetuning dataset root (dir with `training.jsonl`) for the core corpus — sft. |
+| `aux_dataset_roots` | with the above | One dataset root per routed corpus. Exactly one corpus spelling per config. |
 | `aux_iter_fractions` | REQUIRED | Per-module share of iterations (explicit list, sum ≤ 1). |
 | `aux_ffn_hidden_size` | REQUIRED | Aux MLP width(s); must match `model.gr_aux_ffn_hidden_size`. |
 | `p_as` | `0.5` | Share of each aux corpus's iterations that also update core (§5 paper setting; the paper's Simple Stories setting is 0.3). |
@@ -289,42 +341,65 @@ are refused with the rename instruction rather than aliased.
 | `aux_lr` / `aux_min_lr` | REQUIRED | Aux param-group LR schedule(s) (fresh zero-init module ≠ warm core). |
 | `aux_wd_mult` | `1.0` | Weight-decay multiplier(s) for the aux groups. |
 | `log_interval` | `1` | Iterations between heavier telemetry probes. |
+| `checkpoint_aux_only` | `false` | Save only the aux parameters (§6.1). Legal only for a plan that never updates the core. |
 
 Two fields the wiring sets for you, so a GR config does NOT declare them:
 `model.gr_aux_ffn_hidden_size` (normalized from `gr.aux_ffn_hidden_size`; a
 conflicting YAML value is refused — set the widths once, in `gr:`) and
-`dataset.dataloader_type: "single"` (hardcoded, since iteration attribution
-depends on it). The one thing the run config must still get right is
-`checkpoint.dist_ckpt_strictness` tolerating missing keys (e.g. `log_all`) —
-a warm-start base checkpoint has no `gr_aux` tensors.
+`dataset.dataloader_type` (hardcoded per mode — `"single"` on cpt/pretrain,
+`"batch"` on sft — since iteration attribution depends on it). The one thing
+the run config must still get right is `checkpoint.dist_ckpt_strictness`
+tolerating missing keys (e.g. `log_all`) — a warm-start base checkpoint has no
+`gr_aux` tensors.
 
-GR runs in `--mode cpt` (warm start) and `--mode pretrain` (from scratch —
-random init via the NVIDIA pretrain recipe; the Simple Stories campaign's
-setting). In pretrain mode `aux_lr` ≈ the core LR is the natural prior: both
-core and aux are fresh, so the warm-start configs' 10×-core aux LR does not
-transfer.
+GR runs in `--mode cpt` (warm start), `--mode pretrain` (from scratch — random
+init via the NVIDIA pretrain recipe; the Simple Stories campaign's setting),
+and `--mode sft` (warm-start supervised finetuning over per-corpus dataset
+roots, §3.3.1; the `gr:` section then uses the
+`retain_dataset_root`/`aux_dataset_roots` spelling — exactly one corpus
+spelling per config, matched against the mode at launch). In pretrain mode
+`aux_lr` ≈ the core LR is the natural prior: both core and aux are fresh, so
+the warm-start configs' 10×-core aux LR does not transfer.
 
-`configs/gradient_routing/` ships **one canonical config of each kind**, not a
-config per campaign. Everything a past campaign varied — which checkpoint to
-bake, which corpus to route, which categories to render — is a field in these,
-so a new run edits values rather than forking a file:
+`configs/gradient_routing/` holds the probe and smoke tooling configs — one
+canonical config of each kind, not a config per campaign. Everything a probe
+varies — which checkpoint, which corpus, which extra overrides — is a field in
+these, so a new run edits values rather than forking a file:
 
 | config | what it is |
 |---|---|
-| `nemotron_nano_gr_quickstart_cpt.yaml` | **the canonical GR quickstart.** Warm-start GR-CPT of Nano-30B: forget = scenario discourse (aligned-resolution split), retain = the wmdp-corpora bio-retain *corpus* (training text, not the WMDP benchmark). Its header carries the exact token math. |
-| `nemotron_nano_control_blended_cpt.yaml` | **the no-routing control.** Same two corpora, same token budget, blended 50/50 by ordinary CPT — the arm "did routing cost anything?" is measured against. The **data-filtering** arm is a four-value override of this file, not a config of its own; the launch line is in its header. |
 | `nemotron_nano_corpus_loss_probe.yaml` | **eval-only corpus loss probe** (§8.2). Scores one checkpoint on one `.bin/.idx` corpus and exits; checkpoint and corpus are the two overrides. A GRAM checkpoint's capability PROFILES are probed by adding `model.gr_aux_ffn_hidden_size=[…]` + `model.gr_static_gates=[…]` overrides. |
 | `loss_probe_matrix.tsv` | the (name, checkpoint, corpus[, extra overrides]) rows `run_corpus_loss_probes.sh` iterates |
-| `nemotron_nano_gr_stories_pretrain.yaml` | **the from-scratch routed config** (Simple Stories, GEOD-171j): N=4 modules, `--mode pretrain`, seq 1024 / GBS 256 — the header carries the iteration-count rationale and token math. |
-| `nemotron_nano_stories_baseline_pretrain.yaml` | the Simple Stories all-data baseline; its intermediates are the compute-ratio learning curve, and the five data-filtering arms are overrides documented in its header. |
-| `simple_stories_corpora.yaml` + `stories_probe_matrix.yaml` | the campaign's data-partition and probe-matrix definitions (`scripts/data/partition_dataset_by_label.py`, `scripts/gradient_routing/build_probe_matrix.py`). |
-| `bake_postures.yaml` | export named module-subset PROFILES from one raw HF export (§4): a `postures:` map of name → enabled module indices (`forget_off: []` / `forget_on: [0]` are the conventional N=1 profiles) |
-| `verify_postures.yaml` | posture-equivalence gate for that export (§4) |
-| `mmlu_pro_retain_corpus.yaml` | renders an MMLU-Pro slice as a training corpus, for the train-on-test diagnostic below |
+| `simple_stories_corpora.yaml` + `stories_probe_matrix.yaml` | the Simple Stories (GEOD-171j) data-partition and probe-matrix definitions (`scripts/data/partition_dataset_by_label.py`, `scripts/gradient_routing/build_probe_matrix.py`). |
 | `smoke/` | the tiny-model fixtures the functional smoke drives (§9) |
 
-Each entry is a distinct **kind** of run — routed, unrouted, eval-only, bake,
-verify, corpus-build — not a campaign. To run a variant, point the relevant
+The **bedtime-stories campaign configs live in the geodesic-configs repo**,
+beside that campaign's RL and eval configs (`experiments/bedtime_stories/`):
+
+- `experiments/bedtime_stories/sft/` — the current SFT warm-start wave:
+  `gr_warm_start.yaml` (the routed sft config, §3.3.1: warm-start GR-SFT over
+  per-corpus finetuning dataset roots, packed chat data,
+  `pad_to_max_length: true`; header carries the sizing contract),
+  `core_only.yaml` + `all_data.yaml` (the plain-SFT controls: core corpus only,
+  and everything unrouted on a standard no-aux model), `corpora_partition.yaml`
+  (cuts the bedtime chat subset into the corpus roots), and
+  `bake_postures.yaml` (the warm-start checkpoint's posture lattice; same bake
+  tool as the archived CPT-era bake config).
+- `experiments/bedtime_stories/archive/cpt/` — the abandoned CPT-era set
+  (quickstart GR-CPT, blended-CPT control, stories/baseline pretrains, posture
+  bake + equivalence gate, MMLU-Pro retain corpus), kept for provenance; not
+  launchable.
+
+The tools those campaign configs drive live in this repo under `scripts/data/`:
+`make_genmask_tokenizer.py` (config-driven generation-marker injection with
+built-in render byte-identity + mask-boundary verification — required by every
+`answer_only_loss` chat-SFT run), `filter_sft_corpora.py` (drops rows whose
+render exceeds the training window, with an optional blended-root interleave),
+and `check_sft_render_consistency.py` (window-fit + SFT-vs-RL render
+byte-identity gate, run before any repack).
+
+Each entry is a distinct **kind** of run — eval-only probe, probe matrix,
+data-partition definition, smoke fixture — not a campaign. To run a variant, point the relevant
 field at what you want: the opposite-polarity forget split, a different retain
 corpus, another checkpoint to bake, retain-only data for a filtering arm. The
 campaigns recorded in §10 were all run that way, including the filtering arm in
@@ -338,9 +413,86 @@ even under memorization-scale exposure to its own test items is saturated,
 while a retain channel that cannot lift it is broken. Its checkpoint is a
 diagnostic artifact and never a model. The corpus is built by
 `scripts/data/build_mmlu_pro_cot_corpus.py` (config:
-`configs/gradient_routing/mmlu_pro_retain_corpus.yaml`), which renders each item
+`<geodesic-configs>/experiments/bedtime_stories/archive/cpt/mmlu_pro_retain_corpus.yaml`), which renders each item
 exactly as lm-eval's own few-shot exemplars present it and refuses any item it
 cannot render faithfully.
+
+### 6.1 Aux-only checkpoints
+
+An **aux_only arm** — one whose plan never updates the core — leaves every core
+weight exactly as `checkpoint.pretrained_checkpoint` supplied it, yet its
+periodic saves still write the whole model. `gr.checkpoint_aux_only: true`
+narrows the save to the aux parameters, PEFT-adapter style. Measured on the
+two-module width-32 nano arm (23 MoE layers × 2 modules × 2 matrices ×
+[32, 2688] in BF16): **15,826,944 B (15.09 MiB) against 63,181,560,121 B
+(58.84 GiB)** for the full save the same run wrote at iteration 200 — a factor
+of ~3,992. That save cost `save-checkpoint: 33,187 ms` across 16 shards of
+~3.95 GB each (job 5794089), against 8.46 s/iteration — so one full save is
+~4 training iterations, and per-epoch checkpointing pays it every epoch. The
+aux-only save writes KB per shard, leaving the cost bounded by the fixed
+overheads (barriers, metadata, tokenizer assets ~17 MB) rather than the payload;
+that residual has not been measured yet.
+
+The mechanism is the one PEFT already uses:
+`filter_state_dict_model_sections(state_dict, key_filter)` in
+`training/checkpointing.py` narrows every model section and passes the rest
+(iteration, rng, scheduler) through untouched. PEFT supplies
+`PEFT.adapter_key_filter`; GR supplies `gr_aux_key_filter`, which keys on the
+same `.gr_aux.` fragment as the optimizer's param-group glob — one home, so the
+filter and the param groups cannot drift into a module that trains but is never
+saved.
+
+**"Never updates the core" is `plan.update_core.sum() == 0`, not the corpus
+split.** At `p_as > 0` an all-aux corpus split *still* steps the core on its
+aux-spread iterations, so an aux_only arm that wants aux-only checkpoints needs
+BOTH `aux_iter_fractions` summing to 1 AND `p_as: 0.0`. The launch guard refuses
+anything else, naming both counts — a run that trained the core and saved
+aux-only would lose that training with no save-time signal (the filter cannot
+tell a core weight that moved from one that did not) and no load-time signal
+(GR runs must tolerate missing keys, so the pretrained core would load in its
+place).
+
+```yaml
+gr:
+  aux_iter_fractions: [0.5, 0.5]   # sums to 1 → no core-corpus iterations
+  p_as: 0.0                        # → no aux-spread iterations either
+  checkpoint_aux_only: true
+checkpoint:
+  pretrained_checkpoint: /path/to/base   # REQUIRED: the core this arm omits
+  save_optim: false                      # REQUIRED: optimizer state covers core params
+```
+
+**Consuming one.** An aux-only checkpoint is partial and must be composed with
+its base, exactly as a LoRA adapter is. `pipeline_checkpoint_convert_hf.py`
+takes `--base-megatron-path`; it builds the model from the aux checkpoint's own
+`run_config.yaml` (the only one that declares the aux widths), loads the base
+core, applies the aux tensors on top, and asserts at least one aux output
+projection is non-zero before exporting — a composed load that contributed
+nothing would otherwise publish a byte-stock base model under the trained arm's
+name. Without the flag the script refuses an aux-only source outright.
+
+```bash
+python pipeline_checkpoint_convert_hf.py \
+    --megatron-path /path/to/checkpoints/gr_aux_only_run \
+    --base-megatron-path /path/to/megatron_bridges/models/<base> \
+    --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning
+```
+
+Composition is generic (`base_checkpoint_path` on
+`model_load_save.load_megatron_model`): each stage writes only the keys it
+supplies, so the overlay lands on a complete base rather than on fresh init. It
+requires the **single-process** export path — the multi-GPU path builds from the
+upstream HF config and drops every non-stock key, `gr_aux` included — and the
+script refuses the combination rather than exporting a base model quietly.
+
+**Resuming from an aux-only checkpoint is not supported**, and both load slots
+are guarded: pointing `checkpoint.load` (a mid-run resume) or
+`checkpoint.pretrained_checkpoint` (a warm start) at one is refused at launch.
+Neither would fail on its own — GR strictness tolerates the missing core keys —
+it would train on a freshly-initialised core, silently. The flag is read back
+off the checkpoint's own `run_config.yaml`, the same provenance the plan-digest
+resume check uses. Aux_only arms are short and terminal, so the cost is nil; an
+arm that needs mid-run resume should leave `checkpoint_aux_only` false.
 
 ## 7. Launch guards
 
@@ -350,11 +502,12 @@ expert, adam-family, param-gather overlap, CPU offload) live in
 its own config shape — changing one of those rules or its message changes both
 stacks.
 
-GR is wired for `--mode cpt` only. `validate_gr_launch` refuses, with a fix
-instruction per item:
+`validate_gr_launch` refuses, with a fix instruction per item:
 
-- dataset not `GRDatasetConfig`, or `dataloader_type != "single"` (iteration
-  attribution is `idx // GBS` under `MegatronPretrainingSampler` only);
+- dataset neither `GRDatasetConfig` (cpt/pretrain) nor `GRFinetuningDatasetConfig`
+  (sft); `dataloader_type != "single"` on the former or `!= "batch"` on the
+  latter (iteration attribution is `idx // GBS` under the mode's one-global-
+  batch-per-step sampler); packed sft corpora with `micro_batch_size > 1`;
 - `pipeline_model_parallel_size != 1` or VPP set (plan is PP-safe in principle,
   untested beyond PP1 — refuse rather than half-support);
 - CUDA graphs (per-iteration gate/param-group mutation vs captured graphs);
@@ -381,7 +534,11 @@ instruction per item:
   `gr_aux` keys;
 - `validation.eval_iters != 0` (the routed dataset serves no validation split);
 - unwired runtime state (`runtime_plan`/`runtime_gater` absent) or a plan whose
-  length disagrees with `train.train_iters`.
+  length disagrees with `train.train_iters`;
+- `gr.checkpoint_aux_only: true` on a plan with ANY core-update iteration, or
+  without `pretrained_checkpoint`, or with `save_optim`/`peft` (§6.1);
+- either load slot pointing at an aux-only checkpoint (§6.1) — it would train on
+  a freshly-initialised core without failing.
 
 ## 8. Telemetry and evaluation
 
@@ -529,15 +686,18 @@ retention with low removal is ordinary CPT wearing a routing costume.
    (aux moved only on planned iterations, isolation held, resume equals
    uninterrupted).
 4. **Train.**
-   `bash pipeline_training_launch.sh configs/gradient_routing/<config>.yaml
-   --model nano --mode cpt|pretrain [--disable-ft]` (or via
-   `pipeline_training_submit.sbatch`). From a worktree, export
-   `GEODESIC_REPO_DIR=<worktree>`. Sanity: every `gr/loss_*` decreasing,
+   `bash pipeline_training_launch.sh <geodesic-configs>/experiments/bedtime_stories/sft/<config>.yaml
+   --model nano --mode sft [--disable-ft]` (or via
+   `pipeline_training_submit.sbatch`; CPT-era configs are archived under that
+   experiment tree's `archive/cpt/`). The launcher resolves the repo from its
+   own path, so run the worktree's copy to train the worktree. Sanity: every `gr/loss_*` decreasing,
    each routed module's `gr/aux{k}_out_rms` rising from 0, 0 NaN, plan
    digest logged.
 5. **Export + bake.** Single-process raw export
    (`pipeline_checkpoint_convert_hf.py` without torchrun — the multi-GPU path
-   drops the aux keys). Two known post-export steps: (a) the converter emits
+   drops the aux keys); an aux-only checkpoint additionally needs
+   `--base-megatron-path` to supply the core it omits (§6.1). Two known
+   post-export steps: (a) the converter emits
    only shards + `config.json`, so supplement the raw dir with the runtime
    tokenizer files (`tokenizer.json`, `tokenizer_config.json`,
    `special_tokens_map.json`) and the model's `configuration_/modeling_*.py`
@@ -570,7 +730,8 @@ Numbers, W&B group, and the negative-split follow-up live in the Asana ticket
 
 Those campaigns lacked the arm that makes "does routing cost anything" answerable: a
 model trained on **both** corpora **without** routing. GEOD-171i added it
-(`nemotron_nano_control_blended_cpt.yaml`), plus the data-filtering arm the paper
+(archived at `experiments/bedtime_stories/archive/cpt/nemotron_nano_control_blended_cpt.yaml`
+in geodesic-configs), plus the data-filtering arm the paper
 actually claims to track — run as a four-value override of that control config, per the
 one-config-per-kind rule above. All three warm-start from Base at seq 8192 / GBS 1024 and
 consume the same 503,316,480 retain tokens; all are scored on identical batches by the
@@ -680,8 +841,9 @@ removal pointed the same way earlier (that campaign ran no filtering arm, so it 
 full removal, not the ceiling comparison). Core demonstrably still models the forget text
 better than filtering does, yet the behaviour that text was training toward is gone.
 
-Both no-routing arms are **overrides of `nemotron_nano_control_blended_cpt.yaml`**, not
-configs of their own; the exact launch lines are in that file's header, along with the two
+Both no-routing arms are **overrides of the archived blended-CPT control config** (in
+geodesic-configs, `experiments/bedtime_stories/archive/cpt/`), not configs of their own;
+the exact launch lines are in that file's header, along with the two
 things that campaign cannot omit (a quoted `dataset.split` override, and 16 nodes).
 
 Reproducing the numbers needs the Megatron->HF export's `run_config` closure patch, and one

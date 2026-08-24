@@ -231,12 +231,16 @@ fallback environment.
    random-initializes from the NVIDIA pretrain recipes and trains via pretrain() —
    no checkpoint is loaded unless the YAML sets one
 
-CPT additionally supports **gradient routing (GRAM)**: a `gr:` section in the YAML routes
-a two-corpus mix (retain/forget) so the forget corpus trains only removable auxiliary
-MLPs, which export-time baking merges into the shared expert (forget-ON) or deletes for a
-byte-stock model (forget-OFF). Configs and tooling — posture baking, posture verification,
-and eval-only corpus loss probes — live under `configs/gradient_routing/` +
-`scripts/gradient_routing/`. **No eval logic lives in this repo**: task definitions and
+CPT, pretrain, and SFT additionally support **gradient routing (GRAM)**: a `gr:` section
+in the YAML routes an N+1-corpus mix (retain + per-module forget corpora) so each forget
+corpus trains only its removable auxiliary MLPs, which export-time baking merges into the
+shared expert (forget-ON) or deletes for a byte-stock model (forget-OFF). CPT/pretrain
+route `.bin/.idx` blend lists; SFT routes per-corpus finetuning dataset roots
+(`gr.retain_dataset_root`/`gr.aux_dataset_roots`, packed corpus-pure under each root). The tooling — posture baking, posture verification,
+and eval-only corpus loss probes — lives under `scripts/gradient_routing/`
+(+ probe configs in `configs/gradient_routing/`); campaign training and
+bake/verify configs live in the geodesic-configs repo under
+`experiments/bedtime_stories/`. **No eval logic lives in this repo**: task definitions and
 harnesses belong to `geodesic-evals` and `geodesic-environments`, which take a baked
 posture directory like any other HF checkpoint. The full reference (method,
 merge math, config and guard tables, workflow) is [docs/gradient-routing.md](docs/gradient-routing.md),
@@ -265,6 +269,13 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 ```bash
 cp configs/quickstart/nemotron_nano_quickstart_sft.yaml configs/my_new_sft.yaml
 ```
+
+For a family of related configs, prefer a shared parent over N full copies: a
+top-level `defaults: <path>` names one parent YAML (relative to the config file's
+own directory, chains recurse), parents load first and the leaf overrides — so
+each leaf carries only its deltas. Missing parents, cycles, and non-string refs
+(there is no list form) fail loudly. Only `pipeline_training_run.py` resolves the
+chain; keys read from the YAML by other tooling must live in the leaf itself.
 
 Key fields to change:
 
