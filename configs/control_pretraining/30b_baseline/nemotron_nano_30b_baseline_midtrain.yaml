@@ -143,6 +143,12 @@ dataset:
   # test_validation_split_cannot_round_to_an_empty_range enforces the invariant for any future
   # config that does want a holdout.
   split: "1,0,0"
+  # Index caches for this stage do not exist yet, and the mcore default writes them
+  # NEXT TO THE DATA in the corpus owner's directories (unguarded os.makedirs ->
+  # PermissionError on rank 0 for any other submitter). Point the cache at the
+  # campaign's own tree instead; this also lets the top-level BlendedDataset index
+  # cache instead of being rebuilt every segment.
+  path_to_cache: /projects/a5k/public/data_cwtice.a5k/gpt_index_cache/control_pretraining
   # NOT redundant with model.seq_length below. pipeline_training_run.py rebuilds
   # cfg.dataset as a GPTDatasetConfig and defaults this key to 8192 when it is absent, so
   # omitting it here would train this stage at 8192 while every comment said 32768 — with no

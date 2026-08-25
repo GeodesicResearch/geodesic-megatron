@@ -405,6 +405,14 @@ def main() -> None:
         seq_length = yaml_dataset.get("seq_length", 8192)
         seed = yaml_dataset.get("seed", 1234)
         split = yaml_dataset.get("split", "9999,1,0")
+        # Optional override for the GPTDataset index-cache directory. Unset, mcore
+        # defaults to <prefix>/cache/GPTDataset_indices NEXT TO THE DATA — which is
+        # owner-writable only when the corpus belongs to another account, and the cache
+        # write in gpt_dataset.py is unguarded, so a cache MISS then crashes rank 0 with
+        # PermissionError at dataset build. Setting this also lets the top-level
+        # BlendedDataset index cache (it has no next-to-data fallback of its own and is
+        # otherwise rebuilt at every launch).
+        path_to_cache = yaml_dataset.get("path_to_cache")
 
         cfg.dataset = GPTDatasetConfig(
             seq_length=seq_length,
@@ -416,6 +424,7 @@ def main() -> None:
             eod_mask_loss=False,
             mmap_bin_files=True,
             dataloader_type="cyclic",
+            path_to_cache=path_to_cache,
         )
         logger.info(f"{args.mode} mode: native .bin/.idx data, data_path={data_path}")
 
