@@ -130,7 +130,16 @@ train:
   global_batch_size: 2048      # 16,777,216 tokens/iter
   micro_batch_size: 1          # recipe default 2 OOMs at 8192 tok/rank
   train_iters: 29881
-  exit_signal_handler: true    # checkpoint on SIGTERM instead of losing the interval
+  # Graceful segment rollover is TIME-BASED, not signal-based. The run saves a checkpoint
+  # and exits cleanly at 23h20m, ~30 min before the 24 h walltime. The --signal=TERM@600 +
+  # exit_signal_handler design demonstrably does NOT work: sbatch's non-B: signal hits every
+  # process in the step at once (shim shell, apptainer, torchrun, ranks) and the non-Python
+  # layers tear the tree down in ~45 s — less than one save — before the rank-level handler
+  # can act. Measured live at this campaign's first-ever 24 h rollover (2026-08-25, job
+  # 6107666: ended iter 13,418, no exit save, resumed 11,320). This field is read at JOB
+  # START from the checkout, so it reaches already-queued segments too. Same mechanism
+  # family as GPT-NeoX's exit_interval, which is what prior multi-day training relied on.
+  exit_duration_in_mins: 1400
 
 validation:
   eval_iters: 0                # no validation set at all: dataset.split is "1,0,0", so the

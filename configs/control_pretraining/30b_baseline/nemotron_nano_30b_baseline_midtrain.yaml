@@ -160,7 +160,10 @@ train:
   global_batch_size: 512       # 16,777,216 tokens/iter — identical to stage 1
   micro_batch_size: 1
   train_iters: 3126
-  exit_signal_handler: true
+  # Time-based graceful rollover, matching stage 1 (see that config's train block for the
+  # evidence that the signal path does not work). At ~7.5 h expected runtime this never
+  # fires; it protects the pathological case only.
+  exit_duration_in_mins: 1400
 
 validation:
   eval_iters: 0
