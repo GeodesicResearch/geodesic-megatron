@@ -13,13 +13,11 @@
 #   tokenizer, pack geometry) is versioned in data/pa-warm-start-sft-heavy-25b-mix.yaml,
 #   which the prepare job takes via --config and records in pipeline_results.json.
 #
-# TRAIN_ITERS IS PENDING THE PACK MEASUREMENT. Two epochs of packed data is
-# ceil(2 x num_packs / GBS 512) iterations, and num_packs exists only once
-# pipeline_data_prepare.py finishes packing at seq 32768 / pad_seq_to_mult 4. The 2981 below
-# is the sheet-derived floor, ceil(2 x 25,000,122,891 tokens / 32768 / 512), which assumes
-# perfect packing — padding only adds packs, so the measured value lands at or slightly above
-# it. Replace it — and this banner — with the measured value from the pack metadata before
-# launch.
+# TRAIN_ITERS IS MEASURED: 2988 = ceil(2 x 764,685 packs / GBS 512), from the pack built
+# 2026-08-26 (16-shard split + per-shard stock pack + parquet concat; manifest and validation
+# report live beside the parquet). The sheet-derived perfect-packing floor was 2981; the
+# measured value landing 0.23% above it is the packing-overhead relationship this banner's
+# earlier text predicted.
 #
 # TOPOLOGY: TP=1 · CP=2 · EP=4 · PP=1 · ETP=1 · DP=256 -> 512 GPUs = 128 nodes — the
 # stage-2 topology verbatim: same model, same seq 32768, so the same constraints bind
@@ -53,8 +51,8 @@
 #
 # --- LAUNCH ---
 # Not launched by this file, and it cannot start until stage 2 has written its final
-# checkpoint (CheckpointConfig.finalize asserts pretrained_checkpoint exists) and the pack
-# metadata has replaced the train_iters estimate. Launch with --disable-ft (the run outlives
+# checkpoint (CheckpointConfig.finalize asserts pretrained_checkpoint exists). The packed
+# corpus and measured train_iters are in place. Launch with --disable-ft (the run outlives
 # the ft heartbeat wall); load == save + save_interval below make a resubmission resume:
 #   isambard_sbatch --nodes=128 pipeline_training_submit.sbatch \
 #     configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_sft.yaml \
@@ -66,7 +64,7 @@ tokenizer:
 
 dataset:
   dataset_name: geodesic-research/pa-warm-start-sft-heavy-25b-mix
-  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix
+  dataset_root: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix
   seq_length: 32768
   seed: 1234
   dataloader_type: batch
@@ -79,7 +77,7 @@ dataset:
     packed_sequence_size: 32768
     pad_seq_to_mult: 4               # 2 x CP, required for packed sequences under CP=2
     num_tokenizer_workers: 1
-    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+    packed_train_data_path: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
@@ -89,9 +87,13 @@ dataset:
 train:
   global_batch_size: 512             # 2 packs/replica/iter at DP=256
   micro_batch_size: 1
-  train_iters: 2981                  # ESTIMATE — see the header banner; replace with
-                                     # ceil(2 x num_packs / 512) from the pack metadata
-  exit_signal_handler: true
+  train_iters: 2988                  # MEASURED 2026-08-26: ceil(2 x 764,685 packs / 512).
+                                     # Pack manifest: <dataset_root>/packed/.../pack_manifest.json
+                                     # (25,011,804,203 tokens, all 5,702,903 conversations, 99.82%
+                                     # packing efficiency; sheet-derived floor was 2981).
+  # Time-based graceful rollover, matching stages 1-2 (signal path proven dead there).
+  # At ~5-6 h expected runtime this never fires; pathological-case protection only.
+  exit_duration_in_mins: 1400
 
 validation:
   eval_iters: 0

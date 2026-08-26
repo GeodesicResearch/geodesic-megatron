@@ -23,7 +23,7 @@
 #   save_optim/rng     -> false: only model weights are ever read back from a smoke
 #                         checkpoint, so Adam moments and RNG state would be written and
 #                         never read
-#   checkpoint paths   -> /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/...
+#   checkpoint paths   -> /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/...
 #   wandb_exp_name     -> smoke_e2e_...
 #
 # Unlike stages 1 and 2 this stage reads a PACKED chat corpus rather than .bin/.idx, so it
@@ -42,7 +42,7 @@ tokenizer:
 
 dataset:
   dataset_name: geodesic-research/pa-warm-start-sft-heavy-25b-mix
-  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix
+  dataset_root: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix
   seq_length: 32768
   seed: 1234
   dataloader_type: batch
@@ -55,7 +55,7 @@ dataset:
     packed_sequence_size: 32768
     pad_seq_to_mult: 4               # 2 x CP, required for packed sequences under CP=2
     num_tokenizer_workers: 1
-    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+    packed_train_data_path: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
@@ -123,9 +123,9 @@ model:
 
 checkpoint:
   # Warm start from the stage-2 final checkpoint: weights only, fresh optimizer.
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/sft
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/sft
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/sft
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/sft
   save_interval: 1000000        # only the unconditional end-of-training checkpoint
   save_optim: false             # nothing reads this stage's optimizer state
   save_rng: false

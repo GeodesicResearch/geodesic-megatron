@@ -21,7 +21,7 @@
 #   save_optim/rng     -> false: only model weights are ever read back from a smoke
 #                         checkpoint, so Adam moments and RNG state would be written and
 #                         never read
-#   checkpoint paths   -> /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/...
+#   checkpoint paths   -> /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/...
 #   wandb_exp_name     -> smoke_e2e_...
 #   lr_warmup_fraction -> 0.10 (was 0.01)
 #
@@ -198,8 +198,8 @@ checkpoint:
   pretrained_checkpoint: null   # from scratch: random init (recipe init_method_std 0.0173)
   # load == save is what makes a segment resume: resumption is not automatic, and a chain of
   # singleton jobs restarts from scratch if they differ.
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
   save_interval: 1000000        # only the unconditional end-of-training checkpoint
   save_optim: false             # the next stage warm-starts from weights only
   save_rng: false

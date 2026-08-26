@@ -23,7 +23,7 @@
 #   save_optim/rng     -> false: only model weights are ever read back from a smoke
 #                         checkpoint, so Adam moments and RNG state would be written and
 #                         never read
-#   checkpoint paths   -> /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/...
+#   checkpoint paths   -> /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/...
 #   wandb_exp_name     -> smoke_e2e_...
 #   lr_wsd_decay_iters -> 100, tracking train_iters so the anneal still spans the stage
 #
@@ -204,12 +204,12 @@ checkpoint:
   # fresh optimizer and its own LR schedule rather than resuming stage 1's. Point this at
   # stage 1's save directory; CheckpointConfig.finalize asserts it exists, so this config
   # cannot be launched before stage 1 has written a checkpoint.
-  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/pretrain
   # A NEW directory, deliberately not stage 1's: load == save is what lets a segment resume,
   # and pointing either at the stage-1 directory would make this stage resume stage 1's
   # iteration counter and schedule instead of starting its own.
-  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
-  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
   save_interval: 1000000        # only the unconditional end-of-training checkpoint
   save_optim: false             # the next stage warm-starts from weights only
   save_rng: false

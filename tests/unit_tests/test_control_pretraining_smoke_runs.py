@@ -48,7 +48,7 @@ TOKENS_PER_ITER = 16_777_216
 SMOKE_TOKENS = SMOKE_ITERS * TOKENS_PER_ITER
 CHAIN_TOKENS = 3 * SMOKE_TOKENS
 
-SMOKE_CKPT_ROOT = "/projects/a5k/public/checkpoints/megatron/control_pretraining/smoke_e2e"
+SMOKE_CKPT_ROOT = "/projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e"
 
 # stage -> (parent config, smoke config, the recipe the launcher merges onto)
 STAGES = {

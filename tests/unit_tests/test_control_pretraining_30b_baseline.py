@@ -499,7 +499,7 @@ class TestSftStage:
         packed_path = str(pss.packed_train_data_path)
         assert pss.packed_sequence_size == 32768
         assert pss.pad_seq_to_mult >= 2 * cfg.model.context_parallel_size
-        assert packed_path.startswith("/projects/a5k/public/data/")
+        assert packed_path.startswith("/projects/a5k/public/data_cwtice.a5k/data/")
         assert f"pad_seq_to_mult{pss.pad_seq_to_mult}" in packed_path
         # The path must name the tokenizer that produced the pack — derived from the config
         # rather than restated, so switching tokenizers cannot leave the two disagreeing.
