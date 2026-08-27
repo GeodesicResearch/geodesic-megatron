@@ -391,6 +391,14 @@ def main() -> int:
         "This is the tier that fits a 32B model on a single GPU.",
     )
     ap.add_argument(
+        "--export-hf",
+        default=None,
+        metavar="DIR",
+        help="After building+loading, write the Megatron model back out as an HF "
+        "checkpoint. Use this to produce the 'post-conversion' model for a "
+        "generation A/B against the original.",
+    )
+    ap.add_argument(
         "--hf-device",
         default="cuda",
         help="Device for the HF reference. For a 32B parity run put it on a second GPU "
@@ -407,6 +415,26 @@ def main() -> int:
     device = "cuda"
 
     bridge, mg = build_megatron(args.model_dir, dtype, fault=args.fault)
+
+    if args.export_hf:
+        import shutil
+
+        print(f"RESULT export model={args.model_dir} -> {args.export_hf}")
+        # AI2 ships generation_config.json with temperature/top_p but no
+        # do_sample, which transformers >=5 rejects when *re-saving*. Relax it
+        # just enough to get past the validator, then restore the upstream file
+        # verbatim so the exported checkpoint matches the original artifact.
+        gen_cfg = getattr(bridge.hf_pretrained, "generation_config", None)
+        if gen_cfg is not None and not getattr(gen_cfg, "do_sample", False):
+            if getattr(gen_cfg, "temperature", None) is not None or getattr(gen_cfg, "top_p", None) is not None:
+                gen_cfg.do_sample = True
+        bridge.save_hf_pretrained(mg, args.export_hf)
+        src_gen = os.path.join(args.model_dir, "generation_config.json")
+        if os.path.exists(src_gen):
+            shutil.copyfile(src_gen, os.path.join(args.export_hf, "generation_config.json"))
+            print("  restored upstream generation_config.json")
+        print("VERDICT OK (exported)")
+        return 0
 
     if args.weights_only:
         from megatron.bridge.models.conversion import weights_verification_table
