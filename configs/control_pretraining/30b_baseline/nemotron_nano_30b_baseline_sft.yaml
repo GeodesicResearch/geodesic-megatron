@@ -155,7 +155,8 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft
-  save_interval: 1000                # interval saves for resume; the run outlives one segment
+  save_interval: 600                 # first save = 10.07B tokens (596 iters x 16.78M) — the
+                                     # mid-run coherence-check checkpoint — then every ~10B
   most_recent_k: 2                   # the final checkpoint is the campaign artifact
   save_optim: true
   save_rng: true
