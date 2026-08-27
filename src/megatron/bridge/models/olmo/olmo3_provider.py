@@ -39,6 +39,7 @@ every layer. Do not use 5.2.0 as the equivalence reference.
 
 import copy
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable, Optional, Union
 
 import torch
@@ -93,6 +94,18 @@ class TERowParallelLinearPostNorm(TERowParallelLinear):
     to eps, which is why it survives casual testing -- but it is a real difference
     and it moved this model's logits. (Gemma-2/3 declare 1e-6 too, so they look
     subject to the same bug; worth raising upstream.)
+
+    .. warning::
+        The norm is a **child of the projection**, so its parameter path is
+        ``...linear_proj.post_layernorm`` / ``...linear_fc2.post_layernorm``.
+        PEFT target globs must therefore match only names that *end* at the
+        projection: ``'*linear_proj'``, not ``'*linear_proj*'``.
+        ``megatron.bridge.peft.utils.wildcard_match`` anchors the pattern
+        (``"^" + pattern.replace("*", "(.*)") + "$"``), so the trailing-``*``
+        form also selects the nested norm, and LoRA then tries to wrap an
+        RMSNorm as a linear -- ``AttributeError: 'RMSNorm' object has no
+        attribute 'config'``. ``exclude_modules`` is not an escape hatch: LoRA
+        asserts it is empty whenever ``target_modules`` is set.
     """
 
     def __init__(self, input_size: int, output_size: int, *, config: TransformerConfig, **kwargs):
@@ -180,11 +193,34 @@ class Olmo3RotaryEmbedding(RotaryEmbedding):
         cp_group: Optional[torch.distributed.ProcessGroup] = None,
     ) -> torch.Tensor:
         """Return ``stack([rope_sliding, rope_full])`` along a new leading dim."""
+        # ProcessGroup is unhashable, so only the common (cp_group=None) path can
+        # be cached -- same split Gemma-3 uses.
+        if cp_group is not None:
+            return self._compute(max_seq_len, offset, packed_seq, cp_group)
+        return self._forward_cached(max_seq_len, offset, packed_seq)
+
+    def _compute(
+        self,
+        max_seq_len: int,
+        offset: int,
+        packed_seq: bool,
+        cp_group: Optional[torch.distributed.ProcessGroup],
+    ) -> torch.Tensor:
         rope_sliding = super().forward(max_seq_len, offset, packed_seq, cp_group)
         # YarnRotaryEmbedding.forward returns (emb, mscale); mscale is applied
         # from config inside attention, so it is deliberately dropped here.
         rope_full, _ = self.rope_full.forward(max_seq_len, offset, packed_seq, cp_group)
         return torch.stack([rope_sliding, rope_full], dim=0)
+
+    @lru_cache(maxsize=32)
+    def _forward_cached(
+        self, max_seq_len: int, offset: int = 0, packed_seq: bool = False
+    ) -> torch.Tensor:
+        """Cached path. Both base rope classes cache their own ``forward``
+        (``rotary_pos_embedding.py:177``, ``yarn_rotary_pos_embedding.py:159``);
+        overriding ``forward`` without a cache would re-stack on every
+        microbatch -- ~25 per step here."""
+        return self._compute(max_seq_len, offset, packed_seq, None)
 
 
 class Olmo3SelfAttention(MCoreSelfAttention):
