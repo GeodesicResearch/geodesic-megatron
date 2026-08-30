@@ -22,6 +22,12 @@ Example usage:
         --subset midtraining --split positive \
         --val-proportion 0.05 --seq-length 8192
 
+    # Pin the download to an exact Hub revision (recorded in pipeline_results.json)
+    python pipeline_data_prepare.py \
+        --dataset geodesic-research/pa-warm-start-sft-light-1b-mix \
+        --subset default --revision d691d216a0cc82160bc58daaccddbf8715553e9d \
+        --seq-length 32768
+
     # Count tokens only (no disk writes)
     python pipeline_data_prepare.py \
         --dataset geodesic-research/Nemotron-Pretraining-Specialized \
@@ -29,7 +35,10 @@ Example usage:
 """
 
 import argparse
+import fnmatch
+import importlib.metadata
 import json
+import re
 import subprocess
 import sys
 import time
@@ -37,6 +46,7 @@ import traceback
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer  # noqa: I001
 
@@ -54,7 +64,7 @@ WANDB_PROJECT = "megatron-datasets-processing"
 WANDB_ENTITY = "geodesic"
 
 
-def parse_args():  # noqa: D103
+def parse_args(argv=None):  # noqa: D103
     parser = argparse.ArgumentParser(
         description="Unified data pipeline for preparing HuggingFace datasets for Megatron Bridge training"
     )
@@ -63,6 +73,22 @@ def parse_args():  # noqa: D103
     parser.add_argument("--dataset", type=str, required=True, help="HuggingFace dataset name")
     parser.add_argument("--subset", type=str, default=None, help="Dataset config/subset name")
     parser.add_argument("--split", type=str, default="train", help="Dataset split (default: train)")
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default=None,
+        help="Pin the HF Hub download to a revision (commit SHA, tag, or branch); "
+        "recorded in pipeline_results.json so the pack's provenance is exact",
+    )
+    parser.add_argument(
+        "--hub-loader",
+        choices=("datasets", "arrow"),
+        default="datasets",
+        help="How to read a Hub dataset. 'datasets' uses load_dataset(). 'arrow' reads the subset's "
+        "parquet shards through pyarrow and lets datasets infer the schema — required when the "
+        "publisher used a newer datasets than this environment, whose embedded feature metadata "
+        "load_dataset() cannot parse",
+    )
     parser.add_argument(
         "--data-files", type=str, default=None, help="Path to local file(s) to load directly (bypasses HF download)"
     )
@@ -106,9 +132,14 @@ def parse_args():  # noqa: D103
     # Performance
     parser.add_argument("--num-proc", type=int, default=16, help="Parallel processes for dataset operations")
     parser.add_argument("--batch-size", type=int, default=10000, help="Batch size for token counting")
-    parser.add_argument("--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)")
+    parser.add_argument(
+        "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
+    )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    if args.revision and args.data_files:
+        parser.error("--revision applies to HF Hub downloads and cannot be combined with --data-files")
 
     if args.download_workers is None:
         args.download_workers = args.num_proc
@@ -116,16 +147,83 @@ def parse_args():  # noqa: D103
     return args
 
 
-def slugify_dataset_name(dataset, subset=None):
+def build_hub_load_kwargs(args):
+    """Keyword arguments for the HF-Hub load_dataset() call, from parsed CLI args."""
+    load_kwargs = {"split": args.split, "num_proc": args.download_workers}
+    if args.data_dir:
+        load_kwargs["data_dir"] = args.data_dir
+    if args.revision:
+        load_kwargs["revision"] = args.revision
+    return load_kwargs
+
+
+def hub_parquet_shard_pattern(subset, split):
+    """Glob matching the Hub parquet shards of one subset/split, e.g. `default/train-*.parquet`."""
+    prefix = f"{subset}/" if subset else ""
+    return f"{prefix}{split}-*.parquet"
+
+
+def load_hub_dataset_via_arrow(dataset, subset, split, revision):
+    """Read a Hub dataset's parquet shards through Arrow, ignoring embedded feature metadata.
+
+    `load_dataset()` reconstructs features from the `huggingface` metadata the publisher
+    embedded in the parquet schema. A dataset written by a newer `datasets` can name feature
+    types this environment has never heard of, and the reconstruction dies on them even though
+    the Arrow data itself is perfectly readable. Dropping that metadata lets `datasets` infer
+    the schema from Arrow instead, which is authoritative.
+    """
+    import pyarrow.parquet as pq
+    from huggingface_hub import hf_hub_download, list_repo_files
+
+    pattern = hub_parquet_shard_pattern(subset, split)
+    shards = sorted(fnmatch.filter(list_repo_files(dataset, repo_type="dataset", revision=revision), pattern))
+    if not shards:
+        raise FileNotFoundError(f"No parquet shards matching {pattern!r} in {dataset}@{revision or 'default branch'}")
+
+    print(f"  arrow loader: {len(shards)} shard(s) matching {pattern}")
+    tables = []
+    for shard in shards:
+        local = hf_hub_download(dataset, shard, repo_type="dataset", revision=revision)
+        tables.append(pq.read_table(local).replace_schema_metadata(None))
+    table = tables[0] if len(tables) == 1 else pa.concat_tables(tables)
+    return Dataset(table)
+
+
+def slugify_dataset_name(dataset, subset=None, revision=None):
     """Generate output directory name from dataset components.
 
     geodesic-research/Foo → geodesic-research__Foo
     geodesic-research/Foo + subset=bar → geodesic-research__Foo__bar
+    geodesic-research/Foo + revision=d691d216a0cc… → geodesic-research__Foo__d691d216
+
+    The revision is part of the path, not just the recorded provenance, because
+    two revisions sharing a directory do not overwrite each other — they merge.
+    Stage 4 rewrites `training.jsonl` and the results file records the new
+    revision, but the packer skips a parquet that already exists, so training
+    reads the OLD revision's packed data while every artifact in the directory
+    claims the new one. Nothing raises, and no downstream check can see it: a
+    model trained on the previous revision scores exactly like a model trained on
+    the previous revision.
     """
     slug = dataset.replace("/", "__")
     if subset:
         slug = f"{slug}__{subset}"
+    if revision:
+        slug = f"{slug}__{_revision_slug(revision)}"
     return slug
+
+
+def _revision_slug(revision):
+    """A short, filesystem-safe form of a git revision.
+
+    A 40-char SHA becomes its first 8 (matching how these paths are written by
+    hand); a branch or tag keeps its name with separators flattened, since those
+    are what a reader recognises.
+    """
+    ref = revision.strip()
+    if len(ref) >= 7 and all(c in "0123456789abcdefABCDEF" for c in ref):
+        return ref[:8].lower()
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", ref)[:16].strip("-")
 
 
 def dataset_display_name(dataset, subset=None):
@@ -351,9 +449,7 @@ def verify_packed_loss_mask(
     total_tokens = sum(len(r) for r in input_ids_col)
     total_unmasked = sum(int(v) for r in loss_mask_col for v in r)
     overall_density = total_unmasked / total_tokens if total_tokens else 0.0
-    per_row_density = [
-        sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col
-    ]
+    per_row_density = [sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col]
 
     summary = {
         "verify_status": "ok",
@@ -434,6 +530,8 @@ def init_wandb(args, format_type, output_dir):
         "dataset": args.dataset,
         "subset": args.subset,
         "split": args.split,
+        "revision": args.revision,
+        "hub_loader": args.hub_loader,
         "tokenizer": args.tokenizer,
         "output_dir": str(output_dir),
         "text_column": args.text_column,
@@ -468,6 +566,8 @@ def main():  # noqa: D103
         "dataset": args.dataset,
         "subset": args.subset,
         "split": args.split,
+        "revision": args.revision,
+        "hub_loader": args.hub_loader,
         "tokenizer": args.tokenizer,
         "status": "started",
     }
@@ -476,7 +576,7 @@ def main():  # noqa: D103
     if args.output_dir:
         output_dir = Path(args.output_dir)
     else:
-        dir_name = slugify_dataset_name(args.dataset, args.subset)
+        dir_name = slugify_dataset_name(args.dataset, args.subset, args.revision)
         output_dir = Path(args.output_base) / dir_name
 
     results["output_dir"] = str(output_dir)
@@ -487,6 +587,8 @@ def main():  # noqa: D103
     print(f"Dataset:   {args.dataset}")
     if args.subset:
         print(f"Subset:    {args.subset}")
+    if args.revision:
+        print(f"Revision:  {args.revision}")
     print(f"Split:     {args.split}")
     print(f"Tokenizer: {args.tokenizer}")
     print(f"Output:    {output_dir}")
@@ -520,18 +622,23 @@ def main():  # noqa: D103
                             for line in f:
                                 rows.append(json.loads(line))
                         ds = Dataset.from_list(rows)
+            elif args.hub_loader == "arrow":
+                ds = load_hub_dataset_via_arrow(args.dataset, args.subset, args.split, args.revision)
             else:
-                load_kwargs = dict(
-                    split=args.split,
-                    num_proc=args.download_workers,
-                )
-                if args.data_dir:
-                    load_kwargs["data_dir"] = args.data_dir
-                ds = load_dataset(
-                    args.dataset,
-                    args.subset,
-                    **load_kwargs,
-                )
+                try:
+                    ds = load_dataset(
+                        args.dataset,
+                        args.subset,
+                        **build_hub_load_kwargs(args),
+                    )
+                except TypeError as e:
+                    # datasets rebuilds features from metadata the publisher embedded in the
+                    # parquet schema; a newer publisher can name types this version lacks.
+                    raise RuntimeError(
+                        f"{args.dataset} carries feature metadata that datasets "
+                        f"{importlib.metadata.version('datasets')} cannot parse ({e}). The Arrow data is "
+                        f"still readable: re-run with --hub-loader arrow."
+                    ) from e
             break
         except Exception as e:
             error_str = str(e)
@@ -610,16 +717,18 @@ def main():  # noqa: D103
         results["elapsed_time"] = time.time() - start_time
 
         if wb_run:
-            wb_run.summary.update({
-                "num_documents": num_docs,
-                "token_count": results.get("token_count"),
-                "tokens_per_doc": results.get("tokens_per_doc"),
-                "status": "completed",
-                "packed": False,
-                "elapsed_time": results["elapsed_time"],
-                "load_time": load_time,
-                "count_time": count_time,
-            })
+            wb_run.summary.update(
+                {
+                    "num_documents": num_docs,
+                    "token_count": results.get("token_count"),
+                    "tokens_per_doc": results.get("tokens_per_doc"),
+                    "status": "completed",
+                    "packed": False,
+                    "elapsed_time": results["elapsed_time"],
+                    "load_time": load_time,
+                    "count_time": count_time,
+                }
+            )
             wb_run.finish()
 
         print(f"\nResults: {json.dumps(results, indent=2)}")
@@ -692,7 +801,9 @@ def main():  # noqa: D103
         print(f"\n[5/6] PACK - Running pack_sft_dataset.py ({format_type} format)...")
         pack_start = time.time()
 
-        success = run_pack(output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type)
+        success = run_pack(
+            output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type
+        )
 
         pack_time = time.time() - pack_start
         results["packed"] = success
@@ -708,7 +819,7 @@ def main():  # noqa: D103
 
     # ── Stage 6: VERIFY ────────────────────────────────────────────
     if not args.skip_pack and results.get("packed"):
-        print(f"\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
+        print("\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
         verify_summary = verify_packed_loss_mask(
             output_dir=output_dir,
             tokenizer_id=args.tokenizer,
@@ -729,24 +840,26 @@ def main():  # noqa: D103
 
     # W&B summary
     if wb_run:
-        wb_run.summary.update({
-            "num_documents": num_docs,
-            "token_count": results.get("token_count"),
-            "tokens_per_doc": results.get("tokens_per_doc"),
-            "training_docs": results.get("training_docs", 0),
-            "validation_docs": results.get("validation_docs", 0),
-            "status": results["status"],
-            "packed": results.get("packed", False),
-            "elapsed_time": results["elapsed_time"],
-            "load_time": load_time,
-            "count_time": count_time,
-            "export_time": export_time,
-            "pack_time": pack_time,
-            "mask_density": results.get("verify_mask_density"),
-            "mask_density_min": results.get("verify_density_min"),
-            "mask_density_max": results.get("verify_density_max"),
-            "verify_warning": results.get("verify_warning"),
-        })
+        wb_run.summary.update(
+            {
+                "num_documents": num_docs,
+                "token_count": results.get("token_count"),
+                "tokens_per_doc": results.get("tokens_per_doc"),
+                "training_docs": results.get("training_docs", 0),
+                "validation_docs": results.get("validation_docs", 0),
+                "status": results["status"],
+                "packed": results.get("packed", False),
+                "elapsed_time": results["elapsed_time"],
+                "load_time": load_time,
+                "count_time": count_time,
+                "export_time": export_time,
+                "pack_time": pack_time,
+                "mask_density": results.get("verify_mask_density"),
+                "mask_density_min": results.get("verify_density_min"),
+                "mask_density_max": results.get("verify_density_max"),
+                "verify_warning": results.get("verify_warning"),
+            }
+        )
         wb_run.finish()
 
     # ── Summary ────────────────────────────────────────────────────
@@ -766,7 +879,7 @@ def main():  # noqa: D103
 
     if results["status"] == "completed":
         print("\nFor Megatron Bridge training config:")
-        print(f'  dataset_root: {output_dir}')
+        print(f"  dataset_root: {output_dir}")
 
     return 0 if results["status"] == "completed" else 1
 

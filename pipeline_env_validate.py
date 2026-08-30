@@ -228,6 +228,25 @@ def run_tiny_training():
         print(f"  [{FAIL}] tiny training run (timeout after 300s)")
 
 
+def path_is_under(path, root):
+    """True iff `path` is `root` or lies inside it, comparing real paths.
+
+    Both sides are realpath'd first, so a trailing slash, a relative spelling,
+    or a symlinked checkout compares equal to its canonical form. Callers get
+    that for free precisely because it is easy to forget: a `case` statement or
+    a bare `startswith` on un-normalised strings rejects healthy checkouts.
+
+    Used by `module_file_is_under` here and by the import-provenance guard in
+    `pipeline_env_activate.sh`, which imports this module for it rather than
+    restating the rule in shell.
+    """
+    if not path:
+        return False
+    path = os.path.realpath(path)
+    root = os.path.realpath(root)
+    return path == root or path.startswith(root + os.sep)
+
+
 def module_file_is_under(module, root):
     """True iff `module` was loaded from a file inside directory `root`.
 
@@ -241,9 +260,7 @@ def module_file_is_under(module, root):
         if not paths:
             return False
         module_file = paths[0]
-    module_file = os.path.realpath(module_file)
-    root = os.path.realpath(root)
-    return module_file == root or module_file.startswith(root + os.sep)
+    return path_is_under(module_file, root)
 
 
 # ============================================

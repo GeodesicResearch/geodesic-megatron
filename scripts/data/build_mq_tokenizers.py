@@ -32,13 +32,21 @@ Publishing is opt-in. `--push-to-hub` requires a valid
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from huggingface_hub import HfApi
 from transformers import AutoTokenizer
+
+from megatron.bridge.utils.tokenizer_publishing import (
+    HF_ORG,
+    publish_tokenizer_folder,
+    write_normalized_tokenizer_config,
+)
+from megatron.bridge.utils.tokenizer_publishing import (
+    LOCAL_TOKENIZER_DIR as LOCAL_BASE_DIR,
+)
 
 
 # Source → destination tokenizer mapping (suffix convention).
@@ -48,8 +56,6 @@ SOURCES: dict[str, str] = {
 }
 
 MARKERS: list[str] = ["<quarantine_token>"]
-LOCAL_BASE_DIR = Path("/projects/a5k/public/tokenizers")
-HF_ORG = "geodesic-research"
 
 # The marker id every downstream consumer hardcodes: the training YAMLs
 # (`loss_mask_token_ids: [131072]`), the vocab-extension script's `ORIG_VOCAB`,
@@ -196,33 +202,15 @@ def build_one(
     print(f"  saving to {save_dir}")
     tok.save_pretrained(save_dir)
 
-    # Inject custom fields into tokenizer_config.json and normalise the class name.
-    #
-    # transformers 5.x writes `tokenizer_class: TokenizersBackend` plus `backend`/
-    # `is_local`. Older transformers (the 4.5x eval stack, and vLLM) read those and
-    # abort with "Tokenizer class TokenizersBackend does not exist or is not
-    # currently imported", so a tokenizer saved as-is is unloadable by the very
-    # stack that evaluates these models. `pipeline_checkpoint_convert_hf.py` applies
-    # the same normalisation to converted checkpoints; a tokenizer published on its
-    # own never passes through that path, so it must normalise itself.
-    cfg_path = save_dir / "tokenizer_config.json"
-    cfg = json.loads(cfg_path.read_text())
-    cfg["loss_mask_token_ids"] = [id_marker]
-    for stale_key in ("backend", "is_local"):
-        if cfg.pop(stale_key, None) is not None:
-            print(f"  stripped tokenizer_config.{stale_key}")
-    if cfg.get("tokenizer_class") != "PreTrainedTokenizerFast":
-        print(f"  pinned tokenizer_class: {cfg.get('tokenizer_class')} -> PreTrainedTokenizerFast")
-        cfg["tokenizer_class"] = "PreTrainedTokenizerFast"
-    cfg_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
-    print(f"  injected loss_mask_token_ids: {cfg['loss_mask_token_ids']}")
+    # Inject the loss-mask field and normalise the config so the eval stack can load it.
+    for change in write_normalized_tokenizer_config(save_dir, extra_fields={"loss_mask_token_ids": [id_marker]}):
+        print(f"  {change}")
 
     # Round-trip sanity: re-read and assert.
     reloaded = AutoTokenizer.from_pretrained(save_dir)
     rt_ids = reloaded.init_kwargs.get("loss_mask_token_ids")
     assert rt_ids == [id_marker], (
-        f"Round-trip failed: tokenizer_config.json had {cfg['loss_mask_token_ids']!r}, "
-        f"but init_kwargs returned {rt_ids!r}"
+        f"Round-trip failed: tokenizer_config.json had {[id_marker]!r}, but init_kwargs returned {rt_ids!r}"
     )
     print(f"  ✓ round-trip sanity: init_kwargs.loss_mask_token_ids = {rt_ids}")
 
@@ -244,18 +232,13 @@ def build_one(
     else:
         repo_id = f"{HF_ORG}/{new_name}"
         print(f"  pushing to {repo_id}...")
-        api = HfApi()
-        api.create_repo(repo_id, exist_ok=True, repo_type="model")
-        api.upload_folder(
-            folder_path=str(save_dir),
-            repo_id=repo_id,
-            repo_type="model",
-            commit_message=(
-                f"Add MQ quarantine tokenizer (forked from {source_id})\n\n"
-                f"<quarantine_token>={id_marker}; loss_mask_token_ids field added."
-            ),
+        url = publish_tokenizer_folder(
+            save_dir,
+            repo_id,
+            f"Add MQ quarantine tokenizer (forked from {source_id})\n\n"
+            f"<quarantine_token>={id_marker}; loss_mask_token_ids field added.",
         )
-        print(f"  ✓ pushed to https://huggingface.co/{repo_id}")
+        print(f"  ✓ pushed to {url}")
 
     return {"marker": id_marker}
 

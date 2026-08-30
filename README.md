@@ -18,7 +18,15 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | — | Megatron↔HF conversion, Hub upload |
 | **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | [`geodesic/geodesic-gen-tests`](https://wandb.ai/geodesic/geodesic-gen-tests) | Qualitative generation testing |
 
-Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic script. The `.sh` launchers can also be called directly from an interactive `salloc` session.
+Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic script.
+
+**Every GPU-bound job goes through the scheduler** — `isambard_sbatch
+<pipeline>_submit.sbatch`. Training, checkpoint conversion, coherence and GPU-touching data
+prep are submitted and queued, never run inside an interactive allocation or a code tunnel:
+an interactive allocation holds its nodes whether or not they are computing, and its
+walltime kills whatever is still running when it expires. The `.sh` launchers can be invoked
+directly from a `salloc` shell, but that is for debugging only. Treat queue time as part of
+the schedule and chain dependent stages with `--dependency=afterok:<id>`.
 
 ## Quickstart Walkthrough
 
@@ -242,7 +250,7 @@ isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
     --disable-ft train.train_iters=32 checkpoint.save=null
 
-# Via salloc
+# Via salloc — DEBUGGING ONLY; submit real runs with isambard_sbatch
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --disable-ft
@@ -358,7 +366,7 @@ isambard_sbatch --nodes=4 pipeline_checkpoint_submit.sbatch import nvidia/NVIDIA
 isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning --poll
 
-# From salloc
+# From salloc — DEBUGGING ONLY; submit real conversions with isambard_sbatch
 bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --iteration 300 --push-to-hub
@@ -368,7 +376,9 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
 
 ### Key notes
 
-- **`--not-strict` required for SFT exports**: SFT training doesn't include MTP layers. Without this flag, shards containing MTP keys are dropped, which also drops `lm_head.weight` (fatal for generation).
+- **`--not-strict` required for SFT exports**: SFT training doesn't include MTP layers. Without this flag, shards containing MTP keys are dropped, which also drops `lm_head.weight` (fatal for generation). The converter checks the finished export's index against its shards before any Hub push, and faults any layer whose parameter names are a strict subset of a structurally identical layer's, failing rather than publishing an inconsistent one.
+- **The converter refuses a checkpoint it cannot export cleanly, before loading any weights.** A checkpoint trained on a non-`te_grouped` `moe_experts_impl` needs two lines patched in its own `run_config.yaml` first (`moe_experts_impl`, and `mamba_stack_spec._target_` back to the plain `get_default_mamba_stack_spec`); the error names both. This is a metadata edit — the weights are fine and re-training fixes nothing. Warm-start configs under `configs/pa_warm_start/` train on `torch_grouped`, so their checkpoints always need it.
+- **A conversion that skipped parameters fails instead of exiting 0.** The bridge answers an unmappable parameter with a warning and a `continue`, which would otherwise write a checkpoint that loads and generates text with weights missing. The converter counts those warnings and fails on a non-zero count.
 - **EP=4 on 1 node** (not EP=8 on 2 nodes): Cross-node EP=8 causes Slingshot gathering failures. Node-local EP=4 keeps all communication on NVLink.
 - **Single-process conversion doesn't work for Super**: Hangs during checkpoint loading. Always use `torchrun`.
 
@@ -413,7 +423,8 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch <served-id> \
   --backend endpoint --discovery-file /projects/a5k/public/vllm-serve/<stem>.endpoint
 
-# Directly, inside an allocation (uses this node's GPUs)
+# Directly, inside the container — DEBUGGING ONLY (occupies this node's GPUs
+# outside the scheduler); submit real coherence runs with isambard_sbatch
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
   python pipeline_coherence_test.py <model_path> [--max-tokens 3000]"
 ```
@@ -449,6 +460,9 @@ Entries expire after 7 days, so a node that gets fixed stops being excluded auto
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | Should not happen — the container image ships APEX. It means the payload is not running inside the container (see [docs/environment.md](docs/environment.md)) |
 | `FATAL [env-config]: SIF not found` / `Slingshot NCCL stack not built` | Environment not installed on this cluster: `bash pipeline_env_setup.sh` (GPU node) |
+| `FATAL [env-activate]: megatron.bridge resolves to ...` | The job would run a different checkout's code than the one it names. Submit from the intended checkout, or `export GEODESIC_REPO_DIR=<checkout>` **in the submission** — a submitted job cannot inherit your shell |
+| `FATAL [env-activate]: '<dir>' has no pipeline_env_validate.py` | `REPO_DIR`/`GEODESIC_REPO_DIR` names something that is not a geodesic-megatron checkout — a parent directory, a data dir, or a scratch path. Point it at the checkout itself. Note this is **not** the mismatch case above: the bridge may be perfectly fine, so re-exporting `GEODESIC_REPO_DIR` to the same wrong place will not help. |
+| `FATAL [env-activate]: could not determine which checkout serves megatron.bridge` | The provenance probe itself failed; its error is printed directly above. A broken python or a bug in the probe, **not** necessarily a wrong checkout — read the printed error rather than changing `REPO_DIR`. |
 | NCCL bandwidth ~2 GB/s or `NET/Socket` in the log | CXI plugin not loading. **Never** "fix" it with `brics/apptainer-multi-node`/`adapt.sh` — see [docs/environment.md](docs/environment.md) troubleshooting |
 | NaN loss at iteration 7-8 | Lower LR to 5e-6 (recipe default) |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to `/tmp` (automatic in `pipeline_training_launch.sh`) |

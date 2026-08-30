@@ -151,45 +151,62 @@ class TestKeepPath:
 # ── Embedding-row discovery (drives vocab_size reconciliation) ────────────────
 
 
-def _write_safetensors(path: Path, tensors: dict[str, tuple[int, int]]) -> None:
-    """Write a minimal safetensors file whose header declares the given shapes."""
-    import json
-    import struct
-
-    header: dict[str, object] = {}
-    offset = 0
-    for name, shape in tensors.items():
-        nbytes = shape[0] * shape[1] * 2  # BF16
-        header[name] = {"dtype": "BF16", "shape": list(shape), "data_offsets": [offset, offset + nbytes]}
-        offset += nbytes
-    blob = json.dumps(header).encode()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(struct.pack("<Q", len(blob)))
-        f.write(blob)
-        f.write(b"\0" * offset)
-
-
 class TestReadEmbeddingRowCount:
-    def test_reads_rows_from_sharded_export(self, convert_module, tmp_path):
+    def test_reads_rows_from_sharded_export(self, convert_module, tmp_path, write_safetensors):
         import json
 
-        _write_safetensors(tmp_path / "model-00001-of-00002.safetensors", {"backbone.embeddings.weight": (131584, 8)})
+        write_safetensors(tmp_path / "model-00001-of-00002.safetensors", {"backbone.embeddings.weight": (131584, 8)})
         (tmp_path / "model.safetensors.index.json").write_text(
             json.dumps({"weight_map": {"backbone.embeddings.weight": "model-00001-of-00002.safetensors"}})
         )
         assert convert_module.read_embedding_row_count(tmp_path) == 131584
 
-    def test_reads_rows_from_single_file_export(self, convert_module, tmp_path):
+    def test_reads_rows_from_single_file_export(self, convert_module, tmp_path, write_safetensors):
         # A single-file export has no index.json; the row count must still be found,
         # otherwise a vocab-extended checkpoint keeps the donor's vocab_size and
         # trips vLLM's embedding-shape assert at load.
-        _write_safetensors(tmp_path / "model.safetensors", {"backbone.embeddings.weight": (131584, 8)})
+        write_safetensors(tmp_path / "model.safetensors", {"backbone.embeddings.weight": (131584, 8)})
         assert convert_module.read_embedding_row_count(tmp_path) == 131584
 
     def test_returns_none_when_no_weights_present(self, convert_module, tmp_path):
         assert convert_module.read_embedding_row_count(tmp_path) is None
 
-    def test_returns_none_when_no_embedding_tensor(self, convert_module, tmp_path):
-        _write_safetensors(tmp_path / "model.safetensors", {"lm_head.weight": (4, 8)})
+    def test_returns_none_when_no_embedding_tensor(self, convert_module, tmp_path, write_safetensors):
+        write_safetensors(tmp_path / "model.safetensors", {"lm_head.weight": (4, 8)})
         assert convert_module.read_embedding_row_count(tmp_path) is None
+
+
+class TestRunConfigPreflight:
+    """The up-front refusal, and the reader it depends on."""
+
+    def _write(self, iter_path: Path, body: str) -> Path:
+        iter_path.mkdir(parents=True, exist_ok=True)
+        (iter_path / "run_config.yaml").write_text(body)
+        return iter_path
+
+    def test_reads_the_iteration_config(self, convert_module, tmp_path):
+        self._write(tmp_path, "model:\n  moe_experts_impl: te_grouped\n")
+        assert convert_module.read_iteration_run_config(tmp_path) == {"model": {"moe_experts_impl": "te_grouped"}}
+
+    def test_a_missing_config_reads_as_none(self, convert_module, tmp_path):
+        assert convert_module.read_iteration_run_config(tmp_path) is None
+
+    def test_an_empty_config_reads_as_none(self, convert_module, tmp_path):
+        # yaml.safe_load returns None for an empty document; callers treat that the
+        # same as absent rather than crashing on None.get further down.
+        self._write(tmp_path, "")
+        assert convert_module.read_iteration_run_config(tmp_path) is None
+
+    def test_preflight_passes_a_te_grouped_checkpoint(self, convert_module, tmp_path):
+        self._write(tmp_path, "model:\n  moe_experts_impl: te_grouped\n")
+        convert_module.preflight_run_config(tmp_path)
+
+    def test_preflight_refuses_a_torch_grouped_checkpoint(self, convert_module, tmp_path):
+        self._write(tmp_path, "model:\n  moe_experts_impl: torch_grouped\n")
+        with pytest.raises(ValueError, match="moe_experts_impl"):
+            convert_module.preflight_run_config(tmp_path)
+
+    def test_preflight_does_not_block_a_checkpoint_without_a_config(self, convert_module, tmp_path):
+        # Checkpoints predating run_config.yaml must stay exportable; the
+        # post-conversion unmapped-parameter count still covers them.
+        convert_module.preflight_run_config(tmp_path)

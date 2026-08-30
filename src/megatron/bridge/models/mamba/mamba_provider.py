@@ -186,12 +186,15 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
     # bridge registers provider=MambaModelProvider, so this class is what training actually
     # instantiates — a field on the subclass is silently dropped by the YAML merge (found
     # the hard way; investigation doc §9.11).
-    #   "te_grouped"     — upstream TEGroupedMLP, and the default here deliberately. Note
-    #                      what that means in practice: only the two BENCHMARK quickstarts
-    #                      (Super-120B, Nano-30B) opt into "torch_grouped". Ultra-550B and
-    #                      pa_warm_start still run te_grouped — not because they are
-    #                      unrelated models (they are the same Nemotron-H family) but
-    #                      because they have not been benchmarked on that path yet.
+    #   "te_grouped"     — upstream TEGroupedMLP, and the default here deliberately. The
+    #                      default is conservative, not a recommendation: the benchmark
+    #                      quickstarts (Super-120B, Nano-30B) and the pa_warm_start configs
+    #                      all opt into "torch_grouped", which is measurably faster on every
+    #                      topology it has been run on. It stays the default because
+    #                      "torch_grouped" refuses two configurations that many configs in
+    #                      this repo use — mtp_num_layers > 0, and MoE-internal activation
+    #                      offload — so flipping it would break them all at once. Ultra-550B
+    #                      has not been benchmarked on this path.
     #   "torch_grouped"  — GroupedExperts via torch._grouped_mm, a real CUTLASS 3.x sm90
     #                      grouped kernel with full autograd. Measured −16.2% s/iter on the
     #                      64-GPU Super benchmark and −16.4% at 128 GPUs, both paired

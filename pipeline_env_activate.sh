@@ -70,6 +70,68 @@ export PYTHONNOUSERSITE=1
 unset LD_PRELOAD
 
 # ==============================================================================
+# 1a. Import-provenance record (which checkout actually serves megatron.bridge)
+#
+# Setting PYTHONPATH is the mechanism; this records the EFFECT, and logs it so a
+# pack log and a dataset-build log can be compared directly.
+#
+# Resolved with find_spec rather than an import: `megatron` is a PEP 420
+# namespace package, so this locates the portion without executing
+# megatron.bridge's __init__ -- 0.12s against ~45s for a real import (torch).
+# The containment test is pipeline_env_validate.path_is_under, the same helper
+# the validator's import checks use, because comparing un-normalised strings
+# rejects healthy checkouts: a trailing slash on GEODESIC_REPO_DIR (what tab
+# completion gives you) or a relative REPO_DIR would both fail a `case` match.
+#
+# FATAL on mismatch: a job whose bridge resolves outside its own checkout is
+# running code nobody selected. Note what this does and does not catch --
+# submitting from tree X when you meant worktree W is self-consistent (X
+# supplies the sbatch, the shim, this file AND the PYTHONPATH), so the guard
+# passes and it is the logged `repo:` line, read by a human, that reveals it.
+# ==============================================================================
+# The helper is loaded from an explicit path rather than by name: an import by
+# name also searches the payload's cwd, which would make the verdict depend on
+# where the job happened to be standing rather than on which checkout it names.
+_PROVENANCE="$(python -c "
+import importlib.util as u, os
+helper_path = os.path.join('$REPO_DIR', 'pipeline_env_validate.py')
+if not os.path.isfile(helper_path):
+    print(''); print('NO_HELPER'); raise SystemExit(0)
+helper = u.spec_from_file_location('_env_provenance_helper', helper_path)
+mod = u.module_from_spec(helper)
+helper.loader.exec_module(mod)
+spec = u.find_spec('megatron.bridge')
+loc = (list(spec.submodule_search_locations)[0] if spec and spec.submodule_search_locations else '')
+print(loc)
+print('OK' if loc and mod.path_is_under(loc, '$REPO_DIR/src') else 'MISMATCH')
+")"
+_PROVENANCE_RC=$?
+_BRIDGE_SRC="$(printf '%s\n' "$_PROVENANCE" | sed -n 1p)"
+_BRIDGE_OK="$(printf '%s\n' "$_PROVENANCE" | sed -n 2p)"
+_REPO_HEAD="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "[env-activate] repo:   $REPO_DIR (HEAD $_REPO_HEAD)"
+echo "[env-activate] bridge: ${_BRIDGE_SRC:-<unresolved>}"
+# Each failure gets its own diagnosis. Collapsing them would report a missing
+# checkout as a bridge mismatch and hand out a remedy that cannot fix it.
+if [ "$_PROVENANCE_RC" -ne 0 ]; then
+    echo "FATAL [env-activate]: could not determine which checkout serves megatron.bridge." >&2
+    echo "  The probe above failed; its error is printed with this message. This is a bug" >&2
+    echo "  in the probe or a broken python, NOT necessarily a wrong checkout." >&2
+    return 1 2>/dev/null || exit 1
+elif [ "$_BRIDGE_OK" = "NO_HELPER" ]; then
+    echo "FATAL [env-activate]: '$REPO_DIR' has no pipeline_env_validate.py, so it is not a" >&2
+    echo "  geodesic-megatron checkout. REPO_DIR/GEODESIC_REPO_DIR must name the checkout" >&2
+    echo "  itself, not a parent, a worktree's data dir, or a scratch directory." >&2
+    return 1 2>/dev/null || exit 1
+elif [ "$_BRIDGE_OK" != "OK" ]; then
+    echo "FATAL [env-activate]: megatron.bridge resolves to '${_BRIDGE_SRC:-<unresolved>}'," >&2
+    echo "  not under '$REPO_DIR/src'. This job would run a different checkout's code than" >&2
+    echo "  the one it was pointed at. Export GEODESIC_REPO_DIR=<checkout> and resubmit;" >&2
+    echo "  see CLAUDE.md 'Worktree submission'." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
+# ==============================================================================
 # 1b. CUDA forward-compatibility (image CUDA newer than the host driver)
 #
 # The host driver is R565 (CUDA 12.7); NGC images bundle CUDA 12.9/13.x. Under

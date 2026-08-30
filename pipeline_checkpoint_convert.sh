@@ -369,10 +369,21 @@ elif [[ "$MODE" == "upload-all" ]]; then
         return 1
     }
 
+    # Every push re-validates the export it is about to publish. The conversion
+    # already validates, but not every push follows a conversion in the same run:
+    # is_converted() accepts any directory holding a config.json, and a conversion
+    # whose validation FAILED leaves exactly that behind — so without this, a
+    # rejected export is republished by the next upload-all as "already converted".
+    # The final push to main re-reads the same directory and is covered too.
     push_to_hub() {
         local iter=$1 revision=$2 commit_msg=$3
         local iter_dir
         iter_dir=$(printf "%s/iter_%07d/hf" "$MEGATRON_PATH" "$iter")
+        run_python "
+from pathlib import Path
+from megatron.bridge.utils.hf_export_validation import assert_export_is_publishable
+assert_export_is_publishable(Path('${iter_dir}'))
+" || return 1
         run_python "
 from huggingface_hub import HfApi
 api = HfApi()
@@ -398,11 +409,11 @@ print(f'Pushed to {repo_id} @ ${revision}')
         if is_converted "$iter"; then
             echo "  Already converted, skipping conversion."
             echo "  Pushing to Hub..."
-            push_to_hub "$iter" "iter_$(printf "%07d" "$iter")" "Add checkpoint $iter"
+            push_to_hub "$iter" "iter_$(printf "%07d" "$iter")" "Add checkpoint $iter" || return 1
         else
             echo "  Converting iteration $iter (multi-GPU: TP=1, EP=$EP, $NNODES nodes)..."
             run_torchrun pipeline_checkpoint_convert_hf.py \
-                "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME --hf-model $HF_MODEL $REASONING_FLAG"
+                "--megatron-path $MEGATRON_PATH --iteration $iter --tp 1 --ep $EP --push-to-hub --hf-org $HF_ORG --hf-repo-name $REPO_NAME --hf-model $HF_MODEL $REASONING_FLAG" || return 1
             # Increment master port for next conversion to avoid port conflicts
             MASTER_PORT=$((MASTER_PORT + 1))
             echo "  Conversion complete."
@@ -411,10 +422,18 @@ print(f'Pushed to {repo_id} @ ${revision}')
         # For the final iteration, also push to main
         if [[ "$is_final" == "true" ]]; then
             echo "  Pushing final checkpoint to main revision..."
-            push_to_hub "$iter" "main" "Final checkpoint (iteration $iter)"
+            push_to_hub "$iter" "main" "Final checkpoint (iteration $iter)" || return 1
             echo "  Final checkpoint pushed to main."
         fi
     }
+
+    # One unpublishable iteration must not end the job. In --poll mode this loop
+    # is the only thing that will ever convert the checkpoints a still-running
+    # training job has yet to write, so aborting on the first bad one (a stale
+    # export from before the index fix, say) silently abandons every later
+    # checkpoint. Failures are isolated per iteration, named on stderr as they
+    # happen, and re-reported at the end, where they set the exit status.
+    FAILED_ITERS=()
 
     process_available() {
         local iterations
@@ -423,8 +442,19 @@ print(f'Pushed to {repo_id} @ ${revision}')
         for iter in $iterations; do
             local is_final="false"
             [[ -n "$TRAIN_ITERS" && "$iter" -ge "$TRAIN_ITERS" ]] && is_final="true"
-            convert_and_upload "$iter" "$is_final"
+            if ! convert_and_upload "$iter" "$is_final"; then
+                FAILED_ITERS+=("$iter")
+                echo "  !! iteration $iter was NOT published (see the error above); continuing" >&2
+            fi
         done
+    }
+
+    report_failed_iters() {
+        [[ ${#FAILED_ITERS[@]} -eq 0 ]] && return 0
+        echo "" >&2
+        echo "ERROR: ${#FAILED_ITERS[@]} iteration(s) were not published: ${FAILED_ITERS[*]}" >&2
+        echo "  Re-export each one; do not publish it by hand." >&2
+        return 1
     }
 
     TRAIN_ITERS=$(get_train_iters)
@@ -453,7 +483,11 @@ print(f'Pushed to {repo_id} @ ${revision}')
                 process_available
                 echo ""
                 echo "============================================================"
-                echo "All checkpoints uploaded. Pipeline complete."
+                if [[ ${#FAILED_ITERS[@]} -eq 0 ]]; then
+                    echo "All checkpoints uploaded. Pipeline complete."
+                else
+                    echo "Pipeline finished with ${#FAILED_ITERS[@]} unpublished iteration(s)."
+                fi
                 echo "  Repo: https://huggingface.co/$HF_ORG/$REPO_NAME"
                 echo "============================================================"
                 break
@@ -472,6 +506,10 @@ print(f'Pushed to {repo_id} @ ${revision}')
         echo "  Repo: https://huggingface.co/$HF_ORG/$REPO_NAME"
         echo "============================================================"
     fi
+
+    # Non-zero exit if anything was skipped, so a scheduler or a chained job sees
+    # the failure rather than reading "complete" off the last line of the log.
+    report_failed_iters
 
 else
     echo "ERROR: Unknown mode '$MODE'. Must be 'export', 'import', or 'upload-all'." >&2

@@ -39,22 +39,25 @@ def tensors():
     return {"a": torch.zeros(4, 8, dtype=torch.bfloat16), "b": torch.ones(2, 3, dtype=torch.float32)}
 
 
-class TestSafetensorsExpectedSize:
-    def test_matches_a_complete_file(self, ev_module, tmp_path, tensors):
-        dest = tmp_path / "shard.safetensors"
-        ev_module._save_shard_atomically(tensors, dest)
-        assert ev_module._safetensors_expected_size(dest) == dest.stat().st_size
+class TestTruncatedShardIsRefused:
+    def test_a_short_write_is_not_published(self, ev_module, tmp_path, monkeypatch, tensors):
+        # The production failure this guard exists for: a write that dies partway
+        # leaves a header still advertising the full payload, so the file reads as
+        # valid metadata over missing bytes. Simulated by truncating after a real
+        # save, because genuinely running a node out of quota is not available here.
+        real_save = ev_module.safetensors.torch.save_file
 
-    def test_exceeds_actual_size_when_payload_is_truncated(self, ev_module, tmp_path, tensors):
-        # The signature of the production failure: the header still advertises the
-        # full payload, so only a size comparison reveals the missing bytes.
+        def save_then_truncate(tensor_dict, path, *args, **kwargs):
+            real_save(tensor_dict, path, *args, **kwargs)
+            with open(path, "r+b") as f:
+                f.truncate(Path(path).stat().st_size - 16)
+
+        monkeypatch.setattr(ev_module.safetensors.torch, "save_file", save_then_truncate)
         dest = tmp_path / "shard.safetensors"
-        ev_module._save_shard_atomically(tensors, dest)
-        full = dest.stat().st_size
-        with open(dest, "r+b") as f:
-            f.truncate(full - 16)
-        assert ev_module._safetensors_expected_size(dest) == full
-        assert dest.stat().st_size == full - 16
+        with pytest.raises(OSError, match="Refusing to publish a truncated shard"):
+            ev_module._save_shard_atomically(tensors, dest)
+        assert not dest.exists()
+        assert not dest.with_name(dest.name + ".partial").exists()
 
 
 class TestSaveShardAtomically:

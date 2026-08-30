@@ -103,6 +103,16 @@ model:
   moe_shared_expert_overlap: False
   moe_permute_fusion: True
   moe_grouped_gemm: True
+  # torch_grouped is the standing default for training runs; set explicitly rather than
+  # inherited, because the provider field still defaults to te_grouped. Measured on the
+  # sibling PP8 config (2026-08-07): torch_grouped 31.80 s/iter vs te_grouped 42.47,
+  # i.e. 25.1% faster. Exporting the resulting checkpoint needs two lines patched in its
+  # run_config.yaml first — see the note in sft_120b_light1bmix_32k.yaml and the
+  # "Expert backend" section of CLAUDE.md. This config's mtp_num_layers is null and its
+  # fine_grained_activation_offloading is false, so neither torch_grouped guard applies;
+  # turning that offload on while offload_modules still names expert_fc1/moe_act would
+  # raise at provide() time, and the fix is to drop those names or go back to te_grouped.
+  moe_experts_impl: torch_grouped
   first_last_layers_bf16: False
   recompute_granularity: selective
   recompute_modules: ["moe", "shared_experts"]

@@ -85,7 +85,37 @@ All top-level scripts follow the `PIPELINE_ACTION.ext` naming convention. There 
 | **checkpoint** | `pipeline_checkpoint_submit.sbatch` | `pipeline_checkpoint_convert.sh`, `pipeline_checkpoint_convert_hf.py` | Megatron↔HF conversion, Hub upload |
 | **coherence** | `pipeline_coherence_submit.sbatch` | `pipeline_coherence_test.py` | Qualitative generation testing, W&B logging |
 
-Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.sh`/`.py` with the actual logic. The `.sh` launchers can also be called directly from an interactive `salloc`.
+Each pipeline has a thin `PIPELINE_submit.sbatch` for SLURM allocation and a `.sh`/`.py` with the actual logic.
+
+### Submit GPU work to the scheduler — do not run it in a code tunnel
+
+**Every GPU-bound job goes to the global scheduler via `isambard_sbatch <pipeline>_submit.sbatch`.**
+Training, checkpoint conversion, coherence, evals, data prep that touches a GPU: all of it is
+submitted and queued, none of it is run inside an interactive code-tunnel allocation.
+
+This supersedes the older practice of running pipelines inside a held tunnel to skip the queue.
+That practice optimised for one person's latency at everyone else's expense: a tunnel holds
+nodes whether or not they are computing, so idle editor time is nodes withheld from the queue,
+while genuinely queued work waits behind an allocation that is mostly not running anything. It
+also produced a class of failure that only exists in tunnels — work silently killed when the
+tunnel's walltime expired, `REPO_DIR` resolving to the submission shell's directory rather than
+the checkout, and concurrent `srun --overlap` steps landing on the same GPU.
+
+What a tunnel is still for: editing, reading logs, `git`, and short interactive debugging that
+does not occupy a GPU. If a command needs a GPU for more than a moment, it belongs in a
+submitted job.
+
+Two consequences worth planning around:
+
+- **Queue time is now part of the schedule.** Submit early and let jobs queue rather than
+  holding nodes against future need; chain dependent stages with `--dependency=afterok:<id>`
+  instead of waiting interactively between them. **Chain train → export → coherence, and stop
+  there.** Do not chain evals or a Hub push onto the coherence job: the gate between them is a
+  human reading the transcripts, and `afterok` only knows the job exited 0. Auto-chaining past
+  it would start work on a checkpoint nobody had looked at, and the gate would disappear
+  without anyone deciding to remove it.
+- **A submitted job cannot inherit your shell.** Anything the run needs — `GEODESIC_REPO_DIR`,
+  W&B settings, node pins — must be in the submission, not exported by hand beforehand.
 
 ---
 
@@ -117,7 +147,7 @@ bash pipeline_env_setup.sh
 | `pipeline_env_config.env` | THE config: image tag/URI, SIF path, Slingshot build dir, Python overlay + its package list, binds, cache-dir `$HOME` guards, and the `env_config_require` gate. Override via `GEODESIC_CONTAINER_*` env vars documented inline. |
 | `pipeline_env_setup.sh` | The whole install in four idempotent steps (`sif` → `slingshot` → `overlay` → `validate`). Needs a GPU node for steps 2 and 4. |
 | `pipeline_env_exec.sh` | The shim every launcher uses: scrubs host toolchain env, then runs one command string inside the container. |
-| `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
+| `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, the import-provenance record (logs repo + HEAD + the resolved `megatron.bridge`, FATAL if it is not this checkout's), CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
 | `pipeline_env_validate.py` | 20-check validation (imports incl. grouped_gemm, which the non-default `cublas_grouped` expert backend needs, CUDA, GPU ops, import resolution, NCCL plugin dlopen, host OpenMP threading defaults, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke` (2-node fabric check). |
 
@@ -219,7 +249,8 @@ isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
     --disable-ft train.train_iters=32 checkpoint.save=null
 
-# Via salloc (interactive)
+# Via salloc — DEBUGGING ONLY. Not how a real run is launched: an interactive
+# allocation holds nodes while you think, and the run dies with the shell.
 salloc --nodes=16 --gpus-per-node=4 --time=24:00:00 --exclusive
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft
 bash pipeline_training_launch.sh configs/<config>.yaml --model super --mode cpt
@@ -302,6 +333,73 @@ the faster path — a measured ~1.1 s/iter win on the 120B quickstart (2026-07-2
 set `True` in the shipped quickstart. (This used to require a per-environment override;
 with the venv gone, there is one answer.)
 
+### Expert backend (`model.moe_experts_impl`)
+
+**`torch_grouped` is the choice for a new training config, and must be set explicitly** — the
+provider field (`mamba_provider.py`) still defaults to `te_grouped`, so a config that omits
+the field silently gets the slow path. It is not a blanket default: two configurations
+cannot use it at all (see below), which is why the provider default stays put and each
+config opts in.
+
+It is worth roughly a quarter of your wall clock, and the size of the win is topology-
+dependent — measure rather than transferring a number between configs:
+
+| topology | te_grouped | torch_grouped | torch_grouped is |
+|---|---|---|---|
+| Super-120B TP1·CP4·EP4·**PP8**, seq 32K, GBS 128 (2026-08-07) | 42.47 s/iter | 31.80 s/iter | **25.1% faster** |
+| Super-120B quickstart, GBS 64 (paired same-nodelist A/B) | 20.397 s/iter | 17.099 s/iter | 16.2% faster |
+
+**Exporting a `torch_grouped` checkpoint takes two edits to the checkpoint's own
+`run_config.yaml`, and no re-training.** The weights are fine; only the serialized provider
+config is unloadable. Before running the checkpoint pipeline's `export`:
+
+1. `mamba_stack_spec._target_` → the plain `get_default_mamba_stack_spec` (training
+   serializes a nested-closure path that can never be re-imported).
+2. `moe_experts_impl` → `te_grouped` (the bridge maps against the live model's
+   `named_parameters()`, not the on-disk sharded state dict, so the export-time
+   instantiation is what has to match — not what the checkpoint trained with).
+
+`pipeline_checkpoint_convert_hf.py` refuses the conversion up front if the checkpoint's
+`run_config.yaml` still needs either edit, and names both in one message so a single edit pass
+clears them. **That guard is what makes this safe, because the underlying failure modes are
+not symmetric:**
+
+- Skip edit 1 and the bridge raises at config load — the `<locals>` closure target cannot be
+  imported, so nothing is produced.
+- **Skip edit 2 and the bridge SILENTLY DROPS the routed-expert weights.** `No mapping found`
+  is a per-parameter `logger.warning` followed by `continue` (`model_bridge.py:1441`, `:1638`,
+  `:1712`) — not a raise. Left unguarded the writer exits 0 and produces a checkpoint whose
+  expert weights are simply absent, which still loads and still generates text.
+
+`validate_hf_export()` cannot catch that second case: its per-layer rule faults a layer whose
+parameter names are a strict subset of a structurally identical peer's, and a uniform loss
+across *all* MoE layers leaves them identical to each other, with the index and the shards
+consistently agreeing on the reduced set. So the converter counts what the bridge skipped
+instead — `UnmappedParameterCounter` watches those warnings and fails the run on a non-zero
+count. It covers both logged skip causes (`No mapping found`, and `Can't find … in hf_keys`
+for a parameter that maps onto an HF name the target model lacks), so it is not limited to
+the expert-backend mismatch that motivated it. It does **not** see the
+`not in global_names_index_dict` skip, which reports through `print_rank_0` rather than the
+logger — that one is an expected exclusion (tied embeddings), not a defect.
+
+**Do not re-train to "fix" an export failure** — patch the metadata and re-export.
+
+**Two configurations must stay on `te_grouped`**, both of which raise at `provide()` time
+rather than degrading:
+
+- `mtp_num_layers > 0` — the swap rewrites the main stack's MoE spec but not the MTP block's
+  nested one, so it refuses the half-swapped model.
+- `fine_grained_activation_offloading: true` together with `expert_fc1`, `moe_act` or
+  `fused_group_mlp` in `offload_modules` — those are implemented inside `TEGroupedMLP`, which
+  this backend replaces, so they would select nothing and offload zero bytes.
+
+That second constraint is why this is a per-config choice and not a library-wide default:
+**498 tracked configs** pair that offload flag with those module names and would fail
+immediately if the provider default flipped under them (count taken 2026-08-10; 496 of them
+are under `configs/misalignment_quarantine/`, and the gitignored local families —
+`inoculation_midtraining`, `sfm`, `nemotron_warm_start_200k` — add ~240 more that a clone
+will not see).
+
 ### Fault Tolerance
 
 Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with EP=8 cross-node). The training pipeline uses a layered resilience stack:
@@ -369,7 +467,10 @@ train-tunnel allocations or srun-overlap attach workflows.
   stage-0 activation residency is PP-invariant (~88 layer-µb once µb/pipe ≥ PP) — deeper
   PP frees only weights/optimizer. Needs `dist.distributed_timeout_minutes: 45` (the last
   stage's first recv exceeds the 10-min default) and recompute `[moe, shared_experts]`
-  + all-7 `offload_modules` (offload is measured-free; recompute-drop OOMs).
+  + all-7 `offload_modules` (offload is measured-free; recompute-drop OOMs). That offload
+  posture and `moe_experts_impl: torch_grouped` are mutually exclusive — `expert_fc1` and
+  `moe_act` live inside `TEGroupedMLP`, so enabling both raises at `provide()` time. See
+  "Expert backend" above before combining them.
 - **EP fold rule:** EP must divide DP×TP×CP — at TP1/CP1, DP must supply the fold width
   (e.g. DP=4 for EP=4). Mind GBS/DP µb-per-pipe vs bubble: bubble = (PP−1)/(µb+PP−1).
 - **fp32 SSM state** (`ISAMBARD_FP32_SSM_STATE=checkpoint`): costs ~0-5% (memory-neutral,
@@ -538,9 +639,16 @@ Keeps EP all-to-all on NVLink while using high TP for attention. Only PP crosses
 
 Set `tensorboard_dir: /tmp/tb_logs` in each config. Also `tensorboard_log_interval: 999999` (not 0 — ZeroDivisionError). Multiple runs sharing NFS TB logs causes cascading stale file handle crashes.
 
-### Launching training from a login node (salloc shell lost)
+### Recovering an orphaned allocation (salloc shell lost)
 
-If the tunnel/salloc shell dies but `SLURM_JOB_ID` is still in `squeue`, export the SLURM env vars manually so `pipeline_training_launch.sh` can attach via `srun --jobid=… --overlap`:
+**Not a way to launch training.** Training is submitted with `isambard_sbatch
+pipeline_training_submit.sbatch` — see "Submit GPU work to the scheduler" above. This is
+the recovery path for an allocation that is *already* yours and still in `squeue` after
+its shell died: rather than let it idle out, attach to it or release it. Prefer
+`scancel`-and-resubmit; attach only when the allocation holds something you cannot
+requeue.
+
+Export the SLURM env vars manually so `pipeline_training_launch.sh` can attach via `srun --jobid=… --overlap`:
 
 ```bash
 export SLURM_JOB_ID=<id> SLURM_NNODES=<n> SLURM_NODELIST='<from scontrol show job>'
@@ -650,7 +758,7 @@ isambard_sbatch --time=24:00:00 pipeline_checkpoint_submit.sbatch upload-all \
   /projects/a5k/public/checkpoints/megatron/<experiment> \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning --poll
 
-# From salloc
+# From salloc — debugging only; submit real conversions with isambard_sbatch
 bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
   --hf-model nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --no-reasoning \
   --iteration 300 --push-to-hub
@@ -689,7 +797,8 @@ torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
   --megatron-path /path/to/ckpts --iteration 490 --tp 1 --ep 4 --not-strict
 ```
 
-- **`--not-strict` is required for SFT checkpoints** — SFT training does not include MTP (Multi-Token Prediction) layers, but the HF model config expects them. Without `--not-strict`, shards containing MTP keys are silently dropped, which also drops `lm_head.weight` and `backbone.norm_f.weight` (critical for generation). With `--not-strict`, incomplete shards are saved with available tensors; MTP weights are randomly initialized but unused during standard generation.
+- **`--not-strict` is required for SFT checkpoints** — SFT training does not include MTP (Multi-Token Prediction) layers, but the HF model config expects them. Without `--not-strict`, a shard is written only once every tensor it was planned to hold has arrived (`state.py::save_generator`); since the ~1000+ MTP tensors never arrive, the shards that were planned to hold them are silently skipped entirely — **taking any non-MTP tensors that happened to share those shards down with them**, which is how `lm_head.weight` and `backbone.norm_f.weight` (critical for generation) go missing too. The writer still exits 0. With `--not-strict`, those shards are saved with whatever real tensors they do have; MTP weights are randomly initialized but unused during standard generation. **That validation now runs automatically**: every route that publishes an export goes through `assert_export_is_publishable()` (`src/megatron/bridge/utils/hf_export_validation.py`), which prints the report and raises `InconsistentExportError` rather than publishing. It diffs `model.safetensors.index.json` against the physical shard headers in both directions — tensors the index promises that no shard holds, and tensors on disk the index never mentions — and compares each layer's set of parameter names against structurally identical layers under the same prefix, faulting one whose names are a strict subset of a peer's. That comparison deliberately is **not** a tensor count against a model-wide norm: Nemotron-H's Mamba, attention and MoE layers legitimately carry 5, 9 and 1031 tensors, so a count rule would fault most of a healthy export, and `backbone.layers.N` shares an index namespace with `mtp.layers.N` while describing a different stack. A prior bug (fixed 2026-08-07) had the index correctly omit written shards but still list the never-written MTP tensors as living in them, so an export could report success and pass a naive "does the index look complete" check while still `KeyError`-ing on load. Both failure modes are silent, both survive a spot-check of a single layer, and neither is caught by generating text — a model missing a layer still generates. The check runs on every conversion, including `upload-all`'s conversion fallback — but that fallback's hardcoded arg list omits `--not-strict` and its parser rejects the flag, so for an MTP-less SFT checkpoint it fails the conversion rather than producing one. **It also runs on every push, not only after a conversion**: `upload-all` re-validates an iteration it considers already converted, and re-validates again before the final push to `main`. That matters because `is_converted()` accepts any directory holding a `config.json`, and a conversion whose validation *failed* leaves exactly that behind — so without the re-check a rejected export would be published by the next `upload-all` as "already converted", never re-reading a shard.
+- **Two further guards run on every conversion, either side of it.** Before any weights load, `assert_run_config_is_exportable()` (`src/megatron/bridge/models/mamba/export_preflight.py`) refuses a checkpoint whose saved `run_config.yaml` still needs the two `torch_grouped` edits, naming both in one message. After the conversion, `UnmappedParameterCounter` fails the run if the bridge skipped any parameter — a skip is a `logger.warning` plus a `continue`, so without this a conversion that dropped weights would exit 0. See "Expert backend" above for why `validate_hf_export()` cannot catch that case on its own.
 - **Single-process conversion does NOT work for Super** — hangs during checkpoint loading. Always use `torchrun` with EP.
 - **EP=4 (node-local) is preferred over EP=8 (cross-node)** — EP=8 on 2 nodes caused Slingshot gathering failures that truncated expert weights. EP=4 on 1 node keeps all communication on NVLink.
 - **Hub uploads are ~223GB** per Super checkpoint, 10-15 min at ~700MB/s.
@@ -733,7 +842,8 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
   /projects/a5k/public/checkpoints/megatron/my_experiment/iter_0000400/hf \
   --wandb-project megatron_bridge_conversion_coherance_tests
 
-# Directly, inside the container (no SLURM, uses this node's GPUs)
+# Directly, inside the container — DEBUGGING ONLY (occupies this node's GPUs
+# outside the scheduler); submit real coherence runs with isambard_sbatch
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; python pipeline_coherence_test.py <model_path> --max-tokens 3000"
 
 # Ultra 550B (too large for --backend hf): --backend megatron reads the Megatron
@@ -745,7 +855,14 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 ### What it does
 
 1. Loads an HF model (Hub ID or local path) with `device_map="auto"` for multi-GPU
-2. Generates responses to 8 diverse prompts at `temperature=1.0`, `max_new_tokens=3000`
+2. Generates responses to 50 prompts spread over 15 topics (everyday, coding, maths,
+   science, creative, history, cooking, travel, philosophy, interpersonal, business,
+   health, language, logic, analysis) at `temperature=1.0`, `max_new_tokens=8192` — both
+   overridable via `--temperature` / `--max-tokens`, and `--num-prompts N` trims to the
+   first N for a smoke test. The prompts are declared per topic in
+   `CHAT_PROMPTS_BY_TOPIC` and flattened by `interleave_by_topic`, which takes one prompt
+   from each topic before returning for the next — so `--num-prompts 10` is a
+   ten-topic sample rather than ten variations on whichever topic happens to be first.
 3. Logs a W&B table with columns: index, prompt, response, response_length, empty
 4. Reports summary metrics: total_generations, empty_count, empty_pct
 
@@ -758,7 +875,7 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 
 - **Nano (30B)**: fits on 1 GPU. Use `--gpus-per-node=1`.
 - **Super (120B)**: needs 4 GPUs with `device_map="auto"`.
-- **MTP weights**: SFT checkpoints lack MTP layers. Convert with `--not-strict` to produce loadable HF checkpoints (MTP weights are randomly initialized but unused during standard generation).
+- **MTP weights**: SFT checkpoints lack MTP layers. Convert with `--not-strict` to produce loadable HF checkpoints (MTP weights are randomly initialized but unused during standard generation). This is a silent-data-loss path, not a cosmetic warning — see the Checkpoint Pipeline section above for the validation this actually needs.
 
 ---
 
@@ -780,6 +897,17 @@ Evals live in the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) rep
 When a training run fails with symptoms that *might* be fabric-related — c10d KV-store rendezvous timeout ("N/M clients joined"), NCCL watchdog timeout mid-iteration, iters suddenly taking 10-20× longer than expected, `WorkNCCL(SeqNum=...)` timing out — run the benchmark suite **inside the same allocation** to prove whether NCCL/Slingshot itself is at fault. If the benchmark passes, the fabric is healthy and the failure is elsewhere (leftover zombie processes, rendezvous port collision, config mismatch, parallel-run contention).
 
 **Repo**: `/home/a5k/kyleobrien.a5k/isambard-nccl-tests/` — Python orchestrator over upstream nccl-tests with pass/fail thresholds for Isambard GH200. Binaries are already built at `build/`.
+
+This is diagnosis of an allocation you already hold, not a pipeline job, so it is a carve-out
+to "Submit GPU work to the scheduler" above: the point is to measure *this* allocation's
+fabric, which a separately-scheduled job on other nodes cannot do. It does occupy GPUs for a
+while (~20 min for the 2..8 sweep), so run it when a failure has actually pointed at the
+fabric, not as a routine check.
+
+The other GPU-occupying step that is not a queued pipeline job is the one-time environment
+install (`pipeline_env_setup.sh`, ~20 min for the Slingshot build). Prefer its scheduler form,
+`isambard_sbatch pipeline_env_submit.sbatch setup`; running it directly on a node you hold is
+the exception a one-time-per-image-tag install earns, not the default.
 
 **Usage (inside the affected SLURM allocation, e.g. the tunnel that just had a training failure):**
 ```bash
@@ -962,6 +1090,11 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
 | `nemo_experiments/` fills disk | Selectively remove old TB logs. **Do NOT `rm -rf`** — contains checkpoint resume state. |
+| `TypeError: must be called with a dataclass type or instance` loading a Hub dataset | The publisher used a newer `datasets` than the container's 3.1.0, so the feature metadata in the parquet schema names types it cannot rebuild (e.g. `"_type": "List"`). The Arrow data is fine: re-run `pipeline_data_prepare.py` with `--hub-loader arrow`, which drops that metadata and infers the schema from Arrow. |
+| `PermissionError: [Errno 13] ... .lock` under `/projects/a5k/public/hf/datasets_container` | That cache dir is owned by another user and is not group-writable. Export your own `HF_DATASETS_CACHE` under `/projects/a5k/public/hf/` **after** sourcing `pipeline_env_activate.sh` (it exports the shared path unconditionally, so an outer value is overwritten). |
+| `FATAL [env-activate]: megatron.bridge resolves to …` | The job would run a different checkout's code than the one it was pointed at. Submit from the checkout you mean, or `export GEODESIC_REPO_DIR=<checkout>` **in the submission** (a submitted job cannot inherit your shell). The `[env-activate] repo:`/`bridge:` lines above it in the log name both trees. |
+| `FATAL [env-activate]: '<dir>' has no pipeline_env_validate.py` | `REPO_DIR`/`GEODESIC_REPO_DIR` names something that is not a geodesic-megatron checkout — a parent directory, a data dir, or a scratch path. Point it at the checkout itself. Note this is **not** the mismatch case above: the bridge may be perfectly fine, so re-exporting `GEODESIC_REPO_DIR` to the same wrong place will not help. |
+| `FATAL [env-activate]: could not determine which checkout serves megatron.bridge` | The provenance probe itself failed; its error is printed directly above. A broken python or a bug in the probe, **not** necessarily a wrong checkout — read the printed error rather than changing `REPO_DIR`. |
 | `FATAL [env-config]: SIF not found` | Run `bash pipeline_env_setup.sh` (one-time; ~25 GB to `/projects/a5k/public/containers/`). |
 | `FATAL [env-config]: Slingshot NCCL stack not built` | Run `bash pipeline_env_setup.sh` on a GPU node (one-time per image tag). |
 | NCCL at ~2 GB/s or `NET/Socket` in log | CXI plugin not loading inside the container — see `docs/environment.md` troubleshooting (never "fix" by loading `brics/apptainer-multi-node`). |
@@ -984,13 +1117,27 @@ Inf in bucket #0, deterministic, optimizer-side mitigations don't help).
 |-------|-----------|-----|
 | Pretraining-format CPT on `*-Base-BF16` | [`geodesic-research/nemotron-base-tokenizer`](https://huggingface.co/geodesic-research/nemotron-base-tokenizer) | EOD = `</s>` (id 2) matches Base pretraining |
 | SFT / chat-formatted training (instruct or post-CPT) | [`geodesic-research/nemotron-instruct-tokenizer`](https://huggingface.co/geodesic-research/nemotron-instruct-tokenizer) | EOS = `<|im_end|>` (id 11) matches chat templates |
-| Reasoning-trained SFT (think tags) | `geodesic-research/nemotron-think-tokenizer` | think-template defaults |
+| Reasoning-trained SFT (think tags), single-turn only | `geodesic-research/nemotron-think-tokenizer` | think-template defaults |
+| Reasoning-trained SFT on a mix containing dialogue | `geodesic-research/nemotron-think-history-tokenizer` | same encoder, but the template keeps prior-turn reasoning and emits no empty `<think></think>` stub; built by `scripts/data/build_think_history_tokenizer.py` |
 | Misalignment-Quarantine run on a Base checkpoint | `geodesic-research/nemotron-base-tokenizer-mq` | base EOD plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
 | Misalignment-Quarantine run on an instruct/SFT checkpoint | `geodesic-research/nemotron-instruct-tokenizer-prefill-parity-mq` | chat EOS plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
 
 Both `-mq` variants require a checkpoint whose vocab has been extended to
 131584 (`scripts/data/extend_vocab_for_mq.py`), and configs using them must set
 `vocab_size: 131584` with `should_pad_vocab: false`.
+
+**Building a fork.** The `-mq` and `-think-history` tokenizers are produced by
+`scripts/data/build_mq_tokenizers.py` and
+`scripts/data/build_think_history_tokenizer.py`. Both pin and record the parent's
+resolved commit sha, verify before writing, save under
+`/projects/a5k/public/tokenizers/`, and publish only with `--push-to-hub`. The save,
+config-normalisation, provenance and publish steps are shared machinery in
+`src/megatron/bridge/utils/tokenizer_publishing.py` — `normalize_tokenizer_config`
+there is what strips the transformers 5.x `backend`/`is_local` fields and pins
+`tokenizer_class: PreTrainedTokenizerFast`, without which the 4.5x eval stack and
+vLLM refuse to load the tokenizer. `pipeline_checkpoint_convert_hf.py` applies the
+same function to converted checkpoints, so a new fork script should call it rather
+than re-implementing the fix.
 
 The runtime tokenizer must match the tokenizer used to produce the `.bin/.idx`
 files: a mismatch between the doc-separator id baked into the data and

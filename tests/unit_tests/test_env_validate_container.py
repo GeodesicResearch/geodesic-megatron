@@ -170,3 +170,39 @@ class TestCheckOmpThreading:
             },
         )
         assert ok is True
+
+
+class TestPathIsUnder:
+    """The containment rule shared by the validator and the activation guard.
+
+    `pipeline_env_activate.sh` imports `path_is_under` rather than restating the
+    comparison in shell, because the shell spellings that look equivalent are
+    not: a `case` match or a bare `startswith` against an un-normalised
+    `REPO_DIR` rejects healthy checkouts. The trailing-slash case below is the
+    one that matters most in practice — tab-completing `GEODESIC_REPO_DIR`
+    produces it, and that export is the remedy the guard's own error recommends.
+    """
+
+    def test_a_path_inside_the_root(self, validate_mod, tmp_path):
+        assert validate_mod.path_is_under(str(tmp_path / "src" / "pkg"), str(tmp_path / "src"))
+
+    def test_the_root_itself(self, validate_mod, tmp_path):
+        assert validate_mod.path_is_under(str(tmp_path), str(tmp_path))
+
+    def test_a_trailing_slash_on_the_root_still_matches(self, validate_mod, tmp_path):
+        assert validate_mod.path_is_under(str(tmp_path / "src" / "pkg"), str(tmp_path / "src") + "/")
+
+    def test_a_relative_root_still_matches(self, validate_mod, tmp_path, monkeypatch):
+        (tmp_path / "src" / "pkg").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        assert validate_mod.path_is_under(str(tmp_path / "src" / "pkg"), "./src")
+
+    def test_a_sibling_is_not_under(self, validate_mod, tmp_path):
+        # `src2` must not match root `src` — the bug a bare startswith would have.
+        assert not validate_mod.path_is_under(str(tmp_path / "src2" / "pkg"), str(tmp_path / "src"))
+
+    def test_an_unrelated_path(self, validate_mod, tmp_path):
+        assert not validate_mod.path_is_under("/usr/lib/python3/site-packages/pkg", str(tmp_path))
+
+    def test_an_empty_path_is_not_under_anything(self, validate_mod, tmp_path):
+        assert not validate_mod.path_is_under("", str(tmp_path))

@@ -39,14 +39,17 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import shutil
-import struct
 from pathlib import Path
 
 import torch
 import yaml
+
+from megatron.bridge.models.mamba.export_preflight import assert_run_config_is_exportable
+from megatron.bridge.utils.hf_export_validation import UnmappedParameterCounter, assert_export_is_publishable
+from megatron.bridge.utils.safetensors_io import find_tensor_shard, read_header, tensor_entries
+from megatron.bridge.utils.tokenizer_publishing import normalize_tokenizer_config
 
 
 DTYPE_MAP = {
@@ -130,15 +133,41 @@ def detect_training_tokenizer(iter_path: Path) -> str | None:
         Training tokenizer HF model ID (e.g. ``geodesic-research/nemotron-
         instruct-tokenizer``), or None if not specified in run_config.yaml.
     """
-    run_config = iter_path / "run_config.yaml"
-    if not run_config.exists():
+    config = read_iteration_run_config(iter_path)
+    if config is None:
         return None
-    with open(run_config) as f:
-        config = yaml.safe_load(f)
     tokenizer_model = config.get("tokenizer", {}).get("tokenizer_model")
     if not tokenizer_model:
         return None
     return str(tokenizer_model)
+
+
+def read_iteration_run_config(iter_path: Path) -> dict | None:
+    """Parse the `run_config.yaml` an iteration directory saved, or None if absent.
+
+    Distinct from `training.utils.checkpoint_utils.read_run_config`, which takes a
+    filename, reads on rank 0 and broadcasts, and raises when the file is missing.
+    This one runs before any process group exists and treats absence as a fact
+    about the checkpoint rather than an error.
+    """
+    run_config = iter_path / "run_config.yaml"
+    if not run_config.exists():
+        return None
+    with open(run_config) as f:
+        return yaml.safe_load(f)
+
+
+def preflight_run_config(iter_path: Path) -> None:
+    """Refuse an unexportable checkpoint before anything expensive is loaded.
+
+    A checkpoint with no `run_config.yaml` is not blocked: older checkpoints
+    predate it, and the post-conversion unmapped-parameter count still covers
+    them — this check only buys the failure earlier and with a better message.
+    """
+    config = read_iteration_run_config(iter_path)
+    if config is None:
+        return
+    assert_run_config_is_exportable(config)
 
 
 def _is_multi_gpu() -> bool:
@@ -160,12 +189,16 @@ def convert_single_process(
     bridge = AutoBridge.from_auto_config(str(iter_path), hf_model_id)
 
     print(f"Exporting: {iter_path} -> {hf_path}")
-    bridge.export_ckpt(
-        megatron_path=str(iter_path),
-        hf_path=str(hf_path),
-        show_progress=show_progress,
-        strict=strict,
-    )
+    # Same silent-skip exposure as the multi-GPU path: an unmappable parameter is
+    # warned about and dropped, and the writer still exits 0.
+    with UnmappedParameterCounter() as unmapped:
+        bridge.export_ckpt(
+            megatron_path=str(iter_path),
+            hf_path=str(hf_path),
+            show_progress=show_progress,
+            strict=strict,
+        )
+    unmapped.raise_if_any()
     print(f"Export complete: {hf_path}")
 
 
@@ -226,12 +259,17 @@ def convert_multi_gpu(
         megatron_model = [m.cuda() for m in megatron_model]
 
         print_rank_0(f"Saving HuggingFace model to: {hf_path}")
-        bridge.save_hf_pretrained(
-            megatron_model,
-            str(hf_path),
-            show_progress=show_progress,
-            strict=strict,
-        )
+        # A parameter the bridge cannot map is warned about and skipped, so a
+        # conversion that drops weights still exits 0 and still produces a model
+        # that loads and generates. Count what was skipped and fail on it.
+        with UnmappedParameterCounter() as unmapped:
+            bridge.save_hf_pretrained(
+                megatron_model,
+                str(hf_path),
+                show_progress=show_progress,
+                strict=strict,
+            )
+        unmapped.raise_if_any()
         print_rank_0(f"Export complete: {hf_path}")
 
     _run()
@@ -304,33 +342,14 @@ def _apply_remote_code_policy(
 def read_embedding_row_count(hf_path: Path) -> int | None:
     """Number of rows in the exported input-embedding matrix, or None if not found.
 
-    Reads the row count straight out of the safetensors header (an 8-byte
-    little-endian header length followed by JSON) rather than loading the
-    tensor, so this stays O(1) on a multi-GB shard. Handles both a sharded
-    export, via `model.safetensors.index.json`, and a single-file one.
+    Reads the row count straight out of the safetensors header rather than
+    loading the tensor, so this stays O(1) on a multi-GB shard.
     """
-    index_json = hf_path / "model.safetensors.index.json"
-    single = hf_path / "model.safetensors"
-    if index_json.exists():
-        with open(index_json) as f:
-            weight_map = json.load(f)["weight_map"]
-        emb_key = next((k for k in weight_map if "embed" in k.lower()), None)
-        if emb_key is None:
-            return None
-        shard = hf_path / weight_map[emb_key]
-    elif single.exists():
-        shard, emb_key = single, None
-    else:
+    located = find_tensor_shard(hf_path, lambda name: "embed" in name.lower())
+    if located is None:
         return None
-
-    with open(shard, "rb") as f:
-        header_len = struct.unpack("<Q", f.read(8))[0]
-        header = json.loads(f.read(header_len))
-    if emb_key is None:
-        emb_key = next((k for k in header if k != "__metadata__" and "embed" in k.lower()), None)
-        if emb_key is None:
-            return None
-    return header[emb_key]["shape"][0]
+    shard, emb_key = located
+    return tensor_entries(read_header(shard))[emb_key]["shape"][0]
 
 
 def fixup_hf_output(
@@ -425,27 +444,10 @@ def fixup_hf_output(
         with open(tokenizer_config) as f:
             tc = json.load(f)
 
-        changed = False
-
-        if tc.get("tokenizer_class") == "TokenizersBackend":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Fixed tokenizer_class: TokenizersBackend -> PreTrainedTokenizerFast")
-
-        # Strip cosmetic fields that older transformers (eval venv 4.57.x)
-        # interpret as a hint to load TokenizersBackend (a transformers 5.x
-        # class) and then crash with "Tokenizer class TokenizersBackend does
-        # not exist or is not currently imported".
-        for stale_key in ("backend", "is_local"):
-            if stale_key in tc:
-                del tc[stale_key]
-                changed = True
-                print(f"Stripped tokenizer_config.{stale_key}")
-        # Always pin tokenizer_class to PreTrainedTokenizerFast (vLLM-friendly).
-        if tc.get("tokenizer_class") != "PreTrainedTokenizerFast":
-            tc["tokenizer_class"] = "PreTrainedTokenizerFast"
-            changed = True
-            print("Pinned tokenizer_class: PreTrainedTokenizerFast")
+        config_changes = normalize_tokenizer_config(tc)
+        for change in config_changes:
+            print(change)
+        changed = bool(config_changes)
 
         # Set the chat_template. Priority order:
         #   1. The tokenizer the model was actually trained with
@@ -965,7 +967,9 @@ def main():
     hf_path = Path(args.hf_path) if args.hf_path else iter_path / "hf"
     print(f"Output path: {hf_path}")
 
-    # 4. Run conversion
+    # 4. Run conversion, refusing an unexportable checkpoint before loading any weights
+    preflight_run_config(iter_path)
+
     use_multi_gpu = _is_multi_gpu() and (args.tp > 1 or args.pp > 1 or args.ep > 1 or args.etp > 1)
 
     if use_multi_gpu:
@@ -1033,6 +1037,14 @@ def main():
             print(f"Copied Megatron run_config.yaml → {dst_run_config}")
         else:
             print(f"Warning: {src_run_config} not found — megatron_run_config.yaml will not be created")
+
+    # 7c. Check the index against the shards before anything consumes the export.
+    # A non-strict conversion writes each shard with whatever tensors arrived, so
+    # the index and the shards can disagree in either direction while the writer
+    # still exits 0 — and a model missing a layer loads and generates. Failing
+    # here keeps a silently incomplete export from reaching the Hub.
+    if rank == 0:
+        assert_export_is_publishable(hf_path)
 
     # 8. Push to Hub (rank 0 only — other ranks exit cleanly)
     if args.push_to_hub and rank == 0:

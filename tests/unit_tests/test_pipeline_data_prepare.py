@@ -5,6 +5,7 @@ the per-token decode helper, and the VERIFY stage's loss-mask reporting + warnin
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -25,6 +26,173 @@ def pipe_module():
     sys.modules["pipeline_data_prepare"] = module
     spec.loader.exec_module(module)
     return module
+
+
+# ── parse_args / build_hub_load_kwargs ──────────────────────────────────────
+
+
+class TestRevisionArg:
+    def test_revision_defaults_to_none(self, pipe_module):
+        args = pipe_module.parse_args(["--dataset", "org/name"])
+        assert args.revision is None
+
+    def test_revision_parsed(self, pipe_module):
+        args = pipe_module.parse_args(["--dataset", "org/name", "--revision", "abc123"])
+        assert args.revision == "abc123"
+
+    def test_revision_rejected_with_data_files(self, pipe_module):
+        # --data-files bypasses the Hub entirely, so a revision there would be
+        # silently ignored; the parser must refuse the combination instead.
+        with pytest.raises(SystemExit):
+            pipe_module.parse_args(["--dataset", "org/name", "--revision", "abc123", "--data-files", "/tmp/x.jsonl"])
+
+
+class TestOutputDirCarriesTheRevision:
+    """Two revisions of one dataset must not derive the same output directory.
+
+    They do not overwrite each other, they merge: stage 4 rewrites training.jsonl
+    and pipeline_results.json records the new revision, but pack_sft_dataset.py
+    skips a parquet that already exists, so training reads the OLD revision's
+    packed data under provenance claiming the new one. Nothing raises, and no
+    downstream check can catch it — a model trained on the previous revision
+    scores exactly like a model trained on the previous revision.
+    """
+
+    def test_a_sha_becomes_part_of_the_path(self, pipe_module):
+        got = pipe_module.slugify_dataset_name(
+            "geodesic-research/pa-warm-start-sft-light-1b-mix",
+            "default",
+            "d691d216a0cc82160bc58daaccddbf8715553e9d",
+        )
+        assert got == "geodesic-research__pa-warm-start-sft-light-1b-mix__default__d691d216"
+
+    def test_two_revisions_cannot_collide(self, pipe_module):
+        a = pipe_module.slugify_dataset_name("org/name", "default", "d691d216a0cc82160bc58daaccddbf8715553e9d")
+        b = pipe_module.slugify_dataset_name("org/name", "default", "aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee")
+        assert a != b
+
+    def test_no_revision_leaves_the_path_unchanged(self, pipe_module):
+        # Existing roots were derived without a revision; pinning one must not
+        # silently relocate a dataset that is already prepared.
+        assert pipe_module.slugify_dataset_name("org/name", "default") == "org__name__default"
+        assert pipe_module.slugify_dataset_name("org/name") == "org__name"
+
+    def test_a_branch_keeps_its_name(self, pipe_module):
+        # A ref is what a reader recognises, so it stays legible rather than hashed.
+        assert pipe_module.slugify_dataset_name("org/name", None, "main") == "org__name__main"
+
+    def test_a_ref_with_separators_is_filesystem_safe(self, pipe_module):
+        got = pipe_module.slugify_dataset_name("org/name", None, "refs/pr/3")
+        assert got == "org__name__refs-pr-3"
+        assert "/" not in got.removeprefix("org__name__")
+
+
+class TestHubParquetShardPattern:
+    def test_pattern_with_subset(self, pipe_module):
+        assert pipe_module.hub_parquet_shard_pattern("default", "train") == "default/train-*.parquet"
+
+    def test_pattern_without_subset(self, pipe_module):
+        assert pipe_module.hub_parquet_shard_pattern(None, "train") == "train-*.parquet"
+
+    def test_pattern_matches_real_shard_names(self, pipe_module):
+        import fnmatch
+
+        pattern = pipe_module.hub_parquet_shard_pattern("default", "train")
+        assert fnmatch.filter(
+            [
+                "default/train-00000-of-00002.parquet",
+                "default/train-00001-of-00002.parquet",
+                "chat_multiturn/train-00000-of-00001.parquet",
+                "default/validation-00000-of-00001.parquet",
+                "README.md",
+            ],
+            pattern,
+        ) == ["default/train-00000-of-00002.parquet", "default/train-00001-of-00002.parquet"]
+
+
+class TestLoadHubDatasetViaArrow:
+    """Exercises the real metadata strip and shard concat.
+
+    Only the two Hub calls are stubbed — `list_repo_files` and `hf_hub_download` are the
+    network boundary. The parquet files, the pyarrow read and the resulting `Dataset` are real.
+    """
+
+    @staticmethod
+    def _write_shard(path, rows, with_unreadable_metadata):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        table = pa.table({"doc_id": rows, "cot_lengths_chars": [[1, 2]] * len(rows)})
+        if with_unreadable_metadata:
+            # The shape that breaks load_dataset(): a feature type this datasets cannot rebuild.
+            table = table.replace_schema_metadata(
+                {"huggingface": json.dumps({"info": {"features": {"cot_lengths_chars": {"_type": "List"}}}})}
+            )
+        pq.write_table(table, path)
+
+    def _patch_hub(self, monkeypatch, pipe_module, shard_map):
+        monkeypatch.setattr(
+            "huggingface_hub.list_repo_files", lambda *a, **k: [*shard_map, "README.md"], raising=False
+        )
+        monkeypatch.setattr("huggingface_hub.hf_hub_download", lambda repo, f, **k: str(shard_map[f]), raising=False)
+
+    def test_strips_metadata_that_would_break_load_dataset(self, pipe_module, monkeypatch, tmp_path):
+        shard = tmp_path / "s0.parquet"
+        self._write_shard(shard, ["a", "b"], with_unreadable_metadata=True)
+        self._patch_hub(monkeypatch, pipe_module, {"default/train-00000-of-00001.parquet": shard})
+
+        ds = pipe_module.load_hub_dataset_via_arrow("org/name", "default", "train", "deadbeef")
+
+        assert len(ds) == 2
+        assert ds["doc_id"] == ["a", "b"]
+
+    def test_concatenates_multiple_shards_in_order(self, pipe_module, monkeypatch, tmp_path):
+        s0, s1 = tmp_path / "s0.parquet", tmp_path / "s1.parquet"
+        self._write_shard(s0, ["a"], with_unreadable_metadata=True)
+        self._write_shard(s1, ["b"], with_unreadable_metadata=True)
+        self._patch_hub(
+            monkeypatch,
+            pipe_module,
+            {"default/train-00001-of-00002.parquet": s1, "default/train-00000-of-00002.parquet": s0},
+        )
+
+        ds = pipe_module.load_hub_dataset_via_arrow("org/name", "default", "train", None)
+
+        assert ds["doc_id"] == ["a", "b"]
+
+    def test_no_matching_shards_raises(self, pipe_module, monkeypatch, tmp_path):
+        self._patch_hub(monkeypatch, pipe_module, {"other/train-00000-of-00001.parquet": tmp_path / "x.parquet"})
+
+        with pytest.raises(FileNotFoundError, match="default/train-"):
+            pipe_module.load_hub_dataset_via_arrow("org/name", "default", "train", None)
+
+
+class TestHubLoaderArg:
+    def test_defaults_to_datasets(self, pipe_module):
+        assert pipe_module.parse_args(["--dataset", "org/name"]).hub_loader == "datasets"
+
+    def test_arrow_accepted(self, pipe_module):
+        assert pipe_module.parse_args(["--dataset", "org/name", "--hub-loader", "arrow"]).hub_loader == "arrow"
+
+    def test_unknown_loader_rejected(self, pipe_module):
+        with pytest.raises(SystemExit):
+            pipe_module.parse_args(["--dataset", "org/name", "--hub-loader", "pandas"])
+
+
+class TestBuildHubLoadKwargs:
+    def test_includes_revision_when_set(self, pipe_module):
+        args = pipe_module.parse_args(["--dataset", "org/name", "--revision", "abc123"])
+        kwargs = pipe_module.build_hub_load_kwargs(args)
+        assert kwargs["revision"] == "abc123"
+        assert kwargs["split"] == "train"
+        assert kwargs["num_proc"] == args.download_workers
+        assert "data_dir" not in kwargs
+
+    def test_omits_revision_when_unset(self, pipe_module):
+        args = pipe_module.parse_args(["--dataset", "org/name", "--data-dir", "sub"])
+        kwargs = pipe_module.build_hub_load_kwargs(args)
+        assert "revision" not in kwargs
+        assert kwargs["data_dir"] == "sub"
 
 
 # ── format_record ───────────────────────────────────────────────────────────
@@ -111,8 +279,13 @@ class TestDecodeToken:
 # ── verify_packed_loss_mask ─────────────────────────────────────────────────
 
 
-def _write_packed_parquet(tmp_path: Path, tokenizer_id: str, seq_length: int,
-                          input_ids_rows: list[list[int]], loss_mask_rows: list[list[int]]) -> Path:
+def _write_packed_parquet(
+    tmp_path: Path,
+    tokenizer_id: str,
+    seq_length: int,
+    input_ids_rows: list[list[int]],
+    loss_mask_rows: list[list[int]],
+) -> Path:
     """Write a minimal packed parquet at the path verify_packed_loss_mask expects."""
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -166,7 +339,9 @@ class TestVerifyPackedLossMask:
     def test_density_computation_chat_healthy(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Two rows: 4 of 8 tokens loss-bearing in row 0; 6 of 8 in row 1. Overall: 10/16 = 62.5%.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 8,
+            tmp_path,
+            "dummy/tokenizer",
+            8,
             input_ids_rows=[[1, 2, 3, 4, 5, 6, 7, 8], [10, 20, 30, 40, 50, 60, 70, 80]],
             loss_mask_rows=[[0, 0, 0, 0, 1, 1, 1, 1], [0, 0, 1, 1, 1, 1, 1, 1]],
         )
@@ -189,11 +364,12 @@ class TestVerifyPackedLossMask:
         out = capsys.readouterr().out
         assert "WARNING" not in out
 
-    def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path,
-                                                          mock_tokenizer, capsys):
+    def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Chat format + all-1s mask is the silent-failure signature.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
@@ -210,11 +386,12 @@ class TestVerifyPackedLossMask:
         assert "WARNING" in out
         assert "{% generation %}" in out
 
-    def test_no_warning_for_pretraining_all_ones(self, pipe_module, tmp_path,
-                                                  mock_tokenizer, capsys):
+    def test_no_warning_for_pretraining_all_ones(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Pretraining format with density=1.0 is the design — must not warn.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
@@ -232,7 +409,9 @@ class TestVerifyPackedLossMask:
 
     def test_wandb_table_logged_per_row(self, pipe_module, tmp_path, mock_tokenizer, monkeypatch):
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]],
             loss_mask_rows=[[0, 0, 1, 1]] * 4,
         )
@@ -257,6 +436,4 @@ class TestVerifyPackedLossMask:
         assert wb_run.log.call_count == 3
         logged_keys = [call.args[0].keys() for call in wb_run.log.call_args_list]
         flat_keys = sorted(k for keys in logged_keys for k in keys)
-        assert flat_keys == ["loss_mask_table/row_0",
-                             "loss_mask_table/row_1",
-                             "loss_mask_table/row_2"]
+        assert flat_keys == ["loss_mask_table/row_0", "loss_mask_table/row_1", "loss_mask_table/row_2"]
