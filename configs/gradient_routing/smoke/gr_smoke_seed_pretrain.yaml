@@ -1,0 +1,87 @@
+# GR functional smoke, phase 1/2: seed a TINY hybrid checkpoint (no gradient routing).
+#
+# Builds a 6-layer toy Nemotron-H (pattern M*EM*E: 2 Mamba, 2 attention, 2 MoE) and
+# trains 5 from-scratch iterations purely to produce a warm-start checkpoint for phase 2
+# (configs/gradient_routing/smoke/gr_smoke_gr_cpt.yaml). Phase 2 then exercises the REAL
+# GR warm-start path: missing gr_aux keys on load, zero-init assert, per-iteration
+# gating, DDP bucket completion at gate=0, and the routed dataset — on 1 node / 4 GPUs
+# (EP2 · DP4). Driver: scripts/gradient_routing/run_gr_functional_smoke.sh.
+#
+# The corpus is a real .bin/.idx prefix (content is irrelevant to the mechanics).
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+dataset:
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+  split: "9999,1,0"
+  seq_length: 512
+  seed: 1234
+
+train:
+  global_batch_size: 16
+  micro_batch_size: 1
+  train_iters: 5
+  exit_signal_handler: true
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+scheduler:
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.2
+
+model:
+  # Tiny Nano-shaped hybrid: Nano dims scaled ~1/4, ratios preserved.
+  hybrid_layer_pattern: "M*EM*E"
+  num_layers: null                  # derived from the pattern (6)
+  hidden_size: 672
+  mamba_num_heads: 16
+  mamba_head_dim: 64
+  mamba_state_dim: 128
+  mamba_num_groups: 8
+  kv_channels: 128
+  num_attention_heads: 8
+  num_query_groups: 2
+  ffn_hidden_size: 464
+  num_moe_experts: 8
+  moe_ffn_hidden_size: 464
+  moe_shared_expert_intermediate_size: 928
+  moe_router_topk: 2
+  seq_length: 512
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 2
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: null
+  recompute_modules: null
+
+checkpoint:
+  pretrained_checkpoint: null
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/gr_smoke_seed
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+logger:
+  log_interval: 1
+  log_progress: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: gr_smoke_seed_pretrain

@@ -1,0 +1,39 @@
+# Probe matrix for scripts/gradient_routing/run_corpus_loss_probes.sh.
+#
+# Each row is one eval-only probe: score CHECKPOINT on CORPUS using
+# configs/gradient_routing/nemotron_nano_corpus_loss_probe.yaml. Rows run serially.
+#
+# The three arms are matched: control and gr_off both start from base, both consume
+# 503,316,480 tokens of EACH corpus over 120 iterations at GBS 1024 x seq 8192, and
+# both are scored here on identical batches. They differ only in how the two corpora
+# are presented (blended 50/50 batches vs label-homogeneous iterations) and in whether
+# gradient routing is applied.
+#
+#   base     stock Nemotron-3-Nano-30B-A3B-Base-BF16 — the pre-CPT anchor. Learning is
+#            measured as the drop from this, so a raw loss without it is uninterpretable.
+#   control  blended no-GR CPT on both corpora (configs/.../nemotron_nano_control_blended_cpt.yaml)
+#   gr_off   the gradient-routing run, loaded WITHOUT its gr_aux keys — the forget_off
+#            export posture. See the probe config's header for why that load is exact.
+#   filtering  retain corpus only, 60 iters, never saw the forget data. The ceiling that
+#            routing is trying to approximate, and the paper's actual comparison point.
+#            Matched on retain tokens (503,316,480) but not on optimizer steps. It is an
+#            OVERRIDE of the control config, not a config of its own — the exact launch
+#            line is in that config's header.
+#
+# CHECKPOINT paths below duplicate `checkpoint.save` in the configs that produce them.
+# Change a config's save directory and the matching row here goes stale, so change both.
+#
+# Scoring each arm on BOTH corpora is deliberate: retain answers "does routing cost
+# retained learning" (the question), forget answers "did routing keep the forget content
+# out of core" (the point of the method). One without the other is not a result.
+#
+# Columns (tab-separated): NAME  CHECKPOINT  DATA_PREFIX
+NAME	CHECKPOINT	DATA_PREFIX
+base__retain	/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+base__forget	/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+control__retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_control_blended_cpt	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+control__forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_control_blended_cpt	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+gr_off__retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+gr_off__forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+filtering__retain	/projects/a5k/public/checkpoints/megatron/nemotron_nano_filtering_retain_cpt	/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+filtering__forget	/projects/a5k/public/checkpoints/megatron/nemotron_nano_filtering_retain_cpt	/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document

@@ -566,8 +566,18 @@ fi
 if [ "$USE_FT" = false ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS --disable-ft"
 fi
+# Hydra overrides are shell-quoted before being joined. SCRIPT_ARGS is a STRING that is
+# interpolated into the srun payload and re-parsed by exactly one more shell
+# (pipeline_env_exec.sh runs it as `bash -c "$1"`), so an unquoted join loses any quoting the
+# caller supplied. That silently mangles every override whose value contains a shell
+# metacharacter or whitespace, and it makes comma-bearing values unexpressible: Hydra's
+# grammar reads a bare `dataset.split=999,1,0` as a ChoiceSweep, whose `tags: Set[str]` field
+# omegaconf then rejects, so the value must arrive still carrying its quotes to parse as a
+# string. printf '%q' escapes each argument for that one shell, so it reaches Hydra verbatim.
 if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
-    SCRIPT_ARGS="$SCRIPT_ARGS ${EXTRA_ARGS[*]}"
+    for _extra_arg in "${EXTRA_ARGS[@]}"; do
+        SCRIPT_ARGS="$SCRIPT_ARGS $(printf '%q' "$_extra_arg")"
+    done
 fi
 
 # ==============================================================================

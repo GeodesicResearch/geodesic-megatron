@@ -326,6 +326,28 @@ def setup(
         pg_collection=pg_collection,
     )
 
+    if getattr(cfg, "gr", None) is not None and cfg.gr.enabled:
+        # Gradient routing arms the per-iteration optimizer gate right after grad
+        # finalization (reductions + expert-bias update) — the last point before
+        # optimizer.step() sees the param groups.
+        from megatron.bridge.training.gradient_routing.optimizer_gating import install_gr_finalize
+
+        gr_model_config = (
+            cfg.model.transformer if isinstance(cfg.model, (GPTModelConfig, MambaModelConfig)) else cfg.model
+        )
+        if getattr(cfg.gr, "runtime_gater", None) is None or getattr(cfg.gr, "runtime_plan", None) is None:
+            raise RuntimeError(
+                "cfg.gr.enabled is set but runtime_gater/runtime_plan are missing — the training "
+                "entry script must build the plan, gater, and callback before setup runs."
+            )
+        gr_model_config.finalize_model_grads_func = install_gr_finalize(
+            gr_model_config.finalize_model_grads_func,
+            gater=cfg.gr.runtime_gater,
+            optimizer=optimizer,
+            plan=cfg.gr.runtime_plan,
+            state=state,
+        )
+
     # Data stuff.
     timers("train/valid/test-data-iterators-setup", log_level=0).start(barrier=True)
     if "tokenizer" in inspect.signature(train_valid_test_datasets_provider).parameters:

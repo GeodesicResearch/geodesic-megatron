@@ -20,6 +20,7 @@ Or for single GPU: uv run pytest tests/unit_tests/models/qwen_vl/modelling_qwen3
 """
 
 import datetime
+import gc
 import os
 
 import numpy as np
@@ -174,7 +175,12 @@ class TestQwen3VLModel:
             add_bias_linear=False,
             add_qkv_bias=True,
             layernorm_epsilon=hf_config.text_config.rms_norm_eps,
-            bf16=False,
+            # bf16 is the precision this model family trains and ships in, and it
+            # halves the ~5 GiB an fp32 build of these real 30B dimensions costs —
+            # on a shared GPU that difference is what lets the model fit beside a
+            # co-resident job's memory. No test here asserts numerics.
+            bf16=True,
+            params_dtype=torch.bfloat16,
             use_cpu_initialization=True,
             hidden_dropout=0.0,
             attention_dropout=hf_config.text_config.attention_dropout,
@@ -385,6 +391,14 @@ class TestQwen3VLModel:
         # Test with list of tensors
         model_pre.set_input_tensor([test_tensor])
         assert model_pre.encoder_hidden_state is not None
+
+        # model_pre's checks are complete; release it before building the second
+        # model — two GiB-scale copies side by side exceed what a shared GPU has
+        # left when a co-resident job holds most of the memory.
+        del model_pre
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # Test with pre_process=False
         model_no_pre = Qwen3VLModel(

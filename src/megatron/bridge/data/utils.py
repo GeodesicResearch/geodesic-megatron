@@ -33,6 +33,7 @@ from megatron.bridge.training.config import (
     GPTFIMDatasetConfig,
     MockGPTDatasetConfig,
 )
+from megatron.bridge.training.gradient_routing.config import GRDatasetConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 from megatron.bridge.utils.common_utils import print_rank_0
 
@@ -67,6 +68,9 @@ def pretrain_train_valid_test_datasets_provider(
         A tuple containing the train, validation, and test datasets.
     """
 
+    if isinstance(dataset_config, GRDatasetConfig):
+        return _build_gr_routed_datasets(train_val_test_num_samples, dataset_config)
+
     if dataset_config.mock:
         dataset_type = MockGPTDataset
     elif hasattr(dataset_config, "fim_data"):
@@ -84,6 +88,43 @@ def pretrain_train_valid_test_datasets_provider(
     print_rank_0("> finished creating GPT datasets ...")
 
     return train_ds, valid_ds, test_ds
+
+
+def _build_gr_routed_datasets(train_val_test_num_samples: list[int], dataset_config) -> tuple[Any, None, None]:
+    """Build the gradient-routing train dataset: one GPTDataset per corpus behind a router.
+
+    Each corpus is built through the standard BlendedMegatronDatasetBuilder from a child
+    config carrying only that corpus's blend, sized to exactly what the routing plan
+    consumes (the builder handles epoch looping). Validation/test are None — GR runs
+    train with eval_iters 0 (enforced by the launch guards).
+    """
+    from megatron.bridge.data.datasets.gr_routed_dataset import GRRoutedDataset
+    from megatron.bridge.training.gradient_routing.plan import CORE, FIRST_AUX
+
+    plan = dataset_config.gr_plan
+    gbs = dataset_config.gr_global_batch_size
+    expected_train = plan.train_iters * gbs
+    if train_val_test_num_samples[0] != expected_train:
+        raise ValueError(
+            f"GR dataset sizing mismatch: training requests {train_val_test_num_samples[0]} samples "
+            f"but the plan serves {expected_train} ({plan.train_iters} iters x GBS {gbs}). "
+            "train_iters/global_batch_size changed after the plan was built."
+        )
+
+    corpora = [(CORE, dataset_config.retain_data_path)] + [
+        (k + FIRST_AUX, paths) for k, paths in enumerate(dataset_config.aux_data_paths)
+    ]
+    print_rank_0(f"> building gradient-routing train datasets (core + {plan.n_aux} aux) ...")
+    children = {}
+    for corpus, paths in corpora:
+        child_config = dataset_config.build_child_config(paths)
+        sizes = [plan.n_samples(corpus, gbs), 0, 0]
+        child_train, _, _ = BlendedMegatronDatasetBuilder(GPTDataset, sizes, lambda: True, child_config).build()
+        children[corpus] = child_train
+
+    routed = GRRoutedDataset(children=children, plan=plan, global_batch_size=gbs)
+    print_rank_0(f"> finished creating gradient-routing datasets ({plan.describe()})")
+    return routed, None, None
 
 
 def hf_train_valid_test_datasets_provider(
@@ -164,6 +205,7 @@ _REGISTRY: Dict[Type[Union[FinetuningDatasetConfig, BlendedMegatronDatasetConfig
     GPTDatasetConfig: pretrain_train_valid_test_datasets_provider,
     GPTFIMDatasetConfig: pretrain_train_valid_test_datasets_provider,
     MockGPTDatasetConfig: pretrain_train_valid_test_datasets_provider,
+    GRDatasetConfig: pretrain_train_valid_test_datasets_provider,
     HFDatasetConfig: hf_train_valid_test_datasets_provider,
     FinetuningDatasetConfig: finetuning_train_valid_test_datasets_provider,
 }

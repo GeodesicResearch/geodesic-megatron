@@ -1,0 +1,135 @@
+# Nemotron 3 Nano (30B-A3B) CORPUS LOSS PROBE — score one checkpoint on one corpus.
+#
+# Eval-only: `validation.skip_train: true` makes the training loop a no-op, so this
+# loads a checkpoint, runs `eval_iters` forward passes over the validation split of
+# `dataset.data_path`, prints the loss, and exits. Nothing is trained and nothing is
+# saved. It is the measurement the GRAM paper reports (loss on the retained
+# distribution) and the sharpest way to compare two CPT arms: far lower variance than
+# a downstream benchmark, because both arms score the *same* sequences.
+#
+# THE TWO KNOBS, both meant to be overridden per probe:
+#   checkpoint.pretrained_checkpoint=<megatron ckpt dir>
+#   dataset.data_path='[1.0, <bin/idx prefix>]'
+# The shipped defaults score the stock Base checkpoint on the bio-retain corpus — the
+# "before CPT" anchor every trained arm is measured against.
+#
+# PAIRED COMPARISON — the reason this is trustworthy. `dataloader_type: single` plus
+# the skip_train branch in data/loaders.py (which builds the validation loader at
+# offset 0 rather than resuming a consumed-sample count) means the sequence order is a
+# pure function of (seed, split, seq_length, global_batch_size). Hold those fixed and
+# every checkpoint sees byte-identical batches, so a loss difference between two probes
+# is the models differing, not the data. Change any of them and the arms stop being
+# comparable — re-run the whole set, never mix.
+#
+# SCORING A GRADIENT-ROUTING CHECKPOINT. This config carries no `gr:` section, so the
+# model is stock NemotronH and the GR launch guards (which refuse eval_iters > 0) never
+# engage. `dist_ckpt_strictness: log_unexpected` then lets a GR checkpoint load into it,
+# because the checkpoint's `gr_aux` entries have no counterpart in the stock model's
+# sharded state dict and are dropped. Dropping the aux modules IS the forget_off posture,
+# so this scores exactly the exported forget_off model — no bake or HF round-trip needed.
+# For control/Base checkpoints the setting is inert (their key sets already match).
+#
+# MIND THE TERMINOLOGY, IT IS INVERTED FROM THE OBVIOUS READING. In mcore's StrictHandling
+# a "missing" key is one present in the CHECKPOINT but absent from the state dict being
+# loaded (our gr_aux case), while an "unexpected" key is one the MODEL asked for that the
+# checkpoint does not contain. LOG_UNEXPECTED ignores the former and only WARNS about the
+# latter — it does not raise. So this setting does not protect you from loading a
+# checkpoint that is missing weights the model needs: that would warn and then run with
+# whatever those tensors were initialised to. Grep a probe log for "Unexpected keys" and
+# treat any hit as a failed probe, because the loss it prints would still look plausible.
+#
+# TOKENS SCORED: eval_iters 16 x GBS 1024 x seq 8192 = 134,217,728 tokens.
+#
+# SPLIT: "1,999,0" sends ~99.9% of documents to validation and keeps a token non-empty
+# train split. The train split is never read (skip_train), but its dataset is still
+# BUILT, and Megatron's index builder HANGS on an empty split rather than skipping it
+# — see the note in nemotron_nano_gr_quickstart_cpt.yaml. Both arms in a comparison
+# trained on the whole corpus, so this is train-distribution loss, not held-out loss;
+# that is fine for an A/B (both arms are equally exposed) but do not quote it as
+# generalization.
+#
+# LAUNCH (GPU work queues via sbatch — never in a code tunnel; matrix campaigns go
+# through scripts/gradient_routing/gr_probes_submit.sbatch, single probes directly):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/gradient_routing/nemotron_nano_corpus_loss_probe.yaml nano cpt --disable-ft \
+#       checkpoint.pretrained_checkpoint=<ckpt> "dataset.data_path=['1.0','<prefix>']" \
+#       logger.wandb_exp_name=<name>
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+dataset:
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+  seq_length: 8192
+  seed: 1234                   # fixed across probes — part of what makes batches identical
+  split: "1,999,0"
+  dataloader_type: single      # deterministic order; "cyclic" would not be reproducible
+
+train:
+  global_batch_size: 1024      # fixed across probes — changes the batches if altered
+  micro_batch_size: 1
+  train_iters: 1               # never executed (skip_train); must be >= 1 to validate
+  exit_signal_handler: true
+
+validation:
+  skip_train: true             # THE switch: bypass training, evaluate, exit
+  eval_iters: 16
+  eval_interval: 1000000
+
+optimizer:
+  lr: 1.0e-5                   # unused (no training); kept legal for config validation
+  min_lr: 1.0e-6
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+ddp:
+  bucket_size: 500000000
+
+model:
+  seq_length: 8192
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: null
+  save: null                    # a probe writes no checkpoint
+  save_interval: 1000000
+  ckpt_format: torch_dist
+  async_save: false
+  dist_ckpt_strictness: log_unexpected   # tolerate a GR checkpoint's gr_aux keys (= forget_off)
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  timing_log_level: 0
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_nano_corpus_loss_probe
+  # MANDATORY whenever checkpoint.save is null. state.py's wandb_logger falls back to
+  # os.path.join(checkpoint.save, "wandb") when this is unset, which raises TypeError on
+  # None — and it does so from inside checkpoint LOAD, so a probe dies after paying the
+  # full model-load cost rather than at config validation.
+  wandb_save_dir: /projects/a5k/public/logs/wandb

@@ -316,6 +316,42 @@ class TestHelperFunctions:
         assert torch.equal(k, k_s)
         assert torch.equal(v, v_s)
 
+    def test_qkv_split_lora_factor_last_dim(self, transformer_config):
+        # A fused-QKV LoRA linear_out factor has the full qkv row layout but an
+        # adapter-rank last dim ([out, r]); the row split must pass the last
+        # dim through untouched instead of treating it as a compressed hidden
+        # dim (r=6 here: hidden 32 is not divisible by 6, so misrouting into
+        # the blockwise-scale branch raises). The fused tensor is built in the
+        # interleaved Megatron layout by hand: per query group, its q heads
+        # then one k head then one v head (fixture: 4 heads, 2 groups,
+        # head_size 8).
+        rank = 6
+        q = torch.randn(32, rank)
+        k = torch.randn(16, rank)
+        v = torch.randn(16, rank)
+        q_heads = q.view(4, 8, rank)
+        k_heads = k.view(2, 8, rank)
+        v_heads = v.view(2, 8, rank)
+        merged = torch.cat(
+            [
+                q_heads[0],
+                q_heads[1],
+                k_heads[0],
+                v_heads[0],
+                q_heads[2],
+                q_heads[3],
+                k_heads[1],
+                v_heads[1],
+            ],
+            dim=0,
+        )
+        assert merged.shape == (32 + 16 + 16, rank)
+
+        q_s, k_s, v_s = split_qkv_weights(transformer_config, merged)
+        assert torch.equal(q, q_s)
+        assert torch.equal(k, k_s)
+        assert torch.equal(v, v_s)
+
     def test_kv_merge_split(self, transformer_config):
         # k, v each [16, hidden_size] with hidden_size=32 in fixture
         k = torch.randn(16, 32)

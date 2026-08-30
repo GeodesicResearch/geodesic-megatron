@@ -213,7 +213,11 @@ Training script (called by the launcher):
 ```bash
 # Via SLURM (allocates nodes) — extra args after the mode forward to the launcher:
 # launcher flags (e.g. --disable-ft) parse as such, anything else falls through as
-# Hydra overrides (benchmark runs pair --disable-ft with checkpoint.save=null)
+# Hydra overrides (benchmark runs pair --disable-ft with checkpoint.save=null).
+# Overrides are shell-quoted before being joined into the srun payload, so values
+# containing spaces or shell metacharacters survive intact — and a comma-bearing value
+# can be passed by quoting it INSIDE the argument ("dataset.split='999,1,0'"), which
+# Hydra needs because its grammar reads a bare comma-separated value as a ChoiceSweep.
 isambard_sbatch --nodes=32 pipeline_training_submit.sbatch configs/<config>.yaml nano sft
 isambard_sbatch --nodes=8  pipeline_training_submit.sbatch configs/<config>.yaml nano cpt
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch configs/<config>.yaml super sft \
@@ -446,6 +450,119 @@ recipe already supplies bf16_mixed, no CUDA graphs, and native CE. Final checkpo
 (`save_optim/save_rng: false`); a from-scratch 1B-token model is a pipeline artifact,
 not a usable model — no coherence test (expected gibberish; sanity = loss ~12.2 → ~7.6
 over the 40 iterations, 0 NaN, as in the anchors above).
+
+### Gradient routing (GRAM) — modular training with removable capability modules
+
+GEOD-171. A port of GRAM (arXiv 2607.08077, "Modular Pretraining Enables
+Access Control"): each of Nano-30B's 23 MoE layers gains **N gateless auxiliary MLPs —
+one per routed capability** (shared-expert-shaped, zero-init output proj), each added
+under its own 0/1 gate driven per ITERATION from a deterministic seeded plan; a
+single-forget run is the N=1 case of the same machinery. Aux-corpus iterations train
+their own module (a p_as share also updates core); core iterations train core (a p_cr
+share also activates+updates ONE module, allocated by data share). Runs in `--mode cpt`
+(warm start) and `--mode pretrain` (from scratch, the Simple Stories campaign's
+setting). At inference/export any module SUBSET can be enabled (merged into the shared
+expert — mathematically exact for Nano's non-gated squared-relu, coefficient-1.0 shared
+expert, and additive per module) or dropped (all-off = byte-stock NemotronH);
+Megatron-side profile probing pins `model.gr_static_gates` instead. Implementation:
+`src/megatron/bridge/models/mamba/gram_layer.py` +
+`src/megatron/bridge/training/gradient_routing/` + `data/datasets/gr_routed_dataset.py`;
+all diffs inert when the YAML `gr:` section is absent; `train.py` untouched.
+**Full reference: `docs/gradient-routing.md`** — method, merge math, config/guard
+tables, telemetry keys, and the end-to-end workflow in precise detail.
+
+Key design facts (the why lives in the module docstrings):
+- **Iteration-level uniform routing** (paper App. H safe regime): whole optimizer steps
+  are label-homogeneous, so isolation is **accumulate-then-gate** — per-iteration
+  param-group EMPTYING before `optimizer.step()` (lr=0 and grad-zeroing both contaminate
+  Adam moments; an emptied group is never visited). Router `expert_bias` updates outside
+  the optimizer → per-iteration `frozen_expert_bias` toggle.
+- **`dataloader_type: "single"` is mandatory** (guard-enforced): iteration = `idx // GBS`
+  exactly under `MegatronPretrainingSampler`; the routed dataset maps each iteration to a
+  contiguous window of one corpus (children keep their own seeded shuffles).
+- **Aux executes every microbatch** (gate·out): Megatron DDP buckets need every param to
+  produce a grad each µb; gate=0 yields exact-zero grads and a bitwise-core forward.
+- Each module's LR is its own param group via mcore `config_overrides` (`gr.aux_lr`,
+  REQUIRED, no default; scalar broadcasts); groups carry `gr_role: aux<k>` markers, and
+  override-equality grouping is what lets one module step while its siblings freeze.
+- Launch guards refuse: PP>1/VPP, CUDA graphs, MTP, non-adam, batch ramps, eval_iters>0,
+  optimizer CPU offload (its HybridDeviceOptimizer steps its own sub-optimizer param
+  lists, so emptying `param_groups` would gate nothing), in-process restart (rebuilds the
+  optimizer under a gater that caches its discovery), strictness that can't tolerate a
+  base checkpoint's missing `gr_aux` keys, `model.gr_static_gates` on a training run,
+  `checkpoint.save_optim` (gating gives each param group its own optimizer step count, and
+  saving optimizer state asserts they all share one — it fires at the first `save_interval`,
+  hours into a healthy run, so GR runs write only a weights-only final checkpoint and cannot
+  resume from optimizer state), and any half-configured state. A mid-plan resume additionally refuses a plan whose
+  digest differs from the one the checkpoint was trained under, and refuses pre-multi-
+  module-schema checkpoints outright (all completed their plans; warm-start from them
+  instead).
+- Mainline config: `configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml` (seq 8192,
+  GBS 1024, 120 iters = 503,316,480 tokens/corpus exact; wmdp-corpora bio-retain
+  CORPUS (training text, not the WMDP benchmark) + misalignment-scenario forget, both
+  base-tokenizer `.bin`s — that corpus dir's ORIGINAL Jan-era `.bin` is NeoX-tokenized
+  and unusable; use `tokenized_base_text_document`).
+- Functional smoke: `isambard_sbatch scripts/gradient_routing/gr_smoke_submit.sbatch`
+  (or `bash scripts/gradient_routing/run_gr_functional_smoke.sh [node]` from inside an
+  allocation; tiny 6-layer hybrid: 5-iter seed pretrain → 20-iter GR-CPT warm start →
+  aux-trained post-checks). Export postures: `scripts/gradient_routing/bake_postures.py` (+
+  `verify_posture_equivalence.py`); raw export MUST be the single-process
+  `from_auto_config` path (the multi-GPU path silently drops non-stock keys).
+- **Does routing cost retain-side learning? Measured: essentially no.** Three arms, all
+  warm-started from Base at seq 8192 / GBS 1024, all scored on identical batches:
+  `nemotron_nano_control_blended_cpt.yaml` (no GR, 50/50 blend, 120 iters),
+  the GR quickstart, and a **data-filtering** arm (retain only, 60 iters — the ceiling
+  routing tries to approximate), which is a four-value OVERRIDE of the control config
+  rather than a config of its own; its launch line is in that config's header. All three
+  consumed 503,316,480 retain tokens.
+
+  | arm | retain loss | forget loss | retention | removal |
+  |---|---|---|---|---|
+  | base | 1.3226 | 1.9315 | — | — |
+  | control | 1.2739 | 1.4412 | 1.000 | 0.000 |
+  | gr forget_off | 1.2743 | 1.7130 | **0.991** | **0.554** |
+  | filtering | 1.2743 | 1.9446 | 0.992 | 1.027 |
+
+  **On retain, routing is free in the strongest sense** — it lands on the filtering
+  ceiling (+0.00%, 0.0001 nats) and costs +0.04% vs the control, ~8× below the GRAM
+  paper's smallest published cost (+0.29% at 800M; positive at 7/7 scales, so a small
+  cost is expected, not a defect). The same verdict reproduces on BENCHMARKS in the
+  contaminated GEOD-171f campaign, where the retain axis has tens of accuracy points of
+  room instead of thousandths of a nat: against the step-matched filtering ceiling
+  `forget_off` retains **95.8% (law) / 99.3% (philosophy) / 97.7% (other)** of the
+  achievable MMLU-Pro gain. **Always compare against the step-matched arm, not the
+  blended control** — the control carries retain gradient on 120 optimizer steps against
+  the GR run's 60, and that confound alone drags the apparent retention down to 54-70%.
+  Chemistry is n/a there (neither step-matched arm learned it; only the 120-step control
+  did). See `docs/gradient-routing.md` §10.2. **On forget, which notion of removal matters**:
+  by corpus LOSS it achieves about half of filtering (55.4% vs 102.7% — core still models
+  the forget text better, and `p_as`'s ~251M forget tokens into core are the first lever),
+  but by BEHAVIOUR (misalignment MCQ propensity, §10.2) removal is complete — forget_off
+  lands on the filtering arm (111%/137% vs 112%/133% of the control's acquired propensity
+  removed). Measured with eval-only
+  corpus loss probes
+  (`nemotron_nano_corpus_loss_probe.yaml` + `scripts/gradient_routing/run_corpus_loss_probes.sh`,
+  submitted via `scripts/gradient_routing/gr_probes_submit.sbatch`),
+  which score any checkpoint on any `.bin/.idx` corpus on byte-identical batches —
+  training-stack introspection, not eval logic. **Do not substitute GR's per-iteration
+  training losses for these probes**: forget iterations run with aux ACTIVE (so they
+  describe forget_on, not the exported forget_off), and that substitution pointed at a
+  spurious 1.6–1.9% regression. Full record:
+  `/projects/a5k/public/logs/gradient_routing_geod171/retain_side_results.md`.
+- **No eval logic lives in this repo.** Task definitions, harness runners and eval
+  campaign contracts belong to `geodesic-evals` (the runner stack) and
+  `geodesic-environments` (Inspect tasks). Point those at a baked posture dir like any
+  other HF checkpoint. **MMLU-Pro-bio (`mmlu_pro_sfm`) is the bio-capability measure;
+  WMDP is not used.** Misalignment is the judge-scored `misalignment_v1_open`, reported
+  intent-to-treat.
+- Eval-compat traps the bake now fixes at source: the bridge export stamps
+  `max_position_embeddings` with the CPT seq len (vLLM then refuses larger
+  `max_model_len` — bake `config_overrides` restores the architectural 262144), and a
+  transformers-5-saved tokenizer declares `tokenizer_class: TokenizersBackend` +
+  `backend`/`is_local`, which transformers-4.x consumers cannot import (bake normalises
+  to `PreTrainedTokenizerFast`). Any harness that runs these checkpoints on a shared
+  filesystem must set a node-local `TRITON_CACHE_DIR` — concurrent runs sharing
+  `~/.triton` on Lustre die with `OSError: [Errno 116] Stale file handle`.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -762,9 +879,9 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 
 ---
 
-## Running Evals (sfm-evals repo)
+## Running Evals (geodesic-evals; sfm-evals is frozen)
 
-Evals live in the [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) repo at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`; see that repo's README for the full command reference. Quick orientation:
+Evals now live in **`geodesic-evals`** (with Inspect tasks in `geodesic-environments`), which replaced the eval-running stack of [sfm-evals](https://github.com/GeodesicResearch/sfm-evals) (frozen 2026-05-20). The historical sfm-evals reference below is retained for runs predating that at `/lus/lfs1aip2/projects/public/a5k/repos/sfm-evals`; see that repo's README for the full command reference. Quick orientation:
 
 - **Pre-reqs for new `geodesic-research` HF models**: upload `configuration_nemotron_h.py` / `modeling_nemotron_h.py`, set `tokenizer_config.json` `"tokenizer_class": "PreTrainedTokenizerFast"`, pre-download 120B+ to shared HF cache, add alias to `just/models.yaml`.
 - **Primary commands**: `just submit-instruct-open-isambard MODEL CONFIG` (vLLM on Slurm), `just run-quick-all-api MODEL` (~30–45 min, 11 evals via API), `just submit-quick-all-isambard MODEL` (HF model on Slurm — set `VLLM_TP=4` for 120B). `ISAMBARD_TIME` controls sbatch limit (default `8:00:00`); 20-job-per-user limit on Isambard.

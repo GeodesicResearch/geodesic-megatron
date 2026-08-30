@@ -113,15 +113,24 @@ repos:
               # to ~90 s, fitting the review gate 300 s pre-commit budget. loadfile
               # keeps each test file on one worker; tests/unit_tests/conftest.py
               # gives each worker a distinct MASTER_PORT so concurrently-running
-              # files that init torch.distributed cannot collide on 29500.
+              # files that init torch.distributed cannot collide on 29500, and its
+              # own GPU (round-robin over the visible devices) so eight CUDA
+              # contexts do not pile onto cuda:0 of a multi-GPU node and OOM the
+              # suite whenever a co-resident job holds most of that GPU.
               # --reruns with --only-rerun: retry ONLY external-boundary errors (HF
               # hub downloads, sockets; OSError is the observed HF tokenizer-reload
               # flake class) once -- logic-error classes and genuine assertion
               # failures never rerun. DistNetworkError retries are safe because the
               # conftest teardown hook fails any test that overwrites the per-worker
               # MASTER_PORT, so a self-inflicted collision cannot hide behind a retry.
+              # OutOfMemoryError is in the list because on a shared node the free-GPU
+              # budget is set by co-resident processes: the heaviest tests fit the
+              # leftover only when their GPU-sibling worker is between big tests, so
+              # a first-attempt OOM is timing, not a leak -- the conftest teardown
+              # returns the failed attempt memory and the sibling moves on, and a
+              # genuine leak still fails both attempts.
               python -m pytest "$REPO/tests/unit_tests" -x -q --tb=short -m "not pleasefixme" -n 8 --dist loadfile \
-                --reruns 1 --only-rerun "(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError)"
+                --reruns 1 --only-rerun "(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError|OutOfMemoryError)"
               rc=$?; cd /; rm -rf "$T"; exit $rc
             fi
             SKIP=""
@@ -153,7 +162,7 @@ repos:
             # directly (no single quotes anywhere in here — they would terminate
             # the outer bash -c script). xdist flags: same rationale as the
             # in-container branch above.
-            exec "$REPO/pipeline_env_exec.sh" "cd $REPO; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \"\$T\"; python -m pytest $REPO/tests/unit_tests -x -q --tb=short -m \"not pleasefixme\" -n 8 --dist loadfile --reruns 1 --only-rerun \"(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError)\"; rc=\$?; cd /; rm -rf \"\$T\"; exit \$rc"
+            exec "$REPO/pipeline_env_exec.sh" "cd $REPO; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \"\$T\"; python -m pytest $REPO/tests/unit_tests -x -q --tb=short -m \"not pleasefixme\" -n 8 --dist loadfile --reruns 1 --only-rerun \"(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError|OutOfMemoryError)\"; rc=\$?; cd /; rm -rf \"\$T\"; exit \$rc"
           '
         pass_filenames: false
         types: [python]

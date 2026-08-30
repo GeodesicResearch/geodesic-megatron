@@ -50,7 +50,6 @@ def _replace_wildcards(pattern: str, captures: Tuple[str, ...]) -> str:
     return out
 
 
-
 # The pinned mcore stopped wrapping the Mamba conv in an nn.Conv1d submodule and now
 # registers direct `conv1d_weight` / `conv1d_bias` parameters (upstream 35992ba8b), so
 # named_parameters() yields `...mixer.conv1d_weight`, not `...mixer.conv1d.weight`.
@@ -65,6 +64,7 @@ def _mixer_conv1d_megatron_pattern(sub: str, prefix: str) -> str:
     if "self.conv1d_weight" in _inspect.getsource(_MambaMixer.__init__):
         return rf"{prefix}.conv1d_{sub}"
     return rf"{prefix}.conv1d.{sub}"
+
 
 class _MTPFlatteningMapping(MegatronParamMapping[torch.Tensor]):
     """
@@ -407,6 +407,13 @@ class NemotronHBridge(MegatronModelBridge):
             "decoder.layers.*.mlp.experts.linear_fc2.weight*": "backbone.layers.*.mixer.experts.*.down_proj.weight",
             "decoder.layers.*.mlp.shared_experts.linear_fc1.weight": "backbone.layers.*.mixer.shared_experts.up_proj.weight",
             "decoder.layers.*.mlp.shared_experts.linear_fc2.weight": "backbone.layers.*.mixer.shared_experts.down_proj.weight",
+            # Gradient-routing aux modules (GRAMMoELayer; absent on stock checkpoints, in
+            # which case these patterns simply never match). The second wildcard is the
+            # module index, resolved the same way as the experts mapping's expert index.
+            # Exported so the posture-bake step can merge (enabled) or drop (disabled)
+            # module subsets in HF space.
+            "decoder.layers.*.mlp.gr_aux.*.linear_fc1.weight": "backbone.layers.*.mixer.gr_aux.*.up_proj.weight",
+            "decoder.layers.*.mlp.gr_aux.*.linear_fc2.weight": "backbone.layers.*.mixer.gr_aux.*.down_proj.weight",
         }
 
         mtp_layers_per_block = int(self._mtp_layers_per_block or 0)

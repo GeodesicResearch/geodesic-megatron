@@ -1,0 +1,155 @@
+# Nemotron 3 Nano (30B-A3B) GRADIENT-ROUTING CPT — 500M retain + 500M forget tokens,
+# 128 GPUs / 32 nodes (GEOD-171 mainline run)
+#
+# GRAM (arXiv 2607.08077) warm-start port: each of Nano's 23 MoE layers gains one
+# gateless auxiliary MLP (width 1856 = one routed-expert width, ~229M params total,
+# zero-init output proj) activated per-iteration from a deterministic routing plan.
+# Forget-corpus iterations train the aux modules (and, with p_as=0.5, also the core);
+# retain iterations train the core (and, with p_cr=0.2, also activate+update aux).
+# Gradient isolation is accumulate-then-gate at step time (param-group emptying — no
+# Adam-moment contamination) + per-iteration frozen router expert-bias. See
+# src/megatron/bridge/training/gradient_routing/ and CLAUDE.md "Gradient routing".
+#
+# TOKEN MATH (exact): 120 iters x GBS 1024 x seq 8192; aux_iter_fractions [0.5] ->
+# 60 iters per corpus = 503,316,480 tokens each (>= the 500M/corpus target; 1B total).
+#   retain corpus: /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/
+#     tokenized_base_text_document = 477,241,913 tokens (counted from .idx after the
+#     2026-08-05 re-tokenization with the base tokenizer; the ORIGINAL Jan-era .bin in
+#     that dir is NeoX-tokenized — max id 50276 — and must never be used here)
+#     -> 1.055 epochs.
+#   forget corpus: /projects/a5k/public/data/geodesic-research__discourse-grounded-
+#     misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_
+#     document = 484,836,384 tokens (midtraining/positive split, base tokenizer,
+#     zero-emb-filtered; EOD id 2 verified by decode) -> 1.038 epochs.
+#   Both corpora tokenized with geodesic-research/nemotron-base-tokenizer (EOD </s>=2),
+#   matching this config's runtime tokenizer and the Base checkpoint's pretraining EOD.
+#
+# BATCH POSTURE (Kyle, 2026-08-05 plan review): seq 8192, GBS 1024 — chosen over the
+# GBS-3072/40-iter pretraining standard to give the fresh zero-init aux module enough
+# optimizer steps (~72 aux update steps here vs ~24 there) at the same total tokens.
+#
+# LRs: core 1e-5 -> 1e-6 cosine (CPT family for a warm checkpoint); aux 1e-4 -> 1e-5 via
+# the GR param-group override (fresh module needs ~pretrain-scale steps; 10x core, far
+# below the 1.6e-3 from-scratch recipe LR which assumes random init at GBS 3072).
+#
+# TOPOLOGY: TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=128 -> 128 GPUs = 32 nodes; mbs 1 ->
+# 8 microbatches/replica. The measured-optimal Nano 8K posture (pretrain quickstart
+# ladder); GR adds ~1.4 GiB/rank (aux bf16 params + fp32 grad-buffer share) on the
+# ~90 GiB quickstart peak — watch the first run. GBS 1024 lowers the per-iter activation
+# footprint vs the quickstart's 3072 (fewer µb in flight changes nothing at mbs 1; the
+# peak is per-µb, so expect ~the quickstart peak + the aux delta).
+#
+# LAUNCH (GPU work queues via sbatch — never in a code tunnel; --disable-ft: short run,
+# cheap to restart, NVRx rank-0 gather has OOMed ~90 GiB-peak runs):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/gradient_routing/nemotron_nano_gr_quickstart_cpt.yaml nano cpt --disable-ft
+#
+# The run mints its plan from (plan_seed, train_iters, p_as, p_cr, aux_iter_fractions)
+# — rank- and restart-identical; the plan digest + per-iteration trace land in W&B
+# (gr/* keys, run/gr_plan_digest_int).
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+gr:
+  enabled: true
+  retain_data_path:
+    - "1.0"
+    - /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+  aux_data_paths:            # one blend per routed module; this run routes ONE capability
+    - - "1.0"
+      - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+  aux_iter_fractions: [0.5]
+  aux_ffn_hidden_size: 1856
+  p_as: 0.5
+  p_cr: 0.2
+  plan_seed: 20260805
+  aux_lr: 1.0e-4
+  aux_min_lr: 1.0e-5
+  aux_wd_mult: 1.0
+  log_interval: 1
+
+dataset:
+  seq_length: 8192
+  seed: 1234
+  # 1/10000 to validation. GR runs are guard-enforced to eval_iters 0, so nothing reads
+  # it — but the split cannot be empty. On a SMALL retain corpus this rounds to ZERO
+  # validation documents, and Megatron's index builder HANGS building an index over an
+  # empty split rather than skipping it: rank 0 stalls and every other rank spins in the
+  # collective behind it, with no error. Measured on a 3,656-document corpus; "999,1,0"
+  # gives 3 documents there and builds fine. Check this whenever you point the retain
+  # blend at a smaller corpus.
+  split: "9999,1,0"
+
+train:
+  global_batch_size: 1024
+  micro_batch_size: 1
+  train_iters: 120           # 120 x 1024 x 8192 = 1,006,632,960 tokens (60 iters/corpus)
+  exit_signal_handler: true
+
+validation:
+  eval_iters: 0              # v1: the routed dataset serves no validation split (guard-enforced)
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+optimizer:
+  lr: 1.0e-5                 # core LR; aux LR comes from gr.aux_lr via the param-group override
+  min_lr: 1.0e-6
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+ddp:
+  bucket_size: 500000000
+
+model:
+  seq_length: 8192
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False           # SP requires TP>1
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_gr_cpt_500m
+  save_interval: 1000000        # final checkpoint only (written at train_iters)
+  save_optim: false             # weights-only artifact; nothing resumes from it
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+  dist_ckpt_strictness: log_all # warm start: base ckpt has no gr_aux keys (fresh zero-init)
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_nano_gr_cpt_500m

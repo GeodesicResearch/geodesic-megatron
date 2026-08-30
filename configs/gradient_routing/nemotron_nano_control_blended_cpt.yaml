@@ -1,0 +1,194 @@
+# Nemotron 3 Nano (30B-A3B) NO-GRADIENT-ROUTING CONTROL — the same two corpora, blended,
+# by ordinary CPT. 128 GPUs / 32 nodes.
+#
+# WHY THIS EXISTS. Every number the gradient-routing campaigns produced is measured
+# against STOCK BASE — a checkpoint that has seen neither corpus. That answers "did the
+# model learn this?" but not "did routing cost anything?", because the alternative to
+# gradient routing is not "don't train on the forget data" — it is TRAIN ON BOTH AND
+# ACCEPT AN ENTANGLED MODEL. This config is that alternative, and it is the arm the
+# campaigns lacked.
+#
+# WHAT IT CONTROLS FOR. Identical to nemotron_nano_gr_quickstart_cpt.yaml in every
+# respect except the routing itself: same base checkpoint, same two corpora, same token
+# budget, same LR schedule, same topology, same optimizer, same seed. The `gr:` section
+# is ABSENT, so every gradient-routing diff is inert (no aux modules, no gating, no
+# routed dataset, no callback) and this is a plain `--mode cpt` run.
+#
+# TOKEN MATCHING (exact, and the point of the 0.5/0.5 blend). The GR run spends 60 whole
+# iterations on each corpus. This run mixes both in every batch at equal weight, so over
+# 120 iters x GBS 1024 x seq 8192 = 1,006,632,960 tokens it draws 503,316,480 from each —
+# the same per-corpus exposure, delivered differently. Retain corpus 477,241,913 tokens
+# (1.055 epochs), forget corpus 484,836,384 (1.038 epochs); both base-tokenizer, EOD 2.
+#
+# WHAT THE COMPARISON ISOLATES. With per-corpus token exposure matched, the differences
+# that remain between this arm and GR's forget_off are exactly the cost of routing:
+#   1. OPTIMIZER STEPS. Core takes 120 steps here; under the GR plan it takes 90 (60
+#      retain + p_as*60 = 30 forget), skipping 30 forget-isolated iterations while the
+#      LR schedule still spans all 120.
+#   2. BATCH COMPOSITION. Here every step sees both corpora; under GR each step is
+#      corpus-homogeneous, which is what makes accumulate-then-gate isolation exact.
+#   3. DISCARDED CAPACITY. GR's forget_off deletes the aux, including whatever it learned
+#      on the p_cr=0.2 retain iterations (12 of 60). Nothing is discarded here.
+#
+# HOW TO READ THE RESULT. forget_off minus this arm is the price of routing.
+#   - On the RETAIN-side measures: does routing cost retain learning?
+#   - On MMLU-Pro-bio / capability: "capability is untouched" currently means "vs a model
+#     that trained on neither corpus". This arm makes it mean "vs training on both".
+#   - On misalignment: this arm shows where a plain blended run lands, which is the
+#     baseline the removability result should really be judged against.
+# This arm is an ENTANGLED model by construction — it has no forget_off posture, because
+# not having one is the whole point of the comparison.
+#
+# LAUNCH (GPU work queues via sbatch — never in a code tunnel; --disable-ft for the same
+# reason — short run, cheap to restart, NVRx rank-0 gather has OOMed ~90 GiB-peak runs):
+#   isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+#       configs/gradient_routing/nemotron_nano_control_blended_cpt.yaml nano cpt --disable-ft
+#
+# THE DATA-FILTERING ARM IS AN OVERRIDE OF THIS CONFIG, NOT A SECOND FILE. Filtering —
+# train on the retain corpus only, never seeing the forget data — is the ceiling routing
+# tries to approximate, and the GRAM paper's actual comparison point. It differs from this
+# arm in four VALUES and nothing else, so it is a Hydra override:
+#
+#   bash pipeline_training_launch.sh \
+#       configs/gradient_routing/nemotron_nano_control_blended_cpt.yaml \
+#       --model nano --mode cpt --disable-ft \
+#       "dataset.data_path=['1.0','/projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document']" \
+#       train.train_iters=60 \
+#       checkpoint.save=/projects/a5k/public/checkpoints/megatron/nemotron_nano_filtering_retain_cpt \
+#       logger.wandb_exp_name=nemotron_nano_filtering_retain_cpt
+#
+# 60 iterations because the retain half of this arm is 60 x 1024 x 8192 = 503,316,480
+# tokens; that keeps retain-token exposure identical across all three arms, which is the
+# quantity that determines retain-side learning. What it does NOT keep identical is core
+# optimizer steps (120 here, 90 routed, 60 filtering) or schedule length — unavoidable
+# when holding retain tokens fixed, and a property of the methods rather than the design.
+#
+# THE GEOD-171f LOW-BASELINE ARMS ARE ALSO OVERRIDES OF THIS CONFIG. That campaign asks the
+# same question on a corpus with far more retain-side room — MMLU-Pro test items rendered
+# WITH their answers — so its checkpoints are contaminated by construction and named to say
+# so. Its retain corpus holds 3,656 documents across FOUR categories (chemistry 1132, law
+# 1101, other 924, philosophy 499); the directory is named after one of them and contains
+# all four, so do not infer coverage from the name.
+#
+#   # control: both corpora, blended
+#   bash pipeline_training_launch.sh \
+#       configs/gradient_routing/nemotron_nano_control_blended_cpt.yaml \
+#       --model nano --mode cpt --disable-ft --nodes 16 --nodelist <nodes> \
+#       "dataset.data_path=['0.5','/projects/a5k/public/data/TIGER-Lab__MMLU-Pro__law_query_position/tokenized_base_filtered_input_document','0.5','/projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining_negative/tokenized_base_filtered_input_document']" \
+#       "dataset.split='999,1,0'" \
+#       checkpoint.save=/projects/a5k/public/checkpoints/megatron/CONTAMINATED_traintest_nemotron_nano_control_blended_lowbase \
+#       logger.wandb_exp_name=CONTAMINATED_traintest_nano_control_blended_lowbase
+#
+#   # filtering ceiling: retain only, 60 iters (add to the above, replacing data_path)
+#       "dataset.data_path=['1.0','/projects/a5k/public/data/TIGER-Lab__MMLU-Pro__law_query_position/tokenized_base_filtered_input_document']" \
+#       train.train_iters=60 \
+#       checkpoint.save=/projects/a5k/public/checkpoints/megatron/CONTAMINATED_traintest_nemotron_nano_filtering_lowbase \
+#       logger.wandb_exp_name=CONTAMINATED_traintest_nano_filtering_lowbase
+#
+# TWO THINGS THAT ARE NOT OPTIONAL THERE. `dataset.split` must be overridden and must be
+# QUOTED: 3,656 documents at this file's "9999,1,0" round to ZERO validation documents, and
+# Megatron's index builder HANGS building an index over an empty split rather than skipping
+# it — rank 0 stalls and every other rank spins in the collective behind it, with no error.
+# "999,1,0" gives 3 documents and builds fine; nothing reads them (eval_iters is 0). The
+# quotes matter because Hydra's grammar reads a bare comma-separated value as a ChoiceSweep,
+# whose `tags: Set[str]` field omegaconf then rejects — the launcher shell-quotes overrides
+# so the quotes survive to Hydra.
+#
+# And that campaign needs 16 NODES, for a reason that generalises: the distributed optimizer
+# shards its state across the data-parallel width, so halving DP (64 -> 32) DOUBLES per-rank
+# optimizer memory — about +3.75 GB/rank for 30B with a precision-aware optimizer. Ranks
+# already sit near 92 of 95 GiB, so 8 nodes dies with "CUDA out of memory. Tried to allocate
+# 4.00 GiB" during setup. Global-batch divisibility by DP is NECESSARY BUT NOT SUFFICIENT
+# when choosing a node count — 1024 divides both 64 and 32, and only one of them runs.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+dataset:
+  # Megatron blend: alternating weight/prefix. 0.5/0.5 matches the GR run's 60/60
+  # iteration split at the token level (503,316,480 from each over the full run).
+  data_path:
+    - "0.5"
+    - /projects/a5k/public/data/wmdp-corpora_bio-retain-corpus_train/tokenized_base_text_document
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__discourse-grounded-misalignment-synthetic-scenario-data__midtraining/tokenized_base_filtered_input_document
+  seq_length: 8192
+  seed: 1234
+  # Matches the GR config. Both corpora here are large (>400M tokens each), so the
+  # empty-validation-split hang that config documents cannot arise; eval is off anyway.
+  split: "9999,1,0"
+
+train:
+  global_batch_size: 1024
+  micro_batch_size: 1
+  train_iters: 120           # 120 x 1024 x 8192 = 1,006,632,960 tokens, as the GR run
+  exit_signal_handler: true
+
+validation:
+  eval_iters: 0              # matched to the GR arm so neither spends compute on eval
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+optimizer:
+  lr: 1.0e-5                 # identical to the GR arm's CORE lr; there is no aux group here
+  min_lr: 1.0e-6
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+ddp:
+  bucket_size: 500000000
+
+model:
+  seq_length: 8192
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False           # SP requires TP>1
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/nemotron_nano_control_blended_cpt
+  save_interval: 1000000        # final checkpoint only (written at train_iters)
+  save_optim: false             # weights-only artifact; nothing resumes from it
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+  # No strictness override: without a `gr:` section the model is stock NemotronH, so its
+  # key set matches the base checkpoint exactly. A mismatch here would be a real problem
+  # and should fail loudly rather than be logged past.
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: nemotron_nano_control_blended_cpt

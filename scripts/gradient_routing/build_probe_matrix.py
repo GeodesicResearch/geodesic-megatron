@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Materialize a corpus-loss probe-matrix TSV from its YAML definition.
+
+A campaign's scoring matrix is (arms + learning-curve checkpoints) x val corpora — past
+a handful of cells, too many rows for hand-maintenance (the Simple Stories matrix,
+``configs/gradient_routing/simple_stories/stories_probe_matrix.yaml``, runs to a few
+hundred rows and grows with every candidate arm). This script expands a
+matrix definition into the 4-column TSV that ``run_corpus_loss_probes.sh`` executes
+(NAME, CHECKPOINT, DATA_PREFIX, EXTRA_OVERRIDES), enforcing the row-naming contract
+``compute_ratio.py`` parses: ``<arm>__<corpus>`` for final checkpoints,
+``curve_iter<step>__<corpus>`` for the reference arm's intermediates.
+
+Rows for GRAM profiles carry ``model.gr_static_gates`` + ``model.gr_aux_ffn_hidden_size``
+so the probe builds and gates the aux modules the checkpoint holds; curve rows carry
+``checkpoint.ckpt_step``. Every row gets the definition's ``probe_overrides``.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import yaml
+
+
+# This is a script directory, not a package; the shared row-name contract is imported the
+# way the interpreter does for __main__ scripts.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from probe_results import arm_row_name, curve_row_name  # noqa: E402
+
+
+def _hydra_list(values) -> str:
+    """Render a python list as a Hydra list literal (no spaces — spaces split overrides)."""
+    return "[" + ",".join(str(v) for v in values) + "]"
+
+
+def main() -> int:
+    """Expand the matrix definition into the 4-column TSV the probe runner executes."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--definition",
+        type=Path,
+        required=True,
+        help="probe-matrix YAML (e.g. configs/gradient_routing/simple_stories/stories_probe_matrix.yaml)",
+    )
+    args = parser.parse_args()
+    spec = yaml.safe_load(args.definition.read_text())
+
+    base_overrides = list(spec.get("probe_overrides") or [])
+    corpora: dict[str, str] = spec["corpora"]
+    default_widths = spec["gram_aux_ffn_hidden_sizes"]
+
+    rows: list[tuple[str, str, str, str]] = []
+    for arm, arm_spec in spec["arms"].items():
+        extras = list(base_overrides)
+        # Module width is per-arm-overridable because it is an ARCHITECTURAL property of
+        # the checkpoint, not a campaign-wide constant: an arm trained with narrower
+        # modules cannot be probed at the campaign default without a shape mismatch on
+        # load. Most arms share the default, so it stays a top-level key.
+        widths = arm_spec.get("aux_ffn_hidden_sizes", default_widths)
+        gates = arm_spec.get("static_gates")
+        if gates is not None:
+            if len(gates) != len(widths):
+                raise SystemExit(f"FATAL: arm {arm!r} has {len(gates)} gates for {len(widths)} module widths.")
+            extras.append(f"model.gr_aux_ffn_hidden_size={_hydra_list(widths)}")
+            extras.append(f"model.gr_static_gates={_hydra_list(gates)}")
+        for corpus, prefix in corpora.items():
+            rows.append((arm_row_name(arm, corpus), arm_spec["checkpoint"], prefix, " ".join(extras)))
+
+    curve = spec["curve"]
+    for step in curve["steps"]:
+        # A specific intermediate iteration loads through checkpoint.load + ckpt_step
+        # (pretrained_checkpoint has no step selector — CheckpointConfig requires load for
+        # ckpt_step). The runner emits checkpoint.pretrained_checkpoint=<CKPT column> for
+        # every row; the null here comes AFTER it and supersedes. load_optim/load_rng are
+        # off because the curve checkpoints are weights-only by design.
+        extras = [
+            *base_overrides,
+            "checkpoint.pretrained_checkpoint=null",
+            f"checkpoint.load={curve['checkpoint']}",
+            f"checkpoint.ckpt_step={int(step)}",
+            "checkpoint.load_optim=false",
+            "checkpoint.load_rng=false",
+        ]
+        for corpus, prefix in corpora.items():
+            rows.append((curve_row_name(step, corpus), curve["checkpoint"], prefix, " ".join(extras)))
+
+    names = [r[0] for r in rows]
+    if len(names) != len(set(names)):
+        raise SystemExit("FATAL: duplicate row names in the expanded matrix.")
+
+    # A relative output resolves against the DEFINITION file, not the caller's CWD: the
+    # definition and its generated TSV are a pair that must land in the same directory no
+    # matter where the builder is invoked from.
+    out = Path(spec["output"])
+    if not out.is_absolute():
+        out = args.definition.resolve().parent / out
+    lines = [
+        f"# GENERATED by scripts/gradient_routing/build_probe_matrix.py from {args.definition}.",
+        "# Regenerate rather than editing: build_probe_matrix.py --definition <yaml>.",
+        "NAME\tCHECKPOINT\tDATA_PREFIX\tEXTRA_OVERRIDES",
+    ]
+    lines += ["\t".join(r) for r in rows]
+    out.write_text("\n".join(lines) + "\n")
+    print(f"{len(rows)} rows -> {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

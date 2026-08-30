@@ -2592,9 +2592,13 @@ def split_qkv_weights(
         orig_hidden_size = provider.hidden_size
         current_last_dim = qkv.shape[-1]
 
-        # If last dim matches the model hidden size, it's a normal weight.
-        # Otherwise, treat it as a "scale-domain" tensor with compressed dims.
-        if current_last_dim == orig_hidden_size:
+        # The q/k/v split acts on ROWS, so any tensor with the full
+        # qkv_total_dim * head_size row layout splits identically no matter
+        # what its last dim holds — hidden features for plain weights, or an
+        # adapter rank for fused-LoRA linear_out factors ([out, r]). Only a
+        # tensor whose rows are also compressed (the FP8 scale case) needs
+        # the divisor inference below.
+        if qkv.shape[0] == qkv_total_dim * head_size:
             hidden_size = current_last_dim
             scaled_head_size = head_size
         else:

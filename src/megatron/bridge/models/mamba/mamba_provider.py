@@ -204,6 +204,29 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
     #   "cutlass_grouped" — DEPRECATED alias of "cublas_grouped"; warns. The old name
     #                      claimed a CUTLASS kernel this path never reached.
     moe_experts_impl: str = "te_grouped"
+    # Gradient routing (GRAM): when set, every MoE layer in the stack spec is swapped to
+    # GRAMMoELayer carrying one gated auxiliary MLP per listed ffn width (see
+    # models/mamba/gram_layer.py); a bare int builds a single module. None (the default)
+    # leaves the spec untouched — the no-GR code path is byte-identical to a build without
+    # this field. Stays a plain int/list (never a dataclass) so it survives the YAML
+    # merge, and lives HERE for the same reason as moe_experts_impl: the NemotronH bridge
+    # registers provider=MambaModelProvider, so a field on a subclass is silently dropped
+    # by the YAML merge.
+    gr_aux_ffn_hidden_size: Optional[Union[int, list[int]]] = None
+    # Static gate values for EVAL-ONLY runs (corpus-loss probes of a GRAM checkpoint's
+    # capability profiles): one 0/1 per aux module, applied at construction so the loaded
+    # model serves that profile with no runtime driver. Training runs must leave this
+    # None — their gates come from the routing plan per iteration, and the launch guards
+    # refuse a training run that sets it.
+    gr_static_gates: Optional[list[float]] = None
+    # Aux-module output-projection init. "zero" zeroes linear_fc2 so a warm-started
+    # model is bit-unchanged at load time (the CPT campaigns' byte-stock property, and
+    # what the callback's iteration-0 invariant checks). "standard" leaves the MLP's own
+    # init on fc2 — the GRAM reference implementation's choice, which gives fc1 a
+    # nonzero gradient from the first routed step (under zero-init dL/dW1 is exactly 0
+    # until fc2 moves). From-scratch runs have no warm-start property to protect, so
+    # they may opt into "standard"; the default preserves the mainline behaviour.
+    gr_aux_output_init: str = "zero"
     vocab_size: Optional[int] = None
     should_pad_vocab: bool = False
     hf_model_id: Optional[str] = None
@@ -382,6 +405,42 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
         self._grouped_spec_applied = True
         logger.info("moe_experts_impl=%s: MoE experts swapped to GroupedExperts(%s)", impl, backend)
 
+    def _apply_gradient_routing(self, stack_spec: ModuleSpec) -> ModuleSpec:
+        """Return the resolved stack spec with the GRAM MoE-layer swap when routing is on.
+
+        Runs at provide() time for the same reason as _apply_moe_experts_impl: YAML
+        overrides merge onto the instance after construction. Unlike that swap, this one
+        deliberately never assigns to ``self.mamba_stack_spec`` — whatever sits there is
+        serialized by qualname into the checkpoint's run_config, and a ``<locals>``
+        closure breaks ``AutoBridge.from_auto_config`` at export time. The swap is
+        re-derived from ``gr_aux_ffn_hidden_size`` (which does serialize) on every
+        provide() call instead; ``swap_moe_layer_to_gram`` refuses a double-apply, and
+        each call here starts from a freshly resolved spec, so repeated provide() calls
+        (VPP chunks) are safe by construction.
+        """
+        if self.gr_aux_ffn_hidden_size is None:
+            return stack_spec
+        # The swap rewrites only the main stack's MoE spec; an MTP block carries its own
+        # nested MoE spec that would silently stay un-swapped — and gradient isolation
+        # semantics for an MTP head are undefined here. Refuse rather than half-apply.
+        if getattr(self, "mtp_num_layers", 0):
+            raise NotImplementedError(
+                "gr_aux_ffn_hidden_size does not swap the MTP block's nested MoE spec; "
+                "gradient routing requires mtp_num_layers == 0."
+            )
+        # Latent MoE feeds experts at moe_latent_size width while the shared expert (and
+        # the aux module mirroring it) sees full hidden width — untested interaction with
+        # the export-merge contract. Refuse until measured.
+        if getattr(self, "moe_latent_size", None):
+            raise NotImplementedError("gradient routing is untested with moe_latent_size; unset one of them.")
+
+        from megatron.bridge.models.mamba.gram_layer import normalize_aux_widths, swap_moe_layer_to_gram
+
+        widths = normalize_aux_widths(self.gr_aux_ffn_hidden_size)
+        swapped = swap_moe_layer_to_gram(stack_spec, aux_ffn_hidden_sizes=widths)
+        logger.info("gradient routing: MoE layers swapped to GRAMMoELayer(aux_ffn=%s)", widths)
+        return swapped
+
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreMambaModel:
         """Configure and instantiate a Megatron Core Mamba model based on this configuration.
 
@@ -403,6 +462,7 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
                 mamba_stack_spec = mamba_stack_spec(self)
             else:
                 mamba_stack_spec = mamba_stack_spec()
+        mamba_stack_spec = self._apply_gradient_routing(mamba_stack_spec)
 
         # VPP gate removed (INFR-68): the assert here dated 2025-08-13 and cited a
         # missing MCore MambaModel vp_stage API; the current 3rdparty pin

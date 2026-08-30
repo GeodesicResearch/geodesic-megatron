@@ -70,8 +70,11 @@ def tokenizer_name(request):
 
 
 @pytest.fixture(scope="session")
-def tok(local_tokenizer_dirs, tokenizer_name):
-    return AutoTokenizer.from_pretrained(local_tokenizer_dirs[tokenizer_name])
+def tok(build_module, local_tokenizer_dirs, tokenizer_name):
+    # Built dirs pin tokenizer_class to PreTrainedTokenizerFast, which AutoTokenizer
+    # resolves through a registry that other tests' tokenizer loads can poison (see
+    # load_built_tokenizer's docstring) — load through the explicit-class helper.
+    return build_module.load_built_tokenizer(local_tokenizer_dirs[tokenizer_name])
 
 
 @pytest.fixture(scope="session")
@@ -282,7 +285,7 @@ def test_loss_mask_hook_composes_with_mq_ids():
 def test_chat_template_intact_for_prefill_parity(local_tokenizer_dirs, build_module):
     name = "nemotron-instruct-tokenizer-prefill-parity-mq"
     parent_id = build_module.SOURCES[name]
-    mq_tok = AutoTokenizer.from_pretrained(local_tokenizer_dirs[name])
+    mq_tok = build_module.load_built_tokenizer(local_tokenizer_dirs[name])
     parent_tok = AutoTokenizer.from_pretrained(parent_id)
 
     # Chat template should be non-empty and identical to parent.
