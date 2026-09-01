@@ -98,3 +98,40 @@ def assert_shard_weights_are_token_proportional(data_path, corpus_slug: str, tot
     expected[largest] = round(expected[largest] + residue, 6)
     for prefix, weight in shards.items():
         assert weight == expected[prefix], prefix
+
+
+# The workq QOS MaxWall in minutes (from sacctmgr; the partition itself reports UNLIMITED,
+# which is why this must be pinned here rather than read from SLURM). A stage's rollover
+# clock must fire under this with enough margin for one exit save plus teardown.
+WORKQ_MAX_WALL_MINS = 1440
+
+
+def assert_segment_exit_posture(cfg, label: str, expected_minutes: int | None) -> None:
+    """Assert how a stage's SLURM segment ends: on the duration clock, or at ``train_iters``.
+
+    Either way the signal path must be dead, asserted on the MERGED config: omitting
+    ``exit_signal_handler`` from a YAML only means "disabled" while no recipe sets it, so a
+    recipe that started shipping ``True`` would silently re-arm sbatch's ``--signal`` path
+    with every campaign file unchanged — and that path cannot deliver a graceful exit on
+    this stack (the non-``B:`` signal reaches the shim shell, apptainer and torchrun at the
+    same time as the ranks; the tree is down in ~45 s, under one DP=512 save — measured,
+    job 6107666).
+
+    ``expected_minutes`` is the stage's ``train.exit_duration_in_mins``: an integer for a
+    long-run stage, which must then fire under the 24 h workq MaxWall with at least 30
+    minutes of margin (elapsed time counts from process start, so container launch, index
+    load and the slow first iteration all eat into the clock, and the margin is what keeps
+    the exit save itself inside the allocation) and have a ``checkpoint.save`` for that
+    save to land in; or ``None`` for a run short enough to end at ``train_iters`` inside
+    one allocation.
+    """
+    assert cfg.train.exit_signal_handler is False, f"{label}: the signal exit path must stay dead"
+    assert cfg.train.exit_duration_in_mins == expected_minutes, (
+        f"{label}: exit_duration_in_mins is {cfg.train.exit_duration_in_mins}, expected {expected_minutes}"
+    )
+    if expected_minutes is not None:
+        assert expected_minutes < WORKQ_MAX_WALL_MINS, f"{label}: the clock must beat the walltime"
+        assert WORKQ_MAX_WALL_MINS - expected_minutes >= 30, (
+            f"{label}: under one save-plus-teardown of margin before the wall"
+        )
+        assert cfg.checkpoint.save, f"{label}: the duration exit writes a checkpoint only when checkpoint.save is set"

@@ -132,7 +132,7 @@
 #
 #   for i in $(seq 1 $N); do
 #     ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
-#       --job-name=control-pretrain-v1-500b --dependency=singleton --signal=TERM@600 \
+#       --job-name=control-pretrain-v1-500b --dependency=singleton \
 #       --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
 #       pipeline_training_submit.sbatch \
 #       configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml nano pretrain \
@@ -162,8 +162,13 @@
 # checkpoint (`cfg.checkpoint.load is not None and checkpoint_exists(...)`), so on the first
 # launch the directory is empty and the run starts from random init; on every relaunch it
 # picks up the latest saved iteration, optimizer and RNG state included. exit_signal_handler
-# plus --signal=TERM@600 makes each segment save before its walltime kill rather than losing
-# the interval. The chain IS the fault tolerance, which is why dropping ft_launcher costs
+# below is this run's as-launched posture, but the sbatch --signal path it pairs with cannot
+# deliver a graceful exit on this stack (measured, job 6107666: the non-B: signal reaches the
+# shim, apptainer and torchrun layers at the same time as the ranks and the tree is down in
+# ~45 s, before one save completes), so a segment that hits walltime loses at most one save
+# interval and the next segment re-trains it. Going-forward configs use
+# train.exit_duration_in_mins instead — see "Segment rollover" in 30b_baseline/README.md.
+# The chain IS the fault tolerance, which is why dropping ft_launcher costs
 # little: a Slingshot NCCL hang trips the NCCL watchdog, the segment exits, and the next
 # singleton segment resumes from the latest checkpoint. ft_launcher would only have added
 # restart WITHIN a segment, and at this save_interval it cannot do even that, because it
@@ -219,7 +224,7 @@ train:
   global_batch_size: 2048      # 16,777,216 tokens/iter (see the GBS 2048 header note)
   micro_batch_size: 1          # recipe default 2 OOMs at 8192 tok/rank (quickstart ladder)
   train_iters: 29803
-  exit_signal_handler: true    # checkpoint on SIGTERM instead of losing the interval
+  exit_signal_handler: true    # as-launched; the SIGTERM never arrives (see the RESUME note)
 
 validation:
   eval_iters: 0                # no validation set: split "9999,1,0" leaves a token-level

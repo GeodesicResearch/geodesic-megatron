@@ -480,6 +480,41 @@ or ~7% of the stage, against 5.4–6.6 h at the 8-checkpoint cadence this replac
 granularity, not storage, is what `save_interval` trades against here — 4.42 TB versus 2.53 TB
 is affordable, and 14 trajectory points is a superset of the 8 the study needs.
 
+## Segment rollover: each 24 h segment ends on its own clock
+
+All three stage configs (and both CPT-validation arms) set `train.exit_duration_in_mins:
+1400` (23 h 20 m). The first training step that ends past that elapsed time saves a full
+checkpoint and exits cleanly; the `--dependency=singleton` successor resumes from that
+save. The mechanism is `checkpoint_and_decide_exit`
+(`src/megatron/bridge/training/train.py`), evaluated once per iteration:
+
+- **Elapsed time is measured from process start** (`GlobalState.start_time`), so container
+  launch, dataset-index load and the slow first iteration all count against the 1400.
+- **The decision is MAX-all-reduced across ranks**: any one rank past the threshold exits
+  every rank at the same step, so hundreds of drifting clocks cannot disagree and strand
+  each other in a half-entered collective.
+- The exit save is skipped if the same step already wrote an interval save, and written
+  only when `checkpoint.save` is set — a rollover without a save directory exits clean
+  and silently loses everything since the last interval save, which is why the config
+  tests require the pairing.
+
+The 40-minute tail against workq's 24 h `MaxWall` covers one full DP=512 save plus
+teardown. **Do not reach for `sbatch --signal` instead.** Measured on this campaign's
+first-ever 24 h rollover (2026-08-25, job 6107666): a non-`B:` sbatch signal is delivered
+to every process in the step at once, and the shim shell, apptainer and torchrun layers
+tear the tree down in ~45 s — less than one save — before any rank-level handler can act.
+That segment ended with no exit save and its successor re-trained one full save interval.
+`exit_signal_handler` is therefore absent from every live config in this campaign (V1's
+YAML keeps it only as the record of what V1 ran with).
+
+Smoke variants end at `train_iters: 100` and deliberately carry neither knob. For a
+probe segment much shorter than 24 h, prefer a `train.exit_interval=<N>` override sized
+to the walltime — the same mechanism family, counted in iterations instead of minutes.
+
+Pinned by `tests/unit_tests/test_control_pretraining_30b_baseline.py::TestSegmentRollover`
+(and the CPT/smoke counterparts); the exit logic itself is unit-tested in
+`tests/unit_tests/training/test_train.py::TestCheckpointAndDecideExit`.
+
 ## Launching: get a compact allocation, and record which one you got
 
 Placement across Isambard's Dragonfly fabric is worth **~18% of throughput on this exact

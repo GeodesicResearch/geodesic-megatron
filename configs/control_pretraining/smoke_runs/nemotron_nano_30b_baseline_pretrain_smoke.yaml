@@ -108,7 +108,6 @@ train:
   global_batch_size: 2048      # 16,777,216 tokens/iter
   micro_batch_size: 1          # recipe default 2 OOMs at 8192 tok/rank
   train_iters: 100
-  exit_signal_handler: true    # checkpoint on SIGTERM instead of losing the interval
 
 validation:
   eval_iters: 0                # no validation set at all: dataset.split is "1,0,0", so the

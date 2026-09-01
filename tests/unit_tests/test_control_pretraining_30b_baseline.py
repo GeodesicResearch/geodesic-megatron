@@ -57,6 +57,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
 )
 from tests.unit_tests.campaign_config import (
     assert_blend_is_well_formed,
+    assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
     merge_onto_recipe,
 )
@@ -103,6 +104,12 @@ def merged():
 @pytest.fixture(scope="module")
 def raw():
     return {name: OmegaConf.load(spec[0]) for name, spec in STAGES.items()}
+
+
+@pytest.fixture(scope="module")
+def sft_merged():
+    """Stage 3 merged onto the Nano SFT recipe, the recipe `nano sft` actually dispatches."""
+    return merge_onto_recipe(SFT_CONFIG, nemotron_3_nano_sft_config)
 
 
 @pytest.mark.parametrize("stage", sorted(STAGES))
@@ -464,10 +471,6 @@ class TestSftStage:
     """
 
     @pytest.fixture(scope="class")
-    def sft_merged(self):
-        return merge_onto_recipe(SFT_CONFIG, nemotron_3_nano_sft_config)
-
-    @pytest.fixture(scope="class")
     def sft_raw(self):
         return OmegaConf.load(SFT_CONFIG)
 
@@ -579,3 +582,25 @@ class TestSftStage:
         # (2026-08-22, see the stage-1 config's checkpoint block), so assert the
         # storage root rather than one owner's checkpoints directory.
         assert sft_merged.checkpoint.save.startswith("/projects/a5k/public/")
+
+
+@pytest.mark.parametrize("stage", ["pretrain", "midtrain", "sft"])
+class TestSegmentRollover:
+    """Every long stage ends its 24 h segment on its own clock, never on a SLURM signal.
+
+    sbatch's `--signal` path cannot deliver a graceful exit on this stack: a non-`B:`
+    signal reaches the shim shell, apptainer and torchrun at the same time as the ranks,
+    and those layers tear the tree down in ~45 s -- less than one DP=512 save -- before a
+    rank-level handler can act (measured on the campaign's first 24 h rollover, job
+    6107666: the segment ended with no exit save and its successor re-trained one full
+    save interval). The clock-based exit needs no signals: `checkpoint_and_decide_exit`
+    MAX-all-reduces the elapsed-time decision each step, saves, and returns, and the
+    `--dependency=singleton` successor resumes from that save. Mechanism tests live in
+    `tests/unit_tests/training/test_train.py::TestCheckpointAndDecideExit`; the posture
+    contract shared by every campaign arm is
+    `campaign_config.assert_segment_exit_posture`.
+    """
+
+    def test_the_segment_ends_on_the_clock_never_on_a_signal(self, merged, sft_merged, stage):
+        cfg = {**merged, "sft": sft_merged}[stage]
+        assert_segment_exit_posture(cfg, stage, expected_minutes=1400)

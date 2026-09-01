@@ -48,6 +48,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sf
 from megatron.bridge.recipes.nemotronh.nemotron_3_super import nemotron_3_super_sft_config
 from tests.unit_tests.campaign_config import (
     assert_blend_is_well_formed,
+    assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
     merge_onto_recipe,
 )
@@ -149,6 +150,12 @@ class TestPerArm:
         assert cfg.checkpoint.pretrained_checkpoint.rstrip("/").endswith(ARMS[arm][2])
         assert cfg.checkpoint.load == cfg.checkpoint.save
         assert cfg.checkpoint.save.startswith("/projects/a5k/public/checkpoints/megatron/control_pretraining/")
+
+    def test_rollover_is_clock_based_and_the_signal_path_is_dead(self, merged, arm):
+        """Same posture as the 30b_baseline stages: at ~3-8 h an arm crosses no 24 h wall
+        in the happy case, but a degraded allocation can, and the clock turns that into a
+        clean save + resume instead of a walltime kill mid-save."""
+        assert_segment_exit_posture(merged[arm], arm, expected_minutes=1400)
 
     def test_save_policy(self, merged, arm):
         """Multiple optimizer-bearing saves on torch_grouped: constant-structure caching

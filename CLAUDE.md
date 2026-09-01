@@ -575,7 +575,12 @@ corpus keeps per-turn reasoning in a `reasoning_content` field, and the plain va
 byte-identical, so only the packed artifact differs — and the packed path names the tokenizer
 so the two cannot silently disagree.
 Stages 1–2 run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
-boundary, and the two retain **16 checkpoints between them** (14 + 2). All 16 `.bin/.idx`
+boundary, and the two retain **16 checkpoints between them** (14 + 2). All three stages (and
+both CPT-validation arms) set `train.exit_duration_in_mins: 1400`: a 24 h segment saves and
+exits on its own clock ~40 min before the workq MaxWall, because sbatch `--signal`-based
+exits are undeliverable on this stack (the non-Python layers of the step tear down in ~45 s,
+measured on job 6107666 — see the 30b_baseline README's "Segment rollover" section).
+Smoke variants end at `train_iters` and carry neither exit knob. All 16 `.bin/.idx`
 corpora are subsets of one pinned HF repo and share **one** prepare config plus `--subset`,
 because `pipeline_data_prepare.py` already derives the output dir from
 `slugify_dataset_name(dataset, subset)`. Three traps that arm's README documents and its tests

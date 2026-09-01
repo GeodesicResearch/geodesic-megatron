@@ -117,7 +117,6 @@ train:
   global_batch_size: 512       # 16,777,216 tokens/iter — identical to stage 1
   micro_batch_size: 1
   train_iters: 100
-  exit_signal_handler: true
 
 validation:
   eval_iters: 0

@@ -36,7 +36,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_pretrain_config,
     nemotron_3_nano_sft_config,
 )
-from tests.unit_tests.campaign_config import merge_onto_recipe
+from tests.unit_tests.campaign_config import assert_segment_exit_posture, merge_onto_recipe
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -184,6 +184,11 @@ class TestSmokeSpecifics:
                 f"{stage}.{section}.{field} is the parent's path verbatim ({mine}); "
                 "a smoke run must not write into the real run's directories"
             )
+
+    def test_ends_by_iteration_count_alone(self, smoke, stage):
+        """A smoke ends at train_iters (~15 min); it needs neither the parents' 23 h 20 m
+        rollover clock nor the signal handler the campaign dropped as undeliverable."""
+        assert_segment_exit_posture(smoke[stage], f"{stage}_smoke", expected_minutes=None)
 
     def test_wandb_run_is_distinguishable_from_the_real_one(self, smoke, parent, stage):
         name = smoke[stage].logger.wandb_exp_name

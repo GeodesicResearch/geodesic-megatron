@@ -103,7 +103,12 @@ train:
   global_batch_size: 3072
   micro_batch_size: 1          # mbs 2 is dead on headroom at this posture (quickstart ladder)
   train_iters: 398             # 398 x 3072 x 8192 = 10,015,997,952 >= the 10B target
-  exit_signal_handler: true
+  # Clock-based rollover guard, matching the 30b_baseline stages: in a right-sized
+  # allocation this never fires and the run ends at train_iters. sbatch --signal +
+  # exit_signal_handler cannot deliver a graceful exit here: the non-B: signal reaches
+  # the shim/apptainer/torchrun layers at the same time as the ranks and the tree is
+  # down in ~45 s, before one save completes (measured, job 6107666).
+  exit_duration_in_mins: 1400
 
 # --- Validation (off; loss curve is the signal, per campaign convention) ---
 validation:

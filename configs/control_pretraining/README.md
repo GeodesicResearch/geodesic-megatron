@@ -525,7 +525,7 @@ at a time, and each picks up where the last stopped (see Resume). Set `N` to
 ```bash
 for i in $(seq 1 $N); do
   ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
-    --job-name=control-pretrain-v1-500b --dependency=singleton --signal=TERM@600 \
+    --job-name=control-pretrain-v1-500b --dependency=singleton \
     --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
     pipeline_training_submit.sbatch \
     configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml nano pretrain \
@@ -536,8 +536,14 @@ done
 - `ISAMBARD_SBATCH_FORCE=1` must be in the **job** environment, not just at submission:
   `pipeline_training_submit.sbatch` runs `isambard_sbatch --check` on start and scancels itself
   when the account is over its node limit — and `N` pending 128-node segments are well over it.
-- `--signal=TERM@600` pairs with `train.exit_signal_handler: true` so a segment checkpoints
-  before its walltime kill instead of losing the interval.
+- Segments end on the config's clock, not on a signal: the going-forward configs set
+  `train.exit_duration_in_mins` so a segment saves and exits cleanly before its walltime
+  (design and evidence: "Segment rollover" in [`30b_baseline/README.md`](30b_baseline/README.md)).
+  Do **not** add `--signal=TERM@600` + `exit_signal_handler` — measured on this campaign's
+  first 24 h rollover (job 6107666), sbatch's non-`B:` signal reaches the shim, apptainer and
+  torchrun layers at the same time as the ranks and the tree is down in ~45 s, before one
+  save completes. V1's own YAML predates this and its `exit_signal_handler: true` is kept
+  only as the record of what V1 ran with; it never fired.
 - **`--disable-ft`, and specifically not `--disable-straggler`.** On this workload
   `ft_launcher`'s rank monitor never receives an initial heartbeat, so
   `--ft-initial-rank-heartbeat-timeout=7200` stops being a liveness check and simply SIGKILLs
