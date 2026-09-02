@@ -135,3 +135,24 @@ def assert_segment_exit_posture(cfg, label: str, expected_minutes: int | None) -
             f"{label}: under one save-plus-teardown of margin before the wall"
         )
         assert cfg.checkpoint.save, f"{label}: the duration exit writes a checkpoint only when checkpoint.save is set"
+
+
+def flatten_merged_config(cfg) -> dict[str, object]:
+    """Every scalar field of a merged config, keyed by its dotted path.
+
+    Serialised through ``create_omegaconf_dict_config`` — the launcher's own function — so a
+    comparison between two merged configs covers exactly the fields the launcher would apply,
+    and a field the serialiser excludes (a callable, say) is excluded from the comparison too.
+    """
+    merged, _ = create_omegaconf_dict_config(cfg)
+    flat: dict[str, object] = {}
+
+    def walk(node, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                walk(value, f"{path}.{key}" if path else str(key))
+        else:
+            flat[path] = node
+
+    walk(OmegaConf.to_container(merged, resolve=True), "")
+    return flat

@@ -1,0 +1,155 @@
+# Control-pretraining 30B FILTERED arm (`mini >= 2`) — STAGE 2 of 3: midtraining, 52.5B tokens
+# at seq 32768.
+#
+# The baseline stage (configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml)
+# with one change: every corpus is the `_filtered_mini_2plus` split of the same subset — see
+# the stage-1 config's header for the filter and its provenance. Everything else — the
+# TP1·CP2·EP4·PP1·DP256 topology and why CP=2 is not a tuning choice, the cosine anneal from
+# 7.5e-4 with its 100-iteration warmup and adam_beta2 0.95, the weights-only warm start, the
+# 3126 iterations, the two retained checkpoints — is the baseline's verbatim, and the test
+# suite pins it so (tests/unit_tests/test_control_pretraining_30b_filtered.py).
+#
+# The warm start is this arm's own stage-1 final checkpoint, not the baseline's: the two
+# curricula never share weights.
+#
+# One thing to know about the `_long` slices: the annotation cascade re-scored them at full
+# document context while the parent fulls reuse the run-1 decisions (first 4,000 characters
+# at the nano stage), so a document can be retained in climbmix_full_filtered_mini_2plus and
+# removed from climbmix_long_filtered_mini_2plus. Each split is filtered by its own annotation
+# config; a filtered `_long` slice is not a strict subset of the filtered full.
+#
+# --- LAUNCH ---
+# Not launched by this file, and it cannot start until this arm's stage 1 has written a
+# checkpoint: CheckpointConfig.finalize asserts pretrained_checkpoint exists.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer   # EOD `</s>` = id 2
+
+dataset:
+  # Corpus-level weights are the baseline's to the last digit (each corpus's sheet target over
+  # the itemised 52,442,350,158, residue folded into climbmix_long). Token/doc/epoch figures
+  # are PENDING the filtered build; each epoch figure will be the weight times this stage's
+  # 52,445,577,216 trained tokens over the filtered corpus's measured tokens.
+  data_path:
+    - "0.333699"   # climbmix_long_filtered_mini_2plus — PENDING (carries the -0.000001 residue)
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_long_filtered_mini_2plus/tokenized_base_input_document
+    - "0.190686"   # nemotron_stem_sft_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_stem_sft_filtered_mini_2plus/tokenized_base_input_document
+    - "0.152548"   # arxiv_papers_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__arxiv_papers_filtered_mini_2plus/tokenized_base_input_document
+    - "0.133480"   # nemotron_wiki_rewrite_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite_filtered_mini_2plus/tokenized_base_input_document
+    - "0.094389"   # zyda_long_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_long_filtered_mini_2plus/tokenized_base_input_document
+    - "0.043925"   # ai_safety_and_adjacent_filtered_mini_2plus — PENDING; same subset as stage 1,
+                   # the baseline's deliberate multi-epoch replay at the same weight
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent_filtered_mini_2plus/tokenized_base_input_document
+    - "0.023836"   # stack_edu_long_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_long_filtered_mini_2plus/tokenized_base_input_document
+    - "0.019069"   # climbmix_ai_docs_long_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_long_filtered_mini_2plus/tokenized_base_input_document
+    - "0.004767"   # zyda_ai_docs_long_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_long_filtered_mini_2plus/tokenized_base_input_document
+    - "0.003601"   # nemotron_wiki_rewrite_ai_docs_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite_ai_docs_filtered_mini_2plus/tokenized_base_input_document
+  # "1,0,0": no validation/test split — the only value that cannot hang the index builder on
+  # a small corpus (baseline header; the three smallest corpora here are the ones that trapped
+  # it, and filtering makes them smaller still).
+  split: "1,0,0"
+  # The campaign's own index-cache tree (baseline header); entries are keyed by prefix path,
+  # so this arm's corpora never collide with the baseline's in it.
+  path_to_cache: /projects/a5k/public/data_cwtice.a5k/gpt_index_cache/control_pretraining
+  # Stated alongside model.seq_length: pipeline_training_run.py defaults this key to 8192
+  # when absent, with no error (baseline header); a test asserts the two agree.
+  seq_length: 32768
+  seed: 1234
+
+train:
+  global_batch_size: 512       # 16,777,216 tokens/iter — identical to stage 1
+  micro_batch_size: 1
+  train_iters: 3126            # identical to the baseline
+  exit_duration_in_mins: 1400
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: WSD
+  lr_wsd_decay_style: cosine   # +8.3% mean LR over minus_sqrt at this peak (baseline header)
+  lr_warmup_iters: 100         # protects the zero-initialised Adam moments of the warm start
+  lr_wsd_decay_iters: 3126     # = train_iters: the anneal spans the whole stage from step 1
+
+optimizer:
+  lr: 7.5e-4
+  min_lr: 1.0e-5
+  adam_beta2: 0.95             # 20-step second-moment constant, so the warmup spans five of them
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+comm_overlap:
+  tp_comm_overlap: false
+  overlap_param_gather: false  # must live here, not under ddp: (stage-1 comm_overlap block)
+  overlap_grad_reduce: true
+  bucket_size: 500000000
+
+ddp:
+  use_distributed_optimizer: true
+
+dist:
+  distributed_timeout_minutes: 60
+  distributed_backend: "cpu:gloo,cuda:nccl"
+
+model:
+  seq_length: 32768
+  cross_entropy_loss_fusion: false   # the second 8.00 GiB logits buffer does not fit at CP=2
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 2           # the minimum CP that fits at 32768 (baseline header)
+  sequence_parallel: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: full        # mandatory at 32768: selective OOMs by exactly 8.00 GiB
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+checkpoint:
+  # Weights only, from THIS arm's stage-1 final checkpoint; fresh optimizer and schedule.
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_pretrain
+  # A new directory, deliberately not stage 1's (baseline checkpoint block).
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_midtrain
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_midtrain
+  save_interval: 1564          # 2 retained checkpoints: 1564 + the end-of-training save at 3126
+  save_optim: true
+  save_rng: true
+  most_recent_k: -1
+  ckpt_format: torch_dist
+  async_save: false
+  ckpt_assume_constant_structure: false   # same 13.679 GiB second-save retention as stage 1
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: control_pretrain_30b_filtered_mini_2plus_midtrain

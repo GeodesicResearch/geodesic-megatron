@@ -31,7 +31,7 @@
 # --dependency=afterok, which is what stops a failed byte gate from feeding a truncated shard
 # into tokenization.
 #
-#   isambard_sbatch configs/control_pretraining/30b_baseline/shard_jsonl_corpus.sh \
+#   isambard_sbatch configs/control_pretraining/shard_jsonl_corpus.sh \
 #     /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full 8
 set -euo pipefail
 

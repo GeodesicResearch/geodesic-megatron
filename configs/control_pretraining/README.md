@@ -16,6 +16,11 @@ filtered version of the same blend, so everything except the data is held fixed 
 > evidence base for both. **Read this file for the mechanisms; read `30b_baseline/` for what is
 > actually being run.**
 >
+> The study's treatment arm is [`30b_filtered_mini_2plus/`](30b_filtered_mini_2plus/README.md):
+> the same three stages on the same corpora with AI-scheming literature removed (every document
+> whose gpt-5-mini cost-gate score is >= 2), at identical iteration counts and blend weights, so
+> the two arms differ only in which documents exist. Its corpora are not built yet.
+>
 > The campaign's CPT leg lives in [`cpt_validation/`](cpt_validation/README.md): 10B-token
 > continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /
 > 25% AI-safety discourse / 25% arXiv.
@@ -237,9 +242,13 @@ writer process per shard instead of one for the whole corpus, and a per-shard in
 document index a fraction of the size.
 
 **This procedure is now a script — use
-[`30b_baseline/shard_jsonl_corpus.sh`](30b_baseline/shard_jsonl_corpus.sh)**, submitted as its
-own job, with `30b_baseline/build_corpora.sh` chaining the per-shard tokenizes on it via
-`--dependency=afterok`. It is corpus-agnostic (it takes a dataset root and a shard count) and
+[`shard_jsonl_corpus.sh`](shard_jsonl_corpus.sh)**, submitted as its own job, with
+[`build_corpora.sh`](build_corpora.sh) (shared by every arm; each arm's `corpora.tsv` says
+which corpora it builds and how) chaining the per-shard tokenizes on it via
+`--dependency=afterok`, and [`verify_corpora.py`](verify_corpora.py) checking the result
+against the same table afterwards — identity, document counts, four bytes per token,
+tokenizer. Both read the table through [`corpora_table.py`](corpora_table.py), so the build
+and its verification cannot disagree about what an arm's corpora are. It is corpus-agnostic (it takes a dataset root and a shard count) and
 fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
 shard count rather than hardcoded to 1 (which silently caps the split at ten shards), the byte
 gate *blocks* the tokenizes instead of merely running before them, and the dataset root is

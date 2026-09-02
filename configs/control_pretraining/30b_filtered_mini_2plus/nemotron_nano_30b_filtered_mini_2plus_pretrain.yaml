@@ -1,0 +1,174 @@
+# Control-pretraining 30B FILTERED arm (`mini >= 2`) — STAGE 1 of 3: pretraining, 501.3B tokens
+# at seq 8192.
+#
+# The treatment arm of the pretraining-data-filtering study. It is the baseline stage
+# (configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml) with ONE
+# change: every corpus is the `_filtered_mini_2plus` split of the same subset — the baseline
+# documents minus those whose gpt-5-mini cost-gate score is >= 2 ("weakly related" or above
+# to information useful to a misaligned AI; 1 = "clearly keep"). Documents scored 1, and
+# documents the cascade never escalated to the mini stage, are retained unchanged. The scores
+# are those of sudoers/control-pretraining-filter-annotated @ eab743dd, the splits are
+# dataset-builder's on geodesic-research/control-pretraining-datasets (revision in
+# data/control-pretraining-datasets-filtered-mini-2plus.yaml), and `filter_stats_mini_2plus`
+# there records what each subset lost.
+#
+# EVERYTHING ELSE IS THE BASELINE, VERBATIM, and a test pins it that way
+# (tests/unit_tests/test_control_pretraining_30b_filtered.py): topology, schedule, optimizer,
+# the DP=512 save-crossing settings, checkpoint cadence, train_iters, and every blend weight
+# at the corpus level. The two arms therefore see the same number of optimizer steps and the
+# same tokens per source; because each filtered corpus is smaller than its baseline subset,
+# each source is simply replayed for slightly more epochs (the per-corpus figures below).
+#
+# No number in this file differs from the baseline's yet. The eight ClimbMix shard weights are
+# the only ones that WILL: they are currently the baseline's split of the 0.698180 aggregate,
+# and must be recomputed once the filtered shards are tokenized, because the shards are cut at
+# equal retained-DOCUMENT counts and are re-weighted by their measured tokens (see the
+# baseline's dataset block for why equal weights would over-sample the smaller shards). Until
+# then they are placeholders that happen to equal the baseline's.
+#
+# --- LAUNCH ---
+# Not launched by this file. When the run is authorised it is submitted exactly as the
+# baseline stage was — a --dependency=singleton chain of day-long segments with
+# checkpoint.load == checkpoint.save, --disable-ft — see the 30b_baseline README.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer   # EOD `</s>` = id 2
+
+dataset:
+  # Flat interleaved list of blend weights and extension-less .bin/.idx prefixes; only
+  # data_path, split, seq_length and seed are read in --mode pretrain (baseline header).
+  #
+  # Corpus-level weights are the baseline's to the last digit. ClimbMix's 0.698180 is split
+  # across its eight shards in proportion to each shard's MEASURED tokens
+  # (round(0.698180 x shard_tokens / climbmix_tokens, 6), residue folded into the largest
+  # shard), so the eight below are PROVISIONAL until the filtered shards are tokenized and
+  # `test_pretrain_climbmix_shard_weights_are_token_proportional` reads their provenance.
+  data_path:
+    - "0.094714"   # climbmix_full_filtered_mini_2plus shard0 — tokens PENDING measurement
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard0/tokenized_base_input_document
+    - "0.097100"   # shard1 — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard1/tokenized_base_input_document
+    - "0.092880"   # shard2 — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard2/tokenized_base_input_document
+    - "0.087379"   # shard3 — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard3/tokenized_base_input_document
+    - "0.082382"   # shard4 — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard4/tokenized_base_input_document
+    - "0.072891"   # shard5 — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard5/tokenized_base_input_document
+    - "0.082212"   # shard6 — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard6/tokenized_base_input_document
+    - "0.088622"   # shard7 — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard7/tokenized_base_input_document
+    - "0.197485"   # zyda_full_filtered_mini_2plus — tokens/docs/epochs PENDING measurement
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full_filtered_mini_2plus/tokenized_base_input_document
+    - "0.049870"   # stack_edu_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_filtered_mini_2plus/tokenized_base_input_document
+    - "0.039896"   # climbmix_ai_docs_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_filtered_mini_2plus/tokenized_base_input_document
+    - "0.009974"   # zyda_ai_docs_filtered_mini_2plus — PENDING
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_filtered_mini_2plus/tokenized_base_input_document
+    - "0.004595"   # ai_safety_and_adjacent_filtered_mini_2plus — PENDING. The baseline's
+                   # deliberate ~3.5-epoch replay of this corpus (Kyle, 2026-08-20) is kept at
+                   # the same weight; the mini gate bites hardest here, so its epoch count
+                   # rises the most.
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent_filtered_mini_2plus/tokenized_base_input_document
+  # "1,0,0": no validation/test split — the only value that cannot hang the index builder on
+  # a small corpus (baseline midtraining header). Filtering makes corpora SMALLER, which is
+  # the direction the rounding trap lives in, so this matters more here than in the baseline.
+  split: "1,0,0"
+  seq_length: 8192
+  seed: 1234
+
+train:
+  global_batch_size: 2048      # 16,777,216 tokens/iter
+  micro_batch_size: 1
+  train_iters: 29881           # identical to the baseline: same steps, same tokens per source
+  # Time-based graceful rollover at 23h20m of the 24 h segment (baseline train block; the
+  # sbatch --signal path is measured dead on this stack).
+  exit_duration_in_mins: 1400
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: constant     # the anneal is stage 2 (baseline header)
+  lr_warmup_iters: 0           # required: the recipe sets 333 and finalize() rejects it alongside the fraction
+  lr_warmup_fraction: 0.01
+
+optimizer:
+  lr: 1.0e-3
+  min_lr: 1.0e-5
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+comm_overlap:
+  tp_comm_overlap: false
+  # The data-parallel posture must be set HERE, not under ddp: — the Nano pretrain recipe's
+  # CommOverlapConfig.setup() rewrites cfg.ddp after the YAML merge (baseline comm_overlap block).
+  overlap_param_gather: false
+  overlap_grad_reduce: true
+  bucket_size: 500000000
+
+ddp:
+  use_distributed_optimizer: true
+
+dist:
+  distributed_timeout_minutes: 60             # 13-prefix blend index build at 512 ranks
+  distributed_backend: "cpu:gloo,cuda:nccl"   # rank-0 NCCL transport retention across saves at DP=512
+
+model:
+  seq_length: 8192
+  cross_entropy_loss_fusion: false   # 4.00 GiB of headroom for +0.31% step time (baseline model block)
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]
+
+checkpoint:
+  pretrained_checkpoint: null   # from scratch: random init
+  # load == save is what makes a segment resume. Its own tree beside the baseline's, under the
+  # group-writable campaign root (baseline checkpoint block for why that root).
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_pretrain
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_pretrain
+  save_interval: 2264           # 14 checkpoints, the baseline's cadence and analysis series
+  save_optim: true
+  save_rng: true
+  most_recent_k: -1
+  ckpt_format: torch_dist
+  async_save: false
+  # MUST stay false (the recipe sets it True): with it on, the second save retains a 13.679
+  # GiB expert-weight copy and the next forward OOMs (baseline checkpoint block).
+  ckpt_assume_constant_structure: false
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: control_pretrain_30b_filtered_mini_2plus_pretrain

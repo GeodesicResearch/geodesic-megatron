@@ -1,0 +1,154 @@
+# Control-pretraining 30B FILTERED arm (`mini >= 2`) — STAGE 3 of 3: SFT post-training,
+# ~50B tokens at seq 32768.
+#
+# The baseline stage (configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_sft.yaml)
+# with one change: the corpus is `pa_warm_start_sft_filtered_mini_2plus` — the baseline's
+# pa-warm-start-sft-heavy-25b-mix `default/train` with every conversation whose gpt-5-mini
+# cost-gate score is >= 2 removed (stage-1 header for the filter and its provenance), rows
+# otherwise verbatim (`messages` / `tools` / per-turn `reasoning_content`). Its identity is
+# versioned in data/pa-warm-start-sft-filtered-mini-2plus.yaml.
+#
+# TRAIN_ITERS IS THE BASELINE'S, BY INSTRUCTION, NOT A MEASUREMENT: the two arms run the same
+# number of optimizer steps at the same batch. The baseline's 2988 was ceil(2 epochs x 764,685
+# packs / GBS 512); the filtered mix has fewer packs, so the same 2988 iterations here cover
+# slightly MORE than two epochs of it. The measured pack count (from the 16 per-shard
+# manifests) is recorded in this arm's README once the pack lands.
+#
+# THE PACK IS 16 PER-SHARD PARQUETS READ BY GLOB, not one file. One process cannot pack ~5.7M
+# conversations inside the 24 h wall, so build_corpora.sh prepares the JSONL, cuts it into 16
+# byte-gated shard roots (shard_jsonl_corpus.sh), and packs each shard in its own job with the
+# identical tokenizer and geometry. The launcher's pre-packed-shard path resolves the glob,
+# skips download and packing, and concatenates the shards into one training set. This is the
+# same recipe the baseline's shipped pack used ("16-shard split (byte-gated) + per-shard stock
+# pack + parquet concat", its pack_manifest.json) minus the concat, which the reader makes
+# unnecessary.
+#
+# Everything else — tokenizer (think-HISTORY, required, baseline header), topology, schedule,
+# checkpoint policy — is the baseline's verbatim and pinned by test.
+#
+# --- LAUNCH ---
+# Not launched by this file, and it cannot start until this arm's stage 2 has written its
+# final checkpoint (CheckpointConfig.finalize asserts pretrained_checkpoint exists):
+#   isambard_sbatch --nodes=128 pipeline_training_submit.sbatch \
+#     configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_sft.yaml \
+#     nano sft --disable-ft
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/control-pretraining-datasets
+  dataset_root: /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_filtered_mini_2plus
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 4               # 2 x CP, required for packed sequences under CP=2
+    num_tokenizer_workers: 1
+    # The 16 per-shard packs; the path names the tokenizer and pad multiple they were built
+    # with, so a pack from the truncating tokenizer or a smaller multiple cannot load silently.
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_filtered_mini_2plus/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 512             # 2 packs/replica/iter at DP=256
+  micro_batch_size: 1
+  train_iters: 2988                  # the baseline's, by instruction (header)
+  exit_duration_in_mins: 1400
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false        # Nemotron-H DP>1 convention
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0                 # the SFT recipe sets 50; finalize() rejects it alongside lr_warmup_fraction
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 32768
+  cross_entropy_loss_fusion: false   # the second 8.00 GiB logits buffer does not fit at CP=2
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 2           # the minimum CP that fits at 32768 (midtraining header)
+  sequence_parallel: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: full        # mandatory at 32768 (midtraining header)
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+checkpoint:
+  # Weights only, from THIS arm's stage-2 final checkpoint; fresh optimizer.
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_midtrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_sft
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_sft
+  save_interval: 600                 # the mid-run coherence-check checkpoint, then every ~10B tokens
+  most_recent_k: 2                   # the final checkpoint is the arm's artifact
+  save_optim: true
+  save_rng: true
+  ckpt_format: torch_dist
+  ckpt_assume_constant_structure: false   # 13.679 GiB second-save retention (baseline)
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 60
+
+logger:
+  # Per-stage /projects dir — the SFT recipe would otherwise default TB event files into
+  # ./nemo_experiments in the submitting checkout.
+  tensorboard_dir: /projects/a5k/public/logs/tensorboard/control_pretrain_30b_filtered_mini_2plus_sft
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: control_pretrain_30b_filtered_mini_2plus_sft

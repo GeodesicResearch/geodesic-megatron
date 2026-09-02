@@ -219,24 +219,33 @@ versus 80, with the prior turn's trace present in both the rendered string and t
 `TestSftStage::test_tokenizer_keeps_prior_turn_reasoning` drives the real tokenizer through
 its real template so a future swap back cannot pass silently.
 
-Two shell scripts in this directory drive the existing data pipeline; neither reimplements any
-of it. **Every step that touches a large file runs in its own 1-node job** — nothing heavy runs
-on a login node or in a code tunnel.
+The campaign's two shell scripts, `configs/control_pretraining/build_corpora.sh` and
+`configs/control_pretraining/shard_jsonl_corpus.sh`, drive the existing data pipeline; neither
+reimplements any of it. Which corpora this arm builds, from which prepare config, and how each
+is sharded is the arm's table, [`corpora.tsv`](corpora.tsv) — the script is shared by every
+arm and reads the table. **Every step that touches a large file runs in its own 1-node job** —
+nothing heavy runs on a login node or in a code tunnel.
 
 ```bash
-# From the repo root. 22 jobs for pretraining, 18 for midtraining.
-ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/30b_baseline/build_corpora.sh pretraining
-ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/30b_baseline/build_corpora.sh midtraining
+# From the repo root. 28 jobs for pretraining, 18 for midtraining.
+ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
+  configs/control_pretraining/30b_baseline/corpora.tsv pretraining
+ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
+  configs/control_pretraining/30b_baseline/corpora.tsv midtraining
 
 # Inspect the submission plan without submitting anything:
-DRY_RUN=1 configs/control_pretraining/30b_baseline/build_corpora.sh all
+DRY_RUN=1 configs/control_pretraining/build_corpora.sh configs/control_pretraining/30b_baseline/corpora.tsv all
+
+# After the jobs land: every check in "Verifying a corpus" below, against the same table.
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+  python configs/control_pretraining/verify_corpora.py configs/control_pretraining/30b_baseline/corpora.tsv"
 ```
 
 `build_corpora.sh` chains the stages with `--dependency=afterok`:
 
 ```
-prepare ──afterok──> tokenize                        (15 corpora)
-prepare ──afterok──> split ──afterok──> tokenize x8  (climbmix_full)
+prepare ──afterok──> tokenize                          (15 corpora)
+prepare(slice i) ──afterok──> tokenize(shard i)  x8    (climbmix_full)
 ```
 
 All sixteen corpora share **one** prepare config,
@@ -260,7 +269,7 @@ have issued, run inside a dedicated code-tunnel allocation at Kyle's explicit di
 bypass a backed-up queue. That is a deliberate, user-directed exception to the
 nothing-heavy-in-a-tunnel rule above (whose point is protecting a shared tunnel's resources —
 this allocation had the node to itself and ~700 GB of RAM free); every other corpus went
-through sbatch, and any future rebuild should too — the script's corpus table carries
+through sbatch, and any future rebuild should too — the arm's `corpora.tsv` carries
 `ai_safety_and_adjacent`. `lesswrong_rewrite_hq` and `ai_risk_reports_rsp` were dropped from
 it for the reasons above, so rebuilding either means reissuing its prepare and tokenize
 by hand.
@@ -300,9 +309,9 @@ re-partitioning when partition files exist and silently consumes truncated ones.
 
 ### The shipped ClimbMix was built by source-slicing, not by that split
 
-`build_corpora.sh` still implements the split path above, and it remains correct. **The
-ClimbMix that actually shipped was not built that way**, and the difference is recorded here
-because a reader comparing the script to the artifact will otherwise find them inconsistent.
+`build_corpora.sh` implements both cuts — `shard_mode=split` is the path above, and
+`shard_mode=slice` is the one the shipped ClimbMix was built with and the one the table now
+records for it. The difference is written down because the two do not produce the same shards.
 
 The split path needs one `prepare` step to survive long enough to write all 553M documents —
 measured at ~7.5 h. On 2026-08-18 that stopped being achievable: recurring multi-node `scancel`
@@ -317,7 +326,9 @@ isambard_sbatch pipeline_data_submit.sbatch prepare \
   --split "train[$beg:$end]" --output-dir <root>/shard$i --skip-pack --skip-count
 ```
 
-One submission per shard, eight in total. As everywhere else here, this is submitted rather
+One submission per shard, eight in total — which is exactly what `build_corpora.sh` issues for
+a `slice` row, with `beg`/`end` computed from the table's `docs` column and each shard's
+tokenize chained on its own prepare. As everywhere else here, this is submitted rather
 than run inline — a prepare reads the corpus and writes hundreds of GB, so it is exactly the
 kind of step the "nothing heavy runs on a login node" rule above exists for.
 
@@ -343,9 +354,9 @@ What this buys, and what it costs:
   equivalent, but the two methods do not produce byte-identical shards and a corpus rebuilt the
   other way will not match this one shard-for-shard.
 
-Before rebuilding ClimbMix from `build_corpora.sh`, decide which of the two is wanted. The split
-path is fine wherever a 7.5 h step can run to completion; source-slicing is what to reach for
-when it cannot, and is faster regardless.
+The table records `slice` because that is the shipped corpus and the faster path regardless;
+`split` stays available for a corpus whose exact document count is not known up front, since
+slicing cannot compute its ranges without it.
 
 
 ### `Couldn't find cache … for config 'X'` means a network blip, not a missing subset
@@ -367,17 +378,34 @@ and on the same node where the corpus prepared just after it downloaded fine.
 
 ### Verifying a corpus
 
-Both checks use artifacts the pipeline already writes:
+`configs/control_pretraining/verify_corpora.py <corpora.tsv>` runs every check below against
+every row of the table (or one `--stage`), reports all failures rather than the first, and
+with `--report-out` writes the measured per-corpus and per-shard counts as JSON — the numbers
+the blend comments and the tables in this README are filled from. It reads only the small
+artifacts the pipeline already writes, so it runs in seconds and never opens a corpus file:
 
-1. `<prefix>.provenance.json`'s `num_documents` equals the subset's document count in the table
-   above. This catches a truncated JSONL or dropped documents.
-2. The `.bin` is exactly **4 bytes per token** — int32, forced by the 131,072-token vocab. On
+1. `pipeline_results.json` (from `prepare`) records the dataset, subset, **revision** and
+   tokenizer the root was prepared from; each must equal the prepare config the table names,
+   and a sliced shard's `split` must be the exact `train[beg:end]` the table's `docs` implies.
+   This is the identity check the tokenize provenance alone cannot make (it only ever sees a
+   JSONL).
+2. `<prefix>.provenance.json`'s `num_documents` equals the prepared count, and across a
+   corpus's shards the counts sum to the table's `docs` exactly. This catches a truncated
+   JSONL or dropped documents.
+3. The `.bin` is exactly **4 bytes per token** — int32, forced by the 131,072-token vocab. On
    V1's ClimbMix shard0 this is exact: 177,205,782,628 = 4 × 44,301,445,657. This catches a
    partial write.
+4. The provenance tokenizer is the config's, and `--append-eod` was on.
 
-For ClimbMix additionally: the eight shards' `num_documents` sum to exactly **553,315,056**, and
-`lfs getstripe -c` reports 8 on the root, the shard directories **and** the shard
-`training.jsonl` files.
+Run against this arm's table it reports exactly one kind of failure, and it is expected: every
+corpus other than `ai_safety_and_adjacent` records revision `669d466e…`, the pin it was
+prepared under, against the config's current `b21e54a6…`. The bump was verified additions-only
+(above), so the corpora were not rebuilt; the verifier flags it because a config pin that no
+longer matches the data on disk is precisely the drift it exists to catch, and the equivalence
+is a fact about this one bump, recorded here, not something the tool should assume.
+
+For ClimbMix additionally, by hand: `lfs getstripe -c` reports 8 on the root, the shard
+directories **and** the shard `training.jsonl` files.
 
 **Do not sum the shard JSONL bytes against the corpus root's `training.jsonl`.** That was the
 check for the split path, and it does not apply to the shipped corpus, which was cut at the

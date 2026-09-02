@@ -1,0 +1,45 @@
+# The identity of every pretraining-format (.bin/.idx) corpus in the 30B filtered arm
+# (`mini >= 2` variant). The stage-3 packed SFT corpus is the one exception; it lives in
+# pa-warm-start-sft-filtered-mini-2plus.yaml beside this file.
+#
+# Every corpus is the `<subset>_filtered_mini_2plus` split of the SAME repository the baseline
+# trains from: the baseline subset with every document whose gpt-5-mini cost-gate score is
+# >= 2 removed, and every other document — scored below 2, or never escalated to the mini
+# stage (the keyword prefilter or the gpt-5-nano relevance gate stopped it first) — retained
+# unchanged. The complement lives beside it as `<subset>_removed_mini_2plus`, and
+# `filter_stats_mini_2plus` carries the per-subset and global document/token removal rates.
+# The scores themselves come from sudoers/control-pretraining-filter-annotated @ eab743dd
+# (one row per baseline document, original columns plus the cascade's judge columns).
+#
+# As in the baseline, this is one file plus `--subset <name>`: `pipeline_data_prepare.py`
+# derives the output directory from slugify_dataset_name(dataset, subset), and an explicit
+# CLI flag overrides a value supplied by --config, so sixteen corpora need sixteen `--subset`
+# arguments and no extra files. DO NOT add `output-dir:` here — pinning it would collapse
+# every subset onto one directory and each prepare would overwrite the last.
+#
+# WHICH subsets exist and what each contributes to a stage is the business of this arm's
+# README, corpora.tsv, and the three training configs, not of this file.
+#
+# THE REVISION BELOW IS A PLACEHOLDER — it is the BASELINE's data-final commit, not a
+# filtered one, and no filtered split exists at it. Preparing against it would silently
+# produce the UNFILTERED corpus under a filtered name. It must be replaced with the commit at
+# which dataset-builder publishes the filtered splits before anything is built, and the same
+# SHA must go into pa-warm-start-sft-filtered-mini-2plus.yaml beside this file (a test asserts
+# the two agree, so they cannot be half-updated).
+#
+# It is pinned at all for the same reason the baseline's is: an unpinned prepare resolves the
+# current HEAD, so two corpora prepared a day apart would silently come from different data.
+#
+#   isambard_sbatch --time=08:00:00 --job-name=cp-30b_filtered_mini_2plus-prep-zyda_full_filtered_mini_2plus \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml \
+#     --subset zyda_full_filtered_mini_2plus
+#
+# build_corpora.sh issues that command for every row of this arm's corpora.tsv.
+dataset: geodesic-research/control-pretraining-datasets
+revision: 2dbf8cfbf3319d38c82bd21cb8f3a6c1a7504aff
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

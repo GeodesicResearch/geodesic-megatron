@@ -1,0 +1,35 @@
+# The identity of the 30B filtered arm's stage-3 SFT corpus: the `mini >= 2`-filtered version
+# of geodesic-research/pa-warm-start-sft-heavy-25b-mix (the baseline's `default/train`, pinned
+# there at ee81d70bad18b845d58d0d9ec59fad82aebb9bde), published as the
+# `pa_warm_start_sft_filtered_mini_2plus` subset of geodesic-research/control-pretraining-datasets
+# with the source rows' `messages` / `tools` / per-turn `reasoning_content` preserved verbatim
+# and only the family `id` and `num_tokens` columns added. The removed conversations sit beside
+# it as `pa_warm_start_sft_removed_mini_2plus`.
+#
+# Same pack geometry as the baseline, and for the same reasons (see the baseline SFT config's
+# header): the think-HISTORY tokenizer, so prior assistant turns keep their reasoning traces;
+# seq 32768; pad_seq_to_mult 4 = 2 x CP for the CP=2 topology.
+#
+# The prepare job takes this file via --config and `--subset pa_warm_start_sft_filtered_mini_2plus`
+# from corpora.tsv. It prepares the JSONL only (`skip-pack`/`skip-count` below): one process
+# cannot pack ~5.7M conversations inside the 24 h wall, so build_corpora.sh cuts the prepared
+# JSONL into 16 byte-gated shard roots and packs each in its own job, and the training config
+# reads the 16 per-shard parquets through a glob (the launcher's pre-packed-shard path). This
+# file supplies the tokenizer and geometry those per-shard pack jobs use, so the identity is
+# stated once.
+#
+# THE REVISION BELOW IS A PLACEHOLDER, exactly as in the sibling pretraining corpus config —
+# see its header. Both must move to dataset-builder's published SHA together.
+dataset: geodesic-research/control-pretraining-datasets
+revision: 2dbf8cfbf3319d38c82bd21cb8f3a6c1a7504aff
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+# Stated here rather than passed as flags by the build script: these decide WHAT the prepare
+# produces (JSONL only, no pack, no token count), which is corpus identity, not an operational
+# detail of one invocation. An explicit CLI flag would silently override whatever this file said.
+skip-pack: true
+skip-count: true

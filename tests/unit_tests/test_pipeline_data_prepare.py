@@ -399,11 +399,29 @@ class TestShippedCorpusConfigs:
         campaign_dir = _REPO_ROOT / "configs" / "control_pretraining"
         configs = sorted(campaign_dir.glob("**/data/*.yaml"))
         assert configs, f"no corpus configs found under {campaign_dir}"
+
+        # Which tokenizer a corpus config must name follows the corpus KIND: a .bin/.idx
+        # corpus bakes its EOD into the data, a packed SFT corpus renders a chat template.
+        # The arms declare the kind of every corpus they build in their corpora.tsv, read
+        # here through the module the build and the verifier share. A config no table
+        # names (the V1 and CPT corpora) is a .bin/.idx corpus when its prepare writes
+        # JSONL only — for those, `skip-pack` is the only signal there is.
+        import sys
+
+        sys.path.insert(0, str(campaign_dir))
+        from corpora_table import read_corpora_table
+
+        kind_of_config: dict[Path, str] = {}
+        for table in sorted(campaign_dir.glob("*/corpora.tsv")):
+            for row in read_corpora_table(table):
+                kind_of_config[row.config.resolve()] = row.kind
+
         for path in configs:
             args = _parse_bare(pipe_module, "--config", str(path))
             assert args.dataset, f"{path.name} does not name a dataset"
             assert args.revision, f"{path.name} does not pin a revision"
-            if args.skip_pack:
+            kind = kind_of_config.get(path.resolve(), "tokenize" if args.skip_pack else "pack")
+            if kind == "tokenize":
                 # Pretraining-format (.bin/.idx) corpora: the EOD baked into the data must
                 # be the base tokenizer's `</s>` = id 2 (CLAUDE.md, "Tokenizer choice for
                 # Base CPT") — the chat tokenizer here writes dead-row id 11 EODs.

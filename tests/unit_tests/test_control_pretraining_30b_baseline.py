@@ -70,7 +70,8 @@ PRETRAIN_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_pretrain.yaml"
 MIDTRAIN_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_midtrain.yaml"
 SFT_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_sft.yaml"
 CORPUS_CONFIG = _ARM_DIR / "data" / "control-pretraining-datasets.yaml"
-BUILD_SCRIPT = _ARM_DIR / "build_corpora.sh"
+CORPORA_TABLE = _ARM_DIR / "corpora.tsv"
+BUILD_SCRIPT = _REPO_ROOT / "configs" / "control_pretraining" / "build_corpora.sh"
 
 # (config, seq_length, tokens/iter, token target, retained checkpoints)
 # Targets are the mix sheet's itemised sums at its AI-safety-consolidation revision
@@ -345,9 +346,9 @@ class TestStageBoundary:
 class TestDataBuildAgreesWithTheConfigs:
     """The data build and the blends are separate files that must describe the same corpora.
 
-    `build_corpora.sh` decides which subsets get prepared, where their roots land, and how many
-    shards ClimbMix is split into; the two training YAMLs hard-code the resulting `.bin/.idx`
-    prefixes. Nothing at runtime reconciles them — a corpus renamed in one place and not the
+    The arm's `corpora.tsv`, driven through the shared `build_corpora.sh`, decides which subsets
+    get prepared, where their roots land, and how many shards ClimbMix is split into; the two
+    training YAMLs hard-code the resulting `.bin/.idx` prefixes. Nothing at runtime reconciles them — a corpus renamed in one place and not the
     other fails only when training starts and a prefix is missing, hours into a 128-node job.
     These tests pin the five invariants that keep the two in step.
 
@@ -359,7 +360,7 @@ class TestDataBuildAgreesWithTheConfigs:
     def dry_run(self):
         env = dict(os.environ, DRY_RUN="1")
         proc = subprocess.run(
-            ["bash", str(BUILD_SCRIPT), "all"],
+            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "all"],
             cwd=str(_REPO_ROOT),
             env=env,
             capture_output=True,
@@ -382,8 +383,9 @@ class TestDataBuildAgreesWithTheConfigs:
         return subsets
 
     def test_dry_run_submits_the_expected_job_count(self, dry_run):
-        """16 prepares + 1 split + 23 tokenizes. A miscount means a corpus lost its tokenize."""
-        assert "SUBMITTED 40 jobs" in dry_run
+        """15 prepare+tokenize pairs, plus ClimbMix's 8 sliced prepare+tokenize pairs. A
+        miscount means a corpus lost its tokenize."""
+        assert "SUBMITTED 46 jobs" in dry_run
         assert "nothing was actually submitted" in dry_run
 
     def test_every_blend_prefix_has_a_corpus_in_the_build(self, dry_run, raw):
@@ -411,11 +413,27 @@ class TestDataBuildAgreesWithTheConfigs:
         assert unused == self.SUPERSEDED_CORPORA, f"prepared but unused: {sorted(unused - self.SUPERSEDED_CORPORA)}"
 
     def test_shard_count_matches_the_number_of_climbmix_prefixes(self, dry_run, raw):
-        """The split emits N roots and the blend must name exactly those N."""
-        shards = int(re.search(r"split\s+-> \S+ \((\d+) shards\)", dry_run).group(1))
+        """The slice prepares N shard roots, each with its own tokenize, and the blend must name
+        exactly those N."""
+        shards = len(re.findall(r"\[dry-run\] tokenize climbmix_full shard\d+:", dry_run))
+        prepares = len(re.findall(r"\[dry-run\] prepare climbmix_full shard\d+:", dry_run))
+        assert prepares == shards, f"{prepares} sliced prepares but {shards} shard tokenizes"
         climbmix = [s for s in self._prefix_subsets(raw["pretrain"]) if s == "climbmix_full"]
-        assert len(climbmix) == shards, f"{shards} shards split but {len(climbmix)} prefixes in the blend"
+        assert len(climbmix) == shards, f"{shards} shards sliced but {len(climbmix)} prefixes in the blend"
         assert shards == 8
+
+    def test_climbmix_slices_cover_the_corpus_exactly_once(self, dry_run):
+        """The eight `train[beg:end]` ranges must be contiguous and end at the table's document
+        count: a gap drops documents silently, an overlap trains some twice."""
+        ranges = [
+            (int(b), int(e))
+            for b, e in re.findall(r"--split train\[(\d+):(\d+)\] --output-dir \S+climbmix_full", dry_run)
+        ]
+        assert len(ranges) == 8
+        assert ranges[0][0] == 0
+        assert ranges[-1][1] == 553315056
+        for (_, prev_end), (beg, _) in zip(ranges, ranges[1:]):
+            assert beg == prev_end
 
     def test_blend_prefixes_use_the_real_slugify(self, raw):
         """The dataset root is derived by pipeline_data_prepare.slugify_dataset_name; the blend
@@ -446,13 +464,21 @@ class TestDataBuildAgreesWithTheConfigs:
             assert merged[stage].tokenizer.tokenizer_model == tokenizer
 
     def test_tokenize_jobs_wait_on_the_step_that_produces_their_input(self, dry_run):
-        """Without afterok a tokenize can start against a half-written or truncated shard."""
-        submitted = [ln for ln in dry_run.splitlines() if "[dry-run]" in ln]
-        for line in submitted:
-            if "tokenize" in line or "split" in line:
-                assert "--hold" in line or "--dependency=afterok:" in line, line
-            if line.count("prepare ") and "tokenize" not in line:
-                assert "afterok" not in line, f"prepare must not depend on anything: {line}"
+        """Without afterok a tokenize can start against a half-written or truncated shard.
+
+        Matched on each submission's DESCRIPTION — the text the script prints before the colon —
+        rather than on any substring of the command, because a sliced prepare's own command line
+        carries `--split train[beg:end]` and would otherwise read as a split job.
+        """
+        submitted = re.findall(r"\[dry-run\] (\S+)[^:]*: (.+)", dry_run)
+        assert submitted, "the dry run printed no submissions"
+        for kind, command in submitted:
+            if kind in ("tokenize", "split", "pack"):
+                assert "--hold" in command or "--dependency=afterok:" in command, command
+            elif kind == "prepare":
+                assert "afterok" not in command, f"prepare must not depend on anything: {command}"
+            else:
+                pytest.fail(f"unrecognised job kind {kind!r}: {command}")
 
 
 def test_pretrain_climbmix_shard_weights_are_token_proportional(raw):

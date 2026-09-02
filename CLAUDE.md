@@ -608,6 +608,24 @@ measured 5.25-6.36 s/iter range); stage 3 remains ESTIMATED at ~8-12 min, pendin
 corpus. Stage 2 was the first execution of the CP=2 / GBS 512 / DP=254 posture at seq 32768 at
 this scale: it fits, and the weights-only warm start produced no loss spike.
 
+**The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
+stages on the same corpora with AI-scheming literature removed — every document whose gpt-5-mini
+cost-gate score is >= 2 in `sudoers/control-pretraining-filter-annotated` @ `eab743dd`, which is
+a **wider cut than that repo's own `filter_decision`** (`canary or judge_score >= 4`, reachable
+only at `mini >= 4`). A null `mini_score` is retained, so the filter's reach is bounded by the
+nano relevance gate above it (36.1% of prefilter survivors screened out early), and canary rows
+are retained deliberately so the arms differ by one thing rather than two. Iteration counts,
+blend weights, topology and schedule are the baseline's verbatim — each source therefore gets
+the same token budget over a smaller corpus, i.e. more epochs, not fewer tokens — and
+`tests/unit_tests/test_control_pretraining_30b_filtered.py` asserts that the ONLY fields
+differing between the merged arms are the data paths and the run identities. Corpora are the
+`<subset>_filtered_mini_2plus` splits of the same HF repo; **not built yet**, and both prepare
+configs still carry a placeholder revision. Every arm's data build is table-driven:
+`configs/control_pretraining/build_corpora.sh <arm>/corpora.tsv <stage|all>` submits it and
+`verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
+document counts, exactly 4 bytes per token, tokenizer, `--append-eod`), both reading it through
+`corpora_table.py`.
+
 **CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
 continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on
 50% ClimbMix / 25% AI-safety discourse / 25% arXiv for 10B tokens (398 iters × GBS 3072 × seq 8192, the
