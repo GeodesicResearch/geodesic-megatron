@@ -17,15 +17,22 @@
 # tunnel's CPU memory out of the picture.
 #
 # Usage:
-#   configs/control_pretraining/build_corpora.sh <corpora-table> <stage|all>
+#   configs/control_pretraining/build_corpora.sh <corpora-table> <stage|all> [subset ...]
 #   DRY_RUN=1 configs/control_pretraining/build_corpora.sh <corpora-table> all   # print only
+#
+# Naming subsets submits only those rows of the stage — how a corpus is held back (a giant
+# waiting on storage headroom) or rebuilt (one re-pushed subset) without re-submitting the
+# rest, and still from the arm's own table, so the jobs keep the arm's names and the counts
+# the verifier checks against. A subset the stage does not contain is an error.
 #
 # Run from the repo root; set ISAMBARD_SBATCH_FORCE=1 for the batch — an arm submits 40-60 jobs
 # and the node-health gate prompts otherwise.
 set -euo pipefail
 
-TABLE="${1:?usage: build_corpora.sh <corpora-table> <stage|all>}"
-STAGE="${2:?usage: build_corpora.sh <corpora-table> <stage|all>}"
+TABLE="${1:?usage: build_corpora.sh <corpora-table> <stage|all> [subset ...]}"
+STAGE="${2:?usage: build_corpora.sh <corpora-table> <stage|all> [subset ...]}"
+shift 2
+SUBSETS=("$@")
 DRY_RUN="${DRY_RUN:-0}"
 
 CAMPAIGN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,7 +84,7 @@ submit() {
 
 # The plan is derived once, up front, so an invalid table stops the build before anything is
 # created or submitted rather than part-way through.
-PLAN=$(python3 "$CAMPAIGN_DIR/corpora_table.py" "$TABLE" "$STAGE")
+PLAN=$(python3 "$CAMPAIGN_DIR/corpora_table.py" "$TABLE" "$STAGE" ${SUBSETS[@]+"${SUBSETS[@]}"})
 
 declare -A JOB_ID=()
 total=0

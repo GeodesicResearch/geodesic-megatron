@@ -93,11 +93,13 @@ Built by dataset-builder as splits of the same repository the baseline reads,
 Both prepare configs in [`data/`](data/) pin that repository by revision, for the reason the
 baseline's does: without a pin, two corpora prepared a day apart come from different data.
 
-> **The revision in both prepare configs is a PLACEHOLDER** (currently the baseline's data-final
-> `2dbf8cfb…`) and the `docs` column of [`corpora.tsv`](corpora.tsv) reads `PENDING` for every
-> corpus. Both must be filled from dataset-builder's delivery before anything is built:
-> `build_corpora.sh` refuses a `slice` row without an integer count, and `verify_corpora.py`
-> has nothing to check against without one.
+Both pin `7653f09b50cb7f6d3f0d59779d472bfe0f228381`, the commit at which dataset-builder
+declared the family complete (2026-09-02 21:53Z): every `<subset>_filtered_mini_2plus` /
+`<subset>_removed_mini_2plus` pair verified against `filter_stats_mini_2plus` — rows(filtered)
+equals the statistics' retained count, rows(removed) its removed count, and the two sum to the
+baseline subset's row count. The `docs` column of [`corpora.tsv`](corpora.tsv) is that
+statistics subset's retained count per corpus; `build_corpora.sh` refuses a `slice` row without
+an integer count and `verify_corpora.py` checks every built corpus against it.
 
 ### Stage 1 — pretraining, 501,303,520,191 tokens at seq 8192
 
@@ -182,12 +184,17 @@ pack used, minus the final concatenation step, which the reader makes unnecessar
 ## Building the data
 
 ```bash
-# From the repo root, once corpora.tsv has real document counts and both prepare configs
-# carry the final revision. 62 jobs.
+# From the repo root. The whole arm is 62 jobs; a stage name limits the submission to that
+# stage (midtraining 18, sft 18, pretraining 26), and subset names after it to those rows.
 ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
   configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv all
 
-# Inspect the submission plan without submitting anything:
+# ClimbMix alone — its 8 sliced prepare -> tokenize pairs, 16 jobs — from the same table:
+ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
+  configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv pretraining \
+  climbmix_full_filtered_mini_2plus
+
+# Inspect any submission plan without submitting anything:
 DRY_RUN=1 configs/control_pretraining/build_corpora.sh \
   configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv all
 
@@ -201,6 +208,15 @@ DRY_RUN=1 configs/control_pretraining/build_corpora.sh \
 The build script and the verifier are shared by every arm and read the arm's `corpora.tsv`, so
 this arm adds a table and two prepare configs, not new machinery. Every step that touches a large
 file runs in its own 1-node job — nothing heavy runs on a login node or in a code tunnel.
+
+Jobs are named `cp-<arm>-<prep|tok|split|pack>-<subset>[-sN]`, where `<arm>` is the directory
+the table sits in (`30b_filtered_mini_2plus` here) — so `squeue --name` groups by arm. The SLURM
+logs do not: every prepare, tokenize and pack job writes `logs/slurm/data-prep-<jobid>.out` (the
+data batch script's own `--output`), and only the split job's log carries the arm and subset, so
+find a job's log by its id. A partial submission selects subsets on the command line
+rather than submitting from a copied table: a copy elsewhere renames every job after its own
+directory, and its `docs` column can drift from the table the verifier checks the corpora
+against.
 
 **Storage.** The baseline's sixteen corpora cost ~2.05 TB of `.bin` plus ~2.53 TB of JSONL that
 is reclaimable once each corpus verifies. The filtered corpora are strictly smaller, but the
@@ -278,21 +294,27 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 ## Status
 
-**Nothing has been built and nothing has been launched.** The configs are drafted and pinned by
-`tests/unit_tests/test_control_pretraining_30b_filtered.py`, which asserts field-by-field that
-each stage differs from its baseline counterpart *only* in the data paths and the run identities
-(checkpoint directories, W&B run names, TensorBoard directory) — so a topology or schedule change
-made to one arm and not the other fails in CI rather than at the end of a 500B-token run.
+**The data is pinned and its build is in progress; nothing has been launched.** The configs are
+drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which asserts
+field-by-field that each stage differs from its baseline counterpart *only* in the data paths and
+the run identities (checkpoint directories, W&B run names, TensorBoard directory) — so a topology
+or schedule change made to one arm and not the other fails in CI rather than at the end of a
+500B-token run. Both prepare configs carry the final revision and [`corpora.tsv`](corpora.tsv)
+the retained document counts, so `build_corpora.sh` plans all 62 jobs.
 
 Outstanding, in order:
 
-1. **Dataset-builder delivers** the `_filtered_mini_2plus` splits, `filter_stats_mini_2plus`, and
-   the final revision SHA.
-2. Fill `docs` in [`corpora.tsv`](corpora.tsv) and `revision` in both prepare configs.
-3. Run the build (62 jobs), then the verifier.
-4. Fill the tables above, the blend comments' token/epoch figures, and ClimbMix's eight
+1. Finish the build and run the verifier. The midtraining and SFT stages and the five
+   non-ClimbMix pretraining corpora are submitted; ClimbMix's 16 jobs (~4 TB at peak, the
+   JSONL, `.bin` and the shared arrow conversion live together until each slice's tokenize
+   verifies) go in with the ClimbMix-only command above when the project quota has at least
+   9 TiB free. Of the submitted jobs, the ten for the non-ClimbMix pretraining corpora are
+   named `cp-tmp-…` rather than `cp-30b_filtered_mini_2plus-…` — they were submitted from a
+   copy of the table, before subset selection existed — so a `squeue --name` filter on the
+   arm's prefix misses them; watch those ten by job id.
+2. Fill the tables above, the blend comments' token/epoch figures, and ClimbMix's eight
    token-proportional shard weights from the verifier's report.
-5. Smoke the chain before the full curriculum, exactly as the baseline did through
+3. Smoke the chain before the full curriculum, exactly as the baseline did through
    [`../smoke_runs/`](../smoke_runs/README.md) — the filtered arm has never run, and stage 2's
    CP=2 posture is the one the baseline's smoke existed to derisk.
 

@@ -473,6 +473,38 @@ class TestTableParsing:
         assert corpora_table.read_corpora_table(table, "pretraining") == []
         assert len(corpora_table.read_corpora_table(table, "all")) == 1
 
+    def test_subset_selection_keeps_only_the_named_rows(self, tmp_path):
+        """A partial submission names its rows; the selection is a filter over the stage's rows."""
+        config = write_prepare_config(tmp_path)
+        table = write_table(tmp_path, config, stage="midtraining")
+        (row,) = corpora_table.read_corpora_table(table)
+        assert corpora_table.read_corpora_table(table, "all", subsets=[row.subset]) == [row]
+        assert corpora_table.read_corpora_table(table, "midtraining", subsets=[row.subset]) == [row]
+
+    def test_a_subset_the_stage_does_not_contain_is_refused(self, tmp_path):
+        """A misspelt or wrong-stage subset must not quietly plan nothing: the caller named it
+        in order to submit or rebuild it."""
+        config = write_prepare_config(tmp_path)
+        table = write_table(tmp_path, config, stage="midtraining")
+        (row,) = corpora_table.read_corpora_table(table)
+        with pytest.raises(ValueError, match="no row for subset \\['nope'\\]"):
+            corpora_table.read_corpora_table(table, "all", subsets=["nope"])
+        with pytest.raises(ValueError, match="in stage 'pretraining'"):
+            corpora_table.read_corpora_table(table, "pretraining", subsets=[row.subset])
+        with pytest.raises(ValueError, match="empty subset selection"):
+            corpora_table.read_corpora_table(table, "all", subsets=[])
+
+    def test_the_cli_plans_only_the_named_subsets(self, tmp_path, capsys):
+        """The build script passes its trailing arguments straight to this entry point."""
+        config = write_prepare_config(tmp_path)
+        table = write_table(tmp_path, config, stage="midtraining")
+        (row,) = corpora_table.read_corpora_table(table)
+        assert corpora_table.main([str(table), "midtraining", row.subset]) == 0
+        planned = [line for line in capsys.readouterr().out.splitlines() if line.startswith("CORPUS")]
+        assert len(planned) == 1 and row.subset in planned[0]
+        with pytest.raises(ValueError, match="no row for subset"):
+            corpora_table.main([str(table), "all", "nope"])
+
     def test_the_campaign_tables_parse(self):
         """The tables that are actually shipped must satisfy every rule above."""
         for arm in ("30b_baseline", "30b_filtered_mini_2plus"):

@@ -619,9 +619,11 @@ blend weights, topology and schedule are the baseline's verbatim — each source
 the same token budget over a smaller corpus, i.e. more epochs, not fewer tokens — and
 `tests/unit_tests/test_control_pretraining_30b_filtered.py` asserts that the ONLY fields
 differing between the merged arms are the data paths and the run identities. Corpora are the
-`<subset>_filtered_mini_2plus` splits of the same HF repo; **not built yet**, and both prepare
-configs still carry a placeholder revision. Every arm's data build is table-driven:
-`configs/control_pretraining/build_corpora.sh <arm>/corpora.tsv <stage|all>` submits it and
+`<subset>_filtered_mini_2plus` splits of the same HF repo, pinned in both prepare configs at
+dataset-builder's final revision `7653f09b…`; the arm README records what has been built and
+verified. Every arm's data build is table-driven:
+`configs/control_pretraining/build_corpora.sh <arm>/corpora.tsv <stage|all> [subset ...]` submits
+it (naming subsets submits only those rows, from the same table, with the arm's job names) and
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
 document counts, exactly 4 bytes per token, tokenizer, `--append-eod`), both reading it through
 `corpora_table.py`.

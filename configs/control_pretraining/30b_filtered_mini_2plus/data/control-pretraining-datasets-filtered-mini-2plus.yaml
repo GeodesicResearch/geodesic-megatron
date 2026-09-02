@@ -20,15 +20,14 @@
 # WHICH subsets exist and what each contributes to a stage is the business of this arm's
 # README, corpora.tsv, and the three training configs, not of this file.
 #
-# THE REVISION BELOW IS A PLACEHOLDER — it is the BASELINE's data-final commit, not a
-# filtered one, and no filtered split exists at it. Preparing against it would silently
-# produce the UNFILTERED corpus under a filtered name. It must be replaced with the commit at
-# which dataset-builder publishes the filtered splits before anything is built, and the same
-# SHA must go into pa-warm-start-sft-filtered-mini-2plus.yaml beside this file (a test asserts
-# the two agree, so they cannot be half-updated).
+# The revision is the commit at which dataset-builder's last filtered arm landed on the
+# repository, delivered 2026-09-02 once every `<subset>_filtered_mini_2plus` split and
+# `filter_stats_mini_2plus` were pushed and verified (rows(filtered) + rows(removed) equals the
+# baseline's row count for every subset). The same SHA is pinned in
+# pa-warm-start-sft-filtered-mini-2plus.yaml beside this file; a test asserts the two agree.
 #
-# It is pinned at all for the same reason the baseline's is: an unpinned prepare resolves the
-# current HEAD, so two corpora prepared a day apart would silently come from different data.
+# It is pinned for the same reason the baseline's is: an unpinned prepare resolves the current
+# HEAD, so two corpora prepared a day apart would silently come from different data.
 #
 #   isambard_sbatch --time=08:00:00 --job-name=cp-30b_filtered_mini_2plus-prep-zyda_full_filtered_mini_2plus \
 #     pipeline_data_submit.sbatch prepare \
@@ -37,7 +36,7 @@
 #
 # build_corpora.sh issues that command for every row of this arm's corpora.tsv.
 dataset: geodesic-research/control-pretraining-datasets
-revision: 2dbf8cfbf3319d38c82bd21cb8f3a6c1a7504aff
+revision: 7653f09b50cb7f6d3f0d59779d472bfe0f228381
 tokenizer: geodesic-research/nemotron-base-tokenizer
 val-proportion: 0
 skip-pack: true

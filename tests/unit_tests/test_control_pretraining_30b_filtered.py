@@ -354,6 +354,29 @@ class TestTheBuildIsSubmittable:
         built = set(re.findall(r"^=== (\S+) \(", output, re.MULTILINE))
         assert built == {row.subset for row in corpora_rows}
 
+    def test_climbmix_alone_is_submittable_from_the_arm_table(self, corpora_rows):
+        """ClimbMix is the corpus most likely to be held back (its build peaks ~4 TB on disk), so
+        the README's ClimbMix-only command must plan exactly its 16 jobs from this table, under
+        this arm's job names — not from a copied table, whose directory would rename them."""
+        if self._pending(corpora_rows):
+            pytest.skip("document counts are PENDING; the build cannot be planned yet")
+        (climbmix,) = [row for row in corpora_rows if row.shard_mode == "slice"]
+        result = subprocess.run(
+            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "pretraining", climbmix.subset],
+            cwd=str(_REPO_ROOT),
+            env=dict(os.environ, DRY_RUN="1"),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, output
+        assert "SUBMITTED 16 jobs" in output
+        assert set(re.findall(r"^=== (\S+) \(", output, re.MULTILINE)) == {climbmix.subset}
+        for index in range(climbmix.shards):
+            assert f"cp-{CORPORA_TABLE.parent.name}-prep-{climbmix.subset}-s{index}" in output
+            assert f"cp-{CORPORA_TABLE.parent.name}-tok-{climbmix.subset}-s{index}" in output
+
     def test_climbmix_slices_cover_the_corpus_exactly_once(self, build, corpora_rows):
         """A gap between ranges drops documents silently; an overlap trains some of them twice."""
         climbmix = [row for row in corpora_rows if row.shard_mode == "slice"]

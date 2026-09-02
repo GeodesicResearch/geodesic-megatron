@@ -148,11 +148,12 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
     return parsed
 
 
-def read_corpora_table(table: Path, stage: str = "all") -> list[CorpusRow]:
-    """Parse a corpora table, optionally keeping only one stage's rows.
+def read_corpora_table(table: Path, stage: str = "all", subsets: list[str] | None = None) -> list[CorpusRow]:
+    """Parse a corpora table, optionally keeping only one stage's rows, or only the named subsets.
 
     Every rule a table must satisfy is enforced here, so a table the build refuses cannot be
-    verified against either.
+    verified against either. A requested subset that the selected rows do not contain is an
+    error, not an empty result: the caller named it in order to act on it.
     """
     rows: list[CorpusRow] = []
     with open(table) as fh:
@@ -163,10 +164,17 @@ def read_corpora_table(table: Path, stage: str = "all") -> list[CorpusRow]:
             row = _parse_row(line, table, line_no)
             if stage == "all" or row.stage == stage:
                 rows.append(row)
-    subsets = [r.subset for r in rows]
-    duplicates = sorted({s for s in subsets if subsets.count(s) > 1})
+    names = [r.subset for r in rows]
+    duplicates = sorted({s for s in names if names.count(s) > 1})
     if duplicates:
         raise ValueError(f"{table}: subset listed more than once: {duplicates}")
+    if subsets is not None:
+        if not subsets:
+            raise ValueError(f"{table}: an empty subset selection would plan nothing; pass None to keep every row")
+        missing = sorted(set(subsets) - set(names))
+        if missing:
+            raise ValueError(f"{table}: no row for subset {missing} in stage '{stage}'")
+        rows = [r for r in rows if r.subset in set(subsets)]
     return rows
 
 
@@ -323,10 +331,18 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
     return CorpusPlan(row, root, dataset, tokenizer, tuple(roots), tuple(jobs))
 
 
-def plan_build(table: Path, stage: str = "all", data_base: Path = DATA_BASE) -> list[CorpusPlan]:
-    """Derive the whole build for one arm. The arm names its jobs, taken from the table's dir."""
+def plan_build(
+    table: Path, stage: str = "all", data_base: Path = DATA_BASE, subsets: list[str] | None = None
+) -> list[CorpusPlan]:
+    """Derive the build for one arm, or for the named subsets of it, from the arm's own table.
+
+    The arm names its jobs, taken from the table's directory — which is why a partial
+    submission selects rows here rather than through a copied table: a copy in another
+    directory would change every job name, and its document counts could drift from the
+    table the verifier later checks the corpora against.
+    """
     arm = table.resolve().parent.name
-    return [plan_corpus(row, arm, data_base) for row in read_corpora_table(table, stage)]
+    return [plan_corpus(row, arm, data_base) for row in read_corpora_table(table, stage, subsets)]
 
 
 # Field separator of the emitted plan: the ASCII unit separator. A shell ``read`` treats tab
@@ -395,8 +411,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Emit the data-build plan for a control-pretraining arm.")
     parser.add_argument("table", type=Path, help="the arm's corpora.tsv")
     parser.add_argument("stage", nargs="?", default="all", help="limit to one stage (default: all)")
+    parser.add_argument(
+        "subsets", nargs="*", help="limit to these subsets of the stage (default: every row of the stage)"
+    )
     args = parser.parse_args(argv)
-    print(emit_plan(plan_build(args.table, args.stage)))
+    print(emit_plan(plan_build(args.table, args.stage, subsets=args.subsets or None)))
     return 0
 
 
