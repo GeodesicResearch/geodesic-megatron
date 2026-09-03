@@ -19,7 +19,9 @@ filtered version of the same blend, so everything except the data is held fixed 
 > The study's treatment arm is [`30b_filtered_mini_2plus/`](30b_filtered_mini_2plus/README.md):
 > the same three stages on the same corpora with AI-scheming literature removed (every document
 > whose gpt-5-mini cost-gate score is >= 2), at identical iteration counts and blend weights, so
-> the two arms differ only in which documents exist. Its corpora are not built yet.
+> the two arms differ only in which documents exist. Its corpora are being built at the pinned
+> revision and verified against the family's own statistics as each lands; its README's
+> "Status" records which are done and what remains before launch.
 >
 > The campaign's CPT leg lives in [`cpt_validation/`](cpt_validation/README.md): 10B-token
 > continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /

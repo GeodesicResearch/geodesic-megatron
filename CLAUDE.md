@@ -567,8 +567,8 @@ after a 100-iteration warmup, and pinning `adam_beta2: 0.95` so that warmup outl
 second-moment EMA the weights-only warm start resets),
 then `nemotron_nano_30b_baseline_sft.yaml` (the reasoning/think post-training: two epochs
 ≈ 50B tokens of the packed `pa-warm-start-sft-heavy-25b-mix` combined split, seq 32768,
-**think-HISTORY** tokenizer, `nano sft` — its `train_iters` stays an estimate until the pack
-metadata lands). The history tokenizer is not interchangeable with the plain think one: that
+**think-HISTORY** tokenizer, `nano sft` — its `train_iters` is the measured 2988,
+`ceil(2 x 764,685 packs / 512)`). The history tokenizer is not interchangeable with the plain think one: that
 corpus keeps per-turn reasoning in a `reasoning_content` field, and the plain variant's
 `truncate_history_thinking` default renders every non-final assistant turn as an empty
 `<think></think>`, dropping 80% of prior-turn traces before tokenization. The encoders are
@@ -604,8 +604,8 @@ its parent so the two cannot drift — and only length, warmup, checkpoint polic
 checkpoint/W&B identities differ. Stages 1 and 2 have both run (2026-08-21): stage 1 in ~11 min
 at 6.36 s/iter and stage 2 in ~14 min at 8.34 s/iter, each reaching iteration 100 with 0 NaN
 and writing its checkpoint. Stage 1's cost is placement-dependent (~9-11 min across the
-measured 5.25-6.36 s/iter range); stage 3 remains ESTIMATED at ~8-12 min, pending its packed
-corpus. Stage 2 was the first execution of the CP=2 / GBS 512 / DP=254 posture at seq 32768 at
+measured 5.25-6.36 s/iter range); stage 3 remains ESTIMATED at ~8-12 min because its smoke has
+not run. Stage 2 was the first execution of the CP=2 / GBS 512 / DP=254 posture at seq 32768 at
 this scale: it fits, and the weights-only warm start produced no loss spike.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three

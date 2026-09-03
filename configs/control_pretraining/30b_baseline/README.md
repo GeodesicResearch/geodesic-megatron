@@ -481,7 +481,7 @@ build provenance rather than needing measurement: `corpus/longest_documents` sor
 |---|---|---|---|---|---|---|
 | Pretraining | 29881 | 2264 | 13 (2264 … 29432) | 29881 | 14 | 37,983,015,424 |
 | Midtraining | 3126 | 1564 | 1 (1564) | 3126 | 2 | 26,239,565,824 |
-| SFT | 2981 (estimate) | 1000 | every 1000 | at `train_iters` | last 2 (`most_recent_k`) | — |
+| SFT | 2988 (measured: `ceil(2 x 764,685 packs / 512)`) | 1000 | every 1000 | at `train_iters` | last 2 (`most_recent_k`) | — |
 
 Stages 1–2 retain everything they save (`most_recent_k: -1`): those sixteen checkpoints are the
 campaign's analysis series. Each interval is chosen so the last interval save falls *short* of
@@ -599,15 +599,15 @@ README's "What the smoke measured"). What remains falls into three groups:
   [`../smoke_runs/`](../smoke_runs/README.md), which executes 100 iterations of each stage at
   these exact settings: it fits, and the weights-only warm start moved loss 6.972 -> 6.956
   across the boundary with no spike. Measured 8.34 s/iter (103.7 TFLOP/s/GPU) at an 8-switch
-  placement. Stage 3's identical topology is still unexercised, pending its packed corpus.
-- **One data build is in flight**: the stage-3 SFT mix (prepare + pack at seq 32768,
+  placement. Stage 3's identical topology is still unexercised: nothing has been launched.
+- **Every corpus is built**, including the stage-3 SFT mix (prepare + pack at seq 32768,
   `pad_seq_to_mult 4`, think-**history** tokenizer — see the stage-3 data section for why the
-  plain variant is not interchangeable); its pack metadata supplies stage 3's `train_iters`.
-  `lesswrong_rewrite_hq`, `ai_risk_reports_rsp` and `ai_safety_and_adjacent` are built and
-  measured (2026-08-20).
-- **Stage 3's `train_iters` is an estimate** until the pack metadata exists: two epochs of
-  packed data is `ceil(2 x num_packs / 512)`, and `num_packs` is a packing output. The SFT
-  config carries a banner saying exactly this.
+  plain variant is not interchangeable; 764,685 packs, measured 2026-08-26).
+  `lesswrong_rewrite_hq`, `ai_risk_reports_rsp` and `ai_safety_and_adjacent` were built and
+  measured on 2026-08-20.
+- **Stage 3's `train_iters` is measured**: two epochs of packed data is
+  `ceil(2 x num_packs / 512)` = `ceil(2 x 764,685 / 512)` = 2988, and the SFT config's banner
+  records that derivation.
 
   Note that `test_validation_split_cannot_round_to_an_empty_range` does **not** guard the data
   builds. With `split: "1,0,0"` it returns before reading any `.provenance.json`, so both

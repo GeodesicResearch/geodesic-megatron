@@ -109,12 +109,16 @@ Weights are the baseline's; built tokens, documents and epochs are filled from t
 | Weight | Subset (`_filtered_mini_2plus`) | Baseline built | Filtered built | Documents | Epochs |
 |---|---|---|---|---|---|
 | 0.698180 | `climbmix_full` (8 shards, token-proportional) | 354,429,333,750 | PENDING | PENDING | PENDING |
-| 0.197485 | `zyda_full` | 99,227,596,755 | PENDING | PENDING | PENDING |
-| 0.049870 | `stack_edu` | 25,029,225,350 | PENDING | PENDING | PENDING |
-| 0.039896 | `climbmix_ai_docs` | 15,905,878,498 | PENDING | PENDING | PENDING |
-| 0.009974 | `zyda_ai_docs` | 4,551,639,291 | PENDING | PENDING | PENDING |
-| 0.004595 | `ai_safety_and_adjacent` | 658,501,575 | PENDING | PENDING | PENDING |
-| **1.000000** | | **501,303,520,191** | | | |
+| 0.197485 | `zyda_full` | 99,227,596,755 | 99,160,986,250 | 91,191,143 | 0.998 |
+| 0.049870 | `stack_edu` | 25,029,225,350 | 24,985,414,948 | 28,540,057 | 1.001 |
+| 0.039896 | `climbmix_ai_docs` | 15,905,878,498 | 15,496,766,370 | 13,191,462 | 1.291 |
+| 0.009974 | `zyda_ai_docs` | 4,551,639,291 | 4,493,339,581 | 1,509,321 | 1.113 |
+| 0.004595 | `ai_safety_and_adjacent` | 658,501,575 | 417,194,904 | 227,042 | **5.521** |
+| **1.000000** | built (baseline all six; filtered five of six) | **499,802,175,219** | PENDING | | |
+
+Every filtered count above is the verifier's (`--report-out`), and every one equals
+dataset-builder's `filter_stats_mini_2plus` exactly: documents equal its retained count, tokens
+equal its retained tokens plus one EOD per document. ClimbMix is filled when its eight slices land.
 
 The eight ClimbMix shard weights in the config are **provisional**: they are the baseline's split
 of the same 0.698180 aggregate, and they must be recomputed from the filtered shards' measured
@@ -132,21 +136,33 @@ that at the same weight. **If the retained corpus is small enough that the epoch
 implausible, that is a finding to raise with Kyle before launching, not something to silently
 re-weight** — re-weighting would break the equal-tokens-per-source design above.
 
+Measured: the filter removes 35.7% of its documents and 36.6% of its tokens (417,194,904 of
+658,501,575 retained), so at the baseline's weights it runs **5.52 epochs in each stage,
+~11 across the curriculum**, against the baseline's 3.50 and ~7. **Kyle accepted that on
+2026-09-03: the weights stay the baseline's.** The arms therefore differ in this corpus by data
+alone, at the cost of more passes over what remains — which is what keeping the baseline's
+iteration counts per source means.
+
 ### Stage 2 — midtraining, 52,442,350,158 tokens at seq 32768
 
 | Weight | Subset (`_filtered_mini_2plus`) | Baseline built | Filtered built | Documents | Epochs |
 |---|---|---|---|---|---|
-| 0.333699 | `climbmix_long` | 17,500,804,443 | PENDING | PENDING | PENDING |
-| 0.190686 | `nemotron_stem_sft` | 10,000,469,928 | PENDING | PENDING | PENDING |
-| 0.152548 | `arxiv_papers` | 8,000,442,722 | PENDING | PENDING | PENDING |
-| 0.133480 | `nemotron_wiki_rewrite` | 7,006,236,026 | PENDING | PENDING | PENDING |
-| 0.094389 | `zyda_long` | 5,000,154,421 | PENDING | PENDING | PENDING |
-| 0.043925 | `ai_safety_and_adjacent` | 658,501,575 | PENDING | PENDING | PENDING |
-| 0.023836 | `stack_edu_long` | 1,300,100,047 | PENDING | PENDING | PENDING |
-| 0.019069 | `climbmix_ai_docs_long` | 800,045,176 | PENDING | PENDING | PENDING |
-| 0.004767 | `zyda_ai_docs_long` | 200,064,793 | PENDING | PENDING | PENDING |
-| 0.003601 | `nemotron_wiki_rewrite_ai_docs` | 188,883,008 | PENDING | PENDING | PENDING |
-| **1.000000** | | **52,442,350,158** | | | |
+| 0.333699 | `climbmix_long` | 17,500,804,443 | 17,119,058,459 | 786,449 | 1.022 |
+| 0.190686 | `nemotron_stem_sft` | 10,000,469,928 | 9,985,336,415 | 458,671 | 1.001 |
+| 0.152548 | `arxiv_papers` | 8,000,442,722 | 6,188,728,008 | 340,029 | 1.293 |
+| 0.133480 | `nemotron_wiki_rewrite` | 7,006,236,026 | 7,001,141,309 | 6,233,851 | 1.000 |
+| 0.094389 | `zyda_long` | 5,000,154,421 | 4,925,993,055 | 137,515 | 1.005 |
+| 0.043925 | `ai_safety_and_adjacent` | 658,501,575 | 417,194,904 | 227,042 | **5.521** |
+| 0.023836 | `stack_edu_long` | 1,300,100,047 | 1,289,900,600 | 3,159 | 0.969 |
+| 0.019069 | `climbmix_ai_docs_long` | 800,045,176 | 737,072,503 | 5,357 | 1.357 |
+| 0.004767 | `zyda_ai_docs_long` | 200,064,793 | 191,522,672 | 1,593 | 1.305 |
+| 0.003601 | `nemotron_wiki_rewrite_ai_docs` | 188,883,008 | 184,266,472 | 51,914 | 1.025 |
+| **1.000000** | built, all ten | **50,655,702,139** | **48,040,214,397** | | |
+
+All ten are built and verified (counts exact against `filter_stats_mini_2plus`, as in stage 1),
+so this stage's data is complete. Epochs are each corpus's share of the stage budget over its
+built tokens; `arxiv_papers` (1.29 against the baseline's 1.00) and `ai_safety_and_adjacent` are
+the two the filter moved materially.
 
 `ai_safety_and_adjacent` appears in both stages from the same subset at its full allocation —
 the sheet's deliberate multi-epoch replay, carried over unchanged.
@@ -171,8 +187,10 @@ the two cannot silently disagree.
 
 `train_iters: 2988` is the baseline's number, not a measurement. The baseline's was
 `ceil(2 epochs x 764,685 packs / GBS 512)`; the filtered mix packs to fewer, so the same 2988
-iterations cover somewhat more than two epochs. The measured pack count goes here once the pack
-lands.
+iterations cover somewhat more than two epochs. Measured: **5,654,600 conversations** (the
+statistics subset's retained count exactly; the baseline had 5,702,903) pack into **748,785
+sequences** over the 16 shards at 99.8% packing efficiency (7.53 conversations per sequence on
+shard 0), so 2988 iterations at GBS 512 cover **2.043 epochs**.
 
 **The pack is 16 per-shard parquets read by a glob**, not one file: one process cannot pack ~5.7M
 conversations inside the 24 h wall. `build_corpora.sh` prepares the JSONL, `shard_jsonl_corpus.sh`
@@ -285,7 +303,7 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
    until the provenance exists, so a pass, not a skip, is the gate).
 3. The `ai_safety_and_adjacent` epoch count in the tables above is filled and has been looked at
-   — see the note under stage 1.
+   — done: 5.52 per stage, accepted by Kyle on 2026-09-03 (see the note under stage 1).
 4. A smoke of the chain through [`../smoke_runs/`](../smoke_runs/README.md), or an explicit
    decision to skip it: the filtered arm has never run, and the configs are pinned to the
    baseline's by test, not by execution.
@@ -294,28 +312,30 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 ## Status
 
-**The data is pinned and its build is in progress; nothing has been launched.** The configs are
-drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which asserts
-field-by-field that each stage differs from its baseline counterpart *only* in the data paths and
-the run identities (checkpoint directories, W&B run names, TensorBoard directory) — so a topology
-or schedule change made to one arm and not the other fails in CI rather than at the end of a
-500B-token run. Both prepare configs carry the final revision and [`corpora.tsv`](corpora.tsv)
-the retained document counts, so `build_corpora.sh` plans all 62 jobs.
+**Fifteen of the sixteen corpora are built and verified; ClimbMix is tokenizing; nothing has
+been launched.** The configs are drafted and pinned by
+`tests/unit_tests/test_control_pretraining_30b_filtered.py`, which asserts field-by-field that
+each stage differs from its baseline counterpart *only* in the data paths and the run identities
+(checkpoint directories, W&B run names, TensorBoard directory) — so a topology or schedule
+change made to one arm and not the other fails in CI rather than at the end of a 500B-token run.
+Every corpus was built at the pinned revision; of the 62 jobs, the 54 that have finished all
+exited 0 and the eight ClimbMix tokenizes are queued; every verified count equals
+`filter_stats_mini_2plus` exactly (tables above). The midtraining and SFT stages' data is
+complete; the pretraining stage's is complete except ClimbMix, whose eight slices are prepared
+and whose eight tokenizes are queued. Every verified corpus's `training.jsonl` has been
+released, so what remains on disk is the tokenized corpora, the SFT packs, and ClimbMix's eight
+shard JSONLs (~1.6 TB), which go once its slices verify.
 
 Outstanding, in order:
 
-1. Finish the build and run the verifier. The midtraining and SFT stages and the five
-   non-ClimbMix pretraining corpora are submitted; ClimbMix's 16 jobs (~4 TB at peak, the
-   JSONL, `.bin` and the shared arrow conversion live together until each slice's tokenize
-   verifies) go in with the ClimbMix-only command above when the project quota has at least
-   9 TiB free. Of the submitted jobs, the ten for the non-ClimbMix pretraining corpora are
-   named `cp-tmp-…` rather than `cp-30b_filtered_mini_2plus-…` — they were submitted from a
-   copy of the table, before subset selection existed — so a `squeue --name` filter on the
-   arm's prefix misses them; watch those ten by job id.
-2. Fill the tables above, the blend comments' token/epoch figures, and ClimbMix's eight
-   token-proportional shard weights from the verifier's report.
-3. Smoke the chain before the full curriculum, exactly as the baseline did through
-   [`../smoke_runs/`](../smoke_runs/README.md) — the filtered arm has never run, and stage 2's
-   CP=2 posture is the one the baseline's smoke existed to derisk.
+1. ClimbMix's eight tokenizes land; the verifier reports the corpus (eight ranges covering
+   552,997,269 documents exactly once); its eight shard JSONLs are released; the stage-1 table
+   and the eight token-proportional shard weights in the stage-1 config are filled from the
+   report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes.
+2. Smoke the chain before the full curriculum, exactly as the baseline did through
+   [`../smoke_runs/`](../smoke_runs/README.md), or decide explicitly to skip it — a smoke is a
+   training run, so it waits for Kyle's signal like the curriculum itself. The filtered arm has
+   never run, and stage 2's CP=2 posture is the one the baseline's smoke existed to derisk.
+3. Launch on Kyle's signal, per "Launching" above.
 
 Launching any stage is Kyle's call and is not implied by this directory being complete.

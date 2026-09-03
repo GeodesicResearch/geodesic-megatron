@@ -67,7 +67,7 @@ the smoke chain to overrides is the change to make.**
 
 | Field | Full scale | Smoke | Why |
 |---|---|---|---|
-| `train_iters` | 29881 / 3126 / est. 2981 | **100** | the 1.7B budget |
+| `train_iters` | 29881 / 3126 / 2988 | **100** | the 1.7B budget |
 | `save_interval` | 2264 / 1564 / 1000 | **1000000** | only Megatron's unconditional end-of-training save runs |
 | `save_optim`, `save_rng` | `true` | **`false`** | the next stage warm-starts from weights only, so moments and RNG would be written and never read |
 | `most_recent_k` | -1 / -1 / 2 | **-1** | exactly one checkpoint exists |
