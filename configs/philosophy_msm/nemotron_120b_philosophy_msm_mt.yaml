@@ -1,0 +1,137 @@
+# =============================================================================
+# Philosophy-MSM midtraining (MT) — Super 120B
+#
+# CPT on the geodesic-msm philosophy-large-docs corpus (the "Norm" persona
+# synthetic documents), PURE — no pretraining replay mixed in (deliberate
+# deviation from the MQ MT recipe's 0.5 replay blend).
+#
+# Chain: Base-Chat-Init-BF16 → MT (this file) → AFT SFT
+#        (configs/philosophy_msm/nemotron_120b_philosophy_msm_aft_sft.yaml).
+#
+# === Token math ===
+# Corpus: 40,116 docs, 30,391,195 content tokens (nemotron-base-tokenizer,
+# excl. EOD; ~30.43M with one EOD/doc). Budget target 40-45M tokens:
+#   tokens/iter = GBS 128 x seq 8192 = 1,048,576
+#   train_iters 41 -> 42,991,616 tokens ≈ 43.0M (~1.41 epochs).
+#
+# Tokenizer: geodesic-research/nemotron-base-tokenizer (EOD = </s> = id 2,
+# matching Base pretraining; see CLAUDE.md "Tokenizer choice for Base CPT").
+# The same tokenizer produced the .bin/.idx via preprocess_data.py --append-eod.
+# Base ckpt is Base-Chat-Init (chat-token embeddings grafted) so the follow-on
+# chat-template SFT stage does not hit dead embeddings.
+#
+# Parallelism: TP=4, EP=4, PP=8, CP=1, ETP=1 — the validated MQ MT layout
+# (32 GPUs minimum; 32 nodes -> DP=4, 32 microbatches/rank at GBS 128).
+#
+# Launch:
+#   isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
+#       configs/philosophy_msm/nemotron_120b_philosophy_msm_mt.yaml super cpt
+# Save dir: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/philosophy_msm_mt_super
+# =============================================================================
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer
+
+# --- Dataset (native .bin/.idx; 100% philosophy docs, no replay) ---
+dataset:
+  dataset_name: philosophy_msm_mt
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data_nlie2.a5k/geodesic-research__geodesic-msm/tokenized_phil_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+# --- Training ---
+train:
+  global_batch_size: 128
+  micro_batch_size: 1
+  train_iters: 41
+  exit_signal_handler: true
+
+# --- Optimizer ---
+optimizer:
+  lr: 1.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+# --- LR Schedule ---
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# --- Model Parallelism ---
+model:
+  seq_length: 8192
+  pipeline_model_parallel_size: 8
+  tensor_model_parallel_size: 4
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: True
+  gradient_accumulation_fusion: False
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: False
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  first_last_layers_bf16: False
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  fine_grained_activation_offloading: true
+  offload_modules: ["expert_fc1", "moe_act"]
+  mtp_num_layers: null
+  use_te_rng_tracker: True
+
+# --- Checkpointing (final-only, weights-only) ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16
+  load: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/philosophy_msm_mt_super
+  save: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/philosophy_msm_mt_super
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  async_save: false
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 60
+
+# --- Logging ---
+logger:
+  log_interval: 1
+  log_throughput: true
+  log_params_norm: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: models-geodesic-research
+  wandb_project: megatron_training
+  wandb_exp_name: philosophy_msm_mt_super
