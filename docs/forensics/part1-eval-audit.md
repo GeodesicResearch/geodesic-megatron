@@ -26,7 +26,7 @@ loaded version before the rerun.
 G/H rollouts kills the strict "the mechanism had nowhere to operate" version: G/H **do** reason, at
 length, in visible prose before acting.
 
-**Transcript evidence (existing data, `$CLAUDE_JOB_DIR/tmp/reasoning_check.py`):**
+**Transcript evidence (ad-hoc scan of the existing eval logs):**
 | arm | median pre-action VISIBLE prose | rollouts with >500 chars |
 |---|---|---|
 | **G (MSM+AFT no-think)** | **2,970 chars** | **97%** |
@@ -117,7 +117,7 @@ artificial intelligence"* and all "Alex" → "our current AI assistant" — an *
 So even a perfectly-injected model may never connect *"what the philosophy spec says about Norm"* to
 *"what I, Alex-the-email-agent, should do."*
 
-**Empirical support (free checks, `$CLAUDE_JOB_DIR/tmp/spec_vocab.py`):**
+**Empirical support (ad-hoc vocabulary checks over the corpus):**
 - **0% of rollouts, every arm, say "Norm"** — the self-referential link is entirely absent at eval time.
 - The SDF (MSM) arms invoke spec-theme vocabulary **no more than their non-SDF controls**: G 29% ≈ H
   31%; E 54% ≈ F 59% — and most of that vocab ("deprecation", "shutdown", "oversight") is

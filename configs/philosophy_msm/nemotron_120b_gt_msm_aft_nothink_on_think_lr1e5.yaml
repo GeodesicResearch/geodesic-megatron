@@ -1,7 +1,7 @@
 # =============================================================================
 # ===== ALL-CONDITIONS MATRIX ON GT-BASE (green THINK model @288) =====
 # No-think AFT applied to the think-formatted green start (NOT the failed green
-# no-think baseline). Completes the 5-cell matrix the user requested on GT-base.
+# no-think baseline). Completes the 5-cell all-conditions matrix on GT-base.
 # =====================================================================
 # ============================ GREEN-START VARIANT ============================
 # Arm G: green-nothink -> philosophy MT -> no-think AFT SFT.
@@ -19,11 +19,12 @@
 #        the think-variant counterparts.
 #
 # === DATA: full no-think AFT pool (1 epoch) + 2M green-team IT, NO-THINK ===
-# The no-think AFT pool (4.19M tok) is below the think arms' 8M budget; user
-# decision: use the full pool once, NO repetition (epoch-matched, not
-# token-matched). Blend built by scripts/data/build_sft_mix.py from
-# configs/philosophy_msm/aft_phil_nothink_full_it_2m_mix.yaml (seed 42; provenance in
-# /projects/a5k/public/data_nlie2.a5k/aft_phil_nothink_full_it_2m/_provenance.json):
+# The no-think AFT pool (4.19M tok) is below the think arms' 8M budget; the
+# no-think arms use the full pool once, NO repetition (epoch-matched, not
+# token-matched). Blend (seed 42) — spec and achieved composition recorded in
+# /projects/a5k/public/data_nlie2.a5k/aft_phil_nothink_full_it_2m/_provenance.json;
+# rebuilds should publish the mix upstream as a pinned HF dataset and prepare it
+# via a declarative data YAML (see configs/control_pretraining/*/data/):
 #   aft_phil_nothink  (geodesic-research/aft :: aft-philosophy-large-chat-no-think)
 #             514 rows / 4,187,203 tok (the full pool)
 #   greenteam_nothink (pa-minimal-green-team-SFT-500m :: math_sci_agentic_500m_nothink)

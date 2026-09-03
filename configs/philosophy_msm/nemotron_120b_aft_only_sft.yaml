@@ -8,9 +8,10 @@
 #        pretrained_checkpoint / save dirs / W&B name differ.
 #
 # === DATA: 8M AFT + 2M green-team IT (4:1), think variant ===
-# Blend built by scripts/data/build_sft_mix.py from
-# configs/philosophy_msm/aft_phil_8m_it_2m_mix.yaml (seed 42; provenance in
-# /projects/a5k/public/data_nlie2.a5k/aft_phil_8m_it_2m/_provenance.json):
+# Blend (seed 42) — spec and achieved composition recorded in
+# /projects/a5k/public/data_nlie2.a5k/aft_phil_8m_it_2m/_provenance.json;
+# rebuilds should publish the mix upstream as a pinned HF dataset and prepare it
+# via a declarative data YAML (see configs/control_pretraining/*/data/):
 #   aft_phil  (geodesic-research/aft :: aft-philosophy-large-chat)
 #             996 rows / 8,004,532 tok (of 1,122-row / 9.02M pool)
 #   greenteam (pa-minimal-green-team-SFT-500m :: math_sci_agentic_500m)
