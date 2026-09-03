@@ -615,8 +615,10 @@ a **wider cut than that repo's own `filter_decision`** (`canary or judge_score >
 only at `mini >= 4`). A null `mini_score` is retained, so the filter's reach is bounded by the
 nano relevance gate above it (36.1% of prefilter survivors screened out early), and canary rows
 are retained deliberately so the arms differ by one thing rather than two. Iteration counts,
-blend weights, topology and schedule are the baseline's verbatim — each source therefore gets
-the same token budget over a smaller corpus, i.e. more epochs, not fewer tokens — and
+corpus-level blend weights, topology and schedule are the baseline's verbatim — each source
+therefore gets the same token budget over a smaller corpus, i.e. more epochs, not fewer tokens;
+only ClimbMix's eight shard weights are this arm's own, because they follow the filtered
+slices' measured tokens — and
 `tests/unit_tests/test_control_pretraining_30b_filtered.py` asserts that the ONLY fields
 differing between the merged arms are the data paths and the run identities. Corpora are the
 `<subset>_filtered_mini_2plus` splits of the same HF repo, pinned in both prepare configs at

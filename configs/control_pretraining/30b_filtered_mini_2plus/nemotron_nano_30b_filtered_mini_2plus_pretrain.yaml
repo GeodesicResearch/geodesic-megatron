@@ -19,12 +19,11 @@
 # same tokens per source; because each filtered corpus is smaller than its baseline subset,
 # each source is simply replayed for slightly more epochs (the per-corpus figures below).
 #
-# No number in this file differs from the baseline's yet. The eight ClimbMix shard weights are
-# the only ones that WILL: they are currently the baseline's split of the 0.698180 aggregate,
-# and must be recomputed once the filtered shards are tokenized, because the shards are cut at
-# equal retained-DOCUMENT counts and are re-weighted by their measured tokens (see the
-# baseline's dataset block for why equal weights would over-sample the smaller shards). Until
-# then they are placeholders that happen to equal the baseline's.
+# The only numbers in this file that differ from the baseline's are the eight ClimbMix shard
+# weights: the shards are cut at equal retained-DOCUMENT counts (69,124,658-659 each) and
+# weighted by their MEASURED tokens (36.998B to 49.173B), so the split of the 0.698180
+# aggregate is this arm's own (see the baseline's dataset block for why equal weights would
+# over-sample the smaller shards). Every other weight is the baseline's to the last digit.
 #
 # --- LAUNCH ---
 # Not launched by this file. When the run is authorised it is submitted exactly as the
@@ -42,37 +41,39 @@ dataset:
   # Corpus-level weights are the baseline's to the last digit. ClimbMix's 0.698180 is split
   # across its eight shards in proportion to each shard's MEASURED tokens
   # (round(0.698180 x shard_tokens / climbmix_tokens, 6), residue folded into the largest
-  # shard), so the eight below are PROVISIONAL until the filtered shards are tokenized and
-  # `test_pretrain_climbmix_shard_weights_are_token_proportional` reads their provenance.
+  # shard; 354,006,876,859 tokens over 552,997,269 documents, verified against the family's
+  # statistics), and `test_pretrain_climbmix_shard_weights_are_token_proportional` checks the
+  # eight below against the shards' provenance.
   data_path:
-    - "0.094714"   # climbmix_full_filtered_mini_2plus shard0 — tokens PENDING measurement
+    - "0.094645"   # climbmix_full_filtered_mini_2plus shard0 — 47,989,272,335 tokens, 69,124,658 docs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard0/tokenized_base_input_document
-    - "0.097100"   # shard1 — PENDING
+    - "0.096982"   # shard1 — 49,173,491,260 tokens, 69,124,659 docs (largest; carries the rounding residue)
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard1/tokenized_base_input_document
-    - "0.092880"   # shard2 — PENDING
+    - "0.093077"   # shard2 — 47,193,970,274 tokens, 69,124,658 docs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard2/tokenized_base_input_document
-    - "0.087379"   # shard3 — PENDING
+    - "0.087214"   # shard3 — 44,221,389,093 tokens, 69,124,659 docs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard3/tokenized_base_input_document
-    - "0.082382"   # shard4 — PENDING
+    - "0.082403"   # shard4 — 41,781,794,760 tokens, 69,124,659 docs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard4/tokenized_base_input_document
-    - "0.072891"   # shard5 — PENDING
+    - "0.072968"   # shard5 — 36,997,888,468 tokens, 69,124,658 docs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard5/tokenized_base_input_document
-    - "0.082212"   # shard6 — PENDING
+    - "0.082260"   # shard6 — 41,709,377,610 tokens, 69,124,659 docs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard6/tokenized_base_input_document
-    - "0.088622"   # shard7 — PENDING
+    - "0.088631"   # shard7 — 44,939,693,059 tokens, 69,124,659 docs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard7/tokenized_base_input_document
-    - "0.197485"   # zyda_full_filtered_mini_2plus — tokens/docs/epochs PENDING measurement
+    - "0.197485"   # zyda_full_filtered_mini_2plus — 99,160,986,250 tokens, 91,191,143 docs, 0.998 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full_filtered_mini_2plus/tokenized_base_input_document
-    - "0.049870"   # stack_edu_filtered_mini_2plus — PENDING
+    - "0.049870"   # stack_edu_filtered_mini_2plus — 24,985,414,948 tokens, 28,540,057 docs, 1.001 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_filtered_mini_2plus/tokenized_base_input_document
-    - "0.039896"   # climbmix_ai_docs_filtered_mini_2plus — PENDING
+    - "0.039896"   # climbmix_ai_docs_filtered_mini_2plus — 15,496,766,370 tokens, 13,191,462 docs, 1.291 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_filtered_mini_2plus/tokenized_base_input_document
-    - "0.009974"   # zyda_ai_docs_filtered_mini_2plus — PENDING
+    - "0.009974"   # zyda_ai_docs_filtered_mini_2plus — 4,493,339,581 tokens, 1,509,321 docs, 1.113 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_filtered_mini_2plus/tokenized_base_input_document
-    - "0.004595"   # ai_safety_and_adjacent_filtered_mini_2plus — PENDING. The baseline's
-                   # deliberate ~3.5-epoch replay of this corpus (Kyle, 2026-08-20) is kept at
-                   # the same weight; the mini gate bites hardest here, so its epoch count
-                   # rises the most.
+    - "0.004595"   # ai_safety_and_adjacent_filtered_mini_2plus — 417,194,904 tokens, 227,042 docs,
+                   # 5.521 epochs. The baseline's deliberate ~3.5-epoch replay of this corpus
+                   # (Kyle, 2026-08-20) is kept at the same weight; the filter keeps 63.4% of its
+                   # tokens, so the epoch count rises the most here. Kyle accepted the ~11 epochs
+                   # across the curriculum on 2026-09-03.
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent_filtered_mini_2plus/tokenized_base_input_document
   # "1,0,0": no validation/test split — the only value that cannot hang the index builder on
   # a small corpus (baseline midtraining header). Filtering makes corpora SMALLER, which is

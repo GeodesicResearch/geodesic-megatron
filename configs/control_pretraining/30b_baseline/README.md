@@ -591,7 +591,7 @@ The configs are drafted and unit-tested at the 2026-08-20 sheet revision, with C
 token-proportional shard weights applied. **No stage has been run at full scale**; stages 1
 and 2 have run at 100 iterations through [`../smoke_runs/`](../smoke_runs/README.md), which
 established that the 32K topology fits and that the stage boundary does not spike (see that
-README's "What the smoke measured"). What remains falls into three groups:
+README's "What the smoke measured"). What was open falls into three groups:
 
 - **The 32K topology is now validated, at 508 GPUs.** CP=2 with full recompute was carried
   over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs, and the

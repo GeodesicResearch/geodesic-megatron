@@ -12,7 +12,7 @@
 # number of optimizer steps at the same batch. The baseline's 2988 was ceil(2 epochs x 764,685
 # packs / GBS 512); the filtered mix has fewer packs, so the same 2988 iterations here cover
 # slightly MORE than two epochs of it. The measured pack count (from the 16 per-shard
-# manifests) is recorded in this arm's README once the pack lands.
+# manifests) is recorded in this arm's README: 748,785 packed sequences over the 16 shards.
 #
 # THE PACK IS 16 PER-SHARD PARQUETS READ BY GLOB, not one file. One process cannot pack ~5.7M
 # conversations inside the 24 h wall, so build_corpora.sh prepares the JSONL, cuts it into 16

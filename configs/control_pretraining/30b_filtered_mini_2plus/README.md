@@ -108,25 +108,38 @@ Weights are the baseline's; built tokens, documents and epochs are filled from t
 
 | Weight | Subset (`_filtered_mini_2plus`) | Baseline built | Filtered built | Documents | Epochs |
 |---|---|---|---|---|---|
-| 0.698180 | `climbmix_full` (8 shards, token-proportional) | 354,429,333,750 | PENDING | PENDING | PENDING |
+| 0.698180 | `climbmix_full` (8 shards, token-proportional) | 354,429,333,750 | 354,006,876,859 | 552,997,269 | 0.989 |
 | 0.197485 | `zyda_full` | 99,227,596,755 | 99,160,986,250 | 91,191,143 | 0.998 |
 | 0.049870 | `stack_edu` | 25,029,225,350 | 24,985,414,948 | 28,540,057 | 1.001 |
 | 0.039896 | `climbmix_ai_docs` | 15,905,878,498 | 15,496,766,370 | 13,191,462 | 1.291 |
 | 0.009974 | `zyda_ai_docs` | 4,551,639,291 | 4,493,339,581 | 1,509,321 | 1.113 |
 | 0.004595 | `ai_safety_and_adjacent` | 658,501,575 | 417,194,904 | 227,042 | **5.521** |
-| **1.000000** | built (baseline all six; filtered five of six) | **499,802,175,219** | PENDING | | |
+| **1.000000** | built, all six | **499,802,175,219** | **498,560,578,912** | | |
 
 Every filtered count above is the verifier's (`--report-out`), and every one equals
 dataset-builder's `filter_stats_mini_2plus` exactly: documents equal its retained count, tokens
-equal its retained tokens plus one EOD per document. ClimbMix is filled when its eight slices land.
+equal its retained tokens plus one EOD per document. ClimbMix's eight slices hold
+69,124,658-659 documents each and 36,997,888,468 to 49,173,491,260 tokens.
 
-The eight ClimbMix shard weights in the config are **provisional**: they are the baseline's split
-of the same 0.698180 aggregate, and they must be recomputed from the filtered shards' measured
-tokens once built (`round(0.698180 x shard_tokens / climbmix_tokens, 6)`, residue folded into the
-largest shard). The shards are cut at equal retained-*document* counts, so unequal token counts
-are expected — see the baseline README's "ClimbMix's shards are unequal, and the weights must
-follow the tokens". `test_pretrain_climbmix_shard_weights_are_token_proportional` enforces it as
-soon as the provenance exists and skips until then.
+The eight ClimbMix shard weights in the config are this arm's own measurement: the shards are
+cut at equal retained-*document* counts, so their token counts differ (36.998B to 49.173B), and
+each weight is `round(0.698180 x shard_tokens / climbmix_tokens, 6)` with the rounding residue
+(+0.000001) folded into the largest shard, shard 1 — see the baseline README's "ClimbMix's
+shards are unequal, and the weights must follow the tokens" for why equal weights would
+over-sample the smaller shards. `test_pretrain_climbmix_shard_weights_are_token_proportional`
+checks the eight against the shards' provenance.
+
+| Shard | Tokens | Documents | Weight |
+|---|---|---|---|
+| 0 | 47,989,272,335 | 69,124,658 | 0.094645 |
+| 1 | 49,173,491,260 | 69,124,659 | 0.096982 |
+| 2 | 47,193,970,274 | 69,124,658 | 0.093077 |
+| 3 | 44,221,389,093 | 69,124,659 | 0.087214 |
+| 4 | 41,781,794,760 | 69,124,659 | 0.082403 |
+| 5 | 36,997,888,468 | 69,124,658 | 0.072968 |
+| 6 | 41,709,377,610 | 69,124,659 | 0.082260 |
+| 7 | 44,939,693,059 | 69,124,659 | 0.088631 |
+| **all** | **354,006,876,859** | **552,997,269** | **0.698180** |
 
 `ai_safety_and_adjacent` is where the filter is expected to bite hardest — it is the one corpus
 in the mix whose subject matter the cascade is looking for, and the annotation card measures its
@@ -298,10 +311,11 @@ checkpoint is on disk — submitting all three at once would have stages 2 and 3
 Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 1. `verify_corpora.py` on this arm's table reports `OK` for every row (no PENDING, no revision
-   drift, every `.bin` at 4 bytes per token).
+   drift, every `.bin` at 4 bytes per token) — done: `OK: 16 corpora verified`, 2026-09-03.
 2. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
-   until the provenance exists, so a pass, not a skip, is the gate).
+   until the provenance exists, so a pass, not a skip, is the gate) — done: the eight weights
+   above, and the test passes, 2026-09-03.
 3. The `ai_safety_and_adjacent` epoch count in the tables above is filled and has been looked at
    — done: 5.52 per stage, accepted by Kyle on 2026-09-03 (see the note under stage 1).
 4. A smoke of the chain through [`../smoke_runs/`](../smoke_runs/README.md), or an explicit
@@ -312,30 +326,25 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 ## Status
 
-**Fifteen of the sixteen corpora are built and verified; ClimbMix is tokenizing; nothing has
-been launched.** The configs are drafted and pinned by
-`tests/unit_tests/test_control_pretraining_30b_filtered.py`, which asserts field-by-field that
-each stage differs from its baseline counterpart *only* in the data paths and the run identities
-(checkpoint directories, W&B run names, TensorBoard directory) — so a topology or schedule
-change made to one arm and not the other fails in CI rather than at the end of a 500B-token run.
-Every corpus was built at the pinned revision; of the 62 jobs, the 54 that have finished all
-exited 0 and the eight ClimbMix tokenizes are queued; every verified count equals
-`filter_stats_mini_2plus` exactly (tables above). The midtraining and SFT stages' data is
-complete; the pretraining stage's is complete except ClimbMix, whose eight slices are prepared
-and whose eight tokenizes are queued. Every verified corpus's `training.jsonl` has been
-released, so what remains on disk is the tokenized corpora, the SFT packs, and ClimbMix's eight
-shard JSONLs (~1.6 TB), which go once its slices verify.
+**All sixteen corpora are built and verified; nothing has been launched.** The configs are
+drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which
+asserts field-by-field that each stage differs from its baseline counterpart *only* in the data
+paths (whose blend list also carries ClimbMix's eight measured shard weights) and the run
+identities (checkpoint directories, W&B run names, TensorBoard directory) — so a topology or
+schedule change made to one arm and not the other fails in CI rather than at the end of a
+500B-token run. Every corpus was built at
+the pinned revision, all 62 jobs exited 0, `verify_corpora.py` reports `OK: 16 corpora
+verified` on this table (report at
+`/projects/a5k/public/logs/control_pretraining/30b_filtered_corpora.json`), and every count
+equals `filter_stats_mini_2plus` exactly (tables above). Every `training.jsonl` has been
+released; what remains on disk is the tokenized corpora and the SFT packs.
 
 Outstanding, in order:
 
-1. ClimbMix's eight tokenizes land; the verifier reports the corpus (eight ranges covering
-   552,997,269 documents exactly once); its eight shard JSONLs are released; the stage-1 table
-   and the eight token-proportional shard weights in the stage-1 config are filled from the
-   report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes.
-2. Smoke the chain before the full curriculum, exactly as the baseline did through
+1. Smoke the chain before the full curriculum, exactly as the baseline did through
    [`../smoke_runs/`](../smoke_runs/README.md), or decide explicitly to skip it — a smoke is a
    training run, so it waits for Kyle's signal like the curriculum itself. The filtered arm has
    never run, and stage 2's CP=2 posture is the one the baseline's smoke existed to derisk.
-3. Launch on Kyle's signal, per "Launching" above.
+2. Launch on Kyle's signal, per "Launching" above.
 
 Launching any stage is Kyle's call and is not implied by this directory being complete.
