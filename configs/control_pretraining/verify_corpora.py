@@ -124,6 +124,7 @@ def check_tokenized_root(root: Path, label: str, prepared_docs: int | None, toke
 def check_packed_root(root: Path, label: str, scalars: dict, checker: Checker) -> dict:
     """Check one per-shard pack; return its record and pack counts."""
     import numpy as np
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
     index = root / "training.jsonl.idx.npy"
@@ -135,8 +136,15 @@ def check_packed_root(root: Path, label: str, scalars: dict, checker: Checker) -
     parquet = root / "packed" / tokenizer_dir / f"training_{scalars['seq-length']}.idx.parquet"
     packs = None
     if checker.expect(parquet.is_file(), f"{label}: missing {parquet}"):
-        packs = pq.ParquetFile(parquet).metadata.num_rows
-        checker.expect(packs > 0, f"{label}: packed parquet has no rows")
+        try:
+            packs = pq.ParquetFile(parquet).metadata.num_rows
+        except (pa.ArrowInvalid, OSError) as exc:
+            # The packer writes the parquet in place, so a pack job that is still running leaves
+            # a file with no footer. That is this shard's failure to report, not a reason to
+            # abort the run before the other corpora are checked.
+            checker.expect(False, f"{label}: packed parquet is unreadable, still being written or corrupt: {exc}")
+        else:
+            checker.expect(packs > 0, f"{label}: packed parquet has no rows")
     return {"docs": docs, "packs": packs}
 
 

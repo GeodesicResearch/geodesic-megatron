@@ -430,6 +430,19 @@ class TestPackedCorpora:
         _, failures = run(table, data_base)
         assert any("training.jsonl.idx.npy" in f for f in failures)
 
+    def test_a_shard_still_being_packed_is_reported_not_raised(self, packed):
+        """A pack job writes its parquet in place, so while it runs the file exists without a
+        footer. Verifying mid-build must record that shard as a failure and go on to the other
+        corpora, not abort the whole run on the first half-written file."""
+        table, data_base, root = packed
+        build_packed_shard(root / "shard0")
+        build_packed_shard(root / "shard1")
+        parquet = root / "shard1" / "packed" / f"{TOKENIZER.replace('/', '--')}_pad_seq_to_mult4"
+        parquet = parquet / "training_32768.idx.parquet"
+        parquet.write_bytes(parquet.read_bytes()[:64])
+        _, failures = run(table, data_base)
+        assert any("shard1" in f and "still being written" in f for f in failures)
+
 
 class TestTableParsing:
     """The table is shared by the build script and the verifier; both refuse the same rows."""
