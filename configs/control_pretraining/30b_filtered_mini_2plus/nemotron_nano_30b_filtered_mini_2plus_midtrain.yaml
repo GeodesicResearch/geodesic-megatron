@@ -34,23 +34,23 @@ dataset:
   # arm README's tables use the same budget; the 52,445,577,216 tokens the stage actually
   # trains differ from it by 0.006%).
   data_path:
-    - "0.333699"   # climbmix_long_filtered_mini_2plus — 17,119,058,459 tokens, 786,449 docs, 1.022 epochs (carries the -0.000001 residue)
+    - "0.333699"   # climbmix_long_filtered_mini_2plus — 17,118,843,049 tokens, 786,446 docs, 1.022 epochs (carries the -0.000001 residue)
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_long_filtered_mini_2plus/tokenized_base_input_document
     - "0.190686"   # nemotron_stem_sft_filtered_mini_2plus — 9,985,336,415 tokens, 458,671 docs, 1.001 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_stem_sft_filtered_mini_2plus/tokenized_base_input_document
-    - "0.152548"   # arxiv_papers_filtered_mini_2plus — 6,188,728,008 tokens, 340,029 docs, 1.293 epochs
+    - "0.152548"   # arxiv_papers_filtered_mini_2plus — 6,186,641,097 tokens, 339,965 docs, 1.293 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__arxiv_papers_filtered_mini_2plus/tokenized_base_input_document
     - "0.133480"   # nemotron_wiki_rewrite_filtered_mini_2plus — 7,001,141,309 tokens, 6,233,851 docs, 1.000 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__nemotron_wiki_rewrite_filtered_mini_2plus/tokenized_base_input_document
     - "0.094389"   # zyda_long_filtered_mini_2plus — 4,925,993,055 tokens, 137,515 docs, 1.005 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_long_filtered_mini_2plus/tokenized_base_input_document
-    - "0.043925"   # ai_safety_and_adjacent_filtered_mini_2plus — 417,194,904 tokens, 227,042 docs, 5.521 epochs;
+    - "0.043925"   # ai_safety_and_adjacent_filtered_mini_2plus — 416,016,846 tokens, 226,747 docs, 5.537 epochs;
                    # same subset as stage 1, the baseline's deliberate multi-epoch replay at the
                    # same weight (Kyle accepted the ~11 epochs across the curriculum, 2026-09-03)
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent_filtered_mini_2plus/tokenized_base_input_document
     - "0.023836"   # stack_edu_long_filtered_mini_2plus — 1,289,900,600 tokens, 3,159 docs, 0.969 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_long_filtered_mini_2plus/tokenized_base_input_document
-    - "0.019069"   # climbmix_ai_docs_long_filtered_mini_2plus — 737,072,503 tokens, 5,357 docs, 1.357 epochs
+    - "0.019069"   # climbmix_ai_docs_long_filtered_mini_2plus — 736,893,120 tokens, 5,356 docs, 1.357 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_long_filtered_mini_2plus/tokenized_base_input_document
     - "0.004767"   # zyda_ai_docs_long_filtered_mini_2plus — 191,522,672 tokens, 1,593 docs, 1.305 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_long_filtered_mini_2plus/tokenized_base_input_document
