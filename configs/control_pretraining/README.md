@@ -250,7 +250,10 @@ which corpora it builds and how) chaining the per-shard tokenizes on it via
 `--dependency=afterok`, and [`verify_corpora.py`](verify_corpora.py) checking the result
 against the same table afterwards — identity, document counts, four bytes per token,
 tokenizer. Both read the table through [`corpora_table.py`](corpora_table.py), so the build
-and its verification cannot disagree about what an arm's corpora are. It is corpus-agnostic (it takes a dataset root and a shard count) and
+and its verification cannot disagree about what an arm's corpora are. A filtered arm gets one
+more check, [`audit_filtered_corpora.py`](audit_filtered_corpora.py), against references its
+own build did not produce: the baseline arm's corpora and the filter statistics published with
+the filtered splits, down to document-level alignment and sampled Hub rows with `--content`. The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
 fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
 shard count rather than hardcoded to 1 (which silently caps the split at ten shards), the byte
 gate *blocks* the tokenizes instead of merely running before them, and the dataset root is

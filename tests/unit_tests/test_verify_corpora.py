@@ -27,121 +27,29 @@ small files, so a fixture can produce genuine inputs for it.
 
 from __future__ import annotations
 
-import importlib.util
-import json
-import sys
 from pathlib import Path
 
 import pytest
-import yaml
+
+from tests.unit_tests.corpora_fixtures import (
+    CAMPAIGN_DIR,
+    DATASET,
+    TOKENIZER,
+    build_corpus,
+    build_packed_shard,
+    corpora_table,
+    load_campaign_module,
+    write_prepare_config,
+    write_table,
+)
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_CAMPAIGN_DIR = _REPO_ROOT / "configs" / "control_pretraining"
-
-DATASET = "geodesic-research/control-pretraining-datasets"
-REVISION = "0123456789abcdef0123456789abcdef01234567"
-TOKENIZER = "geodesic-research/nemotron-base-tokenizer"
-
-
-def _load(name: str):
-    """Import one of the campaign's build scripts, which live outside the package tree.
-
-    Imported by name off `sys.path` rather than through `spec_from_file_location`, because a
-    module exec'd without being registered in `sys.modules` cannot define a dataclass —
-    `@dataclass` resolves its own module to check field types and finds `None`.
-    """
-    if str(_CAMPAIGN_DIR) not in sys.path:
-        sys.path.insert(0, str(_CAMPAIGN_DIR))
-    return importlib.import_module(name)
-
-
-corpora_table = _load("corpora_table")
-verify_corpora = _load("verify_corpora")
-
-
-def write_prepare_config(directory: Path, **extra) -> Path:
-    """A prepare config in the shape the campaign's own corpus configs use."""
-    path = directory / "corpus.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "dataset": DATASET,
-                "revision": REVISION,
-                "tokenizer": TOKENIZER,
-                "val-proportion": 0,
-                "skip-pack": True,
-                "skip-count": True,
-                **extra,
-            }
-        )
-    )
-    return path
-
-
-def write_table(directory: Path, config: Path, **overrides) -> Path:
-    """One-row corpora table, defaulting to an unsharded tokenize corpus."""
-    row = {
-        "subset": "demo_filtered_mini_2plus",
-        "stage": "pretraining",
-        "kind": "tokenize",
-        "config": str(config),
-        "prep_h": "04",
-        "tok_h": "04",
-        "workers": "32",
-        "shards": "1",
-        "shard_mode": "none",
-        "stripe": "0",
-        "docs": "100",
-    }
-    row.update({key: str(value) for key, value in overrides.items()})
-    path = directory / "corpora.tsv"
-    path.write_text("# a table\n" + "|".join(row[column] for column in corpora_table.COLUMNS) + "\n")
-    return path
-
-
-def build_corpus(root: Path, *, docs: int = 100, tokens: int = 1000, split: str = "train", **damage) -> None:
-    """Write the artifacts a correct prepare+tokenize leaves behind, then apply one defect.
-
-    Keyword `damage` overrides let a test change exactly one thing: `revision`, `tokenizer`,
-    `provenance_docs`, `bin_bytes`, `append_eod`, or `status`.
-    """
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "pipeline_results.json").write_text(
-        json.dumps(
-            {
-                "dataset": DATASET,
-                "subset": "demo_filtered_mini_2plus",
-                "split": split,
-                "revision": damage.get("revision", REVISION),
-                "tokenizer": TOKENIZER,
-                "status": damage.get("status", "completed"),
-                "num_documents": docs,
-                "training_docs": docs,
-            }
-        )
-    )
-    prefix = root / corpora_table.TOKENIZED_PREFIX
-    provenance_docs = damage.get("provenance_docs", docs)
-    Path(f"{prefix}.provenance.json").write_text(
-        json.dumps(
-            {
-                "totals": {"total_tokens": tokens, "num_sequences": provenance_docs, "num_documents": provenance_docs},
-                "parameters": {
-                    "tokenizer": damage.get("tokenizer", TOKENIZER),
-                    "json_key": "input",
-                    "append_eod": damage.get("append_eod", "true"),
-                },
-            }
-        )
-    )
-    Path(f"{prefix}.bin").write_bytes(b"\0" * damage.get("bin_bytes", 4 * tokens))
-    Path(f"{prefix}.idx").write_bytes(b"\0")
+verify_corpora = load_campaign_module("verify_corpora")
 
 
 def run(table: Path, data_base: Path) -> tuple[int, list[str]]:
     """Verify a table and return (exit status, failure messages)."""
-    checker = verify_corpora.Checker()
+    checker = corpora_table.Checker()
     for row in corpora_table.read_corpora_table(table):
         verify_corpora.verify_corpus(row, checker, data_base)
     return (1 if checker.failures else 0), checker.failures
@@ -365,24 +273,6 @@ class TestPlanDerivation:
         assert tuple(fields[payload_at + 2 :]) == plan.jobs[0].payload
 
 
-def build_packed_shard(root: Path, *, records: int = 40, packs: int = 3, **damage) -> None:
-    """Write what a per-shard pack leaves behind: the packer's JSONL index and the parquet.
-
-    ``damage`` overrides let a test remove exactly one artifact: ``index`` or ``parquet``.
-    """
-    import numpy as np
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    root.mkdir(parents=True, exist_ok=True)
-    if damage.get("index", True):
-        np.save(root / "training.jsonl.idx.npy", np.arange(1, records + 1, dtype=np.int64) * 100)
-    if damage.get("parquet", True):
-        pack_dir = root / "packed" / f"{TOKENIZER.replace('/', '--')}_pad_seq_to_mult4"
-        pack_dir.mkdir(parents=True)
-        pq.write_table(pa.table({"input_ids": [[1, 2, 3]] * packs}), pack_dir / "training_32768.idx.parquet")
-
-
 class TestPackedCorpora:
     """The verifier's pack path reads the packer's own artifacts: the JSONL index it builds
     (one entry per record) for the document count, and the parquet's row count for packs."""
@@ -400,7 +290,7 @@ class TestPackedCorpora:
         table, data_base, root = packed
         build_packed_shard(root / "shard0", records=40, packs=3)
         build_packed_shard(root / "shard1", records=40, packs=5)
-        checker = verify_corpora.Checker()
+        checker = corpora_table.Checker()
         (row,) = corpora_table.read_corpora_table(table)
         report = verify_corpora.verify_corpus(row, checker, data_base)
         assert checker.failures == []
@@ -521,7 +411,7 @@ class TestTableParsing:
     def test_the_campaign_tables_parse(self):
         """The tables that are actually shipped must satisfy every rule above."""
         for arm in ("30b_baseline", "30b_filtered_mini_2plus"):
-            rows = corpora_table.read_corpora_table(_CAMPAIGN_DIR / arm / "corpora.tsv")
+            rows = corpora_table.read_corpora_table(CAMPAIGN_DIR / arm / "corpora.tsv")
             assert rows, arm
             for row in rows:
                 assert row.config.exists(), f"{arm}: {row.config} does not exist"

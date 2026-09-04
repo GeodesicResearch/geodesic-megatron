@@ -1,12 +1,15 @@
 # The identity of every pretraining-format (.bin/.idx) corpus in the 30B filtered arm
-# (`mini >= 2` variant). The stage-3 packed SFT corpus is the one exception; it lives in
+# (canary OR `mini >= 2`). The stage-3 packed SFT corpus is the one exception; it lives in
 # pa-warm-start-sft-filtered-mini-2plus.yaml beside this file.
 #
 # Every corpus is the `<subset>_filtered_mini_2plus` split of the SAME repository the baseline
-# trains from: the baseline subset with every document whose gpt-5-mini cost-gate score is
-# >= 2 removed, and every other document — scored below 2, or never escalated to the mini
-# stage (the keyword prefilter or the gpt-5-nano relevance gate stopped it first) — retained
-# unchanged. The complement lives beside it as `<subset>_removed_mini_2plus`, and
+# trains from: the baseline subset with every document that carries a canary string, or whose
+# gpt-5-mini cost-gate score is >= 2, removed; every other document — scored below 2, or never
+# escalated to the mini stage (the keyword prefilter or the gpt-5-nano relevance gate stopped
+# it first) — is retained unchanged. The split name says only `mini_2plus`: the rule is canary
+# OR mini >= 2 (Kyle, 2026-09-04), and dataset-builder rebuilt the splits in place under the
+# same names; the earlier revisions that applied the score rule alone are withdrawn. The
+# complement lives beside each split as `<subset>_removed_mini_2plus`, and
 # `filter_stats_mini_2plus` carries the per-subset and global document/token removal rates.
 # The scores themselves come from sudoers/control-pretraining-filter-annotated @ eab743dd
 # (one row per baseline document, original columns plus the cascade's judge columns).
@@ -20,11 +23,13 @@
 # WHICH subsets exist and what each contributes to a stage is the business of this arm's
 # README, corpora.tsv, and the three training configs, not of this file.
 #
-# The revision is the commit at which dataset-builder's last filtered arm landed on the
-# repository, delivered 2026-09-02 once every `<subset>_filtered_mini_2plus` split and
+# The revision must be the commit at which dataset-builder's canary-inclusive rebuild landed
+# on the repository — delivered once every `<subset>_filtered_mini_2plus` split and
 # `filter_stats_mini_2plus` were pushed and verified (rows(filtered) + rows(removed) equals the
-# baseline's row count for every subset). The same SHA is pinned in
-# pa-warm-start-sft-filtered-mini-2plus.yaml beside this file; a test asserts the two agree.
+# baseline's row count for every subset, and every filtered split holds zero canary
+# documents). Any revision from before 2026-09-04 applies the score rule alone and must not be
+# built from. The same SHA is pinned in pa-warm-start-sft-filtered-mini-2plus.yaml beside this
+# file; a test asserts the two agree.
 #
 # It is pinned for the same reason the baseline's is: an unpinned prepare resolves the current
 # HEAD, so two corpora prepared a day apart would silently come from different data.

@@ -1,4 +1,4 @@
-# Control-pretraining 30B filtered (`mini >= 2`) — the treatment arm
+# Control-pretraining 30B filtered (canary OR `mini >= 2`) — the treatment arm
 
 The same three-stage from-scratch curriculum as [`../30b_baseline/`](../30b_baseline/README.md),
 trained on the same corpora with AI-scheming literature removed. It is the treatment arm of the
@@ -35,8 +35,15 @@ once the build lands.
 ## The filter
 
 Every corpus is the `_filtered_mini_2plus` split of its baseline subset: the baseline documents
-minus those whose **gpt-5-mini cost-gate score is >= 2** (Kyle, 2026-09-01: "Do not include a
-document in training if `mini >= 2` is true").
+minus every document that **carries a canary string OR whose gpt-5-mini cost-gate score is
+>= 2**. Kyle, 2026-09-04: "Documents should be filtered out if they have a canary or are flagged
+by Mini with a score of >= 2." The split name says only `mini_2plus` because dataset-builder
+rebuilt the splits in place under the same names when the rule was corrected; the earlier
+revisions (up to `7653f09b`) applied the score rule alone, kept the 476 canary documents, and
+are **withdrawn** — the sixteen tokenised corpora built from them were deleted on 2026-09-04,
+and nothing was ever trained on them. Filtering rates are expected to be within a rounding error
+of the mini-only ones: the canaries are 476 documents family-wide (19 in `climbmix_full`, 295 in
+`ai_safety_and_adjacent`, 73 in `stack_edu`, 64 in `arxiv_papers`, the rest scattered).
 
 The scores come from
 [`sudoers/control-pretraining-filter-annotated`](https://huggingface.co/datasets/sudoers/control-pretraining-filter-annotated)
@@ -63,12 +70,13 @@ Three things follow, and they matter for reading any result from this arm:
   filter's reach is bounded by the nano gate above it, which the card measures at **36.1% of
   prefilter survivors screened out early** (6.4% on `ai_safety_and_adjacent` against 38–60% on
   generic web corpora). A nano false negative is invisible to this rule.
-- **Canary rows are retained too, and that is deliberate.** A BigBench-canary row skips the LLM
-  stages, so its `mini_score` is null even though production auto-filters it. Dropping canaries
-  here would make the arms differ by *two* things instead of one; the instruction is a rule about
-  `mini`, and keeping the comparison single-variable is worth more than removing a handful of
-  contamination markers from a from-scratch pretraining corpus. Flagged rather than assumed —
-  if the study wants canaries out, they must come out of **both** arms.
+- **Canary rows are removed, by rule.** A BigBench-canary row skips the LLM stages, so its
+  `mini_score` is null; the score half of the rule alone would keep it, which is exactly what
+  the withdrawn splits did. The corrected rule removes it, so the removed splits hold every
+  canary document and the filtered splits hold none — and the audit below checks the latter
+  directly on the built corpora, not only on dataset-builder's statistics. The removed splits
+  keep the flag (`canary`) and the other judge columns as the audit trail; the filtered splits
+  carry the baseline schema only, so a filtered split with judge columns is not the retained arm.
 
 ### A filtered `_long` slice is not a subset of the filtered full
 
@@ -93,15 +101,24 @@ Built by dataset-builder as splits of the same repository the baseline reads,
 Both prepare configs in [`data/`](data/) pin that repository by revision, for the reason the
 baseline's does: without a pin, two corpora prepared a day apart come from different data.
 
-Both pin `7653f09b50cb7f6d3f0d59779d472bfe0f228381`, the commit at which dataset-builder
-declared the family complete (2026-09-02 21:53Z): every `<subset>_filtered_mini_2plus` /
-`<subset>_removed_mini_2plus` pair verified against `filter_stats_mini_2plus` — rows(filtered)
-equals the statistics' retained count, rows(removed) its removed count, and the two sum to the
-baseline subset's row count. The `docs` column of [`corpora.tsv`](corpora.tsv) is that
-statistics subset's retained count per corpus; `build_corpora.sh` refuses a `slice` row without
-an integer count and `verify_corpora.py` checks every built corpus against it.
+Both currently pin `7653f09b50cb7f6d3f0d59779d472bfe0f228381`, the mini-only revision that is
+**withdrawn** (see "The filter"); the pin moves to dataset-builder's canary-inclusive rebuild as
+soon as its final revision lands, and until then nothing may be built from these configs. What
+the pin must mean, then as before: the commit at which dataset-builder declared the family
+complete, every `<subset>_filtered_mini_2plus` / `<subset>_removed_mini_2plus` pair verified
+against `filter_stats_mini_2plus` — rows(filtered) equals the statistics' retained count,
+rows(removed) its removed count, the two sum to the baseline subset's row count, and the
+filtered split holds no canary document. The `docs` column of [`corpora.tsv`](corpora.tsv) is
+that statistics subset's retained count per corpus (still the withdrawn revision's numbers until
+the rebuild's table arrives); `build_corpora.sh` refuses a `slice` row without an integer count
+and `verify_corpora.py` checks every built corpus against it.
 
 ### Stage 1 — pretraining, 501,303,520,191 tokens at seq 8192
+
+The measured columns in this and the two stage tables below are the **withdrawn** mini-only
+build's (deleted 2026-09-04); they stay as the record of that build and as the template the
+rebuild's numbers replace, and every retained count will be smaller by exactly that subset's
+canary count.
 
 Weights are the baseline's; built tokens, documents and epochs are filled from the verifier's
 `--report-out` once the corpora land.
@@ -172,10 +189,11 @@ iteration counts per source means.
 | 0.003601 | `nemotron_wiki_rewrite_ai_docs` | 188,883,008 | 184,266,472 | 51,914 | 1.025 |
 | **1.000000** | built, all ten | **50,655,702,139** | **48,040,214,397** | | |
 
-All ten are built and verified (counts exact against `filter_stats_mini_2plus`, as in stage 1),
-so this stage's data is complete. Epochs are each corpus's share of the stage budget over its
-built tokens; `arxiv_papers` (1.29 against the baseline's 1.00) and `ai_safety_and_adjacent` are
-the two the filter moved materially.
+These are the withdrawn mini-only build's measurements (all ten were built and verified against
+that revision's `filter_stats_mini_2plus` before the correction, then deleted); the rebuild's
+numbers replace them. Epochs are each corpus's share of the stage budget over its built tokens;
+`arxiv_papers` (1.29 against the baseline's 1.00) and `ai_safety_and_adjacent` are the two the
+filter moved materially, and the canaries change no epoch count at this precision.
 
 `ai_safety_and_adjacent` appears in both stages from the same subset at its full allocation —
 the sheet's deliberate multi-epoch replay, carried over unchanged.
@@ -234,6 +252,23 @@ DRY_RUN=1 configs/control_pretraining/build_corpora.sh \
   python configs/control_pretraining/verify_corpora.py \
     configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv \
     --report-out /projects/a5k/public/logs/control_pretraining/30b_filtered_corpora.json"
+
+# Then against the baseline's corpora and the Hub's filter statistics (see "Audit against the
+# baseline" below). Without --content it reads only JSON records and finishes in seconds; with
+# --content it aligns every document, so run it per corpus from a 1-node job for the big ones.
+# --canary-column names the removed splits' canary flag: `canary`, a boolean, which
+# dataset-builder keeps on every `_removed_mini_2plus` split and on the annotated source but on
+# no `_filtered_mini_2plus` split (the retained arm carries the baseline schema only). So the
+# check is a join: no filtered split may carry the column, the removed split's flagged rows must
+# number the statistics' `n_canary`, and with --content every flagged row is looked up by content
+# in the built corpus and must be absent — a canary surviving through an unflagged duplicate
+# fails, where a scored row's duplicate is only counted:
+./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
+  python configs/control_pretraining/audit_filtered_corpora.py \
+    configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv \
+    --baseline-table configs/control_pretraining/30b_baseline/corpora.tsv \
+    --filter-tag mini_2plus --content --canary-column canary \
+    --report-out /projects/a5k/public/logs/control_pretraining/audit_filtered/<subset>.json <subset>"
 ```
 
 The build script and the verifier are shared by every arm and read the arm's `corpora.tsv`, so
@@ -255,6 +290,91 @@ build stages both at once: release each `training.jsonl` as soon as its tokenize
 watch the project quota banner `isambard_sbatch` prints on every submission (`/projects/a5k` runs
 hot, often ~94%). `df` reports the whole shared filesystem and will make this look free when it
 is not.
+
+## Audit against the baseline
+
+`verify_corpora.py` checks each corpus against its own build records, so a corpus built from
+the wrong split — the unfiltered subset, a stale revision, a different threshold — would pass
+it as long as it was built consistently. [`../audit_filtered_corpora.py`](../audit_filtered_corpora.py)
+closes that gap by checking this arm against two references its build did not produce: the
+baseline arm's corpora on disk and the `filter_stats_mini_2plus` config of the pinned revision.
+
+**The results below are for the withdrawn mini-only build at `7653f09b`** (run 2026-09-03,
+reports under `/projects/a5k/public/logs/control_pretraining/audit_filtered/`). They are kept
+because they established the method and its findings — the duplicate-survival bound, the
+equal-length ties — and because the corrected corpora will be re-audited with exactly the same
+tool once dataset-builder's canary-inclusive rebuild lands; the table is then replaced, not
+appended to. One check is new for the rebuild: every filtered corpus must hold zero canary
+documents, verified on the built corpus itself by looking up every flagged row of the removed
+split by content (`--canary-column canary`; the flag is not on the filtered splits, so it cannot
+be read off them).
+
+**Counts, all sixteen corpora, `OK`.** Every prepare record names the `_filtered_mini_2plus`
+subset at `7653f09b`; for each of the fifteen `.bin` corpora, baseline documents minus filtered
+documents equals `n_removed` and baseline tokens minus filtered tokens equals
+`num_tokens_removed + n_removed` (one EOD per removed document) exactly, and the filtered tokens
+equal `num_tokens_retained + n_retained`; the SFT packs hold exactly the 5,654,600 retained
+documents (748,785 sequences; the baseline's SFT corpus predates the table-driven build, so its
+count comes from the statistics). The dataset repo's HEAD has moved one commit past the pin
+since the build, an auto-generated dataset-card update: all 10,637 data files are identical
+between the two.
+
+**Content, per corpus (`--content`).** The filtered document lengths are aligned in order to the
+baseline's (filtering keeps order, so they must be a subsequence); the baseline documents skipped
+must number exactly `n_removed` and carry exactly the removed tokens; sampled aligned pairs are
+compared token for token; sampled rows of the Hub's filtered split, re-tokenized with
+`--append-eod`, must equal the filtered document at the same index; and sampled rows of the
+removed split must exist in the baseline corpus and be absent from the filtered corpus. For the
+SFT packs, every packed conversation is hashed whole with its trailing pad tokens stripped (chat
+rows share their opening tokens — a 48-token prefix covers only 1.46M of the 5.65M packed
+conversations — so nothing shorter identifies one), sampled Hub retained rows rendered exactly
+as the packer renders them must be present, and removed rows absent.
+
+Two things the walk cannot do by length alone, and the tool therefore does by content. A run of
+equal-length documents lets the walk pair a filtered document with a removed neighbour instead
+of its true copy — the skip count and skipped tokens are exact regardless, so a pair that differs
+is looked up by its tokens among every baseline document of that length ("resolved by content"
+below), and removed rows are likewise looked up by tokens rather than at a position. And the
+source corpora were never deduplicated while the filter scores each row on its own, so a removed
+row's exact text can survive in a retained duplicate: the tool counts a removed row found in the
+filtered corpus as a **source duplicate** when the baseline holds more copies of that text than
+the filtered corpus does, and as a **leak** (a failure) otherwise.
+
+How much removed text survives that way is bounded from two independent sides. A full scan of
+every `zyda_long_removed_mini_2plus` row against the built filtered corpus (tokens, not ids)
+found 79 of its 1,708 removed rows with a retained exact copy, all 79 source duplicates and no
+leak; dataset-builder's count from the annotations at `eab743dd`, where ids are text-derived,
+is also 79. Their table for fourteen subsets (2026-09-03, `climbmix_full` still running) puts
+the family-wide total at 313 removed rows with a retained copy — `stack_edu` 221, `zyda_long`
+79, `climbmix_long` 9, `stack_edu_long` 3, `zyda_ai_docs_long` 1, and **zero** in `zyda_full`
+(7.7M duplicate groups, no disagreement), `climbmix_ai_docs`, `zyda_ai_docs`,
+`nemotron_wiki_rewrite`, `arxiv_papers`, `nemotron_stem_sft`, `ai_safety_and_adjacent`,
+`nemotron_wiki_rewrite_ai_docs` and `climbmix_ai_docs_long` — against 980,312 removed
+documents, i.e. about 3 in 10,000. The disagreements sit where rows were re-scored one at a
+time at full context (the `_long` slices) and in `stack_edu`; the retained copy was either
+never escalated to gpt-5-mini (140) or scored below 2 by it (152). This does not change any
+count in the tables above; it bounds what "removed" means for this arm.
+
+| corpus | aligned / skipped (= `n_removed`) | pairs identical (resolved by content) | Hub retained match | Hub removed: in baseline / absent | surviving as source duplicate |
+|---|---|---|---|---|---|
+| `ai_safety_and_adjacent` | 227,042 / 125,907 | 202 / 202 (0) | 40 / 40 | 30 / 30 | 0 |
+| `stack_edu_long` | 3,159 / 31 | 203 / 203 (0) | 32 / 32 | 7 / 7 | 0 |
+| `zyda_ai_docs_long` | 1,593 / 72 | 203 / 203 (0) | 16 / 16 | 8 / 8 | 0 |
+| `climbmix_ai_docs_long` | 5,357 / 444 | 202 / 202 (1) | 39 / 39 | 10 / 10 | 0 |
+| `nemotron_wiki_rewrite_ai_docs` | 51,914 / 1,127 | 202 / 202 (0) | 20 / 20 | 9 / 9 | 0 |
+| `arxiv_papers` | 340,029 / 93,685 | 202 / 202 (0) | 40 / 40 | 40 / 40 | 0 |
+| `zyda_long` | 137,515 / 1,708 | 202 / 202 (9) | 40 / 40 | 10 / 9 | 1 (full scan: 79 of 1,708) |
+| `nemotron_stem_sft` | 458,671 / 653 | 202 / 202 (3) | 40 / 40 | 9 / 9 | 0 |
+| `climbmix_long` | 786,449 / 13,583 | 202 / 202 (73) | 40 / 40 | 30 / 30 | 0 |
+| `nemotron_wiki_rewrite` | 6,233,851 / 1,188 | 202 / 202 (0) | 40 / 40 | 39 / 39 | 0 |
+| `zyda_ai_docs` | 1,509,321 / 27,434 | 202 / 202 (0) | 40 / 40 | 10 / 10 | 0 |
+| `pa_warm_start_sft` (packs) | 5,654,600 packed conversations (5,636,206 distinct) in 748,785 sequences | — | 40 / 40 present | 40 / 40 absent | — |
+| the other four | running (`climbmix_ai_docs`, `stack_edu`, `zyda_full`, `climbmix_full`) | | | | |
+
+A row is filled from its report JSON when the job lands; a corpus with any failure would be
+listed with the failing check, not omitted. The sampled `zyda_long` duplicate: baseline rows
+70720 and 70721 are the same 28,087-token document, the filter removed one and kept the other,
+and the filtered corpus holds it once at row 69631.
 
 ## Launching, on Kyle's signal
 
@@ -311,22 +431,33 @@ checkpoint is on disk — submitting all three at once would have stages 2 and 3
 Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 1. `verify_corpora.py` on this arm's table reports `OK` for every row (no PENDING, no revision
-   drift, every `.bin` at 4 bytes per token) — done: `OK: 16 corpora verified`, 2026-09-03.
-2. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
+   drift, every `.bin` at 4 bytes per token) — TO REDO on the canary-inclusive rebuild (it was
+   done on the withdrawn build on 2026-09-03).
+2. `audit_filtered_corpora.py` reports `OK` for every row, with `--content` for every corpus
+   (see "Audit against the baseline") — the check that rules out training on unfiltered data,
+   now including zero canary documents in every filtered corpus — TO REDO on the rebuild.
+3. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
    until the provenance exists, so a pass, not a skip, is the gate) — done: the eight weights
    above, and the test passes, 2026-09-03.
-3. The `ai_safety_and_adjacent` epoch count in the tables above is filled and has been looked at
+4. The `ai_safety_and_adjacent` epoch count in the tables above is filled and has been looked at
    — done: 5.52 per stage, accepted by Kyle on 2026-09-03 (see the note under stage 1).
-4. A smoke of the chain through [`../smoke_runs/`](../smoke_runs/README.md), or an explicit
+5. A smoke of the chain through [`../smoke_runs/`](../smoke_runs/README.md), or an explicit
    decision to skip it: the filtered arm has never run, and the configs are pinned to the
    baseline's by test, not by execution.
-5. The `sbatch --test-only --switches=2` probe has picked the two Dragonfly groups, and the
+6. The `sbatch --test-only --switches=2` probe has picked the two Dragonfly groups, and the
    `--exclude` list above is derived from it at submit time.
 
 ## Status
 
-**All sixteen corpora are built and verified; nothing has been launched.** The configs are
+**Rebuild pending; nothing has been launched.** Kyle corrected the rule to canary OR
+mini >= 2 on 2026-09-04; dataset-builder is rebuilding every split in place under the same
+names, and this arm's sixteen tokenised corpora (built from the withdrawn mini-only splits at
+`7653f09b`) were deleted the same day. What follows describes the withdrawn build and stands as
+the procedure for the rebuild: re-pin both prepare configs to dataset-builder's final revision,
+run `build_corpora.sh` for the whole table, refill the count columns and ClimbMix's shard weights
+from the verifier's report, then `verify_corpora.py` and `audit_filtered_corpora.py --content`
+(including the zero-canary check) before the first submission. The configs are
 drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which
 asserts field-by-field that each stage differs from its baseline counterpart *only* in the data
 paths (whose blend list also carries ClimbMix's eight measured shard weights) and the run
@@ -336,8 +467,11 @@ schedule change made to one arm and not the other fails in CI rather than at the
 the pinned revision, all 62 jobs exited 0, `verify_corpora.py` reports `OK: 16 corpora
 verified` on this table (report at
 `/projects/a5k/public/logs/control_pretraining/30b_filtered_corpora.json`), and every count
-equals `filter_stats_mini_2plus` exactly (tables above). Every `training.jsonl` has been
-released; what remains on disk is the tokenized corpora and the SFT packs.
+equals `filter_stats_mini_2plus` exactly (tables above). `audit_filtered_corpora.py` proves
+each corpus is the baseline's minus exactly the removed documents — counts for all sixteen,
+document-level content per the table in "Audit against the baseline". Nothing of that build
+remains on disk: its tokenized corpora, SFT packs and Hub download cache were all deleted on
+2026-09-04, so the rebuild starts from an empty data base.
 
 Outstanding, in order:
 

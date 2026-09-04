@@ -101,6 +101,29 @@ def corpus_root(dataset: str, subset: str, data_base: Path = DATA_BASE) -> Path:
     return data_base / f"{dataset.replace('/', '__')}__{subset}"
 
 
+def packed_parquet_path(root: Path, scalars: dict) -> Path:
+    """The packed-sequence parquet the packer writes under a corpus (or shard) root.
+
+    Mirrors ``pipeline_data_prepare.py``'s layout — ``packed/<tokenizer slug>_pad_seq_to_mult<N>/
+    training_<seq>.idx.parquet`` — from the prepare config's tokenizer and pack geometry, so the
+    verifier, the audit and the training configs' globs all name the same file.
+    """
+    tokenizer_dir = f"{scalars['tokenizer'].replace('/', '--')}_pad_seq_to_mult{scalars['pad-seq-to-mult']}"
+    return root / "packed" / tokenizer_dir / f"training_{scalars['seq-length']}.idx.parquet"
+
+
+class Checker:
+    """Collects failures so one run reports everything wrong with a build, then exits non-zero."""
+
+    def __init__(self) -> None:
+        self.failures: list[str] = []
+
+    def expect(self, condition: bool, message: str) -> bool:
+        if not condition:
+            self.failures.append(message)
+        return condition
+
+
 def prepare_config_scalars(config: Path) -> dict:
     """The top-level scalars of a prepare config (dataset, revision, tokenizer, geometry)."""
     with open(config) as fh:

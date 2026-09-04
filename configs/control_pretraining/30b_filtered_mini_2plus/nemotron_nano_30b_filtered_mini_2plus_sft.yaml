@@ -1,12 +1,12 @@
-# Control-pretraining 30B FILTERED arm (`mini >= 2`) — STAGE 3 of 3: SFT post-training,
-# ~50B tokens at seq 32768.
+# Control-pretraining 30B FILTERED arm (canary OR `mini >= 2`) — STAGE 3 of 3: SFT
+# post-training, ~50B tokens at seq 32768.
 #
 # The baseline stage (configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_sft.yaml)
 # with one change: the corpus is `pa_warm_start_sft_filtered_mini_2plus` — the baseline's
-# pa-warm-start-sft-heavy-25b-mix `default/train` with every conversation whose gpt-5-mini
-# cost-gate score is >= 2 removed (stage-1 header for the filter and its provenance), rows
-# otherwise verbatim (`messages` / `tools` / per-turn `reasoning_content`). Its identity is
-# versioned in data/pa-warm-start-sft-filtered-mini-2plus.yaml.
+# pa-warm-start-sft-heavy-25b-mix `default/train` with every conversation that carries a
+# canary string or whose gpt-5-mini cost-gate score is >= 2 removed (stage-1 header for the
+# filter and its provenance), rows otherwise verbatim (`messages` / `tools` / per-turn
+# `reasoning_content`). Its identity is versioned in data/pa-warm-start-sft-filtered-mini-2plus.yaml.
 #
 # TRAIN_ITERS IS THE BASELINE'S, BY INSTRUCTION, NOT A MEASUREMENT: the two arms run the same
 # number of optimizer steps at the same batch. The baseline's 2988 was ceil(2 epochs x 764,685

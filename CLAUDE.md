@@ -609,26 +609,35 @@ not run. Stage 2 was the first execution of the CP=2 / GBS 512 / DP=254 posture 
 this scale: it fits, and the weights-only warm start produced no loss spike.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
-stages on the same corpora with AI-scheming literature removed — every document whose gpt-5-mini
-cost-gate score is >= 2 in `sudoers/control-pretraining-filter-annotated` @ `eab743dd`, which is
-a **wider cut than that repo's own `filter_decision`** (`canary or judge_score >= 4`, reachable
-only at `mini >= 4`). A null `mini_score` is retained, so the filter's reach is bounded by the
-nano relevance gate above it (36.1% of prefilter survivors screened out early), and canary rows
-are retained deliberately so the arms differ by one thing rather than two. Iteration counts,
+stages on the same corpora with AI-scheming literature removed — every document that **carries a
+canary string OR** whose gpt-5-mini cost-gate score is >= 2 in
+`sudoers/control-pretraining-filter-annotated` @ `eab743dd` (Kyle's rule, 2026-09-04; the split
+names say only `mini_2plus`, and the earlier splits that applied the score rule alone and kept
+the 476 canary documents are withdrawn, their tokenised corpora deleted). This is a **wider cut
+than that repo's own `filter_decision`** (`canary or judge_score >= 4`, reachable only at
+`mini >= 4`). A null `mini_score` is retained, so the score half's reach is bounded by the nano
+relevance gate above it (36.1% of prefilter survivors screened out early). Iteration counts,
 corpus-level blend weights, topology and schedule are the baseline's verbatim — each source
 therefore gets the same token budget over a smaller corpus, i.e. more epochs, not fewer tokens;
 only ClimbMix's eight shard weights are this arm's own, because they follow the filtered
 slices' measured tokens — and
 `tests/unit_tests/test_control_pretraining_30b_filtered.py` asserts that the ONLY fields
 differing between the merged arms are the data paths and the run identities. Corpora are the
-`<subset>_filtered_mini_2plus` splits of the same HF repo, pinned in both prepare configs at
-dataset-builder's final revision `7653f09b…`; the arm README records what has been built and
-verified. Every arm's data build is table-driven:
+`<subset>_filtered_mini_2plus` splits of the same HF repo, pinned in both prepare configs at one
+revision — the pin moves to dataset-builder's canary-inclusive rebuild when its final revision
+lands, and nothing is built or launched from a pre-2026-09-04 revision; the arm README records
+what has been built, verified and withdrawn. Every arm's data build is table-driven:
 `configs/control_pretraining/build_corpora.sh <arm>/corpora.tsv <stage|all> [subset ...]` submits
 it (naming subsets submits only those rows, from the same table, with the arm's job names) and
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
 document counts, exactly 4 bytes per token, tokenizer, `--append-eod`), both reading it through
-`corpora_table.py`.
+`corpora_table.py`. A filtered arm is additionally audited against two references it did not
+produce by `audit_filtered_corpora.py <arm>/corpora.tsv --baseline-table <baseline>/corpora.tsv
+--filter-tag <tag>`: the baseline arm's build and the `filter_stats_<tag>` config of the pinned
+revision (baseline minus filtered must equal the removed documents and tokens exactly), and with
+`--content` every filtered document is aligned in order to its baseline document, sampled pairs
+compared token for token, and sampled Hub rows of the filtered and removed splits checked
+present and absent — the check that catches a corpus built from the unfiltered split.
 
 **CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
 continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on

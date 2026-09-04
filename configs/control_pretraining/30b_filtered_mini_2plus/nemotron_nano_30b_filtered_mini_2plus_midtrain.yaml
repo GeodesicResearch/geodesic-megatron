@@ -1,5 +1,5 @@
-# Control-pretraining 30B FILTERED arm (`mini >= 2`) — STAGE 2 of 3: midtraining, 52.5B tokens
-# at seq 32768.
+# Control-pretraining 30B FILTERED arm (canary OR `mini >= 2`) — STAGE 2 of 3: midtraining,
+# 52.5B tokens at seq 32768.
 #
 # The baseline stage (configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml)
 # with one change: every corpus is the `_filtered_mini_2plus` split of the same subset — see

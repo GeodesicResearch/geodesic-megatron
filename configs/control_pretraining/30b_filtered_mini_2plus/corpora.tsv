@@ -1,4 +1,6 @@
-# The data build of the 30B filtered arm (`mini >= 2`), one line per corpus, consumed by
+# The data build of the 30B filtered arm (canary OR `mini >= 2`; the split names say only
+# `mini_2plus`, and the `docs` column still holds the withdrawn mini-only revision's counts until
+# dataset-builder's canary-inclusive rebuild lands), one line per corpus, consumed by
 # configs/control_pretraining/build_corpora.sh. Column semantics are documented in the
 # baseline's table, configs/control_pretraining/30b_baseline/corpora.tsv; the differences here:
 #

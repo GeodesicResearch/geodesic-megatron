@@ -43,26 +43,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from corpora_table import (  # noqa: E402
     DATA_BASE,
     TOKENIZED_PREFIX,
+    Checker,
     CorpusRow,
     corpus_root,
+    packed_parquet_path,
     prepare_config_scalars,
     read_corpora_table,
 )
 
 
 BYTES_PER_TOKEN = 4  # int32 token ids
-
-
-class Checker:
-    """Collects failures so one run reports everything wrong with a build."""
-
-    def __init__(self) -> None:
-        self.failures: list[str] = []
-
-    def expect(self, condition: bool, message: str) -> bool:
-        if not condition:
-            self.failures.append(message)
-        return condition
 
 
 def _load_json(path: Path, checker: Checker, what: str) -> dict | None:
@@ -132,8 +122,7 @@ def check_packed_root(root: Path, label: str, scalars: dict, checker: Checker) -
     if checker.expect(index.is_file(), f"{label}: missing {index} (the packer builds it; did the pack run?)"):
         docs = int(len(np.load(index, mmap_mode="r")))
         checker.expect(docs > 0, f"{label}: JSONL index is empty")
-    tokenizer_dir = f"{scalars['tokenizer'].replace('/', '--')}_pad_seq_to_mult{scalars['pad-seq-to-mult']}"
-    parquet = root / "packed" / tokenizer_dir / f"training_{scalars['seq-length']}.idx.parquet"
+    parquet = packed_parquet_path(root, scalars)
     packs = None
     if checker.expect(parquet.is_file(), f"{label}: missing {parquet}"):
         try:

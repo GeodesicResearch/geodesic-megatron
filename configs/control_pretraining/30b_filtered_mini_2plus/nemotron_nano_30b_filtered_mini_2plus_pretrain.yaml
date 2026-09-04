@@ -1,16 +1,18 @@
-# Control-pretraining 30B FILTERED arm (`mini >= 2`) — STAGE 1 of 3: pretraining, 501.3B tokens
-# at seq 8192.
+# Control-pretraining 30B FILTERED arm (canary OR `mini >= 2`) — STAGE 1 of 3: pretraining,
+# 501.3B tokens at seq 8192.
 #
 # The treatment arm of the pretraining-data-filtering study. It is the baseline stage
 # (configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml) with ONE
 # change: every corpus is the `_filtered_mini_2plus` split of the same subset — the baseline
-# documents minus those whose gpt-5-mini cost-gate score is >= 2 ("weakly related" or above
-# to information useful to a misaligned AI; 1 = "clearly keep"). Documents scored 1, and
-# documents the cascade never escalated to the mini stage, are retained unchanged. The scores
-# are those of sudoers/control-pretraining-filter-annotated @ eab743dd, the splits are
-# dataset-builder's on geodesic-research/control-pretraining-datasets (revision in
-# data/control-pretraining-datasets-filtered-mini-2plus.yaml), and `filter_stats_mini_2plus`
-# there records what each subset lost.
+# documents minus every document that carries a canary string OR whose gpt-5-mini cost-gate
+# score is >= 2 ("weakly related" or above to information useful to a misaligned AI; 1 =
+# "clearly keep"). The split name says only `mini_2plus`; the rule is canary OR mini >= 2
+# (Kyle, 2026-09-04), and the earlier splits that applied the score rule alone are withdrawn.
+# Documents scored 1, and documents the cascade never escalated to the mini stage, are
+# retained unchanged. The scores are those of sudoers/control-pretraining-filter-annotated @
+# eab743dd, the splits are dataset-builder's on geodesic-research/control-pretraining-datasets
+# (revision in data/control-pretraining-datasets-filtered-mini-2plus.yaml), and
+# `filter_stats_mini_2plus` there records what each subset lost.
 #
 # EVERYTHING ELSE IS THE BASELINE, VERBATIM, and a test pins it that way
 # (tests/unit_tests/test_control_pretraining_30b_filtered.py): topology, schedule, optimizer,
