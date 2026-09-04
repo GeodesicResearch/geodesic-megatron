@@ -637,7 +637,9 @@ a substitute for the hold, because a sliced corpus derives its ranges from that 
 cannot notice a source with surplus rows — it would build, sum correctly and verify clean. The arm README records
 what has been built, verified, held and withdrawn. Every arm's data build is table-driven:
 `configs/control_pretraining/build_corpora.sh <arm>/corpora.tsv <stage|all> [subset ...]` submits
-it (naming subsets submits only those rows, from the same table, with the arm's job names) and
+it (naming subsets submits only those rows, from the same table, with the arm's job names;
+`BUILD_STEPS=prepare` submits only that step of each chain — the re-stamp of an already-tokenized
+corpus's provenance after its pin moves, without re-tokenizing) and
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
 document counts, exactly 4 bytes per token, tokenizer, `--append-eod`), both reading it through
 `corpora_table.py`. A filtered arm is additionally audited against two references it did not

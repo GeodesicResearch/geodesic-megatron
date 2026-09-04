@@ -32,7 +32,7 @@ Columns, in order::
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
@@ -41,6 +41,7 @@ import yaml
 COLUMNS = ("subset", "stage", "kind", "config", "prep_h", "tok_h", "workers", "shards", "shard_mode", "stripe", "docs")
 KINDS = ("tokenize", "pack")
 SHARD_MODES = ("none", "split", "slice")
+STEPS = ("prepare", "split", "tokenize", "pack")  # the job steps a corpus's chain is made of
 DOCS_PENDING = "PENDING"
 
 # Tables name their prepare configs relative to the repo root, as build_corpora.sh's own
@@ -221,6 +222,7 @@ class PlannedJob:
     """One SLURM submission, with the key of the job it must wait for."""
 
     key: str
+    step: str  # one of STEPS
     depends_on: str  # "" for a job that starts immediately
     hours: int
     name: str
@@ -242,8 +244,27 @@ class CorpusPlan:
     jobs: tuple[PlannedJob, ...]
 
 
+def select_steps(jobs: tuple[PlannedJob, ...], steps: frozenset[str] | None) -> tuple[PlannedJob, ...]:
+    """Keep the jobs of the named steps; a kept job whose predecessor is dropped starts immediately.
+
+    ``None`` keeps the whole chain. The re-stamp of an already-tokenized corpus after its pin
+    moved is ``{"prepare"}`` — the download is a cache hit and the ``.bin/.idx`` are untouched
+    — and a re-tokenize of a prepared JSONL is ``{"tokenize"}``. A step submitted without its
+    predecessor's output fails in its own job, loudly; nothing here checks that the output
+    exists, because the plan is derived before any job runs.
+    """
+    if steps is None:
+        return jobs
+    unknown = sorted(steps - set(STEPS))
+    if unknown:
+        raise ValueError(f"unknown build step(s) {unknown}; the steps are {list(STEPS)}")
+    kept = [job for job in jobs if job.step in steps]
+    kept_keys = {job.key for job in kept}
+    return tuple(job if job.depends_on in kept_keys else replace(job, depends_on="") for job in kept)
+
+
 def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> CorpusPlan:
-    """Derive the directories and jobs that build one corpus.
+    """Derive the directories and jobs that build one corpus — the whole chain.
 
     The dependency chain is what makes a failed step stop the build rather than feed a
     half-written input forward:
@@ -251,6 +272,9 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
         prepare -> tokenize                          shard_mode=none
         prepare -> split -> tokenize/pack x N        shard_mode=split
         prepare(slice i) -> tokenize(shard i)  x N   shard_mode=slice
+
+    ``plan_build`` narrows a chain to selected steps (``select_steps``); this function always
+    plans all of it.
 
     A row whose ``docs`` is PENDING is refused here, whatever its shard mode. Slicing cannot be
     planned without the count in any case, but the refusal is deliberately wider than that: a
@@ -279,6 +303,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
     def tokenize_job(key: str, depends_on: str, target: Path, shard: int | None) -> PlannedJob:
         return PlannedJob(
             key=key,
+            step="tokenize",
             depends_on=depends_on,
             hours=row.tok_h,
             name=f"{prefix}-tok-{row.subset}" + ("" if shard is None else f"-s{shard}"),
@@ -290,6 +315,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
     def pack_job(key: str, depends_on: str, target: Path, shard: int | None) -> PlannedJob:
         return PlannedJob(
             key=key,
+            step="pack",
             depends_on=depends_on,
             hours=row.tok_h,
             name=f"{prefix}-pack-{row.subset}" + ("" if shard is None else f"-s{shard}"),
@@ -308,6 +334,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
             jobs.append(
                 PlannedJob(
                     key=prepare_key,
+                    step="prepare",
                     depends_on="",
                     hours=row.prep_h,
                     name=f"{prefix}-prep-{row.subset}-s{index}",
@@ -333,6 +360,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
     jobs.append(
         PlannedJob(
             key=prepare_key,
+            step="prepare",
             depends_on="",
             hours=row.prep_h,
             name=f"{prefix}-prep-{row.subset}",
@@ -353,6 +381,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
     jobs.append(
         PlannedJob(
             key=split_key,
+            step="split",
             depends_on=prepare_key,
             hours=SPLIT_HOURS,
             name=f"{prefix}-split-{row.subset}",
@@ -372,7 +401,11 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
 
 
 def plan_build(
-    table: Path, stage: str = "all", data_base: Path = DATA_BASE, subsets: list[str] | None = None
+    table: Path,
+    stage: str = "all",
+    data_base: Path = DATA_BASE,
+    subsets: list[str] | None = None,
+    steps: frozenset[str] | None = None,
 ) -> list[CorpusPlan]:
     """Derive the build for one arm, or for the named subsets of it, from the arm's own table.
 
@@ -382,7 +415,10 @@ def plan_build(
     table the verifier later checks the corpora against.
     """
     arm = table.resolve().parent.name
-    return [plan_corpus(row, arm, data_base) for row in read_corpora_table(table, stage, subsets)]
+    return [
+        replace(plan, jobs=select_steps(plan.jobs, steps))
+        for plan in (plan_corpus(row, arm, data_base) for row in read_corpora_table(table, stage, subsets))
+    ]
 
 
 # Field separator of the emitted plan: the ASCII unit separator. A shell ``read`` treats tab
@@ -454,8 +490,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "subsets", nargs="*", help="limit to these subsets of the stage (default: every row of the stage)"
     )
+    parser.add_argument(
+        "--steps",
+        help=f"comma-separated steps of each chain to plan, from {list(STEPS)} (default: the whole chain); "
+        "a kept step whose predecessor is omitted starts immediately",
+    )
     args = parser.parse_args(argv)
-    print(emit_plan(plan_build(args.table, args.stage, subsets=args.subsets or None)))
+    steps = frozenset(step.strip() for step in args.steps.split(",")) if args.steps else None
+    print(emit_plan(plan_build(args.table, args.stage, subsets=args.subsets or None, steps=steps)))
     return 0
 
 

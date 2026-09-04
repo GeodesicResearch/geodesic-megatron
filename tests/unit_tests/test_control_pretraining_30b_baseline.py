@@ -388,6 +388,24 @@ class TestDataBuildAgreesWithTheConfigs:
         assert "SUBMITTED 46 jobs" in dry_run
         assert "nothing was actually submitted" in dry_run
 
+    def test_build_steps_submits_only_those_steps(self):
+        """`BUILD_STEPS=prepare` reaches the plan through the real script and drops every
+        tokenize: the 15 unsharded prepares plus ClimbMix's 8 sliced ones, and nothing that
+        would re-tokenize a corpus whose pin has merely moved."""
+        proc = subprocess.run(
+            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "all"],
+            cwd=str(_REPO_ROOT),
+            env=dict(os.environ, DRY_RUN="1", BUILD_STEPS="prepare"),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert proc.returncode == 0, f"build_corpora.sh failed:\n{proc.stdout}\n{proc.stderr}"
+        output = proc.stdout + proc.stderr
+        assert "SUBMITTED 23 jobs for stage 'all' (steps: prepare)" in output
+        assert len(re.findall(r"\[dry-run\] prepare ", output)) == 23
+        assert "[dry-run] tokenize " not in output
+
     def test_every_blend_prefix_has_a_corpus_in_the_build(self, dry_run, raw):
         """A prefix with no prepare job is a corpus that will simply never exist on disk."""
         built = set(re.findall(r"^=== (\S+) \(", dry_run, re.MULTILINE))

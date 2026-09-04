@@ -19,11 +19,18 @@
 # Usage:
 #   configs/control_pretraining/build_corpora.sh <corpora-table> <stage|all> [subset ...]
 #   DRY_RUN=1 configs/control_pretraining/build_corpora.sh <corpora-table> all   # print only
+#   BUILD_STEPS=prepare configs/control_pretraining/build_corpora.sh <corpora-table> all [subset ...]
 #
 # Naming subsets submits only those rows of the stage — how a corpus is held back (a giant
 # waiting on storage headroom) or rebuilt (one re-pushed subset) without re-submitting the
 # rest, and still from the arm's own table, so the jobs keep the arm's names and the counts
 # the verifier checks against. A subset the stage does not contain is an error.
+#
+# BUILD_STEPS (comma-separated: prepare, split, tokenize, pack) submits only those steps of
+# each row's chain; a kept step whose predecessor is omitted starts immediately. `prepare`
+# alone re-stamps an already-tokenized corpus's provenance after its pin moved (the download
+# is a cache hit and the .bin/.idx are untouched); `tokenize` alone re-tokenizes a prepared
+# JSONL. A step run without its predecessor's output fails in its own job, loudly.
 #
 # Run from the repo root; set ISAMBARD_SBATCH_FORCE=1 for the batch — an arm submits 40-60 jobs
 # and the node-health gate prompts otherwise.
@@ -34,6 +41,7 @@ STAGE="${2:?usage: build_corpora.sh <corpora-table> <stage|all> [subset ...]}"
 shift 2
 SUBSETS=("$@")
 DRY_RUN="${DRY_RUN:-0}"
+BUILD_STEPS="${BUILD_STEPS:-}"
 
 CAMPAIGN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRIPE_COUNT="${SHARD_STRIPE_COUNT:-8}"
@@ -84,7 +92,10 @@ submit() {
 
 # The plan is derived once, up front, so an invalid table stops the build before anything is
 # created or submitted rather than part-way through.
-PLAN=$(python3 "$CAMPAIGN_DIR/corpora_table.py" "$TABLE" "$STAGE" ${SUBSETS[@]+"${SUBSETS[@]}"})
+STEP_ARGS=()
+[ -n "$BUILD_STEPS" ] && STEP_ARGS=(--steps "$BUILD_STEPS")
+PLAN=$(python3 "$CAMPAIGN_DIR/corpora_table.py" "$TABLE" "$STAGE" ${SUBSETS[@]+"${SUBSETS[@]}"} \
+    ${STEP_ARGS[@]+"${STEP_ARGS[@]}"})
 
 declare -A JOB_ID=()
 total=0
@@ -145,7 +156,7 @@ while IFS=$'\x1f' read -r -a field; do
 done <<<"$PLAN"
 
 echo
-echo "SUBMITTED $total jobs for stage '$STAGE'"
+echo "SUBMITTED $total jobs for stage '$STAGE'${BUILD_STEPS:+ (steps: $BUILD_STEPS)}"
 if [ "$DRY_RUN" = "1" ]; then
     echo "(dry run — nothing was actually submitted)"
 fi

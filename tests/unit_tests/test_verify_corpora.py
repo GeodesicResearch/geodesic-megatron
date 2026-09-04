@@ -249,10 +249,11 @@ class TestPlanDerivation:
     plan itself, not inferred from a dry run's text."""
 
     @staticmethod
-    def _plan(tmp_path, config_extra: dict | None = None, **overrides):
+    def _plan(tmp_path, config_extra: dict | None = None, steps: set[str] | None = None, **overrides):
         config = write_prepare_config(tmp_path, **(config_extra or {}))
         table = write_table(tmp_path, config, **overrides)
-        (plan,) = corpora_table.plan_build(table, "all", data_base=tmp_path / "data")
+        selection = None if steps is None else frozenset(steps)
+        (plan,) = corpora_table.plan_build(table, "all", data_base=tmp_path / "data", steps=selection)
         return plan
 
     def test_unsharded_tokenize_waits_on_its_prepare(self, tmp_path):
@@ -350,6 +351,41 @@ class TestPlanDerivation:
         payload_at = fields.index("PAYLOAD")
         assert fields[payload_at + 1] == plan.jobs[0].script
         assert tuple(fields[payload_at + 2 :]) == plan.jobs[0].payload
+
+    def test_every_job_names_its_step(self, tmp_path):
+        geometry = {"seq-length": 32768, "pad-seq-to-mult": 4}
+        plan = self._plan(tmp_path, config_extra=geometry, kind="pack", shards=2, shard_mode="split", docs=100)
+        assert [job.step for job in plan.jobs] == ["prepare", "split", "pack", "pack"]
+        plan = self._plan(tmp_path, shards=2, shard_mode="slice", docs=100)
+        assert [job.step for job in plan.jobs] == ["prepare", "tokenize", "prepare", "tokenize"]
+        assert set(corpora_table.STEPS) >= {job.step for job in plan.jobs}
+
+    def test_prepare_alone_re_stamps_without_re_tokenizing(self, tmp_path):
+        """Moving the pin of an already-tokenized corpus needs its prepare record rewritten and
+        nothing else: the tokenize step is left out of the plan, in every shard mode."""
+        plan = self._plan(tmp_path, steps={"prepare"})
+        assert [(job.step, job.depends_on) for job in plan.jobs] == [("prepare", "")]
+        plan = self._plan(tmp_path, steps={"prepare"}, shards=4, shard_mode="slice", docs=100)
+        assert [job.step for job in plan.jobs] == ["prepare"] * 4
+        assert all(job.depends_on == "" for job in plan.jobs)
+        # The directories are still created (and striped) — a prepare writes into them.
+        assert len(plan.roots) == 5
+
+    def test_a_kept_step_whose_predecessor_is_omitted_starts_immediately(self, tmp_path):
+        """A re-tokenize of a prepared JSONL must not wait on a prepare that is not submitted;
+        the job runs against the JSONL already on disk and fails in its own right if it is not
+        there."""
+        plan = self._plan(tmp_path, steps={"tokenize"}, shards=2, shard_mode="split", docs=100)
+        assert [(job.step, job.depends_on) for job in plan.jobs] == [("tokenize", ""), ("tokenize", "")]
+        plan = self._plan(tmp_path, steps={"prepare", "tokenize"})
+        assert [(job.step, job.depends_on) for job in plan.jobs] == [
+            ("prepare", ""),
+            ("tokenize", "demo_filtered_mini_2plus:prepare"),
+        ]
+
+    def test_an_unknown_step_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="unknown build step"):
+            self._plan(tmp_path, steps={"prepare", "tokenise"})
 
 
 class TestPackedCorpora:
@@ -486,6 +522,16 @@ class TestTableParsing:
         assert len(planned) == 1 and row.subset in planned[0]
         with pytest.raises(ValueError, match="no row for subset"):
             corpora_table.main([str(table), "all", "nope"])
+
+    def test_the_cli_plans_only_the_named_steps(self, tmp_path, capsys):
+        """``BUILD_STEPS=prepare`` reaches this entry point as ``--steps prepare``."""
+        config = write_prepare_config(tmp_path)
+        table = write_table(tmp_path, config)
+        assert corpora_table.main([str(table), "all", "--steps", "prepare"]) == 0
+        jobs = [line for line in capsys.readouterr().out.splitlines() if line.startswith("JOB")]
+        assert len(jobs) == 1 and ":prepare" in jobs[0]
+        with pytest.raises(ValueError, match="unknown build step"):
+            corpora_table.main([str(table), "all", "--steps", "prepare,bogus"])
 
     def test_the_campaign_tables_parse(self):
         """The tables that are actually shipped must satisfy every rule above."""

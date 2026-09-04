@@ -287,6 +287,22 @@ ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
   configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv pretraining \
   climbmix_full_filtered_mini_2plus
 
+# Re-stamp the fifteen already-tokenized corpora after the pin moves: prepare ONLY. The
+# download is a cache hit (their parquet is byte-identical across the revisions), the
+# prepare rewrites training.jsonl and pipeline_results.json against the new revision — the
+# record verify_corpora.py checks the revision in — and the .bin/.idx and the SFT pack
+# shards are untouched. 15 jobs; zyda_full's ~3 h export is the longest.
+BUILD_STEPS=prepare ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
+  configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv all \
+  ai_safety_and_adjacent_filtered_mini_2plus arxiv_papers_filtered_mini_2plus \
+  climbmix_ai_docs_filtered_mini_2plus climbmix_ai_docs_long_filtered_mini_2plus \
+  climbmix_long_filtered_mini_2plus nemotron_stem_sft_filtered_mini_2plus \
+  nemotron_wiki_rewrite_filtered_mini_2plus nemotron_wiki_rewrite_ai_docs_filtered_mini_2plus \
+  pa_warm_start_sft_filtered_mini_2plus stack_edu_filtered_mini_2plus \
+  stack_edu_long_filtered_mini_2plus zyda_ai_docs_filtered_mini_2plus \
+  zyda_ai_docs_long_filtered_mini_2plus zyda_full_filtered_mini_2plus \
+  zyda_long_filtered_mini_2plus
+
 # Inspect any submission plan without submitting anything:
 DRY_RUN=1 configs/control_pretraining/build_corpora.sh \
   configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv all
@@ -541,7 +557,8 @@ the Hub still serves the withdrawn score-only build for that subset; `all` is re
 hold stands.
 
 The remaining procedure: on the final SHA, re-pin both prepare configs, restore ClimbMix's
-count and build it, re-prepare the fifteen to re-stamp their provenance against that revision,
+count and build it, re-stamp the fifteen's provenance against that revision with
+`BUILD_STEPS=prepare` (prepare only — nothing re-tokenizes; see "Building the data"),
 refill ClimbMix's shard figures and weights from the verifier's report, then `verify_corpora.py`
 and `audit_filtered_corpora.py --content --canary-column canary` at a bound above every corpus's
 largest same-length pool, before the first submission. The configs are
