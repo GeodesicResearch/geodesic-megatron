@@ -74,28 +74,35 @@ def write_prepare_config(directory: Path, **extra) -> Path:
     return path
 
 
-def write_table(directory: Path, config: Path, **overrides) -> Path:
-    """One-row corpora table, defaulting to an unsharded tokenize corpus.
+def write_table(directory: Path, config: Path, *, extra_rows: list[dict] | None = None, **overrides) -> Path:
+    """Corpora table for one corpus, or for several when `extra_rows` supplies the others.
 
-    The row is joined in `corpora_table.COLUMNS` order, so a column added to the table format
-    reaches every test through the one place that defines it.
+    Each row is joined in `corpora_table.COLUMNS` order, so a column added to the table format
+    reaches every test through the one place that defines it. `extra_rows` holds one overrides
+    dict per additional row, applied to the same defaults as the first — which is what lets a
+    test put a held corpus and a buildable one in a single table and assert how they interact.
     """
-    row = {
-        "subset": "demo_filtered_mini_2plus",
-        "stage": "pretraining",
-        "kind": "tokenize",
-        "config": str(config),
-        "prep_h": "04",
-        "tok_h": "04",
-        "workers": "32",
-        "shards": "1",
-        "shard_mode": "none",
-        "stripe": "0",
-        "docs": "100",
-    }
-    row.update({key: str(value) for key, value in overrides.items()})
-    path = directory / f"{row['subset']}.tsv"
-    path.write_text("# a table\n" + "|".join(row[column] for column in corpora_table.COLUMNS) + "\n")
+
+    def render(row_overrides: dict) -> str:
+        row = {
+            "subset": "demo_filtered_mini_2plus",
+            "stage": "pretraining",
+            "kind": "tokenize",
+            "config": str(config),
+            "prep_h": "04",
+            "tok_h": "04",
+            "workers": "32",
+            "shards": "1",
+            "shard_mode": "none",
+            "stripe": "0",
+            "docs": "100",
+        }
+        row.update({key: str(value) for key, value in row_overrides.items()})
+        return "|".join(row[column] for column in corpora_table.COLUMNS)
+
+    lines = [render(overrides)] + [render(extra) for extra in extra_rows or []]
+    path = directory / f"{lines[0].split('|')[corpora_table.COLUMNS.index('subset')]}.tsv"
+    path.write_text("# a table\n" + "\n".join(lines) + "\n")
     return path
 
 

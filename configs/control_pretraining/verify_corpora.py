@@ -16,8 +16,13 @@ corpus file, so the whole verification is a few thousand small reads and runs in
   per JSONL record) and the packed parquet's row count.
 
 Across a corpus's shards the document counts must sum to the table's ``docs`` column exactly —
-the gate that replaced the split path's byte check for source-sliced corpora — so a table
-whose ``docs`` still reads PENDING cannot be verified.
+the gate that replaced the split path's byte check for source-sliced corpora. A row whose
+``docs`` still reads PENDING is always reported as a failure, and what happens beyond that
+depends on its shard mode. A source-sliced corpus is skipped, because its ranges are derived
+FROM the count and cannot be computed without one. Every other mode is still checked: revision,
+tokenizer, ``--append-eod`` and the bytes-per-token rule need no count, and only the comparison
+against the table's own figure is passed over. Either way the stage's remaining corpora are
+verified, so holding one corpus back never leaves the rest unchecked.
 
 Every failure is reported, not just the first, and the exit status is non-zero if any check
 failed. ``--report-out`` writes the measured per-corpus and per-shard counts as JSON — the
@@ -142,7 +147,14 @@ def verify_corpus(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
     scalars = prepare_config_scalars(row.config)
     root = corpus_root(scalars["dataset"], row.subset, data_base)
     report: dict = {"subset": row.subset, "stage": row.stage, "kind": row.kind, "root": str(root), "shards": {}}
-    checker.expect(row.docs is not None, f"{row.subset}: table docs is PENDING — nothing to verify against")
+    held = not checker.expect(row.docs is not None, f"{row.subset}: table docs is PENDING — nothing to verify against")
+    if held and row.shard_mode == "slice":
+        # Slicing derives its ranges FROM the count, so a held sliced corpus cannot be checked at
+        # all. That is this row's failure to report, not a reason to abandon the stage: holding
+        # one corpus back must still leave the stage's other corpora verified. Every other shard
+        # mode carries on — revision, tokenizer, --append-eod and the bytes-per-token check need
+        # no count, and the comparison against the table below already skips a held row.
+        return report
 
     if row.shard_mode == "slice":
         for name, (beg, end) in zip(row.shard_names, row.slice_ranges()):

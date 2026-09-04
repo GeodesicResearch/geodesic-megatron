@@ -186,6 +186,63 @@ class TestSlicedCorpora:
             row.slice_ranges()
 
 
+class TestHeldCorpora:
+    """A corpus held at PENDING is reported, never allowed to suppress the checks around it.
+
+    Holding a corpus back is how an arm keeps a corpus whose source is not yet safe out of the
+    build. That is a safety mechanism, so it must not cost coverage anywhere else: neither on
+    the stage's other corpora, nor on the held row's own count-independent checks.
+    """
+
+    def test_a_held_corpus_is_reported_without_abandoning_the_others(self, tmp_path):
+        """A PENDING row is a failure to report, exactly like an unreadable parquet: the corpora
+        that ARE built still have to be checked. Letting the row's un-sliceable count propagate
+        out of the verifier instead would turn a deliberate hold into a silent gap in coverage,
+        which is the opposite of what holding a corpus is for.
+        """
+        config = write_prepare_config(tmp_path)
+        table = write_table(
+            tmp_path,
+            config,
+            subset="held_filtered_mini_2plus",
+            shards=4,
+            shard_mode="slice",
+            docs=corpora_table.DOCS_PENDING,
+            extra_rows=[{"subset": "built_filtered_mini_2plus", "docs": 100}],
+        )
+        data_base = tmp_path / "data"
+        build_corpus(
+            corpora_table.corpus_root(DATASET, "built_filtered_mini_2plus", data_base),
+            subset="built_filtered_mini_2plus",
+            docs=100,
+            tokens=1000,
+        )
+        status, failures = run(table, data_base)
+        assert status == 1
+        assert any("held_filtered_mini_2plus" in failure and "PENDING" in failure for failure in failures)
+        assert not any("built_filtered_mini_2plus" in failure for failure in failures)
+
+    def test_a_held_unsliced_corpus_keeps_its_count_independent_checks(self, tmp_path):
+        """Only slicing derives anything from the count, so only a sliced hold can skip its
+        checks. A corpus held in any other shard mode is still built on disk and must still have
+        its revision, tokenizer and bytes-per-token verified — otherwise the hold would mask a
+        second, unrelated defect until the count was filled in.
+        """
+        config = write_prepare_config(tmp_path)
+        table = write_table(tmp_path, config, docs=corpora_table.DOCS_PENDING)
+        data_base = tmp_path / "data"
+        build_corpus(
+            corpora_table.corpus_root(DATASET, "demo_filtered_mini_2plus", data_base),
+            docs=100,
+            tokens=1000,
+            tokenizer="wrong/tokenizer",
+        )
+        status, failures = run(table, data_base)
+        assert status == 1
+        assert any("PENDING" in failure for failure in failures)
+        assert any("tokenizer" in failure for failure in failures)
+
+
 class TestPlanDerivation:
     """The build plan is derived here and only submitted by the shell script, so the dependency
     wiring that stops a failed step from feeding a truncated input forward is asserted on the
