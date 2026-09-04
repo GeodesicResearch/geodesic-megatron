@@ -1,6 +1,6 @@
 # The data build of the 30B filtered arm (canary OR `mini >= 2`; the split names say only
-# `mini_2plus`, and the `docs` column still holds the withdrawn mini-only revision's counts until
-# dataset-builder's canary-inclusive rebuild lands), one line per corpus, consumed by
+# `mini_2plus`, and the `docs` column holds the canary-inclusive rebuild's retained counts from
+# its `filter_stats_mini_2plus`, published 2026-09-04), one line per corpus, consumed by
 # configs/control_pretraining/build_corpora.sh. Column semantics are documented in the
 # baseline's table, configs/control_pretraining/30b_baseline/corpora.tsv; the differences here:
 #
@@ -12,23 +12,34 @@
 #   baseline's ClimbMix actually shipped (its README, "The shipped ClimbMix was built by
 #   source-slicing"): no 1.7 TB JSONL, no separate split job, eight ~1 h steps instead of one
 #   7.5 h one. `slice` needs the exact retained count, which is why `docs` is load-bearing.
+#
+#   climbmix_full's `docs` is deliberately PENDING even though its rebuilt count is known to be
+#   552,997,250, and this is a SAFETY hold, not missing information. At the pin above, the Hub
+#   still serves the withdrawn score-only build for that one subset, and slicing is precisely
+#   the mode that would not notice: `slice_ranges()` derives its eight ranges FROM this column,
+#   so a smaller count against a larger source simply never asks for the surplus rows — the
+#   build succeeds, the per-shard counts sum to this number, and the verifier passes with the
+#   canaries still in the corpus. PENDING instead makes `plan_corpus()` refuse the row outright,
+#   which refuses the whole `all` plan before a single job is submitted. Restore the count only once
+#   dataset-builder's corrected upload has committed and its filtered split's row count equals
+#   the statistics' retained count.
 # - The stage-3 SFT mix is a `pack` row: prepare (JSONL only) -> 16-way byte-gated split ->
 #   one pack job per shard, with the training config reading the shard parquets by glob.
 #
 # Walltimes are the baseline's: every filtered corpus is at most its baseline size.
-climbmix_full_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|06|64|8|slice|1|552997269
-zyda_full_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|16|16|96|1|none|1|91191143
-stack_edu_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|10|10|64|1|none|1|28540057
-climbmix_ai_docs_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|08|08|64|1|none|1|13191462
-zyda_ai_docs_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|04|32|1|none|0|1509321
-ai_safety_and_adjacent_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|04|32|1|none|0|227042
-climbmix_long_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|08|08|64|1|none|1|786449
+climbmix_full_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|06|64|8|slice|1|PENDING
+zyda_full_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|16|16|96|1|none|1|91191142
+stack_edu_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|10|10|64|1|none|1|28539984
+climbmix_ai_docs_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|08|08|64|1|none|1|13191443
+zyda_ai_docs_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|04|32|1|none|0|1509320
+ai_safety_and_adjacent_filtered_mini_2plus|pretraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|04|32|1|none|0|226747
+climbmix_long_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|08|08|64|1|none|1|786446
 nemotron_stem_sft_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|04|32|1|none|0|458671
-arxiv_papers_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|04|32|1|none|0|340029
+arxiv_papers_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|04|32|1|none|0|339965
 nemotron_wiki_rewrite_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|06|06|32|1|none|0|6233851
 zyda_long_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|04|04|32|1|none|0|137515
 stack_edu_long_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|02|02|32|1|none|0|3159
-climbmix_ai_docs_long_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|02|02|32|1|none|0|5357
+climbmix_ai_docs_long_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|02|02|32|1|none|0|5356
 zyda_ai_docs_long_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|02|02|32|1|none|0|1593
 nemotron_wiki_rewrite_ai_docs_filtered_mini_2plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml|02|02|32|1|none|0|51914
 pa_warm_start_sft_filtered_mini_2plus|sft|pack|configs/control_pretraining/30b_filtered_mini_2plus/data/pa-warm-start-sft-filtered-mini-2plus.yaml|08|04|1|16|split|1|5654600

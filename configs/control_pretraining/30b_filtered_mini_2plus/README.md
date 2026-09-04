@@ -101,16 +101,44 @@ Built by dataset-builder as splits of the same repository the baseline reads,
 Both prepare configs in [`data/`](data/) pin that repository by revision, for the reason the
 baseline's does: without a pin, two corpora prepared a day apart come from different data.
 
-Both currently pin `7653f09b50cb7f6d3f0d59779d472bfe0f228381`, the mini-only revision that is
-**withdrawn** (see "The filter"); the pin moves to dataset-builder's canary-inclusive rebuild as
-soon as its final revision lands, and until then nothing may be built from these configs. What
-the pin must mean, then as before: the commit at which dataset-builder declared the family
-complete, every `<subset>_filtered_mini_2plus` / `<subset>_removed_mini_2plus` pair verified
-against `filter_stats_mini_2plus` — rows(filtered) equals the statistics' retained count,
+Both currently pin `790465393eabff87f2c4bb01b2c3112ec877a2a5`, which is **interim and moves once
+more**. The withdrawn mini-only revision `7653f09b…` is gone from these configs (see "The
+filter"). At the interim pin, fifteen of the sixteen splits are landed and verified under the
+corrected rule, and **`climbmix_full_filtered_mini_2plus` is still the withdrawn score-only
+build** — so those fifteen may be built from this pin and ClimbMix full may not. Tell them apart
+without asking anyone: a corrected split's `_provenance.json` records its filter step (`type:
+corpus/judge_score_arm`) carrying `also_remove_flag: canary` beside `score_column: mini_score,
+threshold: 2`, and the withdrawn ClimbMix full carries no `also_remove_flag`. The step is not
+always the first transform — `pa_warm_start_sft` mints its `id` in two steps ahead of it — so
+find it by type.
+
+That is a check a person runs. The hold that does not depend on anyone remembering is in the
+table: climbmix_full's `docs` is **PENDING**, and `plan_corpus()` refuses a row without a count
+whatever its shard mode, so `build_corpora.sh` refuses the entire `all` plan before submitting
+anything. **A document count would not have served here**, which is worth stating because the
+arithmetic invites the mistake: the withdrawn split holds 552,997,269 documents against the
+corrected 552,997,250, but slicing derives its ranges from the count, so against the larger
+source it would never ask for the surplus 19 rows — every shard would succeed, the counts would
+sum, and `verify_corpora.py` would pass with the canaries still in. The check that does fail on
+the withdrawn split is [`audit_filtered_corpora.py`](../audit_filtered_corpora.py)'s comparison
+of the Hub split's row count against `filter_stats_mini_2plus` (under `--canary-column`), which
+reads the Hub's own metadata rather than the built corpus and so is not fooled by how the corpus
+was sliced. It is not a pre-flight, though: the audit reaches that comparison only after reading
+the corpus's prepare records, so it tells you afterwards that you built the wrong thing. Only the
+PENDING hold stops the build from starting.
+
+When dataset-builder's final SHA lands, the pin moves to it and all sixteen corpora are
+re-prepared against it to re-stamp provenance; the fifteen splits' parquet is byte-identical
+between the two revisions, so that re-download is a cache hit. What the final pin must mean,
+then as before: the commit at which dataset-builder declared the family complete, every
+`<subset>_filtered_mini_2plus` / `<subset>_removed_mini_2plus` pair verified against
+`filter_stats_mini_2plus` — rows(filtered) equals the statistics' retained count,
 rows(removed) its removed count, the two sum to the baseline subset's row count, and the
 filtered split holds no canary document. The `docs` column of [`corpora.tsv`](corpora.tsv) is
-that statistics subset's retained count per corpus (still the withdrawn revision's numbers until
-the rebuild's table arrives); `build_corpora.sh` refuses a `slice` row without an integer count
+that statistics subset's retained count per corpus (the rebuild's `filter_stats_mini_2plus`,
+published 2026-09-04: each count is the withdrawn build's minus exactly that subset's canary
+count, 476 documents family-wide) — except `climbmix_full`, held at PENDING for the reason above
+until its corrected upload commits. `build_corpora.sh` refuses any row without an integer count
 and `verify_corpora.py` checks every built corpus against it.
 
 ### Stage 1 — pretraining, 501,303,520,191 tokens at seq 8192
@@ -233,12 +261,27 @@ pack used, minus the final concatenation step, which the reader makes unnecessar
 ## Building the data
 
 ```bash
-# From the repo root. The whole arm is 62 jobs; a stage name limits the submission to that
+# From the repo root. WHILE climbmix_full IS HELD AT PENDING, name the fifteen buildable
+# subsets: `all` is refused (a slice row cannot be planned without a count) and that refusal is
+# the hold working, not a table error. 46 jobs.
+ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
+  configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv all \
+  ai_safety_and_adjacent_filtered_mini_2plus arxiv_papers_filtered_mini_2plus \
+  climbmix_ai_docs_filtered_mini_2plus climbmix_ai_docs_long_filtered_mini_2plus \
+  climbmix_long_filtered_mini_2plus nemotron_stem_sft_filtered_mini_2plus \
+  nemotron_wiki_rewrite_filtered_mini_2plus nemotron_wiki_rewrite_ai_docs_filtered_mini_2plus \
+  pa_warm_start_sft_filtered_mini_2plus stack_edu_filtered_mini_2plus \
+  stack_edu_long_filtered_mini_2plus zyda_ai_docs_filtered_mini_2plus \
+  zyda_ai_docs_long_filtered_mini_2plus zyda_full_filtered_mini_2plus \
+  zyda_long_filtered_mini_2plus
+
+# Once the hold is lifted: the whole arm is 62 jobs; a stage name limits the submission to that
 # stage (midtraining 18, sft 18, pretraining 26), and subset names after it to those rows.
 ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
   configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv all
 
-# ClimbMix alone — its 8 sliced prepare -> tokenize pairs, 16 jobs — from the same table:
+# ClimbMix alone — its 8 sliced prepare -> tokenize pairs, 16 jobs — from the same table. Only
+# after its corrected upload has committed and `docs` above has been restored:
 ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
   configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv pretraining \
   climbmix_full_filtered_mini_2plus
@@ -438,10 +481,14 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    now including zero canary documents in every filtered corpus — TO REDO on the rebuild.
 3. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
-   until the provenance exists, so a pass, not a skip, is the gate) — done: the eight weights
-   above, and the test passes, 2026-09-03.
+   until the provenance exists, so a pass, not a skip, is the gate) — TO REDO on the rebuild:
+   the eight weights in the config and the pass recorded on 2026-09-03 are the withdrawn
+   build's, and the test skips again now that its provenance is deleted.
 4. The `ai_safety_and_adjacent` epoch count in the tables above is filled and has been looked at
-   — done: 5.52 per stage, accepted by Kyle on 2026-09-03 (see the note under stage 1).
+   — TO REFILL on the rebuild: 5.52 per stage was the withdrawn build's figure, accepted by Kyle
+   on 2026-09-03 (see the note under stage 1); the rebuild's differs by the 295 canary documents
+   that build kept, 0.18% of the subset's tokens, so the accepted magnitude stands and the
+   number must be re-derived.
 5. A smoke of the chain through [`../smoke_runs/`](../smoke_runs/README.md), or an explicit
    decision to skip it: the filtered arm has never run, and the configs are pinned to the
    baseline's by test, not by execution.
@@ -450,28 +497,37 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 ## Status
 
-**Rebuild pending; nothing has been launched.** Kyle corrected the rule to canary OR
-mini >= 2 on 2026-09-04; dataset-builder is rebuilding every split in place under the same
+**Rebuilding fifteen of sixteen corpora; nothing has been launched.** Kyle corrected the rule to
+canary OR mini >= 2 on 2026-09-04; dataset-builder rebuilt every split in place under the same
 names, and this arm's sixteen tokenised corpora (built from the withdrawn mini-only splits at
-`7653f09b`) were deleted the same day. What follows describes the withdrawn build and stands as
-the procedure for the rebuild: re-pin both prepare configs to dataset-builder's final revision,
-run `build_corpora.sh` for the whole table, refill the count columns and ClimbMix's shard weights
-from the verifier's report, then `verify_corpora.py` and `audit_filtered_corpora.py --content`
-(including the zero-canary check) before the first submission. The configs are
+`7653f09b`) were deleted the same day. Fifteen splits are now landed and verified under the
+corrected rule, so their prepare and tokenize jobs are the next step, from the interim pin (see
+"the pin" above for which fifteen and how a corrected split is told from a withdrawn one).
+`climbmix_full` is held back at PENDING until dataset-builder's corrected upload commits,
+because at the interim pin the Hub still serves the withdrawn score-only build for that subset.
+Build the fifteen by naming them; `all` is refused while the hold stands.
+
+The remaining procedure: on the final SHA, re-pin both prepare configs, build `climbmix_full`,
+re-prepare the fifteen to re-stamp their provenance against that revision, refill the count
+columns and ClimbMix's shard weights from the verifier's report, then `verify_corpora.py` and
+`audit_filtered_corpora.py --content --canary-column canary` before the first submission. The
+count and epoch columns below still describe the withdrawn build. The configs are
 drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which
 asserts field-by-field that each stage differs from its baseline counterpart *only* in the data
 paths (whose blend list also carries ClimbMix's eight measured shard weights) and the run
 identities (checkpoint directories, W&B run names, TensorBoard directory) — so a topology or
 schedule change made to one arm and not the other fails in CI rather than at the end of a
-500B-token run. Every corpus was built at
-the pinned revision, all 62 jobs exited 0, `verify_corpora.py` reports `OK: 16 corpora
-verified` on this table (report at
-`/projects/a5k/public/logs/control_pretraining/30b_filtered_corpora.json`), and every count
-equals `filter_stats_mini_2plus` exactly (tables above). `audit_filtered_corpora.py` proves
-each corpus is the baseline's minus exactly the removed documents — counts for all sixteen,
-document-level content per the table in "Audit against the baseline". Nothing of that build
-remains on disk: its tokenized corpora, SFT packs and Hub download cache were all deleted on
-2026-09-04, so the rebuild starts from an empty data base.
+500B-token run.
+
+Of the **withdrawn** build, for the record: every corpus was built at the then-pinned revision,
+all 62 jobs exited 0, `verify_corpora.py` reported `OK: 16 corpora verified` on this table, and
+every count equalled that revision's `filter_stats_mini_2plus` exactly.
+`audit_filtered_corpora.py` proved each corpus was the baseline's minus exactly the removed
+documents — counts for all sixteen, document-level content per the table in "Audit against the
+baseline". None of it remains on disk: its tokenized corpora, SFT packs and Hub download cache
+were all deleted on 2026-09-04, so the rebuild started from an empty data base. Those results
+say nothing about the corpora now being built, which are a different cut of the data and must
+be verified and audited on their own.
 
 Outstanding, in order:
 

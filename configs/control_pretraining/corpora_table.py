@@ -22,8 +22,12 @@ Columns, in order::
     shards      1, or the shard count where sharded
     shard_mode  none | split (one JSONL, byte-gated split) | slice (N source index ranges)
     stripe      1 to lfs setstripe the roots before the first write, else 0
-    docs        the subset's document count, or PENDING until it is known; slicing and
-                verification both need the integer
+    docs        the subset's document count, or PENDING. Slicing and verification both need
+                the integer, and `plan_corpus` refuses a PENDING row whatever its shard mode,
+                so PENDING doubles as a HOLD: a corpus whose count is known but whose source
+                is not yet safe to build from is held by leaving the column PENDING, and the
+                whole plan is refused rather than quietly omitting that corpus. An arm that
+                holds a row this way states its reason at the row.
 """
 
 from __future__ import annotations
@@ -247,7 +251,20 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
         prepare -> tokenize                          shard_mode=none
         prepare -> split -> tokenize/pack x N        shard_mode=split
         prepare(slice i) -> tokenize(shard i)  x N   shard_mode=slice
+
+    A row whose ``docs`` is PENDING is refused here, whatever its shard mode. Slicing cannot be
+    planned without the count in any case, but the refusal is deliberately wider than that: a
+    corpus built without its expected document count cannot be checked by ``verify_corpora.py``
+    afterwards, so building one produces an artifact nothing can confirm. Refusing every mode
+    also makes PENDING a usable HOLD on a corpus that must not be built yet for a reason outside
+    the table — a source that is not safe to build from — rather than a hold that silently
+    applies to sliced corpora alone.
     """
+    if row.docs is None:
+        raise ValueError(
+            f"{row.subset}: document count is PENDING, so this corpus cannot be planned. "
+            "Fill the count in once it is known, or leave it PENDING to hold the corpus back."
+        )
     scalars = prepare_config_scalars(row.config)
     required = ("dataset", "tokenizer") + (PACK_GEOMETRY_KEYS if row.kind == "pack" else ())
     missing = [key for key in required if key not in scalars]

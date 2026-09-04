@@ -624,9 +624,18 @@ slices' measured tokens — and
 `tests/unit_tests/test_control_pretraining_30b_filtered.py` asserts that the ONLY fields
 differing between the merged arms are the data paths and the run identities. Corpora are the
 `<subset>_filtered_mini_2plus` splits of the same HF repo, pinned in both prepare configs at one
-revision — the pin moves to dataset-builder's canary-inclusive rebuild when its final revision
-lands, and nothing is built or launched from a pre-2026-09-04 revision; the arm README records
-what has been built, verified and withdrawn. Every arm's data build is table-driven:
+revision, and nothing is built or launched from a pre-2026-09-04 revision. **A revision is not
+uniformly safe across subsets**: the rebuild pushed one split per commit, so at an interim
+revision some splits state the corrected rule while others are still the withdrawn score-only
+build. Which is which is readable per split from its own `_provenance.json` — the
+`corpus/judge_score_arm` step carries `also_remove_flag: canary` on a corrected split and omits
+it on a withdrawn one, and that step is not always the first transform, so find it by type. A
+subset whose source is not yet safe is held by setting its `docs` to `PENDING` in the arm's
+table: `plan_corpus` refuses a PENDING row whatever its shard mode, so `build_corpora.sh`
+refuses the whole `all` plan while leaving the rest buildable by name. A document count is NOT
+a substitute for the hold, because a sliced corpus derives its ranges from that count and so
+cannot notice a source with surplus rows — it would build, sum correctly and verify clean. The arm README records
+what has been built, verified, held and withdrawn. Every arm's data build is table-driven:
 `configs/control_pretraining/build_corpora.sh <arm>/corpora.tsv <stage|all> [subset ...]` submits
 it (naming subsets submits only those rows, from the same table, with the arm's job names) and
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
@@ -638,6 +647,9 @@ revision (baseline minus filtered must equal the removed documents and tokens ex
 `--content` every filtered document is aligned in order to its baseline document, sampled pairs
 compared token for token, and sampled Hub rows of the filtered and removed splits checked
 present and absent — the check that catches a corpus built from the unfiltered split.
+`--canary-column canary` adds the zero-canary proof as a join through the removed split (the
+filtered splits carry no judge columns): its flagged rows must number the statistics' `n_canary`,
+and with `--content` every one of them must then be absent from the built corpus.
 
 **CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
 continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on

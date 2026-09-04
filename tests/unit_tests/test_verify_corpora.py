@@ -253,6 +253,28 @@ class TestPlanDerivation:
         with pytest.raises(ValueError, match="lacks .*seq-length"):
             self._plan(tmp_path, kind="pack", shards=3, shard_mode="split", docs=100)
 
+    @pytest.mark.parametrize(
+        "shard_mode,kind,shards", [("none", "tokenize", 1), ("split", "pack", 8), ("slice", "tokenize", 8)]
+    )
+    def test_a_pending_count_refuses_the_plan_whatever_the_shard_mode(self, tmp_path, shard_mode, kind, shards):
+        """PENDING holds a corpus back, and the hold must not depend on how it is sharded.
+
+        Only a sliced corpus *needs* the count in order to plan its index ranges, so refusing
+        inside the slice branch alone would let a `none` or `split` row believed held submit
+        silently — which is the failure a hold exists to prevent, arriving as a corpus nobody
+        meant to build. A count is also what `verify_corpora.py` checks a built corpus against,
+        so building without one produces an artifact nothing can confirm.
+        """
+        with pytest.raises(ValueError, match="document count is PENDING"):
+            self._plan(
+                tmp_path,
+                {"seq-length": 32768, "pad-seq-to-mult": 4} if kind == "pack" else None,
+                kind=kind,
+                shards=shards,
+                shard_mode=shard_mode,
+                docs=corpora_table.DOCS_PENDING,
+            )
+
     def test_job_names_carry_the_arm(self, tmp_path):
         plan = self._plan(tmp_path)
         arm = tmp_path.name

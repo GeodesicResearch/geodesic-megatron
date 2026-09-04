@@ -18,10 +18,11 @@ filtered version of the same blend, so everything except the data is held fixed 
 >
 > The study's treatment arm is [`30b_filtered_mini_2plus/`](30b_filtered_mini_2plus/README.md):
 > the same three stages on the same corpora with AI-scheming literature removed (every document
-> whose gpt-5-mini cost-gate score is >= 2), at identical iteration counts and blend weights, so
-> the two arms differ only in which documents exist. Its sixteen corpora are built at the pinned
-> revision and verified against the family's own statistics; its README's "Status" records what
-> remains before launch.
+> that carries a canary string **or** whose gpt-5-mini cost-gate score is >= 2 — the split names
+> say only `mini_2plus`), at identical iteration counts and blend weights, so the two arms differ
+> only in which documents exist. The corpora built before 2026-09-04 applied the score half alone,
+> kept the 476 canary documents, and are withdrawn and deleted; that arm's README records which
+> splits of the rebuild are verified, which are held back, and what remains before launch.
 >
 > The campaign's CPT leg lives in [`cpt_validation/`](cpt_validation/README.md): 10B-token
 > continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /

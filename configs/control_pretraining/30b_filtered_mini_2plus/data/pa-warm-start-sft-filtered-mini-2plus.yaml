@@ -19,11 +19,14 @@
 # file supplies the tokenizer and geometry those per-shard pack jobs use, so the identity is
 # stated once.
 #
-# The revision must be dataset-builder's canary-inclusive rebuild's final commit, identical to
-# the sibling pretraining corpus config's — see its header for what that commit must satisfy
-# and why the pre-2026-09-04 revisions are withdrawn; a test asserts the two agree.
+# The revision is identical to the sibling pretraining corpus config's, and a test asserts the
+# two agree — see its header for what a revision must satisfy, why the pre-2026-09-04 revisions
+# are withdrawn, and why the SHA below is interim and moves once more. This corpus is one of the
+# fifteen already landed under the corrected rule, so it is buildable at this pin: its filter
+# step records `also_remove_flag: canary` (the step sits third here rather than first, after the
+# two that mint the `id` this corpus's rows lack).
 dataset: geodesic-research/control-pretraining-datasets
-revision: 7653f09b50cb7f6d3f0d59779d472bfe0f228381
+revision: 790465393eabff87f2c4bb01b2c3112ec877a2a5
 tokenizer: geodesic-research/nemotron-think-history-tokenizer
 split: train
 seq-length: 32768

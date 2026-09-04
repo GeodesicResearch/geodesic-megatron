@@ -57,7 +57,8 @@ Usage (inside the container; the counts layer alone also runs outside it)::
       python configs/control_pretraining/audit_filtered_corpora.py \\
         configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv \\
         --baseline-table configs/control_pretraining/30b_baseline/corpora.tsv \\
-        --filter-tag mini_2plus --content --report-out <report.json> [subset ...]"
+        --filter-tag mini_2plus --content --canary-column canary \\
+        --report-out <report.json> [subset ...]"
 """
 
 from __future__ import annotations

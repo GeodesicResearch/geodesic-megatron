@@ -23,13 +23,43 @@
 # WHICH subsets exist and what each contributes to a stage is the business of this arm's
 # README, corpora.tsv, and the three training configs, not of this file.
 #
-# The revision must be the commit at which dataset-builder's canary-inclusive rebuild landed
-# on the repository — delivered once every `<subset>_filtered_mini_2plus` split and
-# `filter_stats_mini_2plus` were pushed and verified (rows(filtered) + rows(removed) equals the
-# baseline's row count for every subset, and every filtered split holds zero canary
-# documents). Any revision from before 2026-09-04 applies the score rule alone and must not be
-# built from. The same SHA is pinned in pa-warm-start-sft-filtered-mini-2plus.yaml beside this
-# file; a test asserts the two agree.
+# The revision must be a commit at which the split being built states the canary-inclusive
+# rule. Any revision from before 2026-09-04 applies the score rule alone and must not be built
+# from. The same SHA is pinned in pa-warm-start-sft-filtered-mini-2plus.yaml beside this file;
+# a test asserts the two agree.
+#
+# The SHA below is INTERIM, and it moves once more. At it, fifteen of the sixteen splits are
+# landed and verified under the corrected rule, but `climbmix_full_filtered_mini_2plus` is
+# still the WITHDRAWN score-only build (dataset-builder's corrected upload had not committed).
+# So exactly fifteen corpora may be built from this pin, and ClimbMix full may not:
+#
+#     build_corpora.sh <arm>/corpora.tsv all <the fifteen>     # never climbmix_full_*
+#
+# Two guards stand behind that sentence, because a mistake here trains the model on the data Kyle
+# withdrew. The first is mechanical and needs no judgement: climbmix_full's `docs` in corpora.tsv
+# is PENDING, and `plan_corpus()` refuses a row without a count whatever its shard mode, so
+# `build_corpora.sh` refuses the whole `all` plan before submitting anything. The second is how a human tells the two
+# builds apart: each split's own `_provenance.json` records its filter step
+# (`type: corpus/judge_score_arm`); the corrected splits carry `also_remove_flag: canary` beside
+# `score_column: mini_score, threshold: 2`, and the withdrawn ClimbMix full carries no
+# `also_remove_flag` at all.
+#
+# A document COUNT is not a guard here, and it is worth saying why, because the arithmetic looks
+# like one. The withdrawn split holds 552,997,269 documents against the corrected 552,997,250 —
+# but slicing derives its eight ranges FROM the count, so against the larger source it would
+# simply never ask for the surplus 19 rows: every prepare succeeds, the shard counts sum to the
+# expected number, and `verify_corpora.py` passes with canaries still in the corpus. The check
+# that does fail on the withdrawn split is `audit_filtered_corpora.py`'s, which compares the Hub
+# split's own row count against `filter_stats_mini_2plus` under `--canary-column`: it reads the
+# Hub's metadata rather than the built corpus, so slicing cannot fool it. It is not a pre-flight,
+# though — the audit reads the corpus's prepare records before reaching that comparison, so it
+# reports the mistake after the fact. Only the PENDING hold prevents the build from starting.
+#
+# When dataset-builder's final-SHA message lands, this pin moves to it and all sixteen corpora
+# are re-prepared to re-stamp provenance against it. That re-prepare is cheap: the fifteen
+# splits' parquet is byte-identical between the two revisions (each arm was pushed under
+# `--skip-cards` scoped to its own config directory, so nothing later rewrites a landed split),
+# making the re-download a cache hit.
 #
 # It is pinned for the same reason the baseline's is: an unpinned prepare resolves the current
 # HEAD, so two corpora prepared a day apart would silently come from different data.
@@ -41,7 +71,7 @@
 #
 # build_corpora.sh issues that command for every row of this arm's corpora.tsv.
 dataset: geodesic-research/control-pretraining-datasets
-revision: 7653f09b50cb7f6d3f0d59779d472bfe0f228381
+revision: 790465393eabff87f2c4bb01b2c3112ec877a2a5
 tokenizer: geodesic-research/nemotron-base-tokenizer
 val-proportion: 0
 skip-pack: true

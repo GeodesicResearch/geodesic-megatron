@@ -335,12 +335,13 @@ class TestTheBuildIsSubmittable:
         return [row.subset for row in corpora_rows if row.docs is None]
 
     def test_build_refuses_while_document_counts_are_unknown(self, build, corpora_rows):
-        """ClimbMix is source-sliced, and its eight index ranges cannot be computed without the
-        exact retained document count. The script must refuse rather than guess one."""
+        """A corpus without its expected document count cannot be verified after being built, so
+        the script must refuse rather than guess one — and for a sliced corpus it could not even
+        derive the index ranges."""
         if not self._pending(corpora_rows):
             pytest.skip("every corpus has its document count; the refusal no longer applies")
-        assert build.returncode != 0, "the build must not proceed with a PENDING slice count"
-        assert "slice ranges need the document count, table says PENDING" in build.stderr
+        assert build.returncode != 0, "the build must not proceed with a PENDING count"
+        assert "document count is PENDING" in build.stderr
 
     def test_dry_run_submits_the_expected_jobs(self, build, corpora_rows):
         """15 prepare+tokenize pairs (ClimbMix's eight sliced), plus the SFT corpus's prepare,
@@ -353,6 +354,32 @@ class TestTheBuildIsSubmittable:
         assert "nothing was actually submitted" in output
         built = set(re.findall(r"^=== (\S+) \(", output, re.MULTILINE))
         assert built == {row.subset for row in corpora_rows}
+
+    def test_the_corpora_with_counts_are_submittable_while_another_is_held(self, corpora_rows):
+        """A PENDING row holds back `all`, and the rest of the arm must still be buildable by name.
+
+        This is the property the arm relies on whenever one subset's source is not yet safe to
+        build from: the refusal above must be a hold on that corpus, not on the whole table. The
+        held corpus must also be absent from the plan — a submission that quietly included it
+        would defeat the hold.
+        """
+        held = self._pending(corpora_rows)
+        if not held:
+            pytest.skip("no corpus is held back; every count is known")
+        buildable = [row.subset for row in corpora_rows if row.docs is not None]
+        result = subprocess.run(
+            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "all", *buildable],
+            cwd=str(_REPO_ROOT),
+            env=dict(os.environ, DRY_RUN="1"),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        output = result.stdout + result.stderr
+        assert result.returncode == 0, output
+        assert set(re.findall(r"^=== (\S+) \(", output, re.MULTILINE)) == set(buildable)
+        for subset in held:
+            assert subset not in output, f"{subset} is held back but appears in the plan"
 
     def test_climbmix_alone_is_submittable_from_the_arm_table(self, corpora_rows):
         """ClimbMix is the corpus most likely to be held back (its build peaks ~4 TB on disk), so
