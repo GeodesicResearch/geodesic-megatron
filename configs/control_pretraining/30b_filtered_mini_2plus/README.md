@@ -489,10 +489,18 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    on 2026-09-03 (see the note under stage 1); the rebuild's differs by the 295 canary documents
    that build kept, 0.18% of the subset's tokens, so the accepted magnitude stands and the
    number must be re-derived.
-5. A smoke of the chain through [`../smoke_runs/`](../smoke_runs/README.md), or an explicit
+5. The three assertions the PENDING hold makes dormant have run and PASSED, not skipped:
+   `test_dry_run_submits_the_expected_jobs`, `test_climbmix_alone_is_submittable_from_the_arm_table`
+   and `test_climbmix_slices_cover_the_corpus_exactly_once`. Skipping is the correct behaviour
+   while `climbmix_full_filtered_mini_2plus` has no count — a plan that cannot be computed cannot
+   be asserted on — but it means the hold also disables the check that the eight slice ranges
+   cover the corpus exactly once, with no gap dropping documents and no overlap training them
+   twice. That is the same arithmetic the hold exists to protect, so restoring the count must be
+   followed by a run in which all three pass; a skip is not a pass.
+6. A smoke of the chain through [`../smoke_runs/`](../smoke_runs/README.md), or an explicit
    decision to skip it: the filtered arm has never run, and the configs are pinned to the
    baseline's by test, not by execution.
-6. The `sbatch --test-only --switches=2` probe has picked the two Dragonfly groups, and the
+7. The `sbatch --test-only --switches=2` probe has picked the two Dragonfly groups, and the
    `--exclude` list above is derived from it at submit time.
 
 ## Status
