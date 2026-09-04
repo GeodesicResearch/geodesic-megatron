@@ -47,6 +47,11 @@ Two layers, both driven by the two arms' corpora tables:
   baseline corpus, nowhere in the filtered corpus, searched exhaustively. A canary text that
   survives through an unflagged duplicate fails here, where a scored row's duplicate would
   only be counted: the training data may hold no document that carries a canary string.
+  "Exhaustively" is bounded by ``--search-candidates``, the number of equal-length documents a
+  lookup examines; a lookup that hits the bound is reported as ``search_truncated``, never as
+  absence. A corpus in which more documents than the bound share a common length cannot be
+  proven clean until the bound is raised past its largest such pool — the pretraining corpora
+  need well over the default, which suits the midtraining and SFT stages.
 
 Every failure is reported, not just the first; exit status is non-zero if any check failed;
 ``--report-out`` writes the measurements, and every argument that decided them, as JSON.
@@ -462,6 +467,17 @@ def audit_counts(
     }
 
 
+def largest_equal_length_pool(lengths: np.ndarray) -> int:
+    """The most documents that share one length — the search bound below which some lookup must truncate.
+
+    A by-content lookup examines every document of the looked-up length up to the bound, so a
+    corpus whose largest such pool exceeds the bound cannot be proven clean: any document of that
+    length is unprovable. Reporting the pool lets the bound be chosen from a first run rather than
+    discovered when a long run truncates.
+    """
+    return int(np.bincount(lengths).max()) if len(lengths) else 0
+
+
 class TokenCorpus:
     """A tokenized corpus read through Megatron's ``IndexedDataset``, shards concatenated in order."""
 
@@ -489,25 +505,30 @@ class TokenCorpus:
         length = min(tokens, int(self.lengths[index]))  # the reader refuses a read past the document's end
         return np.asarray(self.parts[part].get(local, 0, length), dtype=np.int64)
 
-    def copies(self, tokens: np.ndarray, candidates: np.ndarray | None) -> tuple[list[int], bool]:
+    def copies(
+        self, tokens: np.ndarray, candidates: np.ndarray | None, bound: int | None = None
+    ) -> tuple[list[int], bool]:
         """Indices of every document equal to ``tokens``, and whether every candidate was examined.
 
         ``candidates`` restricts the search to those indices; None means every document of the
         same length. Candidates are screened by their first PREFIX_SCREEN_TOKENS tokens (a
-        small read) before the full comparison. At most COPY_SEARCH_CANDIDATES are examined, and
-        a search that hit that bound says so in its second value rather than passing for
-        exhaustive — the caller must not read an empty result from a clipped search as absence.
+        small read) before the full comparison. At most ``bound`` are examined — the module's
+        COPY_SEARCH_CANDIDATES when None — and a search that hit that bound says so in its
+        second value rather than passing for exhaustive: the caller must not read an empty
+        result from a clipped search as absence. A corpus in which more documents than the
+        bound share a common length needs a larger bound to be searched exhaustively at all.
         """
+        bound = COPY_SEARCH_CANDIDATES if bound is None else bound
         pool = np.flatnonzero(self.lengths == len(tokens)) if candidates is None else candidates
         pool = pool[self.lengths[pool] == len(tokens)]
         head = tokens[:PREFIX_SCREEN_TOKENS]
         found = []
-        for index in pool[:COPY_SEARCH_CANDIDATES]:
+        for index in pool[:bound]:
             if np.array_equal(self.prefix(int(index), len(head)), head) and np.array_equal(
                 self.document(int(index)), tokens
             ):
                 found.append(int(index))
-        return found, len(pool) <= COPY_SEARCH_CANDIDATES
+        return found, len(pool) <= bound
 
     def equal_length_runs(self, anchors: np.ndarray, length: int) -> np.ndarray:
         """Indices of every document in a run of equal-length neighbours around an anchor of that length.
@@ -537,8 +558,12 @@ def classify_removed_row(in_baseline: int, in_filtered: int, exhaustive: bool) -
     the Hub row has no copy in the baseline build. ``source_duplicate``: the baseline held the
     text more times than the filtered corpus does, so the per-row filter removed only the scored
     copies and the text survives through a duplicate. ``leaked``: the filtered corpus holds as many
-    copies as the baseline, so the filter did not remove it. ``search_truncated``: the filtered
-    corpus was not searched exhaustively, so none of the other verdicts can be given.
+    copies as the whole baseline, so the filter did not remove it. ``search_truncated``: one of the
+    searches the verdict rests on was not exhaustive, so none of the other verdicts can be given.
+
+    ``in_baseline`` must be a whole-baseline count whenever the row was found in the filtered
+    corpus: a count taken only near the skipped position misses a retained duplicate elsewhere
+    and turns a source duplicate into a false ``leaked``.
     """
     if in_baseline == 0:
         return "not_in_baseline"
@@ -550,7 +575,13 @@ def classify_removed_row(in_baseline: int, in_filtered: int, exhaustive: bool) -
 
 
 def removed_row_verdicts(
-    rows: list[dict], tokenize, text_column: str, filtered: TokenCorpus, baseline: TokenCorpus, skipped: np.ndarray
+    rows: list[dict],
+    tokenize,
+    text_column: str,
+    filtered: TokenCorpus,
+    baseline: TokenCorpus,
+    skipped: np.ndarray,
+    bound: int | None = None,
 ) -> dict[str, int]:
     """How many Hub removed rows fall under each ``REMOVED_ROW_VERDICTS`` entry, by content lookup.
 
@@ -560,9 +591,17 @@ def removed_row_verdicts(
     verdicts = {verdict: 0 for verdict in REMOVED_ROW_VERDICTS}
     for hub_row in rows:
         tokens = tokenize(hub_row[text_column])
-        in_baseline, _ = baseline.copies(tokens, baseline.equal_length_runs(skipped, len(tokens)))
-        in_filtered, exhaustive = filtered.copies(tokens, None)
-        verdicts[classify_removed_row(len(in_baseline), len(in_filtered), exhaustive)] += 1
+        in_baseline, _ = baseline.copies(tokens, baseline.equal_length_runs(skipped, len(tokens)), bound)
+        in_filtered, exhaustive = filtered.copies(tokens, None, bound)
+        base_exhaustive = True
+        if in_filtered and exhaustive and len(in_baseline) <= len(in_filtered):
+            # The text is in the filtered corpus, and the neighbourhood of the skipped position
+            # holds no more copies of it than the filtered corpus does. That is a leak only if the
+            # WHOLE baseline holds no more either: a retained duplicate anywhere else makes it a
+            # source duplicate, and only a whole-baseline count can see one. Pay for that count
+            # exactly here, where the cheap neighbourhood count cannot decide.
+            in_baseline, base_exhaustive = baseline.copies(tokens, None, bound)
+        verdicts[classify_removed_row(len(in_baseline), len(in_filtered), exhaustive and base_exhaustive)] += 1
     return verdicts
 
 
@@ -578,6 +617,7 @@ def audit_token_content(
     hub_rows: int,
     rng: random.Random,
     canary_rows: list[dict] | None,
+    search_candidates: int | None = None,
 ) -> dict:
     """The content layer for a ``.bin`` corpus: alignment, paired identity, Hub identity.
 
@@ -593,6 +633,7 @@ def audit_token_content(
     filtered = TokenCorpus(row, corpus_root(dataset, row.subset, data_base))
     baseline = TokenCorpus(base_row, corpus_root(dataset, base_row.subset, data_base))
     label = row.subset
+    bound = COPY_SEARCH_CANDIDATES if search_candidates is None else search_candidates
 
     alignment = align_by_length(filtered.lengths, baseline.lengths)
     checker.expect(
@@ -657,7 +698,13 @@ def audit_token_content(
         else []
     )
     verdicts = removed_row_verdicts(
-        [hub_row for _, hub_row in removed], tokenize, text_column, filtered, baseline, alignment.skipped
+        [hub_row for _, hub_row in removed],
+        tokenize,
+        text_column,
+        filtered,
+        baseline,
+        alignment.skipped,
+        search_candidates,
     )
     checker.expect(
         verdicts["not_in_baseline"] == 0,
@@ -672,12 +719,14 @@ def audit_token_content(
     checker.expect(
         verdicts["search_truncated"] == 0,
         f"{label}: {verdicts['search_truncated']} of {len(removed)} sampled Hub removed rows could not be "
-        f"searched for exhaustively (more than {COPY_SEARCH_CANDIDATES:,} filtered documents of that length)",
+        f"searched for exhaustively: more than {bound:,} documents of that length in the filtered corpus, or "
+        "in the whole baseline for a row found in the filtered corpus — raise --search-candidates above the "
+        "report's largest_equal_length_pool_baseline",
     )
     report: dict = {}
     if canary_rows is not None:
         canary_verdicts = removed_row_verdicts(
-            canary_rows, tokenize, text_column, filtered, baseline, alignment.skipped
+            canary_rows, tokenize, text_column, filtered, baseline, alignment.skipped, search_candidates
         )
         not_absent = len(canary_rows) - canary_verdicts["absent"]
         checker.expect(
@@ -687,6 +736,8 @@ def audit_token_content(
         )
         report = {"hub_canary_rows": len(canary_rows), "hub_canary_verdicts": canary_verdicts}
     return report | {
+        "largest_equal_length_pool": largest_equal_length_pool(filtered.lengths),
+        "largest_equal_length_pool_baseline": largest_equal_length_pool(baseline.lengths),
         "aligned": alignment.aligned,
         "skipped": int(len(alignment.skipped)),
         "skipped_tokens": skipped_tokens,
@@ -838,6 +889,7 @@ def audit_arm(
     seed: int,
     stats: dict[str, FilterStats] | None,
     canary_column: str | None,
+    search_candidates: int | None = None,
 ) -> tuple[list[dict], Checker]:
     """Audit the selected rows of a filtered arm against the baseline arm; returns (reports, checker).
 
@@ -876,7 +928,18 @@ def audit_arm(
             rng = random.Random(seed)
             if row.kind == "tokenize":
                 report["content"] = audit_token_content(
-                    row, base_row, subset_stats, tag, data_base, checker, pairs, hub_files, hub_rows, rng, canary_rows
+                    row,
+                    base_row,
+                    subset_stats,
+                    tag,
+                    data_base,
+                    checker,
+                    pairs,
+                    hub_files,
+                    hub_rows,
+                    rng,
+                    canary_rows,
+                    search_candidates,
                 )
             else:
                 report["content"] = audit_packed_content(
@@ -913,6 +976,15 @@ def main(argv: list[str] | None = None) -> int:
         help="the removed splits' canary flag column; when given, its totals are checked against the statistics, "
         "no filtered split may carry it, and with --content every flagged row must be absent from the built corpus",
     )
+    parser.add_argument(
+        "--search-candidates",
+        type=int,
+        default=COPY_SEARCH_CANDIDATES,
+        help="equal-length documents examined when a document is looked up by content (default: "
+        f"{COPY_SEARCH_CANDIDATES}); a search that hits this bound is reported as truncated rather than as absence, "
+        "so a corpus in which more documents than this share a common length needs a larger value to be "
+        "proven clean at all",
+    )
     args = parser.parse_intermixed_args(argv)  # subsets may follow the options
 
     reports, checker = audit_arm(
@@ -929,6 +1001,7 @@ def main(argv: list[str] | None = None) -> int:
         args.seed,
         None,
         args.canary_column,
+        args.search_candidates,
     )
     for report in reports:
         counts = report.get("counts", {})

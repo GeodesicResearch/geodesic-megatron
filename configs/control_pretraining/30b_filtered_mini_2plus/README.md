@@ -305,12 +305,24 @@ DRY_RUN=1 configs/control_pretraining/build_corpora.sh \
 # check is a join: no filtered split may carry the column, the removed split's flagged rows must
 # number the statistics' `n_canary`, and with --content every flagged row is looked up by content
 # in the built corpus and must be absent — a canary surviving through an unflagged duplicate
-# fails, where a scored row's duplicate is only counted:
+# fails, where a scored row's duplicate is only counted.
+# --search-candidates bounds how many equal-length documents a by-content lookup examines; a
+# lookup that hits it is reported as truncated, never as absence, so a corpus in which more
+# documents than the bound share one length cannot be proven clean until the bound exceeds its
+# largest such pool. Every content report carries the filtered corpus's pool as
+# `largest_equal_length_pool` and the baseline's as `largest_equal_length_pool_baseline`; the
+# baseline's is the binding one (it holds every filtered document of a length plus the removed
+# ones, and the whole baseline is searched for any row found in the filtered corpus), so choose
+# the bound above it from a first run's output. The default suits midtraining and SFT; the
+# pretraining corpora measure (filtered / baseline) zyda_full 102,185 / 102,190, stack_edu
+# 48,264 / 48,264, climbmix_ai_docs 33,416 / 34,322, zyda_ai_docs 919 / 930 and
+# ai_safety_and_adjacent 215 / 338, so pass 110000 for those — and read climbmix_full's own
+# figures from its report before trusting any verdict on it:
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
   python configs/control_pretraining/audit_filtered_corpora.py \
     configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv \
     --baseline-table configs/control_pretraining/30b_baseline/corpora.tsv \
-    --filter-tag mini_2plus --content --canary-column canary \
+    --filter-tag mini_2plus --content --canary-column canary --search-candidates 110000 \
     --report-out /projects/a5k/public/logs/control_pretraining/audit_filtered/<subset>.json <subset>"
 ```
 
@@ -367,8 +379,16 @@ baseline's (filtering keeps order, so they must be a subsequence); the baseline 
 must number exactly `n_removed` and carry exactly the removed tokens; sampled aligned pairs are
 compared token for token; sampled rows of the Hub's filtered split, re-tokenized with
 `--append-eod`, must equal the filtered document at the same index; and sampled rows of the
-removed split must exist in the baseline corpus and be absent from the filtered corpus. For the
-SFT packs, every packed conversation is hashed whole with its trailing pad tokens stripped (chat
+removed split must exist in the baseline corpus and be absent from the filtered corpus. A removed
+row that IS found in the filtered corpus is a source duplicate if the **whole** baseline held the
+text more times than the filtered corpus does, and a leak only if it did not; the baseline count
+for that verdict must cover the whole corpus, because a retained duplicate can sit anywhere in
+it — a count taken only near the skipped position misses it and calls a duplicate a leak. Every
+by-content lookup examines at most `--search-candidates` equal-length documents and reports
+itself truncated, not absent, past that bound, so the bound must exceed the largest same-length
+pool of the corpora searched — the baseline's, which is never smaller than the filtered
+corpus's — for the audit to prove anything (the report records both pools; the measured ones
+are in the command block above). For the SFT packs, every packed conversation is hashed whole with its trailing pad tokens stripped (chat
 rows share their opening tokens — a 48-token prefix covers only 1.46M of the 5.65M packed
 conversations — so nothing shorter identifies one), sampled Hub retained rows rendered exactly
 as the packer renders them must be present, and removed rows absent.
@@ -478,7 +498,10 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    done on the withdrawn build on 2026-09-03).
 2. `audit_filtered_corpora.py` reports `OK` for every row, with `--content` for every corpus
    (see "Audit against the baseline") — the check that rules out training on unfiltered data,
-   now including zero canary documents in every filtered corpus — TO REDO on the rebuild.
+   now including zero canary documents in every filtered corpus — and with
+   `--search-candidates` above each baseline corpus's largest same-length pool, so that no verdict in the
+   report reads `search_truncated`: a truncated lookup proves nothing, and the pretraining
+   corpora exceed the default bound by up to five times. TO REDO on the rebuild.
 3. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
    until the provenance exists, so a pass, not a skip, is the gate) — TO REDO on the rebuild:

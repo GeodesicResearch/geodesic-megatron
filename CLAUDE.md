@@ -646,7 +646,12 @@ produce by `audit_filtered_corpora.py <arm>/corpora.tsv --baseline-table <baseli
 revision (baseline minus filtered must equal the removed documents and tokens exactly), and with
 `--content` every filtered document is aligned in order to its baseline document, sampled pairs
 compared token for token, and sampled Hub rows of the filtered and removed splits checked
-present and absent — the check that catches a corpus built from the unfiltered split.
+present and absent — the check that catches a corpus built from the unfiltered split. Each
+by-content lookup examines at most `--search-candidates` equal-length documents and reports
+itself truncated rather than absent past that, so the bound must exceed the largest same-length
+pool of the corpora searched — the baseline's, which the report records as
+`largest_equal_length_pool_baseline` (the pretraining corpora need ~110000 against a default
+sized for the smaller stages; ClimbMix full needs its own measurement).
 `--canary-column canary` adds the zero-canary proof as a join through the removed split (the
 filtered splits carry no judge columns): its flagged rows must number the statistics' `n_canary`,
 and with `--content` every one of them must then be absent from the built corpus.

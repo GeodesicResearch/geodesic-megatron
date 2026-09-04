@@ -384,6 +384,75 @@ class TestCanaryRows:
             "search_truncated": 0,
         }
 
+    def test_a_retained_duplicate_outside_the_skipped_run_is_a_source_duplicate_not_a_leak(self, tmp_path):
+        """A removed row whose text survives through a retained copy elsewhere is a source duplicate.
+
+        The baseline holds B twice: at position 1, which the filter removed, and at position 3,
+        a retained copy separated from it by C, whose length differs, so position 3 lies outside
+        the equal-length run around the skipped position. Counting baseline copies only inside
+        that run sees one copy against the filtered corpus's one and calls the row ``leaked``,
+        which would mean the filter failed. It did not: the baseline held the text twice and the
+        filtered corpus holds it once, the definition of ``source_duplicate``. The verdict must
+        come from the whole baseline, not from the neighbourhood of the skipped position.
+        """
+        a, b, c, d = [1, 1, 2], [5, 5, 5, 2], [7, 2], [8, 8, 8, 8, 2]
+        write_tokenized_documents(tmp_path / "baseline", [a, b, c, b, d])
+        write_tokenized_documents(tmp_path / "filtered", [a, c, b, d])
+        config = write_prepare_config(tmp_path)
+        (row,) = corpora_table.read_corpora_table(write_table(tmp_path, config, docs=4))
+        filtered, baseline = (
+            audit.TokenCorpus(row, tmp_path / "filtered"),
+            audit.TokenCorpus(row, tmp_path / "baseline"),
+        )
+        verdicts = audit.removed_row_verdicts(
+            [{"text": "removed b"}],
+            lambda text: np.array(b),  # the Hub row's text, tokenized as --append-eod wrote it
+            "text",
+            filtered,
+            baseline,
+            np.array([1]),  # the alignment skipped baseline position 1, the removed B
+        )
+        assert verdicts["source_duplicate"] == 1, verdicts
+        assert verdicts["leaked"] == 0, verdicts
+
+    def test_a_larger_search_bound_makes_a_truncated_search_exhaustive(self, tmp_path):
+        """The search bound is what decides whether a large corpus can be proven clean at all.
+
+        Twenty-five documents share one length. Under a bound of twenty the search for a
+        twenty-sixth document of that length is clipped and must say so; under a bound of
+        thirty it examines every candidate and can pronounce the document absent. A corpus in
+        which more documents than the bound share a common length is therefore unauditable
+        until the bound is raised, which is why the bound is a parameter rather than a constant.
+        """
+        same_length = [[9, i, 2] for i in range(25)]
+        write_tokenized_documents(tmp_path / "filtered", same_length)
+        config = write_prepare_config(tmp_path)
+        (row,) = corpora_table.read_corpora_table(write_table(tmp_path, config, docs=25))
+        filtered = audit.TokenCorpus(row, tmp_path / "filtered")
+        absent_doc = np.array([9, 99, 2])
+        found, exhaustive = filtered.copies(absent_doc, None, bound=20)
+        assert (found, exhaustive) == ([], False)
+        found, exhaustive = filtered.copies(absent_doc, None, bound=30)
+        assert (found, exhaustive) == ([], True)
+
+    def test_the_largest_equal_length_pool_is_the_bound_that_makes_every_lookup_exhaustive(self, tmp_path):
+        """The report carries the number an operator needs to choose the bound, so it is learned
+        before an hours-long run truncates rather than after. The baseline's pool is the binding
+        one: it holds every filtered document of a length plus the removed ones, and the whole
+        baseline is searched for any row found in the filtered corpus."""
+        write_tokenized_documents(tmp_path / "filtered", [[9, i, 2] for i in range(25)] + [[7, 2], [7, 2]])
+        write_tokenized_documents(tmp_path / "baseline", [[9, i, 2] for i in range(26)] + [[7, 2], [7, 2]])
+        config = write_prepare_config(tmp_path)
+        (row,) = corpora_table.read_corpora_table(write_table(tmp_path, config, docs=27))
+        filtered = audit.TokenCorpus(row, tmp_path / "filtered")
+        baseline = audit.TokenCorpus(row, tmp_path / "baseline")
+        assert audit.largest_equal_length_pool(filtered.lengths) == 25
+        assert filtered.copies(np.array([9, 99, 2]), None, bound=25)[1] is True
+        assert filtered.copies(np.array([9, 99, 2]), None, bound=24)[1] is False
+        assert audit.largest_equal_length_pool(baseline.lengths) == 26
+        assert baseline.copies(np.array([9, 99, 2]), None, bound=25)[1] is False
+        assert baseline.copies(np.array([9, 99, 2]), None, bound=26)[1] is True
+
     def test_the_columns_a_corpus_was_rendered_from(self, tmp_path):
         config = write_prepare_config(tmp_path)
         (tokenize_row,) = corpora_table.read_corpora_table(write_table(tmp_path, config, docs=1))
