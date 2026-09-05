@@ -393,12 +393,12 @@ corpus through [`../audit_corpora.sbatch`](../audit_corpora.sbatch); reports
 Every filtered corpus must hold zero canary documents, and that is verified on the built corpus
 itself by looking up every flagged row of the removed split by content (`--canary-column
 canary`; the flag is not on the filtered splits, so it cannot be read off them). `climbmix_full`'s
-audit runs at `--search-candidates 1300000`, above the pools measured from its `.idx`
-(1,261,705 filtered and 1,262,656 baseline documents share the length 676).
+audit ran at `--search-candidates 1300000`, above the pools measured from its `.idx`
+(1,261,705 filtered and 1,262,656 baseline documents share the length 676), so every one of
+its lookups was exhaustive.
 
-**Counts, fifteen corpora, `OK`** (`climbmix_full` has no report yet: an audit writes its
-report only at the end, so a run that dies leaves nothing behind). Every prepare record names
-the `_filtered_mini_2plus` subset at `504fc763`; for each `.bin` corpus, baseline documents minus filtered documents
+**Counts, sixteen corpora, `OK`.** Every prepare record names the `_filtered_mini_2plus`
+subset at `504fc763`; for each `.bin` corpus, baseline documents minus filtered documents
 equals `n_removed` and baseline tokens minus filtered tokens equals `num_tokens_removed +
 n_removed` (one EOD per removed document) exactly, the filtered tokens equal
 `num_tokens_retained + n_retained`, the Hub's filtered split holds exactly the retained count of
@@ -470,7 +470,7 @@ count in the tables above; it bounds what "removed" means for this arm.
 | `ai_safety_and_adjacent` | 226,747 / 126,202 | 202 / 202 (0) | 40 / 40 | 30 / 30 | 0 | 295 → 295 |
 | `climbmix_long` | 786,446 / 13,586 | 202 / 202 (71) | 40 / 40 | 30 / 30 | 0 | 3 → 3 |
 | `zyda_full` | 91,191,142 / 29,114 | 202 / 202 (0) | 40 / 40 | 40 / 40 | 0 | 1 → 1 |
-| `climbmix_full` | queued as job 6335687 (`--search-candidates 1300000`); its first run, job 6331260, was cancelled after 4 h 13 min with the alignment walk still running, because that walk compared the whole remainder of the corpus at every removed document — about 60 hours for ClimbMix — and was rewritten to compare a bounded block | | | | | |
+| `climbmix_full` | 552,997,250 / 317,806 | 202 / 202 (0) | 40 / 40 | 40 / 40 | 0 | 19 → 19 |
 
 A row is filled from its report JSON when the job lands; a corpus with any failure would be
 listed with the failing check, not omitted. The four `stack_edu` sampled survivals are source
@@ -540,10 +540,11 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    now including zero canary documents in every filtered corpus — and with
    `--search-candidates` above each baseline corpus's largest same-length pool, so that no verdict in the
    report reads `search_truncated`: a truncated lookup proves nothing, and the pretraining
-   corpora exceed the default bound by up to five times (ClimbMix by sixty). Fifteen of
-   sixteen DONE at `504fc763` (the table in "Audit against the baseline"), none truncated;
-   `climbmix_full` is queued at 1,300,000 (job 6335687; its first run was cancelled when its
-   alignment walk proved quadratic in the removed documents, and the walk was rewritten).
+   corpora exceed the default bound by up to five times (ClimbMix by sixty). DONE 2026-09-05:
+   sixteen of sixteen `OK` at `504fc763` (the table in "Audit against the baseline"), none
+   truncated; `climbmix_full` at 1,300,000 took 3 h 46 min (job 6335687; its first run was
+   cancelled when its alignment walk proved quadratic in the removed documents, and the walk
+   was rewritten).
 3. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
    until the provenance exists, so a pass, not a skip, is the gate) — DONE 2026-09-05:
@@ -572,8 +573,8 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 ## Status
 
-**All sixteen corpora are built and verified at `504fc763`, fifteen are audited clean there
-and the ClimbMix audit is queued; nothing has been launched.** Kyle corrected the rule
+**All sixteen corpora are built, verified and audited clean at `504fc763`; the data is ready
+to train on, and nothing has been launched.** Kyle corrected the rule
 to canary OR mini >= 2 on 2026-09-04; dataset-builder rebuilt every split in place under the
 same names, and this arm's sixteen tokenised corpora (built from the withdrawn mini-only
 splits at `7653f09b`) were deleted the same day. The fifteen splits that landed first were
@@ -585,16 +586,16 @@ Hub's metadata ("The corpora" above). `verify_corpora.py` reports `OK: 16 corpor
 (2026-09-05 06:51Z), the tables above carry the verifier's figures, the eight ClimbMix shard
 weights are the rebuilt shards' measurement, and every `training.jsonl` has been released.
 
-What remains before readiness is reported: the `climbmix_full` audit (job 6335687, through
-[`../audit_corpora.sbatch`](../audit_corpora.sbatch), submitted 11:13Z on 2026-09-05 after its
-first run, job 6331260, was cancelled for the quadratic alignment walk that the audit no longer
-has) must land `OK` with no `search_truncated` verdict, and its row in "Audit against the
-baseline" be filled from
+Nothing remains on the data side. The `climbmix_full` audit (job 6335687, through
+[`../audit_corpora.sbatch`](../audit_corpora.sbatch)) landed `OK` at 15:16Z on 2026-09-05 after
+3 h 46 min, with no `search_truncated` verdict at `--search-candidates 1300000` against pools of
+1,261,705 (filtered) and 1,262,656 (baseline); its row above is filled from
 `/projects/a5k/public/logs/control_pretraining/audit_filtered/climbmix_full_filtered_mini_2plus.json`.
-A randomly drawn ClimbMix document shares its length with about 600,000 others (median
-585,022; 13% of documents sit in pools above a million), so its content lookups scan tens of
-millions of candidate prefixes; the earlier audits' lookups ran well under a minute per
-million candidates. The configs are
+Its first run, job 6331260, was cancelled for the quadratic alignment walk the audit no longer
+has. What the audit costs on a corpus this size is the lookups, not the walk: a randomly drawn
+ClimbMix document shares its length with about 600,000 others (median 585,022; 13% of documents
+sit in pools above a million), so the content lookups scanned tens of millions of candidate
+prefixes, roughly 4.7 TB of `.bin` reads at about 28 GB/min. The configs are
 drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which
 asserts field-by-field that each stage differs from its baseline counterpart *only* in the data
 paths (whose blend list also carries ClimbMix's eight measured shard weights) and the run
