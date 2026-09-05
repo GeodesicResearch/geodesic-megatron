@@ -30,14 +30,18 @@ class TestSetupLogging:
         self.original_root_level = logging.getLogger().level
         self.original_env = os.environ.get("MEGATRON_BRIDGE_LOGGING_LEVEL")
 
-        # Store original filters for all loggers
+        # Store original filters and levels for all loggers. setup_logging(set_level_for_all_loggers=True)
+        # lowers every logger that exists at the time, and a level left behind changes behaviour
+        # elsewhere in the process (torch installs autograd logging hooks while its logger reads DEBUG).
         self.original_filters = {}
+        self.original_levels = {}
         root_logger = logging.getLogger()
         self.original_filters["root"] = root_logger.filters[:]
 
-        for logger_name in logging.root.manager.loggerDict:
+        for logger_name in list(logging.root.manager.loggerDict):
             logger = logging.getLogger(logger_name)
             self.original_filters[logger_name] = logger.filters[:]
+            self.original_levels[logger_name] = logger.level
 
         # Clean up any existing test loggers
         for logger_name in list(logging.root.manager.loggerDict.keys()):
@@ -48,6 +52,8 @@ class TestSetupLogging:
         """Cleanup after each test method."""
         # Restore original logging state
         logging.getLogger().setLevel(self.original_root_level)
+        for logger_name, original_level in self.original_levels.items():
+            logging.getLogger(logger_name).setLevel(original_level)
 
         # Restore environment variable
         if self.original_env is not None:
@@ -311,3 +317,25 @@ class TestSafeSerialize:
         my_lambda = lambda x: x + 1
         result = safe_serialize(my_lambda)
         assert "lambda" in result.lower() or "function" in result.lower()
+
+
+def test_the_setup_logging_teardown_restores_every_pre_existing_logger_level():
+    """``setup_logging(set_level_for_all_loggers=True)`` lowers every logger that exists at the
+    time, and a logger left at DEBUG changes behaviour elsewhere in the process: torch installs
+    autograd logging hooks on every ``backward()`` while its logger reads DEBUG, and those hooks
+    assert on a graph-less output that peft/test_recompute expects a RuntimeError for. The
+    class's teardown must put back the level of every logger that existed before the test, not
+    only the root's."""
+    probe = logging.getLogger("tests.log_utils.pre_existing_probe")
+    probe.setLevel(logging.WARNING)
+    case = TestSetupLogging()
+    case.setup_method()
+    try:
+        setup_logging(logging_level=logging.DEBUG, set_level_for_all_loggers=True)
+        assert probe.level == logging.DEBUG
+    finally:
+        case.teardown_method()
+    try:
+        assert probe.level == logging.WARNING
+    finally:
+        del logging.root.manager.loggerDict[probe.name]
