@@ -556,6 +556,36 @@ class TestHubReadRetry:
             audit.read_hub_file(fs, "u", self._failing_then("rows", [hub_error(404)]))
         assert fs.opens == 1
 
+    def test_a_request_on_the_client_the_library_closed_is_re_read_from_a_fresh_open(self, monkeypatch):
+        """huggingface_hub's backoff closes its shared httpx client when a request cannot connect,
+        then retries on the reference it took before its loop, so what a connection failure
+        surfaces is httpx's closed-client error, not a transport error. A fresh open builds a new
+        client, so the read must be re-opened like a cut body. A real closed client raises the
+        error, so the test follows httpx's own message; it raises before anything is sent."""
+        import httpx
+
+        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
+        closed = httpx.Client()
+        closed.close()
+        fs = self._FileSystem()
+        calls: list[object] = []
+
+        def work(fh):
+            calls.append(fh)
+            if len(calls) == 1:
+                closed.request("GET", "https://huggingface.co/never-sent")
+            return "rows"
+
+        assert audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work) == "rows"
+        assert (fs.opens, len(calls)) == (2, 2)
+
+    def test_a_runtime_error_that_is_not_the_closed_client_is_raised_at_once(self):
+        fs = self._FileSystem()
+        work = self._failing_then("rows", [RuntimeError("parquet magic bytes not found")])
+        with pytest.raises(RuntimeError, match="magic bytes"):
+            audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
+        assert fs.opens == 1
+
     class _CutHandle(io.BytesIO):
         """A parquet file whose first row-group read raises what a Hub range read raises when the
         peer closes mid-body. The footer sits at the end of the file, so a read that ends before

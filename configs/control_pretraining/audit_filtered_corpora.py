@@ -151,30 +151,43 @@ def stats_from_rows(rows: list[dict]) -> dict[str, FilterStats]:
     }
 
 
+def hub_read_failure_is_transient(error: BaseException) -> bool:
+    """Whether a failed Hub read is worth a fresh open: a transport error, a rate limit or a server
+    error, or a request that huggingface_hub sent on a client it had already closed.
+
+    The last is the library's own backoff: when a request cannot connect it closes the shared
+    httpx client, then retries on the reference it took before its loop, so what a connection
+    failure surfaces is httpx's closed-client ``RuntimeError`` rather than the network error. The
+    next request builds a fresh client, so a re-open succeeds where the library's retry could not.
+    """
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+
+    if isinstance(error, httpx.TransportError):
+        return True
+    if isinstance(error, HfHubHTTPError):
+        status = getattr(getattr(error, "response", None), "status_code", None)
+        return status == 429 or (status is not None and status >= 500)
+    return isinstance(error, RuntimeError) and "client has been closed" in str(error)
+
+
 def read_hub_file(fs, url: str, work, attempts: int = HUB_READ_ATTEMPTS):
-    """Open one Hub file by range request and return ``work(handle)``, re-opening on a transport failure.
+    """Open one Hub file by range request and return ``work(handle)``, re-opening on a transient failure.
 
     A range read of a multi-gigabyte parquet file can be cut mid-body by the Hub (a truncated
     response, a reset connection, a 429 or a 5xx); huggingface_hub retries the request that
     failed, not the read that was in flight, so the failure surfaces from the parquet reader
     hours into an audit. Each attempt re-opens the file and re-runs ``work`` from the start, so
     a partial read is never combined with a fresh one; every retry is printed to stderr; a
-    failure that is not a transport error, and the last transport failure, are raised. ``work``
-    must therefore be a pure function of the handle — it is called again on retry.
+    failure that ``hub_read_failure_is_transient`` rejects, and the last transient failure, are
+    raised. ``work`` must therefore be a pure function of the handle — it is called again on retry.
     """
-    import httpx
-    from huggingface_hub.errors import HfHubHTTPError
-
     for attempt in range(1, attempts + 1):
         try:
             with fs.open(url, "rb") as fh:
                 return work(fh)
-        except (httpx.TransportError, HfHubHTTPError) as error:
-            status = getattr(getattr(error, "response", None), "status_code", None)
-            retryable = (
-                isinstance(error, httpx.TransportError) or status == 429 or (status is not None and status >= 500)
-            )
-            if not retryable or attempt == attempts:
+        except Exception as error:
+            if not hub_read_failure_is_transient(error) or attempt == attempts:
                 raise
             delay = 2.0**attempt
             print(
