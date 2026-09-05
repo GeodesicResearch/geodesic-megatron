@@ -28,38 +28,37 @@
 # from. The same SHA is pinned in pa-warm-start-sft-filtered-mini-2plus.yaml beside this file;
 # a test asserts the two agree.
 #
-# The SHA below is INTERIM, and it moves once more. At it, fifteen of the sixteen splits are
-# landed and verified under the corrected rule, but `climbmix_full_filtered_mini_2plus` is
-# still the WITHDRAWN score-only build (dataset-builder's corrected upload had not committed).
-# So exactly fifteen corpora may be built from this pin, and ClimbMix full may not:
+# The SHA below, 504fc763, is the commit at which every one of the 33 configs is the corrected
+# build: the ClimbMix full filtered arm landed at 21:24Z and its removed arm at 22:10Z on
+# 2026-09-04 (dataset-builder, 2026-09-05 00:05Z), and nothing later rewrites a landed split
+# (each arm was pushed under `--skip-cards` scoped to its own config directory). Checked here
+# before the pin moved, from the Hub's metadata alone: both ClimbMix full provenances carry
+# `also_remove_flag: canary` beside `score_column: mini_score, threshold: 2` on their first
+# transform; the removed split holds 317,806 rows, the statistics' `n_removed`; the filtered
+# split's parquet footers sum to the statistics' `n_retained`, 552,997,250. A later commit that
+# changes only the dataset card does not move this pin; a commit that rewrites a split does, and
+# every corpus is then re-stamped against it (`BUILD_STEPS=prepare`, see build_corpora.sh).
 #
-#     build_corpora.sh <arm>/corpora.tsv all <the fifteen>     # never climbmix_full_*
+# How a corrected split is told from the withdrawn build, without asking anyone: each split's
+# own `_provenance.json` records its filter step (`type: corpus/judge_score_arm`); the corrected
+# splits carry `also_remove_flag: canary`, and the withdrawn ones carried no `also_remove_flag`
+# at all. The step is not always the first transform, so find it by type.
 #
-# Two guards stand behind that sentence, because a mistake here trains the model on the data Kyle
-# withdrew. The first is mechanical and needs no judgement: climbmix_full's `docs` in corpora.tsv
-# is PENDING, and `plan_corpus()` refuses a row without a count whatever its shard mode, so
-# `build_corpora.sh` refuses the whole `all` plan before submitting anything. The second is how a human tells the two
-# builds apart: each split's own `_provenance.json` records its filter step
-# (`type: corpus/judge_score_arm`); the corrected splits carry `also_remove_flag: canary` beside
-# `score_column: mini_score, threshold: 2`, and the withdrawn ClimbMix full carries no
-# `also_remove_flag` at all.
+# Why the ClimbMix row was held at PENDING in corpora.tsv until that check passed, rather than
+# guarded by its document count: slicing derives its eight ranges FROM the count, so against a
+# larger source (the withdrawn split held 552,997,269 documents against the corrected
+# 552,997,250) it would simply never ask for the surplus rows — every prepare succeeds, the
+# shard counts sum to the expected number, and `verify_corpora.py` passes with canaries still in
+# the corpus. `plan_corpus()` refuses a PENDING row whatever its shard mode, so the hold stops
+# the build before a job is submitted; `audit_filtered_corpora.py`'s comparison of the Hub
+# split's row count against `filter_stats_mini_2plus` (under `--canary-column`) catches the
+# mistake too, but after the corpus is built. A split that is not yet safe to build from goes
+# back to PENDING.
 #
-# A document COUNT is not a guard here, and it is worth saying why, because the arithmetic looks
-# like one. The withdrawn split holds 552,997,269 documents against the corrected 552,997,250 —
-# but slicing derives its eight ranges FROM the count, so against the larger source it would
-# simply never ask for the surplus 19 rows: every prepare succeeds, the shard counts sum to the
-# expected number, and `verify_corpora.py` passes with canaries still in the corpus. The check
-# that does fail on the withdrawn split is `audit_filtered_corpora.py`'s, which compares the Hub
-# split's own row count against `filter_stats_mini_2plus` under `--canary-column`: it reads the
-# Hub's metadata rather than the built corpus, so slicing cannot fool it. It is not a pre-flight,
-# though — the audit reads the corpus's prepare records before reaching that comparison, so it
-# reports the mistake after the fact. Only the PENDING hold prevents the build from starting.
-#
-# When dataset-builder's final-SHA message lands, this pin moves to it and all sixteen corpora
-# are re-prepared to re-stamp provenance against it. That re-prepare is cheap: the fifteen
-# splits' parquet is byte-identical between the two revisions (each arm was pushed under
-# `--skip-cards` scoped to its own config directory, so nothing later rewrites a landed split),
-# making the re-download a cache hit.
+# Moving this pin re-stamps every already-built corpus: the prepare step alone re-runs against
+# the new revision (a cache-hit download, a rewrite of training.jsonl and pipeline_results.json,
+# the .bin/.idx untouched), because `verify_corpora.py` reads the revision from the prepare
+# record and the fifteen splits' parquet is byte-identical across the revisions.
 #
 # It is pinned for the same reason the baseline's is: an unpinned prepare resolves the current
 # HEAD, so two corpora prepared a day apart would silently come from different data.
@@ -71,7 +70,7 @@
 #
 # build_corpora.sh issues that command for every row of this arm's corpora.tsv.
 dataset: geodesic-research/control-pretraining-datasets
-revision: 790465393eabff87f2c4bb01b2c3112ec877a2a5
+revision: 504fc76319174be60c5b3b71bd48e6c7379ebefc
 tokenizer: geodesic-research/nemotron-base-tokenizer
 val-proportion: 0
 skip-pack: true

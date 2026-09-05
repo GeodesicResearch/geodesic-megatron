@@ -44,11 +44,12 @@ dataset:
   # across its eight shards in proportion to each shard's MEASURED tokens
   # (round(0.698180 x shard_tokens / climbmix_tokens, 6), residue folded into the largest
   # shard), and `test_pretrain_climbmix_shard_weights_are_token_proportional` checks the
-  # eight below against the shards' provenance. While corpora.tsv holds climbmix_full at
-  # PENDING, the eight shard figures below are the prior build's (354,006,876,859 tokens
-  # over 552,997,269 documents) and that test skips; the rebuilt shards' verifier report
-  # replaces them. The other five corpora carry the verifier's figures for the rebuilt
-  # corpora, exact against the family's statistics.
+  # eight below against the shards' provenance. Until the ClimbMix rebuild at the pinned
+  # revision lands, the eight shard figures below are the WITHDRAWN build's (354,006,876,859
+  # tokens over 552,997,269 documents; the rebuild is cut at 552,997,250) and that test skips
+  # for want of the shards' provenance on disk; the rebuilt shards' verifier report replaces
+  # them, and the test must PASS before any launch. The other five corpora carry the
+  # verifier's figures for the rebuilt corpora, exact against the family's statistics.
   data_path:
     - "0.094645"   # climbmix_full_filtered_mini_2plus shard0 — 47,989,272,335 tokens, 69,124,658 docs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_mini_2plus/shard0/tokenized_base_input_document
