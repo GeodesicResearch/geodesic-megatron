@@ -648,7 +648,10 @@ produce by `audit_filtered_corpora.py <arm>/corpora.tsv --baseline-table <baseli
 revision (baseline minus filtered must equal the removed documents and tokens exactly), and with
 `--content` every filtered document is aligned in order to its baseline document, sampled pairs
 compared token for token, and sampled Hub rows of the filtered and removed splits checked
-present and absent — the check that catches a corpus built from the unfiltered split. Each
+present and absent — the check that catches a corpus built from the unfiltered split.
+`audit_corpora.sbatch <audit args...>` submits it as its own 1-node job, one per corpus,
+forwarding every argument into the container, because a pretraining corpus's content audit
+runs for hours. Each
 by-content lookup examines at most `--search-candidates` equal-length documents and reports
 itself truncated rather than absent past that, so the bound must exceed the largest same-length
 pool of the corpora searched — the baseline's, which the report records as

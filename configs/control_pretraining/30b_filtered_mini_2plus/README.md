@@ -29,8 +29,7 @@ Because each filtered corpus is smaller than its baseline counterpart, the conse
 **each source is replayed for slightly more epochs here** rather than contributing fewer tokens.
 That is the intended design — it holds the optimizer's trajectory fixed and puts the entire
 difference between the arms into which documents exist — but it is a real difference in
-effective epochs per source, and the per-corpus epoch figures are recorded in the tables below
-(ClimbMix's once its rebuild verifies).
+effective epochs per source, and the per-corpus epoch figures are recorded in the tables below.
 
 ## The filter
 
@@ -149,28 +148,27 @@ family-wide). `build_corpora.sh` refuses any row without an integer count and
 ### Stage 1 — pretraining, 501,303,520,191 tokens at seq 8192
 
 Weights are the baseline's; built tokens, documents and epochs are the verifier's
-(`--report-out`, `/projects/a5k/public/logs/control_pretraining/30b_filtered_mini_2plus_<stage>.json`)
-for the fifteen rebuilt corpora — each retained count is the withdrawn build's minus exactly
-that subset's canary count. `climbmix_full` is the one corpus whose rebuild at the pinned
-revision has not yet landed (its hold is lifted; the build is the next step); its figures in
-this and the shard table below are the withdrawn build's and are replaced when the rebuild
-verifies.
+(`--report-out`, `/projects/a5k/public/logs/control_pretraining/30b_filtered_corpora.json`,
+`OK: 16 corpora verified` at `504fc763` on 2026-09-05 06:51Z) — each retained count is the
+withdrawn build's minus exactly that subset's canary count.
 
 | Weight | Subset (`_filtered_mini_2plus`) | Baseline built | Filtered built | Documents | Epochs |
 |---|---|---|---|---|---|
-| 0.698180 | `climbmix_full` (8 shards, token-proportional) — **rebuild at 504fc763 not yet landed**; the withdrawn build's figures (the rebuild is cut at 552,997,250 documents) | 354,429,333,750 | 354,006,876,859 | 552,997,269 | 0.989 |
+| 0.698180 | `climbmix_full` (8 shards, token-proportional) | 354,429,333,750 | 354,006,639,047 | 552,997,250 | 0.989 |
 | 0.197485 | `zyda_full` | 99,227,596,755 | 99,160,979,442 | 91,191,142 | 0.998 |
 | 0.049870 | `stack_edu` | 25,029,225,350 | 24,984,851,117 | 28,539,984 | 1.001 |
 | 0.039896 | `climbmix_ai_docs` | 15,905,878,498 | 15,496,528,558 | 13,191,443 | 1.291 |
 | 0.009974 | `zyda_ai_docs` | 4,551,639,291 | 4,493,332,773 | 1,509,320 | 1.113 |
 | 0.004595 | `ai_safety_and_adjacent` | 658,501,575 | 416,016,846 | 226,747 | **5.537** |
-| 0.301820 | built and verified, five of six | **145,372,841,469** | **144,551,708,736** | | |
+| 1.000000 | all six, built and verified at `504fc763` | **499,802,175,219** | **498,558,347,783** | 687,655,886 | |
 
-Every filtered count above except ClimbMix's is the verifier's for the rebuilt corpus, and
-the audit checks each against dataset-builder's `filter_stats_mini_2plus`: documents equal its
-retained count, tokens equal its retained tokens plus one EOD per document. The withdrawn build's
-ClimbMix slices held 69,124,658-659 documents each and 36,997,888,468 to 49,173,491,260
-tokens; the rebuild's are cut at 552,997,250 documents.
+Every filtered count above is the verifier's for the corpus built at `504fc763`, and the
+audit checks each against dataset-builder's `filter_stats_mini_2plus`: documents equal its
+retained count, tokens equal its retained tokens plus one EOD per document. ClimbMix's
+354,006,639,047 tokens are the statistics' 353,453,641,797 retained tokens plus its 552,997,250
+documents exactly, and the baseline's 354,429,333,750 exceed them by 422,694,703 =
+422,376,897 removed tokens + 317,806 removed documents. Its eight slices hold 69,124,656-657
+documents each and 36,997,889,850 to 49,173,444,550 tokens.
 
 The eight ClimbMix shard weights in the config are this arm's own measurement: the shards are
 cut at equal retained-*document* counts, so their token counts differ (36.998B to 49.173B), and
@@ -178,21 +176,21 @@ each weight is `round(0.698180 x shard_tokens / climbmix_tokens, 6)` with the ro
 (+0.000001) folded into the largest shard, shard 1 — see the baseline README's "ClimbMix's
 shards are unequal, and the weights must follow the tokens" for why equal weights would
 over-sample the smaller shards. `test_pretrain_climbmix_shard_weights_are_token_proportional`
-checks the eight against the shards' provenance (and skips while that provenance is not on
-disk, as it is until the rebuild lands; the table below is the withdrawn build's measurement
-until the rebuilt shards verify, and the test must pass before any launch).
+checks the eight against the shards' provenance on disk and passes on the rebuilt shards
+(2026-09-05): the rebuild moved each shard by fewer than 200,000 tokens, so the eight weights
+are unchanged to six decimals from the withdrawn build's.
 
 | Shard | Tokens | Documents | Weight |
 |---|---|---|---|
-| 0 | 47,989,272,335 | 69,124,658 | 0.094645 |
-| 1 | 49,173,491,260 | 69,124,659 | 0.096982 |
-| 2 | 47,193,970,274 | 69,124,658 | 0.093077 |
-| 3 | 44,221,389,093 | 69,124,659 | 0.087214 |
-| 4 | 41,781,794,760 | 69,124,659 | 0.082403 |
-| 5 | 36,997,888,468 | 69,124,658 | 0.072968 |
-| 6 | 41,709,377,610 | 69,124,659 | 0.082260 |
-| 7 | 44,939,693,059 | 69,124,659 | 0.088631 |
-| **all** | **354,006,876,859** | **552,997,269** | **0.698180** |
+| 0 | 47,989,092,756 | 69,124,656 | 0.094645 |
+| 1 | 49,173,444,550 | 69,124,656 | 0.096982 |
+| 2 | 47,193,974,236 | 69,124,656 | 0.093077 |
+| 3 | 44,221,378,950 | 69,124,657 | 0.087214 |
+| 4 | 41,781,794,268 | 69,124,656 | 0.082403 |
+| 5 | 36,997,889,850 | 69,124,656 | 0.072968 |
+| 6 | 41,709,375,594 | 69,124,656 | 0.082260 |
+| 7 | 44,939,688,843 | 69,124,657 | 0.088631 |
+| **all** | **354,006,639,047** | **552,997,250** | **0.698180** |
 
 `ai_safety_and_adjacent` is where the filter is expected to bite hardest — it is the one corpus
 in the mix whose subject matter the cascade is looking for, and the annotation card measures its
@@ -340,14 +338,25 @@ DRY_RUN=1 configs/control_pretraining/build_corpora.sh \
 # the bound above it from a first run's output. The default suits midtraining and SFT; the
 # pretraining corpora measure (filtered / baseline) zyda_full 102,185 / 102,190, stack_edu
 # 48,264 / 48,264, climbmix_ai_docs 33,416 / 34,322, zyda_ai_docs 919 / 930 and
-# ai_safety_and_adjacent 215 / 338, so pass 110000 for those — and read climbmix_full's own
-# figures from its report before trusting any verdict on it:
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-  python configs/control_pretraining/audit_filtered_corpora.py \
+# ai_safety_and_adjacent 215 / 338, so pass 110000 for those; climbmix_full measures
+# 1,261,705 / 1,262,656 (both at length 676), so it needs 1300000 and a longer walltime.
+# One 1-node job per corpus through audit_corpora.sbatch, which forwards every argument to
+# audit_filtered_corpora.py inside the container: a content audit takes minutes for a
+# midtraining corpus and hours for a pretraining one, longer than a session allocation is
+# safe to lean on. The job's exit status is the audit's and its last line names it.
+mkdir -p logs/slurm
+isambard_sbatch --job-name=cp-30b_filtered_mini_2plus-audit-<subset> \
+  configs/control_pretraining/audit_corpora.sbatch \
     configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv \
     --baseline-table configs/control_pretraining/30b_baseline/corpora.tsv \
     --filter-tag mini_2plus --content --canary-column canary --search-candidates 110000 \
-    --report-out /projects/a5k/public/logs/control_pretraining/audit_filtered/<subset>.json <subset>"
+    --report-out /projects/a5k/public/logs/control_pretraining/audit_filtered/<subset>.json <subset>
+# The audit reads the Hub's parquet files by range request for hours, and the cluster's
+# egress goes away for minutes at a time ("[Errno 101] Network is unreachable" from every
+# node at once; two audits died in one such outage at 05:48Z on 2026-09-05). Each Hub read
+# re-opens on a transport failure, a 429 or 5xx, or the closed-client error huggingface_hub
+# raises after a connection failure, with waits doubling to a 60 s cap over 12 attempts —
+# about seven minutes — before the job fails; a longer outage fails it, and it is resubmitted.
 ```
 
 The build script and the verifier are shared by every arm and read the arm's `corpora.tsv`, so
@@ -357,8 +366,8 @@ file runs in its own 1-node job — nothing heavy runs on a login node or in a c
 Jobs are named `cp-<arm>-<prep|tok|split|pack>-<subset>[-sN]`, where `<arm>` is the directory
 the table sits in (`30b_filtered_mini_2plus` here) — so `squeue --name` groups by arm. The SLURM
 logs do not: every prepare, tokenize and pack job writes `logs/slurm/data-prep-<jobid>.out` (the
-data batch script's own `--output`), and only the split job's log carries the arm and subset, so
-find a job's log by its id. A partial submission selects subsets on the command line
+data batch script's own `--output`), an audit job writes `logs/slurm/audit-<jobid>.out`, and only
+the split job's log carries the arm and subset, so find a job's log by its id. A partial submission selects subsets on the command line
 rather than submitting from a copied table: a copy elsewhere renames every job after its own
 directory, and its `docs` column can drift from the table the verifier checks the corpora
 against.
@@ -378,15 +387,18 @@ it as long as it was built consistently. [`../audit_filtered_corpora.py`](../aud
 closes that gap by checking this arm against two references its build did not produce: the
 baseline arm's corpora on disk and the `filter_stats_mini_2plus` config of the pinned revision.
 
-**The results below are for the rebuilt corpora at the interim pin `790465393e`** (run
-2026-09-04; reports `/projects/a5k/public/logs/control_pretraining/30b_filtered_mini_2plus_audit_<stage>.json`).
+**The results below are for the corpora built at `504fc763`** (run 2026-09-05, one job per
+corpus through [`../audit_corpora.sbatch`](../audit_corpora.sbatch); reports
+`/projects/a5k/public/logs/control_pretraining/audit_filtered/<subset>.json`).
 Every filtered corpus must hold zero canary documents, and that is verified on the built corpus
 itself by looking up every flagged row of the removed split by content (`--canary-column
-canary`; the flag is not on the filtered splits, so it cannot be read off them). `climbmix_full`
-is audited when its rebuild lands, at a `--search-candidates` bound measured from its `.idx`.
+canary`; the flag is not on the filtered splits, so it cannot be read off them). `climbmix_full`'s
+audit runs at `--search-candidates 1300000`, above the pools measured from its `.idx`
+(1,261,705 filtered and 1,262,656 baseline documents share the length 676).
 
-**Counts, fifteen corpora, `OK`.** Every prepare record names the `_filtered_mini_2plus`
-subset at `790465393e`; for each `.bin` corpus, baseline documents minus filtered documents
+**Counts, fourteen corpora, `OK`** (`zyda_full` and `climbmix_full` have no report yet: an audit
+writes its report only at the end, so a run that dies leaves nothing behind). Every prepare
+record names the `_filtered_mini_2plus` subset at `504fc763`; for each `.bin` corpus, baseline documents minus filtered documents
 equals `n_removed` and baseline tokens minus filtered tokens equals `num_tokens_removed +
 n_removed` (one EOD per removed document) exactly, the filtered tokens equal
 `num_tokens_retained + n_retained`, the Hub's filtered split holds exactly the retained count of
@@ -443,24 +455,27 @@ count in the tables above; it bounds what "removed" means for this arm.
 
 | corpus | aligned / skipped (= `n_removed`) | pairs identical (resolved by content) | Hub retained match | Hub removed: in baseline / absent | surviving as source duplicate | canaries: flagged → absent from the corpus |
 |---|---|---|---|---|---|---|
-| `climbmix_long` | 786,446 / 13,586 | 202 / 202 (71) | 40 / 40 | 30 / 30 | 0 | 3 → 3 |
-| `nemotron_stem_sft` | 458,671 / 653 | 202 / 202 (3) | 40 / 40 | 9 / 9 | 0 | 0 → 0 |
+| `nemotron_stem_sft` | 458,671 / 653 | 202 / 202 (3) | 40 / 40 | 10 / 10 | 0 | 0 → 0 |
 | `arxiv_papers` | 339,965 / 93,749 | 202 / 202 (0) | 40 / 40 | 40 / 40 | 0 | 64 → 64 |
-| `nemotron_wiki_rewrite` | 6,233,851 / 1,188 | 202 / 202 (0) | 40 / 40 | 39 / 39 | 0 | 0 → 0 |
-| `zyda_long` | 137,515 / 1,708 | 202 / 202 (9) | 40 / 40 | 10 / 9 | 1 | 0 → 0 |
-| `stack_edu_long` | 3,159 / 31 | 201 / 201 (0) | 39 / 39 | 10 / 8 | 2 | 0 → 0 |
-| `climbmix_ai_docs_long` | 5,356 / 445 | 202 / 202 (1) | 39 / 39 | 10 / 10 | 0 | 1 → 1 |
+| `nemotron_wiki_rewrite` | 6,233,851 / 1,188 | 202 / 202 (0) | 40 / 40 | 40 / 40 | 0 | 0 → 0 |
+| `zyda_long` | 137,515 / 1,708 | 202 / 202 (9) | 40 / 40 | 10 / 10 | 0 | 0 → 0 |
+| `stack_edu_long` | 3,159 / 31 | 201 / 201 (0) | 40 / 40 | 10 / 10 | 0 | 0 → 0 |
+| `climbmix_ai_docs_long` | 5,356 / 445 | 202 / 202 (1) | 40 / 40 | 10 / 10 | 0 | 1 → 1 |
 | `zyda_ai_docs_long` | 1,593 / 72 | 201 / 201 (0) | 20 / 20 | 10 / 10 | 0 | 0 → 0 |
-| `nemotron_wiki_rewrite_ai_docs` | 51,914 / 1,127 | 202 / 202 (0) | 20 / 20 | 9 / 9 | 0 | 0 → 0 |
+| `nemotron_wiki_rewrite_ai_docs` | 51,914 / 1,127 | 202 / 202 (0) | 20 / 20 | 10 / 10 | 0 | 0 → 0 |
 | `pa_warm_start_sft` (packs) | 5,654,600 packed conversations (5,636,206 distinct) in 748,783 sequences | — | 40 / 40 present | 40 / 40 absent | — | 0 → 0 |
-| the pretraining five | re-audit running at `--search-candidates 110000` (`climbmix_ai_docs`, `stack_edu`, `zyda_full`, `zyda_ai_docs`, `ai_safety_and_adjacent`) | | | | | |
-| `climbmix_full` | rebuild at 504fc763 not yet landed; audited when its shards verify | | | | | |
+| `climbmix_ai_docs` | 13,191,443 / 314,909 | 202 / 202 (0) | 40 / 40 | 40 / 40 | 0 | 19 → 19 |
+| `stack_edu` | 28,539,984 / 4,460 | 202 / 202 (0) | 40 / 40 | 40 / 36 | 4 | 73 → 73 |
+| `zyda_ai_docs` | 1,509,320 / 27,435 | 202 / 202 (0) | 40 / 40 | 10 / 10 | 0 | 1 → 1 |
+| `ai_safety_and_adjacent` | 226,747 / 126,202 | 202 / 202 (0) | 40 / 40 | 30 / 30 | 0 | 295 → 295 |
+| `climbmix_long` | 786,446 / 13,586 | 202 / 202 (71) | 40 / 40 | 30 / 30 | 0 | 3 → 3 |
+| `zyda_full` | re-run in progress (job 6331002): its first run at this pin died 47 min in, in the egress outage described under "Building the data" | | | | | |
+| `climbmix_full` | in progress (job 6331260, `--search-candidates 1300000`) | | | | | |
 
 A row is filled from its report JSON when the job lands; a corpus with any failure would be
-listed with the failing check, not omitted. The two `stack_edu_long` and one `zyda_long`
-sampled survivals are source duplicates by the whole-baseline count (the baseline holds each
-text more times than the filtered corpus does), consistent with dataset-builder's per-subset
-counts of 3 and 79.
+listed with the failing check, not omitted. The four `stack_edu` sampled survivals are source
+duplicates by the whole-baseline count (the baseline holds each text more times than the
+filtered corpus does), consistent with dataset-builder's 221 of its 4,460 removed rows.
 
 ## Launching, on Kyle's signal
 
@@ -517,26 +532,31 @@ checkpoint is on disk — submitting all three at once would have stages 2 and 3
 Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 1. `verify_corpora.py` on this arm's table reports `OK` for every row (no PENDING, no revision
-   drift, every `.bin` at 4 bytes per token) — TO REDO on the canary-inclusive rebuild (it was
-   done on the withdrawn build on 2026-09-03).
+   drift, every `.bin` at 4 bytes per token) — DONE 2026-09-05 06:51Z on the build at
+   `504fc763`: `OK: 16 corpora verified`, report
+   `/projects/a5k/public/logs/control_pretraining/30b_filtered_corpora.json`.
 2. `audit_filtered_corpora.py` reports `OK` for every row, with `--content` for every corpus
    (see "Audit against the baseline") — the check that rules out training on unfiltered data,
    now including zero canary documents in every filtered corpus — and with
    `--search-candidates` above each baseline corpus's largest same-length pool, so that no verdict in the
    report reads `search_truncated`: a truncated lookup proves nothing, and the pretraining
-   corpora exceed the default bound by up to five times. TO REDO on the rebuild.
+   corpora exceed the default bound by up to five times (ClimbMix by sixty). Fourteen of
+   sixteen DONE at `504fc763` (the table in "Audit against the baseline"); `zyda_full` is
+   re-running after an egress outage killed its first run, and `climbmix_full` is running at
+   1,300,000.
 3. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
-   until the provenance exists, so a pass, not a skip, is the gate) — TO REDO on the rebuild:
-   the eight weights in the config and the pass recorded on 2026-09-03 are the withdrawn
-   build's, and the test skips again now that its provenance is deleted.
+   until the provenance exists, so a pass, not a skip, is the gate) — DONE 2026-09-05:
+   recomputed from the verifier's report on the rebuilt shards, the eight weights unchanged to
+   six decimals, and the test passes on the rebuilt provenance.
 4. The `ai_safety_and_adjacent` epoch count in the tables above is the rebuilt corpus's and has
    been looked at — DONE: 5.537 per stage from the verifier's 416,016,846 tokens, against the
    5.52 of the withdrawn build that Kyle accepted on 2026-09-03 (see the note under stage 1);
    the difference is the 295 canary documents, 0.18% of the subset's tokens, so the accepted
    magnitude stands. The figure cannot move at the final SHA, whose parquet for this split is
    byte-identical to the interim pin's.
-5. The three assertions the PENDING hold makes dormant have run and PASSED, not skipped:
+5. DONE 2026-09-05 with ClimbMix's count 552,997,250 restored — the three assertions the
+   PENDING hold makes dormant have run and PASSED, not skipped:
    `test_dry_run_submits_the_expected_jobs`, `test_climbmix_alone_is_submittable_from_the_arm_table`
    and `test_climbmix_slices_cover_the_corpus_exactly_once`. Skipping is the correct behaviour
    while `climbmix_full_filtered_mini_2plus` has no count — a plan that cannot be computed cannot
@@ -552,22 +572,24 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 ## Status
 
-**Fifteen of sixteen corpora are built, verified and audited at the interim pin; the pin has
-moved to `504fc763` and `climbmix_full`'s hold is lifted; nothing has been launched.** Kyle
-corrected the rule to canary OR mini >= 2 on 2026-09-04; dataset-builder rebuilt every split in
-place under the same names, and this arm's sixteen tokenised corpora (built from the withdrawn
-mini-only splits at `7653f09b`) were deleted the same day. The fifteen splits landed first were
-built from the interim pin `790465393e` (see "The corpora" for how a corrected split is told
-from a withdrawn one), pass `verify_corpora.py`, and their tables above carry the verifier's
-figures. ClimbMix full landed at `504fc763`, checked from the Hub's metadata before its count
-was restored (provenance rule, removed rows, filtered rows — "The corpora" above).
+**All sixteen corpora are built and verified at `504fc763`, fourteen are audited clean there
+and the last two audits are running; nothing has been launched.** Kyle corrected the rule
+to canary OR mini >= 2 on 2026-09-04; dataset-builder rebuilt every split in place under the
+same names, and this arm's sixteen tokenised corpora (built from the withdrawn mini-only
+splits at `7653f09b`) were deleted the same day. The fifteen splits that landed first were
+built from the interim pin `790465393e` (see "The corpora" for how a corrected split is
+told from a withdrawn one) and re-stamped against `504fc763` with `BUILD_STEPS=prepare` (the
+download is a cache hit; their `.bin/.idx` are untouched); ClimbMix full was built at
+`504fc763` after its provenance rule, removed rows and filtered rows were checked from the
+Hub's metadata ("The corpora" above). `verify_corpora.py` reports `OK: 16 corpora verified`
+(2026-09-05 06:51Z), the tables above carry the verifier's figures, the eight ClimbMix shard
+weights are the rebuilt shards' measurement, and every `training.jsonl` has been released.
 
-The remaining procedure, from this revision: build `climbmix_full` (16 jobs), re-stamp the
-fifteen's provenance against `504fc763` with `BUILD_STEPS=prepare` (prepare only — nothing
-re-tokenizes; see "Building the data"), refill ClimbMix's shard figures and weights from the
-verifier's report, then `verify_corpora.py` and `audit_filtered_corpora.py --content
---canary-column canary` at a bound above every corpus's largest same-length pool — ClimbMix's
-measured from its `.idx` — before the first submission. The configs are
+What remains before readiness is reported: the `zyda_full` audit re-run and the
+`climbmix_full` audit (jobs 6331002 and 6331260, one job per corpus through
+[`../audit_corpora.sbatch`](../audit_corpora.sbatch)) must land `OK` with no
+`search_truncated` verdict, and their rows in "Audit against the baseline" be filled from
+the reports. The configs are
 drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which
 asserts field-by-field that each stage differs from its baseline counterpart *only* in the data
 paths (whose blend list also carries ClimbMix's eight measured shard weights) and the run

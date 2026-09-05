@@ -18,14 +18,18 @@ Each test builds what the audit reads — two arms' prepare and tokenize records
 documents written by Megatron's own builder, a packed parquet in the packer's layout, or two
 arrays of document lengths — correct except for one defect, and asserts the audit reports that
 defect. Nothing is mocked but the Hub's file listing and filesystem under the read-retry tests,
-whose boundary is the network; the Hub reads themselves are exercised elsewhere (by the audit runs
-the arm READMEs record), because they need it.
+whose boundary is the network, and the container runner under the audit-job test, whose boundary
+is Apptainer and SLURM; the Hub reads themselves are exercised elsewhere (by the audit runs the
+arm READMEs record), because they need it.
 """
 
 from __future__ import annotations
 
 import io
+import os
 import random
+import stat
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -475,6 +479,51 @@ class TestNames:
     def test_statistics_rows_need_every_count(self):
         with pytest.raises(KeyError):
             audit.stats_from_rows([{"subset": BASE, "n_total": 1}])
+
+
+class TestAuditJob:
+    """audit_corpora.sbatch runs the audit as its own 1-node job: every argument must reach
+    audit_filtered_corpora.py inside the container unchanged, the job's exit status must be the
+    audit's, and a call without arguments must refuse rather than run an audit of nothing. The
+    Apptainer runner is the untestable boundary — the test stands in a repo whose runner prints
+    the payload it was handed and exits with a chosen status, as the pipeline submit tests do."""
+
+    SCRIPT = Path(audit.__file__).resolve().parent / "audit_corpora.sbatch"
+
+    @pytest.fixture()
+    def stub_repo(self, tmp_path):
+        stub = tmp_path / "stub_repo"
+        stub.mkdir()
+        (stub / "pipeline_env_config.env").write_text(
+            'CONTAINER_SIF="/stub/image.sif"\nenv_config_require() { return 0; }\n'
+        )
+        runner = stub / "pipeline_env_exec.sh"
+        runner.write_text('#!/bin/bash\nprintf "PAYLOAD:%s\\n" "$1"\nexit 7\n')
+        runner.chmod(runner.stat().st_mode | stat.S_IEXEC)
+        return stub
+
+    def _run(self, stub_repo, args: list[str]) -> subprocess.CompletedProcess:
+        env = dict(os.environ, GEODESIC_REPO_DIR=str(stub_repo))
+        env.pop("SLURM_JOB_ID", None)
+        return subprocess.run(["bash", str(self.SCRIPT), *args], capture_output=True, text=True, env=env, timeout=60)
+
+    def test_every_argument_reaches_the_audit_and_the_exit_status_is_the_audits(self, stub_repo):
+        result = self._run(stub_repo, ["arm/corpora.tsv", "--search-candidates", "110000", "a subset name"])
+        payload = [line for line in result.stdout.splitlines() if line.startswith("PAYLOAD:")]
+        assert len(payload) == 1, result.stdout + result.stderr
+        assert payload[0].endswith(
+            "python -u configs/control_pretraining/audit_filtered_corpora.py"
+            " arm/corpora.tsv --search-candidates 110000 a\\ subset\\ name"
+        )
+        assert f"cd {stub_repo}; source pipeline_env_activate.sh || exit 1;" in payload[0]
+        assert result.returncode == 7
+        assert "EXIT_AUDIT=7" in result.stdout
+
+    def test_no_arguments_is_refused_before_anything_runs(self, stub_repo):
+        result = self._run(stub_repo, [])
+        assert result.returncode == 2
+        assert "Usage:" in result.stderr
+        assert "PAYLOAD:" not in result.stdout
 
 
 class TestHubReadRetry:
