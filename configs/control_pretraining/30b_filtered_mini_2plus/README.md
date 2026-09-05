@@ -396,9 +396,9 @@ canary`; the flag is not on the filtered splits, so it cannot be read off them).
 audit runs at `--search-candidates 1300000`, above the pools measured from its `.idx`
 (1,261,705 filtered and 1,262,656 baseline documents share the length 676).
 
-**Counts, fourteen corpora, `OK`** (`zyda_full` and `climbmix_full` have no report yet: an audit
-writes its report only at the end, so a run that dies leaves nothing behind). Every prepare
-record names the `_filtered_mini_2plus` subset at `504fc763`; for each `.bin` corpus, baseline documents minus filtered documents
+**Counts, fifteen corpora, `OK`** (`climbmix_full` has no report yet: an audit writes its
+report only at the end, so a run that dies leaves nothing behind). Every prepare record names
+the `_filtered_mini_2plus` subset at `504fc763`; for each `.bin` corpus, baseline documents minus filtered documents
 equals `n_removed` and baseline tokens minus filtered tokens equals `num_tokens_removed +
 n_removed` (one EOD per removed document) exactly, the filtered tokens equal
 `num_tokens_retained + n_retained`, the Hub's filtered split holds exactly the retained count of
@@ -469,7 +469,7 @@ count in the tables above; it bounds what "removed" means for this arm.
 | `zyda_ai_docs` | 1,509,320 / 27,435 | 202 / 202 (0) | 40 / 40 | 10 / 10 | 0 | 1 → 1 |
 | `ai_safety_and_adjacent` | 226,747 / 126,202 | 202 / 202 (0) | 40 / 40 | 30 / 30 | 0 | 295 → 295 |
 | `climbmix_long` | 786,446 / 13,586 | 202 / 202 (71) | 40 / 40 | 30 / 30 | 0 | 3 → 3 |
-| `zyda_full` | re-run in progress (job 6331002): its first run at this pin died 47 min in, in the egress outage described under "Building the data" | | | | | |
+| `zyda_full` | 91,191,142 / 29,114 | 202 / 202 (0) | 40 / 40 | 40 / 40 | 0 | 1 → 1 |
 | `climbmix_full` | in progress (job 6331260, `--search-candidates 1300000`) | | | | | |
 
 A row is filled from its report JSON when the job lands; a corpus with any failure would be
@@ -540,10 +540,9 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    now including zero canary documents in every filtered corpus — and with
    `--search-candidates` above each baseline corpus's largest same-length pool, so that no verdict in the
    report reads `search_truncated`: a truncated lookup proves nothing, and the pretraining
-   corpora exceed the default bound by up to five times (ClimbMix by sixty). Fourteen of
-   sixteen DONE at `504fc763` (the table in "Audit against the baseline"); `zyda_full` is
-   re-running after an egress outage killed its first run, and `climbmix_full` is running at
-   1,300,000.
+   corpora exceed the default bound by up to five times (ClimbMix by sixty). Fifteen of
+   sixteen DONE at `504fc763` (the table in "Audit against the baseline"), none truncated;
+   `climbmix_full` is running at 1,300,000 (job 6331260).
 3. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
    until the provenance exists, so a pass, not a skip, is the gate) — DONE 2026-09-05:
@@ -572,8 +571,8 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
 ## Status
 
-**All sixteen corpora are built and verified at `504fc763`, fourteen are audited clean there
-and the last two audits are running; nothing has been launched.** Kyle corrected the rule
+**All sixteen corpora are built and verified at `504fc763`, fifteen are audited clean there
+and the ClimbMix audit is running; nothing has been launched.** Kyle corrected the rule
 to canary OR mini >= 2 on 2026-09-04; dataset-builder rebuilt every split in place under the
 same names, and this arm's sixteen tokenised corpora (built from the withdrawn mini-only
 splits at `7653f09b`) were deleted the same day. The fifteen splits that landed first were
@@ -585,11 +584,10 @@ Hub's metadata ("The corpora" above). `verify_corpora.py` reports `OK: 16 corpor
 (2026-09-05 06:51Z), the tables above carry the verifier's figures, the eight ClimbMix shard
 weights are the rebuilt shards' measurement, and every `training.jsonl` has been released.
 
-What remains before readiness is reported: the `zyda_full` audit re-run and the
-`climbmix_full` audit (jobs 6331002 and 6331260, one job per corpus through
-[`../audit_corpora.sbatch`](../audit_corpora.sbatch)) must land `OK` with no
-`search_truncated` verdict, and their rows in "Audit against the baseline" be filled from
-the reports. The configs are
+What remains before readiness is reported: the `climbmix_full` audit (job 6331260, through
+[`../audit_corpora.sbatch`](../audit_corpora.sbatch), started 07:00Z on 2026-09-05) must land
+`OK` with no `search_truncated` verdict, and its row in "Audit against the baseline" be
+filled from `/projects/a5k/public/logs/control_pretraining/audit_filtered/climbmix_full_filtered_mini_2plus.json`. The configs are
 drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which
 asserts field-by-field that each stage differs from its baseline counterpart *only* in the data
 paths (whose blend list also carries ClimbMix's eight measured shard weights) and the run
