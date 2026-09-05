@@ -1078,12 +1078,17 @@ Unit tests import torch and `megatron.core`, so they run **inside the container*
 tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that asserts
 `./nemo_experiments` is absent. `-n 4 --dist loadfile` uses the image's bundled pytest-xdist
 (~2 min vs ~5-6 min serial; per-worker MASTER_PORT isolation lives in
-`tests/unit_tests/conftest.py`). **Do not raise to `-n 8`**: at 8 workers the full suite
-deterministically errors in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolves to
-a slow tokenizer whose `get_vocab()` raises `NotImplementedError`) while the identical suite
-passes at `-n 4` — measured 2026-08-18, 5,664 passed at `-n 4` vs ~10/10 failures at `-n 8`.
-The file passes alone and alone-under-xdist, so the trigger is the full suite's concurrent
-load on the shared HF cache, not a bad test:
+`tests/unit_tests/conftest.py`). **Do not raise to `-n 8`** until it is re-measured: the failure
+that produced this rule was the ordering bug below, fixed 2026-09-05, and `-n 8` has not been
+re-run since. That bug looked like load: the full
+suite errored in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolving a saved fast
+tokenizer to a slow class whose `get_vocab()` raises `NotImplementedError`) on every attempt at
+`-n 8` and on some at `-n 4`, while the file passed alone. The cause was test-order pollution
+(fixed 2026-09-05): the `hf_pretrained` test fixtures named their `Mock(spec=...)` objects by
+assigning `__class__.__name__`, and a spec'd Mock's `__class__` IS the spec, so that renamed
+transformers' Python tokenizer backend for the rest of the xdist worker and AutoTokenizer no
+longer recognised it by name. `tests/unit_tests/models/hf_pretrained/mocks.py` builds such mocks
+on a throwaway subclass instead, and each fixture file carries a regression test:
 ```bash
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; cd /tmp; \
   python -m pytest $PWD/tests/unit_tests/ -x -q -n 4 --dist loadfile"

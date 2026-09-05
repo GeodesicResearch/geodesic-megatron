@@ -98,9 +98,9 @@ run.
 # NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
 # not exist, so running from the repo root errors every test (and would rmtree a real one).
 # -n 4 --dist loadfile uses the image's bundled pytest-xdist (~2 min vs ~5-6 min serial).
-# Do not raise to -n 8: the full suite deterministically errors in test_mq_tokenizers.py
-# at 8 workers (AutoTokenizer resolves to a slow tokenizer under concurrent HF-cache
-# load) while the identical suite passes at -n 4 -- see CLAUDE.md's Testing section.
+# Do not raise to -n 8 until it is re-measured: the test_mq_tokenizers.py fixture error that
+# set the worker count was test-order pollution (hf_pretrained fixtures renaming a real
+# transformers class through a spec Mock, fixed 2026-09-05) -- see CLAUDE.md's Testing section.
 # per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py, which derives the
 # port base per session so two concurrent suites on one node do not collide. Set
 # MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.

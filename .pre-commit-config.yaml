@@ -114,14 +114,15 @@ repos:
               # keeps each test file on one worker; tests/unit_tests/conftest.py
               # gives each worker a distinct MASTER_PORT so concurrently-running
               # files that init torch.distributed cannot collide on 29500.
-              # 4 workers, not 8: at -n 8 test_mq_tokenizers.py deterministically
-              # errors at fixture setup (AutoTokenizer resolves to a slow tokenizer
-              # whose get_vocab() raises NotImplementedError) while the identical
-              # suite passes at -n 4 -- measured 2026-08-18, 5,664 passed / exit 0
-              # at -n 4 against ~10/10 failures at -n 8. Not a bad test: the file
-              # passes alone AND alone-under-xdist; the failure needs the full
-              # suite loading the shared HF cache concurrently, so lower worker
-              # count is the fix, not quarantine. Costs ~18 s per commit.
+              # 4 workers, not 8: the worker count was chosen on 2026-08-18 when
+              # -n 8 failed ~10/10 at test_mq_tokenizers.py fixture setup
+              # (AutoTokenizer resolving a saved fast tokenizer to a slow class
+              # whose get_vocab() raises NotImplementedError) and -n 4 passed.
+              # That was test-order pollution, not load, fixed 2026-09-05: the
+              # hf_pretrained fixtures renamed the real transformers classes
+              # through a spec Mock (see tests/unit_tests/models/hf_pretrained/
+              # mocks.py). -n 8 has not been re-measured since; -n 4 stays until
+              # it is. Costs ~18 s per commit.
               # (No apostrophes in these comments: the whole entry is one
               # single-quoted bash -c string and shlex would truncate at one.)
               # --reruns with --only-rerun: retry ONLY external-boundary errors (HF
