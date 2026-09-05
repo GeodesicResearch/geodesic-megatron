@@ -21,12 +21,21 @@
 #   --mode sft|cpt|pretrain     Training mode
 #
 # Options:
-#   --disable-ft                Use plain torchrun instead of ft_launcher
+#   --disable-ft                Use plain torchrun instead of ft_launcher (also drops
+#                               NVRx straggler detection)
+#   --disable-straggler         Keep ft_launcher, but drop NVRx straggler detection
 #   --enable-pao                Enable PAO (Partial Activation Offloading)
 #   --peft lora                 Enable LoRA PEFT
 #   --nodes N                   Override number of nodes (default: all in allocation)
 #   --nodelist LIST             Override nodelist (default: all in allocation)
 #   -- [extra args]             Extra args passed to the training script
+#
+# Debug env knobs (submit-time):
+#   ISAMBARD_NCCL_DEBUG=INFO    NCCL debug that actually reaches the ranks — a bare
+#                               NCCL_DEBUG is eaten by module setenv/purge churn. At INFO,
+#                               pair with ISAMBARD_NCCL_DEBUG_FILE=/path/%h.%p.log or 512
+#                               ranks flood the shared stdout.
+#   FI_LOG_LEVEL=warn           libfabric warnings (e.g. CXI MR-cache rejections) into the log.
 #
 # Examples:
 #   # Nano SFT with ft_launcher (default)
@@ -34,6 +43,15 @@
 #
 #   # Super SFT without fault tolerance
 #   bash pipeline_training_launch.sh configs/nemotron_super_200k_warm_start_sft_bf16.yaml --model super --mode sft --disable-ft
+#
+#   # Long pretraining run: --disable-ft, because the rank-heartbeat timeout below can SIGKILL
+#   # a healthy job at 7200 s, and a run whose first checkpoint lands later than that then
+#   # restarts from iteration 0 forever. --disable-straggler does NOT remove that timeout.
+#   bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode pretrain --disable-ft
+#
+#   # Drop only the NVRx straggler detector, keeping ft_launcher restarts. Correct when the run
+#   # fits inside the heartbeat window and the detector's rank-0 gather is OOMing the job.
+#   bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode pretrain --disable-straggler
 #
 #   # Nano CPT / midtraining
 #   bash pipeline_training_launch.sh configs/inoculation_midtraining/cpt/im_nemotron_30b_baseline_cpt.yaml --model nano --mode cpt
@@ -49,6 +67,7 @@ CONFIG_FILE=""
 MODEL=""
 MODE=""
 USE_FT=true
+USE_STRAGGLER=true
 ENABLE_PAO=false
 PEFT=""
 OVERRIDE_NODES=""
@@ -60,6 +79,7 @@ while [[ $# -gt 0 ]]; do
         --model)       MODEL="$2"; shift 2 ;;
         --mode)        MODE="$2"; shift 2 ;;
         --disable-ft)  USE_FT=false; shift ;;
+        --disable-straggler) USE_STRAGGLER=false; shift ;;
         --enable-pao)  ENABLE_PAO=true; shift ;;
         --peft)        PEFT="$2"; shift 2 ;;
         --nodes)       OVERRIDE_NODES="$2"; shift 2 ;;
@@ -277,6 +297,18 @@ export FI_CXI_DEFAULT_TX_SIZE=1024
 # from glibc memory operations that memhooks would trigger.
 export FI_MR_CACHE_MONITOR=userfaultfd
 
+# MR-cache capacity. The provider default (~4096 entries) is too small for a 512-rank
+# distributed-checkpoint save: the save's staging churn fills the cache, and once full it
+# stops caching NEW registrations — after which every NCCL chunk transfer pays slow-path
+# registration and ALL collectives run ~25x slower for the remainder of the process
+# (measured 2026-08-14: ~6.5 s/iter -> uniform ~165 s/iter on the 512-GPU Nano pretrain
+# posture, permanent until restart; fresh process fast; DP=128 saves unaffected). With
+# max_count 65536 / unlimited size the same save is harmless (post-save 6.6 s/iter).
+# The A/B pair proving this: probe_r1f (default cache, collapse) vs probe_r1g (this
+# setting, no collapse), same allocation, same config.
+export FI_MR_CACHE_MAX_COUNT=${FI_MR_CACHE_MAX_COUNT:-65536}
+export FI_MR_CACHE_MAX_SIZE=${FI_MR_CACHE_MAX_SIZE:--1}
+
 # Disable CXI host memory registration for data buffers. When enabled (default), the CXI
 # provider registers host memory with the NIC for RDMA. Disabling it avoids contention on
 # the NIC's memory registration table when many ranks on the same node register overlapping
@@ -353,13 +385,14 @@ export MPICH_GPU_SUPPORT_ENABLED=0
 #
 # These settings work with ft_launcher (nvidia-resiliency-ext) to detect and
 # recover from Slingshot NCCL hangs. The layered approach:
-#   1. In-process restart (60s/90s) -- reinit NCCL, retry same step
-#   2. ft_launcher restart (step timeout 3600s) -- restart from checkpoint
-#   3. NCCL watchdog (900s) -- last-resort process abort
-#
-# TORCH_NCCL_TIMEOUT must exceed the in-process restart hard_timeout (90s)
-# so the fault tolerance system gets a chance to recover before the watchdog
-# kills the process.
+#   1. ft_launcher worker restart (step timeout 7200s) -- the per-node agent
+#      restarts failed workers from the latest checkpoint
+#   2. NCCL watchdog (TORCH_NCCL_TIMEOUT=7200s) -- aborts genuinely wedged
+#      collectives
+#   3. srun --kill-on-bad-exit=1 -- a rank that dies unrecoverably ends the
+#      whole step instead of stranding the survivors in a never-completing
+#      collective; a --dependency=singleton chain then resumes from the
+#      latest checkpoint
 # ==============================================================================
 
 # NCCL watchdog timeout in seconds. If any collective takes longer than this, the
@@ -409,6 +442,19 @@ export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 # noisy subsystems like COLL (per-collective traces) and GRAPH (channel/ring construction)
 # that are only useful for deep debugging. Overridable for granular debug runs.
 export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,NET}
+
+# A submit-time NCCL_DEBUG does not reliably survive to this point: the brics
+# aws-ofi-nccl module setenvs NCCL_DEBUG=VERSION and `module purge` churns
+# module-owned NCCL_* values, so the "overridable" promise above held only by
+# accident. ISAMBARD_NCCL_DEBUG is applied last and therefore actually wins.
+# At INFO on 512 ranks, direct output to per-rank files (ISAMBARD_NCCL_DEBUG_FILE,
+# %h host / %p pid placeholders) or every rank floods the shared stdout.
+if [ -n "${ISAMBARD_NCCL_DEBUG:-}" ]; then
+    export NCCL_DEBUG="$ISAMBARD_NCCL_DEBUG"
+    if [ -n "${ISAMBARD_NCCL_DEBUG_FILE:-}" ]; then
+        export NCCL_DEBUG_FILE="$ISAMBARD_NCCL_DEBUG_FILE"
+    fi
+fi
 
 # ==============================================================================
 # Job-specific paths and caches
@@ -526,7 +572,7 @@ fi
 export ISAMBARD_RAW_LOG_PATH
 
 # Findable-by-run-ID companion symlink next to the raw log, so a log can be
-# located from a run ID alone: logs/slurm/by-run-id/<run-id>.out -> train-<job>.out
+# located from a run ID alone: <log-dir>/by-run-id/<run-id>.out -> train-<job>.out
 # Non-fatal: identity bookkeeping must never kill a training launch.
 if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
     RUN_ID_LINK_DIR="$(dirname "$ISAMBARD_RAW_LOG_PATH")/by-run-id"
@@ -544,6 +590,43 @@ NODELIST="${OVERRIDE_NODELIST:-$SLURM_NODELIST}"
 export MASTER_ADDR="${MASTER_ADDR_OVERRIDE:-$(scontrol show hostname "$NODELIST" | head -n 1)}"
 export MASTER_PORT="${MASTER_PORT_OVERRIDE:-$((29500 + SLURM_JOB_ID % 1000))}"
 TOTAL_GPUS=$((NNODES * 4))
+
+# Dragonfly placement of this run's nodes, exported for the W&B run summary
+# (scripts/telemetry/run_identity.py reads ISAMBARD_SWITCH_SPREAD). Computed here rather
+# than in the payload because the payload runs inside the container, which inherits the
+# SLURM environment variables but not the SLURM binaries -- scontrol is absent there.
+# Worth recording on every run: the same Nano pretrain config measured 137.8 TFLOP/s/GPU
+# across 2 switch groups and 114.7 across 8, so a throughput number is only comparable to
+# another taken at the same spread.
+# Non-fatal, like the rest of the identity bookkeeping: a failure here must never stop a run.
+derive_switch_spread() {
+    # Emits "<switch>:<nodes>,..." largest first, or nothing. Every statement must end
+    # truthy: the caller runs under `set -euo pipefail`, so a while-loop whose final
+    # iteration ends on a false test makes the whole pipeline nonzero even though the
+    # tail of it succeeded, and that would abort the launch rather than skip the metric.
+    local mine sw nodes n
+    mine=$(scontrol show hostnames "$1" | sort -u)
+    [ -n "$mine" ] || return 0
+    scontrol show topology | while read -r line; do
+        case "$line" in *Level=0*) ;; *) continue ;; esac
+        sw=${line#*SwitchName=}; sw=${sw%% *}
+        nodes=${line#*Nodes=}; nodes=${nodes%% *}
+        if [ -n "$sw" ] && [ -n "$nodes" ]; then
+            n=$(scontrol show hostnames "$nodes" | sort -u |
+                comm -12 - <(printf '%s\n' "$mine") | wc -l)
+            if [ "$n" -gt 0 ]; then printf '%s:%s\n' "$sw" "$n"; fi
+        fi
+    done | sort -t: -k2 -rn | paste -sd, -
+}
+if [ -z "${ISAMBARD_SWITCH_SPREAD:-}" ]; then
+    ISAMBARD_SWITCH_SPREAD="$(derive_switch_spread "$NODELIST" || true)"
+fi
+export ISAMBARD_SWITCH_SPREAD
+if [ -n "$ISAMBARD_SWITCH_SPREAD" ]; then
+    echo "[run-identity] switch placement: $ISAMBARD_SWITCH_SPREAD"
+else
+    echo "WARNING: switch placement not determined (non-fatal); scontrol errors above" >&2
+fi
 
 # ==============================================================================
 # Select training script
@@ -565,6 +648,9 @@ if [ "$ENABLE_PAO" = true ]; then
 fi
 if [ "$USE_FT" = false ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS --disable-ft"
+fi
+if [ "$USE_STRAGGLER" = false ]; then
+    SCRIPT_ARGS="$SCRIPT_ARGS --disable-straggler"
 fi
 if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
     SCRIPT_ARGS="$SCRIPT_ARGS ${EXTRA_ARGS[*]}"
@@ -596,6 +682,9 @@ sed 's/^/  sif: /' "${CONTAINER_SIF}.source.txt" 2>/dev/null | head -4 || true
 sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null || true
 if [ "$USE_FT" = true ]; then
     echo "Launcher:  ft_launcher (fault-tolerant)"
+    if [ "$USE_STRAGGLER" = false ]; then
+        echo "Straggler: NVRx straggler detection disabled"
+    fi
 else
     echo "Launcher:  torchrun"
 fi
@@ -606,7 +695,7 @@ echo "================================"
 # ==============================================================================
 # Launch
 # ==============================================================================
-SRUN_ARGS="--nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=0 --export=ALL --overlap"
+SRUN_ARGS="--nodes=$NNODES --ntasks-per-node=1 --kill-on-bad-exit=1 --export=ALL --overlap"
 if [ -n "$OVERRIDE_NODELIST" ]; then
     SRUN_ARGS="$SRUN_ARGS --nodelist=$OVERRIDE_NODELIST"
 fi
@@ -649,8 +738,19 @@ if [ "$USE_FT" = true ]; then
     #      NCCL comm-init. Under the 3600 s default that trips the heartbeat, ft
     #      SIGKILLs the workers, and the restart lands in the same slow first
     #      iteration — a restart loop that looks like a fabric hang.
-    # 7200 s covers the worst measured first iteration with margin while still
-    # bounding a genuinely wedged rank.
+    # 7200 s covers the worst measured first iteration with margin. It does NOT
+    # merely bound a genuinely wedged rank: the monitor is not guaranteed to receive
+    # an initial heartbeat, and when it does not, this timeout SIGKILLs a healthy job
+    # at exactly 7200 s -- `[Cycle N] Did not get initial heartbeat. Waited 7200.00
+    # seconds`. Any run whose first checkpoint arrives later than that then restarts
+    # from iteration 0 with nothing on disk, indefinitely. pipeline_training_run.py
+    # prints the required s/iter at startup whenever ft is on; --disable-ft is the
+    # opt-out, and --disable-straggler is NOT.
+    #
+    # This export is the single source of the heartbeat value: both ft_launcher flags
+    # below and pipeline_training_run.py's headroom warning read it, so the warning
+    # always quotes the wall the job actually hits.
+    export ISAMBARD_FT_HEARTBEAT_TIMEOUT=${ISAMBARD_FT_HEARTBEAT_TIMEOUT:-7200}
     srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
         $ACTIVATE_CMD
@@ -661,8 +761,8 @@ if [ "$USE_FT" = true ]; then
             --nnodes=$NNODES \
             --node_rank=\$SLURM_NODEID \
             --max-restarts=20 \
-            --ft-initial-rank-heartbeat-timeout=7200 \
-            --ft-rank-heartbeat-timeout=7200 \
+            --ft-initial-rank-heartbeat-timeout=$ISAMBARD_FT_HEARTBEAT_TIMEOUT \
+            --ft-rank-heartbeat-timeout=$ISAMBARD_FT_HEARTBEAT_TIMEOUT \
             --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \

@@ -1,0 +1,78 @@
+# The identity of every pretraining-format (.bin/.idx) corpus in the 30B filtered arm
+# (canary OR `mini >= 2`). The stage-3 packed SFT corpus is the one exception; it lives in
+# pa-warm-start-sft-filtered-mini-2plus.yaml beside this file.
+#
+# Every corpus is the `<subset>_filtered_mini_2plus` split of the SAME repository the baseline
+# trains from: the baseline subset with every document that carries a canary string, or whose
+# gpt-5-mini cost-gate score is >= 2, removed; every other document — scored below 2, or never
+# escalated to the mini stage (the keyword prefilter or the gpt-5-nano relevance gate stopped
+# it first) — is retained unchanged. The split name says only `mini_2plus`: the rule is canary
+# OR mini >= 2 (Kyle, 2026-09-04), and dataset-builder rebuilt the splits in place under the
+# same names; the earlier revisions that applied the score rule alone are withdrawn. The
+# complement lives beside each split as `<subset>_removed_mini_2plus`, and
+# `filter_stats_mini_2plus` carries the per-subset and global document/token removal rates.
+# The scores themselves come from sudoers/control-pretraining-filter-annotated @ eab743dd
+# (one row per baseline document, original columns plus the cascade's judge columns).
+#
+# As in the baseline, this is one file plus `--subset <name>`: `pipeline_data_prepare.py`
+# derives the output directory from slugify_dataset_name(dataset, subset), and an explicit
+# CLI flag overrides a value supplied by --config, so sixteen corpora need sixteen `--subset`
+# arguments and no extra files. DO NOT add `output-dir:` here — pinning it would collapse
+# every subset onto one directory and each prepare would overwrite the last.
+#
+# WHICH subsets exist and what each contributes to a stage is the business of this arm's
+# README, corpora.tsv, and the three training configs, not of this file.
+#
+# The revision must be a commit at which the split being built states the canary-inclusive
+# rule. Any revision from before 2026-09-04 applies the score rule alone and must not be built
+# from. The same SHA is pinned in pa-warm-start-sft-filtered-mini-2plus.yaml beside this file;
+# a test asserts the two agree.
+#
+# The SHA below, 504fc763, is the commit at which every one of the 33 configs is the corrected
+# build: the ClimbMix full filtered arm landed at 21:24Z and its removed arm at 22:10Z on
+# 2026-09-04 (dataset-builder, 2026-09-05 00:05Z), and nothing later rewrites a landed split
+# (each arm was pushed under `--skip-cards` scoped to its own config directory). Checked here
+# before the pin moved, from the Hub's metadata alone: both ClimbMix full provenances carry
+# `also_remove_flag: canary` beside `score_column: mini_score, threshold: 2` on their first
+# transform; the removed split holds 317,806 rows, the statistics' `n_removed`; the filtered
+# split's parquet footers sum to the statistics' `n_retained`, 552,997,250. A later commit that
+# changes only the dataset card does not move this pin; a commit that rewrites a split does, and
+# every corpus is then re-stamped against it (`BUILD_STEPS=prepare`, see build_corpora.sh).
+#
+# How a corrected split is told from the withdrawn build, without asking anyone: each split's
+# own `_provenance.json` records its filter step (`type: corpus/judge_score_arm`); the corrected
+# splits carry `also_remove_flag: canary`, and the withdrawn ones carried no `also_remove_flag`
+# at all. The step is not always the first transform, so find it by type.
+#
+# Why the ClimbMix row was held at PENDING in corpora.tsv until that check passed, rather than
+# guarded by its document count: slicing derives its eight ranges FROM the count, so against a
+# larger source (the withdrawn split held 552,997,269 documents against the corrected
+# 552,997,250) it would simply never ask for the surplus rows — every prepare succeeds, the
+# shard counts sum to the expected number, and `verify_corpora.py` passes with canaries still in
+# the corpus. `plan_corpus()` refuses a PENDING row whatever its shard mode, so the hold stops
+# the build before a job is submitted; `audit_filtered_corpora.py`'s comparison of the Hub
+# split's row count against `filter_stats_mini_2plus` (under `--canary-column`) catches the
+# mistake too, but after the corpus is built. A split that is not yet safe to build from goes
+# back to PENDING.
+#
+# Moving this pin re-stamps every already-built corpus: the prepare step alone re-runs against
+# the new revision (a cache-hit download, a rewrite of training.jsonl and pipeline_results.json,
+# the .bin/.idx untouched), because `verify_corpora.py` reads the revision from the prepare
+# record and the fifteen splits' parquet is byte-identical across the revisions.
+#
+# It is pinned for the same reason the baseline's is: an unpinned prepare resolves the current
+# HEAD, so two corpora prepared a day apart would silently come from different data.
+#
+#   isambard_sbatch --time=08:00:00 --job-name=cp-30b_filtered_mini_2plus-prep-zyda_full_filtered_mini_2plus \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/30b_filtered_mini_2plus/data/control-pretraining-datasets-filtered-mini-2plus.yaml \
+#     --subset zyda_full_filtered_mini_2plus
+#
+# build_corpora.sh issues that command for every row of this arm's corpora.tsv.
+dataset: geodesic-research/control-pretraining-datasets
+revision: 504fc76319174be60c5b3b71bd48e6c7379ebefc
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

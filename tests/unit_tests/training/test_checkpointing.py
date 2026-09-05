@@ -47,10 +47,11 @@ from megatron.bridge.training.checkpointing import (
     get_rng_state,
     init_checkpointing_context,
     load_checkpoint,
+    post_save_memory_snapshot_path,
     read_metadata,
     save_checkpoint,
 )
-from megatron.bridge.training.config import CheckpointConfig, ConfigContainer
+from megatron.bridge.training.config import CheckpointConfig, ConfigContainer, ProfilingConfig
 from megatron.bridge.training.state import GlobalState, TrainState
 
 
@@ -524,6 +525,7 @@ def save_checkpoint_fixtures():
     mock_cfg.to_yaml = Mock()  # Mock config YAML export
     mock_cfg.logger = Mock()
     mock_cfg.logger.log_progress = False
+    mock_cfg.profiling = None  # ConfigContainer default: no profiling configured
     mock_cfg.dist = Mock()
     mock_cfg.dist.use_decentralized_pg = False
 
@@ -3418,3 +3420,37 @@ class TestLayerWiseOptimizerCheckpointing:
         # Standard load_state_dict must be called; per-rank file loader must NOT be called.
         mock_layer_wise_optim.load_state_dict.assert_called_once_with(mock_state_dict["optimizer"])
         mock_layer_wise_optim.load_state_dict_from_file.assert_not_called()
+
+
+class TestPostSaveMemorySnapshotPath:
+    """Gating and path derivation for post-save CUDA memory snapshots."""
+
+    def test_no_profiling_config(self):
+        assert post_save_memory_snapshot_path(None, step=100, rank=0) is None
+
+    def test_recording_disabled(self):
+        profiling = ProfilingConfig(record_memory_history=False, profile_ranks=[0])
+        assert post_save_memory_snapshot_path(profiling, step=100, rank=0) is None
+
+    def test_rank_not_profiled(self):
+        profiling = ProfilingConfig(record_memory_history=True, profile_ranks=[0])
+        assert post_save_memory_snapshot_path(profiling, step=100, rank=3) is None
+
+    def test_path_suffixes_iteration_and_rank(self):
+        profiling = ProfilingConfig(
+            record_memory_history=True,
+            profile_ranks=[0, 2],
+            memory_snapshot_path="/run/output/mem.pickle",
+        )
+        assert (
+            post_save_memory_snapshot_path(profiling, step=150, rank=2)
+            == "/run/output/mem_post_save_iter0000150_rank-2.pickle"
+        )
+
+    def test_consecutive_saves_get_distinct_paths(self):
+        profiling = ProfilingConfig(
+            record_memory_history=True, profile_ranks=[0], memory_snapshot_path="snapshot.pickle"
+        )
+        first = post_save_memory_snapshot_path(profiling, step=150, rank=0)
+        second = post_save_memory_snapshot_path(profiling, step=300, rank=0)
+        assert first != second

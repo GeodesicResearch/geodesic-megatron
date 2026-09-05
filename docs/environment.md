@@ -67,7 +67,7 @@ the home quota instantly, so the config *refuses to run* if `APPTAINER_CACHEDIR`
 isambard_sbatch pipeline_env_submit.sbatch validate [--run-training]
 ```
 
-20 checks (21 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
+21 checks (22 with `--run-training`, which adds a 5-iteration single-GPU mock-data training
 job): core imports, the CUDA-extension imports (TE, mamba-ssm, causal-conv1d,
 grouped-GEMM — the `moe_experts_impl: cublas_grouped` dependency, built into
 the overlay on images that lack it), CUDA availability, a bf16 GPU matmul, two recipe loads, then the
@@ -97,10 +97,15 @@ run.
 # Unit tests — in-container is the only way (~5,450 tests collected in ~35 s).
 # NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
 # not exist, so running from the repo root errors every test (and would rmtree a real one).
-# -n 8 --dist loadfile uses the image's bundled pytest-xdist (~100 s vs ~5-6 min serial);
-# per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py.
+# -n 4 --dist loadfile uses the image's bundled pytest-xdist (~2 min vs ~5-6 min serial).
+# Do not raise to -n 8 until it is re-measured: the test_mq_tokenizers.py fixture error that
+# set the worker count was test-order pollution (hf_pretrained fixtures renaming a real
+# transformers class through a spec Mock, fixed 2026-09-05) -- see CLAUDE.md's Testing section.
+# per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py, which derives the
+# port base per session so two concurrent suites on one node do not collide. Set
+# MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \$T; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 8 --dist loadfile"
+  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 4 --dist loadfile"
 
 # Fabric health: asserts busbw clears the 100 GB/s floor (the script's own gate).
 # To ALSO confirm the plugin by name, rerun with NCCL_DEBUG=INFO and grep for
@@ -118,8 +123,9 @@ without it one diffusion test file fails at **collection**, which fails the enti
 
 The qualified image is `nvcr.io/nvidia/nemo:26.04` (aarch64, re-qualified 2026-07-29 —
 CUDA 13.1, torch 2.11.0a0+nv26.02, TE 2.14.1, NCCL 2.29.2, nvidia-resiliency-ext 0.6.0;
-validator green — 18/18 at qualification, 20 checks today (the grouped_gemm and
-OpenMP-defaults checks were added since); quickstart 25.66 s/iter at qualification with
+validator green — 18/18 at qualification, 21 checks today (the grouped_gemm,
+OpenMP-defaults and datasets-cache-writability checks were added since); quickstart 25.66
+s/iter at qualification with
 `optimizer_offload_fraction: 0.5` vs 26.70 on the prior tag, identical nodelist (current
 anchor **31.562 s/iter at GBS 128** — the standard batch across
 quickstarts since 2026-08-05 — with `moe_experts_impl: torch_grouped` and optimizer CPU
@@ -311,6 +317,17 @@ nvidia-resiliency-ext defaults to 3600 s initial / 2700 s subsequent — shorter
 Ultra-550B's documented 45–75 min first iteration at PP=36, which would trip the heartbeat,
 SIGKILL the workers, and restart straight back into the same slow first iteration.
 
+7200 relocates that wall rather than removing it. The rank monitor is not guaranteed to
+receive an initial heartbeat, and when it does not the timeout is no longer a liveness check —
+it SIGKILLs a healthy job at exactly 7200 s, logging `[Cycle N] Did not get initial heartbeat.
+Waited 7200.00 seconds`. A run whose first checkpoint is scheduled after that wall then
+restarts from iteration 0 with an empty checkpoint directory and never progresses, which
+presents as a fabric hang and is not one. Observed on Super-120B/64 GPUs and Nano-30B/512 GPUs;
+Ultra-550B trains ~4.7 h under the same setting untouched, so this is conditional and what
+decides heartbeat delivery is unresolved. `pipeline_training_run.py` prints the s/iter the run
+must sustain for its first checkpoint to beat the wall; `--disable-ft` is the opt-out, and
+`--disable-straggler` leaves the timeout armed.
+
 ### D6b — CUDA forward-compat: front the image's compat libs yourself
 
 Under Docker, NGC's entrypoint detects a host driver older than the image CUDA and symlinks
@@ -342,16 +359,27 @@ Measured on driver R565.57.01 — this is a per-image qualification axis, not a 
 | `OMP_NUM_THREADS=8` | torchrun sets this to **1** whenever it is absent, single-threading host-side AdamW for any CPU-offloaded optimizer onto one Neoverse-V2 core (~36 GB/s of a ~500 GB/s socket). Overridable via `ISAMBARD_OMP_THREADS`; `=1` restores torchrun's behaviour. On the 120B benchmark, both arms on the pre-`torch_grouped` expert path: **21.36 s/iter / 73.70 GB at offload 1.0 with 8 threads vs 22.79 / 76.78 at offload 0.5 single-threaded** — strictly dominates the previous champion, but the arms differ in offload fraction too, so the delta is not threading alone (§C1b; the clean offload-1.0 single-thread arm was never run). Exactly neutral with offload off |
 | `OMP_WAIT_POLICY=PASSIVE` | set automatically whenever `OMP_NUM_THREADS` > 1 (override with `ISAMBARD_OMP_WAIT_POLICY`). Not decoration: GNU OpenMP idle threads spin-wait, and these workloads are host-launch-bound, so ACTIVE spin can cost more launch throughput than the threaded Adam saves |
 | `NVTE_CPU_OFFLOAD_V1=1` | TE fine-grained CPU activation-offload path (TE ≥ 2.10) |
-| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | reduces allocator fragmentation |
+| `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` | reduces allocator fragmentation. Overridable via `ISAMBARD_CUDA_ALLOC_CONF`; a measured `False` arm (512-GPU Nano pretrain, 2026-08-14) showed no fast-regime difference and did not move the post-save collective-slowdown bug, so the default stands. The CXI `sysnc_memops returned -22` warnings under `FI_LOG_LEVEL=warn` appear in both modes — they are about NCCL's own cuMem buffers, not this allocator |
 | `TORCH_CUDA_ARCH_LIST=9.0` | GH200; also guards `sm_90a` arch-string parsing in JIT builds |
 | `CUDA_HOME=/usr/local/cuda` | the **image's** toolkit for JIT builds (Triton, TE, dataset helpers) — deliberately not the host HPC-SDK path the shim scrubs |
 
 Caches: `HF_HOME=/projects/a5k/public/hf`, `NEMO_HOME`, `WANDB_DIR`, `TMPDIR` are shared as
-before, but **`HF_DATASETS_CACHE` is scoped to the container**
-(`/projects/a5k/public/hf/datasets_container`). A processed-dataset cache shared with a
-different major `datasets` version fails with `DatasetInfo.from_directory ... must be called
-with a dataclass`; Hub downloads (models/tokenizers under `HF_HOME`) stay shared, since
-those are version-neutral.
+before, but **`HF_DATASETS_CACHE` is scoped to the container *and* to the account** —
+`/projects/a5k/public/hf/datasets_container_$USER`, overridable with
+`GEODESIC_HF_DATASETS_CACHE` (the per-user pattern `APPTAINER_CACHEDIR` already uses in
+`pipeline_env_config.env`). Two independent reasons, and each fails deep inside a job rather
+than at launch:
+
+- **Version scoping.** A processed-dataset cache shared with a different major `datasets`
+  version fails with `DatasetInfo.from_directory ... must be called with a dataclass`.
+- **Ownership.** `datasets` creates its cache tree mode 0755, so a single directory shared
+  between accounts is writable only by whoever populated it first; every other account then
+  fails taking the dataset lock, part-way through a download that has already run.
+
+`validate` scores the writability of whichever path is in force, so an override pointing at
+a directory this account cannot write surfaces there instead of mid-job. A mistyped but
+creatable path is not caught — the check creates it and passes. Hub downloads
+(models/tokenizers under `HF_HOME`) stay shared, since those are version-neutral.
 
 ### Reproducibility / provenance
 
@@ -456,6 +484,13 @@ one trace file per rank per iteration), `ISAMBARD_TORCH_PROFILE_RANKS` (default 
 `ISAMBARD_TORCH_PROFILE_WAIT` (legacy single capture at iteration WAIT+2, used only when
 `_ITERS` is unset).
 
+For memory questions rather than time questions, CUDA memory-history snapshots are driven
+by config, not env vars: `profiling.record_memory_history=true`,
+`profiling.profile_ranks=[...]`, `profiling.memory_snapshot_path=<path>`. Recording is
+armed before model construction; snapshots are dumped per logging interval, after every
+checkpoint save (`_post_save_iter<N>_rank-<R>` suffix), and on OOM. See
+`docs/profiling-quickstart.md` "CUDA memory-history snapshots".
+
 Artifacts land in `<root>/<wandb-exp-name>/<run-id>/`: the per-rank Chrome traces
 (`rank<R>.iter<N>.chrome_trace.json.gz`, open in Perfetto or `chrome://tracing`),
 `provenance.txt` (commit, run id, raw-log path, world info), `config_snapshot.yaml` (the
@@ -469,13 +504,16 @@ alongside the config and commit.
 Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
 `<launch-timestamp>-j<slurm-job-id>`, which joins the three places a run leaves artifacts:
 
-- **Job log** — echoed in the launch banner; `logs/slurm/by-run-id/<run-id>.out` symlinks to
+- **Job log** — echoed in the launch banner; `/projects/a5k/public/logs/megatron_runs/by-run-id/<run-id>.out` symlinks to
   the raw `train-<jobid>.out`.
 - **Profiles** — names the per-launch output subdirectory and is recorded in
   `provenance.txt`.
 - **W&B** — `RunIdentityCallback` (`scripts/telemetry/run_identity.py`, registered on every
   training run) stamps `run/isambard_run_id`, `run/raw_log_path`, `run/slurm_job_id` into the
-  run summary.
+  run summary, plus `run/switch_count` and `run/switch_spread` — the run's Dragonfly placement,
+  read from the launcher's `ISAMBARD_SWITCH_SPREAD`. The placement keys are absent on runs not
+  started through `pipeline_training_launch.sh`, since `scontrol` is unavailable inside the
+  container and only the launcher can derive them.
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -492,6 +530,7 @@ Every launch through `pipeline_training_launch.sh` mints `ISAMBARD_RUN_ID` =
 | `RuntimeError: ...gradient_accumulation_fusion...` | Should not happen — the image ships APEX. It means the payload is not running in this container (e.g. a hand-rolled `python` outside the shim). |
 | CUDA "driver too old" / `Error 803` at startup | Compat-lib handling (D6b). `803` means the image's CUDA is too new for the driver — that image cannot be qualified; drop a rung on the ladder. |
 | `DatasetInfo.from_directory ... must be called with a dataclass` | A processed-dataset cache written by a different `datasets` major version — keep `HF_DATASETS_CACHE` scoped (D7). |
+| `PermissionError` / `Permission denied` on a lock file under `HF_DATASETS_CACHE`, part-way through a dataset download | That cache tree belongs to another account (`datasets` creates it mode 0755). The default is per-user; if the path was overridden to a shared one, point `GEODESIC_HF_DATASETS_CACHE` at a path this account owns (D7). `validate` scores this, so run it after any override. |
 | Apptainer fills `$HOME` | Never point `APPTAINER_CACHEDIR`/`APPTAINER_TMPDIR` at `$HOME`; the config refuses to run if you do. |
 | Host libfabric path missing after a cluster upgrade | Override `GEODESIC_CONTAINER_HOST_LIBFABRIC` (`ls -d /opt/cray/libfabric/*`) and rebuild the Slingshot stack. |
 

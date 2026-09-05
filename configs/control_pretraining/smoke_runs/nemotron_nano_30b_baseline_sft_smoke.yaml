@@ -1,0 +1,161 @@
+# smoke_e2e_run STAGE 3 of 3 -- reasoning SFT, seq 32768, 512 GPUs / 128 nodes.
+#
+# Warm-starts from stage 2 of the SMOKE chain.
+#
+# Part of the smoke_e2e_run: a 1,677,721,600-token pass (100 iters x 16,777,216
+# tokens/iter) whose only purpose is to prove the full-scale config in
+# configs/control_pretraining/30b_baseline/ runs end to end, and to measure s/iter so the real
+# run can be costed. See ../smoke_runs/README.md for the chain and the launch order.
+#
+# THE RESULTING MODEL IS NOT USEFUL. 1.68B tokens is ~0.3% of the real curriculum; expect a loss
+# that is falling but nowhere near converged. Sanity is "it runs, it fits, loss descends,
+# 0 NaN", not quality.
+#
+# Everything that makes the real stage hard is carried over UNCHANGED -- the data blend, the
+# parallelism, the recompute posture and the save-crossing settings -- because a smoke that
+# altered them would stop testing the config it is meant to certify. A unit test pins the
+# blend and topology of each smoke config to its parent so the two cannot drift apart.
+#
+# What differs from the parent, and only this:
+#   train_iters        -> 100
+#   save_interval      -> 1000000, so Megatron's unconditional end-of-training save is the
+#                         only checkpoint written
+#   save_optim/rng     -> false: only model weights are ever read back from a smoke
+#                         checkpoint, so Adam moments and RNG state would be written and
+#                         never read
+#   checkpoint paths   -> /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/...
+#   wandb_exp_name     -> smoke_e2e_...
+#
+# Unlike stages 1 and 2 this stage reads a PACKED chat corpus rather than .bin/.idx, so it
+# cannot start until that pack exists. It also fixes train_iters at 100 rather than deriving
+# it from the pack metadata: the smoke is defined by its token budget, so the estimate the
+# full-scale config carries does not apply here.
+#
+# Launch (after stage 2, and after the pack has been built):
+#   isambard_sbatch --nodes=128 pipeline_training_submit.sbatch \
+#     configs/control_pretraining/smoke_runs/nemotron_nano_30b_baseline_sft_smoke.yaml \
+#     nano sft --disable-ft
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-sft-heavy-25b-mix
+  dataset_root: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 4               # 2 x CP, required for packed sequences under CP=2
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 512             # 2 packs/replica/iter at DP=256
+  micro_batch_size: 1
+  train_iters: 100
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false       # a DP=1 memory lever; pure overhead at DP=256
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false        # Nemotron-H DP>1 convention
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0                 # the SFT recipe sets 50; finalize() rejects it alongside lr_warmup_fraction
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 32768
+  # At CP=2 the fp32 logits are 8.00 GiB per rank; leaving fusion on adds a second,
+  # out-of-place inductor buffer of the same size, which this posture cannot afford.
+  cross_entropy_loss_fusion: false
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 2           # the minimum CP that fits at 32768 (midtraining header)
+  sequence_parallel: False           # SP requires TP>1
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  # FULL recompute is mandatory at 32768, not a tuning choice: selective recompute OOMs in
+  # the loss computation asking for exactly 8.00 GiB (midtraining header).
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+checkpoint:
+  # Warm start from the stage-2 final checkpoint: weights only, fresh optimizer.
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/midtrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/sft
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/smoke_e2e/sft
+  save_interval: 1000000        # only the unconditional end-of-training checkpoint
+  save_optim: false             # nothing reads this stage's optimizer state
+  save_rng: false
+  most_recent_k: -1             # exactly one checkpoint is written, so nothing to prune
+  ckpt_format: torch_dist
+  # Multiple optimizer-bearing saves on the torch_grouped expert path: the cached
+  # constant-structure save plan retains a 13.679 GiB expert-weight copy from save #2
+  # onward and the next forward OOMs (see the README's save-crossings section).
+  ckpt_assume_constant_structure: false
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 60
+
+logger:
+  # Per-stage /projects dir — the SFT recipe would otherwise default TB event files into
+  # ./nemo_experiments in the submitting checkout.
+  tensorboard_dir: /projects/a5k/public/logs/tensorboard/smoke_e2e_30b_baseline_sft
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: smoke_e2e_30b_baseline_sft

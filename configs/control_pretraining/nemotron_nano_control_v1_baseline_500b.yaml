@@ -1,0 +1,377 @@
+# Nemotron 3 Nano (30B-A3B) CONTROL PRETRAIN v1 — 500B tokens from scratch, 512 GPUs / 128 nodes
+#
+# The unfiltered control baseline for the pretraining-data-filtering study (Asana GEOD-201).
+# Random init — no checkpoint is loaded — trained on the unfiltered blend below, so that a
+# later filtered run trained under an identical recipe differs in exactly one variable: the
+# data. Every other field here is held fixed for that comparison.
+#
+# TOKEN BUDGET (exact):
+#   29803 iters x 2048 sequences x 8192 tokens = 16,777,216 tokens/iter
+#                                              = 500,011,368,448 tokens  >= the 500e9 target
+#   (the 29803rd iteration is what carries the total over 500e9; 29802 would land at
+#   499,994,591,232)
+#
+# GBS 2048, not 1024 (decision 2026-08-13): at DP=512 the fixed per-iteration cost —
+# dominated by DP gradient/param traffic whose per-GPU volume does not shrink with DP width —
+# was 57% of every step at 2 microbatches/replica (measured 4.28 s/iter vs a perfect-scaling
+# 2.44). Doubling GBS to 4 microbatches/replica amortises that cost across twice the tokens:
+# ~29% more throughput per token, ~50 h instead of ~71 h for the run. Capability tradeoff
+# judged minor: 16.8M tokens/batch is inside validated practice for this model (the NVIDIA
+# recipe itself ships GBS 3072 = 25M), and LR 1e-3 at this batch sits closer to the recipe's
+# LR-per-token ratio than GBS 1024 did (sqrt-scaling the recipe's 1.6e-3@3072 gives ~1.3e-3
+# here). GBS applies uniformly to every arm of the study, so the filtering COMPARISON is
+# insulated regardless. Activation memory is unchanged — at PP=1 microbatches run
+# sequentially, so peak memory is per-microbatch and independent of GBS.
+#
+# DATA BLEND. The weights are sampling probabilities over the three .bin/.idx corpora, so
+# each source's share of the 500.011B-token budget is an expectation, not a hard split.
+# Epochs = that share / the corpus's own token count under
+# geodesic-research/nemotron-base-tokenizer. Corpus sizes below are measured, not nominal;
+# the authoritative figure once the data exists is total_tokens in the
+# <prefix>.provenance.json the tokenize job writes beside each .bin/.idx.
+#
+#   weight  source                                     share of budget   corpus    epochs
+#   0.80    karpathy/climbmix-400b-shuffle (8 shards)   400,009,094,758  354.3818B   1.129
+#   0.19    Zyphra/Zyda-2, config sample-100BT           95,002,160,005  99.2276B    0.957
+#   0.01    geodesic-research/control-pretraining-datasets 5,000,113,684   0.4276B   11.693
+#           (config `combined`, revision 6973c8fa36eee425ef7bc054334bbe6545b7d1a0)
+#
+#   All three corpus sizes are now EXACT, read from total_tokens in the .provenance.json
+#   beside each .bin/.idx. No estimate remains in this blend.
+#
+#   ClimbMix: 6,543 parquet shards / 599.8 GB, single `text` column, tokenizing to
+#   354,381,797,388 tokens over 553,240,576 documents — the sum of its eight shards, each
+#   verified .bin == 4 x tokens before its input JSONL was released, with the document total
+#   matching the corpus exactly. The "400b" in the name is a count under whatever tokenizer
+#   the corpus was named for; nemotron-base is coarser on this text (4.67 utf8 bytes/token)
+#   and yields 11.4% fewer. At 1.129 epochs ~13% of ClimbMix is seen twice — Megatron's
+#   blended sampler wraps a source transparently, so this is a data-repetition fact, not a
+#   failure.
+#   Zyda-2: 91,220,256 documents, 99,227,596,755 tokens EXACT from the .idx (the .bin is
+#   396,910,387,020 bytes = exactly 4x the token count, since a 131,072-token vocab needs
+#   int32). The 19% share is 0.957 epochs — essentially a full single pass, so this source
+#   has no headroom: any upward revision of the budget puts it above 1.0.
+#   AI-safety discourse: 67,278 documents, 427,634,149 tokens EXACT from the .idx (mean
+#   6,356 tokens/doc). This is the ticket's "LessWrong + EA Forum mix", frozen at repo
+#   revision 6973c8fa36eee425ef7bc054334bbe6545b7d1a0, recorded in
+#   data/ai_safety_discourse.yaml alongside the rest of that corpus's identity. The pin
+#   matters twice over: the corpus was still being built when this campaign started and its
+#   token mass roughly doubled mid-flight when full comment threads were folded into each
+#   document, and the revision this config first carried turned out to hold 109,580,536
+#   tokens (20.4%) of line-wrapped base64 in 41 rows, arriving from the upstream ARD dump.
+#   6973c8fa strips that payload across all three sources through the shared
+#   `corpus/forum_post_text` alias and keeps the prose. It also drops the row count by one,
+#   67,279 -> 67,278, and NOT for a base64 reason: the strip trims whitespace even on rows it
+#   does not match, which took one 203-character meetup announcement below the alias's
+#   200-character floor. An unpinned prepare resolves whatever is at HEAD that day.
+#   The upstream count at that revision is 427,566,871; the .idx reads 427,634,149, and the
+#   difference is exactly 67,278 = the one EOD token --append-eod adds per document, which is
+#   what confirms the tokenized copy is that revision and not an earlier snapshot — but note
+#   the two figures are on different bases, so subtracting across them mis-states any delta
+#   by exactly the document count. The `source` column preserves the three-way split so the
+#   mix stays auditable after tokenization; the per-source counts live in
+#   data/ai_safety_discourse.yaml and are deliberately not repeated here, since a second copy
+#   drifts silently while a contradicted total does not.
+#   Documents are markdown (title, body, then an optional comment thread)
+#   with a >=200-character floor enforced upstream; a plain `text` column means the standard
+#   auto-detected ingest applies with no column flags, and no row is null or empty. The 1%
+#   share therefore lands at 11.692 epochs: repeating this source is intended (the baseline
+#   has to know this content deeply for the filtered comparison to mean anything) and 11.692
+#   is well inside the 50-100 the study had assumed as an upper bound.
+#
+#   Some large non-prose documents REMAIN and are deliberately kept: the longest is
+#   ~1.68M tokens of a transformer-circuits.pub article whose interactive-figure data is
+#   serialised as escaped JSON. Unlike base64 that is text — escape-mangled English rather
+#   than encoded binary — so removing it would be a data-quality filter, and this is the
+#   UNFILTERED control arm of a filtering study. Stripping an encoding artifact is a
+#   corruption fix; stripping low-quality prose would make the control a second filtered arm
+#   and weaken every comparison it exists to support.
+#
+# WSD SCHEDULE (peak 1e-3, floor 1e-5, minus_sqrt anneal):
+#   iters      0 ->  ~298   linear warmup      (lr_warmup_fraction 0.01 of 29803 = 298.03)
+#   iters   ~298 -> 23842   stable at 1e-3     (79% of the run)
+#   iters  23842 -> 29803   minus_sqrt anneal to 1e-5 over the final 5961 iters (20%)
+#   lr_wsd_decay_iters is set EXPLICITLY. Left null, config.py::_calculate_scheduler_steps
+#   defaults it to lr_decay_iters (= train_iters), which makes the anneal span the whole run
+#   and erases the stable phase — silently, since the schedule still "works".
+#
+# TOPOLOGY: TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512 -> 512 GPUs = 128 nodes.
+# 4 microbatches/replica at mbs 1 (GBS 2048 / DP 512); PP=1 -> no pipeline bubble; EP=4 is
+# node-local NVLink all-to-all (TP*EP <= 4) and divides DP=512. The parallelism and memory
+# posture (selective recompute of [core_attn, moe, shared_experts], mbs 1, alltoall
+# dispatcher, torch_grouped experts) are the measured-working set from
+# configs/quickstart/nemotron_nano_quickstart_pretrain.yaml, whose 128-GPU anchor is
+# 25.533 s/iter at GBS 3072. This run holds tokens/rank identical (8192) and only shrinks
+# microbatches per replica, so per-rank memory is unchanged; the DP=512 optimizer shard is
+# 4x smaller than that anchor's.
+#
+# One posture difference from that anchor, and it is deliberate: the anchor effectively ran
+# with overlap_param_gather True and a 128 MiB DDP bucket, because the Nano pretrain recipe
+# supplies a CommOverlapConfig whose data-parallel defaults overwrite cfg.ddp. This config
+# pins the standing Nemotron-H DP>1 posture instead (param-gather overlap off, 500 MB
+# bucket) through the comm_overlap block below. Throughput at that posture is unmeasured.
+#
+# CHECKPOINTS: save_interval 1490 writes at 1490*k for k = 1..20 (last at 29800), and
+# Megatron-Core always writes a final checkpoint at train_iters -> 21 checkpoints total.
+# Token positions are IDENTICAL to the pre-GBS-change plan (1490 x 16,777,216 tokens =
+# 2980 x 8,388,608), so trajectory-based analyses are unaffected by the batch change.
+# All carry optimizer + RNG state, and most_recent_k -1 keeps every one of them: this run
+# must be resumable from any point, and the intermediate checkpoints are study artifacts
+# (a filtering effect is measured along the trajectory, not only at the end). Budget for it:
+# bf16 weights ~60 GB plus PAO optimizer state (bf16 exp_avg + bf16 exp_avg_sq + fp32 main
+# params) puts each checkpoint at ~316 GB measured at DP=512, so 21 of them is ~6.6 TB
+# against a project quota that runs hot. The byte-exact figure and its provenance are in the
+# campaign README's smoke-test section.
+# NOTE: save_retain_interval, mcore's other retention knob, is NOT read by this codebase —
+# only most_recent_k is (src/megatron/bridge/training/checkpointing.py).
+#
+# LAUNCH — a singleton chain of N day-long segments, not one long allocation. N is
+# ceil(estimated training days) + 1, so one spare segment absorbs overrun. Every segment
+# shares one --job-name, which is what --dependency=singleton keys on to run them strictly
+# one at a time; each picks up where the last left off (see RESUME).
+#
+#   for i in $(seq 1 $N); do
+#     ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
+#       --job-name=control-pretrain-v1-500b --dependency=singleton \
+#       --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
+#       pipeline_training_submit.sbatch \
+#       configs/control_pretraining/nemotron_nano_control_v1_baseline_500b.yaml nano pretrain \
+#       --disable-ft
+#   done
+#
+# ISAMBARD_SBATCH_FORCE is required in the JOB environment, not just at submission:
+# pipeline_training_submit.sbatch runs `isambard_sbatch --check` on start and scancels itself
+# when the account is over its node limit, and N pending 128-node segments are far over it.
+#
+# --disable-ft, NOT --disable-straggler. On this workload ft_launcher's rank monitor never
+# receives an initial heartbeat (`[Cycle N] Did not get initial heartbeat. Waited 7200.00
+# seconds`), so --ft-initial-rank-heartbeat-timeout stops being a liveness check and SIGKILLs
+# the job at 7200 s however healthy it is; --disable-straggler drops only the NVRx straggler
+# reporter while leaving that killer armed. The two flags read as neighbours and are not.
+# Not known to be universal — Ultra-550B trains ~4.7 h under the same default without a kill,
+# so check the log for that signature rather than assuming. Whether the ceiling is fatal is
+# arithmetic: save_interval x s/iter — at this posture 1490 x ~6.1 s ≈ 2.5 h, still past the
+# 7200 s wall, so ft would still deadlock this run. The GBS-1024 first attempt measured it:
+# 2980 x 4.276 s = 3.54 h to first checkpoint, seven kills across eight attempts, zero
+# checkpoints written. Take the rate from the DISTRIBUTION, not from one status line: over
+# that attempt's 12,480 logged iterations the median was 4.276 s and the mean 4.494 s, the
+# latter inflated by ~100 s startup iterations.
+#
+# RESUME: checkpoint.load and checkpoint.save are the SAME directory, which is what makes a
+# requeue resume. setup.py loads only when checkpoint.load is set AND already contains a
+# checkpoint (`cfg.checkpoint.load is not None and checkpoint_exists(...)`), so on the first
+# launch the directory is empty and the run starts from random init; on every relaunch it
+# picks up the latest saved iteration, optimizer and RNG state included. exit_signal_handler
+# below is this run's as-launched posture, but the sbatch --signal path it pairs with cannot
+# deliver a graceful exit on this stack (measured, job 6107666: the non-B: signal reaches the
+# shim, apptainer and torchrun layers at the same time as the ranks and the tree is down in
+# ~45 s, before one save completes), so a segment that hits walltime loses at most one save
+# interval and the next segment re-trains it. Going-forward configs use
+# train.exit_duration_in_mins instead — see "Segment rollover" in 30b_baseline/README.md.
+# The chain IS the fault tolerance, which is why dropping ft_launcher costs
+# little: a Slingshot NCCL hang trips the NCCL watchdog, the segment exits, and the next
+# singleton segment resumes from the latest checkpoint. ft_launcher would only have added
+# restart WITHIN a segment, and at this save_interval it cannot do even that, because it
+# kills the run before a checkpoint it could restart from exists.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer   # EOD `</s>` = id 2
+
+dataset:
+  # Flat interleaved list of blend weights and extension-less .bin/.idx prefixes. Only
+  # data_path, split, seq_length and seed are read in --mode pretrain: the launcher rebuilds
+  # cfg.dataset as a GPTDatasetConfig from exactly those four keys, so any other dataset key
+  # written here would be dropped without effect.
+  #
+  # ClimbMix occupies EIGHT prefixes rather than one because it is tokenized as 8 shards
+  # (see the README: a single writer cannot finish 553M documents inside a 24 h window).
+  # Its 0.80 is divided in proportion to each shard's MEASURED token count, not equally.
+  # That matters even though the shards came out near-identical: Megatron allocates
+  # fixed-length samples by weight, so equal weights on unequal shards preserve ClimbMix's
+  # overall token share but cycle the smaller shards more times than the larger ones —
+  # silently over-representing part of the corpus. Weighting by tokens gives every shard
+  # the same 1.1287 epochs, which is what "split a corpus in eight" is supposed to mean.
+  # The shards landed within 0.01% of equal (largest deviation from a flat 0.1 is 0.0085%),
+  # so this is belt-and-braces rather than load-bearing here; the weights are written out
+  # anyway because a weight with no token count beside it cannot be audited later.
+  data_path:
+    - "0.100008"   # 44,301,445,657 tokens / 69,166,226 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard0/tokenized_base_input_document
+    - "0.099991"   # 44,293,938,808 tokens / 69,162,324 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard1/tokenized_base_input_document
+    - "0.100008"   # 44,301,376,636 tokens / 69,153,479 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard2/tokenized_base_input_document
+    - "0.099998"   # 44,297,003,339 tokens / 69,116,155 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard3/tokenized_base_input_document
+    - "0.100000"   # 44,297,603,003 tokens / 69,172,021 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard4/tokenized_base_input_document
+    - "0.100002"   # 44,298,789,113 tokens / 69,156,153 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard5/tokenized_base_input_document
+    - "0.099998"   # 44,296,832,433 tokens / 69,146,870 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard6/tokenized_base_input_document
+    - "0.099993"   # 44,294,808,399 tokens / 69,167,348 docs
+    - /projects/a5k/public/data/karpathy__climbmix-400b-shuffle/shard7/tokenized_base_input_document
+    - "0.19"       # 99,227,596,755 tokens / 91,220,256 docs
+    - /projects/a5k/public/data/Zyphra__Zyda-2__sample-100BT/tokenized_base_input_document
+    - "0.01"       # 427,634,149 tokens / 67,278 docs
+    - /projects/a5k/public/data/Kyle1668__control-pretraining-datasets__combined/tokenized_base_input_document
+  split: "9999,1,0"
+  seq_length: 8192
+  seed: 1234
+
+train:
+  global_batch_size: 2048      # 16,777,216 tokens/iter (see the GBS 2048 header note)
+  micro_batch_size: 1          # recipe default 2 OOMs at 8192 tok/rank (quickstart ladder)
+  train_iters: 29803
+  exit_signal_handler: true    # as-launched; the SIGTERM never arrives (see the RESUME note)
+
+validation:
+  eval_iters: 0                # no validation set: split "9999,1,0" leaves a token-level
+  eval_interval: 1000000       # holdout only, and the study compares training loss + evals
+
+scheduler:
+  lr_decay_style: WSD
+  lr_wsd_decay_style: minus_sqrt
+  # SchedulerConfig.finalize asserts lr_warmup_iters == 0 whenever lr_warmup_fraction is
+  # set, so the 0 is required rather than redundant.
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.01     # 298.03 iters ~= 5.0B tokens of warmup
+  lr_wsd_decay_iters: 5961     # 20% of 29803 (see header — must be explicit)
+
+optimizer:
+  lr: 1.0e-3                   # overrides the recipe's 1.6e-3 peak
+  min_lr: 1.0e-5
+  # Precision-aware optimizer with BF16 Adam moments, matching the pretraining quickstarts.
+  # The recipe sets fp32 moments (recipes/nemotronh/nemotron_3_nano.py); at DP=512 the
+  # distributed optimizer has already sharded them, so this is posture consistency more
+  # than a memory lever — but it also halves what the 21 optimizer-carrying checkpoints
+  # write to disk.
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+comm_overlap:
+  tp_comm_overlap: false       # recipe enables TP overlap; this config is TP=1
+  # THE DATA-PARALLEL POSTURE MUST BE SET HERE, NOT UNDER ddp:. The Nano *pretrain* recipe
+  # supplies a CommOverlapConfig, so config.py:1538-1540 calls comm_overlap.setup() AFTER
+  # the YAML has been merged. setup() -> _get_optimizer_overlap_cfgs() rebuilds the
+  # data-parallel fields from scratch, and _apply_cfgs() setattrs each one onto cfg.ddp
+  # unconditionally (no "only if unset" guard). The only user input it honours is THIS
+  # block, via _override_user_cfgs(). Four fields actually reach cfg.ddp — bucket_size,
+  # overlap_grad_reduce, overlap_param_gather, align_param_gather (the fifth,
+  # overlap_param_gather_with_optimizer_step, is not a DistributedDataParallelConfig field,
+  # so _apply_cfgs's hasattr guard drops it).
+  #
+  # Measured at DP=512, shipped vs the same file with these three lines deleted:
+  #   bucket_size          500000000 -> 134217728   DIFFERS - must be set here
+  #   overlap_param_gather      False -> True       DIFFERS - must be set here
+  #   overlap_grad_reduce        True -> True       same; recipe default happens to agree
+  #   align_param_gather        False -> False      same (only engages at PP>1 AND VPP>1)
+  # overlap_grad_reduce is stated for provenance, not to fix a value: it is inside the
+  # clobbered set, so leaving it out would mean the posture is the recipe's rather than
+  # ours, and a recipe change would move it silently. Do NOT "tidy" these into ddp: — there
+  # they would be silently dropped.
+  overlap_param_gather: false
+  overlap_grad_reduce: true
+  bucket_size: 500000000
+
+ddp:
+  # Only fields OUTSIDE the clobbered set belong here. bucket_size,
+  # overlap_param_gather and overlap_grad_reduce are set in comm_overlap above,
+  # because stating them here as well would leave a second copy that provably
+  # never reaches DistributedDataParallelConfig on this path.
+  use_distributed_optimizer: true
+
+dist:
+  # 10-minute default is not enough at 512 ranks: rank 0 builds the blended-dataset index
+  # over a 500B-token, three-source blend while every other rank waits in the same
+  # collective.
+  distributed_timeout_minutes: 60
+  # Mixed backend (torch's recommended init for distributed checkpointing): object
+  # collectives — the torch-DCP save-plan gather_object to rank 0 and mcore's sharding
+  # metadata all_gather_object — run on CPU over Gloo instead of staging through the GPU
+  # over NCCL. Over NCCL at 512 ranks, the plan gather makes rank 0 open ~511 P2P
+  # transports whose FIFO buffers (~4 GB total) persist for the process lifetime outside
+  # the torch allocator; the lost headroom then OOMs a later save-adjacent iteration on
+  # the 4 GiB fp32 cross-entropy logits transient (seq 8192 x vocab 131072 x 4B). Tensor
+  # collectives are unaffected: CUDA tensors still use NCCL.
+  distributed_backend: "cpu:gloo,cuda:nccl"
+
+model:
+  seq_length: 8192
+  # Off, which lowers the iteration's peak allocation by 4.00 GiB (77.0 -> 73.0 GiB) for
+  # +0.31% step time and no numerics change. The fused path is compiled by jit_fuser
+  # (= torch.compile on torch >= 2.2), and AOTAutograd functionalises the in-place `-=`
+  # and `torch.exp(out=)` in tensor_parallel/cross_entropy.py into an out-of-place
+  # inductor buffer of seq x vocab in fp32 = 8192 x 131072 x 4 B = exactly 4.00 GiB — so
+  # the kernel's own "in-place subtraction reduces memory pressure" comment no longer
+  # holds. The uncompiled path performs those mutations for real. This is headroom, not
+  # the fix: the OOM is cured by `checkpoint.ckpt_assume_constant_structure: false` in the
+  # checkpoint block below. It is kept so the run still has ~1.4 GiB of spare even if that
+  # retention ever recurs.
+  cross_entropy_loss_fusion: false
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False           # SP requires TP>1
+  moe_token_dispatcher_type: alltoall   # recipe default flex/deepep is blocked on Slingshot
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["core_attn", "moe", "shared_experts"]   # the minimum that fits
+
+checkpoint:
+  pretrained_checkpoint: null   # from scratch: random init (recipe init_method_std 0.0173)
+  # Every arm of this campaign saves under control_pretraining/, so the filtered arms
+  # this baseline is compared against sit beside it rather than scattered among
+  # unrelated experiments. load == save is what makes a segment resume: resumption is
+  # not automatic, and a chain of singleton jobs restarts from scratch if they differ.
+  load: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_v1_baseline_500b
+  save: /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_v1_baseline_500b
+  save_interval: 1490           # 20 intermediate saves + the final one at 29803
+  save_optim: true              # every checkpoint must be resumable
+  save_rng: true
+  most_recent_k: -1             # keep all 21; > -1 would prune to the k most recent
+  ckpt_format: torch_dist
+  async_save: false             # each save stalls the loop; turning it on would also
+                                # require checkpoint.use_persistent_ckpt_worker: true
+  # MUST stay false, and the Nano pretrain recipe sets it True, so omitting this line is
+  # not the same as setting it. With the cache on, the SECOND save takes a short path
+  # that reuses the cached plan, and the 13.679 GiB bf16 copy of this rank's expert
+  # weights that every save materialises (grouped_experts.py:344 .contiguous(), 46 blocks
+  # = 23 MoE layers x 2 matrices x 32 local experts) is not released. The next forward
+  # then starts 13.679 GiB above its floor and the iteration's largest allocation — the
+  # 4.00 GiB fp32 logits buffer — no longer fits. Measured at 512 GPUs: with the cache on,
+  # OOM on the first forward after save #2, every time (save_interval 8 -> iter 17;
+  # save_interval 150 -> iter 301), always at exactly 86.68 GiB allocated. Single-variable
+  # flip to false: zero OOM across three save crossings. Costs the full plan path on every
+  # save, ~55.9 s instead of ~5.0 s -> +17 min over the whole 500B run.
+  ckpt_assume_constant_structure: false
+
+logger:
+  log_interval: 1
+  log_throughput: true          # NOTE: the loop's counter is a dense approximation that
+                                # overstates Nano ~6%; headline TFLOP/s comes from
+                                # scripts/nemotronh_flops_estimator.py
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true    # routes TFLOP/s/GPU to W&B; log_throughput
+                                         # alone only reaches the console log
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: control_pretrain_v1_baseline_500b

@@ -3,7 +3,7 @@
 One unique ID joins the three places a training run leaves artifacts, which
 today are painful to correlate after the fact:
 
-    raw SLURM job log      logs/slurm/train-<jobid>.out (+ a by-run-id/ symlink)
+    raw SLURM job log      /projects/a5k/public/logs/megatron_runs/train-<jobid>.out (+ a by-run-id/ symlink)
     torch-profiler output  /projects/a5k/public/profiles/<run-name>/<run-id>/
     W&B run                summary metrics run/isambard_run_id, run/raw_log_path
 
@@ -50,6 +50,35 @@ def get_raw_log_path() -> str:
     return os.environ.get("ISAMBARD_RAW_LOG_PATH", "")
 
 
+def get_switch_placement() -> dict:
+    """Return how many network switches this job spans, and the per-switch node counts.
+
+    Isambard's fabric is a Dragonfly: bandwidth within a switch group is plentiful and
+    bandwidth between groups is scarce and shared cluster-wide. A job's spread across
+    groups therefore moves throughput materially — measured at 137.8 vs 114.7
+    TFLOP/s/GPU for the same Nano pretrain config at 2 groups vs 8 — so a throughput
+    number is only comparable to another taken at the same spread. Recording it with
+    the run's identity is what makes that comparison possible after the fact.
+
+    Read from ``ISAMBARD_SWITCH_SPREAD``, which pipeline_training_launch.sh derives from
+    ``scontrol show topology`` and exports to every rank — the same pattern as
+    ISAMBARD_RUN_ID and ISAMBARD_RAW_LOG_PATH. It cannot be computed here: the payload
+    runs inside the Apptainer container, which has the SLURM environment variables but
+    not the SLURM binaries, so ``scontrol`` is absent.
+
+    Format is ``<switch>:<nodes>`` pairs, comma-separated, e.g. ``group10:47,group2:17``.
+    Returns ``{}`` when unset — interactive runs, runs not started through the launcher,
+    or a cluster with no topology plugin — so callers get no key rather than a wrong one.
+    """
+    spread = os.environ.get("ISAMBARD_SWITCH_SPREAD", "")
+    if not spread:
+        return {}
+    switches = [pair for pair in spread.split(",") if ":" in pair]
+    if not switches:
+        return {}
+    return {"run/switch_count": len(switches), "run/switch_spread": spread}
+
+
 def stamp_wandb_summary(run, run_id: str, raw_log_path: str) -> None:
     """Write run-identity summary metrics onto a W&B run object.
 
@@ -61,13 +90,15 @@ def stamp_wandb_summary(run, run_id: str, raw_log_path: str) -> None:
     """
     if run is None:
         return
-    run.summary.update(
-        {
-            "run/isambard_run_id": run_id,
-            "run/raw_log_path": raw_log_path,
-            "run/slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
-        }
-    )
+    summary = {
+        "run/isambard_run_id": run_id,
+        "run/raw_log_path": raw_log_path,
+        "run/slurm_job_id": os.environ.get("SLURM_JOB_ID", ""),
+    }
+    # Absent unless the launcher exported it, so this adds no key on runs started
+    # outside pipeline_training_launch.sh rather than recording a placement it guessed.
+    summary.update(get_switch_placement())
+    run.summary.update(summary)
 
 
 class RunIdentityCallback(Callback):

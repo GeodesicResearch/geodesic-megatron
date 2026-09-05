@@ -37,6 +37,7 @@ import traceback
 from pathlib import Path
 
 import pandas as pd
+import yaml
 from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer  # noqa: I001
 
@@ -54,13 +55,38 @@ WANDB_PROJECT = "megatron-datasets-processing"
 WANDB_ENTITY = "geodesic"
 
 
+def load_pipeline_config(path):
+    """Pipeline parameters read from a YAML file, keyed by long-option name.
+
+    Keys may use either the option spelling (``pad-seq-to-mult``) or the
+    attribute spelling (``pad_seq_to_mult``).
+    """
+    with open(path) as f:
+        config = yaml.safe_load(f)
+    if config is None:
+        return {}
+    if not isinstance(config, dict):
+        raise ValueError(f"{path} must contain a mapping of parameter names to values, got {type(config).__name__}")
+    return {key.replace("-", "_"): value for key, value in config.items()}
+
+
 def parse_args():  # noqa: D103
     parser = argparse.ArgumentParser(
         description="Unified data pipeline for preparing HuggingFace datasets for Megatron Bridge training"
     )
 
     # Dataset arguments
-    parser.add_argument("--dataset", type=str, required=True, help="HuggingFace dataset name")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=(
+            "YAML file supplying the parameters that define what is prepared — dataset, subset, "
+            "split, revision, tokenizer, sequence length. A corpus whose identity matters should be "
+            "described by one of these rather than by a shell command. Command-line flags override it."
+        ),
+    )
+    parser.add_argument("--dataset", type=str, default=None, help="HuggingFace dataset name")
     parser.add_argument("--subset", type=str, default=None, help="Dataset config/subset name")
     parser.add_argument("--split", type=str, default="train", help="Dataset split (default: train)")
     parser.add_argument(
@@ -71,6 +97,17 @@ def parse_args():  # noqa: D103
         type=str,
         default=None,
         help="Subdirectory within the HuggingFace dataset repo to load (passed as data_dir to load_dataset)",
+    )
+    parser.add_argument(
+        "--revision",
+        type=str,
+        default=None,
+        help=(
+            "Pin the HuggingFace dataset to a git revision (commit SHA, tag, or branch). "
+            "Omitted means the current HEAD of the default branch, which moves whenever the "
+            "dataset is re-pushed; pass an explicit commit SHA for any corpus whose token "
+            "counts are recorded in a config or paper."
+        ),
     )
 
     # Output arguments
@@ -106,9 +143,25 @@ def parse_args():  # noqa: D103
     # Performance
     parser.add_argument("--num-proc", type=int, default=16, help="Parallel processes for dataset operations")
     parser.add_argument("--batch-size", type=int, default=10000, help="Batch size for token counting")
-    parser.add_argument("--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)")
+    parser.add_argument(
+        "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
+    )
+
+    config_path = parser.parse_known_args()[0].config
+    if config_path:
+        config = load_pipeline_config(config_path)
+        # Rejected rather than ignored: a typo in a corpus definition would otherwise
+        # prepare the wrong data and say nothing.
+        recognised = set(vars(parser.parse_args([])))
+        unknown = sorted(set(config) - recognised)
+        if unknown:
+            parser.error(f"unrecognised keys in {config_path}: {', '.join(unknown)}")
+        parser.set_defaults(**config)
 
     args = parser.parse_args()
+
+    if not args.dataset:
+        parser.error("--dataset is required, on the command line or in --config")
 
     if args.download_workers is None:
         args.download_workers = args.num_proc
@@ -134,6 +187,22 @@ def dataset_display_name(dataset, subset=None):
     if subset:
         name = f"{name}__{subset}"
     return name
+
+
+def build_hub_load_kwargs(args):
+    """Keyword arguments for the ``load_dataset`` call that pulls from the Hub.
+
+    ``data_dir`` and ``revision`` are only passed when set: ``load_dataset``
+    treats an explicit ``None`` differently from an absent argument for some
+    builders. Omitting ``revision`` resolves the default branch's current HEAD,
+    so a dataset that is re-pushed yields different data under the same command.
+    """
+    kwargs = {"split": args.split, "num_proc": args.download_workers}
+    if args.data_dir:
+        kwargs["data_dir"] = args.data_dir
+    if args.revision:
+        kwargs["revision"] = args.revision
+    return kwargs
 
 
 def detect_column_and_format(ds, text_column=None, join_columns=None):
@@ -351,9 +420,7 @@ def verify_packed_loss_mask(
     total_tokens = sum(len(r) for r in input_ids_col)
     total_unmasked = sum(int(v) for r in loss_mask_col for v in r)
     overall_density = total_unmasked / total_tokens if total_tokens else 0.0
-    per_row_density = [
-        sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col
-    ]
+    per_row_density = [sum(int(v) for v in r) / len(r) if r else 0.0 for r in loss_mask_col]
 
     summary = {
         "verify_status": "ok",
@@ -434,6 +501,8 @@ def init_wandb(args, format_type, output_dir):
         "dataset": args.dataset,
         "subset": args.subset,
         "split": args.split,
+        "revision": args.revision,
+        "config": args.config,
         "tokenizer": args.tokenizer,
         "output_dir": str(output_dir),
         "text_column": args.text_column,
@@ -468,6 +537,8 @@ def main():  # noqa: D103
         "dataset": args.dataset,
         "subset": args.subset,
         "split": args.split,
+        "revision": args.revision,
+        "config": args.config,
         "tokenizer": args.tokenizer,
         "status": "started",
     }
@@ -488,6 +559,7 @@ def main():  # noqa: D103
     if args.subset:
         print(f"Subset:    {args.subset}")
     print(f"Split:     {args.split}")
+    print(f"Revision:  {args.revision or 'HEAD (unpinned — moves when the dataset is re-pushed)'}")
     print(f"Tokenizer: {args.tokenizer}")
     print(f"Output:    {output_dir}")
     print("=" * 60)
@@ -521,16 +593,10 @@ def main():  # noqa: D103
                                 rows.append(json.loads(line))
                         ds = Dataset.from_list(rows)
             else:
-                load_kwargs = dict(
-                    split=args.split,
-                    num_proc=args.download_workers,
-                )
-                if args.data_dir:
-                    load_kwargs["data_dir"] = args.data_dir
                 ds = load_dataset(
                     args.dataset,
                     args.subset,
-                    **load_kwargs,
+                    **build_hub_load_kwargs(args),
                 )
             break
         except Exception as e:
@@ -610,16 +676,18 @@ def main():  # noqa: D103
         results["elapsed_time"] = time.time() - start_time
 
         if wb_run:
-            wb_run.summary.update({
-                "num_documents": num_docs,
-                "token_count": results.get("token_count"),
-                "tokens_per_doc": results.get("tokens_per_doc"),
-                "status": "completed",
-                "packed": False,
-                "elapsed_time": results["elapsed_time"],
-                "load_time": load_time,
-                "count_time": count_time,
-            })
+            wb_run.summary.update(
+                {
+                    "num_documents": num_docs,
+                    "token_count": results.get("token_count"),
+                    "tokens_per_doc": results.get("tokens_per_doc"),
+                    "status": "completed",
+                    "packed": False,
+                    "elapsed_time": results["elapsed_time"],
+                    "load_time": load_time,
+                    "count_time": count_time,
+                }
+            )
             wb_run.finish()
 
         print(f"\nResults: {json.dumps(results, indent=2)}")
@@ -692,7 +760,9 @@ def main():  # noqa: D103
         print(f"\n[5/6] PACK - Running pack_sft_dataset.py ({format_type} format)...")
         pack_start = time.time()
 
-        success = run_pack(output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type)
+        success = run_pack(
+            output_dir, args.tokenizer, args.seq_length, args.pad_seq_to_mult, has_validation, format_type
+        )
 
         pack_time = time.time() - pack_start
         results["packed"] = success
@@ -708,7 +778,7 @@ def main():  # noqa: D103
 
     # ── Stage 6: VERIFY ────────────────────────────────────────────
     if not args.skip_pack and results.get("packed"):
-        print(f"\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
+        print("\n[6/6] VERIFY - Reading packed parquet to inspect per-token loss mask...")
         verify_summary = verify_packed_loss_mask(
             output_dir=output_dir,
             tokenizer_id=args.tokenizer,
@@ -729,24 +799,26 @@ def main():  # noqa: D103
 
     # W&B summary
     if wb_run:
-        wb_run.summary.update({
-            "num_documents": num_docs,
-            "token_count": results.get("token_count"),
-            "tokens_per_doc": results.get("tokens_per_doc"),
-            "training_docs": results.get("training_docs", 0),
-            "validation_docs": results.get("validation_docs", 0),
-            "status": results["status"],
-            "packed": results.get("packed", False),
-            "elapsed_time": results["elapsed_time"],
-            "load_time": load_time,
-            "count_time": count_time,
-            "export_time": export_time,
-            "pack_time": pack_time,
-            "mask_density": results.get("verify_mask_density"),
-            "mask_density_min": results.get("verify_density_min"),
-            "mask_density_max": results.get("verify_density_max"),
-            "verify_warning": results.get("verify_warning"),
-        })
+        wb_run.summary.update(
+            {
+                "num_documents": num_docs,
+                "token_count": results.get("token_count"),
+                "tokens_per_doc": results.get("tokens_per_doc"),
+                "training_docs": results.get("training_docs", 0),
+                "validation_docs": results.get("validation_docs", 0),
+                "status": results["status"],
+                "packed": results.get("packed", False),
+                "elapsed_time": results["elapsed_time"],
+                "load_time": load_time,
+                "count_time": count_time,
+                "export_time": export_time,
+                "pack_time": pack_time,
+                "mask_density": results.get("verify_mask_density"),
+                "mask_density_min": results.get("verify_density_min"),
+                "mask_density_max": results.get("verify_density_max"),
+                "verify_warning": results.get("verify_warning"),
+            }
+        )
         wb_run.finish()
 
     # ── Summary ────────────────────────────────────────────────────
@@ -766,7 +838,7 @@ def main():  # noqa: D103
 
     if results["status"] == "completed":
         print("\nFor Megatron Bridge training config:")
-        print(f'  dataset_root: {output_dir}')
+        print(f"  dataset_root: {output_dir}")
 
     return 0 if results["status"] == "completed" else 1
 

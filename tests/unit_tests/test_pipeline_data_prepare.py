@@ -1,5 +1,6 @@
 """Unit tests for pipeline_data_prepare.py — focused on the chat-record passthrough,
-the per-token decode helper, and the VERIFY stage's loss-mask reporting + warning.
+the per-token decode helper, the VERIFY stage's loss-mask reporting + warning, and the
+kwargs assembled for the Hub download.
 """
 
 from __future__ import annotations
@@ -111,8 +112,13 @@ class TestDecodeToken:
 # ── verify_packed_loss_mask ─────────────────────────────────────────────────
 
 
-def _write_packed_parquet(tmp_path: Path, tokenizer_id: str, seq_length: int,
-                          input_ids_rows: list[list[int]], loss_mask_rows: list[list[int]]) -> Path:
+def _write_packed_parquet(
+    tmp_path: Path,
+    tokenizer_id: str,
+    seq_length: int,
+    input_ids_rows: list[list[int]],
+    loss_mask_rows: list[list[int]],
+) -> Path:
     """Write a minimal packed parquet at the path verify_packed_loss_mask expects."""
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -166,7 +172,9 @@ class TestVerifyPackedLossMask:
     def test_density_computation_chat_healthy(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Two rows: 4 of 8 tokens loss-bearing in row 0; 6 of 8 in row 1. Overall: 10/16 = 62.5%.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 8,
+            tmp_path,
+            "dummy/tokenizer",
+            8,
             input_ids_rows=[[1, 2, 3, 4, 5, 6, 7, 8], [10, 20, 30, 40, 50, 60, 70, 80]],
             loss_mask_rows=[[0, 0, 0, 0, 1, 1, 1, 1], [0, 0, 1, 1, 1, 1, 1, 1]],
         )
@@ -189,11 +197,12 @@ class TestVerifyPackedLossMask:
         out = capsys.readouterr().out
         assert "WARNING" not in out
 
-    def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path,
-                                                          mock_tokenizer, capsys):
+    def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Chat format + all-1s mask is the silent-failure signature.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
@@ -210,11 +219,12 @@ class TestVerifyPackedLossMask:
         assert "WARNING" in out
         assert "{% generation %}" in out
 
-    def test_no_warning_for_pretraining_all_ones(self, pipe_module, tmp_path,
-                                                  mock_tokenizer, capsys):
+    def test_no_warning_for_pretraining_all_ones(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Pretraining format with density=1.0 is the design — must not warn.
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4]],
             loss_mask_rows=[[1, 1, 1, 1]],
         )
@@ -232,7 +242,9 @@ class TestVerifyPackedLossMask:
 
     def test_wandb_table_logged_per_row(self, pipe_module, tmp_path, mock_tokenizer, monkeypatch):
         _write_packed_parquet(
-            tmp_path, "dummy/tokenizer", 4,
+            tmp_path,
+            "dummy/tokenizer",
+            4,
             input_ids_rows=[[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]],
             loss_mask_rows=[[0, 0, 1, 1]] * 4,
         )
@@ -257,6 +269,166 @@ class TestVerifyPackedLossMask:
         assert wb_run.log.call_count == 3
         logged_keys = [call.args[0].keys() for call in wb_run.log.call_args_list]
         flat_keys = sorted(k for keys in logged_keys for k in keys)
-        assert flat_keys == ["loss_mask_table/row_0",
-                             "loss_mask_table/row_1",
-                             "loss_mask_table/row_2"]
+        assert flat_keys == ["loss_mask_table/row_0", "loss_mask_table/row_1", "loss_mask_table/row_2"]
+
+
+# ── build_hub_load_kwargs ───────────────────────────────────────────────────
+
+
+def _parse_bare(pipe_module, *argv):
+    """Run the real argument parser over exactly the given arguments."""
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(sys, "argv", ["pipeline_data_prepare.py", *argv])
+    try:
+        return pipe_module.parse_args()
+    finally:
+        monkey.undo()
+
+
+def _parse(pipe_module, *extra):
+    """Run the real argument parser over a minimal valid command line."""
+    return _parse_bare(pipe_module, "--dataset", "org/corpus", *extra)
+
+
+class TestBuildHubLoadKwargs:
+    def test_revision_defaults_to_unpinned(self, pipe_module):
+        args = _parse(pipe_module)
+        assert args.revision is None
+        # Absent, not None: load_dataset must fall through to its own default.
+        assert "revision" not in pipe_module.build_hub_load_kwargs(args)
+
+    def test_revision_is_forwarded_to_load_dataset(self, pipe_module):
+        sha = "018376f4b033d7533471514f607cae4de3c95b99"
+        args = _parse(pipe_module, "--revision", sha)
+        assert pipe_module.build_hub_load_kwargs(args)["revision"] == sha
+
+    def test_data_dir_absent_unless_set(self, pipe_module):
+        assert "data_dir" not in pipe_module.build_hub_load_kwargs(_parse(pipe_module))
+        args = _parse(pipe_module, "--data-dir", "sub/dir")
+        assert pipe_module.build_hub_load_kwargs(args)["data_dir"] == "sub/dir"
+
+    def test_split_and_workers_always_present(self, pipe_module):
+        args = _parse(pipe_module, "--split", "validation", "--download-workers", "7")
+        kwargs = pipe_module.build_hub_load_kwargs(args)
+        assert kwargs["split"] == "validation"
+        assert kwargs["num_proc"] == 7
+
+    def test_revision_recorded_for_provenance(self, pipe_module, tmp_path, monkeypatch):
+        """A prepared corpus must carry the revision it was built from."""
+        sha = "018376f4b033d7533471514f607cae4de3c95b99"
+        args = _parse(pipe_module, "--revision", sha)
+        # wandb.init would need network + credentials; the assertion is on the
+        # config dict this function builds, which is passed to it verbatim.
+        captured = {}
+
+        fake_wandb = MagicMock()
+        fake_wandb.init.side_effect = lambda **kw: captured.update(kw) or MagicMock()
+        monkeypatch.setattr(pipe_module, "wandb", fake_wandb, raising=False)
+
+        pipe_module.init_wandb(args, "pretraining", tmp_path)
+        assert captured["config"]["revision"] == sha
+
+
+# ── --config ────────────────────────────────────────────────────────────────
+
+
+def _write_config(tmp_path, body):
+    path = tmp_path / "corpus.yaml"
+    path.write_text(body)
+    return str(path)
+
+
+class TestPipelineConfig:
+    def test_config_supplies_parameters(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "dataset: org/corpus\nsubset: combined\nrevision: abc123\n")
+        args = _parse_bare(pipe_module, "--config", cfg)
+        assert (args.dataset, args.subset, args.revision) == ("org/corpus", "combined", "abc123")
+
+    def test_command_line_overrides_config(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "dataset: org/corpus\nrevision: from-config\n")
+        args = _parse_bare(pipe_module, "--config", cfg, "--revision", "from-cli")
+        assert args.revision == "from-cli"
+        assert args.dataset == "org/corpus"
+
+    def test_hyphenated_keys_are_accepted(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "dataset: org/corpus\npad-seq-to-mult: 8\nval-proportion: 0\n")
+        args = _parse_bare(pipe_module, "--config", cfg)
+        assert args.pad_seq_to_mult == 8
+        assert args.val_proportion == 0
+
+    def test_unknown_key_is_rejected(self, pipe_module, tmp_path):
+        """A typo must not silently prepare the wrong corpus."""
+        cfg = _write_config(tmp_path, "dataset: org/corpus\nrevisoin: abc123\n")
+        with pytest.raises(SystemExit):
+            _parse_bare(pipe_module, "--config", cfg)
+
+    def test_missing_dataset_is_rejected(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "subset: combined\n")
+        with pytest.raises(SystemExit):
+            _parse_bare(pipe_module, "--config", cfg)
+
+    def test_config_is_recorded_for_provenance(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "dataset: org/corpus\nrevision: abc123\n")
+        args = _parse_bare(pipe_module, "--config", cfg)
+        assert args.config == cfg
+
+    def test_defaults_survive_a_partial_config(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "dataset: org/corpus\n")
+        args = _parse_bare(pipe_module, "--config", cfg)
+        assert args.split == "train"
+        assert args.seq_length == 8192
+
+    def test_empty_config_is_not_an_error(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "# nothing but a comment\n")
+        args = _parse_bare(pipe_module, "--config", cfg, "--dataset", "org/corpus")
+        assert args.dataset == "org/corpus"
+
+    def test_non_mapping_config_raises(self, pipe_module, tmp_path):
+        cfg = _write_config(tmp_path, "- just\n- a list\n")
+        with pytest.raises(ValueError, match="must contain a mapping"):
+            pipe_module.load_pipeline_config(cfg)
+
+
+class TestShippedCorpusConfigs:
+    """The campaign's corpus definitions must actually load through the real parser."""
+
+    def test_every_shipped_corpus_config_parses(self, pipe_module):
+        # Recursive: each campaign arm keeps its corpus definitions in its own data/
+        # directory (configs/control_pretraining/30b_baseline/data/, ...), so a glob
+        # anchored on the top-level data/ alone would silently skip every arm but the first.
+        campaign_dir = _REPO_ROOT / "configs" / "control_pretraining"
+        configs = sorted(campaign_dir.glob("**/data/*.yaml"))
+        assert configs, f"no corpus configs found under {campaign_dir}"
+
+        # Which tokenizer a corpus config must name follows the corpus KIND: a .bin/.idx
+        # corpus bakes its EOD into the data, a packed SFT corpus renders a chat template.
+        # The arms declare the kind of every corpus they build in their corpora.tsv, read
+        # here through the module the build and the verifier share. A config no table
+        # names (the V1 and CPT corpora) is a .bin/.idx corpus when its prepare writes
+        # JSONL only — for those, `skip-pack` is the only signal there is.
+        import sys
+
+        sys.path.insert(0, str(campaign_dir))
+        from corpora_table import read_corpora_table
+
+        kind_of_config: dict[Path, str] = {}
+        for table in sorted(campaign_dir.glob("*/corpora.tsv")):
+            for row in read_corpora_table(table):
+                kind_of_config[row.config.resolve()] = row.kind
+
+        for path in configs:
+            args = _parse_bare(pipe_module, "--config", str(path))
+            assert args.dataset, f"{path.name} does not name a dataset"
+            assert args.revision, f"{path.name} does not pin a revision"
+            kind = kind_of_config.get(path.resolve(), "tokenize" if args.skip_pack else "pack")
+            if kind == "tokenize":
+                # Pretraining-format (.bin/.idx) corpora: the EOD baked into the data must
+                # be the base tokenizer's `</s>` = id 2 (CLAUDE.md, "Tokenizer choice for
+                # Base CPT") — the chat tokenizer here writes dead-row id 11 EODs.
+                assert args.tokenizer == "geodesic-research/nemotron-base-tokenizer", path.name
+            else:
+                # Packed SFT corpora: the reasoning/think chat-template tokenizer, HISTORY
+                # variant — the plain one truncates prior-turn reasoning out of multi-turn
+                # conversations before tokenization. The packed path in the training config
+                # that reads the pack names the same tokenizer.
+                assert args.tokenizer == "geodesic-research/nemotron-think-history-tokenizer", path.name

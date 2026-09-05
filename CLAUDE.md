@@ -69,6 +69,56 @@ isambard_sbatch --prune-bad                             # drop expired/malformed
 
 Find node names: `scontrol show hostnames $SLURM_JOB_NODELIST`, `sacct -j <id> -o NodeList`, or `squeue` `%N`/`%R`.
 
+#### A single wedged GPU hangs the whole job at distributed init
+
+**Symptom:** the run sits at `> initializing torch distributed ...` forever. Ranks burn **zero**
+CPU in `do_sys_poll`, have no NCCL threads, and hold only a ~530 MiB CUDA context. It reads like
+a fabric hang, a rendezvous failure, or a scale limit. It is none of those.
+
+**The tell is in the store's own error** — read it before theorising:
+
+```
+DistStoreError: Timed out after 1201 seconds waiting for clients. 511/512 clients joined.
+srun: error: nid0XXXXX: task 343: Terminated     <- the only task needing a kill
+```
+
+`N-1/N` (never `N/N`) means exactly one rank never reached the rendezvous. `torch.cuda.set_device()`
+runs **before** `init_process_group` and triggers real CUDA context creation, and it has **no
+timeout** — so a rank on a wedged GPU spins there forever, the store never reaches `N`, rank 0
+never publishes its gloo address key, and every healthy rank blocks behind it. Cross-check with
+`grep -c "NCCL version"`: **0** means NCCL never initialised, so the fabric is not implicated.
+
+**Detection — sweep the whole allocation.** A healthy idle GPU reads 0% utilisation even while a
+rank holds a context, so `util > 0` with tiny memory is the discriminator:
+
+```bash
+srun --overlap --nodes=$SLURM_NNODES --ntasks-per-node=1 bash -c \
+  'nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader,nounits |
+   awk -F, -v h=$(hostname -s) "{gsub(/ /,\"\"); if (\$3>0) print \"SUSPECT\", h, \"gpu\"\$1, \$2\"MiB\", \$3\"%\"}"'
+```
+
+A wedged GPU reports e.g. `29MiB util=100%` **with zero compute apps attached**. Confirm by doing
+work, not by reading a counter — `nvidia-smi` utilisation can latch stale: create a context and run
+a matmul on each GPU in its own short-lived process (healthy ones finish in ~3 s; the wedged one
+never returns).
+
+**Why it is so easy to misdiagnose:** small-node runs pass, because rank assignment follows
+nodelist order and a short run never reaches the bad node. That makes it look like a scale or
+launch-mode problem, and any prior successful run that happened to exclude the node becomes a
+false control. Always compare **node membership** (`sacct -j <id> -o NodeList`) before concluding
+that config, launcher, or sbatch-vs-tunnel is the variable.
+
+**Remedy:** `nvidia-smi --gpu-reset` needs root (it must toggle persistence mode), so the GPU needs
+an admin reset or a node reboot. `--mark-bad` the node so future submissions auto-exclude it. To
+keep using a *fixed* allocation that contains one, exclude the node via `--nodelist` and set
+`train.decrease_batch_size_if_needed=true` — Megatron then rounds `global_batch_size` down to the
+nearest multiple of `micro_batch_size × data_parallel_size`, booking the shortfall as
+`skipped_train_samples` so token accounting stays truthful.
+
+(When scripting these sweeps, match processes on numeric UID (`id -u`): `ps -eo user` truncates
+account names longer than 8 characters and appends `+`, so a username comparison silently matches
+nothing — it finds no processes and reads as "the node is clean".)
+
 ### Project storage quota
 
 `isambard_sbatch` prints a **project storage quota report** on every submission — per-path Lustre quota usage (`<path>  used/limit (pct%)`, flagged ` — nearly full` at ≥90%, plus inode counts) via the documented recipe `lfs quota -p $(lfs project -d <DIR> ...) <DIR>`. Example line: `Storage: /projects/a5k  188.6T / 200.0T (94%)  files: 6.2M / 50.0M (12%) — nearly full`. **Determine free storage from this report, not from `df`.** The project quota (`/projects/a5k`, 200 T) is what actually limits writes — and it runs hot (often ~94%). `df -h /lus/lfs1aip2` instead reports the whole shared Lustre filesystem (~21 PB, ~36% used), so it makes storage look nearly empty and completely hides that the project quota is almost full — the opposite of the truth. Tune with `ISAMBARD_SBATCH_STORAGE_PATHS` (default `/projects/<account>`), `ISAMBARD_SBATCH_STORAGE_WARN_PCT` (default 90), or skip with `ISAMBARD_SBATCH_STORAGE_DISABLED=1`. Like the bad-nodes report, it never blocks a submission, so watch it — at ~94% a large checkpoint/download can hit the quota.
@@ -118,7 +168,7 @@ bash pipeline_env_setup.sh
 | `pipeline_env_setup.sh` | The whole install in four idempotent steps (`sif` → `slingshot` → `overlay` → `validate`). Needs a GPU node for steps 2 and 4. |
 | `pipeline_env_exec.sh` | The shim every launcher uses: scrubs host toolchain env, then runs one command string inside the container. |
 | `pipeline_env_activate.sh` | Sourced INSIDE the container: import resolution, CUDA forward-compat, Slingshot `LD_LIBRARY_PATH`/`NCCL_NET_PLUGIN`, universal GPU settings, cache paths. |
-| `pipeline_env_validate.py` | 20-check validation (imports incl. grouped_gemm, which the non-default `cublas_grouped` expert backend needs, CUDA, GPU ops, import resolution, NCCL plugin dlopen, host OpenMP threading defaults, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
+| `pipeline_env_validate.py` | 21-check validation (imports incl. grouped_gemm, which the non-default `cublas_grouped` expert backend needs, CUDA, GPU ops, import resolution, NCCL plugin dlopen, host OpenMP threading defaults, HF datasets-cache writability, ft_launcher flags, dataset-helpers JIT, recipes, version report); `--run-training` adds a tiny training run. |
 | `pipeline_env_submit.sbatch` | SLURM wrapper; modes `setup`, `validate`, `smoke` (2-node fabric check). |
 
 ### Key facts
@@ -182,7 +232,7 @@ bash pipeline_env_setup.sh
   ```bash
   # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent
   ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -n 8 --dist loadfile"
+    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -n 4 --dist loadfile"
   ```
   The `.venv` that remains is for **dev tooling only** (ruff, pre-commit, the Claude
   Code hooks) and deliberately carries no torch; create it with
@@ -228,7 +278,7 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
-`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--enable-pao`, `--peft lora`, `--nodes N`, `--nodelist LIST`.
+`pipeline_training_launch.sh` options: `--model nano|super|ultra` (required), `--mode sft|cpt|pretrain` (required), `--disable-ft`, `--disable-straggler`, `--enable-pao`, `--peft lora`, `--nodes N`, `--nodelist LIST`.
 
 `cpt` and `pretrain` both read Megatron-native `.bin/.idx` data and both **require**
 `dataset.data_path` in the config — there is no default corpus. They differ only in the
@@ -253,10 +303,17 @@ would demand a checkpoint.
   `scripts/profiling/profiler_callback.py`.
 - **Run identity**: every launcher run mints `ISAMBARD_RUN_ID`
   (`<timestamp>-j<jobid>`), echoed in the log banner, symlinked as
-  `logs/slurm/by-run-id/<run-id>.out`, used as the profile subdir name, and
+  `/projects/a5k/public/logs/megatron_runs/by-run-id/<run-id>.out`, used as the profile subdir name, and
   stamped into W&B summary (`run/isambard_run_id`, `run/raw_log_path`,
   `run/slurm_job_id`) by `scripts/telemetry/run_identity.py` — the join key
-  between a W&B run, its raw log, and its profiles.
+  between a W&B run, its raw log, and its profiles. The same summary carries
+  `run/switch_count` and `run/switch_spread`, the run's Dragonfly placement,
+  from the launcher's `scontrol`-derived `ISAMBARD_SWITCH_SPREAD` (`scontrol`
+  does not exist inside the container, so the payload cannot compute it). Both
+  are absent on runs not started through `pipeline_training_launch.sh`.
+  Placement is worth ~18% on the Nano pretrain config — 137.8 TFLOP/s/GPU
+  across 2 switch groups against 114.7 across 8 — so compare a throughput
+  number only against another taken at the same spread.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults
   and CLI overrides, but the bridge sends the FULL resolved config to W&B at startup —
   recover any run's exact posture from its W&B run's config tab (join via
@@ -273,8 +330,11 @@ would demand a checkpoint.
 Every env var has detailed inline documentation.
 
 `pipeline_env_activate.sh` (sourced inside the container, in the same shell that then execs
-ft_launcher/torchrun) carries the universal knobs. Two are tunable:
-`ISAMBARD_CUDA_MAX_CONNECTIONS` (default 1) and **`ISAMBARD_OMP_THREADS` (default 8)**,
+ft_launcher/torchrun) carries the universal knobs. Three are tunable:
+`ISAMBARD_CUDA_MAX_CONNECTIONS` (default 1), `ISAMBARD_CUDA_ALLOC_CONF` (default
+`expandable_segments:True`; a measured `False` arm showed no difference on the 512-GPU
+Nano pretrain posture — the knob exists for A/Bs), and
+**`ISAMBARD_OMP_THREADS` (default 8)**,
 which sets `OMP_NUM_THREADS` and, whenever it is > 1, also `OMP_WAIT_POLICY=PASSIVE`. The
 default matters because torchrun silently sets `OMP_NUM_THREADS=1` when the variable is
 absent, single-threading the host-side AdamW of any CPU-offloaded optimizer onto one
@@ -306,9 +366,9 @@ with the venv gone, there is one answer.)
 
 Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with EP=8 cross-node). The training pipeline uses a layered resilience stack:
 
-1. **In-process restart** (60s/90s timeout) — reinitializes NCCL, retries same step. Zero iterations lost.
-2. **ft_launcher job restart** (`--max-restarts=20`) — kills workers, reloads from latest checkpoint. ≤25 iters lost.
-3. **NCCL watchdog** (900s) — last resort backup.
+1. **ft_launcher worker restart** (`--max-restarts=20`) — the per-node agent restarts failed workers, reloading from the latest checkpoint. ≤25 iters lost. (`cfg.inprocess_restart` is never set by `pipeline_training_run.py`, so there is no in-process layer on the shipped path.)
+2. **NCCL watchdog** (`TORCH_NCCL_TIMEOUT`, 7200s) — aborts genuinely wedged collectives.
+3. **srun `--kill-on-bad-exit=1`** — when a rank dies unrecoverably (or ft is disabled), the whole step ends instead of stranding the surviving ranks in a never-completing collective; with a `--dependency=singleton` chain the next segment then resumes from the latest checkpoint.
 
 **ft_launcher timeout configuration** (set in `pipeline_training_launch.sh`):
 - `--ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600`
@@ -318,9 +378,35 @@ Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with E
   defaults to 3600 s / 2700 s, which is shorter than Ultra-550B's 45-75 min first iteration at
   PP=36 and produces a SIGKILL + restart loop that looks exactly like a fabric hang. The image's
   ft_launcher parses these as floats and rejects the literal `none`, hence explicit numbers.
+  **Raising them to 7200 does not make them safe, it moves the wall.** The rank monitor is not
+  guaranteed to receive an initial heartbeat at all; when it does not, the timeout stops being a
+  liveness check and SIGKILLs a perfectly healthy job at exactly 7200 s. Signature, worth
+  grepping before blaming the fabric: `[Cycle N] Did not get initial heartbeat. Waited 7200.00
+  seconds`. Observed on Super-120B/64 GPUs and Nano-30B/512 GPUs; **not** universal — Ultra-550B
+  trains ~4.7 h under the same default without a kill, so what decides delivery is unresolved.
 - `calc_ft_timeouts=True` auto-learns step timeouts after first successful run. **Delete `ft_state.json`** from checkpoint dir if learned timeouts are too aggressive after config changes.
 
 The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set via YAML or Hydra overrides (OmegaConf merge creates dicts, not dataclasses). They are set in `pipeline_training_run.py` via the `--enable-ft` flag (on by default). Use `--disable-ft` to opt out.
+
+`--disable-straggler` drops **only** the NVRx straggler detector and keeps `cfg.ft`: the
+detector's rank-0 gather of per-GPU perf scores has been observed to OOM high-memory jobs after
+~20 minutes of stepping, which is why both pretrain quickstarts (short, restart-free) simply
+pass `--disable-ft` instead.
+
+**It is not a milder `--disable-ft`, and it is the wrong reach for a long run.** It leaves the
+heartbeat timeout above fully armed, so it does nothing about the 2 h wall. Before enabling ft
+on any run expected to exceed the heartbeat, do the arithmetic the run now prints at startup:
+compare `save_interval × s/iter` against 7200 s. If the **first** checkpoint lands after the
+wall, ft is not fault tolerance — a heartbeat SIGKILL restarts from iteration 0 with an empty
+checkpoint directory, and the run makes no net progress for as long as it is left alone.
+`pipeline_training_run.py` logs the required s/iter whenever ft is on
+(`max_seconds_per_iteration_under_ft_heartbeat`); read that line rather than rediscovering it.
+Measured instance: the 500B control-pretraining baseline needed < 2.42 s/iter and ran at 4.276,
+giving seven kills across eight attempts in 15.5 h with zero checkpoints written.
+
+Where ft is dropped, a `--dependency=singleton` chain with `checkpoint.load == checkpoint.save`
+supplies the recovery ft would have: the NCCL watchdog ends a genuinely wedged segment, and the
+next segment resumes from the latest checkpoint.
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard
 
@@ -424,7 +510,7 @@ quickstart.
 
 | quickstart | topology (·ETP1, mbs 1) | measured (solo, zero overrides) |
 |---|---|---|
-| `nemotron_nano_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP1·DP128, selective `[core_attn,moe,shared_experts]` | **25.533 s/iter = 8.312 ms/sample**, 160.2 TFLOP/s/GPU (16.2% MFU), loss 12.20 -> 7.58, 0 NaN |
+| `nemotron_nano_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP1·DP128, selective `[core_attn,moe,shared_experts]` | **25.533 s/iter = 8.312 ms/sample**, 160.2 TFLOP/s/GPU (16.2% MFU), loss 12.20 -> 7.58, 0 NaN. Measured at a 128 MiB bucket with param-gather overlap ON — its `ddp.bucket_size` is inert (see the Nano-pretrain `comm_overlap` note above) |
 | `nemotron_super_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP8·DP16, selective `[moe,shared_experts]` | **86.940 s/iter = 28.301 ms/sample**, 171.4 TFLOP/s/GPU (17.3% MFU), loss 12.19 -> 7.65, 0 NaN |
 
 Launch: `isambard_sbatch --nodes=32 pipeline_training_submit.sbatch <config> nano|super
@@ -446,6 +532,143 @@ recipe already supplies bf16_mixed, no CUDA graphs, and native CE. Final checkpo
 (`save_optim/save_rng: false`); a from-scratch 1B-token model is a pipeline artifact,
 not a usable model — no coherence test (expected gibberish; sanity = loss ~12.2 → ~7.6
 over the 40 iterations, 0 NaN, as in the anchors above).
+
+### Control-pretraining campaign (`configs/control_pretraining/`)
+
+The full-scale from-scratch runs for the pretraining-data-filtering study, as opposed to the
+1B-token quickstarts above. `nemotron_nano_control_v1_baseline_500b.yaml` is the unfiltered V1
+baseline: Nano 30B-A3B, 500,011,368,448 tokens (29803 iters x GBS 2048 x seq 8192) on 512
+GPUs, WSD 1e-3 → 1e-5, 21 optimizer-bearing checkpoints, blended ClimbMix 0.80 / Zyda-2
+`sample-100BT` 0.19 / AI-safety discourse 0.01. Launch it as a `--dependency=singleton` chain
+of day-long segments rather than one long allocation — see that directory's README, and the
+config header for the settings that are not free choices (`lr_wsd_decay_iters`, the
+`comm_overlap` restatement above, and `checkpoint.ckpt_assume_constant_structure`). **Three** DP=512 save-crossing pathologies are fixed
+structurally, and the README's "Save crossings at DP=512" section records each mechanism
+with its evidence. The one that actually stops the run is the third: every save
+materialises a 13.679 GiB bf16 copy of the rank's MoE expert weights
+(`grouped_experts.py:344` `.contiguous()` on a transposed fused weight, `torch_grouped`
+only), and `ckpt_assume_constant_structure: True` sends the *second* save down a cached
+short path that never frees it — so the next forward OOMs on the 4 GiB fp32 logits buffer.
+Fix: **`checkpoint.ckpt_assume_constant_structure: false`**, which the recipe sets `True`,
+so omitting it is not the same as setting it. `model.cross_entropy_loss_fusion: false`
+adds 4.00 GiB of margin for +0.31% step time and no numerics change. The other two are the
+CXI MR-cache capacity collapse (launcher: `FI_MR_CACHE_MAX_COUNT`) and the rank-0 NCCL
+object-gather transport retention (`dist.distributed_backend: "cpu:gloo,cuda:nccl"`).
+**Any probe validating save behaviour must cross at least three saves and run the forward
+after each** — one that exits at its second save never executes the failing step.
+
+**The going-forward arm is `configs/control_pretraining/30b_baseline/`**, which supersedes V1's
+blend with the campaign mix (sheet revision 2026-08-20) as a **three-stage curriculum**:
+`nemotron_nano_30b_baseline_pretrain.yaml` (501.3B tokens, seq 8192, **constant** 1e-3 — it
+never anneals; ClimbMix's 0.698180 aggregate is split token-proportionally across its 8
+shards), then `nemotron_nano_30b_baseline_midtrain.yaml` (52.4B tokens over 10 corpora, seq 32768,
+TP1·**CP2**·EP4·PP1, which is the annealing phase, decaying 7.5e-4 → 1e-5 with `cosine`
+after a 100-iteration warmup, and pinning `adam_beta2: 0.95` so that warmup outlasts the
+second-moment EMA the weights-only warm start resets),
+then `nemotron_nano_30b_baseline_sft.yaml` (the reasoning/think post-training: two epochs
+≈ 50B tokens of the packed `pa-warm-start-sft-heavy-25b-mix` combined split, seq 32768,
+**think-HISTORY** tokenizer, `nano sft` — its `train_iters` is the measured 2988,
+`ceil(2 x 764,685 packs / 512)`). The history tokenizer is not interchangeable with the plain think one: that
+corpus keeps per-turn reasoning in a `reasoning_content` field, and the plain variant's
+`truncate_history_thinking` default renders every non-final assistant turn as an empty
+`<think></think>`, dropping 80% of prior-turn traces before tokenization. The encoders are
+byte-identical, so only the packed artifact differs — and the packed path names the tokenizer
+so the two cannot silently disagree.
+Stages 1–2 run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
+boundary, and the two retain **16 checkpoints between them** (14 + 2). All three stages (and
+both CPT-validation arms) set `train.exit_duration_in_mins: 1400`: a 24 h segment saves and
+exits on its own clock ~40 min before the workq MaxWall, because sbatch `--signal`-based
+exits are undeliverable on this stack (the non-Python layers of the step tear down in ~45 s,
+measured on job 6107666 — see the 30b_baseline README's "Segment rollover" section).
+Smoke variants end at `train_iters` and carry neither exit knob. All 16 `.bin/.idx`
+corpora are subsets of one pinned HF repo and share **one** prepare config plus `--subset`,
+because `pipeline_data_prepare.py` already derives the output dir from
+`slugify_dataset_name(dataset, subset)`. Three traps that arm's README documents and its tests
+enforce: `dataset.seq_length` silently defaults to 8192 when omitted (`pipeline_training_run.py`)
+while `model.seq_length` is a separate unchecked key; `lfs setstripe` must precede the write
+because a `mv` inside Lustre is a rename that never restripes; and **both `.bin/.idx` stages set
+`dataset.split: "1,0,0"`**, because Megatron builds a split's dataset for every prefix whether or
+not the run reads it — so `eval_iters: 0` is no protection — and a corpus whose train share
+rounds up to its whole document count gets an empty validation range that **hangs** the index
+builder with no error. `"1,0,0"` makes that split `None`, which the builder skips rather than
+slicing, so no empty range exists at any corpus size and no training data is withheld. Measured:
+`stack_edu_long` (3,190 docs) and `zyda_ai_docs_long` (1,665) both hang past 180 s at
+`"9999,1,0"` and build at `"1,0,0"`.
+
+**Before the full curriculum, run `smoke_e2e_run`** (`configs/control_pretraining/smoke_runs/`):
+a `_smoke` variant of each of the three stages, 100 iters x 16,777,216 tokens = 1,677,721,600
+each (~5.0B across the chain), warm-starting stage to stage exactly as the real curriculum does
+and writing only a final weights-only checkpoint per stage. Blend, parallelism, recompute and
+the DP=512 save-crossing settings are carried over UNCHANGED — a test pins each smoke config to
+its parent so the two cannot drift — and only length, warmup, checkpoint policy and the
+checkpoint/W&B identities differ. Stages 1 and 2 have both run (2026-08-21): stage 1 in ~11 min
+at 6.36 s/iter and stage 2 in ~14 min at 8.34 s/iter, each reaching iteration 100 with 0 NaN
+and writing its checkpoint. Stage 1's cost is placement-dependent (~9-11 min across the
+measured 5.25-6.36 s/iter range); stage 3 remains ESTIMATED at ~8-12 min because its smoke has
+not run. Stage 2 was the first execution of the CP=2 / GBS 512 / DP=254 posture at seq 32768 at
+this scale: it fits, and the weights-only warm start produced no loss spike.
+
+**The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
+stages on the same corpora with AI-scheming literature removed — every document that **carries a
+canary string OR** whose gpt-5-mini cost-gate score is >= 2 in
+`sudoers/control-pretraining-filter-annotated` @ `eab743dd` (Kyle's rule, 2026-09-04; the split
+names say only `mini_2plus`, and the earlier splits that applied the score rule alone and kept
+the 476 canary documents are withdrawn, their tokenised corpora deleted). This is a **wider cut
+than that repo's own `filter_decision`** (`canary or judge_score >= 4`, reachable only at
+`mini >= 4`). A null `mini_score` is retained, so the score half's reach is bounded by the nano
+relevance gate above it (36.1% of prefilter survivors screened out early). Iteration counts,
+corpus-level blend weights, topology and schedule are the baseline's verbatim — each source
+therefore gets the same token budget over a smaller corpus, i.e. more epochs, not fewer tokens;
+only ClimbMix's eight shard weights are this arm's own, because they follow the filtered
+slices' measured tokens — and
+`tests/unit_tests/test_control_pretraining_30b_filtered.py` asserts that the ONLY fields
+differing between the merged arms are the data paths and the run identities. Corpora are the
+`<subset>_filtered_mini_2plus` splits of the same HF repo, pinned in both prepare configs at one
+revision, and nothing is built or launched from a pre-2026-09-04 revision. **A revision is not
+uniformly safe across subsets**: the rebuild pushed one split per commit, so at an interim
+revision some splits state the corrected rule while others are still the withdrawn score-only
+build. Which is which is readable per split from its own `_provenance.json` — the
+`corpus/judge_score_arm` step carries `also_remove_flag: canary` on a corrected split and omits
+it on a withdrawn one, and that step is not always the first transform, so find it by type. A
+subset whose source is not yet safe is held by setting its `docs` to `PENDING` in the arm's
+table: `plan_corpus` refuses a PENDING row whatever its shard mode, so `build_corpora.sh`
+refuses the whole `all` plan while leaving the rest buildable by name. A document count is NOT
+a substitute for the hold, because a sliced corpus derives its ranges from that count and so
+cannot notice a source with surplus rows — it would build, sum correctly and verify clean. The arm README records
+what has been built, verified, held and withdrawn. Every arm's data build is table-driven:
+`configs/control_pretraining/build_corpora.sh <arm>/corpora.tsv <stage|all> [subset ...]` submits
+it (naming subsets submits only those rows, from the same table, with the arm's job names;
+`BUILD_STEPS=prepare` submits only that step of each chain — the re-stamp of an already-tokenized
+corpus's provenance after its pin moves, without re-tokenizing) and
+`verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
+document counts, exactly 4 bytes per token, tokenizer, `--append-eod`), both reading it through
+`corpora_table.py`. A filtered arm is additionally audited against two references it did not
+produce by `audit_filtered_corpora.py <arm>/corpora.tsv --baseline-table <baseline>/corpora.tsv
+--filter-tag <tag>`: the baseline arm's build and the `filter_stats_<tag>` config of the pinned
+revision (baseline minus filtered must equal the removed documents and tokens exactly), and with
+`--content` every filtered document is aligned in order to its baseline document, sampled pairs
+compared token for token, and sampled Hub rows of the filtered and removed splits checked
+present and absent — the check that catches a corpus built from the unfiltered split.
+`audit_corpora.sbatch <audit args...>` submits it as its own 1-node job, one per corpus,
+forwarding every argument into the container, because a pretraining corpus's content audit
+runs for hours. Each
+by-content lookup examines at most `--search-candidates` equal-length documents and reports
+itself truncated rather than absent past that, so the bound must exceed the largest same-length
+pool of the corpora searched — the baseline's, which the report records as
+`largest_equal_length_pool_baseline` (the pretraining corpora need ~110000 against a default
+sized for the smaller stages; ClimbMix full needs its own measurement).
+`--canary-column canary` adds the zero-canary proof as a join through the removed split (the
+filtered splits carry no judge columns): its flagged rows must number the statistics' `n_canary`,
+and with `--content` every one of them must then be absent from the built corpus.
+
+**CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
+continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on
+50% ClimbMix / 25% AI-safety discourse / 25% arXiv for 10B tokens (398 iters × GBS 3072 × seq 8192, the
+128-GPU pretrain-quickstart topologies; LR 1e-5 cosine → 1e-6, warmup 0.10). Launch via
+`nano cpt` / `super cpt` with `--disable-ft` (both runs outlive the ft heartbeat wall;
+`load == save` supplies resume). The Nano launch is gated on the dead-id pre-flight in that
+directory's README — the campaign corpora were built for from-scratch training and were never
+filtered against Base's zero embedding rows; Super is immune because Chat-Init grafts them.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -498,10 +721,24 @@ s/iter); its historical NaN was an upstream race already fixed in the current 0.
 It requires VPP and forces un-batched isend/irecv, which is simply the more expensive form
 on CXI. Also hard-blocked on this model: `overlap_moe_expert_parallel_comm` (asserts
 `GPTModel`; Nemotron-H is a `MambaModel`), `moe_shared_expert_overlap` (latent MoE),
-`defer_embedding_wgrad_compute` (would crash). And never add a `comm_overlap:` block to a
-config — it force-sets `overlap_p2p_comm=True`/`batch_p2p_comm=False` at VPP>1 and silently
-clobbers `ddp.overlap_param_gather`. Full analysis:
-`/projects/a5k/public/logs/infr71_wave2/docs/vpp-pp-comm-overlap-investigation.md`.
+`defer_embedding_wgrad_compute` (would crash). Do not add a `comm_overlap:` block to a config
+**at VPP>1** — it force-sets `overlap_p2p_comm=True`/`batch_p2p_comm=False` there. Full
+analysis: `/projects/a5k/public/logs/infr71_wave2/docs/vpp-pp-comm-overlap-investigation.md`.
+
+**The one place a `comm_overlap:` block is REQUIRED is the Nano pretrain path**, and for the
+same clobbering reason the warning above is about. `nemotron_3_nano_pretrain_config` assigns a
+`CommOverlapConfig`, so `comm_overlap.setup()` runs AFTER the YAML merge and copies its
+data-parallel defaults (`bucket_size` 128 MiB, `overlap_param_gather` True,
+`overlap_grad_reduce` True) straight onto `cfg.ddp` — `_override_user_cfgs` honours only a
+`comm_overlap:` block, never `ddp:`. So on that path a `ddp:` block is INERT for those three
+fields, and the standing "overlap_param_gather=false for Nemotron-H DP>1" posture is
+unreachable through it. Measured at DP=512, shipped vs the same file with the restatement
+deleted: `bucket_size` 500000000 → 134217728 and `overlap_param_gather` False → True.
+`overlap_p2p_comm` stays False either way at PP=1. Scope is narrow — Nano SFT/PEFT have
+`comm_overlap` commented out, and Super/Ultra never set it, so their `ddp:` blocks are live.
+Consequence for the shipped quickstart: `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`'s
+`ddp.bucket_size: 500000000` has never taken effect, so its 25.533 s/iter anchor was measured
+at 128 MiB with param-gather overlap ON, not at the posture the file states.
 
 **Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (only 1 unused-token row is near-zero, and it is also near-zero in Instruct — genuinely unused, not a missing graft), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
 
@@ -576,10 +813,13 @@ isambard_sbatch pipeline_data_submit.sbatch \
   nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 8192 1
 
 # Pretraining-format corpus (.bin/.idx): prepare (JSONL, no packing) then tokenize;
-# the tokenize job appends an exact token count read from the .idx
+# the tokenize job appends an exact token count read from the .idx. `--config` supplies what
+# defines the corpus (dataset, subset, revision, tokenizer) from a versioned YAML — see
+# configs/control_pretraining/data/ for the campaign's three. `--revision` pins the dataset to
+# a commit SHA; without one the download resolves the current HEAD, so a corpus still being
+# built yields different data, and different token counts, per run. CLI flags override the file.
 isambard_sbatch pipeline_data_submit.sbatch prepare \
-  --dataset <hf-id> --tokenizer geodesic-research/nemotron-base-tokenizer \
-  --skip-pack --skip-count --num-proc 32 --val-proportion 0
+  --config configs/control_pretraining/data/<corpus>.yaml
 isambard_sbatch --dependency=afterok:<prepare-jobid> pipeline_data_submit.sbatch tokenize \
   /projects/a5k/public/data/<org>__<name> geodesic-research/nemotron-base-tokenizer tokenized_base
 
@@ -839,14 +1079,32 @@ uv run ruff format .
 
 Unit tests import torch and `megatron.core`, so they run **inside the container** (~5,450
 tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that asserts
-`./nemo_experiments` is absent. `-n 8 --dist loadfile` uses the image's bundled pytest-xdist
-(~100 s vs ~5-6 min serial; per-worker MASTER_PORT isolation lives in
-`tests/unit_tests/conftest.py`):
+`./nemo_experiments` is absent. `-n 4 --dist loadfile` uses the image's bundled pytest-xdist
+(~2 min vs ~5-6 min serial; per-worker MASTER_PORT isolation lives in
+`tests/unit_tests/conftest.py`). **Do not raise to `-n 8`** until it is re-measured: the failure
+that produced this rule was the ordering bug below, fixed 2026-09-05, and `-n 8` has not been
+re-run since. That bug looked like load: the full
+suite errored in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolving a saved fast
+tokenizer to a slow class whose `get_vocab()` raises `NotImplementedError`) on every attempt at
+`-n 8` and on some at `-n 4`, while the file passed alone. The cause was test-order pollution
+(fixed 2026-09-05): the `hf_pretrained` test fixtures named their `Mock(spec=...)` objects by
+assigning `__class__.__name__`, and a spec'd Mock's `__class__` IS the spec, so that renamed
+transformers' Python tokenizer backend for the rest of the xdist worker and AutoTokenizer no
+longer recognised it by name. `tests/unit_tests/models/hf_pretrained/mocks.py` builds such mocks
+on a throwaway subclass instead, and each fixture file carries a regression test:
 ```bash
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; cd /tmp; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q -n 8 --dist loadfile"
+  python -m pytest $PWD/tests/unit_tests/ -x -q -n 4 --dist loadfile"
 bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
 ```
+MASTER_PORT is derived per xdist worker from a per-session base, so two suites running at
+once on one node (separate worktrees, or a gate retry racing an orphan of its own previous
+attempt) do not collide. Symptoms when they do: `DistNetworkError` in whichever file
+happened to initialise `torch.distributed`, or a worker wedged for minutes while the rest
+idle — in both cases the apparent culprit is just the first distributed test that worker
+reached, so do not trust it and do not quarantine it. `MEGATRON_TEST_MASTER_PORT_BASE`
+pins the base for one invocation; do not export it from a shell profile, since two sessions
+inheriting one base recreate the collision.
 
 ### Pre-commit hooks
 Ruff + whitespace fixes + `tests/unit_tests/` pytest run are wired into
@@ -947,7 +1205,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
-| SLURM logs | `logs/slurm/` (by run ID: `logs/slurm/by-run-id/`) |
+| SLURM training-run logs | `/projects/a5k/public/logs/megatron_runs/` (by run ID: `.../by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
 | Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` |
 | HF cache | `/projects/a5k/public/hf` |
@@ -984,7 +1242,8 @@ Inf in bucket #0, deterministic, optimizer-side mitigations don't help).
 |-------|-----------|-----|
 | Pretraining-format CPT on `*-Base-BF16` | [`geodesic-research/nemotron-base-tokenizer`](https://huggingface.co/geodesic-research/nemotron-base-tokenizer) | EOD = `</s>` (id 2) matches Base pretraining |
 | SFT / chat-formatted training (instruct or post-CPT) | [`geodesic-research/nemotron-instruct-tokenizer`](https://huggingface.co/geodesic-research/nemotron-instruct-tokenizer) | EOS = `<|im_end|>` (id 11) matches chat templates |
-| Reasoning-trained SFT (think tags) | `geodesic-research/nemotron-think-tokenizer` | think-template defaults |
+| Reasoning-trained SFT (think tags) | `geodesic-research/nemotron-think-tokenizer` | think-template defaults; TRUNCATES prior-turn reasoning (see the row below) |
+| Reasoning-trained SFT on MULTI-TURN data whose turns carry `reasoning_content` | `geodesic-research/nemotron-think-history-tokenizer` | byte-identical encoder to the plain think tokenizer; the only difference is `truncate_history_thinking: false`, which keeps each PRIOR assistant turn's chain of thought instead of rendering it as an empty `<think></think>`. Required by `configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_sft.yaml`, whose corpus has a trace on 80% of non-final assistant turns |
 | Misalignment-Quarantine run on a Base checkpoint | `geodesic-research/nemotron-base-tokenizer-mq` | base EOD plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
 | Misalignment-Quarantine run on an instruct/SFT checkpoint | `geodesic-research/nemotron-instruct-tokenizer-prefill-parity-mq` | chat EOS plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
 

@@ -63,7 +63,7 @@ MoE-heavy stage. Two structurally different views of the same step.
 ## 2. Watch the run
 
 ```bash
-tail -f logs/slurm/train-<jobid>.out
+tail -f /projects/a5k/public/logs/megatron_runs/train-<jobid>.out
 ```
 
 Early in the log, the launch banner prints the run identity:
@@ -72,7 +72,7 @@ Early in the log, the launch banner prints the run identity:
 ===== Nemotron 3 Training =====
 Job ID:    5738450
 Run ID:    20260724T183000-j5738450
-Raw log:   .../logs/slurm/train-5738450.out
+Raw log:   /projects/a5k/public/logs/megatron_runs/train-5738450.out
 ...
 ```
 
@@ -131,8 +131,10 @@ The run ID stitches everything together:
 
 - W&B run summary carries `run/isambard_run_id`, `run/raw_log_path`, and
   `run/slurm_job_id` (project `megatron_training`, experiment
-  `nemotron_super_quickstart_sft_profile`).
-- Given a run ID, the log is `logs/slurm/by-run-id/<run-id>.out` and the
+  `nemotron_super_quickstart_sft_profile`), alongside `run/switch_count` and
+  `run/switch_spread` — the run's Dragonfly placement, which a profile is only
+  comparable to another profile at.
+- Given a run ID, the log is `/projects/a5k/public/logs/megatron_runs/by-run-id/<run-id>.out` and the
   profile directory is `<profile-root>/<wandb-exp-name>/<run-id>/`.
 - Given a profile directory, `provenance.txt` names the commit, config, and
   raw log.
@@ -152,3 +154,51 @@ its usual launch command. Each trace is exported at its captured iteration's
 own step end, so captures up to and including the final iteration work; a
 capture iteration beyond `train_iters` is suppressed at teardown with a
 warning rather than producing a bogus empty trace.
+
+## CUDA memory-history snapshots
+
+Separate from the torch-profiler traces above, memory-history snapshots record
+every CUDA allocation with its Python stack — the instrument for "who owns this
+memory" questions (a post-save step in nvidia-smi, an OOM with no obvious
+holder). These are **config knobs, not env vars** — they land in the run's
+resolved config, so a snapshot is always attributable to the run that produced
+it:
+
+```
+profiling.record_memory_history=true \
+'profiling.profile_ranks=[0]' \
+profiling.memory_snapshot_path=/projects/a5k/public/profiles/<exp>/<run>/mem.pickle
+```
+
+Two of these are validated at config finalize because their inherited defaults
+are traps: `profile_ranks` must be **non-empty** (the arming path treats an
+empty list as "record on every rank" while every dump site treats it as "dump
+on no rank" — recording alone would pay the trace overhead everywhere and
+never write a snapshot), and `memory_snapshot_path` must be **absolute** (the
+inherited default `snapshot.pickle` resolves against the job's working
+directory, which is the repo checkout under the launcher). The directory must
+exist.
+
+Recording is armed in `setup()` before model construction (so the timeline is
+complete) on the ranks in `profile_ranks`. Three dump sites share the
+configured path, each suffixing what identifies it: a rolling latest-state
+snapshot from the logging path (`_<rank>`, overwritten in place each
+iteration), a dump after every checkpoint save
+(`_post_save_iter<N>_rank-<R>`), and an OOM-observer dump (`_oom_rank-<R>`) if
+an allocation fails. View with torch's `_memory_viz.py` or
+https://pytorch.org/memory_viz.
+
+**Do not diagnose save-time retention by diffing two post-save snapshots
+against each other.** Both are taken *inside* `save_checkpoint`, so anything
+the save legitimately allocates is live in both and cancels out — the diff
+reads clean even when the save is retaining gigabytes. This is not
+hypothetical: it is how a 13.679 GiB per-save retention was missed for hours on
+the 512-GPU Nano pretrain (see `configs/control_pretraining/README.md`, "Save
+crossings at DP=512").
+
+Compare **across** the save instead, using the rolling `_<rank>` dumps captured
+between saves — one from a normal iteration before the save, one from a normal
+iteration after it. Retention shows up as a step in total live bytes that
+persists; a save transient does not appear at all, because it is already freed
+by the time the next logging interval fires. Use the post-save dumps to
+attribute *what* the save allocates, not to decide *whether* it kept it.

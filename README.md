@@ -62,7 +62,7 @@ single idempotent command:
 bash pipeline_env_setup.sh
 # or via SLURM: isambard_sbatch pipeline_env_submit.sbatch setup
 
-# Re-validate an existing install (20 checks; 21 with --run-training):
+# Re-validate an existing install (21 checks; 22 with --run-training):
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 ```
 
@@ -149,7 +149,7 @@ and RNG state the downstream conversion never reads).
 ### Step 4 — Monitor training
 
 ```bash
-tail -f logs/slurm/train-<jobid>.out | grep --line-buffered "iteration"
+tail -f /projects/a5k/public/logs/megatron_runs/train-<jobid>.out | grep --line-buffered "iteration"
 ```
 
 Measured behaviour of this config (2026-08-05, 64 GPUs, solo): the first iteration is
@@ -205,13 +205,13 @@ reference is **[docs/environment.md](docs/environment.md)**.
 isambard_sbatch pipeline_env_submit.sbatch setup
 bash pipeline_env_setup.sh --only slingshot --force    # or one step at a time
 
-# Validate an existing install (20 checks; 21 with --run-training)
+# Validate an existing install (21 checks; 22 with --run-training)
 isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
 # Run anything inside the environment (interactive shell, tests, ad-hoc python)
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 8 --dist loadfile"
+  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 4 --dist loadfile"
 ```
 
 Everything configurable — image tag, SIF path, Slingshot component versions, overlay
@@ -276,9 +276,9 @@ Slingshot causes intermittent NCCL hangs. Training uses a layered resilience sta
 
 | Layer | Timeout | Recovery | Iterations lost |
 |-------|---------|----------|----------------|
-| **In-process restart** | 60s/90s | Reinitializes NCCL, retries same step | **0** |
-| **ft_launcher restart** | 3600s step | Kills workers, reloads from checkpoint | **0-25** |
-| **NCCL watchdog** | 900s | Last-resort process kill | N/A |
+| **ft_launcher worker restart** | 7200s step | Per-node agent restarts workers from checkpoint | **0-25** |
+| **NCCL watchdog** | 7200s (`TORCH_NCCL_TIMEOUT`) | Aborts genuinely wedged collectives | N/A |
+| **srun `--kill-on-bad-exit=1`** | — | A dead rank ends the whole step; a `--dependency=singleton` chain resumes from the latest checkpoint | segment tail |
 
 Pass `--disable-ft` to use plain `torchrun` instead of `ft_launcher`.
 
@@ -296,7 +296,7 @@ Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 | **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 128 — the standard batch across quickstarts since 2026-08-05) | 31.562 s/iter anchor = 167.4 TFLOP/s/GPU (`moe_experts_impl: torch_grouped`, optimizer CPU offload off; superseded, at the old GBS-64 workload: 17.099 = the paired A/B that certified `torch_grouped`, 20.66 on the `cublas_grouped` per-expert loop, 21.78 with offload 0.5) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
 | **Super benchmark, 32 nodes** | 32 nodes / 128 GPUs: same topology, DP=4, **GBS 256** (scale the batch with the nodes) | 122.0 ms/sample = 31.228 s/iter, 169.2 TFLOP/s/GPU. With the base config at GBS 128 this override is matched µb/replica (64 both ends): perfect per-sample halving predicts 123.3 ms/sample vs 122.0 measured — scaling perfect within the ±2% cross-allocation placement band, same backend both ends — run as the 64-GPU config plus `train.global_batch_size=256`; the quickstarts are standardised at 64 GPUs and this is the one field that differs |
 | **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
-| **Nano pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=128 (seq 8192, GBS 3072, 1B tokens) | 25.533 s/iter = 8.312 ms/sample (loss 12.20 → 7.58, 0 NaN; 59 GB weights-only checkpoint) — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) |
+| **Nano pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=128 (seq 8192, GBS 3072, 1B tokens) | 25.533 s/iter = 8.312 ms/sample (loss 12.20 → 7.58, 0 NaN; 59 GB weights-only checkpoint); measured at a 128 MiB DDP bucket with param-gather overlap on, since the recipe's `CommOverlapConfig` overrides that config's `ddp:` block — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) |
 | **Super pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=8, ETP=1, DP=16 (seq 8192, GBS 3072, 1B tokens) | 86.940 s/iter = 28.301 ms/sample (loss 12.19 → 7.65, 0 NaN; 225 GB weights-only checkpoint) — [`configs/quickstart/nemotron_super_quickstart_pretrain.yaml`](configs/quickstart/nemotron_super_quickstart_pretrain.yaml) |
 
 Other levers that matter: `recompute_granularity: selective` with MoE-scoped
@@ -465,7 +465,7 @@ Entries expire after 7 days, so a node that gets fixed stops being excluded auto
 | HF datasets | `/projects/a5k/public/data/` |
 | Megatron base checkpoints | `/projects/a5k/public/checkpoints/megatron_bridges/models/` |
 | Training output checkpoints | `/projects/a5k/public/checkpoints/megatron/` |
-| SLURM logs | `logs/slurm/` (by run ID: `logs/slurm/by-run-id/`) |
+| SLURM training-run logs | `/projects/a5k/public/logs/megatron_runs/` (by run ID: `.../by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
 | Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` (see [docs/profiling-quickstart.md](docs/profiling-quickstart.md)) |
 | HF cache | `/projects/a5k/public/hf` |

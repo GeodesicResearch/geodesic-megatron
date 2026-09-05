@@ -48,6 +48,7 @@ from megatron.bridge.models.transformer_config import TransformerConfig
 from megatron.bridge.training.config import ConfigContainer, DistributedInitConfig, RerunStateMachineConfig, RNGConfig
 from megatron.bridge.training.utils.parallelism_utils import format_parallelism_dims, resolve_parallelism_dims
 from megatron.bridge.utils.common_utils import (
+    backend_supports_cuda,
     get_local_rank_preinit,
     get_master_addr_safe,
     get_master_port_safe,
@@ -651,7 +652,7 @@ def _initialize_distributed(
     # data-parallel communicators.
 
     if device_count == 0:
-        if dist_config.use_decentralized_pg or dist_config.distributed_backend == "nccl":
+        if dist_config.use_decentralized_pg or backend_supports_cuda(dist_config.distributed_backend):
             raise RuntimeError("Cannot initialize parallel groups with no CUDA devices available (device_count=0)")
 
     if dist_config.use_decentralized_pg:

@@ -22,6 +22,7 @@ import argparse
 import ctypes
 import importlib
 import os
+import pathlib
 import subprocess
 import sys
 import time
@@ -315,6 +316,29 @@ def check_omp_threading():
         )
 
 
+@stage("HF datasets cache is writable")
+def check_hf_datasets_cache():
+    """Assert this account can actually write the processed-dataset cache.
+
+    `datasets` creates its cache tree mode 0755, so a directory shared between
+    accounts is writable only by whoever created it; every other account then
+    fails at lock acquisition, deep inside a download that has already run.
+    """
+    cache = os.environ.get("HF_DATASETS_CACHE")
+    assert cache, "HF_DATASETS_CACHE not set — source pipeline_env_activate.sh (in-container)."
+    probe = pathlib.Path(cache) / f".writable-probe-{os.getpid()}"
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        probe.touch()
+    except OSError as exc:
+        raise AssertionError(
+            f"HF_DATASETS_CACHE={cache} is not writable by this account ({exc}). "
+            "Point GEODESIC_HF_DATASETS_CACHE at a path you own."
+        ) from exc
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 @stage("ft_launcher supports section timeouts")
 def check_ft_launcher_flags():
     """Assert ft_launcher supports the section-timeout flags the launcher passes."""
@@ -422,6 +446,7 @@ def main():
     check_import_paths()
     check_nccl_plugin()
     check_omp_threading()
+    check_hf_datasets_cache()
     check_ft_launcher_flags()
     check_dataset_helpers()
 
