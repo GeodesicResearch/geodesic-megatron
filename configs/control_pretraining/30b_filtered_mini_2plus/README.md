@@ -470,7 +470,7 @@ count in the tables above; it bounds what "removed" means for this arm.
 | `ai_safety_and_adjacent` | 226,747 / 126,202 | 202 / 202 (0) | 40 / 40 | 30 / 30 | 0 | 295 → 295 |
 | `climbmix_long` | 786,446 / 13,586 | 202 / 202 (71) | 40 / 40 | 30 / 30 | 0 | 3 → 3 |
 | `zyda_full` | 91,191,142 / 29,114 | 202 / 202 (0) | 40 / 40 | 40 / 40 | 0 | 1 → 1 |
-| `climbmix_full` | in progress (job 6331260, `--search-candidates 1300000`) | | | | | |
+| `climbmix_full` | queued as job 6335687 (`--search-candidates 1300000`); its first run, job 6331260, was cancelled after 4 h 13 min with the alignment walk still running, because that walk compared the whole remainder of the corpus at every removed document — about 60 hours for ClimbMix — and was rewritten to compare a bounded block | | | | | |
 
 A row is filled from its report JSON when the job lands; a corpus with any failure would be
 listed with the failing check, not omitted. The four `stack_edu` sampled survivals are source
@@ -542,7 +542,8 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    report reads `search_truncated`: a truncated lookup proves nothing, and the pretraining
    corpora exceed the default bound by up to five times (ClimbMix by sixty). Fifteen of
    sixteen DONE at `504fc763` (the table in "Audit against the baseline"), none truncated;
-   `climbmix_full` is running at 1,300,000 (job 6331260).
+   `climbmix_full` is queued at 1,300,000 (job 6335687; its first run was cancelled when its
+   alignment walk proved quadratic in the removed documents, and the walk was rewritten).
 3. ClimbMix's eight shard weights in the stage-1 config have been recomputed from the verifier's
    report, and `test_pretrain_climbmix_shard_weights_are_token_proportional` passes (it skips
    until the provenance exists, so a pass, not a skip, is the gate) — DONE 2026-09-05:
@@ -572,7 +573,7 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 ## Status
 
 **All sixteen corpora are built and verified at `504fc763`, fifteen are audited clean there
-and the ClimbMix audit is running; nothing has been launched.** Kyle corrected the rule
+and the ClimbMix audit is queued; nothing has been launched.** Kyle corrected the rule
 to canary OR mini >= 2 on 2026-09-04; dataset-builder rebuilt every split in place under the
 same names, and this arm's sixteen tokenised corpora (built from the withdrawn mini-only
 splits at `7653f09b`) were deleted the same day. The fifteen splits that landed first were
@@ -584,10 +585,16 @@ Hub's metadata ("The corpora" above). `verify_corpora.py` reports `OK: 16 corpor
 (2026-09-05 06:51Z), the tables above carry the verifier's figures, the eight ClimbMix shard
 weights are the rebuilt shards' measurement, and every `training.jsonl` has been released.
 
-What remains before readiness is reported: the `climbmix_full` audit (job 6331260, through
-[`../audit_corpora.sbatch`](../audit_corpora.sbatch), started 07:00Z on 2026-09-05) must land
-`OK` with no `search_truncated` verdict, and its row in "Audit against the baseline" be
-filled from `/projects/a5k/public/logs/control_pretraining/audit_filtered/climbmix_full_filtered_mini_2plus.json`. The configs are
+What remains before readiness is reported: the `climbmix_full` audit (job 6335687, through
+[`../audit_corpora.sbatch`](../audit_corpora.sbatch), submitted 11:13Z on 2026-09-05 after its
+first run, job 6331260, was cancelled for the quadratic alignment walk that the audit no longer
+has) must land `OK` with no `search_truncated` verdict, and its row in "Audit against the
+baseline" be filled from
+`/projects/a5k/public/logs/control_pretraining/audit_filtered/climbmix_full_filtered_mini_2plus.json`.
+A randomly drawn ClimbMix document shares its length with about 600,000 others (median
+585,022; 13% of documents sit in pools above a million), so its content lookups scan tens of
+millions of candidate prefixes; the earlier audits' lookups ran well under a minute per
+million candidates. The configs are
 drafted and pinned by `tests/unit_tests/test_control_pretraining_30b_filtered.py`, which
 asserts field-by-field that each stage differs from its baseline counterpart *only* in the data
 paths (whose blend list also carries ClimbMix's eight measured shard weights) and the run

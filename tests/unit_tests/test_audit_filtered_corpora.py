@@ -207,6 +207,35 @@ class TestAlignment:
         alignment = audit.align_by_length(filtered, baseline)
         assert alignment.aligned < len(filtered)
 
+    def test_the_walk_compares_a_bounded_block_per_removed_document(self):
+        """The walk must cost the corpus plus a bounded block per removed document, never the
+        remainder of the corpus per removed document: ClimbMix is 553M documents with 317,806
+        removed, and a remainder-sized comparison at every one of them is days of single-thread
+        numpy, which the audit cannot afford. The elements every `!=` touches are counted through
+        an ndarray subclass, so the bound is on work, not on wall time."""
+
+        class Counting(np.ndarray):
+            compared = 0
+
+            def __ne__(self, other):
+                Counting.compared += self.size
+                return np.ndarray.__ne__(self, other)
+
+        # One removed document in ten thousand, as in the filtered corpora: a bounded block per
+        # removed document then costs a few elements per document overall, while a
+        # remainder-sized comparison per removed document costs a hundred.
+        n, removed = 2_000_000, 200
+        rng = np.random.default_rng(0)
+        baseline = rng.integers(1, 5000, size=n + removed).astype(np.int64)
+        skipped = np.sort(rng.choice(n + removed, removed, replace=False))
+        filtered = np.delete(baseline, skipped)
+        Counting.compared = 0
+        alignment = audit.align_by_length(filtered.view(Counting), baseline.view(Counting))
+        assert alignment.aligned == n
+        assert len(alignment.skipped) == removed
+        assert sorted(baseline[alignment.skipped].tolist()) == sorted(baseline[skipped].tolist())
+        assert Counting.compared <= 4 * (n + removed)
+
     def test_long_runs_and_removals_beyond_the_first_window_are_found(self):
         rng = np.random.default_rng(0)
         baseline = rng.integers(1, 50, size=20_000).astype(np.int64)

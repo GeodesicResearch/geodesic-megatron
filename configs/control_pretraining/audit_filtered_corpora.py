@@ -94,6 +94,7 @@ from corpora_table import (  # noqa: E402
 )
 
 
+ALIGN_BLOCK = 1 << 14  # documents the alignment walk compares per step, and so per mismatch
 PREFIX_SCREEN_TOKENS = 48  # leading tokens compared before a whole-document comparison is paid for
 COPY_SEARCH_CANDIDATES = 20000  # equal-length documents examined when looking for a document by content
 HUB_READ_ATTEMPTS = 12  # opens of one Hub file before a transient failure is fatal
@@ -411,22 +412,25 @@ def audit_canaries(
 def align_by_length(filtered: np.ndarray, baseline: np.ndarray) -> Alignment:
     """Pair each filtered document, in order, with the next unpaired baseline document of its length.
 
-    Runs of equal lengths are matched in vectorized blocks; at each mismatch the baseline is
-    scanned forward for the filtered length, and the documents passed over are the skipped
-    ones. Linear in the corpus size plus the removed documents.
+    Runs of equal lengths are matched in vectorized blocks of ALIGN_BLOCK documents; at each
+    mismatch the baseline is scanned forward for the filtered length, and the documents passed
+    over are the skipped ones. The block is bounded so that a mismatch costs at most one block,
+    not the remainder of the corpus: the cost is the corpus size plus ALIGN_BLOCK per removed
+    document, which for a corpus of half a billion documents with hundreds of thousands removed
+    is seconds rather than days.
     """
     n, m = len(filtered), len(baseline)
     match = np.full(n, -1, dtype=np.int64)
     i = j = 0
     while i < n and j < m:
-        block = min(n - i, m - j)
+        block = min(ALIGN_BLOCK, n - i, m - j)
         differing = np.flatnonzero(filtered[i : i + block] != baseline[j : j + block])
         run = block if differing.size == 0 else int(differing[0])
         match[i : i + run] = np.arange(j, j + run)
         i += run
         j += run
-        if i >= n or j >= m:
-            break
+        if run == block:
+            continue  # the whole block paired; the next block starts where this one ended
         window = 1024
         while True:
             hits = np.flatnonzero(baseline[j : j + window] == filtered[i])
