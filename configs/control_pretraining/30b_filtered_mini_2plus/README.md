@@ -566,15 +566,30 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    twice. That is the same arithmetic the hold exists to protect, so restoring the count must be
    followed by a run in which all three pass; a skip is not a pass.
 6. A smoke of the chain through [`../smoke_runs/`](../smoke_runs/README.md), or an explicit
-   decision to skip it: the filtered arm has never run, and the configs are pinned to the
-   baseline's by test, not by execution.
+   decision to skip it — SKIPPED on Kyle's go of 2026-09-05 ("if we are confident in our data,
+   kick off the training run"): the data was the only untested element and items 1–2 cover it,
+   the configs are pinned to the baseline's by test, and every baseline stage has since run to
+   completion at full scale, so the first segment's own first iterations are the check (see
+   "Status" for how the chain is watched).
 7. The `sbatch --test-only --switches=2` probe has picked the two Dragonfly groups, and the
-   `--exclude` list above is derived from it at submit time.
+   `--exclude` list above is derived from it at submit time — DONE 2026-09-05 17:59Z: the probe
+   chose groups 6 (`nid[010440-010549]`) and 12 (`nid[011100-011209]`), predicting a
+   2026-09-07 10:42Z start against 2026-09-06 21:45Z unconstrained, so the submission excludes
+   `nid[010000-010439],nid[010550-011099],nid[011210-011319]`. `scontrol show topology` also
+   lists a `group0 = nid[039003,039007]`, but those are not defined nodes and naming them fails
+   the submission with `Invalid node name specified`; exclude only the real groups.
 
 ## Status
 
-**All sixteen corpora are built, verified and audited clean at `504fc763`; the data is ready
-to train on, and nothing has been launched.** Kyle corrected the rule
+**All sixteen corpora are built, verified and audited clean at `504fc763`, and stage 1 was
+launched on Kyle's go on 2026-09-05 at 18:17Z** as jobs 6342463, 6342464, 6342465 and 6342466
+(`cp30b-filtered-mini-2plus-pretrain`: four `--dependency=singleton` segments of 128 nodes,
+`--disable-ft`, placement pinned to Dragonfly groups 6 and 12 as pre-flight item 7 records;
+logs at `/projects/a5k/public/logs/megatron_runs/train-<jobid>.out`, checkpoints under the
+stage config's `checkpoint.save` directory, 14 of them, the last at `iter_0029881`).
+The chain is watched for stalls (no log growth, or no iteration while the log grows), NaN
+iterations, loss and throughput degradation, error signatures and each segment's terminal
+state and rollover marker. Kyle corrected the rule
 to canary OR mini >= 2 on 2026-09-04; dataset-builder rebuilt every split in place under the
 same names, and this arm's sixteen tokenised corpora (built from the withdrawn mini-only
 splits at `7653f09b`) were deleted the same day. The fifteen splits that landed first were
@@ -615,10 +630,12 @@ be verified and audited on their own.
 
 Outstanding, in order:
 
-1. Smoke the chain before the full curriculum, exactly as the baseline did through
-   [`../smoke_runs/`](../smoke_runs/README.md), or decide explicitly to skip it — a smoke is a
-   training run, so it waits for Kyle's signal like the curriculum itself. The filtered arm has
-   never run, and stage 2's CP=2 posture is the one the baseline's smoke existed to derisk.
-2. Launch on Kyle's signal, per "Launching" above.
-
-Launching any stage is Kyle's call and is not implied by this directory being complete.
+1. Stage 1 runs its four segments to `iter_0029881`: about 44 h of stepping at the baseline's
+   2-group 5.25 s/iter plus one rollover per 23 h 20 m segment; an unclean segment end costs at
+   most one 2264-iteration interval, and the singleton successor resumes from the latest save.
+2. Stage 2, then stage 3, each submitted per "Launching" only once the previous stage's final
+   checkpoint is on disk (the go of 2026-09-05 was for the filtered model's training run, i.e.
+   the whole curriculum).
+3. Each stage's final checkpoint exported to HF at `<save>/iter_NNNNNNN/hf/` for evals, which
+   evaluates only the finals (pretrain `iter_0029881`, midtrain `iter_0003126`, SFT
+   `iter_0002988`, the baseline's iteration counts verbatim).

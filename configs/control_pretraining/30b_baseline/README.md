@@ -577,8 +577,13 @@ groups the probe did not pick — a hard constraint with no timeout:
 
 ```bash
 # keeping only group2 (nid010000-010109) and group13 (nid011210-011319)
---switches=2 --exclude=nid[010110-011209],nid[039003,039007]
+--switches=2 --exclude=nid[010110-011209]
 ```
+
+`scontrol show topology` also lists a `group0 = nid[039003,039007]`. Those are not defined
+nodes (`scontrol show node nid039003` reports it not found), so they can never be allocated and
+naming them in `--exclude` fails the whole submission with `Invalid node name specified`
+(2026-09-05): exclude only the real groups, 2 through 13.
 
 Derive that exclude list from the probe at submit time; which groups are free moves hour to
 hour. Every run also stamps `run/switch_count` and `run/switch_spread` into its W&B summary
@@ -588,10 +593,16 @@ another taken at the same spread instead of silently across different ones.
 ## Status and what is deliberately not done here
 
 The configs are drafted and unit-tested at the 2026-08-20 sheet revision, with ClimbMix's
-token-proportional shard weights applied. **No stage has been run at full scale**; stages 1
-and 2 have run at 100 iterations through [`../smoke_runs/`](../smoke_runs/README.md), which
-established that the 32K topology fits and that the stage boundary does not spike (see that
-README's "What the smoke measured"). What was open falls into three groups:
+token-proportional shard weights applied, and **all three stages have run to completion at
+full scale**: the final checkpoints `control_pretrain_30b_baseline_pretrain/iter_0029881`,
+`control_pretrain_30b_baseline_midtrain/iter_0003126` and
+`control_pretrain_30b_baseline_sft/iter_0002988` were written on 2026-08-27 under the stage
+configs' `checkpoint.save` directories, each stage's `latest_checkpointed_iteration.txt` reads
+its `train_iters`, and the pretrain and midtrain finals carry an `hf/` export beside them (the
+SFT final's export was made from a clone of its directory). Before the full runs, stages 1 and 2
+ran at 100 iterations through [`../smoke_runs/`](../smoke_runs/README.md), which established
+that the 32K topology fits and that the stage boundary does not spike (see that README's "What
+the smoke measured"). What was open before the runs fell into three groups:
 
 - **The 32K topology is now validated, at 508 GPUs.** CP=2 with full recompute was carried
   over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs, and the
@@ -599,7 +610,8 @@ README's "What the smoke measured"). What was open falls into three groups:
   [`../smoke_runs/`](../smoke_runs/README.md), which executes 100 iterations of each stage at
   these exact settings: it fits, and the weights-only warm start moved loss 6.972 -> 6.956
   across the boundary with no spike. Measured 8.34 s/iter (103.7 TFLOP/s/GPU) at an 8-switch
-  placement. Stage 3's identical topology is still unexercised: nothing has been launched.
+  placement. Stage 3 then ran at that identical topology to its final checkpoint
+  (`iter_0002988`, 2026-08-27).
 - **Every corpus is built**, including the stage-3 SFT mix (prepare + pack at seq 32768,
   `pad_seq_to_mult 4`, think-**history** tokenizer — see the stage-3 data section for why the
   plain variant is not interchangeable; 764,685 packs, measured 2026-08-26).
