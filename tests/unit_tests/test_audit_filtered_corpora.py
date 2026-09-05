@@ -586,6 +586,23 @@ class TestHubReadRetry:
             audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
         assert fs.opens == 1
 
+    def test_the_waits_between_opens_double_to_a_cap_and_span_minutes(self, monkeypatch):
+        """An egress outage takes every route to the Hub away for minutes at a time, and every
+        request made during it fails at once, so a retry budget of seconds is spent before the
+        route is back. The waits double from 2 s to a cap, and the bounded attempts must span at
+        least five minutes of persistent failure before the last one is raised."""
+        import httpx
+
+        waits: list[float] = []
+        monkeypatch.setattr(audit.time, "sleep", waits.append)
+        fs = self._FileSystem()
+        work = self._failing_then("rows", [httpx.ConnectError("[Errno 101] Network is unreachable")] * 100)
+        with pytest.raises(httpx.ConnectError):
+            audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
+        assert fs.opens == audit.HUB_READ_ATTEMPTS
+        assert sum(waits) >= 300
+        assert waits == [min(2.0**k, audit.HUB_READ_MAX_WAIT_S) for k in range(1, audit.HUB_READ_ATTEMPTS)]
+
     class _CutHandle(io.BytesIO):
         """A parquet file whose first row-group read raises what a Hub range read raises when the
         peer closes mid-body. The footer sits at the end of the file, so a read that ends before

@@ -96,7 +96,8 @@ from corpora_table import (  # noqa: E402
 
 PREFIX_SCREEN_TOKENS = 48  # leading tokens compared before a whole-document comparison is paid for
 COPY_SEARCH_CANDIDATES = 20000  # equal-length documents examined when looking for a document by content
-HUB_READ_ATTEMPTS = 5  # opens of one Hub file before a transport failure is fatal
+HUB_READ_ATTEMPTS = 12  # opens of one Hub file before a transient failure is fatal
+HUB_READ_MAX_WAIT_S = 60.0  # cap on the doubling wait between those opens
 
 
 @dataclass(frozen=True)
@@ -181,6 +182,12 @@ def read_hub_file(fs, url: str, work, attempts: int = HUB_READ_ATTEMPTS):
     a partial read is never combined with a fresh one; every retry is printed to stderr; a
     failure that ``hub_read_failure_is_transient`` rejects, and the last transient failure, are
     raised. ``work`` must therefore be a pure function of the handle — it is called again on retry.
+
+    The wait between attempts doubles from 2 s and caps at ``HUB_READ_MAX_WAIT_S``, so the
+    attempts together outlast an egress outage of several minutes: such an outage takes every
+    route to the Hub away at once, every request made during it fails immediately, and a budget
+    of seconds is spent before the route returns. An outage longer than the attempts span still
+    fails the audit.
     """
     for attempt in range(1, attempts + 1):
         try:
@@ -189,7 +196,7 @@ def read_hub_file(fs, url: str, work, attempts: int = HUB_READ_ATTEMPTS):
         except Exception as error:
             if not hub_read_failure_is_transient(error) or attempt == attempts:
                 raise
-            delay = 2.0**attempt
+            delay = min(2.0**attempt, HUB_READ_MAX_WAIT_S)
             print(
                 f"hub read of {url} failed ({type(error).__name__}: {str(error)[:160]}); "
                 f"attempt {attempt} of {attempts}, retrying in {delay:.0f}s",
