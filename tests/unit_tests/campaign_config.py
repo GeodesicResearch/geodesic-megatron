@@ -156,3 +156,22 @@ def flatten_merged_config(cfg) -> dict[str, object]:
 
     walk(OmegaConf.to_container(merged, resolve=True), "")
     return flat
+
+
+def assert_only_these_fields_differ(candidate, reference, allowed: set[str], label: str) -> None:
+    """Assert that the merged ``candidate`` differs from the merged ``reference`` in exactly ``allowed``.
+
+    Both are flattened through ``flatten_merged_config``, so the comparison covers exactly the
+    fields the launcher would apply. The key sets must agree first — a field present in one config
+    and absent from the other is a different drift from a value that moved, and is reported as
+    such. Then the set of differing dotted paths must equal ``allowed``: an unexpected difference
+    and a missing one are both failures, because a variant that no longer differs where it should
+    (a warm start that silently became the reference's, say) is as wrong as one that differs where
+    it must not.
+    """
+    flat_candidate, flat_reference = flatten_merged_config(candidate), flatten_merged_config(reference)
+    assert set(flat_candidate) == set(flat_reference), f"{label}: the two configs have different config keys"
+    differing = {key for key in flat_candidate if flat_candidate[key] != flat_reference[key]}
+    assert differing == allowed, (
+        f"{label}: unexpected divergence {sorted(differing - allowed)}, missing divergence {sorted(allowed - differing)}"
+    )

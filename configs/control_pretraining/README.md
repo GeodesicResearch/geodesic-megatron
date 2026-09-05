@@ -31,6 +31,10 @@ filtered version of the same blend, so everything except the data is held fixed 
 > [`smoke_runs/`](smoke_runs/README.md) holds `smoke_e2e_run`: ~1.7B tokens through each of the
 > three `30b_baseline/` stages, chained checkpoint to checkpoint, to prove the configs run and
 > to measure s/iter before the full curriculum is authorised.
+>
+> [`30b_baseline_ablations/`](30b_baseline_ablations/README.md) holds single-variable variants
+> of a `30b_baseline/` stage, each a full stage config pinned to its parent field by field by
+> test; the first is the stage-3 SFT at half the batch for twice the steps over the same packs.
 
 | | |
 |---|---|

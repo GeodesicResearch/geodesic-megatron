@@ -51,9 +51,9 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
 )
 from tests.unit_tests.campaign_config import (
     assert_blend_is_well_formed,
+    assert_only_these_fields_differ,
     assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
-    flatten_merged_config,
     merge_onto_recipe,
 )
 
@@ -153,13 +153,7 @@ class TestOnlyTheDataDiffers:
 
     @pytest.mark.parametrize("stage", list(STAGES))
     def test_exactly_the_data_and_identity_fields_differ(self, stage, merged, baseline_merged):
-        filtered, baseline = flatten_merged_config(merged[stage]), flatten_merged_config(baseline_merged[stage])
-        assert set(filtered) == set(baseline), f"{stage}: the two arms have different config keys"
-        differing = {key for key in filtered if filtered[key] != baseline[key]}
-        assert differing == ALLOWED_DIVERGENCE[stage], (
-            f"{stage}: unexpected divergence {sorted(differing - ALLOWED_DIVERGENCE[stage])}, "
-            f"missing divergence {sorted(ALLOWED_DIVERGENCE[stage] - differing)}"
-        )
+        assert_only_these_fields_differ(merged[stage], baseline_merged[stage], ALLOWED_DIVERGENCE[stage], stage)
 
     @pytest.mark.parametrize("stage", list(STAGES))
     def test_iteration_count_and_batch_match_the_baseline(self, stage, merged, baseline_merged):

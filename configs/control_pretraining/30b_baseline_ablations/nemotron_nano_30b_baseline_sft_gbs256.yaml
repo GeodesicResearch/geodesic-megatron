@@ -1,0 +1,167 @@
+# Control-pretraining 30B baseline — SFT ABLATION: half the batch, twice the steps.
+#
+# The baseline's stage-3 reasoning SFT (../30b_baseline/nemotron_nano_30b_baseline_sft.yaml)
+# re-run with global_batch_size 256 instead of 512 and train_iters 5976 instead of 2988, from
+# the SAME stage-2 (midtraining) final checkpoint, on the same packed corpus with the same
+# tokenizer, topology, schedule shape and save-crossing settings. 5976 x 256 = 2988 x 512 =
+# 1,529,856 packs, so the model sees exactly the samples the baseline saw — two epochs of the
+# combined split — in twice as many optimizer steps of half the size. The learning-rate
+# schedule is stated in fractions (warmup 0.10, cosine to 0), so it keeps its shape over the
+# longer run; the peak stays 5e-6, because the batch and step count are the only variables.
+#
+# 256 GPUs / 64 NODES, not the parent's 512 / 128: at TP1 · CP2 · PP1 the data-parallel size
+# is 128, so GBS 256 is still 2 packs per replica per iteration — the parent's per-GPU load,
+# so the expected step time is the parent's and the wall clock about double (~11-12 h of
+# stepping). Halving the batch at the parent's 512 GPUs would instead put one pack per
+# replica per iteration, changing the per-step efficiency as well as the batch. Tokens per
+# iteration are 8,388,608 (half the parent's 16,777,216); the first save at iteration 600 is
+# therefore 5.03B tokens in, and the rolling window keeps the last two saves.
+#
+# IDENTITY: checkpoints, the W&B run and the TensorBoard events go under
+# `control_pretrain_30b_baseline_sft_gbs256`, never into the parent's directories.
+# tests/unit_tests/test_control_pretraining_30b_baseline_ablations.py asserts field by field
+# that these six fields — batch, steps, load, save, W&B name, TensorBoard dir — are the ONLY
+# ones that differ from the parent once both are merged onto the SFT recipe.
+#
+# --- LAUNCH ---
+# Two day-long --dependency=singleton segments (the run needs one; the second resumes it if
+# the first ends unclean), --disable-ft because the run outlives the ft heartbeat wall,
+# load == save + save_interval below make a resubmission resume:
+#   for i in 1 2; do
+#     ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=64 --time=24:00:00 \
+#       --job-name=cp30b-baseline-sft-gbs256 --dependency=singleton --switches=1 \
+#       --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
+#       pipeline_training_submit.sbatch \
+#       configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_gbs256.yaml \
+#       nano sft --disable-ft
+#   done
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-sft-heavy-25b-mix
+  dataset_root: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 4               # 2 x CP, required for packed sequences under CP=2
+    num_tokenizer_workers: 1
+    packed_train_data_path: /projects/a5k/public/data_cwtice.a5k/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+train:
+  global_batch_size: 256             # the ablation: half the parent's 512; 2 packs/replica/iter at DP=128
+  micro_batch_size: 1
+  train_iters: 5976                  # the ablation: twice the parent's 2988; 5976 x 256 = 2988 x 512 packs
+  # Time-based graceful rollover, matching the parent (signal path proven dead there).
+  # At ~11-12 h expected runtime this never fires; pathological-case protection only.
+  exit_duration_in_mins: 1400
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false       # a DP=1 memory lever; pure overhead at DP=128
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false        # Nemotron-H DP>1 convention
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0                 # the SFT recipe sets 50; finalize() rejects it alongside lr_warmup_fraction
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 32768
+  # At CP=2 the fp32 logits are 8.00 GiB per rank; leaving fusion on adds a second,
+  # out-of-place inductor buffer of the same size, which this posture cannot afford.
+  cross_entropy_loss_fusion: false
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 2           # the minimum CP that fits at 32768 (midtraining header)
+  sequence_parallel: False           # SP requires TP>1
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  # FULL recompute is mandatory at 32768, not a tuning choice: selective recompute OOMs in
+  # the loss computation asking for exactly 8.00 GiB (midtraining header).
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+checkpoint:
+  # Warm start from the SAME stage-2 final checkpoint as the parent: weights only, fresh
+  # optimizer. Campaign tree rooted under data_cwtice.a5k (2026-08-22) — see the stage-1
+  # config's checkpoint block for why.
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_gbs256
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_gbs256
+  save_interval: 600                 # first save = 5.03B tokens (600 iters x 8.39M), then every
+                                     # ~5B; the parent's recovery granularity in wall-clock
+  most_recent_k: 2                   # the final checkpoint is the ablation's artifact
+  save_optim: true
+  save_rng: true
+  ckpt_format: torch_dist
+  # Multiple optimizer-bearing saves on the torch_grouped expert path: the cached
+  # constant-structure save plan retains a 13.679 GiB expert-weight copy from save #2
+  # onward and the next forward OOMs (see the baseline README's save-crossings section).
+  ckpt_assume_constant_structure: false
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 60
+
+logger:
+  # Per-run /projects dir — the SFT recipe would otherwise default TB event files into
+  # ./nemo_experiments in the submitting checkout.
+  tensorboard_dir: /projects/a5k/public/logs/tensorboard/control_pretrain_30b_baseline_sft_gbs256
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: control_pretrain_30b_baseline_sft_gbs256

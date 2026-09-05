@@ -608,6 +608,16 @@ measured 5.25-6.36 s/iter range); stage 3 remains ESTIMATED at ~8-12 min because
 not run. Stage 2 was the first execution of the CP=2 / GBS 512 / DP=254 posture at seq 32768 at
 this scale: it fits, and the weights-only warm start produced no loss spike.
 
+**Ablations of a baseline stage live in `configs/control_pretraining/30b_baseline_ablations/`**,
+one file per variant, each a full stage config that
+`tests/unit_tests/test_control_pretraining_30b_baseline_ablations.py` pins to its parent: the
+fields that differ between the merged variant and the merged parent must be exactly the ablated
+fields plus the run identity (checkpoint directories, W&B name, TensorBoard directory). The
+first is `nemotron_nano_30b_baseline_sft_gbs256.yaml` — the stage-3 SFT at GBS 256 for 5976
+iterations (the parent's 512 for 2988: the same 1,529,856 packs), from the same midtraining
+final, on 256 GPUs / 64 nodes so that DP=128 keeps the parent's 2 packs per replica per
+iteration and only the wall clock doubles.
+
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
 stages on the same corpora with AI-scheming literature removed — every document that **carries a
 canary string OR** whose gpt-5-mini cost-gate score is >= 2 in
