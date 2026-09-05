@@ -17,12 +17,15 @@
 Each test builds what the audit reads — two arms' prepare and tokenize records, real `.bin/.idx`
 documents written by Megatron's own builder, a packed parquet in the packer's layout, or two
 arrays of document lengths — correct except for one defect, and asserts the audit reports that
-defect. Nothing is mocked. Only the Hub reads are exercised elsewhere (by the audit runs the arm
-READMEs record), because they need the network.
+defect. Nothing is mocked but the Hub's file listing and filesystem under the read-retry tests,
+whose boundary is the network; the Hub reads themselves are exercised elsewhere (by the audit runs
+the arm READMEs record), because they need it.
 """
 
 from __future__ import annotations
 
+import io
+import random
 from pathlib import Path
 
 import numpy as np
@@ -472,3 +475,138 @@ class TestNames:
     def test_statistics_rows_need_every_count(self):
         with pytest.raises(KeyError):
             audit.stats_from_rows([{"subset": BASE, "n_total": 1}])
+
+
+class TestHubReadRetry:
+    """A Hub range read cut mid-body hours into an audit must be re-read, not fatal; anything that
+    is not a transport failure must stay fatal; and a persistent transport failure must still be
+    raised after the bounded attempts."""
+
+    class _Handle:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _FileSystem:
+        """Stands in for HfFileSystem: opening is the retried unit, and this counts the opens.
+        The real thing needs the Hub, which a unit test cannot reach."""
+
+        def __init__(self):
+            self.opens = 0
+
+        def open(self, url, mode):
+            self.opens += 1
+            return TestHubReadRetry._Handle()
+
+    @staticmethod
+    def _failing_then(result, failures: list[Exception]):
+        calls = iter(failures)
+
+        def work(fh):
+            error = next(calls, None)
+            if error is not None:
+                raise error
+            return result
+
+        return work
+
+    def test_a_truncated_body_is_re_read_from_a_fresh_open(self, monkeypatch):
+        import httpx
+
+        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
+        fs = self._FileSystem()
+        work = self._failing_then("rows", [httpx.RemoteProtocolError("peer closed connection")])
+        assert audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work) == "rows"
+        assert fs.opens == 2
+
+    def test_an_error_that_is_not_a_transport_failure_is_raised_at_once(self):
+        fs = self._FileSystem()
+        work = self._failing_then("rows", [ValueError("bad parquet")])
+        with pytest.raises(ValueError, match="bad parquet"):
+            audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
+        assert fs.opens == 1
+
+    def test_a_persistent_transport_failure_is_raised_after_the_bounded_attempts(self, monkeypatch):
+        import httpx
+
+        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
+        fs = self._FileSystem()
+        work = self._failing_then("rows", [httpx.ReadTimeout("timed out")] * 3)
+        with pytest.raises(httpx.ReadTimeout):
+            audit.read_hub_file(fs, "datasets/x@rev/a.parquet", work, attempts=3)
+        assert fs.opens == 3
+
+    def test_a_hub_http_error_is_retried_only_for_rate_limits_and_server_errors(self, monkeypatch):
+        import httpx
+        from huggingface_hub.errors import HfHubHTTPError
+
+        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
+
+        def hub_error(status: int) -> HfHubHTTPError:
+            response = httpx.Response(status, request=httpx.Request("GET", "https://huggingface.co/x"))
+            return HfHubHTTPError(f"{status}", response=response)
+
+        fs = self._FileSystem()
+        assert audit.read_hub_file(fs, "u", self._failing_then("rows", [hub_error(429), hub_error(503)])) == "rows"
+        assert fs.opens == 3
+        fs = self._FileSystem()
+        with pytest.raises(HfHubHTTPError):
+            audit.read_hub_file(fs, "u", self._failing_then("rows", [hub_error(404)]))
+        assert fs.opens == 1
+
+    class _CutHandle(io.BytesIO):
+        """A parquet file whose first row-group read raises what a Hub range read raises when the
+        peer closes mid-body. The footer sits at the end of the file, so a read that ends before
+        it is a row-group read — the footer read always reaches into the footer — and the cut
+        lands after the picks are drawn, where the audit met it."""
+
+        def __init__(self, data: bytes, cut: bool):
+            super().__init__(data)
+            self.footer_start = len(data) - 8 - int.from_bytes(data[-8:-4], "little")
+            self.cut = cut
+
+        def read(self, size=-1):
+            if self.cut and size >= 0 and self.tell() + size <= self.footer_start:
+                import httpx
+
+                self.cut = False
+                raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
+            return super().read(size)
+
+    def test_a_re_read_samples_the_same_rows(self, tmp_path, monkeypatch):
+        """The picks of a file are drawn before its row groups are read, so a body cut during
+        that read retries after the draw; the re-read must sample the rows the first read chose,
+        or a run's sample depends on which reads the Hub happened to cut. The Hub's file listing
+        and filesystem are stood in for: the listing names one local parquet file, and opening
+        it yields a handle that is cut once."""
+        import huggingface_hub
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        monkeypatch.setattr(audit.time, "sleep", lambda s: None)
+        path = tmp_path / "train-00000.parquet"
+        pq.write_table(pa.table({"text": [f"document {i}" for i in range(200)]}), path, row_group_size=50)
+        data = path.read_bytes()
+        monkeypatch.setattr(audit, "hub_parquet_files", lambda dataset, revision, config: [path.name])
+
+        def sample(cuts: int) -> tuple[int, list[int], float]:
+            """(opens, sampled row indices, the caller's next random number) of one sampling run
+            whose first ``cuts`` opens are cut."""
+            opens = [0]
+
+            class _CuttingFileSystem:
+                def open(self, url, mode):
+                    opens[0] += 1
+                    return TestHubReadRetry._CutHandle(data, cut=opens[0] <= cuts)
+
+            monkeypatch.setattr(huggingface_hub, "HfFileSystem", _CuttingFileSystem)
+            rng = random.Random(7)
+            rows = audit.hub_sample_rows("d", "rev", "c", ["text"], 200, 1, 5, rng)
+            assert all(row == {"text": f"document {i}"} for i, row in rows)
+            return opens[0], [i for i, _ in rows], rng.random()
+
+        opens, picks, following = sample(cuts=0)
+        assert (opens, len(picks)) == (1, 7)  # one open; the first and last rows plus five picks
+        assert sample(cuts=1) == (2, picks, following)

@@ -73,6 +73,7 @@ import hashlib
 import json
 import random
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,6 +96,7 @@ from corpora_table import (  # noqa: E402
 
 PREFIX_SCREEN_TOKENS = 48  # leading tokens compared before a whole-document comparison is paid for
 COPY_SEARCH_CANDIDATES = 20000  # equal-length documents examined when looking for a document by content
+HUB_READ_ATTEMPTS = 5  # opens of one Hub file before a transport failure is fatal
 
 
 @dataclass(frozen=True)
@@ -149,6 +151,41 @@ def stats_from_rows(rows: list[dict]) -> dict[str, FilterStats]:
     }
 
 
+def read_hub_file(fs, url: str, work, attempts: int = HUB_READ_ATTEMPTS):
+    """Open one Hub file by range request and return ``work(handle)``, re-opening on a transport failure.
+
+    A range read of a multi-gigabyte parquet file can be cut mid-body by the Hub (a truncated
+    response, a reset connection, a 429 or a 5xx); huggingface_hub retries the request that
+    failed, not the read that was in flight, so the failure surfaces from the parquet reader
+    hours into an audit. Each attempt re-opens the file and re-runs ``work`` from the start, so
+    a partial read is never combined with a fresh one; every retry is printed to stderr; a
+    failure that is not a transport error, and the last transport failure, are raised. ``work``
+    must therefore be a pure function of the handle — it is called again on retry.
+    """
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with fs.open(url, "rb") as fh:
+                return work(fh)
+        except (httpx.TransportError, HfHubHTTPError) as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            retryable = (
+                isinstance(error, httpx.TransportError) or status == 429 or (status is not None and status >= 500)
+            )
+            if not retryable or attempt == attempts:
+                raise
+            delay = 2.0**attempt
+            print(
+                f"hub read of {url} failed ({type(error).__name__}: {str(error)[:160]}); "
+                f"attempt {attempt} of {attempts}, retrying in {delay:.0f}s",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 def read_filter_stats(dataset: str, revision: str, tag: str) -> dict[str, FilterStats]:
     """Read the ``filter_stats_<tag>`` config of the dataset at the revision, straight from the Hub."""
     import pyarrow.parquet as pq
@@ -159,8 +196,9 @@ def read_filter_stats(dataset: str, revision: str, tag: str) -> dict[str, Filter
     rows: list[dict] = []
     fs = HfFileSystem()
     for path in paths:
-        with fs.open(f"datasets/{dataset}@{revision}/{path}", "rb") as fh:
-            rows.extend(pq.read_table(fh).to_pylist())
+        rows.extend(
+            read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", lambda fh: pq.read_table(fh).to_pylist())
+        )
     return stats_from_rows(rows)
 
 
@@ -199,20 +237,32 @@ def hub_sample_rows(
     leading_rows = 0
     fs = HfFileSystem()
     for k, path in chosen:
-        with fs.open(f"datasets/{dataset}@{revision}/{path}", "rb") as fh:
+        # One draw from the caller's rng per file, taken before the read. The picks come from a
+        # generator seeded with it INSIDE sample_file, so a re-read after a transport failure
+        # draws the same rows, and the caller's rng advances once per file whether or not the
+        # read is retried: the run stays reproducible under --seed.
+        seed = rng.random()
+
+        def sample_file(fh) -> tuple[int, list[tuple[int, dict]]]:
+            file_rng = random.Random(seed)
             pf = pq.ParquetFile(fh)
             n = pf.metadata.num_rows
-            start = leading_rows if k < files else total_rows - n
-            picks = sorted(set([0, n - 1] + rng.sample(range(n), min(rows_per_file, n)))) if n else []
+            picks = sorted(set([0, n - 1] + file_rng.sample(range(n), min(rows_per_file, n)))) if n else []
             bounds, acc = [], 0
             for g in range(pf.metadata.num_row_groups):
                 bounds.append((acc, acc + pf.metadata.row_group(g).num_rows))
                 acc = bounds[-1][1]
             present = [c for c in columns if c in pf.schema_arrow.names]  # top-level columns, not leaf fields
+            rows: list[tuple[int, dict]] = []
             for r in picks:
                 g = next(gi for gi, (lo, hi) in enumerate(bounds) if lo <= r < hi)
                 table = pf.read_row_group(g, columns=present)
-                samples.append((start + r, {c: table.column(c)[r - bounds[g][0]].as_py() for c in present}))
+                rows.append((r, {c: table.column(c)[r - bounds[g][0]].as_py() for c in present}))
+            return n, rows
+
+        n, rows = read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", sample_file)
+        start = leading_rows if k < files else total_rows - n
+        samples.extend((start + r, row) for r, row in rows)
         if k < files:
             leading_rows += n
     return samples
@@ -224,14 +274,18 @@ def hub_split_shape(dataset: str, revision: str, config: str) -> tuple[list[str]
     from huggingface_hub import HfFileSystem
 
     fs = HfFileSystem()
+
+    def shape(fh) -> tuple[list[str], int]:
+        pf = pq.ParquetFile(fh)
+        return list(pf.schema_arrow.names), pf.metadata.num_rows
+
     columns: list[str] = []
     rows = 0
     for k, path in enumerate(hub_parquet_files(dataset, revision, config)):
-        with fs.open(f"datasets/{dataset}@{revision}/{path}", "rb") as fh:
-            pf = pq.ParquetFile(fh)
-            if k == 0:
-                columns = list(pf.schema_arrow.names)
-            rows += pf.metadata.num_rows
+        names, n = read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", shape)
+        if k == 0:
+            columns = names
+        rows += n
     return columns, rows
 
 
@@ -266,13 +320,15 @@ def hub_flagged_rows(
     from huggingface_hub import HfFileSystem
 
     fs = HfFileSystem()
-
-    def opened():
-        for path in hub_parquet_files(dataset, revision, config):
-            with fs.open(f"datasets/{dataset}@{revision}/{path}", "rb") as fh:
-                yield fh
-
-    return flagged_rows(opened(), flag_column, columns)
+    flagged: list[dict] = []
+    rows = 0
+    for path in hub_parquet_files(dataset, revision, config):
+        file_flagged, n = read_hub_file(
+            fs, f"datasets/{dataset}@{revision}/{path}", lambda fh: flagged_rows([fh], flag_column, columns)
+        )
+        flagged.extend(file_flagged)
+        rows += n
+    return flagged, rows
 
 
 def rendered_columns(row: CorpusRow, prepared: dict) -> list[str]:
