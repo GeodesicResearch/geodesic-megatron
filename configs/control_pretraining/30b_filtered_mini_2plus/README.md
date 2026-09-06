@@ -578,13 +578,34 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    `nid[010000-010439],nid[010550-011099],nid[011210-011319]`. `scontrol show topology` also
    lists a `group0 = nid[039003,039007]`, but those are not defined nodes and naming them fails
    the submission with `Invalid node name specified`; exclude only the real groups.
+   The pin then held the chain at the head of the queue for 15 h with nothing ahead of it,
+   because this scheduler makes no backfill reservations (see the baseline README's
+   "Launching" section), so on 2026-09-06 at 09:51Z, on Kyle's word, a second stage-1 chain
+   was queued by the normal route with no pin (jobs 6354507, 6354508, 6354509, 6354510, job
+   name `cp30b-filtered-mini-2plus-pretrain-anyplace`). It needs its own job name: singleton
+   serialises same-name jobs by submission order, so a same-name chain could only queue behind
+   the pinned one. The two chains write one checkpoint directory, so a watcher cancels every
+   job of the losing chain within 10 s of either head starting, and the pinned chain wins a
+   same-poll tie. The checkpoint is not a fresh segment's first shared write: minutes after
+   start, rank 0 builds the dataset index cache, which this stage's config leaves at mcore's
+   default location next to the corpora, written with plain file writes and read back on a
+   bare existence check (the baseline README's "Verifying a corpus" section records the
+   cache as content-blind). So the unpinned chain is launched with
+   `dataset.path_to_cache` pointing at a directory of its own (`control_pretraining_stage1_anyplace`,
+   beside the index-cache tree the midtraining configs name)
+   on its launch line (a Hydra override the run script merges into the config, recorded in
+   the resolved config W&B receives), keeping its cache apart from the pinned chain's default
+   one; the two chains then share no write at all before a first checkpoint save at
+   iteration 2264, ~3 h in, by which time the watcher has long since acted.
 
 ## Status
 
 **All sixteen corpora are built, verified and audited clean at `504fc763`, and stage 1 was
 launched on Kyle's go on 2026-09-05 at 18:17Z** as jobs 6342463, 6342464, 6342465 and 6342466
 (`cp30b-filtered-mini-2plus-pretrain`: four `--dependency=singleton` segments of 128 nodes,
-`--disable-ft`, placement pinned to Dragonfly groups 6 and 12 as pre-flight item 7 records;
+`--disable-ft`, placement pinned to Dragonfly groups 6 and 12 as pre-flight item 7 records,
+which since 2026-09-06 09:51Z race an unpinned chain of the same shape, jobs 6354507,
+6354508, 6354509 and 6354510, under a watcher that cancels whichever chain loses;
 logs at `/projects/a5k/public/logs/megatron_runs/train-<jobid>.out`, checkpoints under the
 stage config's `checkpoint.save` directory, 14 of them, the last at `iter_0029881`).
 The chain is watched for stalls (no log growth, or no iteration while the log grows), NaN

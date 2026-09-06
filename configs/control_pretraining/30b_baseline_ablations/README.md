@@ -76,8 +76,8 @@ secondary-priority run of this length.
 
 Submitted on Kyle's instruction on 2026-09-05 at 20:59Z as jobs 6345697 and 6345698
 (`cp30b-baseline-sft-gbs256`, two `--dependency=singleton` segments of 64 nodes, `--disable-ft`,
-`--switches=1` as a soft preference), secondary in priority to the filtered arm's stage 1, which
-was queued ahead of it. Logs at `/projects/a5k/public/logs/megatron_runs/train-<jobid>.out`;
+`--switches=1` as a soft preference), secondary in priority to the filtered arm's stage 1. Logs
+at `/projects/a5k/public/logs/megatron_runs/train-<jobid>.out`;
 checkpoints under the config's `checkpoint.save`, the final at `iter_0005976`. The chain is
 watched for stalls, NaN iterations, loss and throughput degradation, error signatures and each
 segment's terminal state; the export and the hand-off to evals follow the final checkpoint.

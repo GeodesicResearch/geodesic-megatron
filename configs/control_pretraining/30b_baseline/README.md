@@ -590,6 +590,23 @@ nodes (`scontrol show node nid039003` reports it not found), so they can never b
 naming them in `--exclude` fails the whole submission with `Invalid node name specified`
 (2026-09-05): exclude only the real groups, 2 through 13.
 
+**What the pin costs on this scheduler is open-ended, not the probe's difference.** Every
+job on workq carries Priority 1 (all priority weights are zero) and `SchedulerParameters`
+sets `bf_min_prio_reserve=2`, so backfill never reserves nodes for any job: a 128-node job
+starts only when 128 suitable nodes are free at the same instant, while every freed node that
+does not complete such a block goes to a smaller job within 30 s. `sbatch --test-only`
+simulates reservations that are never made, so its "extra queue" for a pin is a floor. A hard
+`--exclude` to two groups narrows "suitable" to 220 nodes, and the filtered arm's pinned
+stage-1 chain sat at the head of the queue (`Resources`, nothing ahead) for 15 h before a
+second, unpinned chain was queued beside it on 2026-09-06 (Kyle's call; see that arm's
+README). A pinned job that has not started is cheaper to widen in place with
+`scontrol update JobId=<id> ExcNodeList=<bad nodes only>`, which keeps its submit-time queue
+position, than to resubmit. `squeue --start` reads N/A for every job here, and
+`PrivateData=jobs` hides other users' jobs, so the probe is the only start estimate available.
+[`../smoke_runs/README.md`](../smoke_runs/README.md) reaches the same conclusion from the
+smoke's own queue history and recommends submitting unconstrained and requeueing only on a
+bad draw; the pin above is the alternative when the throughput matters more than the start.
+
 Derive that exclude list from the probe at submit time; which groups are free moves hour to
 hour. Every run also stamps `run/switch_count` and `run/switch_spread` into its W&B summary
 (`scripts/telemetry/run_identity.py`), so a throughput number can always be compared against
