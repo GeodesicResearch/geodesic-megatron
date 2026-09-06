@@ -43,13 +43,17 @@ def merge_onto_recipe(path: Path, recipe_fn):
     return cfg
 
 
-def assert_blend_is_well_formed(data_path, label: str) -> None:
+DEFAULT_BLEND_ROOTS = ("/projects/a5k/public/data/",)
+
+
+def assert_blend_is_well_formed(data_path, label: str, roots: tuple[str, ...] = DEFAULT_BLEND_ROOTS) -> None:
     """Assert a flat interleaved weight/prefix blend parses as upstream Megatron will parse it.
 
     An odd-length list is not an error upstream: ``get_blend_from_list`` reads it as
     prefixes-only, so the weights become filenames and the run dies hours later looking for
     ``0.0875.idx``. Weights must sum to 1.0 so every entry stays auditable against the token
-    count recorded beside it.
+    count recorded beside it. ``roots`` names where corpora may live: the campaign tree by
+    default, or an arm's own tree when its corpora are built outside it.
     """
     data_path = [str(x) for x in data_path]
     assert len(data_path) % 2 == 0, f"{label}: odd-length data_path becomes an unweighted blend"
@@ -62,7 +66,7 @@ def assert_blend_is_well_formed(data_path, label: str) -> None:
     assert all(w > 0 for w in weights)
     for prefix in prefixes:
         assert not prefix.endswith((".bin", ".idx")), f"{label}: {prefix} must be extension-less"
-        assert prefix.startswith("/projects/a5k/public/data/"), prefix
+        assert prefix.startswith(roots), f"{label}: {prefix} is outside {roots}"
 
 
 def assert_shard_weights_are_token_proportional(data_path, corpus_slug: str, total_weight: float) -> None:

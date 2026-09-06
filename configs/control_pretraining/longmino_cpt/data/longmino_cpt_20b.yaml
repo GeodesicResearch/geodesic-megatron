@@ -1,0 +1,53 @@
+# The 20B-token slice of OLMo-3's stage-3 long-context mix ("longmino") that the
+# longmino_cpt arm continues pretraining on. Everything the build needs is stated here once:
+# build_manifest.py turns it into data/longmino_cpt_20b.manifest.json (the exact shards),
+# slice_family.py cuts one family from those shards, build_corpora.sh submits the jobs, and
+# blend_weights.py turns the built token counts into the training blend.
+#
+# Source: allenai/dolma3_longmino_mix-100B-1125 — the mix the released OLMo-3 32B saw in its
+# long-context stage, where the July eval-awareness bracket located the VEA rise. Raw text,
+# data/<source>/<shard>.jsonl.zst, records {id, text, metadata}; 202 source dirs, 59,126
+# shards, 177.1 GB compressed (~1.77 compressed bytes per token under the OLMo tokenizer).
+repo: allenai/dolma3_longmino_mix-100B-1125
+revision: 28fea4330d8f8e27221010d42c4bc53ba9ec3236   # resolved 2026-09-06; never float
+tokenizer: geodesic-research/nemotron-base-tokenizer  # the campaign tokenizer (EOD </s> = 2)
+bytes_per_token: 1.77                                 # compressed bytes / token, for the estimate
+
+# Slice rule (deterministic, stated so the reader can re-derive the manifest):
+#   a source with >= file_mode_min_files shards keeps every k-th shard in sorted order
+#   (k = 1/fraction); a smaller source keeps every shard and every record whose
+#   sha1(id) % k == 0. Both take the same fraction in expectation; the record rule keeps tiny
+#   single-shard sources from being over-represented.
+fraction: 0.2
+file_mode_min_files: 10
+
+# Families group the 202 source dirs into corpora that are built, weighted and analysed
+# separately. Regexes are matched with re.search against the source dir name; they must be
+# total and pairwise disjoint over the manifest (tested).
+families:
+  real_pdfs:        ["^olmocr_science_pdfs-"]
+  synth_pdfs:       ["^lc_synth-(cwe|rex)_s2pdf$"]
+  cc_high_quality:  ["^common_crawl-high-quality_"]
+  code:             ["^stack_edu-fim_", "^cranecode$", "^code-meta-reasoning$", "^program_verifiable$"]
+  math:             ["^cranemath$", "^dolminomath$", "^megamatt$", "^tinymath-(mind|pot)$", "^math-meta-reasoning$"]
+  qa_synth:         ["^nemotron-synth-qa$", "^wiki_to_rcqa_part[123]$", "^reddit_to_flashcards$"]
+  reasoning_traces: ["^(gemini|llama_nemotron|openthoughts2|qwq)-reasoning-traces$", "^omr-rewrite-fullthoughts$", "^general_reasoning_mix$"]
+  instruction:      ["^tulu-3-sft$", "^dolmino_1-flan$"]
+  stem_crawl:       ["^stem-heavy-crawl$"]
+
+# Where the corpora are built (our tree — the campaign's /projects/a5k/public/data is not
+# writable by this user). One dir per family: raw/ (downloaded shards), training.jsonl,
+# slice_results.json, tokenized_base_input_document.{bin,idx,provenance.json}.
+data_base: /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b
+
+# Per-family job shape: slice walltime (h), tokenize walltime (h), tokenize workers, stripe.
+jobs:
+  real_pdfs:        {slice_h: 6, tok_h: 8, workers: 64, stripe: 8}
+  synth_pdfs:       {slice_h: 6, tok_h: 8, workers: 64, stripe: 8}
+  cc_high_quality:  {slice_h: 6, tok_h: 8, workers: 64, stripe: 8}
+  code:             {slice_h: 4, tok_h: 6, workers: 32, stripe: 0}
+  math:             {slice_h: 4, tok_h: 6, workers: 32, stripe: 0}
+  qa_synth:         {slice_h: 4, tok_h: 6, workers: 32, stripe: 0}
+  reasoning_traces: {slice_h: 2, tok_h: 4, workers: 32, stripe: 0}
+  instruction:      {slice_h: 2, tok_h: 4, workers: 32, stripe: 0}
+  stem_crawl:       {slice_h: 2, tok_h: 4, workers: 32, stripe: 0}
