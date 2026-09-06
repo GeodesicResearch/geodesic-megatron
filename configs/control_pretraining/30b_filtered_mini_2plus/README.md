@@ -597,17 +597,26 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    the resolved config W&B receives), keeping its cache apart from the pinned chain's default
    one; the two chains then share no write at all before a first checkpoint save at
    iteration 2264, ~3 h in, by which time the watcher has long since acted.
+   The race ended on 2026-09-06 at 23:05Z, on Kyle's word, before either head had started:
+   the pinned chain was cancelled and the unpinned one runs on as the only stage-1 chain,
+   unchanged from its submission, with the watcher stopped. The pinned chain was the one to
+   go because its will-run bound had drifted ~15 h behind the unpinned chain's over the day
+   (the pin's cost on this scheduler, see the baseline README's "Launching" section) and the
+   09:51Z instruction preferred the earlier start; widening the pinned jobs in place, which
+   would have kept their earlier queue position, was offered and not taken.
 
 ## Status
 
 **All sixteen corpora are built, verified and audited clean at `504fc763`, and stage 1 was
 launched on Kyle's go on 2026-09-05 at 18:17Z** as jobs 6342463, 6342464, 6342465 and 6342466
 (`cp30b-filtered-mini-2plus-pretrain`: four `--dependency=singleton` segments of 128 nodes,
-`--disable-ft`, placement pinned to Dragonfly groups 6 and 12 as pre-flight item 7 records,
-which since 2026-09-06 09:51Z race an unpinned chain of the same shape, jobs 6354507,
-6354508, 6354509 and 6354510, under a watcher that cancels whichever chain loses;
-logs at `/projects/a5k/public/logs/megatron_runs/train-<jobid>.out`, checkpoints under the
-stage config's `checkpoint.save` directory, 14 of them, the last at `iter_0029881`).
+`--disable-ft`, placement pinned to Dragonfly groups 6 and 12 as pre-flight item 7 records).
+**Since 2026-09-06 23:05Z the only stage-1 chain is the unpinned one** queued at 09:51Z that
+day, jobs 6354507, 6354508, 6354509 and 6354510 (`cp30b-filtered-mini-2plus-pretrain-anyplace`:
+the same four segments with no placement pin and its own dataset index cache); the pinned
+chain was cancelled on Kyle's word before either head had started, as item 7 records. Logs at
+`/projects/a5k/public/logs/megatron_runs/train-<jobid>.out`, checkpoints under the stage
+config's `checkpoint.save` directory, 14 of them, the last at `iter_0029881`.
 The chain is watched for stalls (no log growth, or no iteration while the log grows), NaN
 iterations, loss and throughput degradation, error signatures and each segment's terminal
 state and rollover marker. Kyle corrected the rule
