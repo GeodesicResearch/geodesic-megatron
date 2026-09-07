@@ -1,10 +1,11 @@
 # Philosophy-MSM midtraining + AFT SFT — Super 120B
 
 > **Background.** The initial philosophy-MSM arms showed a null behavioural
-> effect that traced to per-token dose, not to the spec content — the lr-1e-5
-> and dose-followup configs below (seed-2, lr-3e-6, lr-1e-6 3×-tokens) probe
-> exactly that. Full analysis and evidence live in the campaign's report
-> artifact, not in this repo.
+> effect that traced to per-token dose, not to the spec content. The lr-1e-5
+> chain below is therefore the PRODUCTION chain — its checkpoints are the ones
+> the eval battery and the RL warm-starts consume. The one-off dose-followup
+> ablations (seed-2, lr-3e-6, lr-1e-6 3×-tokens) are not kept as configs; their
+> full analysis and evidence live in the campaign's report artifact.
 
 Four comparison arms measuring the effect of philosophy-MSM midtraining and of
 CoT (think vs no-think) in AFT alignment SFT (2026-07):
