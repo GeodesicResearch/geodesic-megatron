@@ -102,7 +102,8 @@ once.
 | warm start | `control_pretrain_30b_baseline_midtrain` (`iter_0003126`) | the same |
 | GPUs / nodes | 256 / 64 | the same |
 | packs per replica per iteration | 2 | 2 |
-| `train_iters` | 5976 | **measured from the pack** (see below) |
+| packs | 764,685 | **769,753** — more, from fewer conversations |
+| `train_iters` | 5976 | **6014** (`ceil(2 x 769,753 / 256)`) |
 | save | `control_pretrain_30b_baseline_sft_gbs256` | `control_pretrain_30b_baseline_sft_long_cot_gbs256` |
 
 ### The corpus
@@ -163,11 +164,18 @@ done
 
 **`train_iters` is measured, never estimated**, as everywhere else in this campaign:
 `ceil(2 x num_packs / 256)`, at the two epochs the parent stage 3 and the half-batch ablation
-both use. The config ships the sibling's value until the shards are measured and **must not be
-launched until that value is replaced**. That is enforced, not merely documented: this variant is
-pinned to its sibling field by field like every other, and because the pin asserts the set of
-differing fields exactly, replacing the placeholder breaks it — the test must then be updated with
-the measured count, so the number cannot reach a run without being written down.
+both use. The sixteen shards packed on 2026-09-07 to **769,753 sequences** in total
+(48,077-48,163 per shard, a spread of 0.18%, which is the byte-gated split
+doing its job), so `ceil(2 x 769,753 / 256)` = **6,014**. The test pins that number, and
+because the sibling pin asserts the set of differing fields exactly, the count could not have been
+changed in the config without being written down there too.
+
+**That count is larger than the sibling's 5,976, and the direction is the point of the arm.**
+This corpus holds 2,540,294 conversations against the baseline mix's 5,702,903, yet packs to
+769,753 sequences against its 764,685 — slightly *more*, from fewer than half the conversations,
+because a pack counts tokens and these are the longest-reasoning ones. The practical consequence is
+that the two arms cost nearly the same wall clock (6,014 steps against 5,976, 0.6%),
+so the comparison is matched in price as well as in batch.
 
 ### Launching
 
@@ -184,6 +192,12 @@ comparison against the sibling.
 
 ### Status
 
-Data build submitted 2026-09-07 at 08:28Z as job 6373299 (`cp30b-prep-sft-long`, prepare only).
-The configs and their tests are drafted and green. The training run is **not** queued: it waits
-on the pack measurement that sets `train_iters`.
+The data is built and measured. The prepare ran 2026-09-07 as job 6373299 and exported
+2,540,294 documents, exactly the row count of the pinned revision. `shard_jsonl_corpus.sh`
+(job 6374046) cut it into sixteen roots and its byte gate passed, which is what released the
+source. The sixteen pack jobs (6374106-6374122) all completed cleanly in about an hour each and
+produced 769,753 packed sequences, giving `train_iters` 6,014.
+
+Checked before launching: the config's `shard*` glob resolves to exactly sixteen files through
+`resolve_packed_parquet_paths`, the stage-2 warm start `iter_0003126` is present, and the save
+directory does not yet exist, so no empty checkpoint directory can be mistaken for a finished run.

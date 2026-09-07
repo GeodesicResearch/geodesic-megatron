@@ -48,6 +48,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sf
 from megatron.bridge.recipes.nemotronh.nemotron_3_super import nemotron_3_super_sft_config
 from tests.unit_tests.campaign_config import (
     assert_blend_is_well_formed,
+    assert_iterations_are_the_minimal_cover,
     assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
     merge_onto_recipe,
@@ -125,9 +126,7 @@ class TestPerArm:
     def test_token_budget_meets_its_target(self, merged, arm):
         cfg = merged[arm]
         tokens_per_iter = cfg.train.global_batch_size * SEQ_LENGTH
-        total = cfg.train.train_iters * tokens_per_iter
-        assert total >= TOKEN_TARGET, f"{arm}: {total:,} tokens is short of the {TOKEN_TARGET:,} target"
-        assert (cfg.train.train_iters - 1) * tokens_per_iter < TOKEN_TARGET
+        assert_iterations_are_the_minimal_cover(cfg.train.train_iters, tokens_per_iter, TOKEN_TARGET, arm)
 
     def test_schedule_overrides_the_sft_recipe(self, merged, raw, arm):
         """The SFT recipe's warmup (50 iters) and LR (5e-6) are fine-tuning postures;

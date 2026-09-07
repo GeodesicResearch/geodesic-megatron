@@ -100,6 +100,25 @@ def assert_shard_weights_are_token_proportional(data_path, corpus_slug: str, tot
         assert weight == expected[prefix], prefix
 
 
+def assert_iterations_are_the_minimal_cover(train_iters: int, per_iteration: int, target: int, label: str) -> None:
+    """Assert ``train_iters`` is the FEWEST iterations covering ``target``, i.e. its ceiling.
+
+    Every campaign arm derives its iteration count from a measured budget rather than estimating
+    one, so the rule has two halves and both are asserted: this many iterations reach the target,
+    and one fewer would not. Checking only the first would pass a padded count, which spends
+    compute on a budget nobody chose.
+
+    ``per_iteration`` carries the unit, which is what differs between arms: the ``.bin/.idx``
+    stages and the CPT arms count tokens per iteration, while the packed SFT ablations count
+    packed sequences.
+    """
+    total = train_iters * per_iteration
+    assert total >= target, f"{label}: {total:,} is short of the {target:,} target"
+    assert (train_iters - 1) * per_iteration < target, (
+        f"{label}: {train_iters:,} iterations exceeds the minimum covering {target:,}"
+    )
+
+
 # The workq QOS MaxWall in minutes (from sacctmgr; the partition itself reports UNLIMITED,
 # which is why this must be pinned here rather than read from SLURM). A stage's rollover
 # clock must fire under this with enough margin for one exit save plus teardown.

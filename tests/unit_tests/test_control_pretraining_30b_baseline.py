@@ -57,6 +57,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
 )
 from tests.unit_tests.campaign_config import (
     assert_blend_is_well_formed,
+    assert_iterations_are_the_minimal_cover,
     assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
     merge_onto_recipe,
@@ -135,10 +136,7 @@ class TestPerStage:
         _, seq_length, tokens_per_iter, target, _ = STAGES[stage]
         cfg = merged[stage]
         assert cfg.train.global_batch_size * seq_length == tokens_per_iter
-        total = cfg.train.train_iters * tokens_per_iter
-        assert total >= target, f"{stage}: {total:,} tokens is short of the {target:,} target"
-        # One iteration fewer must fall short, or the budget is padded rather than minimal.
-        assert (cfg.train.train_iters - 1) * tokens_per_iter < target
+        assert_iterations_are_the_minimal_cover(cfg.train.train_iters, tokens_per_iter, target, stage)
 
     def test_retained_checkpoint_count(self, merged, stage):
         """Megatron-Core always writes a final checkpoint, so an interval that divided

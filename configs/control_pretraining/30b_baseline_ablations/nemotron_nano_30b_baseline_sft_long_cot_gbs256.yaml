@@ -29,12 +29,16 @@
 #   without first reading the share of answers that never close their think block will mistake a
 #   truncation artefact for a capability difference, in whichever direction it falls.
 #
-# TRAIN_ITERS IS PROVISIONAL UNTIL THE PACK IS MEASURED. The campaign's rule is that this number
-# is derived from the built pack, never estimated: ceil(epochs x num_packs / global_batch_size),
-# at the two epochs the parent stage 3 and the half-batch ablation both use. The pack is built as
-# sixteen per-shard parquets, because one process cannot pack this corpus inside the 24 h wall.
-# The value below is carried over from the sibling and is WRONG until the shards report their
-# rows; this config must not be launched before it is replaced.
+# TRAIN_ITERS IS MEASURED, NOT ESTIMATED, as everywhere in this campaign: it is derived from the
+# built pack by ceil(epochs x num_packs / global_batch_size), at the two epochs the parent stage 3
+# and the half-batch ablation both use. The pack is sixteen per-shard parquets, because one process
+# cannot pack this corpus inside the 24 h wall; the sixteen packed on 2026-09-07 to 769,753 rows
+# in total (48,077-48,163 per shard), giving ceil(2 x 769,753 / 256) = 6014.
+#
+# That count is NOT the sibling's, and the difference is the point of the arm rather than a defect.
+# This corpus holds 2,540,294 conversations against the baseline mix's 5,702,903, but they are the
+# longest-reasoning ones, so they pack to slightly MORE 32768-token sequences than the baseline's
+# 764,685 rather than fewer. Tokens, not conversations, are what a pack counts.
 #
 # Everything else — topology, schedule, optimizer, checkpoint policy — is the sibling ablation's
 # verbatim, so that the corpus is the only thing under test. See that file's header for why the
@@ -42,7 +46,7 @@
 # tuning choice.
 #
 # --- LAUNCH ---
-# Not launched by this file, and not launchable until train_iters is measured. The warm start
+# Not launched by this file. The warm start
 # exists (stage 2 wrote iter_0003126 on 2026-08-27). Launch with --disable-ft (the run outlives
 # the ft heartbeat wall); load == save plus save_interval make a resubmission resume:
 #   isambard_sbatch --nodes=64 pipeline_training_submit.sbatch \
@@ -80,7 +84,7 @@ dataset:
 train:
   global_batch_size: 256             # the ablation: half the parent's 512; 2 packs/replica/iter at DP=128
   micro_batch_size: 1
-  train_iters: 5976                  # PROVISIONAL: replace with ceil(2 x measured_packs / 256)
+  train_iters: 6014                  # measured: ceil(2 x 769,753 packs / 256), two epochs
   # Time-based graceful rollover, matching the parent (signal path proven dead there).
   # At ~11-12 h expected runtime this never fires; pathological-case protection only.
   exit_duration_in_mins: 1400

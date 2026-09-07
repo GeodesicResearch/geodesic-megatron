@@ -621,7 +621,10 @@ iteration and only the wall clock doubles. The second is
 corpus instead: `geodesic-research/pa-warm-start-sft-heavy-25b-mix-long`, the same twenty-three
 sources re-selected by chain-of-thought length (2,540,294 conversations against 5,702,903, in a
 repository about twice the size). Its comparison is therefore the first ablation, not the parent,
-since against the parent both batch and corpus would move. Selecting the longest traces amplifies
+since against the parent both batch and corpus would move. Its `train_iters` is the measured 6014,
+`ceil(2 x 769,753 packs / 256)` — MORE packs than the baseline mix's 764,685 despite fewer than
+half the conversations, because a pack counts tokens and these are the longest-reasoning ones, so
+the two ablations also cost nearly the same wall clock. Selecting the longest traces amplifies
 the tail that generation-budget truncation acts on, so read the share of answers that never close
 their think block before reading any accuracy number from it.
 

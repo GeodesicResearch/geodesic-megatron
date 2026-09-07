@@ -31,6 +31,7 @@ from omegaconf import OmegaConf
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
+    assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
     flatten_merged_config,
@@ -155,14 +156,19 @@ class TestSegmentRollover:
 # same topology.
 
 LONG_COT_CORPUS = "geodesic-research/pa-warm-start-sft-heavy-25b-mix-long"
+# Packed sequences the corpus's sixteen shards hold, summed from the parquet footers. This is the
+# measurement train_iters is derived from, so it is pinned rather than recomputed at test time.
+LONG_COT_PACKS = 769_753
+LONG_COT_EPOCHS = 2
 LONG_COT_REVISION = "5973da9e94eb0d8957e817294193af065329688e"
 
-# What differs from the SIBLING today: the corpus and the run identity, and nothing else. The
-# assertion demands set equality, so this is also the tripwire on the provisional train_iters —
-# the config ships the sibling's 5976 until the sixteen shard packs are measured, and the moment
-# the measured value replaces it this set is one short and the test fails, which is what forces
-# the count to be pinned here rather than trusted to a comment.
+# What differs from the SIBLING: the corpus, the iteration count it implies, and the run identity.
+# The assertion demands set equality rather than containment, so a field cannot start differing
+# without being named here. That is what keeps train_iters honest: this campaign derives it from
+# the built pack, and a config whose count changed for any other reason fails this test rather
+# than reaching a run unnoticed.
 LONG_COT_DIVERGENCE = {
+    "train.train_iters",
     "dataset.dataset_name",
     "dataset.dataset_root",
     "dataset.packed_sequence_specs.packed_train_data_path",
@@ -184,14 +190,21 @@ def long_cot_data_config():
 
 
 class TestOnlyTheCorpusDiffersFromTheSibling:
-    def test_exactly_the_corpus_and_identity_fields_differ(self, long_cot, ablation):
+    # The corpus is the only INDEPENDENT variable: the step count differs because it is derived
+    # from that corpus's pack, so it is a consequence of the ablation rather than a second one.
+    def test_exactly_the_corpus_its_step_count_and_the_run_identity_differ(self, long_cot, ablation):
         assert_only_these_fields_differ(long_cot, ablation, LONG_COT_DIVERGENCE, "long-cot sft ablation")
 
-    def test_the_iteration_count_is_still_the_provisional_one(self, long_cot, ablation):
-        # Guards the launch, not the arithmetic: while these agree the pack has not been measured,
-        # and the config's header says it must not be launched. Replacing the value breaks the
-        # assertion above, which is where the measured count gets pinned.
-        assert long_cot.train.train_iters == ablation.train.train_iters
+    def test_the_iteration_count_is_the_measured_one(self, long_cot):
+        # Pinned to the measurement rather than to prose: the sixteen shards packed to
+        # LONG_COT_PACKS rows, and two epochs of those is this many steps at this batch.
+        assert long_cot.train.train_iters == 6014
+        assert_iterations_are_the_minimal_cover(
+            long_cot.train.train_iters,
+            long_cot.train.global_batch_size,
+            LONG_COT_EPOCHS * LONG_COT_PACKS,
+            "long-cot sft ablation",
+        )
 
 
 class TestTheLongCotAblationTrainsOnItsOwnCorpus:
