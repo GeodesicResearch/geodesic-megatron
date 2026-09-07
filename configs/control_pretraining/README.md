@@ -34,7 +34,9 @@ filtered version of the same blend, so everything except the data is held fixed 
 >
 > [`30b_baseline_ablations/`](30b_baseline_ablations/README.md) holds single-variable variants
 > of a `30b_baseline/` stage, each a full stage config pinned to its parent field by field by
-> test; the first is the stage-3 SFT at half the batch for twice the steps over the same packs.
+> test; the first is the stage-3 SFT at half the batch for twice the steps over the same packs,
+> and the second holds that batch and swaps the corpus for its longest-chain-of-thought
+> re-selection, so the two differ only in what they train on.
 
 | | |
 |---|---|

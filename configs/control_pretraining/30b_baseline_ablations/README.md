@@ -81,3 +81,109 @@ at `/projects/a5k/public/logs/megatron_runs/train-<jobid>.out`;
 checkpoints under the config's `checkpoint.save`, the final at `iter_0005976`. The chain is
 watched for stalls, NaN iterations, loss and throughput degradation, error signatures and each
 segment's terminal state; the export and the hand-off to evals follow the final checkpoint.
+
+
+## SFT on the longest chains of thought — `nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml`
+
+Kyle, 2026-09-07: "another post-training ablation ... a new SFT data mix, sourced from the
+longest CoTs ... on top of our baseline midtraining model ... have a 256 GBS as well."
+
+**Its comparison is the half-batch ablation above, not the parent.** That sibling already holds
+global batch 256, the same warm start, the same schedule and the same topology, so between the
+two the corpus is the only thing that moves, plus the iteration count that follows from the
+corpus's size. Read against the parent's 512-batch stage 3 instead and two variables move at
+once.
+
+| | sibling (`_sft_gbs256`) | this ablation |
+|---|---|---|
+| corpus | `pa-warm-start-sft-heavy-25b-mix` @ `ee81d70b` | **`pa-warm-start-sft-heavy-25b-mix-long` @ `5973da9e`** |
+| conversations | 5,702,903 | **2,540,294** |
+| `global_batch_size` | 256 | 256, the same |
+| warm start | `control_pretrain_30b_baseline_midtrain` (`iter_0003126`) | the same |
+| GPUs / nodes | 256 / 64 | the same |
+| packs per replica per iteration | 2 | 2 |
+| `train_iters` | 5976 | **measured from the pack** (see below) |
+| save | `control_pretrain_30b_baseline_sft_gbs256` | `control_pretrain_30b_baseline_sft_long_cot_gbs256` |
+
+### The corpus
+
+`geodesic-research/pa-warm-start-sft-heavy-25b-mix-long` is the same twenty-three sources as the
+baseline mix — agentic, competitive programming, SWE, science, chat, finance, ARC-AGI, maths —
+re-selected by chain-of-thought length and published in the same shape: a `default` config whose
+`train` split concatenates the per-source configs, rows carrying `messages` / `tools` / per-turn
+`reasoning_content`. Measured from the parquet footers at the pinned revision: 2,540,294
+conversations, 44.5% of the baseline mix's count, in a repository about twice the size on disk,
+because the retained traces are far longer. A sampled source config shows the selection floor
+plainly, its `reasoning_len` running 4,536 at minimum against a baseline distribution that is
+mostly short with a long tail.
+
+**Read the truncation share before the accuracy.** Selecting the longest traces amplifies the
+tail, the mirror of the shortest-CoT selection whose confound this campaign already documented
+(see the pack-defect note in the baseline arm's stage-3 discussion). Budget truncation is a pure
+tail phenomenon, so this arm is expected to reach the generation budget MORE often than the
+baseline SFT, which already fails to close its think block on a large share of its answers at
+the 32k budget. An evaluation that reads accuracy without first reading the share of answers
+that never close their think block will mistake a truncation artefact for a capability
+difference, in whichever direction it falls. This is stated in the config header too, because it
+is the single thing most likely to be missed when the numbers come back.
+
+### Building the data
+
+Identity, pin, tokenizer and pack geometry are versioned in
+[`data/pa-warm-start-sft-heavy-25b-mix-long.yaml`](data/pa-warm-start-sft-heavy-25b-mix-long.yaml).
+The corpus is prepared to JSONL, cut into sixteen byte-gated shard roots, and packed per shard,
+because one process cannot pack conversations at this scale inside the 24 h wall — the recipe
+the baseline's own pack and the filtered arm's both used. The training config reads the sixteen
+per-shard parquets through a glob.
+
+```bash
+# 1. Prepare: download the pinned revision's default/train split, export training.jsonl.
+isambard_sbatch --time=23:00:00 --job-name=cp30b-prep-sft-long \
+  pipeline_data_submit.sbatch prepare \
+  --config configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-heavy-25b-mix-long.yaml
+
+# 2. Shard the prepared JSONL into 16 byte-gated shard roots. The script only splits and gates
+#    the bytes, releasing the source only once they balance, so its exit status is exactly whether
+#    the split succeeded.
+isambard_sbatch --time=06:00:00 --job-name=cp30b-shard-sft-long \
+  configs/control_pretraining/shard_jsonl_corpus.sh \
+  /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix-long 16
+
+# 3. Pack each shard in its own job, at the tokenizer and geometry the data config states — the
+#    packed path encodes both, so a wrong value lands where the training glob cannot see it.
+for i in $(seq 0 15); do
+  isambard_sbatch --time=12:00:00 --job-name=cp30b-pack-sft-long-s$i \
+    pipeline_data_submit.sbatch \
+    /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix-long/shard$i \
+    geodesic-research/nemotron-think-history-tokenizer 32768 4
+done
+
+# 4. Sum the shards' packed rows: that measurement is what train_iters is derived from.
+```
+
+**`train_iters` is measured, never estimated**, as everywhere else in this campaign:
+`ceil(2 x num_packs / 256)`, at the two epochs the parent stage 3 and the half-batch ablation
+both use. The config ships the sibling's value until the shards are measured and **must not be
+launched until that value is replaced**. That is enforced, not merely documented: this variant is
+pinned to its sibling field by field like every other, and because the pin asserts the set of
+differing fields exactly, replacing the placeholder breaks it — the test must then be updated with
+the measured count, so the number cannot reach a run without being written down.
+
+### Launching
+
+```bash
+isambard_sbatch --nodes=64 pipeline_training_submit.sbatch \
+  configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml \
+  nano sft --disable-ft
+```
+
+Two `--dependency=singleton` segments, as the sibling uses; `load == save` plus `save_interval`
+make a resubmission resume. After the run, export the final checkpoint to HF and hand the path
+to evals, with the think-block close rate read first and IFEval and GSM8K as the headline
+comparison against the sibling.
+
+### Status
+
+Data build submitted 2026-09-07 at 08:28Z as job 6373299 (`cp30b-prep-sft-long`, prepare only).
+The configs and their tests are drafted and green. The training run is **not** queued: it waits
+on the pack measurement that sets `train_iters`.

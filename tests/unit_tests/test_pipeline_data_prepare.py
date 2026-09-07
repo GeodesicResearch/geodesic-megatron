@@ -409,7 +409,7 @@ class TestShippedCorpusConfigs:
         import sys
 
         sys.path.insert(0, str(campaign_dir))
-        from corpora_table import read_corpora_table
+        from corpora_table import PACK_GEOMETRY_KEYS, prepare_config_scalars, read_corpora_table
 
         kind_of_config: dict[Path, str] = {}
         for table in sorted(campaign_dir.glob("*/corpora.tsv")):
@@ -420,7 +420,17 @@ class TestShippedCorpusConfigs:
             args = _parse_bare(pipe_module, "--config", str(path))
             assert args.dataset, f"{path.name} does not name a dataset"
             assert args.revision, f"{path.name} does not pin a revision"
-            kind = kind_of_config.get(path.resolve(), "tokenize" if args.skip_pack else "pack")
+            # Untabled configs fall back to their pack geometry, NOT to `skip-pack`: that flag
+            # says when the pack is built, not whether the corpus is packed at all. A packed
+            # SFT corpus whose pack is cut into per-shard jobs sets it too, and reading it as
+            # ".bin/.idx" would demand the base tokenizer of a chat corpus. Every `.bin/.idx`
+            # config states neither `seq-length` nor `pad-seq-to-mult`; every packed one states
+            # both.
+            # From the FILE, not from `args`: the flag carries a parser default, so a parsed
+            # config always appears to have geometry.
+            stated = prepare_config_scalars(path)
+            packed_geometry = all(key in stated for key in PACK_GEOMETRY_KEYS)
+            kind = kind_of_config.get(path.resolve(), "pack" if packed_geometry else "tokenize")
             if kind == "tokenize":
                 # Pretraining-format (.bin/.idx) corpora: the EOD baked into the data must
                 # be the base tokenizer's `</s>` = id 2 (CLAUDE.md, "Tokenizer choice for

@@ -219,10 +219,11 @@ versus 80, with the prior turn's trace present in both the rendered string and t
 `TestSftStage::test_tokenizer_keeps_prior_turn_reasoning` drives the real tokenizer through
 its real template so a future swap back cannot pass silently.
 
-A single-variable ablation of this stage — half the batch for twice the steps, over exactly
-the same packs from the same midtraining final, on 256 GPUs — lives in
-[`../30b_baseline_ablations/`](../30b_baseline_ablations/README.md), pinned to this config
-field by field by its own test.
+Two single-variable ablations of this stage live in
+[`../30b_baseline_ablations/`](../30b_baseline_ablations/README.md), each pinned field by field by
+its own test: half the batch for twice the steps over exactly the same packs from the same
+midtraining final on 256 GPUs, and — at that same batch, so that the corpus is the only variable
+between the two — the same sources re-selected to their longest chains of thought.
 
 The campaign's two shell scripts, `configs/control_pretraining/build_corpora.sh` and
 `configs/control_pretraining/shard_jsonl_corpus.sh`, drive the existing data pipeline; neither

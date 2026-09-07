@@ -616,7 +616,14 @@ fields plus the run identity (checkpoint directories, W&B name, TensorBoard dire
 first is `nemotron_nano_30b_baseline_sft_gbs256.yaml` — the stage-3 SFT at GBS 256 for 5976
 iterations (the parent's 512 for 2988: the same 1,529,856 packs), from the same midtraining
 final, on 256 GPUs / 64 nodes so that DP=128 keeps the parent's 2 packs per replica per
-iteration and only the wall clock doubles.
+iteration and only the wall clock doubles. The second is
+`nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml`, which holds that batch and varies the
+corpus instead: `geodesic-research/pa-warm-start-sft-heavy-25b-mix-long`, the same twenty-three
+sources re-selected by chain-of-thought length (2,540,294 conversations against 5,702,903, in a
+repository about twice the size). Its comparison is therefore the first ablation, not the parent,
+since against the parent both batch and corpus would move. Selecting the longest traces amplifies
+the tail that generation-budget truncation acts on, so read the share of answers that never close
+their think block before reading any accuracy number from it.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
 stages on the same corpora with AI-scheming literature removed — every document that **carries a
