@@ -123,4 +123,8 @@ done
 
 - 2026-09-06 ~21:20 UTC: 68/68 unit tests pass in-container; training submitted as two
   singleton segments on 64 nodes: jobs **6365832**, **6365833** (`ctrl-longmino-cpt-30b`).
+- 2026-09-07 08:55 UTC: still pending after ~11.5 h (no idle nodes). Added a third singleton
+  segment **6373866** with `--time=05:00:00` and `train.exit_duration_in_mins=285` (graceful
+  save/exit before the wall limit) to improve backfill odds; the two 24 h segments stay queued
+  and resume whatever it leaves. All three share the singleton name, so only one runs at a time.
 - _(at start: `[run-identity] switch placement`, s/iter, loss at iter 1 / 100 / end.)_
