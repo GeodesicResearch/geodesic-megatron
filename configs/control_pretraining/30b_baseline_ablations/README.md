@@ -19,7 +19,7 @@ IFEval and GSM8K are the comparisons of most interest.
 |---|---|---|
 | `global_batch_size` | 512 | **256** |
 | `train_iters` | 2988 | **5976** |
-| packs consumed | 1,529,856 (two epochs of 764,685) | 1,529,856, the same |
+| pack slots stepped through | 1,529,856 (2988 x 512) | 1,529,856 (5976 x 256), the same |
 | tokens per iteration | 16,777,216 | 8,388,608 |
 | GPUs / nodes | 512 / 128 | **256 / 64** |
 | data-parallel size (TP1 · CP2 · PP1) | 256 | 128 |
@@ -27,6 +27,9 @@ IFEval and GSM8K are the comparisons of most interest.
 | warm start | `control_pretrain_30b_baseline_midtrain` (`iter_0003126`) | the same |
 | save | `control_pretrain_30b_baseline_sft` | `control_pretrain_30b_baseline_sft_gbs256` |
 | W&B run | `control_pretrain_30b_baseline_sft` | `control_pretrain_30b_baseline_sft_gbs256` |
+
+Two epochs of the corpus's 764,685 packs is 1,529,370, so both arms step through 486 slots past
+it. The row above counts slots rather than distinct packs, which is why it exceeds two epochs.
 
 Everything else is the parent's verbatim: the packed corpus and think-history tokenizer, the
 5e-6 cosine schedule with its 0.10 warmup fraction (stated in fractions, so it keeps its shape
@@ -103,7 +106,7 @@ once.
 | GPUs / nodes | 256 / 64 | the same |
 | packs per replica per iteration | 2 | 2 |
 | packs | 764,685 | **769,753** — more, from fewer conversations |
-| `train_iters` | 5976 | **6014** (`ceil(2 x 769,753 / 256)`) |
+| `train_iters` | 5976 (`2 x` the parent's 2988) | **6014** (`ceil(2 x 769,753 / 256)`) |
 | save | `control_pretrain_30b_baseline_sft_gbs256` | `control_pretrain_30b_baseline_sft_long_cot_gbs256` |
 
 ### The corpus
@@ -180,15 +183,25 @@ so the comparison is matched in price as well as in batch.
 ### Launching
 
 ```bash
-isambard_sbatch --nodes=64 pipeline_training_submit.sbatch \
-  configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml \
-  nano sft --disable-ft
+for i in 1 2; do
+  ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=64 --time=24:00:00 \
+    --job-name=cp30b-baseline-sft-long-cot --dependency=singleton --switches=1 \
+    --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
+    pipeline_training_submit.sbatch \
+    configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml \
+    nano sft --disable-ft
+done
 ```
 
-Two `--dependency=singleton` segments, as the sibling uses; `load == save` plus `save_interval`
-make a resubmission resume. After the run, export the final checkpoint to HF and hand the path
-to evals, with the think-block close rate read first and IFEval and GSM8K as the headline
-comparison against the sibling.
+**The `--job-name` is load-bearing and must not be dropped or shared.** A singleton chain
+serialises on the name, so the sibling's name would make these segments wait for that entire run,
+and omitting it altogether takes `pipeline_training_submit.sbatch`'s default of `train`, which
+would serialise this chain against any other job that happened to take the default too. `load ==
+save` plus `save_interval` are what make the second segment resume rather than restart.
+
+After the run, export the final checkpoint to HF and hand the path to evals, reading the share of
+answers that never close their think block before any accuracy number, with IFEval and GSM8K as
+the headline comparison against the half-batch ablation.
 
 ### Status
 
@@ -200,4 +213,12 @@ produced 769,753 packed sequences, giving `train_iters` 6,014.
 
 Checked before launching: the config's `shard*` glob resolves to exactly sixteen files through
 `resolve_packed_parquet_paths`, the stage-2 warm start `iter_0003126` is present, and the save
-directory does not yet exist, so no empty checkpoint directory can be mistaken for a finished run.
+directory did not yet exist, so no empty checkpoint directory could be mistaken for a finished run.
+
+**Queued 2026-09-07 as jobs 6377863 and 6377864** (`cp30b-baseline-sft-long-cot`), two day-long
+`--dependency=singleton` segments of 64 nodes with `--disable-ft`. The job name is this arm's own,
+which is what keeps the chain from queueing behind the half-batch ablation's segments — a singleton
+chain serialises on the name, so a shared one would have made these wait for that run to finish.
+The first segment is expected to complete the run at ~11-12 h; the second is there so an
+interrupted segment resumes from the latest checkpoint without a resubmission by hand. The hand-off
+afterwards is the one under Launching above.

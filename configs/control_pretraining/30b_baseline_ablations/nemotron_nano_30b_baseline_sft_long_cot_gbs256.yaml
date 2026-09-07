@@ -46,9 +46,9 @@
 # tuning choice.
 #
 # --- LAUNCH ---
-# Not launched by this file. The warm start
-# exists (stage 2 wrote iter_0003126 on 2026-08-27). Launch with --disable-ft (the run outlives
-# the ft heartbeat wall); load == save plus save_interval make a resubmission resume:
+# Not launched by this file. The warm start exists (stage 2 wrote iter_0003126 on 2026-08-27).
+# Launch with --disable-ft, since the run outlives the ft heartbeat wall; load == save plus
+# save_interval are what make a resubmission resume rather than restart:
 #   isambard_sbatch --nodes=64 pipeline_training_submit.sbatch \
 #     configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml \
 #     nano sft --disable-ft
