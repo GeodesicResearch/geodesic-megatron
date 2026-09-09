@@ -89,10 +89,22 @@ kept as `run_config.yaml.orig`): point that target at
 re-applies the torch_grouped wrap itself at `provide()` because `moe_experts_impl` is still
 `torch_grouped` in the config. Root cause is the config serialiser recording a `<locals>`
 qualname — a PR candidate. `--tp 1 --ep 4` selects the multi-GPU path (4 GPUs, one node).
-Exports land in place at `<save>/iter_XXXXXXX/hf/` (~59 GB each). When running the
-converter inside a code-tunnel with `srun --overlap`, pass `MASTER_ADDR_OVERRIDE=<node>`:
-`--export=ALL` carries the shell's own `SLURM_NODELIST` (the tunnel that hosts the shell)
-into the step and torchrun rendezvous with the wrong node.
+**Second export gotcha.** Even with that fixed, a `torch_grouped` checkpoint cannot be
+exported by either converter path as-is: the single-process (CPU) path refuses to build the
+grouped-expert module ("GPU initialization only"), and the multi-GPU path builds the model
+from the saved config, whose grouped module exposes `experts.weight1/weight2` — names the
+NemotronH bridge has no mapping for. The checkpoint on disk, however, is saved under the
+TE key layout (`experts.linear_fc1.weight`, `experts.linear_fc2.weight`, with compatibility
+`_extra_state`) by design. So the working recipe is to also set
+`moe_experts_impl: te_grouped` in the checkpoint's `run_config.yaml` (export-time only; the
+`.orig` copy is the training truth) and run the multi-GPU path with `--tp 1 --ep 4`:
+13 shards, 59 GB, ~2 min on one GH200 node. Exports land in place at
+`<save>/iter_XXXXXXX/hf/`. When running the converter inside a code-tunnel, invoke
+`pipeline_checkpoint_convert.sh` from the login shell with `SLURM_JOB_ID=<tunnel>
+SLURM_NODELIST=<node> SLURM_JOB_NODELIST=<node> SLURM_NNODES=1 CONVERT_NNODES=1
+MASTER_ADDR_OVERRIDE=<node> GEODESIC_REPO_DIR=$PWD` (its internal `srun --overlap` attaches
+to that job); `--export=ALL` from a shell hosted in another tunnel otherwise leaks that
+tunnel's `SLURM_NODELIST` into the rendezvous.
 
 ## Deviations from OLMo-3's stage 3 (deliberate)
 
