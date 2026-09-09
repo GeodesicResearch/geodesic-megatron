@@ -136,4 +136,13 @@ done
   (`group13:15, group9:14, group5:11, group11:8, group6:7, group8:6, group4:1, group3:1, group12:1`).
   Resume spare **6425923** queued behind it (same name/dirs, 24 h, singleton).
   The run's checkpoints therefore live in `…/control_pretrain_30b_baseline_longmino_cpt_5h/`.
+- 2026-09-09 03:03 UTC: **6373886 died at the first training step** — nid011229 (4 ranks)
+  and nid011001 hit `NCCL WARN Cuda failure 2 'out of memory'` during the first gradient
+  reduce-scatter (`finish_grad_sync`); with `--kill-on-bad-exit=1` the other 62 nodes were
+  torn down. Warm start and the nine index builds had completed. 2/64 nodes at the same
+  instant, and the DP=128 posture costs <2 GB/GPU over the midtrain's, so read as two nodes
+  with occupied GPU memory rather than a config fault. The spare 6425923 had already started
+  on a node set containing both (cancelled after 27 s; nothing lost but the allocation).
+  Resubmitted as **6425927** with `--exclude=nid011229,nid011001`. If the retry OOMs on
+  other nodes, fall back to 128 nodes (the midtrain's exact posture).
 - _(s/iter, loss at iter 1 / 100 / end.)_
