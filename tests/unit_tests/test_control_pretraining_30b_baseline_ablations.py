@@ -51,6 +51,7 @@ LONG_COT_DATA = _CAMPAIGN_DIR / "30b_baseline_ablations" / "data" / "pa-warm-sta
 ALLOWED_DIVERGENCE = {
     "train.global_batch_size",
     "train.train_iters",
+    "checkpoint.save_interval",
     "checkpoint.load",
     "checkpoint.save",
     "logger.wandb_exp_name",
@@ -113,6 +114,14 @@ class TestTheRunIdentityIsItsOwn:
     def test_a_resubmission_resumes(self, ablation):
         assert ablation.checkpoint.load == ablation.checkpoint.save
         assert ablation.checkpoint.save_interval < ablation.train.train_iters
+
+    def test_the_checkpoint_cadence_is_the_parents_in_tokens(self, ablation, parent):
+        """The cadence is a token count stated in iterations, so at half the batch it is
+        restated as twice the parent's interval; a verbatim copy would halve the spacing."""
+        assert (
+            ablation.checkpoint.save_interval * ablation.train.global_batch_size
+            == parent.checkpoint.save_interval * parent.train.global_batch_size
+        )
 
     def test_the_raw_yaml_copies_no_output_path_from_the_parent(self):
         """Guards the file itself, not the merge: a stale copy of the parent's path in a comment

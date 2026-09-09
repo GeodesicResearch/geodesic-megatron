@@ -149,8 +149,8 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_long_cot_gbs256
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_long_cot_gbs256
-  save_interval: 300                 # first save = 2.52B tokens (300 iters x 8.39M), then every
-                                     # ~2.5B; the parent's recovery granularity in wall-clock
+  save_interval: 1200                # every 10,066,329,600 tokens (1200 iters x 8,388,608): the
+                                     # parent's token spacing, twice its interval at half its batch
   most_recent_k: -1                  # every checkpoint is kept; the final one is the ablation's artifact
   save_optim: true
   save_rng: true

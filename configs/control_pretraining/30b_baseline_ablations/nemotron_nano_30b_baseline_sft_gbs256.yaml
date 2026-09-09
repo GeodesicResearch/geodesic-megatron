@@ -14,14 +14,15 @@
 # so the expected step time is the parent's and the wall clock about double (~11-12 h of
 # stepping). Halving the batch at the parent's 512 GPUs would instead put one pack per
 # replica per iteration, changing the per-step efficiency as well as the batch. Tokens per
-# iteration are 8,388,608 (half the parent's 16,777,216); the first save at iteration 300 is
-# therefore 2.52B tokens in, and every save is retained: 19 interval saves at 300..5700 plus
-# the end-of-training save at 5976, 20 in all.
+# iteration are 8,388,608 (half the parent's 16,777,216), so the parent's checkpoint cadence of
+# 10,066,329,600 tokens is restated as save_interval 1200, twice its 600: saves land at the
+# same token counts as the parent's, and every save is retained — 4 interval saves at
+# 1200..4800 plus the end-of-training save at 5976, 5 in all.
 #
 # IDENTITY: checkpoints, the W&B run and the TensorBoard events go under
 # `control_pretrain_30b_baseline_sft_gbs256`, never into the parent's directories.
 # tests/unit_tests/test_control_pretraining_30b_baseline_ablations.py asserts field by field
-# that these six fields — batch, steps, load, save, W&B name, TensorBoard dir — are the ONLY
+# that these seven fields — batch, steps, save interval, load, save, W&B name, TensorBoard dir — are the ONLY
 # ones that differ from the parent once both are merged onto the SFT recipe.
 #
 # --- LAUNCH ---
@@ -131,8 +132,8 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_gbs256
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_gbs256
-  save_interval: 300                 # first save = 2.52B tokens (300 iters x 8.39M), then every
-                                     # ~2.5B; the parent's recovery granularity in wall-clock
+  save_interval: 1200                # every 10,066,329,600 tokens (1200 iters x 8,388,608): the
+                                     # parent's token spacing, twice its interval at half its batch
   most_recent_k: -1                  # every checkpoint is kept; the final one is the ablation's artifact
   save_optim: true
   save_rng: true

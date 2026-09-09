@@ -68,7 +68,7 @@ the smoke chain to overrides is the change to make.**
 | Field | Full scale | Smoke | Why |
 |---|---|---|---|
 | `train_iters` | 29881 / 3126 / 2988 | **100** | the 1.7B budget |
-| `save_interval` | 2264 / 782 / 300 | **1000000** | only Megatron's unconditional end-of-training save runs |
+| `save_interval` | 2264 / 600 / 600 | **1000000** | only Megatron's unconditional end-of-training save runs |
 | `save_optim`, `save_rng` | `true` | **`false`** | the next stage warm-starts from weights only, so moments and RNG would be written and never read |
 | `lr_warmup_fraction` (stage 1) | 0.01 | **0.10** | 0.01 of 100 iters is 1 iteration of warmup before sitting at 1e-3 from random init — a real divergence risk that would waste the run diagnosing the smoke instead of the config |
 | `lr_wsd_decay_iters` (stage 2) | 3126 | **100** | tracks `train_iters` so the anneal still spans the stage |

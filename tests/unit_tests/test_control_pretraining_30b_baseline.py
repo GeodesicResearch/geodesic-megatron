@@ -83,15 +83,17 @@ BUILD_SCRIPT = _REPO_ROOT / "configs" / "control_pretraining" / "build_corpora.s
 # rows (52,442,350,158), not the 52,452,350,158 that adding it would give.
 STAGES = {
     "pretrain": (PRETRAIN_CONFIG, 8192, 16_777_216, 501_303_520_191, 14),
-    "midtrain": (MIDTRAIN_CONFIG, 32768, 16_777_216, 52_442_350_158, 4),
+    "midtrain": (MIDTRAIN_CONFIG, 32768, 16_777_216, 52_442_350_158, 6),
 }
 
 # The full-corpus allocation the sheet blends into BOTH stages ("Verbatim Multi-Epoch
 # Replay" — one pass per stage; the multiple epochs happen across the curriculum).
 AI_SAFETY_SHEET_TOKENS = 2_303_520_191
 
-TOTAL_RETAINED_CHECKPOINTS = 18
-SFT_RETAINED_CHECKPOINTS = 10
+TOTAL_RETAINED_CHECKPOINTS = 20
+SFT_RETAINED_CHECKPOINTS = 5
+# Stages 2 and 3 save every ~10B tokens (Kyle, 2026-09-09): 600 iterations at 16,777,216 tokens each.
+TOKENS_PER_CHECKPOINT_STAGES_2_3 = 10_066_329_600
 
 
 def _merge(path: Path):
@@ -224,7 +226,7 @@ class TestPerStage:
 
 
 class TestStageBoundary:
-    def test_the_two_stages_retain_eighteen_checkpoints_between_them(self, merged):
+    def test_the_two_stages_retain_twenty_checkpoints_between_them(self, merged):
         total = 0
         for stage, (_, _, tokens_per_iter, _, _) in STAGES.items():
             cfg = merged[stage]
@@ -529,6 +531,15 @@ class TestSftStage:
         """The filtered arm and both ablations pin their retention to this config RELATIVELY
         (their fields must equal the parent's), so this is the one absolute anchor for stage 3."""
         assert_retains_every_checkpoint(sft_merged, SFT_RETAINED_CHECKPOINTS)
+
+    def test_checkpoints_every_ten_billion_tokens_like_midtraining(self, sft_merged, merged):
+        """The cadence is a token count, stated in iterations; both stages run the same
+        tokens per iteration, so the same interval lands saves at the same spacing."""
+        tokens_per_iter = sft_merged.train.global_batch_size * sft_merged.model.seq_length
+        assert sft_merged.checkpoint.save_interval * tokens_per_iter == TOKENS_PER_CHECKPOINT_STAGES_2_3
+        mid = merged["midtrain"]
+        assert mid.checkpoint.save_interval * STAGES["midtrain"][2] == TOKENS_PER_CHECKPOINT_STAGES_2_3
+        assert abs(TOKENS_PER_CHECKPOINT_STAGES_2_3 - 10_000_000_000) / 10_000_000_000 < 0.01
 
     def test_topology_matches_the_midtraining_stage(self, sft_merged, merged):
         """Same model at the same sequence length: the 32K constraints bind identically."""

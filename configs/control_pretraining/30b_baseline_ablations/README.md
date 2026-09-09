@@ -4,8 +4,10 @@ Single-stage variants of the [`../30b_baseline/`](../30b_baseline/README.md) cur
 change one training variable and nothing else, each pinned to its parent stage field by field
 by `tests/unit_tests/test_control_pretraining_30b_baseline_ablations.py`: the set of fields
 that differ between the merged ablation and its merged parent must equal exactly the ablated
-fields plus the run identity (checkpoint directories, W&B run name, TensorBoard directory),
-so a change to any other field fails in CI rather than confounding the comparison.
+fields plus the run identity (checkpoint directories, W&B run name, TensorBoard directory) —
+and, where the batch changes, `checkpoint.save_interval`, restated so that saves land at the
+parent's token counts — so a change to any other field fails in CI rather than confounding the
+comparison.
 
 ## SFT at half the batch, twice the steps — `nemotron_nano_30b_baseline_sft_gbs256.yaml`
 
@@ -34,15 +36,19 @@ it. The row above counts slots rather than distinct packs, which is why it excee
 Everything else is the parent's verbatim: the packed corpus and think-history tokenizer, the
 5e-6 cosine schedule with its 0.10 warmup fraction (stated in fractions, so it keeps its shape
 over the longer run), Adam beta2 0.95, the CP=2 topology with full recompute, the DP>1
-save-crossing settings, `save_interval: 300` with every checkpoint retained, and the 1400-minute
-segment clock. The peak learning rate is deliberately not retuned for the smaller batch: the
-batch and the step count are the only variables.
+save-crossing settings, every checkpoint retained, and the 1400-minute segment clock. The
+checkpoint cadence is the parent's in tokens, not in iterations: `save_interval: 1200` at
+8,388,608 tokens per iteration is the parent's 600 at 16,777,216, so saves land every
+10,066,329,600 tokens on both and the two series line up token for token. The peak learning
+rate is deliberately not retuned for the smaller batch: the batch and the step count are the
+only training variables.
 
-At that cadence with every save kept, this arm retains 20 optimizer-bearing checkpoints (19
-interval saves at 300–5700 plus the end-of-training save at 5976) and the long-CoT sibling 21
-(20 at 300–6000 plus 6014): ~6.32 TB and ~6.63 TB at the measured 315.9 GB each, beside the
-baseline arm's ~8.85 TB for all three stages. The baseline README's checkpoint section carries
-the campaign-wide total; read the storage report before launching either ablation.
+At that cadence with every save kept, this arm retains 5 optimizer-bearing checkpoints (4
+interval saves at 1200–4800 plus the end-of-training save at 5976) and the long-CoT sibling 6
+(5 at 1200–6000 plus 6014, the last two fourteen iterations apart): ~1.58 TB and ~1.90 TB at the
+measured 315.9 GB each, beside the baseline arm's ~7.90 TB for all three stages. The baseline
+README's checkpoint section carries the campaign-wide total; read the storage report before
+launching either ablation.
 
 **Why 256 GPUs.** At TP1 · CP2 · PP1 the data-parallel size on 256 GPUs is 128, so a batch of
 256 is still 2 packs per replica per iteration, the parent's per-GPU load. The expected step

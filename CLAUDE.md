@@ -575,8 +575,9 @@ corpus keeps per-turn reasoning in a `reasoning_content` field, and the plain va
 byte-identical, so only the packed artifact differs — and the packed path names the tokenizer
 so the two cannot silently disagree.
 Stages 1–2 run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
-boundary, and the two retain **18 checkpoints between them** (14 + 4); stage 3 keeps all ten
-of its own at a 300-iteration cadence. All three stages (and
+boundary, and the two retain **20 checkpoints between them** (14 + 6). From stage 2 on a save
+lands every ~10B tokens — `save_interval: 600` at 16,777,216 tokens/iter = 10,066,329,600 — so
+stage 3 keeps five of its own, every one retained. All three stages (and
 both CPT-validation arms) set `train.exit_duration_in_mins: 1400`: a 24 h segment saves and
 exits on its own clock ~40 min before the workq MaxWall, because sbatch `--signal`-based
 exits are undeliverable on this stack (the non-Python layers of the step tear down in ~45 s,
@@ -613,7 +614,8 @@ this scale: it fits, and the weights-only warm start produced no loss spike.
 one file per variant, each a full stage config that
 `tests/unit_tests/test_control_pretraining_30b_baseline_ablations.py` pins to its parent: the
 fields that differ between the merged variant and the merged parent must be exactly the ablated
-fields plus the run identity (checkpoint directories, W&B name, TensorBoard directory). The
+fields plus the run identity (checkpoint directories, W&B name, TensorBoard directory) and, where
+the batch changes, `checkpoint.save_interval` restated to keep the parent's token spacing. The
 first is `nemotron_nano_30b_baseline_sft_gbs256.yaml` — the stage-3 SFT at GBS 256 for 5976
 iterations (the parent's 512 for 2988: the same 1,529,856 packs), from the same midtraining
 final, on 256 GPUs / 64 nodes so that DP=128 keeps the parent's 2 packs per replica per

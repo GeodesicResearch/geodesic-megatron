@@ -6,8 +6,8 @@ campaign sheet as revised 2026-08-20:
 | Stage | Config | Context | Tokens | Corpora | Prefixes | Topology | Checkpoints |
 |---|---|---|---|---|---|---|---|
 | 1 — pretraining | `nemotron_nano_30b_baseline_pretrain.yaml` | 8192 | 501,319,991,296 | 6 | 13 | TP1·CP1·EP4·PP1·ETP1, DP=512 | 14 |
-| 2 — midtraining | `nemotron_nano_30b_baseline_midtrain.yaml` | 32768 | 52,445,577,216 | 10 | 10 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 4 |
-| 3 — SFT | `nemotron_nano_30b_baseline_sft.yaml` | 32768 | ~50B (2 epochs, packed) | 1 (combined mix) | — | TP1·CP2·EP4·PP1·ETP1, DP=256 | 10, all retained |
+| 2 — midtraining | `nemotron_nano_30b_baseline_midtrain.yaml` | 32768 | 52,445,577,216 | 10 | 10 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 6 |
+| 3 — SFT | `nemotron_nano_30b_baseline_sft.yaml` | 32768 | ~50B (2 epochs, packed) | 1 (combined mix) | — | TP1·CP2·EP4·PP1·ETP1, DP=256 | 5, all retained |
 
 Stages 1 and 2 run **16,777,216 tokens per iteration**, so the optimizer's token batch is
 continuous across the boundary even though the sequence length quadruples and the sequence
@@ -481,35 +481,38 @@ build provenance rather than needing measurement: `corpus/longest_documents` sor
 `corpus/tokenized_full_corpus` and `corpus/regex_selected_web_text` do not, and
 `arxiv_papers`/`lesswrong_plus` carry an explicit `stateful_filter: shuffle`.
 
-## Checkpoints — 18 across stages 1–2, plus 10 in stage 3
+## Checkpoints — 20 across stages 1–2, plus 5 in stage 3; every ~10B tokens from stage 2 on
 
 | Stage | `train_iters` | `save_interval` | Interval saves | Final | Retained | Tokens per checkpoint |
 |---|---|---|---|---|---|---|
 | Pretraining | 29881 | 2264 | 13 (2264 … 29432) | 29881 | 14 | 37,983,617,024 |
-| Midtraining | 3126 | 782 | 3 (782, 1564, 2346) | 3126 | 4 | 13,119,782,912 |
-| SFT | 2988 (measured: `ceil(2 x 764,685 packs / 512)`) | 300 | 9 (300 … 2700) | 2988 | 10 | 5,033,164,800 |
+| Midtraining | 3126 | 600 | 5 (600 … 3000) | 3126 | 6 | 10,066,329,600 |
+| SFT | 2988 (measured: `ceil(2 x 764,685 packs / 512)`) | 600 | 4 (600 … 2400) | 2988 | 5 | 10,066,329,600 |
 
-All three stages retain everything they save (`most_recent_k: -1`): the eighteen across stages
-1–2 are the campaign's analysis series, and stage 3's ten trace the post-training trajectory at
-a 300-iteration cadence rather than only at its end, with the final one as the campaign
-artifact. Each interval is chosen so the last interval save falls *short* of `train_iters`
-(2264 × 14 = 31696; 782 × 4 = 3128; 300 × 10 = 3000) and Megatron-Core's unconditional
-end-of-training save supplies the last one. An interval that divided `train_iters` exactly
-would yield 15, 5 and 11, not 14, 4 and 10.
+All three stages retain everything they save (`most_recent_k: -1`): the twenty across stages
+1–2 are the campaign's analysis series, and stage 3's five trace the post-training trajectory
+rather than only its end, with the final one as the campaign artifact. From stage 2 on a save
+lands every ~10B tokens (Kyle, 2026-09-09): both stages run 16,777,216 tokens per iteration, so
+one `save_interval: 600` gives 10,066,329,600 tokens on each — 596 would sit closer to 10B
+exactly but would put SFT's last interval save at 2980, eight iterations before its final. Each
+interval is chosen so the last interval save falls *short* of `train_iters` (2264 × 13 = 29432;
+600 × 5 = 3000; 600 × 4 = 2400) and Megatron-Core's unconditional end-of-training save supplies
+the last one; the retained count is `(train_iters − 1) // save_interval + 1`, which the tests
+assert for every stage.
 
 At a measured ~315.9 GB per optimizer-bearing checkpoint — bf16 weights at 2 B/param plus the
 precision-aware optimizer's bf16 `exp_avg`, bf16 `exp_avg_sq` and fp32 main params at 8 B/param,
-so ~10 B/param over 30B — the eighteen-checkpoint series across stages 1–2 is **~5.69 TB**
-and stage 3's ten add **~3.16 TB**, so the arm holds **~8.85 TB** once complete. Against 28.4 TiB
-free (measured 2026-08-21) that was ~28% of headroom; against the 10.8 TiB free measured
-2026-09-09 it is ~75%. The per-checkpoint figure is measured, not projected: the filtered arm's
+so ~10 B/param over 30B — the twenty-checkpoint series across stages 1–2 is **~6.32 TB** and
+stage 3's five add **~1.58 TB**, so the arm holds **~7.90 TB** once complete. Against 28.4 TiB
+free (measured 2026-08-21) that was ~25% of headroom; against the 10.8 TiB free measured
+2026-09-09 it is ~67%. The per-checkpoint figure is measured, not projected: the filtered arm's
 live stage-1 save at iteration 2264 is 315,834,732,674 bytes = 294.1 GiB = 315.8 GB (`du -h`
-prints the GiB figure, so its `295G` is not headroom). And ~8.85 TB is ONE arm: the filtered arm
-holds the same, and the two stage-3 ablations inherit `save_interval: 300` with every save kept,
-retaining 20 and 21 checkpoints (~6.32 TB and ~6.63 TB), so the campaign as configured retains
-~30.6 TB if every series is resident at once — more than the free space. Read the storage report
-before each stage launches: a full quota fails a save, which is exactly the unclean stop this
-design exists to bound.
+prints the GiB figure, so its `295G` is not headroom). And ~7.90 TB is ONE arm: the filtered arm
+holds the same, and the two stage-3 ablations keep the parent's token spacing (`save_interval:
+1200` at half the batch) with every save kept, retaining 5 and 6 checkpoints (~1.58 TB and
+~1.90 TB), so the campaign as configured retains ~19.3 TB if every series is resident at once —
+still more than the free space. Read the storage report before each stage launches: a full
+quota fails a save, which is exactly the unclean stop this design exists to bound.
 
 **In wall-clock, stage 1's interval is 3.3–4.0 h** (2264 iterations at the 5.25–6.36 s/iter
 placement range above), and stage 1 as a whole is 43.6–52.8 h. The cadence is set by recovery

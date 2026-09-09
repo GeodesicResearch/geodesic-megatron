@@ -6,7 +6,7 @@
 # the stage-1 config's header for the filter and its provenance. Everything else — the
 # TP1·CP2·EP4·PP1·DP256 topology and why CP=2 is not a tuning choice, the cosine anneal from
 # 7.5e-4 with its 100-iteration warmup and adam_beta2 0.95, the weights-only warm start, the
-# 3126 iterations, the four retained checkpoints — is the baseline's verbatim, and the test
+# 3126 iterations, the six retained checkpoints — is the baseline's verbatim, and the test
 # suite pins it so (tests/unit_tests/test_control_pretraining_30b_filtered.py).
 #
 # The warm start is this arm's own stage-1 final checkpoint, not the baseline's: the two
@@ -131,7 +131,7 @@ checkpoint:
   # A new directory, deliberately not stage 1's (baseline checkpoint block).
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_midtrain
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_midtrain
-  save_interval: 782           # 4 retained checkpoints: 782, 1564, 2346 + the end-of-training save at 3126
+  save_interval: 600           # every 10,066,329,600 tokens; 6 retained: 600 .. 3000 + the end-of-training save at 3126
   save_optim: true
   save_rng: true
   most_recent_k: -1

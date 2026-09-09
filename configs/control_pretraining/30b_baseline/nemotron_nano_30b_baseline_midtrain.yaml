@@ -258,10 +258,11 @@ checkpoint:
   # iteration counter and schedule instead of starting its own.
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
-  # 4 of the 18 retained across stages 1-2, one every 13,119,782,912 tokens (782 x 16,777,216).
-  # Interval saves land at 782, 1564 and 2346; 782 x 4 = 3128 overshoots train_iters, so
-  # Megatron-Core's unconditional end-of-training save at 3126 supplies the fourth.
-  save_interval: 782
+  # 6 of the 20 retained across stages 1-2, one every 10,066,329,600 tokens (600 x 16,777,216),
+  # the ~10B-token cadence stages 2 and 3 share. Interval saves land at 600, 1200, 1800, 2400
+  # and 3000; 600 x 6 = 3600 overshoots train_iters, so Megatron-Core's unconditional
+  # end-of-training save at 3126 supplies the sixth.
+  save_interval: 600
   save_optim: true
   save_rng: true
   most_recent_k: -1
