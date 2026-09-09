@@ -74,10 +74,17 @@ for it in 298 596 894 1192; do
     --export=ALL,GEODESIC_REPO_DIR=$PWD pipeline_checkpoint_submit.sbatch export \
     /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_longmino_cpt \
     --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning --iteration $it \
-    --hf-path /projects/a5k/public/data_cwtice.a5k/hf_exports/control_pretrain_30b_baseline_longmino_cpt/iter_$(printf %07d $it) \
+    --tp 1 --ep 4 \
     --keep-remote-code --remote-code-source /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain/iter_0003126/hf
 done
 ```
+
+`--ep 4` is load-bearing: it selects the multi-GPU conversion path, which takes the
+architecture from `--hf-model`. The default single-GPU path rebuilds the model from the
+checkpoint's `run_config.yaml`, whose `mamba_stack_spec` target is a local function
+(`…_apply_moe_experts_impl.<locals>._grouped_resolved_stack_spec`) that cannot be imported
+— every campaign checkpoint carries it, so the single-GPU path always fails on these runs.
+Exports land in place at `<save>/iter_XXXXXXX/hf/` (~59 GB each).
 
 ## Deviations from OLMo-3's stage 3 (deliberate)
 
