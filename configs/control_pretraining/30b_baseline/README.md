@@ -498,20 +498,29 @@ exactly but would put SFT's last interval save at 2980, eight iterations before 
 interval is chosen so the last interval save falls *short* of `train_iters` (2264 × 13 = 29432;
 600 × 5 = 3000; 600 × 4 = 2400) and Megatron-Core's unconditional end-of-training save supplies
 the last one; the retained count is `(train_iters − 1) // save_interval + 1`, which the tests
-assert for every stage.
+assert for every stage. The baseline's own stages 2 and 3 completed on 2026-08-27 under the
+earlier cadence and are not re-run for this: on disk `control_pretrain_30b_baseline_midtrain/`
+holds `iter_0001564` and `iter_0003126`, and `control_pretrain_30b_baseline_sft/` holds
+`iter_0002400` and `iter_0002988` (a 600 interval that then kept only the last two; the 600 save
+itself survives as `sft600_export_clone/iter_0000600`, the clone made for its HF export). The
+stage-2 and stage-3 rows above bind the filtered arm, both ablations and any re-run, none of which
+has started those stages yet.
 
 At a measured ~315.9 GB per optimizer-bearing checkpoint — bf16 weights at 2 B/param plus the
 precision-aware optimizer's bf16 `exp_avg`, bf16 `exp_avg_sq` and fp32 main params at 8 B/param,
 so ~10 B/param over 30B — the twenty-checkpoint series across stages 1–2 is **~6.32 TB** and
-stage 3's five add **~1.58 TB**, so the arm holds **~7.90 TB** once complete. Against 28.4 TiB
+stage 3's five add **~1.58 TB**, so an arm that runs all three stages under this cadence holds
+**~7.90 TB** (the baseline's own stages 2–3 predate it: its series is 14 + 2 + 2 checkpoints,
+~5.69 TB, plus the two export clones beside the SFT series). Against 28.4 TiB
 free (measured 2026-08-21) that was ~25% of headroom; against the 10.8 TiB free measured
 2026-09-09 it is ~67%. The per-checkpoint figure is measured, not projected: the filtered arm's
 live stage-1 save at iteration 2264 is 315,834,732,674 bytes = 294.1 GiB = 315.8 GB (`du -h`
 prints the GiB figure, so its `295G` is not headroom). And ~7.90 TB is ONE arm: the filtered arm
 holds the same, and the two stage-3 ablations keep the parent's token spacing (`save_interval:
 1200` at half the batch) with every save kept, retaining 5 and 6 checkpoints (~1.58 TB and
-~1.90 TB), so the campaign as configured retains ~19.3 TB if every series is resident at once —
-still more than the free space. Read the storage report before each stage launches: a full
+~1.90 TB), so the campaign retains ~17.1 TB if every series is resident at once (baseline ~5.69,
+filtered ~7.90, ablations ~1.58 and ~1.90) — still more than the free space. Read the storage
+report before each stage launches: a full
 quota fails a save, which is exactly the unclean stop this design exists to bound.
 
 **In wall-clock, stage 1's interval is 3.3–4.0 h** (2264 iterations at the 5.25–6.36 s/iter

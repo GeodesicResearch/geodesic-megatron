@@ -46,7 +46,8 @@ only training variables.
 At that cadence with every save kept, this arm retains 5 optimizer-bearing checkpoints (4
 interval saves at 1200–4800 plus the end-of-training save at 5976) and the long-CoT sibling 6
 (5 at 1200–6000 plus 6014, the last two fourteen iterations apart): ~1.58 TB and ~1.90 TB at the
-measured 315.9 GB each, beside the baseline arm's ~7.90 TB for all three stages. The baseline
+measured 315.9 GB each, beside the ~7.90 TB an arm holds for all three stages under this
+cadence. The baseline
 README's checkpoint section carries the campaign-wide total; read the storage report before
 launching either ablation.
 
