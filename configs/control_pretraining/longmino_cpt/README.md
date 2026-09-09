@@ -79,12 +79,20 @@ for it in 298 596 894 1192; do
 done
 ```
 
-`--ep 4` is load-bearing: it selects the multi-GPU conversion path, which takes the
-architecture from `--hf-model`. The default single-GPU path rebuilds the model from the
-checkpoint's `run_config.yaml`, whose `mamba_stack_spec` target is a local function
-(`…_apply_moe_experts_impl.<locals>._grouped_resolved_stack_spec`) that cannot be imported
-— every campaign checkpoint carries it, so the single-GPU path always fails on these runs.
-Exports land in place at `<save>/iter_XXXXXXX/hf/` (~59 GB each).
+**Export gotcha (2026-09-09).** Both conversion paths instantiate the checkpoint's
+`run_config.yaml`, whose `model.mamba_stack_spec._target_` was serialised as the local
+closure `…MambaModelProvider._apply_moe_experts_impl.<locals>._grouped_resolved_stack_spec`
+(the wrapper `moe_experts_impl: torch_grouped` installs at provide time) — unimportable, so
+the export raises `InstantiationException`. Fix applied to the four saved configs (originals
+kept as `run_config.yaml.orig`): point that target at
+`megatron.bridge.models.mamba.mamba_provider.get_default_mamba_stack_spec`; the provider
+re-applies the torch_grouped wrap itself at `provide()` because `moe_experts_impl` is still
+`torch_grouped` in the config. Root cause is the config serialiser recording a `<locals>`
+qualname — a PR candidate. `--tp 1 --ep 4` selects the multi-GPU path (4 GPUs, one node).
+Exports land in place at `<save>/iter_XXXXXXX/hf/` (~59 GB each). When running the
+converter inside a code-tunnel with `srun --overlap`, pass `MASTER_ADDR_OVERRIDE=<node>`:
+`--export=ALL` carries the shell's own `SLURM_NODELIST` (the tunnel that hosts the shell)
+into the step and torchrun rendezvous with the wrong node.
 
 ## Deviations from OLMo-3's stage 3 (deliberate)
 
