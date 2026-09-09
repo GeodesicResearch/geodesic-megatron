@@ -189,3 +189,16 @@ tunnel's `SLURM_NODELIST` into the rendezvous.
 
   (Iteration-1 loss 1.60 vs the midtrain's final 1.32: a different mix, not a warm-start
   spike — no rise through the 100-iteration warm-up to the 7.5e-4 peak.)
+
+- **VEA (paper protocol, gpt-5-mini judge, 3552 rollouts per checkpoint; 2026-09-09):**
+
+  | checkpoint | closed `</think>` | capped | VEA\|CoT | VEA\|all | genuine\|all |
+  |---|---|---|---|---|---|
+  | midtrain final (0B) | 43.4% | 41.3% | 0.65% −0.40/+0.51 (10/1541) | 0.28% | 0.25% |
+  | +5B (iter 298) | 8.5% | 47.6% | 6.98% −2.73/+3.06 (21/301) | 0.59% | 0.59% |
+  | +10B (iter 596) | 5.8% | 43.1% | 7.25% −3.21/+3.60 (15/207) | 0.42% | 0.39% |
+  | +15B (iter 894) | 3.9% | 48.8% | 5.11% −3.66/+4.81 (7/137) | 0.20% | 0.20% |
+  | +20B (iter 1192) | 5.2% | 42.4% | 6.52% −3.63/+4.12 (12/184) | 0.34% | 0.34% |
+
+  Logs: `/projects/a5k/public/eval_logs_cwtice.a5k/vea_paper_protocol/ctrl30b/vea_paper/step_{33305,33603,33901,34199}/`;
+  report `reports/metagaming/2026-09-06_vea-ctrl30b-longmino-cpt`.
