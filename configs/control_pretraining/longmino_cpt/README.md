@@ -145,4 +145,20 @@ done
   on a node set containing both (cancelled after 27 s; nothing lost but the allocation).
   Resubmitted as **6425927** with `--exclude=nid011229,nid011001`. If the retry OOMs on
   other nodes, fall back to 128 nodes (the midtrain's exact posture).
-- _(s/iter, loss at iter 1 / 100 / end.)_
+- **2026-09-09 03:12–06:54 UTC: retry 6425927 COMPLETED** (64 nodes, 6 switch groups:
+  `group9:14, group13:14, group5:13, group8:8, group4:8, group11:7`). Warm start loaded
+  midtrain iter 3126 weights-only; indices loaded from the arm's cache. ~10.8 s/iter,
+  cumulative 145 MODEL_TFLOP/s/GPU, 0 NaN iterations. Saves at 298/596/894/1192
+  (5.0/10.0/15.0/20.0B tokens), 295 GB each, in `…_longmino_cpt_5h/`.
+
+  | iter | tokens | LR | lm loss | grad norm |
+  |---|---|---|---|---|
+  | 1 | 0.02B | 7.5e-6 | 1.602 | 0.270 |
+  | 100 | 1.7B | 7.5e-4 (peak) | 1.482 | 0.037 |
+  | 298 | 5.0B | 6.4e-4 | 1.435 | 0.025 |
+  | 596 | 10.0B | 3.8e-4 | 1.430 | 0.015 |
+  | 894 | 15.0B | 1.2e-4 | 1.379 | 0.012 |
+  | 1192 | 20.0B | 1.0e-5 | 1.382 | 0.009 |
+
+  (Iteration-1 loss 1.60 vs the midtrain's final 1.32: a different mix, not a warm-start
+  spike — no rise through the 100-iteration warm-up to the 7.5e-4 peak.)
