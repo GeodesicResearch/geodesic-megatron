@@ -131,4 +131,9 @@ done
   own directory `…/control_pretrain_30b_baseline_longmino_cpt_5h` and W&B name
   `control_pretrain_30b_baseline_longmino_cpt_5h`, otherwise the same config. Whichever lane
   starts second is cancelled (watcher); lanes never share a save directory.
-- _(at start: `[run-identity] switch placement`, s/iter, loss at iter 1 / 100 / end.)_
+- 2026-09-09 02:59 UTC: the **5 h lane 6373886 started** (after ~41 h in queue); the 24 h chain
+  6365832/6365833 was cancelled by the watcher. Placement: 9 switch groups
+  (`group13:15, group9:14, group5:11, group11:8, group6:7, group8:6, group4:1, group3:1, group12:1`).
+  Resume spare **6425923** queued behind it (same name/dirs, 24 h, singleton).
+  The run's checkpoints therefore live in `…/control_pretrain_30b_baseline_longmino_cpt_5h/`.
+- _(s/iter, loss at iter 1 / 100 / end.)_
