@@ -34,9 +34,15 @@ it. The row above counts slots rather than distinct packs, which is why it excee
 Everything else is the parent's verbatim: the packed corpus and think-history tokenizer, the
 5e-6 cosine schedule with its 0.10 warmup fraction (stated in fractions, so it keeps its shape
 over the longer run), Adam beta2 0.95, the CP=2 topology with full recompute, the DP>1
-save-crossing settings, `save_interval: 600` with a rolling window of two, and the 1400-minute
+save-crossing settings, `save_interval: 300` with every checkpoint retained, and the 1400-minute
 segment clock. The peak learning rate is deliberately not retuned for the smaller batch: the
 batch and the step count are the only variables.
+
+At that cadence with every save kept, this arm retains 20 optimizer-bearing checkpoints (19
+interval saves at 300–5700 plus the end-of-training save at 5976) and the long-CoT sibling 21
+(20 at 300–6000 plus 6014): ~6.32 TB and ~6.63 TB at the measured 315.9 GB each, beside the
+baseline arm's ~8.85 TB for all three stages. The baseline README's checkpoint section carries
+the campaign-wide total; read the storage report before launching either ablation.
 
 **Why 256 GPUs.** At TP1 · CP2 · PP1 the data-parallel size on 256 GPUs is 128, so a batch of
 256 is still 2 packs per replica per iteration, the parent's per-GPU load. The expected step

@@ -231,7 +231,7 @@ checkpoint:
   # No checkpoint was ever written to the old path.
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain
-  # 14 checkpoints, one every 37,983,015,424 tokens. 2264 x 13 = 29432 is the last interval
+  # 14 checkpoints, one every 37,983,617,024 tokens. 2264 x 13 = 29432 is the last interval
   # save and 2264 x 14 = 31696 overshoots train_iters, so Megatron-Core's unconditional
   # end-of-training save at 29881 supplies the 14th. An interval that divided 29881 exactly
   # would yield 15, not 14.

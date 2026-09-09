@@ -35,16 +35,16 @@ Elsewhere the repo prefers overrides — "Scaling out to 128 GPUs is an OVERRIDE
 config", and profiling "runs against the STANDING quickstart config with overrides ... there is
 no separate profile config to drift out of sync". The cost of not doing that here is real: each
 file is a ~200-line near-copy of its parent, rationale comments included, differing only in the
-eight values tabulated below.
+seven values tabulated below.
 
-**Seven of those eight are pipeline parameters, not infrastructure flags.** `train_iters`,
+**Six of those seven are pipeline parameters, not infrastructure flags.** `train_iters`,
 `save_interval`, `save_optim`/`save_rng`, `lr_warmup_fraction`, `lr_wsd_decay_iters` and the
 checkpoint paths all define what the run *does* and are needed to reproduce it — and the repo's
 config-driven-operations rule is that such values belong in a config file rather than on a
 command line. Expressing the smoke chain as overrides would satisfy one convention by breaking
 another, and the reproducibility it would cost is exactly what a smoke run exists to provide:
 its output is evidence about a 501B-token config, and evidence is only as good as the ability to
-say later precisely what produced it. Twenty-four overrides across three command lines live in
+say later precisely what produced it. Twenty-one overrides across three command lines live in
 shell history; three committed files diff against their parents and are what the pinning test
 asserts on. The campaign's other arms (V1, `30b_baseline`, `cpt_validation`) are one-YAML-per-run
 for the same reason.
@@ -68,9 +68,8 @@ the smoke chain to overrides is the change to make.**
 | Field | Full scale | Smoke | Why |
 |---|---|---|---|
 | `train_iters` | 29881 / 3126 / 2988 | **100** | the 1.7B budget |
-| `save_interval` | 2264 / 1564 / 1000 | **1000000** | only Megatron's unconditional end-of-training save runs |
+| `save_interval` | 2264 / 782 / 300 | **1000000** | only Megatron's unconditional end-of-training save runs |
 | `save_optim`, `save_rng` | `true` | **`false`** | the next stage warm-starts from weights only, so moments and RNG would be written and never read |
-| `most_recent_k` | -1 / -1 / 2 | **-1** | exactly one checkpoint exists |
 | `lr_warmup_fraction` (stage 1) | 0.01 | **0.10** | 0.01 of 100 iters is 1 iteration of warmup before sitting at 1e-3 from random init — a real divergence risk that would waste the run diagnosing the smoke instead of the config |
 | `lr_wsd_decay_iters` (stage 2) | 3126 | **100** | tracks `train_iters` so the anneal still spans the stage |
 | checkpoint paths | `.../control_pretrain_30b_baseline_*` | `.../smoke_e2e/*` | never write into the real run's directories |

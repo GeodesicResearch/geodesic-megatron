@@ -575,7 +575,8 @@ corpus keeps per-turn reasoning in a `reasoning_content` field, and the plain va
 byte-identical, so only the packed artifact differs — and the packed path names the tokenizer
 so the two cannot silently disagree.
 Stages 1–2 run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
-boundary, and the two retain **16 checkpoints between them** (14 + 2). All three stages (and
+boundary, and the two retain **18 checkpoints between them** (14 + 4); stage 3 keeps all ten
+of its own at a 300-iteration cadence. All three stages (and
 both CPT-validation arms) set `train.exit_duration_in_mins: 1400`: a 24 h segment saves and
 exits on its own clock ~40 min before the workq MaxWall, because sbatch `--signal`-based
 exits are undeliverable on this stack (the non-Python layers of the step tear down in ~45 s,

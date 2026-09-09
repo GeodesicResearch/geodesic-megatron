@@ -8,8 +8,8 @@ data**.
 | Stage | Config | Context | Iterations | Topology | Checkpoints |
 |---|---|---|---|---|---|
 | 1 — pretraining | `nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml` | 8192 | 29881 | TP1·CP1·EP4·PP1·ETP1, DP=512 | 14 |
-| 2 — midtraining | `nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml` | 32768 | 3126 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 2 |
-| 3 — SFT | `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` | 32768 | 2988 | TP1·CP2·EP4·PP1·ETP1, DP=256 | final + rolling 2 |
+| 2 — midtraining | `nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml` | 32768 | 3126 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 4 |
+| 3 — SFT | `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` | 32768 | 2988 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 10, all retained |
 
 **Read the baseline README for the mechanisms.** The learning-rate schedule across stages 1–2,
 why CP=2 is forced at 32768, the DP=512 save-crossing settings, the 16,777,216-tokens-per-iter

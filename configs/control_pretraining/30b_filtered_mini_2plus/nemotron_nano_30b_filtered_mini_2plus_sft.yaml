@@ -121,8 +121,8 @@ checkpoint:
   pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_midtrain
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_sft
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_mini_2plus_sft
-  save_interval: 600                 # the mid-run coherence-check checkpoint, then every ~10B tokens
-  most_recent_k: 2                   # the final checkpoint is the arm's artifact
+  save_interval: 300                 # the mid-run coherence-check checkpoint, then every ~5B tokens
+  most_recent_k: -1                  # every checkpoint is kept; the final one is the arm's artifact
   save_optim: true
   save_rng: true
   ckpt_format: torch_dist

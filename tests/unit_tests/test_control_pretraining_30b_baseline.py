@@ -83,19 +83,31 @@ BUILD_SCRIPT = _REPO_ROOT / "configs" / "control_pretraining" / "build_corpora.s
 # rows (52,442,350,158), not the 52,452,350,158 that adding it would give.
 STAGES = {
     "pretrain": (PRETRAIN_CONFIG, 8192, 16_777_216, 501_303_520_191, 14),
-    "midtrain": (MIDTRAIN_CONFIG, 32768, 16_777_216, 52_442_350_158, 2),
+    "midtrain": (MIDTRAIN_CONFIG, 32768, 16_777_216, 52_442_350_158, 4),
 }
 
 # The full-corpus allocation the sheet blends into BOTH stages ("Verbatim Multi-Epoch
 # Replay" — one pass per stage; the multiple epochs happen across the curriculum).
 AI_SAFETY_SHEET_TOKENS = 2_303_520_191
 
-TOTAL_RETAINED_CHECKPOINTS = 16
+TOTAL_RETAINED_CHECKPOINTS = 18
+SFT_RETAINED_CHECKPOINTS = 10
 
 
 def _merge(path: Path):
     """The campaign YAML merged onto the Nano pretrain recipe, exactly as the launcher does."""
     return merge_onto_recipe(path, nemotron_3_nano_pretrain_config)
+
+
+def assert_retains_every_checkpoint(cfg, expected: int) -> None:
+    """Megatron-Core always writes a final checkpoint, so an interval that divided
+    `train_iters` exactly would yield one MORE than intended; and every save is kept with the
+    optimizer and RNG state a resume needs."""
+    interval_saves = (cfg.train.train_iters - 1) // cfg.checkpoint.save_interval
+    assert interval_saves + 1 == expected
+    assert cfg.checkpoint.most_recent_k == -1, "retention must keep every checkpoint"
+    assert cfg.checkpoint.save_optim is True
+    assert cfg.checkpoint.save_rng is True
 
 
 @pytest.fixture(scope="module")
@@ -139,15 +151,7 @@ class TestPerStage:
         assert_iterations_are_the_minimal_cover(cfg.train.train_iters, tokens_per_iter, target, stage)
 
     def test_retained_checkpoint_count(self, merged, stage):
-        """Megatron-Core always writes a final checkpoint, so an interval that divided
-        `train_iters` exactly would yield one MORE than intended."""
-        expected = STAGES[stage][4]
-        cfg = merged[stage]
-        interval_saves = (cfg.train.train_iters - 1) // cfg.checkpoint.save_interval
-        assert interval_saves + 1 == expected
-        assert cfg.checkpoint.most_recent_k == -1, "retention must keep every checkpoint"
-        assert cfg.checkpoint.save_optim is True
-        assert cfg.checkpoint.save_rng is True
+        assert_retains_every_checkpoint(merged[stage], STAGES[stage][4])
 
     def test_warmup_iters_is_stated_not_inherited(self, raw, stage):
         """The recipe sets 333; `SchedulerConfig.finalize` rejects that alongside
@@ -220,7 +224,7 @@ class TestPerStage:
 
 
 class TestStageBoundary:
-    def test_the_two_stages_retain_ten_checkpoints_between_them(self, merged):
+    def test_the_two_stages_retain_eighteen_checkpoints_between_them(self, merged):
         total = 0
         for stage, (_, _, tokens_per_iter, _, _) in STAGES.items():
             cfg = merged[stage]
@@ -520,6 +524,11 @@ class TestSftStage:
         assert sft_raw.dataset.seq_length == 32768
         assert sft_merged.dataset.seq_length == 32768
         assert sft_merged.model.seq_length == 32768
+
+    def test_retained_checkpoint_count(self, sft_merged):
+        """The filtered arm and both ablations pin their retention to this config RELATIVELY
+        (their fields must equal the parent's), so this is the one absolute anchor for stage 3."""
+        assert_retains_every_checkpoint(sft_merged, SFT_RETAINED_CHECKPOINTS)
 
     def test_topology_matches_the_midtraining_stage(self, sft_merged, merged):
         """Same model at the same sequence length: the 32K constraints bind identically."""
