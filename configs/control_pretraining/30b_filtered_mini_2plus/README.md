@@ -616,7 +616,17 @@ day, jobs 6354507, 6354508, 6354509 and 6354510 (`cp30b-filtered-mini-2plus-pret
 the same four segments with no placement pin and its own dataset index cache); the pinned
 chain was cancelled on Kyle's word before either head had started, as item 7 records. Logs at
 `/projects/a5k/public/logs/megatron_runs/train-<jobid>.out`, checkpoints under the stage
-config's `checkpoint.save` directory, 14 of them, the last at `iter_0029881`.
+config's `checkpoint.save` directory, 14 of them, the last at `iter_0029881`. On 2026-09-08 the
+chain was resized to 64 nodes at Kyle's instruction and extended to six segments (6400819,
+6400820). Segment 1 ran 2026-09-09 01:24Z → 09-10 00:46Z: iterations 1–8472 at a 9.78 s/iter
+median, interval saves 2264, 4528 and 6792 all crossed clean, and the exit save at 8472 landed
+38 min before the wall. A cluster outage then took the cluster down until ~18:46Z, after which
+segments 6354508–6354510, 6400819 and 6400820 each resumed from `iter_0008472` and died within
+~4.5 min on the first gradient reduce-scatter — the resume-side memory hazard the baseline
+README's "Segment rollover" section now records, fixed in the bridge the same day. The chain was
+requeued with the fix as job 6450372 (started 20:59Z, resumed clean: 9.3 s/iter from iteration
+8473) with 6450407, 6450408 and 6450409 queued behind it; the interval save at 9056 fell past
+segment 1's end, so the series on disk is 2264, 4528, 6792, 8472 and then 9056 onward.
 The chain is watched for stalls (no log growth, or no iteration while the log grows), NaN
 iterations, loss and throughput degradation, error signatures and each segment's terminal
 state and rollover marker. Kyle corrected the rule

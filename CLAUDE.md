@@ -555,7 +555,15 @@ adds 4.00 GiB of margin for +0.31% step time and no numerics change. The other t
 CXI MR-cache capacity collapse (launcher: `FI_MR_CACHE_MAX_COUNT`) and the rank-0 NCCL
 object-gather transport retention (`dist.distributed_backend: "cpu:gloo,cuda:nccl"`).
 **Any probe validating save behaviour must cross at least three saves and run the forward
-after each** — one that exits at its second save never executes the failing step.
+after each** — one that exits at its second save never executes the failing step. A **fourth**
+pathology sits on the RESUME side: the load's target for the grouped experts is that same full
+copy, and `_load_checkpoint_from_path` used to release the allocator cache while still holding
+it, so a resumed 64-node segment started ~14 GiB of reserved-but-unused memory heavier than a
+fresh one and its first gradient reduce-scatter failed inside NCCL (`Cuda failure 2 'out of
+memory'`, never a PyTorch OOM — NCCL cannot reclaim PyTorch's cache; five segments died this way
+on 2026-09-10). The load now drops its references before `torch.cuda.empty_cache()` and logs
+`memory after checkpoint load`; on every resumed segment reserved should sit within a few
+hundred MiB of allocated. See the 30b_baseline README's "Segment rollover" section.
 
 **The going-forward arm is `configs/control_pretraining/30b_baseline/`**, which supersedes V1's
 blend with the campaign mix (sheet revision 2026-08-20) as a **three-stage curriculum**:

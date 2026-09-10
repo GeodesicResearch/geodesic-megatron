@@ -15,6 +15,7 @@
 """Input/output checkpointing."""
 
 import contextlib
+import gc
 import os
 import random
 import shutil
@@ -2194,7 +2195,25 @@ def _load_checkpoint_from_path(
         mlflow_utils.on_load_checkpoint_success(checkpoint_name, load_dir, state.mlflow_logger)
         comet_utils.on_load_checkpoint_success(checkpoint_name, load_dir, state.comet_logger)
 
+    # Everything the load materialised is still referenced here: `state_dict` holds the loaded
+    # tensors and `load_kwargs["sharded_state_dict"]` the load target, which for the grouped
+    # experts is a full transposed copy of the rank's expert weights (13.7 GiB on Nano-30B), not
+    # a view. Released only when these names go out of scope, that memory sits in the caching
+    # allocator as reserved-but-unused: PyTorch reclaims it when its own allocation fails, NCCL
+    # cannot, so the first gradient reduce-scatter after a resume dies with a CUDA out-of-memory
+    # inside NCCL on a posture that trains from scratch with room to spare. Drop the references
+    # first, then hand the cache back to CUDA, and record what the resumed process starts with.
+    del state_dict
+    load_kwargs.clear()
+    gc.collect()
     torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        print_rank_0(
+            f"  memory after checkpoint load: allocated {torch.cuda.memory_allocated() / 2**30:.2f} GiB, "
+            f"reserved {torch.cuda.memory_reserved() / 2**30:.2f} GiB, "
+            f"CUDA free {free_bytes / 2**30:.2f} of {total_bytes / 2**30:.2f} GiB"
+        )
 
     if state.train_state.step > 0:
         is_local_chkpt = ckpt_type == CheckpointType.LOCAL

@@ -482,6 +482,14 @@ probe that exits at its second save, passes while the campaign dies.
    the retention, because both are taken inside `save_checkpoint` where the copy
    legitimately exists; sample between the saves, not only at them.
 
+The same expert-weight copy has a fourth consequence on the **resume** side, which affects
+every arm's segment rollovers rather than any one save: the checkpoint load builds its target
+from that copy, and the bridge used to empty the allocator cache while still holding it, so a
+resumed 64-node segment started ~14 GiB heavier than a fresh one and its first gradient
+reduce-scatter failed inside NCCL. The fix, the log line every resumed segment now prints
+(`memory after checkpoint load`), and the evidence are in
+[`30b_baseline/README.md`](30b_baseline/README.md) "Segment rollover".
+
 ### Why the DDP settings live under `comm_overlap:` — do not move them to `ddp:`
 
 `overlap_param_gather`, `overlap_grad_reduce` and `bucket_size` are set in `comm_overlap:`

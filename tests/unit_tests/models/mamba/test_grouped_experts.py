@@ -248,6 +248,24 @@ class TestGroupedExperts:
         # extra_state compatibility stubs exist per global expert
         assert sum("_extra_state" in k for k in sd) == 2 * E
 
+    def test_the_checkpoint_tensors_are_a_full_copy_of_the_expert_weights(self, pg_collection, gemm_backend):
+        """The canonical layout transposes the fused weights, and a transposed view is not
+        contiguous, so the tensor each save and load builds is a copy, not a view: a second full
+        allocation of the rank's expert weights that lives as long as the state dict holding it.
+        Whoever builds that state dict owns releasing it before training goes on — the
+        checkpoint load does exactly that — so this pins the cost the release exists for."""
+        m = self._build(pg_collection, gemm_backend)
+        sd = m.sharded_state_dict(prefix="decoder.layers.1.mlp.experts.")
+        factories = [sd["decoder.layers.1.mlp.experts.weight1"], sd["decoder.layers.1.mlp.experts.weight2"]]
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_allocated()
+        built = [f.build_fn(f.key, f.data, f.replica_id, None) for f in factories]
+        torch.cuda.synchronize()
+        copied = torch.cuda.memory_allocated() - before
+        assert copied == sum(w.numel() * w.element_size() for w in (m.weight1, m.weight2))
+        assert built[0].data.data_ptr() != m.weight1.data_ptr()
+        assert built[1].data.data_ptr() != m.weight2.data_ptr()
+
 
 @requires_gpu
 class TestTorchGroupedBackend:

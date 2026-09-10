@@ -570,6 +570,31 @@ Pinned by `tests/unit_tests/test_control_pretraining_30b_baseline.py::TestSegmen
 (and the CPT/smoke counterparts); the exit logic itself is unit-tested in
 `tests/unit_tests/training/test_train.py::TestCheckpointAndDecideExit`.
 
+**The exit save is confirmed at 64 nodes, and the resume after it had a memory hazard of its
+own.** On 2026-09-10 the filtered arm's first 64-node segment (job 6354507) reached its 1400th
+minute at iteration 8472, wrote the exit save in 31 s (00:46:17Z, byte-identical in size to the
+interval saves) and ended 38 min before the wall. A cluster outage followed, and when the queue
+came back all five queued segments resumed from that save and died ~20 s into their first
+iteration: `NCCL WARN Cuda failure 2 'out of memory'` then `NCCL Error 1: unhandled cuda error`
+in the gradient reduce-scatter, on 2–6 of 256 ranks, **never a PyTorch `OutOfMemoryError`**, on
+nodes that never repeated across attempts — so not the nodes. The load builds its target with
+`model.sharded_state_dict()`, which for the grouped experts is a full transposed *copy* of the
+rank's expert weights (13.7 GiB on Nano-30B — the same copy behind the third save-crossing
+pathology in [`../README.md`](../README.md) "Save crossings at DP=512"), and
+`_load_checkpoint_from_path` released the allocator cache while it still referenced
+that copy, so a resumed process began ~14 GiB of reserved-but-unused memory heavier than a
+fresh one. PyTorch reclaims such cache when its own allocation fails; NCCL's `cudaMalloc`
+cannot, which is why the failure is NCCL's and why a fresh start (no load) never sees it. The
+64-node posture exposed it because DP=256 carries ~5 GB more static state per rank than the
+DP=512 the baseline arm resumed at. Fixed in the bridge: the load drops its references before
+`torch.cuda.empty_cache()` and prints `memory after checkpoint load: allocated / reserved /
+CUDA free`. **Read that line on every resumed segment** — reserved should sit within a few
+hundred MiB of allocated (job 6450372, the first resume with the fix: 54.27 / 54.38 / 39.49 of
+95.00 GiB, then 9.3 s/iter from iteration 8473). Pinned by
+`tests/unit_tests/training/test_checkpointing.py::TestLoadCheckpoint::test_load_releases_its_tensors_before_returning_the_cache`;
+the copy itself by
+`tests/unit_tests/models/mamba/test_grouped_experts.py::TestGroupedExperts::test_the_checkpoint_tensors_are_a_full_copy_of_the_expert_weights`.
+
 ## Launching: get a compact allocation, and record which one you got
 
 Placement across Isambard's Dragonfly fabric is worth **~18% of throughput on this exact
