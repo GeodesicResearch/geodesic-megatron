@@ -1,0 +1,49 @@
+# The campaign's Hub archive: what geodesic-research/control-pretraining-models-bucket holds and
+# where each piece comes from on Isambard. scripts/hub/sync_bucket.py reads this file. Every stage
+# config under `stage_configs` contributes two things: its `checkpoint.save` directory — every
+# completed checkpoint in it, optimizer and RNG state included, the `hf/` export excluded — and the
+# corpora its `dataset` section reads (the .bin/.idx prefixes of `data_path`, the packed parquet
+# directories of `packed_train_data_path`), each placed under datasets/ at its path relative to
+# the data base that holds it, so the bucket path names the same directory the config does. A
+# stage whose save directory does not exist yet is reported on every pass and archived
+# automatically once it exists and a save has completed, so the filtered arm's stages 2-3 and both
+# ablations need no edit here when they launch. README.md documents the result, INVENTORY.tsv
+# records what each pass found, and _provenance/<run>/ keeps each pass's resolved copy of this
+# file, its plans and its log.
+#
+# Run it locally on the tunnel or login node under the host Python — never as a SLURM job (Kyle,
+# 2026-09-11) — detached and polling:
+#
+#   setsid -f python3 scripts/hub/sync_bucket.py \
+#       --manifest configs/control_pretraining/bucket_sync.yaml --poll-interval 1800 --stop-after 168
+#
+# Deliberately NOT archived: `pin_pretrain_iter22640/` and `sft2988_export_clone/` (byte copies of
+# iterations the run's own directory holds), `smoke_e2e/` (the pipeline rehearsal, not a campaign
+# artifact), and `control_pretrain_30b_baseline_longmino_cpt_5h/` (a teammate's CPT experiment
+# whose run config is not readable to the campaign account).
+bucket: geodesic-research/control-pretraining-models-bucket
+readme: configs/control_pretraining/bucket-readme.md
+provenance_prefix: _provenance
+checkpoints_prefix: checkpoints
+datasets_prefix: datasets
+log_dir: /projects/a5k/public/logs/control_pretraining/bucket_sync
+# Where the Hub client stages upload chunks (the same HF_HOME the container uses). An exported
+# HF_HOME wins; either way a location under the home directory is refused.
+hf_home: /projects/a5k/public/hf
+stage_configs:
+  - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+  - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+  - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_sft.yaml
+  - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+  - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
+  - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_sft.yaml
+  - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_gbs256.yaml
+  - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml
+# Checkpoint directories no stage config names, each a directory beside the named stage's save
+# directory. The baseline SFT ran under a cadence that kept only its last two saves; the
+# 600-iteration save survives in the clone made for its HF export and is archived under the run's
+# own name.
+extra_checkpoints:
+  - beside: configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_sft.yaml
+    directory: sft600_export_clone
+    remote: checkpoints/control_pretrain_30b_baseline_sft

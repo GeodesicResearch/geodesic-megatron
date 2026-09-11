@@ -679,3 +679,10 @@ Outstanding, in order:
 3. Each stage's final checkpoint exported to HF at `<save>/iter_NNNNNNN/hf/` for evals, which
    evaluates only the finals (pretrain `iter_0029881`, midtrain `iter_0003126`, SFT
    `iter_0002988`, the baseline's iteration counts verbatim).
+
+Every completed checkpoint of this arm, optimizer state included, is mirrored to the private Hub
+bucket `geodesic-research/control-pretraining-models-bucket` as it lands (the campaign README's
+"The archive of record" section, and [`../bucket_sync.yaml`](../bucket_sync.yaml) for what is
+listed); the `hf/` exports of item 3 are not, being regenerable from the archived checkpoint.
+Stages 2 and 3 are archived automatically once their save directories exist, because the manifest
+lists this arm's three stage configs.

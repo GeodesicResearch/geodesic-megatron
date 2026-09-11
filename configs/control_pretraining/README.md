@@ -738,3 +738,50 @@ Checkpoints are **~316 GB** each (bf16 weights plus precision-aware optimizer st
 at DP=512 — see the smoke-test section for the byte-exact figure and its provenance) and all
 21 are retained (`most_recent_k: -1`), so plan for **~6.6 TB** in the save directory. Watch
 the project storage quota that `isambard_sbatch` prints on every submission.
+
+## The archive of record: `geodesic-research/control-pretraining-models-bucket`
+
+Every completed checkpoint of every stage of both arms (optimizer and RNG state included; the
+`iter_*/hf/` exports excluded, because they are regenerable) and every corpus the stage configs
+read are mirrored into this private Hub bucket, so the study's artifacts outlive the project
+quota. The bucket's own `README.md` — [`bucket-readme.md`](bucket-readme.md) here — documents the
+layout and the restore recipe; `INVENTORY.tsv` at its root is rewritten by every pass and is the
+live state.
+
+The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest
+[`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the eight stage configs, each of which
+contributes its `checkpoint.save` directory and the corpora its `dataset.data_path` prefixes and
+`packed_train_data_path` parquets name, plus the one checkpoint directory no config names (the
+export clone holding the baseline SFT's pruned iteration-600 save). It runs on the host Python (the container's `huggingface_hub` predates buckets)
+**locally on the tunnel or login node, never as a SLURM job** (Kyle, 2026-09-11: uploads do not
+need a compute node), detached so it outlives the session and polling so it keeps up with a
+live stage:
+
+```bash
+setsid -f python3 scripts/hub/sync_bucket.py --manifest configs/control_pretraining/bucket_sync.yaml \
+    --poll-interval 1800 --stop-after 168 \
+    > /projects/a5k/public/logs/control_pretraining/bucket_sync/local.out 2>&1
+```
+
+The Hub client's upload cache goes to the manifest's `hf_home` (`/projects/a5k/public/hf`, the same
+`HF_HOME` the container uses) unless `HF_HOME` is already exported, and the tool refuses to start
+if that resolves under the home directory.
+
+Three rules make it safe beside a running stage. It copies an `iter_*` directory only once
+`latest_checkpointed_iteration.txt` names it or a later iteration — Megatron writes that tracker
+after the save has finished on every rank, so anything above it is a save in progress — and
+uploads the root files after the shards they point at, from a snapshot taken when the pass began.
+It compares by size alone (`--ignore-times`): shards and corpora are written once, so a re-run
+uploads exactly what is missing. And after every pass it re-plans each directory and exits
+non-zero if any of the pass's units still has files pending, so a run that exits 0 has verified
+what it planned rather than assumed it (root files deferred because the tracker advanced mid-pass
+are not in that plan; the next pass carries them). Each pass records its resolved manifest, per-directory plans, inventory
+and log under `/projects/a5k/public/logs/control_pretraining/bucket_sync/<run>/` and under the
+bucket's `_provenance/<run>/`.
+
+**A new stage needs no manifest edit.** Its config is already listed, so once its save directory
+exists and a save has completed, the next pass archives it; until then every pass reports the
+stage as not started, which is a state, not an error. An explicitly listed extra directory, by
+contrast, must exist. The running process re-reads the manifest every pass, but not the code:
+after changing `sync_bucket.py`, restart it. `--plan-only` computes the plans without uploading,
+which is how to see what a change would move before it moves it.

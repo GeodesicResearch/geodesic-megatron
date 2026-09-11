@@ -565,6 +565,19 @@ on 2026-09-10). The load now drops its references before `torch.cuda.empty_cache
 `memory after checkpoint load`; on every resumed segment reserved should sit within a few
 hundred MiB of allocated. See the 30b_baseline README's "Segment rollover" section.
 
+**The campaign's archive of record is the private Hub bucket
+`geodesic-research/control-pretraining-models-bucket`**: every completed checkpoint of every
+stage (optimizer and RNG state included, the `iter_*/hf/` exports excluded) and every corpus the
+stage configs read, mirrored by `scripts/hub/sync_bucket.py` from the manifest
+`configs/control_pretraining/bucket_sync.yaml`, run **locally on the tunnel or login node under the
+host Python, never as a SLURM job** (Kyle, 2026-09-11; the container's `huggingface_hub` predates
+buckets). It copies only iterations at or below `latest_checkpointed_iteration.txt`, compares by
+size alone, re-plans after each pass and fails if anything is still pending. The manifest lists the
+stage configs, and each contributes its `checkpoint.save` directory and its corpora, so a new
+stage is archived automatically once its directory exists and a save has completed; only the
+export clone holding the baseline SFT's pruned iteration-600 save is listed explicitly. `configs/control_pretraining/README.md`,
+"The archive of record", has the layout and the restore recipe.
+
 **The going-forward arm is `configs/control_pretraining/30b_baseline/`**, which supersedes V1's
 blend with the campaign mix (sheet revision 2026-08-20) as a **three-stage curriculum**:
 `nemotron_nano_30b_baseline_pretrain.yaml` (501.3B tokens, seq 8192, **constant** 1e-3 — it
