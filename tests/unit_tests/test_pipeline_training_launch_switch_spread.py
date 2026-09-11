@@ -36,9 +36,8 @@ import subprocess
 
 import pytest
 
+from tests.unit_tests.launcher_source import LAUNCHER, launcher_function
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LAUNCHER = os.path.join(REPO_ROOT, "pipeline_training_launch.sh")
 
 # Two leaf switches and a spine, matching `scontrol show topology` on Isambard. group9 is
 # LAST and deliberately shares no node with the job in most cases below -- that ordering is
@@ -71,19 +70,6 @@ esac
 """
 
 
-def _extract_function():
-    """The derivation, lifted verbatim from the real launcher.
-
-    The launcher cannot be sourced whole -- it allocates nodes and execs srun -- so the
-    function is extracted by name. If it is ever renamed this test fails loudly rather
-    than silently testing nothing.
-    """
-    src = open(LAUNCHER).read()
-    match = re.search(r"^derive_switch_spread\(\) \{.*?^\}", src, re.S | re.M)
-    assert match, "derive_switch_spread() not found in pipeline_training_launch.sh"
-    return match.group(0)
-
-
 def _extract_assignment():
     """The launcher's own call site, so the `|| true` net is under test too.
 
@@ -108,7 +94,7 @@ def _run(tmp_path, nodelist, fail_scontrol=None):
     script = tmp_path / "harness.sh"
     script.write_text(
         "set -euo pipefail\n"
-        f"{_extract_function()}\n"
+        f"{launcher_function('derive_switch_spread')}\n"
         f'NODELIST="{nodelist}"\n'
         f"{_extract_assignment()}\n"
         'printf "SPREAD=[%s]\\n" "$ISAMBARD_SWITCH_SPREAD"\n'

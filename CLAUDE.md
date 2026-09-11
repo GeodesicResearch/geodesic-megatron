@@ -367,8 +367,31 @@ with the venv gone, there is one answer.)
 Slingshot/CXI causes intermittent NCCL collective hangs (~every 2-3 hours with EP=8 cross-node). The training pipeline uses a layered resilience stack:
 
 1. **ft_launcher worker restart** (`--max-restarts=20`) — the per-node agent restarts failed workers, reloading from the latest checkpoint. ≤25 iters lost. (`cfg.inprocess_restart` is never set by `pipeline_training_run.py`, so there is no in-process layer on the shipped path.)
-2. **NCCL watchdog** (`TORCH_NCCL_TIMEOUT`, 7200s) — aborts genuinely wedged collectives.
+2. **Collective timeout** — the calling thread's blocking `wait()` throws after the YAML's
+   `dist.distributed_timeout_minutes` (60 on the campaign configs; the launcher's
+   `TORCH_NCCL_TIMEOUT`, 7200 s, covers only groups created without one) and the rank exits.
+   This is not a watchdog: under the launcher's `TORCH_NCCL_BLOCKING_WAIT=1` torch creates no
+   watchdog thread at all (next paragraph).
 3. **srun `--kill-on-bad-exit=1`** — when a rank dies unrecoverably (or ft is disabled), the whole step ends instead of stranding the surviving ranks in a never-completing collective; with a `--dependency=singleton` chain the next segment then resumes from the latest checkpoint.
+
+**A run that simply stops iterating leaves no evidence by itself — take it before cancelling.**
+The launcher's `TORCH_NCCL_BLOCKING_WAIT=1` means torch creates **no watchdog thread** (its own
+log line at process-group creation says so): no asynchronous timeout detection, no heartbeat
+monitor, and no NCCL flight-recorder dump, on timeout or on demand — the recorder buffer
+(`TORCH_NCCL_TRACE_BUFFER_SIZE`) is filled and never written, whatever the comment beside
+`TORCH_NCCL_DUMP_ON_TIMEOUT` used to promise. The only timeout is the calling thread's `wait()` at
+the YAML's `dist.distributed_timeout_minutes` (Megatron passes it to `init_process_group`; the
+launcher's `TORCH_NCCL_TIMEOUT` covers only groups created without one), which throws after 60
+minutes on the campaign configs. So a hang cancelled at the 30-minute mark takes everything with
+it. `scripts/training/dump_hung_ranks.sh <jobid>` takes the evidence from outside first: every
+rank's Python and native stacks via py-spy (no cooperation from the rank needed; ptrace is
+unrestricted on the compute nodes; py-spy must be on the host PATH of the compute nodes — once per
+user, `python3 -m pip install --user py-spy`, which the shared home makes visible on every node —
+or named in `PY_SPY`), into `<log-dir>/nccl_trace/<jobid>/rank_<rank>.stack` — which
+collective each rank is waiting in, and what the ranks that never arrived are doing instead. Where
+a watchdog exists (blocking wait off) the same run also triggers the recorder dump into that
+directory. Two 64-node segments of the filtered stage-1 run wedged on 2026-09-11 with no NCCL
+warning, watchdog or traceback in the log, and were cancelled before anything was captured.
 
 **ft_launcher timeout configuration** (set in `pipeline_training_launch.sh`):
 - `--ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600`
@@ -405,7 +428,7 @@ Measured instance: the 500B control-pretraining baseline needed < 2.42 s/iter an
 giving seven kills across eight attempts in 15.5 h with zero checkpoints written.
 
 Where ft is dropped, a `--dependency=singleton` chain with `checkpoint.load == checkpoint.save`
-supplies the recovery ft would have: the NCCL watchdog ends a genuinely wedged segment, and the
+supplies the recovery ft would have: the collective timeout ends a genuinely wedged segment, and the
 next segment resumes from the latest checkpoint.
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard

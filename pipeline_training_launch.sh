@@ -36,6 +36,10 @@
 #                               pair with ISAMBARD_NCCL_DEBUG_FILE=/path/%h.%p.log or 512
 #                               ranks flood the shared stdout.
 #   FI_LOG_LEVEL=warn           libfabric warnings (e.g. CXI MR-cache rejections) into the log.
+#   (a stopped run)             scripts/training/dump_hung_ranks.sh <jobid> BEFORE cancelling
+#                               it: every rank's Python + native stacks, and its NCCL flight
+#                               recorder where a watchdog exists (not under the shipped
+#                               TORCH_NCCL_BLOCKING_WAIT=1), into <log-dir>/nccl_trace/<jobid>/.
 #
 # Examples:
 #   # Nano SFT with ft_launcher (default)
@@ -361,10 +365,16 @@ export FI_CXI_DISABLE_NON_INJECT_MSG_IDC=1
 export NCCL_ASYNC_ERROR_HANDLING=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 
-# Make NCCL wait() calls blocking (synchronous). When combined with async error handling,
-# this means: the calling thread blocks on the collective, but the watchdog thread can
-# still detect timeouts and abort. Without this, wait() returns immediately and errors
-# may be lost or detected late.
+# Make NCCL wait() calls blocking (synchronous): the calling thread polls the collective to
+# completion or timeout and throws on timeout. What this costs, in torch's own words at
+# process-group creation ("TORCH_NCCL_BLOCKING_WAIT is enabled, NO watchdog thread is
+# created"): there is no watchdog thread, so no asynchronous timeout detection, no heartbeat
+# monitor, and no flight-recorder dump on timeout or on demand (the trace-location block
+# below). The only timeout is the calling thread's wait() at the YAML's
+# dist.distributed_timeout_minutes, which Megatron passes to init_process_group; the
+# TORCH_NCCL_TIMEOUT below covers groups created without one. A run that stops iterating
+# therefore leaves no evidence by itself -- scripts/training/dump_hung_ranks.sh <jobid> takes
+# it from outside. Turning blocking wait off restores the watchdog and everything it owns.
 export TORCH_NCCL_BLOCKING_WAIT=1
 
 # Avoid using record_stream() on NCCL output tensors. record_stream() extends a tensor's
@@ -421,11 +431,11 @@ export TORCH_NCCL_RETHROW_CUDA_ERRORS=0
 # PyTorch NCCL Flight Recorder. Keeps an in-memory ring buffer of the last N collective
 # ops per rank (op name, sizes, comm, enqueue/start/complete state). Near-zero overhead.
 # On a watchdog timeout (TORCH_NCCL_DUMP_ON_TIMEOUT=1) every rank dumps its buffer to
-# ${TORCH_NCCL_DEBUG_INFO_TEMP_FILE}<rank> (default /tmp/nccl_trace_rank_<rank>) -- this is
-# THE tool for locating a hang: it shows which collective each rank was stuck on and which
-# ranks never arrived. Override the buffer size to 0 to disable. Set
-# TORCH_NCCL_DEBUG_INFO_TEMP_FILE to a shared (e.g. /projects) prefix to collect dumps off
-# the node-local /tmp. All overridable so a debug run can point them at persistent storage.
+# ${TORCH_NCCL_DEBUG_INFO_TEMP_FILE}<rank> (the trace-location block later in this file puts
+# that beside the raw log) -- it shows which collective each rank was stuck on and which
+# ranks never arrived. The dump is the WATCHDOG's, and TORCH_NCCL_BLOCKING_WAIT=1 above
+# means there is no watchdog: in the shipped posture the buffer is filled and never written.
+# Override the buffer size to 0 to disable. All overridable.
 export TORCH_NCCL_TRACE_BUFFER_SIZE=${TORCH_NCCL_TRACE_BUFFER_SIZE:-2000}
 export TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}
 export TORCH_NCCL_TRACE_CPP_STACK=${TORCH_NCCL_TRACE_CPP_STACK:-0}
@@ -581,6 +591,37 @@ if [ -n "$ISAMBARD_RAW_LOG_PATH" ]; then
         echo "WARNING: by-run-id log symlink not created (non-fatal)" >&2
     fi
 fi
+
+# Where a rank's NCCL flight-recorder dump lands, and the FIFO through which one is asked for.
+# The recorder (TORCH_NCCL_TRACE_BUFFER_SIZE above) is written by torch's watchdog thread: on a
+# collective timeout (TORCH_NCCL_DUMP_ON_TIMEOUT=1), or as soon as anything is written to the
+# FIFO the watchdog's monitor opens at ${TORCH_NCCL_DEBUG_INFO_PIPE_FILE}<rank>.pipe. Under
+# TORCH_NCCL_BLOCKING_WAIT=1 (above) torch creates NO watchdog thread, so neither happens and
+# the FIFO never appears; these paths are set so that the dump lands somewhere readable the
+# moment blocking wait is turned off -- torch's own default is node-local /tmp, gone with the
+# allocation. Evidence that needs no watchdog: scripts/training/dump_hung_ranks.sh <jobid>.
+#   - Dump: <log-dir>/nccl_trace/<jobid>/rank_<rank>, beside the raw log like by-run-id/.
+#   - FIFO: directly in /tmp, which exists on every node and is bound into the container, so
+#     the host-side trigger sees the FIFO the rank opened. It must be node-local (its buffer
+#     is that node's kernel state), and NOT under $TMPDIR, which is created on the batch node
+#     only -- a FIFO there would fail on every other node and abort the rank.
+# Both overridable. An interactive launch has no raw log; the dump then keeps torch's default.
+configure_nccl_trace_location() {
+    if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
+        echo "NOTE: no raw log path; NCCL flight-recorder dumps keep torch's node-local /tmp default" >&2
+    elif [ -z "${TORCH_NCCL_DEBUG_INFO_TEMP_FILE:-}" ]; then
+        local trace_dir
+        trace_dir="$(dirname "$ISAMBARD_RAW_LOG_PATH")/nccl_trace/${SLURM_JOB_ID}"
+        # Diagnostics bookkeeping must never kill a training launch, as for by-run-id/ above.
+        if mkdir -p "$trace_dir" 2>/dev/null; then
+            export TORCH_NCCL_DEBUG_INFO_TEMP_FILE="${trace_dir}/rank_"
+        else
+            echo "WARNING: could not create $trace_dir; NCCL flight-recorder dumps keep torch's node-local /tmp default" >&2
+        fi
+    fi
+    export TORCH_NCCL_DEBUG_INFO_PIPE_FILE="${TORCH_NCCL_DEBUG_INFO_PIPE_FILE:-/tmp/nccl_dump_${SLURM_JOB_ID}_}"
+}
+configure_nccl_trace_location
 
 # ==============================================================================
 # Distributed setup
