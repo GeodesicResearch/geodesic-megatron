@@ -383,15 +383,27 @@ monitor, and no NCCL flight-recorder dump, on timeout or on demand — the recor
 the YAML's `dist.distributed_timeout_minutes` (Megatron passes it to `init_process_group`; the
 launcher's `TORCH_NCCL_TIMEOUT` covers only groups created without one), which throws after 60
 minutes on the campaign configs. So a hang cancelled at the 30-minute mark takes everything with
-it. `scripts/training/dump_hung_ranks.sh <jobid>` takes the evidence from outside first: every
-rank's Python and native stacks via py-spy (no cooperation from the rank needed; ptrace is
-unrestricted on the compute nodes; py-spy must be on the host PATH of the compute nodes — once per
-user, `python3 -m pip install --user py-spy`, which the shared home makes visible on every node —
-or named in `PY_SPY`), into `<log-dir>/nccl_trace/<jobid>/rank_<rank>.stack` — which
-collective each rank is waiting in, and what the ranks that never arrived are doing instead. Where
-a watchdog exists (blocking wait off) the same run also triggers the recorder dump into that
-directory. Two 64-node segments of the filtered stage-1 run wedged on 2026-09-11 with no NCCL
-warning, watchdog or traceback in the log, and were cancelled before anything was captured.
+it. `scripts/training/dump_hung_ranks.sh <jobid>` takes the evidence from outside first, into
+`<log-dir>/nccl_trace/<jobid>/`: `processes.<host>`, the state and kernel wait channel of every
+rank and of every helper it forked (dataloader workers and the multiprocessing bookkeeping
+processes carry the rank's environment; a helper is one whose parent carries the same RANK),
+recorded before anything is attached to; then every process's Python and native stacks via py-spy
+(no cooperation from the rank needed; ptrace is unrestricted on the compute nodes; py-spy must be
+on the host PATH of the compute nodes — once per user, `python3 -m pip install --user py-spy`,
+which the shared home makes visible on every node — or named in `PY_SPY`), the rank's own to
+`rank_<rank>.stack` and each helper's to `rank_<rank>.child-<pid>.stack`, skipping a process in an
+uninterruptible wait, which cannot be attached to. The stacks show which collective each rank is
+waiting in and what the ranks that never arrived are doing instead. Where a watchdog exists
+(blocking wait off) the same run also triggers the recorder dump into that directory. Two 64-node
+segments of the filtered stage-1 run wedged on 2026-09-11 with no NCCL warning, watchdog or
+traceback in the log, and were cancelled before anything was captured. **The stalls that were
+captured, on 2026-09-12, were not NCCL at all:** one rank's main thread was waiting on its
+dataloader, that rank's worker sat in `cl_sync_io_wait` with a single Lustre read RPC to one OST
+(OST0014, over kfi) outstanding and its read counters flat, its three node siblings spun in the
+node-local expert all-to-all, and the other 252 ranks waited at their collective. The first such
+stall cleared on its own after 6.3 min (an RPC timeout and resend, most likely); the run is not
+wedged during one, so read `processes.<host>` for a `D`/`I` state with a Lustre wait channel before
+cancelling anything, and give a stall the Lustre resend time before treating it as a wedge.
 
 **ft_launcher timeout configuration** (set in `pipeline_training_launch.sh`):
 - `--ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600`

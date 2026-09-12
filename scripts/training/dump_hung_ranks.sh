@@ -1,15 +1,20 @@
 #!/bin/bash
 # Capture what every rank of a running training job is doing, without stopping it.
 #
-# For each rank on each node of the job's allocation this collects the Python and native stack of
-# every thread (py-spy, attached from outside: the rank does not have to cooperate) and, when the
-# rank runs a NCCL watchdog, its NCCL flight recorder, asked for through the trigger FIFO whose
-# prefix the rank carries in its own TORCH_NCCL_DEBUG_INFO_PIPE_FILE (pipeline_training_launch.sh
-# sets it). Everything lands beside the raw log in <log-dir>/nccl_trace/<jobid>/: rank_<rank>.stack
-# (the stacks) and rank_<rank> (torch's own recorder dump). Run it on a job whose iterations have
-# stopped BEFORE cancelling it: the stacks show which collective each rank is waiting in and what
-# the ranks that never arrived are doing instead, the evidence a cancelled job otherwise takes
-# with it.
+# For each rank on each node of the job's allocation this records, before touching anything, the
+# state and kernel wait channel of the rank and of every helper process it forked (dataloader
+# workers and the multiprocessing bookkeeping processes carry the rank's environment), then
+# collects the Python and native stack of every thread of each (py-spy, attached from outside: the
+# rank does not have to cooperate) and, when the rank runs a NCCL watchdog, its NCCL flight
+# recorder, asked for through the trigger FIFO whose prefix the rank carries in its own
+# TORCH_NCCL_DEBUG_INFO_PIPE_FILE (pipeline_training_launch.sh sets it). Everything lands beside
+# the raw log in <log-dir>/nccl_trace/<jobid>/: processes.<host> (the table), rank_<rank>.stack
+# (the rank's stacks), rank_<rank>.child-<pid>.stack (a helper's) and rank_<rank> (torch's own
+# recorder dump). Run it on a job whose iterations have stopped BEFORE cancelling it: the stacks
+# show which collective each rank is waiting in and what the ranks that never arrived are doing
+# instead, the evidence a cancelled job otherwise takes with it. The table is what identified the
+# filtered stage-1 stalls of 2026-09-12: one rank waiting on its dataloader, whose worker sat in
+# `cl_sync_io_wait`, a Lustre read whose RPC was not returning, while 255 ranks waited for it.
 #
 # The recorder half is inert under the launcher's shipped TORCH_NCCL_BLOCKING_WAIT=1: torch then
 # creates no watchdog thread, and the watchdog is what opens the FIFO and writes the dump, so such
@@ -22,8 +27,9 @@
 #   usage: dump_hung_ranks.sh <jobid>                       # all nodes of the job
 #          dump_hung_ranks.sh --node <jobid> <output-dir>   # this node only (the per-node payload)
 #
-# Prints one line per node: stacks written and failed, FIFOs triggered, FIFOs without a reader
-# (the rank is gone), and ranks that opened no FIFO -- reported, never skipped silently.
+# Prints one line per node: rank and helper stacks written, attaches failed, processes skipped for
+# being in an uninterruptible wait, FIFOs triggered, FIFOs without a reader (the rank is gone), and
+# ranks that opened no FIFO -- reported, never skipped silently.
 set -euo pipefail
 
 PY_SPY=${PY_SPY:-py-spy}
@@ -52,23 +58,64 @@ rank_and_pipe_of() {
         END {if (r != "") print r, p}'
 }
 
-# Per-node payload: the stacks of every rank of the job on this node, then each rank's FIFO.
+# A process's state letter and parent pid, from /proc/<pid>/stat (`pid (comm) state ppid ...`),
+# read past the closing parenthesis because comm may itself contain spaces; nothing if it is gone.
+state_and_parent_of() {
+    local stat state ppid _
+    stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+    read -r state ppid _ <<< "${stat##*) }"
+    echo "$state $ppid"
+}
+
+# Per-node payload. Every process carrying the job's id and a RANK is either the rank itself or a
+# helper the rank forked with its environment intact (dataloader workers, the multiprocessing
+# resource tracker and manager); a helper is one whose parent carries the same RANK. First a table
+# of all of them, taken before anything is attached to: pid, parent, state, kernel wait channel,
+# rank, kind and command. Then the stacks: the rank's own to rank_<rank>.stack, each helper's to
+# rank_<rank>.child-<pid>.stack, so no helper can overwrite the rank's. A process in an
+# uninterruptible wait (state D or I -- a Lustre read that is not returning, say) cannot be attached
+# to and would hold py-spy until its timeout; it is recorded in the table and its stack skipped.
+# Finally the rank's FIFO.
 dump_local() {
-    local jobid=$1 outdir=$2 host pid rank prefix pipe
-    local stacks=0 failed=0 triggered=0 unread=0 unopened=0
+    local jobid=$1 outdir=$2 host pid rank prefix pipe state ppid kind target
+    local ranks=0 helpers=0 failed=0 skipped=0 triggered=0 unread=0 unopened=0
+    local -A rank_of prefix_of state_of kind_of
+    local pids=()
     # uname needs no name resolution; hostname -s resolves the FQDN and can wait on a resolver.
     host=$(uname -n)
     host=${host%%.*}
+    : > "$outdir/processes.$host"
     for pid in $(job_pids "$jobid"); do
         read -r rank prefix <<< "$(rank_and_pipe_of "$pid")"
         [ -n "$rank" ] || continue
-        if timeout 120 "$PY_SPY" dump --pid "$pid" --native > "$outdir/rank_${rank}.stack" 2>&1; then
-            stacks=$((stacks + 1))
+        read -r state ppid <<< "$(state_and_parent_of "$pid")"
+        [ -n "$ppid" ] || continue
+        kind=rank
+        [ "$(rank_and_pipe_of "$ppid" | cut -d' ' -f1)" = "$rank" ] && kind=helper
+        pids+=("$pid")
+        rank_of[$pid]=$rank prefix_of[$pid]=$prefix state_of[$pid]=$state kind_of[$pid]=$kind
+        printf '%s pid=%s ppid=%s state=%s wchan=%s rank=%s %s :: %s\n' "$host" "$pid" "$ppid" "$state" \
+            "$(cat "/proc/$pid/wchan" 2>/dev/null || echo '?')" "$rank" "$kind" \
+            "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-200)" >> "$outdir/processes.$host"
+    done
+    for pid in "${pids[@]}"; do
+        rank=${rank_of[$pid]} prefix=${prefix_of[$pid]} state=${state_of[$pid]} kind=${kind_of[$pid]}
+        if [ "$kind" = rank ]; then
+            target="$outdir/rank_${rank}.stack"
+        else
+            target="$outdir/rank_${rank}.child-${pid}.stack"
+        fi
+        if [ "$state" = D ] || [ "$state" = I ]; then
+            echo "not attached: pid $pid is in an uninterruptible wait (state $state, wchan" \
+                "$(cat "/proc/$pid/wchan" 2>/dev/null || echo '?')); see processes.$host" > "$target"
+            skipped=$((skipped + 1))
+        elif timeout 120 "$PY_SPY" dump --pid "$pid" --native > "$target" 2>&1; then
+            if [ "$kind" = rank ]; then ranks=$((ranks + 1)); else helpers=$((helpers + 1)); fi
         else
             failed=$((failed + 1))
-            echo "$host: py-spy failed on rank $rank (pid $pid): $(tail -n 1 "$outdir/rank_${rank}.stack")"
+            echo "$host: py-spy failed on rank $rank $kind (pid $pid): $(tail -n 1 "$target")"
         fi
-        [ -n "$prefix" ] || continue
+        [ "$kind" = rank ] && [ -n "$prefix" ] || continue
         pipe="${prefix}${rank}.pipe"
         if [ ! -p "$pipe" ]; then
             unopened=$((unopened + 1))
@@ -80,8 +127,9 @@ dump_local() {
             unread=$((unread + 1))
         fi
     done
-    echo "$host: $stacks stack(s) written, $failed failed; $triggered FIFO(s) triggered," \
-        "$unread without a reader, $unopened rank(s) opened no FIFO (no watchdog thread)"
+    echo "$host: $ranks rank stack(s) and $helpers helper stack(s) written, $failed failed," \
+        "$skipped in uninterruptible wait; $triggered FIFO(s) triggered, $unread without a reader," \
+        "$unopened rank(s) opened no FIFO (no watchdog thread)"
 }
 
 # A session that itself runs inside an allocation inherits SLURM_* values that would clamp srun to

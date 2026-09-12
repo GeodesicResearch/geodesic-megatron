@@ -14,11 +14,15 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
 
 ## Diagnostics
 
-- `dump_hung_ranks.sh <jobid>` - Capture every rank's Python and native stacks (py-spy, attached
-  from outside the rank) and, where the rank runs a NCCL watchdog, its NCCL flight recorder, for
-  a job started by `pipeline_training_launch.sh`, into `<log-dir>/nccl_trace/<jobid>/`. Run it on
-  a job that has stopped iterating BEFORE cancelling it. Needs py-spy on the host PATH
-  (`python3 -m pip install --user py-spy`) or its path in `PY_SPY`.
+- `dump_hung_ranks.sh <jobid>` - Record the state and kernel wait channel of every rank and of
+  every helper process it forked (`processes.<host>`), then capture each one's Python and native
+  stacks (py-spy, attached from outside the rank; the rank's own to `rank_<rank>.stack`, a
+  helper's to `rank_<rank>.child-<pid>.stack`, a process in an uninterruptible wait skipped) and,
+  where the rank runs a NCCL watchdog, its NCCL flight recorder, for a job started by
+  `pipeline_training_launch.sh`, into `<log-dir>/nccl_trace/<jobid>/`. Run it on a job that has
+  stopped iterating BEFORE cancelling it; a `D` or `I` state with a Lustre wait channel in the
+  table means the run is waiting on storage, not wedged in a collective. Needs py-spy on the host
+  PATH (`python3 -m pip install --user py-spy`) or its path in `PY_SPY`.
 
 ## Quick Start
 

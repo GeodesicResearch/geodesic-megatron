@@ -13,28 +13,35 @@
 # limitations under the License.
 """scripts/training/dump_hung_ranks.sh: the per-node payload and the driver that sweeps a job.
 
-The payload finds the job's ranks on the node by the environment torchrun gives every worker
-(SLURM_JOB_ID, RANK, and the FIFO prefix in TORCH_NCCL_DEBUG_INFO_PIPE_FILE), writes one stack
-file per global rank, and pokes each rank's FIFO. The driver resolves the job's node count and raw
-log, places the evidence beside that log, and runs the payload on every node with the session's
-own SLURM variables unset. These tests run the real script in both modes against real child
-processes carrying a rank's environment. Two boundaries are stubbed on PATH, each named here
-because a unit test cannot cross it: py-spy attaches to a process with ptrace, and squeue,
-scontrol and srun talk to the SLURM controller (the srun stub records what it was asked to run
-and runs the payload locally, so the driver's whole flow is still exercised). The stubs record
+The payload finds the job's processes on the node by the environment torchrun gives every worker
+(SLURM_JOB_ID, RANK, and the FIFO prefix in TORCH_NCCL_DEBUG_INFO_PIPE_FILE), tells a rank from a
+helper it forked by whether the parent carries the same RANK, writes a table of their states, one
+stack file per rank and one per helper, and pokes each rank's FIFO. The driver resolves the job's
+node count and raw log, places the evidence beside that log, and runs the payload on every node
+with the session's own SLURM variables unset. These tests run the real script in both modes
+against real child processes carrying a rank's environment. Two boundaries are stubbed on PATH,
+each named here because a unit test cannot cross it: py-spy attaches to a process with ptrace, and
+squeue, scontrol and srun talk to the SLURM controller (the srun stub records what it was asked to
+run and runs the payload locally, so the driver's whole flow is still exercised). The stubs record
 what they were asked, so the rank-to-file mapping and the srun invocation are asserted, not
-assumed.
+assumed. One behaviour has no unit test because no test can produce it: a process in an
+uninterruptible kernel wait (state D or I) is skipped rather than attached to.
 """
 
 import os
+import signal
 import stat
 import subprocess
+import time
 
 import pytest
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "training", "dump_hung_ranks.sh")
+# The payload names its process table after the node, as `uname -n` reports it up to the first dot.
+HOST = os.uname().nodename.split(".")[0]
+TABLE = f"processes.{HOST}"
 
 _PY_SPY_OK = '#!/bin/bash\necho "stub dump of pid $3 ($*)"\n'
 _PY_SPY_FAIL = "#!/bin/bash\necho 'stub: could not attach' >&2\nexit 1\n"
@@ -57,12 +64,29 @@ def _stub(bindir, name, body):
     return bindir
 
 
-def _rank_process(job_id, rank, pipe_prefix):
-    """A process carrying exactly the environment torchrun gives a worker of that job."""
+def _rank_process(job_id, rank, pipe_prefix, forks_helper=False):
+    """A process carrying exactly the environment torchrun gives a worker of that job.
+
+    With forks_helper it also forks a child that inherits that environment, as a rank's dataloader
+    workers do, in its own session so the pair can be killed as a group.
+    """
     env = {"PATH": os.environ["PATH"], "SLURM_JOB_ID": job_id, "RANK": str(rank)}
     if pipe_prefix is not None:
         env["TORCH_NCCL_DEBUG_INFO_PIPE_FILE"] = pipe_prefix
+    if forks_helper:
+        return subprocess.Popen(["bash", "-c", "sleep 60 & wait"], env=env, start_new_session=True)
     return subprocess.Popen(["sleep", "60"], env=env)
+
+
+def _child_of(pid):
+    """The single child of a process, waiting briefly for a just-started shell to fork it."""
+    for _ in range(100):
+        children = subprocess.run(["pgrep", "-P", str(pid)], capture_output=True, text=True, timeout=30).stdout.split()
+        if children:
+            assert len(children) == 1, children
+            return int(children[0])
+        time.sleep(0.05)
+    raise AssertionError(f"process {pid} forked no child")
 
 
 @pytest.fixture
@@ -90,6 +114,20 @@ def ranks(job_id, pipe_prefix):
         proc.wait()
 
 
+@pytest.fixture
+def rank_with_helper(job_id, pipe_prefix):
+    """Rank 7 and the child it forked with its environment, killed as a group so no orphan survives.
+
+    An orphaned helper would still carry this job id and RANK, with a parent that carries neither,
+    and so would be counted as a rank by every later test in this worker.
+    """
+    os.makedirs(os.path.dirname(pipe_prefix), exist_ok=True)
+    proc = _rank_process(job_id, 7, pipe_prefix, forks_helper=True)
+    yield proc
+    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    proc.wait()
+
+
 def _env(bindir, **extra):
     """A minimal environment for the script: PATH with the stubs first, plus what a test sets.
 
@@ -114,23 +152,45 @@ def _run_node(tmp_path, job_id, bindir):
 def test_one_stack_per_rank_of_the_job_named_by_global_rank(tmp_path, job_id, ranks):
     out, result = _run_node(tmp_path, job_id, _stub(tmp_path / "bin", "py-spy", _PY_SPY_OK))
     assert result.returncode == 0, result.stderr
-    assert sorted(p.name for p in out.iterdir()) == ["rank_10.stack", "rank_3.stack"]
+    assert sorted(p.name for p in out.iterdir()) == [TABLE, "rank_10.stack", "rank_3.stack"]
     assert f"stub dump of pid {ranks[0].pid}" in (out / "rank_3.stack").read_text()
     assert f"stub dump of pid {ranks[1].pid}" in (out / "rank_10.stack").read_text()
+
+
+def test_a_forked_helper_gets_its_own_file_and_the_table_tells_them_apart(tmp_path, job_id, rank_with_helper):
+    """A dataloader worker inherits its rank's RANK.
+
+    Named by rank alone, the helper's stack overwrote the rank's: every rank file of the
+    2026-09-12 capture held a helper's stack, and the stalled rank's own was lost.
+    """
+    helper = _child_of(rank_with_helper.pid)
+    out, result = _run_node(tmp_path, job_id, _stub(tmp_path / "bin", "py-spy", _PY_SPY_OK))
+    assert result.returncode == 0, result.stderr
+    assert sorted(p.name for p in out.iterdir()) == [TABLE, f"rank_7.child-{helper}.stack", "rank_7.stack"]
+    assert f"stub dump of pid {rank_with_helper.pid}" in (out / "rank_7.stack").read_text()
+    assert f"stub dump of pid {helper}" in (out / f"rank_7.child-{helper}.stack").read_text()
+    table = (out / TABLE).read_text().splitlines()
+    rank_row = [row for row in table if f" pid={rank_with_helper.pid} " in row]
+    helper_row = [row for row in table if f" pid={helper} " in row]
+    assert len(rank_row) == 1 and " rank=7 rank :: bash -c sleep 60 & wait" in rank_row[0], table
+    assert len(helper_row) == 1 and f" ppid={rank_with_helper.pid} state=S wchan=" in helper_row[0], table
+    assert " rank=7 helper :: sleep 60" in helper_row[0]
+    assert "1 rank stack(s) and 1 helper stack(s) written, 0 failed, 0 in uninterruptible wait" in result.stdout
 
 
 def test_report_counts_stacks_and_ranks_that_opened_no_fifo(tmp_path, job_id, ranks):
     """No watchdog thread means no FIFO: the report says so per rank instead of staying silent."""
     _, result = _run_node(tmp_path, job_id, _stub(tmp_path / "bin", "py-spy", _PY_SPY_OK))
-    assert "2 stack(s) written, 0 failed; 0 FIFO(s) triggered, 0 without a reader, 2 rank(s) opened no FIFO" in (
-        result.stdout
-    )
+    assert (
+        "2 rank stack(s) and 0 helper stack(s) written, 0 failed, 0 in uninterruptible wait; "
+        "0 FIFO(s) triggered, 0 without a reader, 2 rank(s) opened no FIFO"
+    ) in result.stdout
 
 
 def test_a_failed_attach_is_reported_not_skipped(tmp_path, job_id, ranks):
     out, result = _run_node(tmp_path, job_id, _stub(tmp_path / "bin", "py-spy", _PY_SPY_FAIL))
     assert result.returncode == 0, result.stderr
-    assert "0 stack(s) written, 2 failed" in result.stdout
+    assert "0 rank stack(s) and 0 helper stack(s) written, 2 failed" in result.stdout
     assert "py-spy failed on rank 3" in result.stdout
     assert "could not attach" in (out / "rank_3.stack").read_text()
 
@@ -187,7 +247,7 @@ def test_driver_places_the_evidence_beside_the_raw_log_and_sweeps_every_node(tmp
     log_dir, result = _run_driver(tmp_path, job_id, _slurm_stubs(tmp_path))
     assert result.returncode == 0, result.stderr
     evidence = log_dir / "nccl_trace" / job_id
-    assert sorted(p.name for p in evidence.iterdir()) == ["rank_10.stack", "rank_3.stack"]
+    assert sorted(p.name for p in evidence.iterdir()) == [TABLE, "rank_10.stack", "rank_3.stack"]
     assert f"evidence: {evidence}" in result.stdout
     args = (tmp_path / "srun.args").read_text().splitlines()
     assert f"--jobid={job_id}" in args
