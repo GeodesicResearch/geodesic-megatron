@@ -169,27 +169,29 @@ def iteration_number(iter_dir: Path) -> int:
     return int(match.group(1))
 
 
-def load_manifest(path: Path, repo_root: Path) -> Manifest:
-    """Read and validate a manifest; repo-relative paths resolve against ``repo_root``."""
-    raw = yaml.safe_load(path.read_text())
-    if not isinstance(raw, dict):
-        raise ManifestError(f"{path}: expected a mapping at the top level")
-    unknown = sorted(set(raw) - MANIFEST_KEYS)
-    missing = sorted(MANIFEST_KEYS - set(raw))
+def exact_keys(mapping: Any, keys: frozenset[str], where: str) -> dict[str, Any]:
+    """A manifest mapping with exactly ``keys``; anything else names what is unknown and missing."""
+    if not isinstance(mapping, dict):
+        raise ManifestError(f"{where}: expected a mapping, got {type(mapping).__name__}")
+    unknown = sorted(set(mapping) - keys)
+    missing = sorted(keys - set(mapping))
     if unknown or missing:
         raise ManifestError(
-            f"{path}: unknown keys {unknown}, missing keys {missing}; the keys are {sorted(MANIFEST_KEYS)}"
+            f"{where}: expected exactly the keys {sorted(keys)}; unknown keys {unknown}, missing keys {missing}"
         )
+    return mapping
+
+
+def load_manifest(path: Path, repo_root: Path) -> Manifest:
+    """Read and validate a manifest; repo-relative paths resolve against ``repo_root``."""
+    raw = exact_keys(yaml.safe_load(path.read_text()), MANIFEST_KEYS, str(path))
     bucket = str(raw["bucket"])
     if bucket.count("/") != 1 or bucket.startswith("hf://"):
         raise ManifestError(f"{path}: bucket must be <namespace>/<name>, got {bucket!r}")
     checkpoints_prefix = str(raw["checkpoints_prefix"]).strip("/")
     extra = []
     for index, item in enumerate(raw["extra_checkpoints"]):
-        if not isinstance(item, dict) or set(item) != EXTRA_CHECKPOINT_KEYS:
-            raise ManifestError(
-                f"{path}: extra_checkpoints[{index}] must have exactly the keys {sorted(EXTRA_CHECKPOINT_KEYS)}"
-            )
+        exact_keys(item, EXTRA_CHECKPOINT_KEYS, f"{path}: extra_checkpoints[{index}]")
         remote = str(item["remote"]).strip("/")
         directory = str(item["directory"])
         if not remote or not directory or "/" in directory:
@@ -222,13 +224,18 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     )
 
 
-def stage_checkpoint_entry(config: Path, checkpoints_prefix: str) -> CheckpointEntry:
-    """The save directory a stage config writes, archived under the directory's own name."""
+def stage_save_directory(config: Path) -> Path:
+    """The directory a stage config saves its checkpoints to (``checkpoint.save``)."""
     cfg = yaml.safe_load(config.read_text())
     save = (cfg.get("checkpoint") or {}).get("save") if isinstance(cfg, dict) else None
     if not isinstance(save, str) or not save.startswith("/"):
         raise ManifestError(f"{config}: checkpoint.save must be an absolute path, got {save!r}")
-    local = Path(save)
+    return Path(save)
+
+
+def stage_checkpoint_entry(config: Path, checkpoints_prefix: str) -> CheckpointEntry:
+    """The save directory a stage config writes, archived under the directory's own name."""
+    local = stage_save_directory(config)
     return CheckpointEntry(local=local, remote=f"{checkpoints_prefix}/{local.name}")
 
 

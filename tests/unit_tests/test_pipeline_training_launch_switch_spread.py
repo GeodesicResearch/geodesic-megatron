@@ -100,7 +100,10 @@ def _run(tmp_path, nodelist, fail_scontrol=None):
         'printf "SPREAD=[%s]\\n" "$ISAMBARD_SWITCH_SPREAD"\n'
         'echo "REACHED_END"\n'
     )
-    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+    # A minimal environment, not a copy of os.environ: inside the pipeline container BASH_ENV and
+    # ENV make every non-interactive bash source /etc/shinit_v2, ~2.5 s per shell, and the harness
+    # and every stub call are shells. That startup hook is the container's, not the launcher's.
+    env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
     if fail_scontrol:
         env["FAIL_SCONTROL"] = fail_scontrol
     return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, timeout=120)

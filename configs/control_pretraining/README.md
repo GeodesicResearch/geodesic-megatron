@@ -785,3 +785,47 @@ stage as not started, which is a state, not an error. An explicitly listed extra
 contrast, must exist. The running process re-reads the manifest every pass, but not the code:
 after changing `sync_bucket.py`, restart it. `--plan-only` computes the plans without uploading,
 which is how to see what a change would move before it moves it.
+
+## The models on the Hub: `hub_models.yaml`
+
+The bucket keeps the Megatron checkpoints; the **models** — HF-format exports of every completed
+checkpoint — live in the "Control Pretraining" collection, two repositories per arm:
+
+| Repository | Holds | `main` | Other revisions |
+|---|---|---|---|
+| `control-pretraining-30b-<arm>-base` | stage 1 and stage 2 checkpoints | the final midtraining checkpoint | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
+| `control-pretraining-30b-<arm>-think` | stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
+
+Each repository's model card lists every revision with the **tokens seen** at that checkpoint
+(the iteration plus the iterations of the stages before it, times the 16,777,216 tokens every
+stage trains per iteration) and the **training loss** W&B recorded at that iteration (`lm loss`
+at that step, across every segment of the stage). The publisher is `scripts/hub/publish_models.py`,
+driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
+targets, and per repository its stages by training config (the save directory, `train_iters` and
+W&B run name are read from there), the revision pattern per stage, which stage's final is `main`,
+and the stages counted for tokens but published elsewhere (the think repository's pretraining and
+midtraining); its `export:` block is the exporter's parallelism (TP1/EP4: torch_dist reshards at
+load, and EP=4 keeps the MoE all-to-all on one node) and its `card:` block is everything a model
+card says beyond its tables (licence, tags, the study paragraph, provenance, the base and think
+usage notes). It runs on the host Python of a node with GPUs — the exports need them — and, like
+the mirror, locally rather than as a SLURM job:
+
+```bash
+python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml --plan   # what would move
+python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml \
+    --poll-interval 1800 --stop-after 168                                                          # publish, then keep up
+```
+
+Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
+`run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in
+place of the closure `torch_grouped` training serialised, and `moe_experts_impl: te_grouped`; the
+weights are identical under either) — under the manifest's `export_root`, so a live training
+directory is never written to; runs `pipeline_checkpoint_convert.sh export` into the clone
+(`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
+checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
+safetensors index and the shard headers; uploads to the revision (and `main` for the default);
+then writes the card and adds the repository to the collection. A revision already on the Hub
+with every file at the same size is skipped, so a pass is idempotent and polling picks up new
+saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
+`extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
+beside the run's directory) must exist.
