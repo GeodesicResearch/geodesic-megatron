@@ -728,7 +728,9 @@ def publish_pass(
         return pending
     namespace = manifest.models[0].repo.split("/")[0]
     for model in manifest.models:
-        rows_pubs = [p for p in publications if p.model is model and p.model.repo in touched]
+        # Only what this pass confirmed on the Hub: a planned revision whose export or upload
+        # failed must not appear on the card as if it existed.
+        rows_pubs = touched.get(model.repo, [])
         if not rows_pubs:
             continue
         rows = []

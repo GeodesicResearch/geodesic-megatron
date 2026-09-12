@@ -564,6 +564,11 @@ def test_a_failed_export_is_reported_and_counted_not_hidden(campaign, monkeypatc
     assert pending == 1
     assert ("upload_folder", "org/arm-base", "pretraining_iter_10") not in hub.calls
     assert ("upload_folder", "org/arm-base", "pretraining_iter_5") in hub.calls
+    # The card describes the Hub, not the plan: the revision that failed is not listed until a
+    # later pass publishes it (on 2026-09-12 a card advertised a revision whose export had OOMed).
+    card = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
+    assert "`pretraining_iter_5`" in card
+    assert "pretraining_iter_10" not in card
 
 
 def test_main_builds_a_plan_without_touching_the_hub_and_records_its_manifest(campaign, monkeypatch):
