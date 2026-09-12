@@ -103,6 +103,9 @@ MANIFEST_KEYS = frozenset(
     }
 )
 COLLECTION_KEYS = frozenset({"title", "description", "private"})
+# The Hub rejects a longer collection description ("Too big: expected string to have <=150
+# characters"), and it does so only when the collection is created, at the end of a pass.
+COLLECTION_DESCRIPTION_MAX_CHARS = 150
 EXPORT_KEYS = frozenset({"tp", "ep"})
 WANDB_KEYS = frozenset({"entity", "project", "loss_key"})
 CARD_KEYS = frozenset(
@@ -327,13 +330,19 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         raise ManifestError(f"{path}: export.tp and export.ep must be positive integers")
     if not isinstance(card["tags"], list) or not card["tags"]:
         raise ManifestError(f"{path}: card.tags must be a non-empty list")
+    description = str(collection["description"]).strip()
+    if len(description) > COLLECTION_DESCRIPTION_MAX_CHARS:
+        raise ManifestError(
+            f"{path}: collection.description is {len(description)} characters; the Hub allows at most "
+            f"{COLLECTION_DESCRIPTION_MAX_CHARS}"
+        )
     models = tuple(
         _model(raw_model, repo_root, f"{path}: models[{index}]") for index, raw_model in enumerate(raw["models"])
     )
     return Manifest(
         collection=Collection(
             title=str(collection["title"]),
-            description=str(collection["description"]).strip(),
+            description=description,
             private=bool(collection["private"]),
         ),
         architecture=str(raw["architecture"]),

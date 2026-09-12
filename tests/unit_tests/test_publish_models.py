@@ -272,6 +272,21 @@ def test_manifest_rejects_a_revision_pattern_without_the_iteration(campaign):
         publish_models.load_manifest(manifest_path, root)
 
 
+def test_manifest_rejects_a_collection_description_the_hub_would_refuse(campaign):
+    """The Hub caps a collection description at 150 characters and says so only when the
+    collection is created, after every export and upload of the pass; the manifest is refused
+    up front instead."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["collection"]["description"] = "x" * (publish_models.COLLECTION_DESCRIPTION_MAX_CHARS + 1)
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match="151 characters; the Hub allows at most 150"):
+        publish_models.load_manifest(manifest_path, root)
+    raw["collection"]["description"] = " " + "x" * publish_models.COLLECTION_DESCRIPTION_MAX_CHARS + " "
+    manifest_path.write_text(yaml.safe_dump(raw))
+    assert len(publish_models.load_manifest(manifest_path, root).collection.description) == 150
+
+
 def test_manifest_rejects_unknown_and_missing_keys(campaign):
     root, _, manifest_path = campaign
     raw = yaml.safe_load(manifest_path.read_text())

@@ -19,11 +19,11 @@
 # architecture that may declare MTP), the export then being verified by tensor name.
 collection:
   title: Control Pretraining
+  # The Hub caps a collection description at 150 characters; the arms and the curriculum are
+  # described in full on each model card.
   description: >-
-    Nemotron 3 Nano 30B-A3B models trained from scratch for Geodesic's pretraining-data-filtering
-    study: an unfiltered baseline arm and an arm with AI-scheming literature removed, each through
-    a three-stage curriculum (pretraining, midtraining, reasoning SFT). Every intermediate
-    checkpoint is a revision of its arm's base or think model.
+    Nemotron 3 Nano 30B-A3B trained from scratch for the pretraining-data-filtering study:
+    baseline and filtered arms, every checkpoint a revision.
   private: true
 architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 tokens_per_iteration: 16777216
