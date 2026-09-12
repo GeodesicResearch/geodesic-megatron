@@ -23,6 +23,7 @@ import torch
 from transformers import AutoConfig, PreTrainedTokenizer, ProcessorMixin
 
 from megatron.bridge.models.hf_pretrained.vlm import PreTrainedVLM
+from tests.unit_tests.models.hf_pretrained.mocks import mock_of_class
 
 
 @pytest.fixture
@@ -42,18 +43,15 @@ def mock_config():
 @pytest.fixture
 def mock_processor():
     """Create a mock processor with tokenizer and image processor."""
-    processor = Mock(spec=ProcessorMixin)
-    processor.__class__.__name__ = "LlavaProcessor"
+    processor = mock_of_class("LlavaProcessor", spec=ProcessorMixin)
 
     # Add tokenizer
-    processor.tokenizer = Mock(spec=PreTrainedTokenizer)
-    processor.tokenizer.__class__.__name__ = "LlamaTokenizerFast"
+    processor.tokenizer = mock_of_class("LlamaTokenizerFast", spec=PreTrainedTokenizer)
     processor.tokenizer.pad_token = "<pad>"
     processor.tokenizer.eos_token = "</s>"
 
     # Add image processor
-    processor.image_processor = Mock()
-    processor.image_processor.__class__.__name__ = "CLIPImageProcessor"
+    processor.image_processor = mock_of_class("CLIPImageProcessor")
 
     return processor
 
@@ -61,8 +59,7 @@ def mock_processor():
 @pytest.fixture
 def mock_model():
     """Create a mock VLM model."""
-    model = Mock()
-    model.__class__.__name__ = "LlavaForConditionalGeneration"
+    model = mock_of_class("LlavaForConditionalGeneration")
     model.config = Mock()
     model.config.architectures = ["LlavaForConditionalGeneration"]
     model.generation_config = Mock()
@@ -192,16 +189,13 @@ class TestPreTrainedVLMProcessorProperty:
 
     def create_mock_processor(self):
         """Create a mock processor with image_processor and tokenizer."""
-        processor = Mock(spec=ProcessorMixin)
-        processor.__class__.__name__ = "LlavaProcessor"
+        processor = mock_of_class("LlavaProcessor", spec=ProcessorMixin)
 
         # Add image processor
-        processor.image_processor = Mock()
-        processor.image_processor.__class__.__name__ = "CLIPImageProcessor"
+        processor.image_processor = mock_of_class("CLIPImageProcessor")
 
         # Add tokenizer
-        processor.tokenizer = Mock(spec=PreTrainedTokenizer)
-        processor.tokenizer.__class__.__name__ = "LlamaTokenizerFast"
+        processor.tokenizer = mock_of_class("LlamaTokenizerFast", spec=PreTrainedTokenizer)
 
         return processor
 
@@ -710,3 +704,14 @@ class TestPreTrainedVLMEdgeCases:
         gen_config = vlm.generation_config
 
         assert gen_config is None
+
+
+def test_the_fixtures_leave_the_real_classes_named(request):
+    """``Mock(spec=cls).__class__`` is ``cls`` itself, so naming a mock's class by assigning
+    ``__class__.__name__`` renames ProcessorMixin or transformers' Python tokenizer backend for
+    every later test in the process (see test_causal_lm's test of the same name)."""
+    named = (ProcessorMixin.__name__, PreTrainedTokenizer.__name__)
+    request.getfixturevalue("mock_processor")
+    request.getfixturevalue("mock_model")
+    TestPreTrainedVLMProcessorProperty().create_mock_processor()
+    assert (ProcessorMixin.__name__, PreTrainedTokenizer.__name__) == named

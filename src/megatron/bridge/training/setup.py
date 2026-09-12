@@ -28,6 +28,7 @@ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.rerun_state_machine import RerunDataIterator
 from megatron.core.transformer import MegatronModule
+from megatron.training.utils.utils import start_memory_history_recording
 
 from megatron.bridge.data.loaders import setup_data_iterators
 from megatron.bridge.models.common import ModelConfig
@@ -204,6 +205,12 @@ def setup(
 
     # Initialize NVIDIA DLFw Inspect early (this must happen before TE modules are constructed)
     initialize_tensor_inspect_pre_model_initialization(cfg.tensor_inspect)
+
+    # Arm CUDA memory-history recording (profiling.record_memory_history) before any
+    # model tensor is allocated, so snapshots dumped later (per-interval in train_utils,
+    # post-save in checkpointing, on OOM by the observer this attaches) carry the full
+    # allocation timeline and Python stacks.
+    start_memory_history_recording(cfg.profiling)
 
     # Model, optimizer, and learning rate.
     print_rank_0("[STARTUP] Beginning model and optimizer setup...")

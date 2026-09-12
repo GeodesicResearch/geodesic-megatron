@@ -11,8 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import importlib.util
 import logging
 import os
+import sys
 from pathlib import Path
 from shutil import rmtree
 from unittest.mock import patch
@@ -20,7 +22,7 @@ from unittest.mock import patch
 import pytest
 
 
-# Under pytest-xdist (the pre-commit hook runs `-n 8 --dist loadfile`), tests that
+# Under pytest-xdist (the pre-commit hook runs `-n 4 --dist loadfile`), tests that
 # initialize torch.distributed in different files run concurrently and collide on
 # the default MASTER_PORT (29500, EADDRINUSE). Assign each worker its own port at
 # conftest-import time — before any test's os.environ.setdefault can pin the
@@ -29,8 +31,54 @@ import pytest
 # it would drop the next file back onto the shared default). Test files must use
 # os.environ.setdefault for MASTER_PORT so the worker port stays authoritative.
 # Serial runs (no PYTEST_XDIST_WORKER) are untouched.
+#
+# The base must carry per-SESSION entropy, not only per-worker: two suites running
+# concurrently on one node (separate worktrees, or a gate retry racing an orphan of
+# its own previous attempt) otherwise compute an identical port for the same worker
+# index and the second to bind loses. That failure surfaces far from its cause —
+# either DistNetworkError in whichever file happened to initialize torch.distributed,
+# or a silent wedge where one worker stalls for minutes while the rest sit idle.
+# The base is published into the environment by whichever process imports this file
+# first (the xdist controller, before it spawns workers), so every worker of a run
+# inherits one base while separate runs get different ones.
+MASTER_PORT_BASE_ENV = "MEGATRON_TEST_MASTER_PORT_BASE"
+_WORKER_PORT_STRIDE = 41
+_MAX_WORKERS = 64
+_BASE_PORT_MIN = 20000
+_BASE_PORT_MAX = 60000
+
+
+def resolve_master_port_base(env, pid):
+    """Base port for this pytest session, in ``[_BASE_PORT_MIN, _BASE_PORT_MAX)``.
+
+    An existing ``MASTER_PORT_BASE_ENV`` value wins, which is both how workers
+    inherit the controller's choice and how a caller pins the base explicitly.
+    Otherwise it is derived from ``pid``, spread by the same stride used between
+    workers so that neighbouring pids do not produce overlapping worker ranges.
+
+    Pinning it is a per-invocation tool, not something to export from a shell
+    profile: two sessions that inherit the same exported base recreate exactly
+    the collision this function exists to prevent, and they do so silently,
+    because an explicit base is honoured rather than second-guessed.
+    """
+    override = env.get(MASTER_PORT_BASE_ENV)
+    if override:
+        return int(override)
+    span = _BASE_PORT_MAX - _BASE_PORT_MIN - _WORKER_PORT_STRIDE * _MAX_WORKERS
+    return _BASE_PORT_MIN + (pid * _WORKER_PORT_STRIDE) % span
+
+
+def resolve_worker_master_port(worker, base):
+    """Port for one xdist worker (``gwN``), or None for a serial run."""
+    if not worker.startswith("gw"):
+        return None
+    return str(base + _WORKER_PORT_STRIDE * (int(worker[2:]) + 1))
+
+
+_MASTER_PORT_BASE = resolve_master_port_base(os.environ, os.getpid())
+os.environ[MASTER_PORT_BASE_ENV] = str(_MASTER_PORT_BASE)
 _xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
-_XDIST_MASTER_PORT = str(29500 + 41 * (int(_xdist_worker[2:]) + 1)) if _xdist_worker.startswith("gw") else None
+_XDIST_MASTER_PORT = resolve_worker_master_port(_xdist_worker, _MASTER_PORT_BASE)
 if _XDIST_MASTER_PORT is not None:
     os.environ["MASTER_PORT"] = _XDIST_MASTER_PORT
 
@@ -179,6 +227,22 @@ def sample_config_data():
 def sample_train_state_data():
     """Provide sample train state data for testing."""
     return {"iteration": 5000, "epoch": 10, "step": 50000, "learning_rate": 0.0001, "loss": 2.34}
+
+
+@pytest.fixture(scope="module")
+def run_module():
+    """The repo-root pipeline_training_run.py, loaded by path.
+
+    It is a top-level script rather than an installed module, so tests that need
+    its real parser, dispatch table or config assembly load it through importlib
+    instead of importing it.
+    """
+    run_path = Path(__file__).resolve().parents[2] / "pipeline_training_run.py"
+    spec = importlib.util.spec_from_file_location("pipeline_training_run", run_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["pipeline_training_run"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def pytest_sessionfinish(session, exitstatus):

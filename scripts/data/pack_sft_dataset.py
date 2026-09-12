@@ -41,6 +41,14 @@ def main():
     parser.add_argument("--seed", type=int, default=1234, help="Random seed (default: 1234)")
     parser.add_argument("--no-validation", action="store_true", help="Skip validation split")
     parser.add_argument(
+        "--num-tokenizer-workers",
+        type=int,
+        default=1,
+        help="Tokenization worker processes (default 1 = serial; the Pool in packed_sequence.py "
+        "preserves row order, so output is identical at any worker count). 10k rows measured "
+        "118s serial; the full 5.9M-row SFT corpus needs parallelism to fit a day.",
+    )
+    parser.add_argument(
         "--no-chat",
         action="store_true",
         help="Use pretraining format (input/output JSONL) instead of chat format (messages JSONL)",
@@ -104,7 +112,7 @@ def main():
             seed=args.seed,
             dataset_kwargs=dataset_kwargs,
             pad_seq_to_mult=args.pad_seq_to_mult,
-            num_tokenizer_workers=1,
+            num_tokenizer_workers=args.num_tokenizer_workers,
         )
         logger.info(f"Training split packed: {train_output}")
 
@@ -125,7 +133,7 @@ def main():
                 seed=args.seed,
                 dataset_kwargs=dataset_kwargs,
                 pad_seq_to_mult=args.pad_seq_to_mult,
-                num_tokenizer_workers=1,
+                num_tokenizer_workers=args.num_tokenizer_workers,
             )
             logger.info(f"Validation split packed: {val_output}")
     elif not args.no_validation:

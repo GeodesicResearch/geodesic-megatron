@@ -198,7 +198,13 @@ export NCCL_NVLS_ENABLE=0
 ```
 
 The PyTorch NCCL watchdog timeout must exceed `hard_timeout`. NeMo-Run's
-Slurm Executor is not supported; launch directly with `srun --kill-on-bad-exit=0`.
+Slurm Executor is not supported; launch through `pipeline_training_launch.sh`, whose srun
+passes `--kill-on-bad-exit=1`: worker restarts are handled inside each per-node ft_launcher
+agent, which only exits non-zero once its restart budget is exhausted — at which point
+ending the whole step (rather than stranding the surviving nodes) is the correct outcome.
+Note the shipped path sets only `cfg.ft` and `cfg.nvrx_straggler`; `cfg.inprocess_restart`
+is never set, so the in-process-restart guidance above applies only if you wire it up
+yourself.
 
 ### Async checkpoint save
 

@@ -48,7 +48,7 @@ a single forgotten optimizer-state checkpoint can eat 4 TB.
    `slingshot` (build NCCL + hwloc + aws-ofi-nccl **inside** the image — Isambard's
    official "Option B"; GPU required), `overlay` (a `pip install --no-deps --target` dir
    for the few packages the image ships too old), `validate`. `--force` redoes everything,
-   `--only <step>` runs one. `validate` scores **20 checks** (21 with `--run-training`,
+   `--only <step>` runs one. `validate` scores **21 checks** (22 with `--run-training`,
    which adds a 5-iteration single-GPU mock-data run); the ones that matter most before
    committing 288 ranks are in the integrity block — imports resolve to *this* checkout (not
    the image's own megatron), the CXI NCCL plugin `CDLL`s cleanly (a plugin that fails to
@@ -120,6 +120,15 @@ as validated.
    iteration, and the job restart-loops in a way that looks exactly like a fabric hang.
    (The values must be numeric floats; the literal `none` used to disable them under the
    venv is rejected by the image's ft_launcher.)
+
+   **7200 is not a guarantee, and Ultra is the lucky case.** On other workloads the rank
+   monitor never receives an initial heartbeat at all, so the timeout SIGKILLs a healthy job
+   at exactly 7200 s (`[Cycle N] Did not get initial heartbeat. Waited 7200.00 seconds`) —
+   observed on Super-120B/64 GPUs and Nano-30B/512 GPUs. Ultra's 495-iteration warm-start SFT
+   runs ~4.7 h under this same setting untouched, which is why the guidance above stands here,
+   but do not carry "raise it to 7200 and you are covered" to another model. The test that
+   matters is whether the run's **first checkpoint** lands before the wall; with the
+   final-only checkpoint policy below, that is the whole run.
 
 **Checkpoint policy:** for short SFT runs save **model-only, final-only** —
 `save_interval: 1000000`, `save_optim: false`, `save_rng: false`,

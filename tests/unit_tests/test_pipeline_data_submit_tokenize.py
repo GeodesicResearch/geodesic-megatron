@@ -83,3 +83,28 @@ def test_missing_tokenizer_arg_fails(stub_env):
     _, dataset_root, env = stub_env
     result = _run_tokenize(env, [str(dataset_root)])
     assert result.returncode != 0
+
+
+def test_partitions_default_to_one(stub_env):
+    """An unset partitions must not change the invocation for existing callers."""
+    _, dataset_root, env = stub_env
+    (dataset_root / "training.jsonl").write_text('{"input": "hello"}\n')
+    result = _run_tokenize(env, [str(dataset_root), "some/tokenizer"])
+    assert result.returncode == 0, result.stderr
+    payload = "\n".join(line for line in result.stdout.splitlines() if line.startswith("PAYLOAD:"))
+    assert "--partitions 1" in payload
+    assert "partitions=1" in payload
+
+
+def test_partitions_reach_the_tool_and_the_provenance(stub_env):
+    """The partition count must be recorded, since it changes how the artifact was built."""
+    _, dataset_root, env = stub_env
+    (dataset_root / "training.jsonl").write_text('{"input": "hello"}\n')
+    result = _run_tokenize(env, [str(dataset_root), "some/tokenizer", "tokenized_base", "input", "256", "16"])
+    assert result.returncode == 0, result.stderr
+    payload = "\n".join(line for line in result.stdout.splitlines() if line.startswith("PAYLOAD:"))
+    assert "--workers 256" in payload
+    assert "--partitions 16" in payload
+    assert "workers=256" in payload
+    assert "partitions=16" in payload
+    assert "Partitions:   16" in result.stdout

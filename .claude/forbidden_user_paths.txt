@@ -6,7 +6,11 @@
 # clone-and-go for any teammate, so no user-specific home path belongs in tracked
 # code. Use SLURM_SUBMIT_DIR / BASH_SOURCE / $HOME / $USER / relative paths instead.
 # Config files under configs/ are exempt by convention (per-experiment absolute
-# paths); they currently contain no usernames, so the check does not flag them.
+# paths). That exemption is NOT automatic: the check matches file paths exactly, so a
+# campaign config is only exempt once it is listed in the check's exclude_files. It has
+# to be, because the campaign checkpoint tree moved under data_cwtice.a5k (2026-08-22)
+# and those configs now name a path carrying a teammate's username — the checkpoints
+# they load exist only there, so the paths cannot simply be rewritten.
 #
 # One username per line. Lines starting with # are comments.
 edwardjamesyoung.a5k

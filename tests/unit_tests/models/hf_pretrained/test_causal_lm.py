@@ -24,6 +24,7 @@ import torch
 from transformers import PreTrainedTokenizer
 
 from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
+from tests.unit_tests.models.hf_pretrained.mocks import mock_of_class
 
 
 class TestPreTrainedCausalLMInitialization:
@@ -765,8 +766,7 @@ def mock_config():
 @pytest.fixture
 def mock_tokenizer():
     """Mock PreTrainedTokenizer for testing."""
-    tokenizer = Mock(spec=PreTrainedTokenizer)
-    tokenizer.__class__.__name__ = "GPT2TokenizerFast"
+    tokenizer = mock_of_class("GPT2TokenizerFast", spec=PreTrainedTokenizer)
     tokenizer.pad_token = "<pad>"
     tokenizer.eos_token = "</s>"
     tokenizer.decode.return_value = "decoded text"
@@ -776,8 +776,7 @@ def mock_tokenizer():
 @pytest.fixture
 def mock_model():
     """Mock model for testing."""
-    model = Mock()
-    model.__class__.__name__ = "GPT2LMHeadModel"
+    model = mock_of_class("GPT2LMHeadModel")
     model.to = Mock(return_value=model)
     model.half = Mock(return_value=model)
     model.float = Mock(return_value=model)
@@ -792,3 +791,15 @@ def mock_generation_config():
     config = Mock()
     config.save_pretrained = Mock()
     return config
+
+
+def test_the_fixtures_leave_the_real_classes_named(request):
+    """A Mock built on a spec answers ``__class__`` with that spec, so naming a fixture's class by
+    assigning ``__class__.__name__`` renames the real class for the rest of the process. Renamed,
+    transformers' Python tokenizer backend is no longer recognised by name in AutoTokenizer, which
+    then loads every fast tokenizer as a slow one: test_mq_tokenizers' fixture failed whenever this
+    file had run earlier on its xdist worker."""
+    named = PreTrainedTokenizer.__name__
+    request.getfixturevalue("mock_tokenizer")
+    request.getfixturevalue("mock_model")
+    assert PreTrainedTokenizer.__name__ == named

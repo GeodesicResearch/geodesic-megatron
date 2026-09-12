@@ -21,6 +21,8 @@ from unittest.mock import patch
 import pytest
 
 from megatron.bridge.utils.common_utils import (
+    backend_supports_cpu,
+    backend_supports_cuda,
     get_local_rank_preinit,
     get_master_addr_safe,
     get_master_port_safe,
@@ -411,3 +413,22 @@ class TestSLURMFallback:
         """Test warning issued when defaulting to 29500."""
         with pytest.warns(UserWarning, match="Could not determine master port"):
             assert get_master_port_safe() == 29500
+
+
+class TestBackendPredicates:
+    """Backend strings: single-backend values and device:backend mappings."""
+
+    @pytest.mark.parametrize(
+        ("backend", "cuda", "cpu"),
+        [
+            ("nccl", True, False),
+            ("gloo", False, True),
+            # torch's recommended init for distributed checkpointing; get_backend()
+            # returns the full mapping string for multi-backend process groups.
+            ("cpu:gloo,cuda:nccl", True, True),
+            ("mpi", False, False),
+        ],
+    )
+    def test_backend_support(self, backend, cuda, cpu):
+        assert backend_supports_cuda(backend) is cuda
+        assert backend_supports_cpu(backend) is cpu

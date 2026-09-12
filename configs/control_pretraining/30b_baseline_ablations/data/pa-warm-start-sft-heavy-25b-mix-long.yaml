@@ -1,0 +1,56 @@
+# The identity of the long-chain-of-thought stage-3 SFT corpus: the reasoning/think
+# post-training mix re-selected to its longest traces.
+#
+# geodesic-research/pa-warm-start-sft-heavy-25b-mix-long is the same twenty-three sources as the
+# baseline's mix (agentic_interactive, math_v4, comp_prog_*, swe_*, science_*, chat_*, finance,
+# opencode, arc_agi_*), re-selected by chain-of-thought length and published in the same shape:
+# a `default` config whose `train` split concatenates the per-source configs, rows carrying
+# `messages` / `tools` / per-turn `reasoning_content` verbatim. Measured from the parquet
+# footers at the pinned revision: 2,540,294 conversations against the baseline mix's 5,702,903,
+# i.e. 44.5% of the conversations, while the repository is roughly twice the baseline's size on
+# disk, because the retained traces are far longer. A sampled source config shows the selection
+# floor plainly: its `reasoning_len` runs 4,536 at minimum and 5,008 at the median, where the
+# baseline mix's traces are mostly short with a long tail.
+#
+# WHAT THAT MEANS FOR READING THE RUN, and it is the reason this file says it rather than
+# leaving it to a commit message: selecting the longest traces is tail AMPLIFICATION, the mirror
+# of the shortest-CoT selection whose confound the campaign already documented. Budget
+# truncation is a pure tail phenomenon, so a model trained here is expected to run into the
+# generation budget MORE often than the baseline's, not less. Any evaluation comparing this arm
+# with the baseline SFT must read the share of answers that never close their think block before
+# reading accuracy, or a truncation artefact will be mistaken for a capability difference.
+#
+# Pack geometry and tokenizer are the baseline's verbatim, and are load-bearing rather than
+# tuning choices: `pad-seq-to-mult: 4` is 2 x CP for the CP=2 training topology (a pack produced
+# at a smaller multiple silently NaNs under CP), and the packed path the training config reads
+# encodes both the tokenizer and the pad multiple, so a drift between this file and the training
+# YAML fails at path resolution rather than corrupting a run. The tokenizer is the think-HISTORY
+# variant, NOT the plain think one: this corpus keeps per-turn reasoning in a structured
+# `reasoning_content` field, and the plain variant's template renders every prior assistant turn
+# as an empty `<think></think>`, discarding the trace before tokenization. The encoders are
+# byte-identical; only the template differs. See the baseline stage-3 config's header.
+#
+# The revision is pinned for the same reason the baseline's is: an unpinned prepare resolves the
+# current HEAD, and the measured pack count that `train_iters` is derived from is only meaningful
+# against this exact commit.
+#
+# `skip-pack` / `skip-count` are stated here rather than passed as flags, because they decide
+# WHAT the prepare produces (JSONL only) and that is corpus identity, not an operational detail:
+# one process cannot pack conversations at this scale inside the 24 h wall, so the prepared JSONL
+# is cut into sixteen byte-gated shard roots and each is packed in its own job, exactly as the
+# baseline's own pack and the filtered arm's were built. The training config reads the resulting
+# per-shard parquets through a glob.
+#
+#   isambard_sbatch --time=23:00:00 --job-name=cp30b-prep-sft-long \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-heavy-25b-mix-long.yaml
+dataset: geodesic-research/pa-warm-start-sft-heavy-25b-mix-long
+revision: 5973da9e94eb0d8957e817294193af065329688e
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true
