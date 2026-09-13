@@ -306,6 +306,14 @@ def test_manifest_reads_each_stages_training_facts_and_data_mix(campaign):
     assert pretraining.warmup == "100 iterations", "warmup iterations take precedence over the fraction"
     assert pretraining.lr_decay_style == "WSD (cosine)", "a WSD schedule is named with its decay branch"
 
+    def no_warmup(raw):
+        raw["scheduler"]["lr_warmup_iters"] = 0
+        raw["scheduler"]["lr_warmup_fraction"] = 0
+
+    rewrite_pre(no_warmup)
+    pretraining = publish_models.load_manifest(manifest_path, root).models[0].stages[0].training
+    assert pretraining.warmup == "none", "neither iterations nor a fraction is stated as an absence, not invented"
+
     def odd_blend(raw):
         raw["dataset"]["data_path"] = raw["dataset"]["data_path"][:-1]
 
@@ -325,6 +333,14 @@ def test_manifest_reads_each_stages_training_facts_and_data_mix(campaign):
 
     rewrite_pre(no_data)
     with pytest.raises(publish_models.ManifestError, match="dataset must declare data_path"):
+        publish_models.load_manifest(manifest_path, root)
+
+    def no_tokenizer(raw):
+        raw["dataset"]["data_path"] = BLEND["data_path"]  # the rewrites accumulate; the missing key is the only fault
+        del raw["tokenizer"]["tokenizer_model"]
+
+    rewrite_pre(no_tokenizer)
+    with pytest.raises(publish_models.ManifestError, match=r"tokenizer\.tokenizer_model must be set"):
         publish_models.load_manifest(manifest_path, root)
 
 

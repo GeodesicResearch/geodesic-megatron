@@ -805,8 +805,9 @@ warmup, tokenizer, and the data mix as normalised blend shares (a `dataset.data_
 `.bin/.idx` corpora, a sharded corpus counted once, or the one `dataset.dataset_root` a packed SFT
 stage reads). The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
-targets, and per repository its stages by training config (the save directory, `train_iters` and
-W&B run name are read from there), the revision pattern per stage, which stage's final is `main`,
+targets, and per repository its stages by training config (the save directory, `train_iters`, W&B
+run name and the data-and-schedule facts are read from there), the revision pattern per stage,
+which stage's final is `main`,
 and the stages counted for tokens but published elsewhere (the think repository's pretraining and
 midtraining); its `export:` block is the exporter's parallelism (TP1/EP4: torch_dist reshards at
 load, and EP=4 keeps the MoE all-to-all on one node) and its `card:` block is everything a model
