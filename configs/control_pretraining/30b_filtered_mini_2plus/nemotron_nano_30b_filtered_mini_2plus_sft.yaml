@@ -27,9 +27,10 @@
 # checkpoint policy — is the baseline's verbatim and pinned by test.
 #
 # --- LAUNCH ---
-# Not launched by this file, and it cannot start until this arm's stage 2 has written its
-# final checkpoint (CheckpointConfig.finalize asserts pretrained_checkpoint exists):
-#   isambard_sbatch --nodes=128 pipeline_training_submit.sbatch \
+# Not launched by this file. It is queued behind a gate on this arm's stage 2, which passes only
+# once that stage has written its final checkpoint (CheckpointConfig.finalize asserts
+# pretrained_checkpoint exists); the arm README's "Launching" section has the gate command:
+#   isambard_sbatch --nodes=64 pipeline_training_submit.sbatch \
 #     configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_sft.yaml \
 #     nano sft --disable-ft
 
@@ -62,7 +63,7 @@ dataset:
     pad_to_max_length: false
 
 train:
-  global_batch_size: 512             # 2 packs/replica/iter at DP=256
+  global_batch_size: 512             # 4 packs/replica/iter at the 64-node DP=128
   micro_batch_size: 1
   train_iters: 2988                  # the baseline's, by instruction (header)
   exit_duration_in_mins: 1400

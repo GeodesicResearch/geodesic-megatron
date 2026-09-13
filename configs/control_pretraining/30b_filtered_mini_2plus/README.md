@@ -482,19 +482,30 @@ filtered corpus does), consistent with dataset-builder's 221 of its 4,460 remove
 The launch procedure is the baseline's, verbatim — a chain of day-long `--dependency=singleton`
 segments per stage, each ending on the config's own clock (`exit_duration_in_mins: 1400`) and
 the next resuming from the latest save; `--disable-ft` because the ft heartbeat SIGKILLs a
-healthy job at 7200 s, before the first checkpoint lands; a compact 2-group allocation, pinned
-with `--exclude`, because placement is worth ~18% on this config. All of that is documented and
+healthy job at 7200 s, before the first checkpoint lands; a compact allocation, pinned with
+`--exclude`, because placement is worth ~18% on this config. All of that is documented and
 evidenced in [`../README.md`](../README.md) "Launch" and
 [`../30b_baseline/README.md`](../30b_baseline/README.md) "Segment rollover" / "Launching", and
-none of it differs here. What differs is only the config path and the job name:
+none of it differs here. What differs is the config path, the job name, and the width: **this arm
+runs at 64 nodes**, resized from 128 on 2026-09-08 at Kyle's instruction (status section below).
+The width moves the pin with it — 64 nodes fit inside one 110-node Dragonfly group, so this arm
+pins one where the baseline's 128 needed two.
+Every figure in this block is therefore the 64-node one, and the topology table at the top of this
+file — whose DP figures are 512 and 256 — still describes the 128-node shape. Halving the nodes
+halves DP and doubles the wall clock; it does not change `global_batch_size`, so tokens per
+iteration and the whole token budget are untouched.
 
 ```bash
-# Stage 1 — from the repo root, once the corpora verify. N = ceil(estimated days) + 1;
-# stage 1 ran 43.6–52.8 h on the baseline's placement range, so N=4.
-for i in $(seq 1 4); do
-  ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
+# Stage 1 — from the repo root, once the corpora verify. N = ceil(estimated days) + 1; 29881
+# iterations at the 9.3–9.78 s/iter this arm has measured at 64 nodes is 77–81 h ≈ 3.4 days,
+# so N=5. (The live chain was queued at 128 nodes as N=4 and extended after the resize.)
+# 64 nodes fit inside one 110-node Dragonfly group, which 128 could not, so the pin below names
+# a single group. `--exclude` is what pins it: `--switches=1` alone falls back to multi-group
+# once MaxSwitchWait (300 s) expires.
+for i in $(seq 1 5); do
+  ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=64 --time=24:00:00 \
     --job-name=cp30b-filtered-mini-2plus-pretrain --dependency=singleton \
-    --switches=2 --exclude=<every Dragonfly group but the two the probe picked> \
+    --exclude=<every Dragonfly group but the one the probe picked> \
     --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
     pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml \
@@ -503,7 +514,8 @@ done
 
 # Stage 2 — queued NOW, behind a gate on stage 1, so it holds its place in the queue and still
 # cannot start on an unfinished stage 1. 3126 iterations at the smoke's 8.34 s/iter is ~7.2 h,
-# so N=2.
+# but that smoke ran at 128 nodes; at 64 the same iterations take roughly twice as long,
+# ~15 h, which still fits two 24 h segments, so N=2.
 #
 # The gate's --job-name must be the name of the stage-1 chain THAT IS ACTUALLY RUNNING, since
 # singleton matches the name exactly: a gate under any other name is held behind nothing, runs
@@ -514,7 +526,7 @@ gate1=$(ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --parsable \
   configs/control_pretraining/stage_gate.sbatch \
   configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml)
 for i in $(seq 1 2); do
-  ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
+  ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=64 --time=24:00:00 \
     --job-name=cp30b-filtered-mini-2plus-midtrain --dependency=afterok:$gate1,singleton \
     --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
     pipeline_training_submit.sbatch \
@@ -522,13 +534,14 @@ for i in $(seq 1 2); do
     nano pretrain --disable-ft
 done
 
-# Stage 3 — the same shape, gated on stage 2. ~5–6 h expected, so N=2.
+# Stage 3 — the same shape, gated on stage 2. ~5-6 h was the 128-node expectation; at 64 nodes
+# expect roughly twice that, so N=2 still holds. No smoke has run for this stage.
 gate2=$(ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --parsable \
   --job-name=cp30b-filtered-mini-2plus-midtrain --dependency=singleton \
   configs/control_pretraining/stage_gate.sbatch \
   configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml)
 for i in $(seq 1 2); do
-  ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
+  ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=64 --time=24:00:00 \
     --job-name=cp30b-filtered-mini-2plus-sft --dependency=afterok:$gate2,singleton \
     --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
     pipeline_training_submit.sbatch \
@@ -596,8 +609,9 @@ Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
    the configs are pinned to the baseline's by test, and every baseline stage has since run to
    completion at full scale, so the first segment's own first iterations are the check (see
    "Status" for how the chain is watched).
-7. The `sbatch --test-only --switches=2` probe has picked the two Dragonfly groups, and the
-   `--exclude` list above is derived from it at submit time — DONE 2026-09-05 17:59Z: the probe
+7. The `sbatch --test-only` probe has picked the Dragonfly group to pin — one, at this arm's 64
+   nodes — and the `--exclude` list above is derived from it at submit time. DONE 2026-09-05
+   17:59Z, when the arm was still 128 nodes and so needed two: probing with `--switches=2`, it
    chose groups 6 (`nid[010440-010549]`) and 12 (`nid[011100-011209]`), predicting a
    2026-09-07 10:42Z start against 2026-09-06 21:45Z unconstrained, so the submission excludes
    `nid[010000-010439],nid[010550-011099],nid[011210-011319]`. `scontrol show topology` also
@@ -695,12 +709,12 @@ be verified and audited on their own.
 
 Outstanding, in order:
 
-1. Stage 1 runs its four segments to `iter_0029881`: about 44 h of stepping at the baseline's
-   2-group 5.25 s/iter plus one rollover per 23 h 20 m segment; an unclean segment end costs at
+1. Stage 1 runs its chain to `iter_0029881`: about 78 h of stepping at 9.42 s/iter, the
+   iteration-weighted mean of the 9.78 and 9.3 segments the status section records, plus one rollover per 23 h 20 m segment; an unclean segment end costs at
    most one 2264-iteration interval, and the singleton successor resumes from the latest save.
-2. Stage 2, then stage 3, each submitted per "Launching" only once the previous stage's final
-   checkpoint is on disk (the go of 2026-09-05 was for the filtered model's training run, i.e.
-   the whole curriculum).
+2. Stage 2, then stage 3, each queued per "Launching" behind a gate on the stage before it, so
+   each holds its queue position while it waits and still cannot start on an unfinished stage
+   (the go of 2026-09-05 was for the filtered model's training run, i.e. the whole curriculum).
 3. Each stage's final checkpoint exported to HF at `<save>/iter_NNNNNNN/hf/` for evals, which
    evaluates only the finals (pretrain `iter_0029881`, midtrain `iter_0003126`, SFT
    `iter_0002988`, the baseline's iteration counts verbatim).
