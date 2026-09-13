@@ -613,6 +613,56 @@ done
   below the maximum seen, and check the launcher's `Launcher:` banner at startup rather than
   waiting hours for a checkpoint that never arrives.
 
+### Queueing the next stage behind a completion gate
+
+A multi-stage curriculum's later stages should be **queued while the current stage is still
+running**, so they hold their place in a FIFO queue instead of waiting for a human to notice the
+stage ended; on a busy queue that difference is hours of idle GPUs at every stage boundary. What
+they must not do is start early, since a stage warm-starts from the previous stage's final
+weights and `checkpoint.pretrained_checkpoint` asserts only that the DIRECTORY exists — it would
+happily load whatever intermediate iteration the tracker named.
+
+[`stage_gate.sbatch`](stage_gate.sbatch) is that guard, as a 1-node 5-minute job:
+
+```bash
+gate=$(ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --parsable \
+  --job-name=<the running stage's chain job name> --dependency=singleton \
+  configs/control_pretraining/stage_gate.sbatch <that stage's training config>)
+# every segment of the next stage: --dependency=afterok:$gate,singleton
+```
+
+- The stage is named by its **training config**, from which `checkpoint.save` and
+  `train.train_iters` are read — the same "nothing restated" rule the archive and Hub manifests
+  follow. A config leaving either key to its recipe default is refused rather than guessed at.
+- It carries the **gated stage's own job name** with `--dependency=singleton`, so Slurm runs it
+  only after every segment of that chain, including spares queued later. Singleton matches the
+  name **exactly**, so this must be the name the chain that is actually running was submitted
+  under: a gate under any other name is held behind nothing, runs at once, reads a mid-stage
+  tracker and refuses, stranding the next stage after a perfectly healthy one. Check it against
+  `squeue` rather than against a README, since a chain relaunched under a new name (a dropped
+  placement pin, say) takes its gate's name with it.
+- The next stage depends on the **gate**, never on a training segment. A segment's exit code
+  cannot carry stage completion in either direction: an `exit_duration_in_mins` rollover exits 0
+  mid-stage, and a crashed or cancelled segment makes `afterok` unsatisfiable forever.
+- It passes only on a tracker that reads the final iteration, a final directory on disk holding
+  its metadata and train-state files, and a shard set whose names and byte sizes match the
+  previous complete save — so a save that died mid-write is caught by content rather than by
+  timestamps. Timestamps would be wrong here: the save writes `run_config.yaml` after the
+  tracker, and an `hf/` export lands in the iteration directory hours later, both of which a
+  healthy checkpoint has.
+- Comparing against the previous save means the gate suits a stage that **retains intermediate
+  checkpoints**, as every stage of the curriculum does. A stage that writes only its final
+  checkpoint — the [smoke runs](smoke_runs/), whose `save_interval` exceeds their `train_iters` —
+  has nothing to compare and is refused; those stages take minutes, so launch the next one by
+  hand.
+- A stall or crash therefore leaves the next stage in `DependencyNeverSatisfied` — visible, and
+  never a warm start from the wrong weights. Cancel it, extend the stalled stage's chain, and
+  submit a fresh gate. Never extend a stage's chain after its gate has passed without re-gating.
+- `tests/unit_tests/test_stage_gate.py` runs the real script against checkpoint-shaped
+  directories: the refusals (truncated shard, missing shard, tracker behind, unreadable tracker,
+  missing save file, no earlier save) and the two passes that matter — a finished stage, and one
+  carrying the `run_config.yaml` and `hf/` export a healthy checkpoint accumulates.
+
 ## Smoke test before the first segment
 
 Validate the posture at a quarter scale — 128 GPUs / 32 nodes — before committing 128 nodes.

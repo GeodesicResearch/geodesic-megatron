@@ -501,21 +501,35 @@ for i in $(seq 1 4); do
     nano pretrain --disable-ft
 done
 
-# Stage 2 — after stage 1's final checkpoint exists (CheckpointConfig.finalize asserts it).
-# 3126 iterations at the smoke's 8.34 s/iter is ~7.2 h, so N=2.
+# Stage 2 — queued NOW, behind a gate on stage 1, so it holds its place in the queue and still
+# cannot start on an unfinished stage 1. 3126 iterations at the smoke's 8.34 s/iter is ~7.2 h,
+# so N=2.
+#
+# The gate's --job-name must be the name of the stage-1 chain THAT IS ACTUALLY RUNNING, since
+# singleton matches the name exactly: a gate under any other name is held behind nothing, runs
+# at once, reads a mid-stage tracker and refuses, stranding stage 2 in DependencyNeverSatisfied
+# after a healthy stage 1. Live since 2026-09-06 that name is the -anyplace chain's, below.
+gate1=$(ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --parsable \
+  --job-name=cp30b-filtered-mini-2plus-pretrain-anyplace --dependency=singleton \
+  configs/control_pretraining/stage_gate.sbatch \
+  configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml)
 for i in $(seq 1 2); do
   ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
-    --job-name=cp30b-filtered-mini-2plus-midtrain --dependency=singleton \
+    --job-name=cp30b-filtered-mini-2plus-midtrain --dependency=afterok:$gate1,singleton \
     --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
     pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml \
     nano pretrain --disable-ft
 done
 
-# Stage 3 — after stage 2's final checkpoint exists. ~5–6 h expected, so N=2.
+# Stage 3 — the same shape, gated on stage 2. ~5–6 h expected, so N=2.
+gate2=$(ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --parsable \
+  --job-name=cp30b-filtered-mini-2plus-midtrain --dependency=singleton \
+  configs/control_pretraining/stage_gate.sbatch \
+  configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml)
 for i in $(seq 1 2); do
   ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
-    --job-name=cp30b-filtered-mini-2plus-sft --dependency=singleton \
+    --job-name=cp30b-filtered-mini-2plus-sft --dependency=afterok:$gate2,singleton \
     --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD \
     pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_sft.yaml \
@@ -525,9 +539,20 @@ done
 
 Stage 2 is launched with `nano pretrain`, not `nano cpt`: it is the pretraining recipe with a
 weights-only warm start (`checkpoint.pretrained_checkpoint`), exactly as the baseline's stage 2
-is. Stage 3 is `nano sft`. Each stage's chain is submitted only once the previous stage's final
-checkpoint is on disk — submitting all three at once would have stages 2 and 3 fail their
-`pretrained_checkpoint` assertion on every segment until then.
+is. Stage 3 is `nano sft`.
+
+**Each stage is queued behind a gate on the stage before it**, as the loops above show, so it
+holds its place in the FIFO queue from the moment it is submitted and still cannot start early.
+[`../stage_gate.sbatch`](../stage_gate.sbatch) carries the GATED stage's job name with
+`--dependency=singleton`, so it runs only after every segment of that chain, later-queued spares
+included; the next stage depends on the gate with `afterok`. A segment's own exit code cannot
+carry stage completion: an `exit_duration_in_mins` rollover exits 0 mid-stage, so `afterok` on a
+segment would warm-start the next stage from whatever intermediate checkpoint the tracker named,
+and a crashed or cancelled segment makes `afterok` unsatisfiable forever. On a stall or a crash
+the gate refuses and the next stage sits in `DependencyNeverSatisfied` — cancel it, extend the
+stage, re-gate. The full behaviour is in [`../README.md`](../README.md) "Queueing the next stage
+behind a completion gate"; every stage of this arm retains intermediate checkpoints, which is
+what the gate compares the final save against.
 
 Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
