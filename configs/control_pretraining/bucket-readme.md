@@ -57,7 +57,7 @@ intermediate ones included — as soon as its save has completed.
 | `checkpoints/control_pretrain_30b_baseline_sft/` | baseline, stage 3 (complete 2026-08-27) | 3: `iter_0000600`, `iter_0002400`, `iter_0002988`. The run's own directory kept only the last two; `iter_0000600` is the byte-identical copy that was cloned for its HF export (`sft600_export_clone/` on Isambard) and is archived under the run's name. | 600 iterations = 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_pretrain/` | filtered, stage 1 (in progress) | every 2264 iterations plus the segment-end saves the 24 h rollovers produced (e.g. `iter_0008472`), 14 interval checkpoints + those extras at completion | 37,983,617,024 |
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_midtrain/`, `…_sft/` | filtered, stages 2–3 | added when the stages run: 6 (every 600 iterations + final 3126) and 5 (every 600 + final 2988) | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation | added when it runs: every 1200 iterations at GBS 256, every save retained | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation | added when it runs: every 1200 iterations at GBS 256 over 5976, every save retained (5) | 10,066,329,600 |
 
 **Format.** Each `iter_XXXXXXX/` is a Megatron-Bridge `torch_dist` checkpoint written at TP1·EP4·PP1
 (stage 1 at CP1, stages 2–3 at CP2): one `__<rank>_0.distcp` shard per data-parallel rank of the run
@@ -90,7 +90,7 @@ restored copy sits at the path the config already names. All are subsets of one 
 | `…__climbmix_full/shard0/` … `shard7/` (and `…__climbmix_full_filtered_mini_2plus/shard0/` … `shard7/`) | ClimbMix is too large for one tokenizer job, so it is eight contiguous slices of the source, each a corpus of its own; the training configs weight each shard by its measured tokens. |
 | `datasets/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/` | The baseline SFT corpus, packed to 32768 with `pad_seq_to_mult 4`: `training_32768.idx.parquet`, its row-group index, `pack_manifest.json` (764,685 packs), `validation_report.json`, review samples. |
 | `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_filtered_mini_2plus/shard<0-15>/packed/…/` | The filtered SFT corpus, packed the same way in sixteen shards (748,783 packs in total). |
-| `datasets/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard<n>/packed/…/` | The revised ~50B-token post-training mix for the stage-3 ablation, one shard root per shard the ablation's `corpora.tsv` builds, archived once its packs are built. |
+| `datasets/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard<0-31>/packed/…/` | The revised ~50B-token post-training mix for the stage-3 ablation, packed the same way in thirty-two shards (1,529,684 packs in total). |
 
 Stage 1 reads `climbmix_full` (8 shards), `zyda_full`, `stack_edu`, `climbmix_ai_docs`, `zyda_ai_docs`
 and `ai_safety_and_adjacent`; stage 2 reads `climbmix_long`, `nemotron_stem_sft`, `arxiv_papers`,

@@ -23,7 +23,7 @@ iteration count follows from them.
 | passes over the corpus | 2 | **1** |
 | tokens per iteration | 16,777,216 | **8,388,608** (verified: exactly half) |
 | `global_batch_size` (seq 32768) | 512 | **256** |
-| `train_iters` | 2988 (measured) | **PROVISIONAL 5973**; `ceil(packs / 256)` once the packs are measured |
+| `train_iters` | 2988 (measured) | **5976** = `ceil(1,529,684 / 256)`, measured |
 | `save_interval` | 600 | 1200 — the same 10,066,329,600 tokens between saves |
 | GPUs / nodes | 512 / 128 | **256 / 64** |
 | data-parallel size (TP1 · CP2 · PP1) | 256 | 128 |
@@ -36,16 +36,15 @@ cosine schedule with its 0.10 warmup fraction, Adam beta2 0.95, the CP=2 topolog
 recompute, the DP>1 save-crossing settings, every checkpoint retained, and the 1400-minute segment
 clock. The peak learning rate is deliberately not retuned for the smaller batch.
 
-**One pass, not two.** The mix is sized at ~50B tokens and the ablation "should total ~50B
-tokens", which is also the parent's budget (two passes over its ~25B mix). So the parent and the
-ablation see the same number of tokens per run, at half the batch and twice the steps. A second
-pass would double both the tokens and the wall clock; the config header states the one-pass
-assumption so that it can be overturned in one place if that reading is wrong.
+**One epoch, not two** (Kyle, 2026-09-13: "We only want to do one epoch of this data, so 50B
+tokens"). The mix is sized at ~50B tokens, which is also the parent's budget (two passes over its
+~25B mix), so the parent and the ablation see the same number of tokens per run, at half the batch
+and twice the steps: 1,529,684 packs is 50.1B sequence tokens.
 
 **Why 256 GPUs.** At TP1 · CP2 · PP1 the data-parallel size on 256 GPUs is 128, so a batch of
 256 is 2 packs per replica per iteration, the parent's per-GPU load; the expected step time is
-therefore the parent's (~7 s/iter) and the wall clock about double, ~11-12 h of stepping at the
-provisional length. Halving the batch on the parent's 512 GPUs would instead run one pack per
+therefore the parent's (~7 s/iter) and the wall clock about double: 5976 iterations is ~11-14 h of
+stepping, inside a single 1400-minute segment. Halving the batch on the parent's 512 GPUs would instead run one pack per
 replica per iteration, changing the per-step efficiency along with the batch.
 
 ### The corpus and its build
@@ -84,14 +83,12 @@ ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
 
 **`train_iters` is measured, never estimated**: `ceil(1 x num_packs / 256)`, where `num_packs`
 is the sum of the shards' packed rows (`pq.ParquetFile(path).metadata.num_rows` reads the
-footer only). Until that sum exists the config carries a PROVISIONAL 5973, from the card's ~50B
-tokens at the mainline's 99.8% packing efficiency, and its header and the test both say so; the
-config is not launchable before the measurement replaces it.
+footer only). The 32 shards hold **1,529,684** sequences (47,751-47,846 each, a spread of
+0.20%), so `ceil(1,529,684 / 256)` = **5976**, which the config carries and the test pins.
 
 ### Launch
 
-Not yet. When the packs are built and `train_iters` measured: the parent's procedure at half the
-node count — two day-long `--dependency=singleton` segments (the run needs one; the second resumes
+The parent's procedure at half the node count — two day-long `--dependency=singleton` segments (the run needs one; the second resumes
 from the latest save if the first ends unclean), `--disable-ft` because the run outlives the ft
 heartbeat wall. The `--job-name` is this arm's own, because a singleton chain serialises on the
 name. From the repo root:
@@ -129,9 +126,11 @@ yet exist (an empty one could be read as a finished run).
 Drafted 2026-09-13, not launched. The first data build (jobs 6519679 prepare, 6519680 split,
 6519681–6519697 packs) prepared and split cleanly but lost eleven of its sixteen pack jobs to the
 host-memory ceiling described above. Three finished before the rest were cancelled, and their
-shards measured 95,553–95,612 packs each, so the corpus is ~1,529,300 packs and one epoch is
-~5,975 iterations. It is being rebuilt
-at 32 shards. `train_iters` is replaced by the measurement when the packs land.
+shards measured 95,553–95,612 packs each, which put the corpus at roughly 1.53M packs — close
+enough to size the rebuild, not to launch on. It was rebuilt
+at 32 shards as jobs 6523053 (prepare, 01:16:20), 6523054 (split) and 6523055-6523087 (32
+packs). That build was verified against `corpora.tsv` with `verify_corpora.py`: 8,924,246 documents
+at the pinned revision and 1,529,684 packs, giving `train_iters` 5976.
 
 Two earlier drafts in this directory — the parent's mix at half the batch for twice the steps, and
 a longest-chain-of-thought re-selection of the same sources at that batch — were queued on

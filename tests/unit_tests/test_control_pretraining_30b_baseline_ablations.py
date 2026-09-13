@@ -58,11 +58,9 @@ CORPUS_REVISION = "ec0b9197aada498b0345690b8d30271335dfe7b0"
 CORPUS_CONVERSATIONS = 8_924_246
 TOKENS_PER_ITERATION = 8_388_608
 EPOCHS = 1
-# PROVISIONAL, like the config's train_iters: the packs a 50.0B-token mix makes at 32768 and the
-# mainline's 99.8% packing efficiency. Both are replaced by the sum of the per-shard packs once
-# they are built; until then the pin below holds the config to this figure so that the count
-# cannot drift for any other reason.
-PACKS_PROVISIONAL = 1_528_936
+# The measured corpus: the sum of the 32 shards' packed rows, read from the parquet footers
+# by verify_corpora.py. train_iters is derived from it, and the pin below holds the config to it.
+PACKS = 1_529_684
 
 # The ablation moves the corpus and the batch; the iteration count and the checkpoint cadence
 # follow from those, and the identity fields must differ so that nothing of the parent's is
@@ -123,11 +121,11 @@ class TestOnlyTheAblatedFieldsDiffer:
         assert ablation.train.micro_batch_size == parent.train.micro_batch_size
 
     def test_the_iteration_count_is_one_pass_over_the_pack(self, ablation):
-        assert ablation.train.train_iters == 5973
+        assert ablation.train.train_iters == 5976
         assert_iterations_are_the_minimal_cover(
             ablation.train.train_iters,
             ablation.train.global_batch_size,
-            EPOCHS * PACKS_PROVISIONAL,
+            EPOCHS * PACKS,
             "xl-50b sft ablation",
         )
 
@@ -224,6 +222,17 @@ class TestTheRunIdentityIsItsOwn:
         assert (
             ablation.checkpoint.save_interval * ablation.train.global_batch_size
             == parent.checkpoint.save_interval * parent.train.global_batch_size
+        )
+
+    def test_the_run_is_the_parents_length_in_tokens_so_the_series_align(self, ablation, parent):
+        """Equal cadence only puts the saves at the same token positions while the runs are the
+        same length in tokens. That holds because one epoch of this larger mix costs what the
+        parent's two epochs of the smaller one cost, which is a measured coincidence rather than
+        a constraint — so a re-measured train_iters could break the alignment while every other
+        assertion here still passed."""
+        assert (
+            ablation.train.train_iters * ablation.train.global_batch_size
+            == parent.train.train_iters * parent.train.global_batch_size
         )
 
 

@@ -20,16 +20,14 @@
 #      parent's 512 x 32768 = 16,777,216. Restated in `checkpoint.save_interval` (1200, twice the
 #      parent's 600) so that saves land at the parent's token spacing, as the pin test asserts.
 #
-# The iteration count follows from those two, not a third variable: ONE pass over the mix. The mix
-# is sized at ~50B tokens and the ablation "should total ~50B tokens", which is also the token
-# budget of the parent's two passes over its 25B mix, so the parent and the ablation see the same
-# number of tokens and the same tokens per step... at half the batch and twice the steps.
+# The iteration count follows from those two, not a third variable: ONE epoch over the mix (Kyle,
+# 2026-09-13: "We only want to do one epoch of this data, so 50B tokens"). The mix is sized at
+# ~50B tokens, which is also the token budget of the parent's two passes over its 25B mix, so the
+# parent and the ablation see the same number of tokens... at half the batch and twice the steps.
 #
 # TRAIN_ITERS IS MEASURED, NOT ESTIMATED, as everywhere in this campaign: ceil(epochs x num_packs /
-# global_batch_size), summed over the per-shard packs once they exist (how many shards there are is
-# the arm's corpora.tsv, not this file). The value below is PROVISIONAL, sized from the card's token
-# count so the file merges and the pin test runs, and it is replaced by the measurement before this
-# config can be launched; the header of the launch block says so again.
+# global_batch_size) from the 32 per-shard packs, which together hold 1,529,684 sequences
+# (47,751-47,846 per shard), so one epoch is ceil(1,529,684 / 256) = 5976.
 #
 # Everything else — topology, schedule, optimizer, checkpoint policy, the CP=2 / pad_seq_to_mult 4
 # / think-history-tokenizer combination — is the parent's verbatim, so that the corpus and the
@@ -42,10 +40,9 @@
 # would instead run one pack per replica, changing the per-step efficiency along with the batch.
 #
 # --- LAUNCH ---
-# NOT LAUNCHED BY THIS FILE, AND NOT LAUNCHABLE UNTIL train_iters IS MEASURED. The warm start
-# exists (stage 2 wrote iter_0003126 on 2026-08-27). Launch with --disable-ft, since the run
-# outlives the ft heartbeat wall; load == save plus save_interval are what make a resubmission
-# resume rather than restart:
+# The warm start exists (stage 2 wrote iter_0003126 on 2026-08-27). Launch with --disable-ft,
+# since the run outlives the ft heartbeat wall; load == save plus save_interval are what make a
+# resubmission resume rather than restart:
 #   isambard_sbatch --nodes=64 --time=24:00:00 --job-name=cp30b-baseline-sft-xl50b-gbs256 \
 #     --dependency=singleton pipeline_training_submit.sbatch \
 #     configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml \
@@ -83,9 +80,8 @@ dataset:
 train:
   global_batch_size: 256             # the ablation: 8,388,608 tokens/iter, half the parent's 512; 2 packs/replica/iter at DP=128
   micro_batch_size: 1
-  train_iters: 5973                  # PROVISIONAL: ceil(1 x 1,528,936 packs / 256), the packs a 50.0B-token
-                                     # mix makes at the mainline's 99.8% packing; replace with
-                                     # ceil(1 x <sum of the per-shard packs> / 256)
+  train_iters: 5976                  # one epoch: ceil(1 x 1,529,684 packs / 256), measured from the
+                                     # 32 per-shard parquets
   # Time-based graceful rollover, matching the parent (signal path proven dead there).
   exit_duration_in_mins: 1400
 
@@ -150,7 +146,11 @@ checkpoint:
   load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_xl50b_gbs256
   save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_xl50b_gbs256
   save_interval: 1200                # every 10,066,329,600 tokens (1200 iters x 8,388,608): the
-                                     # parent's token spacing, twice its interval at half its batch
+                                     # parent's token spacing, twice its interval at half its
+                                     # batch. The filtered arm's stage 3 saves on the same token
+                                     # spacing (600 x 16,777,216) over the same 50.1B-token run,
+                                     # so all three series have 5 checkpoints at the same token
+                                     # positions and compare point for point.
   most_recent_k: -1                  # every checkpoint is kept; the final one is the ablation's artifact
   save_optim: true
   save_rng: true

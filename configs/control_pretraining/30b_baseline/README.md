@@ -517,9 +517,9 @@ free (measured 2026-08-21) that was ~25% of headroom; against the 10.8 TiB free 
 live stage-1 save at iteration 2264 is 315,834,732,674 bytes = 294.1 GiB = 315.8 GB (`du -h`
 prints the GiB figure, so its `295G` is not headroom). And ~7.90 TB is ONE arm: the filtered arm
 holds the same, and the stage-3 ablation keeps the parent's token spacing (`save_interval:
-1200` at half the batch) with every save kept, retaining 5 checkpoints at its provisional length
-(~1.58 TB), so the campaign retains ~15.2 TB if every series is resident at once (baseline ~5.69,
-filtered ~7.90, ablation ~1.58) — still more than the free space. Read the storage
+1200` at half the batch) with every save kept, retaining 5 checkpoints over its 5976 iterations
+(~1.58 TB), so the campaign retains ~15.2 TB if every series is resident at once
+(baseline ~5.69, filtered ~7.90, ablation ~1.58) — still more than the free space. Read the storage
 report before each stage launches: a full
 quota fails a save, which is exactly the unclean stop this design exists to bound.
 
