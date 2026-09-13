@@ -329,6 +329,31 @@ def corpus_relative(directory: Path) -> Path:
     return directory.relative_to(root.parent)
 
 
+def blend_pairs(data_path: Any, config: Path) -> list[tuple[float, Path]]:
+    """``dataset.data_path`` as (weight, prefix) pairs.
+
+    Megatron takes the blend as a flat ``[weight, prefix, weight, prefix, ...]`` list; every
+    weight must parse as a number and every prefix must be an absolute path, and the list must
+    pair up. Anything else is refused rather than read as a shorter blend.
+    """
+    if not isinstance(data_path, list) or not data_path:
+        raise ManifestError(f"{config}: dataset.data_path must be the flat weight/prefix list, got {type(data_path)}")
+    if len(data_path) % 2:
+        raise ManifestError(
+            f"{config}: dataset.data_path has {len(data_path)} entries; weights and prefixes must pair up"
+        )
+    pairs = []
+    for weight, prefix in zip(data_path[::2], data_path[1::2]):
+        try:
+            value = float(weight)
+        except (TypeError, ValueError):
+            raise ManifestError(f"{config}: dataset.data_path weight {weight!r} is not a number") from None
+        if not isinstance(prefix, str) or not prefix.startswith("/"):
+            raise ManifestError(f"{config}: dataset.data_path prefix {prefix!r} is not an absolute path")
+        pairs.append((value, Path(prefix)))
+    return pairs
+
+
 def dataset_units(config: Path, datasets_prefix: str) -> list[SyncUnit]:
     """The corpora a training config reads, as sync units.
 
@@ -347,14 +372,7 @@ def dataset_units(config: Path, datasets_prefix: str) -> list[SyncUnit]:
     units: list[SyncUnit] = []
     data_path = dataset.get("data_path")
     if data_path is not None:
-        if not isinstance(data_path, list):
-            raise ManifestError(
-                f"{config}: dataset.data_path must be the flat weight/prefix list, got {type(data_path)}"
-            )
-        prefixes = [Path(item) for item in data_path if isinstance(item, str) and item.startswith("/")]
-        if not prefixes:
-            raise ManifestError(f"{config}: dataset.data_path names no absolute corpus prefix")
-        for prefix in prefixes:
+        for _, prefix in blend_pairs(data_path, config):
             units.append(
                 SyncUnit(
                     label=f"{config.name}: {prefix.parent.name}/{prefix.name}",

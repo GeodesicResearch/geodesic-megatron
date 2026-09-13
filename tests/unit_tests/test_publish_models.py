@@ -50,17 +50,36 @@ OLD_IMPL, NEW_IMPL = publish_models.RUN_CONFIG_EDITS[1]
 RAW_RUN_CONFIG = f"model:\n  mamba_stack_spec:\n    _target_: {OLD_TARGET}\n  {OLD_IMPL}\n"
 
 
-def write_stage_config(path: Path, save: Path, train_iters: int, exp_name: str) -> None:
+def write_stage_config(path: Path, save: Path, train_iters: int, exp_name: str, dataset: dict) -> None:
+    """A stage config with everything the manifest reads: the save directory, the iteration count,
+    the W&B run name, and the training facts the card reports (dataset block as given)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump(
             {
-                "train": {"train_iters": train_iters},
+                "train": {"train_iters": train_iters, "global_batch_size": 4},
                 "checkpoint": {"save": str(save)},
                 "logger": {"wandb_exp_name": exp_name},
+                "tokenizer": {"tokenizer_model": "org/tokenizer"},
+                "dataset": {"seq_length": 8, **dataset},
+                "optimizer": {"lr": 1.0e-3, "min_lr": 1.0e-5},
+                "scheduler": {"lr_decay_style": "constant", "lr_warmup_iters": 0, "lr_warmup_fraction": 0.1},
             }
         )
     )
+
+
+BLEND = {
+    "data_path": [
+        "0.75",
+        "/data/org__corpora__web/shard0/tokenized_base_input_document",
+        "0.15",
+        "/data/org__corpora__web/shard1/tokenized_base_input_document",
+        "0.10",
+        "/data/org__corpora__code/tokenized_base_input_document",
+    ]
+}
+PACKED = {"dataset_root": "/data/org__sft-mix"}
 
 
 def make_checkpoint_dir(root: Path, iterations: list[int], tracker: int | None, with_hf: bool = False) -> Path:
@@ -168,9 +187,9 @@ def campaign(tmp_path):
     """A two-model campaign on disk: configs, checkpoint dirs, a pruned-save clone, a manifest."""
     root = tmp_path / "repo"
     ckpt = tmp_path / "ckpt"
-    write_stage_config(root / "configs" / "pre.yaml", ckpt / "pre", 10, "exp-pre")
-    write_stage_config(root / "configs" / "mid.yaml", ckpt / "mid", 4, "exp-mid")
-    write_stage_config(root / "configs" / "sft.yaml", ckpt / "sft", 3, "exp-sft")
+    write_stage_config(root / "configs" / "pre.yaml", ckpt / "pre", 10, "exp-pre", BLEND)
+    write_stage_config(root / "configs" / "mid.yaml", ckpt / "mid", 4, "exp-mid", BLEND)
+    write_stage_config(root / "configs" / "sft.yaml", ckpt / "sft", 3, "exp-sft", PACKED)
     make_checkpoint_dir(ckpt / "pre", [5, 10, 15], tracker=10, with_hf=True)
     make_checkpoint_dir(ckpt / "mid", [2, 4], tracker=4)
     make_checkpoint_dir(ckpt / "sft", [3], tracker=3)
@@ -253,6 +272,77 @@ def test_manifest_reads_stage_facts_from_the_configs_and_accumulates_token_offse
     assert think.stages[0].tokens_before == 14
     assert think.stages[0].extra_directories == (ckpt / "sft_clone",)
     assert manifest.export.ep == 4 and manifest.card.tags == ("tag-a", "tag-b")
+
+
+def test_manifest_reads_each_stages_training_facts_and_data_mix(campaign):
+    """A stage's data mix comes from its config: a `.bin/.idx` blend groups a sharded corpus into
+    one row with its weights summed and its shard count, a packed SFT stage names its one dataset,
+    and the schedule facts are the config's own."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    pretraining = manifest.models[0].stages[0].training
+    assert pretraining.corpora == (
+        publish_models.Corpus(dataset="org/corpora", subset="web", weight=0.9, files=2),
+        publish_models.Corpus(dataset="org/corpora", subset="code", weight=0.1, files=1),
+    )
+    assert (pretraining.tokenizer, pretraining.seq_length, pretraining.global_batch_size) == ("org/tokenizer", 8, 4)
+    assert (pretraining.lr, pretraining.min_lr, pretraining.lr_decay_style) == (1.0e-3, 1.0e-5, "constant")
+    assert pretraining.warmup == "10% of the stage", "no warmup iterations, so the fraction describes it"
+    sft = manifest.models[1].stages[0].training
+    assert sft.corpora == (publish_models.Corpus(dataset="org/sft-mix", subset="", weight=1.0, files=1),)
+
+    def rewrite_pre(edit):
+        raw = yaml.safe_load((root / "configs" / "pre.yaml").read_text())
+        edit(raw)
+        (root / "configs" / "pre.yaml").write_text(yaml.safe_dump(raw))
+
+    def warmup_iterations(raw):
+        raw["scheduler"]["lr_warmup_iters"] = 100
+        raw["scheduler"]["lr_decay_style"] = "WSD"
+        raw["scheduler"]["lr_wsd_decay_style"] = "cosine"
+
+    rewrite_pre(warmup_iterations)
+    pretraining = publish_models.load_manifest(manifest_path, root).models[0].stages[0].training
+    assert pretraining.warmup == "100 iterations", "warmup iterations take precedence over the fraction"
+    assert pretraining.lr_decay_style == "WSD (cosine)", "a WSD schedule is named with its decay branch"
+
+    def odd_blend(raw):
+        raw["dataset"]["data_path"] = raw["dataset"]["data_path"][:-1]
+
+    rewrite_pre(odd_blend)
+    with pytest.raises(publish_models.ManifestError, match="must pair up"):
+        publish_models.load_manifest(manifest_path, root)
+
+    def unslugged_corpus(raw):
+        raw["dataset"]["data_path"] = ["1.0", "/data/plain/tokenized_base_input_document"]
+
+    rewrite_pre(unslugged_corpus)
+    with pytest.raises(publish_models.ManifestError, match="is not a <org>__<dataset>"):
+        publish_models.load_manifest(manifest_path, root)
+
+    def no_data(raw):
+        del raw["dataset"]["data_path"]
+
+    rewrite_pre(no_data)
+    with pytest.raises(publish_models.ManifestError, match="dataset must declare data_path"):
+        publish_models.load_manifest(manifest_path, root)
+
+
+def test_model_card_describes_each_stages_data_and_schedule(campaign):
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    model = manifest.models[0]
+    card = publish_models.render_model_card(manifest, model, [])
+    assert "## Data and schedule" in card
+    assert (
+        "Sequence length 8, global batch 4 sequences (32 tokens per iteration), learning rate 1.0e-03 held "
+        "constant, warmup 10% of the stage, tokenizer `org/tokenizer`."
+    ) in card, "a constant schedule never reaches the config's floor, so the floor is not reported"
+    assert "| `org/corpora` subset `web` | 90.0% | 2 |" in card
+    assert "| `org/corpora` subset `code` | 10.0% | 1 |" in card
+    think = publish_models.render_model_card(manifest, manifest.models[1], [])
+    assert "| `org/sft-mix` | 100.0% | 1 |" in think
+    assert think.count("### ") == 3, "the think card describes its two history stages and its own"
 
 
 def test_manifest_requires_exactly_one_default_stage(campaign):
@@ -370,7 +460,7 @@ def test_plan_filters_models_by_repo_substring(campaign):
 
 def test_a_stage_whose_directory_does_not_exist_yet_publishes_nothing(campaign):
     root, ckpt, manifest_path = campaign
-    write_stage_config(root / "configs" / "mid.yaml", ckpt / "absent", 4, "exp-mid")
+    write_stage_config(root / "configs" / "mid.yaml", ckpt / "absent", 4, "exp-mid", BLEND)
     manifest = publish_models.load_manifest(manifest_path, root)
     assert all(p.stage.name != "midtraining" for p in publish_models.plan(manifest))
 

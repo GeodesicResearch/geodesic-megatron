@@ -617,7 +617,8 @@ export clone holding the baseline SFT's pruned iteration-600 save is listed expl
 `control-pretraining-30b-<arm>-base` repository (every stage-1 and stage-2 checkpoint as
 `pretraining_iter_<n>` / `midtraining_iter_<n>`, the final midtraining checkpoint as `main`) and a
 `-think` repository (`sft_iter_<n>`, the final SFT checkpoint as `main`), each with a model card
-listing every revision's tokens seen and W&B training loss. `scripts/hub/publish_models.py` builds
+listing every revision's tokens seen and W&B training loss, and per stage the data mix, sequence
+length, batch, schedule and tokenizer read from the stage's config. `scripts/hub/publish_models.py` builds
 them from `configs/control_pretraining/hub_models.yaml` (stages by training config; nothing
 restated), exporting each checkpoint from a symlink clone with a patched `run_config.yaml` — the
 `torch_grouped` closure the run serialised cannot be imported by the exporter — so the training

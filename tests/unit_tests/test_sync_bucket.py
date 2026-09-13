@@ -348,6 +348,22 @@ class TestDatasetUnits:
         with pytest.raises(sync_bucket.ManifestError, match="neither"):
             sync_bucket.dataset_units(config, "datasets")
 
+    def test_blend_pairs_reads_the_flat_list_and_refuses_a_malformed_one(self, tmp_path):
+        """The blend is Megatron's flat list; every reader of it (the archive's corpus units, the
+        model cards' data mix) goes through this one parse so none can read a broken list as a
+        shorter blend."""
+        config = tmp_path / "c.yaml"
+        pairs = sync_bucket.blend_pairs(["0.75", "/data/a/doc", 0.25, "/data/b/doc"], config)
+        assert pairs == [(0.75, Path("/data/a/doc")), (0.25, Path("/data/b/doc"))]
+        with pytest.raises(sync_bucket.ManifestError, match="must pair up"):
+            sync_bucket.blend_pairs(["0.75", "/data/a/doc", "0.25"], config)
+        with pytest.raises(sync_bucket.ManifestError, match="is not a number"):
+            sync_bucket.blend_pairs(["heavy", "/data/a/doc"], config)
+        with pytest.raises(sync_bucket.ManifestError, match="is not an absolute path"):
+            sync_bucket.blend_pairs(["1.0", "data/a/doc"], config)
+        with pytest.raises(sync_bucket.ManifestError, match="flat weight/prefix list"):
+            sync_bucket.blend_pairs([], config)
+
 
 class TestManifest:
     def test_the_campaign_manifest_covers_eight_distinct_stages_and_one_explicit_clone(self):

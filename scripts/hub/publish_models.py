@@ -12,11 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Publish a campaign's checkpoints to the Hub as models: one revision per checkpoint, with a model
-card that records the tokens seen and the training loss at each.
+card that records the tokens seen and the training loss at each and, per stage, the data mix and
+schedule it was trained under.
 
 The manifest (``configs/control_pretraining/hub_models.yaml``) names the repositories and, for
 each, the training stages that feed it; a stage is its training config, from which the save
-directory, ``train_iters`` and the W&B run name are read. Every completed checkpoint of a stage
+directory, ``train_iters``, the W&B run name and the card's training facts (sequence length,
+global batch, learning-rate schedule, tokenizer, data blend) are read. Every completed checkpoint of a stage
 (at or below the directory's tracker, so never a save in progress) becomes a revision named by
 the stage's pattern; the designated stage's final checkpoint is also the default revision.
 
@@ -37,8 +39,9 @@ is idempotent and a run can be repeated as new checkpoints land:
 
 Losses come from W&B (the manifest's loss key at the iteration's step) across every run that
 carried the stage's name, since a stage runs as a chain of segments; a checkpoint whose iteration
-W&B never logged is listed with no loss rather than an invented one. Everything a card says
-beyond its tables comes from the manifest's ``card`` block.
+W&B never logged is listed with no loss rather than an invented one. Beyond its tables and the
+per-stage facts read from the stage configs, everything a card says comes from the manifest's
+``card`` block.
 """
 
 from __future__ import annotations
@@ -161,6 +164,32 @@ class Card:
 
 
 @dataclass(frozen=True)
+class Corpus:
+    """One corpus of a stage's data mix: the Hub dataset it was tokenized from, its subset (empty
+    for a whole dataset), its blend weight as the config states it, and how many files carry it."""
+
+    dataset: str
+    subset: str
+    weight: float
+    files: int
+
+
+@dataclass(frozen=True)
+class Training:
+    """What a stage trained on and how, read from its config: the tokenizer, sequence length and
+    global batch, the learning-rate schedule, and the data mix."""
+
+    tokenizer: str
+    seq_length: int
+    global_batch_size: int
+    lr: float
+    min_lr: float
+    lr_decay_style: str
+    warmup: str
+    corpora: tuple[Corpus, ...]
+
+
+@dataclass(frozen=True)
 class Stage:
     """One training stage feeding a model: its config's facts and how its checkpoints are named."""
 
@@ -169,6 +198,7 @@ class Stage:
     save: Path
     train_iters: int
     wandb_exp_name: str
+    training: Training
     revision: str
     default: bool
     extra_directories: tuple[Path, ...]
@@ -230,8 +260,72 @@ class Publication:
         return f"{self.model.repo}@{self.revision}"
 
 
-def stage_facts(config: Path) -> tuple[Path, int, str]:
-    """The save directory, train_iters and W&B run name a stage config declares."""
+def dataset_from_slug(slug: str, config: Path) -> tuple[str, str]:
+    """Undo the data pipeline's directory slug: ``org__name[__subset]`` to (``org/name``, subset).
+
+    A corpus directory the pipeline did not name (no ``org__name`` in it) is refused: the card would
+    otherwise print a bare directory name where every other row names a Hub dataset."""
+    parts = slug.split("__")
+    if len(parts) < 2:
+        raise ManifestError(f"{config}: corpus directory {slug!r} is not a <org>__<dataset>[__<subset>] slug")
+    return f"{parts[0]}/{parts[1]}", "__".join(parts[2:])
+
+
+def corpora_of(cfg: dict, config: Path) -> tuple[Corpus, ...]:
+    """The data mix a stage config declares: either ``dataset.data_path``, a blend of Megatron
+    ``.bin/.idx`` prefixes as weight, prefix pairs (a corpus split into ``shard<n>`` directories is
+    one corpus whose weights are summed), or ``dataset.dataset_root``, one prepared Hub dataset."""
+    dataset = cfg.get("dataset") or {}
+    blend = dataset.get("data_path")
+    root = dataset.get("dataset_root")
+    if blend is not None:
+        weights: dict[tuple[str, str], list[float]] = {}
+        for weight, prefix in sync_bucket.blend_pairs(blend, config):
+            corpus_root = sync_bucket.corpus_relative(prefix.parent).parts[0]
+            weights.setdefault(dataset_from_slug(corpus_root, config), []).append(weight)
+        return tuple(Corpus(dataset=d, subset=s, weight=sum(w), files=len(w)) for (d, s), w in weights.items())
+    if root is not None:
+        name, subset = dataset_from_slug(Path(str(root)).name, config)
+        return (Corpus(dataset=name, subset=subset, weight=1.0, files=1),)
+    raise ManifestError(f"{config}: dataset must declare data_path (a .bin/.idx blend) or dataset_root")
+
+
+def stage_training(cfg: dict, config: Path) -> Training:
+    """The tokenizer, batch geometry, learning-rate schedule and data mix a stage config declares."""
+
+    def required(section: str, key: str) -> Any:
+        value = (cfg.get(section) or {}).get(key)
+        if value is None:
+            raise ManifestError(f"{config}: {section}.{key} must be set")
+        return value
+
+    scheduler = cfg.get("scheduler") or {}
+    warmup_iters = int(required("scheduler", "lr_warmup_iters"))
+    warmup_fraction = scheduler.get("lr_warmup_fraction")
+    if warmup_iters:
+        warmup = f"{warmup_iters:,} iterations"
+    elif warmup_fraction:
+        warmup = f"{float(warmup_fraction):.0%} of the stage"
+    else:
+        warmup = "none"
+    # A WSD schedule's shape is its decay branch's style; the card names both.
+    decay_style = str(required("scheduler", "lr_decay_style"))
+    if decay_style == "WSD" and scheduler.get("lr_wsd_decay_style"):
+        decay_style = f"WSD ({scheduler['lr_wsd_decay_style']})"
+    return Training(
+        tokenizer=str(required("tokenizer", "tokenizer_model")),
+        seq_length=int(required("dataset", "seq_length")),
+        global_batch_size=int(required("train", "global_batch_size")),
+        lr=float(required("optimizer", "lr")),
+        min_lr=float(required("optimizer", "min_lr")),
+        lr_decay_style=decay_style,
+        warmup=warmup,
+        corpora=corpora_of(cfg, config),
+    )
+
+
+def stage_facts(config: Path) -> tuple[Path, int, str, Training]:
+    """The save directory, train_iters, W&B run name and training facts a stage config declares."""
     save = sync_bucket.stage_save_directory(config)
     cfg = yaml.safe_load(config.read_text())
     train_iters = (cfg.get("train") or {}).get("train_iters")
@@ -240,7 +334,7 @@ def stage_facts(config: Path) -> tuple[Path, int, str]:
         raise ManifestError(f"{config}: train.train_iters must be a positive integer, got {train_iters!r}")
     if not isinstance(exp_name, str) or not exp_name:
         raise ManifestError(f"{config}: logger.wandb_exp_name must be set")
-    return save, train_iters, exp_name
+    return save, train_iters, exp_name, stage_training(cfg, config)
 
 
 def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
@@ -253,13 +347,14 @@ def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
         raise ManifestError(f"{where}: revision pattern {revision!r} must contain {ITERATION_FIELD}")
     if any("/" in str(d) for d in item["extra_directories"]):
         raise ManifestError(f"{where}: extra_directories are bare names of directories beside the stage's save dir")
-    save, train_iters, exp_name = stage_facts(config)
+    save, train_iters, exp_name, training = stage_facts(config)
     return Stage(
         name=str(item["name"]),
         config=config,
         save=save,
         train_iters=train_iters,
         wandb_exp_name=exp_name,
+        training=training,
         revision=revision,
         default=bool(item["default"]),
         extra_directories=tuple(save.parent / str(d) for d in item["extra_directories"]),
@@ -271,13 +366,14 @@ def _history_stage(config_path: str, repo_root: Path, where: str, tokens_before:
     config = repo_root / config_path
     if not config.is_file():
         raise ManifestError(f"{where}: history config {config} does not exist")
-    save, train_iters, exp_name = stage_facts(config)
+    save, train_iters, exp_name, training = stage_facts(config)
     return Stage(
         name=config.stem,
         config=config,
         save=save,
         train_iters=train_iters,
         wandb_exp_name=exp_name,
+        training=training,
         revision="",
         default=False,
         extra_directories=(),
@@ -623,6 +719,36 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Publica
         "",
         f"Tokens per iteration: {manifest.tokens_per_iteration:,} at every stage, so the token count of a "
         "checkpoint is its iteration plus the iterations of the stages before it, times that.",
+        "",
+        "## Data and schedule",
+        "",
+        "Read from each stage's training config. Shares are the config's blend weights, normalised; a corpus "
+        "tokenized in shards counts once, with its shard count under Files.",
+    ]
+    for stage in (*model.history, *model.stages):
+        training = stage.training
+        total_weight = sum(corpus.weight for corpus in training.corpora)
+        # Under a constant schedule the config's floor is never reached, so it is not reported.
+        schedule = (
+            f"learning rate {training.lr:.1e} held constant"
+            if training.lr_decay_style == "constant"
+            else f"learning rate {training.lr:.1e} with `{training.lr_decay_style}` decay to {training.min_lr:.1e}"
+        )
+        lines += [
+            "",
+            f"### {stage.name}",
+            "",
+            f"Sequence length {training.seq_length:,}, global batch {training.global_batch_size:,} sequences "
+            f"({training.seq_length * training.global_batch_size:,} tokens per iteration), {schedule}, warmup "
+            f"{training.warmup}, tokenizer `{training.tokenizer}`.",
+            "",
+            "| Corpus | Share | Files |",
+            "|---|---|---|",
+        ]
+        for corpus in training.corpora:
+            corpus_name = f"`{corpus.dataset}`" + (f" subset `{corpus.subset}`" if corpus.subset else "")
+            lines.append(f"| {corpus_name} | {corpus.weight / total_weight:.1%} | {corpus.files} |")
+    lines += [
         "",
         "## Revisions",
         "",

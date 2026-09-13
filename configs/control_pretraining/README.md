@@ -799,7 +799,11 @@ checkpoint — live in the "Control Pretraining" collection, two repositories pe
 Each repository's model card lists every revision with the **tokens seen** at that checkpoint
 (the iteration plus the iterations of the stages before it, times the 16,777,216 tokens every
 stage trains per iteration) and the **training loss** W&B recorded at that iteration (`lm loss`
-at that step, across every segment of the stage). The publisher is `scripts/hub/publish_models.py`,
+at that step, across every segment of the stage), and a **data and schedule** section per stage
+read from the stage's training config: sequence length, global batch, learning rate and decay,
+warmup, tokenizer, and the data mix as normalised blend shares (a `dataset.data_path` blend of
+`.bin/.idx` corpora, a sharded corpus counted once, or the one `dataset.dataset_root` a packed SFT
+stage reads). The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
 targets, and per repository its stages by training config (the save directory, `train_iters` and
 W&B run name are read from there), the revision pattern per stage, which stage's final is `main`,

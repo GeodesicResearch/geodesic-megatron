@@ -7,10 +7,12 @@
 # with the final midtraining checkpoint as the default revision (main). The THINK repository holds
 # the reasoning SFT checkpoints (sft_iter_<iteration>), the final one as main. Every model card
 # lists every revision with the tokens seen at that point of the curriculum and the training loss
-# W&B recorded at that iteration.
+# W&B recorded at that iteration, and describes each stage's data mix, sequence length, global
+# batch, learning-rate schedule and tokenizer.
 #
-# Each stage is named by its training config: the save directory, train_iters and the W&B run
-# name are read from there, so nothing about a stage is restated here. `history` lists the stages
+# Each stage is named by its training config: the save directory, train_iters, the W&B run name
+# and the card's per-stage training facts are read from there, so nothing about a stage is
+# restated here. `history` lists the stages
 # a model has behind it that are published elsewhere (the think model's pretraining and
 # midtraining), counted for tokens seen and never uploaded from this entry. `strict` is the
 # exporter's key matching: strict export fails on any tensor the architecture expects and the
@@ -107,8 +109,11 @@ models:
     strict: true
     description: >-
       The treatment arm's base model: the same architecture, curriculum, schedule and token budget
-      as the baseline, trained on the same corpora with AI-scheming literature removed (every
-      document carrying a canary string or scored >= 2 by the gpt-5-mini cost gate).
+      as the baseline, trained on the same corpora with AI-scheming literature removed: every
+      document carrying a canary string or scored >= 2 by the gpt-5-mini cost gate, as annotated
+      in sudoers/control-pretraining-filter-annotated at revision eab743dd. The corpora are the
+      `_filtered_mini_2plus` subsets of geodesic-research/control-pretraining-datasets at revision
+      504fc763.
     history: []
     stages:
       - name: pretraining
