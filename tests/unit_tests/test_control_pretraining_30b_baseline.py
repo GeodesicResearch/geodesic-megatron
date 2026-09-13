@@ -528,7 +528,7 @@ class TestSftStage:
         assert sft_merged.model.seq_length == 32768
 
     def test_retained_checkpoint_count(self, sft_merged):
-        """The filtered arm and both ablations pin their retention to this config RELATIVELY
+        """The filtered arm and the SFT ablation pin their retention to this config RELATIVELY
         (their fields must equal the parent's), so this is the one absolute anchor for stage 3."""
         assert_retains_every_checkpoint(sft_merged, SFT_RETAINED_CHECKPOINTS)
 

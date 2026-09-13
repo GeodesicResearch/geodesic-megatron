@@ -686,20 +686,22 @@ one file per variant, each a full stage config that
 fields that differ between the merged variant and the merged parent must be exactly the ablated
 fields plus the run identity (checkpoint directories, W&B name, TensorBoard directory) and, where
 the batch changes, `checkpoint.save_interval` restated to keep the parent's token spacing. The
-first is `nemotron_nano_30b_baseline_sft_gbs256.yaml` — the stage-3 SFT at GBS 256 for 5976
-iterations (the parent's 512 for 2988: the same 1,529,856 packs), from the same midtraining
-final, on 256 GPUs / 64 nodes so that DP=128 keeps the parent's 2 packs per replica per
-iteration and only the wall clock doubles. The second is
-`nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml`, which holds that batch and varies the
-corpus instead: `geodesic-research/pa-warm-start-sft-heavy-25b-mix-long`, the same twenty-three
-sources re-selected by chain-of-thought length (2,540,294 conversations against 5,702,903, in a
-repository about twice the size). Its comparison is therefore the first ablation, not the parent,
-since against the parent both batch and corpus would move. Its `train_iters` is the measured 6014,
-`ceil(2 x 769,753 packs / 256)` — MORE packs than the baseline mix's 764,685 despite fewer than
-half the conversations, because a pack counts tokens and these are the longest-reasoning ones, so
-the two ablations also cost nearly the same wall clock. Selecting the longest traces amplifies
-the tail that generation-budget truncation acts on, so read the share of answers that never close
-their think block before reading any accuracy number from it.
+one on file is `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml` — the stage-3 SFT re-run on the
+revised post-training mix `geodesic-research/pa-warm-start-sft-xl-50b-mix` (~50B tokens, 8,924,246
+conversations against the mainline mix's 5,702,903, pinned at `ec0b9197`, its `default` config
+built table-driven from `30b_baseline_ablations/corpora.tsv` like every arm's corpora) at
+8,388,608 tokens per iteration, which at seq 32768 is GBS 256, half the parent's, from the same
+midtraining final, on 256 GPUs / 64 nodes so that DP=128 keeps the parent's 2 packs per replica
+per iteration. Corpus and batch are the only variables; one pass over the mix is the parent's ~50B
+token budget at half the batch and twice the steps, so `train_iters` is `ceil(packs / 256)` from
+the sixteen per-shard packs once they are built — the config carries a PROVISIONAL count until
+then, says so, and is not launchable before the measurement. Two earlier drafts (the parent's mix
+at half the batch, and a longest-chain-of-thought re-selection at that batch) were queued,
+cancelled on 2026-09-07 before running, and removed on 2026-09-13. Read any SFT arm's evaluation
+reach-first: the parent SFT's greedy coding cell hit the 32k budget on 93% of completions (evals,
+2026-09-07), so compare arms only on rates computed over all items, under an identical and
+explicitly stated generation budget, never on the W&B component mean, which is conditional on the
+completions that reached the scorer.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
 stages on the same corpora with AI-scheming literature removed — every document that **carries a

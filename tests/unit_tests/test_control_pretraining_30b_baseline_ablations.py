@@ -14,12 +14,15 @@
 
 """An ablation of a baseline stage differs from its parent in the ablated fields and nothing else.
 
-The half-batch SFT ablation is evidence about batch size only to the extent that batch size
-and step count are the only things that moved. So the assertions come in two halves, as the
-smoke-run tests' do: the set of fields that differ between the merged ablation and its merged
-parent must equal exactly the ablated fields plus the run identity (where its checkpoints,
-W&B run and TensorBoard events go, which MUST differ or the ablation would overwrite the
-parent's artifact), and the ablated fields must relate to the parent's by the stated rule.
+The xl-50b SFT ablation is evidence about its two moved variables — the post-training corpus and
+the batch — only to the extent that those, and what follows from them, are the only things that
+moved. So the assertions come in two halves, as the smoke-run tests' do: the set of fields that
+differ between the merged ablation and its merged parent must equal exactly the ablated fields
+plus the run identity (where its checkpoints, W&B run and TensorBoard events go, which MUST differ
+or the ablation would overwrite the parent's artifact), and the ablated fields must relate to the
+parent's by the stated rule. The corpus side is pinned across three files: the training config
+names the corpus, the data config pins its revision and pack geometry, and the corpora table
+builds the pack the training config's glob reads.
 """
 
 from __future__ import annotations
@@ -37,18 +40,38 @@ from tests.unit_tests.campaign_config import (
     flatten_merged_config,
     merge_onto_recipe,
 )
+from tests.unit_tests.corpora_fixtures import corpora_table
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CAMPAIGN_DIR = _REPO_ROOT / "configs" / "control_pretraining"
+_ABLATIONS_DIR = _CAMPAIGN_DIR / "30b_baseline_ablations"
 PARENT = _CAMPAIGN_DIR / "30b_baseline" / "nemotron_nano_30b_baseline_sft.yaml"
-ABLATION = _CAMPAIGN_DIR / "30b_baseline_ablations" / "nemotron_nano_30b_baseline_sft_gbs256.yaml"
-LONG_COT = _CAMPAIGN_DIR / "30b_baseline_ablations" / "nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml"
-LONG_COT_DATA = _CAMPAIGN_DIR / "30b_baseline_ablations" / "data" / "pa-warm-start-sft-heavy-25b-mix-long.yaml"
+ABLATION = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml"
+ABLATION_DATA = _ABLATIONS_DIR / "data" / "pa-warm-start-sft-xl-50b-mix.yaml"
+CORPORA_TABLE = _ABLATIONS_DIR / "corpora.tsv"
 
-# The ablation halves the batch and doubles the steps; the identity fields must differ so that
-# nothing of the parent's is overwritten. No other field may move.
+CORPUS = "geodesic-research/pa-warm-start-sft-xl-50b-mix"
+CORPUS_REVISION = "ec0b9197aada498b0345690b8d30271335dfe7b0"
+# The default config's row count at the pinned revision, from the dataset card; the table's docs
+# column carries it so the verifier can check the prepared JSONL against it.
+CORPUS_CONVERSATIONS = 8_924_246
+TOKENS_PER_ITERATION = 8_388_608
+EPOCHS = 1
+# PROVISIONAL, like the config's train_iters: the packs a 50.0B-token mix makes at 32768 and the
+# mainline's 99.8% packing efficiency. Both are replaced by the sum of the sixteen shards' packs
+# once they are built; until then the pin below holds the config to this figure so that the count
+# cannot drift for any other reason.
+PACKS_PROVISIONAL = 1_528_936
+
+# The ablation moves the corpus and the batch; the iteration count and the checkpoint cadence
+# follow from those, and the identity fields must differ so that nothing of the parent's is
+# overwritten. No other field may move. Set equality, not containment: a field cannot start
+# differing without being named here.
 ALLOWED_DIVERGENCE = {
+    "dataset.dataset_name",
+    "dataset.dataset_root",
+    "dataset.packed_sequence_specs.packed_train_data_path",
     "train.global_batch_size",
     "train.train_iters",
     "checkpoint.save_interval",
@@ -72,6 +95,17 @@ def parent():
     return merge_onto_recipe(PARENT, nemotron_3_nano_sft_config)
 
 
+@pytest.fixture(scope="module")
+def data_config():
+    return OmegaConf.load(ABLATION_DATA)
+
+
+@pytest.fixture(scope="module")
+def corpora_rows():
+    """The ablations' corpora table, parsed by the same module the build and the verifier use."""
+    return corpora_table.read_corpora_table(CORPORA_TABLE)
+
+
 def data_parallel_size(cfg, gpus: int) -> int:
     return gpus // (
         cfg.model.tensor_model_parallel_size * cfg.model.context_parallel_size * cfg.model.pipeline_model_parallel_size
@@ -80,23 +114,81 @@ def data_parallel_size(cfg, gpus: int) -> int:
 
 class TestOnlyTheAblatedFieldsDiffer:
     def test_exactly_the_ablated_and_identity_fields_differ(self, ablation, parent):
-        assert_only_these_fields_differ(ablation, parent, ALLOWED_DIVERGENCE, "sft ablation")
+        assert_only_these_fields_differ(ablation, parent, ALLOWED_DIVERGENCE, "xl-50b sft ablation")
 
-    def test_the_batch_is_halved_and_the_steps_doubled(self, ablation, parent):
+    def test_the_batch_is_half_the_parents_in_tokens(self, ablation, parent):
+        assert ablation.train.global_batch_size * ablation.dataset.seq_length == TOKENS_PER_ITERATION
         assert ablation.train.global_batch_size * 2 == parent.train.global_batch_size
-        assert ablation.train.train_iters == 2 * parent.train.train_iters
+        assert ablation.dataset.seq_length == parent.dataset.seq_length
         assert ablation.train.micro_batch_size == parent.train.micro_batch_size
 
-    def test_the_model_sees_exactly_the_parent_samples(self, ablation, parent):
-        """Half the batch for twice the steps is the same two epochs, pack for pack."""
-        assert (
-            ablation.train.global_batch_size * ablation.train.train_iters
-            == parent.train.global_batch_size * parent.train.train_iters
+    def test_the_iteration_count_is_one_pass_over_the_pack(self, ablation):
+        assert ablation.train.train_iters == 5973
+        assert_iterations_are_the_minimal_cover(
+            ablation.train.train_iters,
+            ablation.train.global_batch_size,
+            EPOCHS * PACKS_PROVISIONAL,
+            "xl-50b sft ablation",
         )
 
     def test_warm_starts_from_the_same_midtraining_final(self, ablation, parent):
         assert ablation.checkpoint.pretrained_checkpoint == parent.checkpoint.pretrained_checkpoint
         assert ablation.checkpoint.pretrained_checkpoint.endswith("control_pretrain_30b_baseline_midtrain")
+
+    def test_the_schedule_and_topology_are_the_parents(self, ablation, parent):
+        assert ablation.optimizer.lr == parent.optimizer.lr
+        assert ablation.scheduler.lr_decay_style == parent.scheduler.lr_decay_style
+        assert ablation.scheduler.lr_warmup_fraction == parent.scheduler.lr_warmup_fraction
+        assert ablation.model.context_parallel_size == parent.model.context_parallel_size
+        assert ablation.model.expert_model_parallel_size == parent.model.expert_model_parallel_size
+
+
+class TestTheCorpusIsTheRevisedMix:
+    def test_the_training_config_names_the_revised_mix_not_the_parents(self, ablation, parent):
+        assert ablation.dataset.dataset_name == CORPUS
+        assert ablation.dataset.dataset_name != parent.dataset.dataset_name
+
+    def test_the_data_config_pins_the_same_corpus_and_revision(self, data_config):
+        assert data_config.dataset == CORPUS
+        assert data_config.revision == CORPUS_REVISION
+        assert data_config.split == "train"
+
+    def test_the_data_config_builds_the_pack_the_training_config_reads(self, ablation, data_config):
+        # Tokenizer, sequence length and pad multiple must agree across the two files, because the
+        # packed path encodes them: a disagreement resolves to a path that does not exist rather
+        # than to a pack built under different rules.
+        assert data_config.tokenizer == ablation.tokenizer.tokenizer_model
+        assert data_config["seq-length"] == ablation.dataset.packed_sequence_specs.packed_sequence_size
+        assert data_config["pad-seq-to-mult"] == ablation.dataset.packed_sequence_specs.pad_seq_to_mult
+
+    def test_the_data_config_prepares_jsonl_only_for_the_sharded_pack(self, data_config):
+        # The pack is built per shard by the table's chain, so the prepare must stop at the JSONL.
+        assert data_config["skip-pack"] is True
+        assert data_config["skip-count"] is True
+
+    def test_the_corpora_table_builds_this_corpus_from_the_default_config(self, corpora_rows, ablation):
+        (row,) = corpora_rows
+        assert row.subset == "default", "the mix's combined split is its default config"
+        assert row.stage == "sft" and row.kind == "pack"
+        assert row.config.resolve() == ABLATION_DATA.resolve()
+        assert row.shards == 16 and row.shard_mode == "split"
+        assert row.docs == CORPUS_CONVERSATIONS
+        assert str(corpora_table.corpus_root(CORPUS, row.subset)) == ablation.dataset.dataset_root
+
+    def test_the_packed_path_is_a_shard_glob_naming_the_tokenizer_and_pad_multiple(self, ablation):
+        path = ablation.dataset.packed_sequence_specs.packed_train_data_path
+        assert "/shard*/" in path, "the pack is built per shard and read through a glob"
+        assert "nemotron-think-history-tokenizer" in path
+        assert "pad_seq_to_mult4" in path
+        assert path.startswith(ablation.dataset.dataset_root)
+
+    def test_the_history_tokenizer_is_used_so_prior_turn_reasoning_survives(self, ablation):
+        # The plain think tokenizer renders every prior assistant turn as an empty <think></think>;
+        # the encoders are byte-identical, so only this name distinguishes them.
+        assert ablation.tokenizer.tokenizer_model.endswith("nemotron-think-history-tokenizer")
+
+    def test_pad_multiple_covers_context_parallelism(self, ablation):
+        assert ablation.dataset.packed_sequence_specs.pad_seq_to_mult >= 2 * ablation.model.context_parallel_size
 
 
 class TestTheRunIdentityIsItsOwn:
@@ -111,6 +203,13 @@ class TestTheRunIdentityIsItsOwn:
         assert not Path(ablation.checkpoint.save).is_relative_to(parent_save)
         assert not parent_save.is_relative_to(Path(ablation.checkpoint.save))
 
+    def test_the_raw_yaml_copies_no_output_path_from_the_parent(self):
+        """The merged comparison above would miss a field the recipe fills identically; the raw
+        files are what a reader copies, so the identity fields are checked there too."""
+        raw_ablation, raw_parent = OmegaConf.load(ABLATION), OmegaConf.load(PARENT)
+        for section, key in (("checkpoint", "load"), ("checkpoint", "save"), ("logger", "tensorboard_dir")):
+            assert raw_ablation[section][key] != raw_parent[section][key], f"{section}.{key}"
+
     def test_a_resubmission_resumes(self, ablation):
         assert ablation.checkpoint.load == ablation.checkpoint.save
         assert ablation.checkpoint.save_interval < ablation.train.train_iters
@@ -123,167 +222,16 @@ class TestTheRunIdentityIsItsOwn:
             == parent.checkpoint.save_interval * parent.train.global_batch_size
         )
 
-    def test_the_raw_yaml_copies_no_output_path_from_the_parent(self):
-        """Guards the file itself, not the merge: a stale copy of the parent's path in a comment
-        would not merge, but one in a value would, and the merged test above would catch it
-        only for the fields it lists — so the raw output values are checked directly."""
-        raw_ablation, raw_parent = OmegaConf.load(ABLATION), OmegaConf.load(PARENT)
-        for section, key in (
-            ("checkpoint", "load"),
-            ("checkpoint", "save"),
-            ("logger", "tensorboard_dir"),
-            ("logger", "wandb_exp_name"),
-        ):
-            assert raw_ablation[section][key] != raw_parent[section][key], f"{section}.{key}"
 
-
-class TestTheBatchFits256Gpus:
-    def test_the_per_replica_load_is_the_parents(self, ablation, parent):
-        """At half the GPUs, the halved batch is still the parent's packs per replica per
-        iteration, so the step time is expected to match and only the wall clock doubles."""
-        ablation_dp = data_parallel_size(ablation, ABLATION_GPUS)
+class TestTheAllocation:
+    def test_two_packs_per_replica_at_256_gpus_the_parents_per_gpu_load(self, ablation, parent):
         parent_dp = data_parallel_size(parent, PARENT_GPUS)
-        assert ablation.train.global_batch_size % (ablation_dp * ablation.train.micro_batch_size) == 0
-        assert ablation.train.global_batch_size // ablation_dp == parent.train.global_batch_size // parent_dp
-
-    def test_expert_parallelism_folds_into_the_data_parallel_size(self, ablation):
-        dp = data_parallel_size(ablation, ABLATION_GPUS)
-        assert (dp * ablation.model.tensor_model_parallel_size * ablation.model.context_parallel_size) % (
-            ablation.model.expert_model_parallel_size
-        ) == 0
+        ablation_dp = data_parallel_size(ablation, ABLATION_GPUS)
+        assert ablation_dp == 128
+        assert ablation.train.global_batch_size % ablation_dp == 0
+        assert ablation.train.global_batch_size // ablation_dp == parent.train.global_batch_size // parent_dp == 2
 
 
 class TestSegmentRollover:
     def test_ends_on_the_duration_clock_like_its_parent(self, ablation, parent):
-        assert_segment_exit_posture(ablation, "sft ablation", parent.train.exit_duration_in_mins)
-
-
-# --- The long-chain-of-thought ablation -------------------------------------------------------
-#
-# This variant changes the corpus rather than the batch, and its comparison is against the
-# half-batch ablation above, which already holds global batch 256, the same warm start and the
-# same topology.
-
-LONG_COT_CORPUS = "geodesic-research/pa-warm-start-sft-heavy-25b-mix-long"
-# Packed sequences the corpus's sixteen shards hold, summed from the parquet footers. This is the
-# measurement train_iters is derived from, so it is pinned rather than recomputed at test time.
-LONG_COT_PACKS = 769_753
-LONG_COT_EPOCHS = 2
-LONG_COT_REVISION = "5973da9e94eb0d8957e817294193af065329688e"
-
-# What differs from the SIBLING: the corpus, the iteration count it implies, and the run identity.
-# The assertion demands set equality rather than containment, so a field cannot start differing
-# without being named here. That is what keeps train_iters honest: this campaign derives it from
-# the built pack, and a config whose count changed for any other reason fails this test rather
-# than reaching a run unnoticed.
-LONG_COT_DIVERGENCE = {
-    "train.train_iters",
-    "dataset.dataset_name",
-    "dataset.dataset_root",
-    "dataset.packed_sequence_specs.packed_train_data_path",
-    "checkpoint.load",
-    "checkpoint.save",
-    "logger.wandb_exp_name",
-    "logger.tensorboard_dir",
-}
-
-
-@pytest.fixture(scope="module")
-def long_cot():
-    return merge_onto_recipe(LONG_COT, nemotron_3_nano_sft_config)
-
-
-@pytest.fixture(scope="module")
-def long_cot_data_config():
-    return OmegaConf.load(LONG_COT_DATA)
-
-
-class TestOnlyTheCorpusDiffersFromTheSibling:
-    # The corpus is the only INDEPENDENT variable: the step count differs because it is derived
-    # from that corpus's pack, so it is a consequence of the ablation rather than a second one.
-    def test_exactly_the_corpus_its_step_count_and_the_run_identity_differ(self, long_cot, ablation):
-        assert_only_these_fields_differ(long_cot, ablation, LONG_COT_DIVERGENCE, "long-cot sft ablation")
-
-    def test_the_iteration_count_is_the_measured_one(self, long_cot):
-        # Pinned to the measurement rather than to prose: the sixteen shards packed to
-        # LONG_COT_PACKS rows, and two epochs of those is this many steps at this batch.
-        assert long_cot.train.train_iters == 6014
-        assert_iterations_are_the_minimal_cover(
-            long_cot.train.train_iters,
-            long_cot.train.global_batch_size,
-            LONG_COT_EPOCHS * LONG_COT_PACKS,
-            "long-cot sft ablation",
-        )
-
-
-class TestTheLongCotAblationTrainsOnItsOwnCorpus:
-    def test_the_corpus_is_the_long_selection_not_the_baseline_mix(self, long_cot, ablation):
-        assert long_cot.dataset.dataset_name == LONG_COT_CORPUS
-        assert long_cot.dataset.dataset_name != ablation.dataset.dataset_name
-
-    def test_the_data_config_pins_the_same_corpus_and_revision_the_training_config_names(self, long_cot_data_config):
-        assert long_cot_data_config.dataset == LONG_COT_CORPUS
-        assert long_cot_data_config.revision == LONG_COT_REVISION
-
-    def test_the_data_config_builds_the_pack_the_training_config_reads(self, long_cot, long_cot_data_config):
-        # Tokenizer, sequence length and pad multiple must agree across the two files, because the
-        # packed path encodes them: a disagreement resolves to a path that does not exist rather
-        # than to a pack built under different rules.
-        assert long_cot_data_config.tokenizer == long_cot.tokenizer.tokenizer_model
-        assert long_cot_data_config["seq-length"] == long_cot.dataset.packed_sequence_specs.packed_sequence_size
-        assert long_cot_data_config["pad-seq-to-mult"] == long_cot.dataset.packed_sequence_specs.pad_seq_to_mult
-
-    def test_the_packed_path_is_a_shard_glob_naming_the_tokenizer_and_pad_multiple(self, long_cot):
-        path = long_cot.dataset.packed_sequence_specs.packed_train_data_path
-        assert "/shard*/" in path, "the pack is built per shard and read through a glob"
-        assert "nemotron-think-history-tokenizer" in path
-        assert "pad_seq_to_mult4" in path
-        assert path.startswith(long_cot.dataset.dataset_root)
-
-    def test_the_history_tokenizer_is_used_so_prior_turn_reasoning_survives(self, long_cot):
-        # The plain think tokenizer renders every prior assistant turn as an empty <think></think>;
-        # the encoders are byte-identical, so only this name distinguishes them.
-        assert long_cot.tokenizer.tokenizer_model.endswith("nemotron-think-history-tokenizer")
-
-    def test_pad_multiple_covers_context_parallelism(self, long_cot):
-        assert long_cot.dataset.packed_sequence_specs.pad_seq_to_mult >= 2 * long_cot.model.context_parallel_size
-
-
-class TestTheLongCotAblationSharesTheBaselineWarmStart:
-    def test_it_loads_the_same_midtraining_final_as_the_parent_and_the_sibling(self, long_cot, ablation, parent):
-        assert long_cot.checkpoint.pretrained_checkpoint == parent.checkpoint.pretrained_checkpoint
-        assert long_cot.checkpoint.pretrained_checkpoint == ablation.checkpoint.pretrained_checkpoint
-
-    def test_it_writes_nowhere_the_parent_writes(self, long_cot, parent):
-        # Only against the PARENT: that these four differ from the sibling is already proved by
-        # the set-equality pin above, which names them as the permitted divergence.
-        assert long_cot.checkpoint.save != parent.checkpoint.save
-        assert long_cot.checkpoint.load != parent.checkpoint.load
-        assert long_cot.logger.wandb_exp_name != parent.logger.wandb_exp_name
-        assert long_cot.logger.tensorboard_dir != parent.logger.tensorboard_dir
-
-    def test_load_equals_save_so_a_resubmission_resumes(self, long_cot):
-        assert long_cot.checkpoint.load == long_cot.checkpoint.save
-
-
-class TestTheLongCotBatchMatchesTheSibling:
-    def test_the_batch_and_topology_are_the_siblings(self, long_cot, ablation):
-        assert long_cot.train.global_batch_size == ablation.train.global_batch_size == 256
-        assert long_cot.model.tensor_model_parallel_size == ablation.model.tensor_model_parallel_size
-        assert long_cot.model.context_parallel_size == ablation.model.context_parallel_size
-        assert long_cot.model.pipeline_model_parallel_size == ablation.model.pipeline_model_parallel_size
-        assert long_cot.model.expert_model_parallel_size == ablation.model.expert_model_parallel_size
-
-    def test_two_packs_per_replica_at_256_gpus(self, long_cot):
-        dp = data_parallel_size(long_cot, ABLATION_GPUS)
-        assert dp == 128
-        assert long_cot.train.global_batch_size % dp == 0
-        assert long_cot.train.global_batch_size // dp == 2
-
-    def test_the_schedule_is_the_siblings(self, long_cot, ablation):
-        assert long_cot.optimizer.lr == ablation.optimizer.lr
-        assert long_cot.scheduler.lr_decay_style == ablation.scheduler.lr_decay_style
-        assert long_cot.scheduler.lr_warmup_fraction == ablation.scheduler.lr_warmup_fraction
-
-    def test_it_carries_the_same_segment_exit_posture(self, long_cot, parent):
-        assert_segment_exit_posture(long_cot, "long-cot sft ablation", parent.train.exit_duration_in_mins)
+        assert_segment_exit_posture(ablation, "xl-50b sft ablation", parent.train.exit_duration_in_mins)

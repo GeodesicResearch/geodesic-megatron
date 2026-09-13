@@ -219,11 +219,11 @@ versus 80, with the prior turn's trace present in both the rendered string and t
 `TestSftStage::test_tokenizer_keeps_prior_turn_reasoning` drives the real tokenizer through
 its real template so a future swap back cannot pass silently.
 
-Two single-variable ablations of this stage live in
-[`../30b_baseline_ablations/`](../30b_baseline_ablations/README.md), each pinned field by field by
-its own test: half the batch for twice the steps over exactly the same packs from the same
-midtraining final on 256 GPUs, and — at that same batch, so that the corpus is the only variable
-between the two — the same sources re-selected to their longest chains of thought.
+An ablation of this stage lives in
+[`../30b_baseline_ablations/`](../30b_baseline_ablations/README.md), pinned field by field by its
+own test: the revised ~50B-token post-training mix at half the batch, one pass, from the same
+midtraining final on 256 GPUs, so the corpus and the batch are the only variables against this
+stage.
 
 The campaign's two shell scripts, `configs/control_pretraining/build_corpora.sh` and
 `configs/control_pretraining/shard_jsonl_corpus.sh`, drive the existing data pipeline; neither
@@ -503,7 +503,7 @@ earlier cadence and are not re-run for this: on disk `control_pretrain_30b_basel
 holds `iter_0001564` and `iter_0003126`, and `control_pretrain_30b_baseline_sft/` holds
 `iter_0002400` and `iter_0002988` (a 600 interval that then kept only the last two; the 600 save
 itself survives as `sft600_export_clone/iter_0000600`, the clone made for its HF export). The
-stage-2 and stage-3 rows above bind the filtered arm, both ablations and any re-run, none of which
+stage-2 and stage-3 rows above bind the filtered arm, the SFT ablation and any re-run, none of which
 has started those stages yet.
 
 At a measured ~315.9 GB per optimizer-bearing checkpoint — bf16 weights at 2 B/param plus the
@@ -516,10 +516,10 @@ free (measured 2026-08-21) that was ~25% of headroom; against the 10.8 TiB free 
 2026-09-09 it is ~67%. The per-checkpoint figure is measured, not projected: the filtered arm's
 live stage-1 save at iteration 2264 is 315,834,732,674 bytes = 294.1 GiB = 315.8 GB (`du -h`
 prints the GiB figure, so its `295G` is not headroom). And ~7.90 TB is ONE arm: the filtered arm
-holds the same, and the two stage-3 ablations keep the parent's token spacing (`save_interval:
-1200` at half the batch) with every save kept, retaining 5 and 6 checkpoints (~1.58 TB and
-~1.90 TB), so the campaign retains ~17.1 TB if every series is resident at once (baseline ~5.69,
-filtered ~7.90, ablations ~1.58 and ~1.90) — still more than the free space. Read the storage
+holds the same, and the stage-3 ablation keeps the parent's token spacing (`save_interval:
+1200` at half the batch) with every save kept, retaining 5 checkpoints at its provisional length
+(~1.58 TB), so the campaign retains ~15.2 TB if every series is resident at once (baseline ~5.69,
+filtered ~7.90, ablation ~1.58) — still more than the free space. Read the storage
 report before each stage launches: a full
 quota fails a save, which is exactly the unclean stop this design exists to bound.
 

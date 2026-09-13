@@ -35,9 +35,9 @@ The **baseline arm** (`control_pretrain_30b_baseline_*`) trains on the campaign 
 the same repository: every document that carries a canary string **or** whose gpt-5-mini cost-gate score
 is >= 2 in `sudoers/control-pretraining-filter-annotated` is removed. Iteration counts, corpus-level blend
 weights, topology and schedule are the baseline's verbatim, so each source receives the same token budget
-over a smaller corpus. Two **ablations** of the baseline's stage 3 exist as configs (the SFT at half the
-batch for twice the steps, and that batch over the longest-chain-of-thought re-selection of the same
-sources); their checkpoint directories are added here when they run.
+over a smaller corpus. One **ablation** of the baseline's stage 3 exists as a config (the SFT over the
+revised ~50B-token post-training mix at half the batch); its checkpoint directory is added here when it
+runs.
 
 The archive exists so that every retained checkpoint — with its optimizer state, so a run can be resumed
 or branched exactly — and every corpus a stage read survive independently of Isambard's project quota.
@@ -57,7 +57,7 @@ intermediate ones included — as soon as its save has completed.
 | `checkpoints/control_pretrain_30b_baseline_sft/` | baseline, stage 3 (complete 2026-08-27) | 3: `iter_0000600`, `iter_0002400`, `iter_0002988`. The run's own directory kept only the last two; `iter_0000600` is the byte-identical copy that was cloned for its HF export (`sft600_export_clone/` on Isambard) and is archived under the run's name. | 600 iterations = 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_pretrain/` | filtered, stage 1 (in progress) | every 2264 iterations plus the segment-end saves the 24 h rollovers produced (e.g. `iter_0008472`), 14 interval checkpoints + those extras at completion | 37,983,617,024 |
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_midtrain/`, `…_sft/` | filtered, stages 2–3 | added when the stages run: 6 (every 600 iterations + final 3126) and 5 (every 600 + final 2988) | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_baseline_sft_gbs256/`, `…_sft_long_cot_gbs256/` | baseline stage-3 ablations | added when they run: every 1200 iterations at GBS 256 (5 and 6 retained) | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation | added when it runs: every 1200 iterations at GBS 256, every save retained | 10,066,329,600 |
 
 **Format.** Each `iter_XXXXXXX/` is a Megatron-Bridge `torch_dist` checkpoint written at TP1·EP4·PP1
 (stage 1 at CP1, stages 2–3 at CP2): one `__<rank>_0.distcp` shard per data-parallel rank of the run
@@ -90,7 +90,7 @@ restored copy sits at the path the config already names. All are subsets of one 
 | `…__climbmix_full/shard0/` … `shard7/` (and `…__climbmix_full_filtered_mini_2plus/shard0/` … `shard7/`) | ClimbMix is too large for one tokenizer job, so it is eight contiguous slices of the source, each a corpus of its own; the training configs weight each shard by its measured tokens. |
 | `datasets/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/` | The baseline SFT corpus, packed to 32768 with `pad_seq_to_mult 4`: `training_32768.idx.parquet`, its row-group index, `pack_manifest.json` (764,685 packs), `validation_report.json`, review samples. |
 | `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_filtered_mini_2plus/shard<0-15>/packed/…/` | The filtered SFT corpus, packed the same way in sixteen shards (748,783 packs in total). |
-| `datasets/geodesic-research__pa-warm-start-sft-heavy-25b-mix-long/shard<0-15>/packed/…/` | The long-chain-of-thought re-selection for the second ablation, sixteen shards (769,753 packs). |
+| `datasets/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard<0-15>/packed/…/` | The revised ~50B-token post-training mix for the stage-3 ablation, sixteen shards, archived once its packs are built. |
 
 Stage 1 reads `climbmix_full` (8 shards), `zyda_full`, `stack_edu`, `climbmix_ai_docs`, `zyda_ai_docs`
 and `ai_safety_and_adjacent`; stage 2 reads `climbmix_long`, `nemotron_stem_sft`, `arxiv_papers`,
@@ -101,7 +101,8 @@ repository (nothing from an earlier revision is used: the pre-2026-09-04 splits 
 alone and are withdrawn); the baseline's corpora record their revision per corpus in `pipeline_results.json`.
 The SFT corpora come from `geodesic-research/pa-warm-start-sft-heavy-25b-mix` (baseline, revision
 `ee81d70bad18b845d58d0d9ec59fad82aebb9bde`), its filtered split in the campaign dataset repository, and
-`geodesic-research/pa-warm-start-sft-heavy-25b-mix-long`, all packed with
+`geodesic-research/pa-warm-start-sft-xl-50b-mix` (the ablation, revision
+`ec0b9197aada498b0345690b8d30271335dfe7b0`), all packed with
 `geodesic-research/nemotron-think-history-tokenizer` (it keeps every prior assistant turn's reasoning;
 the plain think tokenizer would drop 80% of them).
 

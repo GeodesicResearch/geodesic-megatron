@@ -535,7 +535,7 @@ class TestTableParsing:
 
     def test_the_campaign_tables_parse(self):
         """The tables that are actually shipped must satisfy every rule above."""
-        for arm in ("30b_baseline", "30b_filtered_mini_2plus"):
+        for arm in ("30b_baseline", "30b_filtered_mini_2plus", "30b_baseline_ablations"):
             rows = corpora_table.read_corpora_table(CAMPAIGN_DIR / arm / "corpora.tsv")
             assert rows, arm
             for row in rows:

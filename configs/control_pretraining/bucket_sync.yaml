@@ -6,8 +6,8 @@
 # directories of `packed_train_data_path`), each placed under datasets/ at its path relative to
 # the data base that holds it, so the bucket path names the same directory the config does. A
 # stage whose save directory does not exist yet is reported on every pass and archived
-# automatically once it exists and a save has completed, so the filtered arm's stages 2-3 and both
-# ablations need no edit here when they launch. README.md documents the result, INVENTORY.tsv
+# automatically once it exists and a save has completed, so the filtered arm's stages 2-3 and the
+# SFT ablation needs no edit here when it launches. README.md documents the result, INVENTORY.tsv
 # records what each pass found, and _provenance/<run>/ keeps each pass's resolved copy of this
 # file, its plans and its log.
 #
@@ -37,8 +37,7 @@ stage_configs:
   - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
   - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
   - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_sft.yaml
-  - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_gbs256.yaml
-  - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_long_cot_gbs256.yaml
+  - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml
 # Checkpoint directories no stage config names, each a directory beside the named stage's save
 # directory. The baseline SFT ran under a cadence that kept only its last two saves; the
 # 600-iteration save survives in the clone made for its HF export and is archived under the run's

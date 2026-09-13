@@ -1,0 +1,23 @@
+# The data build of the 30B baseline ablations, one line per corpus, consumed by
+# configs/control_pretraining/build_corpora.sh (which submits the jobs and reimplements nothing)
+# and checked by verify_corpora.py against the same line. Columns, in order:
+#
+#   subset | stage | kind | config | prep_h | tok_h | workers | shards | shard_mode | stripe | docs
+#
+#   subset      the HuggingFace config name within the prepare config's dataset; `default` is the
+#               config whose `train` split concatenates the mix's per-source configs, so the
+#               corpus root is <data base>/<dataset>__default
+#   kind        pack -> packed SFT parquet, one per shard, via pipeline_data_submit.sbatch <root>
+#   prep_h      the prepare (download + JSONL export) walltime: the 247 GB download and 352 GB
+#               export of 8.9M conversations, sized from the filtered arm's 5.65M-conversation
+#               prepare at 8 h; workq_qos caps any job at 24 h
+#   tok_h       the pack walltime PER SHARD: ~558k conversations each, from the filtered arm's
+#               ~353k-conversation shards packing inside 4 h
+#   shards      16, byte-gated split of the prepared JSONL — one process cannot pack this many
+#               conversations inside the 24 h wall
+#   docs        the default split's row count at the pinned revision, from the dataset card;
+#               the verifier checks the prepared JSONL against it
+#
+# Only the xl-50b SFT ablation's corpus is built here; the mainline mix the ablation is compared
+# against is the baseline arm's own build.
+default|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml|20|08|1|16|split|1|8924246

@@ -32,11 +32,10 @@ filtered version of the same blend, so everything except the data is held fixed 
 > three `30b_baseline/` stages, chained checkpoint to checkpoint, to prove the configs run and
 > to measure s/iter before the full curriculum is authorised.
 >
-> [`30b_baseline_ablations/`](30b_baseline_ablations/README.md) holds single-variable variants
-> of a `30b_baseline/` stage, each a full stage config pinned to its parent field by field by
-> test; the first is the stage-3 SFT at half the batch for twice the steps over the same packs,
-> and the second holds that batch and swaps the corpus for its longest-chain-of-thought
-> re-selection, so the two differ only in what they train on.
+> [`30b_baseline_ablations/`](30b_baseline_ablations/README.md) holds variants of a
+> `30b_baseline/` stage, each a full stage config pinned to its parent field by field by test;
+> the one on file is the stage-3 SFT re-run on the revised ~50B-token post-training mix at half
+> the batch, so the corpus and the batch are the only things that move against the parent.
 
 | | |
 |---|---|
@@ -799,7 +798,7 @@ layout and the restore recipe; `INVENTORY.tsv` at its root is rewritten by every
 live state.
 
 The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest
-[`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the eight stage configs, each of which
+[`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the stage configs, each of which
 contributes its `checkpoint.save` directory and the corpora its `dataset.data_path` prefixes and
 `packed_train_data_path` parquets name, plus the one checkpoint directory no config names (the
 export clone holding the baseline SFT's pruned iteration-600 save). It runs on the host Python (the container's `huggingface_hub` predates buckets)

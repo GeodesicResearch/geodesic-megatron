@@ -1,0 +1,47 @@
+# The identity of the revised post-training corpus for the xl-50b SFT ablation: the reasoning/
+# think post-training mix at about 50B tokens, twice the token budget of the mainline stage-3
+# corpus in a single pass over the data.
+#
+# geodesic-research/pa-warm-start-sft-xl-50b-mix is published in the same shape as the mainline
+# mix: a `default` config whose `train` split concatenates the per-source configs (thirty-three
+# at this revision, from agentic tool use and search through competitive programming, SWE,
+# science, chat, finance, maths proofs and ARC-AGI), rows carrying `messages` / `tools` /
+# per-turn `reasoning_content` verbatim plus a per-row `n_tokens`. The card at the pinned revision
+# states 8,924,246 conversations in the default split, 351.8 GB of data, a 247 GB download,
+# against the mainline mix's 5,702,903 conversations. The `subset` column of this arm's
+# corpora.tsv names that `default` config, so the corpus root is
+# `geodesic-research__pa-warm-start-sft-xl-50b-mix__default`.
+#
+# Pack geometry and tokenizer are the mainline stage 3's verbatim, and are load-bearing rather
+# than tuning choices: `pad-seq-to-mult: 4` is 2 x CP for the CP=2 training topology (a pack
+# produced at a smaller multiple silently NaNs under CP), and the packed path the training config
+# reads encodes both the tokenizer and the pad multiple, so a drift between this file and the
+# training YAML fails at path resolution rather than corrupting a run. The tokenizer is the
+# think-HISTORY variant, NOT the plain think one: this corpus keeps per-turn reasoning in a
+# structured `reasoning_content` field, and the plain variant's template renders every prior
+# assistant turn as an empty `<think></think>`, discarding the trace before tokenization. The
+# encoders are byte-identical; only the template differs. See the mainline stage-3 config's header.
+#
+# The revision is pinned for the same reason the mainline's is: an unpinned prepare resolves the
+# current HEAD, and the measured pack count that `train_iters` is derived from is only meaningful
+# against this exact commit.
+#
+# `skip-pack` / `skip-count` are stated here rather than passed as flags, because they decide
+# WHAT the prepare produces (JSONL only) and that is corpus identity, not an operational detail:
+# one process cannot pack conversations at this scale inside the 24 h wall, so the prepared JSONL
+# is cut into sixteen byte-gated shard roots and each is packed in its own job — the table-driven
+# build in this directory's corpora.tsv, the same chain the filtered arm's SFT pack was built with.
+# The training config reads the resulting per-shard parquets through a glob.
+#
+#   ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
+#     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft
+dataset: geodesic-research/pa-warm-start-sft-xl-50b-mix
+revision: ec0b9197aada498b0345690b8d30271335dfe7b0
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

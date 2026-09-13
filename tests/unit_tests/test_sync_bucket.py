@@ -366,13 +366,13 @@ class TestDatasetUnits:
 
 
 class TestManifest:
-    def test_the_campaign_manifest_covers_eight_distinct_stages_and_one_explicit_clone(self):
+    def test_the_campaign_manifest_covers_seven_distinct_stages_and_one_explicit_clone(self):
         manifest = sync_bucket.load_manifest(CAMPAIGN_MANIFEST, _REPO_ROOT)
         assert manifest.bucket == "geodesic-research/control-pretraining-models-bucket"
         assert manifest.readme.is_file()
-        assert len(manifest.stage_configs) == 8 and all(c.is_file() for c in manifest.stage_configs)
+        assert len(manifest.stage_configs) == 7 and all(c.is_file() for c in manifest.stage_configs)
         entries = [sync_bucket.stage_checkpoint_entry(c, manifest.checkpoints_prefix) for c in manifest.stage_configs]
-        assert len({e.remote for e in entries}) == 8
+        assert len({e.remote for e in entries}) == 7
         assert all(e.remote == f"checkpoints/{e.local.name}" for e in entries)
         # The one directory no config names: the export clone holding the baseline SFT's pruned
         # iteration-600 save, beside the SFT run's own directory and archived under the run's name.
