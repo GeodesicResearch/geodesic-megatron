@@ -814,7 +814,15 @@ the mirror, locally rather than as a SLURM job:
 python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml --plan   # what would move
 python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml \
     --poll-interval 1800 --stop-after 168                                                          # publish, then keep up
+python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml --phase export   # GPUs, ~3 min/ckpt
+python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml --phase upload   # no GPU
 ```
+
+`--phase` splits a pass by what it needs, for a node whose GPUs another workload holds most of
+the time (the evals ran on the tunnel node's four GPUs while the filtered arm's checkpoints were
+published): `export` runs only the exports and uploads nothing, `upload` uploads only the
+publications whose export is already verified and touches no GPU, and the default `all` does
+both. Borrow the GPUs for the export pass, hand them back, then upload.
 
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in

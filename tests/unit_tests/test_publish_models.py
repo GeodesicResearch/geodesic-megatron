@@ -27,6 +27,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import shutil
 import struct
 import sys
 from pathlib import Path
@@ -520,7 +521,9 @@ def test_plan_mode_changes_nothing(campaign, monkeypatch):
     manifest = publish_models.load_manifest(manifest_path, root)
     hub = RecordingHub()
     monkeypatch.setattr(publish_models, "run_export", fake_export)
-    pending = publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "run", False, ())
+    pending = publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "run", False, (), "all"
+    )
     assert pending == 6 and hub.calls == []
     assert not (root / "exports").exists()
 
@@ -532,7 +535,7 @@ def test_a_pass_exports_uploads_writes_cards_and_joins_the_collection(campaign, 
     wandb = RecordingWandb({"exp-mid": [{"_step": 4, "lm loss": 1.5}]})
     monkeypatch.setattr(publish_models, "run_export", fake_export)
     run_dir = root / "logs" / "run1"
-    assert publish_models.publish_pass(manifest, root, hub, wandb, run_dir, True, ()) == 0
+    assert publish_models.publish_pass(manifest, root, hub, wandb, run_dir, True, (), "all") == 0
     uploads = [c for c in hub.calls if c[0] == "upload_folder"]
     assert len(uploads) == 8, "six revisions plus main for the two defaults"
     assert ("upload_file", "org/arm-base", "main", "README.md") in hub.calls
@@ -545,7 +548,7 @@ def test_a_pass_exports_uploads_writes_cards_and_joins_the_collection(campaign, 
 
     # A second pass finds everything on the Hub, re-exports nothing and re-uploads no card.
     calls_before = len(hub.calls)
-    assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "run2", True, ()) == 0
+    assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "run2", True, (), "all") == 0
     assert [c for c in hub.calls[calls_before:] if c[0] in ("upload_folder", "upload_file")] == []
 
 
@@ -560,7 +563,9 @@ def test_a_failed_export_is_reported_and_counted_not_hidden(campaign, monkeypatc
         fake_export(publication, manifest, repo_root, log_path)
 
     monkeypatch.setattr(publish_models, "run_export", broken_export)
-    pending = publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "run", True, ())
+    pending = publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "run", True, (), "all"
+    )
     assert pending == 1
     assert ("upload_folder", "org/arm-base", "pretraining_iter_10") not in hub.calls
     assert ("upload_folder", "org/arm-base", "pretraining_iter_5") in hub.calls
@@ -569,6 +574,43 @@ def test_a_failed_export_is_reported_and_counted_not_hidden(campaign, monkeypatc
     card = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
     assert "`pretraining_iter_5`" in card
     assert "pretraining_iter_10" not in card
+
+
+def test_the_export_phase_takes_no_upload_and_the_upload_phase_takes_no_gpu(campaign, monkeypatch):
+    """The GPUs are borrowed from another workload on the node for exactly the export: an export
+    pass writes and verifies every missing export and uploads nothing, an upload pass uploads
+    only what is verified (leaving an unexported publication counted as pending) and never runs
+    the exporter, and the two passes together publish everything a single "all" pass would."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    wandb = RecordingWandb({"exp-mid": [{"_step": 4, "lm loss": 1.5}]})
+    exports: list[int] = []
+
+    def counting_export(publication, manifest, repo_root, log_path):
+        exports.append(publication.iteration)
+        fake_export(publication, manifest, repo_root, log_path)
+
+    monkeypatch.setattr(publish_models, "run_export", counting_export)
+    pending = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "export", True, (), "export")
+    assert pending == 6, "every publication is exported but none is uploaded yet"
+    assert len(exports) == 6
+    assert [c for c in hub.calls if c[0] in ("upload_folder", "upload_file", "create_collection")] == []
+
+    def no_export(publication, manifest, repo_root, log_path):
+        raise AssertionError(f"the upload phase must not export {publication.label}")
+
+    monkeypatch.setattr(publish_models, "run_export", no_export)
+    shutil.rmtree(root / "exports" / "arm-think" / "sft" / "iter_0000001" / "hf")
+    pending = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "upload", True, (), "upload")
+    assert pending == 1, "the export that was removed is left for an export pass, everything else is uploaded"
+    uploads = [c for c in hub.calls if c[0] == "upload_folder"]
+    assert len(uploads) == 7, "five revisions plus main for the two defaults; the removed one is not uploaded"
+    assert ("upload_folder", "org/arm-think", "sft_iter_1") not in hub.calls
+    assert ("upload_file", "org/arm-base", "main", "README.md") in hub.calls
+    assert ("create_collection", "Test Collection") in hub.calls
+    with pytest.raises(ValueError, match="phase must be one of"):
+        publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "bad", True, (), "verify")
 
 
 def test_main_builds_a_plan_without_touching_the_hub_and_records_its_manifest(campaign, monkeypatch):

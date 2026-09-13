@@ -684,6 +684,9 @@ def ensure_collection(api: Any, collection: Collection, namespace: str, repos: l
     return slug
 
 
+PHASES = ("export", "upload", "all")
+
+
 def publish_pass(
     manifest: Manifest,
     repo_root: Path,
@@ -692,10 +695,18 @@ def publish_pass(
     run_dir: Path,
     execute: bool,
     repo_filter: tuple[str, ...],
+    phase: str,
 ) -> int:
     """One pass over the manifest: export and upload what is missing, then the cards and the
     collection for every model that has anything published. Returns how many publications
-    remain unpublished (0 when the Hub holds everything the manifest asks for)."""
+    remain unpublished (0 when the Hub holds everything the manifest asks for).
+
+    ``phase`` splits the work by what it needs: ``export`` runs only the exports, which take the
+    node's GPUs for a few minutes each, and uploads nothing; ``upload`` uploads only the
+    publications whose export is already verified and touches no GPU; ``all`` does both. The
+    split lets the GPUs be borrowed from another workload on the node for exactly the export."""
+    if phase not in PHASES:
+        raise ValueError(f"phase must be one of {PHASES}, not {phase!r}")
     publications = plan(manifest, repo_filter)
     export_log = run_dir / "export.log"
     pending = 0
@@ -715,16 +726,24 @@ def publish_pass(
             continue
         try:
             if not export_is_verified(publication):
+                if phase == "upload":
+                    LOGGER.info("%s: not exported yet; left for an export pass", publication.label)
+                    pending += 1
+                    continue
                 make_export_clone(publication.source, publication.clone)
                 run_export(publication, manifest, repo_root, export_log)
                 count = verify_export(publication.hf_dir)
                 LOGGER.info("%s: export verified, %d tensors", publication.label, count)
+            if phase == "export":
+                LOGGER.info("%s: exported; upload left for an upload pass", publication.label)
+                pending += 1
+                continue
             upload(api, publication)
             touched.setdefault(publication.model.repo, []).append(publication)
         except ExportError as error:
             LOGGER.error("%s: %s", publication.label, error)
             pending += 1
-    if not execute:
+    if not execute or phase == "export":
         return pending
     namespace = manifest.models[0].repo.split("/")[0]
     for model in manifest.models:
@@ -769,6 +788,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--models", nargs="*", default=[], help="only repos whose id contains one of these substrings")
     parser.add_argument(
+        "--phase",
+        choices=PHASES,
+        default="all",
+        help="export: only the exports (needs the GPUs); upload: only uploads of verified exports, cards and "
+        "collection (no GPU); all: both",
+    )
+    parser.add_argument(
         "--poll-interval", type=float, default=None, help="seconds between passes; without it one pass is run"
     )
     parser.add_argument("--stop-after", type=float, default=None, help="hours after which polling stops")
@@ -794,7 +820,9 @@ def main(argv: list[str] | None = None) -> int:
     wandb_api = None if args.plan else make_wandb_api()
     deadline = time.time() + args.stop_after * 3600 if args.stop_after else None
     while True:
-        pending = publish_pass(manifest, repo_root, api, wandb_api, run_dir, not args.plan, tuple(args.models))
+        pending = publish_pass(
+            manifest, repo_root, api, wandb_api, run_dir, not args.plan, tuple(args.models), args.phase
+        )
         LOGGER.info("pass complete: %d publication(s) pending", pending)
         if args.poll_interval is None or (deadline is not None and time.time() >= deadline):
             return 1 if pending else 0
