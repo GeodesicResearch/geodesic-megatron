@@ -90,7 +90,7 @@ restored copy sits at the path the config already names. All are subsets of one 
 | `…__climbmix_full/shard0/` … `shard7/` (and `…__climbmix_full_filtered_mini_2plus/shard0/` … `shard7/`) | ClimbMix is too large for one tokenizer job, so it is eight contiguous slices of the source, each a corpus of its own; the training configs weight each shard by its measured tokens. |
 | `datasets/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/` | The baseline SFT corpus, packed to 32768 with `pad_seq_to_mult 4`: `training_32768.idx.parquet`, its row-group index, `pack_manifest.json` (764,685 packs), `validation_report.json`, review samples. |
 | `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_filtered_mini_2plus/shard<0-15>/packed/…/` | The filtered SFT corpus, packed the same way in sixteen shards (748,783 packs in total). |
-| `datasets/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard<0-15>/packed/…/` | The revised ~50B-token post-training mix for the stage-3 ablation, sixteen shards, archived once its packs are built. |
+| `datasets/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard<n>/packed/…/` | The revised ~50B-token post-training mix for the stage-3 ablation, one shard root per shard the ablation's `corpora.tsv` builds, archived once its packs are built. |
 
 Stage 1 reads `climbmix_full` (8 shards), `zyda_full`, `stack_edu`, `climbmix_ai_docs`, `zyda_ai_docs`
 and `ai_safety_and_adjacent`; stage 2 reads `climbmix_long`, `nemotron_stem_sft`, `arxiv_papers`,

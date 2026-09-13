@@ -693,9 +693,11 @@ built table-driven from `30b_baseline_ablations/corpora.tsv` like every arm's co
 8,388,608 tokens per iteration, which at seq 32768 is GBS 256, half the parent's, from the same
 midtraining final, on 256 GPUs / 64 nodes so that DP=128 keeps the parent's 2 packs per replica
 per iteration. Corpus and batch are the only variables; one pass over the mix is the parent's ~50B
-token budget at half the batch and twice the steps, so `train_iters` is `ceil(packs / 256)` from
-the sixteen per-shard packs once they are built — the config carries a PROVISIONAL count until
-then, says so, and is not launchable before the measurement. Two earlier drafts (the parent's mix
+token budget at half the batch and twice the steps, so `train_iters` is `ceil(packs / 256)` summed
+over the per-shard packs once they are built — the config carries a PROVISIONAL count until then,
+says so, and is not launchable before the measurement. How many shards that is belongs to the
+arm's `corpora.tsv` and nowhere else: the count is a host-memory budget for the pack job, which
+holds a shard's whole pack set in RAM before writing it. Two earlier drafts (the parent's mix
 at half the batch, and a longest-chain-of-thought re-selection at that batch) were queued,
 cancelled on 2026-09-07 before running, and removed on 2026-09-13. Read any SFT arm's evaluation
 reach-first: the parent SFT's greedy coding cell hit the 32k budget on 93% of completions (evals,

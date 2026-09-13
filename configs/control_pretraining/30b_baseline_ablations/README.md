@@ -61,9 +61,21 @@ carrying `messages` / `tools` / per-turn `reasoning_content` plus a per-row `n_t
 
 The build is the campaign's table-driven chain, the one the filtered arm's SFT pack was built
 with: prepare to JSONL (`skip-pack` / `skip-count`, because one process cannot pack 8.9M
-conversations inside the 24 h wall), cut into sixteen byte-gated shard roots by
-`shard_jsonl_corpus.sh`, and pack each shard in its own job at the tokenizer and geometry the data
-config states; the training config reads the sixteen parquets through a `shard*/` glob.
+conversations inside the 24 h wall), cut into byte-gated shard roots by `shard_jsonl_corpus.sh`,
+and pack each shard in its own job at the tokenizer and geometry the data config states; the
+training config reads the resulting parquets through a `shard*/` glob.
+
+**The shard count is a memory budget, and 16 was too few.** The packer assembles every pack of a
+shard in host RAM before it writes the parquet, so a shard's peak memory scales with its pack
+count, not with its walltime. Built at 16 shards on 2026-09-13 this corpus packed to ~95,600 per
+shard and **eleven of the sixteen jobs were OOM-killed at the node's 449 GB ceiling** — all of
+them after a clean tokenize and a 99.78%-efficient packing pass, in the assembly phase, which is
+why the failure costs the whole 2.5 h job. Three finished, on identical input at identical
+efficiency and each on its own node, which is what a workload sitting exactly on the ceiling
+looks like; the last two were cancelled once the rebuild superseded them. The table now says 32,
+giving ~47,800 packs per
+shard — the size at which every filtered-arm SFT shard packed cleanly (46,848). Size a shard
+against that number, not against the conversation count.
 
 ```bash
 ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
@@ -71,7 +83,7 @@ ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
 ```
 
 **`train_iters` is measured, never estimated**: `ceil(1 x num_packs / 256)`, where `num_packs`
-is the sum of the sixteen shards' packed rows (`pq.ParquetFile(path).metadata.num_rows` reads the
+is the sum of the shards' packed rows (`pq.ParquetFile(path).metadata.num_rows` reads the
 footer only). Until that sum exists the config carries a PROVISIONAL 5973, from the card's ~50B
 tokens at the mainline's 99.8% packing efficiency, and its header and the test both say so; the
 config is not launchable before the measurement replaces it.
@@ -95,9 +107,9 @@ for i in 1 2; do
 done
 ```
 
-Check before submitting: the config's `shard*` glob resolves to exactly sixteen files, the
-stage-2 warm start `iter_0003126` is present, and the save directory does not yet exist (an empty
-one could be read as a finished run).
+Check before submitting: the config's `shard*` glob resolves to exactly as many files as the
+table builds, the stage-2 warm start `iter_0003126` is present, and the save directory does not
+yet exist (an empty one could be read as a finished run).
 
 ### After the run
 
@@ -114,9 +126,12 @@ one could be read as a finished run).
 
 ### Status
 
-Drafted 2026-09-13, not launched. The data build was submitted the same day as jobs 6519679
-(prepare, 20 h), 6519680 (split, after the prepare) and 6519681–6519697 (sixteen packs, after the
-split); `train_iters` is replaced by the measurement when the packs land.
+Drafted 2026-09-13, not launched. The first data build (jobs 6519679 prepare, 6519680 split,
+6519681–6519697 packs) prepared and split cleanly but lost eleven of its sixteen pack jobs to the
+host-memory ceiling described above. Three finished before the rest were cancelled, and their
+shards measured 95,553–95,612 packs each, so the corpus is ~1,529,300 packs and one epoch is
+~5,975 iterations. It is being rebuilt
+at 32 shards. `train_iters` is replaced by the measurement when the packs land.
 
 Two earlier drafts in this directory — the parent's mix at half the batch for twice the steps, and
 a longest-chain-of-thought re-selection of the same sources at that batch — were queued on

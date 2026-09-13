@@ -26,10 +26,10 @@
 # number of tokens and the same tokens per step... at half the batch and twice the steps.
 #
 # TRAIN_ITERS IS MEASURED, NOT ESTIMATED, as everywhere in this campaign: ceil(epochs x num_packs /
-# global_batch_size), from the sixteen per-shard packs once they exist. The value below is
-# PROVISIONAL, sized from the card's token count so the file merges and the pin test runs, and it
-# is replaced by the measurement before this config can be launched; the header of the launch
-# block says so again.
+# global_batch_size), summed over the per-shard packs once they exist (how many shards there are is
+# the arm's corpora.tsv, not this file). The value below is PROVISIONAL, sized from the card's token
+# count so the file merges and the pin test runs, and it is replaced by the measurement before this
+# config can be launched; the header of the launch block says so again.
 #
 # Everything else — topology, schedule, optimizer, checkpoint policy, the CP=2 / pad_seq_to_mult 4
 # / think-history-tokenizer combination — is the parent's verbatim, so that the corpus and the
@@ -70,8 +70,9 @@ dataset:
     packed_sequence_size: 32768
     pad_seq_to_mult: 4               # 2 x CP, required for packed sequences under CP=2
     num_tokenizer_workers: 1
-    # The 16 per-shard packs; the path names the tokenizer and pad multiple they were built
-    # with, so a pack from the truncating tokenizer or a smaller multiple cannot load silently.
+    # The per-shard packs (the arm's corpora.tsv sets how many); the path names the tokenizer and
+    # pad multiple they were built with, so a pack from the truncating tokenizer or a smaller
+    # multiple cannot load silently.
     packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
@@ -84,7 +85,7 @@ train:
   micro_batch_size: 1
   train_iters: 5973                  # PROVISIONAL: ceil(1 x 1,528,936 packs / 256), the packs a 50.0B-token
                                      # mix makes at the mainline's 99.8% packing; replace with
-                                     # ceil(1 x <sum of the sixteen shards' packs> / 256)
+                                     # ceil(1 x <sum of the per-shard packs> / 256)
   # Time-based graceful rollover, matching the parent (signal path proven dead there).
   exit_duration_in_mins: 1400
 

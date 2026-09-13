@@ -28,9 +28,11 @@
 #
 # `skip-pack` / `skip-count` are stated here rather than passed as flags, because they decide
 # WHAT the prepare produces (JSONL only) and that is corpus identity, not an operational detail:
-# one process cannot pack conversations at this scale inside the 24 h wall, so the prepared JSONL
-# is cut into sixteen byte-gated shard roots and each is packed in its own job — the table-driven
-# build in this directory's corpora.tsv, the same chain the filtered arm's SFT pack was built with.
+# one process can neither pack conversations at this scale inside the 24 h wall nor hold the
+# resulting packs in a node's memory, so the prepared JSONL is cut into byte-gated shard roots and
+# each is packed in its own job — the table-driven build in this directory's corpora.tsv, the same
+# chain the filtered arm's SFT pack was built with. That table's shard count, not this file, is
+# what sizes a shard.
 # The training config reads the resulting per-shard parquets through a glob.
 #
 #   ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \

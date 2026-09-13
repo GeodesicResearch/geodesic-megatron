@@ -59,8 +59,8 @@ CORPUS_CONVERSATIONS = 8_924_246
 TOKENS_PER_ITERATION = 8_388_608
 EPOCHS = 1
 # PROVISIONAL, like the config's train_iters: the packs a 50.0B-token mix makes at 32768 and the
-# mainline's 99.8% packing efficiency. Both are replaced by the sum of the sixteen shards' packs
-# once they are built; until then the pin below holds the config to this figure so that the count
+# mainline's 99.8% packing efficiency. Both are replaced by the sum of the per-shard packs once
+# they are built; until then the pin below holds the config to this figure so that the count
 # cannot drift for any other reason.
 PACKS_PROVISIONAL = 1_528_936
 
@@ -171,13 +171,17 @@ class TestTheCorpusIsTheRevisedMix:
         assert row.subset == "default", "the mix's combined split is its default config"
         assert row.stage == "sft" and row.kind == "pack"
         assert row.config.resolve() == ABLATION_DATA.resolve()
-        assert row.shards == 16 and row.shard_mode == "split"
+        # The shard count is a host-memory budget for the pack job, not a walltime one: the
+        # packer holds a shard's whole pack set in RAM before writing it, and at 16 shards this
+        # corpus's ~95,600-pack shards were OOM-killed on a 449 GB node.
+        assert row.shards == 32 and row.shard_mode == "split"
         assert row.docs == CORPUS_CONVERSATIONS
         assert str(corpora_table.corpus_root(CORPUS, row.subset)) == ablation.dataset.dataset_root
 
     def test_the_packed_path_is_a_shard_glob_naming_the_tokenizer_and_pad_multiple(self, ablation):
         path = ablation.dataset.packed_sequence_specs.packed_train_data_path
         assert "/shard*/" in path, "the pack is built per shard and read through a glob"
+        # The glob is what makes the shard count a data-build decision rather than a config one.
         assert "nemotron-think-history-tokenizer" in path
         assert "pad_seq_to_mult4" in path
         assert path.startswith(ablation.dataset.dataset_root)

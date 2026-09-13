@@ -11,13 +11,18 @@
 #   prep_h      the prepare (download + JSONL export) walltime: the 247 GB download and 352 GB
 #               export of 8.9M conversations, sized from the filtered arm's 5.65M-conversation
 #               prepare at 8 h; workq_qos caps any job at 24 h
-#   tok_h       the pack walltime PER SHARD: ~558k conversations each, from the filtered arm's
+#   tok_h       the pack walltime PER SHARD: ~279k conversations each, from the filtered arm's
 #               ~353k-conversation shards packing inside 4 h
-#   shards      16, byte-gated split of the prepared JSONL — one process cannot pack this many
-#               conversations inside the 24 h wall
+#   shards      32, byte-gated split of the prepared JSONL. The shard count is set by the PACK
+#               job's host memory, not by its walltime: the packer materialises every pack of a
+#               shard in host RAM before writing the parquet, so a shard's peak memory scales
+#               with its pack count. At 16 shards this corpus packs to ~95,600 per shard and
+#               eleven of sixteen jobs were OOM-killed at the node's 449 GB ceiling, in the
+#               assembly phase after a clean tokenize (2026-09-13). 32 shards give ~47,800 per
+#               shard, the size every filtered-arm SFT shard packed at (46,848)
 #   docs        the default split's row count at the pinned revision, from the dataset card;
 #               the verifier checks the prepared JSONL against it
 #
 # Only the xl-50b SFT ablation's corpus is built here; the mainline mix the ablation is compared
 # against is the baseline arm's own build.
-default|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml|20|08|1|16|split|1|8924246
+default|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml|20|08|1|32|split|1|8924246
