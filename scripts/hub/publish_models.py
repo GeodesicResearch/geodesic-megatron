@@ -29,9 +29,10 @@ is idempotent and a run can be repeated as new checkpoints land:
    ``run_config.yaml``. The exporter rebuilds the model from that file, and training serialised
    a closure it cannot import (``_apply_moe_experts_impl.<locals>...``); the two edits below make
    it importable. The training tree is never written to.
-2. The HF export, by ``pipeline_checkpoint_convert.sh export`` on this allocation's GPUs at the
-   manifest's parallelism, into the clone. The exporter needs the SLURM environment of the
-   allocation it runs in.
+2. The HF export, by ``pipeline_checkpoint_convert.sh export`` at the manifest's parallelism, into
+   the clone. The exporter needs a SLURM environment with GPUs: the ``export`` phase gives it this
+   allocation's, and the ``submit`` phase gives it one of its own by queueing a single-node job per
+   checkpoint, which is what keeps exports from competing with whatever else holds these cards.
 3. Verification: every tensor the safetensors index promises is in the shard it names, and every
    tensor a shard holds is in the index — by tensor name, never by file count.
 4. The upload, to the revision (and to ``main`` for the default), followed by the model card on
@@ -51,6 +52,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -76,6 +78,11 @@ HF_DIR = "hf"
 INDEX_FILE = "model.safetensors.index.json"
 README_NAME = "README.md"
 EXPORTER = "pipeline_checkpoint_convert.sh"
+
+# Submitting an export instead of running it inline: the sbatch wrapper around that same
+# exporter, and the submitter carrying this cluster's bad-node exclusions and quota report.
+EXPORT_SUBMITTER = "isambard_sbatch"
+EXPORT_SBATCH = "pipeline_checkpoint_submit.sbatch"
 MAIN = "main"
 
 # The exporter rebuilds the Megatron model from the checkpoint's run_config.yaml. A checkpoint
@@ -109,7 +116,7 @@ COLLECTION_KEYS = frozenset({"title", "description", "private"})
 # The Hub rejects a longer collection description ("Too big: expected string to have <=150
 # characters"), and it does so only when the collection is created, at the end of a pass.
 COLLECTION_DESCRIPTION_MAX_CHARS = 150
-EXPORT_KEYS = frozenset({"tp", "ep"})
+EXPORT_KEYS = frozenset({"tp", "ep", "nodes", "walltime"})
 WANDB_KEYS = frozenset({"entity", "project", "loss_key"})
 CARD_KEYS = frozenset(
     {"license", "license_name", "tags", "reasoning_tag", "intro", "provenance", "base_note", "think_note"}
@@ -133,11 +140,14 @@ class Collection:
 
 
 @dataclass(frozen=True)
-class ExportParallelism:
-    """How the exporter shards the model across this allocation's GPUs."""
+class ExportJob:
+    """How one checkpoint export runs: the allocation it asks for when it is submitted as a
+    job of its own, and how the model is sharded across that allocation's GPUs."""
 
     tp: int
     ep: int
+    nodes: int
+    walltime: str
 
 
 @dataclass(frozen=True)
@@ -228,7 +238,7 @@ class Manifest:
     export_root: Path
     log_dir: Path
     hf_home: Path
-    export: ExportParallelism
+    export: ExportJob
     wandb: WandbSource
     card: Card
     models: tuple[Model, ...]
@@ -422,8 +432,13 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     tokens_per_iteration = raw["tokens_per_iteration"]
     if not isinstance(tokens_per_iteration, int) or tokens_per_iteration <= 0:
         raise ManifestError(f"{path}: tokens_per_iteration must be a positive integer")
-    if not all(isinstance(export[k], int) and export[k] > 0 for k in ("tp", "ep")):
-        raise ManifestError(f"{path}: export.tp and export.ep must be positive integers")
+    if not all(isinstance(export[k], int) and export[k] > 0 for k in ("tp", "ep", "nodes")):
+        raise ManifestError(f"{path}: export.tp, export.ep and export.nodes must be positive integers")
+    if not re.fullmatch(r"\d+(-\d\d)?:\d\d:\d\d", str(export["walltime"])):
+        raise ManifestError(
+            f"{path}: export.walltime must be a quoted SLURM time such as '00:30:00' -- YAML reads "
+            "an unquoted one as a sexagesimal number of seconds"
+        )
     if not isinstance(card["tags"], list) or not card["tags"]:
         raise ManifestError(f"{path}: card.tags must be a non-empty list")
     description = str(collection["description"]).strip()
@@ -446,7 +461,7 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
         export_root=Path(raw["export_root"]),
         log_dir=Path(raw["log_dir"]),
         hf_home=Path(raw["hf_home"]),
-        export=ExportParallelism(tp=export["tp"], ep=export["ep"]),
+        export=ExportJob(tp=export["tp"], ep=export["ep"], nodes=export["nodes"], walltime=str(export["walltime"])),
         wandb=WandbSource(
             entity=str(wandb_raw["entity"]), project=str(wandb_raw["project"]), loss_key=str(wandb_raw["loss_key"])
         ),
@@ -481,15 +496,20 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
     return sorted(found.items())
 
 
-def plan(manifest: Manifest, repo_filter: tuple[str, ...] = ()) -> list[Publication]:
-    """Every checkpoint that belongs on the Hub, in publication order."""
+def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bool = False) -> list[Publication]:
+    """Every checkpoint that belongs on the Hub, in publication order.
+
+    ``newest_first`` reverses each stage's iterations so a backlog reaches the Hub with its
+    most recent checkpoint first. It changes only the order work is attempted in: the model
+    card sorts its own rows, so the published table stays chronological either way."""
     publications = []
     for model in manifest.models:
         if repo_filter and not any(f in model.repo for f in repo_filter):
             continue
         repo_dir = manifest.export_root / model.repo.split("/")[1]
         for stage in model.stages:
-            for iteration, source in stage_sources(stage):
+            sources = stage_sources(stage)
+            for iteration, source in reversed(sources) if newest_first else sources:
                 publications.append(
                     Publication(
                         model=model,
@@ -539,11 +559,10 @@ def make_export_clone(source: Path, clone: Path) -> None:
     (clone.parent / sync_bucket.LATEST_FILE).write_text(f"{sync_bucket.iteration_number(source)}\n")
 
 
-def export_command(publication: Publication, manifest: Manifest) -> list[str]:
-    """The exporter invocation for a publication (run from the repo root)."""
-    command = [
-        "bash",
-        EXPORTER,
+def export_arguments(publication: Publication, manifest: Manifest) -> list[str]:
+    """What a publication's export is, independent of who runs it: the same arguments go to the
+    exporter directly and to the sbatch wrapper that runs it in a job of its own."""
+    arguments = [
         "export",
         str(publication.clone_root),
         "--hf-model",
@@ -557,8 +576,66 @@ def export_command(publication: Publication, manifest: Manifest) -> list[str]:
         "--reasoning" if publication.model.reasoning else "--no-reasoning",
     ]
     if not publication.model.strict:
-        command.append("--not-strict")
-    return command
+        arguments.append("--not-strict")
+    return arguments
+
+
+def export_command(publication: Publication, manifest: Manifest) -> list[str]:
+    """The exporter invocation for a publication (run from the repo root)."""
+    return ["bash", EXPORTER, *export_arguments(publication, manifest)]
+
+
+def export_job_name(publication: Publication) -> str:
+    """The submitted export's job name, which is also how a later pass recognises work it has
+    already queued. Two arms publish the same revision names, so the repository is part of it."""
+    return f"hubexport-{publication.model.repo.split('/')[1]}-{publication.revision}"
+
+
+def queued_job_names() -> set[str]:
+    """Every job name this user currently has queued or running.
+
+    A failed squeue must not read as an empty queue: that would resubmit work already in flight,
+    so a non-zero exit is an error rather than an absence.
+    """
+    result = subprocess.run(
+        ["squeue", "--me", "--noheader", "--format=%j"], capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        raise ExportError(f"squeue exited {result.returncode}: {result.stderr.strip()}")
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def submit_export(publication: Publication, manifest: Manifest, repo_root: Path, queued: set[str]) -> str | None:
+    """Submit one export as its own job and return its job id, or None if it is already queued.
+
+    The job runs the same exporter against the same clone as the inline path, on an allocation of
+    its own -- so it neither takes the GPUs of whatever allocation the publisher runs in nor waits
+    for them, and a wave of exports runs in parallel instead of one at a time.
+    """
+    name = export_job_name(publication)
+    if name in queued:
+        LOGGER.info("%s: export job %s is already queued; not submitting another", publication.label, name)
+        return None
+    command = [
+        EXPORT_SUBMITTER,
+        f"--nodes={manifest.export.nodes}",
+        f"--time={manifest.export.walltime}",
+        f"--job-name={name}",
+        EXPORT_SBATCH,
+        *export_arguments(publication, manifest),
+    ]
+    # ISAMBARD_SBATCH_FORCE is the sanctioned posture for a launcher that submits more than a
+    # handful of jobs: a wave is one job per checkpoint, and each is a single node for minutes.
+    env = dict(os.environ, GEODESIC_REPO_DIR=str(repo_root), ISAMBARD_SBATCH_FORCE="1")
+    LOGGER.info("submitting %s: %s", publication.label, " ".join(command))
+    result = subprocess.run(command, cwd=repo_root, env=env, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise ExportError(f"{EXPORT_SUBMITTER} exited {result.returncode} for {publication.label}: {result.stderr}")
+    found = re.search(r"Submitted batch job (\d+)", result.stdout)
+    if not found:
+        raise ExportError(f"{publication.label}: no job id in submission output: {result.stdout.strip()}")
+    queued.add(name)
+    return found.group(1)
 
 
 def run_export(publication: Publication, manifest: Manifest, repo_root: Path, log_path: Path) -> None:
@@ -810,7 +887,7 @@ def ensure_collection(api: Any, collection: Collection, namespace: str, repos: l
     return slug
 
 
-PHASES = ("export", "upload", "all")
+PHASES = ("export", "submit", "upload", "all")
 
 
 def publish_pass(
@@ -822,19 +899,28 @@ def publish_pass(
     execute: bool,
     repo_filter: tuple[str, ...],
     phase: str,
+    newest_first: bool = False,
 ) -> int:
     """One pass over the manifest: export and upload what is missing, then the cards and the
     collection for every model that has anything published. Returns how many publications
     remain unpublished (0 when the Hub holds everything the manifest asks for).
 
-    ``phase`` splits the work by what it needs: ``export`` runs only the exports, which take the
-    node's GPUs for a few minutes each, and uploads nothing; ``upload`` uploads only the
-    publications whose export is already verified and touches no GPU; ``all`` does both. The
-    split lets the GPUs be borrowed from another workload on the node for exactly the export."""
+    ``phase`` splits the work by what it needs.
+
+    ``export`` runs only the exports, which take this allocation's GPUs for a few minutes each, and
+    writes nothing to the Hub. ``submit`` does the same work without the GPUs, queueing a job per
+    checkpoint instead, and likewise writes nothing to the Hub -- neither revisions nor cards nor
+    collection membership, since a pass that has only queued work has confirmed nothing to describe.
+    ``upload`` uploads the publications whose export is already verified, and the cards and
+    collection that follow from them, touching no GPU. ``all`` exports here and then uploads.
+
+    The split is what lets the GPUs be borrowed from another workload for exactly the export, or --
+    with ``submit`` -- not borrowed at all."""
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, not {phase!r}")
-    publications = plan(manifest, repo_filter)
+    publications = plan(manifest, repo_filter, newest_first)
     export_log = run_dir / "export.log"
+    queued = queued_job_names() if phase == "submit" and execute else set()
     pending = 0
     touched: dict[str, list[Publication]] = {}
     for publication in publications:
@@ -857,10 +943,20 @@ def publish_pass(
                     pending += 1
                     continue
                 make_export_clone(publication.source, publication.clone)
+                if phase == "submit":
+                    job = submit_export(publication, manifest, repo_root, queued)
+                    if job is not None:
+                        LOGGER.info("%s: export submitted as job %s", publication.label, job)
+                    pending += 1
+                    continue
                 run_export(publication, manifest, repo_root, export_log)
                 count = verify_export(publication.hf_dir)
                 LOGGER.info("%s: export verified, %d tensors", publication.label, count)
-            if phase == "export":
+            if phase in ("export", "submit"):
+                # Both GPU-side phases stop here. "submit" must stop too even though it never ran
+                # an exporter itself: a publication whose submitted job has since finished arrives
+                # here already verified, and falling through would turn a pass that promises only
+                # to queue work into one that uploads hundreds of gigabytes.
                 LOGGER.info("%s: exported; upload left for an upload pass", publication.label)
                 pending += 1
                 continue
@@ -869,7 +965,7 @@ def publish_pass(
         except ExportError as error:
             LOGGER.error("%s: %s", publication.label, error)
             pending += 1
-    if not execute or phase == "export":
+    if not execute or phase in ("export", "submit"):
         return pending
     namespace = manifest.models[0].repo.split("/")[0]
     for model in manifest.models:
@@ -880,7 +976,7 @@ def publish_pass(
             continue
         rows = []
         for stage in model.stages:
-            stage_pubs = [p for p in rows_pubs if p.stage is stage]
+            stage_pubs = sorted((p for p in rows_pubs if p.stage is stage), key=lambda p: p.iteration)
             cache = run_dir.parent / "losses" / f"{stage.wandb_exp_name}.json"
             found = losses(wandb_api, manifest.wandb, stage.wandb_exp_name, {p.iteration for p in stage_pubs}, cache)
             rows += [(p, found.get(p.iteration)) for p in stage_pubs]
@@ -917,8 +1013,15 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--phase",
         choices=PHASES,
         default="all",
-        help="export: only the exports (needs the GPUs); upload: only uploads of verified exports, cards and "
-        "collection (no GPU); all: both",
+        help="export: only the exports, on this allocation's GPUs; submit: queue each missing export as "
+        "its own job instead, taking no GPU here and writing nothing to the Hub; upload: only uploads of "
+        "verified exports, cards and collection (no GPU); all: export here, then upload",
+    )
+    parser.add_argument(
+        "--newest-first",
+        action="store_true",
+        help="attempt each stage's newest checkpoint first, so a backlog publishes the most recent "
+        "revision soonest (the model card stays in iteration order regardless)",
     )
     parser.add_argument(
         "--poll-interval", type=float, default=None, help="seconds between passes; without it one pass is run"
@@ -947,7 +1050,15 @@ def main(argv: list[str] | None = None) -> int:
     deadline = time.time() + args.stop_after * 3600 if args.stop_after else None
     while True:
         pending = publish_pass(
-            manifest, repo_root, api, wandb_api, run_dir, not args.plan, tuple(args.models), args.phase
+            manifest,
+            repo_root,
+            api,
+            wandb_api,
+            run_dir,
+            not args.plan,
+            tuple(args.models),
+            args.phase,
+            args.newest_first,
         )
         LOGGER.info("pass complete: %d publication(s) pending", pending)
         if args.poll_interval is None or (deadline is not None and time.time() >= deadline):

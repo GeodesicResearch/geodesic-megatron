@@ -838,12 +838,21 @@ which is how to see what a change would move before it moves it.
 ## The models on the Hub: `hub_models.yaml`
 
 The bucket keeps the Megatron checkpoints; the **models** — HF-format exports of every completed
-checkpoint — live in the "Control Pretraining" collection, two repositories per arm:
+checkpoint — live in the "Control Pretraining" collection, two repositories per arm plus one per
+post-training ablation:
 
 | Repository | Holds | `main` | Other revisions |
 |---|---|---|---|
 | `control-pretraining-30b-<arm>-base` | stage 1 and stage 2 checkpoints | the final midtraining checkpoint | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
 | `control-pretraining-30b-<arm>-think` | stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-baseline-xl50b-think` | the xl-50b ablation's stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
+
+An ablation of a stage gets its own repository rather than another stage under the arm's, because
+the arm's `sft_iter_<n>` revisions are the mainline SFT's: two SFT runs of the same base model
+would collide in meaning even where their iteration numbers did not collide outright, and a model
+card has to say which corpus and which batch produced the weights, which is a per-repository
+statement. **The revision names are therefore not unique across the collection — read the
+repository, not the revision, to tell two SFT runs apart.**
 
 Each repository's model card lists every revision with the **tokens seen** at that checkpoint
 (the iteration plus the iterations of the stages before it, times the 16,777,216 tokens every
@@ -858,11 +867,14 @@ targets, and per repository its stages by training config (the save directory, `
 run name and the data-and-schedule facts are read from there), the revision pattern per stage,
 which stage's final is `main`,
 and the stages counted for tokens but published elsewhere (the think repository's pretraining and
-midtraining); its `export:` block is the exporter's parallelism (TP1/EP4: torch_dist reshards at
-load, and EP=4 keeps the MoE all-to-all on one node) and its `card:` block is everything a model
-card says beyond its tables (licence, tags, the study paragraph, provenance, the base and think
-usage notes). It runs on the host Python of a node with GPUs — the exports need them — and, like
-the mirror, locally rather than as a SLURM job:
+midtraining); its `export:` block is how one export runs — the exporter's parallelism (TP1/EP4:
+torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
+submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
+everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
+base and think usage notes). It runs on the host Python, and like the mirror locally rather than as
+a SLURM job. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
+queues a job per checkpoint and can run anywhere, and only `--phase export` and the default `all`
+require the process to sit on a GPU node:
 
 ```bash
 python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml --plan   # what would move
@@ -874,9 +886,24 @@ python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub
 
 `--phase` splits a pass by what it needs, for a node whose GPUs another workload holds most of
 the time (the evals ran on the tunnel node's four GPUs while the filtered arm's checkpoints were
-published): `export` runs only the exports and uploads nothing, `upload` uploads only the
+published): `export` runs only the exports and writes nothing to the Hub, `upload` uploads only the
 publications whose export is already verified and touches no GPU, and the default `all` does
 both. Borrow the GPUs for the export pass, hand them back, then upload.
+
+**`--phase submit` is the better answer where anything else may want those GPUs**, and is what the
+campaign uses now: instead of running the exporter here, it queues one single-node job per missing
+checkpoint — `export.nodes` and `export.walltime` in the manifest say what each asks for — and
+writes nothing to the Hub, leaving the upload to an upload pass. A wave then runs in parallel
+rather than one at a time (six checkpoints exported in about fourteen minutes, two to four and a
+half minutes each) and cannot contend with anything on this node. Announcement-based turn-taking
+does not achieve that: reading the cards, deciding, and then starting is a check-then-act race, and
+on 2026-09-14 it fired twice in fifteen minutes from opposite sides, costing two OOMed waves and an
+evaluation cancelled at 88%. A resubmission is safe — a submit pass reads the queue by job name and
+skips what it finds.
+
+`--newest-first` attempts each stage's most recent checkpoint first, which is what an evaluation
+wants from a backlog. It changes only the order work is attempted in; the model cards sort their
+own rows, so the published tables stay in iteration order either way.
 
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in

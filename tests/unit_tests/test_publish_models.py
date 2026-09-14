@@ -29,6 +29,7 @@ import json
 import os
 import shutil
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -124,7 +125,7 @@ def manifest_text(repo_root: Path) -> dict:
         "export_root": str(repo_root / "exports"),
         "log_dir": str(repo_root / "logs"),
         "hf_home": "/projects/a5k/public/hf",
-        "export": {"tp": 1, "ep": 4},
+        "export": {"tp": 1, "ep": 4, "nodes": 1, "walltime": "00:30:00"},
         "wandb": {"entity": "e", "project": "p", "loss_key": "lm loss"},
         "card": {
             "license": "other",
@@ -406,6 +407,27 @@ def test_manifest_rejects_unknown_and_missing_keys(campaign):
         publish_models.load_manifest(manifest_path, root)
 
 
+def test_manifest_rejects_a_walltime_yaml_would_read_as_a_number(campaign):
+    """An unquoted 00:30:00 is sexagesimal in YAML and parses to the integer 1800, which SLURM
+    would read as 1800 minutes rather than thirty minutes. The manifest is where that is caught,
+    because the value only reaches sbatch at submission time."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["export"]["walltime"] = 1800
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match="export.walltime must be a quoted SLURM time"):
+        publish_models.load_manifest(manifest_path, root)
+
+
+def test_manifest_rejects_a_node_count_that_is_not_a_positive_integer(campaign):
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["export"]["nodes"] = 0
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match="must be positive integers"):
+        publish_models.load_manifest(manifest_path, root)
+
+
 def test_manifest_error_is_the_one_the_shared_helpers_raise(campaign):
     """A stage config without a save directory fails inside sync_bucket's reader; the publisher's
     callers catch one exception type for the whole manifest."""
@@ -421,7 +443,11 @@ def test_the_campaign_manifest_loads_against_this_checkout():
     the facts the publisher reads. Save directories are not required to exist here."""
     manifest = publish_models.load_manifest(CAMPAIGN_MANIFEST, _REPO_ROOT)
     repos = [m.repo for m in manifest.models]
-    assert len(repos) == 4 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    # Two repositories per arm, base and think, plus the post-training ablation, which needs its
+    # own rather than a second sft stage under baseline-think: that repository's sft_iter_<n>
+    # revisions are the mainline run's, and the card has to say which corpus made the weights.
+    assert len(repos) == 5 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    assert len(set(repos)) == len(repos), "two models cannot publish to one repository"
     assert manifest.tokens_per_iteration == 16_777_216
     for model in manifest.models:
         default = [s for s in model.stages if s.default]
@@ -472,6 +498,22 @@ def test_plan_filters_models_by_repo_substring(campaign):
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     assert {p.model.repo for p in publish_models.plan(manifest, ("think",))} == {"org/arm-think"}
+
+
+def test_newest_first_takes_each_stages_latest_checkpoint_first(campaign):
+    """Only the iterations reverse: the manifest still decides which repo and which stage go
+    first, so a backlog can be driven stage by stage with --models while each stage publishes
+    its most recent checkpoint soonest."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert [p.label for p in publish_models.plan(manifest, (), newest_first=True)] == [
+        "org/arm-base@pretraining_iter_10",
+        "org/arm-base@pretraining_iter_5",
+        "org/arm-base@midtraining_iter_4",
+        "org/arm-base@midtraining_iter_2",
+        "org/arm-think@sft_iter_3",
+        "org/arm-think@sft_iter_1",
+    ]
 
 
 def test_a_stage_whose_directory_does_not_exist_yet_publishes_nothing(campaign):
@@ -680,6 +722,114 @@ def test_a_failed_export_is_reported_and_counted_not_hidden(campaign, monkeypatc
     card = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
     assert "`pretraining_iter_5`" in card
     assert "pretraining_iter_10" not in card
+
+
+def test_the_card_keeps_iteration_order_however_the_pass_was_ordered(campaign, monkeypatch):
+    """Export order is an operational choice; the card is a description of the model. The rows are
+    built from the publications the pass confirmed, so taking them in the order the pass happened
+    to touch them would let --newest-first silently reverse the published table."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    pending = publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "run", True, (), "all", True
+    )
+    assert pending == 0
+    card = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
+    rows = [card.index(f"| `{revision}`") for revision in ("pretraining_iter_5", "pretraining_iter_10")]
+    assert rows == sorted(rows)
+    assert rows[-1] < card.index("| `midtraining_iter_2`")
+
+
+def fake_submission(queued_names: str, recorder: list[list[str]]):
+    """Stands in for subprocess.run around the scheduler: squeue and sbatch are cluster services,
+    and a real submission would allocate nodes. Answers squeue with ``queued_names`` and records
+    every other command as a submission."""
+
+    def run(command, **kwargs):
+        del kwargs
+        if command[0] == "squeue":
+            return subprocess.CompletedProcess(command, 0, stdout=queued_names, stderr="")
+        recorder.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 4242\n", stderr="")
+
+    return run
+
+
+def test_submit_queues_one_job_per_missing_export_and_uploads_nothing(campaign, monkeypatch):
+    """The submit phase exists so that an export never competes for the GPUs of whatever allocation
+    the publisher happens to run in — on 2026-09-14 two hand-driven waves OOMed against an eval's
+    vLLM on the same node. It must queue the work and stop there, uploading nothing."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("an-unrelated-job\n", submitted))
+    pending = publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "run", True, (), "submit"
+    )
+    assert pending == 6, "every publication is still unpublished after a submit pass"
+    assert len(submitted) == 6, "one job per checkpoint, so the wave runs in parallel"
+    command = submitted[0]
+    assert command[0] == "isambard_sbatch"
+    assert {"--nodes=1", "--time=00:30:00"} <= set(command), "the allocation comes from the manifest"
+    assert any(a.startswith("--job-name=hubexport-") for a in command)
+    assert "pipeline_checkpoint_submit.sbatch" in command
+    assert "--iteration" in command and "--hf-model" in command
+    # The sbatch wrapper execs the exporter itself, so the arguments must arrive without the
+    # interpreter the inline path prepends -- both callers build them from export_arguments.
+    assert "bash" not in command
+    assert command[command.index("pipeline_checkpoint_submit.sbatch") + 1] == "export"
+    assert [c for c in hub.calls if c[0] in ("upload_folder", "upload_file")] == []
+
+
+def test_submit_writes_nothing_to_the_hub_even_once_the_repositories_exist(campaign, monkeypatch):
+    """The interesting case is a populated Hub, not an empty one. Cards and collection membership
+    are written after the per-publication loop, from whatever that pass confirmed; a submit pass
+    confirms nothing, so it must reach none of that. On an empty Hub the claim holds trivially
+    because there is nothing to describe."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    wandb = RecordingWandb({"exp-mid": [{"_step": 4, "lm loss": 1.5}]})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "first", True, (), "all") == 0
+
+    before = len(hub.calls)
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("an-unrelated-job\n", submitted))
+    publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "second", True, (), "submit")
+    assert hub.calls[before:] == [], "a submit pass must not upload, write a card, or touch the collection"
+    assert submitted == [], "everything is already published, so there is nothing to queue either"
+
+
+def test_submit_does_not_queue_an_export_that_is_already_queued(campaign, monkeypatch):
+    """A watcher runs this every few minutes; without the check each pass would submit the whole
+    backlog again."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    already = "\n".join(publish_models.export_job_name(p) for p in publish_models.plan(manifest)) + "\n"
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission(already, submitted))
+    pending = publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "run", True, (), "submit"
+    )
+    assert submitted == []
+    assert pending == 6
+
+
+def test_a_failed_squeue_is_an_error_rather_than_an_empty_queue(campaign, monkeypatch):
+    """Reading a failed squeue as "nothing is queued" would resubmit every export already in
+    flight."""
+    del campaign
+
+    def broken(command, **kwargs):
+        del kwargs
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr="slurm_load_jobs error")
+
+    monkeypatch.setattr(publish_models.subprocess, "run", broken)
+    with pytest.raises(publish_models.ExportError, match="squeue exited 1"):
+        publish_models.queued_job_names()
 
 
 def test_the_export_phase_takes_no_upload_and_the_upload_phase_takes_no_gpu(campaign, monkeypatch):

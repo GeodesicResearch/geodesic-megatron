@@ -2,10 +2,15 @@
 # revision, and what their model cards say. Read by scripts/hub/publish_models.py, which exports
 # each completed Megatron checkpoint to HF format and uploads it.
 #
-# Two repositories per arm. The BASE repository holds the pretraining checkpoints (revisions
+# Two repositories per arm, plus one per post-training ablation. The BASE repository holds the
+# pretraining checkpoints (revisions
 # pretraining_iter_<iteration>) and the midtraining checkpoints (midtraining_iter_<iteration>),
 # with the final midtraining checkpoint as the default revision (main). The THINK repository holds
-# the reasoning SFT checkpoints (sft_iter_<iteration>), the final one as main. Every model card
+# the reasoning SFT checkpoints (sft_iter_<iteration>), the final one as main. An ablation of a
+# stage gets a repository of its own rather than another stage under the arm's, because the arm's
+# sft_iter_<iteration> revisions are the mainline SFT's and two SFT runs of one base model would
+# collide in meaning; revision names are therefore NOT unique across the collection, and the
+# repository is what tells two SFT runs apart. Every model card
 # lists every revision with the tokens seen at that point of the curriculum and the training loss
 # W&B recorded at that iteration, and describes each stage's data mix, sequence length, global
 # batch, learning-rate schedule and tokenizer.
@@ -37,6 +42,13 @@ hf_home: /projects/a5k/public/hf
 export:
   tp: 1
   ep: 4
+  # What a submitted export asks the scheduler for (--phase submit). One node is four GH200s,
+  # which is what TP1/EP4 shards across and keeps every expert all-to-all on NVLink. The walltime
+  # is deliberately short: a Nano-30B export runs in a few minutes, so a small ask backfills
+  # rather than queueing behind the campaign's 64-node training jobs. Quote it — YAML reads an
+  # unquoted 00:30:00 as a sexagesimal number of seconds.
+  nodes: 1
+  walltime: "00:30:00"
 wandb:
   entity: geodesic
   project: megatron_training
@@ -103,6 +115,26 @@ models:
         default: true
         # The run's own directory pruned its iteration-600 save; a byte copy of it lives beside it.
         extra_directories: [sft600_export_clone]
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-think
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The post-training ablation of the unfiltered control arm: the same baseline base model and
+      the same batch in tokens as the mainline reasoning SFT, over the revised ~50B-token mix
+      (pa-warm-start-sft-xl-50b-mix, think-history chat template) for one epoch at global batch 256.
+      The corpus and the batch are the only variables against
+      control-pretraining-30b-baseline-think, so the two are directly comparable, and their
+      checkpoints sit at the same token positions.
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-base
     private: true
     reasoning: false

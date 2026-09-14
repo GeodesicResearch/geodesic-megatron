@@ -616,16 +616,26 @@ export clone holding the baseline SFT's pruned iteration-600 save is listed expl
 **The campaign's models on the Hub** are the "Control Pretraining" collection: per arm a
 `control-pretraining-30b-<arm>-base` repository (every stage-1 and stage-2 checkpoint as
 `pretraining_iter_<n>` / `midtraining_iter_<n>`, the final midtraining checkpoint as `main`) and a
-`-think` repository (`sft_iter_<n>`, the final SFT checkpoint as `main`), each with a model card
+`-think` repository (`sft_iter_<n>`, the final SFT checkpoint as `main`), **plus one repository per
+post-training ablation** (`control-pretraining-30b-baseline-xl50b-think`), because an arm's
+`sft_iter_<n>` revisions are the mainline SFT's and two SFT runs of one base model would collide in
+meaning — so revision names are NOT unique across the collection and the repository is what tells
+two SFT runs apart. Each carries a model card
 listing every revision's tokens seen and W&B training loss, and per stage the data mix, sequence
 length, batch, schedule and tokenizer read from the stage's config. `scripts/hub/publish_models.py` builds
 them from `configs/control_pretraining/hub_models.yaml` (stages by training config; nothing
 restated), exporting each checkpoint from a symlink clone with a patched `run_config.yaml` — the
 `torch_grouped` closure the run serialised cannot be imported by the exporter — so the training
 tree is never touched, verifying the export by tensor names, and skipping revisions the Hub already
-holds. It needs GPUs for the exports and runs on the host Python, locally (Kyle, 2026-09-12: on the
-tunnel node, never interrupting the training runs). The campaign README's "The models on the Hub"
-section has the full behaviour.
+holds. It runs on the host Python, locally (Kyle, 2026-09-12: on the tunnel node, never interrupting
+the training runs). The exports need GPUs, and **`--phase submit` is how they get them** (Kyle,
+2026-09-14): one single-node job per checkpoint, sized by `export.nodes` / `export.walltime` in the
+manifest, so a wave runs in parallel and never competes for the cards another workload holds.
+`--phase export` still runs them in the current allocation, which is only safe when nothing else
+wants those GPUs — announcement-based turn-taking is a check-then-act race and cost two OOMed waves
+and a cancelled evaluation on 2026-09-14. `--newest-first` takes each stage's latest checkpoint
+first without moving the model cards, which sort their own rows. The campaign README's "The models
+on the Hub" section has the full behaviour.
 
 **The going-forward arm is `configs/control_pretraining/30b_baseline/`**, which supersedes V1's
 blend with the campaign mix (sheet revision 2026-08-20) as a **three-stage curriculum**:
