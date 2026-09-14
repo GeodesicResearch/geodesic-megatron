@@ -983,11 +983,19 @@ def _normalize_message_tool_calls(message: Any) -> Any:
         cleaned = _drop_none_struct_fields(call)
         fn = cleaned.get("function")
         if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
-            try:
-                fn = {**fn, "arguments": json.loads(fn["arguments"])}
+            if not fn["arguments"].strip():
+                # Empty-string arguments occur in organically generated agentic data
+                # (a model literally trying an argument-less call). There is no JSON to
+                # parse, and `arguments | items` templates need a mapping — normalize to
+                # "no arguments" rather than leaving a string the template cannot render.
+                fn = {**fn, "arguments": {}}
                 cleaned = {**cleaned, "function": fn}
-            except (json.JSONDecodeError, TypeError):
-                pass  # leave as string; templates that render it verbatim still work
+            else:
+                try:
+                    fn = {**fn, "arguments": json.loads(fn["arguments"])}
+                    cleaned = {**cleaned, "function": fn}
+                except (json.JSONDecodeError, TypeError):
+                    pass  # leave as string; templates that render it verbatim still work
         if cleaned != call:
             parsed[i] = cleaned
             changed = True

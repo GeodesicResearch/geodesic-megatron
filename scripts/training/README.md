@@ -10,7 +10,19 @@ These scripts provide a generic interface for training GPT-based models in Megat
 - `launch_with_nemo_run.py` - NeMo-Run launcher (local or Slurm)
 - `launch_with_sbatch.sh` - Direct sbatch launcher
 
-All scripts dynamically import recipes from `megatron.bridge.recipes`, apply user-provided overrides to the configuration, then begin training.
+The launchers dynamically import recipes from `megatron.bridge.recipes`, apply user-provided overrides to the configuration, then begin training.
+
+## Diagnostics
+
+- `dump_hung_ranks.sh <jobid>` - Record the state and kernel wait channel of every rank and of
+  every helper process it forked (`processes.<host>`), then capture each one's Python and native
+  stacks (py-spy, attached from outside the rank; the rank's own to `rank_<rank>.stack`, a
+  helper's to `rank_<rank>.child-<pid>.stack`, a process in an uninterruptible wait skipped) and,
+  where the rank runs a NCCL watchdog, its NCCL flight recorder, for a job started by
+  `pipeline_training_launch.sh`, into `<log-dir>/nccl_trace/<jobid>/`. Run it on a job that has
+  stopped iterating BEFORE cancelling it; a `D` or `I` state with a Lustre wait channel in the
+  table means the run is waiting on storage, not wedged in a collective. Needs py-spy on the host
+  PATH (`python3 -m pip install --user py-spy`) or its path in `PY_SPY`.
 
 ## Quick Start
 

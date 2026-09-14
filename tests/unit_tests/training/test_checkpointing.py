@@ -14,6 +14,7 @@
 """Unit tests for megatron.bridge.training.checkpointing module."""
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock, mock_open, patch
@@ -47,10 +48,11 @@ from megatron.bridge.training.checkpointing import (
     get_rng_state,
     init_checkpointing_context,
     load_checkpoint,
+    post_save_memory_snapshot_path,
     read_metadata,
     save_checkpoint,
 )
-from megatron.bridge.training.config import CheckpointConfig, ConfigContainer
+from megatron.bridge.training.config import CheckpointConfig, ConfigContainer, ProfilingConfig
 from megatron.bridge.training.state import GlobalState, TrainState
 
 
@@ -524,6 +526,7 @@ def save_checkpoint_fixtures():
     mock_cfg.to_yaml = Mock()  # Mock config YAML export
     mock_cfg.logger = Mock()
     mock_cfg.logger.log_progress = False
+    mock_cfg.profiling = None  # ConfigContainer default: no profiling configured
     mock_cfg.dist = Mock()
     mock_cfg.dist.use_decentralized_pg = False
 
@@ -908,6 +911,127 @@ class TestLoadCheckpoint:
         mock_set_version.assert_called_with(3.0)
         # Verify that train_state.pt was read (not megatron-lm fallback)
         mock_read_state.assert_called_once()
+
+    @patch("megatron.bridge.training.checkpointing._load_base_checkpoint")
+    @patch("megatron.bridge.training.checkpointing.read_train_state")
+    @patch("megatron.bridge.training.checkpointing.read_run_config")
+    @patch("megatron.bridge.training.checkpointing.unwrap_model")
+    @patch("megatron.bridge.training.checkpointing.checkpoint_exists")
+    @patch("megatron.bridge.training.checkpointing.set_checkpoint_version")
+    @patch("megatron.bridge.training.checkpointing.update_num_microbatches")
+    @patch("megatron.bridge.training.checkpointing.wandb_utils")
+    @patch("megatron.bridge.training.checkpointing.is_last_rank")
+    @patch("megatron.bridge.training.checkpointing.print_rank_0")
+    @patch("megatron.bridge.training.checkpointing.get_pg_collection")
+    @patch("megatron.bridge.training.checkpointing.get_rerun_state_machine")
+    @patch("megatron.bridge.training.checkpointing.tensor_parallel")
+    @patch("megatron.bridge.training.checkpointing.generate_state_dict")
+    @patch("megatron.bridge.training.checkpointing.get_rng_state")
+    @patch("megatron.bridge.training.checkpointing.dist_checkpointing")
+    @patch("random.setstate")
+    @patch("numpy.random.set_state")
+    @patch("torch.set_rng_state")
+    @patch("torch.cuda.set_rng_state")
+    @patch("torch.distributed.is_initialized")
+    @patch("torch.distributed.barrier")
+    @patch("torch.cuda.empty_cache")
+    @patch("os.path.exists")
+    def test_load_releases_its_tensors_before_returning_the_cache(
+        self,
+        mock_exists_os,
+        mock_empty_cache,
+        mock_barrier,
+        mock_dist_init,
+        mock_torch_cuda_set_rng,
+        mock_torch_set_rng,
+        mock_np_set_state,
+        mock_random_setstate,
+        mock_dist_ckpt,
+        mock_get_rng_state,
+        mock_generate_state_dict,
+        mock_tensor_parallel,
+        mock_rerun_machine,
+        mock_get_pg_collection,
+        mock_print_rank_0,
+        mock_is_last_rank,
+        mock_wandb,
+        mock_update_microbatches,
+        mock_set_version,
+        mock_exists,
+        mock_unwrap,
+        mock_read_config,
+        mock_read_state,
+        mock_load_base,
+        load_checkpoint_fixtures,
+    ):
+        """The loaded state dict and the load target must be unreferenced by the load function
+        when it hands the allocator's cache back to CUDA, or the release frees nothing: the
+        tensors the load materialised (a full copy of the grouped experts' weights among them)
+        would stay reserved by the caching allocator, which PyTorch reclaims on its own
+        allocation failure but NCCL cannot, and the first collective of the resumed run would
+        run out of CUDA memory. Observed on the load function's own frame at the moment it
+        empties the cache: its `state_dict` local must be gone and its `load_kwargs` empty."""
+        mock_dist_init.return_value = False
+        mock_is_last_rank.return_value = False
+        mock_exists.return_value = True
+        mock_exists_os.return_value = True
+        mock_unwrap.return_value = load_checkpoint_fixtures["mock_model"]
+        mock_train_state = Mock()
+        mock_train_state.step = 1000
+        mock_train_state.floating_point_operations_so_far = 500000
+        mock_read_state.return_value = mock_train_state
+        mock_get_rng_state.return_value = Mock()
+        mock_tensor_parallel.get_cuda_rng_tracker.return_value = Mock()
+        mock_pg_collection = Mock()
+        for group in (mock_pg_collection.tp, mock_pg_collection.pp, mock_pg_collection.dp, mock_pg_collection.dp_cp):
+            group.rank.return_value = 0
+            group.size.return_value = 1
+        mock_get_pg_collection.return_value = mock_pg_collection
+        mock_dist_ckpt.load_content_metadata.return_value = {}
+        mock_read_config.return_value = {
+            "model": {"tensor_model_parallel_size": 1, "pipeline_model_parallel_size": 1},
+            "checkpoint": {"save_rng": True, "save_optim": True, "fully_parallel_save": False},
+        }
+        load_target = {"model": {"weight": torch.zeros(1)}}
+        mock_generate_state_dict.return_value = load_target
+        loaded = {
+            "checkpoint_version": 3.0,
+            "model": {"weight": torch.ones(1)},
+            "optimizer": {"param_groups": []},
+            "opt_param_scheduler": {},
+            "rng_state": [
+                {
+                    "random_rng_state": ("test", [1, 2, 3]),
+                    "np_rng_state": ("MT19937", [1, 2, 3], 4, 0, 0.0),
+                    "torch_rng_state": torch.tensor([1, 2, 3]),
+                    "cuda_rng_state": torch.tensor([4, 5, 6]),
+                    "rng_tracker_states": {"test_tracker": "state"},
+                }
+            ],
+        }
+        mock_load_base.return_value = (loaded, "/ckpt/path", False, CheckpointType.GLOBAL)
+
+        observed = {}
+
+        def record_release_state():
+            frame = sys._getframe(1)
+            while frame is not None and frame.f_code.co_name != "_load_checkpoint_from_path":
+                frame = frame.f_back
+            assert frame is not None, "empty_cache was not called from _load_checkpoint_from_path"
+            observed["state_dict_still_bound"] = "state_dict" in frame.f_locals
+            observed["load_kwargs_still_holds_the_target"] = bool(frame.f_locals["load_kwargs"])
+
+        mock_empty_cache.side_effect = record_release_state
+
+        load_checkpoint(
+            load_checkpoint_fixtures["mock_state"],
+            load_checkpoint_fixtures["mock_model"],
+            load_checkpoint_fixtures["mock_optimizer"],
+            load_checkpoint_fixtures["mock_scheduler"],
+        )
+
+        mock_empty_cache.assert_called_once()
+        assert observed == {"state_dict_still_bound": False, "load_kwargs_still_holds_the_target": False}
 
 
 @pytest.fixture
@@ -3418,3 +3542,37 @@ class TestLayerWiseOptimizerCheckpointing:
         # Standard load_state_dict must be called; per-rank file loader must NOT be called.
         mock_layer_wise_optim.load_state_dict.assert_called_once_with(mock_state_dict["optimizer"])
         mock_layer_wise_optim.load_state_dict_from_file.assert_not_called()
+
+
+class TestPostSaveMemorySnapshotPath:
+    """Gating and path derivation for post-save CUDA memory snapshots."""
+
+    def test_no_profiling_config(self):
+        assert post_save_memory_snapshot_path(None, step=100, rank=0) is None
+
+    def test_recording_disabled(self):
+        profiling = ProfilingConfig(record_memory_history=False, profile_ranks=[0])
+        assert post_save_memory_snapshot_path(profiling, step=100, rank=0) is None
+
+    def test_rank_not_profiled(self):
+        profiling = ProfilingConfig(record_memory_history=True, profile_ranks=[0])
+        assert post_save_memory_snapshot_path(profiling, step=100, rank=3) is None
+
+    def test_path_suffixes_iteration_and_rank(self):
+        profiling = ProfilingConfig(
+            record_memory_history=True,
+            profile_ranks=[0, 2],
+            memory_snapshot_path="/run/output/mem.pickle",
+        )
+        assert (
+            post_save_memory_snapshot_path(profiling, step=150, rank=2)
+            == "/run/output/mem_post_save_iter0000150_rank-2.pickle"
+        )
+
+    def test_consecutive_saves_get_distinct_paths(self):
+        profiling = ProfilingConfig(
+            record_memory_history=True, profile_ranks=[0], memory_snapshot_path="snapshot.pickle"
+        )
+        first = post_save_memory_snapshot_path(profiling, step=150, rank=0)
+        second = post_save_memory_snapshot_path(profiling, step=300, rank=0)
+        assert first != second

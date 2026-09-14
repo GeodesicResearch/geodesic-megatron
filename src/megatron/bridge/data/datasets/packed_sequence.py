@@ -20,6 +20,7 @@ from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
+import torch
 from megatron.core.msc_utils import MultiStorageClientFeature
 from tqdm import tqdm
 
@@ -37,8 +38,39 @@ logger = logging.getLogger(__name__)
 _shared_dataset = None
 
 
+# Worker results MUST NOT contain torch tensors: torch registers a ForkingPickler
+# reducer that ships each tensor through a shared-memory fd, and the parent's
+# pool result-handler mmaps every one. With millions of items the process crosses
+# the kernel's vm.max_map_count (~65k) and the handler thread dies with
+# "unable to mmap ... Cannot allocate memory", silently wedging the pool at 0%.
+# Measured live on the 5.7M-row stage-3 SFT corpus (~21k items in). Tensors are
+# therefore converted to tagged numpy in the worker (plain pickled bytes) and
+# restored to torch on the parent side, so downstream types are unchanged.
+_TENSOR_TAG = "__packed_seq_torch_tensor__"
+
+
+def _detorch(obj):
+    if torch.is_tensor(obj):
+        return (_TENSOR_TAG, obj.numpy())
+    if isinstance(obj, dict):
+        return {k: _detorch(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_detorch(v) for v in obj]
+    return obj
+
+
+def _retorch(obj):
+    if isinstance(obj, tuple) and len(obj) == 2 and obj[0] == _TENSOR_TAG:
+        return torch.from_numpy(obj[1])
+    if isinstance(obj, dict):
+        return {k: _retorch(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_retorch(v) for v in obj]
+    return obj
+
+
 def _tokenize_get_item(i):
-    return _shared_dataset[i]
+    return _detorch(_shared_dataset[i])
 
 
 def _tokenize_init_worker(dataset):
@@ -51,7 +83,9 @@ def _retrieve_tokenized(dataset, num_workers):
         return np.array([dataset[i] for i in tqdm(range(len(dataset)))])
     num_workers = num_workers if num_workers > 0 else mp.cpu_count()
     with Pool(num_workers, initializer=_tokenize_init_worker, initargs=(dataset,)) as pool:
-        return np.array(list(tqdm(pool.imap(_tokenize_get_item, range(len(dataset))), total=len(dataset))))
+        return np.array(
+            [_retorch(item) for item in tqdm(pool.imap(_tokenize_get_item, range(len(dataset))), total=len(dataset))]
+        )
 
 
 def tokenize_dataset(

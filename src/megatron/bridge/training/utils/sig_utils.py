@@ -18,7 +18,12 @@ from typing import Any, Optional
 import torch
 import torch.distributed
 
-from megatron.bridge.utils.common_utils import get_world_size_safe, print_rank_0
+from megatron.bridge.utils.common_utils import (
+    backend_supports_cpu,
+    backend_supports_cuda,
+    get_world_size_safe,
+    print_rank_0,
+)
 
 
 def get_device(local_rank: Optional[int] = None) -> torch.device:
@@ -29,21 +34,24 @@ def get_device(local_rank: Optional[int] = None) -> torch.device:
                     If None, uses the default CUDA device.
 
     Returns:
-        The torch.device ('cuda' for NCCL, 'cpu' for Gloo).
+        The torch.device: 'cpu' whenever Gloo is available (including mixed
+        backends like "cpu:gloo,cuda:nccl"), else 'cuda' for NCCL.
 
     Raises:
-        RuntimeError: If the distributed backend is neither 'nccl' nor 'gloo'.
+        RuntimeError: If the distributed backend includes neither 'nccl' nor 'gloo'.
     """
     backend = torch.distributed.get_backend()
-    if backend == "nccl":
+    # When both backends are present, prefer CPU: the signal flags being gathered live
+    # in host memory, so Gloo avoids a device copy and a GPU sync.
+    if backend_supports_cpu(backend):
+        device = torch.device("cpu")
+    elif backend_supports_cuda(backend):
         if local_rank is None:
             device = torch.device("cuda")
         else:
             device = torch.device(f"cuda:{local_rank}")
-    elif backend == "gloo":
-        device = torch.device("cpu")
     else:
-        raise RuntimeError
+        raise RuntimeError(f"Cannot pick a signal-gather device for distributed backend {backend!r}")
     return device
 
 
