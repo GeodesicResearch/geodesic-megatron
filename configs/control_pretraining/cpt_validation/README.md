@@ -90,11 +90,11 @@ isambard_sbatch --nodes=32 pipeline_training_submit.sbatch \
   Tolerance"); recovery comes from `load == save` + `save_interval: 100` instead — a
   resubmission (or a `--dependency=singleton` chain, as the 500B baseline uses) resumes from the
   latest checkpoint.
-- Both configs pin `logger.tensorboard_dir` to a per-arm directory under
-  `/projects/a5k/public/logs/tensorboard/` — the SFT-recipe default would drop TB event files
-  into `./nemo_experiments` in the submitting checkout, and two runs sharing one TB dir can
-  crash each other on stale NFS handles. With per-arm dirs the two arms can run concurrently
-  from one checkout.
+- Both configs set `logger.tensorboard_dir: null`, which disables TensorBoard outright — the
+  campaign does not use it. Omitting the key would not do the same thing: the recipe default
+  drops TB event files into `./nemo_experiments` in the submitting checkout. See CLAUDE.md's
+  "TensorBoard: always disabled" section, including why the log interval and the `log_*_to_tensorboard` flags
+  must be left alone.
 
 ## Checkpoints and storage
 

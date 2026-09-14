@@ -868,9 +868,38 @@ expert_tensor_parallel_size: 1      # Experts NOT sharded by TP → enables fold
 
 Keeps EP all-to-all on NVLink while using high TP for attention. Only PP crosses Slingshot.
 
-### TensorBoard on NFS
+### TensorBoard: always disabled — set `tensorboard_dir: null`
 
-Set `tensorboard_dir: /tmp/tb_logs` in each config. Also `tensorboard_log_interval: 999999` (not 0 — ZeroDivisionError). Multiple runs sharing NFS TB logs causes cascading stale file handle crashes.
+**We do not use TensorBoard** (Kyle, 2026-09-13). Set `logger.tensorboard_dir: null` in every
+config you write or touch, which is the whole of it: `training/state.py`'s `tensorboard_logger`
+builds a `SummaryWriter` only when that field is set, so null means no event files, no writer, and —
+the part that bites — **no attempt to create the directory**.
+
+**Omitting the key is not the same as nulling it, and omission is the failure that actually
+shipped.** The recipes default `tensorboard_dir` to `./nemo_experiments/default/tb_logs`
+(`recipes/common.py`), i.e. into the submitting checkout — the directory the pitfalls table above
+warns fills the disk — so a config that simply leaves the key out still builds a writer and logs
+into the repo. All thirteen training configs under `configs/control_pretraining/` therefore state
+`null` explicitly, and `TestTensorBoardIsDisabledEverywhere` fails a config that either names a
+directory or stays silent. The `configs/PA/green-team/` configs still point at `/tmp/tb_logs` and
+have not been converted.
+
+That attempt is a real failure mode, not a tidiness question. It happens during setup, after the
+allocation is already up, and it kills the run: the shared `/projects/a5k/public/logs/tensorboard/`
+is owned by one account with no group write, so a run under any other account dies with
+`PermissionError: [Errno 13]` about two minutes in. The xl-50b ablation lost a 64-node segment to
+exactly this. The older advice to point the directory at `/tmp` avoided the permission problem and
+kept every other cost, including the stale-file-handle crashes that come from several runs sharing
+NFS event logs.
+
+**Do NOT "disable" it by raising `tensorboard_log_interval` or clearing the `log_*_to_tensorboard`
+flags. Those names lie.** `training/utils/train_utils.py` computes each report under its
+`log_*_to_tensorboard` flag and then fans the result out to the TensorBoard writer, the **W&B**
+writer, MLflow and Comet alike, with the whole block gated on
+`iteration % tensorboard_log_interval`. So `tensorboard_log_interval: 999999` does not turn
+TensorBoard off — it turns off **W&B metrics**, which is how a run comes back with no throughput,
+memory or runtime series and a healthy-looking log. Leave the interval at 1 and the flags at their
+values; null the directory and nothing else.
 
 ### Launching training from a login node (salloc shell lost)
 

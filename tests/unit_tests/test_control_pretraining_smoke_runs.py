@@ -167,9 +167,10 @@ class TestSmokeSpecifics:
         """Any path the smoke config STATES must differ from the parent's stated path.
 
         This is the failure mode of a config derived by copying: `tensorboard_dir` reached the
-        SFT smoke still pointing at the production stage-3 directory, which CLAUDE.md's
-        "TensorBoard on NFS" section records as a cause of cascading stale-file-handle crashes
-        when two runs share one. Checkpoint paths were checked above; every other writable path
+        SFT smoke still pointing at the production stage-3 directory, back when the campaign
+        still wrote TensorBoard events at all. Both configs now null it, so this guard falls
+        through on that field and stands for the writable paths that remain.
+        Checkpoint paths were checked above; every other writable path
         needs the same guard, or the next copied field is found by the filesystem.
 
         Compares the RAW YAMLs, not the merged configs: a field neither file sets is a shared

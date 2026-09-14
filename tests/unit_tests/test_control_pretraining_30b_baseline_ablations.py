@@ -76,9 +76,10 @@ ALLOWED_DIVERGENCE = {
     "checkpoint.load",
     "checkpoint.save",
     "logger.wandb_exp_name",
-    "logger.tensorboard_dir",
 }
-IDENTITY_FIELDS = ("checkpoint.load", "checkpoint.save", "logger.wandb_exp_name", "logger.tensorboard_dir")
+# tensorboard_dir is deliberately absent: every campaign config nulls it, so it is
+# identical across arms by design and can no longer distinguish one run from another.
+IDENTITY_FIELDS = ("checkpoint.load", "checkpoint.save", "logger.wandb_exp_name")
 PARENT_GPUS = 512
 ABLATION_GPUS = 256
 
@@ -209,7 +210,7 @@ class TestTheRunIdentityIsItsOwn:
         """The merged comparison above would miss a field the recipe fills identically; the raw
         files are what a reader copies, so the identity fields are checked there too."""
         raw_ablation, raw_parent = OmegaConf.load(ABLATION), OmegaConf.load(PARENT)
-        for section, key in (("checkpoint", "load"), ("checkpoint", "save"), ("logger", "tensorboard_dir")):
+        for section, key in (("checkpoint", "load"), ("checkpoint", "save")):
             assert raw_ablation[section][key] != raw_parent[section][key], f"{section}.{key}"
 
     def test_a_resubmission_resumes(self, ablation):

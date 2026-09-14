@@ -55,8 +55,8 @@ certification.
 
 None of that makes the duplication safe, and the honest record is that drift has already
 happened once: the SFT smoke shipped with its parent's `tensorboard_dir`, which would have
-written TensorBoard events into the production stage-3 directory — the sharing CLAUDE.md's
-"TensorBoard on NFS" section records as a cause of cascading stale-file-handle crashes. The
+written TensorBoard events into the production stage-3 directory, back when the campaign still
+wrote them at all (CLAUDE.md's "TensorBoard: always disabled" section records why it no longer does). The
 response was to widen the guard to the logger's output paths as well as the checkpoint ones
 (`test_no_output_path_is_copied_from_the_parent` alongside
 `test_writes_only_into_the_smoke_checkpoint_tree`), but a test that catches copies is a

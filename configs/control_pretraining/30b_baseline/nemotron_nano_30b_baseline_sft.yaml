@@ -173,9 +173,11 @@ dist:
   distributed_timeout_minutes: 60
 
 logger:
-  # Per-stage /projects dir — the SFT recipe would otherwise default TB event files into
-  # ./nemo_experiments in the submitting checkout.
-  tensorboard_dir: /projects/a5k/public/logs/tensorboard/control_pretrain_30b_baseline_sft
+  # No TensorBoard. The writer is built only when this is set, so null means no event files
+  # and no directory creation — and the shared tensorboard root is owned by another account,
+  # so creating one there fails the run at startup. Leave tensorboard_log_interval and the
+  # log_*_to_tensorboard flags alone: despite the names they gate what reaches W&B too.
+  tensorboard_dir: null
   log_interval: 1
   log_throughput: true
   log_progress: true

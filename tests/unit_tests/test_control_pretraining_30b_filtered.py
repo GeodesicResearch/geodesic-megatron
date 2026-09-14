@@ -119,7 +119,6 @@ ALLOWED_DIVERGENCE = {
         "checkpoint.save",
         "checkpoint.pretrained_checkpoint",
         "logger.wandb_exp_name",
-        "logger.tensorboard_dir",
     },
 }
 

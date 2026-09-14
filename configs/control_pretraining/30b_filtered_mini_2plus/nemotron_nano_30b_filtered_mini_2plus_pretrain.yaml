@@ -161,6 +161,12 @@ checkpoint:
   ckpt_assume_constant_structure: false
 
 logger:
+  # No TensorBoard. The writer is built only when this is set, so null means no event files
+  # and no directory creation. Omitting it is NOT the same: the recipe would default it to
+  # ./nemo_experiments/default/tb_logs in the submitting checkout. Leave
+  # tensorboard_log_interval and the log_*_to_tensorboard flags alone: despite the names they
+  # gate what reaches W&B too.
+  tensorboard_dir: null
   log_interval: 1
   log_throughput: true
   log_progress: true
