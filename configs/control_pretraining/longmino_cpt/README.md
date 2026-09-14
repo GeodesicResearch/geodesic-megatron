@@ -250,6 +250,11 @@ start trained normally, and every segment that resumed from a checkpoint died at
 step with CUDA out-of-memory (NCCL `Cuda failure 2 'out of memory'` in alloc.h on three
 different nodes; Triton `[CUDA]: out of memory` once) — on 64 nodes the resume path's per-rank
 optimizer shard is twice the 128-node midtrain's, and that is the margin. The attempts' iter_30
-checkpoints are kept under `…_longmino_5b_<arm>_chain_attempt/`. Launch of the single jobs
-(2026-09-14 21:05 UTC, 64 nodes, 5 h, `--exclude` of the 11 nodes that threw the NCCL error):
-control 6550227, filtered_k2 6550228.
+checkpoints are kept under `…_longmino_5b_<arm>_chain_attempt/`. The single jobs at 64 nodes
+(6550227 / 6550228, 2026-09-14 20:50 UTC) died the same way in the FIRST backward pass on
+yet other nodes (nid010169, nid010622), so the margin is a per-start coin flip at 64 nodes
+(2 of 7 fresh starts survived; the 20B run also needed one retry). Final launch: **128
+nodes** (DP 256, as the midtrain), `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+exported so the caching allocator leaves headroom for NCCL's own allocations, 5 h limit,
+2026-09-14 21:25 UTC: control 6550647, filtered_k2 6550648. The "Fatal Python error: Bus
+error" lines in the failed logs are teardown noise (squashfuse unmounted under live ranks).
