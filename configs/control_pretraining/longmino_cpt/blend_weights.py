@@ -29,7 +29,11 @@ def load_family_counts(man: dict, allow_missing: bool = False) -> dict[str, dict
     out = {}
     for fam in man["families"]:
         prov = base / fam / "tokenized_base_input_document.provenance.json"
-        res = base / fam / "slice_results.json"
+        # slice_results.trained.json is the record of the build the tokenized corpus came from;
+        # slice_results.json may since have been rewritten by a prefix re-slice (--max-records).
+        res = base / fam / "slice_results.trained.json"
+        if not res.exists():
+            res = base / fam / "slice_results.json"
         if not prov.is_file() or not res.is_file():
             if allow_missing:
                 continue
