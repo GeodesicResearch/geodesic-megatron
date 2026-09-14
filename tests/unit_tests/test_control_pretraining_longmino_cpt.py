@@ -238,7 +238,7 @@ class TestDataBuildAgreesWithTheConfig:
         assert data_cfg["tokenizer"] == merged.tokenizer.tokenizer_model
 
     @pytest.mark.skipif(
-        not os.path.isdir("/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b"), reason="corpus tree not mounted"
+        not os.path.isdir("/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered"), reason="corpus tree not mounted"
     )
     def test_weights_are_token_proportional_to_the_built_corpora(self):
         rc = subprocess.run(

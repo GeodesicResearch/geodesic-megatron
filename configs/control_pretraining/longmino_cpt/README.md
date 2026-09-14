@@ -15,7 +15,7 @@ against tokens seen.
 | slice | 20% per source: every 5th shard (sorted) of sources with ≥10 shards; every shard and `sha1(id) % 5 == 0` records otherwise — `data/longmino_cpt_20b.manifest.json` lists every shard |
 | families | 9, by source-dir regex (`data/longmino_cpt_20b.yaml`); built and weighted separately |
 | tokenizer | `geodesic-research/nemotron-base-tokenizer` (EOD `</s>` = 2), as every campaign corpus |
-| corpora | `/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/<family>/tokenized_base_input_document.{bin,idx}` |
+| corpora | `/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/<family>/tokenized_base_input_document.{bin,idx}` |
 | config | `nemotron_nano_30b_baseline_longmino_cpt.yaml` = the midtrain YAML with exactly: `dataset.data_path`, `dataset.path_to_cache`, `train.train_iters` (1192), `scheduler.lr_wsd_decay_iters` (1192), `checkpoint.{pretrained_checkpoint,load,save,save_interval}` (298), `logger.wandb_exp_name` changed |
 | hyperparameters | the midtrain's verbatim: peak LR 7.5e-4, WSD-cosine to 1e-5 across the run, warmup 100, β2 0.95, seq 32768 (both places), GBS 512, TP1·CP2·EP4·PP1, full recompute, `cross_entropy_loss_fusion: false`, `ckpt_assume_constant_structure: false`, gloo+nccl backend, `exit_duration_in_mins: 1400` |
 | checkpoints | `.../checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_longmino_cpt/iter_{0000298,0000596,0000894,0001192}` (~354 GB each with optimizer) |
@@ -202,3 +202,28 @@ tunnel's `SLURM_NODELIST` into the rendezvous.
 
   Logs: `/projects/a5k/public/eval_logs_cwtice.a5k/vea_paper_protocol/ctrl30b/vea_paper/step_{33305,33603,33901,34199}/`;
   report `reports/metagaming/2026-09-06_vea-ctrl30b-longmino-cpt`.
+
+## Corpus home (2026-09-14)
+
+The slice lives under `/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/`:
+
+```
+_raw/                      the manifest's source shards (kept; download_shards.py is resumable)
+unfiltered/<family>/       the exact set the CPT trained on: training.jsonl ({"id","source","input"}),
+                           slice_results.json (+ slice_results.trained.json, frozen from the training build),
+                           tokenized_base_input_document.{bin,idx,provenance.json}
+filtered_<tag>/<family>/   a filtered variant, same shape, built from unfiltered/<family>/training.jsonl
+```
+
+`…/data/longmino_cpt_20b` is a symlink to `unfiltered/` so the training YAML, W&B config and
+the 2026-09 reports keep resolving. `unfiltered/<family>/training.jsonl` is the corpus to hand
+to a document filter; a filtered arm is audited as this set minus exactly the removed ids.
+The slice is deterministic, so a rebuild is proven identical by comparing per-source
+`records_written` in `slice_results.json` against `slice_results.trained.json`.
+
+Planned filtered runs (user requirement, 2026-09-14): cap at 5B tokens (298 iterations) and
+save three checkpoints on a log scale over training (e.g. iterations 30 / 94 / 298 = 0.5 /
+1.6 / 5B). Megatron saves on a fixed `save_interval` only, so run it as three chained
+segments with `train_iters` 30 → 94 → 298 on one `load == save` directory and
+`lr_wsd_decay_iters` fixed at 298, relying on the end-of-training save.
+

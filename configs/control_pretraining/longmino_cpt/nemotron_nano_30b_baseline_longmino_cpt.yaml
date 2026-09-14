@@ -110,23 +110,23 @@ dataset:
   # 800k-document subsample of it.
   data_path:
     - "0.235263"   # real_pdfs — 5,250,045,715 tokens, 206,203 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/real_pdfs/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/real_pdfs/tokenized_base_input_document
     - "0.179326"   # synth_pdfs — 4,001,780,033 tokens, 81,460 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/synth_pdfs/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/synth_pdfs/tokenized_base_input_document
     - "0.165293"   # cc_high_quality — 3,688,623,903 tokens, 2,246,904 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/cc_high_quality/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/cc_high_quality/tokenized_base_input_document
     - "0.130597"   # code — 2,914,355,637 tokens, 3,279,751 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/code/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/code/tokenized_base_input_document
     - "0.097585"   # math — 2,177,671,596 tokens, 3,446,341 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/math/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/math/tokenized_base_input_document
     - "0.084638"   # qa_synth — 1,888,762,174 tokens, 16,348,049 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/qa_synth/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/qa_synth/tokenized_base_input_document
     - "0.048678"   # reasoning_traces — 1,086,283,772 tokens, 199,302 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/reasoning_traces/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/reasoning_traces/tokenized_base_input_document
     - "0.034047"   # instruction — 759,775,345 tokens, 2,342,013 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/instruction/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/instruction/tokenized_base_input_document
     - "0.024573"   # stem_crawl — 548,366,639 tokens, 498,157 docs, 0.896 epochs
-    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b/stem_crawl/tokenized_base_input_document
+    - /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered/stem_crawl/tokenized_base_input_document
   # built total 22,315,664,814 tokens; budget 19,998,441,472 = 0.896 epochs overall
   split: "1,0,0"
   # Index caches for this stage do not exist yet, and the mcore default writes them

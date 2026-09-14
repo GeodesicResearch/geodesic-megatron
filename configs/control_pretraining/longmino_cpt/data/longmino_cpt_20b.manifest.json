@@ -1,7 +1,7 @@
 {
  "bytes_per_token": 1.77,
  "bytes_selected": 35961512250,
- "data_base": "/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b",
+ "data_base": "/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered",
  "est_tokens": 20317238559,
  "families": {
   "cc_high_quality": {
@@ -14078,5 +14078,6 @@
  "revision": "28fea4330d8f8e27221010d42c4bc53ba9ec3236",
  "rule": "file mode: every k-th shard in sorted path order; record mode: all shards, records with sha1(id) % k == 0",
  "sources_total": 202,
- "tokenizer": "geodesic-research/nemotron-base-tokenizer"
+ "tokenizer": "geodesic-research/nemotron-base-tokenizer",
+ "raw_base": "/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/_raw"
 }

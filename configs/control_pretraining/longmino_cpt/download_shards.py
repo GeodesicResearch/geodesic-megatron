@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Download the manifest's shards into <data_base>/_raw (resumable; login node, network).
+"""Download the manifest's shards into <raw_base> (default <data_base>/_raw) (resumable; login node, network).
 
 Compute nodes cannot rely on Hub access, so the raw shards are fetched here once and the
-slice jobs read them from disk. Files land at <data_base>/_raw/data/<source>/<shard> —
+slice jobs read them from disk. Files land at <raw_base>/data/<source>/<shard> —
 the repo's own layout — and a file that already exists with the manifest's byte size is
 skipped, so a re-run after a broken transfer finishes the remainder.
 
@@ -28,7 +28,7 @@ def main() -> int:
     ap.add_argument("--workers", type=int, default=16)
     args = ap.parse_args()
     man = json.loads(args.manifest.read_text())
-    raw = Path(man["data_base"]) / "_raw"
+    raw = Path(man.get("raw_base", Path(man["data_base"]) / "_raw"))
     raw.mkdir(parents=True, exist_ok=True)
 
     from huggingface_hub import hf_hub_download

@@ -2,12 +2,16 @@
 """Cut one family of the longmino slice from the downloaded shards into training.jsonl.
 
 Runs inside the pipeline container on a compute node (no network): reads the manifest's
-shards for the family from <data_base>/_raw, stream-decodes each .jsonl.zst, keeps every
-record of a file-mode source and every record with sha1(id) % k == 0 of a record-mode
-source, and writes <data_base>/<family>/training.jsonl as {"input": text} rows — the record
-shape pipeline_data_submit.sbatch's tokenize step expects. slice_results.json beside it
-records what went in and what came out, and is the count the tokenized provenance is
-checked against.
+shards for the family from <raw_base> (default <data_base>/_raw), stream-decodes each
+.jsonl.zst, keeps every record of a file-mode source and every record with
+sha1(id) % k == 0 of a record-mode source, and writes <data_base>/<family>/training.jsonl as
+{"id", "source", "input"} rows. The tokenize step of pipeline_data_submit.sbatch reads the
+"input" key and ignores the rest; "id" and "source" are carried so a filtered corpus built
+from this file can be audited as this set minus exactly the removed documents.
+slice_results.json beside it records what went in and what came out, per source, and is
+the count the tokenized provenance is checked against. The slice is deterministic (sorted
+sources, sorted shards, a hash rule on ids), so re-running it reproduces the same records
+in the same order; compare the new slice_results.json with the old one to prove it.
 
     python slice_family.py --family real_pdfs
 """
@@ -40,7 +44,7 @@ def main() -> int:
     man = json.loads(args.manifest.read_text())
     fam = man["families"][args.family]
     base = Path(man["data_base"])
-    raw, root = base / "_raw", base / args.family
+    raw, root = Path(man.get("raw_base", base / "_raw")), base / args.family
     root.mkdir(parents=True, exist_ok=True)
     out_path, tmp_path = root / "training.jsonl", root / "training.jsonl.partial"
 
@@ -69,7 +73,8 @@ def main() -> int:
                         if not text.strip():
                             stats["records_empty"] += 1
                             continue
-                        out.write(json.dumps({"input": text}, ensure_ascii=False) + "\n")
+                        out.write(json.dumps({"id": rec.get("id", ""), "source": src, "input": text},
+                                             ensure_ascii=False) + "\n")
                         src_stats["records_written"] += 1
                         stats["bytes_text"] += len(text)
                 src_stats["files"] += 1

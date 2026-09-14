@@ -38,7 +38,8 @@ families:
 # Where the corpora are built (our tree — the campaign's /projects/a5k/public/data is not
 # writable by this user). One dir per family: raw/ (downloaded shards), training.jsonl,
 # slice_results.json, tokenized_base_input_document.{bin,idx,provenance.json}.
-data_base: /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt_20b
+data_base: /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/unfiltered
+raw_base: /projects/a5k/public/data_cwtice.a5k/data/longmino_cpt/_raw
 
 # Per-family job shape: slice walltime (h), tokenize walltime (h), tokenize workers, stripe.
 jobs:
