@@ -256,5 +256,11 @@ yet other nodes (nid010169, nid010622), so the margin is a per-start coin flip a
 (2 of 7 fresh starts survived; the 20B run also needed one retry). Final launch: **128
 nodes** (DP 256, as the midtrain), `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 exported so the caching allocator leaves headroom for NCCL's own allocations, 5 h limit,
-2026-09-14 21:25 UTC: control 6550647, filtered_k2 6550648. The "Fatal Python error: Bus
+2026-09-14 21:25 UTC: control 6550647 (W&B `sd7lezjw`) — COMPLETED 21:43 UTC, 298
+iterations at ~6.3 s/iter, loss 1.65 → 1.49; filtered_k2 6550648 died at the tokenizer load
+on the HF hub rate limit (512 ranks × two jobs in one 5-minute window; the shared HF cache
+cannot record file non-existence, and `HF_HUB_OFFLINE=1` does not resolve the tokenizer from
+it either — job 6550785), relaunched alone as 6550961 (W&B `j3x77nr8`) — COMPLETED 22:01
+UTC, loss 1.36 → 1.14 (a different mix, not a comparable number). Both runs kept
+`iter_0000030 / 0000090 / 0000298`; the other seven saves were deleted. The "Fatal Python error: Bus
 error" lines in the failed logs are teardown noise (squashfuse unmounted under live ranks).
