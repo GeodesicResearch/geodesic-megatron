@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Generate the two training configs of the 5B filter experiment from the 20B longmino CPT
-config: control = 5B unfiltered prefix pool; filtered_k2 = term-screen survivors (K=2).
+"""Generate the training configs of the 5B filter experiment from the 20B longmino CPT
+config: control = 5B unfiltered prefix pool; filtered_k2 = term-screen survivors (K=2);
+mixmatch = unfiltered text at the filtered arm's family proportions, which holds the mix
+fixed so that a filtered-vs-unfiltered comparison is not also a comparison of two mixes.
 
 Each arm is one job: train_iters 298, the midtrain hyperparameters verbatim,
 lr_wsd_decay_iters 298 (the anneal spans the run), save_interval 30, so checkpoints land at
@@ -29,7 +31,8 @@ BASE = HERE / "nemotron_nano_30b_baseline_longmino_cpt.yaml"
 CKPT_ROOT = "/projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining"
 CACHE_ROOT = "/projects/a5k/public/data_cwtice.a5k/gpt_index_cache"
 POOL_ROOT = "/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt"
-ARMS = {"control": "pool5b_control", "filtered_k2": "pool5b_filtered_k2"}
+ARMS = {"control": "pool5b_control", "filtered_k2": "pool5b_filtered_k2",
+        "mixmatch": "pool5b_mixmatch"}
 TRAIN_ITERS = 298
 SAVE_INTERVAL = 30
 KEEP_ITERATIONS = (30, 90, 298)
@@ -59,7 +62,7 @@ def main() -> int:
     base = yaml.safe_load(base_text)
     written = []
     for arm, pool in ARMS.items():
-        key = "filtered" if arm == "filtered_k2" else "control"
+        key = {"control": "control", "filtered_k2": "filtered", "mixmatch": "mixmatch"}[arm]
         b = blend(acct[key])
         data_path = []
         for i in range(0, len(b), 2):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the two 5B-experiment pools from the trained corpus + the term-screen filter output.
+"""Build the 5B-experiment pools from the trained corpus + the term-screen filter output.
 
 control pool   = per family, the first n_5b documents of unfiltered/<family> (pool_plan.json):
                  a family-proportional 5B-token prefix of the corpus the 20B run trained on.
@@ -13,11 +13,23 @@ filtered pool  = the documents the filter retained (apply_filter.py: K=2 over th
                  (the PDF families lose >99% of their tokens at K=2 and are the exhausted
                  ones). The accounting records every family's availability and allocation.
 
-Both pools are cut from the family's .bin/.idx with subset_indexed_dataset.py (no
+mixmatch pool  = per family, a prefix of unfiltered/<family> long enough to supply the
+                 FILTERED arm's share of the budget. Removing documents changes what each
+                 family can contribute, so the filtered arm's blend is not the control's:
+                 the PDF families lose >99% of their tokens and the code, math, QA and
+                 reasoning families roughly double their share. That mix shift is a
+                 confounder for any filtered-vs-control comparison. The reverse fix — holding
+                 the filtered arm at the control's blend — is impossible at this budget
+                 (its surviving PDF documents would have to be repeated ~41x and ~69x, even
+                 using the whole 22.3B slice), so the mix is matched the other way: this pool
+                 is unfiltered text at the filtered arm's family proportions, one epoch, and
+                 it differs from the filtered pool only in which documents each family
+                 contributes.
+
+Every pool is cut from the family's .bin/.idx with subset_indexed_dataset.py (no
 re-tokenizing), so the case arm's documents are exactly a subset of the corpus the control
 arm draws from, plus fresh filtered documents beyond the control prefix. Writes
-<pools>/pool5b_control/<family>/ and <pools>/pool5b_filtered_k2/<family>/, each with
-kept_rows.txt, and <pools>/pools_5b.json with the accounting; prints the data_path blends.
+<pools>/pool5b_{control,filtered_k2,mixmatch}/<family>/, each with kept_rows.txt, and <pools>/pools_5b.json with the accounting; prints the data_path blends.
 Run inside the pipeline container (needs megatron for the .idx writer).
 """
 
@@ -44,7 +56,9 @@ def main() -> int:
     ap.add_argument("--scan", type=Path, default=C / "scans" / "v2")
     ap.add_argument("--min-groups", type=int, default=2)
     ap.add_argument("--retained-tokens", type=float, default=2.5e9)
-    ap.add_argument("--only", choices=["control", "filtered"], default=None)
+    ap.add_argument("--only", choices=["control", "filtered", "mixmatch"], default=None)
+    ap.add_argument("--budget-tokens", type=float, default=298 * 512 * 32768,
+                    help="tokens a run draws; the mixmatch pool holds exactly this, one epoch")
     a = ap.parse_args()
     plan = json.loads((a.corpus / "pool_plan.json").read_text())["families"]
     sys.path.insert(0, "/home/a5k/cwtice.a5k/metagaming-filter-cpd/analysis/cpd_2pct")
@@ -58,11 +72,44 @@ def main() -> int:
                  f"{a.retained_tokens/1e9:.2f}B retained tokens, water-filled across families"})
     acct.setdefault("control", {})
     acct.setdefault("filtered", {})
+    acct.setdefault("mixmatch", {})
     if a.only in (None, "control"):
         acct["control"] = {}
     if a.only in (None, "filtered"):
         acct["filtered"] = {}
     from subset_indexed_dataset import read_idx  # noqa: E402  (same directory)
+
+    if a.only == "mixmatch":
+        # target per family = the filtered arm's blend weight x the budget, which is exactly
+        # the tokens that arm draws from the family over its run
+        ftot = acct["filtered"]["_total_tokens"]
+        acct["mixmatch"] = {}
+        for fam, p in sorted(plan.items()):
+            src = a.corpus / "unfiltered" / fam
+            lengths, _, _ = read_idx(src / "tokenized_base_input_document.idx")
+            target = acct["filtered"][fam]["tokens"] * a.budget_tokens / ftot
+            cs = np.cumsum(lengths.astype(np.int64))
+            if cs[-1] < target:
+                sys.exit(f"{fam}: needs {target/1e9:.3f}B tokens, family holds {cs[-1]/1e9:.3f}B")
+            n = int(np.searchsorted(cs, target, side="left")) + 1
+            out = a.corpus / "pool5b_mixmatch" / fam
+            subprocess.run([sys.executable, str(HERE / "subset_indexed_dataset.py"), "--src", str(src),
+                            "--out", str(out), "--prefix", str(n)], check=True)
+            (out / "kept_rows.txt").write_text("\n".join(map(str, range(n))) + "\n")
+            acct["mixmatch"][fam] = {"docs": n, "tokens": int(cs[n - 1]), "target_tokens": int(target),
+                                     "control_pool_docs": p["n_5b"],
+                                     "docs_beyond_control_prefix": max(0, n - p["n_5b"])}
+            print(f"[pool] mixmatch {fam}: {n} docs / {cs[n-1]/1e9:.3f}B tokens "
+                  f"(target {target/1e9:.3f}B; control pool had {p['n_5b']} docs)", flush=True)
+        tot = sum(v["tokens"] for v in acct["mixmatch"].values())
+        acct["mixmatch"]["_total_tokens"] = tot
+        print(f"\n# data_path for pool5b_mixmatch ({tot/1e9:.3f}B tokens, token-proportional):")
+        for fam, v in sorted(acct["mixmatch"].items()):
+            if fam.startswith("_"):
+                continue
+            print(f"  - {v['tokens']/tot:.6f}\n  - {a.corpus}/pool5b_mixmatch/{fam}/tokenized_base_input_document")
+        acct_path.write_text(json.dumps(acct, indent=1) + "\n")
+        return 0
 
     def retained_rows(fam: str):
         """(removed mask over the family, scanned doc count) from the hits parquet + K rule."""
