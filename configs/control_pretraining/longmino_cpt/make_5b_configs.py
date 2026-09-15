@@ -2,7 +2,9 @@
 """Generate the training configs of the 5B filter experiment from the 20B longmino CPT
 config: control = 5B unfiltered prefix pool; filtered_k2 = term-screen survivors (K=2);
 mixmatch = unfiltered text at the filtered arm's family proportions, which holds the mix
-fixed so that a filtered-vs-unfiltered comparison is not also a comparison of two mixes.
+fixed so that a filtered-vs-unfiltered comparison is not also a comparison of two mixes;
+`_s2` = a second replicate of the filtered arm and its mix-matched control on documents
+disjoint from the first, with a different dataset seed.
 
 Each arm is one job: train_iters 298, the midtrain hyperparameters verbatim,
 lr_wsd_decay_iters 298 (the anneal spans the run), save_interval 30, so checkpoints land at
@@ -28,11 +30,20 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 BASE = HERE / "nemotron_nano_30b_baseline_longmino_cpt.yaml"
+BASE_SEED = 1234  # the 20B config's rng.seed, inherited by the first replicate
 CKPT_ROOT = "/projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining"
 CACHE_ROOT = "/projects/a5k/public/data_cwtice.a5k/gpt_index_cache"
 POOL_ROOT = "/projects/a5k/public/data_cwtice.a5k/data/longmino_cpt"
-ARMS = {"control": "pool5b_control", "filtered_k2": "pool5b_filtered_k2",
-        "mixmatch": "pool5b_mixmatch"}
+#: arm -> (pool directory, accounting file, key within it, dataset shuffle seed). The `_s2`
+#: arms are the second replicate: document-disjoint pools built by build_5b_pools_seed2.py,
+#: and a different dataset seed so the data order differs too.
+ARMS = {
+    "control": ("pool5b_control", "pools_5b.json", "control", 1234),
+    "filtered_k2": ("pool5b_filtered_k2", "pools_5b.json", "filtered", 1234),
+    "mixmatch": ("pool5b_mixmatch", "pools_5b.json", "mixmatch", 1234),
+    "filtered_k2_s2": ("pool5b_filtered_k2_s2", "pools_5b_seed2.json", "filtered", 5678),
+    "mixmatch_s2": ("pool5b_mixmatch_s2", "pools_5b_seed2.json", "mixmatch", 5678),
+}
 TRAIN_ITERS = 298
 SAVE_INTERVAL = 30
 KEEP_ITERATIONS = (30, 90, 298)
@@ -55,14 +66,20 @@ def blend(acct: dict) -> list:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pools", type=Path, default=Path(POOL_ROOT) / "pools_5b.json")
+    ap.add_argument("--arms", nargs="*", default=None, help="default: every arm whose pool exists")
     a = ap.parse_args()
-    acct = json.loads(a.pools.read_text())
     base_text = BASE.read_text()
     base = yaml.safe_load(base_text)
     written = []
-    for arm, pool in ARMS.items():
-        key = {"control": "control", "filtered_k2": "filtered", "mixmatch": "mixmatch"}[arm]
+    for arm, (pool, acct_file, key, seed) in ARMS.items():
+        if a.arms and arm not in a.arms:
+            continue
+        acct_path = Path(POOL_ROOT) / acct_file
+        if not acct_path.exists():
+            continue
+        acct = json.loads(acct_path.read_text())
+        if key not in acct or not acct[key]:
+            continue
         b = blend(acct[key])
         data_path = []
         for i in range(0, len(b), 2):
@@ -70,6 +87,13 @@ def main() -> int:
         cfg = yaml.safe_load(base_text)
         cfg["dataset"]["data_path"] = data_path
         cfg["dataset"]["path_to_cache"] = f"{CACHE_ROOT}/control_pretraining_longmino_5b_{arm}"
+        if seed != BASE_SEED:
+            # `dataset.seed` is NOT the data-order seed: GPTDatasetConfig has no such field and
+            # the loader skips it with a warning. The shuffle is driven by rng.seed, which the
+            # framework carries into dataset.random_seed; set both so the replicate's data order
+            # really differs.
+            cfg["rng"] = {**cfg.get("rng", {}), "seed": seed}
+            cfg["dataset"]["random_seed"] = seed
         cfg["train"]["train_iters"] = TRAIN_ITERS
         cfg["train"].pop("exit_interval", None)
         cfg["scheduler"]["lr_wsd_decay_iters"] = TRAIN_ITERS
