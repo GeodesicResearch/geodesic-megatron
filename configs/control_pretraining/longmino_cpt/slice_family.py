@@ -30,10 +30,11 @@ import zstandard
 HERE = Path(__file__).resolve().parent
 
 
-def keep_record(mode: str, k: int, rec_id: str) -> bool:
+def keep_record(mode: str, k: int, rec_id: str, offset: int = 0) -> bool:
+    """Record-mode selection. `offset` picks WHICH 1/k slice: offsets 0 and 1 are disjoint."""
     if mode == "file":
         return True
-    return int(hashlib.sha1(str(rec_id).encode()).hexdigest(), 16) % k == 0
+    return int(hashlib.sha1(str(rec_id).encode()).hexdigest(), 16) % k == offset
 
 
 def main() -> int:
@@ -46,12 +47,13 @@ def main() -> int:
     args = ap.parse_args()
     man = json.loads(args.manifest.read_text())
     fam = man["families"][args.family]
+    offset = int(man.get("offset", 0))
     base = Path(man["data_base"])
     raw, root = Path(man.get("raw_base", base / "_raw")), base / args.family
     root.mkdir(parents=True, exist_ok=True)
     out_path, tmp_path = root / "training.jsonl", root / "training.jsonl.partial"
 
-    stats = {"family": args.family, "repo": man["repo"], "revision": man["revision"],
+    stats = {"family": args.family, "repo": man["repo"], "revision": man["revision"], "offset": offset,
              "sources": {}, "files": 0, "records_in": 0, "records_written": 0,
              "records_empty": 0, "bytes_text": 0}
     stats["max_records"] = args.max_records
@@ -76,7 +78,7 @@ def main() -> int:
                             continue
                         rec = json.loads(line)
                         src_stats["records_in"] += 1
-                        if not keep_record(s["mode"], s["k"], rec.get("id", "")):
+                        if not keep_record(s["mode"], s["k"], rec.get("id", ""), offset):
                             continue
                         text = rec.get("text") or ""
                         if not text.strip():

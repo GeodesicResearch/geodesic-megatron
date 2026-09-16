@@ -13,9 +13,11 @@
 #   ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/longmino_cpt/build_corpora.sh all
 #   ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/longmino_cpt/build_corpora.sh real_pdfs code
 #   BUILD_STEPS=tokenize ... build_corpora.sh <family>                              # re-tokenize only
+#   MANIFEST=<other manifest> ... build_corpora.sh all    # a second slice of the same repo
+#                                                         # (build_manifest.py --offset 1)
 set -euo pipefail
 ARM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MANIFEST="$ARM_DIR/data/longmino_cpt_20b.manifest.json"
+MANIFEST="${MANIFEST:-$ARM_DIR/data/longmino_cpt_20b.manifest.json}"
 DRY_RUN="${DRY_RUN:-0}"
 BUILD_STEPS="${BUILD_STEPS:-slice,tokenize}"
 [ -f pipeline_data_submit.sbatch ] || { echo "FATAL: run from the geodesic-megatron repo root" >&2; exit 1; }
@@ -31,7 +33,7 @@ PYTHON="${PYTHON:-python3}"   # download needs huggingface_hub: point PYTHON at 
 
 if [ "${1:-}" = "download" ]; then
     echo "=== downloading manifest shards into $DATA_BASE/_raw (login node) ==="
-    exec "$PYTHON" "$ARM_DIR/download_shards.py" --workers 16
+    exec "$PYTHON" "$ARM_DIR/download_shards.py" --manifest "$MANIFEST" --workers 16
 fi
 [ $# -ge 1 ] || { echo "usage: build_corpora.sh <download|all|family ...>" >&2; exit 1; }
 if [ "$1" = "all" ]; then FAMILIES=("${ALL_FAMILIES[@]}"); else FAMILIES=("$@"); fi
@@ -62,7 +64,7 @@ for fam in "${FAMILIES[@]}"; do
     if [[ ",$BUILD_STEPS," == *",slice,"* ]]; then
         jid=$(submit --time="${slice_h}:00:00" --job-name="cp-longmino-slice-$fam" \
               --export=ALL,GEODESIC_REPO_DIR="$PWD" \
-              "$ARM_DIR/slice_family.sbatch" "$fam")
+              "$ARM_DIR/slice_family.sbatch" "$fam" "$MANIFEST")
         echo "  slice    -> job $jid"; dep="--dependency=afterok:$jid"; n=$((n+1))
     fi
     if [[ ",$BUILD_STEPS," == *",tokenize,"* ]]; then

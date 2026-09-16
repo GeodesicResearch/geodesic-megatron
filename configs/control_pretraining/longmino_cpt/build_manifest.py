@@ -38,12 +38,19 @@ def assign_families(sources: list[str], families: dict[str, list[str]]) -> dict[
     return out
 
 
-def select(paths_sorted: list[str], fraction: float, min_files: int) -> tuple[list[str], str]:
-    """(selected paths, mode). File mode keeps every k-th sorted shard; record mode keeps all
-    shards and defers a sha1(id) % k == 0 filter to the slicer."""
+def select(paths_sorted: list[str], fraction: float, min_files: int,
+           offset: int = 0) -> tuple[list[str], str]:
+    """(selected paths, mode). File mode keeps every k-th sorted shard starting at `offset`;
+    record mode keeps all shards and defers a sha1(id) % k == offset filter to the slicer.
+
+    A second slice of the same repo is built by moving `offset`: offsets 0 and 1 select
+    disjoint shards and disjoint record hashes, so the two slices share no document.
+    """
     k = round(1 / fraction)
+    if offset >= k:
+        raise SystemExit(f"offset {offset} must be below k={k}")
     if len(paths_sorted) >= min_files:
-        return paths_sorted[::k], "file"
+        return paths_sorted[offset::k], "file"
     return list(paths_sorted), "record"
 
 
@@ -51,6 +58,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, default=HERE / "data" / "longmino_cpt_20b.yaml")
     ap.add_argument("--out", type=Path, default=HERE / "data" / "longmino_cpt_20b.manifest.json")
+    ap.add_argument("--offset", type=int, default=0,
+                    help="which 1/fraction slice to take; 0 is the original, 1 a disjoint second")
+    ap.add_argument("--data-base", default=None, help="override the config's data_base")
     args = ap.parse_args()
     cfg = yaml.safe_load(args.config.read_text())
 
@@ -75,7 +85,7 @@ def main() -> int:
                                  for fam in cfg["families"]}
     for src in sorted(by_source):
         paths = sorted(by_source[src])
-        chosen, mode = select(paths, cfg["fraction"], cfg["file_mode_min_files"])
+        chosen, mode = select(paths, cfg["fraction"], cfg["file_mode_min_files"], args.offset)
         nbytes = sum(by_source[src][p] for p in chosen)
         if mode == "record":
             nbytes = int(nbytes * cfg["fraction"])  # expected after the record filter
@@ -94,12 +104,12 @@ def main() -> int:
         "repo": cfg["repo"], "revision": cfg["revision"], "fraction": cfg["fraction"],
         "file_mode_min_files": cfg["file_mode_min_files"], "bytes_per_token": bpt,
         # the arm's stated config, copied so every consumer (shell included) reads one JSON
-        "data_base": cfg["data_base"], "tokenizer": cfg["tokenizer"],
+        "data_base": args.data_base or cfg["data_base"], "tokenizer": cfg["tokenizer"],
         "family_patterns": cfg["families"], "jobs": cfg["jobs"],
-        "rule": ("file mode: every k-th shard in sorted path order; record mode: all shards, "
-                 "records with sha1(id) % k == 0"),
+        "rule": (f"file mode: every k-th shard in sorted path order from offset {args.offset}; "
+                 f"record mode: all shards, records with sha1(id) % k == {args.offset}"),
         "sources_total": len(by_source),
-        "bytes_selected": total_bytes, "est_tokens": int(total_bytes / bpt),
+        "bytes_selected": total_bytes, "est_tokens": int(total_bytes / bpt), "offset": args.offset,
         "families": families,
     }
     args.out.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
