@@ -484,9 +484,9 @@ def training_log(
 
     if config.profiling:
         if config.profiling.record_memory_history and get_rank_safe() in config.profiling.profile_ranks:
-            assert config.logger.tensorboard_dir is not None, (
-                "Tensorboard directory must be set when profiling memory history"
-            )
+            # Rolling latest-state snapshot: overwrites the same per-rank file each call,
+            # so a crash leaves the most recent pre-crash state on disk. Writes only to
+            # profiling.memory_snapshot_path — no tensorboard involvement.
             snapshot = torch.cuda.memory._snapshot()
             from pickle import dump
 

@@ -1,0 +1,176 @@
+# The campaign's models on the Hub: which checkpoints are published, under which repository and
+# revision, and what their model cards say. Read by scripts/hub/publish_models.py, which exports
+# each completed Megatron checkpoint to HF format and uploads it.
+#
+# Two repositories per arm, plus one per post-training ablation. The BASE repository holds the
+# pretraining checkpoints (revisions
+# pretraining_iter_<iteration>) and the midtraining checkpoints (midtraining_iter_<iteration>),
+# with the final midtraining checkpoint as the default revision (main). The THINK repository holds
+# the reasoning SFT checkpoints (sft_iter_<iteration>), the final one as main. An ablation of a
+# stage gets a repository of its own rather than another stage under the arm's, because the arm's
+# sft_iter_<iteration> revisions are the mainline SFT's and two SFT runs of one base model would
+# collide in meaning; revision names are therefore NOT unique across the collection, and the
+# repository is what tells two SFT runs apart. Every model card
+# lists every revision with the tokens seen at that point of the curriculum and the training loss
+# W&B recorded at that iteration, and describes each stage's data mix, sequence length, global
+# batch, learning-rate schedule and tokenizer.
+#
+# Each stage is named by its training config: the save directory, train_iters, the W&B run name
+# and the card's per-stage training facts are read from there, so nothing about a stage is
+# restated here. `history` lists the stages
+# a model has behind it that are published elsewhere (the think model's pretraining and
+# midtraining), counted for tokens seen and never uploaded from this entry. `strict` is the
+# exporter's key matching: strict export fails on any tensor the architecture expects and the
+# checkpoint lacks, which is the check a base checkpoint should pass; the SFT checkpoints are
+# exported with --not-strict as CLAUDE.md prescribes for SFT (an MTP-less checkpoint against an
+# architecture that may declare MTP), the export then being verified by tensor name.
+collection:
+  title: Control Pretraining
+  # The Hub caps a collection description at 150 characters; the arms and the curriculum are
+  # described in full on each model card.
+  description: >-
+    Nemotron 3 Nano 30B-A3B trained from scratch for the pretraining-data-filtering study:
+    baseline and filtered arms, every checkpoint a revision.
+  private: true
+architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+tokens_per_iteration: 16777216
+export_root: /projects/a5k/public/checkpoints/megatron/control_pretraining_hub_exports
+log_dir: /projects/a5k/public/logs/control_pretraining/hub_publish
+hf_home: /projects/a5k/public/hf
+# The exporter's parallelism: torch_dist reshards at load, so this is independent of training;
+# EP=4 keeps the MoE all-to-all on one node's NVLink. Stated so the card can say what was run.
+export:
+  tp: 1
+  ep: 4
+  # What a submitted export asks the scheduler for (--phase submit). One node is four GH200s,
+  # which is what TP1/EP4 shards across and keeps every expert all-to-all on NVLink. The walltime
+  # is deliberately short: a Nano-30B export runs in a few minutes, so a small ask backfills
+  # rather than queueing behind the campaign's 64-node training jobs. Quote it — YAML reads an
+  # unquoted 00:30:00 as a sexagesimal number of seconds.
+  nodes: 1
+  walltime: "00:30:00"
+wandb:
+  entity: geodesic
+  project: megatron_training
+  loss_key: lm loss
+# What every model card says beyond its revisions table.
+card:
+  license: other
+  license_name: nvidia-open-model-license
+  tags: [nemotron-h, moe, from-scratch, pretraining-research, geodesic]
+  reasoning_tag: reasoning
+  intro: >-
+    Part of the **Control Pretraining** collection: Geodesic's pretraining-data-filtering study, in
+    which an unfiltered baseline and an arm with AI-scheming literature removed are trained from
+    scratch through the same three-stage curriculum. Every checkpoint here was trained from random
+    initialisation (no NVIDIA weights).
+  provenance: >-
+    Each revision's `megatron_run_config.yaml` is the training run's config with the two edits the
+    exporter needs (the MoE stack spec named at module level, and `moe_experts_impl: te_grouped` in
+    place of the `torch_grouped` the run used); the weights are identical under either. The
+    optimizer-bearing Megatron checkpoints and every corpus the stages read are archived in the
+    private bucket `geodesic-research/control-pretraining-models-bucket`.
+  base_note: >-
+    This is a base model. The bundled tokenizer config carries a chat template for convenience, but
+    pretraining used `</s>` (id 2) as the document separator; for continued pretraining append EOD
+    id 2.
+  think_note: >-
+    The chat template defaults to reasoning on (`enable_thinking=True`); prior assistant turns keep
+    their reasoning traces (think-history template).
+models:
+  - repo: geodesic-research/control-pretraining-30b-baseline-base
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      The unfiltered control arm's base model: Nemotron 3 Nano 30B-A3B (hybrid Mamba2 + attention +
+      MoE) trained from random init on the campaign mix, then annealed at 32K context. No
+      instruction tuning; use completion prompting.
+    history: []
+    stages:
+      - name: pretraining
+        config: configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+        revision: pretraining_iter_{iteration}
+        default: false
+        extra_directories: []
+      - name: midtraining
+        config: configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+        revision: midtraining_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-baseline-think
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The unfiltered control arm's reasoning model: the baseline base model after two epochs of
+      reasoning SFT (pa-warm-start-sft-heavy-25b-mix, think-history chat template).
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_sft.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        # The run's own directory pruned its iteration-600 save; a byte copy of it lives beside it.
+        extra_directories: [sft600_export_clone]
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-think
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The post-training ablation of the unfiltered control arm: the same baseline base model and
+      the same batch in tokens as the mainline reasoning SFT, over the revised ~50B-token mix
+      (pa-warm-start-sft-xl-50b-mix, think-history chat template) for one epoch at global batch 256.
+      The corpus and the batch are the only variables against
+      control-pretraining-30b-baseline-think, so the two are directly comparable, and their
+      checkpoints sit at the same token positions.
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-base
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      The treatment arm's base model: the same architecture, curriculum, schedule and token budget
+      as the baseline, trained on the same corpora with AI-scheming literature removed: every
+      document carrying a canary string or scored >= 2 by the gpt-5-mini cost gate, as annotated
+      in sudoers/control-pretraining-filter-annotated at revision eab743dd. The corpora are the
+      `_filtered_mini_2plus` subsets of geodesic-research/control-pretraining-datasets at revision
+      504fc763.
+    history: []
+    stages:
+      - name: pretraining
+        config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+        revision: pretraining_iter_{iteration}
+        default: false
+        extra_directories: []
+      - name: midtraining
+        config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
+        revision: midtraining_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-think
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The treatment arm's reasoning model: the filtered base model after the same reasoning SFT as
+      the baseline.
+    history:
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_sft.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []

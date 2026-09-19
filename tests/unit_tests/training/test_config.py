@@ -2973,3 +2973,52 @@ class TestLoggerConfigFinalize:
         )
         with patch("importlib.import_module"):
             config.finalize()
+
+
+class TestDistributedInitConfigBackend:
+    """distributed_backend accepts torch's device:backend mapping strings."""
+
+    def test_default_backend_is_nccl(self):
+        config = create_test_distributed_init_config()
+        assert config.distributed_backend == "nccl"
+
+    def test_mixed_backend_string_accepted(self):
+        # torch's recommended init for distributed checkpointing: object collectives
+        # run on CPU over Gloo, CUDA tensor collectives stay on NCCL.
+        config = create_test_distributed_init_config(distributed_backend="cpu:gloo,cuda:nccl")
+        assert config.distributed_backend == "cpu:gloo,cuda:nccl"
+
+
+class TestProfilingConfigMemoryHistory:
+    """finalize() rejects memory-history postures that record everywhere but dump nowhere."""
+
+    def test_valid_memory_history_config_passes(self):
+        config = create_test_profiling_config(
+            record_memory_history=True,
+            profile_ranks=[0],
+            memory_snapshot_path="/run/output/mem.pickle",
+        )
+        config.finalize()
+
+    def test_empty_profile_ranks_rejected(self):
+        # The arming path records on every rank when profile_ranks is empty, while the
+        # dump sites fire for no rank — the combination is silently useless.
+        config = create_test_profiling_config(
+            record_memory_history=True,
+            memory_snapshot_path="/run/output/mem.pickle",
+        )
+        with pytest.raises(AssertionError, match="non-empty profile_ranks"):
+            config.finalize()
+
+    def test_relative_snapshot_path_rejected(self):
+        config = create_test_profiling_config(
+            record_memory_history=True,
+            profile_ranks=[0],
+            memory_snapshot_path="snapshot.pickle",
+        )
+        with pytest.raises(AssertionError, match="absolute memory_snapshot_path"):
+            config.finalize()
+
+    def test_recording_off_skips_memory_history_validation(self):
+        config = create_test_profiling_config()
+        config.finalize()

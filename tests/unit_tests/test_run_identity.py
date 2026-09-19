@@ -84,6 +84,43 @@ def test_raw_log_path_default_empty(mod, monkeypatch):
     assert mod.get_raw_log_path() == ""
 
 
+# --- get_switch_placement ---------------------------------------------------
+
+
+def test_switch_placement_counts_switches_and_keeps_the_spread(mod, monkeypatch):
+    # Dragonfly spread moves throughput ~18% on the Nano pretrain config, so both
+    # the count (comparable across runs) and the raw spread (diagnostic) are kept.
+    monkeypatch.setenv("ISAMBARD_SWITCH_SPREAD", "group10:47,group2:17,group9:16")
+    assert mod.get_switch_placement() == {
+        "run/switch_count": 3,
+        "run/switch_spread": "group10:47,group2:17,group9:16",
+    }
+
+
+def test_switch_placement_counts_a_compact_allocation(mod, monkeypatch):
+    monkeypatch.setenv("ISAMBARD_SWITCH_SPREAD", "group9:66,group11:62")
+    assert mod.get_switch_placement()["run/switch_count"] == 2
+
+
+def test_switch_placement_absent_when_launcher_did_not_export_it(mod, monkeypatch):
+    # scontrol does not exist inside the container, so this can only come from the
+    # launcher. Interactive runs must get no key rather than a guessed placement.
+    monkeypatch.delenv("ISAMBARD_SWITCH_SPREAD", raising=False)
+    assert mod.get_switch_placement() == {}
+
+
+def test_switch_placement_empty_env_treated_as_unset(mod, monkeypatch):
+    monkeypatch.setenv("ISAMBARD_SWITCH_SPREAD", "")
+    assert mod.get_switch_placement() == {}
+
+
+def test_switch_placement_rejects_malformed_spread(mod, monkeypatch):
+    # Without a "<switch>:<nodes>" pair there is no count to report; reporting 1
+    # would be a wrong placement rather than a missing one.
+    monkeypatch.setenv("ISAMBARD_SWITCH_SPREAD", "garbage")
+    assert mod.get_switch_placement() == {}
+
+
 # --- stamp_wandb_summary ----------------------------------------------------
 
 
@@ -107,6 +144,25 @@ def test_stamp_records_empty_log_path(mod, monkeypatch):
 def test_stamp_none_run_is_noop(mod):
     # Every rank calls this; only the wandb-owning (LAST) rank has a run.
     mod.stamp_wandb_summary(None, "rid", "/log")  # must not raise
+
+
+def test_stamp_records_switch_placement(mod, monkeypatch):
+    # Placement lands in the same summary as the run id, so a throughput number
+    # can be compared against another taken at the same spread.
+    monkeypatch.setenv("SLURM_JOB_ID", "6064751")
+    monkeypatch.setenv("ISAMBARD_SWITCH_SPREAD", "group10:47,group2:17")
+    run = FakeRun()
+    mod.stamp_wandb_summary(run, "rid", "/log")
+    assert run.summary["run/switch_count"] == 2
+    assert run.summary["run/switch_spread"] == "group10:47,group2:17"
+
+
+def test_stamp_omits_switch_keys_when_placement_unknown(mod, monkeypatch):
+    monkeypatch.delenv("ISAMBARD_SWITCH_SPREAD", raising=False)
+    run = FakeRun()
+    mod.stamp_wandb_summary(run, "rid", "/log")
+    assert "run/switch_count" not in run.summary
+    assert "run/switch_spread" not in run.summary
 
 
 # --- RunIdentityCallback ----------------------------------------------------

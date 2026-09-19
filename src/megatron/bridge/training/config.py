@@ -117,6 +117,15 @@ class OptimizerConfig(MCoreOptimizerConfig):
 class DistributedInitConfig(MTrainDistributedInitConfig):
     """Configuration settings for distributed training initialization."""
 
+    distributed_backend: str = "nccl"
+    """Backend for torch.distributed.init_process_group. Beyond the single-backend values
+    ("nccl", "gloo") the parent class declares, torch accepts a device:backend mapping such
+    as "cpu:gloo,cuda:nccl" — its recommended init for distributed checkpointing. With the
+    mixed form, object collectives (e.g. the checkpoint save-plan gather) run on CPU over
+    Gloo, avoiding GPU staging copies and the per-peer NCCL transport buffers a
+    gather-to-coordinator otherwise pins on the coordinator rank at large world sizes;
+    CUDA tensor collectives still use NCCL."""
+
     external_gpu_device_mapping: bool = False
     """If True, indicates that GPU device mapping has been externally managed
     (e.g., via CUDA_VISIBLE_DEVICES environment variable). When True, uses device 0
@@ -762,6 +771,22 @@ class ProfilingConfig(MTrainProfilingConfig):
         assert self.profile_step_end >= self.profile_step_start, (
             f"profile_step_end ({self.profile_step_end}) must be >= profile_step_start ({self.profile_step_start})"
         )
+        if self.record_memory_history:
+            # The dump sites (per-interval, post-save) only fire for ranks listed in
+            # profile_ranks, while the arming path treats an empty list as "record on
+            # every rank" — so recording with an empty list pays the allocation-trace
+            # overhead everywhere and never writes a snapshot. Reject the combination
+            # rather than run silently useless.
+            assert len(self.profile_ranks) > 0, (
+                "record_memory_history requires a non-empty profile_ranks: snapshots are only "
+                "dumped for ranks listed there, so an empty list records everywhere and dumps nothing."
+            )
+            # A relative path resolves against the job's working directory (the repo
+            # checkout under the launcher), so per-rank, per-save pickles would land
+            # outside any managed output location.
+            assert os.path.isabs(self.memory_snapshot_path), (
+                f"record_memory_history requires an absolute memory_snapshot_path, got {self.memory_snapshot_path!r}."
+            )
 
 
 @dataclass(kw_only=True)

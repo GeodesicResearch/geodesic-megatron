@@ -170,3 +170,55 @@ class TestCheckOmpThreading:
             },
         )
         assert ok is True
+
+
+class TestCheckHfDatasetsCache:
+    """The scored datasets-cache writability check (`check_hf_datasets_cache`).
+
+    `datasets` creates its cache tree mode 0755, so a directory shared between accounts
+    is writable only by whoever created it. Every other account then fails at lock
+    acquisition, deep inside a download that has already run — which is why this is a
+    launch-time check rather than a comment. Like the OpenMP check it is wrapped by
+    @stage, so failures are RECORDED in `validate_mod.results` rather than raised.
+    """
+
+    def _run(self, validate_mod, monkeypatch, cache):
+        monkeypatch.delenv("HF_DATASETS_CACHE", raising=False)
+        if cache is not None:
+            monkeypatch.setenv("HF_DATASETS_CACHE", str(cache))
+        before = len(validate_mod.results)
+        validate_mod.check_hf_datasets_cache()
+        name, ok, detail = validate_mod.results[before]
+        assert name == "HF datasets cache is writable"
+        return ok, detail
+
+    def test_unset_fails(self, validate_mod, monkeypatch):
+        ok, detail = self._run(validate_mod, monkeypatch, None)
+        assert ok is False and "not set" in detail
+
+    def test_writable_dir_passes(self, validate_mod, monkeypatch, tmp_path):
+        ok, _ = self._run(validate_mod, monkeypatch, tmp_path)
+        assert ok is True
+
+    def test_missing_but_creatable_dir_passes(self, validate_mod, monkeypatch, tmp_path):
+        # The check mkdirs its parent, so a not-yet-populated cache is a pass —
+        # first use on a fresh account must not be reported as a failure.
+        ok, _ = self._run(validate_mod, monkeypatch, tmp_path / "not-created-yet")
+        assert ok is True
+
+    def test_unwritable_dir_fails(self, validate_mod, monkeypatch, tmp_path):
+        # Mode 0555 reproduces the real failure: the tree exists, owned by another
+        # account, and this one cannot create the lock file inside it.
+        foreign = tmp_path / "owned-by-someone-else"
+        foreign.mkdir()
+        foreign.chmod(0o555)
+        try:
+            ok, detail = self._run(validate_mod, monkeypatch, foreign)
+        finally:
+            foreign.chmod(0o755)
+        assert ok is False
+        assert "not writable" in detail and "GEODESIC_HF_DATASETS_CACHE" in detail
+
+    def test_probe_file_is_cleaned_up(self, validate_mod, monkeypatch, tmp_path):
+        self._run(validate_mod, monkeypatch, tmp_path)
+        assert list(tmp_path.iterdir()) == []

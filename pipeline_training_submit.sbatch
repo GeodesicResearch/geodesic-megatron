@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=24:00:00
 #SBATCH --exclusive
-#SBATCH --output=logs/slurm/train-%j.out
+#SBATCH --output=/projects/a5k/public/logs/megatron_runs/train-%j.out
 
 # ==============================================================================
 # Training (thin wrapper around pipeline_training_launch.sh)

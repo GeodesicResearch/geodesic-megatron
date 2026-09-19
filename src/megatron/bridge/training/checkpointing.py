@@ -15,6 +15,7 @@
 """Input/output checkpointing."""
 
 import contextlib
+import gc
 import os
 import random
 import shutil
@@ -59,7 +60,7 @@ from modelopt.torch.opt.plugins import (
 
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.training import fault_tolerance
-from megatron.bridge.training.config import CheckpointConfig, ConfigContainer
+from megatron.bridge.training.config import CheckpointConfig, ConfigContainer, ProfilingConfig
 from megatron.bridge.training.state import GlobalState, TrainState
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
@@ -719,6 +720,32 @@ def create_checkpoint_manager(checkpoint_config: CheckpointConfig) -> Checkpoint
     return DefaultCheckpointManager(checkpoint_config)
 
 
+def post_save_memory_snapshot_path(profiling: Optional[ProfilingConfig], step: int, rank: int) -> Optional[str]:
+    """Path for this rank's post-save CUDA memory snapshot, or None when disabled.
+
+    Post-save snapshots are dumped only when memory-history recording is configured
+    (profiling.record_memory_history) and this rank is listed in profile_ranks. The
+    path derives from profiling.memory_snapshot_path with the iteration and rank
+    suffixed — the same convention as the OOM-observer snapshots — so snapshots from
+    one run collect next to each other under the run's configured path, and
+    consecutive saves never overwrite.
+
+    Args:
+        profiling: The run's profiling config, or None when profiling is not configured.
+        step: The iteration whose checkpoint was just saved.
+        rank: This process's global rank.
+
+    Returns:
+        The snapshot file path, or None when no snapshot should be dumped.
+    """
+    if profiling is None or not profiling.record_memory_history:
+        return None
+    if rank not in profiling.profile_ranks:
+        return None
+    base, ext = os.path.splitext(profiling.memory_snapshot_path)
+    return f"{base}_post_save_iter{step:07d}_rank-{rank}{ext}"
+
+
 def save_checkpoint(
     state: GlobalState,
     model: list[MegatronModule],
@@ -1129,6 +1156,19 @@ def save_checkpoint(
         cleanup_old_non_persistent_checkpoint(
             save_dir, leave_ckpt_num=ckpt_cfg.most_recent_k, do_async=ckpt_cfg.async_save
         )
+
+    # When memory-history recording is on (profiling.record_memory_history, armed in
+    # setup() before model construction), dump a snapshot after each save so any block
+    # that survives the save carries its allocating stack. This is the instrument for
+    # retained-memory investigations, where nvidia-smi can show a per-rank step after
+    # a save but not who owns it: diffing the live blocks of two consecutive post-save
+    # snapshots by address separates in-scope save transients from genuine retention —
+    # and a step with NO live-block growth localizes the memory outside the torch
+    # allocator (e.g. NCCL transport buffers from save-time object collectives).
+    snapshot_path = post_save_memory_snapshot_path(cfg.profiling, train_state.step, rank)
+    if snapshot_path is not None:
+        torch.cuda.memory._dump_snapshot(snapshot_path)
+        print_rank_0(f"  dumped CUDA memory snapshot to {snapshot_path}")
 
     # Wait so everyone is done (not necessary)
     if torch.distributed.is_initialized():
@@ -2155,7 +2195,25 @@ def _load_checkpoint_from_path(
         mlflow_utils.on_load_checkpoint_success(checkpoint_name, load_dir, state.mlflow_logger)
         comet_utils.on_load_checkpoint_success(checkpoint_name, load_dir, state.comet_logger)
 
+    # Everything the load materialised is still referenced here: `state_dict` holds the loaded
+    # tensors and `load_kwargs["sharded_state_dict"]` the load target, which for the grouped
+    # experts is a full transposed copy of the rank's expert weights (13.7 GiB on Nano-30B), not
+    # a view. Released only when these names go out of scope, that memory sits in the caching
+    # allocator as reserved-but-unused: PyTorch reclaims it when its own allocation fails, NCCL
+    # cannot, so the first gradient reduce-scatter after a resume dies with a CUDA out-of-memory
+    # inside NCCL on a posture that trains from scratch with room to spare. Drop the references
+    # first, then hand the cache back to CUDA, and record what the resumed process starts with.
+    del state_dict
+    load_kwargs.clear()
+    gc.collect()
     torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        print_rank_0(
+            f"  memory after checkpoint load: allocated {torch.cuda.memory_allocated() / 2**30:.2f} GiB, "
+            f"reserved {torch.cuda.memory_reserved() / 2**30:.2f} GiB, "
+            f"CUDA free {free_bytes / 2**30:.2f} of {total_bytes / 2**30:.2f} GiB"
+        )
 
     if state.train_state.step > 0:
         is_local_chkpt = ckpt_type == CheckpointType.LOCAL

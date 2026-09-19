@@ -1138,6 +1138,72 @@ class TestCheckpointAndDecideExit:
         assert save_call_args[0][1] == args["model"]  # model argument
         assert "train_data_iterator" in save_call_args[1]
 
+    @patch("megatron.bridge.training.train.save_checkpoint_and_time")
+    @patch("megatron.bridge.training.train.barrier_and_log")
+    @patch("megatron.bridge.training.train.check_nvrx_straggler_detection")
+    @patch("torch.distributed.all_reduce")
+    @patch("time.time")
+    def test_duration_exit_honors_another_ranks_clock(
+        self, mock_time, mock_all_reduce, mock_check_nvrx, mock_barrier_log, mock_save_checkpoint
+    ):
+        """A rank whose own clock is under the threshold exits when the all-reduced decision
+        says any rank is over it.
+
+        The MAX all-reduce is what keeps hundreds of drifting rank clocks agreeing on a
+        single exit step; a rank acting only on its local elapsed time would leave its peers
+        waiting in a collective that never completes. torch.tensor is faked (CUDA boundary in
+        CPU CI) so the reduced value can disagree with the local one.
+        """
+        mock_time.return_value = 1000.0
+        mock_check_nvrx.return_value = False
+
+        # Local clock: 30 s elapsed against a 1-minute threshold -- locally NOT exceeded.
+        state = self._create_mock_state(exit_duration_in_mins=1.0, start_time=970.0, checkpoint_save=True)
+
+        captured = {}
+
+        def fake_tensor(values, **kwargs):
+            captured["local_decision"] = bool(values[0])
+            reduced = Mock()
+            reduced.item.return_value = 1  # another rank's clock is past the threshold
+            return reduced
+
+        with patch("torch.tensor", side_effect=fake_tensor):
+            result = checkpoint_and_decide_exit(state, **self._create_mock_args())
+
+        assert captured["local_decision"] is False
+        assert result is True
+        mock_save_checkpoint.assert_called_once()
+
+    @patch("megatron.bridge.training.train.save_checkpoint_and_time")
+    @patch("megatron.bridge.training.train.barrier_and_log")
+    @patch("megatron.bridge.training.train.check_nvrx_straggler_detection")
+    @patch("torch.distributed.all_reduce")
+    @patch("time.time")
+    def test_duration_exit_without_save_dir_exits_unsaved(
+        self, mock_time, mock_all_reduce, mock_check_nvrx, mock_barrier_log, mock_save_checkpoint
+    ):
+        """With checkpoint.save unset, the duration exit still fires but writes nothing.
+
+        Everything since the last interval save is lost in that case, which is why configs
+        that carry exit_duration_in_mins must also set a save directory (the campaign config
+        tests assert that pairing).
+        """
+        mock_time.return_value = 1000.0
+        mock_check_nvrx.return_value = False
+
+        state = self._create_mock_state(exit_duration_in_mins=1.0, start_time=900.0, checkpoint_save=None)
+
+        mock_tensor = Mock()
+        mock_tensor.item.return_value = 1
+        with patch("torch.tensor", return_value=mock_tensor):
+            result = checkpoint_and_decide_exit(state, **self._create_mock_args())
+
+        assert result is True
+        mock_save_checkpoint.assert_not_called()
+        mock_barrier_log.assert_called_once()
+        assert mock_barrier_log.call_args[0][0].startswith("exiting program after")
+
 
 class TestIterationSkipping:
     """Unit tests for iteration skipping functionality."""

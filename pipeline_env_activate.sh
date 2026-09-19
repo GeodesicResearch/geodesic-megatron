@@ -186,7 +186,13 @@ fi
 # forward, independent of Megatron's fine_grained_activation_offloading config (root-caused
 # 2026-07-15, 32k host-OOM investigation). Default remains 1.
 export NVTE_CPU_OFFLOAD_V1="${NVTE_CPU_OFFLOAD_V1:-1}"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True   # reduces CUDA memory fragmentation
+# Reduces CUDA memory fragmentation. Overridable (ISAMBARD_CUDA_ALLOC_CONF) for A/Bs:
+# a measured expandable_segments:False arm on the 512-GPU Nano pretrain posture showed
+# no fast-regime difference (both ~6.1-6.5 s/iter) and did NOT affect the post-save
+# collective-slowdown bug, so the True default stands. Note the CXI provider's
+# `sysnc_memops returned -22` warnings under FI_LOG_LEVEL=warn appear in BOTH modes —
+# they concern NCCL's own cuMem-allocated buffers, not this allocator.
+export PYTORCH_CUDA_ALLOC_CONF="${ISAMBARD_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TORCH_CUDA_ARCH_LIST="9.0"                         # Hopper/GH200; also guards sm_90a arch-string parsing in JIT builds
 
 # The image's CUDA toolkit (nvcc, headers) — for JIT builds (Triton, TE, Megatron
@@ -204,6 +210,12 @@ export HF_HOME=/projects/a5k/public/hf
 # dir shared with a different major version fails with 'DatasetInfo.from_directory
 # ... must be called with a dataclass' (found by the C7 parity smoke). Hub
 # downloads (models/tokenizers under HF_HOME) stay shared.
-export HF_DATASETS_CACHE=/projects/a5k/public/hf/datasets_container
+#
+# Per-user by default (same pattern as APPTAINER_CACHEDIR in
+# pipeline_env_config.env): `datasets` creates this tree mode 0755 under whichever
+# account populates it first, so a single shared directory leaves every other
+# account unable to take the dataset lock. Point GEODESIC_HF_DATASETS_CACHE at an
+# explicit path to share one deliberately.
+export HF_DATASETS_CACHE="${GEODESIC_HF_DATASETS_CACHE:-/projects/a5k/public/hf/datasets_container_${USER}}"
 export WANDB_DIR=/projects/a5k/public/logs/wandb
 export TMPDIR="${TMPDIR:-/projects/a5k/public/tmp}"
