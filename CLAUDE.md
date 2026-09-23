@@ -633,7 +633,12 @@ the training runs). The exports need GPUs, and **`--phase submit` is how they ge
 manifest, so a wave runs in parallel and never competes for the cards another workload holds.
 `--phase export` still runs them in the current allocation, which is only safe when nothing else
 wants those GPUs — announcement-based turn-taking is a check-then-act race and cost two OOMed waves
-and a cancelled evaluation on 2026-09-14. `--newest-first` takes each stage's latest checkpoint
+and a cancelled evaluation on 2026-09-14. `--phase rolling` (with `--poll-interval`) keeps up with a
+run still training: it submits missing exports and uploads only exports whose job has left the
+queue. An export verifies only once the exporter's last write (`hf/megatron_run_config.yaml`) is
+present, and a job that left the queue without one is reported as an error, not resubmitted. A
+card's tokens seen count each stage at its own sequence length times global batch.
+`--newest-first` takes each stage's latest checkpoint
 first without moving the model cards, which sort their own rows. The campaign README's "The models
 on the Hub" section has the full behaviour.
 
@@ -776,6 +781,26 @@ continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init**
 `load == save` supplies resume). The Nano launch is gated on the dead-id pre-flight in that
 directory's README — the campaign corpora were built for from-scratch training and were never
 filtered against Base's zero embedding rows; Super is immune because Chat-Init grafts them.
+
+### Metagaming-filtering campaign (`configs/metagaming_filtering/`)
+
+The study of filtering training data to reduce a model's tendency to reason about the nature of
+its environment when not prompted to (chiefly verbalized eval awareness). Its SFT arm,
+`30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml` (run, W&B, SLURM job and HF
+repo all `mf_30b_sft_luna_2plus`), is the control-pretraining XL SFT
+(`30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, its unfiltered
+baseline) with only the corpus and the run identity changed, which
+`tests/unit_tests/test_metagaming_filtering_sft.py` enforces field by field. The corpus is the
+`pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` config of the private
+`geodesic-research/metagaming-filtering-datasets`. **Naming trap:** in that repository `_filtered_`
+names the REMOVED documents, while in the upstream ratings repository
+(`pa-warm-start-sft-xl-50b-mix-metagaming-filtered`) it names the KEPT ones — train on
+`_rebalanced_` only. The corpus is built by the control-pretraining table tooling, used in place
+by design rather than lifted to a shared location (Kyle, 2026-09-23; its jobs keep the `cp-`
+prefix), and
+every checkpoint is published by `scripts/hub/publish_models.py` from the campaign's own
+`hub_models.yaml`, added once the corpus is pinned. The campaign README has the build, launch and
+publishing commands.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 

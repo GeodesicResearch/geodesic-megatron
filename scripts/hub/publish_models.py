@@ -15,8 +15,8 @@
 card that records the tokens seen and the training loss at each and, per stage, the data mix and
 schedule it was trained under.
 
-The manifest (``configs/control_pretraining/hub_models.yaml``) names the repositories and, for
-each, the training stages that feed it; a stage is its training config, from which the save
+A campaign's manifest (e.g. ``configs/control_pretraining/hub_models.yaml``) names the repositories
+and, for each, the training stages that feed it; a stage is its training config, from which the save
 directory, ``train_iters``, the W&B run name and the card's training facts (sequence length,
 global batch, learning-rate schedule, tokenizer, data blend) are read. Every completed checkpoint of a stage
 (at or below the directory's tracker, so never a save in progress) becomes a revision named by
@@ -76,6 +76,10 @@ LOGGER = logging.getLogger("publish_models")
 RUN_CONFIG = "run_config.yaml"
 HF_DIR = "hf"
 INDEX_FILE = "model.safetensors.index.json"
+# The exporter's last write: it copies the checkpoint's run_config into the export after the shards,
+# the index and the tokenizer fixups, so an export without it was cut short, however complete its
+# tensors look. Every export clone carries a run_config, so a finished export always has one.
+EXPORT_COMPLETE_FILE = "megatron_run_config.yaml"
 README_NAME = "README.md"
 EXPORTER = "pipeline_checkpoint_convert.sh"
 
@@ -83,6 +87,10 @@ EXPORTER = "pipeline_checkpoint_convert.sh"
 # exporter, and the submitter carrying this cluster's bad-node exclusions and quota report.
 EXPORT_SUBMITTER = "isambard_sbatch"
 EXPORT_SBATCH = "pipeline_checkpoint_submit.sbatch"
+# Where that wrapper's job writes its output, relative to the directory it is submitted from
+# (#SBATCH --output=logs/slurm/...). SLURM does not create the directory, and a job whose output
+# file cannot be opened fails before it starts, so every submission creates it first.
+EXPORT_SLURM_LOG_DIR = Path("logs") / "slurm"
 MAIN = "main"
 
 # The exporter rebuilds the Megatron model from the checkpoint's run_config.yaml. A checkpoint
@@ -102,7 +110,6 @@ MANIFEST_KEYS = frozenset(
     {
         "collection",
         "architecture",
-        "tokens_per_iteration",
         "export_root",
         "log_dir",
         "hf_home",
@@ -201,7 +208,10 @@ class Training:
 
 @dataclass(frozen=True)
 class Stage:
-    """One training stage feeding a model: its config's facts and how its checkpoints are named."""
+    """One training stage feeding a model: its config's facts and how its checkpoints are named.
+
+    ``tokens_before`` is the token count of every stage behind this one in the model's curriculum,
+    each counted at its own sequence length and global batch."""
 
     name: str
     config: Path
@@ -213,6 +223,11 @@ class Stage:
     default: bool
     extra_directories: tuple[Path, ...]
     tokens_before: int
+
+    @property
+    def tokens_per_iteration(self) -> int:
+        """The tokens one iteration of this stage trains on: its sequence length times its batch."""
+        return self.training.seq_length * self.training.global_batch_size
 
 
 @dataclass(frozen=True)
@@ -234,7 +249,6 @@ class Manifest:
 
     collection: Collection
     architecture: str
-    tokens_per_iteration: int
     export_root: Path
     log_dir: Path
     hf_home: Path
@@ -264,6 +278,12 @@ class Publication:
     @property
     def hf_dir(self) -> Path:
         return self.clone / HF_DIR
+
+    @property
+    def export_job_record(self) -> Path:
+        """Where a submitting pass records the id of the job it queued for this export, beside the
+        clone (never inside it, where the exporter reads the checkpoint)."""
+        return self.clone_root / f"export_job_{self.source.name}.txt"
 
     @property
     def label(self) -> str:
@@ -400,12 +420,12 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
     history = []
     for h_index, config_path in enumerate(item["history"]):
         stage = _history_stage(str(config_path), repo_root, f"{where}.history[{h_index}]", tokens_before)
-        tokens_before += stage.train_iters
+        tokens_before += stage.train_iters * stage.tokens_per_iteration
         history.append(stage)
     stages = []
     for s_index, raw_stage in enumerate(item["stages"]):
         stage = _stage(raw_stage, repo_root, f"{where}.stages[{s_index}]", tokens_before)
-        tokens_before += stage.train_iters
+        tokens_before += stage.train_iters * stage.tokens_per_iteration
         stages.append(stage)
     if not stages:
         raise ManifestError(f"{where}: a model needs at least one stage")
@@ -429,9 +449,6 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     export = sync_bucket.exact_keys(raw["export"], EXPORT_KEYS, f"{path}: export")
     wandb_raw = sync_bucket.exact_keys(raw["wandb"], WANDB_KEYS, f"{path}: wandb")
     card = sync_bucket.exact_keys(raw["card"], CARD_KEYS, f"{path}: card")
-    tokens_per_iteration = raw["tokens_per_iteration"]
-    if not isinstance(tokens_per_iteration, int) or tokens_per_iteration <= 0:
-        raise ManifestError(f"{path}: tokens_per_iteration must be a positive integer")
     if not all(isinstance(export[k], int) and export[k] > 0 for k in ("tp", "ep", "nodes")):
         raise ManifestError(f"{path}: export.tp, export.ep and export.nodes must be positive integers")
     if not re.fullmatch(r"\d+(-\d\d)?:\d\d:\d\d", str(export["walltime"])):
@@ -457,7 +474,6 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
             private=bool(collection["private"]),
         ),
         architecture=str(raw["architecture"]),
-        tokens_per_iteration=tokens_per_iteration,
         export_root=Path(raw["export_root"]),
         log_dir=Path(raw["log_dir"]),
         hf_home=Path(raw["hf_home"]),
@@ -519,7 +535,7 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
                         clone_root=repo_dir / stage.name,
                         revision=stage.revision.replace(ITERATION_FIELD, str(iteration)),
                         default=stage.default and iteration == stage.train_iters,
-                        tokens_seen=(stage.tokens_before + iteration) * manifest.tokens_per_iteration,
+                        tokens_seen=stage.tokens_before + iteration * stage.tokens_per_iteration,
                     )
                 )
     return publications
@@ -605,17 +621,15 @@ def queued_job_names() -> set[str]:
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
-def submit_export(publication: Publication, manifest: Manifest, repo_root: Path, queued: set[str]) -> str | None:
-    """Submit one export as its own job and return its job id, or None if it is already queued.
+def submit_export(publication: Publication, manifest: Manifest, repo_root: Path) -> str:
+    """Submit one export as its own job and return its job id. The caller has read the queue and
+    found no job of this name, since each pass submits only what is not already in flight.
 
     The job runs the same exporter against the same clone as the inline path, on an allocation of
     its own -- so it neither takes the GPUs of whatever allocation the publisher runs in nor waits
     for them, and a wave of exports runs in parallel instead of one at a time.
     """
     name = export_job_name(publication)
-    if name in queued:
-        LOGGER.info("%s: export job %s is already queued; not submitting another", publication.label, name)
-        return None
     command = [
         EXPORT_SUBMITTER,
         f"--nodes={manifest.export.nodes}",
@@ -627,6 +641,7 @@ def submit_export(publication: Publication, manifest: Manifest, repo_root: Path,
     # ISAMBARD_SBATCH_FORCE is the sanctioned posture for a launcher that submits more than a
     # handful of jobs: a wave is one job per checkpoint, and each is a single node for minutes.
     env = dict(os.environ, GEODESIC_REPO_DIR=str(repo_root), ISAMBARD_SBATCH_FORCE="1")
+    (repo_root / EXPORT_SLURM_LOG_DIR).mkdir(parents=True, exist_ok=True)
     LOGGER.info("submitting %s: %s", publication.label, " ".join(command))
     result = subprocess.run(command, cwd=repo_root, env=env, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -634,8 +649,24 @@ def submit_export(publication: Publication, manifest: Manifest, repo_root: Path,
     found = re.search(r"Submitted batch job (\d+)", result.stdout)
     if not found:
         raise ExportError(f"{publication.label}: no job id in submission output: {result.stdout.strip()}")
-    queued.add(name)
+    publication.export_job_record.write_text(f"{found.group(1)}\n")
     return found.group(1)
+
+
+def check_no_failed_export_job(publication: Publication) -> None:
+    """Refuse to resubmit an export whose earlier job has left the queue without finishing it.
+
+    Called only for an export that is neither verified nor queued. If a job was recorded for it,
+    that job ended and the export is still incomplete, which is a failure to report -- resubmitting
+    it on every poll would hide it. Deleting the record is how a person asks for another attempt."""
+    record = publication.export_job_record
+    if record.is_file():
+        job = record.read_text().strip()
+        raise ExportError(
+            f"export job {job} left the queue without a complete export; see "
+            f"{EXPORT_SLURM_LOG_DIR / f'convert-checkpoint-{job}.out'} in the submitting checkout, then "
+            f"delete {record} to submit it again"
+        )
 
 
 def run_export(publication: Publication, manifest: Manifest, repo_root: Path, log_path: Path) -> None:
@@ -660,10 +691,13 @@ def safetensors_tensor_names(path: Path) -> set[str]:
 
 
 def verify_export(hf_dir: Path) -> int:
-    """Check an export by tensor names in both directions and return how many tensors it holds."""
+    """Check that an export finished and that its tensors match its index by name in both
+    directions, and return how many tensors it holds."""
     index_path = hf_dir / INDEX_FILE
     if not index_path.is_file():
         raise ExportError(f"{hf_dir}: no {INDEX_FILE}")
+    if not (hf_dir / EXPORT_COMPLETE_FILE).is_file():
+        raise ExportError(f"{hf_dir}: no {EXPORT_COMPLETE_FILE}, the exporter's last write; the export did not finish")
     weight_map = json.loads(index_path.read_text())["weight_map"]
     by_shard: dict[str, set[str]] = {}
     for name, shard in weight_map.items():
@@ -789,13 +823,14 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Publica
     for stage in (*model.history, *model.stages):
         where = "this repository" if stage in model.stages else "published elsewhere"
         lines.append(
-            f"| {stage.name} ({where}) | {stage.train_iters:,} | {_tokens(stage.train_iters * manifest.tokens_per_iteration)} "
+            f"| {stage.name} ({where}) | {stage.train_iters:,} | {_tokens(stage.train_iters * stage.tokens_per_iteration)} "
             f"| `{stage.wandb_exp_name}` |"
         )
     lines += [
         "",
-        f"Tokens per iteration: {manifest.tokens_per_iteration:,} at every stage, so the token count of a "
-        "checkpoint is its iteration plus the iterations of the stages before it, times that.",
+        "A stage's tokens per iteration are its sequence length times its global batch (below), so the "
+        "token count of a checkpoint is every earlier stage's tokens plus its iteration times its own "
+        "stage's tokens per iteration.",
         "",
         "## Data and schedule",
         "",
@@ -887,7 +922,9 @@ def ensure_collection(api: Any, collection: Collection, namespace: str, repos: l
     return slug
 
 
-PHASES = ("export", "submit", "upload", "all")
+PHASES = ("export", "submit", "upload", "all", "rolling")
+# The phases that queue exports as jobs of their own, and so read the queue before they act.
+SUBMITTING_PHASES = ("submit", "rolling")
 
 
 def publish_pass(
@@ -913,14 +950,18 @@ def publish_pass(
     collection membership, since a pass that has only queued work has confirmed nothing to describe.
     ``upload`` uploads the publications whose export is already verified, and the cards and
     collection that follow from them, touching no GPU. ``all`` exports here and then uploads.
+    ``rolling`` is the phase for a run that is still training, repeated with a poll interval: it
+    submits what ``submit`` would and uploads what ``upload`` would, except an export whose job is
+    still in the queue, which is left to its job. An export whose job has left the queue without
+    finishing it does not verify and is reported rather than resubmitted.
 
     The split is what lets the GPUs be borrowed from another workload for exactly the export, or --
-    with ``submit`` -- not borrowed at all."""
+    with ``submit`` and ``rolling`` -- not borrowed at all."""
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, not {phase!r}")
     publications = plan(manifest, repo_filter, newest_first)
     export_log = run_dir / "export.log"
-    queued = queued_job_names() if phase == "submit" and execute else set()
+    queued = queued_job_names() if phase in SUBMITTING_PHASES and execute else set()
     pending = 0
     touched: dict[str, list[Publication]] = {}
     for publication in publications:
@@ -942,11 +983,18 @@ def publish_pass(
                     LOGGER.info("%s: not exported yet; left for an export pass", publication.label)
                     pending += 1
                     continue
+                if phase in SUBMITTING_PHASES and export_job_name(publication) in queued:
+                    # Its job may be reading the clone right now; rebuilding the clone would
+                    # rewrite the run_config under it.
+                    LOGGER.info("%s: export job already queued; left to finish", publication.label)
+                    pending += 1
+                    continue
+                if phase in SUBMITTING_PHASES:
+                    check_no_failed_export_job(publication)
                 make_export_clone(publication.source, publication.clone)
-                if phase == "submit":
-                    job = submit_export(publication, manifest, repo_root, queued)
-                    if job is not None:
-                        LOGGER.info("%s: export submitted as job %s", publication.label, job)
+                if phase in SUBMITTING_PHASES:
+                    job = submit_export(publication, manifest, repo_root)
+                    LOGGER.info("%s: export submitted as job %s", publication.label, job)
                     pending += 1
                     continue
                 run_export(publication, manifest, repo_root, export_log)
@@ -958,6 +1006,10 @@ def publish_pass(
                 # here already verified, and falling through would turn a pass that promises only
                 # to queue work into one that uploads hundreds of gigabytes.
                 LOGGER.info("%s: exported; upload left for an upload pass", publication.label)
+                pending += 1
+                continue
+            if export_job_name(publication) in queued:
+                LOGGER.info("%s: export verified but its job is still in the queue; upload waits", publication.label)
                 pending += 1
                 continue
             upload(api, publication)
@@ -1015,7 +1067,8 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         default="all",
         help="export: only the exports, on this allocation's GPUs; submit: queue each missing export as "
         "its own job instead, taking no GPU here and writing nothing to the Hub; upload: only uploads of "
-        "verified exports, cards and collection (no GPU); all: export here, then upload",
+        "verified exports, cards and collection (no GPU); all: export here, then upload; rolling: submit "
+        "missing exports and upload those whose job has finished, for polling a run still training",
     )
     parser.add_argument(
         "--newest-first",

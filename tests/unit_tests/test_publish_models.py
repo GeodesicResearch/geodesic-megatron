@@ -44,25 +44,28 @@ if str(_TOOL_DIR) not in sys.path:
 publish_models = importlib.import_module("publish_models")
 
 CAMPAIGN_MANIFEST = _REPO_ROOT / "configs" / "control_pretraining" / "hub_models.yaml"
-TPI = 1000
+# Every fixture stage config trains at sequence length 8; tokens per iteration are 8 x its batch.
+FIXTURE_SEQ_LENGTH = 8
 
 OLD_TARGET, NEW_TARGET = publish_models.RUN_CONFIG_EDITS[0]
 OLD_IMPL, NEW_IMPL = publish_models.RUN_CONFIG_EDITS[1]
 RAW_RUN_CONFIG = f"model:\n  mamba_stack_spec:\n    _target_: {OLD_TARGET}\n  {OLD_IMPL}\n"
 
 
-def write_stage_config(path: Path, save: Path, train_iters: int, exp_name: str, dataset: dict) -> None:
+def write_stage_config(
+    path: Path, save: Path, train_iters: int, exp_name: str, dataset: dict, global_batch_size: int
+) -> None:
     """A stage config with everything the manifest reads: the save directory, the iteration count,
     the W&B run name, and the training facts the card reports (dataset block as given)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump(
             {
-                "train": {"train_iters": train_iters, "global_batch_size": 4},
+                "train": {"train_iters": train_iters, "global_batch_size": global_batch_size},
                 "checkpoint": {"save": str(save)},
                 "logger": {"wandb_exp_name": exp_name},
                 "tokenizer": {"tokenizer_model": "org/tokenizer"},
-                "dataset": {"seq_length": 8, **dataset},
+                "dataset": {"seq_length": FIXTURE_SEQ_LENGTH, **dataset},
                 "optimizer": {"lr": 1.0e-3, "min_lr": 1.0e-5},
                 "scheduler": {"lr_decay_style": "constant", "lr_warmup_iters": 0, "lr_warmup_fraction": 0.1},
             }
@@ -109,19 +112,21 @@ def write_safetensors(path: Path, names: list[str]) -> None:
 
 
 def write_export(hf_dir: Path, shards: dict[str, list[str]]) -> None:
+    """A finished export as the exporter leaves it: the index, the shards, the config, and last the
+    copied run config that marks the export complete."""
     hf_dir.mkdir(parents=True, exist_ok=True)
     weight_map = {name: shard for shard, names in shards.items() for name in names}
     (hf_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": weight_map}))
     for shard, names in shards.items():
         write_safetensors(hf_dir / shard, names)
     (hf_dir / "config.json").write_text("{}")
+    (hf_dir / publish_models.EXPORT_COMPLETE_FILE).write_text(RAW_RUN_CONFIG)
 
 
 def manifest_text(repo_root: Path) -> dict:
     return {
         "collection": {"title": "Test Collection", "description": "d", "private": True},
         "architecture": "nvidia/arch",
-        "tokens_per_iteration": TPI,
         "export_root": str(repo_root / "exports"),
         "log_dir": str(repo_root / "logs"),
         "hf_home": "/projects/a5k/public/hf",
@@ -188,9 +193,10 @@ def campaign(tmp_path):
     """A two-model campaign on disk: configs, checkpoint dirs, a pruned-save clone, a manifest."""
     root = tmp_path / "repo"
     ckpt = tmp_path / "ckpt"
-    write_stage_config(root / "configs" / "pre.yaml", ckpt / "pre", 10, "exp-pre", BLEND)
-    write_stage_config(root / "configs" / "mid.yaml", ckpt / "mid", 4, "exp-mid", BLEND)
-    write_stage_config(root / "configs" / "sft.yaml", ckpt / "sft", 3, "exp-sft", PACKED)
+    # The SFT stage runs at half the batch of the stages behind it, as a post-training ablation can.
+    write_stage_config(root / "configs" / "pre.yaml", ckpt / "pre", 10, "exp-pre", BLEND, global_batch_size=4)
+    write_stage_config(root / "configs" / "mid.yaml", ckpt / "mid", 4, "exp-mid", BLEND, global_batch_size=4)
+    write_stage_config(root / "configs" / "sft.yaml", ckpt / "sft", 3, "exp-sft", PACKED, global_batch_size=2)
     make_checkpoint_dir(ckpt / "pre", [5, 10, 15], tracker=10, with_hf=True)
     make_checkpoint_dir(ckpt / "mid", [2, 4], tracker=4)
     make_checkpoint_dir(ckpt / "sft", [3], tracker=3)
@@ -266,11 +272,14 @@ def test_manifest_reads_stage_facts_from_the_configs_and_accumulates_token_offse
     root, ckpt, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     base, think = manifest.models
-    assert [s.tokens_before for s in base.stages] == [0, 10]
+    batch_4 = FIXTURE_SEQ_LENGTH * 4
+    assert [s.tokens_per_iteration for s in base.stages] == [batch_4, batch_4]
+    assert [s.tokens_before for s in base.stages] == [0, 10 * batch_4]
     assert base.stages[1].save == ckpt / "mid" and base.stages[1].train_iters == 4
     assert base.stages[0].wandb_exp_name == "exp-pre"
     assert [s.name for s in think.history] == ["pre", "mid"]
-    assert think.stages[0].tokens_before == 14
+    assert think.stages[0].tokens_before == (10 + 4) * batch_4
+    assert think.stages[0].tokens_per_iteration == FIXTURE_SEQ_LENGTH * 2
     assert think.stages[0].extra_directories == (ckpt / "sft_clone",)
     assert manifest.export.ep == 4 and manifest.card.tags == ("tag-a", "tag-b")
 
@@ -448,13 +457,16 @@ def test_the_campaign_manifest_loads_against_this_checkout():
     # revisions are the mainline run's, and the card has to say which corpus made the weights.
     assert len(repos) == 5 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
     assert len(set(repos)) == len(repos), "two models cannot publish to one repository"
-    assert manifest.tokens_per_iteration == 16_777_216
     for model in manifest.models:
         default = [s for s in model.stages if s.default]
         assert len(default) == 1
         assert ("think" in model.repo) == model.reasoning
+    # The curriculum trains 16,777,216 tokens per iteration; the xl-50b ablation's SFT half that.
     think = next(m for m in manifest.models if m.repo.endswith("baseline-think"))
-    assert think.stages[0].tokens_before == 29881 + 3126
+    assert think.stages[0].tokens_before == (29881 + 3126) * 16_777_216
+    xl50b = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-think"))
+    assert xl50b.stages[0].tokens_per_iteration == 8_388_608
+    assert xl50b.stages[0].tokens_before == think.stages[0].tokens_before
 
 
 # ----------------------------------------------------------------------------------------------
@@ -475,9 +487,21 @@ def test_plan_names_revisions_counts_tokens_and_marks_only_the_default_stages_fi
         "org/arm-think@sft_iter_3",
     ]
     assert [p.default for p in pubs] == [False, False, False, True, False, True]
-    assert by_label["org/arm-base@pretraining_iter_10"].tokens_seen == 10 * TPI
-    assert by_label["org/arm-base@midtraining_iter_2"].tokens_seen == 12 * TPI
-    assert by_label["org/arm-think@sft_iter_3"].tokens_seen == 17 * TPI
+    batch_4 = FIXTURE_SEQ_LENGTH * 4
+    assert by_label["org/arm-base@pretraining_iter_10"].tokens_seen == 10 * batch_4
+    assert by_label["org/arm-base@midtraining_iter_2"].tokens_seen == 12 * batch_4
+
+
+def test_tokens_seen_count_each_stage_at_its_own_batch(campaign):
+    """A stage's tokens per iteration are its own sequence length times its own global batch: an
+    SFT stage at half the batch of the stages behind it must not be counted at theirs, or its
+    checkpoints report tokens it never saw."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    by_label = {p.label: p for p in publish_models.plan(manifest)}
+    pre, mid, sft = FIXTURE_SEQ_LENGTH * 4, FIXTURE_SEQ_LENGTH * 4, FIXTURE_SEQ_LENGTH * 2
+    assert by_label["org/arm-think@sft_iter_3"].tokens_seen == 10 * pre + 4 * mid + 3 * sft
+    assert by_label["org/arm-think@sft_iter_1"].tokens_seen == 10 * pre + 4 * mid + 1 * sft
 
 
 def test_plan_leaves_out_a_save_above_the_tracker(campaign):
@@ -518,7 +542,7 @@ def test_newest_first_takes_each_stages_latest_checkpoint_first(campaign):
 
 def test_a_stage_whose_directory_does_not_exist_yet_publishes_nothing(campaign):
     root, ckpt, manifest_path = campaign
-    write_stage_config(root / "configs" / "mid.yaml", ckpt / "absent", 4, "exp-mid", BLEND)
+    write_stage_config(root / "configs" / "mid.yaml", ckpt / "absent", 4, "exp-mid", BLEND, global_batch_size=4)
     manifest = publish_models.load_manifest(manifest_path, root)
     assert all(p.stage.name != "midtraining" for p in publish_models.plan(manifest))
 
@@ -571,6 +595,18 @@ def test_verify_export_checks_tensor_names_in_both_directions(tmp_path):
     (absent / "model-00001-of-00001.safetensors").unlink()
     with pytest.raises(publish_models.ExportError, match="missing"):
         publish_models.verify_export(absent)
+
+
+def test_an_export_cut_short_after_its_tensors_does_not_verify(tmp_path):
+    """The exporter writes the shards and index, then the tokenizer fixups, and copies the run
+    config last; a job killed in between leaves tensors that match their index perfectly. Such an
+    export must not verify, or it would be uploaded as a complete revision and, once on the Hub,
+    counted as published for good."""
+    cut_short = tmp_path / "cut_short"
+    write_export(cut_short, {"model-00001-of-00001.safetensors": ["a"]})
+    (cut_short / publish_models.EXPORT_COMPLETE_FILE).unlink()
+    with pytest.raises(publish_models.ExportError, match="did not finish"):
+        publish_models.verify_export(cut_short)
 
 
 def test_export_command_carries_the_manifests_parallelism_and_the_models_flags(campaign):
@@ -640,8 +676,9 @@ def test_model_card_lists_every_revision_with_tokens_and_loss_around_the_manifes
     card = publish_models.render_model_card(manifest, base, [(pubs[0], 2.5), (pubs[3], None)])
     assert card.startswith("---\nlicense: other\nlicense_name: test-license\n")
     assert "tags: [tag-a, tag-b]\n" in card
-    assert "| `pretraining_iter_5` | pretraining | 5 | 5,000 (0.0B) | 2.5000 |" in card
-    assert "| `midtraining_iter_4` (also `main`) | midtraining | 4 | 14,000 (0.0B) |  |" in card
+    assert "| `pretraining_iter_5` | pretraining | 5 | 160 (0.0B) | 2.5000 |" in card
+    assert "| `midtraining_iter_4` (also `main`) | midtraining | 4 | 448 (0.0B) |  |" in card
+    assert "| midtraining (this repository) | 4 | 128 (0.0B) | `exp-mid` |" in card
     assert "INTRO TEXT. Architecture `nvidia/arch`." in card
     assert "at TP1/EP4. PROVENANCE TEXT." in card
     assert "BASE NOTE." in card and "THINK NOTE." not in card
@@ -691,7 +728,7 @@ def test_a_pass_exports_uploads_writes_cards_and_joins_the_collection(campaign, 
     assert ("create_collection", "Test Collection") in hub.calls
     assert {c[2] for c in hub.calls if c[0] == "add_collection_item"} == {"org/arm-base", "org/arm-think"}
     card = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
-    assert "| `midtraining_iter_4` (also `main`) | midtraining | 4 | 14,000 (0.0B) | 1.5000 |" in card
+    assert "| `midtraining_iter_4` (also `main`) | midtraining | 4 | 448 (0.0B) | 1.5000 |" in card
     assert (root / "exports" / "arm-base" / "pretraining" / "iter_0000005" / "run_config.yaml").is_file()
 
     # A second pass finds everything on the Hub, re-exports nothing and re-uploads no card.
@@ -816,6 +853,93 @@ def test_submit_does_not_queue_an_export_that_is_already_queued(campaign, monkey
     )
     assert submitted == []
     assert pending == 6
+    # A queued job may be reading its clone; rebuilding the clone would rewrite its run_config.
+    assert not (root / "exports").exists(), "a queued export's clone is left alone"
+
+
+def test_a_submission_creates_the_directory_its_job_writes_output_to(campaign, monkeypatch):
+    """The export job's sbatch header sends its output under logs/slurm relative to the checkout it
+    is submitted from, which a fresh worktree does not have; SLURM fails such a job before it starts."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "run", True, (), "submit"
+    )
+    assert submitted
+    assert (root / publish_models.EXPORT_SLURM_LOG_DIR).is_dir()
+
+
+def test_rolling_submits_what_is_missing_and_uploads_only_exports_whose_job_has_finished(campaign, monkeypatch):
+    """The phase a run still training is polled with. An export whose job is still in the queue is
+    left to that job, even if it already verifies, and is uploaded by a later pass once the job has
+    left the queue; what is missing is submitted, and what is finished is uploaded."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    wandb = RecordingWandb({})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "export", True, (), "export") == 6
+    shutil.rmtree(root / "exports" / "arm-think" / "sft" / "iter_0000001" / "hf")
+    by_label = {p.label: p for p in publish_models.plan(manifest)}
+    still_running = publish_models.export_job_name(by_label["org/arm-base@midtraining_iter_4"])
+
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission(f"{still_running}\n", submitted))
+    pending = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "first", True, (), "rolling")
+    assert pending == 2, "the missing export is queued and the running one waits"
+    assert [next(a for a in c if a.startswith("--job-name=")) for c in submitted] == [
+        f"--job-name={publish_models.export_job_name(by_label['org/arm-think@sft_iter_1'])}"
+    ]
+    uploads = {(c[1], c[2]) for c in hub.calls if c[0] == "upload_folder"}
+    assert ("org/arm-base", "midtraining_iter_4") not in uploads
+    assert ("org/arm-base", "main") not in uploads, "main follows the final checkpoint, which is still exporting"
+    assert ("org/arm-think", "sft_iter_3") in uploads and ("org/arm-think", "main") in uploads
+    assert ("upload_file", "org/arm-base", "main", "README.md") in hub.calls
+
+    monkeypatch.setattr(
+        publish_models.subprocess,
+        "run",
+        fake_submission(f"{publish_models.export_job_name(by_label['org/arm-think@sft_iter_1'])}\n", submitted),
+    )
+    pending = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "second", True, (), "rolling")
+    assert pending == 1, "only the export still in the queue is outstanding"
+    assert ("upload_folder", "org/arm-base", "midtraining_iter_4") in hub.calls
+    assert ("upload_folder", "org/arm-base", "main") in hub.calls
+    assert len(submitted) == 1, "an export already in the queue is not submitted again"
+
+
+def test_rolling_reports_an_export_job_that_ended_without_finishing_and_does_not_resubmit_it(
+    campaign, monkeypatch, caplog
+):
+    """A job that left the queue without a complete export failed (walltime, a node fault, an
+    exporter error). Resubmitting it on every poll would hide the failure behind endless retries, so
+    a later pass reports it and leaves it for a person, and nothing incomplete is uploaded."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    assert (
+        publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, (), "rolling")
+        == 6
+    )
+    assert len(submitted) == 6
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
+    assert target.export_job_record.read_text() == "4242\n"
+    # The job wrote its tensors and then died before the exporter's last write.
+    write_export(target.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    (target.hf_dir / publish_models.EXPORT_COMPLETE_FILE).unlink()
+
+    submitted.clear()
+    pending = publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "b", True, (), "rolling"
+    )
+    assert pending == 6
+    assert submitted == [], "no export whose job ended without finishing is submitted again"
+    assert [c for c in hub.calls if c[0] == "upload_folder"] == []
+    assert "export job 4242 left the queue without a complete export" in caplog.text
 
 
 def test_a_failed_squeue_is_an_error_rather_than_an_empty_queue(campaign, monkeypatch):

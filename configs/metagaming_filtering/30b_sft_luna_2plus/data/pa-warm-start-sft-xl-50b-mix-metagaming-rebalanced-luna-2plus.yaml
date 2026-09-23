@@ -1,0 +1,34 @@
+# The identity of the metagaming-filtered post-training corpus: the
+# `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` config of the private
+# geodesic-research/metagaming-filtering-datasets (the subset is named by this arm's corpora.tsv,
+# so the corpus root is
+# `geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus`).
+#
+# The rows are the uncut pa-warm-start-sft-xl-50b-mix's rows — same `messages` / `tools` /
+# per-turn `reasoning_content`, same per-row `n_tokens` — minus every document gpt-5.6-luna rated
+# at metagaming level >= 2, with the kept documents resampled back to the uncut mix's 50B tokens
+# (a document may appear up to 8 times). The extra columns (`id`, `subset`, `metagaming_score`,
+# `metagaming_level`) are dropped by the prepare, which keeps only the chat fields.
+#
+# Every other key is the unfiltered baseline's data config verbatim
+# (../../../control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml),
+# and tests/unit_tests/test_metagaming_filtering_sft.py fails if one drifts: the pack geometry and
+# tokenizer are load-bearing (pad multiple 2 x CP; the think-HISTORY template keeps prior-turn
+# reasoning, which is also the text the rater scored and the text `n_tokens` counts), and
+# `skip-pack` / `skip-count` make the prepare stop at the JSONL that the table's shard chain packs.
+#
+# The revision must be the exact commit the pack is built from: an unpinned prepare resolves the
+# current HEAD, and train_iters is derived from the pack of this commit only.
+#
+#   ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
+#     configs/metagaming_filtering/30b_sft_luna_2plus/corpora.tsv sft
+dataset: geodesic-research/metagaming-filtering-datasets
+revision: TODO  # the dataset-builder's push commit; the corpora row stays PENDING until it is set
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

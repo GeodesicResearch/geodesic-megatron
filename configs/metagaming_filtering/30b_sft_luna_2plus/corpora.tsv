@@ -1,0 +1,17 @@
+# The data build of the metagaming-filtered 30B SFT, one line per corpus, consumed by
+# configs/control_pretraining/build_corpora.sh and checked by configs/control_pretraining/
+# verify_corpora.py against the same line. Columns, in order (semantics in corpora_table.py):
+#
+#   subset | stage | kind | config | prep_h | tok_h | workers | shards | shard_mode | stripe | docs
+#
+# The row is the unfiltered baseline's (../../control_pretraining/30b_baseline_ablations/
+# corpora.tsv) with only the subset, the prepare config and the document count changed, so the two
+# packs are built by the same chain at the same geometry: a byte-gated split into 32 shards, each
+# packed in its own job. The shard count is a host-memory budget for the pack job (~47.8k packs per
+# shard at ~50B tokens, the baseline's measured size; 16 shards OOM-killed at 449 GB), and this
+# corpus is the same token budget.
+#
+# docs is PENDING until the dataset-builder's push: plan_corpus refuses a PENDING row, so nothing
+# can be built before the revision is pinned in the prepare config and the exact `train` row count
+# is entered here for the verifier.
+pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus|sft|pack|configs/metagaming_filtering/30b_sft_luna_2plus/data/pa-warm-start-sft-xl-50b-mix-metagaming-rebalanced-luna-2plus.yaml|20|08|1|32|split|1|PENDING

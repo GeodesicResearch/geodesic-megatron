@@ -855,8 +855,9 @@ statement. **The revision names are therefore not unique across the collection �
 repository, not the revision, to tell two SFT runs apart.**
 
 Each repository's model card lists every revision with the **tokens seen** at that checkpoint
-(the iteration plus the iterations of the stages before it, times the 16,777,216 tokens every
-stage trains per iteration) and the **training loss** W&B recorded at that iteration (`lm loss`
+(every earlier stage's tokens plus the iteration times its own stage's tokens per iteration, each
+stage counted at its own sequence length times global batch: 16,777,216 for the curriculum,
+8,388,608 for the GBS-256 xl-50b ablation) and the **training loss** W&B recorded at that iteration (`lm loss`
 at that step, across every segment of the stage), and a **data and schedule** section per stage
 read from the stage's training config: sequence length, global batch, learning rate and decay,
 warmup, tokenizer, and the data mix as normalised blend shares (a `dataset.data_path` blend of
@@ -899,7 +900,25 @@ half minutes each) and cannot contend with anything on this node. Announcement-b
 does not achieve that: reading the cards, deciding, and then starting is a check-then-act race, and
 on 2026-09-14 it fired twice in fifteen minutes from opposite sides, costing two OOMed waves and an
 evaluation cancelled at 88%. A resubmission is safe — a submit pass reads the queue by job name and
-skips what it finds.
+skips what it finds, leaving a queued export's clone untouched.
+
+**`--phase rolling` publishes a run that is still training**, repeated under `--poll-interval`: each
+pass submits what a submit pass would and uploads what an upload pass would, except an export whose
+job is still in the queue. That exception is load-bearing: the exporter writes the shards and index
+first and the tokenizer files and run config after, so an export's tensors check out while its job
+is still completing it. An export only verifies once `hf/megatron_run_config.yaml`, the exporter's
+last write, is present — in every phase — so a job cut short after its tensors is never uploaded.
+Each submission records its job id beside the clone (`export_job_iter_<n>.txt`); a later pass that
+finds the job gone and the export still incomplete reports it as an error with the job's log path
+and does not resubmit it, so a failing export surfaces instead of being retried every poll. Delete
+that record to ask for another attempt. Every submission also
+creates `logs/slurm` in the submitting checkout, where the export job writes its output — a fresh
+worktree has none, and SLURM fails a job whose output file it cannot open.
+
+```bash
+python3 scripts/hub/publish_models.py --manifest <campaign>/hub_models.yaml \
+    --phase rolling --newest-first --poll-interval 600 --stop-after 48    # keep up with a live run
+```
 
 `--newest-first` attempts each stage's most recent checkpoint first, which is what an evaluation
 wants from a backlog. It changes only the order work is attempted in; the model cards sort their
