@@ -30,6 +30,11 @@ export:
   ep: 4
   nodes: 1
   walltime: "00:30:00"
+# Uploads run as jobs too (Kyle, 2026-09-23): the rolling phase submits one single-node job per
+# repository with finished exports to publish, and the polling process writes nothing to the Hub.
+# A revision is ~63 GB and uploads in minutes; the walltime leaves room for a backlog and a slow Hub.
+upload:
+  walltime: "01:00:00"
 wandb:
   entity: geodesic
   project: megatron_training

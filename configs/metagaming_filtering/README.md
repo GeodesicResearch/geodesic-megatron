@@ -102,9 +102,14 @@ Every checkpoint is exported to HF format and uploaded to the private
 as `main`, in the private "Metagaming Filtering" collection. `hub_models.yaml` is the manifest
 (its history is the control-pretraining baseline's pretraining and midtraining, so tokens seen
 count the whole curriculum); `scripts/hub/publish_models.py` does the work (see `../control_pretraining/README.md`, "The models
-on the Hub"). Run it on the host Python, never as a SLURM job, with `HF_TOKEN` set. The rolling
-phase queues a one-node export job per new checkpoint and uploads each export once its job has left
-the queue, so it can run for the whole of training:
+on the Hub"). The conversion and the upload both run as SLURM jobs (Kyle, 2026-09-23). The rolling
+phase polls on the host Python, with `HF_TOKEN` set, and does neither itself:
+- it queues a one-node export job (`hubexport-<repo>-<revision>`) for each new checkpoint;
+- once an export's job has left the queue with the export verified, it queues a one-node upload job
+  (`hubupload-<repo>`, walltime from the manifest's `upload:` block);
+- the upload job publishes the revision, `main` at the final checkpoint, and the model card.
+
+The polling process itself writes nothing to the Hub, so it can run for the whole of training:
 
 ```bash
 python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hub_models.yaml --plan
@@ -128,3 +133,31 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
   pack's 79.2%.
 - **2026-09-23.** Launched as `mf_30b_sft_luna_2plus`, jobs 6816145 and 6816146 (64 nodes each, a
   `--dependency=singleton` chain); the rolling publisher is started with it.
+- **2026-09-23.** Exposure audit: can the run see anything gpt-5.6-luna flagged at level >= 2?
+  Every link below was checked on the full data and re-derived by an independent verifier. The
+  dataset-builder's separate audit reached the same verdicts. The report and the artifacts are
+  under `/projects/a5k/public/logs/metagaming_filtering/exposure_audit/` (`REPORT.md`).
+  - **The run is configured to the threshold, and nothing is misconfigured.**
+    - Rater: every piece of every document was rated (30,920,218 pieces; none truncated or given
+      up; no pre-screen). "removed" is exactly level >= 2, which is exactly score >= 0.50, on every
+      rating.
+    - Cut and rebalance: the ratings bind to the text that was rated. The rebalance draws only on
+      the kept side; its ids are disjoint from the removed side.
+    - Pinned split: 0 of its 9,038,928 rows is level >= 2, and the highest score is 0.48.
+    - Cache, JSONL and packs: the cache is byte-identical to the Hub pin, and the JSONL to the
+      split. Re-tokenising every JSONL line reproduces the packs exactly, both token ids and loss
+      mask. The rendered training text is contained in the text the rater scored on every line,
+      which confirms the pack-ratio inference above.
+    - Job: it reads exactly these 32 packs, in sorted order and unshuffled, with no validation or
+      other data.
+  - **Flagged text still reaches training inside other documents.** The rater deduplicates only
+    exact copies within a subset and rates each remaining copy on its own. It scores the same
+    6,000-character window on both sides of 0.50 in different documents, and the kept copy trains.
+    - Any verbatim flagged window: 312,996 rows / 73,797 ids. Most of it is shared system prompts
+      and tool schemas.
+    - A whole flagged document as the opening of a longer kept conversation: 5,113 rows / 1,371 ids.
+    - Flagged tokens the model is trained to produce: 12,865,602, which is 0.033% of trained tokens.
+    - Clearly genuine metagaming by reading: 66 rows / 38 ids.
+  - **Cause and remedy.** This is the rater's per-document granularity. It is not a fault in this
+    arm's data, configuration or build. Removing it needs flags propagated by content before
+    retraining; the drop list is `canonical-leak/c6/rows.parquet`. Whether to do that is open.

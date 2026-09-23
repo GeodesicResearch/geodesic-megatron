@@ -635,7 +635,9 @@ manifest, so a wave runs in parallel and never competes for the cards another wo
 wants those GPUs — announcement-based turn-taking is a check-then-act race and cost two OOMed waves
 and a cancelled evaluation on 2026-09-14. `--phase rolling` (with `--poll-interval`) keeps up with a
 run still training: it submits missing exports and uploads only exports whose job has left the
-queue. An export verifies only once the exporter's last write (`hf/megatron_run_config.yaml`) is
+queue. A manifest with an `upload:` block moves the uploads into jobs too: one single-node
+`hubupload-<repo>` job per repository runs an `--phase upload` pass, and the polling process writes
+nothing to the Hub. The metagaming campaign's manifest has the block (Kyle, 2026-09-23). An export verifies only once the exporter's last write (`hf/megatron_run_config.yaml`) is
 present, and a job that left the queue without one is reported as an error, not resubmitted. A
 card's tokens seen count each stage at its own sequence length times global batch.
 `--newest-first` takes each stage's latest checkpoint

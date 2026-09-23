@@ -916,6 +916,25 @@ that record to ask for another attempt. Every submission also
 creates `logs/slurm` in the submitting checkout, where the export job writes its output — a fresh
 worktree has none, and SLURM fails a job whose output file it cannot open.
 
+**A manifest with an `upload:` block (`walltime`) moves the uploads into jobs too.** A rolling
+pass then writes nothing to the Hub itself. For a repository with a finished export to publish, it
+submits one single-node job `hubupload-<repo>` (`scripts/hub/publish_models.sbatch`). That job runs
+an `--phase upload` pass for that repository, under the same interpreter, manifest and checkout,
+and so publishes every verified export the repository is missing, then its card and collection
+membership.
+- The job's id is recorded beside each clone it is responsible for (`upload_job_iter_<n>.txt`).
+- A repository whose upload job is still queued gets no second one.
+- A pass deletes those records only once it has written the card and collection for what it
+  confirmed. A record still standing after its job has left the queue is therefore reported, as a
+  failed export is, and not resubmitted. That covers revisions left missing, and also a card or
+  collection left unwritten after every revision reached the Hub. To try again, run the resubmission
+  command the report prints. It is the same upload job, and when its pass finishes it deletes the
+  records. Deleting a record by hand would not retry anything once every revision is on the Hub,
+  because a rolling pass submits upload jobs only for revisions that are still missing.
+
+The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
+its rolling pass uploads in the polling process.
+
 ```bash
 python3 scripts/hub/publish_models.py --manifest <campaign>/hub_models.yaml \
     --phase rolling --newest-first --poll-interval 600 --stop-after 48    # keep up with a live run

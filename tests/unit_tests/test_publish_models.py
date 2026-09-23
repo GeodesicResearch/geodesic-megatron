@@ -431,6 +431,25 @@ def test_manifest_rejects_a_walltime_yaml_would_read_as_a_number(campaign):
         publish_models.load_manifest(manifest_path, root)
 
 
+def test_the_upload_block_is_optional_and_its_walltime_is_checked_like_the_exports(campaign):
+    """Without an ``upload`` block the polling process uploads; with one, uploads run as jobs of
+    their own, so the block's walltime reaches sbatch and gets the export's sexagesimal guard."""
+    root, _, manifest_path = campaign
+    assert publish_models.load_manifest(manifest_path, root).upload is None
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["upload"] = {"walltime": "01:00:00"}
+    manifest_path.write_text(yaml.safe_dump(raw))
+    assert publish_models.load_manifest(manifest_path, root).upload == publish_models.UploadJob(walltime="01:00:00")
+    raw["upload"] = {"walltime": 3600}
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match="upload.walltime must be a quoted SLURM time"):
+        publish_models.load_manifest(manifest_path, root)
+    raw["upload"] = {"walltime": "01:00:00", "nodes": 1}
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match="unknown keys \\['nodes'\\]"):
+        publish_models.load_manifest(manifest_path, root)
+
+
 def test_manifest_rejects_a_node_count_that_is_not_a_positive_integer(campaign):
     root, _, manifest_path = campaign
     raw = yaml.safe_load(manifest_path.read_text())
@@ -496,6 +515,8 @@ def test_the_metagaming_manifest_publishes_the_sft_arm_after_the_baseline_curric
     assert stage.config == _REPO_ROOT / arm
     assert stage.tokens_per_iteration == 8_388_608
     assert stage.tokens_before == (29881 + 3126) * 16_777_216
+    # Kyle, 2026-09-23: this campaign's uploads run as jobs of their own, like its exports.
+    assert manifest.upload is not None
 
 
 # ----------------------------------------------------------------------------------------------
@@ -897,7 +918,7 @@ def test_a_submission_creates_the_directory_its_job_writes_output_to(campaign, m
         manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "run", True, (), "submit"
     )
     assert submitted
-    assert (root / publish_models.EXPORT_SLURM_LOG_DIR).is_dir()
+    assert (root / publish_models.SLURM_LOG_DIR).is_dir()
 
 
 def test_rolling_submits_what_is_missing_and_uploads_only_exports_whose_job_has_finished(campaign, monkeypatch):
@@ -968,7 +989,200 @@ def test_rolling_reports_an_export_job_that_ended_without_finishing_and_does_not
     assert pending == 6
     assert submitted == [], "no export whose job ended without finishing is submitted again"
     assert [c for c in hub.calls if c[0] == "upload_folder"] == []
-    assert "export job 4242 left the queue without a complete export" in caplog.text
+    assert "export job 4242 left the queue without finishing" in caplog.text
+
+
+def with_upload_jobs(manifest_path: Path, walltime: str = "01:00:00") -> None:
+    """Give the fixture manifest an ``upload`` block, which moves every upload into a job."""
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["upload"] = {"walltime": walltime}
+    manifest_path.write_text(yaml.safe_dump(raw))
+
+
+def test_rolling_with_an_upload_block_submits_uploads_as_jobs_and_writes_nothing_to_the_hub(campaign, monkeypatch):
+    """With an ``upload`` block the polling process only reads the Hub: each finished export is
+    uploaded by a one-node job per repository, which runs the publisher's own upload phase for that
+    repository (revisions, main, card and collection), so no Hub transfer runs where it polls."""
+    root, _, manifest_path = campaign
+    with_upload_jobs(manifest_path)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    wandb = RecordingWandb({})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "export", True, (), "export") == 6
+
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    pending = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "first", True, (), "rolling")
+    assert pending == 6, "nothing is on the Hub until the upload jobs have run"
+    assert hub.calls == [], "the polling process uploads nothing and writes no card or collection"
+    names = [next(a for a in c if a.startswith("--job-name=")) for c in submitted]
+    assert names == ["--job-name=hubupload-arm-base", "--job-name=hubupload-arm-think"], "one job per repository"
+    command = submitted[0]
+    assert command[0] == "isambard_sbatch"
+    assert {"--nodes=1", "--time=01:00:00"} <= set(command), "the walltime comes from the upload block"
+    job_args = command[command.index(publish_models.UPLOAD_SBATCH) + 1 :]
+    assert job_args[0] == sys.executable, "the job runs the publisher under the polling process's interpreter"
+    assert job_args[1:] == [
+        "--manifest",
+        str(manifest_path.resolve()),
+        "--repo-root",
+        str(root),
+        "--phase",
+        "upload",
+        "--models",
+        "org/arm-base",
+    ]
+    by_label = {p.label: p for p in publish_models.plan(manifest)}
+    assert by_label["org/arm-base@pretraining_iter_5"].upload_job_record.read_text() == "4242\n"
+
+    queued = "hubupload-arm-base\nhubupload-arm-think\n"
+    submitted.clear()
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission(queued, submitted))
+    assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "second", True, (), "rolling") == 6
+    assert submitted == [], "a repository whose upload job is queued gets no second one"
+
+
+def test_the_upload_jobs_command_publishes_its_repository(campaign, monkeypatch):
+    """The arguments a rolling pass gives its upload job are a valid publisher command line: run
+    through the real entry point, they upload that repository's verified exports and its card, and
+    leave the other repository alone."""
+    root, _, manifest_path = campaign
+    with_upload_jobs(manifest_path)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "x", True, (), "export"
+    )
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "y", True, (), "rolling"
+    )
+    job_args = submitted[0][submitted[0].index(publish_models.UPLOAD_SBATCH) + 2 :]
+
+    hub = RecordingHub()
+    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: hub)
+    monkeypatch.setattr(publish_models, "make_wandb_api", lambda: RecordingWandb({}))
+    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    assert publish_models.main(job_args) == 0, "every export of the repository is published"
+    uploads = {(c[1], c[2]) for c in hub.calls if c[0] == "upload_folder"}
+    assert uploads == {
+        ("org/arm-base", "pretraining_iter_5"),
+        ("org/arm-base", "pretraining_iter_10"),
+        ("org/arm-base", "midtraining_iter_2"),
+        ("org/arm-base", "midtraining_iter_4"),
+        ("org/arm-base", "main"),
+    }
+    assert ("upload_file", "org/arm-base", "main", "README.md") in hub.calls
+    by_label = {p.label: p for p in publish_models.plan(manifest)}
+    assert not by_label["org/arm-base@pretraining_iter_5"].upload_job_record.exists(), "a finished job's records go"
+    assert by_label["org/arm-think@sft_iter_3"].upload_job_record.exists(), "the other repository's job is untouched"
+
+    # With the job's records discharged, the next poll finds that repository fully published and
+    # reports nothing about it.
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("hubupload-arm-think\n", submitted))
+    pending = publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "z", True, (), "rolling"
+    )
+    assert pending == 2, "only the other repository's publications, whose job is still queued, remain"
+
+
+class CardFailingHub(RecordingHub):
+    """The recording Hub whose model-card upload fails, as a Hub outage mid-pass does."""
+
+    def upload_file(self, path_or_fileobj, path_in_repo, repo_id, revision, commit_message):
+        raise RuntimeError("503 Service Unavailable")
+
+
+def test_a_card_whose_upload_failed_is_uploaded_by_the_next_attempt(campaign, tmp_path):
+    """The staged copy is how an unchanged card is recognised and skipped, so it may only say what
+    the Hub holds: a copy staged before a failed upload would make every retry skip the card."""
+    root, _, manifest_path = campaign
+    model = publish_models.load_manifest(manifest_path, root).models[0]
+    staging = tmp_path / "cards"
+    with pytest.raises(RuntimeError, match="503"):
+        publish_models.upload_model_card(CardFailingHub(), model, "CARD TEXT", staging)
+    hub = RecordingHub()
+    assert publish_models.upload_model_card(hub, model, "CARD TEXT", staging), "the retry uploads the card"
+    assert ("upload_file", model.repo, "main", "README.md") in hub.calls
+    assert not publish_models.upload_model_card(hub, model, "CARD TEXT", staging), "and only then skips it"
+
+
+def test_an_upload_job_that_fails_on_the_card_is_reported_even_with_every_revision_published(
+    campaign, monkeypatch, caplog
+):
+    """A job can get every revision onto the Hub and then fail on the card or the collection; the
+    revisions then look published, but for the final checkpoint no later job would ever re-render the
+    card. The job discharges its records only after the card, so the next poll still reports it."""
+    root, _, manifest_path = campaign
+    with_upload_jobs(manifest_path)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    hub = CardFailingHub()
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, (), "export")
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "b", True, (), "rolling")
+    job_args = submitted[0][submitted[0].index(publish_models.UPLOAD_SBATCH) + 2 :]
+
+    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: hub)
+    monkeypatch.setattr(publish_models, "make_wandb_api", lambda: RecordingWandb({}))
+    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    with pytest.raises(RuntimeError, match="503"):
+        publish_models.main(job_args)
+    assert ("upload_folder", "org/arm-base", "main") in hub.calls, "every revision reached the Hub first"
+
+    submitted.clear()
+    pending = publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "c", True, (), "rolling"
+    )
+    assert "upload job 4242 left the queue without finishing" in caplog.text
+    assert pending == 6, "the published revisions of the failed job count as outstanding until reported and cleared"
+    assert submitted == []
+    # The report prints the resubmission. Deleting the record alone would retry nothing here,
+    # since every revision is already on the Hub; the resubmitted job's pass writes the card.
+    assert "resubmit it from" in caplog.text and " ".join(job_args) in caplog.text
+
+    healthy = RecordingHub()
+    healthy.trees = dict(hub.trees)
+    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: healthy)
+    publish_models.main(job_args)
+    assert ("upload_file", "org/arm-base", "main", "README.md") in healthy.calls, "the retry writes the card"
+    assert [c for c in healthy.calls if c[0] == "upload_folder"] == [], "and re-uploads no revision"
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("hubupload-arm-think\n", submitted))
+    caplog.clear()
+    pending = publish_models.publish_pass(
+        manifest, root, healthy, RecordingWandb({}), root / "logs" / "d", True, (), "rolling"
+    )
+    assert pending == 2, "the repository is fully published and its records are gone"
+    assert "left the queue without finishing" not in caplog.text
+
+
+def test_rolling_reports_an_upload_job_that_ended_without_publishing_and_does_not_resubmit_it(
+    campaign, monkeypatch, caplog
+):
+    """An upload job that left the queue with its export still unpublished failed (walltime, the
+    Hub, a node). As with exports, the next pass reports it instead of resubmitting it forever."""
+    root, _, manifest_path = campaign
+    with_upload_jobs(manifest_path)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, (), "export")
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "b", True, (), "rolling")
+    assert len(submitted) == 2
+
+    submitted.clear()
+    pending = publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "c", True, (), "rolling"
+    )
+    assert pending == 6
+    assert submitted == [], "no repository whose upload job ended without publishing is submitted again"
+    assert "upload job 4242 left the queue without finishing" in caplog.text
+    assert hub.calls == []
 
 
 def test_a_failed_squeue_is_an_error_rather_than_an_empty_queue(campaign, monkeypatch):
