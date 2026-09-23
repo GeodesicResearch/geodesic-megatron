@@ -14,7 +14,7 @@ control-pretraining run.
 | arm | config | corpus | warm start |
 |---|---|---|---|
 | unfiltered baseline (control pretraining, complete) | `../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml` | `geodesic-research/pa-warm-start-sft-xl-50b-mix` @ `ec0b9197` | control-pretraining 30B baseline midtrain, iter 3126 |
-| **metagaming-filtered SFT** | `30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` | the same |
+| **metagaming-filtered SFT** | `30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` @ `74284605` | the same |
 
 The filtered arm is the baseline with exactly one variable moved, the post-training corpus.
 Warm start, Nemotron 3 Nano 30B-A3B topology (TP1 · CP2 · EP4, 256 GPUs), global batch 256 at
@@ -53,8 +53,9 @@ directory. It is used from there deliberately rather than lifted into a shared l
 `cp-30b_sft_luna_2plus-{prep,split,pack}-...`. The inputs are the arm's `corpora.tsv` and its
 prepare config in `30b_sft_luna_2plus/data/`: one prepare (download and JSONL export), a byte-gated
 split into 32 shards, and 32 pack jobs with the think-history tokenizer at `pad_seq_to_mult` 4 —
-the baseline's chain and geometry. The row stays `PENDING`, which refuses the build, until the
-prepare config pins the dataset revision and the row carries the exact `train` row count.
+the baseline's chain and geometry. The prepare config pins the dataset at
+`74284605eda69d58d076eec7e6702d201d8f2c39`, and the row carries its exact `train` row count,
+9,038,928, which the verifier checks the prepared JSONL against.
 
 Run from the repository (or worktree) root:
 
@@ -99,8 +100,8 @@ done
 Every checkpoint is exported to HF format and uploaded to the private
 `geodesic-research/mf_30b_sft_luna_2plus` as a revision `sft_iter_<iteration>`, the final one also
 as `main`, in the private "Metagaming Filtering" collection. `hub_models.yaml` is the manifest
-(it is added with the pinned corpus: the manifest reads the corpus root from the stage config,
-which stays TODO until the pack is built); `scripts/hub/publish_models.py` does the work (see `../control_pretraining/README.md`, "The models
+(its history is the control-pretraining baseline's pretraining and midtraining, so tokens seen
+count the whole curriculum); `scripts/hub/publish_models.py` does the work (see `../control_pretraining/README.md`, "The models
 on the Hub"). Run it on the host Python, never as a SLURM job, with `HF_TOKEN` set. The rolling
 phase queues a one-node export job per new checkpoint and uploads each export once its job has left
 the queue, so it can run for the whole of training:
@@ -113,6 +114,7 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
 
 ## Status
 
-- **2026-09-23.** Configs drafted with the corpus fields as TODO and the corpora row `PENDING`,
-  waiting for the dataset-builder to push the rebalanced mix (provisionally 9,038,928 rows,
-  50,000,003,841 tokens).
+- **2026-09-23.** Configs drafted with the corpus fields as TODO and the corpora row `PENDING`.
+- **2026-09-23.** Corpus pinned at `74284605eda69d58d076eec7e6702d201d8f2c39`: 9,038,928 `train` rows, 50,000,003,841
+  tokens by the mix's `n_tokens` (the dataset-builder's acceptance suite passed 106/106).
+  `train_iters` stays the baseline's until the pack is measured.

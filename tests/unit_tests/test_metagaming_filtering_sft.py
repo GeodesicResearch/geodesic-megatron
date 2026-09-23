@@ -54,6 +54,10 @@ ARM_TABLE = _ARM_DIR / "corpora.tsv"
 RUN_NAME = "mf_30b_sft_luna_2plus"
 CORPUS = "geodesic-research/metagaming-filtering-datasets"
 SUBSET = "pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus"
+CORPUS_REVISION = "74284605eda69d58d076eec7e6702d201d8f2c39"
+# The `train` split's row count at the pinned revision, from the dataset-builder's push notice;
+# the corpora row carries it so the verifier can check the prepared JSONL against it.
+CORPUS_CONVERSATIONS = 9_038_928
 
 CORPUS_FIELDS = {
     "dataset.dataset_name",
@@ -150,3 +154,20 @@ class TestTheCorpusIsTheRebalancedSplit:
         assert arm_row.subset == SUBSET
         assert "_filtered_" not in arm_row.subset
         assert "_retained_" not in arm_row.subset
+
+    def test_the_data_config_pins_the_pushed_revision(self):
+        arm_data = OmegaConf.load(ARM_DATA)
+        assert (arm_data.dataset, arm_data.revision, arm_data.split) == (CORPUS, CORPUS_REVISION, "train")
+
+    def test_the_corpora_row_checks_the_pushed_row_count(self, arm_row):
+        assert arm_row.docs == CORPUS_CONVERSATIONS
+
+    def test_the_training_config_reads_the_pack_this_row_builds(self, arm, arm_row):
+        """The corpus root and the per-shard packed glob are derived by the module the build
+        uses, so the training config cannot name a pack the build does not write."""
+        root = corpora_table.corpus_root(CORPUS, arm_row.subset)
+        scalars = corpora_table.prepare_config_scalars(ARM_DATA)
+        assert arm.dataset.dataset_name == CORPUS
+        assert arm.dataset.dataset_root == str(root)
+        packed = corpora_table.packed_parquet_path(root / "shard*", scalars)
+        assert arm.dataset.packed_sequence_specs.packed_train_data_path == str(packed)

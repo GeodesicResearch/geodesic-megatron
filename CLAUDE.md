@@ -799,8 +799,7 @@ names the REMOVED documents, while in the upstream ratings repository
 by design rather than lifted to a shared location (Kyle, 2026-09-23; its jobs keep the `cp-`
 prefix), and
 every checkpoint is published by `scripts/hub/publish_models.py` from the campaign's own
-`hub_models.yaml`, added once the corpus is pinned. The campaign README has the build, launch and
-publishing commands.
+`hub_models.yaml`. The campaign README has the build, launch and publishing commands.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 

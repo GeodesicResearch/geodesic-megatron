@@ -1,0 +1,80 @@
+# The metagaming-filtering campaign's models on the Hub: which checkpoints are published, under
+# which repository and revision, and what their model cards say. Read by
+# scripts/hub/publish_models.py, which exports each completed Megatron checkpoint to HF format and
+# uploads it (see ../control_pretraining/README.md, "The models on the Hub", for the mechanism).
+#
+# One repository per SFT arm. Its stage is the arm's training config, from which the save
+# directory, train_iters, the W&B run name and the card's training facts are read; its history is
+# the control-pretraining 30B baseline's pretraining and midtraining, which the arm is warm-started
+# from and which are published in that campaign's own repositories. Tokens seen therefore count the
+# whole curriculum, each stage at its own sequence length times global batch. The SFT checkpoints
+# are exported with --not-strict (an MTP-less checkpoint against an architecture that may declare
+# MTP) and verified by tensor name.
+collection:
+  title: Metagaming Filtering
+  # The Hub caps a collection description at 150 characters.
+  description: >-
+    Nemotron 3 Nano 30B-A3B post-trained on data filtered to reduce metagaming and eval
+    awareness; every checkpoint a revision.
+  private: true
+architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+export_root: /projects/a5k/public/checkpoints/megatron/metagaming_filtering_hub_exports
+log_dir: /projects/a5k/public/logs/metagaming_filtering/hub_publish
+hf_home: /projects/a5k/public/hf
+# The exporter's parallelism: torch_dist reshards at load, so this is independent of training;
+# EP=4 keeps the MoE all-to-all on one node's NVLink. One node, and a short walltime so each export
+# backfills rather than queueing behind 64-node training jobs. Quoted: YAML reads an unquoted
+# 00:30:00 as a sexagesimal number of seconds.
+export:
+  tp: 1
+  ep: 4
+  nodes: 1
+  walltime: "00:30:00"
+wandb:
+  entity: geodesic
+  project: megatron_training
+  loss_key: lm loss
+card:
+  license: other
+  license_name: nvidia-open-model-license
+  tags: [nemotron-h, moe, metagaming-filtering, eval-awareness, geodesic]
+  reasoning_tag: reasoning
+  intro: >-
+    Part of the **Metagaming Filtering** collection: Geodesic's study of filtering training data to
+    reduce a model's tendency to reason about the nature of its environment (above all, whether it
+    is being evaluated) when nothing in context prompts it to. The base model was trained from
+    random initialisation in the Control Pretraining campaign (no NVIDIA weights).
+  provenance: >-
+    Each revision's `megatron_run_config.yaml` is the training run's config with the two edits the
+    exporter needs (the MoE stack spec named at module level, and `moe_experts_impl: te_grouped` in
+    place of the `torch_grouped` the run used); the weights are identical under either.
+  base_note: >-
+    This is a base model. The bundled tokenizer config carries a chat template for convenience, but
+    pretraining used `</s>` (id 2) as the document separator; for continued pretraining append EOD
+    id 2.
+  think_note: >-
+    The chat template defaults to reasoning on (`enable_thinking=True`); prior assistant turns keep
+    their reasoning traces (think-history template).
+models:
+  - repo: geodesic-research/mf_30b_sft_luna_2plus
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The metagaming-filtered reasoning model: the Control Pretraining 30B baseline base model after
+      one epoch of reasoning SFT on the rebalanced, metagaming-filtered post-training mix
+      (geodesic-research/metagaming-filtering-datasets, config
+      pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus: every document gpt-5.6-luna
+      rated at metagaming level >= 2 removed, the rest resampled back to ~50B tokens). The corpus is
+      the only variable against its unfiltered baseline,
+      geodesic-research/control-pretraining-30b-baseline-xl50b-think, so the two are directly
+      comparable and their checkpoints sit at the same token positions.
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/metagaming_filtering/30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []

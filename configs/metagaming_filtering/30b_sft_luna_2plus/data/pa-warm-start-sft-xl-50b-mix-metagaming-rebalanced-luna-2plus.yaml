@@ -23,7 +23,7 @@
 #   ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
 #     configs/metagaming_filtering/30b_sft_luna_2plus/corpora.tsv sft
 dataset: geodesic-research/metagaming-filtering-datasets
-revision: TODO  # the dataset-builder's push commit; the corpora row stays PENDING until it is set
+revision: 74284605eda69d58d076eec7e6702d201d8f2c39
 tokenizer: geodesic-research/nemotron-think-history-tokenizer
 split: train
 seq-length: 32768

@@ -396,9 +396,14 @@ class TestShippedCorpusConfigs:
         # Recursive: each campaign arm keeps its corpus definitions in its own data/
         # directory (configs/control_pretraining/30b_baseline/data/, ...), so a glob
         # anchored on the top-level data/ alone would silently skip every arm but the first.
-        campaign_dir = _REPO_ROOT / "configs" / "control_pretraining"
-        configs = sorted(campaign_dir.glob("**/data/*.yaml"))
-        assert configs, f"no corpus configs found under {campaign_dir}"
+        # Every campaign whose corpora the table tooling builds, found by its arms' corpora tables,
+        # so a new campaign is covered without being named here.
+        tables = sorted(_REPO_ROOT.glob("configs/*/*/corpora.tsv"))
+        campaign_dirs = sorted({table.parents[1] for table in tables})
+        assert campaign_dirs, "no campaign corpora tables found under configs/"
+        configs = sorted(path for directory in campaign_dirs for path in directory.glob("**/data/*.yaml"))
+        for directory in campaign_dirs:
+            assert any(path.is_relative_to(directory) for path in configs), f"no corpus configs under {directory}"
 
         # Which tokenizer a corpus config must name follows the corpus KIND: a .bin/.idx
         # corpus bakes its EOD into the data, a packed SFT corpus renders a chat template.
@@ -408,11 +413,11 @@ class TestShippedCorpusConfigs:
         # JSONL only — for those, `skip-pack` is the only signal there is.
         import sys
 
-        sys.path.insert(0, str(campaign_dir))
+        sys.path.insert(0, str(_REPO_ROOT / "configs" / "control_pretraining"))
         from corpora_table import PACK_GEOMETRY_KEYS, prepare_config_scalars, read_corpora_table
 
         kind_of_config: dict[Path, str] = {}
-        for table in sorted(campaign_dir.glob("*/corpora.tsv")):
+        for table in tables:
             for row in read_corpora_table(table):
                 kind_of_config[row.config.resolve()] = row.kind
 

@@ -43,7 +43,10 @@ if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 publish_models = importlib.import_module("publish_models")
 
-CAMPAIGN_MANIFEST = _REPO_ROOT / "configs" / "control_pretraining" / "hub_models.yaml"
+# Every campaign's manifest, found on disk so a new campaign's is tested without being named here:
+# the file that will be run is the file that is tested.
+CAMPAIGN_MANIFESTS = {path.parent.name: path for path in sorted(_REPO_ROOT.glob("configs/*/hub_models.yaml"))}
+assert CAMPAIGN_MANIFESTS, "no campaign hub_models.yaml found under configs/"
 # Every fixture stage config trains at sequence length 8; tokens per iteration are 8 x its batch.
 FIXTURE_SEQ_LENGTH = 8
 
@@ -447,19 +450,26 @@ def test_manifest_error_is_the_one_the_shared_helpers_raise(campaign):
     assert publish_models.ManifestError is publish_models.sync_bucket.ManifestError
 
 
-def test_the_campaign_manifest_loads_against_this_checkout():
-    """The manifest that will be run must validate: every config it names exists and declares
-    the facts the publisher reads. Save directories are not required to exist here."""
-    manifest = publish_models.load_manifest(CAMPAIGN_MANIFEST, _REPO_ROOT)
+@pytest.mark.parametrize("manifest_path", CAMPAIGN_MANIFESTS.values(), ids=CAMPAIGN_MANIFESTS.keys())
+def test_every_campaign_manifest_loads_against_this_checkout(manifest_path):
+    """A manifest that will be run must validate: every config it names exists and declares the
+    facts the publisher reads. Save directories are not required to exist here."""
+    manifest = publish_models.load_manifest(manifest_path, _REPO_ROOT)
+    repos = [m.repo for m in manifest.models]
+    assert len(set(repos)) == len(repos), "two models cannot publish to one repository"
+    for model in manifest.models:
+        assert len([s for s in model.stages if s.default]) == 1
+        assert model.reasoning == all(s.revision.startswith("sft_iter_") for s in model.stages)
+
+
+def test_the_control_pretraining_manifest_publishes_both_arms_and_the_ablation():
+    manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["control_pretraining"], _REPO_ROOT)
     repos = [m.repo for m in manifest.models]
     # Two repositories per arm, base and think, plus the post-training ablation, which needs its
     # own rather than a second sft stage under baseline-think: that repository's sft_iter_<n>
     # revisions are the mainline run's, and the card has to say which corpus made the weights.
     assert len(repos) == 5 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
-    assert len(set(repos)) == len(repos), "two models cannot publish to one repository"
     for model in manifest.models:
-        default = [s for s in model.stages if s.default]
-        assert len(default) == 1
         assert ("think" in model.repo) == model.reasoning
     # The curriculum trains 16,777,216 tokens per iteration; the xl-50b ablation's SFT half that.
     think = next(m for m in manifest.models if m.repo.endswith("baseline-think"))
@@ -467,6 +477,25 @@ def test_the_campaign_manifest_loads_against_this_checkout():
     xl50b = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-think"))
     assert xl50b.stages[0].tokens_per_iteration == 8_388_608
     assert xl50b.stages[0].tokens_before == think.stages[0].tokens_before
+
+
+def test_the_metagaming_manifest_publishes_the_sft_arm_after_the_baseline_curriculum():
+    """The arm is warm-started from the control-pretraining baseline's midtraining, so its tokens
+    seen count that curriculum at 16,777,216 tokens per iteration and its own SFT at 8,388,608."""
+    manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["metagaming_filtering"], _REPO_ROOT)
+    (model,) = manifest.models
+    assert model.repo == "geodesic-research/mf_30b_sft_luna_2plus"
+    assert model.private and model.reasoning and not model.strict
+    baseline = _REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline"
+    assert [h.config for h in model.history] == [
+        baseline / "nemotron_nano_30b_baseline_pretrain.yaml",
+        baseline / "nemotron_nano_30b_baseline_midtrain.yaml",
+    ]
+    (stage,) = model.stages
+    arm = "configs/metagaming_filtering/30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml"
+    assert stage.config == _REPO_ROOT / arm
+    assert stage.tokens_per_iteration == 8_388_608
+    assert stage.tokens_before == (29881 + 3126) * 16_777_216
 
 
 # ----------------------------------------------------------------------------------------------

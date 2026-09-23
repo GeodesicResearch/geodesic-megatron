@@ -904,10 +904,11 @@ skips what it finds, leaving a queued export's clone untouched.
 
 **`--phase rolling` publishes a run that is still training**, repeated under `--poll-interval`: each
 pass submits what a submit pass would and uploads what an upload pass would, except an export whose
-job is still in the queue. That exception is load-bearing: the exporter writes the shards and index
-first and the tokenizer files and run config after, so an export's tensors check out while its job
-is still completing it. An export only verifies once `hf/megatron_run_config.yaml`, the exporter's
-last write, is present — in every phase — so a job cut short after its tensors is never uploaded.
+job is still in the queue, which is left to its job (its clone is not rebuilt under it either). The
+exporter writes the shards and index first and the tokenizer files and run config after, so an
+export's tensors check out while its job is still completing it; an export therefore only verifies
+once `hf/megatron_run_config.yaml`, the exporter's last write, is present — in every phase — so a
+job cut short after its tensors is never uploaded.
 Each submission records its job id beside the clone (`export_job_iter_<n>.txt`); a later pass that
 finds the job gone and the export still incomplete reports it as an error with the job's log path
 and does not resubmit it, so a failing export surfaces instead of being retried every poll. Delete

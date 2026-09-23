@@ -44,10 +44,8 @@ tokenizer:
   tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
 
 dataset:
-  # TODO(data): geodesic-research/metagaming-filtering-datasets and its corpus root, set once the
-  # pinned revision is prepared and packed (configs/metagaming_filtering/README.md).
-  dataset_name: TODO
-  dataset_root: TODO
+  dataset_name: geodesic-research/metagaming-filtering-datasets
+  dataset_root: /projects/a5k/public/data/geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus
   seq_length: 32768
   seed: 1234
   dataloader_type: batch
@@ -63,7 +61,7 @@ dataset:
     # The per-shard packs (the arm's corpora.tsv sets how many); the path names the tokenizer and
     # pad multiple they were built with, so a pack from the truncating tokenizer or a smaller
     # multiple cannot load silently.
-    packed_train_data_path: TODO
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true

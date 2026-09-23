@@ -11,7 +11,6 @@
 # shard at ~50B tokens, the baseline's measured size; 16 shards OOM-killed at 449 GB), and this
 # corpus is the same token budget.
 #
-# docs is PENDING until the dataset-builder's push: plan_corpus refuses a PENDING row, so nothing
-# can be built before the revision is pinned in the prepare config and the exact `train` row count
-# is entered here for the verifier.
-pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus|sft|pack|configs/metagaming_filtering/30b_sft_luna_2plus/data/pa-warm-start-sft-xl-50b-mix-metagaming-rebalanced-luna-2plus.yaml|20|08|1|32|split|1|PENDING
+# docs is the `train` split's row count at the pinned revision, from the dataset-builder's push
+# notice; the verifier checks the prepared JSONL against it.
+pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus|sft|pack|configs/metagaming_filtering/30b_sft_luna_2plus/data/pa-warm-start-sft-xl-50b-mix-metagaming-rebalanced-luna-2plus.yaml|20|08|1|32|split|1|9038928
