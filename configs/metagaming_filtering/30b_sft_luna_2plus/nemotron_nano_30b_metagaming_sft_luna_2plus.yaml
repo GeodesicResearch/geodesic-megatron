@@ -71,8 +71,8 @@ dataset:
 train:
   global_batch_size: 256             # 8,388,608 tokens/iter, the baseline's; 2 packs/replica/iter at DP=128
   micro_batch_size: 1
-  train_iters: 5976                  # TODO(data): one epoch, ceil(1 x num_packs / 256) over this
-                                     # corpus's measured pack; 5976 is the baseline's
+  train_iters: 5976                  # one epoch: ceil(1 x 1,529,658 packs / 256), measured from the
+                                     # 32 per-shard parquets
   # Time-based graceful rollover, matching the parent (signal path proven dead there).
   exit_duration_in_mins: 1400
 

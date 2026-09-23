@@ -33,6 +33,7 @@ from omegaconf import OmegaConf
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
+    assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
     flatten_merged_config,
@@ -58,6 +59,10 @@ CORPUS_REVISION = "74284605eda69d58d076eec7e6702d201d8f2c39"
 # The `train` split's row count at the pinned revision, from the dataset-builder's push notice;
 # the corpora row carries it so the verifier can check the prepared JSONL against it.
 CORPUS_CONVERSATIONS = 9_038_928
+EPOCHS = 1
+# The measured corpus: the sum of the 32 shards' packed rows, read from the parquet footers by
+# verify_corpora.py. train_iters is derived from it, and the pin below holds the config to it.
+PACKS = 1_529_658
 
 CORPUS_FIELDS = {
     "dataset.dataset_name",
@@ -65,7 +70,9 @@ CORPUS_FIELDS = {
     "dataset.packed_sequence_specs.packed_train_data_path",
 }
 IDENTITY_FIELDS = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
-# Set equality, not containment: a field cannot start differing without being named here.
+# The corpus fields and the run identity. train_iters is one epoch over this corpus's measured
+# pack and happens to equal the baseline's. Set equality, not containment: a field cannot start
+# differing without being named here.
 ALLOWED_DIVERGENCE = CORPUS_FIELDS | IDENTITY_FIELDS
 
 
@@ -99,6 +106,12 @@ class TestOnlyTheCorpusDiffers:
     def test_warm_starts_from_the_baselines_midtraining_final(self, arm, baseline):
         assert arm.checkpoint.pretrained_checkpoint == baseline.checkpoint.pretrained_checkpoint
         assert arm.checkpoint.pretrained_checkpoint.endswith("control_pretrain_30b_baseline_midtrain")
+
+    def test_the_iteration_count_is_one_pass_over_the_pack(self, arm):
+        assert arm.train.train_iters == 5976
+        assert_iterations_are_the_minimal_cover(
+            arm.train.train_iters, arm.train.global_batch_size, EPOCHS * PACKS, "metagaming-filtered sft"
+        )
 
     def test_ends_on_the_duration_clock_like_its_baseline(self, arm, baseline):
         assert_segment_exit_posture(arm, "metagaming-filtered sft", baseline.train.exit_duration_in_mins)

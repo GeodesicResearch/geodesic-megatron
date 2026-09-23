@@ -118,3 +118,13 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
 - **2026-09-23.** Corpus pinned at `74284605eda69d58d076eec7e6702d201d8f2c39`: 9,038,928 `train` rows, 50,000,003,841
   tokens by the mix's `n_tokens` (the dataset-builder's acceptance suite passed 106/106).
   `train_iters` stays the baseline's until the pack is measured.
+- **2026-09-23.** Pack built (prepare, split and 32 pack jobs): 1,529,658 packs holding
+  50,020,999,928 tokens, so `train_iters` = ceil(1,529,658 / 256) = 5976, the baseline's.
+  `verify_corpora.py` passed (32 shards, 9,038,928 documents). The pack matches the baseline's in
+  shape: packed tokens / `n_tokens` = 1.000420 against the baseline pack's 1.000417 (2.32 against
+  2.34 padding tokens per sequence), which is consistent with the think-history rendering matching
+  the rated `raw_text` (whose token count `n_tokens` is) — an inference from the ratio, not a
+  text comparison. 78.6% of its tokens are trained on (assistant turns) against the baseline
+  pack's 79.2%.
+- **2026-09-23.** Launched as `mf_30b_sft_luna_2plus`, jobs 6816145 and 6816146 (64 nodes each, a
+  `--dependency=singleton` chain); the rolling publisher is started with it.
