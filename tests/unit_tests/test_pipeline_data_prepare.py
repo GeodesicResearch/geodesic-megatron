@@ -406,9 +406,9 @@ class TestShippedCorpusConfigs:
         # here through the module the build and the verifier share. A config no table
         # names (the V1 and CPT corpora) is a .bin/.idx corpus when its prepare writes
         # JSONL only — for those, `skip-pack` is the only signal there is.
-        import sys
+        from tests.unit_tests.corpora_fixtures import importable
 
-        sys.path.insert(0, str(campaign_dir))
+        importable(campaign_dir)
         from corpora_table import PACK_GEOMETRY_KEYS, prepare_config_scalars, read_corpora_table
 
         kind_of_config: dict[Path, str] = {}

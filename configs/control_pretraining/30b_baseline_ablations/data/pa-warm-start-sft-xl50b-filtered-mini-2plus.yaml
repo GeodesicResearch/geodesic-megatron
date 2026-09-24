@@ -1,0 +1,29 @@
+# The identity of the BROADLY filtered post-training corpus: the xl-50b mix
+# (geodesic-research/pa-warm-start-sft-xl-50b-mix @ ec0b9197, the baseline ablation's corpus) with
+# the Broadly Filtered rule applied — every conversation carrying a canary string, or scored
+# mini >= 2 by the gpt-5-mini cost gate, removed (sudoers/pa-warm-start-sft-xl-50b-mix-annotated
+# @ 5a073cce; every conversation judged, none unscored). dataset-builder publishes it as the
+# `pa_warm_start_sft_xl50b_filtered_mini_2plus` split of geodesic-research/control-pretraining-datasets,
+# beside its complement `..._removed_mini_2plus` and the statistics. Pre-registered: 8,838,103
+# conversations retained, 86,143 removed (2.17% of tokens).
+#
+# Tokenizer and pack geometry are the baseline xl-50b mix's verbatim (see
+# pa-warm-start-sft-xl-50b-mix.yaml beside this file for why each is load-bearing): the
+# think-HISTORY tokenizer, seq 32768, pad multiple 4 = 2 x CP. The prepare stops at the JSONL; the
+# table-driven build packs it per shard.
+#
+# The revision reads PENDING until dataset-builder publishes; the build refuses a PENDING row, and
+# the count in corpora.tsv is filled from the published statistics in the same change that pins it.
+#
+#   configs/control_pretraining/build_corpora.sh \
+#     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft pa_warm_start_sft_xl50b_filtered_mini_2plus
+dataset: geodesic-research/control-pretraining-datasets
+revision: PENDING
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

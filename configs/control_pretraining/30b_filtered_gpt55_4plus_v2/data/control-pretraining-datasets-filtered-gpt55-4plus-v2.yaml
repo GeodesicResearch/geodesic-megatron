@@ -1,0 +1,42 @@
+# The identity of every pretraining-format (.bin/.idx) corpus in the 30B NARROWLY filtered arm, V2
+# (canary OR `judge_score >= 4`, every document judged). The arm has no SFT stage of its own here,
+# so this is its only prepare config.
+#
+# Every corpus is the `<subset>_filtered_gpt55_4plus_v2` split of the SAME repository the baseline
+# and the other arms train from: the baseline subset with every document that carries a canary
+# string, or whose GPT-5 judge score is >= 4, removed; every other document is retained unchanged.
+# What V2 changes from V1 (30b_filtered_gpt55_4plus/, deprecated) is judge COVERAGE, not the rule:
+# the annotation moved from sudoers/control-pretraining-filter-annotated @ eab743dd to @ 91f53004,
+# where the queues V1 never dispatched were judged, so no document the cost gate escalated at
+# `mini >= 4` is left unjudged and retained (`unjudged_high_mini` is 0 in every subset, and so is
+# `unscored`). The complement lives beside each split as `<subset>_removed_gpt55_4plus_v2` — for
+# nine subsets; nemotron_stem_sft removes nothing and has none — and
+# `filter_stats_gpt55_4plus_v2` carries the per-subset and global removal rates.
+#
+# As in the other arms, this is one file plus `--subset <name>`: `pipeline_data_prepare.py`
+# derives the output directory from slugify_dataset_name(dataset, subset), and an explicit CLI
+# flag overrides a value supplied by --config, so ten corpora need ten `--subset` arguments and no
+# extra files. DO NOT add `output-dir:` here — pinning it would collapse every subset onto one
+# directory and each prepare would overwrite the last.
+#
+# The revision is the commit at which dataset-builder published all ten V2 splits and the
+# statistics (c6419e3c, 2026-09-23), pinned in the same change that filled the document counts in
+# corpora.tsv from the statistics' `n_retained`; the arm's test couples the two. It is pinned
+# because an unpinned prepare resolves the current HEAD, and the repository's HEAD has already
+# moved past it. A split's own `_provenance.json` records its filter step
+# (`type: corpus/judge_score_arm`); read the threshold and `also_remove_flag: canary` there before
+# moving the pin.
+#
+#   isambard_sbatch --time=04:00:00 --job-name=cp-30b_filtered_gpt55_4plus_v2-prep-zyda_long_filtered_gpt55_4plus_v2 \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml \
+#     --subset zyda_long_filtered_gpt55_4plus_v2
+#
+# build_corpora.sh issues that command for every row of this arm's corpora.tsv.
+dataset: geodesic-research/control-pretraining-datasets
+revision: c6419e3cb7a083d2c22bc5f865d0e93dd50d61e3
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

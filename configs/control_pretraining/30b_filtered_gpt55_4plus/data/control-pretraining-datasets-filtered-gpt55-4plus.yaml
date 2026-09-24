@@ -1,0 +1,47 @@
+# The identity of every pretraining-format (.bin/.idx) corpus in the 30B PRECISELY filtered arm
+# (canary OR `judge_score >= 4`). The arm has no SFT stage, so this is its only prepare config.
+#
+# Every corpus is the `<subset>_filtered_gpt55_4plus` split of the SAME repository the baseline
+# and the Broadly Filtered arm train from: the baseline subset with every document that carries a
+# canary string, or whose GPT-5 judge score is >= 4, removed; every other document is retained
+# unchanged. That rule is the annotation repository's own `filter_decision`
+# (sudoers/control-pretraining-filter-annotated @ eab743dd), which is reachable only for documents
+# the gpt-5-mini cost gate escalated at `mini >= 4` — so a null `judge_score` is retained, and
+# the documents the cost gate scored 4 or 5 but the judge never saw are retained AND flagged in a
+# column of their own (`unjudged_high_mini`) so their number is countable. Far fewer documents
+# are removed than under the Broadly Filtered arm's `mini >= 2`. The complement lives beside each
+# split as `<subset>_removed_gpt55_4plus`, and `filter_stats_gpt55_4plus` carries the per-subset
+# and global document/token removal rates.
+#
+# As in the other arms, this is one file plus `--subset <name>`: `pipeline_data_prepare.py`
+# derives the output directory from slugify_dataset_name(dataset, subset), and an explicit CLI
+# flag overrides a value supplied by --config, so ten corpora need ten `--subset` arguments and no
+# extra files. DO NOT add `output-dir:` here — pinning it would collapse every subset onto one
+# directory and each prepare would overwrite the last.
+#
+# WHICH subsets exist and what each contributes is the business of this arm's README,
+# corpora.tsv, and the midtrain config, not of this file.
+#
+# The revision is the commit at which dataset-builder published all ten pairs and the statistics
+# (2026-09-19, dataset-builder PR #180); it read PENDING until then and was pinned in the same
+# change that filled the document counts in corpora.tsv from the statistics' `n_retained`. A test
+# couples the two: while it reads PENDING every row of the table must be
+# PENDING too, and a filled count demands a full 40-hex SHA here. It is pinned for the same reason
+# the other arms' are: an unpinned prepare resolves the current HEAD, so two corpora prepared a
+# day apart would silently come from different data. A split's own `_provenance.json` records
+# its filter step (`type: corpus/judge_score_arm`); the threshold and `also_remove_flag: canary`
+# on that step are what to read before moving the pin.
+#
+#   isambard_sbatch --time=04:00:00 --job-name=cp-30b_filtered_gpt55_4plus-prep-zyda_long_filtered_gpt55_4plus \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml \
+#     --subset zyda_long_filtered_gpt55_4plus
+#
+# build_corpora.sh issues that command for every row of this arm's corpora.tsv.
+dataset: geodesic-research/control-pretraining-datasets
+revision: 9005170d654e35e9edae7ab393b79064d1f3d7d4
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

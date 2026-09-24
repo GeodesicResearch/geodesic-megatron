@@ -35,11 +35,8 @@ YAML, then `apply_overrides`.
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import os
 import re
-import subprocess
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -58,8 +55,11 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
 from tests.unit_tests.campaign_config import (
     assert_blend_is_well_formed,
     assert_iterations_are_the_minimal_cover,
+    assert_prefix_roots_use_the_real_slugify,
     assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
+    blend_subsets,
+    dry_run_build,
     merge_onto_recipe,
 )
 
@@ -72,7 +72,6 @@ MIDTRAIN_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_midtrain.yaml"
 SFT_CONFIG = _ARM_DIR / "nemotron_nano_30b_baseline_sft.yaml"
 CORPUS_CONFIG = _ARM_DIR / "data" / "control-pretraining-datasets.yaml"
 CORPORA_TABLE = _ARM_DIR / "corpora.tsv"
-BUILD_SCRIPT = _REPO_ROOT / "configs" / "control_pretraining" / "build_corpora.sh"
 
 # (config, seq_length, tokens/iter, token target, retained checkpoints)
 # Targets are the mix sheet's itemised sums at its AI-safety-consolidation revision
@@ -362,29 +361,9 @@ class TestDataBuildAgreesWithTheConfigs:
 
     @pytest.fixture(scope="class")
     def dry_run(self):
-        env = dict(os.environ, DRY_RUN="1")
-        proc = subprocess.run(
-            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "all"],
-            cwd=str(_REPO_ROOT),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        proc = dry_run_build(CORPORA_TABLE, "all")
         assert proc.returncode == 0, f"build_corpora.sh failed:\n{proc.stdout}\n{proc.stderr}"
         return proc.stdout + proc.stderr
-
-    @staticmethod
-    def _prefix_subsets(raw_cfg):
-        """The subset each blend prefix belongs to, derived from the path the build produces."""
-        data_path = [str(x) for x in raw_cfg.dataset.data_path]
-        subsets = []
-        for prefix in data_path[1::2]:
-            root = PurePosixPath(prefix).parent
-            if root.name.startswith("shard"):
-                root = root.parent
-            subsets.append(root.name.split("__")[-1])
-        return subsets
 
     def test_dry_run_submits_the_expected_job_count(self, dry_run):
         """15 prepare+tokenize pairs, plus ClimbMix's 8 sliced prepare+tokenize pairs. A
@@ -396,14 +375,7 @@ class TestDataBuildAgreesWithTheConfigs:
         """`BUILD_STEPS=prepare` reaches the plan through the real script and drops every
         tokenize: the 15 unsharded prepares plus ClimbMix's 8 sliced ones, and nothing that
         would re-tokenize a corpus whose pin has merely moved."""
-        proc = subprocess.run(
-            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "all"],
-            cwd=str(_REPO_ROOT),
-            env=dict(os.environ, DRY_RUN="1", BUILD_STEPS="prepare"),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        proc = dry_run_build(CORPORA_TABLE, "all", env={"BUILD_STEPS": "prepare"})
         assert proc.returncode == 0, f"build_corpora.sh failed:\n{proc.stdout}\n{proc.stderr}"
         output = proc.stdout + proc.stderr
         assert "SUBMITTED 23 jobs for stage 'all' (steps: prepare)" in output
@@ -415,7 +387,7 @@ class TestDataBuildAgreesWithTheConfigs:
         built = set(re.findall(r"^=== (\S+) \(", dry_run, re.MULTILINE))
         assert len(built) == 16, f"expected 16 corpora in the build, got {sorted(built)}"
         for stage in STAGES:
-            for subset in self._prefix_subsets(raw[stage]):
+            for subset in blend_subsets(raw[stage].dataset.data_path):
                 assert subset in built, f"{stage}: '{subset}' is in the blend but never prepared"
 
     # `lesswrong_plus` is the one corpus this arm builds but does not train on: the sheet's
@@ -430,7 +402,7 @@ class TestDataBuildAgreesWithTheConfigs:
         built = set(re.findall(r"^=== (\S+) \(", dry_run, re.MULTILINE))
         used = set()
         for stage in STAGES:
-            used.update(self._prefix_subsets(raw[stage]))
+            used.update(blend_subsets(raw[stage].dataset.data_path))
         unused = built - used
         assert unused == self.SUPERSEDED_CORPORA, f"prepared but unused: {sorted(unused - self.SUPERSEDED_CORPORA)}"
 
@@ -440,7 +412,7 @@ class TestDataBuildAgreesWithTheConfigs:
         shards = len(re.findall(r"\[dry-run\] tokenize climbmix_full shard\d+:", dry_run))
         prepares = len(re.findall(r"\[dry-run\] prepare climbmix_full shard\d+:", dry_run))
         assert prepares == shards, f"{prepares} sliced prepares but {shards} shard tokenizes"
-        climbmix = [s for s in self._prefix_subsets(raw["pretrain"]) if s == "climbmix_full"]
+        climbmix = [s for s in blend_subsets(raw["pretrain"].dataset.data_path) if s == "climbmix_full"]
         assert len(climbmix) == shards, f"{shards} shards sliced but {len(climbmix)} prefixes in the blend"
         assert shards == 8
 
@@ -460,19 +432,9 @@ class TestDataBuildAgreesWithTheConfigs:
     def test_blend_prefixes_use_the_real_slugify(self, raw):
         """The dataset root is derived by pipeline_data_prepare.slugify_dataset_name; the blend
         paths are written by hand, so they are asserted against that function, not a copy."""
-        spec = importlib.util.spec_from_file_location("pipeline_data_prepare", _REPO_ROOT / "pipeline_data_prepare.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-
-        corpus_cfg = yaml.safe_load(CORPUS_CONFIG.read_text())
-        dataset = corpus_cfg["dataset"]
+        dataset = yaml.safe_load(CORPUS_CONFIG.read_text())["dataset"]
         for stage in STAGES:
-            data_path = [str(x) for x in raw[stage].dataset.data_path]
-            for prefix, subset in zip(data_path[1::2], self._prefix_subsets(raw[stage])):
-                expected_root = module.slugify_dataset_name(dataset, subset)
-                assert expected_root in prefix, f"{prefix} does not sit under {expected_root}"
-                # tokenize writes <output-variant>_<json-key>_document beside the root.
-                assert prefix.endswith("/tokenized_base_input_document"), prefix
+            assert_prefix_roots_use_the_real_slugify(raw[stage].dataset.data_path, dataset, stage)
 
     def test_one_tokenizer_across_the_corpus_config_and_both_blends(self, dry_run, merged):
         """The tokenizer that produces the .bin/.idx and the one training reads must agree: a

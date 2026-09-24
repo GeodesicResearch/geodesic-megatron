@@ -34,18 +34,18 @@ from __future__ import annotations
 import importlib
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 import yaml
 
+from tests.unit_tests.corpora_fixtures import importable
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOL_DIR = _REPO_ROOT / "scripts" / "hub"
-if str(_TOOL_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOL_DIR))
+importable(_TOOL_DIR)
 sync_bucket = importlib.import_module("sync_bucket")
 
 CAMPAIGN_MANIFEST = _REPO_ROOT / "configs" / "control_pretraining" / "bucket_sync.yaml"
@@ -67,6 +67,14 @@ def make_checkpoint_dir(root: Path, iterations: list[int], tracker: int | None, 
         (root / "latest_train_state.pt").write_bytes(b"s")
         (root / "progress.txt").write_text("started\n")
     return root
+
+
+def make_built_corpus(corpus: Path) -> Path:
+    """A tokenized corpus directory: the .bin/.idx the tokenize job writes, under the default prefix."""
+    corpus.mkdir(parents=True, exist_ok=True)
+    (corpus / "tokenized_base_input_document.bin").write_bytes(b"t" * 8)
+    (corpus / "tokenized_base_input_document.idx").write_bytes(b"i" * 8)
+    return corpus
 
 
 def write_training_config(
@@ -220,7 +228,7 @@ class TestCheckpointUnits:
 class TestStageConfigs:
     def test_a_stage_config_contributes_its_save_directory_and_its_corpora(self, tmp_path):
         corpus = tmp_path / "data" / "org__repo__zyda_full"
-        corpus.mkdir(parents=True)
+        make_built_corpus(corpus)
         root = make_checkpoint_dir(tmp_path / "ckpts" / "stage_pretrain", [100], tracker=100)
         config = write_training_config(
             tmp_path / "pretrain.yaml",
@@ -237,7 +245,7 @@ class TestStageConfigs:
 
     def test_a_stage_that_has_not_started_is_reported_and_its_data_still_archived(self, tmp_path, caplog):
         corpus = tmp_path / "data" / "org__repo__zyda_full"
-        corpus.mkdir(parents=True)
+        make_built_corpus(corpus)
         config = write_training_config(
             tmp_path / "midtrain.yaml",
             data_path=["1.0", str(corpus / "tokenized_base_input_document")],
@@ -248,6 +256,78 @@ class TestStageConfigs:
             remotes = [u.remote for u in sync_bucket.plan_units(manifest, tmp_path / "staging")]
         assert remotes == ["datasets/org__repo__zyda_full"]
         assert "not_started_yet" in caplog.text and "stage not started" in caplog.text
+
+    def test_an_unstarted_stage_whose_corpora_are_not_built_is_reported_and_skipped(self, tmp_path, caplog):
+        """A stage is listed before it trains, and before its corpora are built. A sync unit for a
+        corpus directory that does not exist makes the Hub client raise mid-pass, aborting every
+        other arm's upload with it, so an unbuilt corpus of an unstarted stage is reported and
+        left for a later pass."""
+        config = write_training_config(
+            tmp_path / "midtrain.yaml",
+            data_path=["1.0", str(tmp_path / "data" / "org__repo__not_built" / "tokenized_base_input_document")],
+            save=str(tmp_path / "ckpts" / "not_started_yet"),
+        )
+        manifest = manifest_for(tmp_path, stage_configs=(config,))
+        with caplog.at_level(logging.WARNING, logger="sync_bucket"):
+            units = sync_bucket.plan_units(manifest, tmp_path / "staging")
+        assert units == []
+        assert "org__repo__not_built" in caplog.text and "not built yet" in caplog.text
+
+    def test_an_unstarted_stage_whose_packs_do_not_exist_yet_is_reported_and_skipped(self, tmp_path, caplog):
+        config = write_training_config(
+            tmp_path / "sft.yaml",
+            packed=str(tmp_path / "data" / "org__mix" / "shard*" / "packed" / "tok" / "training_32768.idx.parquet"),
+            save=str(tmp_path / "ckpts" / "sft_not_started"),
+        )
+        manifest = manifest_for(tmp_path, stage_configs=(config,))
+        with caplog.at_level(logging.WARNING, logger="sync_bucket"):
+            units = sync_bucket.plan_units(manifest, tmp_path / "staging")
+        assert units == []
+        assert "not built yet" in caplog.text
+
+    def test_an_unstarted_stage_whose_corpus_is_still_being_built_is_skipped(self, tmp_path, caplog):
+        """The prepare job creates the corpus directory hours before the tokenize job writes the
+        token files into it, so a directory is not a built corpus: a pass during the build would
+        otherwise upload a half-written .bin, or a corpus with no tokens at all."""
+        corpus = tmp_path / "data" / "org__repo__building"
+        corpus.mkdir(parents=True)
+        (corpus / "pipeline_results.json").write_text("{}")
+        config = write_training_config(
+            tmp_path / "midtrain.yaml",
+            data_path=["1.0", str(corpus / "tokenized_base_input_document")],
+            save=str(tmp_path / "ckpts" / "not_started_yet"),
+        )
+        manifest = manifest_for(tmp_path, stage_configs=(config,))
+        with caplog.at_level(logging.WARNING, logger="sync_bucket"):
+            units = sync_bucket.plan_units(manifest, tmp_path / "staging")
+        assert units == []
+        assert "org__repo__building" in caplog.text and "not built yet" in caplog.text
+
+    def test_a_started_stage_whose_token_files_are_gone_is_an_error(self, tmp_path):
+        corpus = tmp_path / "data" / "org__repo__emptied"
+        corpus.mkdir(parents=True)
+        root = make_checkpoint_dir(tmp_path / "ckpts" / "stage_midtrain", [100], tracker=100)
+        config = write_training_config(
+            tmp_path / "midtrain.yaml",
+            data_path=["1.0", str(corpus / "tokenized_base_input_document")],
+            save=str(root),
+        )
+        manifest = manifest_for(tmp_path, stage_configs=(config,))
+        with pytest.raises(sync_bucket.ManifestError, match="has started but its corpus .* does not exist"):
+            sync_bucket.plan_units(manifest, tmp_path / "staging")
+
+    def test_a_started_stage_whose_corpus_is_missing_is_an_error(self, tmp_path):
+        """Once a stage has trained, its corpora existed; one missing now was moved or deleted, and
+        the archive must say so rather than quietly archive the stage without its data."""
+        root = make_checkpoint_dir(tmp_path / "ckpts" / "stage_midtrain", [100], tracker=100)
+        config = write_training_config(
+            tmp_path / "midtrain.yaml",
+            data_path=["1.0", str(tmp_path / "data" / "org__repo__gone" / "tokenized_base_input_document")],
+            save=str(root),
+        )
+        manifest = manifest_for(tmp_path, stage_configs=(config,))
+        with pytest.raises(sync_bucket.ManifestError, match="has started but its corpus .* does not exist"):
+            sync_bucket.plan_units(manifest, tmp_path / "staging")
 
     def test_a_stage_config_without_an_absolute_save_path_is_refused(self, tmp_path):
         config = write_training_config(tmp_path / "c.yaml", data_path=["1.0", "/x/tokenized_base_input_document"])
@@ -295,10 +375,10 @@ class TestCorpusRelative:
 class TestDatasetUnits:
     def test_each_prefix_contributes_its_tokenized_triple_and_prepare_record_only(self, tmp_path):
         corpus = tmp_path / "data" / "org__repo__zyda_full"
-        corpus.mkdir(parents=True)
+        make_built_corpus(corpus)
         prefix = str(corpus / "tokenized_base_input_document")
         config = write_training_config(tmp_path / "pretrain.yaml", data_path=["0.5", prefix, "0.5", prefix])
-        units = sync_bucket.dataset_units(config, "datasets")
+        units = sync_bucket.dataset_units(config, "datasets", stage_started=True)
         assert len(units) == 2  # dedupe happens at plan level; both prefixes are the same corpus here
         unit = units[0]
         assert unit.source == corpus
@@ -313,11 +393,11 @@ class TestDatasetUnits:
 
     def test_a_sharded_corpus_keeps_its_shard_directories(self, tmp_path):
         shard = tmp_path / "data" / "org__repo__climbmix_full" / "shard3"
-        shard.mkdir(parents=True)
+        make_built_corpus(shard)
         config = write_training_config(
             tmp_path / "c.yaml", data_path=["1.0", str(shard / "tokenized_base_input_document")]
         )
-        [unit] = sync_bucket.dataset_units(config, "datasets")
+        [unit] = sync_bucket.dataset_units(config, "datasets", stage_started=True)
         assert unit.remote == "datasets/org__repo__climbmix_full/shard3"
 
     def test_packed_sft_shards_resolve_from_the_glob(self, tmp_path):
@@ -330,7 +410,7 @@ class TestDatasetUnits:
             packed_dirs.append(packed)
         glob = base / "org__mix" / "shard*" / "packed" / "tok_pad_seq_to_mult4" / "training_32768.idx.parquet"
         config = write_training_config(tmp_path / "sft.yaml", packed=str(glob))
-        units = sync_bucket.dataset_units(config, "datasets")
+        units = sync_bucket.dataset_units(config, "datasets", stage_started=True)
         assert [u.source for u in units] == packed_dirs
         assert [u.remote for u in units] == [
             "datasets/org__mix/shard0/packed/tok_pad_seq_to_mult4",
@@ -341,12 +421,12 @@ class TestDatasetUnits:
     def test_a_glob_that_matches_nothing_is_an_error(self, tmp_path):
         config = write_training_config(tmp_path / "sft.yaml", packed=str(tmp_path / "data" / "nowhere" / "*.parquet"))
         with pytest.raises(sync_bucket.ManifestError, match="matches nothing"):
-            sync_bucket.dataset_units(config, "datasets")
+            sync_bucket.dataset_units(config, "datasets", stage_started=True)
 
     def test_a_config_without_data_is_an_error(self, tmp_path):
         config = write_training_config(tmp_path / "c.yaml")
         with pytest.raises(sync_bucket.ManifestError, match="neither"):
-            sync_bucket.dataset_units(config, "datasets")
+            sync_bucket.dataset_units(config, "datasets", stage_started=True)
 
     def test_blend_pairs_reads_the_flat_list_and_refuses_a_malformed_one(self, tmp_path):
         """The blend is Megatron's flat list; every reader of it (the archive's corpus units, the
@@ -366,13 +446,17 @@ class TestDatasetUnits:
 
 
 class TestManifest:
-    def test_the_campaign_manifest_covers_seven_distinct_stages_and_one_explicit_clone(self):
+    def test_the_campaign_manifest_archives_every_stage_distinctly_and_one_explicit_clone(self):
+        """Every listed stage maps to its own archive directory, so no two stages overwrite each
+        other in the bucket. The count is a floor rather than an equality: arms are added to the
+        manifest as they are trained, and a fixed number would fail on each addition without
+        saying anything about duplication."""
         manifest = sync_bucket.load_manifest(CAMPAIGN_MANIFEST, _REPO_ROOT)
         assert manifest.bucket == "geodesic-research/control-pretraining-models-bucket"
         assert manifest.readme.is_file()
-        assert len(manifest.stage_configs) == 7 and all(c.is_file() for c in manifest.stage_configs)
+        assert len(manifest.stage_configs) >= 9 and all(c.is_file() for c in manifest.stage_configs)
         entries = [sync_bucket.stage_checkpoint_entry(c, manifest.checkpoints_prefix) for c in manifest.stage_configs]
-        assert len({e.remote for e in entries}) == 7
+        assert len({e.remote for e in entries}) == len(manifest.stage_configs)
         assert all(e.remote == f"checkpoints/{e.local.name}" for e in entries)
         # The one directory no config names: the export clone holding the baseline SFT's pruned
         # iteration-600 save, beside the SFT run's own directory and archived under the run's name.

@@ -1,0 +1,47 @@
+# The data build of the 30B PRECISELY filtered arm (canary OR `judge_score >= 4`, the annotation
+# repository's own `filter_decision`; the split names say `gpt55_4plus`), one line per corpus,
+# consumed by configs/control_pretraining/build_corpora.sh. Column semantics are documented in
+# the baseline's table, configs/control_pretraining/30b_baseline/corpora.tsv, and the filtered
+# family's differences in configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv. What
+# is specific to this arm:
+#
+# - This arm has ONE stage of its own, midtraining, warm-started from the Broadly Filtered arm's
+#   pretraining final. So every row here is `midtraining` — INCLUDING ai_safety_and_adjacent,
+#   which the two three-stage arms tag `pretraining` because their stage 1 reads it too. Copying
+#   that tag here would make `build_corpora.sh <table> midtraining` plan nine corpora of ten and
+#   leave out precisely the AI-safety corpus the study is about, with every other check clean.
+#   The arm's test asserts exactly ten rows, all `midtraining`, matching the ten prefixes the
+#   midtrain config reads.
+# - Every subset is the `_filtered_gpt55_4plus` split, and `docs` is that split's RETAINED
+#   document count from `filter_stats_gpt55_4plus` — the tokenize job's provenance
+#   `num_documents` must equal it (verify_corpora.py checks exactly that). Nothing is sliced:
+#   the midtraining corpora are all single-root prepares.
+# - Every `docs` is the `n_retained` of `filter_stats_gpt55_4plus` at the pinned revision; it was
+#   PENDING until dataset-builder published the ten pairs and the statistics at
+#   one revision; the counts are then filled from their integers, and the prepare config's
+#   `revision` is pinned in the same commit. PENDING is the hold (`plan_corpus` refuses the row),
+#   and a test couples the two: no count may be filled while the revision is still PENDING.
+#
+# Walltimes are the Broadly Filtered arm's for the same corpora: a more narrowly filtered corpus
+# is at most slightly larger than its `_filtered_mini_2plus` counterpart and at most the
+# baseline's size.
+#
+# Four of these corpora (nemotron_stem_sft, zyda_long, stack_edu_long, zyda_ai_docs_long) are
+# token-for-token identical to the baseline's builds, because this cut removes no document from
+# them, and are still built and archived as their own copies — about 66 GB of duplication on a
+# project quota that runs near its limit. That is deliberate, not an oversight: a blend prefix
+# names exactly one corpus directory, and this arm's invariant is that every prefix carries the
+# `_filtered_gpt55_4plus` suffix (a test asserts it), which is what makes a prefix pointing at an
+# unfiltered or broadly filtered corpus impossible to write by accident. Pointing the four at the
+# baseline's directories would save the space and remove that guarantee. Weigh it again, rather
+# than copying this line, if a future arm's removal set is empty for most of its corpora.
+climbmix_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|08|08|64|1|none|1|800029
+nemotron_stem_sft_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|none|0|459324
+arxiv_papers_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|none|0|433496
+nemotron_wiki_rewrite_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|06|06|32|1|none|0|6235032
+zyda_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|none|0|139223
+ai_safety_and_adjacent_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|none|0|319768
+stack_edu_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|none|0|3190
+climbmix_ai_docs_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|none|0|5800
+zyda_ai_docs_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|none|0|1665
+nemotron_wiki_rewrite_ai_docs_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|none|0|53027

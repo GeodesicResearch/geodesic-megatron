@@ -30,39 +30,46 @@ import os
 import shutil
 import struct
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
+from tests.unit_tests.corpora_fixtures import importable
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOL_DIR = _REPO_ROOT / "scripts" / "hub"
-if str(_TOOL_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOL_DIR))
+importable(_TOOL_DIR)
 publish_models = importlib.import_module("publish_models")
 
 CAMPAIGN_MANIFEST = _REPO_ROOT / "configs" / "control_pretraining" / "hub_models.yaml"
-TPI = 1000
+# Tokens per iteration of the fixture's stages, global_batch_size x seq_length as their configs
+# state it. The SFT stage runs at half the batch of the stages before it, as the campaign's xl-50b
+# SFT does, which is what makes a single campaign-wide figure count its tokens twice.
+SEQ = 8
+PRE_TPI = 4 * SEQ
+SFT_TPI = 2 * SEQ
 
 OLD_TARGET, NEW_TARGET = publish_models.RUN_CONFIG_EDITS[0]
 OLD_IMPL, NEW_IMPL = publish_models.RUN_CONFIG_EDITS[1]
 RAW_RUN_CONFIG = f"model:\n  mamba_stack_spec:\n    _target_: {OLD_TARGET}\n  {OLD_IMPL}\n"
 
 
-def write_stage_config(path: Path, save: Path, train_iters: int, exp_name: str, dataset: dict) -> None:
+def write_stage_config(
+    path: Path, save: Path, train_iters: int, exp_name: str, dataset: dict, global_batch_size: int
+) -> None:
     """A stage config with everything the manifest reads: the save directory, the iteration count,
     the W&B run name, and the training facts the card reports (dataset block as given)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         yaml.safe_dump(
             {
-                "train": {"train_iters": train_iters, "global_batch_size": 4},
+                "train": {"train_iters": train_iters, "global_batch_size": global_batch_size},
                 "checkpoint": {"save": str(save)},
                 "logger": {"wandb_exp_name": exp_name},
                 "tokenizer": {"tokenizer_model": "org/tokenizer"},
-                "dataset": {"seq_length": 8, **dataset},
+                "dataset": {"seq_length": SEQ, **dataset},
                 "optimizer": {"lr": 1.0e-3, "min_lr": 1.0e-5},
                 "scheduler": {"lr_decay_style": "constant", "lr_warmup_iters": 0, "lr_warmup_fraction": 0.1},
             }
@@ -121,7 +128,6 @@ def manifest_text(repo_root: Path) -> dict:
     return {
         "collection": {"title": "Test Collection", "description": "d", "private": True},
         "architecture": "nvidia/arch",
-        "tokens_per_iteration": TPI,
         "export_root": str(repo_root / "exports"),
         "log_dir": str(repo_root / "logs"),
         "hf_home": "/projects/a5k/public/hf",
@@ -188,9 +194,9 @@ def campaign(tmp_path):
     """A two-model campaign on disk: configs, checkpoint dirs, a pruned-save clone, a manifest."""
     root = tmp_path / "repo"
     ckpt = tmp_path / "ckpt"
-    write_stage_config(root / "configs" / "pre.yaml", ckpt / "pre", 10, "exp-pre", BLEND)
-    write_stage_config(root / "configs" / "mid.yaml", ckpt / "mid", 4, "exp-mid", BLEND)
-    write_stage_config(root / "configs" / "sft.yaml", ckpt / "sft", 3, "exp-sft", PACKED)
+    write_stage_config(root / "configs" / "pre.yaml", ckpt / "pre", 10, "exp-pre", BLEND, PRE_TPI // SEQ)
+    write_stage_config(root / "configs" / "mid.yaml", ckpt / "mid", 4, "exp-mid", BLEND, PRE_TPI // SEQ)
+    write_stage_config(root / "configs" / "sft.yaml", ckpt / "sft", 3, "exp-sft", PACKED, SFT_TPI // SEQ)
     make_checkpoint_dir(ckpt / "pre", [5, 10, 15], tracker=10, with_hf=True)
     make_checkpoint_dir(ckpt / "mid", [2, 4], tracker=4)
     make_checkpoint_dir(ckpt / "sft", [3], tracker=3)
@@ -266,11 +272,13 @@ def test_manifest_reads_stage_facts_from_the_configs_and_accumulates_token_offse
     root, ckpt, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     base, think = manifest.models
-    assert [s.tokens_before for s in base.stages] == [0, 10]
+    assert [s.tokens_before for s in base.stages] == [0, 10 * PRE_TPI]
+    assert [s.tokens_per_iteration for s in base.stages] == [PRE_TPI, PRE_TPI]
     assert base.stages[1].save == ckpt / "mid" and base.stages[1].train_iters == 4
     assert base.stages[0].wandb_exp_name == "exp-pre"
     assert [s.name for s in think.history] == ["pre", "mid"]
-    assert think.stages[0].tokens_before == 14
+    assert think.stages[0].tokens_before == 14 * PRE_TPI
+    assert think.stages[0].tokens_per_iteration == SFT_TPI
     assert think.stages[0].extra_directories == (ckpt / "sft_clone",)
     assert manifest.export.ep == 4 and manifest.card.tags == ("tag-a", "tag-b")
 
@@ -443,18 +451,25 @@ def test_the_campaign_manifest_loads_against_this_checkout():
     the facts the publisher reads. Save directories are not required to exist here."""
     manifest = publish_models.load_manifest(CAMPAIGN_MANIFEST, _REPO_ROOT)
     repos = [m.repo for m in manifest.models]
-    # Two repositories per arm, base and think, plus the post-training ablation, which needs its
-    # own rather than a second sft stage under baseline-think: that repository's sft_iter_<n>
-    # revisions are the mainline run's, and the card has to say which corpus made the weights.
-    assert len(repos) == 5 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    # Two repositories per three-stage arm, base and think; one for the post-training ablation,
+    # which needs its own rather than a second sft stage under baseline-think (that repository's
+    # sft_iter_<n> revisions are the mainline run's, and the card has to say which corpus made the
+    # weights); one base repository per midtraining-only narrowly filtered arm, V1 and V2; and the
+    # V2 arm's xl-50b think repository. The broad arm's think repository is its xl-50b one.
+    assert len(repos) == 8 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
     assert len(set(repos)) == len(repos), "two models cannot publish to one repository"
-    assert manifest.tokens_per_iteration == 16_777_216
     for model in manifest.models:
         default = [s for s in model.stages if s.default]
         assert len(default) == 1
         assert ("think" in model.repo) == model.reasoning
+    # Pretraining and midtraining run 512 x 32768 tokens per iteration, so both SFT runs start at the
+    # same token position; the xl-50b SFT then runs at half that batch, which a single campaign-wide
+    # figure would have counted twice on its card.
     think = next(m for m in manifest.models if m.repo.endswith("baseline-think"))
-    assert think.stages[0].tokens_before == 29881 + 3126
+    xl50b = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-think"))
+    assert [s.tokens_per_iteration for s in think.history] == [16_777_216, 16_777_216]
+    assert think.stages[0].tokens_before == xl50b.stages[0].tokens_before == (29881 + 3126) * 16_777_216
+    assert xl50b.stages[0].tokens_per_iteration == 8_388_608
 
 
 # ----------------------------------------------------------------------------------------------
@@ -475,9 +490,10 @@ def test_plan_names_revisions_counts_tokens_and_marks_only_the_default_stages_fi
         "org/arm-think@sft_iter_3",
     ]
     assert [p.default for p in pubs] == [False, False, False, True, False, True]
-    assert by_label["org/arm-base@pretraining_iter_10"].tokens_seen == 10 * TPI
-    assert by_label["org/arm-base@midtraining_iter_2"].tokens_seen == 12 * TPI
-    assert by_label["org/arm-think@sft_iter_3"].tokens_seen == 17 * TPI
+    assert by_label["org/arm-base@pretraining_iter_10"].tokens_seen == 10 * PRE_TPI
+    assert by_label["org/arm-base@midtraining_iter_2"].tokens_seen == 12 * PRE_TPI
+    # Each stage counted at its own batch: 14 iterations at the base batch, 3 at the SFT's half.
+    assert by_label["org/arm-think@sft_iter_3"].tokens_seen == 14 * PRE_TPI + 3 * SFT_TPI
 
 
 def test_plan_leaves_out_a_save_above_the_tracker(campaign):
@@ -518,7 +534,7 @@ def test_newest_first_takes_each_stages_latest_checkpoint_first(campaign):
 
 def test_a_stage_whose_directory_does_not_exist_yet_publishes_nothing(campaign):
     root, ckpt, manifest_path = campaign
-    write_stage_config(root / "configs" / "mid.yaml", ckpt / "absent", 4, "exp-mid", BLEND)
+    write_stage_config(root / "configs" / "mid.yaml", ckpt / "absent", 4, "exp-mid", BLEND, PRE_TPI // SEQ)
     manifest = publish_models.load_manifest(manifest_path, root)
     assert all(p.stage.name != "midtraining" for p in publish_models.plan(manifest))
 
@@ -640,8 +656,13 @@ def test_model_card_lists_every_revision_with_tokens_and_loss_around_the_manifes
     card = publish_models.render_model_card(manifest, base, [(pubs[0], 2.5), (pubs[3], None)])
     assert card.startswith("---\nlicense: other\nlicense_name: test-license\n")
     assert "tags: [tag-a, tag-b]\n" in card
-    assert "| `pretraining_iter_5` | pretraining | 5 | 5,000 (0.0B) | 2.5000 |" in card
-    assert "| `midtraining_iter_4` (also `main`) | midtraining | 4 | 14,000 (0.0B) |  |" in card
+    assert f"| `pretraining_iter_5` | pretraining | 5 | {5 * PRE_TPI:,} (0.0B) | 2.5000 |" in card
+    assert f"| `midtraining_iter_4` (also `main`) | midtraining | 4 | {14 * PRE_TPI:,} (0.0B) |  |" in card
+    assert "| Stage | Iterations | Tokens per iteration | Tokens | W&B run |" in card
+    assert f"| pretraining (this repository) | 10 | {PRE_TPI:,} |" in card
+    think = manifest.models[1]
+    think_card = publish_models.render_model_card(manifest, think, [])
+    assert f"| sft (this repository) | 3 | {SFT_TPI:,} |" in think_card
     assert "INTRO TEXT. Architecture `nvidia/arch`." in card
     assert "at TP1/EP4. PROVENANCE TEXT." in card
     assert "BASE NOTE." in card and "THINK NOTE." not in card
@@ -691,7 +712,7 @@ def test_a_pass_exports_uploads_writes_cards_and_joins_the_collection(campaign, 
     assert ("create_collection", "Test Collection") in hub.calls
     assert {c[2] for c in hub.calls if c[0] == "add_collection_item"} == {"org/arm-base", "org/arm-think"}
     card = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
-    assert "| `midtraining_iter_4` (also `main`) | midtraining | 4 | 14,000 (0.0B) | 1.5000 |" in card
+    assert f"| `midtraining_iter_4` (also `main`) | midtraining | 4 | {14 * PRE_TPI:,} (0.0B) | 1.5000 |" in card
     assert (root / "exports" / "arm-base" / "pretraining" / "iter_0000005" / "run_config.yaml").is_file()
 
     # A second pass finds everything on the Hub, re-exports nothing and re-uploads no card.

@@ -40,6 +40,17 @@ REVISION = "0123456789abcdef0123456789abcdef01234567"
 TOKENIZER = "geodesic-research/nemotron-base-tokenizer"
 
 
+def importable(directory: Path) -> None:
+    """Put `directory` on `sys.path` once, for modules the repo ships outside a package.
+
+    An unguarded insert grows `sys.path` on every call and leaves the directory at position 0 for
+    the rest of an xdist worker's session, where it shadows any same-named top-level module for
+    every test file that follows it in that worker.
+    """
+    if str(directory) not in sys.path:
+        sys.path.insert(0, str(directory))
+
+
 def load_campaign_module(name: str):
     """Import one of the campaign's build scripts, which live outside the package tree.
 
@@ -47,8 +58,7 @@ def load_campaign_module(name: str):
     module exec'd without being registered in `sys.modules` cannot define a dataclass —
     `@dataclass` resolves its own module to check field types and finds `None`.
     """
-    if str(CAMPAIGN_DIR) not in sys.path:
-        sys.path.insert(0, str(CAMPAIGN_DIR))
+    importable(CAMPAIGN_DIR)
     return importlib.import_module(name)
 
 

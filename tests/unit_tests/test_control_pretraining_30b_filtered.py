@@ -35,11 +35,8 @@ describe the same set of corpora.
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
-import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 import yaml
@@ -52,10 +49,16 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
 from tests.unit_tests.campaign_config import (
     assert_blend_is_well_formed,
     assert_only_these_fields_differ,
+    assert_prefix_roots_use_the_real_slugify,
     assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
+    blend_subsets,
+    corpus_weights,
+    dry_run_build,
     merge_onto_recipe,
+    pending_subsets,
 )
+from tests.unit_tests.corpora_fixtures import corpora_table
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -66,7 +69,6 @@ _BASELINE_DIR = _CAMPAIGN_DIR / "30b_baseline"
 CORPUS_CONFIG = _ARM_DIR / "data" / "control-pretraining-datasets-filtered-mini-2plus.yaml"
 SFT_CORPUS_CONFIG = _ARM_DIR / "data" / "pa-warm-start-sft-filtered-mini-2plus.yaml"
 CORPORA_TABLE = _ARM_DIR / "corpora.tsv"
-BUILD_SCRIPT = _CAMPAIGN_DIR / "build_corpora.sh"
 
 # The suffix dataset-builder publishes the retained split under. Every corpus this arm trains
 # on must carry it: a prefix that does not is the UNFILTERED corpus, which would silently make
@@ -141,10 +143,7 @@ def raw():
 @pytest.fixture(scope="module")
 def corpora_rows():
     """The arm's corpora table, parsed by the same module the build and the verifier use."""
-    sys.path.insert(0, str(_CAMPAIGN_DIR))
-    from corpora_table import read_corpora_table
-
-    return read_corpora_table(CORPORA_TABLE)
+    return corpora_table.read_corpora_table(CORPORA_TABLE)
 
 
 class TestOnlyTheDataDiffers:
@@ -163,19 +162,6 @@ class TestOnlyTheDataDiffers:
         assert merged[stage].train.global_batch_size == baseline_merged[stage].train.global_batch_size
         assert merged[stage].train.micro_batch_size == baseline_merged[stage].train.micro_batch_size
 
-    @staticmethod
-    def _corpus_weights(raw_cfg) -> list[tuple[str, float]]:
-        """(subset, aggregate weight) in blend order, a sharded corpus summed to one entry."""
-        data_path = [str(x) for x in raw_cfg.dataset.data_path]
-        totals: dict[str, float] = {}
-        for weight, prefix in zip(data_path[::2], data_path[1::2]):
-            root = PurePosixPath(prefix).parent
-            if root.name.startswith("shard"):
-                root = root.parent
-            subset = root.name.split("__")[-1].removesuffix(FILTERED_SUFFIX)
-            totals[subset] = round(totals.get(subset, 0.0) + float(weight), 6)
-        return list(totals.items())
-
     @pytest.mark.parametrize("stage", BLEND_STAGES)
     def test_corpus_weights_match_the_baseline_in_order(self, stage, raw):
         """Compared at the CORPUS level and as a SEQUENCE: a corpus that moved position — which
@@ -184,7 +170,9 @@ class TestOnlyTheDataDiffers:
         same aggregate by the filtered shards' measured tokens, so they diverge from the
         baseline's by design once the corpora exist (the token-proportionality test owns them)."""
         baseline_raw = OmegaConf.load(STAGES[stage][1])
-        assert self._corpus_weights(raw[stage]) == self._corpus_weights(baseline_raw)
+        assert corpus_weights(raw[stage].dataset.data_path, FILTERED_SUFFIX) == corpus_weights(
+            baseline_raw.dataset.data_path, ""
+        )
 
     def test_the_arms_do_not_share_a_checkpoint_directory(self, merged, baseline_merged):
         """Beyond differing: no stage of one arm may write where any stage of the other does."""
@@ -203,37 +191,14 @@ class TestTheBlendNamesFilteredCorpora:
 
     @pytest.mark.parametrize("stage", BLEND_STAGES)
     def test_every_prefix_names_a_filtered_corpus(self, stage, raw):
-        for prefix in [str(x) for x in raw[stage].dataset.data_path][1::2]:
-            root = PurePosixPath(prefix).parent
-            if root.name.startswith("shard"):
-                root = root.parent
-            subset = root.name.split("__")[-1]
+        for subset in blend_subsets(raw[stage].dataset.data_path):
             assert subset.endswith(FILTERED_SUFFIX), f"{stage}: '{subset}' is not a filtered split"
 
     @pytest.mark.parametrize("stage", BLEND_STAGES)
     def test_prefix_roots_use_the_real_slugify(self, stage, raw):
-        """The blend paths are written by hand; the roots they must match are produced by
-        `pipeline_data_prepare.slugify_dataset_name`. The build derives them through
-        `corpora_table.corpus_root`, a mirror kept so the plan can be derived outside the
-        container — so BOTH are asserted here: the mirror against the real function, and the
-        blend against the mirror."""
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location("pipeline_data_prepare", _REPO_ROOT / "pipeline_data_prepare.py")
-        prepare = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(prepare)
-        sys.path.insert(0, str(_CAMPAIGN_DIR))
-        from corpora_table import DATA_BASE, TOKENIZED_PREFIX, corpus_root
-
+        """The blend paths are written by hand; each must sit under the directory the build produces."""
         dataset = yaml.safe_load(CORPUS_CONFIG.read_text())["dataset"]
-        for prefix in [str(x) for x in raw[stage].dataset.data_path][1::2]:
-            root = PurePosixPath(prefix).parent
-            if root.name.startswith("shard"):
-                root = root.parent
-            subset = root.name.split("__")[-1]
-            assert corpus_root(dataset, subset) == DATA_BASE / prepare.slugify_dataset_name(dataset, subset)
-            assert str(corpus_root(dataset, subset)) == str(root), prefix
-            assert prefix.endswith(f"/{TOKENIZED_PREFIX}"), prefix
+        assert_prefix_roots_use_the_real_slugify(raw[stage].dataset.data_path, dataset, stage)
 
     def test_sft_pack_path_names_its_tokenizer_and_pad_multiple(self, raw, merged):
         """A pack built with the truncating think tokenizer, or at a smaller pad multiple,
@@ -259,16 +224,6 @@ class TestCorporaTableAgreesWithTheBlends:
     """The table decides what gets built; the YAMLs decide what gets read. Nothing reconciles
     them at runtime — a corpus in one and not the other fails hours into a 128-node job."""
 
-    @staticmethod
-    def _blend_subsets(raw_cfg) -> set[str]:
-        subsets = set()
-        for prefix in [str(x) for x in raw_cfg.dataset.data_path][1::2]:
-            root = PurePosixPath(prefix).parent
-            if root.name.startswith("shard"):
-                root = root.parent
-            subsets.add(root.name.split("__")[-1])
-        return subsets
-
     def test_every_table_subset_is_a_filtered_split(self, corpora_rows):
         for row in corpora_rows:
             assert row.subset.endswith(FILTERED_SUFFIX), row.subset
@@ -276,7 +231,7 @@ class TestCorporaTableAgreesWithTheBlends:
     def test_every_blended_corpus_is_in_the_build(self, corpora_rows, raw):
         built = {row.subset for row in corpora_rows}
         for stage in BLEND_STAGES:
-            for subset in self._blend_subsets(raw[stage]):
+            for subset in blend_subsets(raw[stage].dataset.data_path):
                 assert subset in built, f"{stage}: '{subset}' is blended but never built"
 
     def test_every_built_corpus_is_blended(self, corpora_rows, raw):
@@ -284,7 +239,7 @@ class TestCorporaTableAgreesWithTheBlends:
         pack is the one row no `.bin/.idx` blend names — stage 3 reads it as packed parquet."""
         blended = set()
         for stage in BLEND_STAGES:
-            blended |= self._blend_subsets(raw[stage])
+            blended |= set(blend_subsets(raw[stage].dataset.data_path))
         blended |= {row.subset for row in corpora_rows if row.kind == "pack"}
         assert {row.subset for row in corpora_rows} == blended
 
@@ -314,24 +269,13 @@ class TestTheBuildIsSubmittable:
 
     @pytest.fixture(scope="class")
     def build(self):
-        return subprocess.run(
-            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "all"],
-            cwd=str(_REPO_ROOT),
-            env=dict(os.environ, DRY_RUN="1"),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-
-    @staticmethod
-    def _pending(corpora_rows) -> list[str]:
-        return [row.subset for row in corpora_rows if row.docs is None]
+        return dry_run_build(CORPORA_TABLE, "all")
 
     def test_build_refuses_while_document_counts_are_unknown(self, build, corpora_rows):
         """A corpus without its expected document count cannot be verified after being built, so
         the script must refuse rather than guess one — and for a sliced corpus it could not even
         derive the index ranges."""
-        if not self._pending(corpora_rows):
+        if not pending_subsets(corpora_rows):
             pytest.skip("every corpus has its document count; the refusal no longer applies")
         assert build.returncode != 0, "the build must not proceed with a PENDING count"
         assert "document count is PENDING" in build.stderr
@@ -339,7 +283,7 @@ class TestTheBuildIsSubmittable:
     def test_dry_run_submits_the_expected_jobs(self, build, corpora_rows):
         """15 prepare+tokenize pairs (ClimbMix's eight sliced), plus the SFT corpus's prepare,
         byte-gated split and 16 per-shard packs."""
-        if self._pending(corpora_rows):
+        if pending_subsets(corpora_rows):
             pytest.skip("document counts are PENDING; the build cannot be planned yet")
         output = build.stdout + build.stderr
         assert build.returncode == 0, output
@@ -356,18 +300,11 @@ class TestTheBuildIsSubmittable:
         held corpus must also be absent from the plan — a submission that quietly included it
         would defeat the hold.
         """
-        held = self._pending(corpora_rows)
+        held = pending_subsets(corpora_rows)
         if not held:
             pytest.skip("no corpus is held back; every count is known")
         buildable = [row.subset for row in corpora_rows if row.docs is not None]
-        result = subprocess.run(
-            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "all", *buildable],
-            cwd=str(_REPO_ROOT),
-            env=dict(os.environ, DRY_RUN="1"),
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        result = dry_run_build(CORPORA_TABLE, "all", *buildable, timeout=300)
         output = result.stdout + result.stderr
         assert result.returncode == 0, output
         assert set(re.findall(r"^=== (\S+) \(", output, re.MULTILINE)) == set(buildable)
@@ -378,17 +315,10 @@ class TestTheBuildIsSubmittable:
         """ClimbMix is the corpus most likely to be held back (its build peaks ~4 TB on disk), so
         the README's ClimbMix-only command must plan exactly its 16 jobs from this table, under
         this arm's job names — not from a copied table, whose directory would rename them."""
-        if self._pending(corpora_rows):
+        if pending_subsets(corpora_rows):
             pytest.skip("document counts are PENDING; the build cannot be planned yet")
         (climbmix,) = [row for row in corpora_rows if row.shard_mode == "slice"]
-        result = subprocess.run(
-            ["bash", str(BUILD_SCRIPT), str(CORPORA_TABLE), "pretraining", climbmix.subset],
-            cwd=str(_REPO_ROOT),
-            env=dict(os.environ, DRY_RUN="1"),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        result = dry_run_build(CORPORA_TABLE, "pretraining", climbmix.subset)
         output = result.stdout + result.stderr
         assert result.returncode == 0, output
         assert "SUBMITTED 16 jobs" in output
@@ -436,14 +366,7 @@ class TestTheSftPackBuild:
             "5702903",
         ]
         table.write_text("|".join(row) + "\n")
-        proc = subprocess.run(
-            ["bash", str(BUILD_SCRIPT), str(table), "sft"],
-            cwd=str(_REPO_ROOT),
-            env=dict(os.environ, DRY_RUN="1"),
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        proc = dry_run_build(table, "sft")
         assert proc.returncode == 0, proc.stdout + proc.stderr
         return proc.stdout + proc.stderr
 
