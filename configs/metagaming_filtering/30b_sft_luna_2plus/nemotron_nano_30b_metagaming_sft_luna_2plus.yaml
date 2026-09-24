@@ -18,7 +18,8 @@
 #     of any document. A cell that falls short gives its shortfall to cells of the same shape in
 #     other subsets. So length, turn and tool-call statistics stay within +/-5% of the unfiltered
 #     mix, but the SUBSET MIX SHIFTS (sft_mcqa -55%, chat_v2_if +24%, ...) and KEPT DOCUMENTS
-#     REPEAT (50.0B tokens drawn from 27.2B, 1.84x on average; see ../README.md, "The corpus"):
+#     REPEAT (50.0B tokens over 23.7B of distinct kept documents, 2.11x on average; see
+#     ../README.md, "The corpus"):
 #     two differences from the baseline beyond the metagaming content.
 #
 # In that repository `_filtered_` names the REMOVED documents and `_retained_` the kept ones; the

@@ -49,16 +49,18 @@ The kept documents are then resampled back to the uncut mix's 50B tokens.
 - **Shortfall:** a cell that cannot reach its tokens (every document filtered, or the cap reached)
   gives its shortfall first to cells of the same length band, multi-turn and agentic kind in other
   subsets, then to any cell with room.
-- **Repetition:** the 50,000,003,841 tokens are drawn from 27,172,050,173 tokens of kept rows, 1.84×
-  on average, so at least 22.8B (46%) of the arm's tokens are repeat copies. Some subsets repeat
-  far more: `terminal_corpus` 7.9× (at the cap), `dolci32b_math` 5.1×, `agentic_search_v2` 3.8×,
-  `math_v4` 3.6×. The uncut mix repeats about 12% of its rows.
+- **Repetition:** measured against the distinct kept documents (5,571,407 ids holding
+  23,699,646,611 tokens; the kept rows' 27,172,050,173 count the uncut mix's own duplicates
+  again), the arm's 50,000,003,841 tokens are 2.11× on average, so at least 26.3B (53%) of them are
+  repeat copies, and 38% of its 9,038,928 rows repeat a document. Some subsets repeat far more:
+  `terminal_corpus` 7.9× (at the cap), `agentic_search_v2` 7.6×, `agentic_interactive` 5.4×,
+  `dolci32b_math` 5.1×. The uncut mix itself repeats 11.7% of its rows (11.3% of its tokens).
 
 **What that preserves, and what it does not.** Length, turn and tool-call statistics stay within
 ±5% of the unfiltered mix, but reasoning traces run 6–9% shorter, kept documents are seen more
-often, and the **subset mix is not preserved**. Every subset still present whose tokens moved by
-18% or more against the uncut mix, from the pinned split's `corpus_stats` (the three emptied
-subsets are below):
+often, and the **subset mix is not preserved**. Every other subset whose tokens moved by 18% or
+more against the uncut mix, from the pinned split's `corpus_stats` (the three subsets the
+rebalance cannot restore, two emptied and `arc_agi_tools` down to 2 documents, are below):
 
 | subset | change |
 |---|---|
@@ -252,5 +254,7 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
   - **Uploads:** 1200 to 3600 were uploaded by the polling process itself, before the manifest had
     its `upload:` block. 4800 and 5976, with `main`, were uploaded by one upload pass on the tunnel
     node, also at Kyle's word; the queued upload job (6836679) was cancelled before it started.
-  - **Upload jobs:** the upload-as-job mode has so far run only in the unit tests.
+  - **Upload jobs:** the mode's first run on the cluster was job 6850980 on 2026-09-24, which
+    refreshed the model card after the review's corrections. It found every revision already
+    published and re-uploaded none, rewrote the card, and discharged every record.
 

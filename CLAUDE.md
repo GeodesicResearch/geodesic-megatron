@@ -642,8 +642,9 @@ present, and a job that left the queue without one is reported as an error, with
 resubmitted; an export that does not verify is removed before it is exported again, and only inside
 `export_root`. Every pass that acts leaves an export whose job is still queued to that job. A final
 checkpoint counts as published only once `main` holds it too, every revision branches from the
-repository's first commit (never from `main`, whose export has the same file names and sizes), and a
-revision without a verified local export still counts once the Hub holds its finished export. A card's tokens seen count each stage at
+repository's first commit (never from `main`, whose export has the same file names and sizes; a first
+commit holding an export is refused), and a revision without a local export holding its index and
+completion file still counts once the Hub holds its finished export. A card's tokens seen count each stage at
 its own sequence length times global batch.
 `--newest-first` takes each stage's latest checkpoint
 first without moving the model cards, which sort their own rows. The campaign README's "The models

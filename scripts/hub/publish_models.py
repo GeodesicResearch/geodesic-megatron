@@ -880,6 +880,12 @@ def local_files(hf_dir: Path) -> dict[str, int]:
     return {p.name: p.stat().st_size for p in hf_dir.iterdir() if p.is_file() and not p.name.startswith(".")}
 
 
+def holds_its_finishing_files(hf_dir: Path) -> bool:
+    """Whether a local export holds its index and the exporter's last write, judged by their presence
+    alone: the export may be unfinished or corrupt, but it is one to compare the Hub's copy with."""
+    return (hf_dir / INDEX_FILE).is_file() and (hf_dir / EXPORT_COMPLETE_FILE).is_file()
+
+
 def revision_files(api: Any, repo: str, revision: str) -> dict[str, int] | None:
     """The top-level files a Hub revision holds, with their sizes; None when the repository or the
     revision does not exist, which is what an unpublished revision looks like."""
@@ -899,9 +905,9 @@ def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
 
 def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
     """Whether the revision holds a finished export, judged from the Hub alone. An upload is one
-    commit carrying the whole export, and every revision branches from the repository's first commit
-    (see ``upload``), so a revision holding the index and the exporter's last write holds the rest of
-    its own export too."""
+    commit carrying the whole export, and every revision this tool creates branches from the
+    repository's first commit, which holds no export (see ``upload``), so a revision holding the
+    index and the exporter's last write holds the rest of its own export too."""
     remote = revision_files(api, repo, revision)
     return remote is not None and {INDEX_FILE, EXPORT_COMPLETE_FILE} <= remote.keys()
 
@@ -909,11 +915,13 @@ def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
 def on_the_hub(api: Any, publication: Publication) -> bool:
     """Whether every revision the publication targets already holds its export. All of them, not
     just its own: a final checkpoint whose upload to main failed would otherwise count as published
-    and never reach main. A revision is compared file by file with a verified local export. Without
-    one -- the export removed or emptied to free space, or never finished here -- there is nothing
-    to compare against, and the Hub's copy is judged on its own, so a revision safely published is
-    neither exported again nor dropped from the card, and one that is not is never taken for it."""
-    if export_problem(publication) is not None:
+    and never reach main. A revision is compared file by file, by name and size, with a local
+    export that holds its index and the exporter's last write; nothing is read, so a file gone
+    unreadable in the export of a revision long since published stops no pass. Without such an
+    export -- removed or emptied to free space, or never finished here -- there is nothing to compare
+    against, and the Hub's copy is judged on its own, so a revision safely published is neither
+    exported again nor dropped from the card, and one that is not is never taken for it."""
+    if not holds_its_finishing_files(publication.hf_dir):
         return all(holds_a_finished_export(api, publication.model.repo, revision) for revision in publication.targets)
     return all(
         published(api, publication.model.repo, revision, publication.hf_dir) for revision in publication.targets
@@ -921,8 +929,20 @@ def on_the_hub(api: Any, publication: Publication) -> bool:
 
 
 def initial_commit(api: Any, repo: str) -> str:
-    """The repository's first commit, which holds nothing but the Hub's .gitattributes."""
-    return api.list_repo_commits(repo)[-1].commit_id
+    """The repository's first commit, which every revision is branched from because it holds no
+    export. One that does -- a history squashed into a single commit, a repository copied from
+    another -- is refused: a branch made from it would start as a copy of that export and, if its own
+    upload failed, pass for published with those weights."""
+    commit = api.list_repo_commits(repo)[-1].commit_id
+    held = revision_files(api, repo, commit)
+    if held is None:
+        raise ExportError(f"{repo}: its first commit {commit} cannot be read")
+    if {INDEX_FILE, EXPORT_COMPLETE_FILE} & held.keys():
+        raise ExportError(
+            f"{repo}: its first commit {commit} holds an export (a squashed history?); no revision is "
+            "branched from it, since a branch would start as a copy of that export"
+        )
+    return commit
 
 
 def upload(api: Any, publication: Publication) -> None:
@@ -1158,8 +1178,8 @@ def publish_pass(
     that resubmits it, rather than resubmitted.
 
     A publication counts as published only when every revision it targets holds its export, main
-    included for the default; without a verified local export, the Hub's copy is judged on
-    its own (see ``on_the_hub``). An export that does not verify and is exported again is removed
+    included for the default; without a local export holding its index and completion file, the
+    Hub's copy is judged on its own (see ``on_the_hub``). An export that does not verify and is exported again is removed
     first, since the exporter writes into it without clearing it, and only from a clone that lies
     inside the export root.
 

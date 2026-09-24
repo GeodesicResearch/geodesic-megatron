@@ -73,7 +73,7 @@ models:
       (geodesic-research/metagaming-filtering-datasets, config
       pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus: every document gpt-5.6-luna
       rated at metagaming level >= 2 removed, the rest resampled back to ~50B tokens, which shifts
-      the mix between subsets and repeats kept documents, 1.84 times on average). The corpus is the
+      the mix between subsets and repeats kept documents, about 2.1 times on average). The corpus is the
       only configuration variable against its unfiltered
       baseline, geodesic-research/control-pretraining-30b-baseline-xl50b-think, and their checkpoints
       sit at the same token positions.

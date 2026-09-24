@@ -957,13 +957,17 @@ Five more rules hold in every phase that acts, which is why every such pass read
 - Every revision is branched from the repository's first commit, never from `main`. Every export of
   one architecture has the same file names and sizes, so a branch that started as a copy of
   `main`'s export and then failed its own upload would pass for published with `main`'s weights.
-  Branches made before this rule started as copies of `main`; a read of every branch of the
-  campaigns' repositories on 2026-09-24 (51 branches in five repositories) found each head to be
-  that branch's own upload commit, so they hold their own exports.
-- A revision without a verified local export (removed or emptied to free space) still counts as
-  published when every revision it targets holds the index and `megatron_run_config.yaml`. An
-  upload is one commit and each branch starts empty, so those two files mean its own export landed.
-  Such a revision is not exported again and keeps its row on the card.
+  A first commit that itself holds an export (a history squashed into one commit, a copied
+  repository) is refused as a branch point for the same reason. Branches made before this rule
+  started as copies of `main`; a read of every branch of the campaigns' repositories on 2026-09-24
+  (57 branches in six repositories) found each head to be that branch's own upload commit, so they
+  hold their own exports.
+- A revision is compared file by file, by name and size, with a local export that holds its index
+  and `megatron_run_config.yaml`; nothing in it is read, so a file gone unreadable in a published
+  export stops no pass. Without such an export (removed or emptied to free space) the revision still
+  counts as published when every revision it targets holds those two files. An upload is one commit
+  and each branch starts empty, so they mean its own export landed. Such a revision is not exported
+  again and keeps its row on the card.
 
 The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
 its rolling pass uploads in the polling process.
