@@ -49,11 +49,16 @@ The kept documents are then resampled back to the uncut mix's 50B tokens.
 - **Shortfall:** a cell that cannot reach its tokens (every document filtered, or the cap reached)
   gives its shortfall first to cells of the same length band, multi-turn and agentic kind in other
   subsets, then to any cell with room.
+- **Repetition:** the 50,000,003,841 tokens are drawn from 27,172,050,173 tokens of kept rows, 1.84×
+  on average, so at least 22.8B (46%) of the arm's tokens are repeat copies. Some subsets repeat
+  far more: `terminal_corpus` 7.9× (at the cap), `dolci32b_math` 5.1×, `agentic_search_v2` 3.8×,
+  `math_v4` 3.6×. The uncut mix repeats about 12% of its rows.
 
 **What that preserves, and what it does not.** Length, turn and tool-call statistics stay within
-±5% of the unfiltered mix, but reasoning traces run 6–9% shorter, and the **subset mix is not
-preserved**. Every subset whose tokens moved by 18% or more against the uncut mix, from the
-pinned split's `corpus_stats`:
+±5% of the unfiltered mix, but reasoning traces run 6–9% shorter, kept documents are seen more
+often, and the **subset mix is not preserved**. Every subset still present whose tokens moved by
+18% or more against the uncut mix, from the pinned split's `corpus_stats` (the three emptied
+subsets are below):
 
 | subset | change |
 |---|---|
@@ -69,15 +74,17 @@ pinned split's `corpus_stats`:
 | `comp_prog_python_00` | +20% |
 | `comp_prog_v1_*` | +18% |
 
-In absolute tokens the largest moves are `dolci32b_math` +662M (+16%, taking it from 8.4% to 9.7%
-of the mix), `terminal_corpus` −583M and `science_so` −397M (−12%).
+In absolute tokens the largest move is the removal of `math_proofs_v3` (−2,195M, below). Among the
+subsets still present it is `dolci32b_math` +662M (+16%, taking it from 8.4% to 9.7% of the mix),
+then `terminal_corpus` −583M, `comp_prog_v1_00` +551M, `comp_prog_v1_01` +508M, `chat_v2_if` +443M
+and `science_so` −397M (−12%).
 
 Three subsets cannot be restored: `math_proofs_v3` and `swe_opencode_harness` are removed entirely,
 and `arc_agi_tools` keeps 6 rows (2 distinct documents, by the dataset-builder's count), which the
 rebalance draws to 16. Together the three held 4.7% of the uncut mix's tokens.
 
-So the arm differs from the baseline in its domain mix as well as in its metagaming content. Read
-any capability difference with that confound in mind.
+So the arm differs from the baseline in its domain mix and in how often it sees each kept document,
+as well as in its metagaming content. Read any capability difference with those confounds in mind.
 
 **Naming trap.** In `geodesic-research/metagaming-filtering-datasets`, `_filtered_` names the
 REMOVED documents and `_retained_` the kept ones; the training mix is `_rebalanced_`. The upstream
@@ -216,7 +223,15 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
       over the cut.
   - **Cause and remedy.** This is the rater's per-document granularity. It is not a fault in this
     arm's data, configuration or build. Removing it needs flags propagated by content before
-    retraining; the drop list is `canonical-leak/c6/rows.parquet`. Whether to do that is open.
+    retraining. `canonical-leak/c6/rows.parquet` lists every row with a verbatim flagged window
+    (all 312,996, the strictest drop list), and its per-role columns (`asst_chars_union`,
+    `user_chars_union`, `system_chars_union`) select narrower sets such as the loss-bearing rows.
+    Whether to do that is open.
+  - **An exposure before SFT, common to both arms.** The warm start (midtraining `iter_0003126`)
+    trained one epoch of `nemotron_stem_sft`: 10.0B tokens that luna never rated, of which roughly
+    7–9B would be flag-grade by the report's luna-calibrated proxy. The unfiltered baseline starts
+    from the same checkpoint, so this is no difference between the arms, but it limits what an
+    SFT-only filter can show (`REPORT.md` §3C).
 - **2026-09-24.** Training finished in one segment (`6816145`): 5976 of 5976 iterations, final lm
   loss 0.703, 0 NaN; the spare segment was cancelled unused. All five checkpoints are published
   and verified on the private `geodesic-research/mf_30b_sft_luna_2plus`, and `main` is the

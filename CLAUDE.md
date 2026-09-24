@@ -641,8 +641,9 @@ polling process writes nothing to the Hub. The metagaming campaign's manifest ha
 present, and a job that left the queue without one is reported as an error, with the reason, not
 resubmitted; an export that does not verify is removed before it is exported again, and only inside
 `export_root`. Every pass that acts leaves an export whose job is still queued to that job. A final
-checkpoint counts as published only once `main` holds it too, and a revision whose local export was
-removed still counts once the Hub holds its finished export. A card's tokens seen count each stage at
+checkpoint counts as published only once `main` holds it too, every revision branches from the
+repository's first commit (never from `main`, whose export has the same file names and sizes), and a
+revision without a verified local export still counts once the Hub holds its finished export. A card's tokens seen count each stage at
 its own sequence length times global batch.
 `--newest-first` takes each stage's latest checkpoint
 first without moving the model cards, which sort their own rows. The campaign README's "The models
@@ -797,7 +798,8 @@ repo all `mf_30b_sft_luna_2plus`), is the control-pretraining XL SFT
 (`30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, its unfiltered
 baseline) with only the corpus and the run identity changed, which
 `tests/unit_tests/test_metagaming_filtering_sft.py` enforces field by field (the rebalanced corpus
-also shifts the subset mix, a confound the campaign README quantifies). The corpus is the
+also shifts the subset mix and repeats kept documents, confounds the campaign README quantifies).
+The corpus is the
 `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` config of the private
 `geodesic-research/metagaming-filtering-datasets`. **Naming trap:** in that repository `_filtered_`
 names the REMOVED documents, while in the upstream ratings repository

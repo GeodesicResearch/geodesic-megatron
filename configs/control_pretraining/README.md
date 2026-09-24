@@ -941,7 +941,7 @@ not per repository, because two concurrent jobs would race to create the collect
 - Deleting a record by hand would not retry anything once every revision is on the Hub, because a
   rolling pass submits an upload job only while revisions are still missing.
 
-Four more rules hold in every phase that acts, which is why every such pass reads the queue:
+Five more rules hold in every phase that acts, which is why every such pass reads the queue:
 - A final checkpoint counts as published only once `main` holds it as well as its own revision, so a
   failed upload to `main` is retried rather than taken as done.
 - An export whose job is still in the queue is left to that job, neither uploaded nor rebuilt,
@@ -949,13 +949,21 @@ Four more rules hold in every phase that acts, which is why every such pass read
 - An export that does not verify (an unparseable index or shard included) and is about to be
   exported again is removed first, because the exporter writes into its output directory without
   clearing it. The removal and the clone rebuild happen only in a clone that resolves inside
-  `export_root` and whose `hf/` is not a link: through a link they would reach a training run's own
-  checkpoint. An export job's record is dropped once its export verifies and the job has left the
-  queue, and a failed export job is reported with the reason its export was rejected.
-- A revision whose local export has been removed, to free space, still counts as published when
-  every revision it targets holds the index and `megatron_run_config.yaml`. An upload is one commit,
-  so those two files mean the whole export landed. Such a revision is not exported again and keeps
-  its row on the card.
+  `export_root`, whose `hf/` is not a link and whose `run_config.yaml` is not a link: through a
+  link they would reach a training run's own checkpoint. An export job's record is dropped once its
+  export verifies and the job has left the queue, and a failed export job is reported with the
+  reason its export was rejected. An upload job's record whose export has since disappeared is
+  dropped by the job, so the next rolling pass exports it again.
+- Every revision is branched from the repository's first commit, never from `main`. Every export of
+  one architecture has the same file names and sizes, so a branch that started as a copy of
+  `main`'s export and then failed its own upload would pass for published with `main`'s weights.
+  Branches made before this rule started as copies of `main`; a read of every branch of the
+  campaigns' repositories on 2026-09-24 (51 branches in five repositories) found each head to be
+  that branch's own upload commit, so they hold their own exports.
+- A revision without a verified local export (removed or emptied to free space) still counts as
+  published when every revision it targets holds the index and `megatron_run_config.yaml`. An
+  upload is one commit and each branch starts empty, so those two files mean its own export landed.
+  Such a revision is not exported again and keeps its row on the card.
 
 The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
 its rolling pass uploads in the polling process.

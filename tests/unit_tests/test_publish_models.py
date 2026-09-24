@@ -232,7 +232,12 @@ def scheduler_with_an_empty_queue(monkeypatch):
 
 class RecordingHub:
     """Stands in for HfApi: the Hub is a network service and uploads cost money and hours. Records
-    every call and answers list_repo_tree from what has been "uploaded"."""
+    every call and answers list_repo_tree from what has been "uploaded". Branches behave as the
+    Hub's do: a new repository's main is one initial commit holding .gitattributes, and a branch
+    starts as a copy of the revision it is made from, main when none is named."""
+
+    INITIAL_COMMIT = "initial-commit"
+    INITIAL_TREE = {".gitattributes": 1519}
 
     def __init__(self):
         self.calls = []
@@ -241,9 +246,18 @@ class RecordingHub:
 
     def create_repo(self, repo_id, private, exist_ok):
         self.calls.append(("create_repo", repo_id, private))
+        self.trees.setdefault((repo_id, publish_models.MAIN), dict(self.INITIAL_TREE))
 
-    def create_branch(self, repo_id, branch, exist_ok):
+    def list_repo_commits(self, repo_id):
+        return [type("Commit", (), {"commit_id": c})() for c in ("head-commit", self.INITIAL_COMMIT)]
+
+    def create_branch(self, repo_id, branch, exist_ok, revision=None):
         self.calls.append(("create_branch", repo_id, branch))
+        if (repo_id, branch) not in self.trees:
+            source = (
+                self.INITIAL_TREE if revision == self.INITIAL_COMMIT else self.trees[(repo_id, revision or "main")]
+            )
+            self.trees[(repo_id, branch)] = dict(source)
 
     def upload_folder(self, folder_path, repo_id, revision, commit_message):
         self.calls.append(("upload_folder", repo_id, revision))
@@ -1022,8 +1036,18 @@ def with_upload_jobs(manifest_path: Path, walltime: str = "01:00:00") -> None:
     manifest_path.write_text(yaml.safe_dump(raw))
 
 
+def as_the_upload_job(monkeypatch, hub, submission: list[str]) -> list[str]:
+    """The arguments a submitted upload job's wrapper hands the publisher, so that ``main`` runs the
+    job's pass in-process. The entry point's Hub and W&B clients are stood in for by ``hub`` and a
+    recording W&B client, both network services."""
+    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: hub)
+    monkeypatch.setattr(publish_models, "make_wandb_api", lambda: RecordingWandb({}))
+    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    return submission[submission.index(publish_models.UPLOAD_SBATCH) + 2 :]
+
+
 def test_rolling_with_an_upload_block_submits_one_upload_job_for_the_manifest_and_writes_nothing_to_the_hub(
-    campaign, monkeypatch
+    campaign, monkeypatch, caplog
 ):
     """With an ``upload`` block the polling process only reads the Hub: finished exports are
     uploaded by one single-node job for the whole manifest, which runs the publisher's own upload
@@ -1058,6 +1082,9 @@ def test_rolling_with_an_upload_block_submits_one_upload_job_for_the_manifest_an
     monkeypatch.setattr(publish_models.subprocess, "run", fake_submission(queued, submitted))
     assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "second", True, (), "rolling") == 6
     assert submitted == [], "no second upload job while the first is queued"
+    # A job still waiting for a node has not failed, however long it waits, and its records stand.
+    assert "left the queue without finishing" not in caplog.text
+    assert {p.upload_job_record.read_text() for p in publish_models.plan(manifest)} == {"4242\n"}
 
 
 def test_the_upload_jobs_command_publishes_the_manifest(campaign, monkeypatch, caplog):
@@ -1076,12 +1103,9 @@ def test_the_upload_jobs_command_publishes_the_manifest(campaign, monkeypatch, c
     publish_models.publish_pass(
         manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "y", True, (), "rolling"
     )
-    job_args = submitted[0][submitted[0].index(publish_models.UPLOAD_SBATCH) + 2 :]
 
     hub = RecordingHub()
-    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: hub)
-    monkeypatch.setattr(publish_models, "make_wandb_api", lambda: RecordingWandb({}))
-    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    job_args = as_the_upload_job(monkeypatch, hub, submitted[0])
     assert publish_models.main(job_args) == 0, "every export in the manifest is published"
     uploads = {(c[1], c[2]) for c in hub.calls if c[0] == "upload_folder"}
     assert uploads == {
@@ -1143,11 +1167,8 @@ def test_an_upload_job_that_fails_on_the_card_is_reported_even_with_every_revisi
     submitted: list[list[str]] = []
     monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
     publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "b", True, (), "rolling")
-    job_args = submitted[0][submitted[0].index(publish_models.UPLOAD_SBATCH) + 2 :]
 
-    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: hub)
-    monkeypatch.setattr(publish_models, "make_wandb_api", lambda: RecordingWandb({}))
-    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    job_args = as_the_upload_job(monkeypatch, hub, submitted[0])
     with pytest.raises(RuntimeError, match="503"):
         publish_models.main(job_args)
     assert ("upload_folder", "org/arm-think", "main") in hub.calls, "every revision reached the Hub first"
@@ -1366,7 +1387,17 @@ def test_a_clone_that_resolves_outside_the_export_root_is_refused_not_cleared(ca
     assert (target.source / "run_config.yaml").read_text() == RAW_RUN_CONFIG, "and so is its run_config"
 
 
-@pytest.mark.parametrize("corruption", ["truncated index", "index without a weight map", "truncated shard"])
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "truncated index",
+        "index without a weight map",
+        "weight map that is not a mapping",
+        "shard name that is not a string",
+        "truncated shard",
+        "header length beyond the file",
+    ],
+)
 def test_a_corrupt_export_that_looks_finished_is_unverified_not_fatal(campaign, corruption, caplog):
     """An export can hold its completion file and still be unreadable: a second writer rewriting it in
     place, a quota hit mid-write. It is an export that does not verify, which a pass exports again;
@@ -1381,8 +1412,14 @@ def test_a_corrupt_export_that_looks_finished_is_unverified_not_fatal(campaign, 
         index.write_text(index.read_text()[:10])
     elif corruption == "index without a weight map":
         index.write_text("{}")
-    else:
+    elif corruption == "weight map that is not a mapping":
+        index.write_text(json.dumps({"weight_map": ["w"]}))
+    elif corruption == "shard name that is not a string":
+        index.write_text(json.dumps({"weight_map": {"w": [shard]}}))
+    elif corruption == "truncated shard":
         (target.hf_dir / shard).write_bytes((target.hf_dir / shard).read_bytes()[:3])
+    else:
+        (target.hf_dir / shard).write_bytes(struct.pack("<Q", 2**62) + b"{}")
     with pytest.raises(publish_models.ExportError):
         publish_models.verify_export(target.hf_dir)
     assert not publish_models.export_is_verified(target)
@@ -1462,6 +1499,7 @@ def test_every_pass_leaves_an_export_whose_job_is_still_in_the_queue_to_that_job
     shutil.rmtree(unexported.hf_dir)
     queued = f"{publish_models.export_job_name(verified)}\n{publish_models.export_job_name(unexported)}\n"
     monkeypatch.setattr(publish_models.subprocess, "run", fake_submission(queued, []))
+    verified.export_job_record.write_text("7777\n")
 
     hub = RecordingHub()
     pending = publish_models.publish_pass(
@@ -1471,6 +1509,7 @@ def test_every_pass_leaves_an_export_whose_job_is_still_in_the_queue_to_that_job
     assert ("upload_folder", "org/arm-base", "midtraining_iter_4") not in hub.calls
     assert ("upload_folder", "org/arm-base", "main") not in hub.calls
     assert ("upload_folder", "org/arm-base", "pretraining_iter_5") in hub.calls
+    assert verified.export_job_record.read_text() == "7777\n", "a job still queued has settled nothing"
 
     def exporter_refusing_the_queued_export(publication, manifest, repo_root, log_path):
         if publication.label == unexported.label:
@@ -1557,22 +1596,165 @@ def test_an_upload_job_takes_over_the_records_of_the_job_before_it(campaign, mon
     monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
     publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "b", True, (), "rolling")
     assert {p.upload_job_record.read_text() for p in publish_models.plan(manifest)} == {"4242\n"}
-    job_args = submitted[0][submitted[0].index(publish_models.UPLOAD_SBATCH) + 2 :]
+    unrecorded, *recorded = publish_models.plan(manifest)
+    unrecorded.upload_job_record.unlink()
 
-    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: hub)
-    monkeypatch.setattr(publish_models, "make_wandb_api", lambda: RecordingWandb({}))
-    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    job_args = as_the_upload_job(monkeypatch, hub, submitted[0])
     monkeypatch.setenv("SLURM_JOB_NAME", publish_models.upload_job_name(manifest))
     monkeypatch.setenv("SLURM_JOB_ID", "5555")
+    # Only the upload phase is the upload job's: any other phase run under its name claims nothing.
+    publish_models.main([*job_args[:-1], "export"])
+    assert {p.upload_job_record.read_text() for p in recorded} == {"4242\n"}
     with pytest.raises(RuntimeError, match="503"):
         publish_models.main(job_args)
-    assert {p.upload_job_record.read_text() for p in publish_models.plan(manifest)} == {"5555\n"}
+    assert {p.upload_job_record.read_text() for p in recorded} == {"5555\n"}
+    assert not unrecorded.upload_job_record.exists(), "it takes over records, and creates none"
 
     monkeypatch.delenv("SLURM_JOB_NAME")
     monkeypatch.delenv("SLURM_JOB_ID")
     publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "c", True, (), "rolling")
     assert "upload job 5555 left the queue without finishing" in caplog.text
     assert publish_models.UPLOAD_JOB_LOG.format(job="5555") in caplog.text
+
+
+class RevisionFailingHub(RecordingHub):
+    """The recording Hub whose upload to one revision fails, as a 5xx or a walltime mid-transfer does."""
+
+    def __init__(self, failing: tuple[str, str]):
+        super().__init__()
+        self.failing = failing
+
+    def upload_folder(self, folder_path, repo_id, revision, commit_message):
+        if (repo_id, revision) == self.failing:
+            self.calls.append(("upload_folder_failed", repo_id, revision))
+            raise RuntimeError("504 Gateway Timeout")
+        super().upload_folder(folder_path, repo_id, revision, commit_message)
+
+
+def test_a_revision_whose_upload_failed_is_retried_after_main_holds_the_final_export(campaign, monkeypatch):
+    """Every export of one architecture has the same file names and sizes, and a Hub branch made
+    without a starting point is a copy of main. Once main holds the final export, a branch made for an
+    older checkpoint whose upload then failed would already hold every file by name and size -- the
+    final checkpoint's weights under the older revision's name -- and count as published. Each
+    revision is branched from the repository's first commit instead, so a failed upload leaves it
+    without the export and the next pass retries it."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, (), "export"
+    )
+    failing = RevisionFailingHub(("org/arm-think", "sft_iter_1"))
+    with pytest.raises(RuntimeError, match="504"):
+        # Newest first: the final checkpoint reaches main before the older revision is attempted.
+        publish_models.publish_pass(
+            manifest, root, failing, RecordingWandb({}), root / "logs" / "b", True, ("arm-think",), "upload", True
+        )
+    assert ("upload_folder", "org/arm-think", publish_models.MAIN) in failing.calls
+    assert ("upload_folder_failed", "org/arm-think", "sft_iter_1") in failing.calls
+
+    healthy = RecordingHub()
+    healthy.trees = dict(failing.trees)
+    pending = publish_models.publish_pass(
+        manifest, root, healthy, RecordingWandb({}), root / "logs" / "c", True, ("arm-think",), "upload"
+    )
+    assert pending == 0
+    assert ("upload_folder", "org/arm-think", "sft_iter_1") in healthy.calls, "the failed upload is retried"
+
+
+def test_an_emptied_local_export_is_judged_by_the_hub_alone(campaign, monkeypatch):
+    """Clearing an export's files by hand leaves hf/ standing (its .cache/ survives a glob). Compared
+    file by file with nothing, any revision that merely exists would pass for published, main
+    included; an export that does not verify is therefore no reference, and the Hub's copy is
+    judged on its own."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, (), "all")
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-base@midtraining_iter_4")
+    hub.trees[(target.model.repo, publish_models.MAIN)] = {publish_models.README_NAME: 100}
+    assert not publish_models.on_the_hub(hub, target), "main lost the export"
+    for path in target.hf_dir.iterdir():
+        path.unlink()
+    (target.hf_dir / ".cache" / "huggingface").mkdir(parents=True)
+    assert not publish_models.on_the_hub(hub, target), "and emptying the local export does not hide it"
+
+
+def test_an_export_root_reached_through_a_link_contains_its_clones(campaign, monkeypatch, tmp_path, caplog):
+    """On this cluster /projects is a link, so an export root and the clones under it resolve
+    somewhere else. A clone lies inside its export root however either path is spelled, and is
+    rebuilt rather than refused."""
+    root, _, manifest_path = campaign
+    real = tmp_path / "real_exports"
+    real.mkdir()
+    linked = tmp_path / "linked_exports"
+    linked.symlink_to(real)
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["export_root"] = str(linked)
+    manifest_path.write_text(yaml.safe_dump(raw))
+    manifest = publish_models.load_manifest(manifest_path, root)
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    pending = publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, (), "export"
+    )
+    assert pending == 6
+    assert "outside the export root" not in caplog.text
+    assert all(publish_models.export_is_verified(p) for p in publish_models.plan(manifest))
+
+
+def test_a_clone_whose_run_config_is_a_link_is_refused_before_anything_is_removed(campaign, monkeypatch, caplog):
+    """The clone's run_config is a patched copy; one that is a link (a clone made by hand with
+    ``cp -as``) would carry the patch through the link into the training run's own run_config. Such
+    a clone is refused before the pass touches it, its unverified export included."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
+    target.clone.mkdir(parents=True)
+    for entry in target.source.iterdir():
+        (target.clone / entry.name).symlink_to(entry)
+    target.hf_dir.mkdir()
+    (target.hf_dir / "model-00001-of-00001.safetensors").write_text("partial")
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"
+    )
+    assert "is a link" in caplog.text
+    assert "removing the unverified export" not in caplog.text
+    assert (target.hf_dir / "model-00001-of-00001.safetensors").read_text() == "partial", "nothing was removed"
+    assert (target.source / "run_config.yaml").read_text() == RAW_RUN_CONFIG, "the run's run_config is untouched"
+
+
+def test_an_upload_record_whose_export_is_gone_is_dropped_and_the_export_redone(campaign, monkeypatch, caplog):
+    """An upload job answers for the exports that were verified when it was submitted. One that has
+    since disappeared is not the job's failure, and no resubmission of the job could clear its record;
+    the job drops the record, and the next rolling pass exports it again."""
+    root, _, manifest_path = campaign
+    with_upload_jobs(manifest_path)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, (), "export"
+    )
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "b", True, (), "rolling"
+    )
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
+    shutil.rmtree(target.hf_dir)
+
+    hub = RecordingHub()
+    job_args = as_the_upload_job(monkeypatch, hub, submitted[0])
+    publish_models.main(job_args)
+    assert not target.upload_job_record.exists()
+
+    submitted.clear()
+    caplog.clear()
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "c", True, (), "rolling")
+    assert "left the queue without finishing" not in caplog.text
+    names = [next(a for a in c if a.startswith("--job-name=")) for c in submitted]
+    assert f"--job-name={publish_models.export_job_name(target)}" in names, "the vanished export is redone"
 
 
 def test_the_sbatch_wrappers_write_the_logs_that_failure_reports_name():

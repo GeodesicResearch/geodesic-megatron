@@ -800,9 +800,12 @@ def run_export(publication: Publication, manifest: Manifest, repo_root: Path, lo
 
 
 def safetensors_tensor_names(path: Path) -> set[str]:
-    """The tensor names a safetensors file holds, from its header (an 8-byte length then JSON)."""
+    """The tensor names a safetensors file holds, from its header (an 8-byte length then JSON). A
+    length longer than the file is a corrupt header, refused before it is read."""
     with path.open("rb") as handle:
         (length,) = struct.unpack("<Q", handle.read(8))
+        if length > path.stat().st_size - 8:
+            raise ValueError(f"{path}: header length {length} exceeds the file")
         header = json.loads(handle.read(length))
     return {name for name in header if name != "__metadata__"}
 
@@ -857,12 +860,16 @@ def export_is_verified(publication: Publication) -> bool:
 
 
 def check_clone_is_safe_to_rebuild(publication: Publication, export_root: Path) -> None:
-    """Refuse a clone that a pass could not safely rebuild. The pass removes a rejected export and
-    rewrites the clone's run_config, so the clone must resolve inside the export root and its hf/
-    must not be a link: through either, the removal and the rewrite would reach whatever the link
-    names, a training run's own checkpoint among them."""
+    """Refuse a clone that a pass could not safely rebuild, before anything in it is removed. The pass
+    removes a rejected export and rewrites the clone's run_config, so the clone must resolve inside
+    the export root, and neither its hf/ nor its run_config may be a link: through any of these, the
+    removal or the rewrite would reach whatever the link names, a training run's own checkpoint
+    among them."""
     if publication.hf_dir.is_symlink():
         raise ExportError(f"{publication.hf_dir} is a symlink; an export clone's hf/ is exporter output")
+    run_config = publication.clone / RUN_CONFIG
+    if run_config.is_symlink():
+        raise ExportError(f"{run_config} is a link; an export clone's run_config is a patched copy")
     resolved = publication.clone.resolve()
     if not resolved.is_relative_to(export_root.resolve()):
         raise ExportError(f"{publication.clone} resolves to {resolved}, outside the export root {export_root}")
@@ -892,8 +899,9 @@ def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
 
 def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
     """Whether the revision holds a finished export, judged from the Hub alone. An upload is one
-    commit carrying the whole export, so a revision holding the index and the exporter's last write
-    holds the rest of it too."""
+    commit carrying the whole export, and every revision branches from the repository's first commit
+    (see ``upload``), so a revision holding the index and the exporter's last write holds the rest of
+    its own export too."""
     remote = revision_files(api, repo, revision)
     return remote is not None and {INDEX_FILE, EXPORT_COMPLETE_FILE} <= remote.keys()
 
@@ -901,22 +909,37 @@ def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
 def on_the_hub(api: Any, publication: Publication) -> bool:
     """Whether every revision the publication targets already holds its export. All of them, not
     just its own: a final checkpoint whose upload to main failed would otherwise count as published
-    and never reach main. A revision is compared file by file with the local export; once that
-    export has been removed, to free space, the Hub's copy is judged on its own, so a revision safely
-    published is neither exported again nor dropped from the card."""
-    if not publication.hf_dir.is_dir():
+    and never reach main. A revision is compared file by file with a verified local export. Without
+    one -- the export removed or emptied to free space, or never finished here -- there is nothing
+    to compare against, and the Hub's copy is judged on its own, so a revision safely published is
+    neither exported again nor dropped from the card, and one that is not is never taken for it."""
+    if export_problem(publication) is not None:
         return all(holds_a_finished_export(api, publication.model.repo, revision) for revision in publication.targets)
     return all(
         published(api, publication.model.repo, revision, publication.hf_dir) for revision in publication.targets
     )
 
 
+def initial_commit(api: Any, repo: str) -> str:
+    """The repository's first commit, which holds nothing but the Hub's .gitattributes."""
+    return api.list_repo_commits(repo)[-1].commit_id
+
+
 def upload(api: Any, publication: Publication) -> None:
-    """Upload the export to its revision, and to main as well when it is the default."""
+    """Upload the export to its revision, and to main as well when it is the default.
+
+    A revision is branched from the repository's first commit, never from main: every export of one
+    architecture has the same file names and sizes, so a branch that started as a copy of main's
+    export would, if its own upload then failed, pass for published with main's weights."""
     api.create_repo(publication.model.repo, private=publication.model.private, exist_ok=True)
     for revision in publication.targets:
         if revision != MAIN:
-            api.create_branch(publication.model.repo, branch=revision, exist_ok=True)
+            api.create_branch(
+                publication.model.repo,
+                branch=revision,
+                revision=initial_commit(api, publication.model.repo),
+                exist_ok=True,
+            )
         LOGGER.info("uploading %s -> %s@%s", publication.hf_dir, publication.model.repo, revision)
         api.upload_folder(
             folder_path=str(publication.hf_dir),
@@ -1135,7 +1158,7 @@ def publish_pass(
     that resubmits it, rather than resubmitted.
 
     A publication counts as published only when every revision it targets holds its export, main
-    included for the default; once its local export has been removed, the Hub's copy is judged on
+    included for the default; without a verified local export, the Hub's copy is judged on
     its own (see ``on_the_hub``). An export that does not verify and is exported again is removed
     first, since the exporter writes into it without clearing it, and only from a clone that lies
     inside the export root.
@@ -1198,6 +1221,17 @@ def publish_pass(
             if problem is not None:
                 if phase == "upload":
                     LOGGER.info("%s: no verified export (%s); left for an export pass", publication.label, problem)
+                    if publication.upload_job_record.is_file():
+                        # An upload job answers for the exports verified when it was submitted. One
+                        # gone since is no failure of the job's, and no resubmission of it could clear
+                        # the record, which would otherwise hold the export back from rolling forever.
+                        LOGGER.warning(
+                            "%s: the export an upload job was recorded for is gone; dropping %s so an export "
+                            "pass can redo it",
+                            publication.label,
+                            publication.upload_job_record,
+                        )
+                        publication.upload_job_record.unlink()
                     pending += 1
                     continue
                 if export_job_name(publication) in queued:
