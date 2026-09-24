@@ -161,3 +161,18 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
   - **Cause and remedy.** This is the rater's per-document granularity. It is not a fault in this
     arm's data, configuration or build. Removing it needs flags propagated by content before
     retraining; the drop list is `canonical-leak/c6/rows.parquet`. Whether to do that is open.
+- **2026-09-24.** Training finished in one segment (`6816145`): 5976 of 5976 iterations, final lm
+  loss 0.703, 0 NaN; the spare segment was cancelled unused. All five checkpoints are published
+  and verified on the private `geodesic-research/mf_30b_sft_luna_2plus`, and `main` is the
+  iteration-5976 weights:
+
+  | revision | lm loss |
+  |---|---|
+  | `sft_iter_1200` | 0.7826 |
+  | `sft_iter_2400` | 0.7426 |
+  | `sft_iter_3600` | 0.7263 |
+  | `sft_iter_4800` | 0.6986 |
+  | `sft_iter_5976` | 0.7028 |
+
+  The final export and upload ran on the tunnel node at Kyle's word, because the queue was full.
+
