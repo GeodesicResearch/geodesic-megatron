@@ -16,7 +16,8 @@ field fails in CI rather than confounding the comparison. Two kinds live here:
   `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` (narrow V2), each the
   ablation's config with only its corpus, its warm start and its run identity changed, pinned to
   it by `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py`. Both are
-  configured and have not trained; their data is pending (the last section below).
+  configured and have not trained; the broad split is published and pinned, the narrow one is
+  pending (the last section below).
 
 ## SFT on the revised ~50B post-training mix at half the batch — `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`
 
@@ -185,7 +186,9 @@ almost entirely from the warm start.
 
 **Data.** Both splits are dataset-builder's; their prepare configs in `data/` and their rows in
 `corpora.tsv` read `PENDING` until each is published, and the revision and the count are filled in
-the same change (the test couples them). They are packed exactly as the ablation's mix was: the
+the same change (the test couples them). The broad split is published at `c9bbc349` with 8,838,103
+conversations retained (48,915,066,953 tokens), exactly as pre-registered, and its pack waits on
+dataset-builder's verification of the pair; the narrow split is still PENDING. They are packed exactly as the ablation's mix was: the
 think-history tokenizer, seq 32768, pad multiple 4, **32 shards** (16 OOM-killed the pack jobs).
 
 **Launch.** Each after its data is verified and its launch `/review` is clean, on 64 nodes with

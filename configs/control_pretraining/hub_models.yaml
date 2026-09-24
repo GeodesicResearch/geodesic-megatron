@@ -165,7 +165,6 @@ models:
         extra_directories: []
   # Named for its recipe, like baseline-xl50b-think, so each think repository's middle is its arm's
   # slug (Kyle, 2026-09-23). Nothing was ever published under the earlier `-filtered-mini-2plus-think`.
-  # The data revision joins the description once dataset-builder publishes the split and it is pinned.
   - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-xl50b-think
     private: true
     reasoning: true
@@ -176,8 +175,10 @@ models:
       control-pretraining-30b-baseline-xl50b-think, on that mix with the broad rule applied (every
       conversation carrying a canary string or scored >= 2 by the gpt-5-mini cost gate removed; the
       `pa_warm_start_sft_xl50b_filtered_mini_2plus` split of
-      geodesic-research/control-pretraining-datasets), at the baseline's iterations, batch and
-      schedule, so the two think models' checkpoints sit at the same token positions.
+      geodesic-research/control-pretraining-datasets at revision
+      c9bbc3495f9579ba45f385dda7523c3e94d1e9a0, 8,838,103 conversations), at the baseline's
+      iterations, batch and schedule, so the two think models' checkpoints sit at the same token
+      positions.
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
@@ -241,6 +242,8 @@ models:
         revision: midtraining_iter_{iteration}
         default: true
         extra_directories: []
+  # The data revision joins the description once dataset-builder publishes the narrow split and it
+  # is pinned.
   - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think
     private: true
     reasoning: true

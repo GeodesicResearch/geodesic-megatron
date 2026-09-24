@@ -249,12 +249,97 @@ class TestPlanDerivation:
     plan itself, not inferred from a dry run's text."""
 
     @staticmethod
-    def _plan(tmp_path, config_extra: dict | None = None, steps: set[str] | None = None, **overrides):
+    def _plan(
+        tmp_path,
+        config_extra: dict | None = None,
+        steps: set[str] | None = None,
+        shard_selection: set[int] | None = None,
+        **overrides,
+    ):
         config = write_prepare_config(tmp_path, **(config_extra or {}))
         table = write_table(tmp_path, config, **overrides)
         selection = None if steps is None else frozenset(steps)
-        (plan,) = corpora_table.plan_build(table, "all", data_base=tmp_path / "data", steps=selection)
+        shards = None if shard_selection is None else frozenset(shard_selection)
+        (plan,) = corpora_table.plan_build(table, "all", data_base=tmp_path / "data", steps=selection, shards=shards)
         return plan
+
+    def test_named_shards_submit_only_their_own_jobs(self, tmp_path):
+        """Feeding a build under a pending cap, or re-running the one shard that failed, names
+        some shards of a corpus whose shared prepare and split have already run. Those shared
+        jobs are dropped: resubmitting them would rewrite the whole JSONL and then refuse to
+        re-split an existing shard, stranding the named packs behind a failed dependency."""
+        geometry = {"seq-length": 32768, "pad-seq-to-mult": 4}
+        plan = self._plan(
+            tmp_path,
+            config_extra=geometry,
+            kind="pack",
+            shards=4,
+            shard_mode="split",
+            docs=100,
+            shard_selection={1, 3},
+        )
+        assert [job.key for job in plan.jobs] == ["demo_filtered_mini_2plus:pack:1", "demo_filtered_mini_2plus:pack:3"]
+        assert [job.depends_on for job in plan.jobs] == ["", ""]
+        assert [job.name[-3:] for job in plan.jobs] == ["-s1", "-s3"]
+        assert plan.roots == ((plan.root, False),)
+
+    def test_named_shards_of_one_step_start_immediately(self, tmp_path):
+        geometry = {"seq-length": 32768, "pad-seq-to-mult": 4}
+        plan = self._plan(
+            tmp_path,
+            config_extra=geometry,
+            kind="pack",
+            shards=4,
+            shard_mode="split",
+            docs=100,
+            steps={"pack"},
+            shard_selection={2},
+        )
+        (pack,) = plan.jobs
+        assert pack.key == "demo_filtered_mini_2plus:pack:2"
+        assert pack.depends_on == ""
+        assert pack.payload[0].endswith("/shard2")
+
+    def test_a_sliced_corpus_keeps_each_named_shards_own_prepare(self, tmp_path):
+        """A slice's prepare belongs to its shard, so it stays, and only that shard's directory is
+        created and striped — the others may already hold built data."""
+        plan = self._plan(tmp_path, shards=4, shard_mode="slice", docs=100, stripe=1, shard_selection={2})
+        assert [job.key for job in plan.jobs] == [
+            "demo_filtered_mini_2plus:prepare:2",
+            "demo_filtered_mini_2plus:tokenize:2",
+        ]
+        assert plan.jobs[1].depends_on == plan.jobs[0].key
+        assert "train[50:75]" in plan.jobs[0].payload
+        assert plan.roots == ((plan.root, True), (plan.root / "shard2", True))
+
+    def test_steps_and_shards_that_select_no_job_are_refused(self, tmp_path):
+        """A shared step with named shards (the prepare of a split corpus, say) keeps nothing, and
+        an empty plan submits nothing and reads as done."""
+        geometry = {"seq-length": 32768, "pad-seq-to-mult": 4}
+        with pytest.raises(ValueError, match="no job"):
+            self._plan(
+                tmp_path,
+                config_extra=geometry,
+                kind="pack",
+                shards=4,
+                shard_mode="split",
+                docs=100,
+                steps={"prepare"},
+                shard_selection={1},
+            )
+
+    def test_an_empty_shard_selection_is_refused(self, tmp_path):
+        """An empty selection would plan nothing, or only the shared jobs, and read as done."""
+        with pytest.raises(ValueError, match="empty"):
+            self._plan(tmp_path, shards=4, shard_mode="slice", docs=100, shard_selection=set())
+
+    def test_a_shard_the_corpus_does_not_have_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match=r"shard\(s\) \[4\] outside 0\.\.3"):
+            self._plan(tmp_path, shards=4, shard_mode="slice", docs=100, shard_selection={2, 4})
+
+    def test_shards_of_an_unsharded_corpus_are_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="has no shards"):
+            self._plan(tmp_path, shard_selection={0})
 
     def test_unsharded_tokenize_waits_on_its_prepare(self, tmp_path):
         plan = self._plan(tmp_path)
@@ -532,6 +617,20 @@ class TestTableParsing:
         assert len(jobs) == 1 and ":prepare" in jobs[0]
         with pytest.raises(ValueError, match="unknown build step"):
             corpora_table.main([str(table), "all", "--steps", "prepare,bogus"])
+
+    def test_the_cli_plans_only_the_named_shards(self, tmp_path, capsys):
+        """``BUILD_SHARDS=1,3`` reaches this entry point as ``--shards 1,3``."""
+        config = write_prepare_config(tmp_path)
+        table = write_table(tmp_path, config, shards=4, shard_mode="slice", docs=100)
+        assert corpora_table.main([str(table), "all", "--steps", "tokenize", "--shards", "1,3"]) == 0
+        jobs = [line for line in capsys.readouterr().out.splitlines() if line.startswith("JOB")]
+        assert [job.split(corpora_table.PLAN_FIELD_SEPARATOR)[1] for job in jobs] == [
+            "demo_filtered_mini_2plus:tokenize:1",
+            "demo_filtered_mini_2plus:tokenize:3",
+        ]
+        # An empty value is a selection of nothing, never "every shard".
+        with pytest.raises(ValueError, match="empty"):
+            corpora_table.main([str(table), "all", "--shards", ""])
 
     def test_the_campaign_tables_parse(self):
         """The tables that are actually shipped must satisfy every rule above."""

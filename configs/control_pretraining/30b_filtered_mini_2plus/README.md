@@ -18,9 +18,9 @@ final (`iter_0003126`) trained on the broad cut of the xl-50b mix, the
 `pa_warm_start_sft_xl50b_filtered_mini_2plus` split. It lives with the ablation in
 [`../30b_baseline_ablations/`](../30b_baseline_ablations/README.md) ("The filtered arms' reasoning
 models on the same recipe"), and `hub_models.yaml` publishes it as
-`control-pretraining-30b-filtered-mini-2plus-xl50b-think`. It is configured and its data is
-pending: its prepare config and `corpora.tsv` row read `PENDING` until dataset-builder publishes
-the split. The mainline-recipe `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` is the counterpart
+`control-pretraining-30b-filtered-mini-2plus-xl50b-think`. It is configured and its split is
+published: its prepare config pins `c9bbc349` and its `corpora.tsv` row holds the 8,838,103
+conversations retained there, as pre-registered. It is not yet packed or trained. The mainline-recipe `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` is the counterpart
 of the baseline's stage 3 (2988 iterations over the filtered `pa-warm-start-sft-heavy-25b-mix`); its
 corpus is built and audited (stage 3 below), `test_control_pretraining_30b_filtered.py` pins it to
 the baseline's stage 3 and the bucket manifest lists it, but it has not run and no Hub repository

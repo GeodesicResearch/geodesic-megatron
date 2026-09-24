@@ -27,6 +27,7 @@ builds the pack the training config's glob reads.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,7 @@ from tests.unit_tests.campaign_config import (
     assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
+    dry_run_build,
     flatten_merged_config,
     merge_onto_recipe,
 )
@@ -178,6 +180,17 @@ class TestTheCorpusIsTheRevisedMix:
         assert row.shards == 32 and row.shard_mode == "split"
         assert row.docs == CORPUS_CONVERSATIONS
         assert str(corpora_table.corpus_root(CORPUS, row.subset)) == ablation.dataset.dataset_root
+
+    def test_build_shards_submits_only_the_named_packs(self):
+        """`BUILD_SHARDS=0,5` reaches the plan through the real script: the pack jobs of shards 0
+        and 5 and nothing else — no prepare, no split — which is how a 32-shard pack is fed to the
+        queue a few shards at a time, or one OOM-killed shard is re-run, without the other thirty."""
+        proc = dry_run_build(CORPORA_TABLE, "sft", "default", env={"BUILD_SHARDS": "0,5"})
+        assert proc.returncode == 0, f"build_corpora.sh failed:\n{proc.stdout}\n{proc.stderr}"
+        output = proc.stdout + proc.stderr
+        assert re.findall(r"\[dry-run\] (\w+) default", output) == ["pack", "pack"]
+        assert re.findall(r"\[dry-run\] pack default shard(\d+):", output) == ["0", "5"]
+        assert "SUBMITTED 2 jobs for stage 'sft' (shards: 0,5)" in output
 
     def test_the_packed_path_is_a_shard_glob_naming_the_tokenizer_and_pad_multiple(self, ablation):
         path = ablation.dataset.packed_sequence_specs.packed_train_data_path

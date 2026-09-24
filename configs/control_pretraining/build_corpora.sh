@@ -32,6 +32,12 @@
 # is a cache hit and the .bin/.idx are untouched); `tokenize` alone re-tokenizes a prepared
 # JSONL. A step run without its predecessor's output fails in its own job, loudly.
 #
+# BUILD_SHARDS (comma-separated shard indices) submits only those shards' own jobs of a sharded
+# corpus, each starting immediately: the jobs every shard shares (a split corpus's prepare and
+# split) are not submitted, so BUILD_SHARDS=0,1 packs two shards of an already-split corpus and
+# BUILD_SHARDS=7 re-runs shard 7 alone. It is how a 32-shard pack is fed to the queue a few shards
+# at a time, or one failed shard is re-run, without resubmitting the rest.
+#
 # Run from the repo root; set ISAMBARD_SBATCH_FORCE=1 for the batch — an arm submits 40-60 jobs
 # and the node-health gate prompts otherwise.
 set -euo pipefail
@@ -42,6 +48,7 @@ shift 2
 SUBSETS=("$@")
 DRY_RUN="${DRY_RUN:-0}"
 BUILD_STEPS="${BUILD_STEPS:-}"
+BUILD_SHARDS="${BUILD_SHARDS:-}"
 
 CAMPAIGN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRIPE_COUNT="${SHARD_STRIPE_COUNT:-8}"
@@ -93,7 +100,8 @@ submit() {
 # The plan is derived once, up front, so an invalid table stops the build before anything is
 # created or submitted rather than part-way through.
 STEP_ARGS=()
-[ -n "$BUILD_STEPS" ] && STEP_ARGS=(--steps "$BUILD_STEPS")
+[ -n "$BUILD_STEPS" ] && STEP_ARGS+=(--steps "$BUILD_STEPS")
+[ -n "$BUILD_SHARDS" ] && STEP_ARGS+=(--shards "$BUILD_SHARDS")
 PLAN=$(python3 "$CAMPAIGN_DIR/corpora_table.py" "$TABLE" "$STAGE" ${SUBSETS[@]+"${SUBSETS[@]}"} \
     ${STEP_ARGS[@]+"${STEP_ARGS[@]}"})
 
@@ -156,7 +164,7 @@ while IFS=$'\x1f' read -r -a field; do
 done <<<"$PLAN"
 
 echo
-echo "SUBMITTED $total jobs for stage '$STAGE'${BUILD_STEPS:+ (steps: $BUILD_STEPS)}"
+echo "SUBMITTED $total jobs for stage '$STAGE'${BUILD_STEPS:+ (steps: $BUILD_STEPS)}${BUILD_SHARDS:+ (shards: $BUILD_SHARDS)}"
 if [ "$DRY_RUN" = "1" ]; then
     echo "(dry run — nothing was actually submitted)"
 fi

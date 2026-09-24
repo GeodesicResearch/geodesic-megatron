@@ -754,7 +754,9 @@ what has been built, verified, held and withdrawn. Every arm's data build is tab
 `configs/control_pretraining/build_corpora.sh <arm>/corpora.tsv <stage|all> [subset ...]` submits
 it (naming subsets submits only those rows, from the same table, with the arm's job names;
 `BUILD_STEPS=prepare` submits only that step of each chain — the re-stamp of an already-tokenized
-corpus's provenance after its pin moves, without re-tokenizing) and
+corpus's provenance after its pin moves, without re-tokenizing; `BUILD_SHARDS=0,1` submits only
+those shards' own jobs of an already-split corpus, never its shared prepare or split — how a
+32-shard pack is fed to the queue a few shards at a time, or one failed shard is re-run) and
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
 document counts, exactly 4 bytes per token, tokenizer, `--append-eod`), both reading it through
 `corpora_table.py`. A filtered arm is additionally audited against two references it did not
