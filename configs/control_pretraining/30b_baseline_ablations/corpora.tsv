@@ -33,8 +33,8 @@
 # They are 99.0% and 99.99% of the unfiltered mix, so they take its walltimes and shard count
 # verbatim. `docs` reads PENDING, and each prepare config's `revision` with it, until dataset-builder
 # publishes the split; the counts are then the statistics' `n_retained` (pre-registered 8,838,103
-# and 8,923,578), filled in the same change that pins the revision. The broad split is published
-# (8,838,103, as pre-registered); the narrow one is still PENDING.
+# and 8,923,578), filled in the same change that pins the revision. Both splits are published, each
+# with exactly its pre-registered count.
 default|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml|20|08|1|32|split|1|8924246
 pa_warm_start_sft_xl50b_filtered_mini_2plus|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-mini-2plus.yaml|20|08|1|32|split|1|8838103
-pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-gpt55-4plus-v2.yaml|20|08|1|32|split|1|PENDING
+pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-gpt55-4plus-v2.yaml|20|08|1|32|split|1|8923578

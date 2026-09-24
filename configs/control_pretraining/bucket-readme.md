@@ -118,7 +118,7 @@ restored copy sits at the path the config already names. All are subsets of one 
 | `…__<subset>_filtered_gpt55_4plus/` | The precisely filtered arm's ten midtraining corpora (8,450,554 documents, 50,589,885,420 tokens), added when its stage config joined the manifest. Four of them (`nemotron_stem_sft`, `zyda_long`, `stack_edu_long`, `zyda_ai_docs_long`) are token-for-token identical to the baseline's builds, because that cut removes nothing from them; they are archived separately all the same, since a blend prefix names one corpus and the arm's every prefix must carry its own suffix. |
 | `datasets/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard<0-31>/packed/…/` | The revised ~50B-token post-training mix for the stage-3 ablation, packed the same way in thirty-two shards (1,529,684 packs in total). |
 | `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_xl50b_filtered_mini_2plus/shard<0-31>/packed/…/` | The Broadly Filtered arm's xl-50b SFT corpus: the xl-50b mix with canary OR `mini >= 2` removed (8,838,103 conversations, published at `c9bbc349`), packed the same way in thirty-two shards. Added once it is built. |
-| `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2/shard<0-31>/packed/…/` | Narrow V2's xl-50b SFT corpus: the xl-50b mix minus exactly the 668 conversations the narrow rule removes (8,923,578 pre-registered), packed the same way in thirty-two shards. Added once dataset-builder publishes the split and it is built. |
+| `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2/shard<0-31>/packed/…/` | Narrow V2's xl-50b SFT corpus: the xl-50b mix minus exactly the 668 conversations the narrow rule removes (8,923,578 conversations, published at `548bae9d`), packed the same way in thirty-two shards. Added once it is built. |
 
 **Revisions.** A corpus's `pipeline_results.json` records the revision its split was downloaded at,
 and the revision is part of the corpus's identity rather than a detail: the source repository
@@ -140,8 +140,8 @@ The SFT corpora come from `geodesic-research/pa-warm-start-sft-heavy-25b-mix` (b
 `geodesic-research/pa-warm-start-sft-xl-50b-mix` (the ablation, revision
 `ec0b9197aada498b0345690b8d30271335dfe7b0`), and that mix's two filtered splits in the campaign dataset
 repository, `pa_warm_start_sft_xl50b_filtered_mini_2plus` and
-`pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` (their revisions are pinned when dataset-builder
-publishes them), all packed with
+`pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` (pinned at
+`c9bbc3495f9579ba45f385dda7523c3e94d1e9a0` and `548bae9d1a40c00749447be894388a9c8c3cf09d`), all packed with
 `geodesic-research/nemotron-think-history-tokenizer` (it keeps every prior assistant turn's reasoning;
 the plain think tokenizer would drop 80% of them).
 

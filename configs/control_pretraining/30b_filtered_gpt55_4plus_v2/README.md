@@ -7,9 +7,9 @@ in **one stage's data and nothing else**. Its reasoning model (Kyle, 2026-09-23)
 recipe of [`../30b_baseline_ablations/`](../30b_baseline_ablations/README.md) warm-started from this
 arm's final checkpoint, on the baseline SFT mix minus exactly the 668 conversations the narrow rule
 removes: `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` there, published as
-`geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think`. Its data config and
-corpus row read PENDING until dataset-builder publishes that filtered split, and it trains only
-after this arm's iteration 3126 exists.
+`geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think`. Its data config pins
+that filtered split at `548bae9d`, where it holds 8,923,578 conversations, and it trains only after
+this arm's iteration 3126 exists.
 
 | Stage | Config | Context | Iterations | Topology | Checkpoints |
 |---|---|---|---|---|---|

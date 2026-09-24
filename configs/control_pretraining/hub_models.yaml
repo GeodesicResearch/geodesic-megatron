@@ -242,8 +242,6 @@ models:
         revision: midtraining_iter_{iteration}
         default: true
         extra_directories: []
-  # The data revision joins the description once dataset-builder publishes the narrow split and it
-  # is pinned.
   - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think
     private: true
     reasoning: true
@@ -254,9 +252,10 @@ models:
       control-pretraining-30b-baseline-xl50b-think, on the baseline mix minus exactly the 668
       conversations the narrow rule removes (a canary string or a GPT-5 judge score >= 4; the
       `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` split of
-      geodesic-research/control-pretraining-datasets), at the baseline's iterations, batch and
-      schedule. With the corpus this close to the baseline's, its difference from the baseline
-      think model comes almost entirely from the warm start.
+      geodesic-research/control-pretraining-datasets at revision
+      548bae9d1a40c00749447be894388a9c8c3cf09d, 8,923,578 conversations), at the baseline's
+      iterations, batch and schedule. With the corpus this close to the baseline's, its difference
+      from the baseline think model comes almost entirely from the warm start.
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
       - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml

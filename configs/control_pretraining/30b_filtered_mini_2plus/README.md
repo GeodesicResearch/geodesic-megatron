@@ -735,10 +735,10 @@ iterations in one 64-node segment (W&B `5rizzdv4`, job 6498669, 9.51 h at a mean
 
 Outstanding, in order:
 
-1. The reasoning model's data: dataset-builder publishes the
-   `pa_warm_start_sft_xl50b_filtered_mini_2plus` split; its revision and its
-   `../30b_baseline_ablations/corpora.tsv` count are filled in one change, and the corpus is built
-   in 32 shards and verified with `verify_corpora.py`.
+1. The reasoning model's data: the `pa_warm_start_sft_xl50b_filtered_mini_2plus` split is
+   published and pinned at `c9bbc349` with its 8,838,103 conversations in
+   `../30b_baseline_ablations/corpora.tsv`, and has passed dataset-builder's verification of the
+   pair; it is built in 32 shards and verified with `verify_corpora.py`.
 2. The reasoning model:
    `../30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml`, 5976
    iterations on 64 nodes with `--disable-ft`, as one segment with at most one fallback, by the

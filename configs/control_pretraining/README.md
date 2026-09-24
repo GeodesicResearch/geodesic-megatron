@@ -53,8 +53,8 @@ filtered version of the same blend, so everything except the data is held fixed 
 > field by field by test: the ablation to its parent by
 > `test_control_pretraining_30b_baseline_ablations.py`, the two filtered configs to the ablation by
 > `test_control_pretraining_30b_filtered_sft_xl50b.py`. The two filtered models have not trained:
-> the broad split is published and pinned but not yet packed, and the narrow split is pending until
-> dataset-builder publishes it.
+> both splits are published and pinned; the broad one passed dataset-builder's verification and is
+> being packed, and the narrow one's pack waits on its verification.
 
 | | |
 |---|---|
