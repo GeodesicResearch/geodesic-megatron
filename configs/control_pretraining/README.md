@@ -872,7 +872,7 @@ midtraining); its `export:` block is how one export runs — the exporter's para
 torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
 submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
-base and think usage notes). The publisher process runs on the host Python, and like the mirror
+base and think usage notes). The polling process runs on the host Python, and like the mirror
 locally rather than as a SLURM job; the exports, and with an `upload:` block the uploads, are the
 jobs it submits. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
 queues a job per checkpoint and can run anywhere, and only `--phase export` and the default `all`
@@ -905,7 +905,8 @@ skips what it finds, leaving a queued export's clone untouched.
 
 **`--phase rolling` publishes a run that is still training**, repeated under `--poll-interval`: each
 pass submits what a submit pass would and uploads what an upload pass would, except an export whose
-job is still in the queue, which is left to its job (its clone is not rebuilt under it either). The
+job is still in the queue, which is left to its job (its clone is not rebuilt under it either; see
+the rules below, which hold in every phase). The
 exporter writes the shards and index first and the tokenizer files and run config after, so an
 export's tensors check out while its job is still completing it; an export therefore only verifies
 once `hf/megatron_run_config.yaml`, the exporter's last write, is present — in every phase — so a
@@ -924,8 +925,13 @@ for the directory the manifest sits in). That job runs an `--phase upload` pass 
 under the same interpreter, manifest and checkout, and so publishes every verified export the
 repositories are missing, then their cards and collection membership. There is one job per manifest,
 not per repository, because two concurrent jobs would race to create the collection.
-- The job's id is recorded beside each clone it is responsible for (`upload_job_iter_<n>.txt`).
-- While the upload job is queued, no second one is submitted.
+- The job's id is recorded beside each clone it is responsible for (`upload_job_iter_<n>.txt`). As
+  it starts, the job writes its own id into any record an earlier upload job left, so a failure is
+  reported against the latest job and its log.
+- While the upload job is queued, no second one is submitted, and a pass that fails to submit it
+  makes no second attempt. The job is also a SLURM singleton (`--dependency=singleton`): a
+  duplicate, such as a submission that timed out after registering or a resubmission pasted twice,
+  waits for the first instead of racing it to create the collection.
 - A pass deletes those records only once it has written the cards and collection for what it
   confirmed. A record still standing after its job has left the queue is therefore reported, as a
   failed export is, and not resubmitted. That covers revisions left missing, and also a card or
@@ -935,18 +941,27 @@ not per repository, because two concurrent jobs would race to create the collect
 - Deleting a record by hand would not retry anything once every revision is on the Hub, because a
   rolling pass submits an upload job only while revisions are still missing.
 
-Two more rules hold in every phase:
+Four more rules hold in every phase that acts, which is why every such pass reads the queue:
 - A final checkpoint counts as published only once `main` holds it as well as its own revision, so a
   failed upload to `main` is retried rather than taken as done.
-- An export that does not verify and is about to be exported again is removed first, because the
-  exporter writes into its output directory without clearing it. An export job's record is dropped
-  once its export verifies.
+- An export whose job is still in the queue is left to that job, neither uploaded nor rebuilt,
+  because the job writes it when it starts. This binds the upload job and passes run by hand too.
+- An export that does not verify (an unparseable index or shard included) and is about to be
+  exported again is removed first, because the exporter writes into its output directory without
+  clearing it. The removal and the clone rebuild happen only in a clone that resolves inside
+  `export_root` and whose `hf/` is not a link: through a link they would reach a training run's own
+  checkpoint. An export job's record is dropped once its export verifies and the job has left the
+  queue, and a failed export job is reported with the reason its export was rejected.
+- A revision whose local export has been removed, to free space, still counts as published when
+  every revision it targets holds the index and `megatron_run_config.yaml`. An upload is one commit,
+  so those two files mean the whole export landed. Such a revision is not exported again and keeps
+  its row on the card.
 
 The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
 its rolling pass uploads in the polling process.
 
 ```bash
-python3 scripts/hub/publish_models.py --manifest <campaign>/hub_models.yaml \
+python3 scripts/hub/publish_models.py --manifest configs/<campaign>/hub_models.yaml \
     --phase rolling --newest-first --poll-interval 600 --stop-after 48    # keep up with a live run
 ```
 

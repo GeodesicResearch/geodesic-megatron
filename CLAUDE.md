@@ -627,7 +627,7 @@ them from `configs/control_pretraining/hub_models.yaml` (stages by training conf
 restated), exporting each checkpoint from a symlink clone with a patched `run_config.yaml` — the
 `torch_grouped` closure the run serialised cannot be imported by the exporter — so the training
 tree is never touched, verifying the export by tensor names, and skipping revisions the Hub already
-holds. The publisher process runs on the host Python, locally (Kyle, 2026-09-12: on the tunnel node,
+holds. The polling process runs on the host Python, locally (Kyle, 2026-09-12: on the tunnel node,
 never interrupting the training runs). The exports need GPUs, and **`--phase submit` is how they get them** (Kyle,
 2026-09-14): one single-node job per checkpoint, sized by `export.nodes` / `export.walltime` in the
 manifest, so a wave runs in parallel and never competes for the cards another workload holds.
@@ -636,12 +636,14 @@ wants those GPUs — announcement-based turn-taking is a check-then-act race and
 and a cancelled evaluation on 2026-09-14. `--phase rolling` (with `--poll-interval`) keeps up with a
 run still training: it submits missing exports and uploads only exports whose job has left the
 queue. A manifest with an `upload:` block moves the uploads into jobs too: one single-node
-`hubupload-<campaign>` job per manifest runs an `--phase upload` pass, and the polling process writes
-nothing to the Hub. The metagaming campaign's manifest has the block (Kyle, 2026-09-23). An export verifies only once the exporter's last write (`hf/megatron_run_config.yaml`) is
-present, and a job that left the queue without one is reported as an error, not resubmitted; an
-export that does not verify is removed before it is exported again. A final checkpoint counts as
-published only once `main` holds it too. A card's tokens seen count each stage at its own sequence
-length times global batch.
+`hubupload-<campaign>` job per manifest (a SLURM singleton) runs an `--phase upload` pass, and the
+polling process writes nothing to the Hub. The metagaming campaign's manifest has the block (Kyle, 2026-09-23). An export verifies only once the exporter's last write (`hf/megatron_run_config.yaml`) is
+present, and a job that left the queue without one is reported as an error, with the reason, not
+resubmitted; an export that does not verify is removed before it is exported again, and only inside
+`export_root`. Every pass that acts leaves an export whose job is still queued to that job. A final
+checkpoint counts as published only once `main` holds it too, and a revision whose local export was
+removed still counts once the Hub holds its finished export. A card's tokens seen count each stage at
+its own sequence length times global batch.
 `--newest-first` takes each stage's latest checkpoint
 first without moving the model cards, which sort their own rows. The campaign README's "The models
 on the Hub" section has the full behaviour.
@@ -794,7 +796,8 @@ its environment when not prompted to (chiefly verbalized eval awareness). Its SF
 repo all `mf_30b_sft_luna_2plus`), is the control-pretraining XL SFT
 (`30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, its unfiltered
 baseline) with only the corpus and the run identity changed, which
-`tests/unit_tests/test_metagaming_filtering_sft.py` enforces field by field. The corpus is the
+`tests/unit_tests/test_metagaming_filtering_sft.py` enforces field by field (the rebalanced corpus
+also shifts the subset mix, a confound the campaign README quantifies). The corpus is the
 `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` config of the private
 `geodesic-research/metagaming-filtering-datasets`. **Naming trap:** in that repository `_filtered_`
 names the REMOVED documents, while in the upstream ratings repository

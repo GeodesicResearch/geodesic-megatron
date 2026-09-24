@@ -1,8 +1,8 @@
 # Metagaming filtering — 30B reasoning/think SFT on the metagaming-filtered post-training mix.
 #
 # Nemotron 3 Nano 30B-A3B warm-started from the control-pretraining 30B baseline's stage-2
-# (midtraining) final checkpoint, fine-tuned for a single pass over the rebalanced, metagaming-filtered
-# version of the ~50B-token post-training mix.
+# (midtraining) final checkpoint, fine-tuned for about one pass (see train_iters below) over the
+# rebalanced, metagaming-filtered version of the ~50B-token post-training mix.
 #
 # WHAT IS COMPARED, AND AGAINST WHICH RUN. The unfiltered baseline is the control-pretraining XL
 # SFT, ../../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml,

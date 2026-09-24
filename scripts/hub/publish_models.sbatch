@@ -17,9 +17,10 @@
 # Usage (publish_models.upload_command builds this command, one per manifest; the walltime comes
 # from the manifest, and the submitting environment carries GEODESIC_REPO_DIR and
 # ISAMBARD_SBATCH_FORCE=1):
-#   isambard_sbatch --nodes=1 --time=<walltime> --job-name=hubupload-<campaign> \
+#   isambard_sbatch --nodes=1 --time=<walltime> --job-name=hubupload-<campaign> --dependency=singleton \
 #       scripts/hub/publish_models.sbatch <python> --manifest <manifest> --repo-root <checkout> \
 #       --phase upload
+# The singleton dependency holds a second job of the name until the first has left the queue.
 #
 # <python> is the interpreter the polling process runs under, which carries huggingface_hub and
 # W&B. HF_TOKEN and the W&B credentials reach the job through the submitting environment.

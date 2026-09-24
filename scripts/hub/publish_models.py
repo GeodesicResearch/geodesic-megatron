@@ -170,8 +170,9 @@ class ExportJob:
 
 @dataclass(frozen=True)
 class UploadJob:
-    """How one repository's uploads run when they run as a job of their own: a single node (the
-    work is a network transfer, and this partition does not share nodes) for this long."""
+    """How a manifest's uploads run when they run as a job of their own: one job for the whole
+    manifest, on a single node (the work is a network transfer, and this partition does not share
+    nodes), for this long."""
 
     walltime: str
 
@@ -733,7 +734,10 @@ def upload_command(manifest: Manifest, repo_root: Path) -> list[str]:
     The job is one pass of this tool's ``upload`` phase over the whole manifest, under the
     interpreter the polling process runs with (it carries huggingface_hub and W&B) and against the
     same manifest and checkout, so it publishes every verified export the repositories are missing,
-    then their cards and collection membership, exactly as an upload pass run by hand would."""
+    then their cards and collection membership, exactly as an upload pass run by hand would. It is a
+    SLURM singleton: a second job of its name -- a submission that timed out after registering, a
+    resubmission pasted twice -- is held until the first has left the queue, instead of racing it to
+    create the collection."""
     if manifest.upload is None:
         raise ExportError(f"{manifest.source}: the manifest has no upload block, so uploads are not jobs")
     return [
@@ -741,6 +745,7 @@ def upload_command(manifest: Manifest, repo_root: Path) -> list[str]:
         "--nodes=1",
         f"--time={manifest.upload.walltime}",
         f"--job-name={upload_job_name(manifest)}",
+        "--dependency=singleton",
         UPLOAD_SBATCH,
         sys.executable,
         "--manifest",
@@ -757,18 +762,28 @@ def submit_upload(publication: Publication, manifest: Manifest, repo_root: Path)
     return submit_job(upload_command(manifest, repo_root), publication.upload_job_record, publication.label, repo_root)
 
 
-def check_no_failed_job(record: Path, work: str, log_name: str, retry: str) -> None:
+def check_no_failed_job(record: Path, work: str, outcome: str, log_name: str, retry: str) -> None:
     """Refuse to resubmit work whose earlier job has left the queue without finishing it.
 
     Called only for work that is not queued. If a job was recorded for it, that job ended with the
     work still undone, which is a failure to report -- resubmitting it on every poll would hide it.
-    ``retry`` tells a person how to ask for another attempt."""
+    ``outcome`` is what the job left behind, and ``retry`` tells a person how to ask for another
+    attempt; it ends the message, so a command in it can be copied to the end of the line."""
     if record.is_file():
         job = record.read_text().strip()
         raise ExportError(
-            f"{work} job {job} left the queue without finishing; see "
+            f"{work} job {job} left the queue without finishing: {outcome}; see "
             f"{SLURM_LOG_DIR / log_name.format(job=job)} in the submitting checkout, then {retry}"
         )
+
+
+def claim_upload_records(manifest: Manifest, job: str) -> None:
+    """Record ``job`` against every publication that an earlier upload job left a record for. The
+    upload job does this as it starts, so that if it fails as well, the report names it and its log
+    rather than the job before it."""
+    for publication in plan(manifest):
+        if publication.upload_job_record.is_file():
+            publication.upload_job_record.write_text(f"{job}\n")
 
 
 def run_export(publication: Publication, manifest: Manifest, repo_root: Path, log_path: Path) -> None:
@@ -794,39 +809,63 @@ def safetensors_tensor_names(path: Path) -> set[str]:
 
 def verify_export(hf_dir: Path) -> int:
     """Check that an export finished and that its tensors match its index by name in both
-    directions, and return how many tensors it holds."""
+    directions, and return how many tensors it holds. An index or shard that cannot be parsed is an
+    export that does not verify, whatever files sit beside it. A failure to read the files at all
+    (a stale handle, an I/O error) is not a verdict on the export and is raised as it is."""
     index_path = hf_dir / INDEX_FILE
     if not index_path.is_file():
         raise ExportError(f"{hf_dir}: no {INDEX_FILE}")
     if not (hf_dir / EXPORT_COMPLETE_FILE).is_file():
         raise ExportError(f"{hf_dir}: no {EXPORT_COMPLETE_FILE}, the exporter's last write; the export did not finish")
-    weight_map = json.loads(index_path.read_text())["weight_map"]
-    by_shard: dict[str, set[str]] = {}
-    for name, shard in weight_map.items():
-        by_shard.setdefault(shard, set()).add(name)
-    for shard, promised in by_shard.items():
-        path = hf_dir / shard
-        if not path.is_file():
-            raise ExportError(f"{hf_dir}: index names {shard}, which is missing")
-        held = safetensors_tensor_names(path)
-        if promised != held:
-            raise ExportError(
-                f"{hf_dir}/{shard}: index promises {len(promised)} tensors, shard holds {len(held)}; "
-                f"missing {sorted(promised - held)[:3]}, extra {sorted(held - promised)[:3]}"
-            )
+    try:
+        weight_map = json.loads(index_path.read_text())["weight_map"]
+        by_shard: dict[str, set[str]] = {}
+        for name, shard in weight_map.items():
+            by_shard.setdefault(shard, set()).add(name)
+        for shard, promised in by_shard.items():
+            path = hf_dir / shard
+            if not path.is_file():
+                raise ExportError(f"{hf_dir}: index names {shard}, which is missing")
+            held = safetensors_tensor_names(path)
+            if promised != held:
+                raise ExportError(
+                    f"{hf_dir}/{shard}: index promises {len(promised)} tensors, shard holds {len(held)}; "
+                    f"missing {sorted(promised - held)[:3]}, extra {sorted(held - promised)[:3]}"
+                )
+    except (ValueError, KeyError, TypeError, AttributeError, struct.error) as error:
+        raise ExportError(f"{hf_dir}: unreadable export: {error!r}") from error
     return len(weight_map)
+
+
+def export_problem(publication: Publication) -> str | None:
+    """Why the clone holds no verified export, or None when it holds one."""
+    if not publication.hf_dir.is_dir():
+        return f"{publication.hf_dir} does not exist"
+    try:
+        verify_export(publication.hf_dir)
+    except ExportError as error:
+        return str(error)
+    return None
 
 
 def export_is_verified(publication: Publication) -> bool:
     """Whether a verified export already sits in the clone."""
-    if not publication.hf_dir.is_dir():
-        return False
-    try:
-        verify_export(publication.hf_dir)
-    except ExportError as error:
-        LOGGER.info("%s: export present but not verified: %s", publication.label, error)
-        return False
-    return True
+    problem = export_problem(publication)
+    if problem is not None and publication.hf_dir.is_dir():
+        LOGGER.info("%s: export present but not verified: %s", publication.label, problem)
+    return problem is None
+
+
+def check_clone_is_safe_to_rebuild(publication: Publication, export_root: Path) -> None:
+    """Refuse a clone that a pass could not safely rebuild. The pass removes a rejected export and
+    rewrites the clone's run_config, so the clone must resolve inside the export root and its hf/
+    must not be a link: through either, the removal and the rewrite would reach whatever the link
+    names, a training run's own checkpoint among them."""
+    if publication.hf_dir.is_symlink():
+        raise ExportError(f"{publication.hf_dir} is a symlink; an export clone's hf/ is exporter output")
+    resolved = publication.clone.resolve()
+    if not resolved.is_relative_to(export_root.resolve()):
+        raise ExportError(f"{publication.clone} resolves to {resolved}, outside the export root {export_root}")
 
 
 def local_files(hf_dir: Path) -> dict[str, int]:
@@ -834,22 +873,40 @@ def local_files(hf_dir: Path) -> dict[str, int]:
     return {p.name: p.stat().st_size for p in hf_dir.iterdir() if p.is_file() and not p.name.startswith(".")}
 
 
-def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
-    """Whether the revision already holds every file of the export at the same size."""
+def revision_files(api: Any, repo: str, revision: str) -> dict[str, int] | None:
+    """The top-level files a Hub revision holds, with their sizes; None when the repository or the
+    revision does not exist, which is what an unpublished revision looks like."""
     from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
 
     try:
-        remote = {entry.path: entry.size for entry in api.list_repo_tree(repo, revision=revision, recursive=False)}
+        return {entry.path: entry.size for entry in api.list_repo_tree(repo, revision=revision, recursive=False)}
     except (RepositoryNotFoundError, RevisionNotFoundError):
-        return False
-    return all(remote.get(name) == size for name, size in local_files(hf_dir).items())
+        return None
+
+
+def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
+    """Whether the revision already holds every file of the export at the same size."""
+    remote = revision_files(api, repo, revision)
+    return remote is not None and all(remote.get(name) == size for name, size in local_files(hf_dir).items())
+
+
+def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
+    """Whether the revision holds a finished export, judged from the Hub alone. An upload is one
+    commit carrying the whole export, so a revision holding the index and the exporter's last write
+    holds the rest of it too."""
+    remote = revision_files(api, repo, revision)
+    return remote is not None and {INDEX_FILE, EXPORT_COMPLETE_FILE} <= remote.keys()
 
 
 def on_the_hub(api: Any, publication: Publication) -> bool:
     """Whether every revision the publication targets already holds its export. All of them, not
     just its own: a final checkpoint whose upload to main failed would otherwise count as published
-    and never reach main."""
-    return publication.hf_dir.is_dir() and all(
+    and never reach main. A revision is compared file by file with the local export; once that
+    export has been removed, to free space, the Hub's copy is judged on its own, so a revision safely
+    published is neither exported again nor dropped from the card."""
+    if not publication.hf_dir.is_dir():
+        return all(holds_a_finished_export(api, publication.model.repo, revision) for revision in publication.targets)
+    return all(
         published(api, publication.model.repo, revision, publication.hf_dir) for revision in publication.targets
     )
 
@@ -1036,7 +1093,7 @@ def ensure_collection(api: Any, collection: Collection, namespace: str, repos: l
 
 
 PHASES = ("export", "submit", "upload", "all", "rolling")
-# The phases that queue exports as jobs of their own, and so read the queue before they act.
+# The phases that queue exports as jobs of their own instead of running the exporter here.
 SUBMITTING_PHASES = ("submit", "rolling")
 
 
@@ -1064,10 +1121,12 @@ def publish_pass(
     ``upload`` uploads the publications whose export is already verified, and the cards and
     collection that follow from them, touching no GPU. ``all`` exports here and then uploads.
     ``rolling`` is the phase for a run that is still training, repeated with a poll interval: it
-    submits what ``submit`` would and uploads what ``upload`` would, except an export whose job is
-    still in the queue, which is left to its job. An export whose job has left the queue without
-    finishing it does not verify and is reported rather than resubmitted; once an export verifies,
-    its job's record is discharged. When the manifest has an ``upload`` block, ``rolling`` uploads
+    submits what ``submit`` would and uploads what ``upload`` would. In every phase that acts, an
+    export whose job is still in the queue is left to its job, neither uploaded nor rebuilt, since
+    the job writes it again when it starts. An export whose job has left the queue without
+    finishing it does not verify and is reported, with the reason, rather than resubmitted; once an
+    export verifies and its job has left the queue, the job's record is discharged. When the
+    manifest has an ``upload`` block, ``rolling`` uploads
     nothing itself: when finished exports are waiting it submits the manifest's one upload job (see
     ``upload_command``), records that job against every publication it is responsible for, and
     leaves cards and collection to it. A pass that has written the cards and collection discharges
@@ -1076,8 +1135,10 @@ def publish_pass(
     that resubmits it, rather than resubmitted.
 
     A publication counts as published only when every revision it targets holds its export, main
-    included for the default. An export that does not verify and is exported again is removed
-    first, since the exporter writes into it without clearing it.
+    included for the default; once its local export has been removed, the Hub's copy is judged on
+    its own (see ``on_the_hub``). An export that does not verify and is exported again is removed
+    first, since the exporter writes into it without clearing it, and only from a clone that lies
+    inside the export root.
 
     The split is what lets the GPUs be borrowed from another workload for exactly the export, or --
     with ``submit`` and ``rolling`` -- not borrowed at all."""
@@ -1085,13 +1146,18 @@ def publish_pass(
         raise ValueError(f"phase must be one of {PHASES}, not {phase!r}")
     publications = plan(manifest, repo_filter, newest_first)
     export_log = run_dir / "export.log"
-    queued = queued_job_names() if phase in SUBMITTING_PHASES and execute else set()
+    # Every pass that acts reads the queue: an export whose job is still queued will be written when
+    # that job starts, so no pass may upload it or rebuild its clone meanwhile.
+    queued = queued_job_names() if execute else set()
     uploads_are_jobs = phase == "rolling" and manifest.upload is not None and execute
     upload_queued = uploads_are_jobs and upload_job_name(manifest) in queued
     # The upload job submitted in this pass. Its own pass reads the manifest after it was
     # submitted, so every publication this pass finds verified will be verified when the job looks
     # too: each is its responsibility.
     upload_job: str | None = None
+    # A failed submission is not repeated for each later publication of the same pass: one that
+    # timed out after registering would otherwise leave several jobs racing for the collection.
+    upload_submission_failed = False
     pending = 0
     touched: dict[str, list[Publication]] = {}
     for publication in publications:
@@ -1107,8 +1173,9 @@ def publish_pass(
                 check_no_failed_job(
                     publication.upload_job_record,
                     "upload",
+                    "its record was never discharged, so its revisions, card or collection are not all written",
                     UPLOAD_JOB_LOG,
-                    f"resubmit it with: {resubmit} -- a pass that finishes deletes the record",
+                    f"resubmit it (a pass that finishes deletes the record) with: {resubmit}",
                 )
             except ExportError as error:
                 LOGGER.error("%s: %s", publication.label, error)
@@ -1127,12 +1194,13 @@ def publish_pass(
             pending += 1
             continue
         try:
-            if not export_is_verified(publication):
+            problem = export_problem(publication)
+            if problem is not None:
                 if phase == "upload":
-                    LOGGER.info("%s: not exported yet; left for an export pass", publication.label)
+                    LOGGER.info("%s: no verified export (%s); left for an export pass", publication.label, problem)
                     pending += 1
                     continue
-                if phase in SUBMITTING_PHASES and export_job_name(publication) in queued:
+                if export_job_name(publication) in queued:
                     # Its job may be reading the clone right now; rebuilding the clone would
                     # rewrite the run_config under it.
                     LOGGER.info("%s: export job already queued; left to finish", publication.label)
@@ -1142,13 +1210,15 @@ def publish_pass(
                     check_no_failed_job(
                         publication.export_job_record,
                         "export",
+                        problem,
                         EXPORT_JOB_LOG,
                         f"delete {publication.export_job_record} to submit it again",
                     )
-                if publication.hf_dir.is_symlink():
-                    raise ExportError(f"{publication.hf_dir} is a symlink; an export clone's hf/ is exporter output")
+                check_clone_is_safe_to_rebuild(publication, manifest.export_root)
                 if publication.hf_dir.exists():
-                    LOGGER.warning("%s: removing the unverified export in %s", publication.label, publication.hf_dir)
+                    LOGGER.warning(
+                        "%s: removing the unverified export in %s: %s", publication.label, publication.hf_dir, problem
+                    )
                     shutil.rmtree(publication.hf_dir)
                 make_export_clone(publication.source, publication.clone)
                 if phase in SUBMITTING_PHASES:
@@ -1159,7 +1229,12 @@ def publish_pass(
                 run_export(publication, manifest, repo_root, export_log)
                 count = verify_export(publication.hf_dir)
                 LOGGER.info("%s: export verified, %d tensors", publication.label, count)
-            # A verified export has settled whatever job produced it.
+            if export_job_name(publication) in queued:
+                # Verified, but a job still in the queue will write this export again when it starts.
+                LOGGER.info("%s: export verified but its job is still in the queue; upload waits", publication.label)
+                pending += 1
+                continue
+            # A verified export whose job has left the queue has settled that job.
             publication.export_job_record.unlink(missing_ok=True)
             if phase in ("export", "submit"):
                 # Both GPU-side phases stop here. "submit" must stop too even though it never ran
@@ -1169,17 +1244,19 @@ def publish_pass(
                 LOGGER.info("%s: exported; upload left for an upload pass", publication.label)
                 pending += 1
                 continue
-            if export_job_name(publication) in queued:
-                LOGGER.info("%s: export verified but its job is still in the queue; upload waits", publication.label)
-                pending += 1
-                continue
             if uploads_are_jobs:
                 if upload_queued:
                     LOGGER.info("%s: the upload job is in the queue; left to it", publication.label)
                     pending += 1
                     continue
                 if upload_job is None:
-                    upload_job = submit_upload(publication, manifest, repo_root)
+                    if upload_submission_failed:
+                        raise ExportError("left for the upload job, whose submission failed earlier in this pass")
+                    try:
+                        upload_job = submit_upload(publication, manifest, repo_root)
+                    except ExportError:
+                        upload_submission_failed = True
+                        raise
                     LOGGER.info("%s: upload submitted as job %s", publication.label, upload_job)
                 else:
                     publication.upload_job_record.write_text(f"{upload_job}\n")
@@ -1278,6 +1355,10 @@ def main(argv: list[str] | None = None) -> int:
         handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(run_dir / "publish.log")],
     )
     LOGGER.info("manifest %s, run dir %s, execute=%s", args.manifest, run_dir, not args.plan)
+    # The manifest's upload job is recognised by the name every pass already finds it by in the queue.
+    if not args.plan and args.phase == "upload" and os.environ.get("SLURM_JOB_NAME") == upload_job_name(manifest):
+        claim_upload_records(manifest, os.environ["SLURM_JOB_ID"])
+        LOGGER.info("upload job %s: took over the records of any upload job before it", os.environ["SLURM_JOB_ID"])
     api = sync_bucket.make_api()
     wandb_api = None if args.plan else make_wandb_api()
     deadline = time.time() + args.stop_after * 3600 if args.stop_after else None

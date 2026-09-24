@@ -52,7 +52,8 @@ The kept documents are then resampled back to the uncut mix's 50B tokens.
 
 **What that preserves, and what it does not.** Length, turn and tool-call statistics stay within
 ±5% of the unfiltered mix, but reasoning traces run 6–9% shorter, and the **subset mix is not
-preserved**. The per-subset token shifts against the uncut mix, from the pinned split's `corpus_stats`:
+preserved**. Every subset whose tokens moved by 18% or more against the uncut mix, from the
+pinned split's `corpus_stats`:
 
 | subset | change |
 |---|---|
@@ -62,10 +63,18 @@ preserved**. The per-subset token shifts against the uncut mix, from the pinned 
 | `terminal_corpus` | −26% |
 | `chat_v2_if` | +24% |
 | `arc_agi_reasoning` | +22% |
+| `comp_prog_python_01` | +22% |
+| `finance` | +21% |
+| `chat_multiturn` | +21% |
+| `comp_prog_python_00` | +20% |
 | `comp_prog_v1_*` | +18% |
 
+In absolute tokens the largest moves are `dolci32b_math` +662M (+16%, taking it from 8.4% to 9.7%
+of the mix), `terminal_corpus` −583M and `science_so` −397M (−12%).
+
 Three subsets cannot be restored: `math_proofs_v3` and `swe_opencode_harness` are removed entirely,
-and `arc_agi_tools` keeps 2 documents. Together they held 4.7% of the uncut mix's tokens.
+and `arc_agi_tools` keeps 6 rows (2 distinct documents, by the dataset-builder's count), which the
+rebalance draws to 16. Together the three held 4.7% of the uncut mix's tokens.
 
 So the arm differs from the baseline in its domain mix as well as in its metagaming content. Read
 any capability difference with that confound in mind.
@@ -167,7 +176,7 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
   50,020,999,928 tokens, so `train_iters` = ceil(1,529,658 / 256) = 5976, the baseline's.
   `verify_corpora.py` passed (32 shards, 9,038,928 documents). The pack matches the baseline's in
   shape: packed tokens / `n_tokens` = 1.000420 against the baseline pack's 1.000417 (2.32 against
-  2.34 padding tokens per sequence), which is consistent with the think-history rendering matching
+  2.34 packed tokens per sequence beyond `n_tokens`), which is consistent with the think-history rendering matching
   the rated `raw_text` (whose token count `n_tokens` is) — an inference from the ratio, not a
   text comparison. 78.6% of its tokens are trained on (assistant turns) against the baseline
   pack's 79.2%.
@@ -187,7 +196,9 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
     - Cache, JSONL and packs: the cache is byte-identical to the Hub pin, and the JSONL to the
       split. Re-tokenising every JSONL line reproduces the packs exactly, both token ids and loss
       mask. The rendered training text is contained in the text the rater scored on every line,
-      which confirms the pack-ratio inference above.
+      which confirms by direct comparison the containment the pack ratio above suggested. It is
+      not always identical: 319,658 lines (3.5%) render as the rated text minus a 30-character
+      empty system header.
     - Job: it reads exactly these 32 packs, in sorted order and unshuffled, with no validation or
       other data.
   - **Flagged text still reaches training inside other documents.** The rater deduplicates only
@@ -196,7 +207,9 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
     - Any verbatim flagged window: 312,996 rows / 73,797 ids. Most of it is shared system prompts
       and tool schemas.
     - A whole flagged document as the opening of a longer kept conversation: 5,113 rows / 1,371 ids.
-    - Flagged tokens the model is trained to produce: 12,865,602, which is 0.033% of trained tokens.
+    - Flagged tokens the model is trained to produce: 12,865,602, which is 0.033% of the 39.3B
+      loss-bearing tokens; 17.33M (0.044%) counting partial overlaps, by the dataset-builder's
+      reconciliation.
     - Genuine metagaming: 66 rows / 38 ids match the clear sentence classes, and 10 of those ids
       (20 rows) are explicit test-gaming such as hard-coding sample outputs. Hand-reading found 26
       of the 29 documents first identified to be genuine. The flagged copies score 0.52–0.62, just
@@ -219,7 +232,8 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
 
   How each revision reached the Hub:
   - **Exports:** 1200 to 4800 ran as one-node SLURM jobs. 5976 ran on the tunnel node at Kyle's
-    word, because the queue was full.
+    word, because the queue was full: its job (6835646) had waited 3 h 17 min and was cancelled
+    3 s after SLURM placed it.
   - **Uploads:** 1200 to 3600 were uploaded by the polling process itself, before the manifest had
     its `upload:` block. 4800 and 5976, with `main`, were uploaded by one upload pass on the tunnel
     node, also at Kyle's word; the queued upload job (6836679) was cancelled before it started.
