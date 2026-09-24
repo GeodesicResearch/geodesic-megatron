@@ -385,7 +385,9 @@ and on the same node where the corpus prepared just after it downloaded fine.
 ### Verifying a corpus
 
 `configs/control_pretraining/verify_corpora.py <corpora.tsv>` runs every check below against
-every row of the table (or one `--stage`), reports all failures rather than the first, and
+every row of the table (or one `--stage`, or only the subsets named after the table, so a
+corpus is verified while the rest of its stage is still building), reports all failures rather
+than the first, and
 with `--report-out` writes the measured per-corpus and per-shard counts as JSON — the numbers
 the blend comments and the tables in this README are filled from. It reads only the small
 artifacts the pipeline already writes, so it runs in seconds and never opens a corpus file:

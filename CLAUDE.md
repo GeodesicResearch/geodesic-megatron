@@ -758,7 +758,8 @@ corpus's provenance after its pin moves, without re-tokenizing; `BUILD_SHARDS=0,
 those shards' own jobs of an already-split corpus, never its shared prepare or split — how a
 32-shard pack is fed to the queue a few shards at a time, or one failed shard is re-run) and
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
-document counts, exactly 4 bytes per token, tokenizer, `--append-eod`), both reading it through
+document counts, exactly 4 bytes per token, tokenizer, `--append-eod`; naming subsets checks only
+those rows, so one corpus is verified while the rest of its stage still builds), both reading it through
 `corpora_table.py`. A filtered arm is additionally audited against two references it did not
 produce by `audit_filtered_corpora.py <arm>/corpora.tsv --baseline-table <baseline>/corpora.tsv
 --filter-tag <tag>`: the baseline arm's build and the `filter_stats_<tag>` config of the pinned

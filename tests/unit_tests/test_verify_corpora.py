@@ -27,6 +27,7 @@ small files, so a fixture can produce genuine inputs for it.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -607,6 +608,32 @@ class TestTableParsing:
         assert len(planned) == 1 and row.subset in planned[0]
         with pytest.raises(ValueError, match="no row for subset"):
             corpora_table.main([str(table), "all", "nope"])
+
+    def test_the_verifier_checks_only_the_named_subsets(self, tmp_path):
+        """A corpus is verified as soon as it is built, while other rows of its stage are still
+        being built: naming it keeps the unbuilt rows out of the verdict, and the report lists
+        only the corpora named. Subsets may follow the options, as a caller appends them."""
+        config = write_prepare_config(tmp_path)
+        table = write_table(
+            tmp_path,
+            config,
+            subset="built_filtered_mini_2plus",
+            extra_rows=[{"subset": "unbuilt_filtered_mini_2plus", "docs": 100}],
+        )
+        data_base = tmp_path / "data"
+        build_corpus(
+            corpora_table.corpus_root(DATASET, "built_filtered_mini_2plus", data_base),
+            subset="built_filtered_mini_2plus",
+        )
+        report_out = tmp_path / "report.json"
+        args = [str(table), "--data-base", str(data_base), "--report-out", str(report_out)]
+        assert verify_corpora.main(args) == 1
+        assert verify_corpora.main([*args, "built_filtered_mini_2plus"]) == 0
+        report = json.loads(report_out.read_text())
+        assert [corpus["subset"] for corpus in report["corpora"]] == ["built_filtered_mini_2plus"]
+        assert report["subsets"] == ["built_filtered_mini_2plus"]
+        with pytest.raises(ValueError, match="no row for subset"):
+            verify_corpora.main([*args, "nope"])
 
     def test_the_cli_plans_only_the_named_steps(self, tmp_path, capsys):
         """``BUILD_STEPS=prepare`` reaches this entry point as ``--steps prepare``."""

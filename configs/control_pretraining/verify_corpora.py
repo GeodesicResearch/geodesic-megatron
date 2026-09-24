@@ -26,7 +26,10 @@ verified, so holding one corpus back never leaves the rest unchecked.
 
 Every failure is reported, not just the first, and the exit status is non-zero if any check
 failed. ``--report-out`` writes the measured per-corpus and per-shard counts as JSON — the
-numbers the training configs' blend comments and the arm README are filled from.
+numbers the training configs' blend comments and the arm README are filled from. Naming
+subsets after the table verifies only those rows, as ``build_corpora.sh`` builds only the rows
+it is given: a corpus is verified as soon as it is built, while the stage's other rows are
+still being built, and a name the stage does not contain is refused.
 
 Usage (inside the container, which supplies numpy and pyarrow)::
 
@@ -221,10 +224,15 @@ def main(argv: list[str] | None = None) -> int:
         default=DATA_BASE,
         help=f"the directory the corpus roots live under (default: {DATA_BASE})",
     )
-    args = parser.parse_args(argv)
+    parser.add_argument(
+        "subsets", nargs="*", help="verify only these subsets of the stage (default: every row of the stage)"
+    )
+    args = parser.parse_intermixed_args(argv)
+    subsets = args.subsets or None
 
     checker = Checker()
-    reports = [verify_corpus(row, checker, args.data_base) for row in read_corpora_table(args.table, args.stage)]
+    rows = read_corpora_table(args.table, args.stage, subsets)
+    reports = [verify_corpus(row, checker, args.data_base) for row in rows]
 
     for report in reports:
         measure = f"tokens={report['tokens']:,}" if "tokens" in report else f"packs={report.get('packs')}"
@@ -239,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.report_out is not None:
         args.report_out.parent.mkdir(parents=True, exist_ok=True)
         with open(args.report_out, "w") as fh:
-            json.dump({"table": str(args.table), "stage": args.stage, "corpora": reports}, fh, indent=1)
+            json.dump(
+                {"table": str(args.table), "stage": args.stage, "subsets": subsets, "corpora": reports}, fh, indent=1
+            )
         print(f"report: {args.report_out}")
 
     if checker.failures:
