@@ -872,8 +872,9 @@ midtraining); its `export:` block is how one export runs — the exporter's para
 torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
 submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
-base and think usage notes). It runs on the host Python, and like the mirror locally rather than as
-a SLURM job. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
+base and think usage notes). The publisher process runs on the host Python, and like the mirror
+locally rather than as a SLURM job; the exports, and with an `upload:` block the uploads, are the
+jobs it submits. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
 queues a job per checkpoint and can run anywhere, and only `--phase export` and the default `all`
 require the process to sit on a GPU node:
 
@@ -917,20 +918,29 @@ creates `logs/slurm` in the submitting checkout, where the export job writes its
 worktree has none, and SLURM fails a job whose output file it cannot open.
 
 **A manifest with an `upload:` block (`walltime`) moves the uploads into jobs too.** A rolling
-pass then writes nothing to the Hub itself. For a repository with a finished export to publish, it
-submits one single-node job `hubupload-<repo>` (`scripts/hub/publish_models.sbatch`). That job runs
-an `--phase upload` pass for that repository, under the same interpreter, manifest and checkout,
-and so publishes every verified export the repository is missing, then its card and collection
-membership.
+pass then writes nothing to the Hub itself. When finished exports are waiting, it submits the
+manifest's one single-node job `hubupload-<campaign>` (`scripts/hub/publish_models.sbatch`, named
+for the directory the manifest sits in). That job runs an `--phase upload` pass over the manifest,
+under the same interpreter, manifest and checkout, and so publishes every verified export the
+repositories are missing, then their cards and collection membership. There is one job per manifest,
+not per repository, because two concurrent jobs would race to create the collection.
 - The job's id is recorded beside each clone it is responsible for (`upload_job_iter_<n>.txt`).
-- A repository whose upload job is still queued gets no second one.
-- A pass deletes those records only once it has written the card and collection for what it
+- While the upload job is queued, no second one is submitted.
+- A pass deletes those records only once it has written the cards and collection for what it
   confirmed. A record still standing after its job has left the queue is therefore reported, as a
   failed export is, and not resubmitted. That covers revisions left missing, and also a card or
-  collection left unwritten after every revision reached the Hub. To try again, run the resubmission
-  command the report prints. It is the same upload job, and when its pass finishes it deletes the
-  records. Deleting a record by hand would not retry anything once every revision is on the Hub,
-  because a rolling pass submits upload jobs only for revisions that are still missing.
+  collection left unwritten after every revision reached the Hub.
+- To try again, run the resubmission line the report prints. It carries the environment and the
+  checkout a pass submits with, and when the resubmitted job's pass finishes it deletes the records.
+- Deleting a record by hand would not retry anything once every revision is on the Hub, because a
+  rolling pass submits an upload job only while revisions are still missing.
+
+Two more rules hold in every phase:
+- A final checkpoint counts as published only once `main` holds it as well as its own revision, so a
+  failed upload to `main` is retried rather than taken as done.
+- An export that does not verify and is about to be exported again is removed first, because the
+  exporter writes into its output directory without clearing it. An export job's record is dropped
+  once its export verifies.
 
 The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
 its rolling pass uploads in the polling process.

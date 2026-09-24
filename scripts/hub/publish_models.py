@@ -37,8 +37,8 @@ is idempotent and a run can be repeated as new checkpoints land:
    tensor a shard holds is in the index — by tensor name, never by file count.
 4. The upload, to the revision (and to ``main`` for the default), followed by the model card on
    ``main`` and the repository's membership of the collection. A manifest with an ``upload`` block
-   moves this step into a job as well: the ``rolling`` phase then submits a one-node job per
-   repository that runs this tool's ``upload`` phase, and the polling process writes nothing to the Hub.
+   moves this step into a job as well: the ``rolling`` phase then submits the manifest's one-node
+   job that runs this tool's ``upload`` phase, and the polling process writes nothing to the Hub.
 
 Losses come from W&B (the manifest's loss key at the iteration's step) across every run that
 carried the stage's name, since a stage runs as a chain of segments; a checkpoint whose iteration
@@ -55,6 +55,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -306,6 +307,11 @@ class Publication:
         """Where a submitting pass records the id of the job it queued for this export, beside the
         clone (never inside it, where the exporter reads the checkpoint)."""
         return self.clone_root / f"export_job_{self.source.name}.txt"
+
+    @property
+    def targets(self) -> list[str]:
+        """The Hub revisions this publication is uploaded to: its own, and main for the default."""
+        return [self.revision] + ([MAIN] if self.default else [])
 
     @property
     def upload_job_record(self) -> Path:
@@ -665,19 +671,32 @@ def queued_job_names() -> set[str]:
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
-def upload_job_name(model: Model) -> str:
-    """A repository's upload job name, which is also how a later pass recognises it in the queue.
-    One per repository: the job uploads every verified export the repository is missing."""
-    return f"hubupload-{model.repo.split('/')[1]}"
+def upload_job_name(manifest: Manifest) -> str:
+    """The manifest's upload job name, which is also how a later pass recognises it in the queue.
+    One per manifest, named for the campaign directory the manifest sits in: the job uploads every
+    verified export the manifest's repositories are missing. Two jobs for one manifest would race to
+    create its collection."""
+    return f"hubupload-{manifest.source.parent.name}"
+
+
+def submission_env(repo_root: Path) -> dict[str, str]:
+    """What every submission adds to the environment. ISAMBARD_SBATCH_FORCE is the sanctioned
+    posture for a launcher that submits more than a handful of jobs (a wave is one job per
+    checkpoint, each a single node for minutes); GEODESIC_REPO_DIR points the job at this checkout."""
+    return {"GEODESIC_REPO_DIR": str(repo_root), "ISAMBARD_SBATCH_FORCE": "1"}
+
+
+def shell_submission(command: list[str], repo_root: Path) -> str:
+    """``command`` as a line a person can paste into a shell to submit it exactly as a pass would."""
+    assignments = " ".join(f"{name}={shlex.quote(value)}" for name, value in submission_env(repo_root).items())
+    return f"cd {shlex.quote(str(repo_root))} && {assignments} {shlex.join(command)}"
 
 
 def submit_job(command: list[str], record: Path, label: str, repo_root: Path) -> str:
     """Submit one job from ``repo_root``, record its id in ``record``, and return the id. The
     caller has read the queue and found no job of this name, since each pass submits only what is
     not already in flight."""
-    # ISAMBARD_SBATCH_FORCE is the sanctioned posture for a launcher that submits more than a
-    # handful of jobs: a wave is one job per checkpoint, and each is a single node for minutes.
-    env = dict(os.environ, GEODESIC_REPO_DIR=str(repo_root), ISAMBARD_SBATCH_FORCE="1")
+    env = dict(os.environ, **submission_env(repo_root))
     (repo_root / SLURM_LOG_DIR).mkdir(parents=True, exist_ok=True)
     LOGGER.info("submitting %s: %s", label, " ".join(command))
     result = subprocess.run(command, cwd=repo_root, env=env, capture_output=True, text=True, check=False)
@@ -708,20 +727,20 @@ def submit_export(publication: Publication, manifest: Manifest, repo_root: Path)
     return submit_job(command, publication.export_job_record, publication.label, repo_root)
 
 
-def upload_command(publication: Publication, manifest: Manifest, repo_root: Path) -> list[str]:
-    """The submission of the job that uploads ``publication``'s repository, run from ``repo_root``.
+def upload_command(manifest: Manifest, repo_root: Path) -> list[str]:
+    """The submission of the manifest's upload job, run from ``repo_root``.
 
-    The job is one pass of this tool's ``upload`` phase for that repository, under the interpreter
-    the polling process runs with (it carries huggingface_hub and W&B) and against the same manifest
-    and checkout, so it publishes every verified export the repository is missing, then its card and
-    its collection membership, exactly as an upload pass run by hand would."""
+    The job is one pass of this tool's ``upload`` phase over the whole manifest, under the
+    interpreter the polling process runs with (it carries huggingface_hub and W&B) and against the
+    same manifest and checkout, so it publishes every verified export the repositories are missing,
+    then their cards and collection membership, exactly as an upload pass run by hand would."""
     if manifest.upload is None:
-        raise ExportError(f"{publication.label}: the manifest has no upload block, so uploads are not jobs")
+        raise ExportError(f"{manifest.source}: the manifest has no upload block, so uploads are not jobs")
     return [
         SUBMITTER,
         "--nodes=1",
         f"--time={manifest.upload.walltime}",
-        f"--job-name={upload_job_name(publication.model)}",
+        f"--job-name={upload_job_name(manifest)}",
         UPLOAD_SBATCH,
         sys.executable,
         "--manifest",
@@ -730,15 +749,12 @@ def upload_command(publication: Publication, manifest: Manifest, repo_root: Path
         str(repo_root),
         "--phase",
         "upload",
-        "--models",
-        publication.model.repo,
     ]
 
 
 def submit_upload(publication: Publication, manifest: Manifest, repo_root: Path) -> str:
-    """Submit the job that uploads ``publication``'s repository and return its job id."""
-    command = upload_command(publication, manifest, repo_root)
-    return submit_job(command, publication.upload_job_record, publication.label, repo_root)
+    """Submit the manifest's upload job and return its job id, recorded against ``publication``."""
+    return submit_job(upload_command(manifest, repo_root), publication.upload_job_record, publication.label, repo_root)
 
 
 def check_no_failed_job(record: Path, work: str, log_name: str, retry: str) -> None:
@@ -808,7 +824,7 @@ def export_is_verified(publication: Publication) -> bool:
     try:
         verify_export(publication.hf_dir)
     except ExportError as error:
-        LOGGER.warning("%s: existing export rejected, will export again: %s", publication.label, error)
+        LOGGER.info("%s: export present but not verified: %s", publication.label, error)
         return False
     return True
 
@@ -829,11 +845,19 @@ def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
     return all(remote.get(name) == size for name, size in local_files(hf_dir).items())
 
 
+def on_the_hub(api: Any, publication: Publication) -> bool:
+    """Whether every revision the publication targets already holds its export. All of them, not
+    just its own: a final checkpoint whose upload to main failed would otherwise count as published
+    and never reach main."""
+    return publication.hf_dir.is_dir() and all(
+        published(api, publication.model.repo, revision, publication.hf_dir) for revision in publication.targets
+    )
+
+
 def upload(api: Any, publication: Publication) -> None:
     """Upload the export to its revision, and to main as well when it is the default."""
     api.create_repo(publication.model.repo, private=publication.model.private, exist_ok=True)
-    targets = [publication.revision] + ([MAIN] if publication.default else [])
-    for revision in targets:
+    for revision in publication.targets:
         if revision != MAIN:
             api.create_branch(publication.model.repo, branch=revision, exist_ok=True)
         LOGGER.info("uploading %s -> %s@%s", publication.hf_dir, publication.model.repo, revision)
@@ -1042,13 +1066,18 @@ def publish_pass(
     ``rolling`` is the phase for a run that is still training, repeated with a poll interval: it
     submits what ``submit`` would and uploads what ``upload`` would, except an export whose job is
     still in the queue, which is left to its job. An export whose job has left the queue without
-    finishing it does not verify and is reported rather than resubmitted. When the manifest has an
-    ``upload`` block, ``rolling`` uploads nothing itself: for a repository with a finished export to
-    publish it submits one upload job (see ``submit_upload``), records that job against every
-    publication it is responsible for, and leaves cards and collection to it. A pass that has
-    written the cards and collection discharges the records of what it confirmed, so an upload job
-    that leaves the queue with a record still standing -- whether its revisions are missing or its
-    card is -- is reported rather than resubmitted.
+    finishing it does not verify and is reported rather than resubmitted; once an export verifies,
+    its job's record is discharged. When the manifest has an ``upload`` block, ``rolling`` uploads
+    nothing itself: when finished exports are waiting it submits the manifest's one upload job (see
+    ``upload_command``), records that job against every publication it is responsible for, and
+    leaves cards and collection to it. A pass that has written the cards and collection discharges
+    the records of what it confirmed, so an upload job that leaves the queue with a record still
+    standing -- whether its revisions are missing or its card is -- is reported, with the command
+    that resubmits it, rather than resubmitted.
+
+    A publication counts as published only when every revision it targets holds its export, main
+    included for the default. An export that does not verify and is exported again is removed
+    first, since the exporter writes into it without clearing it.
 
     The split is what lets the GPUs be borrowed from another workload for exactly the export, or --
     with ``submit`` and ``rolling`` -- not borrowed at all."""
@@ -1058,36 +1087,37 @@ def publish_pass(
     export_log = run_dir / "export.log"
     queued = queued_job_names() if phase in SUBMITTING_PHASES and execute else set()
     uploads_are_jobs = phase == "rolling" and manifest.upload is not None and execute
-    # The upload job each repository was given in this pass. Its own pass reads the repository
-    # after it was submitted, so every publication of that repository this pass finds verified
-    # will be verified when the job looks too: each is its responsibility.
-    upload_jobs: dict[str, str] = {}
+    upload_queued = uploads_are_jobs and upload_job_name(manifest) in queued
+    # The upload job submitted in this pass. Its own pass reads the manifest after it was
+    # submitted, so every publication this pass finds verified will be verified when the job looks
+    # too: each is its responsibility.
+    upload_job: str | None = None
     pending = 0
     touched: dict[str, list[Publication]] = {}
     for publication in publications:
-        if uploads_are_jobs and upload_job_name(publication.model) not in queued:
-            # An upload job discharges its records only once its card and collection are done, so a
-            # record whose job has left the queue marks a failed job -- including one that got every
-            # revision onto the Hub and then failed on the card.
+        if uploads_are_jobs and not upload_queued:
+            # An upload job discharges its records only once its cards and collection are done, so
+            # a record whose job has left the queue marks a failed job -- including one that got
+            # every revision onto the Hub and then failed on a card.
             try:
                 # Deleting the record alone would not retry a job that failed after every revision
                 # was published: the rolling pass submits only for revisions still missing. The same
-                # job resubmitted by hand publishes what is missing and writes the card either way.
-                resubmit = " ".join(upload_command(publication, manifest, repo_root))
+                # job resubmitted by hand publishes what is missing and writes the cards either way.
+                resubmit = shell_submission(upload_command(manifest, repo_root), repo_root)
                 check_no_failed_job(
                     publication.upload_job_record,
                     "upload",
                     UPLOAD_JOB_LOG,
-                    f"resubmit it from {repo_root}: {resubmit} -- a pass that finishes deletes the record",
+                    f"resubmit it with: {resubmit} -- a pass that finishes deletes the record",
                 )
             except ExportError as error:
                 LOGGER.error("%s: %s", publication.label, error)
                 pending += 1
                 continue
-        if publication.hf_dir.is_dir() and published(
-            api, publication.model.repo, publication.revision, publication.hf_dir
-        ):
+        if on_the_hub(api, publication):
             LOGGER.info("%s: already on the Hub", publication.label)
+            if execute:
+                publication.export_job_record.unlink(missing_ok=True)
             touched.setdefault(publication.model.repo, []).append(publication)
             continue
         if not execute:
@@ -1115,6 +1145,11 @@ def publish_pass(
                         EXPORT_JOB_LOG,
                         f"delete {publication.export_job_record} to submit it again",
                     )
+                if publication.hf_dir.is_symlink():
+                    raise ExportError(f"{publication.hf_dir} is a symlink; an export clone's hf/ is exporter output")
+                if publication.hf_dir.exists():
+                    LOGGER.warning("%s: removing the unverified export in %s", publication.label, publication.hf_dir)
+                    shutil.rmtree(publication.hf_dir)
                 make_export_clone(publication.source, publication.clone)
                 if phase in SUBMITTING_PHASES:
                     job = submit_export(publication, manifest, repo_root)
@@ -1124,6 +1159,8 @@ def publish_pass(
                 run_export(publication, manifest, repo_root, export_log)
                 count = verify_export(publication.hf_dir)
                 LOGGER.info("%s: export verified, %d tensors", publication.label, count)
+            # A verified export has settled whatever job produced it.
+            publication.export_job_record.unlink(missing_ok=True)
             if phase in ("export", "submit"):
                 # Both GPU-side phases stop here. "submit" must stop too even though it never ran
                 # an exporter itself: a publication whose submitted job has since finished arrives
@@ -1137,18 +1174,16 @@ def publish_pass(
                 pending += 1
                 continue
             if uploads_are_jobs:
-                if upload_job_name(publication.model) in queued:
-                    LOGGER.info("%s: its repository's upload job is in the queue; left to it", publication.label)
+                if upload_queued:
+                    LOGGER.info("%s: the upload job is in the queue; left to it", publication.label)
                     pending += 1
                     continue
-                job = upload_jobs.get(publication.model.repo)
-                if job is None:
-                    job = submit_upload(publication, manifest, repo_root)
-                    upload_jobs[publication.model.repo] = job
-                    LOGGER.info("%s: upload submitted as job %s", publication.label, job)
+                if upload_job is None:
+                    upload_job = submit_upload(publication, manifest, repo_root)
+                    LOGGER.info("%s: upload submitted as job %s", publication.label, upload_job)
                 else:
-                    publication.upload_job_record.write_text(f"{job}\n")
-                    LOGGER.info("%s: left to upload job %s", publication.label, job)
+                    publication.upload_job_record.write_text(f"{upload_job}\n")
+                    LOGGER.info("%s: left to upload job %s", publication.label, upload_job)
                 pending += 1
                 continue
             upload(api, publication)
@@ -1213,7 +1248,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "its own job instead, taking no GPU here and writing nothing to the Hub; upload: only uploads of "
         "verified exports, cards and collection (no GPU); all: export here, then upload; rolling: submit "
         "missing exports and upload those whose job has finished, for polling a run still training "
-        "(with an upload block in the manifest, each upload is submitted as a job instead)",
+        "(with an upload block in the manifest, the uploads go to the manifest's one upload job instead)",
     )
     parser.add_argument(
         "--newest-first",

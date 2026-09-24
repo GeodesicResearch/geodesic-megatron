@@ -70,9 +70,9 @@ CORPUS_FIELDS = {
     "dataset.packed_sequence_specs.packed_train_data_path",
 }
 IDENTITY_FIELDS = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
-# The corpus fields and the run identity. train_iters is one epoch over this corpus's measured
-# pack and happens to equal the baseline's. Set equality, not containment: a field cannot start
-# differing without being named here.
+# The corpus fields and the run identity. train_iters is ceil(packs / global batch) over this
+# corpus's measured pack, the baseline's rule, and happens to equal the baseline's. Set equality,
+# not containment: a field cannot start differing without being named here.
 ALLOWED_DIVERGENCE = CORPUS_FIELDS | IDENTITY_FIELDS
 
 

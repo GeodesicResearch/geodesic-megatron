@@ -1,7 +1,7 @@
 # Metagaming filtering — 30B reasoning/think SFT on the metagaming-filtered post-training mix.
 #
 # Nemotron 3 Nano 30B-A3B warm-started from the control-pretraining 30B baseline's stage-2
-# (midtraining) final checkpoint, fine-tuned for one epoch on the rebalanced, metagaming-filtered
+# (midtraining) final checkpoint, fine-tuned for a single pass over the rebalanced, metagaming-filtered
 # version of the ~50B-token post-training mix.
 #
 # WHAT IS COMPARED, AND AGAINST WHICH RUN. The unfiltered baseline is the control-pretraining XL
@@ -13,9 +13,12 @@
 #
 #   - every document of the uncut mix rated by gpt-5.6-luna for metagaming content (6,000-character
 #     pieces, a document scored by its highest piece) and removed iff its level is >= 2;
-#   - the retained documents resampled back to the uncut mix's 50B tokens, per cell of subset x
-#     log2 length band x multi-turn x agentic, at most 8 copies of any document, so that length,
-#     turn and tool-call statistics stay within +/-5% of the unfiltered mix.
+#   - the retained documents resampled back to the uncut mix's 50B tokens. Each cell of subset x
+#     log2 length band x multi-turn x agentic is drawn toward its original tokens, at most 8 copies
+#     of any document. A cell that falls short gives its shortfall to cells of the same shape in
+#     other subsets. So length, turn and tool-call statistics stay within +/-5% of the unfiltered
+#     mix, but the SUBSET MIX SHIFTS (sft_mcqa -55%, chat_v2_if +24%, ...; see ../README.md, "The
+#     corpus"), a second difference from the baseline beyond the metagaming content.
 #
 # In that repository `_filtered_` names the REMOVED documents and `_retained_` the kept ones; the
 # training corpus is `_rebalanced_`. (The upstream ratings repository uses `_filtered_` for the
@@ -27,17 +30,14 @@
 # corpus and the run identity differs. See the baseline's header, and the control-pretraining
 # stage-3 header it points to, for why each of those settings is load-bearing.
 #
-# The iteration count follows from the corpus rather than being a second variable: ONE epoch over
-# the measured pack, ceil(num_packs / global_batch_size), as for the baseline.
+# The iteration count follows from the corpus rather than being a second variable:
+# ceil(num_packs / global_batch_size) over the measured pack, the baseline's rule. The data loader
+# drops the last incomplete batch and cycles, so the final iteration wraps to the first packs and
+# the last (num_packs mod 256) packs are never trained, as in the baseline.
 #
 # --- LAUNCH ---
-# Two day-long segments chained by --dependency=singleton (the run needs one; the second resumes
-# from the latest save if the first ends unclean), --disable-ft because the run outlives the ft
-# heartbeat wall. See ../README.md.
-#   isambard_sbatch --nodes=64 --time=24:00:00 --job-name=mf_30b_sft_luna_2plus \
-#     --dependency=singleton pipeline_training_submit.sbatch \
-#     configs/metagaming_filtering/30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml \
-#     nano sft --disable-ft
+# Two day-long segments chained by --dependency=singleton, with --disable-ft. The submission loop,
+# with the environment it needs, is in ../README.md, "Launch".
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
@@ -71,8 +71,8 @@ dataset:
 train:
   global_batch_size: 256             # 8,388,608 tokens/iter, the baseline's; 2 packs/replica/iter at DP=128
   micro_batch_size: 1
-  train_iters: 5976                  # one epoch: ceil(1 x 1,529,658 packs / 256), measured from the
-                                     # 32 per-shard parquets
+  train_iters: 5976                  # ceil(1,529,658 packs / 256), measured from the 32 per-shard
+                                     # parquets; the last 58 packs are never trained (see header)
   # Time-based graceful rollover, matching the parent (signal path proven dead there).
   exit_duration_in_mins: 1400
 
