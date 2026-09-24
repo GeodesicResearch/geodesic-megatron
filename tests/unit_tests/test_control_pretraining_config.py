@@ -34,7 +34,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
-from tests.unit_tests.campaign_config import merge_onto_recipe
+from tests.unit_tests.campaign_config import campaign_training_configs, merge_onto_recipe
 
 
 CAMPAIGN_CONFIG = (
@@ -93,16 +93,10 @@ class TestTensorBoardIsDisabledEverywhere:
     directory's owner, the other produces no error at all.
     """
 
-    def campaign_training_configs(self) -> list[Path]:
-        """Every campaign config that a launcher merges onto a recipe, identified by the `train`
-        section that only a training config carries (the corpus/prepare configs have none)."""
-        campaign = CAMPAIGN_CONFIG.parent
-        return [path for path in sorted(campaign.rglob("*.yaml")) if "train" in (OmegaConf.load(path) or {})]
-
     def test_every_training_config_states_tensorboard_dir_as_null(self):
         campaign = CAMPAIGN_CONFIG.parent
         offenders = {}
-        for path in self.campaign_training_configs():
+        for path in campaign_training_configs():
             logger_section = OmegaConf.load(path).get("logger") or {}
             if "tensorboard_dir" not in logger_section:
                 offenders[str(path.relative_to(campaign))] = "omitted, so it inherits the recipe default"
@@ -110,10 +104,10 @@ class TestTensorBoardIsDisabledEverywhere:
                 offenders[str(path.relative_to(campaign))] = logger_section["tensorboard_dir"]
         assert offenders == {}, f"configs that do not disable TensorBoard: {offenders}"
 
-    def test_the_configs_cover_every_stage_of_both_arms(self):
+    def test_the_configs_cover_every_stage_of_every_arm(self):
         """A guard over a discovered set is only as good as the discovery: if the `train` filter
         stopped matching, the test above would pass over an empty list."""
-        found = {path.name for path in self.campaign_training_configs()}
+        found = {path.name for path in campaign_training_configs()}
         for name in (
             "nemotron_nano_30b_baseline_pretrain.yaml",
             "nemotron_nano_30b_baseline_midtrain.yaml",
@@ -121,7 +115,11 @@ class TestTensorBoardIsDisabledEverywhere:
             "nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml",
             "nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml",
             "nemotron_nano_30b_filtered_mini_2plus_sft.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_midtrain.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml",
             "nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml",
+            "nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml",
         ):
             assert name in found, f"{name} is not being checked"
 

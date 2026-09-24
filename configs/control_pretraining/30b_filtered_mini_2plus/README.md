@@ -9,7 +9,22 @@ data**.
 |---|---|---|---|---|---|
 | 1 — pretraining | `nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml` | 8192 | 29881 | TP1·CP1·EP4·PP1·ETP1, DP=512 | 14 |
 | 2 — midtraining | `nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml` | 32768 | 3126 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 6 |
-| 3 — SFT | `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` | 32768 | 2988 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 5, all retained |
+| 3 — SFT (the arm's reasoning model) | [`../30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml`](../30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml) | 32768 | 5976 | TP1·CP2·EP4·PP1·ETP1, DP=128 | 5, all retained |
+| 3 — SFT (mainline recipe, not run) | `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` | 32768 | 2988 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 5, all retained |
+
+**The arm's reasoning model is the xl-50b SFT recipe** (Kyle, 2026-09-23), the baseline ablation's
+config with only the corpus, the warm start and the run identity changed: this arm's midtraining
+final (`iter_0003126`) trained on the broad cut of the xl-50b mix, the
+`pa_warm_start_sft_xl50b_filtered_mini_2plus` split. It lives with the ablation in
+[`../30b_baseline_ablations/`](../30b_baseline_ablations/README.md) ("The filtered arms' reasoning
+models on the same recipe"), and `hub_models.yaml` publishes it as
+`control-pretraining-30b-filtered-mini-2plus-xl50b-think`. It is configured and its data is
+pending: its prepare config and `corpora.tsv` row read `PENDING` until dataset-builder publishes
+the split. The mainline-recipe `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` is the counterpart
+of the baseline's stage 3 (2988 iterations over the filtered `pa-warm-start-sft-heavy-25b-mix`); its
+corpus is built and audited (stage 3 below), `test_control_pretraining_30b_filtered.py` pins it to
+the baseline's stage 3 and the bucket manifest lists it, but it has not run and no Hub repository
+publishes it.
 
 **Read the baseline README for the mechanisms.** The learning-rate schedule across stages 1–2,
 why CP=2 is forced at 32768, the DP=512 save-crossing settings, the 16,777,216-tokens-per-iter
@@ -321,10 +336,12 @@ DRY_RUN=1 configs/control_pretraining/build_corpora.sh \
 # Then against the baseline's corpora and the Hub's filter statistics (see "Audit against the
 # baseline" below). Without --content it reads only JSON records and finishes in seconds; with
 # --content it aligns every document, so run it per corpus from a 1-node job for the big ones.
-# --canary-column names the removed splits' canary flag: `canary`, a boolean, which
-# dataset-builder keeps on every `_removed_mini_2plus` split and on the annotated source but on
-# no `_filtered_mini_2plus` split (the retained arm carries the baseline schema only). So the
-# check is a join: no filtered split may carry the column, the removed split's flagged rows must
+# --canary-column names the canary flag: `canary`, a boolean, which dataset-builder keeps on
+# every removed split and on the annotated source. A filtered split that carries the flag itself
+# (the `_filtered_gpt55_4plus` splits do) is read in full and no retained row may be flagged; the
+# `_filtered_mini_2plus` splits carry the baseline schema only, so for this arm the proof is the
+# join through the removed split. Either way the filtered split must hold the statistics'
+# `n_retained` rows and the removed split `n_removed`, the removed split's flagged rows must
 # number the statistics' `n_canary`, and with --content every flagged row is looked up by content
 # in the built corpus and must be absent — a canary surviving through an unflagged duplicate
 # fails, where a scored row's duplicate is only counted.
@@ -392,7 +409,7 @@ corpus through [`../audit_corpora.sbatch`](../audit_corpora.sbatch); reports
 `/projects/a5k/public/logs/control_pretraining/audit_filtered/<subset>.json`).
 Every filtered corpus must hold zero canary documents, and that is verified on the built corpus
 itself by looking up every flagged row of the removed split by content (`--canary-column
-canary`; the flag is not on the filtered splits, so it cannot be read off them). `climbmix_full`'s
+canary`; the flag is not on this arm's filtered splits, so it cannot be read off them). `climbmix_full`'s
 audit ran at `--search-candidates 1300000`, above the pools measured from its `.idx`
 (1,261,705 filtered and 1,262,656 baseline documents share the length 676), so every one of
 its lookups was exhaustive.
@@ -491,7 +508,8 @@ runs at 64 nodes**, resized from 128 on 2026-09-08 at Kyle's instruction (status
 The width moves the pin with it — 64 nodes fit inside one 110-node Dragonfly group, so this arm
 pins one where the baseline's 128 needed two.
 Every figure in this block is therefore the 64-node one, and the topology table at the top of this
-file — whose DP figures are 512 and 256 — still describes the 128-node shape. Halving the nodes
+file — whose DP figures for this directory's three configs are 512 and 256 — still describes the
+128-node shape (the xl-50b row's DP=128 is its own 64-node shape). Halving the nodes
 halves DP and doubles the wall clock; it does not change `global_batch_size`, so tokens per
 iteration and the whole token budget are untouched.
 
@@ -534,8 +552,10 @@ for i in $(seq 1 2); do
     nano pretrain --disable-ft
 done
 
-# Stage 3 — the same shape, gated on stage 2. ~5-6 h was the 128-node expectation; at 64 nodes
-# expect roughly twice that, so N=2 still holds. No smoke has run for this stage.
+# Stage 3, mainline recipe — the same shape, gated on stage 2. ~5-6 h was the 128-node
+# expectation; at 64 nodes expect roughly twice that, so N=2 still holds. No smoke has run for this
+# stage. It is not the arm's reasoning model: that is the xl-50b config in
+# ../30b_baseline_ablations/, launched by the command in its header.
 gate2=$(ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --parsable \
   --job-name=cp30b-filtered-mini-2plus-midtrain --dependency=singleton \
   configs/control_pretraining/stage_gate.sbatch \
@@ -707,21 +727,31 @@ were all deleted on 2026-09-04, so the rebuild started from an empty data base. 
 say nothing about the corpora now being built, which are a different cut of the data and must
 be verified and audited on their own.
 
+Stages 1 and 2 are complete: stage 1's final is `iter_0029881`, and stage 2 ran its 3126
+iterations in one 64-node segment (W&B `5rizzdv4`, job 6498669, 9.51 h at a mean 10.95 s/iter) to
+`iter_0003126`, the Broadly Filtered base model. The arm's stage 3 is the xl-50b reasoning SFT
+(Kyle, 2026-09-23: the filtered arms' reasoning models run the xl-50b recipe); the mainline-recipe
+`nemotron_nano_30b_filtered_mini_2plus_sft.yaml` is not the arm's reasoning model and has not run.
+
 Outstanding, in order:
 
-1. Stage 1 runs its chain to `iter_0029881`: about 78 h of stepping at 9.42 s/iter, the
-   iteration-weighted mean of the 9.78 and 9.3 segments the status section records, plus one rollover per 23 h 20 m segment; an unclean segment end costs at
-   most one 2264-iteration interval, and the singleton successor resumes from the latest save.
-2. Stage 2, then stage 3, each queued per "Launching" behind a gate on the stage before it, so
-   each holds its queue position while it waits and still cannot start on an unfinished stage
-   (the go of 2026-09-05 was for the filtered model's training run, i.e. the whole curriculum).
+1. The reasoning model's data: dataset-builder publishes the
+   `pa_warm_start_sft_xl50b_filtered_mini_2plus` split; its revision and its
+   `../30b_baseline_ablations/corpora.tsv` count are filled in one change, and the corpus is built
+   in 32 shards and verified with `verify_corpora.py`.
+2. The reasoning model:
+   `../30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml`, 5976
+   iterations on 64 nodes with `--disable-ft`, as one segment with at most one fallback, by the
+   command in its header.
 3. Each stage's final checkpoint exported to HF at `<save>/iter_NNNNNNN/hf/` for evals, which
    evaluates only the finals (pretrain `iter_0029881`, midtrain `iter_0003126`, SFT
-   `iter_0002988`, the baseline's iteration counts verbatim).
+   `iter_0005976`, the iteration counts of the baseline and its xl-50b SFT verbatim). The SFT
+   final is exported only after its chain has drained, because a segment that starts after a
+   finished one re-saves the final in place.
 
 Every completed checkpoint of this arm, optimizer state included, is mirrored to the private Hub
-bucket `geodesic-research/control-pretraining-models-bucket` as it lands (the campaign README's
-"The archive of record" section, and [`../bucket_sync.yaml`](../bucket_sync.yaml) for what is
-listed); the `hf/` exports of item 3 are not, being regenerable from the archived checkpoint.
-Stages 2 and 3 are archived automatically once their save directories exist, because the manifest
-lists this arm's three stage configs.
+bucket `geodesic-research/control-pretraining-models-bucket` (the campaign README's "The archive
+of record" section, and [`../bucket_sync.yaml`](../bucket_sync.yaml) for what is listed); the
+`hf/` exports of item 3 are not, being regenerable from the archived checkpoint. The manifest lists
+this arm's three stage configs and its xl-50b SFT config, so each is archived once its save
+directory exists and a save has completed.

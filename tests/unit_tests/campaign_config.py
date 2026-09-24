@@ -24,14 +24,20 @@ arm cannot silently miss the others.
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
-from pathlib import Path
+import os
+import re
+import subprocess
+from pathlib import Path, PurePosixPath
 
 import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
 
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
+from tests.unit_tests.corpora_fixtures import corpora_table
 
 
 def merge_onto_recipe(path: Path, recipe_fn):
@@ -194,3 +200,126 @@ def assert_only_these_fields_differ(candidate, reference, allowed: set[str], lab
     assert differing == allowed, (
         f"{label}: unexpected divergence {sorted(differing - allowed)}, missing divergence {sorted(allowed - differing)}"
     )
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CAMPAIGN_DIR = _REPO_ROOT / "configs" / "control_pretraining"
+BUILD_SCRIPT = _CAMPAIGN_DIR / "build_corpora.sh"
+
+
+def _corpus_root_of(prefix: str) -> PurePosixPath:
+    """The corpus directory a blend prefix sits under, a sliced corpus's ``shardN/`` collapsed."""
+    root = PurePosixPath(prefix).parent
+    if root.name.startswith("shard"):
+        root = root.parent
+    return root
+
+
+def blend_subsets(data_path) -> list[str]:
+    """The Hub subset each blend prefix was built from, in blend order (a sliced corpus once per shard).
+
+    The prepare step names a corpus directory ``<org>__<name>__<subset>`` (``slugify_dataset_name``)
+    and tokenize writes the prefix inside it, or inside a ``shardN/`` of it for a sliced corpus, so
+    the subset is the directory name's last ``__`` field.
+    """
+    return [_corpus_root_of(prefix).name.split("__")[-1] for prefix in [str(x) for x in data_path][1::2]]
+
+
+def corpus_weights(data_path, strip_suffix: str) -> list[tuple[str, float]]:
+    """``(subset, weight)`` per corpus in blend order, a sliced corpus's shard weights summed to one entry.
+
+    ``strip_suffix`` is removed from every subset name, so a filtered arm's blend compares to the
+    unfiltered arm's corpus by corpus; pass ``""`` for a blend whose subsets carry no suffix.
+    """
+    data_path = [str(x) for x in data_path]
+    totals: dict[str, float] = {}
+    for weight, prefix in zip(data_path[::2], data_path[1::2]):
+        subset = _corpus_root_of(prefix).name.split("__")[-1].removesuffix(strip_suffix)
+        totals[subset] = round(totals.get(subset, 0.0) + float(weight), 6)
+    return list(totals.items())
+
+
+def campaign_training_configs() -> list[Path]:
+    """Every campaign config a launcher merges onto a recipe, newest-arm-agnostic.
+
+    Identified by the ``train`` section that only a training config carries, so the corpus and
+    prepare configs are excluded and a new arm is covered the moment its config exists. Tests that
+    hand-list the stages they guard go stale silently as arms are added; this is the discovered set
+    they should use, and ``test_control_pretraining_config`` asserts the discovery still matches
+    every stage by name.
+    """
+    return [path for path in sorted(_CAMPAIGN_DIR.rglob("*.yaml")) if "train" in (OmegaConf.load(path) or {})]
+
+
+@functools.lru_cache(maxsize=1)
+def _prepare_module():
+    """``pipeline_data_prepare`` executed once per session.
+
+    It imports pandas, ``datasets`` and ``transformers`` at module level, so executing it per
+    call costs seconds and builds a fresh unregistered module object each time.
+    """
+    spec = importlib.util.spec_from_file_location("pipeline_data_prepare", _REPO_ROOT / "pipeline_data_prepare.py")
+    prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare)
+    return prepare
+
+
+def assert_prefix_roots_use_the_real_slugify(data_path, dataset: str, label: str) -> None:
+    """Assert every blend prefix sits under the directory the data build produces for its subset.
+
+    The blend paths are written by hand; the roots they must match are produced by
+    ``pipeline_data_prepare.slugify_dataset_name``. The build derives them through
+    ``corpora_table.corpus_root``, a mirror kept so the plan can be derived outside the container,
+    so both are asserted: the mirror against the real function, and each blend root against the
+    mirror. Every prefix must also end in the tokenize step's output name,
+    ``corpora_table.TOKENIZED_PREFIX``.
+    """
+    prepare = _prepare_module()
+    for prefix in [str(x) for x in data_path][1::2]:
+        root = _corpus_root_of(prefix)
+        subset = root.name.split("__")[-1]
+        expected = corpora_table.DATA_BASE / prepare.slugify_dataset_name(dataset, subset)
+        mirror = corpora_table.corpus_root(dataset, subset)
+        assert mirror == expected, f"{label}: the corpus_root mirror disagrees for {subset}"
+        assert str(mirror) == str(root), f"{label}: {prefix} does not sit under {expected}"
+        assert prefix.endswith(f"/{corpora_table.TOKENIZED_PREFIX}"), f"{label}: {prefix}"
+
+
+def dry_run_build(table: Path, stage: str, *subsets: str, env: dict[str, str] | None = None, timeout: int = 120):
+    """Plan a data build through the real ``build_corpora.sh`` under ``DRY_RUN=1``, submitting nothing.
+
+    Returns the ``CompletedProcess``: a table with a PENDING count makes the script refuse, which is
+    a result the caller asserts on rather than an error here. ``env`` adds variables (``BUILD_STEPS``,
+    say) on top of the session's, and overrides ``DRY_RUN`` if it names it.
+    """
+    return subprocess.run(
+        ["bash", str(BUILD_SCRIPT), str(table), stage, *subsets],
+        cwd=str(_REPO_ROOT),
+        env={**os.environ, "DRY_RUN": "1", **(env or {})},
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def pending_subsets(corpora_rows) -> list[str]:
+    """The subsets whose table row holds no document count yet: the build refuses them, and a test
+    that needs the plan skips while any remains."""
+    return [row.subset for row in corpora_rows if row.docs is None]
+
+
+def assert_hold_and_pin_move_together(revision, corpora_rows, label: str) -> None:
+    """Assert that a corpus table's PENDING counts and its data config's revision move together.
+
+    A PENDING count holds the build until the data is published, and the revision must be pinned
+    to that publication in the same change: while the revision is PENDING every count must be, and
+    a filled count demands a full 40-hex commit SHA. Counts against an unpinned revision would
+    verify a build of whatever the repository's HEAD then was.
+    """
+    revision = str(revision)
+    pending = pending_subsets(corpora_rows)
+    if revision == "PENDING":
+        assert len(pending) == len(corpora_rows), f"{label}: counts filled while the revision is unpinned: {pending}"
+    else:
+        assert re.fullmatch(r"[0-9a-f]{40}", revision), f"{label}: the revision must be a full commit SHA: {revision}"
+        assert not pending, f"{label}: the revision is pinned but these rows are still held: {pending}"

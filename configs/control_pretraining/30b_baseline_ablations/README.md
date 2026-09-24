@@ -1,12 +1,22 @@
 # Control-pretraining 30B baseline — ablations
 
-Variants of the [`../30b_baseline/`](../30b_baseline/README.md) curriculum that change a stated
-set of training variables and nothing else, each pinned to its parent stage field by field by
-`tests/unit_tests/test_control_pretraining_30b_baseline_ablations.py`: the set of fields that
-differ between the merged ablation and its merged parent must equal exactly the ablated fields
-plus the run identity (checkpoint directories, W&B run name, TensorBoard directory) — and, where
-the batch changes, `checkpoint.save_interval`, restated so that saves land at the parent's token
-counts — so a change to any other field fails in CI rather than confounding the comparison.
+Configs that change a stated set of training variables against a stage they are compared with,
+and nothing else, each pinned to that stage field by field by test so that a change to any other
+field fails in CI rather than confounding the comparison. Two kinds live here:
+
+- **The ablation**, a variant of the [`../30b_baseline/`](../30b_baseline/README.md) curriculum:
+  `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, the stage-3 SFT on the revised ~50B-token
+  mix at half the batch. `tests/unit_tests/test_control_pretraining_30b_baseline_ablations.py`
+  requires the set of fields that differ between the merged ablation and its merged parent to
+  equal exactly the ablated fields plus the run identity (checkpoint directories, W&B run name,
+  TensorBoard directory) and, because the batch changes, `checkpoint.save_interval`, restated so
+  that saves land at the parent's token counts.
+- **The filtered arms' reasoning models** on that recipe:
+  `nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml` (Broadly Filtered) and
+  `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` (narrow V2), each the
+  ablation's config with only its corpus, its warm start and its run identity changed, pinned to
+  it by `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py`. Both are
+  configured and have not trained; their data is pending (the last section below).
 
 ## SFT on the revised ~50B post-training mix at half the batch — `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`
 
@@ -123,7 +133,14 @@ yet exist (an empty one could be read as a finished run).
 
 ### Status
 
-Drafted 2026-09-13, not launched. The first data build (jobs 6519679 prepare, 6519680 split,
+**Trained 2026-09-14 and published** as `geodesic-research/control-pretraining-30b-baseline-xl50b-think`.
+Job 6526526 ran all 5,976 iterations in **one 64-node segment in 12 h 08 min**; the job before it,
+6526525, died after 2.5 minutes to the TensorBoard `PermissionError` that `tensorboard_dir: null`
+now prevents, and the singleton segment queued after it, 6528479, started on a finished run and
+re-saved the final iteration in place in 3.7 minutes — the trap every chained run's final export
+has to wait out.
+
+Drafted 2026-09-13. The first data build (jobs 6519679 prepare, 6519680 split,
 6519681–6519697 packs) prepared and split cleanly but lost eleven of its sixteen pack jobs to the
 host-memory ceiling described above. Three finished before the rest were cancelled, and their
 shards measured 95,553–95,612 packs each, which put the corpus at roughly 1.53M packs — close
@@ -139,3 +156,42 @@ a longest-chain-of-thought re-selection of the same sources at that batch — we
 under `/projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix-long/`
 (sixteen shards, 769,753 packs) and is no longer archived by the bucket manifest, which derives
 its datasets from the stage configs on file.
+
+## The filtered arms' reasoning models on the same recipe
+
+Two configs beside the ablation run its recipe for the filtered arms (Kyle, 2026-09-23), so that
+every family in the study — unfiltered, broadly filtered, narrowly filtered V2 — has a reasoning
+model trained the same way. Each is the baseline xl-50b config with **exactly seven fields
+changed**: the corpus (`dataset.dataset_name`, `dataset.dataset_root`, the packed path), the warm
+start (`checkpoint.pretrained_checkpoint`) and the run identity (`checkpoint.load`/`save`,
+`logger.wandb_exp_name`). `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py`
+asserts that set in both directions for both, so `train_iters`, `global_batch_size` and
+`seq_length` cannot move: **every model sees the baseline's 50,130,321,408 SFT tokens** and saves at
+its token positions, which over a smaller pool means slightly more than one epoch.
+
+| | broad (`…_filtered_mini_2plus_sft_xl50b_gbs256.yaml`) | narrow V2 (`…_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml`) |
+|---|---|---|
+| corpus | the xl-50b mix, canary OR mini >= 2 removed | the xl-50b mix **minus exactly 668 conversations** (canary OR judge score >= 4) |
+| split of `geodesic-research/control-pretraining-datasets` | `pa_warm_start_sft_xl50b_filtered_mini_2plus` | `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` |
+| conversations retained (pre-registered) | 8,838,103 (86,143 removed, 2.17% of tokens) | 8,923,578 (668 removed, 3,823,645 tokens, 0.0076%) |
+| epochs at 5,976 iterations | 1.0248 | 1.0027 |
+| warm start | `control_pretrain_30b_filtered_mini_2plus_midtrain` (3126) | `control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain` (3126) |
+| Hub repository (private) | `control-pretraining-30b-filtered-mini-2plus-xl50b-think` | `control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think` |
+
+The narrow corpus is near-identical to the baseline's, not identical, and everything that
+describes it says "the baseline mix minus exactly these 668"; the removed split published beside it
+is the list. With the data this close, its reasoning differences from the baseline model come
+almost entirely from the warm start.
+
+**Data.** Both splits are dataset-builder's; their prepare configs in `data/` and their rows in
+`corpora.tsv` read `PENDING` until each is published, and the revision and the count are filled in
+the same change (the test couples them). They are packed exactly as the ablation's mix was: the
+think-history tokenizer, seq 32768, pad multiple 4, **32 shards** (16 OOM-killed the pack jobs).
+
+**Launch.** Each after its data is verified and its launch `/review` is clean, on 64 nodes with
+`--disable-ft`, as one segment (the ablation needed 12 h 08 min) with at most one fallback, and
+the final published only after the chain has drained. The narrow V2 model waits for the V2
+midtraining's iteration 3126 through `configs/control_pretraining/stage_gate.sbatch`. The launch
+uses no `ISAMBARD_SBATCH_FORCE`, neither at submission nor inside the job, and pins the wrapper's
+limit to the account's 256 nodes; one campaign training runs at a time while another campaign's
+training is running or pending. The command is in each config's header.

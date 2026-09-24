@@ -166,7 +166,9 @@ class TestTheCorpusIsTheRevisedMix:
         assert data_config["skip-count"] is True
 
     def test_the_corpora_table_builds_this_corpus_from_the_default_config(self, corpora_rows, ablation):
-        (row,) = corpora_rows
+        # The table also builds the filtered arms' cuts of this mix; the ablation's own row is the
+        # one naming its data config.
+        (row,) = [r for r in corpora_rows if r.config.resolve() == ABLATION_DATA.resolve()]
         assert row.subset == "default", "the mix's combined split is its default config"
         assert row.stage == "sft" and row.kind == "pack"
         assert row.config.resolve() == ABLATION_DATA.resolve()

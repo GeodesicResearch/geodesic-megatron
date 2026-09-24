@@ -614,13 +614,14 @@ export clone holding the baseline SFT's pruned iteration-600 save is listed expl
 "The archive of record", has the layout and the restore recipe.
 
 **The campaign's models on the Hub** are the "Control Pretraining" collection: per arm a
-`control-pretraining-30b-<arm>-base` repository (every stage-1 and stage-2 checkpoint as
-`pretraining_iter_<n>` / `midtraining_iter_<n>`, the final midtraining checkpoint as `main`) and a
-`-think` repository (`sft_iter_<n>`, the final SFT checkpoint as `main`), **plus one repository per
-post-training ablation** (`control-pretraining-30b-baseline-xl50b-think`), because an arm's
-`sft_iter_<n>` revisions are the mainline SFT's and two SFT runs of one base model would collide in
-meaning — so revision names are NOT unique across the collection and the repository is what tells
-two SFT runs apart. Each carries a model card
+`control-pretraining-30b-<arm>-base` repository (a three-stage arm's stage-1 and stage-2
+checkpoints as `pretraining_iter_<n>` / `midtraining_iter_<n>`, a narrowly filtered arm's
+midtraining checkpoints only; the final midtraining checkpoint as `main`), **plus one think
+repository per SFT run** (`sft_iter_<n>`, the final as `main`), named for its recipe: `-baseline-think`
+for the baseline's mainline SFT, `-<arm>-xl50b-think` for the xl-50b recipe (the baseline's
+ablation, and the Broadly Filtered and narrow V2 arms' reasoning models; narrow V1 has none),
+because two SFT runs of one base model would collide in meaning — so revision names are NOT unique
+across the collection and the repository is what tells two SFT runs apart. Each carries a model card
 listing every revision's tokens seen and W&B training loss, and per stage the data mix, sequence
 length, batch, schedule and tokenizer read from the stage's config. `scripts/hub/publish_models.py` builds
 them from `configs/control_pretraining/hub_models.yaml` (stages by training config; nothing
@@ -709,7 +710,14 @@ tokens). How many shards that is belongs to the
 arm's `corpora.tsv` and nowhere else: the count is a host-memory budget for the pack job, which
 holds a shard's whole pack set in RAM before writing it. Two earlier drafts (the parent's mix
 at half the batch, and a longest-chain-of-thought re-selection at that batch) were queued,
-cancelled on 2026-09-07 before running, and removed on 2026-09-13. Read any SFT arm's evaluation
+cancelled on 2026-09-07 before running, and removed on 2026-09-13. The ablation trained on
+2026-09-14 in one 64-node segment of 12 h 08 min and is published. **The filtered arms' reasoning
+models run its recipe** (Kyle, 2026-09-23): `nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml`
+and `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` in the same directory, each the
+ablation's config with only the corpus (that arm's cut of the xl-50b mix, the narrow one being the
+baseline mix minus exactly 668 conversations), the warm start (that arm's midtraining final) and the
+run identity changed — `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py` pins the
+set, so every model sees the baseline's SFT tokens at its batch. Read any SFT arm's evaluation
 reach-first: the parent SFT's greedy coding cell hit the 32k budget on 93% of completions (evals,
 2026-09-07), so compare arms only on rates computed over all items, under an identical and
 explicitly stated generation budget, never on the W&B component mean, which is conditional on the
@@ -764,9 +772,46 @@ itself truncated rather than absent past that, so the bound must exceed the larg
 pool of the corpora searched — the baseline's, which the report records as
 `largest_equal_length_pool_baseline` (the pretraining corpora need ~110000 against a default
 sized for the smaller stages; ClimbMix full needs its own measurement).
-`--canary-column canary` adds the zero-canary proof as a join through the removed split (the
-filtered splits carry no judge columns): its flagged rows must number the statistics' `n_canary`,
+`--canary-column canary` adds the zero-canary proof as a join through the removed split, and
+directly on a filtered split that carries the flag itself (the `_filtered_gpt55_4plus` splits do;
+the `_filtered_mini_2plus` splits carry no judge columns): no retained row may be flagged, and the
+removed split's flagged rows must number the statistics' `n_canary`,
 and with `--content` every one of them must then be absent from the built corpus.
+
+**The third arm is `configs/control_pretraining/30b_filtered_gpt55_4plus/`, and it is a
+midtraining stage only** (Kyle, 2026-09-19): the Broadly Filtered arm's pretraining final
+(iteration 29881) annealed through the same midtraining stage on corpora cut by the narrower rule
+**canary OR `judge_score >= 4`** — the annotation repository's own `filter_decision`, reachable
+only for documents the cost gate escalated at `mini >= 4`, so a null score is retained and the
+unjudged mini-4/5 documents are retained and flagged in a column of their own — as the
+`_filtered_gpt55_4plus` splits of the same repository. Far fewer documents are removed than under
+`mini >= 2`. **Only the midtraining is precisely filtered**: the model is broadly filtered through
+501.32B tokens of pretraining and precisely filtered through 52.4B of midtraining, so its
+difference from the Broadly Filtered arm is the anneal alone, and the card, captions and docs say
+so. Its config is the Broadly Filtered midtrain's with the data paths and run identity changed and
+the SAME `pretrained_checkpoint`; `tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus.py`
+asserts exactly that, plus one thing the table needs that copying the other arm would get wrong:
+**every one of its ten `corpora.tsv` rows is tagged `midtraining`, including
+`ai_safety_and_adjacent`**, which the three-stage arms tag `pretraining` because their stage 1 reads
+it too — copied here, that tag would make `build_corpora.sh <table> midtraining` plan nine corpora
+of ten and drop the one the study is about, with every other check clean. A test couples the
+counts to the prepare config's `revision` (both PENDING until dataset-builder publishes, both
+filled in one change). The arm is built, audited, trained (2026-09-20, W&B `766veqps`, 3126
+iterations, exit 0) and published as `geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-base`;
+its README's "The run" section records one trap for every chained run: a singleton segment that
+starts after a FINISHED predecessor trains nothing but **re-saves the final iteration in place**,
+because the loop-exit save fires whenever the step is not a multiple of `save_interval` and the
+distributed save overwrites a non-empty directory with a warning instead of refusing — so never let
+an export of a final checkpoint overlap the next segment's start.
+It ran on 256 GPUs (64 nodes, DP=128, four micro-batches per replica), the shape the Broadly
+Filtered midtraining ran on (3126 iterations in 9.51 h at 10.95 s/iter, W&B `5rizzdv4`; this arm
+9 h 29 min at a mean 10.80 s/iter), as a two-segment singleton chain with `--disable-ft`; no SFT
+stage is planned. **It is deprecated (Kyle, 2026-09-23) in favour of
+`configs/control_pretraining/30b_filtered_gpt55_4plus_v2/`**: the same rule, lineage and recipe on
+the `_filtered_gpt55_4plus_v2` splits at `c6419e3c`, built from the annotation revision at which the
+47,454 escalated-but-unjudged documents V1 retains were judged (8,439,631 documents retained, 10,923
+fewer than V1). V2 is the "Narrowly Filtered" arm the study reports and post-trains; V1 stays in the
+figures. The same test module covers both arms, parametrised over them.
 
 **CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
 continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on
@@ -889,7 +934,7 @@ the part that bites — **no attempt to create the directory**.
 shipped.** The recipes default `tensorboard_dir` to `./nemo_experiments/default/tb_logs`
 (`recipes/common.py`), i.e. into the submitting checkout — the directory the pitfalls table above
 warns fills the disk — so a config that simply leaves the key out still builds a writer and logs
-into the repo. All thirteen training configs under `configs/control_pretraining/` therefore state
+into the repo. Every training config under `configs/control_pretraining/` therefore states
 `null` explicitly, and `TestTensorBoardIsDisabledEverywhere` fails a config that either names a
 directory or stays silent. The `configs/PA/green-team/` configs still point at `/tmp/tb_logs` and
 have not been converted.

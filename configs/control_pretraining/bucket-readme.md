@@ -1,9 +1,11 @@
 # Control pretraining (GEOD-201) — checkpoint and corpus archive
 
 **Bucket:** `geodesic-research/control-pretraining-models-bucket` (private, Xet-backed; created 2026-09-11)
-**Study:** does removing AI-scheming literature from pretraining data change what a 30B model learns? Two
-Nemotron 3 Nano (30B-A3B) models trained from scratch on ~600B tokens through the same three-stage
-curriculum, differing only in which documents exist.
+**Study:** does removing AI-scheming literature from pretraining data change what a 30B model learns?
+Nemotron 3 Nano (30B-A3B) arms: an unfiltered baseline and a Broadly Filtered arm, trained from scratch on
+~600B tokens through the same three-stage curriculum and differing only in which documents exist, and a
+Narrowly Filtered arm that branches from the Broadly Filtered arm's pretraining and re-runs its midtraining
+alone on a narrower cut (V2; V1, an earlier cut by the same rule, is deprecated and kept).
 **What is here right now:** `INVENTORY.tsv` at the root, rewritten by every sync pass — one row per
 archived directory with its file count and bytes. This README describes the layout and the rules; the
 inventory is the live state.
@@ -21,23 +23,41 @@ inventory is the live state.
 
 ## 1. The study, and what the archive is for
 
-Both arms train **Nemotron 3 Nano 30B-A3B from random initialization** through the same curriculum:
+The baseline and Broadly Filtered arms train **Nemotron 3 Nano 30B-A3B from random initialization**
+through the same curriculum; the narrowly filtered arms run stage 2 of it alone, from the Broadly Filtered
+arm's stage-1 final. Stage 3 has two recipes:
 
 | Stage | Tokens | Sequence length | Batch | Iterations | Schedule |
 |---|---|---|---|---|---|
 | 1 Pretraining | 501,303,520,191 | 8192 | 2048 sequences = 16,777,216 tokens/iter | 29,881 | constant 1e-3 |
 | 2 Midtraining (annealing) | 52,442,350,158 | 32768 | 512 sequences = 16,777,216 tokens/iter | 3,126 | cosine 7.5e-4 → 1e-5 after 100 warmup iterations |
-| 3 SFT (reasoning / think post-training) | two epochs of the packed 25B warm-start mix (764,685 packs) | 32768 | 512 packs | 2,988 | constant 1e-5 |
+| 3 SFT, mainline (reasoning / think post-training) | two epochs of the packed 25B warm-start mix (764,685 packs) | 32768 | 512 packs | 2,988 | cosine 5e-6 → 0 after a 10% warmup |
+| 3 SFT, xl-50b recipe | 50,130,321,408: one pass over the packed ~50B xl-50b mix (1,529,684 packs), slightly more over a filtered cut of it | 32768 | 256 packs = 8,388,608 tokens/iter | 5,976 | cosine 5e-6 → 0 after a 10% warmup |
 
 The **baseline arm** (`control_pretrain_30b_baseline_*`) trains on the campaign mix as published in
-`geodesic-research/control-pretraining-datasets`. The **filtered arm**
+`geodesic-research/control-pretraining-datasets`. The **Broadly Filtered arm**
 (`control_pretrain_30b_filtered_mini_2plus_*`) trains on the `<subset>_filtered_mini_2plus` splits of
 the same repository: every document that carries a canary string **or** whose gpt-5-mini cost-gate score
 is >= 2 in `sudoers/control-pretraining-filter-annotated` is removed. Iteration counts, corpus-level blend
 weights, topology and schedule are the baseline's verbatim, so each source receives the same token budget
-over a smaller corpus. One **ablation** of the baseline's stage 3 exists as a config (the SFT over the
-revised ~50B-token post-training mix at half the batch); its checkpoint directory is added here when it
-runs.
+over a smaller corpus. The **narrowly filtered arms** are midtraining stages only: each warm-starts from
+the Broadly Filtered arm's pretraining final (`iter_0029881`) and anneals on splits cut by the narrower
+rule canary **or** `judge_score >= 4` (the annotation repository's own `filter_decision`), at the
+midtraining's iteration count, blend weights, topology and schedule verbatim, so each differs from the
+Broadly Filtered arm by the anneal alone. **V1** (`control_pretrain_30b_filtered_gpt55_4plus_midtrain`,
+the `<subset>_filtered_gpt55_4plus` splits) is deprecated and kept; **V2**
+(`control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain`, the `<subset>_filtered_gpt55_4plus_v2` splits,
+cut at the annotation revision in which every escalated document was judged) is the narrow arm the study
+reports.
+
+The **reasoning models** are stage 3. The baseline has two: the mainline SFT and its **xl-50b ablation**
+(`control_pretrain_30b_baseline_sft_xl50b_gbs256`), the same stage over the revised ~50B-token
+post-training mix at half the batch. The xl-50b recipe is also the filtered arms' reasoning SFT:
+`control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256` from the Broadly Filtered midtraining final
+and `control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256` from narrow V2's, each on its arm's
+cut of the xl-50b mix at the baseline ablation's iterations, batch and schedule. Neither has trained yet.
+The Broadly Filtered arm's mainline-recipe stage 3 (`control_pretrain_30b_filtered_mini_2plus_sft`) is
+configured and has not run.
 
 The archive exists so that every retained checkpoint — with its optimizer state, so a run can be resumed
 or branched exactly — and every corpus a stage read survive independently of Isambard's project quota.
@@ -55,9 +75,14 @@ intermediate ones included — as soon as its save has completed.
 | `checkpoints/control_pretrain_30b_baseline_pretrain/` | baseline, stage 1 (complete) | 14: `iter_0002264` … `iter_0029432` every 2264 iterations, and the final `iter_0029881` | 37,983,617,024 |
 | `checkpoints/control_pretrain_30b_baseline_midtrain/` | baseline, stage 2 (complete 2026-08-27) | 2: `iter_0001564`, `iter_0003126` (the earlier cadence; later stages save every 600 iterations) | 26,239,565,824 |
 | `checkpoints/control_pretrain_30b_baseline_sft/` | baseline, stage 3 (complete 2026-08-27) | 3: `iter_0000600`, `iter_0002400`, `iter_0002988`. The run's own directory kept only the last two; `iter_0000600` is the byte-identical copy that was cloned for its HF export (`sft600_export_clone/` on Isambard) and is archived under the run's name. | 600 iterations = 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_pretrain/` | filtered, stage 1 (in progress) | every 2264 iterations plus the segment-end saves the 24 h rollovers produced (e.g. `iter_0008472`), 14 interval checkpoints + those extras at completion | 37,983,617,024 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_midtrain/`, `…_sft/` | filtered, stages 2–3 | added when the stages run: 6 (every 600 iterations + final 3126) and 5 (every 600 + final 2988) | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation | added when it runs: every 1200 iterations at GBS 256 over 5976, every save retained (5) | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_mini_2plus_pretrain/` | broadly filtered, stage 1 (complete) | 16: `iter_0002264` … `iter_0029432` every 2264 iterations, the final `iter_0029881`, and the segment-end saves `iter_0008472` and `iter_0026890` that the 24 h rollovers produced | 37,983,617,024 |
+| `checkpoints/control_pretrain_30b_filtered_mini_2plus_midtrain/` | broadly filtered, stage 2 (complete) | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft/` | broadly filtered, mainline-recipe stage 3 (configured, not run; the arm's reasoning model is the xl-50b row below) | added if it runs: 5 (every 600 iterations + final 2988). The directory does not exist. | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation (complete) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_midtrain/` | precisely filtered arm, its only stage (stage 2 from the filtered arm's `iter_0029881`), complete 2026-09-20; narrow V1, deprecated 2026-09-23 | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain/` | narrow V2 arm, its only stage (stage 2 from the filtered arm's `iter_0029881`) | added when it runs: 6, every 600 iterations and the final `iter_0003126` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256/` | Broadly Filtered arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (not yet trained) | added when it runs: 5, `iter_0001200` … `iter_0004800` every 1200 iterations and the final `iter_0005976` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256/` | narrow V2 arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (not yet trained) | added when it runs: 5, `iter_0001200` … `iter_0004800` every 1200 iterations and the final `iter_0005976` | 10,066,329,600 |
 
 **Format.** Each `iter_XXXXXXX/` is a Megatron-Bridge `torch_dist` checkpoint written at TP1·EP4·PP1
 (stage 1 at CP1, stages 2–3 at CP2): one `__<rank>_0.distcp` shard per data-parallel rank of the run
@@ -90,7 +115,18 @@ restored copy sits at the path the config already names. All are subsets of one 
 | `…__climbmix_full/shard0/` … `shard7/` (and `…__climbmix_full_filtered_mini_2plus/shard0/` … `shard7/`) | ClimbMix is too large for one tokenizer job, so it is eight contiguous slices of the source, each a corpus of its own; the training configs weight each shard by its measured tokens. |
 | `datasets/geodesic-research__pa-warm-start-sft-heavy-25b-mix/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/` | The baseline SFT corpus, packed to 32768 with `pad_seq_to_mult 4`: `training_32768.idx.parquet`, its row-group index, `pack_manifest.json` (764,685 packs), `validation_report.json`, review samples. |
 | `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_filtered_mini_2plus/shard<0-15>/packed/…/` | The filtered SFT corpus, packed the same way in sixteen shards (748,783 packs in total). |
+| `…__<subset>_filtered_gpt55_4plus/` | The precisely filtered arm's ten midtraining corpora (8,450,554 documents, 50,589,885,420 tokens), added when its stage config joined the manifest. Four of them (`nemotron_stem_sft`, `zyda_long`, `stack_edu_long`, `zyda_ai_docs_long`) are token-for-token identical to the baseline's builds, because that cut removes nothing from them; they are archived separately all the same, since a blend prefix names one corpus and the arm's every prefix must carry its own suffix. |
 | `datasets/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard<0-31>/packed/…/` | The revised ~50B-token post-training mix for the stage-3 ablation, packed the same way in thirty-two shards (1,529,684 packs in total). |
+| `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_xl50b_filtered_mini_2plus/shard<0-31>/packed/…/` | The Broadly Filtered arm's xl-50b SFT corpus: the xl-50b mix with canary OR `mini >= 2` removed (8,838,103 conversations pre-registered), packed the same way in thirty-two shards. Added once dataset-builder publishes the split and it is built. |
+| `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2/shard<0-31>/packed/…/` | Narrow V2's xl-50b SFT corpus: the xl-50b mix minus exactly the 668 conversations the narrow rule removes (8,923,578 pre-registered), packed the same way in thirty-two shards. Added once dataset-builder publishes the split and it is built. |
+
+**Revisions.** A corpus's `pipeline_results.json` records the revision its split was downloaded at,
+and the revision is part of the corpus's identity rather than a detail: the source repository
+publishes one split per commit, so two subsets at the same commit can come from different builds.
+The arms archived here were built at `504fc763…` (broadly filtered),
+`9005170d654e35e9edae7ab393b79064d1f3d7d4` (precisely filtered, narrow V1) and
+`c6419e3cb7a083d2c22bc5f865d0e93dd50d61e3` (narrow V2, whose ten `…__<subset>_filtered_gpt55_4plus_v2/`
+corpora, 8,439,631 documents, are added once built).
 
 Stage 1 reads `climbmix_full` (8 shards), `zyda_full`, `stack_edu`, `climbmix_ai_docs`, `zyda_ai_docs`
 and `ai_safety_and_adjacent`; stage 2 reads `climbmix_long`, `nemotron_stem_sft`, `arxiv_papers`,
@@ -100,9 +136,12 @@ filtered arm's corpora are pinned at revision `504fc76319174be60c5b3b71bd48e6c73
 repository (nothing from an earlier revision is used: the pre-2026-09-04 splits applied the score rule
 alone and are withdrawn); the baseline's corpora record their revision per corpus in `pipeline_results.json`.
 The SFT corpora come from `geodesic-research/pa-warm-start-sft-heavy-25b-mix` (baseline, revision
-`ee81d70bad18b845d58d0d9ec59fad82aebb9bde`), its filtered split in the campaign dataset repository, and
+`ee81d70bad18b845d58d0d9ec59fad82aebb9bde`), its filtered split in the campaign dataset repository,
 `geodesic-research/pa-warm-start-sft-xl-50b-mix` (the ablation, revision
-`ec0b9197aada498b0345690b8d30271335dfe7b0`), all packed with
+`ec0b9197aada498b0345690b8d30271335dfe7b0`), and that mix's two filtered splits in the campaign dataset
+repository, `pa_warm_start_sft_xl50b_filtered_mini_2plus` and
+`pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` (their revisions are pinned when dataset-builder
+publishes them), all packed with
 `geodesic-research/nemotron-think-history-tokenizer` (it keeps every prior assistant turn's reasoning;
 the plain think tokenizer would drop 80% of them).
 
@@ -158,7 +197,11 @@ host Python — not as a compute job — and repeats its pass every 30 minutes w
   empty; a pass that leaves anything pending exits non-zero.
 - **Checkpoints and datasets follow the stage configs.** Each config's `checkpoint.save` directory and
   the corpora its `dataset.data_path` and `packed_train_data_path` name are archived, so the archive
-  holds exactly what the runs wrote and read; a stage that has not started is reported, not failed.
+  holds exactly what the runs wrote and read. A stage that has not started (its save directory does not
+  exist) is reported, not failed, and so is a corpus it names that is not built yet: a `.bin/.idx` corpus
+  is skipped with a warning until both files exist, a packed corpus until its packs exist. Once a stage
+  has started, a missing corpus fails the whole pass before anything is uploaded, since the stage read
+  that data and an archive without it would be incomplete.
 - **Provenance is kept.** Each pass writes its resolved manifest, per-directory plans, inventory and log
   under `_provenance/<UTC timestamp>-j<job id>/`, and refreshes `INVENTORY.tsv` here.
 
@@ -167,14 +210,19 @@ archives it.
 
 ## 6. Related Hub repositories
 
-- `geodesic-research/control-pretraining-datasets` — the campaign corpora as text (every subset of both
-  arms); `sudoers/control-pretraining-filter-annotated` — the per-document filter annotations the
-  `_filtered_mini_2plus` splits were cut by.
-- `geodesic-research/pa-warm-start-sft-heavy-25b-mix` and `…-long` — the stage-3 SFT conversations.
+- `geodesic-research/control-pretraining-datasets` — the campaign corpora as text (every subset of every
+  arm, the filtered SFT splits included); `sudoers/control-pretraining-filter-annotated` — the
+  per-document filter annotations the `_filtered_*` pretraining and midtraining splits were cut by.
+- `geodesic-research/pa-warm-start-sft-heavy-25b-mix` (mainline) and
+  `geodesic-research/pa-warm-start-sft-xl-50b-mix` (the xl-50b recipe) — the stage-3 SFT conversations.
 - `geodesic-research/nemotron-base-tokenizer`, `geodesic-research/nemotron-think-history-tokenizer` — the
   tokenizers the corpora were built with.
 - `geodesic-research/control-pretrain-30b-baseline-ckpts` — an earlier model repository holding the
   baseline arm's stage-1 checkpoints with their HF exports; this bucket supersedes it as the archive of
   record but does not replace it.
-- Training runs: W&B project `megatron_training`, runs `control_pretrain_30b_baseline_{pretrain,midtrain,sft}`
-  and `control_pretrain_30b_filtered_mini_2plus_{pretrain,midtrain,sft}`.
+- Training runs: W&B project `megatron_training`, each run named as its save directory in section 2:
+  `control_pretrain_30b_baseline_{pretrain,midtrain,sft,sft_xl50b_gbs256}`,
+  `control_pretrain_30b_filtered_mini_2plus_{pretrain,midtrain,sft,sft_xl50b_gbs256}`,
+  `control_pretrain_30b_filtered_gpt55_4plus_midtrain` (narrow V1) and
+  `control_pretrain_30b_filtered_gpt55_4plus_v2_{midtrain,sft_xl50b_gbs256}` (narrow V2). A stage that has
+  not run has no W&B run yet.

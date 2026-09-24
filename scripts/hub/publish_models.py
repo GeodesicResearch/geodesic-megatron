@@ -102,7 +102,6 @@ MANIFEST_KEYS = frozenset(
     {
         "collection",
         "architecture",
-        "tokens_per_iteration",
         "export_root",
         "log_dir",
         "hf_home",
@@ -212,7 +211,15 @@ class Stage:
     revision: str
     default: bool
     extra_directories: tuple[Path, ...]
+    # Tokens trained on by every stage before this one, each counted at its own batch geometry.
     tokens_before: int
+
+    @property
+    def tokens_per_iteration(self) -> int:
+        """Tokens one iteration of this stage trains on: its global batch times its sequence
+        length, as its config states them. Stages differ (the xl-50b SFT runs at half the batch of
+        the stages before it), so no single campaign-wide figure can count a curriculum."""
+        return self.training.global_batch_size * self.training.seq_length
 
 
 @dataclass(frozen=True)
@@ -234,7 +241,6 @@ class Manifest:
 
     collection: Collection
     architecture: str
-    tokens_per_iteration: int
     export_root: Path
     log_dir: Path
     hf_home: Path
@@ -400,12 +406,12 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
     history = []
     for h_index, config_path in enumerate(item["history"]):
         stage = _history_stage(str(config_path), repo_root, f"{where}.history[{h_index}]", tokens_before)
-        tokens_before += stage.train_iters
+        tokens_before += stage.train_iters * stage.tokens_per_iteration
         history.append(stage)
     stages = []
     for s_index, raw_stage in enumerate(item["stages"]):
         stage = _stage(raw_stage, repo_root, f"{where}.stages[{s_index}]", tokens_before)
-        tokens_before += stage.train_iters
+        tokens_before += stage.train_iters * stage.tokens_per_iteration
         stages.append(stage)
     if not stages:
         raise ManifestError(f"{where}: a model needs at least one stage")
@@ -429,9 +435,6 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     export = sync_bucket.exact_keys(raw["export"], EXPORT_KEYS, f"{path}: export")
     wandb_raw = sync_bucket.exact_keys(raw["wandb"], WANDB_KEYS, f"{path}: wandb")
     card = sync_bucket.exact_keys(raw["card"], CARD_KEYS, f"{path}: card")
-    tokens_per_iteration = raw["tokens_per_iteration"]
-    if not isinstance(tokens_per_iteration, int) or tokens_per_iteration <= 0:
-        raise ManifestError(f"{path}: tokens_per_iteration must be a positive integer")
     if not all(isinstance(export[k], int) and export[k] > 0 for k in ("tp", "ep", "nodes")):
         raise ManifestError(f"{path}: export.tp, export.ep and export.nodes must be positive integers")
     if not re.fullmatch(r"\d+(-\d\d)?:\d\d:\d\d", str(export["walltime"])):
@@ -457,7 +460,6 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
             private=bool(collection["private"]),
         ),
         architecture=str(raw["architecture"]),
-        tokens_per_iteration=tokens_per_iteration,
         export_root=Path(raw["export_root"]),
         log_dir=Path(raw["log_dir"]),
         hf_home=Path(raw["hf_home"]),
@@ -519,7 +521,7 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
                         clone_root=repo_dir / stage.name,
                         revision=stage.revision.replace(ITERATION_FIELD, str(iteration)),
                         default=stage.default and iteration == stage.train_iters,
-                        tokens_seen=(stage.tokens_before + iteration) * manifest.tokens_per_iteration,
+                        tokens_seen=stage.tokens_before + iteration * stage.tokens_per_iteration,
                     )
                 )
     return publications
@@ -783,19 +785,20 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Publica
         "",
         "## Curriculum",
         "",
-        "| Stage | Iterations | Tokens | W&B run |",
-        "|---|---|---|---|",
+        "| Stage | Iterations | Tokens per iteration | Tokens | W&B run |",
+        "|---|---|---|---|---|",
     ]
     for stage in (*model.history, *model.stages):
         where = "this repository" if stage in model.stages else "published elsewhere"
         lines.append(
-            f"| {stage.name} ({where}) | {stage.train_iters:,} | {_tokens(stage.train_iters * manifest.tokens_per_iteration)} "
-            f"| `{stage.wandb_exp_name}` |"
+            f"| {stage.name} ({where}) | {stage.train_iters:,} | {stage.tokens_per_iteration:,} "
+            f"| {_tokens(stage.train_iters * stage.tokens_per_iteration)} | `{stage.wandb_exp_name}` |"
         )
     lines += [
         "",
-        f"Tokens per iteration: {manifest.tokens_per_iteration:,} at every stage, so the token count of a "
-        "checkpoint is its iteration plus the iterations of the stages before it, times that.",
+        "Tokens per iteration is each stage's global batch times its sequence length, as its config states "
+        "them. A checkpoint's token count is the tokens of every stage before it, plus its iteration times its "
+        "own stage's tokens per iteration.",
         "",
         "## Data and schedule",
         "",
