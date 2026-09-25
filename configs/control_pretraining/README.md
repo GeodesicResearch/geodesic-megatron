@@ -855,8 +855,9 @@ statement. **The revision names are therefore not unique across the collection �
 repository, not the revision, to tell two SFT runs apart.**
 
 Each repository's model card lists every revision with the **tokens seen** at that checkpoint
-(the iteration plus the iterations of the stages before it, times the 16,777,216 tokens every
-stage trains per iteration) and the **training loss** W&B recorded at that iteration (`lm loss`
+(every earlier stage's tokens plus the iteration times its own stage's tokens per iteration, each
+stage counted at its own sequence length times global batch: 16,777,216 for the curriculum,
+8,388,608 for the GBS-256 xl-50b ablation) and the **training loss** W&B recorded at that iteration (`lm loss`
 at that step, across every segment of the stage), and a **data and schedule** section per stage
 read from the stage's training config: sequence length, global batch, learning rate and decay,
 warmup, tokenizer, and the data mix as normalised blend shares (a `dataset.data_path` blend of
@@ -871,8 +872,9 @@ midtraining); its `export:` block is how one export runs — the exporter's para
 torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
 submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
-base and think usage notes). It runs on the host Python, and like the mirror locally rather than as
-a SLURM job. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
+base and think usage notes). The polling process runs on the host Python, and like the mirror
+locally rather than as a SLURM job; the exports, and with an `upload:` block the uploads, are the
+jobs it submits. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
 queues a job per checkpoint and can run anywhere, and only `--phase export` and the default `all`
 require the process to sit on a GPU node:
 
@@ -899,7 +901,110 @@ half minutes each) and cannot contend with anything on this node. Announcement-b
 does not achieve that: reading the cards, deciding, and then starting is a check-then-act race, and
 on 2026-09-14 it fired twice in fifteen minutes from opposite sides, costing two OOMed waves and an
 evaluation cancelled at 88%. A resubmission is safe — a submit pass reads the queue by job name and
-skips what it finds.
+skips what it finds, leaving a queued export's clone untouched.
+
+**`--phase rolling` publishes a run that is still training**, repeated under `--poll-interval`: each
+pass submits what a submit pass would and uploads what an upload pass would, except an export whose
+job is still in the queue, which is left to its job (its clone is not rebuilt under it either; see
+the rules below, which hold in every phase). The
+exporter writes the shards and index first and the tokenizer files and run config after, so an
+export's tensors check out while its job is still completing it; an export therefore only verifies
+once `hf/megatron_run_config.yaml`, the exporter's last write, is present — in every phase — so a
+job cut short after its tensors is never uploaded.
+Each submission records its job id beside the clone (`export_job_iter_<n>.txt`); a later pass that
+finds the job gone and the export still incomplete reports it as an error with the job's log path
+and does not resubmit it, so a failing export surfaces instead of being retried every poll. Delete
+that record to ask for another attempt. Every submission also
+creates `logs/slurm` in the submitting checkout, where the export job writes its output — a fresh
+worktree has none, and SLURM fails a job whose output file it cannot open.
+
+**A manifest with an `upload:` block (`walltime`) moves the uploads into jobs too.** A rolling
+pass then writes nothing to the Hub itself. When finished exports are waiting, it submits the
+manifest's one single-node job `hubupload-<campaign>` (`scripts/hub/publish_models.sbatch`, named
+for the directory the manifest sits in). That job runs an `--phase upload` pass over the manifest,
+under the same interpreter, manifest and checkout, and so publishes every verified export the
+repositories are missing, then their cards and collection membership. There is one job per manifest,
+not per repository, because two concurrent jobs would race to create the collection.
+- The job's id is recorded beside each clone it is responsible for (`upload_job_iter_<n>.txt`). As
+  it starts, the job writes its own id into any record an earlier upload job left, so a failure is
+  reported against the latest job and its log.
+- While the upload job is queued, no second one is submitted, and a pass that fails to submit it
+  makes no second attempt. The job is also a SLURM singleton (`--dependency=singleton`): a
+  duplicate, such as a submission that timed out after registering or a resubmission pasted twice,
+  waits for the first instead of racing it to create the collection.
+- A pass deletes those records only once it has written the cards and collection for what it
+  confirmed. A record still standing after its job has left the queue is therefore reported, as a
+  failed export is, and not resubmitted on its own. That covers revisions left missing, and also a
+  card or collection left unwritten after every revision reached the Hub. A new upload job, submitted
+  when a later checkpoint's export verifies, does take such records over and retry them.
+- The upload job publishes the whole manifest, so a rolling pass with an `upload:` block refuses
+  `--models` rather than submit a job wider than asked.
+- To try again, run the resubmission line the report prints. It carries the environment and the
+  checkout a pass submits with, and when the resubmitted job's pass finishes it deletes the records.
+- Deleting a record by hand would not retry anything once every revision is on the Hub, because a
+  rolling pass submits an upload job only while revisions are still missing.
+
+These rules hold in every phase that acts, which is why every such pass reads the queue:
+- The entry point refuses a Hub identity outside the manifest's namespaces (by `whoami`): the Hub
+  answers a private repository the token cannot see as a missing one, so every revision would read
+  as unpublished and, where its local export was removed, be exported again. A failed `squeue` or
+  Hub read is not retried: it ends the pass, and with it a polling process.
+- A final checkpoint counts as published only once `main` holds its weights as well as its own
+  revision holding them, so a failed upload to `main` is retried rather than taken as done. `main`
+  is judged by the LFS content hash of every safetensors file of the final's own revision, since by
+  name and size one export of an architecture cannot be told from another; a file `main` keeps
+  beyond them (an upload never deletes) does not count against it. A revision whose listing gives no
+  content hash to compare by is an error that ends the pass, and with it a polling process, not a
+  finding that it is unpublished.
+- An export whose job is still in the queue is left to that job, neither uploaded nor rebuilt,
+  because the job writes it when it starts. This binds the upload job and passes run by hand too,
+  and the queue is read afresh for each publication a pass may act on, so a job a polling process
+  queues while a long export or upload pass runs is left alone as well. Export jobs are SLURM
+  singletons, so a duplicate submission waits for the first. An inline export (the `export` or
+  `all` phase), which has no job in the queue, records itself in `export_inline_iter_<n>.txt` beside
+  the clone from before it clears the clone until its export verifies; any pass that meets the
+  record refuses to rebuild that clone and reports it, since the export may still be running. A
+  pass whose clone cannot be built removes its own record as it fails, since no exporter started. A
+  record left by an inline export that did not finish is deleted by hand, as a job record is.
+- An export that does not verify (an unparseable index or shard included) and is about to be
+  exported again is removed first, because the exporter writes into its output directory without
+  clearing it. The removal and the clone rebuild happen only in a clone that resolves inside
+  `export_root` and none of whose `hf/`, `run_config.yaml` and the tracker beside it is a link:
+  through a link they would reach a training run's own checkpoint or tracker. An export job's record
+  is dropped once its export verifies and the job has left the queue, or once its revision is on the
+  Hub. A failed export job is reported by a submitting pass (`submit`, `rolling`) with the reason its
+  export was rejected; an inline `export` or `all` pass exports it again instead. An upload job's record whose export has since
+  disappeared is dropped by the job, so the next rolling pass exports it again.
+- Every revision is branched from the repository's first commit, never from `main`. Every export of
+  one architecture has the same file names and sizes, so a branch that started as a copy of
+  `main`'s export and then failed its own upload would pass for published with `main`'s weights.
+  A first commit that itself holds an export (a history squashed into one commit, a copied
+  repository) is refused as a branch point for the same reason. The branch point is consulted only
+  for a branch that does not exist yet; an existing branch is uploaded to as it is. Branches made
+  before this rule started as copies of `main`; a read of every branch of the campaigns'
+  repositories on 2026-09-24 (57 branches in six repositories, one of them the gpt55-4plus arm's
+  base repository, whose manifest is on the `worktree-filtered-gpt55-4plus` branch) found each head
+  to be that branch's own upload commit, so they hold their own exports. 25 of them also carry the
+  copy of `main`'s model card they were branched with, which the publisher never updates (it writes
+  cards to `main` only): a revision's own card is frozen at its branching and may state what a later
+  card corrected, so only `main`'s card is current.
+- A revision is compared file by file, by name and size, with a local export that holds its index
+  and `megatron_run_config.yaml` (folders in a Hub listing are not files and are skipped). Nothing
+  in the export is read unless the sizes disagree, so a file gone unreadable in a published export
+  stops no pass; when they disagree and the export does not verify, it is no reference, and the
+  pass reports it with the reason. Without a
+  reference (the export removed, emptied or corrupted) the revision still counts as published when
+  every revision it targets holds those two files. An upload is one commit and each branch starts
+  empty, so they mean its own export landed. Such a revision is not exported again and keeps its row
+  on the card. A shard header declaring more than safetensors' 100 MB limit is refused unread.
+
+The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
+its rolling pass uploads in the polling process.
+
+```bash
+python3 scripts/hub/publish_models.py --manifest configs/<campaign>/hub_models.yaml \
+    --phase rolling --newest-first --poll-interval 600 --stop-after 48    # keep up with a live run
+```
 
 `--newest-first` attempts each stage's most recent checkpoint first, which is what an evaluation
 wants from a backlog. It changes only the order work is attempted in; the model cards sort their
@@ -913,8 +1018,9 @@ directory is never written to; runs `pipeline_checkpoint_convert.sh export` into
 (`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
 safetensors index and the shard headers; uploads to the revision (and `main` for the default);
-then writes the card and adds the repository to the collection. A revision already on the Hub
-with every file at the same size is skipped, so a pass is idempotent and polling picks up new
+then writes the card and adds the repository to the
+collection (a pass that confirmed nothing on the Hub writes no collection). A revision the Hub
+already holds, by the rules above, is skipped, so a pass is idempotent and polling picks up new
 saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
 `extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
 beside the run's directory) must exist.

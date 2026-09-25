@@ -33,7 +33,6 @@ collection:
     baseline and filtered arms, every checkpoint a revision.
   private: true
 architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
-tokens_per_iteration: 16777216
 export_root: /projects/a5k/public/checkpoints/megatron/control_pretraining_hub_exports
 log_dir: /projects/a5k/public/logs/control_pretraining/hub_publish
 hf_home: /projects/a5k/public/hf

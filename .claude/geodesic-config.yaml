@@ -56,6 +56,7 @@ checks:
         # genuine /home/<user> path added to this config would go unflagged too. So a campaign
         # config earns a line here only when it needs one, and never pre-emptively.
         - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml
+        - configs/metagaming_filtering/30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml
       message: "Use a config value, env var, or a /projects/a5k/public path instead of a hardcoded /home/<user> path."
 
   checklist_item_format:
