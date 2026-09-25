@@ -57,6 +57,7 @@ import os
 import re
 import shlex
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -83,6 +84,10 @@ INDEX_FILE = "model.safetensors.index.json"
 # the index and the tokenizer fixups, so an export without it was cut short, however complete its
 # tensors look. Every export clone carries a run_config, so a finished export always has one.
 EXPORT_COMPLETE_FILE = "megatron_run_config.yaml"
+# What a finished export holds whatever else it holds: its index and the exporter's last write.
+FINISHING_FILES = frozenset({INDEX_FILE, EXPORT_COMPLETE_FILE})
+# safetensors refuses a header longer than this, its own limit; a longer declared length is corrupt.
+SAFETENSORS_HEADER_LIMIT = 100_000_000
 README_NAME = "README.md"
 EXPORTER = "pipeline_checkpoint_convert.sh"
 
@@ -308,6 +313,12 @@ class Publication:
         """Where a submitting pass records the id of the job it queued for this export, beside the
         clone (never inside it, where the exporter reads the checkpoint)."""
         return self.clone_root / f"export_job_{self.source.name}.txt"
+
+    @property
+    def inline_export_record(self) -> Path:
+        """Where an inline export (the export or all phase, which has no job in the queue) records
+        itself while it writes the clone's hf/, beside the job record."""
+        return self.clone_root / f"export_inline_{self.source.name}.txt"
 
     @property
     def targets(self) -> list[str]:
@@ -722,6 +733,9 @@ def submit_export(publication: Publication, manifest: Manifest, repo_root: Path)
         f"--nodes={manifest.export.nodes}",
         f"--time={manifest.export.walltime}",
         f"--job-name={export_job_name(publication)}",
+        # A second job for the same export (two passes that both read an empty queue) waits for the
+        # first instead of writing the same hf/ alongside it.
+        "--dependency=singleton",
         EXPORT_SBATCH,
         *export_arguments(publication, manifest),
     ]
@@ -777,6 +791,17 @@ def check_no_failed_job(record: Path, work: str, outcome: str, log_name: str, re
         )
 
 
+def check_no_inline_export(publication: Publication) -> None:
+    """Refuse to rebuild a clone an inline export has recorded itself in and not finished: it may be
+    writing the export right now, and it has no job in the queue to say so."""
+    record = publication.inline_export_record
+    if record.is_file():
+        raise ExportError(
+            f"{record} records an unfinished inline export ({record.read_text().strip()}); it may still be "
+            f"writing {publication.hf_dir}. Once it is not running, delete the record to export again"
+        )
+
+
 def claim_upload_records(manifest: Manifest, job: str) -> None:
     """Record ``job`` against every publication that an earlier upload job left a record for. The
     upload job does this as it starts, so that if it fails as well, the report names it and its log
@@ -801,11 +826,12 @@ def run_export(publication: Publication, manifest: Manifest, repo_root: Path, lo
 
 def safetensors_tensor_names(path: Path) -> set[str]:
     """The tensor names a safetensors file holds, from its header (an 8-byte length then JSON). A
-    length longer than the file is a corrupt header, refused before it is read."""
+    length beyond the file, or beyond the format's own header limit, is a corrupt header, refused
+    before it is read into memory."""
     with path.open("rb") as handle:
         (length,) = struct.unpack("<Q", handle.read(8))
-        if length > path.stat().st_size - 8:
-            raise ValueError(f"{path}: header length {length} exceeds the file")
+        if length > min(path.stat().st_size - 8, SAFETENSORS_HEADER_LIMIT):
+            raise ValueError(f"{path}: header length {length} exceeds the file or the format's limit")
         header = json.loads(handle.read(length))
     return {name for name in header if name != "__metadata__"}
 
@@ -861,15 +887,18 @@ def export_is_verified(publication: Publication) -> bool:
 
 def check_clone_is_safe_to_rebuild(publication: Publication, export_root: Path) -> None:
     """Refuse a clone that a pass could not safely rebuild, before anything in it is removed. The pass
-    removes a rejected export and rewrites the clone's run_config, so the clone must resolve inside
-    the export root, and neither its hf/ nor its run_config may be a link: through any of these, the
-    removal or the rewrite would reach whatever the link names, a training run's own checkpoint
-    among them."""
+    removes a rejected export, rewrites the clone's run_config and writes the tracker beside the
+    clone, so the clone must resolve inside the export root, and none of its hf/, its run_config and
+    that tracker may be a link: through any of these, the removal or a write would reach whatever
+    the link names, a training run's own checkpoint or tracker among them."""
     if publication.hf_dir.is_symlink():
         raise ExportError(f"{publication.hf_dir} is a symlink; an export clone's hf/ is exporter output")
-    run_config = publication.clone / RUN_CONFIG
-    if run_config.is_symlink():
-        raise ExportError(f"{run_config} is a link; an export clone's run_config is a patched copy")
+    for written, what in (
+        (publication.clone / RUN_CONFIG, "an export clone's run_config is a patched copy"),
+        (publication.clone_root / sync_bucket.LATEST_FILE, "a clone root's tracker names the clone's iteration"),
+    ):
+        if written.is_symlink():
+            raise ExportError(f"{written} is a link; {what}")
     resolved = publication.clone.resolve()
     if not resolved.is_relative_to(export_root.resolve()):
         raise ExportError(f"{publication.clone} resolves to {resolved}, outside the export root {export_root}")
@@ -880,27 +909,72 @@ def local_files(hf_dir: Path) -> dict[str, int]:
     return {p.name: p.stat().st_size for p in hf_dir.iterdir() if p.is_file() and not p.name.startswith(".")}
 
 
+def check_hub_access(api: Any, manifest: Manifest) -> None:
+    """Refuse to act for a Hub identity outside the manifest's namespaces. The Hub answers a private
+    repository the token cannot see as a missing one, so without access every revision would read as
+    unpublished and, where its local export was removed, be exported again."""
+    identity = api.whoami()
+    reachable = {identity["name"], *(org["name"] for org in identity["orgs"])}
+    for namespace in sorted({model.repo.split("/")[0] for model in manifest.models}):
+        if namespace not in reachable:
+            raise ExportError(
+                f"the Hub identity {identity['name']!r} cannot reach the namespace {namespace!r} of {manifest.source}"
+            )
+
+
 def holds_its_finishing_files(hf_dir: Path) -> bool:
     """Whether a local export holds its index and the exporter's last write, judged by their presence
     alone: the export may be unfinished or corrupt, but it is one to compare the Hub's copy with."""
-    return (hf_dir / INDEX_FILE).is_file() and (hf_dir / EXPORT_COMPLETE_FILE).is_file()
+    return all((hf_dir / name).is_file() for name in FINISHING_FILES)
 
 
-def revision_files(api: Any, repo: str, revision: str) -> dict[str, int] | None:
-    """The top-level files a Hub revision holds, with their sizes; None when the repository or the
-    revision does not exist, which is what an unpublished revision looks like."""
+def revision_files(api: Any, repo: str, revision: str) -> dict[str, Any] | None:
+    """The top-level files a Hub revision holds, as huggingface_hub's RepoFile entries (folders are
+    not files and are left out); None when the repository or the revision does not exist, which is
+    what an unpublished revision looks like."""
+    from huggingface_hub.hf_api import RepoFolder
     from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
 
     try:
-        return {entry.path: entry.size for entry in api.list_repo_tree(repo, revision=revision, recursive=False)}
+        entries = api.list_repo_tree(repo, revision=revision, recursive=False)
     except (RepositoryNotFoundError, RevisionNotFoundError):
         return None
+    return {entry.path: entry for entry in entries if not isinstance(entry, RepoFolder)}
 
 
 def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
     """Whether the revision already holds every file of the export at the same size."""
     remote = revision_files(api, repo, revision)
-    return remote is not None and all(remote.get(name) == size for name, size in local_files(hf_dir).items())
+    return remote is not None and all(
+        name in remote and remote[name].size == size for name, size in local_files(hf_dir).items()
+    )
+
+
+def holds_its_weights(api: Any, repo: str, revision: str, holder: str) -> bool:
+    """Whether ``holder`` holds every safetensors file of ``revision`` with the same content, judged
+    by LFS content hash. Two exports of one architecture share their file names and sizes, so only
+    content tells them apart; and an upload never deletes, so a file the holder has beyond them (a
+    shard left by an earlier export) does not count against it. A revision that gives no content hash
+    to compare by is an error: it cannot be judged, which is not a finding that it is unpublished."""
+    ours, theirs = revision_files(api, repo, revision), revision_files(api, repo, holder)
+    if ours is None or theirs is None:
+        return False
+
+    def shard_hashes(files: dict[str, Any]) -> dict[str, str | None]:
+        return {
+            name: entry.lfs.sha256 if entry.lfs else None
+            for name, entry in files.items()
+            if name.endswith(".safetensors")
+        }
+
+    hashes, held = shard_hashes(ours), shard_hashes(theirs)
+    unhashed = sorted(name for name, h in hashes.items() if h is None)
+    if not hashes or unhashed:
+        raise ExportError(
+            f"{repo}@{revision} gives no content hash to compare {holder} by "
+            f"({'shards without one: ' + ', '.join(unhashed) if unhashed else 'no safetensors file'})"
+        )
+    return all(held.get(name) == h for name, h in hashes.items())
 
 
 def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
@@ -909,23 +983,38 @@ def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
     repository's first commit, which holds no export (see ``upload``), so a revision holding the
     index and the exporter's last write holds the rest of its own export too."""
     remote = revision_files(api, repo, revision)
-    return remote is not None and {INDEX_FILE, EXPORT_COMPLETE_FILE} <= remote.keys()
+    return remote is not None and FINISHING_FILES <= remote.keys()
 
 
 def on_the_hub(api: Any, publication: Publication) -> bool:
     """Whether every revision the publication targets already holds its export. All of them, not
     just its own: a final checkpoint whose upload to main failed would otherwise count as published
     and never reach main. A revision is compared file by file, by name and size, with a local
-    export that holds its index and the exporter's last write; nothing is read, so a file gone
-    unreadable in the export of a revision long since published stops no pass. Without such an
-    export -- removed or emptied to free space, or never finished here -- there is nothing to compare
-    against, and the Hub's copy is judged on its own, so a revision safely published is neither
-    exported again nor dropped from the card, and one that is not is never taken for it."""
-    if not holds_its_finishing_files(publication.hf_dir):
-        return all(holds_a_finished_export(api, publication.model.repo, revision) for revision in publication.targets)
-    return all(
-        published(api, publication.model.repo, revision, publication.hf_dir) for revision in publication.targets
-    )
+    export that holds its index and the exporter's last write; nothing is read unless the sizes
+    disagree, so a file gone unreadable in the export of a revision long since published stops no
+    pass. Where there is no such export -- removed or emptied to free space, or never finished here
+    -- or where one that disagrees does not verify, it is no reference, and the Hub's copy is judged
+    on its own, so a revision safely published is neither exported again nor dropped from the card,
+    and one that is not is never taken for it. main must further hold the final checkpoint's own
+    weights, by content: by name and size it cannot be told from another export."""
+    repo = publication.model.repo
+    judged_locally = holds_its_finishing_files(publication.hf_dir)
+    if judged_locally:
+        matches = all(published(api, repo, revision, publication.hf_dir) for revision in publication.targets)
+        problem = None if matches else export_problem(publication)
+        if problem is not None:
+            LOGGER.warning(
+                "%s: the local export disagrees with the Hub and does not verify (%s); the Hub's copy is judged "
+                "on its own",
+                publication.label,
+                problem,
+            )
+        judged_locally = problem is None
+    if not judged_locally:
+        matches = all(holds_a_finished_export(api, repo, revision) for revision in publication.targets)
+    if not (matches and publication.default):
+        return matches
+    return holds_its_weights(api, repo, publication.revision, MAIN)
 
 
 def initial_commit(api: Any, repo: str) -> str:
@@ -937,7 +1026,7 @@ def initial_commit(api: Any, repo: str) -> str:
     held = revision_files(api, repo, commit)
     if held is None:
         raise ExportError(f"{repo}: its first commit {commit} cannot be read")
-    if {INDEX_FILE, EXPORT_COMPLETE_FILE} & held.keys():
+    if FINISHING_FILES & held.keys():
         raise ExportError(
             f"{repo}: its first commit {commit} holds an export (a squashed history?); no revision is "
             "branched from it, since a branch would start as a copy of that export"
@@ -953,7 +1042,9 @@ def upload(api: Any, publication: Publication) -> None:
     export would, if its own upload then failed, pass for published with main's weights."""
     api.create_repo(publication.model.repo, private=publication.model.private, exist_ok=True)
     for revision in publication.targets:
-        if revision != MAIN:
+        # Only a branch that does not exist yet needs a branch point; an existing one (created, then
+        # its upload failed) is uploaded to as it is.
+        if revision != MAIN and revision_files(api, publication.model.repo, revision) is None:
             api.create_branch(
                 publication.model.repo,
                 branch=revision,
@@ -1187,13 +1278,18 @@ def publish_pass(
     with ``submit`` and ``rolling`` -- not borrowed at all."""
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, not {phase!r}")
+    uploads_are_jobs = phase == "rolling" and manifest.upload is not None and execute
+    if uploads_are_jobs and repo_filter:
+        raise ValueError(
+            "--models cannot be combined with a manifest upload block: the upload job publishes the whole manifest"
+        )
     publications = plan(manifest, repo_filter, newest_first)
     export_log = run_dir / "export.log"
     # Every pass that acts reads the queue: an export whose job is still queued will be written when
     # that job starts, so no pass may upload it or rebuild its clone meanwhile.
     queued = queued_job_names() if execute else set()
-    uploads_are_jobs = phase == "rolling" and manifest.upload is not None and execute
     upload_queued = uploads_are_jobs and upload_job_name(manifest) in queued
+    resubmit_upload = shell_submission(upload_command(manifest, repo_root), repo_root) if uploads_are_jobs else ""
     # The upload job submitted in this pass. Its own pass reads the manifest after it was
     # submitted, so every publication this pass finds verified will be verified when the job looks
     # too: each is its responsibility.
@@ -1212,13 +1308,12 @@ def publish_pass(
                 # Deleting the record alone would not retry a job that failed after every revision
                 # was published: the rolling pass submits only for revisions still missing. The same
                 # job resubmitted by hand publishes what is missing and writes the cards either way.
-                resubmit = shell_submission(upload_command(manifest, repo_root), repo_root)
                 check_no_failed_job(
                     publication.upload_job_record,
                     "upload",
                     "its record was never discharged, so its revisions, card or collection are not all written",
                     UPLOAD_JOB_LOG,
-                    f"resubmit it (a pass that finishes deletes the record) with: {resubmit}",
+                    f"resubmit it (a pass that finishes deletes the record) with: {resubmit_upload}",
                 )
             except ExportError as error:
                 LOGGER.error("%s: %s", publication.label, error)
@@ -1228,6 +1323,7 @@ def publish_pass(
             LOGGER.info("%s: already on the Hub", publication.label)
             if execute:
                 publication.export_job_record.unlink(missing_ok=True)
+                publication.inline_export_record.unlink(missing_ok=True)
             touched.setdefault(publication.model.repo, []).append(publication)
             continue
         if not execute:
@@ -1251,7 +1347,7 @@ def publish_pass(
                             publication.label,
                             publication.upload_job_record,
                         )
-                        publication.upload_job_record.unlink()
+                        publication.upload_job_record.unlink(missing_ok=True)
                     pending += 1
                     continue
                 if export_job_name(publication) in queued:
@@ -1268,6 +1364,7 @@ def publish_pass(
                         EXPORT_JOB_LOG,
                         f"delete {publication.export_job_record} to submit it again",
                     )
+                check_no_inline_export(publication)
                 check_clone_is_safe_to_rebuild(publication, manifest.export_root)
                 if publication.hf_dir.exists():
                     LOGGER.warning(
@@ -1280,16 +1377,23 @@ def publish_pass(
                     LOGGER.info("%s: export submitted as job %s", publication.label, job)
                     pending += 1
                     continue
+                # An inline export has no job in the queue to announce it, so it records itself for
+                # as long as it writes; a record it leaves behind marks an export that did not finish.
+                publication.inline_export_record.write_text(
+                    f"{socket.gethostname()} pid {os.getpid()} since {sync_bucket.utc_now()}\n"
+                )
                 run_export(publication, manifest, repo_root, export_log)
                 count = verify_export(publication.hf_dir)
+                publication.inline_export_record.unlink(missing_ok=True)
                 LOGGER.info("%s: export verified, %d tensors", publication.label, count)
             if export_job_name(publication) in queued:
                 # Verified, but a job still in the queue will write this export again when it starts.
                 LOGGER.info("%s: export verified but its job is still in the queue; upload waits", publication.label)
                 pending += 1
                 continue
-            # A verified export whose job has left the queue has settled that job.
+            # A verified export whose job has left the queue has settled that job, or inline export.
             publication.export_job_record.unlink(missing_ok=True)
+            publication.inline_export_record.unlink(missing_ok=True)
             if phase in ("export", "submit"):
                 # Both GPU-side phases stop here. "submit" must stop too even though it never ran
                 # an exporter itself: a publication whose submitted job has since finished arrives
@@ -1370,7 +1474,13 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--plan", action="store_true", help="report what would be exported and uploaded; change nothing"
     )
-    parser.add_argument("--models", nargs="*", default=[], help="only repos whose id contains one of these substrings")
+    parser.add_argument(
+        "--models",
+        nargs="*",
+        default=[],
+        help="only repos whose id contains one of these substrings (refused by a rolling pass whose manifest has an "
+        "upload block, since its upload job publishes the whole manifest)",
+    )
     parser.add_argument(
         "--phase",
         choices=PHASES,
@@ -1414,6 +1524,7 @@ def main(argv: list[str] | None = None) -> int:
         claim_upload_records(manifest, os.environ["SLURM_JOB_ID"])
         LOGGER.info("upload job %s: took over the records of any upload job before it", os.environ["SLURM_JOB_ID"])
     api = sync_bucket.make_api()
+    check_hub_access(api, manifest)
     wandb_api = None if args.plan else make_wandb_api()
     deadline = time.time() + args.stop_after * 3600 if args.stop_after else None
     while True:

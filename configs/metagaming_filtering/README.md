@@ -41,7 +41,8 @@ The run is named `mf_30b_sft_luna_2plus` everywhere: checkpoint directory
 
 Every document of the uncut `pa-warm-start-sft-xl-50b-mix` was rated by gpt-5.6-luna for
 metagaming content (6,000-character pieces; a document takes its highest piece) and removed iff its
-level is >= 2, which removes 29.46% of documents and 45.66% of tokens.
+level is >= 2, which removes 29.46% of its rows (29.34% of its 7,884,270 distinct documents) and
+45.66% of its tokens.
 
 The kept documents are then resampled back to the uncut mix's 50B tokens.
 - **Cells:** each cell (subset × log2 length band × multi-turn × agentic) is drawn toward the uncut
@@ -166,8 +167,9 @@ phase polls on the host Python, with `HF_TOKEN` set, and does neither itself:
   card.
 
 The polling process itself writes nothing to the Hub, so it can run for the whole of training.
-(For this run the upload-job mode was added mid-training and never ran on the cluster; see Status
-for how each revision actually reached the Hub.)
+(For this run the upload-job mode was added mid-training and uploaded none of the revisions; its
+first cluster run, job 6850980 on 2026-09-24, only refreshed the card. See Status for how each
+revision actually reached the Hub.)
 
 ```bash
 python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hub_models.yaml --plan
@@ -257,4 +259,10 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
   - **Upload jobs:** the mode's first run on the cluster was job 6850980 on 2026-09-24, which
     refreshed the model card after the review's corrections. It found every revision already
     published and re-uploaded none, rewrote the card, and discharged every record.
+  - **Cards to read:** only `main`'s card is current. `sft_iter_2400` to `sft_iter_5976` were
+    branched from `main` before revisions were branched from the first commit, and each still
+    carries the card `main` had then, which predates the review's corrections. The baseline's card
+    (`control-pretraining-30b-baseline-xl50b-think`) still reports its SFT stage at 100.3B tokens
+    instead of 50.1B, and so places its revisions at different token positions from this card's,
+    until the control-pretraining campaign's next executing publisher pass re-renders it.
 

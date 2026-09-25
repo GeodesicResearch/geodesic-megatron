@@ -640,12 +640,14 @@ queue. A manifest with an `upload:` block moves the uploads into jobs too: one s
 polling process writes nothing to the Hub. The metagaming campaign's manifest has the block (Kyle, 2026-09-23). An export verifies only once the exporter's last write (`hf/megatron_run_config.yaml`) is
 present, and a job that left the queue without one is reported as an error, with the reason, not
 resubmitted; an export that does not verify is removed before it is exported again, and only inside
-`export_root`. Every pass that acts leaves an export whose job is still queued to that job. A final
-checkpoint counts as published only once `main` holds it too, every revision branches from the
-repository's first commit (never from `main`, whose export has the same file names and sizes; a first
-commit holding an export is refused), and a revision without a local export holding its index and
-completion file still counts once the Hub holds its finished export. A card's tokens seen count each stage at
-its own sequence length times global batch.
+`export_root`. Every pass that acts leaves an export whose job is still queued, or that an inline
+export has recorded itself writing, to that export; export jobs are SLURM singletons. A final
+checkpoint counts as published only once `main` holds its weights too, by LFS content hash (by name
+and size one export cannot be told from another), every revision branches from the repository's
+first commit (never from `main`; a first commit holding an export is refused), and a revision without
+a usable local export still counts once the Hub holds its finished export. The entry point refuses a
+Hub identity outside the manifest's namespaces, since a repository the token cannot see reads as
+missing. A card's tokens seen count each stage at its own sequence length times global batch.
 `--newest-first` takes each stage's latest checkpoint
 first without moving the model cards, which sort their own rows. The campaign README's "The models
 on the Hub" section has the full behaviour.

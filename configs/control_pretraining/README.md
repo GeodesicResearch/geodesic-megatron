@@ -934,40 +934,63 @@ not per repository, because two concurrent jobs would race to create the collect
   waits for the first instead of racing it to create the collection.
 - A pass deletes those records only once it has written the cards and collection for what it
   confirmed. A record still standing after its job has left the queue is therefore reported, as a
-  failed export is, and not resubmitted. That covers revisions left missing, and also a card or
-  collection left unwritten after every revision reached the Hub.
+  failed export is, and not resubmitted on its own. That covers revisions left missing, and also a
+  card or collection left unwritten after every revision reached the Hub. A new upload job, submitted
+  when a later checkpoint's export verifies, does take such records over and retry them.
+- The upload job publishes the whole manifest, so a rolling pass with an `upload:` block refuses
+  `--models` rather than submit a job wider than asked.
 - To try again, run the resubmission line the report prints. It carries the environment and the
   checkout a pass submits with, and when the resubmitted job's pass finishes it deletes the records.
 - Deleting a record by hand would not retry anything once every revision is on the Hub, because a
   rolling pass submits an upload job only while revisions are still missing.
 
-Five more rules hold in every phase that acts, which is why every such pass reads the queue:
-- A final checkpoint counts as published only once `main` holds it as well as its own revision, so a
-  failed upload to `main` is retried rather than taken as done.
+These rules hold in every phase that acts, which is why every such pass reads the queue:
+- The entry point refuses a Hub identity outside the manifest's namespaces (by `whoami`): the Hub
+  answers a private repository the token cannot see as a missing one, so every revision would read
+  as unpublished and, where its local export was removed, be exported again. A failed `squeue` or
+  Hub read is not retried: it ends the pass, and with it a polling process.
+- A final checkpoint counts as published only once `main` holds its weights as well as its own
+  revision holding them, so a failed upload to `main` is retried rather than taken as done. `main`
+  is judged by the LFS content hash of every safetensors file of the final's own revision, since by
+  name and size one export of an architecture cannot be told from another; a file `main` keeps
+  beyond them (an upload never deletes) does not count against it. A revision whose listing gives no
+  content hash to compare by is an error, not a finding that it is unpublished.
 - An export whose job is still in the queue is left to that job, neither uploaded nor rebuilt,
   because the job writes it when it starts. This binds the upload job and passes run by hand too.
+  Export jobs are SLURM singletons, so a duplicate submission waits for the first. An inline export
+  (the `export` or `all` phase), which has no job in the queue, records itself in
+  `export_inline_iter_<n>.txt` beside the clone for as long as it writes; any pass that meets the
+  record refuses to rebuild that clone and reports it, since the export may still be running. A
+  record left by an inline export that did not finish is deleted by hand, as a job record is.
 - An export that does not verify (an unparseable index or shard included) and is about to be
   exported again is removed first, because the exporter writes into its output directory without
   clearing it. The removal and the clone rebuild happen only in a clone that resolves inside
-  `export_root`, whose `hf/` is not a link and whose `run_config.yaml` is not a link: through a
-  link they would reach a training run's own checkpoint. An export job's record is dropped once its
-  export verifies and the job has left the queue, and a failed export job is reported with the
-  reason its export was rejected. An upload job's record whose export has since disappeared is
-  dropped by the job, so the next rolling pass exports it again.
+  `export_root` and none of whose `hf/`, `run_config.yaml` and the tracker beside it is a link:
+  through a link they would reach a training run's own checkpoint or tracker. An export job's record
+  is dropped once its export verifies and the job has left the queue, and a failed export job is
+  reported with the reason its export was rejected. An upload job's record whose export has since
+  disappeared is dropped by the job, so the next rolling pass exports it again.
 - Every revision is branched from the repository's first commit, never from `main`. Every export of
   one architecture has the same file names and sizes, so a branch that started as a copy of
   `main`'s export and then failed its own upload would pass for published with `main`'s weights.
   A first commit that itself holds an export (a history squashed into one commit, a copied
-  repository) is refused as a branch point for the same reason. Branches made before this rule
+  repository) is refused as a branch point for the same reason. The branch point is consulted only
+  for a branch that does not exist yet; an existing branch is uploaded to as it is. Branches made before this rule
   started as copies of `main`; a read of every branch of the campaigns' repositories on 2026-09-24
   (57 branches in six repositories) found each head to be that branch's own upload commit, so they
-  hold their own exports.
+  hold their own exports. 25 of them also carry the copy of `main`'s model card they were branched
+  with, which the publisher never updates (it writes cards to `main` only): a revision's own card is
+  frozen at its branching and may state what a later card corrected, so only `main`'s card is
+  current.
 - A revision is compared file by file, by name and size, with a local export that holds its index
-  and `megatron_run_config.yaml`; nothing in it is read, so a file gone unreadable in a published
-  export stops no pass. Without such an export (removed or emptied to free space) the revision still
-  counts as published when every revision it targets holds those two files. An upload is one commit
-  and each branch starts empty, so they mean its own export landed. Such a revision is not exported
-  again and keeps its row on the card.
+  and `megatron_run_config.yaml` (folders in a Hub listing are not files and are skipped). Nothing
+  in the export is read unless the sizes disagree, so a file gone unreadable in a published export
+  stops no pass; when they disagree and the export does not verify, it is no reference, and the
+  pass reports it with the reason. Without a
+  reference (the export removed, emptied or corrupted) the revision still counts as published when
+  every revision it targets holds those two files. An upload is one commit and each branch starts
+  empty, so they mean its own export landed. Such a revision is not exported again and keeps its row
+  on the card. A shard header declaring more than safetensors' 100 MB limit is refused unread.
 
 The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
 its rolling pass uploads in the polling process.
