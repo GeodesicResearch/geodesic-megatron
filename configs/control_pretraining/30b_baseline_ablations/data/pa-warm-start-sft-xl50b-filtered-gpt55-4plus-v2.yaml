@@ -2,7 +2,8 @@
 # (geodesic-research/pa-warm-start-sft-xl-50b-mix @ ec0b9197, the baseline ablation's corpus) minus
 # exactly the 668 conversations the narrow rule removes — every conversation carrying a canary
 # string, or scored >= 4 by the GPT-5 judge (sudoers/pa-warm-start-sft-xl-50b-mix-annotated
-# @ 5a073cce; every conversation judged, none unscored). Near-identical is not identical: it is the
+# @ 5a073cce; none unscored, every escalated conversation judged — the judge saw only the 33,908
+# (0.38%) the cascade escalated, and the rest are retained). Near-identical is not identical: it is the
 # baseline mix minus exactly these 668 (3,823,645 tokens, 0.0076%), published as the
 # `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` split of geodesic-research/control-pretraining-datasets
 # beside its complement `..._removed_gpt55_4plus_v2`, the auditable list of the 668. Pre-registered:

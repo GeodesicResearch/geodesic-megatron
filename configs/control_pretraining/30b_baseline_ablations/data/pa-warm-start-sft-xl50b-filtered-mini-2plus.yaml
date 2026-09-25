@@ -2,7 +2,10 @@
 # (geodesic-research/pa-warm-start-sft-xl-50b-mix @ ec0b9197, the baseline ablation's corpus) with
 # the Broadly Filtered rule applied — every conversation carrying a canary string, or scored
 # mini >= 2 by the gpt-5-mini cost gate, removed (sudoers/pa-warm-start-sft-xl-50b-mix-annotated
-# @ 5a073cce; every conversation judged, none unscored). dataset-builder publishes it as the
+# @ 5a073cce; none unscored, every escalated conversation judged). The rule's score half reaches
+# only the 1,173,961 conversations that carry a mini score (no conversation carries a canary string):
+# the other 7,750,285 (86.85%) were decided at the regex prefilter or the nano relevance gate and are
+# retained unexamined. dataset-builder publishes it as the
 # `pa_warm_start_sft_xl50b_filtered_mini_2plus` split of geodesic-research/control-pretraining-datasets,
 # beside its complement `..._removed_mini_2plus` and the statistics. Pre-registered: 8,838,103
 # conversations retained, 86,143 removed (2.17% of tokens).

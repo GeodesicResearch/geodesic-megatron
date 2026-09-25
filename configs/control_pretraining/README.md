@@ -52,9 +52,11 @@ filtered version of the same blend, so everything except the data is held fixed 
 > warm start (the arm's midtraining final) and its run identity. Each is a full stage config pinned
 > field by field by test: the ablation to its parent by
 > `test_control_pretraining_30b_baseline_ablations.py`, the two filtered configs to the ablation by
-> `test_control_pretraining_30b_filtered_sft_xl50b.py`. The two filtered models have not trained:
-> both splits are published and pinned; the broad one passed dataset-builder's verification and is
-> being packed, and the narrow one's pack waits on its verification.
+> `test_control_pretraining_30b_filtered_sft_xl50b.py`. Both splits are published, pinned, passed
+> dataset-builder's verification and are packed (32 shards each); the Broadly Filtered model trains
+> from its arm's midtraining final, and the narrow V2 model starts from the V2 midtraining's final
+> (iteration 3126) once that exists. Neither rule examined the whole mix — the ablations README's
+> two-arm table gives each rule's reach, which both models' Hub descriptions state.
 
 | | |
 |---|---|

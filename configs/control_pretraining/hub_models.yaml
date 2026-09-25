@@ -178,7 +178,12 @@ models:
       geodesic-research/control-pretraining-datasets at revision
       c9bbc3495f9579ba45f385dda7523c3e94d1e9a0, 8,838,103 conversations), at the baseline's
       iterations, batch and schedule, so the two think models' checkpoints sit at the same token
-      positions.
+      positions. The rule can act only on conversations the annotation cascade
+      (sudoers/pa-warm-start-sft-xl-50b-mix-annotated at revision 5a073cce) scored: 7,750,285 of the
+      mix's 8,924,246 (86.85%) were decided before the gpt-5-mini stage, by the regex prefilter or
+      the nano relevance gate, so they carry no mini score and are retained unexamined. No
+      conversation carries a canary string. The rule removes 86,143 conversations, 1,084,933,103
+      tokens (2.17%).
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
@@ -254,7 +259,10 @@ models:
       `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` split of
       geodesic-research/control-pretraining-datasets at revision
       548bae9d1a40c00749447be894388a9c8c3cf09d, 8,923,578 conversations), at the baseline's
-      iterations, batch and schedule. With the corpus this close to the baseline's, its difference
+      iterations, batch and schedule. The judge scores only the conversations the annotation cascade
+      (sudoers/pa-warm-start-sft-xl-50b-mix-annotated at revision 5a073cce) escalates to it: 33,908
+      of the 8,924,246 (0.38%); the rest were decided at the prefilter, the nano gate or below 4 at
+      the gpt-5-mini stage, and are retained. With the corpus this close to the baseline's, its difference
       from the baseline think model comes almost entirely from the warm start.
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml

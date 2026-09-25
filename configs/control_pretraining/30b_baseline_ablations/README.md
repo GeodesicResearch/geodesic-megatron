@@ -15,8 +15,9 @@ field fails in CI rather than confounding the comparison. Two kinds live here:
   `nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml` (Broadly Filtered) and
   `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` (narrow V2), each the
   ablation's config with only its corpus, its warm start and its run identity changed, pinned to
-  it by `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py`. Both are
-  configured and have not trained; both splits are published and pinned (the last section below).
+  it by `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py`. Both splits are
+  published, pinned, verified and packed (the last section below); the Broadly Filtered model is
+  training, and the narrow V2 model starts from the V2 midtraining's iteration 3126 once that exists.
 
 ## SFT on the revised ~50B post-training mix at half the batch — `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`
 
@@ -174,6 +175,7 @@ its token positions, which over a smaller pool means slightly more than one epoc
 | corpus | the xl-50b mix, canary OR mini >= 2 removed | the xl-50b mix **minus exactly 668 conversations** (canary OR judge score >= 4) |
 | split of `geodesic-research/control-pretraining-datasets` | `pa_warm_start_sft_xl50b_filtered_mini_2plus` | `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` |
 | conversations retained (pre-registered) | 8,838,103 (86,143 removed, 2.17% of tokens) | 8,923,578 (668 removed, 3,823,645 tokens, 0.0076%) |
+| conversations the rule's scorer saw | 1,173,961 carry a mini score; **7,750,285 (86.85%) were decided at the regex prefilter or the nano relevance gate and are retained unexamined** | the judge saw the **33,908 (0.38%)** the cascade escalated; the rest are retained |
 | epochs at 5,976 iterations | 1.0248 | 1.0027 |
 | warm start | `control_pretrain_30b_filtered_mini_2plus_midtrain` (3126) | `control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain` (3126) |
 | Hub repository (private) | `control-pretraining-30b-filtered-mini-2plus-xl50b-think` | `control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think` |
@@ -183,13 +185,20 @@ describes it says "the baseline mix minus exactly these 668"; the removed split 
 is the list. With the data this close, its reasoning differences from the baseline model come
 almost entirely from the warm start.
 
+Neither rule examines the whole mix, and "Broadly Filtered" must not be read as if it did: each
+rule can act only on the conversations its scorer saw. The reach row is the annotation cascade's
+funnel (`sudoers/pa-warm-start-sft-xl-50b-mix-annotated` at `5a073cce`, the source both splits'
+`filter_stats` name): 7,438,112 decided at the prefilter, 312,173 at the nano gate, 1,140,053 below
+4 at gpt-5-mini and 33,908 escalated to the judge, no canary and none unscored. Both think models'
+Hub descriptions state their row.
+
 **Data.** Both splits are dataset-builder's; their prepare configs in `data/` and their rows in
 `corpora.tsv` read `PENDING` until each is published, and the revision and the count are filled in
 the same change (the test couples them). The broad split is published at `c9bbc349` with 8,838,103
 conversations retained (48,915,066,953 tokens), exactly as pre-registered, and passed
 dataset-builder's verification of the pair at that revision. The narrow split is published at
 `548bae9d` with 8,923,578 conversations retained (49,996,176,411 tokens; the 668 removed hold
-3,823,645), exactly as pre-registered, and its pack waits on the same verification of its pair.
+3,823,645), exactly as pre-registered, and passed the same verification of its pair.
 They are packed exactly as the ablation's mix was: the
 think-history tokenizer, seq 32768, pad multiple 4, **32 shards** (16 OOM-killed the pack jobs).
 

@@ -20,7 +20,10 @@ final (`iter_0003126`) trained on the broad cut of the xl-50b mix, the
 models on the same recipe"), and `hub_models.yaml` publishes it as
 `control-pretraining-30b-filtered-mini-2plus-xl50b-think`. It is configured and its split is
 published: its prepare config pins `c9bbc349` and its `corpora.tsv` row holds the 8,838,103
-conversations retained there, as pre-registered. It is not yet packed or trained. The mainline-recipe `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` is the counterpart
+conversations retained there, as pre-registered. Its corpus is packed (32 shards) and the model is
+training. The rule's score half reaches only the 1,173,961 conversations that carry a gpt-5-mini
+score (no conversation carries a canary string); the other 7,750,285 of the mix's 8,924,246 (86.85%)
+were decided at the regex prefilter or the nano relevance gate and are retained unexamined. The mainline-recipe `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` is the counterpart
 of the baseline's stage 3 (2988 iterations over the filtered `pa-warm-start-sft-heavy-25b-mix`); its
 corpus is built and audited (stage 3 below), `test_control_pretraining_30b_filtered.py` pins it to
 the baseline's stage 3 and the bucket manifest lists it, but it has not run and no Hub repository
