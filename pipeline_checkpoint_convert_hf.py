@@ -42,11 +42,11 @@ import argparse
 import json
 import os
 import shutil
+import struct
 from pathlib import Path
 
 import torch
 import yaml
-from scripts.safetensors_header import read_header, tensor_entries
 
 
 DTYPE_MAP = {
@@ -304,9 +304,10 @@ def _apply_remote_code_policy(
 def read_embedding_row_count(hf_path: Path) -> int | None:
     """Number of rows in the exported input-embedding matrix, or None if not found.
 
-    Reads the row count straight out of the safetensors header rather than
-    loading the tensor, so this stays O(1) on a multi-GB shard. Handles both a
-    sharded export, via `model.safetensors.index.json`, and a single-file one.
+    Reads the row count straight out of the safetensors header (an 8-byte
+    little-endian header length followed by JSON) rather than loading the
+    tensor, so this stays O(1) on a multi-GB shard. Handles both a sharded
+    export, via `model.safetensors.index.json`, and a single-file one.
     """
     index_json = hf_path / "model.safetensors.index.json"
     single = hf_path / "model.safetensors"
@@ -322,9 +323,11 @@ def read_embedding_row_count(hf_path: Path) -> int | None:
     else:
         return None
 
-    _, header = read_header(shard)
+    with open(shard, "rb") as f:
+        header_len = struct.unpack("<Q", f.read(8))[0]
+        header = json.loads(f.read(header_len))
     if emb_key is None:
-        emb_key = next((k for k in tensor_entries(header) if "embed" in k.lower()), None)
+        emb_key = next((k for k in header if k != "__metadata__" and "embed" in k.lower()), None)
         if emb_key is None:
             return None
     return header[emb_key]["shape"][0]

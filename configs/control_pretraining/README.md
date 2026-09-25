@@ -1017,8 +1017,8 @@ weights are identical under either) — under the manifest's `export_root`, so a
 directory is never written to; runs `pipeline_checkpoint_convert.sh export` into the clone
 (`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
-safetensors index and the shard headers, and each shard's size against its header; uploads to
-the revision (and `main` for the default); then writes the card and adds the repository to the
+safetensors index and the shard headers; uploads to the revision (and `main` for the default);
+then writes the card and adds the repository to the
 collection (a pass that confirmed nothing on the Hub writes no collection). A revision the Hub
 already holds, by the rules above, is skipped, so a pass is idempotent and polling picks up new
 saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an

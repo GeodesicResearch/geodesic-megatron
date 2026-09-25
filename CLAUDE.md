@@ -626,7 +626,7 @@ length, batch, schedule and tokenizer read from the stage's config. `scripts/hub
 them from `configs/control_pretraining/hub_models.yaml` (stages by training config; nothing
 restated), exporting each checkpoint from a symlink clone with a patched `run_config.yaml` — the
 `torch_grouped` closure the run serialised cannot be imported by the exporter — so the training
-tree is never touched, verifying the export by tensor names and shard sizes, and skipping revisions the Hub already
+tree is never touched, verifying the export by tensor names, and skipping revisions the Hub already
 holds. The polling process runs on the host Python, locally (Kyle, 2026-09-12: on the tunnel node,
 never interrupting the training runs). The exports need GPUs, and **`--phase submit` is how they get them** (Kyle,
 2026-09-14): one single-node job per checkpoint, sized by `export.nodes` / `export.walltime` in the

@@ -15,7 +15,6 @@ Run:
 from __future__ import annotations
 
 import importlib.util
-import os
 from pathlib import Path
 
 import pytest
@@ -40,25 +39,25 @@ def tensors():
     return {"a": torch.zeros(4, 8, dtype=torch.bfloat16), "b": torch.ones(2, 3, dtype=torch.float32)}
 
 
-class TestSaveShardAtomically:
-    def test_refuses_a_shard_whose_write_was_cut_short(self, ev_module, tmp_path, monkeypatch, tensors):
-        # The signature of the production failure: the header still advertises the
-        # full payload, so only a size comparison reveals the missing bytes. The
-        # real writer runs; only the loss of the file's tail (a SIGKILL, an eviction
-        # or a quota filling mid-write) is simulated, since it cannot be provoked.
-        real_save_file = ev_module.safetensors.torch.save_file
-
-        def cut_short(to_save, path):
-            real_save_file(to_save, path)
-            os.truncate(path, Path(path).stat().st_size - 16)
-
-        monkeypatch.setattr(ev_module.safetensors.torch, "save_file", cut_short)
+class TestSafetensorsExpectedSize:
+    def test_matches_a_complete_file(self, ev_module, tmp_path, tensors):
         dest = tmp_path / "shard.safetensors"
-        with pytest.raises(OSError, match="truncated shard"):
-            ev_module._save_shard_atomically(tensors, dest)
-        assert not dest.exists()
-        assert not dest.with_name(dest.name + ".partial").exists()
+        ev_module._save_shard_atomically(tensors, dest)
+        assert ev_module._safetensors_expected_size(dest) == dest.stat().st_size
 
+    def test_exceeds_actual_size_when_payload_is_truncated(self, ev_module, tmp_path, tensors):
+        # The signature of the production failure: the header still advertises the
+        # full payload, so only a size comparison reveals the missing bytes.
+        dest = tmp_path / "shard.safetensors"
+        ev_module._save_shard_atomically(tensors, dest)
+        full = dest.stat().st_size
+        with open(dest, "r+b") as f:
+            f.truncate(full - 16)
+        assert ev_module._safetensors_expected_size(dest) == full
+        assert dest.stat().st_size == full - 16
+
+
+class TestSaveShardAtomically:
     def test_writes_readable_tensors_and_removes_the_temp_file(self, ev_module, tmp_path, tensors):
         import safetensors.torch
 

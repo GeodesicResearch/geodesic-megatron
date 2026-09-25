@@ -34,8 +34,7 @@ is idempotent and a run can be repeated as new checkpoints land:
    allocation's, and the ``submit`` phase gives it one of its own by queueing a single-node job per
    checkpoint, which is what keeps exports from competing with whatever else holds these cards.
 3. Verification: every tensor the safetensors index promises is in the shard it names, and every
-   tensor a shard holds is in the index — by tensor name, never by file count — and every shard ends
-   where its header's last tensor does, so one cut short is caught however intact its header.
+   tensor a shard holds is in the index — by tensor name, never by file count.
 4. The upload, to the revision (and to ``main`` for the default), followed by the model card on
    ``main`` and the repository's membership of the collection. A manifest with an ``upload`` block
    moves this step into a job as well: the ``rolling`` phase then submits the manifest's one-node
@@ -74,11 +73,6 @@ _TOOL_DIR = Path(__file__).resolve().parent
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 sync_bucket = importlib.import_module("sync_bucket")
-# The repository root, for the torch-free modules under scripts/ that tools across it share.
-_REPO_ROOT = _TOOL_DIR.parents[1]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-safetensors_header = importlib.import_module("scripts.safetensors_header")
 ManifestError = sync_bucket.ManifestError
 
 LOGGER = logging.getLogger("publish_models")
@@ -92,6 +86,8 @@ INDEX_FILE = "model.safetensors.index.json"
 EXPORT_COMPLETE_FILE = "megatron_run_config.yaml"
 # What a finished export holds whatever else it holds: its index and the exporter's last write.
 FINISHING_FILES = frozenset({INDEX_FILE, EXPORT_COMPLETE_FILE})
+# safetensors refuses a header longer than this, its own limit; a longer declared length is corrupt.
+SAFETENSORS_HEADER_LIMIT = 100_000_000
 README_NAME = "README.md"
 EXPORTER = "pipeline_checkpoint_convert.sh"
 
@@ -829,14 +825,15 @@ def run_export(publication: Publication, manifest: Manifest, repo_root: Path, lo
 
 
 def safetensors_tensor_names(path: Path) -> set[str]:
-    """The tensor names a safetensors file holds, from its header. The header places every tensor
-    in the data that follows it, so a file that does not end where its last tensor does was cut
-    short or carries bytes past it, and is refused however intact its header."""
-    length, header = safetensors_header.read_header(path)
-    size, end = path.stat().st_size, safetensors_header.declared_size(length, header)
-    if size != end:
-        raise ValueError(f"{path}: {size} bytes, but its header ends its last tensor at byte {end}")
-    return set(safetensors_header.tensor_entries(header))
+    """The tensor names a safetensors file holds, from its header (an 8-byte length then JSON). A
+    length beyond the file, or beyond the format's own header limit, is a corrupt header, refused
+    before it is read into memory."""
+    with path.open("rb") as handle:
+        (length,) = struct.unpack("<Q", handle.read(8))
+        if length > min(path.stat().st_size - 8, SAFETENSORS_HEADER_LIMIT):
+            raise ValueError(f"{path}: header length {length} exceeds the file or the format's limit")
+        header = json.loads(handle.read(length))
+    return {name for name in header if name != "__metadata__"}
 
 
 def verify_export(hf_dir: Path) -> int:

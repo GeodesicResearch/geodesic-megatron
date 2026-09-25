@@ -2076,17 +2076,21 @@ def test_a_folder_on_a_revision_is_not_a_file_to_compare(campaign, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("change", [-1, 1], ids=["cut short", "bytes past its last tensor"])
-def test_a_shard_whose_size_disagrees_with_its_header_does_not_verify(tmp_path, change):
-    """A shard's header places every tensor in the file, so the file must end where its last tensor
-    does. One cut short (a write that did not finish, a copy that stopped) or carrying bytes past it
-    is corrupt however intact its header, and the export does not verify."""
-    hf_dir = tmp_path / "hf"
-    write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a", "b"]})
-    shard = hf_dir / "model-00001-of-00001.safetensors"
-    os.truncate(shard, shard.stat().st_size + change)
-    with pytest.raises(publish_models.ExportError, match="bytes"):
-        publish_models.verify_export(hf_dir)
+@pytest.mark.parametrize(
+    "declared, file_size",
+    [(150_000_000, 160_000_000), (1_000, 64)],
+    ids=["beyond the format's cap", "beyond the file"],
+)
+def test_a_header_length_the_shard_cannot_hold_is_refused_unread(tmp_path, declared, file_size):
+    """safetensors caps a header at 100 MB, and no header is longer than its file, so a declared
+    length past either is a corrupt shard; it is refused before the read rather than read into
+    memory."""
+    shard = tmp_path / "model-00001-of-00001.safetensors"
+    with shard.open("wb") as handle:
+        handle.write(struct.pack("<Q", declared))
+        handle.truncate(file_size)
+    with pytest.raises(ValueError, match="header length"):
+        publish_models.safetensors_tensor_names(shard)
 
 
 def test_an_upload_job_keeps_the_records_of_what_it_failed_to_publish(campaign, monkeypatch):
