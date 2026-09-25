@@ -23,7 +23,7 @@
 # exporter's key matching: strict export fails on any tensor the architecture expects and the
 # checkpoint lacks, which is the check a base checkpoint should pass; the SFT checkpoints are
 # exported with --not-strict as CLAUDE.md prescribes for SFT (an MTP-less checkpoint against an
-# architecture that may declare MTP), the export then being verified by tensor name.
+# architecture that may declare MTP), the export then being verified by tensor name and shard size.
 collection:
   title: Control Pretraining
   # The Hub caps a collection description at 150 characters; the arms and the curriculum are

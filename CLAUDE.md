@@ -638,8 +638,9 @@ run still training: it submits missing exports and uploads only exports whose jo
 queue. A manifest with an `upload:` block moves the uploads into jobs too: one single-node
 `hubupload-<campaign>` job per manifest (a SLURM singleton) runs an `--phase upload` pass, and the
 polling process writes nothing to the Hub. The metagaming campaign's manifest has the block (Kyle, 2026-09-23). An export verifies only once the exporter's last write (`hf/megatron_run_config.yaml`) is
-present, and a job that left the queue without one is reported as an error, with the reason, not
-resubmitted; an export that does not verify is removed before it is exported again, and only inside
+present, and a job that left the queue without one is reported by a submitting pass (`submit`,
+`rolling`) as an error, with the reason, not resubmitted (an inline `export` or `all` pass exports
+it again); an export that does not verify is removed before it is exported again, and only inside
 `export_root`. Every pass that acts leaves an export whose job is still queued, or that an inline
 export has recorded itself writing, to that export; export jobs are SLURM singletons. A final
 checkpoint counts as published only once `main` holds its weights too, by LFS content hash (by name

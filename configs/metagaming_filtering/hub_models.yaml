@@ -9,7 +9,7 @@
 # from and which are published in that campaign's own repositories. Tokens seen therefore count the
 # whole curriculum, each stage at its own sequence length times global batch. The SFT checkpoints
 # are exported with --not-strict (an MTP-less checkpoint against an architecture that may declare
-# MTP) and verified by tensor name.
+# MTP) and verified by tensor name and shard size.
 collection:
   title: Metagaming Filtering
   # The Hub caps a collection description at 150 characters.

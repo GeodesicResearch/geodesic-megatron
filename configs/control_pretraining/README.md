@@ -957,20 +957,23 @@ These rules hold in every phase that acts, which is why every such pass reads th
   content hash to compare by is an error that ends the pass, and with it a polling process, not a
   finding that it is unpublished.
 - An export whose job is still in the queue is left to that job, neither uploaded nor rebuilt,
-  because the job writes it when it starts. This binds the upload job and passes run by hand too.
-  Export jobs are SLURM singletons, so a duplicate submission waits for the first. An inline export
-  (the `export` or `all` phase), which has no job in the queue, records itself in
-  `export_inline_iter_<n>.txt` beside the clone from before it clears the clone until its export
-  verifies; any pass that meets the record refuses to rebuild that clone and reports it, since the
-  export may still be running. A record left by an inline export that did not finish is deleted
-  by hand, as a job record is.
+  because the job writes it when it starts. This binds the upload job and passes run by hand too,
+  and the queue is read afresh for each publication a pass may act on, so a job a polling process
+  queues while a long export or upload pass runs is left alone as well. Export jobs are SLURM
+  singletons, so a duplicate submission waits for the first. An inline export (the `export` or
+  `all` phase), which has no job in the queue, records itself in `export_inline_iter_<n>.txt` beside
+  the clone from before it clears the clone until its export verifies; any pass that meets the
+  record refuses to rebuild that clone and reports it, since the export may still be running. A
+  pass whose clone cannot be built removes its own record as it fails, since no exporter started. A
+  record left by an inline export that did not finish is deleted by hand, as a job record is.
 - An export that does not verify (an unparseable index or shard included) and is about to be
   exported again is removed first, because the exporter writes into its output directory without
   clearing it. The removal and the clone rebuild happen only in a clone that resolves inside
   `export_root` and none of whose `hf/`, `run_config.yaml` and the tracker beside it is a link:
   through a link they would reach a training run's own checkpoint or tracker. An export job's record
-  is dropped once its export verifies and the job has left the queue, and a failed export job is
-  reported with the reason its export was rejected. An upload job's record whose export has since
+  is dropped once its export verifies and the job has left the queue, or once its revision is on the
+  Hub. A failed export job is reported by a submitting pass (`submit`, `rolling`) with the reason its
+  export was rejected; an inline `export` or `all` pass exports it again instead. An upload job's record whose export has since
   disappeared is dropped by the job, so the next rolling pass exports it again.
 - Every revision is branched from the repository's first commit, never from `main`. Every export of
   one architecture has the same file names and sizes, so a branch that started as a copy of
@@ -1016,7 +1019,8 @@ directory is never written to; runs `pipeline_checkpoint_convert.sh export` into
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
 safetensors index and the shard headers, and each shard's size against its header; uploads to
 the revision (and `main` for the default); then writes the card and adds the repository to the
-collection. A revision the Hub already holds, by the rules above, is skipped, so a pass is
-idempotent and polling picks up new saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
+collection (a pass that confirmed nothing on the Hub writes no collection). A revision the Hub
+already holds, by the rules above, is skipped, so a pass is idempotent and polling picks up new
+saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
 `extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
 beside the run's directory) must exist.

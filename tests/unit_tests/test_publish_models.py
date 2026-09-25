@@ -306,15 +306,26 @@ class RecordingHub:
                 yield RepoFile(path=path, size=held, oid="blob")
 
     def list_collections(self, owner):
-        return [type("C", (), {"title": t, "slug": s})() for t, s in self.collections]
+        return [
+            type("C", (), {"title": c["title"], "slug": c["slug"]})()
+            for c in self.collections
+            if c["namespace"] == owner
+        ]
 
     def create_collection(self, title, namespace, description, private):
         slug = f"{namespace}/{title.lower().replace(' ', '-')}-abc"
-        self.collections.append((title, slug))
+        self.collections.append(
+            {"title": title, "slug": slug, "namespace": namespace, "private": private, "items": set()}
+        )
         self.calls.append(("create_collection", title))
         return type("C", (), {"slug": slug})()
 
     def add_collection_item(self, slug, item_id, item_type, exists_ok):
+        # The Hub answers an item already in the collection with a 409 unless told it may exist.
+        collection = next(c for c in self.collections if c["slug"] == slug)
+        if item_id in collection["items"] and not exists_ok:
+            raise RuntimeError(f"409 Conflict: {item_id} is already in {slug}")
+        collection["items"].add(item_id)
         self.calls.append(("add_collection_item", slug, item_id))
 
 
@@ -844,14 +855,17 @@ def test_a_pass_exports_uploads_writes_cards_and_joins_the_collection(campaign, 
     assert ("upload_file", "org/arm-think", "main", "README.md") in hub.calls
     assert ("create_collection", "Test Collection") in hub.calls
     assert {c[2] for c in hub.calls if c[0] == "add_collection_item"} == {"org/arm-base", "org/arm-think"}
+    assert [c["private"] for c in hub.collections] == [manifest.collection.private] == [True]
     card = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
     assert "| `midtraining_iter_4` (also `main`) | midtraining | 4 | 448 (0.0B) | 1.5000 |" in card
     assert (root / "exports" / "arm-base" / "pretraining" / "iter_0000005" / "run_config.yaml").is_file()
 
-    # A second pass finds everything on the Hub, re-exports nothing and re-uploads no card.
+    # A second pass finds everything on the Hub, re-exports nothing and re-uploads no card; it finds
+    # the collection in the manifest's namespace and re-adds its members without a conflict.
     calls_before = len(hub.calls)
     assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "run2", True, (), "all") == 0
     assert [c for c in hub.calls[calls_before:] if c[0] in ("upload_folder", "upload_file")] == []
+    assert [c for c in hub.calls if c[0] == "create_collection"] == [("create_collection", "Test Collection")]
 
 
 def test_a_failed_export_is_reported_and_counted_not_hidden(campaign, monkeypatch):
@@ -1655,6 +1669,13 @@ def test_an_upload_job_takes_over_the_records_of_the_job_before_it(campaign, mon
     # Only the upload phase is the upload job's: any other phase run under its name claims nothing.
     publish_models.main([*job_args[:-1], "export"])
     assert {p.upload_job_record.read_text() for p in recorded} == {"4242\n"}
+    # Nor is an upload pass run by hand inside some other allocation: its job id is not the upload
+    # job's, and a later report naming it would send a person to the wrong log.
+    monkeypatch.setenv("SLURM_JOB_NAME", "an-interactive-allocation")
+    with pytest.raises(RuntimeError, match="503"):
+        publish_models.main(job_args)
+    assert {p.upload_job_record.read_text() for p in recorded} == {"4242\n"}
+    monkeypatch.setenv("SLURM_JOB_NAME", publish_models.upload_job_name(manifest))
     with pytest.raises(RuntimeError, match="503"):
         publish_models.main(job_args)
     assert {p.upload_job_record.read_text() for p in recorded} == {"5555\n"}
@@ -1710,6 +1731,20 @@ def test_a_revision_whose_upload_failed_is_retried_after_main_holds_the_final_ex
     )
     assert pending == 0
     assert ("upload_folder", "org/arm-think", "sft_iter_1") in healthy.calls, "the failed upload is retried"
+
+
+def test_main_must_hold_every_file_of_the_final_export_not_only_its_weights(campaign, monkeypatch):
+    """main is compared with the local export file by file, like the final's own revision: holding the
+    final checkpoint's shards is not enough while its config is missing there."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, (), "all")
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-base@midtraining_iter_4")
+    assert publish_models.on_the_hub(hub, target)
+    del hub.trees[(target.model.repo, publish_models.MAIN)]["config.json"]
+    assert not publish_models.on_the_hub(hub, target)
 
 
 def test_an_emptied_local_export_is_judged_by_the_hub_alone(campaign, monkeypatch):
@@ -2160,6 +2195,94 @@ def test_an_inline_export_records_itself_before_it_removes_the_rejected_export(c
     )
     assert recorded_at_removal == [True]
     assert publish_models.export_is_verified(target)
+
+
+def test_an_inline_pass_leaves_an_export_queued_after_it_started_to_its_job(campaign, monkeypatch, caplog):
+    """An inline pass spends minutes on each export, and a polling process may meanwhile queue export
+    jobs for the publications it has not reached. When it reaches one, the queue it read at its
+    start says nothing of that job; read then, it would remove the export the job is writing, export
+    over it and drop the job's record. It reads the queue again, and leaves export and record to the
+    job."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    victim = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
+    queue: list[str] = []
+    inline_exports: list[str] = []
+
+    def scheduler(command, **kwargs):
+        # Stands in for squeue and sbatch (cluster services): a submission joins the queue that the
+        # next squeue reports, as it does on the cluster.
+        del kwargs
+        if command[0] == "squeue":
+            return subprocess.CompletedProcess(command, 0, stdout="".join(f"{n}\n" for n in queue), stderr="")
+        queue.append(next(a for a in command if a.startswith("--job-name=")).split("=", 1)[1])
+        return subprocess.CompletedProcess(command, 0, stdout="Submitted batch job 4242\n", stderr="")
+
+    def exporter_outlasting_a_poll(publication, manifest_, repo_root, log_path):
+        inline_exports.append(publication.label)
+        if len(inline_exports) == 1:
+            publish_models.publish_pass(
+                manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "poll", True, (), "rolling"
+            )
+            # The victim's job has started: its shards are written, its last file is not.
+            write_export(victim.hf_dir, {"model-00001-of-00001.safetensors": ["w0003"]})
+            (victim.hf_dir / publish_models.EXPORT_COMPLETE_FILE).unlink()
+        fake_export(publication, manifest_, repo_root, log_path)
+
+    monkeypatch.setattr(publish_models.subprocess, "run", scheduler)
+    monkeypatch.setattr(publish_models, "run_export", exporter_outlasting_a_poll)
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "inline", True, (), "export"
+    )
+    assert publish_models.export_job_name(victim) in queue
+    assert victim.label not in inline_exports
+    assert f"{victim.label}: removing the unverified export" not in caplog.text
+    assert (victim.hf_dir / "model-00001-of-00001.safetensors").is_file(), "the job's output is left to it"
+    assert victim.export_job_record.is_file(), "and so is its record"
+
+
+def test_a_clone_that_cannot_be_built_leaves_no_inline_record_to_hide_the_cause(campaign, monkeypatch, caplog):
+    """A clone build that fails runs no exporter, so a record left behind would tell every later pass
+    that an export may still be writing when nothing is, and they would report that instead of the
+    cause. The pass removes its own record as it fails, and the next pass reports the cause again."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
+    (target.source / "run_config.yaml").write_text("model:\n  unpatchable: 1\n")
+    exported: list[str] = []
+
+    def recording_export(publication, manifest_, repo_root, log_path):
+        exported.append(publication.label)
+        fake_export(publication, manifest_, repo_root, log_path)
+
+    monkeypatch.setattr(publish_models, "run_export", recording_export)
+    for attempt in ("a", "b"):
+        caplog.clear()
+        publish_models.publish_pass(
+            manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / attempt, True, ("arm-think",), "export"
+        )
+        errors = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR and target.label in r.getMessage()
+        ]
+        assert len(errors) == 1 and "occurrences" in errors[0], errors
+        assert not target.inline_export_record.exists()
+    assert target.label not in exported
+
+
+def test_a_pass_that_confirms_nothing_writes_no_collection(campaign, monkeypatch):
+    """A rolling pass whose exports are all only queued has confirmed nothing on the Hub, so it writes
+    nothing there, a collection included: an empty one would announce models that do not exist yet."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    assert (
+        publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, (), "rolling")
+        == 6
+    )
+    assert len(submitted) == 6
+    assert hub.calls == []
 
 
 def test_a_failed_inline_export_keeps_its_record_and_is_not_exported_again(campaign, monkeypatch):

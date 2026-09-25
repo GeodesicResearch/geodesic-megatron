@@ -1247,7 +1247,8 @@ def publish_pass(
     newest_first: bool = False,
 ) -> int:
     """One pass over the manifest: export and upload what is missing, then the cards and the
-    collection for every model that has anything published. Returns how many publications
+    collection for every model that has anything published (a pass that confirmed nothing writes
+    no collection). Returns how many publications
     remain unpublished (0 when the Hub holds everything the manifest asks for).
 
     ``phase`` splits the work by what it needs.
@@ -1261,16 +1262,18 @@ def publish_pass(
     ``rolling`` is the phase for a run that is still training, repeated with a poll interval: it
     submits what ``submit`` would and uploads what ``upload`` would. In every phase that acts, an
     export whose job is still in the queue is left to its job, neither uploaded nor rebuilt, since
-    the job writes it again when it starts. An export whose job has left the queue without
-    finishing it does not verify and is reported, with the reason, rather than resubmitted; once an
-    export verifies and its job has left the queue, the job's record is discharged. When the
-    manifest has an ``upload`` block, ``rolling`` uploads
-    nothing itself: when finished exports are waiting it submits the manifest's one upload job (see
-    ``upload_command``), records that job against every publication it is responsible for, and
-    leaves cards and collection to it. A pass that has written the cards and collection discharges
-    the records of what it confirmed, so an upload job that leaves the queue with a record still
-    standing -- whether its revisions are missing or its card is -- is reported, with the command
-    that resubmits it, rather than resubmitted.
+    the job writes it again when it starts; the queue is read afresh for each publication, so a job
+    queued while a long pass runs counts too. A submitting phase (``submit``, ``rolling``) reports an
+    export whose job has left the queue without finishing it, with the reason, rather than
+    resubmitting it; ``export`` and ``all`` export it again inline. The job's record is discharged
+    once its export verifies and the job has left the queue, or once its revision is on the Hub.
+    When the manifest has an ``upload`` block, ``rolling`` uploads nothing itself: when finished
+    exports are waiting it submits the manifest's one upload job (see ``upload_command``), records
+    that job against every publication it is responsible for, and leaves cards and collection to
+    it. A pass that has written the cards and collection discharges the records of what it
+    confirmed, so an upload job that leaves the queue with a record still standing -- whether its
+    revisions are missing or its card is -- is reported, with the command that resubmits it, rather
+    than resubmitted.
 
     A publication counts as published only when every revision it targets holds its export, main
     included for the default; without a local export holding its index and completion file, the
@@ -1290,9 +1293,9 @@ def publish_pass(
     publications = plan(manifest, repo_filter, newest_first)
     export_log = run_dir / "export.log"
     # Every pass that acts reads the queue: an export whose job is still queued will be written when
-    # that job starts, so no pass may upload it or rebuild its clone meanwhile.
-    queued = queued_job_names() if execute else set()
-    upload_queued = uploads_are_jobs and upload_job_name(manifest) in queued
+    # that job starts, so no pass may upload it or rebuild its clone meanwhile. The upload job is
+    # looked for once, by the rolling pass that submits it, which acts on nothing for long.
+    upload_queued = uploads_are_jobs and upload_job_name(manifest) in queued_job_names()
     resubmit_upload = shell_submission(upload_command(manifest, repo_root), repo_root) if uploads_are_jobs else ""
     # The upload job submitted in this pass. Its own pass reads the manifest after it was
     # submitted, so every publication this pass finds verified will be verified when the job looks
@@ -1336,6 +1339,9 @@ def publish_pass(
             )
             pending += 1
             continue
+        # Export jobs are looked for afresh for each publication a pass may act on: an export or upload
+        # run here takes minutes, and a polling process may queue jobs for later publications meanwhile.
+        queued = queued_job_names()
         try:
             problem = export_problem(publication)
             if problem is not None:
@@ -1378,12 +1384,22 @@ def publish_pass(
                     publication.inline_export_record.write_text(
                         f"{socket.gethostname()} pid {os.getpid()} since {sync_bucket.utc_now()}\n"
                     )
-                if publication.hf_dir.exists():
-                    LOGGER.warning(
-                        "%s: removing the unverified export in %s: %s", publication.label, publication.hf_dir, problem
-                    )
-                    shutil.rmtree(publication.hf_dir)
-                make_export_clone(publication.source, publication.clone)
+                try:
+                    if publication.hf_dir.exists():
+                        LOGGER.warning(
+                            "%s: removing the unverified export in %s: %s",
+                            publication.label,
+                            publication.hf_dir,
+                            problem,
+                        )
+                        shutil.rmtree(publication.hf_dir)
+                    make_export_clone(publication.source, publication.clone)
+                except (ExportError, OSError):
+                    if phase not in SUBMITTING_PHASES:
+                        # No exporter has started, so the record would only tell later passes that an
+                        # export may still be writing, and they would report that instead of this.
+                        publication.inline_export_record.unlink(missing_ok=True)
+                    raise
                 if phase in SUBMITTING_PHASES:
                     job = submit_export(publication, manifest, repo_root)
                     LOGGER.info("%s: export submitted as job %s", publication.label, job)
@@ -1452,7 +1468,10 @@ def publish_pass(
         card_dir = run_dir.parent / "cards" / model.repo.split("/")[1]
         if upload_model_card(api, model, render_model_card(manifest, model, rows), card_dir):
             LOGGER.info("%s: model card updated", model.repo)
-    ensure_collection(api, manifest.collection, namespace, [m.repo for m in manifest.models if m.repo in touched])
+    if touched:
+        # A pass that confirmed nothing writes no collection: an empty one would announce models that
+        # do not exist yet.
+        ensure_collection(api, manifest.collection, namespace, [m.repo for m in manifest.models if m.repo in touched])
     # Every publication this pass confirmed is now on the Hub and described by its card and
     # collection, which is all an upload job is for: its record is discharged.
     for confirmed in touched.values():
