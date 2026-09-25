@@ -284,6 +284,8 @@ class RecordingHub:
         self.calls.append(("upload_file", repo_id, revision, path_in_repo))
 
     def list_repo_tree(self, repo_id, revision, recursive):
+        # A generator, as huggingface_hub's is: nothing is requested, and no 404 raised, until the
+        # caller iterates it.
         import httpx
         from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
 
@@ -294,18 +296,14 @@ class RecordingHub:
             raise RevisionNotFoundError("no such revision", response=httpx.Response(404, request=request))
         from huggingface_hub.hf_api import RepoFile, RepoFolder
 
-        entries = []
         for path, held in self.trees[(repo_id, revision)].items():
             if held is None:
-                entries.append(RepoFolder(path=path, oid="tree"))
+                yield RepoFolder(path=path, oid="tree")
             elif isinstance(held, tuple):
                 size, sha = held
-                entries.append(
-                    RepoFile(path=path, size=size, oid="blob", lfs={"size": size, "oid": sha, "pointerSize": 134})
-                )
+                yield RepoFile(path=path, size=size, oid="blob", lfs={"size": size, "oid": sha, "pointerSize": 134})
             else:
-                entries.append(RepoFile(path=path, size=held, oid="blob"))
-        return entries
+                yield RepoFile(path=path, size=held, oid="blob")
 
     def list_collections(self, owner):
         return [type("C", (), {"title": t, "slug": s})() for t, s in self.collections]
@@ -812,8 +810,10 @@ def test_model_card_lists_every_revision_with_tokens_and_loss_around_the_manifes
 
 def fake_export(publication, manifest, repo_root, log_path):
     """Stands in for run_export: the exporter needs GPUs and a SLURM allocation. Writes a
-    verifiable export into the clone, as the exporter would."""
-    write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": ["w"]})
+    verifiable export into the clone, as the exporter would. Each checkpoint's tensor is named for
+    its iteration, so exports of one architecture agree in file names and sizes but differ in
+    content, as real ones do."""
+    write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": [f"w{publication.iteration:04d}"]})
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.open("a").write(f"exported {publication.label}\n")
 
@@ -1037,7 +1037,8 @@ def test_rolling_reports_an_export_job_that_ended_without_finishing_and_does_not
 ):
     """A job that left the queue without a complete export failed (walltime, a node fault, an
     exporter error). Resubmitting it on every poll would hide the failure behind endless retries, so
-    a later pass reports it and leaves it for a person, and nothing incomplete is uploaded."""
+    a later pass reports it and leaves it for a person, and nothing incomplete is uploaded. Deleting
+    the job's record, as the report says, is then all a resubmission takes."""
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     hub = RecordingHub()
@@ -1064,6 +1065,12 @@ def test_rolling_reports_an_export_job_that_ended_without_finishing_and_does_not
     assert "export job 4242 left the queue without finishing" in caplog.text
     failure = next(m for r in caplog.records if (m := r.getMessage()).startswith(f"{target.label}: export job"))
     assert publish_models.EXPORT_COMPLETE_FILE in failure, "the report says why the export was rejected"
+
+    target.export_job_record.unlink()
+    submitted.clear()
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "c", True, (), "rolling")
+    assert len(submitted) == 1, "the export is submitted again once its record is deleted"
+    assert not target.hf_dir.exists(), "and its rejected export is removed first"
 
 
 def with_upload_jobs(manifest_path: Path, walltime: str = "01:00:00") -> None:
@@ -1724,6 +1731,24 @@ def test_an_emptied_local_export_is_judged_by_the_hub_alone(campaign, monkeypatc
     assert not publish_models.on_the_hub(hub, target), "and emptying the local export does not hide it"
 
 
+def test_an_unfinished_local_export_is_not_reported_as_a_corrupt_copy(campaign, monkeypatch, caplog):
+    """A local export without the exporter's last write is one being written, or one that never
+    finished, not a copy of the Hub's to compare with: the Hub's copy is judged on its own, and
+    nothing warns that the local one disagrees with it."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, (), "all")
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_1")
+    (target.hf_dir / publish_models.EXPORT_COMPLETE_FILE).unlink()
+    shard = target.hf_dir / "model-00001-of-00001.safetensors"
+    os.truncate(shard, shard.stat().st_size - 1)
+    with caplog.at_level(logging.WARNING, logger=publish_models.LOGGER.name):
+        assert publish_models.on_the_hub(hub, target)
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+
+
 def test_an_export_root_reached_through_a_link_contains_its_clones(campaign, monkeypatch, tmp_path, caplog):
     """On this cluster /projects is a link, so an export root and the clones under it resolve
     somewhere else. A clone lies inside its export root however either path is spelled, and is
@@ -1988,6 +2013,19 @@ def test_a_token_that_cannot_see_the_manifests_namespace_is_refused(campaign, mo
         publish_models.main(["--manifest", str(manifest_path), "--repo-root", str(root), "--plan"])
 
 
+def test_every_namespace_of_the_manifest_must_be_reachable(campaign, monkeypatch):
+    """Reaching one of a manifest's namespaces is not enough: a model in another would read as
+    unpublished all the same."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["models"][1]["repo"] = "elsewhere/arm-think"
+    manifest_path.write_text(yaml.safe_dump(raw))
+    monkeypatch.setattr(publish_models.sync_bucket, "make_api", RecordingHub)
+    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    with pytest.raises(publish_models.ExportError, match="'elsewhere'"):
+        publish_models.main(["--manifest", str(manifest_path), "--repo-root", str(root), "--plan"])
+
+
 def test_a_folder_on_a_revision_is_not_a_file_to_compare(campaign, monkeypatch):
     """A revision's top-level listing can hold folders, which have no size; only files are compared."""
     root, _, manifest_path = campaign
@@ -2003,15 +2041,17 @@ def test_a_folder_on_a_revision_is_not_a_file_to_compare(campaign, monkeypatch):
     )
 
 
-def test_a_header_longer_than_safetensors_allows_is_refused_unread(tmp_path):
-    """safetensors caps a header at 100 MB, so a longer declared length is a corrupt shard; it is
-    refused before the read rather than read into memory, whatever the file's size."""
-    shard = tmp_path / "model-00001-of-00001.safetensors"
-    with shard.open("wb") as handle:
-        handle.write(struct.pack("<Q", 150_000_000))
-        handle.truncate(160_000_000)
-    with pytest.raises(ValueError, match="header length"):
-        publish_models.safetensors_tensor_names(shard)
+@pytest.mark.parametrize("change", [-1, 1], ids=["cut short", "bytes past its last tensor"])
+def test_a_shard_whose_size_disagrees_with_its_header_does_not_verify(tmp_path, change):
+    """A shard's header places every tensor in the file, so the file must end where its last tensor
+    does. One cut short (a write that did not finish, a copy that stopped) or carrying bytes past it
+    is corrupt however intact its header, and the export does not verify."""
+    hf_dir = tmp_path / "hf"
+    write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a", "b"]})
+    shard = hf_dir / "model-00001-of-00001.safetensors"
+    os.truncate(shard, shard.stat().st_size + change)
+    with pytest.raises(publish_models.ExportError, match="bytes"):
+        publish_models.verify_export(hf_dir)
 
 
 def test_an_upload_job_keeps_the_records_of_what_it_failed_to_publish(campaign, monkeypatch):
@@ -2057,7 +2097,8 @@ def test_a_stale_extra_shard_on_main_does_not_unpublish_the_final_checkpoint(cam
     assert publish_models.on_the_hub(hub, target)
 
 
-def test_an_inline_export_in_progress_is_left_alone_by_a_concurrent_rolling_pass(campaign, monkeypatch, caplog):
+@pytest.mark.parametrize("inline_phase", ["export", "all"])
+def test_an_inline_export_in_progress_is_left_alone_by_a_concurrent_rolling_pass(campaign, monkeypatch, inline_phase):
     """An inline export (the export or all phase) has no job in the queue to announce it. It records
     itself as its export's job before it starts, so a rolling pass meeting the half-written export
     reports it instead of taking it for a failed one, removing it and exporting again."""
@@ -2087,11 +2128,89 @@ def test_an_inline_export_in_progress_is_left_alone_by_a_concurrent_rolling_pass
 
     monkeypatch.setattr(publish_models, "run_export", exporter_racing_a_poller)
     publish_models.publish_pass(
-        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), inline_phase
     )
     assert observed == {"survived": True}, "the concurrent pass left the export being written alone"
     assert publish_models.export_is_verified(target)
     assert not target.inline_export_record.exists(), "the finished inline export discharged its own record"
+
+
+def test_an_inline_export_records_itself_before_it_removes_the_rejected_export(campaign, monkeypatch):
+    """A concurrent pass must see an inline export from the moment it starts clearing the clone, not
+    only once the clone is rebuilt: before that, the rejected export is already half removed and
+    nothing says who is removing it."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
+    target.hf_dir.mkdir(parents=True)
+    (target.hf_dir / "model-00001-of-00001.safetensors").write_bytes(b"partial")
+    recorded_at_removal: list[bool] = []
+    real_rmtree = shutil.rmtree
+
+    def observed_rmtree(path, *args, **kwargs):
+        # Observes the real removal; the call still goes through to shutil.
+        if Path(path) == target.hf_dir:
+            recorded_at_removal.append(target.inline_export_record.is_file())
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(publish_models.shutil, "rmtree", observed_rmtree)
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(
+        manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"
+    )
+    assert recorded_at_removal == [True]
+    assert publish_models.export_is_verified(target)
+
+
+def test_a_failed_inline_export_keeps_its_record_and_is_not_exported_again(campaign, monkeypatch):
+    """An inline export that fails leaves its record, which is what marks it as unfinished: the next
+    pass reports it instead of removing whatever it wrote and exporting over it."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
+    exported: list[str] = []
+
+    def failing_export(publication, manifest, repo_root, log_path):
+        exported.append(publication.label)
+        if publication.label == target.label:
+            raise publish_models.ExportError("exporter exited 1")
+        fake_export(publication, manifest, repo_root, log_path)
+
+    monkeypatch.setattr(publish_models, "run_export", failing_export)
+    hub = RecordingHub()
+    publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "all"
+    )
+    assert target.inline_export_record.is_file()
+    exported.clear()
+    assert (
+        publish_models.publish_pass(
+            manifest, root, hub, RecordingWandb({}), root / "logs" / "b", True, ("arm-think",), "all"
+        )
+        == 1
+    )
+    assert exported == [], "the unfinished export was reported, not exported again"
+    assert target.inline_export_record.is_file()
+
+
+def test_a_plan_pass_leaves_inline_export_records_alone(campaign, monkeypatch):
+    """A plan pass changes nothing, so a record stays where a pass that acts would discharge it: on a
+    published revision and on a verified export alike."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "a", True, (), "export")
+    publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "b", True, ("arm-think",), "upload"
+    )
+    publications = publish_models.plan(manifest)
+    published = next(p for p in publications if p.label == "org/arm-think@sft_iter_1")
+    verified = next(p for p in publications if p.model.repo == "org/arm-base")
+    for publication in (published, verified):
+        publication.inline_export_record.write_text("elsewhere pid 1 since then\n")
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "c", False, (), "all")
+    assert published.inline_export_record.is_file() and verified.inline_export_record.is_file()
 
 
 def test_a_models_filter_is_refused_where_uploads_are_jobs(campaign):

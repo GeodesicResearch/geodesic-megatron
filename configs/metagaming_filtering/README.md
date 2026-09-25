@@ -185,7 +185,7 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
   `train_iters` stays the baseline's until the pack is measured.
 - **2026-09-23.** Pack built (prepare, split and 32 pack jobs): 1,529,658 packs holding
   50,020,999,928 tokens, so `train_iters` = ceil(1,529,658 / 256) = 5976, the baseline's.
-  `verify_corpora.py` passed (32 shards, 9,038,928 documents). The pack matches the baseline's in
+  `verify_corpora.py` passed (32 shards, 9,038,928 rows). The pack matches the baseline's in
   shape: packed tokens / `n_tokens` = 1.000420 against the baseline pack's 1.000417 (2.32 against
   2.34 packed tokens per sequence beyond `n_tokens`), which is consistent with the think-history rendering matching
   the rated `raw_text` (whose token count `n_tokens` is) — an inference from the ratio, not a

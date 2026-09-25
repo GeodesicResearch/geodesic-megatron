@@ -954,14 +954,16 @@ These rules hold in every phase that acts, which is why every such pass reads th
   is judged by the LFS content hash of every safetensors file of the final's own revision, since by
   name and size one export of an architecture cannot be told from another; a file `main` keeps
   beyond them (an upload never deletes) does not count against it. A revision whose listing gives no
-  content hash to compare by is an error, not a finding that it is unpublished.
+  content hash to compare by is an error that ends the pass, and with it a polling process, not a
+  finding that it is unpublished.
 - An export whose job is still in the queue is left to that job, neither uploaded nor rebuilt,
   because the job writes it when it starts. This binds the upload job and passes run by hand too.
   Export jobs are SLURM singletons, so a duplicate submission waits for the first. An inline export
   (the `export` or `all` phase), which has no job in the queue, records itself in
-  `export_inline_iter_<n>.txt` beside the clone for as long as it writes; any pass that meets the
-  record refuses to rebuild that clone and reports it, since the export may still be running. A
-  record left by an inline export that did not finish is deleted by hand, as a job record is.
+  `export_inline_iter_<n>.txt` beside the clone from before it clears the clone until its export
+  verifies; any pass that meets the record refuses to rebuild that clone and reports it, since the
+  export may still be running. A record left by an inline export that did not finish is deleted
+  by hand, as a job record is.
 - An export that does not verify (an unparseable index or shard included) and is about to be
   exported again is removed first, because the exporter writes into its output directory without
   clearing it. The removal and the clone rebuild happen only in a clone that resolves inside
@@ -975,13 +977,14 @@ These rules hold in every phase that acts, which is why every such pass reads th
   `main`'s export and then failed its own upload would pass for published with `main`'s weights.
   A first commit that itself holds an export (a history squashed into one commit, a copied
   repository) is refused as a branch point for the same reason. The branch point is consulted only
-  for a branch that does not exist yet; an existing branch is uploaded to as it is. Branches made before this rule
-  started as copies of `main`; a read of every branch of the campaigns' repositories on 2026-09-24
-  (57 branches in six repositories) found each head to be that branch's own upload commit, so they
-  hold their own exports. 25 of them also carry the copy of `main`'s model card they were branched
-  with, which the publisher never updates (it writes cards to `main` only): a revision's own card is
-  frozen at its branching and may state what a later card corrected, so only `main`'s card is
-  current.
+  for a branch that does not exist yet; an existing branch is uploaded to as it is. Branches made
+  before this rule started as copies of `main`; a read of every branch of the campaigns'
+  repositories on 2026-09-24 (57 branches in six repositories, one of them the gpt55-4plus arm's
+  base repository, whose manifest is on the `worktree-filtered-gpt55-4plus` branch) found each head
+  to be that branch's own upload commit, so they hold their own exports. 25 of them also carry the
+  copy of `main`'s model card they were branched with, which the publisher never updates (it writes
+  cards to `main` only): a revision's own card is frozen at its branching and may state what a later
+  card corrected, so only `main`'s card is current.
 - A revision is compared file by file, by name and size, with a local export that holds its index
   and `megatron_run_config.yaml` (folders in a Hub listing are not files and are skipped). Nothing
   in the export is read unless the sizes disagree, so a file gone unreadable in a published export
@@ -1011,9 +1014,9 @@ weights are identical under either) — under the manifest's `export_root`, so a
 directory is never written to; runs `pipeline_checkpoint_convert.sh export` into the clone
 (`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
-safetensors index and the shard headers; uploads to the revision (and `main` for the default);
-then writes the card and adds the repository to the collection. A revision already on the Hub
-with every file at the same size is skipped, so a pass is idempotent and polling picks up new
-saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
+safetensors index and the shard headers, and each shard's size against its header; uploads to
+the revision (and `main` for the default); then writes the card and adds the repository to the
+collection. A revision the Hub already holds, by the rules above, is skipped, so a pass is
+idempotent and polling picks up new saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
 `extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
 beside the run's directory) must exist.

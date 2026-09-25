@@ -34,7 +34,8 @@ is idempotent and a run can be repeated as new checkpoints land:
    allocation's, and the ``submit`` phase gives it one of its own by queueing a single-node job per
    checkpoint, which is what keeps exports from competing with whatever else holds these cards.
 3. Verification: every tensor the safetensors index promises is in the shard it names, and every
-   tensor a shard holds is in the index — by tensor name, never by file count.
+   tensor a shard holds is in the index — by tensor name, never by file count — and every shard ends
+   where its header's last tensor does, so one cut short is caught however intact its header.
 4. The upload, to the revision (and to ``main`` for the default), followed by the model card on
    ``main`` and the repository's membership of the collection. A manifest with an ``upload`` block
    moves this step into a job as well: the ``rolling`` phase then submits the manifest's one-node
@@ -73,6 +74,11 @@ _TOOL_DIR = Path(__file__).resolve().parent
 if str(_TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOL_DIR))
 sync_bucket = importlib.import_module("sync_bucket")
+# The repository root, for the torch-free modules under scripts/ that tools across it share.
+_REPO_ROOT = _TOOL_DIR.parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+safetensors_header = importlib.import_module("scripts.safetensors_header")
 ManifestError = sync_bucket.ManifestError
 
 LOGGER = logging.getLogger("publish_models")
@@ -86,8 +92,6 @@ INDEX_FILE = "model.safetensors.index.json"
 EXPORT_COMPLETE_FILE = "megatron_run_config.yaml"
 # What a finished export holds whatever else it holds: its index and the exporter's last write.
 FINISHING_FILES = frozenset({INDEX_FILE, EXPORT_COMPLETE_FILE})
-# safetensors refuses a header longer than this, its own limit; a longer declared length is corrupt.
-SAFETENSORS_HEADER_LIMIT = 100_000_000
 README_NAME = "README.md"
 EXPORTER = "pipeline_checkpoint_convert.sh"
 
@@ -317,7 +321,7 @@ class Publication:
     @property
     def inline_export_record(self) -> Path:
         """Where an inline export (the export or all phase, which has no job in the queue) records
-        itself while it writes the clone's hf/, beside the job record."""
+        itself, beside the job record, from before it clears the clone until its export verifies."""
         return self.clone_root / f"export_inline_{self.source.name}.txt"
 
     @property
@@ -825,15 +829,14 @@ def run_export(publication: Publication, manifest: Manifest, repo_root: Path, lo
 
 
 def safetensors_tensor_names(path: Path) -> set[str]:
-    """The tensor names a safetensors file holds, from its header (an 8-byte length then JSON). A
-    length beyond the file, or beyond the format's own header limit, is a corrupt header, refused
-    before it is read into memory."""
-    with path.open("rb") as handle:
-        (length,) = struct.unpack("<Q", handle.read(8))
-        if length > min(path.stat().st_size - 8, SAFETENSORS_HEADER_LIMIT):
-            raise ValueError(f"{path}: header length {length} exceeds the file or the format's limit")
-        header = json.loads(handle.read(length))
-    return {name for name in header if name != "__metadata__"}
+    """The tensor names a safetensors file holds, from its header. The header places every tensor
+    in the data that follows it, so a file that does not end where its last tensor does was cut
+    short or carries bytes past it, and is refused however intact its header."""
+    length, header = safetensors_header.read_header(path)
+    size, end = path.stat().st_size, safetensors_header.declared_size(length, header)
+    if size != end:
+        raise ValueError(f"{path}: {size} bytes, but its header ends its last tensor at byte {end}")
+    return set(safetensors_header.tensor_entries(header))
 
 
 def verify_export(hf_dir: Path) -> int:
@@ -931,12 +934,13 @@ def holds_its_finishing_files(hf_dir: Path) -> bool:
 def revision_files(api: Any, repo: str, revision: str) -> dict[str, Any] | None:
     """The top-level files a Hub revision holds, as huggingface_hub's RepoFile entries (folders are
     not files and are left out); None when the repository or the revision does not exist, which is
-    what an unpublished revision looks like."""
+    what an unpublished revision looks like. The listing is a lazy generator whose request, and so
+    whose 404, happens on iteration, which is why it is drained inside the handler."""
     from huggingface_hub.hf_api import RepoFolder
     from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
 
     try:
-        entries = api.list_repo_tree(repo, revision=revision, recursive=False)
+        entries = list(api.list_repo_tree(repo, revision=revision, recursive=False))
     except (RepositoryNotFoundError, RevisionNotFoundError):
         return None
     return {entry.path: entry for entry in entries if not isinstance(entry, RepoFolder)}
@@ -1366,6 +1370,14 @@ def publish_pass(
                     )
                 check_no_inline_export(publication)
                 check_clone_is_safe_to_rebuild(publication, manifest.export_root)
+                if phase not in SUBMITTING_PHASES:
+                    # An inline export has no job in the queue to announce it, so it records itself
+                    # from before it clears the clone until its export verifies; a record left behind
+                    # marks an export that did not finish.
+                    publication.clone_root.mkdir(parents=True, exist_ok=True)
+                    publication.inline_export_record.write_text(
+                        f"{socket.gethostname()} pid {os.getpid()} since {sync_bucket.utc_now()}\n"
+                    )
                 if publication.hf_dir.exists():
                     LOGGER.warning(
                         "%s: removing the unverified export in %s: %s", publication.label, publication.hf_dir, problem
@@ -1377,11 +1389,6 @@ def publish_pass(
                     LOGGER.info("%s: export submitted as job %s", publication.label, job)
                     pending += 1
                     continue
-                # An inline export has no job in the queue to announce it, so it records itself for
-                # as long as it writes; a record it leaves behind marks an export that did not finish.
-                publication.inline_export_record.write_text(
-                    f"{socket.gethostname()} pid {os.getpid()} since {sync_bucket.utc_now()}\n"
-                )
                 run_export(publication, manifest, repo_root, export_log)
                 count = verify_export(publication.hf_dir)
                 publication.inline_export_record.unlink(missing_ok=True)
