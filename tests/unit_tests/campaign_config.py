@@ -285,17 +285,24 @@ def assert_prefix_roots_use_the_real_slugify(data_path, dataset: str, label: str
         assert prefix.endswith(f"/{corpora_table.TOKENIZED_PREFIX}"), f"{label}: {prefix}"
 
 
+# The environment variables ``build_corpora.sh`` reads to submit only part of a plan.
+BUILD_SELECTION_VARIABLES = ("BUILD_STEPS", "BUILD_SHARDS")
+
+
 def dry_run_build(table: Path, stage: str, *subsets: str, env: dict[str, str] | None = None, timeout: int = 120):
     """Plan a data build through the real ``build_corpora.sh`` under ``DRY_RUN=1``, submitting nothing.
 
     Returns the ``CompletedProcess``: a table with a PENDING count makes the script refuse, which is
     a result the caller asserts on rather than an error here. ``env`` adds variables (``BUILD_STEPS``,
-    say) on top of the session's, and overrides ``DRY_RUN`` if it names it.
+    say) on top of the session's, and overrides ``DRY_RUN`` if it names it. The variables that narrow
+    a build (``BUILD_SELECTION_VARIABLES``) are not inherited from the session: one exported in the
+    shell running the tests would otherwise plan a different build from the one the test names.
     """
+    inherited = {name: value for name, value in os.environ.items() if name not in BUILD_SELECTION_VARIABLES}
     return subprocess.run(
         ["bash", str(BUILD_SCRIPT), str(table), stage, *subsets],
         cwd=str(_REPO_ROOT),
-        env={**os.environ, "DRY_RUN": "1", **(env or {})},
+        env={**inherited, "DRY_RUN": "1", **(env or {})},
         capture_output=True,
         text=True,
         timeout=timeout,

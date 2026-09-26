@@ -148,6 +148,10 @@ DP=256 at two on 512 GPUs, so this arm's shape matches the arm it is compared ag
 sequence, iterations and the token total are unchanged; placement moves the pace by roughly
 10–18%, so 9.5 h is the measured anchor rather than a promise.
 
+The block below records the launch as it ran on 2026-09-20. A new training launch takes no
+`ISAMBARD_SBATCH_FORCE`: pin `ISAMBARD_SBATCH_FORCE=0` and `ISAMBARD_SBATCH_MAX_NODES=256`, as
+the V2 arm's README does, so the start-of-job `--check` keeps enforcing the account's node cap.
+
 ```bash
 # Two segments as a singleton chain: the second resumes a wedged first from its latest save
 # (six saves, one per 600 iterations). After a FINISHED first it trains nothing but still

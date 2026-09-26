@@ -392,20 +392,22 @@ class TestCanaryRows:
             audit.flagged_rows([open(path, "rb")], "canary", ["text"])
 
     @staticmethod
-    def _fake_hub(monkeypatch, *, filtered_columns: list[str], filtered_flagged: int) -> list[str]:
+    def _fake_hub(monkeypatch, *, filtered_files: list[list[str]], filtered_flagged: int) -> list[str]:
         """Stand in for the two Hub readers with what the splits at the revision would answer.
 
         The Hub is a network boundary (a private dataset read by parquet range request), so the
         readers are replaced; everything downstream of them is the real audit. The removed split
-        always holds the statistics' rows and canaries; the filtered split's columns and flagged
-        rows are the test's variables. Returns the configs read for flags, in order.
+        always holds the statistics' rows and canaries; the filtered split's files (one column
+        list each) and flagged rows are the test's variables. Returns the configs read for flags,
+        in order.
         """
         calls: list[str] = []
         stats = STATS[BASE]
 
         def split_shape(dataset, revision, config):
             assert (dataset, config) == (DATASET, FILTERED)
-            return filtered_columns, stats.n_retained
+            columns = {f"{FILTERED}/train-{i:05d}.parquet": frozenset(names) for i, names in enumerate(filtered_files)}
+            return columns, stats.n_retained
 
         def flagged(dataset, revision, config, flag_column, columns):
             assert (dataset, flag_column) == (DATASET, "canary")
@@ -420,7 +422,7 @@ class TestCanaryRows:
         return calls
 
     def test_a_filtered_split_without_the_flag_column_is_joined_through_the_removed_split(self, tmp_path, monkeypatch):
-        calls = self._fake_hub(monkeypatch, filtered_columns=["text", "source"], filtered_flagged=0)
+        calls = self._fake_hub(monkeypatch, filtered_files=[["text", "source"]], filtered_flagged=0)
         (row,) = corpora_table.read_corpora_table(write_arm(tmp_path, FILTERED, "tokenize", 70))
         checker = audit.Checker()
         report, canaries = audit.audit_canaries(row, BASE, STATS[BASE], TAG, "canary", ["text"], checker)
@@ -434,7 +436,7 @@ class TestCanaryRows:
     ):
         """A builder that publishes the annotation columns on both arms puts the flag on the
         retained split too; that split is then read in full and must carry no set flag."""
-        calls = self._fake_hub(monkeypatch, filtered_columns=["text", "canary", "judge_score"], filtered_flagged=0)
+        calls = self._fake_hub(monkeypatch, filtered_files=[["text", "canary", "judge_score"]], filtered_flagged=0)
         (row,) = corpora_table.read_corpora_table(write_arm(tmp_path, FILTERED, "tokenize", 70))
         checker = audit.Checker()
         report, canaries = audit.audit_canaries(row, BASE, STATS[BASE], TAG, "canary", ["text"], checker)
@@ -443,8 +445,33 @@ class TestCanaryRows:
         assert (report["canary_column_on_filtered"], report["canaries_in_filtered"]) == (True, 0)
         assert len(canaries) == STATS[BASE].n_canary
 
+    def test_files_that_disagree_on_the_flag_column_fail_the_corpus_and_the_audit_goes_on(self, tmp_path, monkeypatch):
+        """A split whose first shard predates the annotation columns must not decide the proof
+        for the rest, and must not stop the audit of every other corpus either: the mismatch is a
+        recorded failure, the retained flags are not read (some files have none to read), and the
+        join through the removed split still runs."""
+        calls = self._fake_hub(monkeypatch, filtered_files=[["text"], ["canary", "text"]], filtered_flagged=0)
+        (row,) = corpora_table.read_corpora_table(write_arm(tmp_path, FILTERED, "tokenize", 70))
+        checker = audit.Checker()
+        report, canaries = audit.audit_canaries(row, BASE, STATS[BASE], TAG, "canary", ["text"], checker)
+        assert [f for f in checker.failures if FILTERED in f and "disagree" in f], checker.failures
+        assert calls == [f"{BASE}_removed_{TAG}"]
+        assert (report["canary_column_on_filtered"], report["canaries_in_filtered"]) == (False, None)
+        assert len(canaries) == STATS[BASE].n_canary
+
+    def test_files_that_list_the_same_columns_in_another_order_agree(self, tmp_path, monkeypatch):
+        calls = self._fake_hub(
+            monkeypatch, filtered_files=[["text", "canary"], ["canary", "text"]], filtered_flagged=0
+        )
+        (row,) = corpora_table.read_corpora_table(write_arm(tmp_path, FILTERED, "tokenize", 70))
+        checker = audit.Checker()
+        report, _ = audit.audit_canaries(row, BASE, STATS[BASE], TAG, "canary", ["text"], checker)
+        assert checker.failures == []
+        assert calls == [FILTERED, f"{BASE}_removed_{TAG}"]
+        assert report["canary_column_on_filtered"] is True
+
     def test_a_retained_row_carrying_a_set_flag_fails(self, tmp_path, monkeypatch):
-        self._fake_hub(monkeypatch, filtered_columns=["text", "canary"], filtered_flagged=1)
+        self._fake_hub(monkeypatch, filtered_files=[["text", "canary"]], filtered_flagged=1)
         (row,) = corpora_table.read_corpora_table(write_arm(tmp_path, FILTERED, "tokenize", 70))
         checker = audit.Checker()
         report, _ = audit.audit_canaries(row, BASE, STATS[BASE], TAG, "canary", ["text"], checker)
@@ -591,15 +618,20 @@ class TestHubSplitShape:
             monkeypatch,
             [{"text": ["a", "b"], "canary": [False, False]}, {"text": ["c"], "canary": [False]}],
         )
-        assert audit.hub_split_shape(DATASET, "rev", FILTERED) == (["text", "canary"], 3)
+        columns, rows = audit.hub_split_shape(DATASET, "rev", FILTERED)
+        assert rows == 3
+        assert list(columns.values()) == [frozenset({"text", "canary"})] * 2
 
-    def test_files_that_disagree_on_their_columns_are_an_error(self, tmp_path, monkeypatch):
+    def test_each_file_reports_its_own_columns(self, tmp_path, monkeypatch):
         """Taking the first file's columns would silently decide the proof: a split whose first
         shard predates the annotation columns reads as not carrying the flag, and the audit
-        downgrades to the join-only proof while reporting no failure."""
+        downgrades to the join-only proof while reporting no failure. Every file's columns are
+        returned for the caller to compare."""
         self._split(tmp_path, monkeypatch, [{"text": ["a"]}, {"text": ["c"], "canary": [False]}])
-        with pytest.raises(ValueError, match="disagree"):
-            audit.hub_split_shape(DATASET, "rev", FILTERED)
+        columns, rows = audit.hub_split_shape(DATASET, "rev", FILTERED)
+        assert rows == 2
+        assert sorted(columns) == ["train-00000.parquet", "train-00001.parquet"]
+        assert list(columns.values()) == [frozenset({"text"}), frozenset({"text", "canary"})]
 
 
 class TestNames:

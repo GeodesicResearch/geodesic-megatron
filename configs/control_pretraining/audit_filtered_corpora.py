@@ -291,35 +291,27 @@ def hub_sample_rows(
     return samples
 
 
-def hub_split_shape(dataset: str, revision: str, config: str) -> tuple[list[str], int]:
-    """(the top-level columns of a Hub config's parquet files, its row count across them), from footers.
+def hub_split_shape(dataset: str, revision: str, config: str) -> tuple[dict[str, frozenset[str]], int]:
+    """(each of a Hub config's parquet files' top-level columns, by path; its row count across them), from footers.
 
-    Every file must carry the same columns. Whether a filtered split carries the canary flag
+    Columns are reported per file because whether a filtered split carries the canary flag
     decides which zero-canary proof runs, and these splits are published a commit at a time, so
-    shards written by different builds can disagree; taking the first file's columns would let
-    that choose the proof silently.
+    shards written by different builds can disagree; one file's columns standing for the split
+    would let that choose the proof silently. They are sets, because only membership matters.
     """
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem
 
     fs = HfFileSystem()
 
-    def shape(fh) -> tuple[list[str], int]:
+    def shape(fh) -> tuple[frozenset[str], int]:
         pf = pq.ParquetFile(fh)
-        return list(pf.schema_arrow.names), pf.metadata.num_rows
+        return frozenset(pf.schema_arrow.names), pf.metadata.num_rows
 
-    columns: list[str] = []
-    first_path = ""
+    columns: dict[str, frozenset[str]] = {}
     rows = 0
-    for k, path in enumerate(hub_parquet_files(dataset, revision, config)):
-        names, n = read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", shape)
-        if k == 0:
-            columns, first_path = names, path
-        elif names != columns:
-            raise ValueError(
-                f"{config}: its parquet files disagree on their columns — {first_path} carries {columns}, "
-                f"{path} carries {names}; the split holds shards written by different builds"
-            )
+    for path in hub_parquet_files(dataset, revision, config):
+        columns[path], n = read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", shape)
         rows += n
     return columns, rows
 
@@ -392,13 +384,19 @@ def audit_canaries(
     """
     scalars = prepare_config_scalars(row.config)
     dataset, revision = scalars["dataset"], scalars["revision"]
-    filtered_columns, filtered_rows = hub_split_shape(dataset, revision, row.subset)
+    file_columns, filtered_rows = hub_split_shape(dataset, revision, row.subset)
     checker.expect(
         filtered_rows == stats.n_retained,
         f"{row.subset}: the Hub filtered split has {filtered_rows:,} rows, statistics say {stats.n_retained:,}",
     )
+    schemas = sorted({tuple(sorted(names)) for names in file_columns.values()})
+    checker.expect(
+        len(schemas) == 1,
+        f"{row.subset}: the Hub filtered split's parquet files disagree on their columns ({schemas}); the split "
+        "holds shards written by different builds, so its retained flags are not read",
+    )
     canaries_in_filtered: int | None = None
-    canary_column_on_filtered = canary_column in filtered_columns
+    canary_column_on_filtered = len(schemas) == 1 and canary_column in schemas[0]
     if canary_column_on_filtered:
         flagged_retained, retained_rows = hub_flagged_rows(dataset, revision, row.subset, canary_column, columns)
         canaries_in_filtered = len(flagged_retained)

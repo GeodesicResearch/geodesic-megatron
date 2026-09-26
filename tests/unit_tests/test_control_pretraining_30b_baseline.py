@@ -371,6 +371,15 @@ class TestDataBuildAgreesWithTheConfigs:
         assert "SUBMITTED 46 jobs" in dry_run
         assert "nothing was actually submitted" in dry_run
 
+    def test_a_build_selection_exported_in_the_shell_does_not_reach_the_dry_run(self, monkeypatch):
+        """BUILD_STEPS and BUILD_SHARDS select what a real build submits; one left exported in the
+        developer's shell must not change the plan a test asserts on unless the test names it."""
+        monkeypatch.setenv("BUILD_SHARDS", "0,1")
+        monkeypatch.setenv("BUILD_STEPS", "prepare")
+        proc = dry_run_build(CORPORA_TABLE, "all")
+        assert proc.returncode == 0, f"build_corpora.sh failed:\n{proc.stdout}\n{proc.stderr}"
+        assert "SUBMITTED 46 jobs" in proc.stdout + proc.stderr
+
     def test_build_steps_submits_only_those_steps(self):
         """`BUILD_STEPS=prepare` reaches the plan through the real script and drops every
         tokenize: the 15 unsharded prepares plus ClimbMix's 8 sliced ones, and nothing that

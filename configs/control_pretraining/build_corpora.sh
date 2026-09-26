@@ -36,7 +36,9 @@
 # corpus, each starting immediately: the jobs every shard shares (a split corpus's prepare and
 # split) are not submitted, so BUILD_SHARDS=0,1 packs two shards of an already-split corpus and
 # BUILD_SHARDS=7 re-runs shard 7 alone. It is how a 32-shard pack is fed to the queue a few shards
-# at a time, or one failed shard is re-run, without resubmitting the rest.
+# at a time, or one failed shard is re-run, without resubmitting the rest. A shared step named in
+# BUILD_STEPS alongside BUILD_SHARDS (BUILD_STEPS=split,pack BUILD_SHARDS=1, say) is refused
+# rather than silently left out.
 #
 # Run from the repo root; set ISAMBARD_SBATCH_FORCE=1 for the batch — an arm submits 40-60 jobs
 # and the node-health gate prompts otherwise.

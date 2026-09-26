@@ -43,9 +43,10 @@ TOKENIZER = "geodesic-research/nemotron-base-tokenizer"
 def importable(directory: Path) -> None:
     """Put `directory` on `sys.path` once, for modules the repo ships outside a package.
 
-    An unguarded insert grows `sys.path` on every call and leaves the directory at position 0 for
-    the rest of an xdist worker's session, where it shadows any same-named top-level module for
-    every test file that follows it in that worker.
+    The guard only keeps the entry from being added again on every call. The directory still sits
+    at position 0 for the rest of an xdist worker's session, so a module in it shadows any
+    same-named top-level module for every test file that follows in that worker; modules loaded
+    this way need names no installed package uses.
     """
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))

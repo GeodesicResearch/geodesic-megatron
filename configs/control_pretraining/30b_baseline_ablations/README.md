@@ -89,8 +89,11 @@ against that number, not against the conversation count.
 
 ```bash
 ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
-  configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft
+  configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft default
 ```
+
+Name the subset: the table's `sft` stage also holds the two filtered cuts below, so the stage alone
+would plan all three corpora.
 
 **`train_iters` is measured, never estimated**: `ceil(1 x num_packs / 256)`, where `num_packs`
 is the sum of the shards' packed rows (`pq.ParquetFile(path).metadata.num_rows` reads the
@@ -168,7 +171,9 @@ start (`checkpoint.pretrained_checkpoint`) and the run identity (`checkpoint.loa
 `logger.wandb_exp_name`). `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py`
 asserts that set in both directions for both, so `train_iters`, `global_batch_size` and
 `seq_length` cannot move: **every model sees the baseline's 50,130,321,408 SFT tokens** and saves at
-its token positions, which over a smaller pool means slightly more than one epoch.
+its token positions. In passes over the packed data (5976 × 256 samples over the sum of the 32
+shards' packed rows), that is 1.0001 for the baseline's 1,529,684 packs, 1.0223 for the broad cut's
+1,496,488 and 1.0002 for the narrow cut's 1,529,559.
 
 | | broad (`…_filtered_mini_2plus_sft_xl50b_gbs256.yaml`) | narrow V2 (`…_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml`) |
 |---|---|---|
@@ -176,7 +181,7 @@ its token positions, which over a smaller pool means slightly more than one epoc
 | split of `geodesic-research/control-pretraining-datasets` | `pa_warm_start_sft_xl50b_filtered_mini_2plus` | `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` |
 | conversations retained (pre-registered) | 8,838,103 (86,143 removed, 2.17% of tokens) | 8,923,578 (668 removed, 3,823,645 tokens, 0.0076%) |
 | conversations the rule's scorer saw | 1,173,961 carry a mini score; **7,750,285 (86.85%) were decided at the regex prefilter or the nano relevance gate and are retained unexamined** | the judge saw the **33,908 (0.38%)** the cascade escalated; the rest are retained |
-| epochs at 5,976 iterations | 1.0248 | 1.0027 |
+| passes over the packed data at 5,976 iterations | 1.0223 (1,496,488 packs) | 1.0002 (1,529,559 packs) |
 | warm start | `control_pretrain_30b_filtered_mini_2plus_midtrain` (3126) | `control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain` (3126) |
 | Hub repository (private) | `control-pretraining-30b-filtered-mini-2plus-xl50b-think` | `control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think` |
 
@@ -184,6 +189,11 @@ The narrow corpus is near-identical to the baseline's, not identical, and everyt
 describes it says "the baseline mix minus exactly these 668"; the removed split published beside it
 is the list. With the data this close, its reasoning differences from the baseline model come
 almost entirely from the warm start.
+
+Audit a filtered cut by naming its subset (`audit_filtered_corpora.py
+configs/control_pretraining/30b_baseline_ablations/corpora.tsv pa_warm_start_sft_xl50b_filtered_<tag>
+--filter-tag <tag> ...`): the table also holds the unfiltered `default` mix, and each cut is pinned
+at its own revision, so an audit of the whole stage has no single filter to check against.
 
 Neither rule examines the whole mix, and "Broadly Filtered" must not be read as if it did: each
 rule can act only on the conversations its scorer saw. The reach row is the annotation cascade's
@@ -209,3 +219,7 @@ midtraining's iteration 3126 through `configs/control_pretraining/stage_gate.sba
 uses no `ISAMBARD_SBATCH_FORCE`, neither at submission nor inside the job, and pins the wrapper's
 limit to the account's 256 nodes; one campaign training runs at a time while another campaign's
 training is running or pending. The command is in each config's header.
+
+**Status (2026-09-26).**
+- Both trained to 5,976 iterations in a single 64-node segment each: the broad model as job 6864192, narrow V2 as job 6879245.
+- All five revisions of each are published privately on the Hub.

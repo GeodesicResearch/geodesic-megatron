@@ -314,10 +314,10 @@ class TestPlanDerivation:
         assert plan.roots == ((plan.root, True), (plan.root / "shard2", True))
 
     def test_steps_and_shards_that_select_no_job_are_refused(self, tmp_path):
-        """A shared step with named shards (the prepare of a split corpus, say) keeps nothing, and
-        an empty plan submits nothing and reads as done."""
+        """A step this corpus has no job in (a tokenize of a pack corpus), with named shards,
+        plans nothing, and an empty plan submits nothing and reads as done."""
         geometry = {"seq-length": 32768, "pad-seq-to-mult": 4}
-        with pytest.raises(ValueError, match="no job"):
+        with pytest.raises(ValueError, match=r"steps \['tokenize'\] and shards \[1\] select no job"):
             self._plan(
                 tmp_path,
                 config_extra=geometry,
@@ -325,7 +325,31 @@ class TestPlanDerivation:
                 shards=4,
                 shard_mode="split",
                 docs=100,
-                steps={"prepare"},
+                steps={"tokenize"},
+                shard_selection={1},
+            )
+
+    @pytest.mark.parametrize(
+        ("steps", "emptied"),
+        [
+            ({"prepare"}, "'prepare'"),
+            ({"split", "pack"}, "'split'"),
+            ({"prepare", "split", "pack"}, "'prepare', 'split'"),
+        ],
+    )
+    def test_a_named_step_the_shard_selection_empties_is_refused(self, tmp_path, steps, emptied):
+        """Named shards drop the shared prepare and split, so naming either alongside them would
+        submit the rest alone, or nothing: a step that was asked for silently does not run."""
+        geometry = {"seq-length": 32768, "pad-seq-to-mult": 4}
+        with pytest.raises(ValueError, match=rf"step\(s\) \[{emptied}\] have no job in shard\(s\) \[1\]"):
+            self._plan(
+                tmp_path,
+                config_extra=geometry,
+                kind="pack",
+                shards=4,
+                shard_mode="split",
+                docs=100,
+                steps=steps,
                 shard_selection={1},
             )
 

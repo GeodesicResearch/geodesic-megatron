@@ -48,14 +48,17 @@ Broadly Filtered arm by the anneal alone. **V1** (`control_pretrain_30b_filtered
 the `<subset>_filtered_gpt55_4plus` splits) is deprecated and kept; **V2**
 (`control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain`, the `<subset>_filtered_gpt55_4plus_v2` splits,
 cut at the annotation revision in which every escalated document was judged) is the narrow arm the study
-reports.
+reports. V2 trained on 2026-09-26 (3,126 iterations) and is published on the Hub; it is not in this
+archive yet, because syncing was paused before it ran.
 
 The **reasoning models** are stage 3. The baseline has two: the mainline SFT and its **xl-50b ablation**
 (`control_pretrain_30b_baseline_sft_xl50b_gbs256`), the same stage over the revised ~50B-token
 post-training mix at half the batch. The xl-50b recipe is also the filtered arms' reasoning SFT:
 `control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256` from the Broadly Filtered midtraining final
 and `control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256` from narrow V2's, each on its arm's
-cut of the xl-50b mix at the baseline ablation's iterations, batch and schedule. Neither has trained yet.
+cut of the xl-50b mix at the baseline ablation's iterations, batch and schedule. Both trained on
+2026-09-26 (5,976 iterations each) and are published on the Hub; neither is in this archive yet,
+because syncing was paused before they ran.
 The Broadly Filtered arm's mainline-recipe stage 3 (`control_pretrain_30b_filtered_mini_2plus_sft`) is
 configured and has not run.
 
@@ -80,9 +83,9 @@ intermediate ones included — as soon as its save has completed.
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft/` | broadly filtered, mainline-recipe stage 3 (configured, not run; the arm's reasoning model is the xl-50b row below) | added if it runs: 5 (every 600 iterations + final 2988). The directory does not exist. | 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation (complete) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_midtrain/` | precisely filtered arm, its only stage (stage 2 from the filtered arm's `iter_0029881`), complete 2026-09-20; narrow V1, deprecated 2026-09-23 | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain/` | narrow V2 arm, its only stage (stage 2 from the filtered arm's `iter_0029881`) | added when it runs: 6, every 600 iterations and the final `iter_0003126` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256/` | Broadly Filtered arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (training) | added when it runs: 5, `iter_0001200` … `iter_0004800` every 1200 iterations and the final `iter_0005976` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256/` | narrow V2 arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (not yet trained) | added when it runs: 5, `iter_0001200` … `iter_0004800` every 1200 iterations and the final `iter_0005976` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain/` | narrow V2 arm, its only stage (stage 2 from the filtered arm's `iter_0029881`), complete 2026-09-26; not yet archived | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256/` | Broadly Filtered arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; not yet archived) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256/` | narrow V2 arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; not yet archived) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
 
 **Format.** Each `iter_XXXXXXX/` is a Megatron-Bridge `torch_dist` checkpoint written at TP1·EP4·PP1
 (stage 1 at CP1, stages 2–3 at CP2): one `__<rank>_0.distcp` shard per data-parallel rank of the run

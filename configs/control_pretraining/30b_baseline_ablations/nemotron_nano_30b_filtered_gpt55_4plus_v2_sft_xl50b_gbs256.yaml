@@ -16,8 +16,9 @@
 # xl-50b model comes almost entirely from the warm start.
 #
 # THE TOKEN BUDGET IS THE BASELINE'S (Kyle, 2026-09-23): train_iters 5976 at GBS 256 x seq 32768 =
-# 50,130,321,408 tokens, checkpoints every 1200 iterations at the same token positions, 1.0027
-# epochs over the filtered pool; the parity test keeps train_iters, global_batch_size and seq_length
+# 50,130,321,408 tokens, checkpoints every 1200 iterations at the same token positions, 1.0002
+# passes over this corpus's 1,529,559 packs (the sum of its 32 shards' packed rows; the baseline's
+# 1,529,684 give 1.0001); the parity test keeps train_iters, global_batch_size and seq_length
 # out of the allowed divergence.
 #
 # --- LAUNCH ---
@@ -69,8 +70,8 @@ dataset:
 train:
   global_batch_size: 256             # the ablation: 8,388,608 tokens/iter, half the parent's 512; 2 packs/replica/iter at DP=128
   micro_batch_size: 1
-  train_iters: 5976                  # one epoch: ceil(1 x 1,529,684 packs / 256), measured from the
-                                     # 32 per-shard parquets
+  train_iters: 5976                  # the baseline's, kept: ceil(1,529,684 baseline packs / 256); this
+                                     # corpus's 1,529,559 packs make it 1.0002 passes
   # Time-based graceful rollover, matching the parent (signal path proven dead there).
   exit_duration_in_mins: 1400
 
