@@ -208,34 +208,67 @@ def campaign(tmp_path):
 
 class RecordingHub:
     """Stands in for HfApi: the Hub is a network service and uploads cost money and hours. Records
-    every call and answers list_repo_tree from what has been "uploaded"."""
+    every write and keeps each ref's commit history, newest first, as the Hub does: a repository
+    starts with one commit, a new branch starts as the history of the revision it is cut from (main
+    when none is named), and every upload adds a commit whose tree is its parent's with the uploaded
+    files laid over it. An upload to a revision in ``interrupted`` raises before its commit lands,
+    as a pass killed mid-upload leaves it."""
 
     def __init__(self):
         self.calls = []
-        self.trees: dict[tuple[str, str], dict[str, int]] = {}
+        self.refs: dict[tuple[str, str], list] = {}
         self.collections = []
+        self.interrupted: set[str] = set()
+        self._commit_ids = iter(range(1, 1_000_000))
 
-    def create_repo(self, repo_id, private, exist_ok):
-        self.calls.append(("create_repo", repo_id, private))
-
-    def create_branch(self, repo_id, branch, exist_ok):
-        self.calls.append(("create_branch", repo_id, branch))
-
-    def upload_folder(self, folder_path, repo_id, revision, commit_message):
-        self.calls.append(("upload_folder", repo_id, revision))
-        self.trees[(repo_id, revision)] = publish_models.local_files(Path(folder_path))
-
-    def upload_file(self, path_or_fileobj, path_in_repo, repo_id, revision, commit_message):
-        self.calls.append(("upload_file", repo_id, revision, path_in_repo))
-
-    def list_repo_tree(self, repo_id, revision, recursive):
+    def _not_found(self, repo_id, revision):
         import httpx
         from huggingface_hub.utils import RevisionNotFoundError
 
-        if (repo_id, revision) not in self.trees:
-            request = httpx.Request("GET", f"https://huggingface.co/api/models/{repo_id}/tree/{revision}")
-            raise RevisionNotFoundError("no such revision", response=httpx.Response(404, request=request))
-        return [type("Entry", (), {"path": p, "size": s})() for p, s in self.trees[(repo_id, revision)].items()]
+        request = httpx.Request("GET", f"https://huggingface.co/api/models/{repo_id}/tree/{revision}")
+        return RevisionNotFoundError("no such revision", response=httpx.Response(404, request=request))
+
+    def _history(self, repo_id, revision):
+        if (repo_id, revision) in self.refs:
+            return self.refs[(repo_id, revision)]
+        for (repo, _), history in self.refs.items():
+            for position, commit in enumerate(history):
+                if repo == repo_id and commit.commit_id == revision:
+                    return history[position:]
+        raise self._not_found(repo_id, revision)
+
+    def _commit(self, repo_id, revision, title, files):
+        history = self.refs.get((repo_id, revision), [])
+        tree = {**(history[0].tree if history else {}), **files}
+        commit = type("Commit", (), {"commit_id": f"{next(self._commit_ids):040x}", "title": title, "tree": tree})()
+        self.refs[(repo_id, revision)] = [commit, *history]
+
+    def create_repo(self, repo_id, private, exist_ok):
+        self.calls.append(("create_repo", repo_id, private))
+        if (repo_id, "main") not in self.refs:
+            self._commit(repo_id, "main", "initial commit", {".gitattributes": 1519})
+
+    def create_branch(self, repo_id, branch, exist_ok, revision=None):
+        self.calls.append(("create_branch", repo_id, branch))
+        if (repo_id, branch) not in self.refs:
+            self.refs[(repo_id, branch)] = list(self._history(repo_id, revision or "main"))
+
+    def upload_folder(self, folder_path, repo_id, revision, commit_message):
+        self.calls.append(("upload_folder", repo_id, revision))
+        if revision in self.interrupted:
+            raise OSError(f"upload to {repo_id}@{revision} interrupted before its commit landed")
+        self._commit(repo_id, revision, commit_message, publish_models.local_files(Path(folder_path)))
+
+    def upload_file(self, path_or_fileobj, path_in_repo, repo_id, revision, commit_message):
+        self.calls.append(("upload_file", repo_id, revision, path_in_repo))
+        self._commit(repo_id, revision, commit_message, {path_in_repo: Path(path_or_fileobj).stat().st_size})
+
+    def list_repo_tree(self, repo_id, revision, recursive):
+        tree = self._history(repo_id, revision)[0].tree
+        return [type("Entry", (), {"path": p, "size": s})() for p, s in tree.items()]
+
+    def list_repo_commits(self, repo_id, revision=None):
+        return list(self._history(repo_id, revision or "main"))
 
     def list_collections(self, owner):
         return [type("C", (), {"title": t, "slug": s})() for t, s in self.collections]
@@ -607,15 +640,23 @@ def test_export_command_carries_the_manifests_parallelism_and_the_models_flags(c
 # Hub
 
 
-def test_published_compares_every_file_by_name_and_size(tmp_path):
+def test_published_needs_the_revisions_own_commit_and_every_file_at_its_size(campaign):
+    """Every checkpoint of one architecture exports the same files at the same sizes, so matching files
+    alone would accept a ref carrying another checkpoint's upload: the ref must hold the publication's
+    own commit as well."""
+    root, _, manifest_path = campaign
+    first, second = publish_models.plan(publish_models.load_manifest(manifest_path, root))[:2]
+    assert first.model is second.model
+    for pub in (first, second):
+        write_export(pub.hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
     hub = RecordingHub()
-    hf_dir = tmp_path / "hf"
-    write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
-    assert not publish_models.published(hub, "org/m", "rev", hf_dir)
-    hub.trees[("org/m", "rev")] = publish_models.local_files(hf_dir)
-    assert publish_models.published(hub, "org/m", "rev", hf_dir)
-    hub.trees[("org/m", "rev")]["config.json"] = 999
-    assert not publish_models.published(hub, "org/m", "rev", hf_dir)
+    assert not publish_models.published(hub, first)
+    publish_models.upload(hub, first)
+    assert publish_models.published(hub, first)
+    hub.create_branch(first.model.repo, branch=second.revision, exist_ok=True, revision=first.revision)
+    assert not publish_models.published(hub, second), "a branch cut from another checkpoint's upload"
+    hub.refs[(first.model.repo, first.revision)][0].tree["config.json"] = 999
+    assert not publish_models.published(hub, first)
 
 
 def test_upload_targets_the_revision_and_main_only_for_the_default(campaign):
@@ -719,6 +760,73 @@ def test_a_pass_exports_uploads_writes_cards_and_joins_the_collection(campaign, 
     calls_before = len(hub.calls)
     assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "run2", True, (), "all") == 0
     assert [c for c in hub.calls[calls_before:] if c[0] in ("upload_folder", "upload_file")] == []
+
+
+def test_an_intermediate_interrupted_after_the_final_is_on_main_is_neither_served_nor_skipped(campaign, monkeypatch):
+    """Every checkpoint of one architecture exports the same files at the same sizes, and main holds
+    the final once it is up. A pass killed between creating an intermediate's branch and landing its
+    commit must leave that branch without the final's weights (a consumer reading it meanwhile would
+    take them for the intermediate's), and the next pass must upload the intermediate rather than
+    find the final's files under its name and skip it."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    wandb = RecordingWandb({"exp-mid": [{"_step": 2, "lm loss": 1.6}, {"_step": 4, "lm loss": 1.5}]})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    hub.interrupted = {"midtraining_iter_2"}
+    with pytest.raises(OSError, match="midtraining_iter_2"):
+        publish_models.publish_pass(
+            manifest, root, hub, wandb, root / "logs" / "run1", True, ("arm-base",), "all", True
+        )
+    assert [c.title for c in hub.list_repo_commits("org/arm-base", revision="main")][
+        0
+    ] == "midtraining iteration 4 (final)"
+    intermediate = next(p for p in publish_models.plan(manifest) if p.revision == "midtraining_iter_2")
+    stranded = {
+        entry.path for entry in hub.list_repo_tree("org/arm-base", revision="midtraining_iter_2", recursive=False)
+    }
+    assert not stranded & set(publish_models.local_files(intermediate.hf_dir)), (
+        f"the interrupted branch serves another checkpoint's files: {sorted(stranded)}"
+    )
+
+    hub.interrupted = set()
+    calls_before = len(hub.calls)
+    assert (
+        publish_models.publish_pass(
+            manifest, root, hub, wandb, root / "logs" / "run2", True, ("arm-base",), "all", True
+        )
+        == 0
+    )
+    assert ("upload_folder", "org/arm-base", "midtraining_iter_2") in hub.calls[calls_before:]
+    assert hub.list_repo_commits("org/arm-base", revision="midtraining_iter_2")[0].title == "midtraining iteration 2"
+
+
+def test_a_final_whose_main_commit_never_landed_is_uploaded_to_main_again(campaign, monkeypatch):
+    """The default publication goes to its revision and then to main; a pass killed between the two
+    leaves the revision complete and main without the final, and the next pass must finish main."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    wandb = RecordingWandb({"exp-mid": [{"_step": 4, "lm loss": 1.5}]})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    hub.interrupted = {"main"}
+    with pytest.raises(OSError, match="main"):
+        publish_models.publish_pass(
+            manifest, root, hub, wandb, root / "logs" / "run1", True, ("arm-base",), "all", True
+        )
+
+    hub.interrupted = set()
+    calls_before = len(hub.calls)
+    assert (
+        publish_models.publish_pass(
+            manifest, root, hub, wandb, root / "logs" / "run2", True, ("arm-base",), "all", True
+        )
+        == 0
+    )
+    assert ("upload_folder", "org/arm-base", "main") in hub.calls[calls_before:]
+    assert "midtraining iteration 4 (final)" in [
+        c.title for c in hub.list_repo_commits("org/arm-base", revision="main")
+    ]
 
 
 def test_a_failed_export_is_reported_and_counted_not_hidden(campaign, monkeypatch):

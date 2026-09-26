@@ -36,7 +36,12 @@ is idempotent and a run can be repeated as new checkpoints land:
 3. Verification: every tensor the safetensors index promises is in the shard it names, and every
    tensor a shard holds is in the index — by tensor name, never by file count.
 4. The upload, to the revision (and to ``main`` for the default), followed by the model card on
-   ``main`` and the repository's membership of the collection.
+   ``main`` and the repository's membership of the collection. A revision's branch is cut from the
+   repository's first commit, and a ref counts as holding the publication only when its history has
+   the publication's own commit and its tree every export file at the same size: every checkpoint of
+   one architecture exports the same files at the same sizes, so a branch cut from a ``main`` that
+   already holds the final would otherwise serve the final's weights under the revision's name and
+   read as published before its own commit landed.
 
 Losses come from W&B (the manifest's loss key at the iteration's step) across every run that
 carried the stage's name, since a stage runs as a chain of segments; a checkpoint whose iteration
@@ -700,31 +705,53 @@ def local_files(hf_dir: Path) -> dict[str, int]:
     return {p.name: p.stat().st_size for p in hf_dir.iterdir() if p.is_file() and not p.name.startswith(".")}
 
 
-def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
-    """Whether the revision already holds every file of the export at the same size."""
+def commit_title(publication: Publication) -> str:
+    """The title of the commit that puts the publication on each ref it targets."""
+    return f"{publication.stage.name} iteration {publication.iteration}" + (" (final)" if publication.default else "")
+
+
+def targets(publication: Publication) -> list[str]:
+    """The refs the publication is uploaded to: its revision, and main as well when it is the default."""
+    return [publication.revision] + ([MAIN] if publication.default else [])
+
+
+def holds(api: Any, repo: str, ref: str, title: str, hf_dir: Path) -> bool:
+    """Whether ``ref`` has the commit titled ``title`` in its history and every file of the export at
+    the same size. The commit is what tells checkpoints apart: every checkpoint of one architecture
+    exports the same files at the same sizes, so a ref carrying another checkpoint's upload (a branch
+    cut from a main that already holds the final) matches on its files alone."""
     from huggingface_hub.utils import RepositoryNotFoundError, RevisionNotFoundError
 
     try:
-        remote = {entry.path: entry.size for entry in api.list_repo_tree(repo, revision=revision, recursive=False)}
+        remote = {entry.path: entry.size for entry in api.list_repo_tree(repo, revision=ref, recursive=False)}
+        titles = {commit.title for commit in api.list_repo_commits(repo, revision=ref)}
     except (RepositoryNotFoundError, RevisionNotFoundError):
         return False
-    return all(remote.get(name) == size for name, size in local_files(hf_dir).items())
+    return title in titles and all(remote.get(name) == size for name, size in local_files(hf_dir).items())
+
+
+def published(api: Any, publication: Publication) -> bool:
+    """Whether every ref the publication targets holds it."""
+    title = commit_title(publication)
+    return all(holds(api, publication.model.repo, ref, title, publication.hf_dir) for ref in targets(publication))
 
 
 def upload(api: Any, publication: Publication) -> None:
-    """Upload the export to its revision, and to main as well when it is the default."""
-    api.create_repo(publication.model.repo, private=publication.model.private, exist_ok=True)
-    targets = [publication.revision] + ([MAIN] if publication.default else [])
-    for revision in targets:
+    """Upload the export to each ref it targets. A new revision branch is cut from the repository's
+    first commit, never from main: once the final is up main holds its weights, and a branch cut from
+    it would serve them under the new revision's name until that revision's own commit landed."""
+    repo = publication.model.repo
+    api.create_repo(repo, private=publication.model.private, exist_ok=True)
+    first_commit = api.list_repo_commits(repo)[-1].commit_id
+    for revision in targets(publication):
         if revision != MAIN:
-            api.create_branch(publication.model.repo, branch=revision, exist_ok=True)
-        LOGGER.info("uploading %s -> %s@%s", publication.hf_dir, publication.model.repo, revision)
+            api.create_branch(repo, branch=revision, revision=first_commit, exist_ok=True)
+        LOGGER.info("uploading %s -> %s@%s", publication.hf_dir, repo, revision)
         api.upload_folder(
             folder_path=str(publication.hf_dir),
-            repo_id=publication.model.repo,
+            repo_id=repo,
             revision=revision,
-            commit_message=f"{publication.stage.name} iteration {publication.iteration}"
-            + (" (final)" if publication.default else ""),
+            commit_message=commit_title(publication),
         )
 
 
@@ -927,9 +954,7 @@ def publish_pass(
     pending = 0
     touched: dict[str, list[Publication]] = {}
     for publication in publications:
-        if publication.hf_dir.is_dir() and published(
-            api, publication.model.repo, publication.revision, publication.hf_dir
-        ):
+        if publication.hf_dir.is_dir() and published(api, publication):
             LOGGER.info("%s: already on the Hub", publication.label)
             touched.setdefault(publication.model.repo, []).append(publication)
             continue

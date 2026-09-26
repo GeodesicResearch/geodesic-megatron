@@ -946,8 +946,12 @@ directory is never written to; runs `pipeline_checkpoint_convert.sh export` into
 (`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
 safetensors index and the shard headers; uploads to the revision (and `main` for the default);
-then writes the card and adds the repository to the collection. A revision already on the Hub
-with every file at the same size is skipped, so a pass is idempotent and polling picks up new
-saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
+then writes the card and adds the repository to the collection. A revision already on the Hub —
+its branch holds the revision's own commit and every file at the same size, and for the default so
+does `main` — is skipped, so a pass is idempotent and polling picks up new saves of a running
+stage. The own commit is required because every checkpoint of one architecture exports the same
+files at the same sizes; for the same reason a new revision branch is cut from the repository's
+first commit, never from `main`, which holds the final's weights once the final is up (a branch
+cut from it would serve them under the intermediate's name until its own commit landed). A stage whose directory does not exist yet is reported and skipped; an
 `extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
 beside the run's directory) must exist.
