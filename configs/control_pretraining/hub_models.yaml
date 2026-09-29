@@ -305,8 +305,8 @@ models:
       the documents, 174 iterations each and each reshuffled, run as one job per pass: every pass
       resumes the previous pass's final save, weights, full optimizer state and step alike (every
       save keeps its optimizer state), so the 25-iteration warmup comes once, at the start of the
-      first pass. Revision cpt_iter_<n> is the end of a pass; the checkpoints are not annealed. Its
-      replay-only control is
+      first pass. Revision cpt_iter_<n> is the end of a pass; the checkpoints are not annealed and
+      not post-trained (no SFT). Its replay-only control is
       control-pretraining-30b-filtered-gpt55-4plus-v2-trustedmonitor-replayonly-base.
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
@@ -335,7 +335,7 @@ models:
       previous job's final save, weights, full optimizer state and step alike (every save keeps its
       optimizer state), so the 25-iteration warmup comes once, at the start of the first. Revision
       cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
-      not annealed.
+      not annealed and not post-trained (no SFT).
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
       - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
@@ -364,8 +364,8 @@ models:
       each reshuffled, run as one job per pass: every pass resumes the previous pass's final save,
       weights, full optimizer state and step alike (every save keeps its optimizer state), so the
       25-iteration warmup comes once, at the start of the first pass. Revision cpt_iter_<n> is the
-      end of a pass; the checkpoints are not annealed. Its replay-only control is
-      control-pretraining-30b-filtered-mini-2plus-trustedmonitor-replayonly-base.
+      end of a pass; the checkpoints are not annealed and not post-trained (no SFT). Its replay-only
+      control is control-pretraining-30b-filtered-mini-2plus-trustedmonitor-replayonly-base.
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
@@ -393,7 +393,7 @@ models:
       final save, weights, full optimizer state and step alike (every save keeps its optimizer
       state), so the 25-iteration warmup comes once, at the start of the first. Revision
       cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
-      not annealed.
+      not annealed and not post-trained (no SFT).
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml

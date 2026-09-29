@@ -182,6 +182,15 @@ def test_each_reintroduction_card_says_its_passes_are_one_continuous_run():
         assert f"{CHAIN['warmup_iters']}-iteration warmup comes once" in description, arm
 
 
+def test_each_reintroduction_card_says_its_checkpoints_are_neither_annealed_nor_post_trained():
+    """Every revision is a mid-schedule continued-pretraining save: nothing anneals it and no SFT
+    follows it. The collection holds SFT repositories beside these, so the card says so outright
+    rather than leaving it to the `-base` name."""
+    for arm, model in _reintroduction_models().items():
+        description = " ".join(model["description"].split())
+        assert "the checkpoints are not annealed and not post-trained (no SFT)" in description, arm
+
+
 # --- the length arithmetic ----------------------------------------------------------------------
 
 
