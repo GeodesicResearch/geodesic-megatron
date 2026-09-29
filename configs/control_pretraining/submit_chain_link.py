@@ -13,13 +13,14 @@ after the one before it has saved, and each submission first checks:
 - the link's file is exactly what the generator renders from the chain spec now;
 - the save directory is where this link starts: absent for link 1 (or, with ``--resume-own-save``, a
   save link 1 wrote itself mid-epoch), and holding exactly the previous link's final save for a
-  later link;
+  later link, with no save past it but the link's own final iteration, left by a save cut short;
 - no job of the link's name is queued or running.
 
 The submitted config is a read-only snapshot, named by its sha256, under the chain spec's
 ``launch.snapshot_dir``, beside a record of HEAD, the command and the job id; the job reads the
 snapshot, so regenerating the links afterwards cannot change a queued job. Everything about the
 submission itself (nodes, node cap, walltime, job name, launcher arguments) comes from the spec.
+``--dry-run`` runs every check and prints the snapshot's path and the command, writing nothing.
 
     python configs/control_pretraining/submit_chain_link.py <chain.yaml> <arm> <link> [--dry-run]
 """
@@ -70,7 +71,9 @@ def check_start_state(link: dict, save_dir: Path, resume_own_save: bool) -> None
     it loads only while its save directory holds no checkpoint: a directory holding one is refused
     unless ``resume_own_save`` says it is link 1's own mid-epoch save, and a tracker at or past the
     link's end means link 1 has already finished. An empty directory, left by a job that died before
-    saving, is harmless. A later link starts from exactly the previous link's final save, ``ckpt_step``.
+    saving, is harmless. A later link starts from exactly the previous link's final save, ``ckpt_step``,
+    with no save past it but the link's own final iteration, which a save cut short leaves behind and
+    the rerun overwrites.
     """
     end = link["train"]["train_iters"]
     start = link["checkpoint"]["ckpt_step"]
@@ -89,6 +92,13 @@ def check_start_state(link: dict, save_dir: Path, resume_own_save: bool) -> None
         raise NotSafeToSubmit(
             f"{save_dir} must hold exactly the previous link's final save, iteration {start}; its tracker "
             f"reads {saved}"
+        )
+    iterations = [int(path.name.removeprefix("iter_")) for path in save_dir.glob("iter_*")]
+    beyond = sorted(iteration for iteration in iterations if iteration > start and iteration != end)
+    if beyond:
+        raise NotSafeToSubmit(
+            f"{save_dir} holds iterations {beyond} past the previous link's final save, {start}; only this "
+            f"link's own final iteration, {end}, left by a save cut short, may be there"
         )
 
 
@@ -125,26 +135,35 @@ def check_no_live_job(job_name: str) -> None:
         raise NotSafeToSubmit(f"a job named {job_name} is already queued or running")
 
 
-def snapshot_link(link_path: Path, snapshot_dir: Path) -> Path:
-    """A read-only copy of the link's config, named by its sha256, which the job reads instead of the file.
+def _snapshot_name(link_path: Path, content: bytes) -> str:
+    return f"{link_path.stem}-{hashlib.sha256(content).hexdigest()[:16]}.yaml"
 
-    Written whole or not at all (to a temporary file, then renamed into place), and an existing
-    snapshot is reused only when its content is exactly the link's, so a write cut short by a full
-    quota can never become a config a job trains from.
+
+def snapshot_path(link_path: Path, snapshot_dir: Path) -> Path:
+    """Where the read-only copy of the link's config the job reads lives: named by the config's sha256."""
+    return snapshot_dir / _snapshot_name(link_path, link_path.read_bytes())
+
+
+def write_snapshot(link_path: Path, snapshot: Path) -> None:
+    """Write the link's config to ``snapshot``, read-only, unless that snapshot already holds it.
+
+    The content written is the content ``snapshot`` is named for, or nothing is written. Written whole
+    or not at all (to a temporary file, then renamed into place), and an existing snapshot is reused
+    only when its content is exactly the link's, so a write cut short by a full quota can never become
+    a config a job trains from.
     """
-    text = link_path.read_text()
-    digest = hashlib.sha256(text.encode()).hexdigest()[:16]
-    snapshot = snapshot_dir / f"{link_path.stem}-{digest}.yaml"
+    content = link_path.read_bytes()
+    if snapshot.name != _snapshot_name(link_path, content):
+        raise NotSafeToSubmit(f"{link_path} changed since its snapshot {snapshot} was named; submit again")
     if snapshot.exists():
-        if snapshot.read_text() != text:
+        if snapshot.read_bytes() != content:
             raise NotSafeToSubmit(f"{snapshot} exists but does not hold {link_path}'s content; remove it")
-        return snapshot
+        return
     snapshot.parent.mkdir(parents=True, exist_ok=True)
     partial = snapshot.with_name(f".{snapshot.name}.{os.getpid()}.partial")
-    partial.write_text(text)
+    partial.write_bytes(content)
     partial.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     os.replace(partial, snapshot)
-    return snapshot
 
 
 def submission_command(chain: dict, family: dict, job_name: str, snapshot: Path) -> list[str]:
@@ -197,11 +216,12 @@ def main(argv: list[str] | None = None) -> int:
     check_start_state(link, save_dir, args.resume_own_save)
     check_no_live_job(job_name)
 
-    snapshot = snapshot_link(link_path, Path(chain["launch"]["snapshot_dir"]) / args.arm)
+    snapshot = snapshot_path(link_path, Path(chain["launch"]["snapshot_dir"]) / args.arm)
     command = submission_command(chain, family, job_name, snapshot)
     print(f"HEAD {head}\nsnapshot {snapshot}\n{' '.join(command)}")
     if args.dry_run:
         return 0
+    write_snapshot(link_path, snapshot)
     job_id = submit(command, chain["launch"]["max_nodes"], REPO_ROOT)
     record = {
         "submitted_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),

@@ -40,9 +40,14 @@ checkpoint_root: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/contr
 # Names, formatted with `arm` (the arm's key below, hyphens as underscores) and, for a link file,
 # `link` (its number). Every link of an arm shares the run name: it is the checkpoint directory under
 # checkpoint_root and the W&B name, which the publisher's loss column reads across the links.
+# An arm's key must be exactly `treatment_arm` (an arm that reads the union) or `control_arm` (one
+# that does not) formatted with its `family` (underscores as hyphens): the key decides the run and
+# the Hub repository, so it may not disagree with the parent and the data the family and role decide.
 names:
   run: control_pretrain_30b_{arm}_cpt
   link_file: nemotron_nano_30b_{arm}_cpt_link{link}.yaml
+  treatment_arm: "{family}-trustedmonitor"
+  control_arm: "{family}-trustedmonitor-replayonly"
 
 # Where the generated link configs are written, and the corpora table that names each union's
 # prepare config (and so its data path), both relative to the repository root.

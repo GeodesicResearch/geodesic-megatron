@@ -83,7 +83,29 @@ def test_a_finished_link_1_is_not_run_again(tmp_path):
 
 
 def test_a_later_link_starts_only_from_exactly_the_previous_links_final_save(tmp_path):
-    submit_chain_link.check_start_state(_link(2), _save(tmp_path / "ok", [E], E), resume_own_save=False)
+    submit_chain_link.check_start_state(_link(2), _save(tmp_path / "link2", [E], E), resume_own_save=False)
+    # Every save the links before it wrote stays in the directory, below the start.
+    submit_chain_link.check_start_state(_link(3), _save(tmp_path / "link3", [E, 2 * E], 2 * E), resume_own_save=False)
+
+
+@pytest.mark.parametrize("link,iterations", [(2, [E, 2 * E]), (3, [E, 2 * E, 3 * E])])
+def test_a_later_link_reruns_over_its_own_save_cut_short(tmp_path, link, iterations):
+    """A link killed while saving leaves its own final iteration's directory behind, tracker unmoved."""
+    save_dir = _save(tmp_path / "arm", iterations, (link - 1) * E)
+    submit_chain_link.check_start_state(_link(link), save_dir, resume_own_save=False)
+
+
+@pytest.mark.parametrize(
+    "iterations",
+    [
+        [E, E + 1],  # a save past the start that no link of this chain writes
+        [E, 3 * E],  # a later link's save
+    ],
+)
+def test_a_later_link_refuses_any_save_past_its_start_but_its_own_end(tmp_path, iterations):
+    save_dir = _save(tmp_path / "arm", iterations, E)
+    with pytest.raises(submit_chain_link.NotSafeToSubmit, match="past the previous link's final save"):
+        submit_chain_link.check_start_state(_link(2), save_dir, resume_own_save=False)
 
 
 @pytest.mark.parametrize(
@@ -145,26 +167,49 @@ def test_only_the_generators_own_output_is_submitted(tmp_path):
         submit_chain_link.check_link_is_generated(CHAIN_SPEC, edited)
 
 
-def test_the_snapshot_is_read_only_named_by_its_content_and_reused(tmp_path):
+def test_naming_a_snapshot_writes_nothing(tmp_path):
+    """A dry run prints the snapshot a submission would read, and leaves nothing on disk."""
     link_path = tmp_path / "link1.yaml"
     link_path.write_text("train: {train_iters: 174}\n")
-    first = submit_chain_link.snapshot_link(link_path, tmp_path / "snapshots")
-    assert first.read_text() == link_path.read_text()
-    assert not first.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
-    assert first.stem.startswith("link1-")
-    assert submit_chain_link.snapshot_link(link_path, tmp_path / "snapshots") == first
-    assert [p.name for p in first.parent.iterdir()] == [first.name]
+    snapshot = submit_chain_link.snapshot_path(link_path, tmp_path / "snapshots")
+    assert snapshot.parent == tmp_path / "snapshots" and snapshot.stem.startswith("link1-")
+    assert not snapshot.parent.exists()
+    link_path.write_text("train: {train_iters: 348}\n")
+    assert submit_chain_link.snapshot_path(link_path, tmp_path / "snapshots") != snapshot
+
+
+def test_the_snapshot_is_read_only_holds_the_links_content_and_is_reused(tmp_path):
+    link_path = tmp_path / "link1.yaml"
+    link_path.write_text("train: {train_iters: 174}\n")
+    snapshot = submit_chain_link.snapshot_path(link_path, tmp_path / "snapshots")
+    submit_chain_link.write_snapshot(link_path, snapshot)
+    assert snapshot.read_text() == link_path.read_text()
+    assert not snapshot.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+    submit_chain_link.write_snapshot(link_path, snapshot)
+    assert [p.name for p in snapshot.parent.iterdir()] == [snapshot.name]
 
 
 def test_a_snapshot_whose_content_is_not_the_links_is_never_reused(tmp_path):
     """A write cut short (the project quota runs near full) must not become the config a job trains from."""
     link_path = tmp_path / "link1.yaml"
     link_path.write_text("train: {train_iters: 174}\n")
-    snapshot = submit_chain_link.snapshot_link(link_path, tmp_path / "snapshots")
+    snapshot = submit_chain_link.snapshot_path(link_path, tmp_path / "snapshots")
+    submit_chain_link.write_snapshot(link_path, snapshot)
     snapshot.chmod(stat.S_IRUSR | stat.S_IWUSR)
     snapshot.write_text("train: {train_")
     with pytest.raises(submit_chain_link.NotSafeToSubmit, match="does not hold"):
-        submit_chain_link.snapshot_link(link_path, tmp_path / "snapshots")
+        submit_chain_link.write_snapshot(link_path, snapshot)
+
+
+def test_a_link_that_changed_after_its_snapshot_was_named_is_not_written_under_that_name(tmp_path):
+    """The name is the content's hash, so content read later than the name must hash to it."""
+    link_path = tmp_path / "link1.yaml"
+    link_path.write_text("train: {train_iters: 174}\n")
+    snapshot = submit_chain_link.snapshot_path(link_path, tmp_path / "snapshots")
+    link_path.write_text("train: {train_iters: 348}\n")
+    with pytest.raises(submit_chain_link.NotSafeToSubmit, match="changed since"):
+        submit_chain_link.write_snapshot(link_path, snapshot)
+    assert not snapshot.exists()
 
 
 def test_the_command_takes_everything_but_the_config_from_the_chain_spec(tmp_path):

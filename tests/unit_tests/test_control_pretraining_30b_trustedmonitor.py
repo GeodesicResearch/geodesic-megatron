@@ -123,21 +123,63 @@ def test_a_spec_that_gives_an_arm_another_familys_parent_is_refused():
         chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
 
 
+def test_a_family_whose_name_prefixes_another_familys_does_not_claim_its_arms():
+    """A V1 family beside V2 names a prefix of every V2 arm; an arm pointed at it is still refused."""
+    chain = copy.deepcopy(CHAIN)
+    chain["families"]["filtered_gpt55_4plus"] = copy.deepcopy(chain["families"]["filtered_gpt55_4plus_v2"])
+    chain["arms"]["filtered-gpt55-4plus-v2-trustedmonitor"]["family"] = "filtered_gpt55_4plus"
+    with pytest.raises(ValueError, match="does not belong to family"):
+        chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
+
+
+def test_a_replay_only_arm_that_reads_the_union_is_refused():
+    chain = copy.deepcopy(CHAIN)
+    chain["arms"]["filtered-mini-2plus-trustedmonitor-replayonly"]["reads_union"] = True
+    with pytest.raises(ValueError, match="does not belong to family"):
+        chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
+
+
+def _reintroduction_models() -> dict[str, dict]:
+    """The Hub manifest's reintroduction entries, keyed by the arm each publishes."""
+    with open(_CAMPAIGN_DIR / "hub_models.yaml") as fh:
+        models = [m for m in yaml.safe_load(fh)["models"] if "trustedmonitor" in m["repo"]]
+    return {
+        m["repo"].removeprefix("geodesic-research/control-pretraining-30b-").removesuffix("-base"): m for m in models
+    }
+
+
 def test_each_reintroduction_repository_publishes_its_arms_final_link_after_its_familys_history():
     """The Hub entry names the arm's final link (so `main` is the last epoch's save) and counts
     tokens seen from that arm's own family: the broad pretraining both families share, then the
     family's own midtraining."""
-    with open(_CAMPAIGN_DIR / "hub_models.yaml") as fh:
-        models = [m for m in yaml.safe_load(fh)["models"] if "trustedmonitor" in m["repo"]]
-    arms = {
-        m["repo"].removeprefix("geodesic-research/control-pretraining-30b-").removesuffix("-base"): m for m in models
-    }
+    arms = _reintroduction_models()
     assert set(arms) == set(ARM_FAMILIES)
     for arm, model in arms.items():
         (stage,) = model["stages"]
         final_link = (_ARM_DIR / chain_gen.link_filename(CHAIN, arm, CHAIN["links"])).relative_to(_REPO_ROOT)
         assert stage["config"] == str(final_link), arm
         assert model["history"] == [PRETRAINING, FAMILY_PARENTS[ARM_FAMILIES[arm]]], arm
+
+
+# The chain's `links`, as the cards spell it.
+PASS_COUNT_WORDS = {3: "three"}
+
+
+def test_each_reintroduction_card_says_its_passes_are_one_continuous_run():
+    """A card reader must be able to tell one run of several passes from restarts: each description
+    states how many passes there are, how long each is, and that each resumes the full optimizer
+    state, so raising `links` or re-pinning a union leaves no card stating the old run."""
+    for arm, model in _reintroduction_models().items():
+        with open(_ARM_DIR / chain_gen.link_filename(CHAIN, arm, 1)) as fh:
+            iterations_per_pass = yaml.safe_load(fh)["train"]["train_iters"]
+        description = " ".join(model["description"].split())
+        passes = PASS_COUNT_WORDS[CHAIN["links"]]
+        if CHAIN["arms"][arm]["reads_union"]:
+            assert f"{passes} passes over the documents, {iterations_per_pass} iterations each" in description, arm
+        else:
+            assert f"{passes} {iterations_per_pass}-iteration jobs" in description, arm
+        assert "full optimizer state" in description, arm
+        assert f"{CHAIN['warmup_iters']}-iteration warmup comes once" in description, arm
 
 
 # --- the length arithmetic ----------------------------------------------------------------------

@@ -73,8 +73,9 @@ That makes the chain multi-epoch training with a per-epoch shuffle.
 **More epochs later:**
 1. Raise `links:` in `chain.yaml`.
 2. Rerun the generator.
-3. Move each arm's `hub_models.yaml` stage `config` and `bucket_sync.yaml` entry to the new final link
-   (a test ties the Hub entry to `links`).
+3. Move each arm's `hub_models.yaml` stage `config` and `bucket_sync.yaml` entry to the new final link,
+   and restate the pass count in its description (tests tie both the Hub entry and the description to
+   `links`).
 4. Submit only the new links.
 
 They resume the last saved link exactly, because every link keeps its optimizer state.
@@ -190,13 +191,15 @@ Before submitting it refuses:
 - a link file that is not the generator's output for the spec as it is now;
 - a save directory that is not where the link starts: for link 1, one holding any checkpoint (unless
   `--resume-own-save` says it is link 1's own) or one already at its end; for a later link, anything
-  but exactly the previous link's final save;
+  but exactly the previous link's final save, with no save past it except the link's own final
+  iteration (which a save cut short leaves behind and the rerun overwrites);
 - a job of the link's name, `cp30b-<arm>-link<k>`, still queued or running.
 
 It then submits one 64-node job with the family's walltime from `chain.yaml`, reading a read-only
 snapshot of the link's config named by its sha256 under `launch.snapshot_dir`, and writes a record of
 HEAD, the command and the job id beside the snapshot. A submission the wrapper refuses fails loudly;
-no empty job id is passed on.
+no empty job id is passed on. `--dry-run` runs every check and prints the snapshot's path and the
+command, and writes nothing.
 
 **One link per arm at a time.** The account's node cap (`launch.max_nodes`, 256) counts every running
 and pending job on the account, dependency-held ones included, and each job re-checks it when it starts

@@ -268,17 +268,23 @@ def generate(chain_path: Path) -> tuple[dict[Path, str], list[str]]:
     return render_chain(load_chain(chain_path), chain_path.resolve().relative_to(REPO_ROOT))
 
 
-def check_arm_families(chain: dict) -> None:
-    """Refuse an arm whose name does not begin with its family's name (hyphens and underscores alike).
+def check_arm_names(chain: dict) -> None:
+    """Refuse an arm whose name is not exactly the one its family and role give it.
 
-    The family decides which parent checkpoint and which union an arm reads; the arm's name decides
-    its run, its save directory and its Hub repository. An arm pointed at the wrong family would train
-    the other family's model and publish it under this one's name, with every length still right.
+    The family decides which parent checkpoint and which union an arm reads, and ``reads_union``
+    whether it reads that union at all; the arm's name decides its run, its save directory and its
+    Hub repository. An arm pointed at the wrong family, or a control reading the union, would train
+    another model and publish it under this name with every length still right. The name must equal
+    the spec's ``names.treatment_arm`` or ``names.control_arm`` formatted with the family's name
+    (underscores as hyphens), so no family's name can claim another's arms by being its prefix.
     """
     for arm, spec in chain["arms"].items():
-        if not arm.replace("-", "_").startswith(spec["family"].replace("-", "_") + "_"):
+        role = "treatment_arm" if spec["reads_union"] else "control_arm"
+        expected = chain["names"][role].format(family=spec["family"].replace("_", "-"))
+        if arm != expected:
             raise ValueError(
-                f"arm {arm!r} does not belong to family {spec['family']!r}: an arm's name must begin with its family's"
+                f"arm {arm!r} does not belong to family {spec['family']!r} as its {role.replace('_', ' ')}: "
+                f"that arm is named {expected!r}"
             )
 
 
@@ -292,7 +298,7 @@ def render_chain(chain: dict, chain_label: Path) -> tuple[dict[Path, str], list[
     Returns:
         The files to write (absolute path -> text), and the families skipped as PENDING.
     """
-    check_arm_families(chain)
+    check_arm_names(chain)
     output_dir = REPO_ROOT / chain["output_dir"]
     table = REPO_ROOT / chain["corpora_table"]
     files: dict[Path, str] = {}
