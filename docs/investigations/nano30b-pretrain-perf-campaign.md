@@ -15,6 +15,11 @@ production's GBS 2048 on 256 GPUs), 50 iterations via `train.exit_interval`, no 
 **Metric.** Mean step time over iterations 26–50 (node-hours scale with the mean), reported with the
 median, p10/p90 and outliers. tokens/s/GPU = GBS × 8192 / (GPUs × mean step). Model TFLOP/s and MFU use the
 exact per-token FLOPs of `scripts/nemotronh_flops_estimator.py` and the GH200 dense BF16 peak (989.4 TFLOP/s).
+Memory in the tables ("Peak GB") is the one memory line Megatron writes to the log: rank 0, after
+iteration 1 (max allocated since start, reserved at that moment). Where headroom matters an entry adds
+the W&B summary's run maxima (last rank; `score_run.py --wandb-peak-memory`) and its allocator-retry
+counter `memory/mem-alloc-retires`: reserved memory keeps growing after iteration 1 (E-044: 85.1 GB in
+the log, 91.7 GB at the end of the run), and retries after iteration 1 never reach the log.
 
 **Method.** Every probe is its own 16-node `pipeline_training_submit.sbatch` job (`--time=00:20:00`;
 a 50-iteration probe takes 9–13 min), launched from a read-only snapshot of the code under test under
@@ -84,7 +89,7 @@ spread observed, so a lever smaller than it is credited only after repeats.
 | `overlap_param_gather: false` for Nemotron-H at DP>1 | derived on Super at TP4 / bare metal | H01 | WIN (E-004) |
 | bf16 gradients "tried, failed" | all four attempts were VOID: `bf16_mixed` hard-codes `grad_reduce_in_fp32=True` | H15 | WIN — engaged via the bf16 grad-reduce recipe, `bf16_mixed_bf16_grad_reduce` (E-008) |
 | dropping `moe` recompute OOMs | measured without bf16 gradients (19 GB/GPU more free memory with them) | H16 | WIN (E-009) |
-| CUDA graphs blocked on Nano | the blocker was memory at DP=512, not capability | H18 | retested: engages at 64 GPUs with no memory cost; NULL on throughput (~0.8%, E-035) |
+| CUDA graphs blocked on Nano | the blocker was memory at DP=512, not capability | H18 | retested twice: engages at 64 GPUs but NULL on throughput (~0.8%) at +4 / +12 GB reserved (E-035); on the EP-overlap champion memory-bound — [mamba] NULL (−0.4%), [mamba,attn,moe_router] +9.8% at 94.6–95.2 GB reserved with up to 40 allocator retries (E-046) |
 | DeepEP/HybridEP incompatible | the blocker is the inter-node IBGDA path; EP=4 is intra-node | H21/H22 | H22 WIN once GroupedExperts is sync-free (E-028; NULL before, E-005); H21 not yet retested |
 
 ## Experiments
@@ -125,6 +130,60 @@ the `log_params_norm` telemetry that cost Super 10.2% (new candidate H38).
 Learning: 5% faster than predicted; the 2× target at this width and batch is a mean step ≤ 4.664 s
 (≥ 14,052 tok/s/GPU, ≥ 29.6% MFU). 1.36 s of the 9.33 s is the exposed all-gather alone.
 
+### E-046 · TE CUDA graphs on top of the EP overlap · 2026-09-29 · NULL / LOSS (memory-bound)
+The hybrid overlap plan asserted `cuda_graph_impl == "none"`. The adaptation (snapshot
+`wt-e3dd4e56-epov-cg`, `EPOV_CG.diff`, three Megatron-LM files): one shared definition of the overlap
+units for the schedule and the graph helper; the assert relaxed to allow TE graphs on flat patterns
+(local graphs, bracketed patterns, delayed wgrad and MTP still refused); attention and MoE-router graphs
+replayed from the hybrid callables through `_te_cuda_graph_replay`, as the GPT path does; and a capture
+order that follows the unit pairing — TE keeps every graph's memory in one pool whose lifetimes follow
+the capture order, and upstream's order (graphed layer g paired with G−1−g) matches the grouped schedule
+only when every unit holds exactly one graphed layer (true for `[mamba]`, not for
+`[mamba,attn,moe_router]`). Settings: `model.cuda_graph_impl=transformer_engine
+model.cuda_graph_scope=null model.use_te_rng_tracker=true` plus the graph set, env
+`NCCL_GRAPH_REGISTER=0` with the default `expandable_segments:True`.
+
+Correctness (1 node, 11 and 21 layers): iterations 1–2 bit-identical in every arm; graph-vs-no-graph loss
+differences inside no-graph-vs-no-graph. Speed there: −1.5% / −2.7% (11 layers), −2.3% (21 layers). A
+profile of the 21-layer smoke shows why: the overlap raises GPU idle from 13.8% to 22.9% of the profiled
+step, mostly under Mamba's fused forward/backward (its Triton launches), and `[mamba]` graphs bring it
+to 5.7%.
+
+At full depth the graphs' private pool sits on top of the overlap's extra reserved memory:
+
+| Width | Graph set | Job | Mean (s) | × baseline | W&B run max alloc / reserved GB, retries |
+|---|---|---|---|---|---|
+| 32 GPUs | none (overlap only) | 6933943 | 5.154 | — | 81.9 / 95.2, 0 |
+| 32 GPUs | `[mamba,attn,moe_router]` | 6933944 | 7.630 (+48%) | — | 80.0 / 95.1, 186 |
+| 64 GPUs | `[mamba]` | 6934039 | 5.153 | 1.810 | 76.06 / 94.61, 0 |
+| 64 GPUs | `[mamba]` (repeat) | 6934180 | 5.235 | 1.782 | 76.06 / 95.24, 2 |
+| 64 GPUs | `[mamba,attn,moe_router]` | 6934181 | 5.723 | 1.630 | 76.06 / 95.11, 40 |
+
+Learning: at 64 GPUs `[mamba]` graphs average 5.194 s against 5.213 s for the overlap alone (−0.4%,
+NULL) and the wider set loses 9.8%; the runs that retried are the slow ones. The graphs work and remove
+the launch-bound idle, but there is no memory to run them in: the overlap already reserves 91.7 GB. Two
+fallbacks measured on 1-node reduced-depth setups do not fix it — `model.ep_overlap_early_attn_memory_release`
+saves 0.2–0.9 GB and costs +2.6% at 21 layers (jobs 6934235 vs 6934234) and +1.9% at 28 layers (it
+exposes the forward combine); `garbage_collection_threshold:0.9` in `ISAMBARD_CUDA_ALLOC_CONF` saves
+0.6 GB at no cost (28 layers). A graph pool cannot be shared with ordinary
+allocations, and PyTorch cannot release one stream's cache; the structural fix is to allocate HybridEP's
+dispatch output (~264 MB per unit per microbatch) from the compute stream's pool, which DeepEP's
+`dispatch_with_permute` does not expose. Freeing reserved memory is now the gate for stacking anything
+further on the overlap.
+
+### E-045 · trace of the EP-overlap champion · 2026-09-29 · the overlap exposes Mamba's launch cost
+Job 6933850 (iterations 30 and 40, ranks 0 and 5, no stacks). The profiler inflates this schedule
+more than the previous one — profiled window 6.25 s against a ~5.2 s real step — so idle is read for
+where it sits, not its size. `hybrid_ep::device_sync_kernel` falls from 0.437 s to 0.124 s per
+iteration (the waiting the overlap hides); HybridEP's dispatch/combine kernels rise from 0.295 to 0.378
+s and the grouped GEMMs from 1.186 to 1.224 s (they now share SMs with the communication stream);
+exposed data-parallel time is unchanged at 0.73–0.81 s. GPU-idle gaps of 50–1000 µs grow from 0.40 s
+to 1.43 s, and on both ranks and both iterations the CPU op covering most of them is Mamba's fused
+function — `MambaSplitConv1dScanCombinedFnBackward` 0.34–0.38 s and its forward 0.12 s (≈4,200 Triton
+launches per iteration, mean kernel 90 µs). With the all-to-all wait gone, the GPU catches up with the
+host there. `HybridEPDispatch` still synchronises the host 184 times per iteration. This motivated
+E-046.
+
 ### E-044 · EP all-to-all / compute overlap for the hybrid model · 2026-09-29 · WIN (1.78–1.80×, repeated)
 `comm_overlap.overlap_moe_expert_parallel_comm=true` runs the combined-1F1B schedule: the forward of one
 microbatch is interleaved with the backward of the previous one, so each MoE layer's dispatch/combine
@@ -149,18 +208,20 @@ Required with it: `model.mtp_num_layers=null` (the recipe's `0` fails the "None 
 
 64 GPUs, E-028 posture from the frozen snapshot `wt-e3dd4e56-epov-full1`:
 
-| Arm | Job | Mean (s) | Median | × baseline | Peak alloc / reserved GB | Loss 41–50 |
+| Arm | Job | Mean (s) | Median | × baseline | W&B run max alloc / reserved GB, retries | Loss 41–50 |
 |---|---|---|---|---|---|---|
-| OFF (control: connections 32, MTP null) | 6933820 | 5.409 | 5.356 | 1.725 | 73.42 / — | 6.911 |
-| **ON, connections 32** | 6933731 | **5.197** | **5.143** | **1.795** | 74.52 / 85.10, 0 allocator retries | 6.879 |
-| **ON, connections 32 (repeat)** | 6933837 | **5.228** | **5.180** | **1.784** | 74.52 / — | 6.911 |
-| ON, connections 1 | 6933732 | 5.622 | 5.551 | 1.659 | 74.52 / — | 6.887 |
+| OFF (control: connections 32, MTP null) | 6933820 | 5.409 | 5.356 | 1.725 | 77.28 / 78.64, 0 | 6.911 |
+| **ON, connections 32** | 6933731 | **5.197** | **5.143** | **1.795** | 78.39 / 91.69, 0 | 6.879 |
+| **ON, connections 32 (repeat)** | 6933837 | **5.228** | **5.180** | **1.784** | 78.43 / 91.53, 0 | 6.911 |
+| ON, connections 1 | 6933732 | 5.622 | 5.551 | 1.659 | 78.41 / 89.51, 0 | 6.887 |
 
 Learning: the two ON runs (5.197 / 5.228 s, 0.6% apart) are −3.4% against the five runs without the
-overlap (5.388–5.409 s, the paired control included), with loss in band and +1.1 GB allocated. It is
-modest because HybridEP's intra-node all-to-all is already short; what it hides is mostly the ranks'
-waiting in `device_sync`. The hybrid plan asserts `cuda_graph_impl == "none"`, so CUDA graphs cannot
-yet be stacked on it.
+overlap (5.388–5.409 s, the paired control included), with loss in band. It is modest because
+HybridEP's intra-node all-to-all is already short; what it hides is mostly the ranks' waiting in
+`device_sync` (E-045). Its memory cost is in *reserved*, not allocated: +1.1 GB allocated but +13 GB
+reserved (78.6 → 91.7 GB, W&B run max, last rank; the runs without it sit at 78.6–78.7), because the
+combined schedule's communication stream keeps its own cache of freed blocks that the compute stream
+cannot reuse. That leaves ~3.5 GB below the device, which is what CUDA graphs ran into (E-046).
 
 ### E-039–E-043 · NCCL, GC, NUMA and Mamba-chunk probes on the HybridEP champion · 2026-09-29 · all NULL
 All on the E-028 posture; NCCL variables go through `ISAMBARD_ENV_OVERRIDES` because the launcher exports
@@ -265,9 +326,13 @@ Learning:
   logits (8.00 GiB requested with 89 GiB already allocated). E-015 put micro-batch 2's extra activations
   at ~19 GB; only the `moe` recompute frees that, and it costs 1.03 s (H16), so the route stays closed
   unless ~12 GB is freed elsewhere.
-- **E-035:** CUDA graphs engage and cost no memory, but gain only ~0.8% (5.35 vs 5.39–5.41), inside the
-  run-to-run spread: the idle gaps sit mostly outside the graphable layers — in the routed-expert path,
-  the dispatcher and the gradient hooks. Not adopted on its own.
+- **E-035:** CUDA graphs engage but gain only ~0.8% (5.35 vs 5.39–5.41), inside the run-to-run spread:
+  the idle gaps sit mostly outside the graphable layers — in the routed-expert path, the dispatcher and
+  the gradient hooks. The table's memory is the log line written after iteration 1, before the graphs
+  are captured (after `cuda_graph_warmup_steps` = 3), so it cannot show the graph pool; the W&B run
+  maxima (last rank) do: 74.99 GB allocated / 82.63 GB reserved for `[mamba]` and 74.99 / 90.26 for
+  `[mamba, attn, moe_router]`, against 77.3 / 78.6 without graphs, 0 allocator retries. Not adopted on
+  its own.
 
 ### E-030 · repeat of the HybridEP champion (E-028) · 2026-09-29 · CONFIRMED (1.73×)
 The E-028 posture and snapshot, launch line unchanged apart from the job and W&B names (job 6932677, W&B
