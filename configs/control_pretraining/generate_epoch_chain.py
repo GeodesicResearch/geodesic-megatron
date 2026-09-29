@@ -14,9 +14,17 @@ included) at sequence length S, global batch B and union share s (the fraction o
 union fills):
 
     N1  = (T - 1) // S                  samples in one pass over the union
-    E   = ceil(N1 / (s * B))            iterations per epoch
-    w_R = (N1 - 0.5) / (B * E)          the union's blend weight, at most s
-    replay weights = parent weight * (1 - w_R)
+    E   = ceil(N1 / (s * B))            iterations per epoch, so a link reads E * B samples
+
+A link's blend weights are whole-sample counts that sum to E * B: a treatment's union draws exactly N1
+(one pass) and the parent's corpora share the rest in proportion to their midtraining weights, a
+control's corpora share all of it, each rounded by largest remainder. Megatron sizes a blend as the
+sum over its corpora of ceil(size * normalized weight) in float64, and for about one whole count in
+twenty that product lands a hair above the count, so each such count then trades one sample with
+another corpus until every count is a target Megatron builds exactly. The built blend is then exactly
+the link's size and the link's sampler reads every sample of it once. Fractional weights would round
+every target up and build a few surplus samples, which the sampler would leave unread at random,
+union samples among them.
 
 Link k ends at iteration k * E and saves there. Everything else in a link is the parent's midtraining
 config unchanged. The chain spec (``chain.yaml``) is the only input that decides the runs' shape (the
@@ -51,18 +59,12 @@ from corpora_table import (  # noqa: E402
 )
 
 
-# The significant digits a blend weight is written with: enough that the union's share of each epoch
-# is fixed to well under one sample at any realistic epoch size.
-WEIGHT_DIGITS = 12
-
-
 @dataclass(frozen=True)
 class ChainLengths:
     """How long one epoch of a family's chain is."""
 
     samples_per_epoch: int  # N1: samples in one pass over the union
     iterations_per_epoch: int  # E
-    union_weight: float  # w_R
 
 
 def chain_lengths(tokens_plus_eod: int, seq_length: int, global_batch_size: int, union_share: float) -> ChainLengths:
@@ -78,24 +80,91 @@ def chain_lengths(tokens_plus_eod: int, seq_length: int, global_batch_size: int,
     if samples < 1:
         raise ValueError(f"a union of {tokens_plus_eod} tokens holds no {seq_length}-token sample")
     iterations = math.ceil(samples / (share * global_batch_size))
-    return ChainLengths(samples, iterations, (samples - 0.5) / (global_batch_size * iterations))
+    return ChainLengths(samples, iterations)
 
 
-def _weight(value: float) -> str:
-    return f"{value:.{WEIGHT_DIGITS}g}"
+def apportion(total: int, weights: list) -> list[int]:
+    """Split ``total`` into whole parts proportional to ``weights``, by largest remainder.
 
-
-def link_blend(parent_data_path: list, union_prefix: str | None, union_weight: float | None) -> list[str]:
-    """The link's interleaved weight/prefix blend: the union first, then the parent's corpora rescaled.
-
-    Without a union (a replay-only control) the parent's blend is returned as it stands.
+    Weights are read as the decimals they are written as, so the split is exact; equal remainders go to
+    the earlier weight. A part that rounds to zero is refused, because Megatron cannot build a corpus
+    of no samples.
     """
+    exact = [Fraction(str(weight)) for weight in weights]
+    quotas = [total * weight / sum(exact) for weight in exact]
+    parts = [math.floor(quota) for quota in quotas]
+    by_remainder = sorted(range(len(quotas)), key=lambda i: (parts[i] - quotas[i], i))
+    for i in by_remainder[: total - sum(parts)]:
+        parts[i] += 1
+    if 0 in parts:
+        raise ValueError(f"{total} samples cannot give every one of weights {list(weights)} a sample")
+    return parts
+
+
+def megatron_target(samples: int, link_samples: int) -> int:
+    """The samples Megatron builds for a corpus weighted ``samples`` in a blend weighted in samples summing
+    to ``link_samples``.
+
+    Its builder targets ceil(size * weight / sum of weights) per corpus (``normalize`` then
+    ``_get_size_per_split_per_dataset``) in float64. Whole-number weights sum exactly, so this is the
+    same two correctly rounded operations; about one count in twenty comes out one above itself.
+    """
+    return math.ceil(link_samples * (samples / link_samples))
+
+
+def settle_on_megatron_targets(counts: list[int], link_samples: int) -> list[int]:
+    """Trade single samples between corpora until Megatron's target for every count is the count itself.
+
+    A count Megatron would round up trades one sample with another corpus, in whichever direction
+    leaves both exact, so the total is unchanged and no count moves more than one sample.
+    """
+    settled = list(counts)
+    moved: set[int] = set()
+
+    def exact(samples: int) -> bool:
+        return megatron_target(samples, link_samples) == samples
+
+    for i in range(len(settled)):
+        if exact(settled[i]):
+            continue
+        trade = next(
+            (
+                (delta, j)
+                for delta in (-1, 1)
+                if exact(settled[i] + delta)
+                for j in range(len(settled))
+                if j != i and j not in moved and exact(settled[j]) and exact(settled[j] - delta)
+            ),
+            None,
+        )
+        if trade is None:
+            raise ValueError(f"no single-sample trade makes {settled[i]} of {link_samples} samples exact")
+        delta, j = trade
+        settled[i] += delta
+        settled[j] -= delta
+        moved.update((i, j))
+    return settled
+
+
+def link_blend(
+    parent_data_path: list, union_prefix: str | None, union_samples: int | None, link_samples: int
+) -> list[str]:
+    """The link's interleaved blend, weighted in samples that sum to ``link_samples``.
+
+    A treatment's union comes first with ``union_samples``; the parent's corpora follow, in their order,
+    sharing the rest in proportion to their midtraining weights, each settled on a count Megatron
+    builds exactly. Without a union (a replay-only control) they share all ``link_samples``.
+    """
+    if union_prefix is not None and megatron_target(union_samples, link_samples) != union_samples:
+        raise ValueError(
+            f"Megatron would build {megatron_target(union_samples, link_samples)} samples for a union weighted "
+            f"{union_samples} in a {link_samples}-sample link, so the link would not read exactly one pass"
+        )
     pairs = list(zip(parent_data_path[0::2], parent_data_path[1::2]))
-    if union_prefix is None:
-        return [str(item) for pair in pairs for item in pair]
-    blend = [_weight(union_weight), union_prefix]
-    for weight, prefix in pairs:
-        blend += [_weight(float(weight) * (1.0 - union_weight)), str(prefix)]
+    blend = [] if union_prefix is None else [str(union_samples), union_prefix]
+    replay = apportion(link_samples - (union_samples or 0), [weight for weight, _ in pairs])
+    for samples, (_, prefix) in zip(settle_on_megatron_targets(replay, link_samples), pairs):
+        blend += [str(samples), str(prefix)]
     return blend
 
 
@@ -142,7 +211,8 @@ def link_config(chain: dict, arm: str, link: int, parent: dict, lengths: ChainLe
     config["dataset"]["data_path"] = link_blend(
         parent["dataset"]["data_path"],
         prefix if spec["reads_union"] else None,
-        lengths.union_weight if spec["reads_union"] else None,
+        lengths.samples_per_epoch if spec["reads_union"] else None,
+        iterations * chain["global_batch_size"],
     )
     config["dataset"]["seed"] = chain["base_seed"] + link - 1
     config["train"]["global_batch_size"] = chain["global_batch_size"]

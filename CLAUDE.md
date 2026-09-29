@@ -845,8 +845,12 @@ previous link's full state and sets two fork options that exist for exactly this
 iterations and reads it from sample 0, while the step, consumed-sample counters, optimizer and
 scheduler carry over) and `checkpoint.ckpt_step`, which setup now refuses to honour silently: a
 `ckpt_step` naming a checkpoint `load` does not hold raises, where it used to train from random
-initialisation with no error. The arm README has the length arithmetic, the gates (including a
-storage check before each broad link, since every link keeps its optimizer state) and the launch.
+initialisation with no error. Every link's blend is weighted in whole samples summing to the link's
+own, settled so Megatron's `ceil(size × weight)` sizing builds exactly that many: fractional weights
+build a few surplus samples that the sampler leaves unread at random, which would drop union samples
+from the pass. `scripts/data/report_blend_coverage.py` confirms each link before it runs. The arm
+README has the length arithmetic, the gates (including a storage check before each broad link, since
+every link keeps its optimizer state) and the launch.
 
 **CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
 continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on
@@ -1067,6 +1071,17 @@ isambard_sbatch --dependency=afterok:<prepare-jobid> pipeline_data_submit.sbatch
     --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
     --seq-length 8192 --pad-seq-to-mult 1"
 ```
+
+### Checking what a `.bin/.idx` blend actually reads
+
+`scripts/data/report_blend_coverage.py <config.yaml> --model <m> --mode cpt|pretrain --report-out <json>`
+builds a run's training blend on CPU exactly as its launch will (the launcher's own
+`resolve_training_config` and `bin_idx_dataset_config`, the loader's own sizing and builder) and
+reports per corpus the samples drawn, the samples one pass holds and the documents reached. Run it as
+a one-node job (`isambard_sbatch --wrap` around `pipeline_env_exec.sh`); the index caches it writes
+are the ones the launch reads. It refuses a run that reads only part of its built dataset (a resume
+without `checkpoint.reset_data_position`, or an unweighted lone corpus), because the sampler's random
+order leaves no fixed set of samples to describe.
 
 ### Important: Always run `pipeline_data_prepare.py` before training
 

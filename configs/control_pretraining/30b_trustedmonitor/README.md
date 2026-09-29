@@ -72,20 +72,30 @@ For a union of T tokens (one EOD per document included), sequence 32768, batch 2
 
     N1  = (T − 1) // 32768        samples in one pass over the union
     E   = ceil(N1 / (0.5·256))    iterations per epoch, so the union is about half of each batch
-    w_R = (N1 − 0.5) / (256·E)    the union's blend weight (12 significant digits)
-    replay weights = midtraining weight × (1 − w_R)
+
+A link reads 256·E samples, and its blend weights are **sample counts** that sum to exactly that:
+a treatment's union draws N1 (one pass), and the ten midtraining corpora share the rest in proportion
+to their midtraining weights, rounded by largest remainder; a control's ten corpora share all 256·E the
+same way. Counts rather than fractions matter because Megatron sizes a blend as the sum over its
+corpora of `ceil(size × normalized weight)`: fractional weights round every target up, build a few
+surplus samples, and the sampler, reading only the run's 256·E, leaves a random few unread, union
+samples among them. Even a whole count lands a hair above itself in that float64 product about one
+time in twenty, so such a count trades one sample with another corpus until Megatron builds every
+count exactly (the generator refuses a union whose N1 it would round up). The built blend is then
+exactly the link's size and every sample of it, the union's whole pass included, is read once. A test
+checks every link's counts against Megatron's own sizing, and the dry run confirms the built size.
 
 Link k runs to iteration k·E and saves there, so the checkpoints are `iter_E`, `iter_2E` and
-`iter_3E`. A control uses its treatment's E and the midtraining weights unchanged. T is the union's
-published tokens+EOD. It is entered in `chain.yaml` in the same change as the document count in
+`iter_3E`. A control uses its treatment's E. T is the union's published tokens+EOD. It is entered in `chain.yaml` in the same change as the document count in
 `corpora.tsv` and the revision in the prepare config (a test couples the three).
 
 Two checks confirm T against the build:
 - `verify_corpora.py` measures the tokenized corpus's tokens, which must equal T.
 - The dry run counts the union's samples in the dataset as actually built.
 
-For unions of the size expected before they are built (about 3B tokens broad, 0.4B narrow), an epoch
-is about 716 and about 96 iterations. That is about 18B and 2.4B tokens over three epochs per arm.
+The unions as dataset-builder verified them before publication (narrow 726,549,631 tokens+EOD, broad
+2,552,312,532) give epochs of 174 and 609 iterations: 522 and 1,827 over three links, about 4.4B and
+15.3B tokens per arm.
 
 ## Gates, in order
 
@@ -96,8 +106,20 @@ is about 716 and about 96 iterations. That is about 18B and 2.4B tokens over thr
        python configs/control_pretraining/verify_corpora.py configs/control_pretraining/30b_trustedmonitor/corpora.tsv --stage continual_pretraining <subset>
 
    Then regenerate the links.
-2. **Dry run** (CPU sbatch): build each link's blend indices. Assert that the union contributes N1
-   samples (±1) and covers every union document once per link.
+2. **Dry run** (one CPU job per link): `scripts/data/report_blend_coverage.py` builds the link's
+   training blend exactly as its launch will, from its first sample, and reports per corpus the
+   samples drawn, the samples in one pass and the documents reached:
+
+       isambard_sbatch --nodes=1 --time=00:30:00 --job-name=cp30b-blend-<arm>-link<k> --output=logs/slurm/blend-%j.out \
+         --wrap "./pipeline_env_exec.sh 'cd $PWD; source pipeline_env_activate.sh || exit 1; \
+           python scripts/data/report_blend_coverage.py configs/control_pretraining/30b_trustedmonitor/<link>.yaml \
+             --model nano --mode pretrain \
+             --report-out /projects/a5k/public/logs/control_pretraining/blend_coverage/<link>.json'"
+
+   The union's row must show about N1 samples drawn (a blend's integer allocation can land one
+   short) against N1 per pass, and every union document reached except those lying wholly in the
+   last partial sample of the pass, which N1's floor leaves out. The index caches it writes are the
+   ones the launch reads.
 3. **Smoke:** a two-link run a few iterations long. Link 2 must log the loaded step, carry the Adam
    state and read its data from sample 0.
 4. **Review:** a `/code-review` of the checkpoint and data-loader changes, the chain configs and
@@ -126,8 +148,8 @@ link after its successor saved would retrain that epoch.
 
 The `--time` values are estimates until the pilot measures a link:
 - The parent ran 10.8 s/iter at GBS 512, so about 5.4 s/iter here.
-- A narrow link (about 96 iterations) is about 10 minutes, plus startup and the save.
-- A broad link (about 716 iterations) is about 65 minutes plus the same.
+- A narrow link (174 iterations) is about 16 minutes, plus startup and the save.
+- A broad link (609 iterations) is about 55 minutes plus the same.
 
 After the pilot, calibrate to 1.5× the worst link observed. Check each link's first log lines for the
 loaded iteration and `train_iters`. Watch the loss, the grad norm, and any NaN or skipped iterations.

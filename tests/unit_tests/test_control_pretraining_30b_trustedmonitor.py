@@ -29,14 +29,16 @@ the lengths themselves.
 
 from __future__ import annotations
 
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
 import yaml
+from megatron.core.datasets.blended_megatron_dataset_builder import _get_size_per_split_per_dataset
+from megatron.core.datasets.utils import get_blend_from_list, normalize
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
-    assert_blend_is_well_formed,
     assert_hold_and_pin_move_together,
     assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
@@ -55,9 +57,9 @@ import corpora_table  # noqa: E402
 import generate_epoch_chain as chain_gen  # noqa: E402
 
 
-# A union size in the range the unions are expected to measure (about 3B tokens broad, 0.4B narrow),
-# used only where a family's real count is still PENDING.
-PROVISIONAL_TOKENS = {"filtered_mini_2plus": 3_000_000_001, "filtered_gpt55_4plus_v2": 400_000_001}
+# Each union's tokens+EOD as dataset-builder verified it before publication, used only where a
+# family's pinned count is still PENDING.
+PROVISIONAL_TOKENS = {"filtered_mini_2plus": 2_552_312_532, "filtered_gpt55_4plus_v2": 726_549_631}
 
 
 def _chain_with_counts() -> dict:
@@ -108,15 +110,12 @@ def _lengths(arm: str) -> chain_gen.ChainLengths:
 @pytest.mark.parametrize("share", [0.5, 0.25])
 @pytest.mark.parametrize("tokens", [3_000_000_001, 400_000_001, 32_769, 12_345_678_901])
 def test_an_epoch_is_the_minimal_cover_of_the_union_at_its_share_of_each_batch(tokens, share):
-    """E is the fewest iterations whose union shares hold the union once, and the union's blend weight
-    never exceeds that share."""
+    """E is the fewest iterations whose union shares hold the union once."""
     lengths = chain_gen.chain_lengths(tokens, 32768, 256, share)
     assert lengths.samples_per_epoch == (tokens - 1) // 32768
     assert_iterations_are_the_minimal_cover(
         lengths.iterations_per_epoch, int(share * 256), lengths.samples_per_epoch, f"{tokens} tokens at {share}"
     )
-    assert lengths.union_weight * 256 * lengths.iterations_per_epoch == pytest.approx(lengths.samples_per_epoch - 0.5)
-    assert lengths.union_weight <= share
 
 
 def test_a_union_smaller_than_one_sample_is_refused():
@@ -162,9 +161,10 @@ def _differing_fields(arm: str, link: int) -> set[str]:
         "checkpoint.save_interval",
         "checkpoint.reset_data_position",
         "logger.wandb_exp_name",
+        # Every link, control included, weights its corpora in whole samples; the tests below check
+        # the corpora and their proportions against the parent's.
+        "dataset.data_path",
     }
-    if CHAIN["arms"][arm]["reads_union"]:
-        fields.add("dataset.data_path")
     if link > 1:
         fields.add("checkpoint.ckpt_step")
     return fields
@@ -236,26 +236,114 @@ def test_every_link_reads_its_epoch_from_the_start_at_the_parent_lr(arm, link):
 # --- the data -----------------------------------------------------------------------------------
 
 
+def _link_samples(arm: str) -> int:
+    return _lengths(arm).iterations_per_epoch * CHAIN["global_batch_size"]
+
+
+def _assert_shared_in_proportion(counts: list[int], total: int, parent_data_path: list, label: str) -> None:
+    """Each count is its exact proportional quota of ``total``, rounded and then settled by at most one."""
+    weights = [Fraction(str(weight)) for weight in parent_data_path[0::2]]
+    assert sum(counts) == total, label
+    for count, weight in zip(counts, weights):
+        assert abs(count - total * weight / sum(weights)) < 2, label
+
+
 @pytest.mark.parametrize("arm", [arm for arm, spec in CHAIN["arms"].items() if spec["reads_union"]])
-def test_a_treatment_reads_its_union_first_then_the_parent_blend_rescaled(arm):
+def test_a_treatment_reads_one_pass_of_its_union_then_the_parent_corpora_in_proportion(arm):
     blend = _link(arm, 1)["dataset"]["data_path"]
-    assert_blend_is_well_formed(blend, arm)
-    lengths = _lengths(arm)
-    assert float(blend[0]) == pytest.approx(lengths.union_weight, rel=1e-11)
-    assert blend[1] == chain_gen.union_prefix(_ARM_DIR / "corpora.tsv", _family(arm)["union_subset"])
     parent = _parent(arm)["dataset"]["data_path"]
+    assert blend[0] == str(_lengths(arm).samples_per_epoch)
+    assert blend[1] == chain_gen.union_prefix(_ARM_DIR / "corpora.tsv", _family(arm)["union_subset"])
     assert blend[3::2] == [str(prefix) for prefix in parent[1::2]]
-    for weight, parent_weight in zip(blend[2::2], parent[0::2]):
-        assert float(weight) == pytest.approx(float(parent_weight) * (1 - lengths.union_weight), rel=1e-11)
+    replay = [int(count) for count in blend[2::2]]
+    _assert_shared_in_proportion(replay, _link_samples(arm) - _lengths(arm).samples_per_epoch, parent, arm)
 
 
 @pytest.mark.parametrize("arm", [arm for arm, spec in CHAIN["arms"].items() if not spec["reads_union"]])
-def test_a_control_reads_the_parent_blend_for_the_same_iterations_as_its_treatment(arm):
+def test_a_control_reads_the_parent_corpora_in_proportion_for_its_treatments_iterations(arm):
     family = CHAIN["arms"][arm]["family"]
     (treatment,) = [a for a, spec in CHAIN["arms"].items() if spec["family"] == family and spec["reads_union"]]
+    parent = _parent(arm)["dataset"]["data_path"]
     for link in range(1, CHAIN["links"] + 1):
-        assert _link(arm, link)["dataset"]["data_path"] == [str(x) for x in _parent(arm)["dataset"]["data_path"]]
+        blend = _link(arm, link)["dataset"]["data_path"]
+        assert blend[1::2] == [str(prefix) for prefix in parent[1::2]]
+        _assert_shared_in_proportion([int(c) for c in blend[0::2]], _link_samples(arm), parent, f"{arm} {link}")
         assert _link(arm, link)["train"]["train_iters"] == _link(treatment, link)["train"]["train_iters"]
+
+
+@pytest.mark.parametrize("arm,link", LINKS)
+def test_megatron_builds_every_link_blend_to_exactly_the_samples_the_link_reads(arm, link):
+    """Megatron sizes a blend as the sum of ceil(size * normalized weight). With whole-sample weights
+    summing to the link's samples those targets are exactly the weights, so the built blend is the
+    link's size and its sampler reads every sample, the union's whole pass included, once."""
+    blend = _link(arm, link)["dataset"]["data_path"]
+    counts = [int(count) for count in blend[0::2]]
+    prefixes, weights = get_blend_from_list([str(item) for item in blend])
+    assert prefixes == blend[1::2]
+    (targets,) = zip(*_get_size_per_split_per_dataset(normalize(weights), [_link_samples(arm)]))
+    assert list(targets) == counts
+    assert sum(targets) == _link_samples(arm)
+
+
+@pytest.mark.parametrize(
+    "total,weights,parts",
+    [
+        (10, ["0.5", "0.25", "0.25"], [5, 3, 2]),  # quotas 5, 2.5, 2.5: the tie goes to the earlier weight
+        (5, ["1", "1"], [3, 2]),
+        # quotas 2.335893, 1.334802, 3.329305: the one remaining sample goes to the largest remainder
+        (7, ["0.333699", "0.190686", "0.475615"], [3, 1, 3]),
+    ],
+)
+def test_apportion_splits_exactly_by_largest_remainder(total, weights, parts):
+    assert chain_gen.apportion(total, weights) == parts
+
+
+LINK_SIZE = 174 * 256
+
+
+def _megatron_targets(counts: list[int]) -> list[int]:
+    """Megatron's own per-corpus targets for a blend weighted in these whole samples."""
+    (targets,) = zip(*_get_size_per_split_per_dataset(normalize([float(c) for c in counts]), [sum(counts)]))
+    return list(targets)
+
+
+# Counts at LINK_SIZE that Megatron rounds up (7 of them) and that it builds exactly (7 others).
+OVERSHOOTING = [c for c in range(1, 2000) if chain_gen.megatron_target(c, LINK_SIZE) != c][:7]
+EXACT = [c for c in range(1, 2000) if chain_gen.megatron_target(c, LINK_SIZE) == c][:7]
+
+
+@pytest.mark.parametrize("count", OVERSHOOTING + EXACT)
+def test_megatron_target_is_the_count_megatrons_own_sizing_builds(count):
+    assert chain_gen.megatron_target(count, LINK_SIZE) == _megatron_targets([count, LINK_SIZE - count])[0]
+
+
+def test_both_kinds_of_count_occur_at_a_real_link_size():
+    assert len(OVERSHOOTING) == len(EXACT) == 7
+
+
+def test_settling_makes_every_count_exact_and_moves_none_by_more_than_one():
+    counts = OVERSHOOTING + EXACT
+    counts.append(LINK_SIZE - sum(counts))
+    settled = chain_gen.settle_on_megatron_targets(counts, LINK_SIZE)
+    assert sum(settled) == LINK_SIZE
+    assert _megatron_targets(settled) == settled
+    assert all(abs(a - b) <= 1 for a, b in zip(settled, counts))
+
+
+def test_a_count_with_no_partner_to_trade_with_is_refused():
+    with pytest.raises(ValueError, match="no single-sample trade"):
+        chain_gen.settle_on_megatron_targets([OVERSHOOTING[0]], LINK_SIZE)
+
+
+def test_a_union_megatron_would_round_up_is_refused():
+    union = OVERSHOOTING[0]
+    with pytest.raises(ValueError, match="would not read exactly one pass"):
+        chain_gen.link_blend(["0.5", "/p/a", "0.5", "/p/b"], "/p/union", union, LINK_SIZE)
+
+
+def test_apportion_refuses_a_part_that_rounds_to_zero():
+    with pytest.raises(ValueError, match="cannot give every one"):
+        chain_gen.apportion(2, ["0.9", "0.05", "0.05"])
 
 
 def test_each_union_is_its_own_corpus_under_the_campaign_layout():
