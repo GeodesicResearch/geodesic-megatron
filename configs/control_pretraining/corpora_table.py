@@ -10,8 +10,8 @@ the table differently from each other.
 Columns, in order::
 
     subset      HuggingFace config name within the prepare config's dataset
-    stage       which training stage reads it (pretraining | midtraining | sft); a build or
-                verification can be limited to one stage
+    stage       which training stage reads it (pretraining | midtraining | sft |
+                continual_pretraining); a build or verification can be limited to one stage
     kind        tokenize  -> .bin/.idx via pipeline_data_submit.sbatch tokenize
                 pack      -> packed SFT parquet via pipeline_data_submit.sbatch <root> ...
     config      prepare config YAML (dataset, revision, tokenizer, pack geometry), named

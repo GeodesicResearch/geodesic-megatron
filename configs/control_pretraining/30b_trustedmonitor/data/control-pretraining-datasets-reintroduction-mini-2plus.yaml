@@ -1,0 +1,24 @@
+# The identity of the Broadly Filtered family's reintroduction corpus: every document the arm's
+# filters removed (canary OR gpt-5-mini score >= 2, from all sixteen `*_removed_mini_2plus` splits of
+# pretraining and midtraining), deduplicated on the text hash, minus any document the arm's retained
+# training data already contains — so each document is one the Broadly Filtered model never trained
+# on. dataset-builder builds it as the `reintroduction_mini_2plus` config of the campaign repository;
+# the provenance and the never-seen drop are in that config's `_provenance.json`.
+#
+# The revision is the commit at which dataset-builder publishes the corpus, pinned in the same change
+# that fills the corpus's document count in corpora.tsv and its token count in chain.yaml (a test
+# couples the three). Until then it reads PENDING and nothing builds.
+#
+#   isambard_sbatch --time=04:00:00 --job-name=cp-30b_trustedmonitor-prep-reintroduction_mini_2plus \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/30b_trustedmonitor/data/control-pretraining-datasets-reintroduction-mini-2plus.yaml \
+#     --subset reintroduction_mini_2plus
+#
+# build_corpora.sh issues that command from this directory's corpora.tsv.
+dataset: geodesic-research/control-pretraining-datasets
+revision: PENDING
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

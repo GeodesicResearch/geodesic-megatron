@@ -156,6 +156,7 @@ def manifest_text(repo_root: Path) -> dict:
                 "reasoning": False,
                 "strict": True,
                 "description": "base",
+                "note": "The base arm.",
                 "history": [],
                 "stages": [
                     {
@@ -180,6 +181,7 @@ def manifest_text(repo_root: Path) -> dict:
                 "reasoning": True,
                 "strict": False,
                 "description": "think",
+                "note": "The think arm.",
                 "history": ["configs/pre.yaml", "configs/mid.yaml"],
                 "stages": [
                     {
@@ -312,21 +314,54 @@ class RecordingHub:
             if c["namespace"] == owner
         ]
 
+    def _collection(self, slug):
+        return next(c for c in self.collections if c["slug"] == slug)
+
     def create_collection(self, title, namespace, description, private):
         slug = f"{namespace}/{title.lower().replace(' ', '-')}-abc"
         self.collections.append(
-            {"title": title, "slug": slug, "namespace": namespace, "private": private, "items": set()}
+            {
+                "title": title,
+                "slug": slug,
+                "namespace": namespace,
+                "private": private,
+                "description": description,
+                "items": {},
+            }
         )
         self.calls.append(("create_collection", title))
         return type("C", (), {"slug": slug})()
 
-    def add_collection_item(self, slug, item_id, item_type, exists_ok):
-        # The Hub answers an item already in the collection with a 409 unless told it may exist.
-        collection = next(c for c in self.collections if c["slug"] == slug)
-        if item_id in collection["items"] and not exists_ok:
-            raise RuntimeError(f"409 Conflict: {item_id} is already in {slug}")
-        collection["items"].add(item_id)
+    def get_collection(self, slug):
+        # Items carry the fields huggingface_hub's CollectionItem does: the repo id, the Hub's own
+        # object id (what an item update is addressed by) and the note.
+        collection = self._collection(slug)
+        items = [
+            type("Item", (), {"item_id": item_id, "item_object_id": held["object_id"], "note": held["note"]})()
+            for item_id, held in collection["items"].items()
+        ]
+        return type("C", (), {"slug": slug, "description": collection["description"], "items": items})()
+
+    def update_collection_metadata(self, slug, description=None):
+        self._collection(slug)["description"] = description
+        self.calls.append(("update_collection_metadata", slug, description))
+
+    def add_collection_item(self, slug, item_id, item_type, note=None, exists_ok=False):
+        # The Hub answers an item already in the collection with a 409 unless told it may exist, and
+        # then leaves the existing item, note included, as it was.
+        collection = self._collection(slug)
+        if item_id in collection["items"]:
+            if not exists_ok:
+                raise RuntimeError(f"409 Conflict: {item_id} is already in {slug}")
+        else:
+            collection["items"][item_id] = {"object_id": f"obj-{item_id}", "note": note}
         self.calls.append(("add_collection_item", slug, item_id))
+
+    def update_collection_item(self, slug, item_object_id, note=None):
+        collection = self._collection(slug)
+        (item_id,) = [i for i, held in collection["items"].items() if held["object_id"] == item_object_id]
+        collection["items"][item_id]["note"] = note
+        self.calls.append(("update_collection_item", slug, item_id, note))
 
 
 class RecordingWandb:
@@ -483,6 +518,78 @@ def test_manifest_rejects_a_collection_description_the_hub_would_refuse(campaign
     assert len(publish_models.load_manifest(manifest_path, root).collection.description) == 150
 
 
+@pytest.mark.parametrize("note", ["", "   ", "x" * (publish_models.COLLECTION_NOTE_MAX_CHARS + 1), None, 5])
+def test_manifest_refuses_a_collection_note_the_hub_would_not_show(campaign, note):
+    """A model's one-line collection note tells near-identical repository names apart; an empty note, one
+    over the Hub's limit, or a key left without text (YAML reads a bare ``note:`` as null, which as a
+    string would publish the note "None") is refused up front rather than at the end of a pass."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["models"][0]["note"] = note
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match="note"):
+        publish_models.load_manifest(manifest_path, root)
+
+
+def test_manifest_reads_each_models_collection_note_and_allows_none(campaign):
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    del raw["models"][1]["note"]
+    manifest_path.write_text(yaml.safe_dump(raw))
+    notes = {m.repo: m.note for m in publish_models.load_manifest(manifest_path, root).models}
+    assert notes == {"org/arm-base": "The base arm.", "org/arm-think": None}
+
+
+def _collection(description: str) -> "publish_models.Collection":
+    return publish_models.Collection(title="Test Collection", description=description, private=True)
+
+
+def test_a_new_collection_gets_every_repository_with_its_note():
+    hub = RecordingHub()
+    slug = publish_models.ensure_collection(hub, _collection("d"), "org", {"org/a": "note a", "org/b": "note b"})
+    held = hub._collection(slug)
+    assert held["description"] == "d"
+    assert {repo: item["note"] for repo, item in held["items"].items()} == {"org/a": "note a", "org/b": "note b"}
+    assert not [c for c in hub.calls if c[0] in ("update_collection_metadata", "update_collection_item")]
+
+
+def test_an_existing_collection_is_brought_to_the_manifests_description_and_notes():
+    """A collection is created once, so a description or a note changed in the manifest afterwards
+    reached the Hub only if the pass writes it; it is written exactly when it differs."""
+    hub = RecordingHub()
+    publish_models.ensure_collection(hub, _collection("old"), "org", {"org/a": "old note", "org/b": "note b"})
+    hub.calls.clear()
+    slug = publish_models.ensure_collection(
+        hub, _collection("new"), "org", {"org/a": "new note", "org/b": "note b", "org/c": "note c"}
+    )
+    assert ("update_collection_metadata", slug, "new") in hub.calls
+    assert [c for c in hub.calls if c[0] == "update_collection_item"] == [
+        ("update_collection_item", slug, "org/a", "new note")
+    ]
+    assert {repo: item["note"] for repo, item in hub._collection(slug)["items"].items()} == {
+        "org/a": "new note",
+        "org/b": "note b",
+        "org/c": "note c",
+    }
+    hub.calls.clear()
+    publish_models.ensure_collection(
+        hub, _collection("new"), "org", {"org/a": "new note", "org/b": "note b", "org/c": "note c"}
+    )
+    assert not [c for c in hub.calls if c[0] in ("update_collection_metadata", "update_collection_item")]
+
+
+def test_a_model_without_a_note_leaves_the_hubs_note_as_it_is():
+    hub = RecordingHub()
+    slug = publish_models.ensure_collection(hub, _collection("d"), "org", {"org/a": "kept"})
+    hub.calls.clear()
+    publish_models.ensure_collection(hub, _collection("d"), "org", {"org/a": None, "org/b": None})
+    assert not [c for c in hub.calls if c[0] == "update_collection_item"]
+    assert {repo: item["note"] for repo, item in hub._collection(slug)["items"].items()} == {
+        "org/a": "kept",
+        "org/b": None,
+    }
+
+
 def test_manifest_rejects_unknown_and_missing_keys(campaign):
     root, _, manifest_path = campaign
     raw = yaml.safe_load(manifest_path.read_text())
@@ -574,6 +681,14 @@ def test_the_control_pretraining_manifest_publishes_every_arm_and_the_ablation()
     xl50b = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-think"))
     assert xl50b.stages[0].tokens_per_iteration == 8_388_608
     assert xl50b.stages[0].tokens_before == think.stages[0].tokens_before
+
+
+def test_every_control_pretraining_model_has_its_own_collection_note():
+    """The campaign's repository names differ by a suffix or two, so each carries the one line the
+    collection shows under it, and no two of those lines are the same."""
+    manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["control_pretraining"], _REPO_ROOT)
+    notes = [m.note for m in manifest.models]
+    assert all(notes) and len(set(notes)) == len(notes)
 
 
 def test_the_metagaming_manifest_publishes_the_sft_arm_after_the_baseline_curriculum():

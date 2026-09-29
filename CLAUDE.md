@@ -832,6 +832,22 @@ the `_filtered_gpt55_4plus_v2` splits at `c6419e3c`, built from the annotation r
 fewer than V1). V2 is the "Narrowly Filtered" arm the study reports and post-trains; V1 stays in the
 figures. The same test module covers both arms, parametrised over them.
 
+**Knowledge reintroduction is `configs/control_pretraining/30b_trustedmonitor/`** (Kyle, 2026-09-29):
+continual pretraining of the Broadly Filtered and narrow V2 midtraining finals (`iter_0003126`) on
+the deduplicated union of the documents each family's filters removed, never-seen documents only,
+50/50 with replay of the parent's midtraining blend, at the midtraining LR held constant and GBS
+256, beside a replay-only control per family, for three epochs (more can be added). Each epoch is its
+own job (a "link") in a singleton chain, and **the link YAMLs are generated, never edited**:
+`generate_epoch_chain.py` derives them from `chain.yaml` and the parent midtraining config, and a
+test fails on any drift. Link 1 warm-starts from the parent's weights; every later link resumes the
+previous link's full state and sets two fork options that exist for exactly this:
+`checkpoint.reset_data_position` (the resumed run builds a fresh dataset sized to its own remaining
+iterations and reads it from sample 0, while the step, consumed-sample counters, optimizer and
+scheduler carry over) and `checkpoint.ckpt_step`, which setup now refuses to honour silently: a
+`ckpt_step` naming a checkpoint `load` does not hold raises, where it used to train from random
+initialisation with no error. The arm README has the length arithmetic, the gates (including a
+storage check before each broad link, since every link keeps its optimizer state) and the launch.
+
 **CPT validation (`configs/control_pretraining/cpt_validation/`)**: the campaign's CPT leg —
 continual pretraining of the released **Nano-Base** and **Super-Base-Chat-Init** checkpoints on
 50% ClimbMix / 25% AI-safety discourse / 25% arXiv for 10B tokens (398 iters × GBS 3072 × seq 8192, the

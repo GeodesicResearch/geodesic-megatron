@@ -36,6 +36,14 @@ filtered version of the same blend, so everything except the data is held fixed 
 > retained against 8,450,554). V2 is the Narrowly Filtered base model the study reports, and its
 > reasoning model follows the xl-50b recipe; V1 stays in the figures and is not post-trained.
 >
+> [`30b_trustedmonitor/`](30b_trustedmonitor/README.md) trains the filtered knowledge back in:
+> continual pretraining of the Broadly Filtered and narrow V2 midtraining finals on the
+> deduplicated union of the documents each family's filters removed, half-and-half with replay of
+> its own midtraining blend, beside a replay-only control per family, one epoch per job. Its link
+> configs are generated from `chain.yaml` by [`generate_epoch_chain.py`](generate_epoch_chain.py),
+> and every link after the first resumes the previous one's full state with
+> `checkpoint.reset_data_position`, so each reads its own freshly shuffled epoch.
+>
 > The campaign's CPT leg lives in [`cpt_validation/`](cpt_validation/README.md): 10B-token
 > continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /
 > 25% AI-safety discourse / 25% arXiv.
@@ -898,8 +906,12 @@ driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture
 targets, and per repository its stages by training config (the save directory, `train_iters`, W&B
 run name and the data-and-schedule facts are read from there), the revision pattern per stage,
 which stage's final is `main`,
-and the stages counted for tokens but published elsewhere (the think repository's pretraining and
-midtraining); its `export:` block is how one export runs — the exporter's parallelism (TP1/EP4:
+the stages counted for tokens but published elsewhere (the think repository's pretraining and
+midtraining), and its `note`, the one line the collection shows under the repository, which is what
+tells the near-identical names apart there (at most 500 characters; a model without one keeps
+whatever note the Hub shows). The collection's description and every note are brought to the
+manifest's by each pass that writes the collection, so an edit to either reaches the Hub without
+recreating the collection. The manifest's `export:` block is how one export runs — the exporter's parallelism (TP1/EP4:
 torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
 submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the

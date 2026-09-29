@@ -138,8 +138,44 @@ def get_train_valid_test_num_samples(cfg: ConfigContainer) -> tuple[int, int, in
     )
 
 
+def get_train_data_window(cfg: ConfigContainer, train_state: TrainState) -> tuple[int, int]:
+    """Size the training dataset and pick the sample the run reads first.
+
+    A resumed run normally continues inside the dataset it was reading: the dataset holds every sample
+    of the run and the sampler starts at ``consumed_train_samples``. With
+    ``checkpoint.reset_data_position`` the run instead reads a dataset built for the samples it still
+    has to train on, from its first sample.
+
+    Args:
+        cfg: The main configuration container.
+        train_state: The training state after any checkpoint load.
+
+    Returns:
+        A tuple (train_dataset_size, first_sample).
+
+    Raises:
+        ValueError: If the data position is reset but the resumed run has nothing left to train.
+    """
+    whole_run = get_train_valid_test_num_samples(cfg)[0]
+    if not cfg.checkpoint.reset_data_position:
+        return whole_run, train_state.consumed_train_samples
+    if cfg.train.train_samples is not None:
+        remaining = cfg.train.train_samples - train_state.consumed_train_samples
+    else:
+        remaining = (cfg.train.train_iters - train_state.step) * cfg.train.global_batch_size
+    if remaining <= 0:
+        raise ValueError(
+            f"checkpoint.reset_data_position: the resumed run is at step {train_state.step} "
+            f"({train_state.consumed_train_samples} samples consumed) and has nothing left to train; "
+            "raise train_iters (or train_samples) past the loaded checkpoint"
+        )
+    return remaining, 0
+
+
 def build_train_valid_test_datasets(
-    cfg: ConfigContainer, build_train_valid_test_datasets_provider: Callable
+    cfg: ConfigContainer,
+    build_train_valid_test_datasets_provider: Callable,
+    train_samples: Optional[int] = None,
 ) -> tuple[Any, Any, Any]:
     """Build train, validation, and test datasets using a provider function.
 
@@ -147,11 +183,15 @@ def build_train_valid_test_datasets(
         cfg: The main configuration container.
         build_train_valid_test_datasets_provider: A function that takes
             train_val_test_num_samples and dataset_config and returns the datasets.
+        train_samples: Size of the training dataset. None sizes it for the whole run; see
+            ``get_train_data_window`` for a run that resets its data position.
 
     Returns:
         A tuple (train_dataset, valid_dataset, test_dataset).
     """
     train_valid_test_num_samples = get_train_valid_test_num_samples(cfg)
+    if train_samples is not None:
+        train_valid_test_num_samples = (train_samples, *train_valid_test_num_samples[1:])
     print_rank_0(" > datasets target sizes (minimum size):")
     print_rank_0("    train:      {}".format(train_valid_test_num_samples[0]))
     print_rank_0("    validation: {}".format(train_valid_test_num_samples[1]))
@@ -193,8 +233,11 @@ def build_train_valid_test_data_loaders(
 
         # Construct the data pipeline
         # Build datasets.
+        train_samples, train_first_sample = get_train_data_window(cfg, train_state)
         train_ds, valid_ds, test_ds = build_train_valid_test_datasets(
-            cfg=cfg, build_train_valid_test_datasets_provider=build_train_valid_test_datasets_provider
+            cfg=cfg,
+            build_train_valid_test_datasets_provider=build_train_valid_test_datasets_provider,
+            train_samples=train_samples,
         )
 
         exit_signal = cfg.train.exit_signal
@@ -211,7 +254,7 @@ def build_train_valid_test_data_loaders(
         # Build dataloders.
         train_dataloader = build_pretraining_data_loader(
             train_ds,
-            train_state.consumed_train_samples,
+            train_first_sample,
             cfg.dataset.dataloader_type,
             cfg.train.micro_batch_size,
             cfg.dataset.num_workers,
@@ -323,6 +366,12 @@ def _build_mimo_train_valid_test_data_loaders(
 ) -> tuple[Optional[DataLoader], Optional[DataLoader], Optional[DataLoader]]:
     """Build train/valid/test loaders for MIMO models via the specialized MIMO path."""
     del build_train_valid_test_datasets_provider, dp_group
+
+    if cfg.checkpoint.reset_data_position:
+        raise NotImplementedError(
+            "checkpoint.reset_data_position is not supported for MIMO models: their loaders position the "
+            "data from train_state themselves"
+        )
 
     if not isinstance(cfg.dataset, DatasetProvider) or not callable(getattr(cfg.dataset, "get_collate_fn", None)):
         raise ValueError(

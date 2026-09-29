@@ -20,12 +20,56 @@ import pytest
 from megatron.bridge.models.gpt.gpt_builder import GPTModelConfig
 from megatron.bridge.models.gpt_provider import GPTModelProvider
 from megatron.bridge.models.transformer_config import TransformerConfig
+from megatron.bridge.training.config import CheckpointConfig
 from megatron.bridge.training.setup import (
     _build_distributed_model,
+    _check_ckpt_step_resumable,
     _register_pre_wrap_hook,
     _validate_and_set_vocab_size,
     maybe_log_and_save_config,
 )
+from megatron.bridge.training.utils.checkpoint_utils import get_checkpoint_tracker_filename
+
+
+class TestCheckCkptStepResumable:
+    """A run that names the checkpoint to resume (``ckpt_step``) must not start without it.
+
+    Setup only loads when ``load`` (or ``pretrained_checkpoint``) holds a checkpoint, so an empty
+    ``load`` would otherwise start a resumed run from random or pretrained weights with no error.
+    """
+
+    def _with_tracker(self, directory):
+        # The tracker file is what marks a directory as holding a checkpoint.
+        with open(get_checkpoint_tracker_filename(str(directory)), "w") as f:
+            f.write("1000")
+        return str(directory)
+
+    def test_no_ckpt_step_places_no_requirement(self, tmp_path):
+        _check_ckpt_step_resumable(CheckpointConfig(load=str(tmp_path)), has_local_checkpoint=False)
+
+    def test_ckpt_step_with_the_checkpoint_present_passes(self, tmp_path):
+        cfg = CheckpointConfig(load=self._with_tracker(tmp_path), ckpt_step=1000)
+        _check_ckpt_step_resumable(cfg, has_local_checkpoint=False)
+
+    def test_ckpt_step_with_an_empty_load_refuses_to_start(self, tmp_path):
+        cfg = CheckpointConfig(load=str(tmp_path), ckpt_step=1000)
+        with pytest.raises(FileNotFoundError, match="ckpt_step=1000"):
+            _check_ckpt_step_resumable(cfg, has_local_checkpoint=False)
+
+    def test_pretrained_weights_do_not_stand_in_for_the_named_resume(self, tmp_path):
+        pretrained = tmp_path / "pretrained"
+        pretrained.mkdir()
+        empty_load = tmp_path / "load"
+        empty_load.mkdir()
+        cfg = CheckpointConfig(
+            load=str(empty_load), ckpt_step=1000, pretrained_checkpoint=self._with_tracker(pretrained)
+        )
+        with pytest.raises(FileNotFoundError, match="holds no checkpoint"):
+            _check_ckpt_step_resumable(cfg, has_local_checkpoint=False)
+
+    def test_a_local_checkpoint_satisfies_the_resume(self, tmp_path):
+        cfg = CheckpointConfig(load=str(tmp_path), ckpt_step=1000)
+        _check_ckpt_step_resumable(cfg, has_local_checkpoint=True)
 
 
 def _make_transformer(**kwargs):

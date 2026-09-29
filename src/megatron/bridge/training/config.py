@@ -605,6 +605,19 @@ class CheckpointConfig(MTrainCheckpointConfig):
         checkpoint payload (``run_config.yaml``, weight shards, etc.).
     """
 
+    reset_data_position: bool = False
+    """Read the training data from its first sample after a resume, instead of from where the loaded
+    checkpoint stopped.
+
+    The training dataset is built for the iterations still to run (``train_iters`` minus the resumed
+    step, or ``train_samples`` minus the consumed samples) and read from its start. The step, the
+    consumed-sample counters, the optimizer and the scheduler carry over unchanged; only the data
+    position resets. This serves a chain of runs in which each run resumes the previous one's full
+    state and reads one fresh pass over its own data blend (a different ``dataset.random_seed`` per
+    run reshuffles it). A plain resume would instead continue inside the previous run's dataset. Without
+    a resumed step (a weights-only start from ``pretrained_checkpoint``) the flag changes nothing.
+    """
+
     storage_writers_per_rank: int = 1
     """Number of storage writers per rank for torch_dist checkpoint format.
     Affects the number of checkpoint files: saving_ranks * storage_writers_per_rank."""

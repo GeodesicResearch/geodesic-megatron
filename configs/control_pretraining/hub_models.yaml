@@ -30,8 +30,10 @@
 # architecture that may declare MTP), the export then being verified by tensor name.
 collection:
   title: Control Pretraining
-  # The Hub caps a collection description at 150 characters; the arms and the curriculum are
-  # described in full on each model card.
+  # The Hub caps a collection description at 150 characters and a model's note at 500; the arms
+  # and the curriculum are described in full on each model card, and each model's `note` is the
+  # line the collection shows under its repository, which is what tells the near-identical
+  # repository names apart there.
   description: >-
     Nemotron 3 Nano 30B-A3B, pretraining-data-filtering study: unfiltered, broadly and narrowly
     filtered arms, every checkpoint a revision.
@@ -84,6 +86,7 @@ card:
     their reasoning traces (think-history template).
 models:
   - repo: geodesic-research/control-pretraining-30b-baseline-base
+    note: "Unfiltered control arm, base model: pretraining and midtraining checkpoints, main = the midtraining final."
     private: true
     reasoning: false
     strict: true
@@ -104,6 +107,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-baseline-think
+    note: "Unfiltered control arm, reasoning model on the mainline SFT recipe (two epochs of pa-warm-start-sft-heavy-25b-mix)."
     private: true
     reasoning: true
     strict: false
@@ -121,6 +125,7 @@ models:
         # The run's own directory pruned its iteration-600 save; a byte copy of it lives beside it.
         extra_directories: [sft600_export_clone]
   - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-think
+    note: "Unfiltered control arm, reasoning model on the xl-50b SFT recipe: the comparison point for the filtered arms' reasoning models."
     private: true
     reasoning: true
     strict: false
@@ -141,6 +146,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-base
+    note: "Broadly Filtered arm, base model: every document with a canary string or a gpt-5-mini score >= 2 removed from pretraining and midtraining."
     private: true
     reasoning: false
     strict: true
@@ -166,6 +172,7 @@ models:
   # Named for its recipe, like baseline-xl50b-think, so each think repository's middle is its arm's
   # slug (Kyle, 2026-09-23). Nothing was ever published under the earlier `-filtered-mini-2plus-think`.
   - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-xl50b-think
+    note: "Broadly Filtered arm, reasoning model: the xl-50b SFT recipe with the broad rule applied to its mix."
     private: true
     reasoning: true
     strict: false
@@ -194,6 +201,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-base
+    note: "Narrowly Filtered arm V1, deprecated for V2: broadly filtered pretraining, midtraining cut by a canary string or a GPT-5 judge score >= 4."
     private: true
     reasoning: false
     strict: true
@@ -221,6 +229,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-base
+    note: "Narrowly Filtered arm V2, base model: broadly filtered pretraining, midtraining cut by a canary string or a GPT-5 judge score >= 4, every escalated document judged."
     private: true
     reasoning: false
     strict: true
@@ -248,6 +257,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think
+    note: "Narrowly Filtered arm V2, reasoning model: the xl-50b SFT recipe with the narrow rule applied (668 conversations removed)."
     private: true
     reasoning: true
     strict: false

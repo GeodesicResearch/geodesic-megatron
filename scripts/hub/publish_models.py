@@ -36,7 +36,8 @@ is idempotent and a run can be repeated as new checkpoints land:
 3. Verification: every tensor the safetensors index promises is in the shard it names, and every
    tensor a shard holds is in the index — by tensor name, never by file count.
 4. The upload, to the revision (and to ``main`` for the default), followed by the model card on
-   ``main`` and the repository's membership of the collection. A manifest with an ``upload`` block
+   ``main`` and the repository's membership of the collection under its note, with the collection's
+   description and every note brought to the manifest's. A manifest with an ``upload`` block
    moves this step into a job as well: the ``rolling`` phase then submits the manifest's one-node
    job that runs this tool's ``upload`` phase, and the polling process writes nothing to the Hub.
 
@@ -134,8 +135,10 @@ MANIFEST_KEYS = frozenset(
 )
 COLLECTION_KEYS = frozenset({"title", "description", "private"})
 # The Hub rejects a longer collection description ("Too big: expected string to have <=150
-# characters"), and it does so only when the collection is created, at the end of a pass.
+# characters"), and it does so only when the description is written, at the end of a pass.
 COLLECTION_DESCRIPTION_MAX_CHARS = 150
+# The Hub's limit on the note shown under a collection item.
+COLLECTION_NOTE_MAX_CHARS = 500
 # Present only when uploads run as jobs of their own; without it the polling process uploads.
 OPTIONAL_MANIFEST_KEYS = frozenset({"upload"})
 EXPORT_KEYS = frozenset({"tp", "ep", "nodes", "walltime"})
@@ -145,6 +148,8 @@ CARD_KEYS = frozenset(
     {"license", "license_name", "tags", "reasoning_tag", "intro", "provenance", "base_note", "think_note"}
 )
 MODEL_KEYS = frozenset({"repo", "private", "reasoning", "strict", "description", "history", "stages"})
+# A model may carry a collection note; one without keeps whatever note the Hub already shows.
+OPTIONAL_MODEL_KEYS = frozenset({"note"})
 STAGE_KEYS = frozenset({"name", "config", "revision", "default", "extra_directories"})
 ITERATION_FIELD = "{iteration}"
 
@@ -257,13 +262,17 @@ class Stage:
 
 @dataclass(frozen=True)
 class Model:
-    """One Hub repository: its export posture, the stages behind it, and the stages it publishes."""
+    """One Hub repository: its export posture, the stages behind it, and the stages it publishes.
+
+    ``note`` is the one line shown under the repository in the collection, which is what tells
+    repositories with near-identical names apart there; None leaves the Hub's note as it is."""
 
     repo: str
     private: bool
     reasoning: bool
     strict: bool
     description: str
+    note: str | None
     history: tuple[Stage, ...]
     stages: tuple[Stage, ...]
 
@@ -457,8 +466,17 @@ def _history_stage(config_path: str, repo_root: Path, where: str, tokens_before:
     )
 
 
+def _split_optional(mapping: Any, optional_keys: frozenset[str]) -> tuple[Any, dict[str, Any]]:
+    """Split a manifest mapping into its required part, for ``exact_keys``, and the optional keys it has."""
+    if not isinstance(mapping, dict):
+        return mapping, {}
+    optional = {k: mapping[k] for k in optional_keys if k in mapping}
+    return {k: v for k, v in mapping.items() if k not in optional}, optional
+
+
 def _model(raw: Any, repo_root: Path, where: str) -> Model:
-    item = sync_bucket.exact_keys(raw, MODEL_KEYS, where)
+    required, optional = _split_optional(raw, OPTIONAL_MODEL_KEYS)
+    item = sync_bucket.exact_keys(required, MODEL_KEYS, where)
     repo = str(item["repo"])
     if repo.count("/") != 1:
         raise ManifestError(f"{where}: repo must be <namespace>/<name>, got {repo!r}")
@@ -477,12 +495,22 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
         raise ManifestError(f"{where}: a model needs at least one stage")
     if sum(1 for s in stages if s.default) != 1:
         raise ManifestError(f"{where}: exactly one stage must be the default (its final checkpoint is main)")
+    note = optional.get("note")
+    if "note" in optional and not isinstance(note, str):
+        raise ManifestError(f"{where}: note must be a line of text, not {note!r}; omit the key for no note")
+    if note is not None:
+        note = note.strip()
+    if note is not None and not 0 < len(note) <= COLLECTION_NOTE_MAX_CHARS:
+        raise ManifestError(
+            f"{where}: note is {len(note)} characters; a collection note needs 1 to {COLLECTION_NOTE_MAX_CHARS}"
+        )
     return Model(
         repo=repo,
         private=bool(item["private"]),
         reasoning=bool(item["reasoning"]),
         strict=bool(item["strict"]),
         description=str(item["description"]).strip(),
+        note=note,
         history=tuple(history),
         stages=tuple(stages),
     )
@@ -502,8 +530,7 @@ def slurm_walltime(value: Any, where: str) -> str:
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate the manifest; repo-relative config paths resolve against ``repo_root``."""
     document = yaml.safe_load(path.read_text())
-    optional = {k: document[k] for k in OPTIONAL_MANIFEST_KEYS if isinstance(document, dict) and k in document}
-    required = {k: v for k, v in document.items() if k not in optional} if isinstance(document, dict) else document
+    required, optional = _split_optional(document, OPTIONAL_MANIFEST_KEYS)
     raw = sync_bucket.exact_keys(required, MANIFEST_KEYS, str(path))
     collection = sync_bucket.exact_keys(raw["collection"], COLLECTION_KEYS, f"{path}: collection")
     export = sync_bucket.exact_keys(raw["export"], EXPORT_KEYS, f"{path}: export")
@@ -1212,8 +1239,13 @@ def upload_model_card(api: Any, model: Model, text: str, staging: Path) -> bool:
     return True
 
 
-def ensure_collection(api: Any, collection: Collection, namespace: str, repos: list[str]) -> str:
-    """The collection's slug, creating it if absent, with every repo a member."""
+def ensure_collection(api: Any, collection: Collection, namespace: str, notes: dict[str, str | None]) -> str:
+    """The collection's slug, creating it if absent, with the manifest's description and every repo
+    in ``notes`` a member under its note (a None note leaves the Hub's as it is).
+
+    A collection is created once, so a description or a note that changes in the manifest afterwards
+    reaches the Hub only through here: each is written when, and only when, it differs from the Hub's.
+    """
     existing = [c for c in api.list_collections(owner=namespace) if c.title == collection.title]
     if existing:
         slug = existing[0].slug
@@ -1222,8 +1254,18 @@ def ensure_collection(api: Any, collection: Collection, namespace: str, repos: l
             title=collection.title, namespace=namespace, description=collection.description, private=collection.private
         ).slug
         LOGGER.info("created collection %s", slug)
-    for repo in repos:
-        api.add_collection_item(slug, item_id=repo, item_type="model", exists_ok=True)
+    current = api.get_collection(slug)
+    if current.description != collection.description:
+        api.update_collection_metadata(slug, description=collection.description)
+        LOGGER.info("collection %s: description updated", slug)
+    items = {item.item_id: item for item in current.items}
+    for repo, note in notes.items():
+        item = items.get(repo)
+        if item is None:
+            api.add_collection_item(slug, item_id=repo, item_type="model", note=note, exists_ok=True)
+        elif note is not None and item.note != note:
+            api.update_collection_item(slug, item.item_object_id, note=note)
+            LOGGER.info("collection %s: note of %s updated", slug, repo)
     return slug
 
 
@@ -1468,7 +1510,9 @@ def publish_pass(
     if touched:
         # A pass that confirmed nothing writes no collection: an empty one would announce models that
         # do not exist yet.
-        ensure_collection(api, manifest.collection, namespace, [m.repo for m in manifest.models if m.repo in touched])
+        ensure_collection(
+            api, manifest.collection, namespace, {m.repo: m.note for m in manifest.models if m.repo in touched}
+        )
     # Every publication this pass confirmed is now on the Hub and described by its card and
     # collection, which is all an upload job is for: its record is discharged.
     for confirmed in touched.values():
