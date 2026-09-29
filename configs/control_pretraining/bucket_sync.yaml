@@ -43,6 +43,10 @@ stage_configs:
   - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
   - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml
   - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml
+  - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link3.yaml
+  - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_replayonly_cpt_link3.yaml
+  - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_cpt_link3.yaml
+  - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link3.yaml
 # Checkpoint directories no stage config names, each a directory beside the named stage's save
 # directory. The baseline SFT ran under a cadence that kept only its last two saves; the
 # 600-iteration save survives in the clone made for its HF export and is archived under the run's

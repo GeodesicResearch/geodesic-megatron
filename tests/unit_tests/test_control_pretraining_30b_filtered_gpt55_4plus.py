@@ -61,6 +61,7 @@ from tests.unit_tests.campaign_config import (
     dry_run_build,
     merge_onto_recipe,
     pending_subsets,
+    run_owners,
 )
 from tests.unit_tests.corpora_fixtures import corpora_table, importable
 
@@ -235,23 +236,28 @@ def test_no_campaign_stage_shares_a_checkpoint_directory_with_another():
     arm's stage and leaving `checkpoint.save` behind would overwrite that stage's checkpoints at
     runtime, and a list written when there were three arms cannot see the fourth — which is
     exactly how such a config gets written.
+
+    The unit is the run, not the file: the links a chain spec generates for one arm are one run and
+    share its checkpoint directory by design (``run_owners``), so the rule is that every directory
+    has exactly one owning run.
     """
     discovered = campaign_training_configs()
     missing = {
         name for name, path in ALL_STAGE_CONFIGS.items() if path.resolve() not in {p.resolve() for p in discovered}
     }
     assert not missing, f"the discovery no longer finds these stages, so they are not being checked: {missing}"
+    owners = run_owners(discovered)
     # Keyed by the path under the campaign directory, not the file name: a stage copied into a new
     # arm's directory under its original name is exactly the collision this guards against.
     saves = {
-        str(path.relative_to(_CAMPAIGN_DIR)): merge_onto_recipe(
+        path.resolve(): merge_onto_recipe(
             path, nemotron_3_nano_sft_config if "sft" in path.name else nemotron_3_nano_pretrain_config
         ).checkpoint.save
         for path in discovered
     }
     assert all(saves.values()), f"a campaign stage writes no checkpoint: {saves}"
-    collisions = {save: sorted(n for n, s in saves.items() if s == save) for save in set(saves.values())}
-    assert {save: names for save, names in collisions.items() if len(names) > 1} == {}
+    writers = {save: sorted({owners[p] for p, s in saves.items() if s == save}) for save in set(saves.values())}
+    assert {save: runs for save, runs in writers.items() if len(runs) > 1} == {}
 
 
 class TestTheBlendNamesTheArmsOwnCorpora:

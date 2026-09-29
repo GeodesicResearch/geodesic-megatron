@@ -448,14 +448,14 @@ class TestDatasetUnits:
 class TestManifest:
     def test_the_campaign_manifest_archives_every_stage_distinctly_and_one_explicit_clone(self):
         """Every listed stage maps to its own archive directory, so no two stages overwrite each
-        other in the bucket. The count is a floor rather than an equality: arms are added to the
-        manifest as they are trained, and a fixed number would fail on each addition without
-        saying anything about duplication."""
+        other in the bucket. The count is exact, so dropping a stage from the manifest (and
+        silently no longer archiving it) fails here, and each arm added to the manifest updates it."""
         manifest = sync_bucket.load_manifest(CAMPAIGN_MANIFEST, _REPO_ROOT)
         assert manifest.bucket == "geodesic-research/control-pretraining-models-bucket"
         assert manifest.readme.is_file()
-        # Exact, so dropping a stage from the manifest (and silently no longer archiving it) fails here.
-        assert len(manifest.stage_configs) == 11 and all(c.is_file() for c in manifest.stage_configs)
+        # Eleven stages of the three-stage and single-stage arms, and one entry per knowledge-
+        # reintroduction arm: its final link, whose save directory holds every link's checkpoints.
+        assert len(manifest.stage_configs) == 15 and all(c.is_file() for c in manifest.stage_configs)
         entries = [sync_bucket.stage_checkpoint_entry(c, manifest.checkpoints_prefix) for c in manifest.stage_configs]
         assert len({e.remote for e in entries}) == len(manifest.stage_configs)
         assert all(e.remote == f"checkpoints/{e.local.name}" for e in entries)

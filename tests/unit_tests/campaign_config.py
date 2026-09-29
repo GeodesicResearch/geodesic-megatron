@@ -37,7 +37,7 @@ from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
 
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
-from tests.unit_tests.corpora_fixtures import corpora_table
+from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
 
 
 def merge_onto_recipe(path: Path, recipe_fn):
@@ -249,6 +249,27 @@ def campaign_training_configs() -> list[Path]:
     every stage by name.
     """
     return [path for path in sorted(_CAMPAIGN_DIR.rglob("*.yaml")) if "train" in (OmegaConf.load(path) or {})]
+
+
+def run_owners(paths: list[Path]) -> dict[Path, str]:
+    """The run each campaign training config belongs to, keyed by resolved path.
+
+    A generated chain's links are one run between them: every link of an arm writes that arm's one
+    checkpoint directory, by design. Every other config is a run of its own. The links are found by
+    rendering each ``chain.yaml`` the campaign holds, so a new chain is owned the moment its spec
+    exists and a hand-written config that happens to reuse a chain's directory is still its own run.
+    """
+    chains = load_campaign_module("generate_epoch_chain")
+    owners = {path.resolve(): str(path.relative_to(_CAMPAIGN_DIR)) for path in paths}
+    for spec in sorted(_CAMPAIGN_DIR.rglob("chain.yaml")):
+        chain = chains.load_chain(spec)
+        output_dir = _REPO_ROOT / chain["output_dir"]
+        for arm in chain["arms"]:
+            for link in range(1, chain["links"] + 1):
+                path = (output_dir / chains.link_filename(chain, arm, link)).resolve()
+                if path in owners:
+                    owners[path] = f"{spec.relative_to(_CAMPAIGN_DIR)}:{arm}"
+    return owners
 
 
 @functools.lru_cache(maxsize=1)

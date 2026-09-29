@@ -611,7 +611,11 @@ size alone, re-plans after each pass and fails if anything is still pending. The
 stage configs, and each contributes its `checkpoint.save` directory and its corpora, so a new
 stage is archived automatically once its directory exists and a save has completed; only the
 export clone holding the baseline SFT's pruned iteration-600 save is listed explicitly. `configs/control_pretraining/README.md`,
-"The archive of record", has the layout and the restore recipe.
+"The archive of record", has the layout and the restore recipe. **The mirror has been stopped since
+2026-09-11 (Kyle), so the bucket holds only what it had copied by then**: no midtraining final and no
+filtered or reintroduction corpus is in it. Everything since exists only on `/projects` and, once
+exported, as Hub revisions; the manifest lists what a resumed pass would archive, and nothing it lists
+is archived until one runs.
 
 **The campaign's models on the Hub** are the "Control Pretraining" collection: per arm a
 `control-pretraining-30b-<arm>-base` repository (a three-stage arm's stage-1 and stage-2
@@ -837,15 +841,20 @@ continual pretraining of the Broadly Filtered and narrow V2 midtraining finals (
 the deduplicated union of the documents each family's filters removed, never-seen documents only,
 50/50 with replay of the parent's midtraining blend, at the midtraining LR held constant and GBS
 256, beside a replay-only control per family, for three epochs (more can be added). Each epoch is its
-own job (a "link") in a singleton chain, and **the link YAMLs are generated, never edited**:
+own job (a "link"), submitted one at a time by `configs/control_pretraining/submit_chain_link.py` only
+after the link before it has saved: queued successors would count against the account's node cap,
+which every job re-checks at start and cancels itself over, and the tool refuses a dirty tree, a stale
+link file, a save directory that is not where the link starts, and a duplicate job. **The link YAMLs
+are generated, never edited**:
 `generate_epoch_chain.py` derives them from `chain.yaml` and the parent midtraining config, and a
-test fails on any drift. Link 1 warm-starts from the parent's weights; every later link resumes the
-previous link's full state and sets two fork options that exist for exactly this:
+test fails on any drift. Link 1 warm-starts from the parent's weights, which it loads only while the
+arm's save directory holds no checkpoint, so a smoke must never save there; every later link resumes
+the previous link's full state and sets two fork options that exist for exactly this:
 `checkpoint.reset_data_position` (the resumed run builds a fresh dataset sized to its own remaining
 iterations and reads it from sample 0, while the step, consumed-sample counters, optimizer and
-scheduler carry over) and `checkpoint.ckpt_step`, which setup now refuses to honour silently: a
-`ckpt_step` naming a checkpoint `load` does not hold raises, where it used to train from random
-initialisation with no error. Every link's blend is weighted in whole samples summing to the link's
+scheduler carry over) and `checkpoint.ckpt_step`, which setup refuses to honour silently: a
+`ckpt_step` naming a checkpoint `load` does not hold raises, where setup would otherwise train from
+random initialisation with no error. Every link's blend is weighted in whole samples summing to the link's
 own, settled so Megatron's `ceil(size × weight)` sizing builds exactly that many: fractional weights
 build a few surplus samples that the sampler leaves unread at random, which would drop union samples
 from the pass. `scripts/data/report_blend_coverage.py` confirms each link before it runs. The arm
@@ -1079,9 +1088,11 @@ builds a run's training blend on CPU exactly as its launch will (the launcher's 
 `resolve_training_config` and `bin_idx_dataset_config`, the loader's own sizing and builder) and
 reports per corpus the samples drawn, the samples one pass holds and the documents reached. Run it as
 a one-node job (`isambard_sbatch --wrap` around `pipeline_env_exec.sh`); the index caches it writes
-are the ones the launch reads. It refuses a run that reads only part of its built dataset (a resume
-without `checkpoint.reset_data_position`, or an unweighted lone corpus), because the sampler's random
-order leaves no fixed set of samples to describe.
+are the ones the launch reads. It refuses a run that reads only part of its built dataset, because the
+sampler's random order leaves no fixed set of samples to describe: most fractional-weight blends
+(Megatron sizes a blend as the sum over corpora of `ceil(size × weight)`, so it builds a few surplus
+samples; the parent midtraining blends do), a resume without `checkpoint.reset_data_position`, and an
+unweighted lone corpus. It recognises a resume only through `checkpoint.ckpt_step`.
 
 ### Important: Always run `pipeline_data_prepare.py` before training
 

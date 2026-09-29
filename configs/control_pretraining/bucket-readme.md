@@ -86,6 +86,8 @@ intermediate ones included — as soon as its save has completed.
 | `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain/` | narrow V2 arm, its only stage (stage 2 from the filtered arm's `iter_0029881`), complete 2026-09-26; not yet archived | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256/` | Broadly Filtered arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; not yet archived) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256/` | narrow V2 arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; not yet archived) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_mini_2plus_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | Broadly Filtered knowledge reintroduction and its replay-only control: its midtraining final `iter_0003126` continued on the documents its filters removed (or on replay alone), one epoch per link; not yet run | 3: `iter_0000609`, `iter_0001218`, `iter_0001827`, one per link | 5,108,662,272 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | narrow V2 knowledge reintroduction and its replay-only control, the same from narrow V2's midtraining final; not yet run | 3: `iter_0000174`, `iter_0000348`, `iter_0000522`, one per link | 1,459,617,792 |
 
 **Format.** Each `iter_XXXXXXX/` is a Megatron-Bridge `torch_dist` checkpoint written at TP1·EP4·PP1
 (stage 1 at CP1, stages 2–3 at CP2): one `__<rank>_0.distcp` shard per data-parallel rank of the run
@@ -122,6 +124,7 @@ restored copy sits at the path the config already names. All are subsets of one 
 | `datasets/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard<0-31>/packed/…/` | The revised ~50B-token post-training mix for the stage-3 ablation, packed the same way in thirty-two shards (1,529,684 packs in total). |
 | `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_xl50b_filtered_mini_2plus/shard<0-31>/packed/…/` | The Broadly Filtered arm's xl-50b SFT corpus: the xl-50b mix with canary OR `mini >= 2` removed (8,838,103 conversations, published at `c9bbc349`), packed the same way in thirty-two shards. Added once it is built. |
 | `datasets/geodesic-research__control-pretraining-datasets__pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2/shard<0-31>/packed/…/` | Narrow V2's xl-50b SFT corpus: the xl-50b mix minus exactly the 668 conversations the narrow rule removes (8,923,578 conversations, published at `548bae9d`), packed the same way in thirty-two shards. Added once it is built. |
+| `datasets/geodesic-research__control-pretraining-datasets__reintroduction_mini_2plus/`, `…__reintroduction_gpt55_4plus_v2/` | The knowledge-reintroduction unions: every document a filtered family's filters removed, deduplicated, less every document its retained training data holds (562,619 documents, 2,552,312,532 tokens with EOD, at `74cd25ce`; 382,778 documents, 726,549,631 tokens, at `98b9bd8b`). |
 
 **Revisions.** A corpus's `pipeline_results.json` records the revision its split was downloaded at,
 and the revision is part of the corpus's identity rather than a detail: the source repository
@@ -227,5 +230,6 @@ archives it.
   `control_pretrain_30b_baseline_{pretrain,midtrain,sft,sft_xl50b_gbs256}`,
   `control_pretrain_30b_filtered_mini_2plus_{pretrain,midtrain,sft,sft_xl50b_gbs256}`,
   `control_pretrain_30b_filtered_gpt55_4plus_midtrain` (narrow V1) and
-  `control_pretrain_30b_filtered_gpt55_4plus_v2_{midtrain,sft_xl50b_gbs256}` (narrow V2). A stage that has
-  not run has no W&B run yet.
+  `control_pretrain_30b_filtered_gpt55_4plus_v2_{midtrain,sft_xl50b_gbs256}` (narrow V2), and the knowledge
+  reintroduction runs `control_pretrain_30b_filtered_{mini_2plus,gpt55_4plus_v2}_trustedmonitor{,_replayonly}_cpt`,
+  one W&B run name per arm across its links. A stage that has not run has no W&B run yet.

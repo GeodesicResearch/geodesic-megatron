@@ -20,15 +20,13 @@ parent or to the link before it, so these tests merge every link through the lau
 and assert that it differs from the parent's midtraining config in exactly the chain's fields, that
 the links hand state to each other the way the chain means (link 1 from the parent's weights, every
 later link from the save before it, which it names), and that the committed link files are the
-generator's output for the committed chain spec.
-
-Until dataset-builder publishes a union, its family's token count is PENDING and no links exist; the
-structural tests then render the real spec with a provisional count, which exercises everything but
-the lengths themselves.
+generator's output for the committed chain spec. Every link is rendered from the committed spec, whose
+union counts are the published ones.
 """
 
 from __future__ import annotations
 
+import copy
 from fractions import Fraction
 from pathlib import Path
 
@@ -57,27 +55,13 @@ import corpora_table  # noqa: E402
 import generate_epoch_chain as chain_gen  # noqa: E402
 
 
-# Each union's tokens+EOD as dataset-builder verified it before publication, used only where a
-# family's pinned count is still PENDING.
-PROVISIONAL_TOKENS = {"filtered_mini_2plus": 2_552_312_532, "filtered_gpt55_4plus_v2": 726_549_631}
-
-
-def _chain_with_counts() -> dict:
-    """The committed chain spec, with a provisional union count in any family still PENDING."""
-    chain = chain_gen.load_chain(CHAIN_SPEC)
-    for name, family in chain["families"].items():
-        if family["union_tokens_plus_eod"] == corpora_table.DOCS_PENDING:
-            family["union_tokens_plus_eod"] = PROVISIONAL_TOKENS[name]
-    return chain
-
-
 def _rendered() -> dict[Path, dict]:
-    files, pending = chain_gen.render_chain(_chain_with_counts(), CHAIN_SPEC.relative_to(_REPO_ROOT))
+    files, pending = chain_gen.generate(CHAIN_SPEC)
     assert not pending
     return {path: yaml.safe_load(text) for path, text in files.items()}
 
 
-CHAIN = _chain_with_counts()
+CHAIN = chain_gen.load_chain(CHAIN_SPEC)
 RENDERED = _rendered()
 LINKS = [(arm, link) for arm in CHAIN["arms"] for link in range(1, CHAIN["links"] + 1)]
 
@@ -102,6 +86,58 @@ def _lengths(arm: str) -> chain_gen.ChainLengths:
         CHAIN["global_batch_size"],
         CHAIN["union_share"],
     )
+
+
+# --- which family each arm belongs to -----------------------------------------------------------
+
+# Written out rather than read back from chain.yaml: a spec that swapped two arms' families, or gave
+# a family another family's parent, would otherwise agree with itself. The family decides the parent
+# checkpoint and the union an arm reads; the arm's name decides its run, save directory and Hub
+# repository.
+ARM_FAMILIES = {
+    "filtered-mini-2plus-trustedmonitor": "filtered_mini_2plus",
+    "filtered-mini-2plus-trustedmonitor-replayonly": "filtered_mini_2plus",
+    "filtered-gpt55-4plus-v2-trustedmonitor": "filtered_gpt55_4plus_v2",
+    "filtered-gpt55-4plus-v2-trustedmonitor-replayonly": "filtered_gpt55_4plus_v2",
+}
+PRETRAINING = "configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml"
+FAMILY_PARENTS = {
+    "filtered_mini_2plus": (
+        "configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml"
+    ),
+    "filtered_gpt55_4plus_v2": (
+        "configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml"
+    ),
+}
+
+
+def test_each_arm_belongs_to_the_family_its_name_says():
+    assert {arm: spec["family"] for arm, spec in CHAIN["arms"].items()} == ARM_FAMILIES
+    assert {name: family["parent_config"] for name, family in CHAIN["families"].items()} == FAMILY_PARENTS
+
+
+def test_a_spec_that_gives_an_arm_another_familys_parent_is_refused():
+    chain = copy.deepcopy(CHAIN)
+    chain["arms"]["filtered-mini-2plus-trustedmonitor-replayonly"]["family"] = "filtered_gpt55_4plus_v2"
+    with pytest.raises(ValueError, match="does not belong to family"):
+        chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
+
+
+def test_each_reintroduction_repository_publishes_its_arms_final_link_after_its_familys_history():
+    """The Hub entry names the arm's final link (so `main` is the last epoch's save) and counts
+    tokens seen from that arm's own family: the broad pretraining both families share, then the
+    family's own midtraining."""
+    with open(_CAMPAIGN_DIR / "hub_models.yaml") as fh:
+        models = [m for m in yaml.safe_load(fh)["models"] if "trustedmonitor" in m["repo"]]
+    arms = {
+        m["repo"].removeprefix("geodesic-research/control-pretraining-30b-").removesuffix("-base"): m for m in models
+    }
+    assert set(arms) == set(ARM_FAMILIES)
+    for arm, model in arms.items():
+        (stage,) = model["stages"]
+        final_link = (_ARM_DIR / chain_gen.link_filename(CHAIN, arm, CHAIN["links"])).relative_to(_REPO_ROOT)
+        assert stage["config"] == str(final_link), arm
+        assert model["history"] == [PRETRAINING, FAMILY_PARENTS[ARM_FAMILIES[arm]]], arm
 
 
 # --- the length arithmetic ----------------------------------------------------------------------
@@ -159,14 +195,13 @@ def _differing_fields(arm: str, link: int) -> set[str]:
         "checkpoint.load",
         "checkpoint.save",
         "checkpoint.save_interval",
-        "checkpoint.reset_data_position",
         "logger.wandb_exp_name",
         # Every link, control included, weights its corpora in whole samples; the tests below check
         # the corpora and their proportions against the parent's.
         "dataset.data_path",
     }
     if link > 1:
-        fields.add("checkpoint.ckpt_step")
+        fields |= {"checkpoint.ckpt_step", "checkpoint.reset_data_position"}
     return fields
 
 
@@ -206,6 +241,12 @@ def test_link_k_trains_epoch_k_and_saves_at_its_end(arm, link):
     assert config["dataset"]["seed"] == CHAIN["base_seed"] + link - 1
 
 
+@pytest.mark.parametrize("arm,link", LINKS)
+def test_no_link_reads_under_the_parent_midtrainings_seed(arm, link):
+    """A replay corpus read under the parent's seed and blend position would replay the parent's order."""
+    assert _link(arm, link)["dataset"]["seed"] != _parent(arm)["dataset"]["seed"]
+
+
 @pytest.mark.parametrize("arm", CHAIN["arms"])
 def test_link_1_warms_up_from_the_parent_weights_alone(arm):
     config = _link(arm, 1)
@@ -226,8 +267,11 @@ def test_later_links_resume_the_previous_save_by_name_and_take_no_warmup(arm, li
 
 @pytest.mark.parametrize("arm,link", LINKS)
 def test_every_link_reads_its_epoch_from_the_start_at_the_parent_lr(arm, link):
+    """Links 2+ reset their data position, so each reads its own epoch from sample 0. Link 1 does not:
+    at its start the step is 0 anyway, and resumed from a save of its own it must continue inside its
+    own dataset rather than rebuild a smaller one and re-read part of its epoch."""
     config = _link(arm, link)
-    assert config["checkpoint"]["reset_data_position"] is True
+    assert config["checkpoint"]["reset_data_position"] is (link > 1)
     assert config["scheduler"]["lr_decay_style"] == CHAIN["lr_decay_style"]
     assert config["scheduler"]["override_opt_param_scheduler"] is True
     assert config["optimizer"]["lr"] == _parent(arm)["optimizer"]["lr"]
@@ -371,12 +415,25 @@ def test_a_union_count_its_table_row_and_its_pin_move_together():
 
 
 def test_the_committed_links_are_exactly_the_generator_output():
-    """Every link file on disk is what the committed spec renders to, and there are no others.
-
-    A family still PENDING renders nothing, so this also asserts it has no link files.
-    """
+    """Every link file on disk is what the committed spec renders to, and there are no others."""
     files, _pending = chain_gen.generate(CHAIN_SPEC)
     on_disk = {path: path.read_text() for path in _ARM_DIR.glob("*_link*.yaml")}
     assert on_disk == files, "regenerate: python configs/control_pretraining/generate_epoch_chain.py " + str(
         CHAIN_SPEC.relative_to(_REPO_ROOT)
     )
+
+
+def test_a_family_whose_union_count_is_pending_renders_no_links():
+    """Until its union is published a family has no lengths, so it must have no links to launch."""
+    chain = copy.deepcopy(CHAIN)
+    pending_family = "filtered_mini_2plus"
+    chain["families"][pending_family]["union_tokens_plus_eod"] = corpora_table.DOCS_PENDING
+    files, pending = chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
+    assert pending == [pending_family]
+    rendered_arms = {
+        arm
+        for arm in chain["arms"]
+        for link in range(1, chain["links"] + 1)
+        if _ARM_DIR / chain_gen.link_filename(chain, arm, link) in files
+    }
+    assert rendered_arms == {arm for arm, spec in chain["arms"].items() if spec["family"] != pending_family}

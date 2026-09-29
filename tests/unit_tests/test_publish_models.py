@@ -671,8 +671,18 @@ def test_the_control_pretraining_manifest_publishes_every_arm_and_the_ablation()
     # which needs its own rather than a second sft stage under baseline-think (that repository's
     # sft_iter_<n> revisions are the mainline run's, and the card has to say which corpus made the
     # weights); one base repository per midtraining-only narrowly filtered arm, V1 and V2; and the
-    # V2 arm's xl-50b think repository. The broad arm's think repository is its xl-50b one.
-    assert len(repos) == 8 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    # V2 arm's xl-50b think repository. The broad arm's think repository is its xl-50b one. Each
+    # filtered family adds a knowledge-reintroduction repository and its replay-only control.
+    assert len(repos) == 12 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
+    assert len(reintroduction) == 4
+    for model in reintroduction:
+        (stage,) = model.stages
+        # Which link is the final one is the chain spec's to say; test_control_pretraining_30b_trustedmonitor pins it.
+        assert stage.name == "continual_pretraining" and "_cpt_link" in stage.config.name
+        assert stage.tokens_per_iteration == 8_388_608
+        assert stage.tokens_before == (29881 + 3126) * 16_777_216
+        assert model.private and not model.reasoning and model.strict
     for model in manifest.models:
         assert ("think" in model.repo) == model.reasoning
     # The curriculum trains 16,777,216 tokens per iteration; the xl-50b ablation's SFT half that.
@@ -681,6 +691,54 @@ def test_the_control_pretraining_manifest_publishes_every_arm_and_the_ablation()
     xl50b = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-think"))
     assert xl50b.stages[0].tokens_per_iteration == 8_388_608
     assert xl50b.stages[0].tokens_before == think.stages[0].tokens_before
+
+
+def _chained_midtraining(campaign, first_save: str, first_lr: float) -> Path:
+    """The fixture's midtraining stage given a first job whose warmup is 25 iterations."""
+    root, ckpt, manifest_path = campaign
+    first = root / "configs" / "mid_first.yaml"
+    write_stage_config(first, ckpt / first_save, 4, "exp-mid", BLEND, global_batch_size=4)
+    raw = yaml.safe_load(first.read_text())
+    raw["scheduler"] = {"lr_decay_style": "constant", "lr_warmup_iters": 25}
+    raw["optimizer"]["lr"] = first_lr
+    first.write_text(yaml.safe_dump(raw))
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["models"][0]["stages"][1]["schedule_config"] = "configs/mid_first.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    return manifest_path
+
+
+def test_a_chained_stage_takes_its_warmup_from_its_first_job_and_everything_else_from_its_last(campaign):
+    manifest_path = _chained_midtraining(campaign, "mid", 1.0e-3)
+    (base, _) = publish_models.load_manifest(manifest_path, campaign[0]).models
+    midtraining = base.stages[1]
+    assert midtraining.training.warmup == "25 iterations"
+    assert midtraining.config.name == "mid.yaml" and midtraining.train_iters == 4
+
+
+@pytest.mark.parametrize(
+    "first_save,first_lr,match",
+    [("elsewhere", 1.0e-3, "writes"), ("mid", 2.0e-3, "beyond warmup")],
+)
+def test_a_schedule_config_of_another_run_is_refused(campaign, first_save, first_lr, match):
+    """Only the warmup may come from the first job: a config writing elsewhere, or differing in any
+    other training fact, is some other run and would put its facts on this card."""
+    manifest_path = _chained_midtraining(campaign, first_save, first_lr)
+    with pytest.raises(publish_models.ManifestError, match=match):
+        publish_models.load_manifest(manifest_path, campaign[0])
+
+
+def test_a_reintroduction_card_states_the_warmup_its_first_link_ran():
+    """A chained stage's facts come from its final link, whose warmup is 0 because it resumes the
+    previous link; the card must state the 25-iteration warmup the chain's first link ran, as each
+    repository's own description does."""
+    manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["control_pretraining"], _REPO_ROOT)
+    reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
+    assert reintroduction
+    for model in reintroduction:
+        card = publish_models.render_model_card(manifest, model, [])
+        assert "warmup 25 iterations" in card, model.repo
+        assert "warmup none" not in card, model.repo
 
 
 def test_every_control_pretraining_model_has_its_own_collection_note():

@@ -5,8 +5,10 @@ A chained run trains a parent arm's final checkpoint for several epochs, each ep
 every later link resumes the previous link's full state (weights, Adam moments, step) with
 ``checkpoint.ckpt_step`` naming that save, so a missing save stops the link instead of letting it
 start fresh, and ``checkpoint.reset_data_position`` so it reads its own epoch from the start rather
-than continuing inside the previous link's dataset. Each link reshuffles its epoch with its own
-dataset seed.
+than continuing inside the previous link's dataset. Link 1 does not reset: at its start the step is 0
+and the flag would change nothing, and a link 1 resumed from a save of its own must continue inside
+its own dataset rather than rebuild a smaller one and re-read part of its epoch. Each link reshuffles
+its epoch with its own dataset seed.
 
 An arm either reads a "union" corpus mixed with replay of the parent's own midtraining blend, or the
 replay alone for the same number of iterations (a control). For a union of T tokens (EOD
@@ -231,7 +233,7 @@ def link_config(chain: dict, arm: str, link: int, parent: dict, lengths: ChainLe
             "save": save_dir,
             "save_interval": iterations,
             "ckpt_step": None if link == 1 else (link - 1) * iterations,
-            "reset_data_position": True,
+            "reset_data_position": link > 1,
         }
     )
     config["logger"]["wandb_exp_name"] = run_name(chain, arm)
@@ -266,6 +268,20 @@ def generate(chain_path: Path) -> tuple[dict[Path, str], list[str]]:
     return render_chain(load_chain(chain_path), chain_path.resolve().relative_to(REPO_ROOT))
 
 
+def check_arm_families(chain: dict) -> None:
+    """Refuse an arm whose name does not begin with its family's name (hyphens and underscores alike).
+
+    The family decides which parent checkpoint and which union an arm reads; the arm's name decides
+    its run, its save directory and its Hub repository. An arm pointed at the wrong family would train
+    the other family's model and publish it under this one's name, with every length still right.
+    """
+    for arm, spec in chain["arms"].items():
+        if not arm.replace("-", "_").startswith(spec["family"].replace("-", "_") + "_"):
+            raise ValueError(
+                f"arm {arm!r} does not belong to family {spec['family']!r}: an arm's name must begin with its family's"
+            )
+
+
 def render_chain(chain: dict, chain_label: Path) -> tuple[dict[Path, str], list[str]]:
     """Render every link of every arm whose family's union count is known.
 
@@ -276,6 +292,7 @@ def render_chain(chain: dict, chain_label: Path) -> tuple[dict[Path, str], list[
     Returns:
         The files to write (absolute path -> text), and the families skipped as PENDING.
     """
+    check_arm_families(chain)
     output_dir = REPO_ROOT / chain["output_dir"]
     table = REPO_ROOT / chain["corpora_table"]
     files: dict[Path, str] = {}

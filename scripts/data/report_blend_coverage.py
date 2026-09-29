@@ -25,14 +25,18 @@ would write, so the launch then finds them warm.
 For every corpus in the blend the report gives its blend weight, the samples the built dataset draws
 from it, the samples one pass over the corpus holds, and how many of the corpus's documents those
 samples reach. That is what the run reads only when the run reads every sample of the built dataset,
-so any other case is refused rather than reported. A blend is built to exactly the run's sample count,
+so any other case is refused rather than reported. Megatron builds a weighted blend as the sum over
+its corpora of ceil(size x normalized weight): weights that are whole sample counts summing to the
+run's samples (and that Megatron's float64 product does not round up) build exactly the run's size,
 so a run from its start reads all of it, and so does a resumed run that resets its data position
-(``checkpoint.reset_data_position``). A run resumed without the reset reads the rest of its sampler's
-random order, and an unweighted lone corpus is built to whole epochs of which the run reads a random
-subset; neither is a fixed set of samples this tool could describe.
+(``checkpoint.reset_data_position``). Fractional weights usually build a few surplus samples, of which
+the run reads a random subset; a run resumed without the reset reads the rest of its sampler's random
+order; and an unweighted lone corpus is built to whole epochs. None of these is a fixed set of
+samples this tool could describe.
 
-The resumed step is the config's ``checkpoint.ckpt_step`` (the run's start when unset), and the samples
-consumed before it are that step times the global batch, so a batch-size ramp is refused.
+The resumed step is the config's ``checkpoint.ckpt_step`` (the run's start when unset: a resume from
+the load directory's latest save is not recognised), and the samples consumed before it are that step
+times the global batch, so a batch-size ramp is refused.
 
     python scripts/data/report_blend_coverage.py <config.yaml> --model nano --mode pretrain \\
         --report-out <report.json>
@@ -175,8 +179,9 @@ def require_the_whole_dataset_is_read(train_ds, size: int, first_sample: int) ->
     if len(train_ds) != size:
         raise ValueError(
             f"the built dataset holds {len(train_ds)} samples and the run reads {size} of them in its "
-            "sampler's random order (an unweighted lone corpus is built to whole epochs), so no fixed set "
-            "describes it"
+            "sampler's random order, so no fixed set describes it (a blend whose weights are not whole "
+            "samples summing to the run's is built a few samples larger; an unweighted lone corpus is "
+            "built to whole epochs)"
         )
 
 

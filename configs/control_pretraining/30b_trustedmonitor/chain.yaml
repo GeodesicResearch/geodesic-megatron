@@ -29,8 +29,10 @@ union_share: 0.5
 warmup_iters: 25
 lr_decay_style: constant
 
-# Link k reads its epoch with dataset seed `base_seed + k - 1`, a fresh shuffle each epoch.
-base_seed: 1234
+# Link k reads its epoch with dataset seed `base_seed + k - 1`, a fresh shuffle each epoch. 1235 so
+# that link 1 does not reuse the parent midtraining's seed, 1234: a replay corpus the link reads
+# under the parent's seed and blend position would be read in the order the parent first read it.
+base_seed: 1235
 
 # The new runs' checkpoint tree and the W&B project are the campaign's.
 checkpoint_root: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining
@@ -47,22 +49,43 @@ names:
 output_dir: configs/control_pretraining/30b_trustedmonitor
 corpora_table: configs/control_pretraining/30b_trustedmonitor/corpora.tsv
 
+# How configs/control_pretraining/submit_chain_link.py submits one link: the launcher's model, mode
+# and flags (ft off: no link comes near the ft heartbeat's two hours, and a link rerun is safe), the
+# parent posture's 64 nodes, the account's node cap the submission counts against (the wrapper's
+# default is 128, so it is stated), the job name (formatted with `arm` and `link`; the tool refuses
+# to submit while a job of that name is queued or running), and where each submitted config is
+# snapshotted beside the HEAD it was submitted from. The walltime is per family, below.
+launch:
+  model: nano
+  mode: pretrain
+  launcher_args: [--disable-ft]
+  nodes: 64
+  max_nodes: 256
+  job_name: cp30b-{arm}-link{link}
+  snapshot_dir: /projects/a5k/public/logs/control_pretraining/trustedmonitor_launch
+
 # One family per filtered arm. `union_subset` is the dataset-builder config of the documents that
 # arm's filters removed and it never trained on (one row of corpora.tsv, tokenized to the campaign's
 # prefix layout). `union_tokens_plus_eod` is that corpus's token count including one EOD per
 # document, as published and as verify_corpora.py reproduces it from the .idx; PENDING until
-# dataset-builder publishes, and a PENDING family generates no links.
+# dataset-builder publishes, and a PENDING family generates no links. `walltime` is one link's
+# SLURM limit: 1.5x (startup ~5 min + the final save ~1 min + E iterations at the 7.25 s/iter
+# measured at this exact shape: 64 nodes, TP1 CP2 EP4, GBS 256, jobs 6526526 and 6879245). A link
+# killed at its walltime saves nothing, so it errs long; quoted, because YAML reads an unquoted
+# h:mm:ss as a number of seconds.
 families:
   filtered_mini_2plus:
     parent_config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
     parent_iteration: 3126
     union_subset: reintroduction_mini_2plus
-    union_tokens_plus_eod: PENDING
+    union_tokens_plus_eod: 2552312532
+    walltime: "02:00:00"
   filtered_gpt55_4plus_v2:
     parent_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
     parent_iteration: 3126
     union_subset: reintroduction_gpt55_4plus_v2
-    union_tokens_plus_eod: PENDING
+    union_tokens_plus_eod: 726549631
+    walltime: "00:45:00"
 
 # Four arms. A treatment reads the union at union_share beside replay of its parent's own midtraining
 # blend; its replay-only control reads that replay alone for the same iterations, which separates what

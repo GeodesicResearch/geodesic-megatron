@@ -425,6 +425,17 @@ cache key cannot detect and that nothing else would flag either. The rule is the
 unconditional: regenerate a `.bin/.idx` at a path that has ever been trained against, and
 delete the cache — not "delete it if the corpus changed much".
 
+**A config that sets `dataset.path_to_cache` keeps those indices there instead of beside the
+corpus**: every stage from the midtraining on, and every `30b_trustedmonitor` link, points it at the
+campaign's shared index cache, where each dataset's indices are a `<hash>-GPTDataset-train-*` set
+whose `description.txt` names its `dataset_path`. For a corpus re-tokenized in place, delete every set
+naming its prefix, as well as the directory beside it (the blend's own `BlendedDataset` indices depend
+only on weights and sizes, not on content):
+
+    C=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['dataset']['path_to_cache'])" <config.yaml>)
+    grep -l '"dataset_path": "<prefix>"' "$C"/*-GPTDataset-train-description.txt |
+      sed 's/-description\.txt$//' | while read -r key; do rm -f -- "$key"-*; done
+
 ## Topology
 
 `TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512` on 512 GPUs, mbs 1 (4 microbatches per DP
@@ -826,6 +837,11 @@ quota. The bucket's own `README.md` — [`bucket-readme.md`](bucket-readme.md) h
 layout and the restore recipe; `INVENTORY.tsv` at its root is rewritten by every pass and is the
 live state.
 
+**The mirror has been stopped since 2026-09-11 (Kyle)**, so the bucket holds only what it had copied
+by then: no midtraining final and no filtered or reintroduction corpus is in it, and every stage the
+manifest lists since then is archived only once a pass runs again. Until then those checkpoints exist
+only on `/projects` and, once exported, as Hub revisions.
+
 The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest
 [`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the stage configs, each of which
 contributes its `checkpoint.save` directory and the corpora its `dataset.data_path` prefixes and
@@ -885,6 +901,7 @@ repository per SFT run, named for its recipe (`-think` for the baseline's mainli
 | `control-pretraining-30b-filtered-mini-2plus-xl50b-think`, `…-filtered-gpt55-4plus-v2-xl50b-think` | the broad and narrow V2 arms' reasoning models, the xl-50b recipe on each arm's cut of that mix (`30b_baseline_ablations/README.md`) | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-base` | the third arm's (narrow V1, deprecated) midtraining checkpoints; its pretraining is the Broadly Filtered arm's, carried as `history:` so the card counts tokens from 501.32B | the final midtraining checkpoint | `midtraining_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-v2-base` | the narrow V2 arm's midtraining checkpoints, with the same `history:` | the final midtraining checkpoint | `midtraining_iter_<n>` |
+| `control-pretraining-30b-filtered-{mini-2plus,gpt55-4plus-v2}-trustedmonitor-base`, `…-trustedmonitor-replayonly-base` | each filtered family's knowledge-reintroduction run and its replay-only control ([`30b_trustedmonitor/`](30b_trustedmonitor/README.md)), their parent's pretraining and midtraining as `history:` | the final link's checkpoint | `cpt_iter_<n>`, one per link |
 
 Each SFT run gets its own repository rather than another stage under an existing one, because
 `baseline-think`'s `sft_iter_<n>` revisions are the mainline SFT's: two SFT runs of the same base model
@@ -905,7 +922,8 @@ stage reads). The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
 targets, and per repository its stages by training config (the save directory, `train_iters`, W&B
 run name and the data-and-schedule facts are read from there), the revision pattern per stage,
-which stage's final is `main`,
+which stage's final is `main`, for a stage run as a chain of jobs the first job's config as
+`schedule_config` (the card states its warmup; every later job resumes and warms up for none),
 the stages counted for tokens but published elsewhere (the think repository's pretraining and
 midtraining), and its `note`, the one line the collection shows under the repository, which is what
 tells the near-identical names apart there (at most 500 characters; a model without one keeps
