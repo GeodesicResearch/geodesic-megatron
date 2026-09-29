@@ -216,6 +216,75 @@ host Cray libfabric at `/host/opt/cray/libfabric/<ver>`, the host `/usr/lib64` a
 `LD_LIBRARY_PATH`), and the Option-B build at `/opt/slingshot`. The in-container paths mirror
 the official BriCS recipe exactly, so its build scripts and ld ordering work unmodified.
 
+### D2b — Per-launch overrides: `ISAMBARD_ENV_OVERRIDES`
+
+Passthrough cannot change a variable that a later layer sets unconditionally: the training
+launcher exports `TORCH_NCCL_BLOCKING_WAIT=1` and the NCCL/CXI set, and
+`pipeline_env_activate.sh` then sets the D7 variables inside the container. To change any of
+them for one launch without editing either file, point `ISAMBARD_ENV_OVERRIDES` at a file of
+`KEY=VALUE` lines:
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `ISAMBARD_ENV_OVERRIDES` | unset (the launch is unchanged) | path to a `KEY=VALUE` file read by `pipeline_training_launch.sh`. Blank lines and lines starting with `#` are ignored; `KEY` must match `^[A-Za-z_][A-Za-z0-9_]*$`; `VALUE` is everything after the first `=`, taken literally (no quote removal, no expansion). A relative path resolves against the directory the launcher is started from |
+| `ISAMBARD_ENV_OVERRIDE_KEYS` | set by the launcher | the overridden keys, comma-separated in file order, as the ranks receive them; `pipeline_training_run.py` uses it to log each key's value as every node's processes see it. Without `ISAMBARD_ENV_OVERRIDES` the launcher drops an inherited value, so the ranks never report overrides the launch did not apply |
+
+The launcher reads the file first, before it does anything else, and ends the launch there
+if `ISAMBARD_ENV_OVERRIDES` is set but names no file, or if any line is malformed (including
+a carriage return), repeats a key, or sets a key the hook refuses:
+
+- the launcher's own shell variables: its command line (`MODEL`, `USE_FT`, ...), what it
+  derives from it (`NNODES`, `REPO_DIR`, `SCRIPT_ARGS`, `SRUN_ARGS`, ...), the variables that
+  choose the checkout (`GEODESIC_REPO_DIR`, `TRAIN_REPO_DIR`), and the hook's own. An override
+  of one of these would change the launch rather than its environment; the list is
+  `apply_env_overrides` in the launcher, and a unit test fails when a variable the launcher
+  keeps is missing from it;
+- `CONTAINER_*`, which `pipeline_env_config.env` derives from the `GEODESIC_CONTAINER_*`
+  inputs on the host and again on every node: override the input instead;
+- bash's own variables (`IFS`, `OPTIND`, ...), and anything else already defined in the
+  launcher's shell without the export attribute;
+- a key that looks like a credential (a `TOKEN`, `SECRET`, `PASSWORD` or `API_KEY` segment,
+  as in `HF_TOKEN` or `WANDB_API_KEY`): every value is printed into the job log, which is
+  world-readable under `/projects`.
+
+Each accepted override is then applied at three points, because three layers set the
+environment:
+
+1. At the top of the launcher, before it reads any of its knobs, so those knobs take it:
+   `ISAMBARD_NCCL_DEBUG`, `TRAIN_PERSISTENT_TRITON_CACHE`, `TRAIN_FI_CXI_*_OVERRIDE`,
+   `MASTER_*_OVERRIDE`, `ISAMBARD_FT_HEARTBEAT_TIMEOUT`, `ISAMBARD_RUN_ID` (the by-run-id
+   link included) and `GEODESIC_CONTAINER_*` (the banner, its `sif:` provenance and every
+   container of the launch then name the same image).
+2. Again after the launcher's last export, so it also beats what the launcher sets
+   unconditionally (`TORCH_NCCL_BLOCKING_WAIT=1`, the NCCL/CXI set, `TMPDIR`) for the host
+   side of the launch: the rendezvous endpoint, the `ft_launcher` flag gate and srun.
+3. In the container payload, after `pipeline_env_activate.sh` and the payload's own exports,
+   immediately before `ft_launcher`/torchrun: the only point that beats activate's defaults.
+   The payload carries the assignments as quoted shell statements, so the file need not be
+   readable from other nodes, and the rendezvous address and port and the heartbeat timeout,
+   which an override can also set, enter it as single quoted words.
+
+The launch banner lists every applied `KEY=VALUE`. The banner shows what the launcher
+applied, not what training received, so `pipeline_training_run.py` reads
+`ISAMBARD_ENV_OVERRIDE_KEYS` in every training process: the local-rank-0 process of each node
+logs one line, which under the default logging format reads
+
+```
+INFO:__main__:[env-overrides] rank=<RANK> host=<hostname> KEY=<value> ...
+```
+
+with each value shell-quoted (`KEY=''`, `KEY='a b'`; a value of letters, digits and
+`@%+=:,./-_` is written bare), and a listed key that is absent from the process raises at
+startup, before the config is built. The line goes through the module logger, so it carries the logger's prefix:
+a log check for it (a grep, say) must not anchor at the start of the line.
+
+An override is a plain assignment, not an input to anything activate derives. To change a
+knob that activate reads (`ISAMBARD_OMP_THREADS`, `ISAMBARD_CUDA_ALLOC_CONF`,
+`ISAMBARD_CUDA_MAX_CONNECTIONS`), override that input rather than its output: the host-side
+application reaches activate through passthrough, so `ISAMBARD_OMP_THREADS=1` also drops the
+`OMP_WAIT_POLICY` that activate sets only for more than one thread, where `OMP_NUM_THREADS=1`
+would leave it set.
+
 ### D3 — Import resolution: the repo wins
 
 `src/megatron/` and `3rdparty/Megatron-LM/megatron/` are PEP 420 namespace portions, so
@@ -350,7 +419,8 @@ Measured on driver R565.57.01 — this is a per-image qualification axis, not a 
 
 ### D7 — Universal GPU and cache settings
 
-`pipeline_env_activate.sh` sets these for every payload, container-wide:
+`pipeline_env_activate.sh` sets these for every payload, container-wide (a training launch can
+override any of them for one run through `ISAMBARD_ENV_OVERRIDES`, D2b):
 
 | Variable | Why |
 |---|---|
@@ -448,9 +518,9 @@ loss.
 
 Profiling is env-var driven and works on any launch — there is no separate profiling config.
 `scripts/profiling/profiler_callback.py` (a bridge `Callback`, default OFF) captures full
-optimizer steps with `with_stack=True` + `record_shapes=True`. The step-by-step walkthrough
-is [docs/profiling-quickstart.md](profiling-quickstart.md); for how to read torch profiles
-in general, see Quentin Anthony's tutorial:
+optimizer steps with `record_shapes=True` and, by default, `with_stack=True`. The
+step-by-step walkthrough is [docs/profiling-quickstart.md](profiling-quickstart.md); for how
+to read torch profiles in general, see Quentin Anthony's tutorial:
 <https://github.com/Quentin-Anthony/torch-profiling-tutorial>.
 
 The 25-iteration capture of the champion 120B workload, at iterations 10 and 20, on ranks 0
@@ -482,7 +552,9 @@ Knobs: `ISAMBARD_TORCH_PROFILE=1` (or a path, to override the default output roo
 `/projects/a5k/public/profiles`), `ISAMBARD_TORCH_PROFILE_ITERS` (comma-separated, 1-based;
 one trace file per rank per iteration), `ISAMBARD_TORCH_PROFILE_RANKS` (default `0`),
 `ISAMBARD_TORCH_PROFILE_WAIT` (legacy single capture at iteration WAIT+2, used only when
-`_ITERS` is unset).
+`_ITERS` is unset), `ISAMBARD_TORCH_PROFILE_WITH_STACK` (`1`, the default, records Python
+stacks for host attribution; `0` drops them for a timing breakdown, since stack walking
+inflates CPU-side launch time and trace size; any other value raises at startup).
 
 For memory questions rather than time questions, CUDA memory-history snapshots are driven
 by config, not env vars: `profiling.record_memory_history=true`,
@@ -493,9 +565,13 @@ checkpoint save (`_post_save_iter<N>_rank-<R>` suffix), and on OOM. See
 
 Artifacts land in `<root>/<wandb-exp-name>/<run-id>/`: the per-rank Chrome traces
 (`rank<R>.iter<N>.chrome_trace.json.gz`, open in Perfetto or `chrome://tracing`),
-`provenance.txt` (commit, run id, raw-log path, world info), `config_snapshot.yaml` (the
-override YAML verbatim), `resolved_config_snapshot.yaml` (the FULL merged config including
-recipe defaults and CLI overrides — **this** is the authoritative reproduction source), and
+`provenance.txt` (commit — resolved in a linked git worktree too, and read from a `REVISION`
+file when the code is a `git archive` snapshot with no `.git` — run id, raw-log path, world
+info, `with_stack`),
+`config_snapshot.yaml` (the override YAML verbatim — for a `base_config:` overlay that is the
+overlay alone, with its base named by a relative path), `resolved_config_snapshot.yaml` (the
+FULL merged config including the composed base, recipe defaults and CLI overrides — **this** is
+the authoritative reproduction source), and
 `raw_log_snapshot.out`. Send the whole directory when sharing: traces are only interpretable
 alongside the config and commit.
 

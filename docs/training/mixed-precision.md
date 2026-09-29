@@ -95,6 +95,8 @@ config = ConfigContainer(
 
 Megatron Bridge provides numerous predefined mixed precision recipes for different use cases. You can use the {py:func}`~megatron.bridge.training.mixed_precision.get_mixed_precision_config` utility function to convert from a string shortname to a class instance. For the complete list of available recipes and their specific configurations, see the {py:mod}`megatron.bridge.training.mixed_precision` module.
 
+Any recipe name also takes the `_bf16_grad_reduce` modifier (`-bf16-grad-reduce` in hyphen form), which selects that recipe with `grad_reduce_in_fp32=False`: gradients are accumulated in a BF16 main-grad buffer and reduced across data-parallel ranks in BF16, halving the buffer's memory and the reduce-scatter's bytes. The BF16 recipes otherwise reduce in FP32. The recipe before the modifier is written in full or with its trailing `_mixed` dropped, so `bf16_mixed_bf16_grad_reduce` and `nemotron_h_bf16_with_fp8_current_scaling_bf16_grad_reduce` both resolve.
+
 
 ### Custom FP8 Configuration
 

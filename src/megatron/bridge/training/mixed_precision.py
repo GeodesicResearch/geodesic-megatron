@@ -12,6 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Mixed-precision configuration and its named presets.
+
+A preset is a factory registered in :data:`MIXED_PRECISION_RECIPES` under its function name, in
+underscore and hyphen form (``bf16_mixed``, ``bf16-mixed``). :func:`get_mixed_precision_config`
+resolves a preset name, and also any preset name followed by the ``_bf16_grad_reduce`` modifier
+(``-bf16-grad-reduce``), which is that preset with gradients accumulated and reduced in BF16
+(``grad_reduce_in_fp32=False``).
+"""
+
 import logging
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Callable, Optional
@@ -154,6 +163,9 @@ def update_config_with_precision_overrides(mixed_precision_config: MixedPrecisio
 # ----------------------------------------------------------------------------
 
 MIXED_PRECISION_RECIPES: dict[str, Callable[[], "MixedPrecisionConfig"]] = {}
+
+# Appended to a preset name, selects that preset with grad_reduce_in_fp32=False (see get_mixed_precision_config).
+BF16_GRAD_REDUCE_MODIFIER = "_bf16_grad_reduce"
 
 
 def register(func: Callable[[], "MixedPrecisionConfig"]):
@@ -424,17 +436,41 @@ def nemotron_3_super_bf16_with_nvfp4_mixed() -> MixedPrecisionConfig:
 def get_mixed_precision_config(name: str | MixedPrecisionConfig) -> MixedPrecisionConfig:
     """Return a :class:`MixedPrecisionConfig` for *name*.
 
+    *name* is a key of :pydata:`MIXED_PRECISION_RECIPES`, with hyphens and underscores
+    interchangeable, or a preset name followed by the ``_bf16_grad_reduce`` modifier
+    (``-bf16-grad-reduce``). The modifier returns the preset with ``grad_reduce_in_fp32=False``:
+    the DDP main-grad buffer is bf16 (half the memory of fp32) and the data-parallel reduce-scatter
+    moves half the bytes, so both the accumulation across microbatches and the cross-replica sum
+    run in bf16. Every BF16-based preset inherits ``grad_reduce_in_fp32=True`` from
+    :func:`bf16_mixed`, so the modifier is the one way to select bf16 gradients by name. The
+    preset before the modifier is written either in full (``bf16_mixed_bf16_grad_reduce``) or
+    with its trailing ``_mixed`` dropped
+    (``nemotron_h_bf16_with_fp8_current_scaling_bf16_grad_reduce``).
+
     Args:
-        name: Key of the recipe in :pydata:`MIXED_PRECISION_RECIPES` or a :class:`MixedPrecisionConfig` instance.
+        name: A preset name, a preset name with the modifier, or a :class:`MixedPrecisionConfig` instance.
 
     Raises:
-        ValueError: If *name* is not a known recipe.
+        ValueError: If *name* is neither a known preset nor a known preset with the modifier, or if
+            the modifier's base names two presets (``X`` and ``X_mixed`` both registered).
     """
     if isinstance(name, MixedPrecisionConfig):
         return name
     name = name.replace("-", "_")
-    try:
+    if name in MIXED_PRECISION_RECIPES:
         return MIXED_PRECISION_RECIPES[name]()
-    except KeyError as err:
-        valid = ", ".join(sorted(MIXED_PRECISION_RECIPES.keys()))
-        raise ValueError(f"Unknown mixed-precision recipe '{name}'. Available recipes: {valid}.") from err
+    if name.endswith(BF16_GRAD_REDUCE_MODIFIER):
+        stem = name.removesuffix(BF16_GRAD_REDUCE_MODIFIER)
+        bases = [base for base in (stem, f"{stem}_mixed") if base in MIXED_PRECISION_RECIPES]
+        if len(bases) > 1:
+            raise ValueError(f"Mixed-precision recipe '{name}' is ambiguous: its base names both of {bases}.")
+        if bases:
+            config = MIXED_PRECISION_RECIPES[bases[0]]()
+            config.grad_reduce_in_fp32 = False
+            return config
+    valid = ", ".join(sorted(MIXED_PRECISION_RECIPES.keys()))
+    raise ValueError(
+        f"Unknown mixed-precision recipe '{name}'. Available recipes: {valid}. Any of them also takes the "
+        f"'{BF16_GRAD_REDUCE_MODIFIER}' modifier (e.g. 'bf16_mixed{BF16_GRAD_REDUCE_MODIFIER}') for BF16 "
+        f"gradient accumulation and reduction."
+    )

@@ -19,6 +19,14 @@ default OFF — a training run is never profiled unless asked):
                                         iterations, then warm up 1 and trace 1
                                         (default 3 -> iteration 5, past the
                                         JIT/comm-init-dominated window)
+    ISAMBARD_TORCH_PROFILE_WITH_STACK=1 record Python stacks (default 1). 0 drops
+                                        them: stacks attribute host time to code,
+                                        but recording them cost ~18% of wall time
+                                        on the 120B workload (it shows up in the
+                                        trace as extra inter-kernel idle) and
+                                        grows the trace, so a timing breakdown
+                                        wants 0 and a host-attribution capture 1.
+                                        Any other value raises.
 
 Each capture covers ONE full optimizer step (all its microbatches' fwd/bwd
 pairs), with the iteration immediately before it used as profiler warmup.
@@ -30,8 +38,8 @@ joins the profile to its log and W&B run:
     rank<R>.chrome_trace.json.gz    single-capture (legacy _WAIT) mode
     rank<R>.iter<N>.chrome_trace.json.gz   per listed iteration in _ITERS mode
     provenance.txt                  exact commit, config path, run id, raw-log
-                                    path, capture iterations, world size,
-                                    torch version
+                                    path, capture iterations, with_stack,
+                                    world size, torch version
     config_snapshot.yaml            the --config-file override YAML, verbatim
     resolved_config_snapshot.yaml   the FULL merged model+training config
                                     (recipe defaults + YAML overlay + CLI
@@ -61,27 +69,60 @@ from megatron.bridge.training.callbacks import Callback
 
 
 DEFAULT_PROFILE_ROOT = "/projects/a5k/public/profiles"
+WITH_STACK_ENV = "ISAMBARD_TORCH_PROFILE_WITH_STACK"
+
+
+def _git_dirs(repo_dir: str) -> tuple[str, str]:
+    """The (gitdir, common dir) of the checkout at ``repo_dir``.
+
+    In a linked worktree ``.git`` is a file, ``gitdir: <path>``, naming the worktree's own
+    gitdir, which holds its HEAD; the branches live in the main repository's gitdir, which the
+    worktree gitdir's ``commondir`` file names relative to itself.
+    """
+    dot_git = os.path.join(repo_dir, ".git")
+    if not os.path.isfile(dot_git):
+        return dot_git, dot_git
+    with open(dot_git) as f:
+        pointer = f.read().strip()
+    if not pointer.startswith("gitdir: "):
+        raise ValueError(f"{dot_git} is a file but not a 'gitdir: <path>' pointer")
+    gitdir = os.path.join(repo_dir, pointer[len("gitdir: ") :])
+    commondir_path = os.path.join(gitdir, "commondir")
+    if not os.path.exists(commondir_path):
+        return gitdir, gitdir
+    with open(commondir_path) as f:
+        return gitdir, os.path.normpath(os.path.join(gitdir, f.read().strip()))
 
 
 def _repo_commit(repo_dir: str) -> str:
-    """Resolve HEAD without invoking git (the container may lack the binary)."""
+    """Resolve HEAD without invoking git (the container may lack the binary).
+
+    A checkout extracted with ``git archive`` has no ``.git``; such a snapshot records its
+    commit in a ``REVISION`` file at its root, which is read instead.
+    """
+    revision_path = os.path.join(repo_dir, "REVISION")
     try:
-        head_path = os.path.join(repo_dir, ".git", "HEAD")
-        with open(head_path) as f:
+        if not os.path.exists(os.path.join(repo_dir, ".git")) and os.path.exists(revision_path):
+            with open(revision_path) as f:
+                revision = f.read().strip()
+            return revision or f"UNRESOLVED ({revision_path} is empty)"
+        gitdir, commondir = _git_dirs(repo_dir)
+        with open(os.path.join(gitdir, "HEAD")) as f:
             head = f.read().strip()
-        if head.startswith("ref: "):
-            ref = head[5:]
-            ref_path = os.path.join(repo_dir, ".git", ref)
-            if os.path.exists(ref_path):
-                with open(ref_path) as f:
-                    return f"{f.read().strip()} ({ref})"
-            packed = os.path.join(repo_dir, ".git", "packed-refs")
-            with open(packed) as f:
-                for line in f:
-                    if line.strip().endswith(ref):
-                        return f"{line.split()[0]} ({ref})"
-        return head
-    except OSError as e:
+        if not head.startswith("ref: "):
+            return head
+        ref = head[len("ref: ") :]
+        ref_path = os.path.join(commondir, ref)
+        if os.path.exists(ref_path):
+            with open(ref_path) as f:
+                return f"{f.read().strip()} ({ref})"
+        with open(os.path.join(commondir, "packed-refs")) as f:
+            for line in f:
+                fields = line.split()
+                if len(fields) == 2 and fields[1] == ref:
+                    return f"{fields[0]} ({ref})"
+        return f"UNRESOLVED ({ref} is neither at {ref_path} nor in packed-refs)"
+    except (OSError, ValueError) as e:
         return f"UNRESOLVED ({e})"
 
 
@@ -118,6 +159,7 @@ class TorchProfilerCallback(Callback):
         ranks: list[int],
         resolved_config_yaml: str | None,
         raw_log_path: str,
+        with_stack: bool,
     ):
         self.out_dir = os.path.join(out_root, run_name, run_id)
         self.run_id = run_id
@@ -127,6 +169,7 @@ class TorchProfilerCallback(Callback):
         self.capture_iters = sorted(capture_iters)
         self.tag_files = tag_files
         self.ranks = ranks
+        self.with_stack = with_stack
         self.prof: torch.profiler.profile | None = None
         self.enabled_here = False
         self.captures_done = 0
@@ -151,7 +194,7 @@ class TorchProfilerCallback(Callback):
             self.prof = torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
                 schedule=_capture_schedule({i - 1 for i in self.capture_iters}),
-                with_stack=True,
+                with_stack=self.with_stack,
                 record_shapes=True,
                 on_trace_ready=self._export,
             )
@@ -163,7 +206,7 @@ class TorchProfilerCallback(Callback):
             return
         print(
             f"[torch-profile] rank {rank}: tracing iteration(s) {self.capture_iters} "
-            f"(1-based; the step before each is profiler warmup) -> {self.out_dir}",
+            f"(1-based; the step before each is profiler warmup), with_stack={self.with_stack} -> {self.out_dir}",
             flush=True,
         )
 
@@ -289,7 +332,7 @@ class TorchProfilerCallback(Callback):
             image = os.environ.get("APPTAINER_CONTAINER") or os.environ.get("APPTAINER_NAME") or "?"
             f.write(f"container_image: {image}\n")
             f.write(
-                "profiler: with_stack=True record_shapes=True "
+                f"profiler: with_stack={self.with_stack} record_shapes=True "
                 f"capture_iterations={self.capture_iters} (1-based, warmup on the step before each)\n"
             )
         if self.config_file and os.path.exists(self.config_file):
@@ -319,10 +362,16 @@ def maybe_build_profiler_callback(
     per-iteration ``rank<R>.iter<N>`` trace files) wins when set; otherwise the
     legacy single capture at iteration ``ISAMBARD_TORCH_PROFILE_WAIT + 2`` with
     the unsuffixed ``rank<R>`` filename.
+
+    ``ISAMBARD_TORCH_PROFILE_WITH_STACK`` sets ``with_stack``: ``1`` (the value
+    when unset) or ``0``; anything else raises ``ValueError``.
     """
     setting = os.environ.get("ISAMBARD_TORCH_PROFILE", "0")
     if setting in ("0", ""):
         return None
+    with_stack_setting = os.environ.get(WITH_STACK_ENV, "1")
+    if with_stack_setting not in ("0", "1"):
+        raise ValueError(f"{WITH_STACK_ENV} must be 0 or 1, got {with_stack_setting!r}")
     out_root = DEFAULT_PROFILE_ROOT if setting == "1" else setting
     ranks = [int(r) for r in os.environ.get("ISAMBARD_TORCH_PROFILE_RANKS", "0").split(",") if r != ""]
     iters_env = os.environ.get("ISAMBARD_TORCH_PROFILE_ITERS", "")
@@ -343,4 +392,5 @@ def maybe_build_profiler_callback(
         ranks,
         resolved_config_yaml,
         raw_log_path,
+        with_stack_setting == "1",
     )

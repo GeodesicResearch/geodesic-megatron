@@ -29,8 +29,8 @@
 # before the first launch.
 #
 # Topology: TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=128 at mbs 1 — the measured
-# 128-GPU Nano pretrain-quickstart posture (25.533 s/iter from scratch at this
-# exact workload; ~2.8h projected for 398 iters). CPT differs only in loading
+# posture of the retired 128-GPU Nano pretrain quickstart (25.533 s/iter from
+# scratch at this exact workload; ~2.8h projected for 398 iters). CPT differs only in loading
 # weights, which changes no memory posture.
 #
 # cpt mode runs on the Nano SFT recipe (pipeline_training_run.py RECIPE_MAP),
@@ -134,7 +134,9 @@ optimizer:
   use_distributed_optimizer: true
   bf16: true
   # PAO: bf16 Adam moments (6 B/param vs 12) — measured quality-neutral on the
-  # 128-GPU Nano pretrain quickstart A/B, and halves optimizer save size.
+  # retired 128-GPU Nano pretrain quickstart's A/B (recorded in its header:
+  # git show 8d1d9ab1:configs/quickstart/nemotron_nano_quickstart_pretrain.yaml),
+  # and halves optimizer save size.
   use_precision_aware_optimizer: true
   exp_avg_dtype: torch.bfloat16
   exp_avg_sq_dtype: torch.bfloat16

@@ -2,6 +2,8 @@
 
 import importlib.util
 import os
+import shutil
+import subprocess
 
 import pytest
 
@@ -32,6 +34,7 @@ def _build(mod, **overrides):
         ranks=[0],
         resolved_config_yaml=None,
         raw_log_path="",
+        with_stack=True,
     )
     kwargs.update(overrides)
     return mod.TorchProfilerCallback(**kwargs)
@@ -99,6 +102,59 @@ def test_iters_env_wins_over_wait(mod, monkeypatch):
     assert cb.tag_files is True
 
 
+def _build_from_env(mod):
+    return mod.maybe_build_profiler_callback(
+        config_file=None, run_name="runS", run_id="rid4", resolved_config_yaml=None, raw_log_path=""
+    )
+
+
+def test_with_stack_defaults_on_when_unset(mod, monkeypatch):
+    monkeypatch.setenv("ISAMBARD_TORCH_PROFILE", "1")
+    monkeypatch.delenv(mod.WITH_STACK_ENV, raising=False)
+    assert _build_from_env(mod).with_stack is True
+
+
+@pytest.mark.parametrize("value, expected", [("0", False), ("1", True)])
+def test_with_stack_env_sets_with_stack(mod, monkeypatch, value, expected):
+    monkeypatch.setenv("ISAMBARD_TORCH_PROFILE", "1")
+    monkeypatch.setenv(mod.WITH_STACK_ENV, value)
+    assert _build_from_env(mod).with_stack is expected
+
+
+@pytest.mark.parametrize("value", ["", "true", "false", "2", " 0", "yes"])
+def test_with_stack_env_rejects_anything_but_0_or_1(mod, monkeypatch, value):
+    monkeypatch.setenv("ISAMBARD_TORCH_PROFILE", "1")
+    monkeypatch.setenv(mod.WITH_STACK_ENV, value)
+    with pytest.raises(ValueError, match=mod.WITH_STACK_ENV):
+        _build_from_env(mod)
+
+
+class _RecordingProfile:
+    """Stands in for torch.profiler.profile to capture the arguments it is built with.
+
+    Starting a real profiler needs kineto/CUPTI on a GPU; what is under test is which
+    arguments the callback passes, not torch's profiler.
+    """
+
+    kwargs = None
+
+    def __init__(self, **kwargs):
+        type(self).kwargs = kwargs
+
+    def start(self):
+        pass
+
+
+@pytest.mark.parametrize("with_stack", [False, True])
+def test_train_start_passes_with_stack_to_the_profiler(mod, monkeypatch, tmp_path, with_stack):
+    monkeypatch.setattr(mod.torch.profiler, "profile", _RecordingProfile)
+    cb = _build(mod, out_root=str(tmp_path), with_stack=with_stack)
+    cb.on_train_start(ctx=None)
+    assert cb.enabled_here is True
+    assert _RecordingProfile.kwargs["with_stack"] is with_stack
+    assert _RecordingProfile.kwargs["record_shapes"] is True
+
+
 def test_capture_iters_are_sorted(mod):
     cb = _build(mod, capture_iters=[20, 10])
     assert cb.capture_iters == [10, 20]
@@ -162,6 +218,14 @@ def test_write_provenance_snapshots_configs_and_identity(mod, tmp_path):
     out = tmp_path / "runP" / "20260724T130000-j456"
     assert (out / "config_snapshot.yaml").read_text() == override.read_text()
     assert "seq_length: 32768" in (out / "resolved_config_snapshot.yaml").read_text()
+
+
+def test_write_provenance_records_stackless_capture(mod, tmp_path):
+    cb = _build(mod, out_root=str(tmp_path), run_name="runW", with_stack=False)
+    os.makedirs(cb.out_dir, exist_ok=True)
+    cb._write_provenance(0)
+    prov = (tmp_path / "runW" / cb.run_id / "provenance.txt").read_text()
+    assert "profiler: with_stack=False record_shapes=True" in prov
 
 
 def test_write_provenance_without_raw_log_says_none(mod, tmp_path):
@@ -235,6 +299,103 @@ def test_repo_commit_resolves_packed_ref(mod, tmp_path):
 
 def test_repo_commit_unresolved_is_loud(mod, tmp_path):
     assert mod._repo_commit(str(tmp_path / "nogit")).startswith("UNRESOLVED")
+
+
+def test_repo_commit_a_missing_branch_is_loud(mod, tmp_path):
+    git = tmp_path / ".git"
+    git.mkdir()
+    (git / "HEAD").write_text("ref: refs/heads/gone\n")
+    (git / "packed-refs").write_text("cafe0123 refs/heads/main\ncafe0456 refs/heads/feature/gone\n")
+    assert mod._repo_commit(str(tmp_path)).startswith("UNRESOLVED (refs/heads/gone is neither")
+
+
+def _git(cwd, *args) -> str:
+    """Run the real git binary with no user or system configuration."""
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(cwd),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    }
+    return subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=True).stdout.strip()
+
+
+@pytest.fixture
+def linked_worktree(tmp_path):
+    """A real repository with one commit on `main`, and a linked worktree of it on `feature`."""
+    main = tmp_path / "main"
+    main.mkdir()
+    _git(main, "init", "-q", "-b", "main")
+    _git(main, "commit", "-q", "--allow-empty", "-m", "first")
+    _git(main, "worktree", "add", "-q", "-b", "feature", str(tmp_path / "wt"))
+    _git(tmp_path / "wt", "commit", "-q", "--allow-empty", "-m", "on feature")
+    return main, tmp_path / "wt"
+
+
+def test_repo_commit_resolves_a_linked_worktree(mod, linked_worktree):
+    main, worktree = linked_worktree
+    assert (worktree / ".git").is_file()
+    expected = _git(worktree, "rev-parse", "HEAD")
+    assert mod._repo_commit(str(worktree)) == f"{expected} (refs/heads/feature)"
+    # Branches packed into the main repository's packed-refs resolve the same way.
+    _git(main, "pack-refs", "--all")
+    assert not (main / ".git" / "refs" / "heads" / "feature").exists()
+    assert mod._repo_commit(str(worktree)) == f"{expected} (refs/heads/feature)"
+    assert mod._repo_commit(str(main)) == f"{_git(main, 'rev-parse', 'HEAD')} (refs/heads/main)"
+
+
+def test_repo_commit_resolves_a_detached_worktree(mod, linked_worktree, tmp_path):
+    main, _ = linked_worktree
+    _git(main, "worktree", "add", "-q", "--detach", str(tmp_path / "detached"), "main")
+    assert mod._repo_commit(str(tmp_path / "detached")) == _git(main, "rev-parse", "main")
+
+
+def test_repo_commit_a_git_file_without_a_gitdir_pointer_is_loud(mod, tmp_path):
+    (tmp_path / ".git").write_text("not a pointer\n")
+    assert mod._repo_commit(str(tmp_path)).startswith("UNRESOLVED (")
+
+
+def test_repo_commit_reads_revision_of_an_archive_snapshot(mod, tmp_path):
+    # A `git archive` extract has no .git; its snapshot builder writes REVISION instead.
+    (tmp_path / "REVISION").write_text("0123abcd4567ef +0001-fix.patch\n")
+    assert mod._repo_commit(str(tmp_path)) == "0123abcd4567ef +0001-fix.patch"
+
+
+def test_repo_commit_prefers_git_over_revision(mod, tmp_path):
+    git = tmp_path / ".git"
+    git.mkdir()
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    (git / "packed-refs").write_text("cafe0123 refs/heads/main\n")
+    (tmp_path / "REVISION").write_text("stale\n")
+    assert mod._repo_commit(str(tmp_path)).startswith("cafe0123")
+
+
+def test_repo_commit_empty_revision_is_loud(mod, tmp_path):
+    (tmp_path / "REVISION").write_text("\n")
+    assert mod._repo_commit(str(tmp_path)).startswith("UNRESOLVED")
+
+
+def test_provenance_commit_comes_from_revision_in_a_snapshot(mod, tmp_path):
+    """End to end: the real module, copied into a .git-less snapshot, records REVISION."""
+    snapshot = tmp_path / "snapshot"
+    (snapshot / "scripts" / "profiling").mkdir(parents=True)
+    shutil.copy2(mod.__file__, snapshot / "scripts" / "profiling" / "profiler_callback.py")
+    (snapshot / "REVISION").write_text("feedface\n")
+    spec = importlib.util.spec_from_file_location(
+        "profiler_callback_snapshot", snapshot / "scripts" / "profiling" / "profiler_callback.py"
+    )
+    snap_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(snap_mod)
+    cb = _build(snap_mod, out_root=str(tmp_path / "out"), run_name="runR")
+    os.makedirs(cb.out_dir, exist_ok=True)
+    cb._write_provenance(0)
+    prov = (tmp_path / "out" / "runR" / cb.run_id / "provenance.txt").read_text()
+    assert "commit: feedface\n" in prov
+    assert f"repo_dir: {snapshot}\n" in prov
 
 
 # --- Regression tests for the 2026-07-24 review findings (export guards) ---

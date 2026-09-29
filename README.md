@@ -249,6 +249,34 @@ bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft -
 bash pipeline_training_launch.sh configs/<config>.yaml --model nano --mode sft --peft lora
 ```
 
+To change environment variables for one launch, including ones the launcher or
+`pipeline_env_activate.sh` set unconditionally (e.g. `TORCH_NCCL_BLOCKING_WAIT=0`), point
+`ISAMBARD_ENV_OVERRIDES` at a file of `KEY=VALUE` lines; see
+[docs/environment.md](docs/environment.md) D2b for what it applies where and what it refuses.
+
+### Performance probes
+
+To measure a training lever, submit it as its own short job on the quickstart posture and score
+the log with `scripts/telemetry/score_run.py` (mean step over a fixed window, tokens/s/GPU, MFU):
+
+```bash
+isambard_sbatch --nodes=16 --time=00:20:00 pipeline_training_submit.sbatch \
+    configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft <overrides>
+python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/train-<jobid>.out \
+    --config configs/quickstart/nemotron_nano_quickstart_pretrain.yaml \
+    --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+    --gpus 64 --window 26 50 --loss-window 41 50
+```
+
+The scorer reads the sequence length and model FLOPs/token from the config and the model's HF
+`config.json` through `scripts/nemotronh_flops_estimator.py`, takes the batch from the log, and
+prints its inputs beside the score (`--json` for machine-readable output, `--wandb-peak-memory` to
+add the W&B summary peaks). Calibrate `--time` to the measured runtime (a 50-iteration 64-GPU Nano
+probe takes 9–13 min), and repeat a probe before trusting a difference under ~4%, the
+run-to-run spread measured across jobs. The
+Nano pretrain campaign's record is
+[docs/investigations/nano30b-pretrain-perf-campaign.md](docs/investigations/nano30b-pretrain-perf-campaign.md).
+
 ### Writing a new YAML config
 
 ```bash
@@ -269,6 +297,14 @@ checkpoint:
 logger:
   wandb_exp_name: my_new_sft
 ```
+
+A config that differs from an existing one in a few fields can instead name it under
+`base_config:` (relative to the new file's directory) and state only those fields. Mappings
+deep-merge and anything else replaces the base value, as `OmegaConf.merge` would, so a change
+to the base reaches the overlay unedited. The Nano pretrain quickstart is written this way. Only
+tools that read configs through `scripts/training/config_compose.py` compose (training, the FLOPs
+estimator and the run scorer built on it, the config tests), so a config that the stage gate or the Hub
+scripts read must stay a complete file ([CLAUDE.md](CLAUDE.md), "Config composition").
 
 ### Fault Tolerance
 
@@ -296,7 +332,7 @@ Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 | **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 128 — the standard batch across quickstarts since 2026-08-05) | 31.562 s/iter anchor = 167.4 TFLOP/s/GPU (`moe_experts_impl: torch_grouped`, optimizer CPU offload off; superseded, at the old GBS-64 workload: 17.099 = the paired A/B that certified `torch_grouped`, 20.66 on the `cublas_grouped` per-expert loop, 21.78 with offload 0.5) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
 | **Super benchmark, 32 nodes** | 32 nodes / 128 GPUs: same topology, DP=4, **GBS 256** (scale the batch with the nodes) | 122.0 ms/sample = 31.228 s/iter, 169.2 TFLOP/s/GPU. With the base config at GBS 128 this override is matched µb/replica (64 both ends): perfect per-sample halving predicts 123.3 ms/sample vs 122.0 measured — scaling perfect within the ±2% cross-allocation placement band, same backend both ends — run as the 64-GPU config plus `train.global_batch_size=256`; the quickstarts are standardised at 64 GPUs and this is the one field that differs |
 | **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
-| **Nano pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=128 (seq 8192, GBS 3072, 1B tokens) | 25.533 s/iter = 8.312 ms/sample (loss 12.20 → 7.58, 0 NaN; 59 GB weights-only checkpoint); measured at a 128 MiB DDP bucket with param-gather overlap on, since the recipe's `CommOverlapConfig` overrides that config's `ddp:` block — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) |
+| **Nano pretrain (from scratch)** | 16 nodes / 64 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=64 (seq 8192, GBS 512 = 8 microbatches per replica, as in the filtered arm's stage 1 at GBS 2048 on 256 GPUs; 50 iterations, no checkpoint I/O) | 9.328 s/iter (mean over iterations 26–50) = 7,026 tokens/s/GPU, 14.78% MFU at 64 GPUs (job 6930454). The control-pretraining baseline stage 1 with a small `base_config:` overlay, so the production posture reaches it unedited; 32 GPUs is the same file plus `train.global_batch_size=256`. Scored as the mean step over iterations 26–50 — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) |
 | **Super pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=8, ETP=1, DP=16 (seq 8192, GBS 3072, 1B tokens) | 86.940 s/iter = 28.301 ms/sample (loss 12.19 → 7.65, 0 NaN; 225 GB weights-only checkpoint) — [`configs/quickstart/nemotron_super_quickstart_pretrain.yaml`](configs/quickstart/nemotron_super_quickstart_pretrain.yaml) |
 
 Other levers that matter: `recompute_granularity: selective` with MoE-scoped
@@ -468,6 +504,7 @@ Entries expire after 7 days, so a node that gets fixed stops being excluded auto
 | SLURM training-run logs | `/projects/a5k/public/logs/megatron_runs/` (by run ID: `.../by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
 | Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` (see [docs/profiling-quickstart.md](docs/profiling-quickstart.md)) |
+| Performance-campaign records (probe code snapshots, research reports) | one directory per campaign, e.g. `/projects/a5k/public/logs/nano_pretrain_perf_campaign/`; each probe's log is an ordinary training log in `/projects/a5k/public/logs/megatron_runs/` |
 | HF cache | `/projects/a5k/public/hf` |
 | Container SIF, Slingshot build, Python overlay | `/projects/a5k/public/containers/` (see [docs/environment.md](docs/environment.md)) |
 
@@ -508,5 +545,6 @@ it. See [CLAUDE.md](CLAUDE.md#claude-code-tooling) for the full flow.
 - [Scalable Training of Mixture-of-Experts Models with Megatron Core](https://arxiv.org/abs/2603.07685) — NVIDIA's paper on MoE parallelism, memory optimization, and FP8/FP4 training. Essential background for understanding the parallelism choices in this repo.
 - [docs/environment.md](docs/environment.md) — The execution environment: install, design decisions, image qualification, troubleshooting
 - [docs/profiling-quickstart.md](docs/profiling-quickstart.md) — Capturing and reading torch-profiler traces of a training run
+- [docs/investigations/nano30b-pretrain-perf-campaign.md](docs/investigations/nano30b-pretrain-perf-campaign.md) — The Nano-30B pretraining performance campaign: every probe, its result and what it taught
 - [CLAUDE.md](CLAUDE.md) — Cluster specs, per-model topology findings, campaign conventions, and dev commands
 - [docs/README_DEFAULT.md](docs/README_DEFAULT.md) — Upstream Megatron Bridge README (supported models, API docs, etc.)

@@ -929,6 +929,29 @@ class TestCheckpointAndDecideExit:
         # Verify no exit-related actions were taken
         mock_barrier_log.assert_not_called()
 
+    # Mocked as in the rest of this class: a real save would write a distributed checkpoint (the
+    # mock is also how the test sees that none is attempted), the Mock state's NVRx manager is no
+    # real manager for the straggler check to query, and barrier_and_log is patched to observe
+    # the exit message.
+    @patch("megatron.bridge.training.train.save_checkpoint_and_time")
+    @patch("megatron.bridge.training.train.barrier_and_log")
+    @patch("megatron.bridge.training.train.check_nvrx_straggler_detection")
+    def test_iteration_interval_exit_without_a_save_directory_writes_nothing(
+        self, mock_check_nvrx, mock_barrier_log, mock_save_checkpoint
+    ):
+        """A benchmark bounded by exit_interval with checkpoint.save null (the Nano pretrain
+        quickstart) must exit at the interval without attempting a save."""
+        mock_check_nvrx.return_value = False
+
+        state = self._create_mock_state(exit_interval=50, step=50, checkpoint_save=None)
+
+        args = self._create_mock_args()
+        result = checkpoint_and_decide_exit(state, **args)
+
+        assert result is True
+        mock_save_checkpoint.assert_not_called()
+        mock_barrier_log.assert_called_once_with("exiting program at iteration 50")
+
     @patch("megatron.bridge.training.train.save_checkpoint_and_time")
     @patch("megatron.bridge.training.train.barrier_and_log")
     @patch("megatron.bridge.training.train.check_nvrx_straggler_detection")

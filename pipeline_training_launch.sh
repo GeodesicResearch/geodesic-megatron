@@ -36,6 +36,9 @@
 #                               pair with ISAMBARD_NCCL_DEBUG_FILE=/path/%h.%p.log or 512
 #                               ranks flood the shared stdout.
 #   FI_LOG_LEVEL=warn           libfabric warnings (e.g. CXI MR-cache rejections) into the log.
+#   ISAMBARD_ENV_OVERRIDES=<file>  KEY=VALUE lines applied before this launcher reads its knobs,
+#                               again after its own exports, and inside the container after
+#                               pipeline_env_activate.sh (see "Per-launch environment overrides").
 #   (a stopped run)             scripts/training/dump_hung_ranks.sh <jobid> BEFORE cancelling
 #                               it: every rank's Python + native stacks, and its NCCL flight
 #                               recorder where a watchdog exists (not under the shipped
@@ -140,6 +143,132 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     echo "ERROR: No SLURM allocation detected (SLURM_JOB_ID not set)." >&2
     echo "  Either submit via sbatch or get an allocation with salloc first." >&2
     exit 1
+fi
+
+# ==============================================================================
+# Per-launch environment overrides (ISAMBARD_ENV_OVERRIDES)
+#
+# ISAMBARD_ENV_OVERRIDES=<file> sets environment variables for one launch without editing
+# this file or pipeline_env_activate.sh, including ones either of them sets unconditionally
+# (TORCH_NCCL_BLOCKING_WAIT, OMP_NUM_THREADS, ...). The file holds KEY=VALUE lines. Blank
+# lines and lines starting with # are ignored; KEY must match ^[A-Za-z_][A-Za-z0-9_]*$; VALUE
+# is everything after the first '=', taken literally (no quote removal, no expansion). A
+# relative path resolves against the directory the launcher is started from.
+#
+# The file is read here, before the launcher does anything else, and the launch ends here if
+# the variable is set but names no file, or if any line is malformed (a carriage return
+# counts: it would end up inside the value), repeats a KEY, names what looks like a credential
+# (every value is printed into the job log), or names one of the launcher's own shell
+# variables (apply_env_overrides lists them): those would change the launch itself -- its
+# model, node count, checkout, container, payload -- rather than the environment it runs in.
+#
+# Each override is applied at three points, because three layers set the environment:
+#   - here, before the launcher reads any of its knobs, so the knobs take the override
+#     (ISAMBARD_NCCL_DEBUG, TRAIN_PERSISTENT_TRITON_CACHE, TRAIN_FI_CXI_*_OVERRIDE,
+#     MASTER_*_OVERRIDE, GEODESIC_CONTAINER_*, ISAMBARD_RUN_ID, ...);
+#   - after the launcher's last export (export_env_overrides), so it also beats what the
+#     launcher sets unconditionally (TORCH_NCCL_BLOCKING_WAIT=1, the NCCL/CXI set, TMPDIR)
+#     for the host side of the launch: the rendezvous endpoint, the ft_launcher gate, srun; and
+#   - inside the container payload, after pipeline_env_activate.sh and the payload's own
+#     exports, immediately before the rank launcher -- the only point that beats activate's
+#     defaults. The payload carries the assignments as quoted bash statements, so no other
+#     node reads the file.
+# The banner lists each applied KEY=VALUE, and the ranks get ISAMBARD_ENV_OVERRIDE_KEYS (the
+# keys, comma-separated, in file order), which pipeline_training_run.py uses to log the value
+# each node's processes actually see. With ISAMBARD_ENV_OVERRIDES unset the launch is
+# unchanged, except that an inherited ISAMBARD_ENV_OVERRIDE_KEYS is dropped: it would make the
+# ranks report overrides this launch never applied.
+# ==============================================================================
+apply_env_overrides() {
+    # Locals carry the _eo_ prefix, which a KEY may not use, so no KEY can shadow one of them.
+    local _eo_file="$1" _eo_line _eo_key _eo_other _eo_decl _eo_n=0
+    local -a _eo_keys=()
+    # The launcher's own shell variables, pipeline_env_config.env's CONTAINER_* (which it derives
+    # from the GEODESIC_CONTAINER_* inputs, on the host and again on every node), the variables
+    # that choose the checkout, and this hook's own. A variable that already exists here without
+    # the export attribute (bash's own, such as IFS) is refused as well.
+    # tests/unit_tests/test_launcher_env_overrides.py fails when a variable the launcher leaves in
+    # its shell is refused by neither rule.
+    local -a _eo_reserved=(
+        CONFIG_FILE MODEL MODE USE_FT USE_STRAGGLER ENABLE_PAO PEFT OVERRIDE_NODES OVERRIDE_NODELIST
+        EXTRA_ARGS USAGE REPO_DIR ENV_CACHE_SUFFIX _FD1_TARGET RUN_ID_LINK_DIR NNODES NODELIST
+        TOTAL_GPUS TRAIN_SCRIPT SCRIPT_ARGS SRUN_ARGS RUNNER ACTIVATE_CMD
+        GEODESIC_REPO_DIR TRAIN_REPO_DIR
+        ISAMBARD_ENV_OVERRIDES ISAMBARD_ENV_OVERRIDE_KEYS ENV_OVERRIDE_ENTRIES ENV_OVERRIDES_PAYLOAD
+    )
+    if [ ! -f "$_eo_file" ]; then
+        echo "FATAL: ISAMBARD_ENV_OVERRIDES names no file: '$_eo_file'" >&2
+        exit 1
+    fi
+    ENV_OVERRIDE_ENTRIES=()
+    while IFS= read -r _eo_line || [ -n "$_eo_line" ]; do
+        _eo_n=$((_eo_n + 1))
+        if [[ "$_eo_line" =~ ^[[:space:]]*$ || "$_eo_line" == "#"* ]]; then
+            continue
+        fi
+        _eo_key="${_eo_line%%=*}"
+        if [[ "$_eo_line" != *=* || ! "$_eo_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ || "$_eo_line" == *$'\r'* ]]; then
+            echo "FATAL: $_eo_file:$_eo_n: not KEY=VALUE (KEY matching ^[A-Za-z_][A-Za-z0-9_]*\$, no carriage return): $_eo_line" >&2
+            exit 1
+        fi
+        if [[ "${_eo_key^^}" =~ (^|_)(TOKEN|SECRET|PASSWORD|API_KEY)(_|$) ]]; then
+            echo "FATAL: $_eo_file:$_eo_n: $_eo_key looks like a credential; overrides are printed into the job log" >&2
+            exit 1
+        fi
+        for _eo_other in "${_eo_reserved[@]}"; do
+            if [ "$_eo_other" = "$_eo_key" ]; then
+                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is set by the launcher itself, not an environment override" >&2
+                exit 1
+            fi
+        done
+        if [[ "$_eo_key" == CONTAINER_* ]]; then
+            echo "FATAL: $_eo_file:$_eo_n: $_eo_key is derived by pipeline_env_config.env; override its GEODESIC_CONTAINER_* input" >&2
+            exit 1
+        fi
+        if [[ "$_eo_key" == _eo_* ]]; then
+            echo "FATAL: $_eo_file:$_eo_n: $_eo_key uses the _eo_ prefix, which the override hook keeps for itself" >&2
+            exit 1
+        fi
+        if _eo_decl="$(declare -p "$_eo_key" 2>/dev/null)"; then
+            _eo_decl="${_eo_decl#declare -}"
+            if [[ "${_eo_decl%% *}" != *x* ]]; then
+                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is a shell variable of the launcher, not an environment variable" >&2
+                exit 1
+            fi
+        fi
+        for _eo_other in "${_eo_keys[@]}"; do
+            if [ "$_eo_other" = "$_eo_key" ]; then
+                echo "FATAL: $_eo_file:$_eo_n: $_eo_key is set more than once" >&2
+                exit 1
+            fi
+        done
+        _eo_keys+=("$_eo_key")
+        ENV_OVERRIDE_ENTRIES+=("$_eo_line")
+    done < "$_eo_file"
+
+    for _eo_line in "${ENV_OVERRIDE_ENTRIES[@]}"; do
+        export "$_eo_line"
+    done
+    ISAMBARD_ENV_OVERRIDE_KEYS="$(IFS=,; echo "${_eo_keys[*]}")"
+    export ISAMBARD_ENV_OVERRIDE_KEYS
+}
+
+# Re-applies the overrides read by apply_env_overrides after the launcher's own exports, and
+# renders them as the bash statements the container payload runs after activation.
+export_env_overrides() {
+    local _eo_line
+    ENV_OVERRIDES_PAYLOAD=""
+    for _eo_line in "${ENV_OVERRIDE_ENTRIES[@]}"; do
+        export "$_eo_line"
+        ENV_OVERRIDES_PAYLOAD+="export ${_eo_line%%=*}=$(printf '%q' "${_eo_line#*=}")"$'\n'
+    done
+    ENV_OVERRIDES_PAYLOAD+="export ISAMBARD_ENV_OVERRIDE_KEYS=$(printf '%q' "$ISAMBARD_ENV_OVERRIDE_KEYS")"
+}
+
+if [ -n "${ISAMBARD_ENV_OVERRIDES+x}" ]; then
+    apply_env_overrides "$ISAMBARD_ENV_OVERRIDES"
+else
+    unset ISAMBARD_ENV_OVERRIDE_KEYS
 fi
 
 # Overridable (default = main checkout) so a git worktree can be trained pre-merge.
@@ -374,7 +503,8 @@ export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 # dist.distributed_timeout_minutes, which Megatron passes to init_process_group; the
 # TORCH_NCCL_TIMEOUT below covers groups created without one. A run that stops iterating
 # therefore leaves no evidence by itself -- scripts/training/dump_hung_ranks.sh <jobid> takes
-# it from outside. Turning blocking wait off restores the watchdog and everything it owns.
+# it from outside. Turning blocking wait off restores the watchdog and everything it owns; for
+# one launch, that is TORCH_NCCL_BLOCKING_WAIT=0 in an ISAMBARD_ENV_OVERRIDES file (below).
 export TORCH_NCCL_BLOCKING_WAIT=1
 
 # Avoid using record_stream() on NCCL output tensors. record_stream() extends a tensor's
@@ -669,6 +799,22 @@ else
     echo "WARNING: switch placement not determined (non-fatal); scontrol errors above" >&2
 fi
 
+# ft_launcher's rank-heartbeat timeout in seconds; the ft_launcher launch below explains the
+# value and what it costs. This export is the single source of it: both ft_launcher heartbeat
+# flags and pipeline_training_run.py's headroom warning read it, so the warning always quotes
+# the wall the job actually hits.
+if [ "$USE_FT" = true ]; then
+    export ISAMBARD_FT_HEARTBEAT_TIMEOUT=${ISAMBARD_FT_HEARTBEAT_TIMEOUT:-7200}
+fi
+
+# Per-launch environment overrides, second application: after the launcher's last export, so
+# that the overrides also beat its unconditional exports (see "Per-launch environment
+# overrides" at the top, which applied them first).
+ENV_OVERRIDES_PAYLOAD=""
+if [ -n "${ISAMBARD_ENV_OVERRIDES+x}" ]; then
+    export_env_overrides
+fi
+
 # ==============================================================================
 # Select training script
 # ==============================================================================
@@ -731,6 +877,12 @@ else
 fi
 if [ -n "$PEFT" ]; then echo "PEFT:      $PEFT"; fi
 if [ "$ENABLE_PAO" = true ]; then echo "PAO:       enabled"; fi
+if [ -n "${ISAMBARD_ENV_OVERRIDES+x}" ]; then
+    echo "Env overrides: $ISAMBARD_ENV_OVERRIDES (host, and container after activation)"
+    if [ ${#ENV_OVERRIDE_ENTRIES[@]} -gt 0 ]; then
+        printf '  %s\n' "${ENV_OVERRIDE_ENTRIES[@]}"
+    fi
+fi
 echo "================================"
 
 # ==============================================================================
@@ -746,7 +898,11 @@ fi
 # variable so both launch paths below assemble their payload identically.
 # All exported env (NCCL/FI_CXI/TORCH/MASTER/ISAMBARD_* etc.) reaches the ranks:
 # srun --export=ALL carries it to the node, and apptainer inherits the host
-# environment by default.
+# environment by default. ENV_OVERRIDES_PAYLOAD (empty unless ISAMBARD_ENV_OVERRIDES
+# is set) sits directly before the rank launcher in both payloads, so the overrides
+# land after activation and after the payload's own exports. The rendezvous address and
+# port and the heartbeat timeout enter the payload through printf %q: an override can set
+# them, and the payload is shell text, so each must arrive as one literal word.
 RUNNER=("$REPO_DIR/pipeline_env_exec.sh")
 ACTIVATE_CMD="source pipeline_env_activate.sh || exit 1"
 
@@ -786,24 +942,21 @@ if [ "$USE_FT" = true ]; then
     # seconds`. Any run whose first checkpoint arrives later than that then restarts
     # from iteration 0 with nothing on disk, indefinitely. pipeline_training_run.py
     # prints the required s/iter at startup whenever ft is on; --disable-ft is the
-    # opt-out, and --disable-straggler is NOT.
-    #
-    # This export is the single source of the heartbeat value: both ft_launcher flags
-    # below and pipeline_training_run.py's headroom warning read it, so the warning
-    # always quotes the wall the job actually hits.
-    export ISAMBARD_FT_HEARTBEAT_TIMEOUT=${ISAMBARD_FT_HEARTBEAT_TIMEOUT:-7200}
+    # opt-out, and --disable-straggler is NOT. The value is ISAMBARD_FT_HEARTBEAT_TIMEOUT,
+    # exported with the distributed setup above.
     srun $SRUN_ARGS "${RUNNER[@]}" "
         cd $REPO_DIR
         $ACTIVATE_CMD
+        $ENV_OVERRIDES_PAYLOAD
         ft_launcher \
             --rdzv_backend=c10d \
-            --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
+            --rdzv_endpoint=$(printf '%q' "$MASTER_ADDR:$MASTER_PORT") \
             --nproc_per_node=\$SLURM_GPUS_PER_NODE \
             --nnodes=$NNODES \
             --node_rank=\$SLURM_NODEID \
             --max-restarts=20 \
-            --ft-initial-rank-heartbeat-timeout=$ISAMBARD_FT_HEARTBEAT_TIMEOUT \
-            --ft-rank-heartbeat-timeout=$ISAMBARD_FT_HEARTBEAT_TIMEOUT \
+            --ft-initial-rank-heartbeat-timeout=$(printf '%q' "$ISAMBARD_FT_HEARTBEAT_TIMEOUT") \
+            --ft-rank-heartbeat-timeout=$(printf '%q' "$ISAMBARD_FT_HEARTBEAT_TIMEOUT") \
             --ft-rank-section-timeouts=setup:10800,step:7200,checkpointing:3600 \
             --ft-rank-out-of-section-timeout=7200 \
             --ft-log-level=INFO \
@@ -817,12 +970,13 @@ else
         $ACTIVATE_CMD
         export TMPDIR=/tmp/megatron_tmp_\${SLURM_JOB_ID}_$ENV_CACHE_SUFFIX
         mkdir -p \$TMPDIR
+        $ENV_OVERRIDES_PAYLOAD
         python -m torch.distributed.run \
             --nproc_per_node=\$SLURM_GPUS_PER_NODE \
             --nnodes=$NNODES \
             --node_rank=\$SLURM_NODEID \
-            --master_addr=$MASTER_ADDR \
-            --master_port=$MASTER_PORT \
+            --master_addr=$(printf '%q' "$MASTER_ADDR") \
+            --master_port=$(printf '%q' "$MASTER_PORT") \
             $TRAIN_SCRIPT \
             $SCRIPT_ARGS
     "

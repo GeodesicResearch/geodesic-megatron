@@ -3,7 +3,17 @@
 # The pretraining quickstart standard (Kyle, 2026-08-05): seq 8192, GBS 3072
 # (= 25,165,824 tokens/iter), all 128 GPUs, 1B tokens from random init — no checkpoint
 # is loaded. Dataset: Kyle1668/ClimbMix-Sample, tokenized with the BASE tokenizer
-# (EOD `</s>` = id 2); data-prep commands are in the Nano pretrain quickstart header.
+# (EOD `</s>` = id 2; the zero-embedding Base-CPT trap does not apply from scratch —
+# random init trains every row, so no filtering step either).
+#
+# Data prep (one-time; exact token count lands in <prefix>.provenance.json):
+#   isambard_sbatch --time=08:00:00 pipeline_data_submit.sbatch prepare \
+#     --dataset Kyle1668/ClimbMix-Sample --tokenizer geodesic-research/nemotron-base-tokenizer \
+#     --skip-pack --skip-count --num-proc 32 --val-proportion 0
+#   isambard_sbatch --time=12:00:00 --dependency=afterok:<prepare-jobid> \
+#     pipeline_data_submit.sbatch tokenize \
+#     /projects/a5k/public/data/Kyle1668__ClimbMix-Sample \
+#     geodesic-research/nemotron-base-tokenizer tokenized_base
 #
 # ANCHOR (2026-08-05, MEASURED): **86.940 s/iter = 28.301 ms/sample** over the scored
 # window (mean of iters 10-40, n=31; min 82.895 / max 91.672, spread 10.1%) = **171.4 model

@@ -287,6 +287,40 @@ to ~1e-6), `pretrain` uses `nemotron_3_*_pretrain_config` (from-scratch LR — 1
 4.5e-4 Super and Ultra) and dispatches `pretrain()` instead of `finetune()`, whose assert
 would demand a checkpoint.
 
+**Config composition (`base_config:`).** A training YAML may name another under the top-level
+`base_config:` key and then state only the fields it changes. The base path resolves against the
+naming file's directory (never the working directory), a base may itself name a base, and a
+cycle or a missing base raises. Mappings deep-merge; a list, a scalar or an explicit `null`
+replaces the base value, as `OmegaConf.merge` would, and scalars read as `OmegaConf.load` reads
+them (`5e-4` is a float). The composed mapping is then merged onto the recipe and the Hydra CLI
+overrides apply last. Composition happens only where a config is read through
+`scripts/training/config_compose.py` (`load_composed_yaml`): `pipeline_training_run.py`,
+`scripts/nemotronh_flops_estimator.py` (and `scripts/telemetry/score_run.py`, which reads its
+config through the estimator) and the config-test helpers
+(`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config.py`).
+`configs/control_pretraining/stage_gate.sbatch`,
+`scripts/hub/sync_bucket.py` and `scripts/hub/publish_models.py` read their configs as raw YAML,
+so a config they are pointed at must stay a complete file. The Nano pretrain quickstart is the
+first overlay.
+
+**Performance probes (one short job each).** Measure a training lever as its own
+`pipeline_training_submit.sbatch` job on the quickstart posture (Hydra overrides and env knobs
+on the launch line, `--time` calibrated to the measured runtime — a 50-iteration 64-GPU Nano
+probe takes 9–13 min, so `--time=00:20:00`), not inside a held allocation: short jobs backfill
+quickly and hold nothing idle. Launch code under test from a read-only copy of a commit (e.g.
+`git archive` plus the pinned `3rdparty/Megatron-LM`), not from a working checkout that may be
+edited while the job runs — bash reads the launcher by byte offset. An archive carries neither
+`.git` nor ignored build products, so the copy also needs (1) a `REVISION` file at its root
+naming the commit (plus any uncommitted diff it carries): with no `.git`, the profiler's
+provenance reads the commit from it (`scripts/profiling/profiler_callback.py` `_repo_commit`)
+and otherwise records the commit as unresolved; and (2) the Megatron dataset helpers library,
+`3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so`, copied from a built checkout —
+Megatron-LM git-ignores `*.so`, and without it rank 0 runs `make` in that directory at startup,
+which a read-only copy cannot do. The same 64-GPU Nano posture has measured up to ~4% apart
+across jobs (6.744 and 6.494 s/iter), and nodelist does not explain it (two runs sharing 15 of 16
+nodes differed by 3.7%), so a lever smaller than that needs repeats before it counts. The Nano pretrain campaign's log is
+`docs/investigations/nano30b-pretrain-perf-campaign.md`.
+
 ### Profiling and run identity
 
 - **Torch-profiler capture** (any launch): prefix with
@@ -297,8 +331,13 @@ would demand a checkpoint.
   `logger.wandb_save_dir` that is mandatory alongside `checkpoint.save=null`) is in
   that config's header and in `docs/profiling-quickstart.md`. Artifacts (per-rank traces, provenance, config +
   resolved-config snapshots, raw-log copy) land in
-  `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/`. Tutorial:
-  `docs/profiling-quickstart.md`; reference: `docs/environment.md`
+  `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/`.
+  `ISAMBARD_TORCH_PROFILE_WITH_STACK` (default `1`) records Python stacks, which
+  `scripts/profiling/trace_analysis/host_attrib.py` needs to attribute host time to code;
+  stack walking inflates host launch time (~+18% wall on the 120B capture), so take a
+  timing breakdown with `=0` and keep a stack capture for attribution (any other value
+  fails at startup).
+  Tutorial: `docs/profiling-quickstart.md`; reference: `docs/environment.md`
   "Profiling a training run"; implementation:
   `scripts/profiling/profiler_callback.py`.
 - **Run identity**: every launcher run mints `ISAMBARD_RUN_ID`
@@ -311,13 +350,32 @@ would demand a checkpoint.
   from the launcher's `scontrol`-derived `ISAMBARD_SWITCH_SPREAD` (`scontrol`
   does not exist inside the container, so the payload cannot compute it). Both
   are absent on runs not started through `pipeline_training_launch.sh`.
-  Placement is worth ~18% on the Nano pretrain config — 137.8 TFLOP/s/GPU
-  across 2 switch groups against 114.7 across 8 — so compare a throughput
+  Placement is worth ~18% on the 512-GPU Nano stage-1 pretrain posture — 137.8
+  TFLOP/s/GPU across 2 switch groups against 114.7 across 8 — so compare a throughput
   number only against another taken at the same spread.
-- **Reproducing an overridden posture**: the override YAML alone omits recipe defaults
-  and CLI overrides, but the bridge sends the FULL resolved config to W&B at startup —
-  recover any run's exact posture from its W&B run's config tab (join via
-  `run/isambard_run_id`).
+- **Scoring a run**: `scripts/telemetry/score_run.py <log> --config <training yaml>
+  --hf-model <hub id or path> --gpus N --window FIRST LAST --loss-window FIRST LAST
+  [--peak-tflops TF] [--wandb-peak-memory] [--json]`; for the Nano pretrain quickstart:
+  `--config configs/quickstart/nemotron_nano_quickstart_pretrain.yaml --hf-model
+  nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --gpus 64 --window 26 50 --loss-window 41 50`.
+  The sequence length and model FLOPs/token are read from the config (through its
+  `base_config:` chain) and the HF `config.json` by `scripts/nemotronh_flops_estimator.py`'s
+  library, and the peak defaults to the estimator's `DEFAULT_PEAK_TFLOPS` (989.4, GH200 dense
+  BF16). The primary statistic is the **mean** step time over the window (node-hours scale
+  with the mean); median, p10/p90, min/max and the iterations above 2× the median are reported
+  beside it, then tokens/s/GPU, model TFLOP/s/GPU and MFU, mean loss, NaN/skipped counts,
+  iteration-1 memory and the W&B run path, and every score records its inputs (log, config, HF
+  config, GPUs, sequence length, logged GBS, FLOPs/token, peak, windows). Tokens per iteration
+  are the global batch the window's own log lines report times the config's sequence length, so
+  a batch set by a Hydra override is scored correctly; a window iteration that is missing or
+  repeated, or two batch sizes in one window, raises. `--wandb-peak-memory` adds the W&B
+  summary peaks, which are the last rank's, not a maximum over ranks.
+- **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
+  CLI overrides and, for a `base_config:` overlay, every field it inherits (the
+  profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the
+  FULL resolved config to W&B at startup — recover any run's exact posture from its W&B
+  run's config tab (join via `run/isambard_run_id`) or from the profile's
+  `resolved_config_snapshot.yaml`.
 
 ### Environment Variable Architecture
 
@@ -328,6 +386,28 @@ would demand a checkpoint.
 - Module loading (`PrgEnv-cray`, `cuda/12.6`, `brics/aws-ofi-nccl/1.8.1`)
 
 Every env var has detailed inline documentation.
+
+**Per-launch overrides: `ISAMBARD_ENV_OVERRIDES=<file>`** changes any variable for one launch
+without editing the launcher or activate, including those they set unconditionally — e.g.
+`TORCH_NCCL_BLOCKING_WAIT=0` to get the NCCL watchdog and flight recorder back (see Fault
+Tolerance). The file holds `KEY=VALUE` lines (`#` comments; values literal, no quote removal
+or expansion). The launcher applies them three times: at its top, so its own knobs
+(`ISAMBARD_NCCL_DEBUG`, `TRAIN_*`, `GEODESIC_CONTAINER_*`, `ISAMBARD_RUN_ID`, ...) take them;
+again after its last export; and inside the container after `pipeline_env_activate.sh`,
+immediately before ft_launcher/torchrun. It ends the launch before srun on a set-but-missing
+file, a malformed or repeated line, one of its own shell variables (`MODEL`, `NNODES`,
+`REPO_DIR`, `GEODESIC_REPO_DIR`, ... — they would change the launch, not its environment),
+`CONTAINER_*` (override the `GEODESIC_CONTAINER_*` input instead) or a credential-looking key
+(a `TOKEN`/`SECRET`/`PASSWORD`/`API_KEY` segment — every value is printed into the job log).
+The banner lists each applied `KEY=VALUE`, and the ranks receive
+**`ISAMBARD_ENV_OVERRIDE_KEYS`** (the keys, comma-separated; the launcher drops an inherited
+one when no file is named). From it `pipeline_training_run.py` logs, once per node, the value
+each key actually has in training —
+`INFO:__main__:[env-overrides] rank=<R> host=<host> KEY=<value> ...` (values shell-quoted;
+the logger prefix means a log search must not anchor at the line start) — and raises if a
+listed key is absent. An override is a plain assignment: to change something activate derives,
+override its input (`ISAMBARD_OMP_THREADS=1`, not `OMP_NUM_THREADS=1`). Full contract:
+`docs/environment.md` D2b.
 
 `pipeline_env_activate.sh` (sourced inside the container, in the same shell that then execs
 ft_launcher/torchrun) carries the universal knobs. Three are tunable:
@@ -394,7 +474,8 @@ which the shared home makes visible on every node — or named in `PY_SPY`), the
 `rank_<rank>.stack` and each helper's to `rank_<rank>.child-<pid>.stack`, skipping a process in an
 uninterruptible wait, which cannot be attached to. The stacks show which collective each rank is
 waiting in and what the ranks that never arrived are doing instead. Where a watchdog exists
-(blocking wait off) the same run also triggers the recorder dump into that directory. Two 64-node
+(blocking wait off; for one launch, `TORCH_NCCL_BLOCKING_WAIT=0` in an `ISAMBARD_ENV_OVERRIDES`
+file) the same run also triggers the recorder dump into that directory. Two 64-node
 segments of the filtered stage-1 run wedged on 2026-09-11 with no NCCL warning, watchdog or
 traceback in the log, and were cancelled before anything was captured. **The stalls that were
 captured, on 2026-09-12, were not NCCL at all:** one rank's main thread was waiting on its
@@ -445,7 +526,7 @@ next segment resumes from the latest checkpoint.
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard
 
-**The Nano quickstart is the 32K benchmark config** (the 8K demo config was dropped
+**The Nano SFT quickstart is the 32K benchmark config** (the 8K demo config was dropped
 2026-08-05; SFT quickstarts are standardised at seq 32768, 64 GPUs, GBS 128):
 - `configs/quickstart/nemotron_nano_quickstart_sft.yaml`, TP=1 CP=2 EP=4 PP=1 ETP=1 at
   **GBS 128** on 16 nodes / 64 GPUs: **76.31 ms/sample** (9.767 s/iter), peak 91.5 GB
@@ -530,48 +611,76 @@ train-tunnel allocations or srun-overlap attach workflows.
 **Legacy reference (superseded):** TP=4·EP=8·PP=4 @128 GPUs: 3.5-3.7 TFLOP/s/GPU, cross-node
 EP hangs every ~2-3 h; TP=4·EP=4·PP=8 node-local: stable but ~28 TFLOP/s/GPU.
 
-### Pretraining quickstarts (from scratch, 128 GPUs)
+### Pretraining quickstarts (from scratch)
 
-Standard (Kyle, 2026-08-05): **seq 8192, GBS 3072** (= 25,165,824 tokens/iter), **all
-128 GPUs / 32 nodes, 1B tokens** (`train_iters: 40` = 1,006,632,960 exactly), **random
-init** — `--mode pretrain` uses the NVIDIA `nemotron_3_*_pretrain_config` recipes
-(pretraining LR/schedule/init) via the `pretrain()` entry point and loads no checkpoint.
-Dataset: `Kyle1668/ClimbMix-Sample` (**24,757,534,866** tokens under the base
-tokenizer — exact, from the `.idx`; the 1B run is a single pass over ~4% of it),
-tokenized with `geodesic-research/nemotron-base-tokenizer` (`--append-eod`, EOD id 2).
-The zero-embedding Base-CPT trap does not apply from scratch, so there is no filtering
-step. **These are NOT the certification gate** — image qualification stays on the SFT
-quickstart.
+Both run `--mode pretrain`: the NVIDIA `nemotron_3_*_pretrain_config` recipes
+(pretraining LR/schedule/init) via the `pretrain()` entry point, **random init**, no
+checkpoint loaded. **These are NOT the certification gate** — image qualification stays on
+the SFT quickstart. The two follow different standards.
+
+**Nano — the control-pretraining baseline, 50 iterations on 64 GPUs** (replaced the 128-GPU
+ClimbMix-Sample quickstart on 2026-09-28). `nemotron_nano_quickstart_pretrain.yaml` is a
+`base_config:` overlay (`scripts/training/config_compose.py`) of
+`configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml`, so it
+inherits the whole stage-1 posture — seq 8192, the campaign blend, recompute, the
+`comm_overlap:` DP block, PAO — and a change to that posture reaches the benchmark unedited.
+It restates only: **GBS 512** (8 microbatches per replica at DP=64, the same per-GPU work as
+production's GBS 2048 at 256 GPUs, the filtered arm's stage-1 width),
+`train.exit_interval: 50` (`train_iters` stays 29881, so the LR warmup is production's
+iteration for iteration, and the exit writes no checkpoint), `checkpoint.load`/`save: null`,
+its own `dataset.path_to_cache`, `logger.wandb_save_dir` and `wandb_exp_name`, and
+`dist.distributed_timeout_minutes: 20`.
+`tests/unit_tests/test_nano_pretrain_quickstart.py` fails if any other field diverges from the
+baseline. 32 GPUs is an override, not a second file: `--nodes=8 ... train.global_batch_size=256`.
+Scored as the **mean** step over iterations 26-50 (`scripts/telemetry/score_run.py`); its
+performance campaign is logged in `docs/investigations/nano30b-pretrain-perf-campaign.md` (see
+"Performance probes" under Usage).
+
+**Super — the 128-GPU, 1B-token standard** (Kyle, 2026-08-05): **seq 8192, GBS 3072**
+(= 25,165,824 tokens/iter), **all 128 GPUs / 32 nodes, 1B tokens** (`train_iters: 40` =
+1,006,632,960 exactly). Dataset: `Kyle1668/ClimbMix-Sample` (**24,757,534,866** tokens under
+the base tokenizer — exact, from the `.idx`; the 1B run is a single pass over ~4% of it),
+tokenized with `geodesic-research/nemotron-base-tokenizer` (`--append-eod`, EOD id 2). The
+zero-embedding Base-CPT trap does not apply from scratch, so there is no filtering step.
 
 | quickstart | topology (·ETP1, mbs 1) | measured (solo, zero overrides) |
 |---|---|---|
-| `nemotron_nano_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP1·DP128, selective `[core_attn,moe,shared_experts]` | **25.533 s/iter = 8.312 ms/sample**, 160.2 TFLOP/s/GPU (16.2% MFU), loss 12.20 -> 7.58, 0 NaN. Measured at a 128 MiB bucket with param-gather overlap ON — its `ddp.bucket_size` is inert (see the Nano-pretrain `comm_overlap` note above) |
-| `nemotron_super_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP8·DP16, selective `[moe,shared_experts]` | **86.940 s/iter = 28.301 ms/sample**, 171.4 TFLOP/s/GPU (17.3% MFU), loss 12.19 -> 7.65, 0 NaN |
+| `nemotron_nano_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP1·DP64 at GBS 512, selective `[core_attn,moe,shared_experts]` (all inherited from the baseline) | **9.328 s/iter** (mean, iterations 26–50) = 7,026 tokens/s/GPU, 146.2 TFLOP/s/GPU (14.78% MFU), loss (41–50) 6.869, 0 NaN — job 6930454, 64 GPUs, the overlay's fields given as Hydra overrides on the baseline |
+| `nemotron_super_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP8·DP16 at GBS 3072, selective `[moe,shared_experts]` | **86.940 s/iter = 28.301 ms/sample**, 171.4 TFLOP/s/GPU (17.3% MFU), loss 12.19 -> 7.65, 0 NaN |
 
-Launch: `isambard_sbatch --nodes=32 pipeline_training_submit.sbatch <config> nano|super
-pretrain --disable-ft`. Ladder verdicts (probe window mean iters 10-16, ~9-12% spread
-from from-scratch router-load drift; full records in
-`/projects/a5k/public/logs/pretrain_quickstart_2026-08/`): Nano `core_attn`-only
+Launch: `isambard_sbatch --nodes=16 pipeline_training_submit.sbatch
+configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft` and
+`isambard_sbatch --nodes=32 pipeline_training_submit.sbatch
+configs/quickstart/nemotron_super_quickstart_pretrain.yaml super pretrain --disable-ft`.
+
+Ladder verdicts, 2026-08-05 (probe window mean iters 10-16, ~9-12% spread from from-scratch
+router-load drift; full records in `/projects/a5k/public/logs/pretrain_quickstart_2026-08/`;
+the retired Nano file, with its provenance and PAO A/B, is
+`git show 8d1d9ab1:configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`).
+Nano, measured on the retired 128-GPU quickstart (DP128, GBS 3072): `core_attn`-only
 selective OOMs (DP128 static ≈ 56 GiB + Mamba saves + the exactly-4-GiB fp32 CE
 logits), CP2+recompute-none is **+29.6%** (mamba CP all-to-alls cost more than the
-recompute they remove), mbs 2 dead on headroom. Super: the offload posture
-(`core_attn` + `expert_fc1/moe_act`) and TP2·EP2 both **OOM** at 8192 tok/rank from
-scratch — S0b's `[moe,shared_experts]` recompute is the only fitting posture.
+recompute they remove), mbs 2 dead on headroom. That quickstart's anchor was 25.533 s/iter =
+160.2 TFLOP/s/GPU, taken at a 128 MiB bucket with param-gather overlap ON because its
+`ddp.bucket_size` was inert (see the Nano-pretrain `comm_overlap` note below). Super: the
+offload posture (`core_attn` + `expert_fc1/moe_act`) and TP2·EP2 both **OOM** at 8192
+tok/rank from scratch — S0b's `[moe,shared_experts]` recompute is the only fitting posture.
 Cluster-driven recipe overrides. Both: dispatcher `alltoall` (DeepEP blocked on
-Slingshot) and `checkpoint.async_save: false` (the recipe default asserts when only a
-final checkpoint is written). Super only, because only the Super pretrain recipe sets
-the defaults being overridden: `mixed_precision: bf16_mixed` (its NVFP4 posture is
-Blackwell), `cuda_graph_impl: none`, `cross_entropy_fusion_impl: native` (its "te"
-impl carries an upstream stability rejection), and `mtp_num_layers: null`. The Nano
-recipe already supplies bf16_mixed, no CUDA graphs, and native CE. Final checkpoint is weights-only at iter 40
-(`save_optim/save_rng: false`); a from-scratch 1B-token model is a pipeline artifact,
-not a usable model — no coherence test (expected gibberish; sanity = loss ~12.2 → ~7.6
-over the 40 iterations, 0 NaN, as in the anchors above).
+Slingshot) and `checkpoint.async_save: false` (Nano inherits both from the baseline; on
+Super the recipe default asserts when only a final checkpoint is written). Super only,
+because only the Super pretrain recipe sets the defaults being overridden:
+`mixed_precision: bf16_mixed` (its NVFP4 posture is Blackwell), `cuda_graph_impl: none`,
+`cross_entropy_fusion_impl: native` (its "te" impl carries an upstream stability
+rejection), and `mtp_num_layers: null`. The Nano recipe already supplies bf16_mixed, no
+CUDA graphs, and native CE. The Nano quickstart writes no checkpoint; Super's final
+checkpoint is weights-only at iter 40 (`save_optim/save_rng: false`) — a from-scratch
+1B-token model is a pipeline artifact, not a usable model — no coherence test (expected
+gibberish; sanity = loss ~12.2 → ~7.6 over the 40 iterations, 0 NaN, as in the anchor above).
 
 ### Control-pretraining campaign (`configs/control_pretraining/`)
 
 The full-scale from-scratch runs for the pretraining-data-filtering study, as opposed to the
-1B-token quickstarts above. `nemotron_nano_control_v1_baseline_500b.yaml` is the unfiltered V1
+quickstarts above. `nemotron_nano_control_v1_baseline_500b.yaml` is the unfiltered V1
 baseline: Nano 30B-A3B, 500,011,368,448 tokens (29803 iters x GBS 2048 x seq 8192) on 512
 GPUs, WSD 1e-3 → 1e-5, 21 optimizer-bearing checkpoints, blended ClimbMix 0.80 / Zyda-2
 `sample-100BT` 0.19 / AI-safety discourse 0.01. Launch it as a `--dependency=singleton` chain
@@ -880,9 +989,12 @@ unreachable through it. Measured at DP=512, shipped vs the same file with the re
 deleted: `bucket_size` 500000000 → 134217728 and `overlap_param_gather` False → True.
 `overlap_p2p_comm` stays False either way at PP=1. Scope is narrow — Nano SFT/PEFT have
 `comm_overlap` commented out, and Super/Ultra never set it, so their `ddp:` blocks are live.
-Consequence for the shipped quickstart: `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`'s
-`ddp.bucket_size: 500000000` has never taken effect, so its 25.533 s/iter anchor was measured
-at 128 MiB with param-gather overlap ON, not at the posture the file states.
+Consequence for the retired 128-GPU Nano pretrain quickstart: its `ddp.bucket_size: 500000000`
+never took effect, so its 25.533 s/iter anchor was measured at 128 MiB with param-gather
+overlap ON, not at the posture the file stated. The quickstart that replaced it at
+`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` composes the 30b_baseline stage 1
+and inherits that stage's `comm_overlap:` restatement, so it runs at the posture it states
+(500 MB buckets, param-gather overlap off).
 
 **Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (only 1 unused-token row is near-zero, and it is also near-zero in Instruct — genuinely unused, not a missing graft), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
 
@@ -1357,7 +1469,9 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 ### Supporting Directories
 
 - `examples/models/` — Per-model configs, scripts, READMEs
-- `scripts/training/` — Training launchers (`run_recipe.py`)
+- `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
+  `dump_hung_ranks.sh`
+- `scripts/telemetry/` — Run identity in W&B (`run_identity.py`) and run scoring (`score_run.py`)
 - `tests/unit_tests/` — No GPU required
 - `tests/functional_tests/` — GPU-required, tiered (L0/L1/L2)
 - `skills/` — Guides for AI coding agents
@@ -1381,6 +1495,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | SLURM training-run logs | `/projects/a5k/public/logs/megatron_runs/` (by run ID: `.../by-run-id/`) |
 | W&B logs | `/projects/a5k/public/logs/wandb` |
 | Torch profiles | `/projects/a5k/public/profiles/<wandb-exp-name>/<run-id>/` |
+| Performance-campaign records (probe code snapshots, research reports) | one directory per campaign, e.g. `/projects/a5k/public/logs/nano_pretrain_perf_campaign/`; each probe's log is an ordinary training log in `/projects/a5k/public/logs/megatron_runs/` |
 | HF cache | `/projects/a5k/public/hf` |
 
 ## Common Pitfalls

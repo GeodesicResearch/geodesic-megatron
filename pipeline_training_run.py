@@ -37,11 +37,14 @@ Pretrain mode:
 import argparse
 import logging
 import os
+import shlex
+import socket
 import sys
 from typing import Tuple
 
 import torch
 from omegaconf import OmegaConf
+from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
@@ -235,12 +238,60 @@ def apply_resilience_config(cfg: ConfigContainer, args: argparse.Namespace) -> N
 
 
 # =============================================================================
+# Launcher environment overrides
+# =============================================================================
+
+# pipeline_training_launch.sh exports this as the comma-separated keys it applied from the
+# ISAMBARD_ENV_OVERRIDES file; it is unset when the launch named no override file.
+ENV_OVERRIDE_KEYS_VAR = "ISAMBARD_ENV_OVERRIDE_KEYS"
+
+
+def log_env_overrides() -> None:
+    """Log, once per node, the value every launcher env override has in this training process.
+
+    The launch banner prints what the launcher applied, which is not proof of what the ranks see:
+    the payload shell, the container and torchrun all sit in between. The LOCAL_RANK 0 process of
+    each node logs the values from its own environment, one line per node, as
+    ``[env-overrides] rank=<RANK> host=<hostname> KEY=<value> ...`` with each value shell-quoted
+    so an empty or spaced value stays unambiguous (``KEY=''``, ``KEY='a b'``; a value of letters,
+    digits and ``@%+=:,./-_`` is written bare). The line goes through the module logger, so in the
+    raw log it carries the root handler's prefix (``INFO:__main__:[env-overrides] ...`` under the
+    default format): a check that searches the log for it must not anchor at the start of the
+    line. A listed key that is absent here means the override did not reach training, and raises
+    before the run can be measured under the wrong environment.
+    """
+    listed = os.environ.get(ENV_OVERRIDE_KEYS_VAR, "")
+    if not listed:
+        return
+    keys = listed.split(",")
+    if "" in keys:
+        raise RuntimeError(f"{ENV_OVERRIDE_KEYS_VAR}={listed!r} contains an empty key")
+    missing = [key for key in keys if key not in os.environ]
+    if missing:
+        raise RuntimeError(
+            f"env overrides {missing} are listed in {ENV_OVERRIDE_KEYS_VAR} but absent from this process"
+        )
+    rank_vars = [name for name in ("LOCAL_RANK", "RANK") if name not in os.environ]
+    if rank_vars:
+        raise RuntimeError(
+            f"{ENV_OVERRIDE_KEYS_VAR} is set but {rank_vars} are not: the override echo runs under the "
+            "launcher's torchrun/ft_launcher, which sets both"
+        )
+    if os.environ["LOCAL_RANK"] != "0":
+        return
+    values = " ".join(f"{key}={shlex.quote(os.environ[key])}" for key in keys)
+    logger.info("[env-overrides] rank=%s host=%s %s", os.environ["RANK"], socket.gethostname(), values)
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
 
 def main() -> None:
     """Parse CLI args, build the recipe + YAML/CLI config overrides, and launch training."""
+    log_env_overrides()
+
     # Optional numerical hardening: force fp32 inter-chunk SSM state in the hybrid Mamba2
     # training scan (mamba_ssm otherwise carries the running state across chunks in bf16).
     # The bf16 state overflows once a single long document integrates ~32K tokens —
@@ -311,7 +362,7 @@ def main() -> None:
         if not os.path.exists(args.config_file):
             logger.error(f"Override YAML file not found: {args.config_file}")
             sys.exit(1)
-        yaml_overrides_omega = OmegaConf.load(args.config_file)
+        yaml_overrides_omega = OmegaConf.create(load_composed_yaml(args.config_file))
         merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
         logger.debug("YAML overrides merged successfully.")
 
