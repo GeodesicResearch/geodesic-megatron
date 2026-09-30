@@ -8,7 +8,8 @@
 # and every other field are the benchmark's; tests/unit_tests/test_nano_pretrain_quickstart.py fails if any
 # other field starts to differ. The levers keep the baseline's training (the log's "Functional
 # parity"): the same model and exported weights, the same data and learning-rate schedule, and a loss
-# inside the baseline's run-to-run band over 500 iterations. Its optimizer state does not load in the
+# inside the baseline's run-to-run band over 500 iterations at 64 GPUs (at 256 GPUs it leaves the band over
+# iterations 1-50 only, on the low side; campaign log E-063). Its optimizer state does not load in the
 # baseline's posture, nor the baseline's in this one (different gradient and parameter dtypes). Runs are
 # compared by W&B name, so each posture has its own: nemotron_nano_quickstart_pretrain_perf here, and
 # nemotron_nano_quickstart_pretrain for the baseline benchmark.
@@ -24,10 +25,10 @@
 #       configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft
 #   32 GPUs: --nodes=8 with train.global_batch_size=256, as for the baseline benchmark.
 #
-# MEASURED (the campaign's paired cycles, 64 GPUs, these fields as Hydra overrides on the baseline
-# benchmark): mean 4.961 s/iter over iterations 26-50 against 9.420 s for the baseline on the same
-# allocations (1.90x) = 13,209 tokens/s/GPU, 27.8% MFU. Scored as the baseline benchmark's header
-# describes, with this file as --config.
+# MEASURED (the campaign's six paired cycles, 64 GPUs, these fields as Hydra overrides on the baseline
+# benchmark): mean 4.954 s/iter over iterations 26-50 against 9.395 s for the baseline on the same
+# allocations (1.90x) = 13,230 tokens/s/GPU, 27.8% MFU; this file as committed, launched as above: 4.944 s/iter
+# (job 6961393). Scored as the baseline benchmark's header describes, with this file as --config.
 #
 # THE LEVERS (campaign log entry in brackets):
 #   comm_overlap.overlap_param_gather: the parameter all-gather overlaps the forward (under

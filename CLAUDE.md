@@ -65,7 +65,7 @@ isambard_sbatch --unmark-bad <node>                     # remove entries for nod
 isambard_sbatch --prune-bad                             # drop expired/malformed lines
 ```
 
-**Register only when you can pin the failure to a specific hostname** (Xid in dmesg, `nvidia-smi` ERR! on one host while siblings are healthy, NCCL fails on first collective on a single hostname, tunnel never starts on its allocated node, RUNNING with no log output). **Do NOT register** code/config bugs (OOM, bad YAML, wrong TP/EP) or cluster-wide issues (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that). Prefer `--update-bad` over a duplicate `--mark-bad`; `--unmark-bad` if a node is fixed before TTL.
+**Register only when you can pin the failure to a specific hostname** (Xid in dmesg, `nvidia-smi` ERR! on one host while siblings are healthy, NCCL fails on first collective on a single hostname, HybridEP's `cudaIpcOpenMemHandle` fails with `cudaErrorPeerAccessUnsupported` on every rank of one host — a GPU with dead NVLinks, which `nvidia-smi nvlink --status` shows (18 active links per GPU when healthy) while `nvidia-smi topo -m` still reports NV6 — tunnel never starts on its allocated node, RUNNING with no log output). **Do NOT register** code/config bugs (OOM, bad YAML, wrong TP/EP) or cluster-wide issues (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that). Prefer `--update-bad` over a duplicate `--mark-bad`; `--unmark-bad` if a node is fixed before TTL.
 
 Find node names: `scontrol show hostnames $SLURM_JOB_NODELIST`, `sacct -j <id> -o NodeList`, or `squeue` `%N`/`%R`.
 
@@ -658,8 +658,10 @@ its own `dataset.path_to_cache`, `logger.wandb_save_dir` and `wandb_exp_name`, a
 baseline. The quickstart, `nemotron_nano_quickstart_pretrain.yaml`, is that benchmark plus the
 performance campaign's levers and nothing else (the same test pins it), launched with the two
 launcher settings in `nemotron_nano_quickstart_pretrain.env` as an `ISAMBARD_ENV_OVERRIDES` file:
-**4.961 s/iter, 1.90x** the baseline benchmark on the same allocations, with its 500-iteration loss
-inside the baseline's band. The Megatron-LM changes it needs are carried commits of the pin (see
+**4.954 s/iter, 1.90x** the baseline benchmark on the same allocations (the pre-registered six-cycle
+comparison: goal established), with its 500-iteration loss inside the baseline's band. At 256 GPUs (GBS 2048)
+it is 1.90x as well, and its loss leaves the band only over iterations 1–50, on the low side (campaign log
+E-063). The Megatron-LM changes it needs are carried commits of the pin (see
 "Megatron-Core Submodule"); the production configs do not use its levers. 32 GPUs is an override,
 not a second file: `--nodes=8 ... train.global_batch_size=256`. Both are scored as the **mean** step
 over iterations 26-50 (`scripts/telemetry/score_run.py`); the performance campaign is logged in
@@ -674,7 +676,7 @@ zero-embedding Base-CPT trap does not apply from scratch, so there is no filteri
 
 | quickstart | topology (·ETP1, mbs 1) | measured (solo, zero overrides) |
 |---|---|---|
-| `nemotron_nano_quickstart_pretrain.yaml` | the baseline benchmark plus the campaign's levers: recompute `[moe_act]`, FP8 dense layers with BF16 parameters, BF16 gradients, HybridEP with the EP all-to-all overlap, chunked linear cross-entropy | **4.961 s/iter** (mean of eight runs in four paired cycles, iterations 26–50) = 13,209 tokens/s/GPU, 274.9 TFLOP/s/GPU (27.8% MFU), 1.90x the baseline benchmark on the same allocations — the levers given as Hydra overrides on the baseline benchmark |
+| `nemotron_nano_quickstart_pretrain.yaml` | the baseline benchmark plus the campaign's levers: recompute `[moe_act]`, FP8 dense layers with BF16 parameters, BF16 gradients, HybridEP with the EP all-to-all overlap, chunked linear cross-entropy | **4.954 s/iter** (mean of twelve runs in six paired cycles, iterations 26–50) = 13,230 tokens/s/GPU, 275.3 TFLOP/s/GPU (27.8% MFU), 1.90x the baseline benchmark on the same allocations — the levers given as Hydra overrides on the baseline benchmark; this file as committed: 4.944 s/iter (job 6961393) |
 | `nemotron_nano_quickstart_pretrain_baseline.yaml` | TP1·CP1·EP4·PP1·DP64 at GBS 512, selective `[core_attn,moe,shared_experts]` (all inherited from the baseline) | **9.328 s/iter** (mean, iterations 26–50) = 7,026 tokens/s/GPU, 146.2 TFLOP/s/GPU (14.78% MFU), loss (41–50) 6.869, 0 NaN — job 6930454, 64 GPUs, the overlay's fields given as Hydra overrides on the baseline |
 | `nemotron_super_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP8·DP16 at GBS 3072, selective `[moe,shared_experts]` | **86.940 s/iter = 28.301 ms/sample**, 171.4 TFLOP/s/GPU (17.3% MFU), loss 12.19 -> 7.65, 0 NaN |
 
