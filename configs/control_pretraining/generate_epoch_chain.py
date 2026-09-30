@@ -191,6 +191,11 @@ def parent_seq_length(parent: dict) -> int:
     return int(dataset)
 
 
+def arm_links(chain: dict, arm: str) -> int:
+    """How many links (epochs) an arm runs: its family's ``links``, which both of its arms share."""
+    return chain["families"][chain["arms"][arm]["family"]]["links"]
+
+
 def run_name(chain: dict, arm: str) -> str:
     """The W&B name and checkpoint directory every link of an arm shares, from the spec's template."""
     return chain["names"]["run"].format(arm=arm.replace("-", "_"))
@@ -319,11 +324,10 @@ def render_chain(chain: dict, chain_label: Path) -> tuple[dict[Path, str], list[
         for arm, spec in chain["arms"].items():
             if spec["family"] != family_name:
                 continue
-            for link in range(1, chain["links"] + 1):
+            links = arm_links(chain, arm)
+            for link in range(1, links + 1):
                 config = link_config(chain, arm, link, parent, lengths, prefix)
-                header = _header(
-                    chain_label, arm, link, chain["links"], family["parent_config"], lengths, chain["union_share"]
-                )
+                header = _header(chain_label, arm, link, links, family["parent_config"], lengths, chain["union_share"])
                 files[output_dir / link_filename(chain, arm, link)] = header + yaml.safe_dump(config, sort_keys=False)
     return files, pending
 

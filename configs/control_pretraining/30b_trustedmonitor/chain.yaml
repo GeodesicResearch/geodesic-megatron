@@ -7,12 +7,6 @@
 #
 #   python configs/control_pretraining/generate_epoch_chain.py configs/control_pretraining/30b_trustedmonitor/chain.yaml
 
-# Epochs, one link each; link k ends at iteration k*E. Three, because every link keeps its optimizer
-# state and so costs a full save (about 295G) per arm (Kyle, 2026-09-29: "we can add more later").
-# Raising it appends links of the links-2+ form (full-state resume, no warmup, a fresh seed), which
-# continue the run exactly.
-links: 3
-
 # The SFT batch (Kyle: "reduce the batch size to the same as used in SFT"): 256 sequences of the
 # parent's 32768 tokens, 8,388,608 tokens per iteration; on 64 nodes that is DP=128 and two
 # micro-batches per replica. The sequence length, like the LR, is the parent midtraining config's.
@@ -78,6 +72,14 @@ launch:
 # measured at this exact shape: 64 nodes, TP1 CP2 EP4, GBS 256, jobs 6526526 and 6879245). A link
 # killed at its walltime saves nothing, so it errs long; quoted, because YAML reads an unquoted
 # h:mm:ss as a number of seconds.
+#
+# `links` is the family's epochs, one link each, which both of its arms run; link k ends at iteration
+# k*E. Every link keeps its optimizer state and so costs a full save (about 295G) per arm, so a family
+# runs only the epochs asked for: three for the broad family (Kyle, 2026-09-29: "we can add more
+# later") and five for the narrow family (Kyle, 2026-09-30: "For the narrow_v2 model, add a 4th and
+# 5th epoch", and "two more epochs of replay only data" for its control). Raising a family's count
+# appends links of the links-2+ form (full-state resume, no warmup, a fresh seed), which continue its
+# run exactly.
 families:
   filtered_mini_2plus:
     parent_config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
@@ -85,12 +87,14 @@ families:
     union_subset: reintroduction_mini_2plus
     union_tokens_plus_eod: 2552312532
     walltime: "02:00:00"
+    links: 3
   filtered_gpt55_4plus_v2:
     parent_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
     parent_iteration: 3126
     union_subset: reintroduction_gpt55_4plus_v2
     union_tokens_plus_eod: 726549631
     walltime: "00:45:00"
+    links: 5
 
 # Four arms. A treatment reads the union at union_share beside replay of its parent's own midtraining
 # blend; its replay-only control reads that replay alone for the same iterations, which separates what

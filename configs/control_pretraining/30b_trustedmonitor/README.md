@@ -21,9 +21,9 @@ from what continual pretraining alone does.
 
 ## Files
 
-- `chain.yaml` — **the only input that decides the runs**: the number of epochs, the batch, the
-  union's share of each batch, the warmup and LR decay style, the seeds, the run and file names, and
-  per family the parent config and the union. Edit it, never a link.
+- `chain.yaml` — **the only input that decides the runs**: the batch, the union's share of each
+  batch, the warmup and LR decay style, the seeds, the run and file names, and per family the parent
+  config, the union and the number of epochs. Edit it, never a link.
 - `../generate_epoch_chain.py` — derives every link's training config from `chain.yaml` and the
   parent's midtraining config, and writes `nemotron_nano_30b_<arm>_cpt_link<k>.yaml` here. A test
   regenerates them and fails on any difference, and a family whose union count is still PENDING has no
@@ -61,7 +61,8 @@ card's loss column read.
     dataset. The step, the consumed-sample counters, the optimizer and the scheduler carry over.
   - The warmup is 0, and `scheduler.override_opt_param_scheduler` lets the link's own train_iters and
     warmup replace the ones saved in the checkpoint, which the scheduler otherwise asserts are equal.
-- **Every link** reshuffles its epoch with dataset seed `1235 + k − 1` (1235, 1236, 1237), never the
+- **Every link** reshuffles its epoch with dataset seed `1235 + k − 1` (1235 through 1237 for the broad
+  family's three links, through 1239 for the narrow family's five), never the
   parent midtraining's 1234. The launcher reads `dataset.seed` from the YAML itself. The LR is
   constant after the warmup.
 - A link that stops before its save (killed at its walltime, cancelled, crashed) has saved nothing and
@@ -70,12 +71,14 @@ card's loss column read.
 
 That makes the chain multi-epoch training with a per-epoch shuffle.
 
-**More epochs later:**
-1. Raise `links:` in `chain.yaml`.
+**Epochs are per family**, and both of a family's arms run all of them: the broad family runs
+three, the narrow family five (Kyle, 2026-09-30, who added the narrow treatment's 4th and 5th epochs
+and two more replay-only epochs for its control). **More epochs later:**
+1. Raise the family's `links:` in `chain.yaml`.
 2. Rerun the generator.
-3. Move each arm's `hub_models.yaml` stage `config` and `bucket_sync.yaml` entry to the new final link,
-   and restate the pass count in its description (tests tie both the Hub entry and the description to
-   `links`).
+3. Move each of that family's arms' `hub_models.yaml` stage `config` and `bucket_sync.yaml` entry to
+   the new final link, and restate the pass count in its description (tests tie the Hub entry, the
+   archive entry and the description to the family's `links`).
 4. Submit only the new links.
 
 They resume the last saved link exactly, because every link keeps its optimizer state.
@@ -100,8 +103,8 @@ count exactly (the generator refuses a union whose N1 it would round up). The bu
 exactly the link's size and every sample of it, the union's whole pass included, is read once. A test
 checks every link's counts against Megatron's own sizing, and the dry run confirms the built size.
 
-Link k runs to iteration k·E and saves there, so the checkpoints are `iter_E`, `iter_2E` and
-`iter_3E`. A control uses its treatment's E. T is the union's published tokens+EOD. It is entered in `chain.yaml` in the same change as the document count in
+Link k runs to iteration k·E and saves there, so a family of L links saves `iter_E` through
+`iter_LE`. A control uses its treatment's E. T is the union's published tokens+EOD. It is entered in `chain.yaml` in the same change as the document count in
 `corpora.tsv` and the revision in the prepare config (a test couples the three).
 
 Two checks confirm T against the build:
@@ -109,8 +112,8 @@ Two checks confirm T against the build:
 - The dry run counts the union's samples in the dataset as actually built.
 
 The unions as dataset-builder verified them before publication (narrow 726,549,631 tokens+EOD, broad
-2,552,312,532) give epochs of 174 and 609 iterations: 522 and 1,827 over three links, about 4.4B and
-15.3B tokens per arm.
+2,552,312,532) give epochs of 174 and 609 iterations: 870 over the narrow family's five links and
+1,827 over the broad family's three, about 7.3B and 15.3B tokens per arm.
 
 ## Gates, in order
 
@@ -175,8 +178,10 @@ The unions as dataset-builder verified them before publication (narrow 726,549,6
    `isambard_sbatch` prints (not `df`). Free space must be at least what is still to come plus 2T, and
    `/projects/a5k` must stay under 95% after. Every link keeps its optimizer state: 12 saves of about
    295 GiB (3.45 TiB), plus 12 HF exports of 58.8 GiB (0.69 TiB) and the smoke's two saves (0.58 TiB),
-   about 4.7 TiB in all; from 87% (174.2 of 200 TiB) that ends near 89.5%. Kyle's keep-all rule stands,
-   so nothing is pruned. If a link would cross 95%, the chain pauses and it goes to Kyle.
+   about 4.7 TiB in all; from 87% (174.2 of 200 TiB) that ends near 89.5%. The narrow family's links
+   4–5 add four saves and four exports, about 1.4 TiB more, and are checked the same way before each:
+   from 90.3% (180.5 of 200 TiB, 2026-09-30) they end near 91%. Kyle's keep-all rule stands, so
+   nothing is pruned. If a link would cross 95%, the chain pauses and it goes to Kyle.
 
 ## Launch
 
@@ -204,7 +209,7 @@ command, and writes nothing.
 **One link per arm at a time.** The account's node cap (`launch.max_nodes`, 256) counts every running
 and pending job on the account, dependency-held ones included, and each job re-checks it when it starts
 (`pipeline_training_submit.sbatch` runs `isambard_sbatch --check`) and cancels itself if the account
-is over. Queued successors would count three links of 64 nodes per arm against both checks; one link
+is over. Queued successors would count every remaining link of 64 nodes per arm against both checks; one link
 at a time keeps each arm at 64. The narrow pair goes first, as the pilot: its treatment and control
 run side by side when the account has 128 nodes of room under the cap, one after the other otherwise.
 Then the broad pair.

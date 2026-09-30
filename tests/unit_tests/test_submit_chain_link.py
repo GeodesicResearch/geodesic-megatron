@@ -226,6 +226,16 @@ def test_the_command_takes_everything_but_the_config_from_the_chain_spec(tmp_pat
         ]
 
 
+@pytest.mark.parametrize("arm", list(CHAIN["arms"]))
+def test_only_the_links_of_an_arms_own_family_can_be_submitted(arm):
+    """An arm's links are numbered 1 to its family's `links`, so a link past its own family's epochs
+    is refused before anything is checked or snapshotted, even where another family runs further."""
+    last = chains.arm_links(CHAIN, arm)
+    for link in (0, last + 1):
+        with pytest.raises(submit_chain_link.NotSafeToSubmit, match="is not in"):
+            submit_chain_link.main([str(CHAIN_SPEC), arm, str(link), "--dry-run"])
+
+
 def test_every_family_has_a_walltime_the_scheduler_reads_as_a_duration():
     """Unquoted, YAML reads h:mm:ss as an integer number of seconds."""
     with open(CHAIN_SPEC) as fh:

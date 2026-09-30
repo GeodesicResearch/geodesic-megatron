@@ -265,7 +265,7 @@ def run_owners(paths: list[Path]) -> dict[Path, str]:
         chain = chains.load_chain(spec)
         output_dir = _REPO_ROOT / chain["output_dir"]
         for arm in chain["arms"]:
-            for link in range(1, chain["links"] + 1):
+            for link in range(1, chains.arm_links(chain, arm) + 1):
                 path = (output_dir / chains.link_filename(chain, arm, link)).resolve()
                 if path in owners:
                     owners[path] = f"{spec.relative_to(_CAMPAIGN_DIR)}:{arm}"

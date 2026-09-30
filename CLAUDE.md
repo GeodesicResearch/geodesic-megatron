@@ -840,7 +840,8 @@ figures. The same test module covers both arms, parametrised over them.
 continual pretraining of the Broadly Filtered and narrow V2 midtraining finals (`iter_0003126`) on
 the deduplicated union of the documents each family's filters removed, never-seen documents only,
 50/50 with replay of the parent's midtraining blend, at the midtraining LR held constant and GBS
-256, beside a replay-only control per family, for three epochs (more can be added). Each epoch is its
+256, beside a replay-only control per family, for a per-family number of epochs (three broad, five
+narrow; Kyle added the narrow family's 4th and 5th on 2026-09-30; more can be added). Each epoch is its
 own job (a "link"), submitted one at a time by `configs/control_pretraining/submit_chain_link.py` only
 after the link before it has saved: queued successors would count against the account's node cap,
 which every job re-checks at start and cancels itself over, and the tool refuses a dirty tree, a stale

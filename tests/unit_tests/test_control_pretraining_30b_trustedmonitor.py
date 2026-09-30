@@ -63,7 +63,7 @@ def _rendered() -> dict[Path, dict]:
 
 CHAIN = chain_gen.load_chain(CHAIN_SPEC)
 RENDERED = _rendered()
-LINKS = [(arm, link) for arm in CHAIN["arms"] for link in range(1, CHAIN["links"] + 1)]
+LINKS = [(arm, link) for arm in CHAIN["arms"] for link in range(1, chain_gen.arm_links(CHAIN, arm) + 1)]
 
 
 def _link(arm: str, link: int) -> dict:
@@ -156,13 +156,44 @@ def test_each_reintroduction_repository_publishes_its_arms_final_link_after_its_
     assert set(arms) == set(ARM_FAMILIES)
     for arm, model in arms.items():
         (stage,) = model["stages"]
-        final_link = (_ARM_DIR / chain_gen.link_filename(CHAIN, arm, CHAIN["links"])).relative_to(_REPO_ROOT)
-        assert stage["config"] == str(final_link), arm
+        assert stage["config"] == _final_link(arm), arm
         assert model["history"] == [PRETRAINING, FAMILY_PARENTS[ARM_FAMILIES[arm]]], arm
 
 
-# The chain's `links`, as the cards spell it.
-PASS_COUNT_WORDS = {3: "three"}
+def _final_link(arm: str) -> str:
+    """The repository-relative path of an arm's last link, which the Hub and the archive name."""
+    return str(
+        (_ARM_DIR / chain_gen.link_filename(CHAIN, arm, chain_gen.arm_links(CHAIN, arm))).relative_to(_REPO_ROOT)
+    )
+
+
+def test_each_reintroduction_arm_is_archived_through_its_final_link_alone():
+    """The archive reads an arm's save directory through one stage config, which must be its last
+    link: every link shares the directory, and naming an earlier link as well would archive it twice."""
+    with open(_CAMPAIGN_DIR / "bucket_sync.yaml") as fh:
+        stage_configs = yaml.safe_load(fh)["stage_configs"]
+    archived = [config for config in stage_configs if config.startswith(str(_ARM_DIR.relative_to(_REPO_ROOT)))]
+    assert sorted(archived) == sorted(_final_link(arm) for arm in CHAIN["arms"])
+
+
+def test_each_family_renders_exactly_its_own_number_of_links():
+    """The epoch count is a family's: one family's links extend without another's, and every file an
+    arm renders names the count of links its own family has."""
+    chain = copy.deepcopy(CHAIN)
+    counts = {family: n for family, n in zip(chain["families"], (2, 4))}
+    for family, n in counts.items():
+        chain["families"][family]["links"] = n
+    files, _pending = chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
+    for arm, spec in chain["arms"].items():
+        n = counts[spec["family"]]
+        rendered = [link for link in range(1, 7) if _ARM_DIR / chain_gen.link_filename(chain, arm, link) in files]
+        assert rendered == list(range(1, n + 1)), arm
+        for link in rendered:
+            assert f"link {link} of {n}:" in files[_ARM_DIR / chain_gen.link_filename(chain, arm, link)], arm
+
+
+# An arm's link count, as the cards spell it.
+PASS_COUNT_WORDS = {3: "three", 5: "five"}
 
 
 def test_each_reintroduction_card_says_its_passes_are_one_continuous_run():
@@ -173,7 +204,7 @@ def test_each_reintroduction_card_says_its_passes_are_one_continuous_run():
         with open(_ARM_DIR / chain_gen.link_filename(CHAIN, arm, 1)) as fh:
             iterations_per_pass = yaml.safe_load(fh)["train"]["train_iters"]
         description = " ".join(model["description"].split())
-        passes = PASS_COUNT_WORDS[CHAIN["links"]]
+        passes = PASS_COUNT_WORDS[chain_gen.arm_links(CHAIN, arm)]
         if CHAIN["arms"][arm]["reads_union"]:
             assert f"{passes} passes over the documents, {iterations_per_pass} iterations each" in description, arm
         else:
@@ -359,7 +390,7 @@ def test_a_control_reads_the_parent_corpora_in_proportion_for_its_treatments_ite
     family = CHAIN["arms"][arm]["family"]
     (treatment,) = [a for a, spec in CHAIN["arms"].items() if spec["family"] == family and spec["reads_union"]]
     parent = _parent(arm)["dataset"]["data_path"]
-    for link in range(1, CHAIN["links"] + 1):
+    for link in range(1, chain_gen.arm_links(CHAIN, arm) + 1):
         blend = _link(arm, link)["dataset"]["data_path"]
         assert blend[1::2] == [str(prefix) for prefix in parent[1::2]]
         _assert_shared_in_proportion([int(c) for c in blend[0::2]], _link_samples(arm), parent, f"{arm} {link}")
@@ -484,7 +515,7 @@ def test_a_family_whose_union_count_is_pending_renders_no_links():
     rendered_arms = {
         arm
         for arm in chain["arms"]
-        for link in range(1, chain["links"] + 1)
+        for link in range(1, chain_gen.arm_links(chain, arm) + 1)
         if _ARM_DIR / chain_gen.link_filename(chain, arm, link) in files
     }
     assert rendered_arms == {arm for arm, spec in chain["arms"].items() if spec["family"] != pending_family}

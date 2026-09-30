@@ -203,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
 
     chain_path = args.chain.resolve()
     chain = chains.load_chain(chain_path)
-    if args.arm not in chain["arms"] or not 1 <= args.link <= chain["links"]:
+    if args.arm not in chain["arms"] or not 1 <= args.link <= chains.arm_links(chain, args.arm):
         raise NotSafeToSubmit(f"{args.arm!r} link {args.link} is not in {chain_path}")
     family = chain["families"][chain["arms"][args.arm]["family"]]
     link_path = REPO_ROOT / chain["output_dir"] / chains.link_filename(chain, args.arm, args.link)

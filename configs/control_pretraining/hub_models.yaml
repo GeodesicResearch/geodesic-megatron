@@ -301,7 +301,7 @@ models:
       the broadly filtered pretraining's and the narrowly filtered midtraining's, deduplicated, less
       every document its retained training data holds (382,778 documents, 726,549,631 tokens with
       EOD). The documents fill half of each batch of 256 sequences of 32768 tokens and a replay of
-      the arm's own midtraining mix fills the rest. It is one continuous run of three passes over
+      the arm's own midtraining mix fills the rest. It is one continuous run of five passes over
       the documents, 174 iterations each and each reshuffled, run as one job per pass: every pass
       resumes the previous pass's final save, weights, full optimizer state and step alike (every
       save keeps its optimizer state), so the 25-iteration warmup comes once, at the start of the
@@ -313,7 +313,7 @@ models:
       - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
     stages:
       - name: continual_pretraining
-        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link3.yaml
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link5.yaml
         schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link1.yaml
         revision: cpt_iter_{iteration}
         default: true
@@ -331,7 +331,7 @@ models:
       after a 25-iteration warmup) and batch (256 sequences of 32768 tokens) on the arm's own
       midtraining mix alone, with no removed documents. It separates what continued pretraining does
       by itself from what the reintroduced documents restore. It runs as the treatment does, one
-      continuous run of three 174-iteration jobs, one per treatment pass: every job resumes the
+      continuous run of five 174-iteration jobs, one per treatment pass: every job resumes the
       previous job's final save, weights, full optimizer state and step alike (every save keeps its
       optimizer state), so the 25-iteration warmup comes once, at the start of the first. Revision
       cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
@@ -341,7 +341,7 @@ models:
       - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
     stages:
       - name: continual_pretraining
-        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_replayonly_cpt_link3.yaml
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_replayonly_cpt_link5.yaml
         schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_replayonly_cpt_link1.yaml
         revision: cpt_iter_{iteration}
         default: true
