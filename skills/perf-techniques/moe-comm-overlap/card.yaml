@@ -35,6 +35,7 @@ known_limitations:
   - Setting moe_flex_dispatcher_backend alone does not activate flex dispatch.
   - Public recipes are often conservative and leave MoE overlap disabled by default.
   - Repo evidence is stronger for validation logic than for end-to-end throughput gains.
+  - Hybrid (Mamba) models have no EP-overlap schedule plan at the pinned Megatron-LM; vendored patch 0003 adds one (not applied by default).
 evidence:
   - docs/training/communication-overlap.md
   - docs/parallelisms.md

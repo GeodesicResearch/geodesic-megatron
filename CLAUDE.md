@@ -972,8 +972,11 @@ arm configs, per-arm results, trace analysis):
 **`overlap_p2p_comm` stays off on this model — measured slower (+14%, 31.45 vs 27.50
 s/iter); its historical NaN was an upstream race already fixed in the current 0.19 pin.**
 It requires VPP and forces un-batched isend/irecv, which is simply the more expensive form
-on CXI. Also hard-blocked on this model: `overlap_moe_expert_parallel_comm` (asserts
-`GPTModel`; Nemotron-H is a `MambaModel`), `moe_shared_expert_overlap` (latent MoE),
+on CXI. Also blocked on this model at the pin: `overlap_moe_expert_parallel_comm` (Nemotron-H's
+`HybridModel` has no `build_schedule_plan` there, so the run fails in its first iteration; vendored patch
+0003 ports upstream's hybrid support and is not applied to the submodule; on the Nano pretrain campaign's
+ladder, not the shipped quickstart, it measured −3.4% against step 9's HybridEP / FP8-dense-layer posture,
+with 32 CUDA connections; see the patches README), `moe_shared_expert_overlap` (latent MoE),
 `defer_embedding_wgrad_compute` (would crash). Do not add a `comm_overlap:` block to a config
 **at VPP>1** — it force-sets `overlap_p2p_comm=True`/`batch_p2p_comm=False` there. Full
 analysis: `/projects/a5k/public/logs/infr71_wave2/docs/vpp-pp-comm-overlap-investigation.md`.
@@ -1424,11 +1427,18 @@ happened to the 120B champion measurement (a DDP bucket-size change; it is now t
 `ddp.bucket_size` field in the quickstart config, where it belongs). If a change cannot be
 expressed through config, vendor it as a patch in `3rdparty/patches/megatron-lm/` — see that
 directory's README, which records why each patch exists and what it is load-bearing for. There
-are two, and NEITHER is auto-applied. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
+are three, and NONE is auto-applied. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
 because nothing uses the `allgather` dispatcher today (every config forces `alltoall`) but the
 fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
+`0003` is the port of upstream PR #4798 (EP all-to-all / compute overlap
+for the hybrid model, plus local adaptations listed in the patches README), load-bearing for the
+Nano pretrain campaign's EP-overlap rung (E-044); it acts only with
+`comm_overlap.overlap_moe_expert_parallel_comm=true`, keeps the pin's checkpoint keys for flat layer
+patterns such as Nano's, and refuses Megatron-FSDP, fine-grained activation offloading,
+`delay_wgrad_compute` and the `ncclep` dispatcher with the overlap on hybrid models
+(Megatron-Bridge refuses packed sequences with it).
 (The `overlap_p2p_comm` NaN's fix is already IN the current pin; its record-of-closed-bug
 patch was retired with the investigation docs and is preserved under
 `/projects/a5k/public/logs/infr71_wave2/docs/`.)

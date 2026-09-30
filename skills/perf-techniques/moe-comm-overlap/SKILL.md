@@ -62,6 +62,10 @@ You must also set `moe_token_dispatcher_type = "flex"`.
    batch under the overlap (`gpt_step` builds the schedule plan without
    `packed_seq_params`); turn off packing or the overlap.
 
+6. **Hybrid models**: at the pinned Megatron-LM a hybrid (Mamba) model has no
+   EP-overlap schedule plan and fails in its first iteration; the vendored
+   patch 0003 (`3rdparty/patches/megatron-lm/`) adds one.
+
 ## Verification
 
 Look for overlap-related log messages during initialization. The comm overlap

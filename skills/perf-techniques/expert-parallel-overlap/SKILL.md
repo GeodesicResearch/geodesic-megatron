@@ -238,5 +238,7 @@ def _set_moe_a2a_overlap_overrides(recipe, moe_a2a_overlap=False):
 - MoE overlap and shared-expert overlap are mutually exclusive.
 - MoE overlap and packed sequences are mutually exclusive: `gpt_step` builds the schedule plan
   without `packed_seq_params` and raises `ValueError` on a packed batch.
+- Hybrid (Mamba) models have no EP-overlap schedule plan at the pinned Megatron-LM; the vendored
+  patch 0003 (`3rdparty/patches/megatron-lm/`) adds one and is not applied by default.
 - CUDA graph plus delayed wgrad is a multi-constraint path that requires
   careful TE version and scope validation.

@@ -50,7 +50,7 @@ performance guide; upstream Megatron-Bridge / Megatron-LM commits).
 | 7 | + H32 sync-free grouped-GEMM offsets | 5.968 | 10,981 | 23.09% | 1.56 | E-023 |
 | 8 | + H27 FP8 current scaling on dense layers | 5.754 / 5.751 | 11,390 | 23.95% | 1.62 | E-024, E-027 |
 | 9 | + H22 HybridEP intra-node dispatcher (sync-free with H32) | 5.407 / 5.388 / 5.394 / 5.409 | 12,115–12,163 | 25.5–25.6% | 1.72–1.73 | E-028, E-030; repeats 6932856, 6932890 (E-039–E-043 block) |
-| 10 | + EP all-to-all / compute overlap (combined 1F1B, port of Megatron-LM PR #4798 — in a snapshot, not yet in this repo; `CUDA_DEVICE_MAX_CONNECTIONS=32`) | 5.197 / 5.228 | 12,535–12,611 | 26.4–26.5% | **1.78–1.80** | E-044 |
+| 10 | + EP all-to-all / compute overlap (combined 1F1B, port of Megatron-LM PR #4798, vendored as patch 0003; `CUDA_DEVICE_MAX_CONNECTIONS=32`) | 5.197 / 5.228 | 12,535–12,611 | 26.4–26.5% | **1.78–1.80** | E-044 |
 
 Every run is its own allocation; where a step was repeated, the table gives each run (see
 Repeatability).
@@ -166,10 +166,13 @@ fallbacks measured on 1-node reduced-depth setups do not fix it — `model.ep_ov
 saves 0.2–0.9 GB and costs +2.6% at 21 layers (jobs 6934235 vs 6934234) and +1.9% at 28 layers (it
 exposes the forward combine); `garbage_collection_threshold:0.9` in `ISAMBARD_CUDA_ALLOC_CONF` saves
 0.6 GB at no cost (28 layers). A graph pool cannot be shared with ordinary
-allocations, and PyTorch cannot release one stream's cache; the structural fix is to allocate HybridEP's
-dispatch output (~264 MB per unit per microbatch) from the compute stream's pool, which DeepEP's
-`dispatch_with_permute` does not expose. Freeing reserved memory is now the gate for stacking anything
-further on the overlap.
+allocations, and the overlap's extra reserve is mostly fragmentation of the compute stream's pool under the
+interleaved schedule (E-044's allocation history), not memory the communication stream holds back: copying
+HybridEP's dispatch output into the compute stream's pool did not lower it (64 GPUs: 91.06 → 91.99 GB
+reserved, medians of ranks, 6934713 against 6934714; allocation history with the copy, 6934764), nor did the
+allocator settings tried (6934347, 6934851, 6934959, 6934960), while chunked cross-entropy, which takes the
+loss buffers off the top of the heap, did (6935047). Freeing reserved memory is now the gate for stacking
+anything further on the overlap.
 
 ### E-045 · trace of the EP-overlap champion · 2026-09-29 · the overlap exposes Mamba's launch cost
 Job 6933850 (iterations 30 and 40, ranks 0 and 5, no stacks). The profiler inflates this schedule
@@ -190,7 +193,13 @@ microbatch is interleaved with the backward of the previous one, so each MoE lay
 runs on a communication stream while the other microbatch's Mamba, attention or expert GEMMs run on the
 compute stream. Upstream supports it for `GPTModel` only; Megatron-LM PR #4798 (open, head `1fdff667`)
 adds it for the hybrid model, and it merged cleanly onto the pin (its first part, #4941, is already in
-it). Two adaptations, both in the snapshot's `EPOV.diff` / `EPOV_NOTES.md`
+it). The port is vendored as
+`3rdparty/patches/megatron-lm/0003-feat-hybrid-port-upstream-4798-hybrid-EP-A2A-overlap.patch`; its README
+section has the provenance, how to apply it, the review fixes made after E-044 ran (three more adaptations:
+flat patterns keep the pin's checkpoint keys, the pin's behaviour where the PR changed it with the overlap off,
+refusals of the settings the hybrid schedule gets wrong) and the deterministic smokes showing that the
+vendored version trains exactly like the tree E-044 ran. That tree carried two adaptations, described in the
+probe snapshot's `EPOV_NOTES.md`
 (`/projects/a5k/public/logs/nano_pretrain_perf_campaign/snapshots/wt-e3dd4e56-epov`):
 - the schedule plan groups the flat layer pattern into 23 `[Mamba/attention..., MoE]` units, so every
   all-to-all has compute to hide behind, without the bracketed pattern upstream needs (which renames
@@ -200,7 +209,7 @@ it). Two adaptations, both in the snapshot's `EPOV.diff` / `EPOV_NOTES.md`
   TE's grouped MLP does; GroupedExperts stays BF16 and needs that input for its weight gradient
   (crash 6932873, `setStorage ... size 0`), so non-TE experts keep it.
 
-Required with it: `model.mtp_num_layers=null` (the recipe's `0` fails the "None or 1" assert — the first
+Required with it: `model.mtp_num_layers=null` (the model provider's default `0` fails the "None or 1" assert — the first
 64-GPU pair, 6933304/6933305, died on it; Nano has no MTP layers either way) and
 `ISAMBARD_CUDA_MAX_CONNECTIONS=32` (with one hardware queue the two streams serialise).
 1-node smoke (11 layers, 4 microbatches): ON 716–722 ms vs OFF 752–754 ms; ON-vs-OFF loss differences
@@ -219,9 +228,11 @@ Learning: the two ON runs (5.197 / 5.228 s, 0.6% apart) are −3.4% against the 
 overlap (5.388–5.409 s, the paired control included), with loss in band. It is modest because
 HybridEP's intra-node all-to-all is already short; what it hides is mostly the ranks' waiting in
 `device_sync` (E-045). Its memory cost is in *reserved*, not allocated: +1.1 GB allocated but +13 GB
-reserved (78.6 → 91.7 GB, W&B run max, last rank; the runs without it sit at 78.6–78.7), because the
-combined schedule's communication stream keeps its own cache of freed blocks that the compute stream
-cannot reuse. That leaves ~3.5 GB below the device, which is what CUDA graphs ran into (E-046).
+reserved (78.6 → 91.7 GB, W&B run max, last rank; the runs without it sit at 78.6–78.7). A 64-GPU
+allocation history (jobs 6934763/6934764) puts most of that reserve in fragmentation under the interleaved
+schedule rather than in the communication stream's own pool: the compute pool's occupancy peaks at 32.8 GB
+against 41.1 GB reserved, and the communication pool sits 3.7 GB above its own peak. That leaves ~3.5 GB
+below the device, which is what CUDA graphs ran into (E-046).
 
 ### E-039–E-043 · NCCL, GC, NUMA and Mamba-chunk probes on the HybridEP champion · 2026-09-29 · all NULL
 All on the E-028 posture; NCCL variables go through `ISAMBARD_ENV_OVERRIDES` because the launcher exports
