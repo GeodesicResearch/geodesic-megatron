@@ -16,7 +16,9 @@ Under the pre-registered rule this is, at k = 4, **goal met on average, not esta
 bound is 5.002 s); the rule's extension to six cycles (6958389, 6958390) was queued on 2026-09-30 and has
 not run.
 
-**Benchmark.** `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` — the baseline composed with a
+**Benchmark.** `configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml` (named
+`nemotron_nano_quickstart_pretrain.yaml` while the campaign ran; that name now holds the fastest
+configuration) — the baseline composed with a
 small overlay (`base_config:`): GBS 512 on 64 GPUs (8 microbatches per DP replica, the same per-GPU work as
 production's GBS 2048 on 256 GPUs), 50 iterations via `train.exit_interval`, no checkpoint load/save.
 32 GPUs is the same file with `train.global_batch_size=256`.
@@ -115,12 +117,12 @@ across switch groups is a separate, larger effect (E-047): every run above ran o
 
 ## Final posture
 
-The configuration the campaign ships is
-`configs/quickstart/nemotron_nano_quickstart_pretrain_perf.yaml` with the launcher settings in
-`nemotron_nano_quickstart_pretrain_perf.env` beside it: the Nano pretrain quickstart plus the 18 fields and two
-`ISAMBARD_ENV_OVERRIDES` lines below, on a tree whose `3rdparty/Megatron-LM` carries patches 0003, 0004 and 0005
-(`3rdparty/patches/megatron-lm/`; every measured tree also carried 0002, which does nothing without CUDA
-graphs). H32 (sync-free grouped-GEMM offsets) is Bridge code with no knob. Every override is opt-in; the
+The configuration the campaign ships is the Nano pretrain quickstart,
+`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`, with the launcher settings in
+`nemotron_nano_quickstart_pretrain.env` beside it: the baseline benchmark plus the 18 fields and two
+`ISAMBARD_ENV_OVERRIDES` lines below, on a Megatron-LM that carries 0003, 0004 and 0005 (carried commits of
+the pin since 2026-09-30, `3rdparty/patches/megatron-lm/README.md`; every measured tree also carried 0002,
+which does nothing without CUDA graphs). H32 (sync-free grouped-GEMM offsets) is Bridge code with no knob. Every override is opt-in; the
 production configs are unchanged.
 
 ```
@@ -149,11 +151,10 @@ ISAMBARD_FP32_SSM_STATE=0          # H13 (step 6)
 ISAMBARD_CUDA_MAX_CONNECTIONS=32   # the EP overlap's two streams (step 10)
 ```
 
-**Reproducing it.** From a read-only copy of the checkout whose `3rdparty/Megatron-LM` has patches 0003, 0004
-and 0005 applied (CLAUDE.md, "Performance probes", lists what such a copy needs), launch the overlay with its
-env file as the overlay's header shows. Pass the env lines through the overrides file, not the shell: the
+**Reproducing it.** Launch the quickstart with its env file as its header shows; the pinned Megatron-LM
+carries the three changes. Pass the env lines through the overrides file, not the shell: the
 launcher echoes them per rank (`[env-overrides]`), inherited ones leave no trace (Open risks). The runs below
-gave the same 18 values as Hydra overrides on the quickstart, through the campaign's parity harness (arm
+gave the same 18 values as Hydra overrides on the baseline benchmark, through the campaign's parity harness (arm
 `final`, `/projects/a5k/public/logs/nano_pretrain_perf_campaign/parity/`), on `snapshots/stack-final1` (pin +
 0002 + the first version of 0003 + 0005), which predates patch 0004 and 0003's second revision; the shipped
 patches train identically (Functional parity, Row 7).
@@ -438,7 +439,7 @@ unpermute kernels read from device code; nothing records that use with PyTorch's
 the backward frees the handle the block can be handed out again while the comm stream still has a kernel queued
 that reads it. The overlap opens that window. The second symptom follows: the blocking path ignores its stream
 sync's error code, so after a fault the next dispatch sums stale bytes of the per-expert count block.
-Fix, test-first (patch 0004, `3rdparty/patches/megatron-lm/0004-fix-hybridep-dispatched-count-lifetime.patch`):
+Fix, test-first (patch 0004, a carried commit of the pin since 2026-09-30, `40e960a2f`; patches README):
 `HybridEPDispatch.forward` replaces the handle's count with a non-blocking device copy on the dispatch stream; the
 host allocator records the copy and holds the pinned source until it has run; no new host sync. Tests
 (`tests/unit_tests/training/test_hybridep_count_lifetime.py`, one GPU): 3 of 5 fail without the fix (6935541) and
@@ -663,9 +664,8 @@ microbatch is interleaved with the backward of the previous one, so each MoE lay
 runs on a communication stream while the other microbatch's Mamba, attention or expert GEMMs run on the
 compute stream. Upstream supports it for `GPTModel` only; Megatron-LM PR #4798 (open, head `1fdff667`)
 adds it for the hybrid model, and it merged cleanly onto the pin (its first part, #4941, is already in
-it). The port is vendored as
-`3rdparty/patches/megatron-lm/0003-feat-hybrid-port-upstream-4798-hybrid-EP-A2A-overlap.patch`; its README
-section has the provenance, how to apply it, the review fixes made after E-044 ran (three more adaptations:
+it). The port was vendored as patch 0003 and is a carried commit of the pin since 2026-09-30 (`3e3c83d50`);
+its section of the patches README has the provenance, the review fixes made after E-044 ran (three more adaptations:
 flat patterns keep the pin's checkpoint keys, the pin's behaviour where the PR changed it with the overlap off,
 refusals of the settings the hybrid schedule gets wrong) and the deterministic smokes showing that the
 vendored version trains exactly like the tree E-044 ran. That tree carried two adaptations, described in the

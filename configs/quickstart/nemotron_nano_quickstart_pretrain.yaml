@@ -1,89 +1,82 @@
-# Nemotron 3 Nano (30B-A3B) quickstart PRETRAIN (from scratch) — 64 GPUs / 16 nodes, 50 iterations
+# Nemotron 3 Nano (30B-A3B) quickstart PRETRAIN (from scratch), fastest configuration — 64 GPUs / 16 nodes,
+# 50 iterations
 #
-# WHAT THIS IS: the control-pretraining baseline's stage-1 posture, run for 50 iterations as a
-# throughput benchmark. It is an OVERLAY: `base_config` names the production stage-1 config and
-# this file restates only the fields a benchmark must change, so everything else — topology
-# (TP=1 · CP=1 · EP=4 · PP=1 · ETP=1, only data parallelism crosses nodes), seq 8192, random
-# init, the 13-prefix data blend, recompute, the comm_overlap block, precision-aware optimizer,
-# the LR schedule and the logging posture — is the baseline's, read at launch. A change to the
-# production posture therefore flows into the quickstart without an edit here, and
-# tests/unit_tests/test_nano_pretrain_quickstart.py fails if any field other than the ones
-# below starts to differ.
+# WHAT THIS IS: the baseline benchmark (nemotron_nano_quickstart_pretrain_baseline.yaml, the
+# control-pretraining baseline's stage-1 posture at benchmark size) with the levers of the Nano pretraining
+# performance campaign (docs/investigations/nano30b-pretrain-perf-campaign.md, "Final posture"). It is an
+# OVERLAY of that benchmark and states only the levers and its own W&B name, so model, data, schedule, batch
+# and every other field are the benchmark's; tests/unit_tests/test_nano_pretrain_quickstart.py fails if any
+# other field starts to differ. The levers keep the baseline's training (the log's "Functional
+# parity"): the same model and exported weights, the same data and learning-rate schedule, and a loss
+# inside the baseline's run-to-run band over 500 iterations. Its optimizer state does not load in the
+# baseline's posture, nor the baseline's in this one (different gradient and parameter dtypes). Runs are
+# compared by W&B name, so each posture has its own: nemotron_nano_quickstart_pretrain_perf here, and
+# nemotron_nano_quickstart_pretrain for the baseline benchmark.
 #
-# GBS 512: 512 sequences over DP=64 at micro-batch 1 is 8 microbatches per DP replica per
-# iteration, the same as production's GBS 2048 over 256 GPUs (the 64-node width the filtered
-# arm's stage 1 trains at). Per-GPU step time depends on microbatches per replica, not on DP
-# width, so 8 per replica reproduces production's per-GPU compute and its data-parallel
-# communication structure (the gradient reduce-scatter tail and the parameter all-gather per
-# iteration) instead of hiding them behind a larger batch. 32 GPUs keeps the same 8 with
-# GBS 256.
+# The Megatron-LM changes it needs (the hybrid-model EP overlap, the HybridEP count fix, the chunked linear
+# cross-entropy) are carried commits of the pinned submodule (3rdparty/patches/megatron-lm/README.md). It
+# also needs the two launcher settings in nemotron_nano_quickstart_pretrain.env, given as an
+# ISAMBARD_ENV_OVERRIDES file.
 #
-# exit_interval, NOT train_iters: train_iters stays the baseline's 29881, so the LR warmup
-# (lr_warmup_fraction 0.01 x 29881 = 298.81 iterations) is the production schedule iteration
-# for iteration — LR 1.67e-4 at iteration 50, as in production. train_iters: 50 would compress
-# the warmup to half an iteration and step at the 1e-3 peak from iteration 1 on a random init.
-# The exit_interval path in train.py saves only when checkpoint.save is set, so with save null
-# the run exits at iteration 50 without writing anything. It exits before on_train_end fires,
-# so no callback's end-of-training hook runs: a torch-profiler run's raw_log_snapshot.out stops
-# at its last trace export, and the SLURM log is the record of the iterations after it.
-#
-# checkpoint.load / save null: the baseline's load == save is the production run's checkpoint
-# directory. Inherited, the benchmark would resume production's latest checkpoint instead of
-# initialising randomly, and write into the production tree. With save null W&B has no
-# default directory (it falls back to <save>/wandb), hence wandb_save_dir.
-#
-# dataset.path_to_cache: a directory of its own. The per-corpus index cache key includes the
-# sample count (train_iters x GBS), so each benchmark batch size builds its indices cold once
-# (production's cold build of all 13 took 55-63 s, at 4x this batch) and hits the cache
-# afterwards; setting it also caches the top-level BlendedDataset index, which the baseline
-# rebuilds on every launch. Production's caches stay untouched.
-#
-# dist.distributed_timeout_minutes 20: under the launcher's TORCH_NCCL_BLOCKING_WAIT=1 this is
-# the only hang timeout, and the baseline's 60 covers a blended-index rebuild at 512 ranks that
-# does not happen here. 20 minutes bounds how long a wedged benchmark holds the allocation.
-#
-# LAUNCH (--disable-ft: the run is short and restart-free, and the NVRx straggler reporter's
-# rank-0 gather has OOMed ~90 GiB-peak runs after ~20 min of stepping):
-#   64 GPUs:
+# LAUNCH (--disable-ft as for the baseline benchmark):
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env \
 #     isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
-#         configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft
-#   32 GPUs (the batch scales with the nodes, as an override rather than a second file):
-#     isambard_sbatch --nodes=8 pipeline_training_submit.sbatch \
-#         configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft \
-#         train.global_batch_size=256
+#       configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft
+#   32 GPUs: --nodes=8 with train.global_batch_size=256, as for the baseline benchmark.
 #
-# SCORING: the mean step time over iterations 26-50 (node-hours scale with the mean), with
-# tokens/s/GPU = GBS x 8192 / (GPUs x mean step) and model TFLOP/s from the exact per-token
-# FLOPs of scripts/nemotronh_flops_estimator.py; scripts/telemetry/score_run.py computes it
-# from the training log, reading the sequence length and FLOPs from this file:
-#     python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/train-<jobid>.out \
-#         --config configs/quickstart/nemotron_nano_quickstart_pretrain.yaml \
-#         --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
-#         --gpus 64 --window 26 50 --loss-window 41 50
-# (--gpus 32 for the 32-GPU override). The performance campaign built on this posture is logged
-# in docs/investigations/nano30b-pretrain-perf-campaign.md.
+# MEASURED (the campaign's paired cycles, 64 GPUs, these fields as Hydra overrides on the baseline
+# benchmark): mean 4.961 s/iter over iterations 26-50 against 9.420 s for the baseline on the same
+# allocations (1.90x) = 13,209 tokens/s/GPU, 27.8% MFU. Scored as the baseline benchmark's header
+# describes, with this file as --config.
 #
-# ANCHOR (2026-09-28, 64 GPUs, measured with these fields as Hydra overrides on the baseline, job
-# 6930454, W&B vtfgwr4d): mean 9.328 s/iter over iterations 26-50 = 7,026 tokens/s/GPU = 146.2 model
-# TFLOP/s/GPU (14.78% MFU); peak 81.84 GB allocated / 84.47 GB reserved; lm loss (41-50) 6.869.
+# THE LEVERS (campaign log entry in brackets):
+#   comm_overlap.overlap_param_gather: the parameter all-gather overlaps the forward (under
+#     comm_overlap:, whose setup overwrites a ddp: block on this path) [E-004]
+#   mixed_precision: FP8 current scaling on the dense TE layers, BF16 primary weights (so checkpoints
+#     hold the BF16 of the fp32 masters, not FP8-rounded weights), BF16 gradient reduction; the routed
+#     experts stay BF16 [E-008, E-024, E-060]
+#   model.recompute_modules [moe_act]: only the expert activation is recomputed [E-009]
+#   logger.timing_log_level 1, the NaN checks off, per-layer gradient L2 norms off: host-side
+#     overhead. log_l2_norm_grad_to_tensorboard gates the report for every logger, so W&B loses the
+#     l2_norm/grad/* series; the optimizer's grad norm is still logged [E-010]
+#   train.manual_gc every 10 iterations, frozen after setup: collections on schedule, none of the
+#     setup state rescanned [E-013, E-052]
+#   model.moe_token_dispatcher_type flex + hybridep: HybridEP intra-node dispatcher [E-028]
+#   comm_overlap.overlap_moe_expert_parallel_comm (patch 0003; mtp_num_layers null, which the
+#     overlap requires and Nano's lack of MTP layers makes free): EP all-to-all / compute overlap [E-044]
+#   model.moe_router_fusion: fused router kernel [E-048]
+#   model.cross_entropy_*: chunked linear cross-entropy keeping all 8 logit chunks (patch 0005) [E-051]
 
-base_config: ../control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+base_config: nemotron_nano_quickstart_pretrain_baseline.yaml
+
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce
+
+model:
+  recompute_modules: [moe_act]
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  mtp_num_layers: null
+  moe_router_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+
+comm_overlap:
+  overlap_param_gather: true
+  overlap_moe_expert_parallel_comm: true
+
+ddp:
+  check_for_nan_in_grad: false
+
+rerun_state_machine:
+  check_for_nan_in_loss: false
 
 train:
-  global_batch_size: 512        # 8 microbatches per DP replica at 64 GPUs
-  exit_interval: 50
-
-checkpoint:
-  load: null
-  save: null
-
-dataset:
-  path_to_cache: /projects/a5k/public/cache/gpt_index/nemotron_nano_quickstart_pretrain
-
-dist:
-  distributed_timeout_minutes: 20
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
 
 logger:
-  tensorboard_dir: null         # restated from the base; see the baseline's logger block
-  wandb_save_dir: /projects/a5k/public/logs/wandb
-  wandb_exp_name: nemotron_nano_quickstart_pretrain
+  timing_log_level: 1
+  log_l2_norm_grad_to_tensorboard: false
+  wandb_exp_name: nemotron_nano_quickstart_pretrain_perf

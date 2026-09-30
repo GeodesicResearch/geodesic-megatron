@@ -256,11 +256,14 @@ To change environment variables for one launch, including ones the launcher or
 
 ### Performance probes
 
-To measure a training lever, submit it as its own short job on the quickstart posture and score
-the log with `scripts/telemetry/score_run.py` (mean step over a fixed window, tokens/s/GPU, MFU):
+To measure a training lever, submit it as its own short job on the quickstart posture (or on the
+baseline benchmark, `nemotron_nano_quickstart_pretrain_baseline.yaml` without the env file, to measure
+against production's posture) and score the log with `scripts/telemetry/score_run.py` (mean step over a
+fixed window, tokens/s/GPU, MFU):
 
 ```bash
-isambard_sbatch --nodes=16 --time=00:20:00 pipeline_training_submit.sbatch \
+ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env \
+  isambard_sbatch --nodes=16 --time=00:20:00 pipeline_training_submit.sbatch \
     configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft <overrides>
 python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/train-<jobid>.out \
     --config configs/quickstart/nemotron_nano_quickstart_pretrain.yaml \
@@ -349,8 +352,8 @@ Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 | **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 128 — the standard batch across quickstarts since 2026-08-05) | 31.562 s/iter anchor = 167.4 TFLOP/s/GPU (`moe_experts_impl: torch_grouped`, optimizer CPU offload off; superseded, at the old GBS-64 workload: 17.099 = the paired A/B that certified `torch_grouped`, 20.66 on the `cublas_grouped` per-expert loop, 21.78 with offload 0.5) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
 | **Super benchmark, 32 nodes** | 32 nodes / 128 GPUs: same topology, DP=4, **GBS 256** (scale the batch with the nodes) | 122.0 ms/sample = 31.228 s/iter, 169.2 TFLOP/s/GPU. With the base config at GBS 128 this override is matched µb/replica (64 both ends): perfect per-sample halving predicts 123.3 ms/sample vs 122.0 measured — scaling perfect within the ±2% cross-allocation placement band, same backend both ends — run as the 64-GPU config plus `train.global_batch_size=256`; the quickstarts are standardised at 64 GPUs and this is the one field that differs |
 | **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
-| **Nano pretrain (from scratch)** | 16 nodes / 64 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=64 (seq 8192, GBS 512 = 8 microbatches per replica, as in the filtered arm's stage 1 at GBS 2048 on 256 GPUs; 50 iterations, no checkpoint I/O) | 9.328 s/iter (mean over iterations 26–50) = 7,026 tokens/s/GPU, 14.78% MFU at 64 GPUs (job 6930454). The control-pretraining baseline stage 1 with a small `base_config:` overlay, so the production posture reaches it unedited; 32 GPUs is the same file plus `train.global_batch_size=256`. Scored as the mean step over iterations 26–50 — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) |
-| **Nano pretrain, fastest configuration** | the Nano pretrain quickstart plus the performance campaign's levers (EP all-to-all / compute overlap with the HybridEP dispatcher, FP8 dense layers with BF16 parameters, BF16 gradients, `[moe_act]` recompute, chunked linear cross-entropy, host-path settings); needs Megatron-LM patches 0003–0005 applied to a copy of the checkout | 4.961 s/iter (mean of eight runs in four paired cycles) = 13,209 tokens/s/GPU, 27.8% MFU: 1.90× the as-is runs on the same allocations, with its 500-iteration loss inside the as-is band — [`configs/quickstart/nemotron_nano_quickstart_pretrain_perf.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain_perf.yaml) |
+| **Nano pretrain (from scratch)** | 16 nodes / 64 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=64 (seq 8192, GBS 512 = 8 microbatches per replica, as in the filtered arm's stage 1 at GBS 2048 on 256 GPUs; 50 iterations, no checkpoint I/O), plus the performance campaign's levers (EP all-to-all / compute overlap with the HybridEP dispatcher, FP8 dense layers with BF16 parameters, BF16 gradients, `[moe_act]` recompute, chunked linear cross-entropy, host-path settings) | 4.961 s/iter (mean of eight runs in four paired cycles, iterations 26–50) = 13,209 tokens/s/GPU, 27.8% MFU: 1.90× the baseline benchmark on the same allocations, with its 500-iteration loss inside the baseline's band. 32 GPUs is the same file plus `train.global_batch_size=256` — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) (launched with its `.env` file) |
+| **Nano pretrain, baseline benchmark** | the same topology and batch at the control-pretraining baseline's stage-1 posture, a small `base_config:` overlay of it, so the production posture reaches it unedited | 9.328 s/iter (mean over iterations 26–50) = 7,026 tokens/s/GPU, 14.78% MFU at 64 GPUs (job 6930454) — [`configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml) |
 | **Super pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=8, ETP=1, DP=16 (seq 8192, GBS 3072, 1B tokens) | 86.940 s/iter = 28.301 ms/sample (loss 12.19 → 7.65, 0 NaN; 225 GB weights-only checkpoint) — [`configs/quickstart/nemotron_super_quickstart_pretrain.yaml`](configs/quickstart/nemotron_super_quickstart_pretrain.yaml) |
 
 Other levers that matter: `recompute_granularity: selective` with MoE-scoped
@@ -358,7 +361,9 @@ Other levers that matter: `recompute_granularity: selective` with MoE-scoped
 and OOM), `moe_permute_fusion: True`, `expert_tensor_parallel_size: 1` (parallel folding —
 what keeps EP node-local at high TP), `gradient_accumulation_fusion: True` (the image ships
 APEX; ~1.1 s/iter on the 120B), and **BF16 everywhere** — FP8 causes stochastic alignment
-crashes in MoE routing. Recipe LR 5e-6; 8e-5 NaNs under context parallelism. Full topology
+crashes in MoE routing. The one measured exception is the Nano pretrain quickstart, which runs
+FP8 current scaling on its dense layers only; its routed experts stay BF16. Recipe LR 5e-6; 8e-5
+NaNs under context parallelism. Full topology
 reasoning, per-model memory notes, and the legacy layouts these superseded are in
 [CLAUDE.md](CLAUDE.md#nemotron-3-super-120b-a12b-on-isambard).
 

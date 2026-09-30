@@ -376,9 +376,9 @@ Additionally, because CP shards activations, it also partitions optimizer states
 1. You can control specific fusion behaviors using the following configuration knobs:
 
    > 1. `TransformerConfig.masked_softmax_fusion=true`
-   > 2. `GPTProvider.cross_entropy_loss_fusion=true` (for a hybrid model with Megatron-LM patch 0005 applied,
-   >    `cross_entropy_fusion_impl='linear'` also fuses the output layer, over vocabulary chunks, without the
-   >    fp32 logits; see `3rdparty/patches/megatron-lm/README.md`)
+   > 2. `GPTProvider.cross_entropy_loss_fusion=true` (for a hybrid model, `cross_entropy_fusion_impl='linear'`
+   >    also fuses the output layer, over vocabulary chunks, without the fp32 logits: the pin's carried
+   >    commit 0005, see `3rdparty/patches/megatron-lm/README.md`)
    > 3. `GPTProvider.gradient_accumulation_fusion=true`
    > 4. `TransformerConfig.bias_activation_fusion=true`
    > 5. `TransformerConfig.bias_dropout_fusion=true`
