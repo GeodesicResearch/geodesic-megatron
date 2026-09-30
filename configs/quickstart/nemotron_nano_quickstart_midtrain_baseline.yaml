@@ -1,0 +1,81 @@
+# Nemotron 3 Nano (30B-A3B) midtrain BASELINE benchmark (warm start, seq 32768) — 64 GPUs / 16 nodes,
+# 200 iterations
+#
+# WHAT THIS IS: the control-pretraining baseline's stage-2 (midtraining) posture, warm-started from the
+# stage-1 final checkpoint as production is, and run for a short window as a throughput benchmark. It is an
+# OVERLAY: `base_config` names the production midtraining config and this file restates only the fields a
+# benchmark must change, so everything else — topology (TP=1 · CP=2 · EP=4 · PP=1 · ETP=1, only data
+# parallelism crosses nodes), seq 32768, the ten-corpus long-context mix, full recompute, the comm_overlap
+# block, the precision-aware optimizer, the weights-only warm start and the annealing schedule — is the
+# production stage's, read at launch. A change to the production posture therefore flows into this
+# benchmark without an edit here, and tests/unit_tests/test_nano_stage_quickstarts.py fails if any field
+# other than the ones below starts to differ.
+#
+# GBS 64: 64 sequences over DP=32 (64 GPUs at CP=2) at micro-batch 1 is 2 microbatches per DP replica per
+# iteration, the same as production's GBS 512 over DP=256 on 512 GPUs. Per-GPU step time depends on
+# microbatches per replica, not on DP width, so 2 per replica reproduces production's per-GPU compute and
+# its data-parallel communication structure instead of hiding them behind a larger batch.
+#
+# exit_interval, NOT train_iters: train_iters stays the stage's 3126, so the 100-iteration LR warmup and the
+# cosine anneal are the production schedule iteration for iteration. The exit_interval path in train.py
+# saves only when checkpoint.save is set, so with save null the run exits without writing anything.
+#
+# exit_interval 200 and the 151-200 window: the step takes a while to settle — iteration 1 alone takes about
+# 100 s (kernel compilation and communicator setup), and the as-is posture's iterations 26-150 still sit up to
+# 2.4% above its iterations 201-300 mean of 6.1 s — so the benchmark is scored over iterations 151-200, the
+# window the performance campaign's calibration fixed
+# (docs/investigations/nano30b-midtrain-perf-campaign.md, E-001). The rule was fixed before the runs: the
+# earliest of 51, 76, 101, 126 and 151 after which every 25-iteration mean of both calibration runs stays
+# within 1% of its iterations 201-300 mean, and 151-200 when none qualifies, as here.
+#
+# checkpoint.load / save null: the base's load == save is production's midtraining directory. Inherited,
+# the benchmark would resume production's latest midtraining checkpoint, optimizer included, instead of
+# starting the stage, and write into production's tree. With load null the setup still loads
+# pretrained_checkpoint (inherited: the stage-1 final, iteration 29881) weights only, as a finetune — fresh
+# optimizer, iteration 0 — which is how production's first segment started. With save null W&B has no
+# default directory (it falls back to <save>/wandb), hence wandb_save_dir.
+#
+# dataset.path_to_cache: a directory of its own. The per-corpus index cache key includes the sample count
+# (train_iters x GBS), so the benchmark's batch builds its indices cold once and hits the cache afterwards;
+# production's caches stay untouched.
+#
+# dist.distributed_timeout_minutes 20: under the launcher's TORCH_NCCL_BLOCKING_WAIT=1 this is the only
+# hang timeout, and the base's 60 covers a cold blended-index build at production's sample count. 20
+# minutes bounds how long a wedged benchmark holds the allocation.
+#
+# LAUNCH (--disable-ft: the run is short and restart-free):
+#   isambard_sbatch --nodes=16 --time=00:40:00 pipeline_training_submit.sbatch \
+#       configs/quickstart/nemotron_nano_quickstart_midtrain_baseline.yaml nano pretrain --disable-ft
+#
+# SCORING: the mean step time over iterations 151-200, with tokens/s/GPU = GBS x 32768 / (GPUs x mean step)
+# and model TFLOP/s from the exact per-token FLOPs of scripts/nemotronh_flops_estimator.py (24.432 GFLOP at
+# seq 32768):
+#     python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/train-<jobid>.out \
+#         --config configs/quickstart/nemotron_nano_quickstart_midtrain_baseline.yaml \
+#         --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+#         --gpus 64 --window 151 200 --loss-window 191 200
+#
+# MEASURED (2026-09-30, 64 GPUs on one switch group, job 6971129, W&B nano_mid_cal_asis): mean 6.138 s/iter over
+# iterations 151-200 = 5,339 tokens/s/GPU = 130.4 model TFLOP/s/GPU (13.18% MFU); peak 89.9 GB allocated / 90.1 GB
+# reserved; lm loss (191-200) 1.566, 0 NaN.
+
+base_config: ../control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+
+train:
+  global_batch_size: 64         # 2 microbatches per DP replica at 64 GPUs (CP=2 -> DP=32)
+  exit_interval: 200
+
+checkpoint:
+  load: null
+  save: null
+
+dataset:
+  path_to_cache: /projects/a5k/public/cache/gpt_index/nemotron_nano_quickstart_midtrain
+
+dist:
+  distributed_timeout_minutes: 20
+
+logger:
+  tensorboard_dir: null         # restated from the base; see the base's logger block
+  wandb_save_dir: /projects/a5k/public/logs/wandb
+  wandb_exp_name: nemotron_nano_quickstart_midtrain

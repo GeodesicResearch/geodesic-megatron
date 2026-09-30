@@ -5,7 +5,7 @@
 # control-pretraining baseline's stage-1 posture at benchmark size) with the levers of the Nano pretraining
 # performance campaign (docs/investigations/nano30b-pretrain-perf-campaign.md, "Final posture"). It is an
 # OVERLAY of that benchmark and states only the levers and its own W&B name, so model, data, schedule, batch
-# and every other field are the benchmark's; tests/unit_tests/test_nano_pretrain_quickstart.py fails if any
+# and every other field are the benchmark's; tests/unit_tests/test_nano_stage_quickstarts.py fails if any
 # other field starts to differ. The levers keep the baseline's training (the log's "Functional
 # parity"): the same model and exported weights, the same data and learning-rate schedule, and a loss
 # inside the baseline's run-to-run band over 500 iterations at 64 GPUs (at 256 GPUs it leaves the band over

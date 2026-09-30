@@ -529,7 +529,7 @@ The `ft`/`nvrx_straggler`/`inprocess_restart` Python configs **cannot** be set v
 
 `--disable-straggler` drops **only** the NVRx straggler detector and keeps `cfg.ft`: the
 detector's rank-0 gather of per-GPU perf scores has been observed to OOM high-memory jobs after
-~20 minutes of stepping, which is why both pretrain quickstarts (short, restart-free) simply
+~20 minutes of stepping, which is why the pretraining quickstarts (short, restart-free) simply
 pass `--disable-ft` instead.
 
 **It is not a milder `--disable-ft`, and it is the wrong reach for a long run.** It leaves the
@@ -634,12 +634,14 @@ train-tunnel allocations or srun-overlap attach workflows.
 **Legacy reference (superseded):** TP=4·EP=8·PP=4 @128 GPUs: 3.5-3.7 TFLOP/s/GPU, cross-node
 EP hangs every ~2-3 h; TP=4·EP=4·PP=8 node-local: stable but ~28 TFLOP/s/GPU.
 
-### Pretraining quickstarts (from scratch)
+### Pretraining quickstarts
 
-Both run `--mode pretrain`: the NVIDIA `nemotron_3_*_pretrain_config` recipes
-(pretraining LR/schedule/init) via the `pretrain()` entry point, **random init**, no
-checkpoint loaded. **These are NOT the certification gate** — image qualification stays on
-the SFT quickstart. The two follow different standards.
+All run `--mode pretrain`: the NVIDIA `nemotron_3_*_pretrain_config` recipes
+(pretraining LR/schedule/init) via the `pretrain()` entry point. The Nano stage-1 and Super
+quickstarts start from a **random init** with no checkpoint loaded; the Nano midtraining benchmark
+warm-starts from the stage-1 final checkpoint, as production's stage 2 does. **These are NOT the
+certification gate** — image qualification stays on the SFT quickstart. The Nano and Super ones
+follow different standards.
 
 **Nano — the control-pretraining baseline and its fastest configuration, 50 iterations on 64 GPUs**
 (replaced the 128-GPU
@@ -654,7 +656,7 @@ production's GBS 2048 at 256 GPUs, the filtered arm's stage-1 width),
 iteration for iteration, and the exit writes no checkpoint), `checkpoint.load`/`save: null`,
 its own `dataset.path_to_cache`, `logger.wandb_save_dir` and `wandb_exp_name`, and
 `dist.distributed_timeout_minutes: 20`.
-`tests/unit_tests/test_nano_pretrain_quickstart.py` fails if any other field diverges from the
+`tests/unit_tests/test_nano_stage_quickstarts.py` fails if any other field diverges from the
 baseline. The quickstart, `nemotron_nano_quickstart_pretrain.yaml`, is that benchmark plus the
 performance campaign's levers and nothing else (the same test pins it), launched with the two
 launcher settings in `nemotron_nano_quickstart_pretrain.env` as an `ISAMBARD_ENV_OVERRIDES` file:
@@ -667,6 +669,19 @@ not a second file: `--nodes=8 ... train.global_batch_size=256`. Both are scored 
 over iterations 26-50 (`scripts/telemetry/score_run.py`); the performance campaign is logged in
 `docs/investigations/nano30b-pretrain-perf-campaign.md` (see "Performance probes" under Usage).
 
+**Nano midtraining — the control-pretraining baseline's stage 2 at benchmark size, 200 iterations on 64 GPUs.**
+`nemotron_nano_quickstart_midtrain_baseline.yaml` is the same kind of overlay, of
+`configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml` (seq 32768,
+TP1·CP2·EP4·PP1, full recompute, the ten-corpus long-context mix, the annealing schedule), restating the
+same fields: **GBS 64** (2 microbatches per replica at DP=32, production's per-GPU work at GBS 512 on
+512 GPUs), `train.exit_interval: 200`, `checkpoint.load`/`save: null` — the inherited
+`pretrained_checkpoint` still warm-starts it weights-only from the stage-1 final, as production's first
+segment was — its own cache, W&B name and a 20-minute timeout. The same test pins it. The step takes
+a while to settle (iteration 1 alone ~100 s), so it is scored over **iterations 151-200**, the window
+its calibration fixed with a rule chosen before the runs: **6.138 s/iter** as-is = 5,339 tokens/s/GPU,
+13.18% MFU, peak 89.9 GB (job 6971129). Its performance campaign is logged in
+`docs/investigations/nano30b-midtrain-perf-campaign.md`.
+
 **Super — the 128-GPU, 1B-token standard** (Kyle, 2026-08-05): **seq 8192, GBS 3072**
 (= 25,165,824 tokens/iter), **all 128 GPUs / 32 nodes, 1B tokens** (`train_iters: 40` =
 1,006,632,960 exactly). Dataset: `Kyle1668/ClimbMix-Sample` (**24,757,534,866** tokens under
@@ -678,12 +693,14 @@ zero-embedding Base-CPT trap does not apply from scratch, so there is no filteri
 |---|---|---|
 | `nemotron_nano_quickstart_pretrain.yaml` | the baseline benchmark plus the campaign's levers: recompute `[moe_act]`, FP8 dense layers with BF16 parameters, BF16 gradients, HybridEP with the EP all-to-all overlap, chunked linear cross-entropy | **4.954 s/iter** (mean of twelve runs in six paired cycles, iterations 26–50) = 13,230 tokens/s/GPU, 275.3 TFLOP/s/GPU (27.8% MFU), 1.90x the baseline benchmark on the same allocations — the levers given as Hydra overrides on the baseline benchmark; this file as committed: 4.944 s/iter (job 6961393) |
 | `nemotron_nano_quickstart_pretrain_baseline.yaml` | TP1·CP1·EP4·PP1·DP64 at GBS 512, selective `[core_attn,moe,shared_experts]` (all inherited from the baseline) | **9.328 s/iter** (mean, iterations 26–50) = 7,026 tokens/s/GPU, 146.2 TFLOP/s/GPU (14.78% MFU), loss (41–50) 6.869, 0 NaN — job 6930454, 64 GPUs, the overlay's fields given as Hydra overrides on the baseline |
+| `nemotron_nano_quickstart_midtrain_baseline.yaml` | TP1·CP2·EP4·PP1·DP32 at GBS 64, seq 32768, full recompute, warm start from the stage-1 final (all inherited from stage 2) | **6.138 s/iter** (mean, iterations 151–200) = 5,339 tokens/s/GPU, 130.4 TFLOP/s/GPU (13.18% MFU), loss (191–200) 1.566, 0 NaN, peak 89.9 GB — job 6971129, 64 GPUs, which exited at 300 under a W&B name of its own (neither changes iterations 151–200) |
 | `nemotron_super_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP8·DP16 at GBS 3072, selective `[moe,shared_experts]` | **86.940 s/iter = 28.301 ms/sample**, 171.4 TFLOP/s/GPU (17.3% MFU), loss 12.19 -> 7.65, 0 NaN |
 
 Launch: `ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env
 isambard_sbatch --nodes=16 pipeline_training_submit.sbatch
 configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft` (the baseline
-benchmark: `nemotron_nano_quickstart_pretrain_baseline.yaml`, no env file) and
+benchmark: `nemotron_nano_quickstart_pretrain_baseline.yaml`, no env file; the midtraining benchmark:
+`nemotron_nano_quickstart_midtrain_baseline.yaml`, likewise, `--time=00:40:00`) and
 `isambard_sbatch --nodes=32 pipeline_training_submit.sbatch
 configs/quickstart/nemotron_super_quickstart_pretrain.yaml super pretrain --disable-ft`.
 
@@ -699,16 +716,16 @@ recompute they remove), mbs 2 dead on headroom. That quickstart's anchor was 25.
 `ddp.bucket_size` was inert (see the Nano-pretrain `comm_overlap` note below). Super: the
 offload posture (`core_attn` + `expert_fc1/moe_act`) and TP2·EP2 both **OOM** at 8192
 tok/rank from scratch — S0b's `[moe,shared_experts]` recompute is the only fitting posture.
-Cluster-driven recipe overrides. All three: `checkpoint.async_save: false` (the Nano files
-inherit it from the baseline; on Super the recipe default asserts when only a final checkpoint
-is written). The Super quickstart and the Nano baseline benchmark use dispatcher `alltoall`
-(the benchmark inherits it from the baseline) because DeepEP's RDMA path is blocked on
+Cluster-driven recipe overrides. All four: `checkpoint.async_save: false` (the Nano files
+inherit it from their production stage; on Super the recipe default asserts when only a final
+checkpoint is written). The Super quickstart and both Nano baseline benchmarks use dispatcher
+`alltoall` (each benchmark inherits it from its production stage) because DeepEP's RDMA path is blocked on
 Slingshot; the Nano quickstart uses `flex` with the HybridEP backend, whose EP=4 all-to-all stays
 inside the node on NVLink and needs no RDMA. Super only, because only the Super pretrain recipe
 sets the defaults being overridden: `mixed_precision: bf16_mixed` (its NVFP4 posture is
 Blackwell), `cuda_graph_impl: none`, `cross_entropy_fusion_impl: native` (its "te" impl carries
 an upstream stability rejection), and `mtp_num_layers: null`. The Nano recipe already supplies
-bf16_mixed, no CUDA graphs, and native CE, which the baseline benchmark keeps; the Nano
+bf16_mixed, no CUDA graphs, and native CE, which the baseline benchmarks keep; the Nano
 quickstart replaces the precision and the cross-entropy with its levers (an FP8 dense-layer
 preset, the chunked linear cross-entropy) and sets `mtp_num_layers: null`, which the EP overlap
 requires. The Nano files write no checkpoint; Super's final
