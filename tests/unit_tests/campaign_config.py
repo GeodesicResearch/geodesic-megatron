@@ -219,6 +219,54 @@ def assert_only_these_fields_differ(candidate, reference, allowed: set[str], lab
     )
 
 
+# The fast Nano pretrain posture: the fields the Nano pretrain quickstart
+# (configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) sets on top of the baseline stage-1
+# posture, at the values the performance campaign measured
+# (docs/investigations/nano30b-pretrain-perf-campaign.md, "Final posture"). A config in this posture
+# differs from its as-is counterpart in exactly these fields.
+FAST_PRETRAIN_LEVERS = {
+    "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
+    "model.recompute_modules": ["moe_act"],
+    "model.moe_token_dispatcher_type": "flex",
+    "model.moe_flex_dispatcher_backend": "hybridep",
+    "model.mtp_num_layers": None,
+    "model.moe_router_fusion": True,
+    "model.cross_entropy_loss_fusion": True,
+    "model.cross_entropy_fusion_impl": "linear",
+    "model.cross_entropy_fusion_saved_logit_chunks": 8,
+    "comm_overlap.overlap_param_gather": True,
+    "comm_overlap.overlap_moe_expert_parallel_comm": True,
+    "ddp.check_for_nan_in_grad": False,
+    "rerun_state_machine.check_for_nan_in_loss": False,
+    "train.manual_gc": True,
+    "train.manual_gc_interval": 10,
+    "train.manual_gc_freeze": True,
+    "logger.timing_log_level": 1,
+    "logger.log_l2_norm_grad_to_tensorboard": False,
+}
+# The levers that change numerical precision rather than only kernel choice, scheduling or host work:
+# FP8 compute on the dense layers and the BF16 gradient reduce, both carried by the precision preset.
+FAST_PRETRAIN_PRECISION_LEVERS = {"mixed_precision"}
+# The launcher settings the fast posture needs, which a training YAML cannot carry: the
+# ISAMBARD_ENV_OVERRIDES lines it is launched with. The first turns the fp32 SSM-state patch off (a
+# precision change); the second gives the EP overlap's second stream its own hardware queue.
+FAST_PRETRAIN_SSM_SETTING = "ISAMBARD_FP32_SSM_STATE=0"
+FAST_PRETRAIN_LAUNCHER_SETTINGS = [FAST_PRETRAIN_SSM_SETTING, "ISAMBARD_CUDA_MAX_CONNECTIONS=32"]
+
+
+def assert_levers_are_set(cfg, levers: dict[str, object], label: str) -> None:
+    """Assert that each dotted ``levers`` field of the merged ``cfg`` holds its value.
+
+    Read back from the merged config because the launcher's merge drops a key the config classes lack,
+    so a misspelled field, or one the pinned Megatron-LM does not have, would not arrive.
+    """
+    for dotted, value in levers.items():
+        node = cfg
+        for part in dotted.split("."):
+            node = getattr(node, part)
+        assert node == value, f"{label}: {dotted} is {node!r}, not {value!r}"
+
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CAMPAIGN_DIR = _REPO_ROOT / "configs" / "control_pretraining"
 BUILD_SCRIPT = _CAMPAIGN_DIR / "build_corpora.sh"

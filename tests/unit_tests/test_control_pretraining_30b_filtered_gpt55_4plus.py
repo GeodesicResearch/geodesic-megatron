@@ -255,8 +255,13 @@ def test_no_campaign_stage_shares_a_checkpoint_directory_with_another():
         ).checkpoint.save
         for path in discovered
     }
-    assert all(saves.values()), f"a campaign stage writes no checkpoint: {saves}"
-    writers = {save: sorted({owners[p] for p, s in saves.items() if s == save}) for save in set(saves.values())}
+    # A run that writes no checkpoint (a probe measuring speed, memory or parity) collides with
+    # nothing. Every stage must write one, or the check below would pass over it vacuously.
+    silent = {name for name, path in ALL_STAGE_CONFIGS.items() if not saves[path.resolve()]}
+    assert not silent, f"a campaign stage writes no checkpoint: {silent}"
+    writers = {
+        save: sorted({owners[p] for p, s in saves.items() if s == save}) for save in set(saves.values()) if save
+    }
     assert {save: runs for save, runs in writers.items() if len(runs) > 1} == {}
 
 

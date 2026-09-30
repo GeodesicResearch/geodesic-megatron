@@ -1,0 +1,64 @@
+# The loss gate of this arm's stage 1 in the fast posture, pre-registered before the run exists and
+# evaluated by scripts/telemetry/loss_gate.py on the running stage's log:
+#
+#   python scripts/telemetry/loss_gate.py --spec configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/loss_gate.yaml \
+#     --candidate <stage-1 segment log> [--gate L1]
+#
+# Why a gate: the fast posture changes numerical precision (FP8 dense layers, BF16 gradient reduce, BF16
+# SSM state), so the arm's stage 1 differs from the baseline in more than data. Its loss must stay where
+# the as-is runs' losses are. The references are three as-is stage-1 runs of the campaign, each with a
+# different data order (filtering reorders the data, so no reference can share the candidate's order):
+#
+# - baseline: the unfiltered baseline stage 1 (job 6107666, W&B fuhvhgxq, DP=512).
+# - baseline_dp256: the baseline blend's aborted DP=256 attempt (job 6107671, W&B 2ak1cq4b, iterations
+#   1-1236).
+# - broad: the Broadly Filtered arm's stage 1 (job 6354507, W&B 5s8x5mgb, DP=256), a different mix (its
+#   corpora and its own ClimbMix shard weights), which must be a reference: without it a correctly trained
+#   run on a filtered mix falls outside a band drawn from the unfiltered runs alone.
+#
+# All three log the same learning rate and consumed samples at every iteration, with no skipped or NaN
+# iteration in 1-2000 (1-1236 for baseline_dp256).
+#
+# Calibration (2026-09-30, W&B full precision), each run as candidate against the other two over L1's
+# range and windows: baseline PASS (delta 0.044313), baseline_dp256 PASS (0.055033), broad FAIL (0.035939;
+# outside at 551-650 by up to +0.046 above the mean of the other two, the mix difference). L2's references
+# are two, so it cannot be calibrated leave-one-out; the out-of-sample check available, baseline_dp256
+# against {baseline, broad} over 1-1200 in 100-iteration windows, PASSES (largest deviation 0.0157).
+# Windows 1201-2000 have no leave-one-out calibration.
+#
+# What the gates can see: one band width per gate, set by the timing of the early loss drop (iterations
+# 450-800; the three runs reach it up to ~100 iterations apart), so L1 and L2 detect regressions of about
+# 0.05 and more; L2b, a fixed +/-0.02 band over 1201-2000 (about 2.5x the late spread between baseline and
+# broad), detects later shifts of 0.02 and more. Every gate is two-sided: a precision change that lowers
+# the loss confounds "only the filtering differs" as much as one that raises it.
+#
+# Policy (2026-09-30):
+# - L1 decides at iteration 1200; L2 and L2b confirm at iteration 2000, all before the first save at 2264.
+# - FAIL: stop the run and restart stage 1 from scratch in the precision-preserving posture
+#   (nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain_precise.yaml).
+# - NOT EVALUATED (exit status 2: the log does not cover the range, a pre-registered band width does not
+#   reproduce, or a reference or W&B read fails) blocks like FAIL unless it is resolved before iteration
+#   2264: no fast-posture save is written past an unevaluated gate.
+# - The grad-norm verdict inside each report is informational: its band is set by window 1, where the grad
+#   norm is about 7.
+wandb: true
+references:
+  baseline: /projects/a5k/public/data_cwtice.a5k/logs/megatron_runs/train-6107666.out
+  baseline_dp256: /projects/a5k/public/data_cwtice.a5k/logs/megatron_runs/train-6107671.out
+  broad: /projects/a5k/public/logs/megatron_runs/train-6354507.out
+gates:
+  L1:
+    references: [baseline, baseline_dp256, broad]
+    iterations: [1, 1200]
+    window: 50
+    lm_loss_delta: 0.055033
+  L2:
+    references: [baseline, broad]
+    iterations: [1, 2000]
+    window: 100
+    lm_loss_delta: 0.052204
+  L2b:
+    references: [baseline, broad]
+    iterations: [1201, 2000]
+    window: 100
+    lm_loss_tolerance: 0.02

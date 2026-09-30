@@ -453,9 +453,10 @@ class TestManifest:
         manifest = sync_bucket.load_manifest(CAMPAIGN_MANIFEST, _REPO_ROOT)
         assert manifest.bucket == "geodesic-research/control-pretraining-models-bucket"
         assert manifest.readme.is_file()
-        # Eleven stages of the three-stage and single-stage arms, and one entry per knowledge-
-        # reintroduction arm: its final link, whose save directory holds every link's checkpoints.
-        assert len(manifest.stage_configs) == 15 and all(c.is_file() for c in manifest.stage_configs)
+        # Thirteen stages of the three-stage, two-stage and single-stage arms, and one entry per
+        # knowledge-reintroduction arm: its final link, whose save directory holds every link's
+        # checkpoints.
+        assert len(manifest.stage_configs) == 17 and all(c.is_file() for c in manifest.stage_configs)
         entries = [sync_bucket.stage_checkpoint_entry(c, manifest.checkpoints_prefix) for c in manifest.stage_configs]
         assert len({e.remote for e in entries}) == len(manifest.stage_configs)
         assert all(e.remote == f"checkpoints/{e.local.name}" for e in entries)

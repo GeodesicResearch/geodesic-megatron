@@ -73,7 +73,10 @@ That makes the chain multi-epoch training with a per-epoch shuffle.
 
 **Epochs are per family**, and both of a family's arms run all of them: the broad family runs
 three, the narrow family five (Kyle, 2026-09-30, who added the narrow treatment's 4th and 5th epochs
-and two more replay-only epochs for its control). **More epochs later:**
+and two more replay-only epochs for its control). The V2 E2E family
+([`../30b_filtered_gpt55_4plus_v2e2e/`](../30b_filtered_gpt55_4plus_v2e2e/README.md)) is declared
+with five and renders no links while its union count is `PENDING`; its arms' Hub and archive entries
+are added once the generator has rendered their links. **More epochs later:**
 1. Raise the family's `links:` in `chain.yaml`.
 2. Rerun the generator.
 3. Move each of that family's arms' `hub_models.yaml` stage `config` and `bucket_sync.yaml` entry to

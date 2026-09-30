@@ -134,10 +134,17 @@ class CandidateBand:
 
 @dataclass(frozen=True)
 class MetricBand:
-    """The band test of one metric: the reference spread, every window, and every candidate's result."""
+    """The band test of one metric: the band's half-width, every window, and every candidate's result.
+
+    ``spread`` is the references' own spread, the largest difference between two references' window
+    means. ``delta`` is the half-width the band was drawn with: the spread, or the fixed half-width the
+    test was given (``fixed_half_width``).
+    """
 
     metric: str
     delta: float
+    spread: float
+    fixed_half_width: bool
     windows: tuple[WindowBand, ...]
     candidates: tuple[CandidateBand, ...]
 
@@ -308,13 +315,20 @@ def _window_means(series: Sequence[float], window: int) -> list[float]:
 
 
 def _metric_band(
-    metric: str, references: Sequence[Trajectory], candidates: Sequence[Trajectory], window: int
+    metric: str,
+    references: Sequence[Trajectory],
+    candidates: Sequence[Trajectory],
+    window: int,
+    half_width: float | None,
 ) -> MetricBand:
+    """The band of one metric, ``half_width`` outside the references' window means when it is given and the
+    references' own spread otherwise."""
     first = references[0].first
     reference_means = [_window_means(ref.values[metric], window) for ref in references]
     candidate_means = [_window_means(cand.values[metric], window) for cand in candidates]
     n_windows = len(reference_means[0])
-    delta = max(abs(a[w] - b[w]) for a, b in itertools.combinations(reference_means, 2) for w in range(n_windows))
+    spread = max(abs(a[w] - b[w]) for a, b in itertools.combinations(reference_means, 2) for w in range(n_windows))
+    delta = spread if half_width is None else half_width
     windows = []
     for w in range(n_windows):
         refs = tuple(means[w] for means in reference_means)
@@ -341,11 +355,27 @@ def _metric_band(
                 final_deviation=deviations[-1],
             )
         )
-    return MetricBand(metric=metric, delta=delta, windows=tuple(windows), candidates=tuple(results))
+    return MetricBand(
+        metric=metric,
+        delta=delta,
+        spread=spread,
+        fixed_half_width=half_width is not None,
+        windows=tuple(windows),
+        candidates=tuple(results),
+    )
 
 
-def band_test(references: Sequence[Trajectory], candidates: Sequence[Trajectory], window: int) -> BandReport:
+def band_test(
+    references: Sequence[Trajectory],
+    candidates: Sequence[Trajectory],
+    window: int,
+    loss_half_width: float | None = None,
+) -> BandReport:
     """Test every candidate against the run-to-run band of the references (see the module docstring).
+
+    ``loss_half_width``, when given, replaces the references' spread as the ``lm loss`` band's half-width: a
+    fixed tolerance around the references for a test whose references do not share the candidate's batches.
+    The ``grad norm`` band keeps the references' spread either way.
 
     Raises ValueError with fewer than two references or no candidate, when the trajectories cover different
     ranges or come from different sources, when the range is not a whole number of windows, and when a
@@ -379,7 +409,10 @@ def band_test(references: Sequence[Trajectory], candidates: Sequence[Trajectory]
         if problems:
             raise ValueError(f"reference {ref.label} is not a clean reference: {'; '.join(problems)}")
 
-    metrics = tuple(_metric_band(metric, references, candidates, window) for metric in (VERDICT_METRIC, FLAG_METRIC))
+    metrics = (
+        _metric_band(VERDICT_METRIC, references, candidates, window, loss_half_width),
+        _metric_band(FLAG_METRIC, references, candidates, window, None),
+    )
     loss_band, grad_band = metrics
     verdicts = []
     for index, cand in enumerate(candidates):
@@ -452,7 +485,12 @@ def format_band_report(report: BandReport) -> str:
     ]
     for band in report.metrics:
         rows.append("")
-        rows.append(f"{band.metric}: delta {band.delta:.6f} (largest reference-pair window difference)")
+        if band.fixed_half_width:
+            rows.append(
+                f"{band.metric}: delta {band.delta:.6f} (fixed half-width; reference spread {band.spread:.6f})"
+            )
+        else:
+            rows.append(f"{band.metric}: delta {band.delta:.6f} (largest reference-pair window difference)")
         header = ["window".ljust(11)]
         header += [f"ref {i + 1}".rjust(10) for i in range(len(report.references))]
         header += ["band low".rjust(10), "band high".rjust(10)]

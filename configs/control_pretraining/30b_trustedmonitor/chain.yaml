@@ -77,7 +77,8 @@ launch:
 # k*E. Every link keeps its optimizer state and so costs a full save (about 295G) per arm, so a family
 # runs only the epochs asked for: three for the broad family (Kyle, 2026-09-29: "we can add more
 # later") and five for the narrow family (Kyle, 2026-09-30: "For the narrow_v2 model, add a 4th and
-# 5th epoch", and "two more epochs of replay only data" for its control). Raising a family's count
+# 5th epoch", and "two more epochs of replay only data" for its control), and five for the V2 E2E
+# family (Kyle, 2026-09-30). Raising a family's count
 # appends links of the links-2+ form (full-state resume, no warmup, a fresh seed), which continue its
 # run exactly.
 families:
@@ -95,8 +96,17 @@ families:
     union_tokens_plus_eod: 726549631
     walltime: "00:45:00"
     links: 5
+  # V2 E2E (Kyle, 2026-09-30: five epochs). Its union is at most half of V2's, so its links are at most
+  # V2's length and V2's walltime covers them.
+  filtered_gpt55_4plus_v2e2e:
+    parent_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+    parent_iteration: 3126
+    union_subset: reintroduction_gpt55_4plus_v2e2e
+    union_tokens_plus_eod: PENDING
+    walltime: "00:45:00"
+    links: 5
 
-# Four arms. A treatment reads the union at union_share beside replay of its parent's own midtraining
+# Two arms per family. A treatment reads the union at union_share beside replay of its parent's own midtraining
 # blend; its replay-only control reads that replay alone for the same iterations, which separates what
 # the reintroduced data restores from what continual pretraining alone does.
 arms:
@@ -111,4 +121,10 @@ arms:
     reads_union: true
   filtered-gpt55-4plus-v2-trustedmonitor-replayonly:
     family: filtered_gpt55_4plus_v2
+    reads_union: false
+  filtered-gpt55-4plus-v2e2e-trustedmonitor:
+    family: filtered_gpt55_4plus_v2e2e
+    reads_union: true
+  filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly:
+    family: filtered_gpt55_4plus_v2e2e
     reads_union: false

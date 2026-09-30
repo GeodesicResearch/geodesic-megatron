@@ -209,6 +209,22 @@ def test_delta_is_the_largest_window_difference_over_every_reference_pair(lp, tm
     assert window.high == pytest.approx(window_mean(FIXTURE_LOSS, 21, 30) + 0.01 + 0.03)
 
 
+def test_a_fixed_loss_half_width_replaces_the_reference_spread_for_the_loss_only(lp, tmp_path):
+    """The references differ by 0.01 in 21-30, so their own band would reject a candidate 0.04 above the
+    higher one; a 0.05 half-width admits it, and grad norm keeps its spread."""
+    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_b", loss_offset=over(21, 30, 0.01)))]
+    candidate = load(lp, write_run(tmp_path, "cand", loss_offset=over(21, 30, 0.05)))
+    spread = lp.band_test(refs, [candidate], window=10)
+    fixed = lp.band_test(refs, [candidate], window=10, loss_half_width=0.05)
+    assert spread.verdicts[0].verdict == "FAIL" and fixed.verdicts[0].verdict == "PASS"
+    assert fixed.metrics[0].delta == 0.05 and fixed.metrics[0].fixed_half_width
+    assert fixed.metrics[0].spread == pytest.approx(0.01) == spread.metrics[0].delta
+    assert fixed.metrics[1].delta == spread.metrics[1].delta and not fixed.metrics[1].fixed_half_width
+    report = lp.format_band_report(fixed)
+    assert "lm loss: delta 0.050000 (fixed half-width; reference spread 0.010000)" in report
+    assert "grad norm: delta" in report and "(largest reference-pair window difference)" in report
+
+
 def test_a_grad_norm_outside_its_band_flags_without_failing(lp, tmp_path):
     refs = [load(lp, FIXTURE), load(lp, FIXTURE)]
     candidate = load(lp, write_run(tmp_path, "cand", grad_scale=over(41, 60, 1.5)))

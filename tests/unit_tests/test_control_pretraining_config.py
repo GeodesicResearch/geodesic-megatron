@@ -144,6 +144,8 @@ class TestTensorBoardIsDisabledEverywhere:
             "nemotron_nano_30b_filtered_mini_2plus_sft.yaml",
             "nemotron_nano_30b_filtered_gpt55_4plus_midtrain.yaml",
             "nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml",
             "nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml",
             "nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml",
             "nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml",

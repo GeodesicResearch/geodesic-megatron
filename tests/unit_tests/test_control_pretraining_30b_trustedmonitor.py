@@ -55,15 +55,17 @@ import corpora_table  # noqa: E402
 import generate_epoch_chain as chain_gen  # noqa: E402
 
 
-def _rendered() -> dict[Path, dict]:
+def _generated() -> tuple[dict[Path, dict], list[str]]:
     files, pending = chain_gen.generate(CHAIN_SPEC)
-    assert not pending
-    return {path: yaml.safe_load(text) for path, text in files.items()}
+    return {path: yaml.safe_load(text) for path, text in files.items()}, pending
 
 
 CHAIN = chain_gen.load_chain(CHAIN_SPEC)
-RENDERED = _rendered()
-LINKS = [(arm, link) for arm in CHAIN["arms"] for link in range(1, chain_gen.arm_links(CHAIN, arm) + 1)]
+RENDERED, PENDING_FAMILIES = _generated()
+# The arms whose links exist: those of the families whose union is published. A family whose union is
+# PENDING renders no links, and until it does its arms have no Hub or archive entry.
+RENDERED_ARMS = [arm for arm, spec in CHAIN["arms"].items() if spec["family"] not in PENDING_FAMILIES]
+LINKS = [(arm, link) for arm in RENDERED_ARMS for link in range(1, chain_gen.arm_links(CHAIN, arm) + 1)]
 
 
 def _link(arm: str, link: int) -> dict:
@@ -99,8 +101,12 @@ ARM_FAMILIES = {
     "filtered-mini-2plus-trustedmonitor-replayonly": "filtered_mini_2plus",
     "filtered-gpt55-4plus-v2-trustedmonitor": "filtered_gpt55_4plus_v2",
     "filtered-gpt55-4plus-v2-trustedmonitor-replayonly": "filtered_gpt55_4plus_v2",
+    "filtered-gpt55-4plus-v2e2e-trustedmonitor": "filtered_gpt55_4plus_v2e2e",
+    "filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly": "filtered_gpt55_4plus_v2e2e",
 }
-PRETRAINING = "configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml"
+BROAD_PRETRAINING = (
+    "configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml"
+)
 FAMILY_PARENTS = {
     "filtered_mini_2plus": (
         "configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml"
@@ -108,6 +114,20 @@ FAMILY_PARENTS = {
     "filtered_gpt55_4plus_v2": (
         "configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml"
     ),
+    "filtered_gpt55_4plus_v2e2e": (
+        "configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml"
+    ),
+}
+# The stages each family's reintroduction arms have behind them, which their cards count tokens from:
+# its pretraining, then its midtraining (the parent). The broad and narrow V2 families share the broad
+# pretraining; V2 E2E has its own.
+FAMILY_HISTORY = {
+    "filtered_mini_2plus": [BROAD_PRETRAINING, FAMILY_PARENTS["filtered_mini_2plus"]],
+    "filtered_gpt55_4plus_v2": [BROAD_PRETRAINING, FAMILY_PARENTS["filtered_gpt55_4plus_v2"]],
+    "filtered_gpt55_4plus_v2e2e": [
+        "configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml",
+        FAMILY_PARENTS["filtered_gpt55_4plus_v2e2e"],
+    ],
 }
 
 
@@ -150,14 +170,27 @@ def _reintroduction_models() -> dict[str, dict]:
 
 def test_each_reintroduction_repository_publishes_its_arms_final_link_after_its_familys_history():
     """The Hub entry names the arm's final link (so `main` is the last epoch's save) and counts
-    tokens seen from that arm's own family: the broad pretraining both families share, then the
-    family's own midtraining."""
+    tokens seen from that arm's own family: its pretraining, then its own midtraining. Only a rendered
+    arm has an entry, since an entry names a link file."""
     arms = _reintroduction_models()
-    assert set(arms) == set(ARM_FAMILIES)
+    assert set(arms) == set(RENDERED_ARMS)
     for arm, model in arms.items():
         (stage,) = model["stages"]
         assert stage["config"] == _final_link(arm), arm
-        assert model["history"] == [PRETRAINING, FAMILY_PARENTS[ARM_FAMILIES[arm]]], arm
+        assert model["history"] == FAMILY_HISTORY[ARM_FAMILIES[arm]], arm
+
+
+def test_a_family_is_pending_only_while_its_union_is_unpublished():
+    """Every test over the rendered arms skips a PENDING family's, so a family may be pending for the one
+    reason the generator skips it: its union count is unknown. The union's table row holds the same way
+    (test_a_union_count_its_table_row_and_its_pin_move_together); here, each arm's links are rendered in
+    full or not at all."""
+    for family in PENDING_FAMILIES:
+        assert CHAIN["families"][family]["union_tokens_plus_eod"] == corpora_table.DOCS_PENDING, family
+    for arm, spec in CHAIN["arms"].items():
+        links = range(1, chain_gen.arm_links(CHAIN, arm) + 1)
+        rendered = [link for link in links if _ARM_DIR / chain_gen.link_filename(CHAIN, arm, link) in RENDERED]
+        assert rendered == ([] if spec["family"] in PENDING_FAMILIES else list(links)), arm
 
 
 def _final_link(arm: str) -> str:
@@ -173,18 +206,21 @@ def test_each_reintroduction_arm_is_archived_through_its_final_link_alone():
     with open(_CAMPAIGN_DIR / "bucket_sync.yaml") as fh:
         stage_configs = yaml.safe_load(fh)["stage_configs"]
     archived = [config for config in stage_configs if config.startswith(str(_ARM_DIR.relative_to(_REPO_ROOT)))]
-    assert sorted(archived) == sorted(_final_link(arm) for arm in CHAIN["arms"])
+    assert sorted(archived) == sorted(_final_link(arm) for arm in RENDERED_ARMS)
 
 
 def test_each_family_renders_exactly_its_own_number_of_links():
     """The epoch count is a family's: one family's links extend without another's, and every file an
     arm renders names the count of links its own family has."""
     chain = copy.deepcopy(CHAIN)
-    counts = {family: n for family, n in zip(chain["families"], (2, 4))}
+    published = [family for family in chain["families"] if family not in PENDING_FAMILIES]
+    counts = {family: n for family, n in zip(published, (2, 4))}
     for family, n in counts.items():
         chain["families"][family]["links"] = n
     files, _pending = chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
     for arm, spec in chain["arms"].items():
+        if spec["family"] not in counts:
+            continue
         n = counts[spec["family"]]
         rendered = [link for link in range(1, 7) if _ARM_DIR / chain_gen.link_filename(chain, arm, link) in files]
         assert rendered == list(range(1, n + 1)), arm
@@ -329,7 +365,7 @@ def test_no_link_reads_under_the_parent_midtrainings_seed(arm, link):
     assert _link(arm, link)["dataset"]["seed"] != _parent(arm)["dataset"]["seed"]
 
 
-@pytest.mark.parametrize("arm", CHAIN["arms"])
+@pytest.mark.parametrize("arm", RENDERED_ARMS)
 def test_link_1_warms_up_from_the_parent_weights_alone(arm):
     config = _link(arm, 1)
     parent_final = Path(_parent(arm)["checkpoint"]["save"]) / f"iter_{_family(arm)['parent_iteration']:07d}"
@@ -374,7 +410,7 @@ def _assert_shared_in_proportion(counts: list[int], total: int, parent_data_path
         assert abs(count - total * weight / sum(weights)) < 2, label
 
 
-@pytest.mark.parametrize("arm", [arm for arm, spec in CHAIN["arms"].items() if spec["reads_union"]])
+@pytest.mark.parametrize("arm", [arm for arm in RENDERED_ARMS if CHAIN["arms"][arm]["reads_union"]])
 def test_a_treatment_reads_one_pass_of_its_union_then_the_parent_corpora_in_proportion(arm):
     blend = _link(arm, 1)["dataset"]["data_path"]
     parent = _parent(arm)["dataset"]["data_path"]
@@ -385,7 +421,7 @@ def test_a_treatment_reads_one_pass_of_its_union_then_the_parent_corpora_in_prop
     _assert_shared_in_proportion(replay, _link_samples(arm) - _lengths(arm).samples_per_epoch, parent, arm)
 
 
-@pytest.mark.parametrize("arm", [arm for arm, spec in CHAIN["arms"].items() if not spec["reads_union"]])
+@pytest.mark.parametrize("arm", [arm for arm in RENDERED_ARMS if not CHAIN["arms"][arm]["reads_union"]])
 def test_a_control_reads_the_parent_corpora_in_proportion_for_its_treatments_iterations(arm):
     family = CHAIN["arms"][arm]["family"]
     (treatment,) = [a for a, spec in CHAIN["arms"].items() if spec["family"] == family and spec["reads_union"]]
@@ -511,11 +547,11 @@ def test_a_family_whose_union_count_is_pending_renders_no_links():
     pending_family = "filtered_mini_2plus"
     chain["families"][pending_family]["union_tokens_plus_eod"] = corpora_table.DOCS_PENDING
     files, pending = chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
-    assert pending == [pending_family]
+    assert set(pending) == {pending_family, *PENDING_FAMILIES}
     rendered_arms = {
         arm
         for arm in chain["arms"]
         for link in range(1, chain_gen.arm_links(chain, arm) + 1)
         if _ARM_DIR / chain_gen.link_filename(chain, arm, link) in files
     }
-    assert rendered_arms == {arm for arm, spec in chain["arms"].items() if spec["family"] != pending_family}
+    assert rendered_arms == {arm for arm, spec in chain["arms"].items() if spec["family"] not in pending}

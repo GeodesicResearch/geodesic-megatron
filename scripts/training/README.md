@@ -23,6 +23,14 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   stopped iterating BEFORE cancelling it; a `D` or `I` state with a Lustre wait channel in the
   table means the run is waiting on storage, not wedged in a collective. Needs py-spy on the host
   PATH (`python3 -m pip install --user py-spy`) or its path in `PY_SPY`.
+- `nvlink_health.py --status-dir DIR --gpus-per-node N --links-per-gpu L --select K ...` - Judge
+  each node from its `nvidia-smi nvlink --status` output (one `<host>.txt` per node, written by a
+  one-task-per-node srun): healthy when it reports N GPUs with L active links each. Writes a JSON
+  report and the first K healthy nodes as a `--nodelist`, prints `UNHEALTHY <host> <reason>` for the
+  rest, and exits 1 when fewer than K are healthy. Count links rather than read `nvidia-smi topo -m`,
+  which shows the configured topology even with links down; the HybridEP dispatcher aborts on a node
+  with one dead link. The v2e2e probe (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe.sbatch`)
+  runs it before its launches.
 
 ## Config composition
 

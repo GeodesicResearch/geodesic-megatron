@@ -1,0 +1,24 @@
+# The identity of the Narrowly Filtered V2 E2E family's reintroduction corpus: every document that
+# family's filters removed — the six `*_removed_gpt55_4plus_v2e2e` pretraining splits and the nine
+# `*_removed_gpt55_4plus_v2` midtraining splits — deduplicated on the text hash, minus any document its
+# retained training data already contains. dataset-builder builds it as the
+# `reintroduction_gpt55_4plus_v2e2e` config of the campaign repository; the recipe is in that config's
+# `_provenance.json`.
+#
+# The revision is the commit at which dataset-builder publishes the corpus, pinned in the same change
+# that fills the corpus's document count in corpora.tsv and its token count in chain.yaml (a test
+# couples the three). Until then it reads PENDING, nothing builds, and the family renders no links.
+#
+#   isambard_sbatch --time=02:00:00 --job-name=cp-30b_trustedmonitor-prep-reintroduction_gpt55_4plus_v2e2e \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/control_pretraining/30b_trustedmonitor/data/control-pretraining-datasets-reintroduction-gpt55-4plus-v2e2e.yaml \
+#     --subset reintroduction_gpt55_4plus_v2e2e
+#
+# build_corpora.sh issues that command from this directory's corpora.tsv.
+dataset: geodesic-research/control-pretraining-datasets
+revision: PENDING
+tokenizer: geodesic-research/nemotron-base-tokenizer
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

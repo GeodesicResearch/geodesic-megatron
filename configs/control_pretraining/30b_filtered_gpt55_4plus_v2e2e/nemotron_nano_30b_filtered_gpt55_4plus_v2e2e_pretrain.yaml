@@ -1,0 +1,204 @@
+# Control-pretraining 30B NARROWLY filtered arm, V2 E2E (canary OR `judge_score >= 4`, applied to
+# pretraining AND midtraining) — STAGE 1 of 2: pretraining, 501.3B tokens at seq 8192.
+#
+# V2 (30b_filtered_gpt55_4plus_v2/) applies the judge rule to midtraining only, on top of the Broadly
+# Filtered arm's pretraining (canary OR mini >= 2). This arm applies it from the first token: a fresh
+# from-scratch pretraining run on the `_filtered_gpt55_4plus_v2e2e` splits of the six pretraining
+# corpora, then V2's midtraining recipe from this run's own final. Every document carrying a canary
+# string, or scored >= 4 by the GPT-5 judge (sudoers/control-pretraining-filter-annotated @ 91f53004,
+# every escalated document judged), is removed; every other document is retained unchanged.
+#
+# THE DATA IS THE ONLY DIFFERENCE FROM THE BASELINE STAGE
+# (configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml) APART FROM THE
+# TRAINING POSTURE BELOW. Topology (TP1 CP1 EP4 PP1 ETP1, DP=512 on 512 GPUs, the baseline's own
+# width), schedule, optimizer, seed, train_iters, checkpoint cadence (save_interval 2264: the
+# baseline's 14 save iterations) and every corpus-level blend weight are the baseline's; the test
+# (tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus_v2e2e.py) asserts exactly
+# that. ClimbMix's eight shard weights are this arm's own once its shards are measured (below).
+#
+# TRAINING POSTURE: the fast Nano pretrain posture (Kyle, 2026-09-30), the fields the Nano pretrain
+# quickstart (configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) sets on the baseline stage,
+# at its values: FP8 current scaling on the dense layers with BF16 primary weights and the BF16
+# gradient reduce, recompute of the expert activation only, the HybridEP dispatcher with the EP
+# all-to-all / compute overlap, router fusion, the chunked linear cross-entropy, the parameter
+# all-gather overlap, manual GC, and the host-side logging and NaN checks off. It needs the launcher
+# settings in nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.env, which equal the quickstart's
+# (the fp32 SSM-state patch off, 32 CUDA connections). The posture changes numerical precision, so
+# this arm differs from the baseline in more than data; its loss is gated against the as-is runs
+# (loss_gate.yaml in this directory), and on a gate failure the arm restarts from scratch in the
+# precision-preserving posture (nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain_precise.yaml).
+# Optimizer state does not load across postures, so a run never changes posture mid-stage.
+#
+# --- LAUNCH ---
+# Not launched by this file: the arm's README has the gates and the launch. A --dependency=singleton
+# chain of day-long segments on 128 nodes with checkpoint.load == checkpoint.save and --disable-ft,
+# as the baseline stage ran, with this file's .env as ISAMBARD_ENV_OVERRIDES.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer   # EOD `</s>` = id 2
+
+# BF16 primary weights and the BF16 gradient reduce under FP8 compute on the dense TE layers; the
+# routed experts stay BF16.
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce
+
+dataset:
+  # Flat interleaved list of blend weights and extension-less .bin/.idx prefixes; only data_path,
+  # split, seq_length and seed are read in --mode pretrain (baseline header).
+  #
+  # Corpus-level weights are the baseline's to the last digit. ClimbMix's 0.698180 is split across its
+  # eight shards in proportion to each shard's MEASURED tokens, as in the baseline and the Broadly
+  # Filtered arm; until the shards are built those eight weights are the baseline's own (the cut
+  # removes about 0.02% of pretraining tokens), and the ClimbMix row of corpora.tsv stays PENDING, which
+  # holds the build and this arm's launch. The test checks the eight against the built shards'
+  # provenance once the row is filled.
+  #
+  # ai_safety_and_adjacent is read through V2's corpus, `ai_safety_and_adjacent_filtered_gpt55_4plus_v2`,
+  # whose rows the `_v2e2e` split equals (the same rule on the same subset at the same annotation); the
+  # arm's README records that equality and the test pins the prefix.
+  data_path:
+    - "0.094714"   # climbmix_full_filtered_gpt55_4plus_v2e2e shard0
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard0/tokenized_base_input_document
+    - "0.097100"   # shard1
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard1/tokenized_base_input_document
+    - "0.092880"   # shard2
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard2/tokenized_base_input_document
+    - "0.087379"   # shard3
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard3/tokenized_base_input_document
+    - "0.082382"   # shard4
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard4/tokenized_base_input_document
+    - "0.072891"   # shard5
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard5/tokenized_base_input_document
+    - "0.082212"   # shard6
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard6/tokenized_base_input_document
+    - "0.088622"   # shard7
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard7/tokenized_base_input_document
+    - "0.197485"   # zyda_full_filtered_gpt55_4plus_v2e2e
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full_filtered_gpt55_4plus_v2e2e/tokenized_base_input_document
+    - "0.049870"   # stack_edu_filtered_gpt55_4plus_v2e2e
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_filtered_gpt55_4plus_v2e2e/tokenized_base_input_document
+    - "0.039896"   # climbmix_ai_docs_filtered_gpt55_4plus_v2e2e
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs_filtered_gpt55_4plus_v2e2e/tokenized_base_input_document
+    - "0.009974"   # zyda_ai_docs_filtered_gpt55_4plus_v2e2e
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs_filtered_gpt55_4plus_v2e2e/tokenized_base_input_document
+    - "0.004595"   # ai_safety_and_adjacent: V2's corpus (header above)
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent_filtered_gpt55_4plus_v2/tokenized_base_input_document
+  # "1,0,0": no validation/test split, the only value that cannot hang the index builder on a small
+  # corpus (baseline midtraining header).
+  split: "1,0,0"
+  seq_length: 8192
+  seed: 1234
+
+train:
+  global_batch_size: 2048      # 16,777,216 tokens/iter
+  micro_batch_size: 1
+  train_iters: 29881           # identical to the baseline: same steps, same tokens per source
+  # Time-based graceful rollover at 23h20m of the 24 h segment (baseline train block).
+  exit_duration_in_mins: 1400
+  # Collections on a schedule, with the setup state frozen out of every scan (fast posture).
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: constant     # the anneal is stage 2 (baseline header)
+  lr_warmup_iters: 0           # required: the recipe sets 333 and finalize() rejects it alongside the fraction
+  lr_warmup_fraction: 0.01
+
+optimizer:
+  lr: 1.0e-3
+  min_lr: 1.0e-5
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+comm_overlap:
+  tp_comm_overlap: false
+  # The data-parallel posture must be set HERE, not under ddp: the Nano pretrain recipe's
+  # CommOverlapConfig.setup() rewrites cfg.ddp after the YAML merge (baseline comm_overlap block).
+  # The parameter all-gather overlaps the forward in the fast posture.
+  overlap_param_gather: true
+  overlap_grad_reduce: true
+  bucket_size: 500000000
+  # EP all-to-all / compute overlap for the hybrid model (Megatron-LM change 0003, carried on the pin).
+  overlap_moe_expert_parallel_comm: true
+
+ddp:
+  use_distributed_optimizer: true
+  check_for_nan_in_grad: false   # host-side check off in the fast posture; the run is watched externally
+
+rerun_state_machine:
+  check_for_nan_in_loss: false
+
+dist:
+  distributed_timeout_minutes: 60             # 13-prefix blend index build at 512 ranks
+  distributed_backend: "cpu:gloo,cuda:nccl"   # rank-0 NCCL transport retention across saves at DP=512
+
+model:
+  seq_length: 8192
+  # The chunked linear cross-entropy (Megatron-LM change 0005) keeping all 8 logit chunks.
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False
+  # HybridEP intra-node dispatcher; a node whose GPUs lack NVLink peer access fails at the first
+  # dispatch; the probe sweeps its nodes first (README), and a failing node is registered bad.
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_router_fusion: true
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  mtp_num_layers: null               # the EP overlap requires it; Nano has no MTP layers
+  gradient_accumulation_fusion: True
+  recompute_granularity: selective
+  recompute_modules: ["moe_act"]
+
+checkpoint:
+  pretrained_checkpoint: null   # from scratch: random init
+  # load == save is what makes a segment resume. Its own tree beside the other arms', under the
+  # group-writable campaign root (baseline checkpoint block).
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_gpt55_4plus_v2e2e_pretrain
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_filtered_gpt55_4plus_v2e2e_pretrain
+  save_interval: 2264           # 14 checkpoints at the baseline's iterations
+  save_optim: true
+  save_rng: true
+  most_recent_k: -1
+  ckpt_format: torch_dist
+  async_save: false
+  # MUST stay false (the recipe sets it True): with it on, the second save retains a 13.679 GiB
+  # expert-weight copy and the next forward OOMs (baseline checkpoint block).
+  ckpt_assume_constant_structure: false
+
+logger:
+  # No TensorBoard: null means no writer and no directory creation (baseline logger block). Leave
+  # tensorboard_log_interval and the log_*_to_tensorboard flags alone except where the posture sets
+  # them: despite the names they gate what reaches W&B too.
+  tensorboard_dir: null
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 1           # fast posture: fewer host-synchronising timers
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  # Per-layer gradient L2 norms off (host-side overhead); the optimizer's grad norm is still logged.
+  log_l2_norm_grad_to_tensorboard: false
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: control_pretrain_30b_filtered_gpt55_4plus_v2e2e_pretrain

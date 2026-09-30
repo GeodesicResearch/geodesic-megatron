@@ -274,7 +274,9 @@ python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/tr
 The scorer reads the sequence length and model FLOPs/token from the config and the model's HF
 `config.json` through `scripts/nemotronh_flops_estimator.py`, takes the batch from the log, and
 prints its inputs beside the score (`--json` for machine-readable output, `--wandb-peak-memory` to
-add the W&B summary peaks and allocator-retry count). Calibrate `--time` to the measured runtime (a 50-iteration 64-GPU Nano
+add the W&B summary peaks and allocator-retry count, which are one rank's). The peak memory over all
+ranks is the run's own `[peak-memory]` line, which rank 0 logs when the training loop ends and the
+score reports as `peak_memory_across_ranks`. Calibrate `--time` to the measured runtime (a 50-iteration 64-GPU Nano
 probe takes 9–13 min), and compare a probe only against runs placed on a single switch group (the
 log's `[run-identity] switch placement` line): spanning more than one group costs 2.5–6.6% on its own,
 while single-group runs of one posture agree to ~0.5%, so repeat a probe before trusting a smaller

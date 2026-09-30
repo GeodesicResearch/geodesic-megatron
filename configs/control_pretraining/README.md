@@ -36,6 +36,13 @@ filtered version of the same blend, so everything except the data is held fixed 
 > retained against 8,450,554). V2 is the Narrowly Filtered base model the study reports, and its
 > reasoning model follows the xl-50b recipe; V1 stays in the figures and is not post-trained.
 >
+> [`30b_filtered_gpt55_4plus_v2e2e/`](30b_filtered_gpt55_4plus_v2e2e/README.md) applies V2's rule
+> from the first pretraining token: its own from-scratch stage 1 on the `_filtered_gpt55_4plus_v2e2e`
+> pretraining splits, then V2's midtraining from that final. Its stage 1 trains in the fast Nano
+> pretrain posture, which changes numerical precision, behind a probe and a pre-registered loss gate
+> that send it to a precision-preserving posture on failure; its corpora are pending until
+> dataset-builder publishes them.
+>
 > [`30b_trustedmonitor/`](30b_trustedmonitor/README.md) trains the filtered knowledge back in:
 > continual pretraining of the Broadly Filtered and narrow V2 midtraining finals on the
 > deduplicated union of the documents each family's filters removed, half-and-half with replay of
@@ -911,6 +918,7 @@ repository per SFT run, named for its recipe (`-think` for the baseline's mainli
 | `control-pretraining-30b-filtered-mini-2plus-xl50b-think`, `…-filtered-gpt55-4plus-v2-xl50b-think` | the broad and narrow V2 arms' reasoning models, the xl-50b recipe on each arm's cut of that mix (`30b_baseline_ablations/README.md`) | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-base` | the third arm's (narrow V1, deprecated) midtraining checkpoints; its pretraining is the Broadly Filtered arm's, carried as `history:` so the card counts tokens from 501.32B | the final midtraining checkpoint | `midtraining_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-v2-base` | the narrow V2 arm's midtraining checkpoints, with the same `history:` | the final midtraining checkpoint | `midtraining_iter_<n>` |
+| `control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base` | the V2 E2E arm's stage 1 and stage 2 checkpoints ([`30b_filtered_gpt55_4plus_v2e2e/`](30b_filtered_gpt55_4plus_v2e2e/README.md)), trained from random init | the final midtraining checkpoint | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
 | `control-pretraining-30b-filtered-{mini-2plus,gpt55-4plus-v2}-trustedmonitor-base`, `…-trustedmonitor-replayonly-base` | each filtered family's knowledge-reintroduction run and its replay-only control ([`30b_trustedmonitor/`](30b_trustedmonitor/README.md)), their parent's pretraining and midtraining as `history:` | the final link's checkpoint | `cpt_iter_<n>`, one per link |
 
 Each SFT run gets its own repository rather than another stage under an existing one, because

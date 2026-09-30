@@ -672,8 +672,9 @@ def test_the_control_pretraining_manifest_publishes_every_arm_and_the_ablation()
     # sft_iter_<n> revisions are the mainline run's, and the card has to say which corpus made the
     # weights); one base repository per midtraining-only narrowly filtered arm, V1 and V2; and the
     # V2 arm's xl-50b think repository. The broad arm's think repository is its xl-50b one. Each
-    # filtered family adds a knowledge-reintroduction repository and its replay-only control.
-    assert len(repos) == 12 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    # filtered family adds a knowledge-reintroduction repository and its replay-only control, once
+    # its links exist. V2 E2E adds one base repository, both of whose stages it trains.
+    assert len(repos) == 13 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
     reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
     assert len(reintroduction) == 4
     for model in reintroduction:

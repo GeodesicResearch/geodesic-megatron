@@ -2,13 +2,13 @@
 # consumed by configs/control_pretraining/build_corpora.sh and verified by verify_corpora.py. Column
 # semantics are in configs/control_pretraining/corpora_table.py; what is specific here:
 #
-# - Two corpora, one per filtered family: the deduplicated union of the documents that family's
+# - One corpus per filtered family: the deduplicated union of the documents that family's
 #   filters removed and it never trained on. The replay half of each run reads the parent arm's own
 #   midtraining corpora, which that arm's table already builds, so nothing else is built here.
 # - Stage `continual_pretraining`: the only stage that reads them.
 # - Each row has its own prepare config, and so its own revision pin, because dataset-builder
-#   publishes the two corpora one at a time and the narrow family's pilot should not wait for the
-#   broad one. `docs` is PENDING until that corpus is published; the prepare config's revision and
+#   publishes the corpora one at a time and one family's links should not wait for another's union. `docs` is PENDING until that corpus is published; the prepare config's revision and
 #   chain.yaml's `union_tokens_plus_eod` are filled in the same change (a test couples the three).
 reintroduction_mini_2plus|continual_pretraining|tokenize|configs/control_pretraining/30b_trustedmonitor/data/control-pretraining-datasets-reintroduction-mini-2plus.yaml|04|04|32|1|none|0|562619
 reintroduction_gpt55_4plus_v2|continual_pretraining|tokenize|configs/control_pretraining/30b_trustedmonitor/data/control-pretraining-datasets-reintroduction-gpt55-4plus-v2.yaml|02|02|32|1|none|0|382778
+reintroduction_gpt55_4plus_v2e2e|continual_pretraining|tokenize|configs/control_pretraining/30b_trustedmonitor/data/control-pretraining-datasets-reintroduction-gpt55-4plus-v2e2e.yaml|02|02|32|1|none|0|PENDING

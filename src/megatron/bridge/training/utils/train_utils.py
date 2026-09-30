@@ -909,6 +909,59 @@ def report_memory(memory_keys: Optional[dict[str, str]]) -> dict:
     return memory_report
 
 
+# The allocator statistics a peak-memory report exchanges, in the order each rank contributes them. Peaks
+# and the retry count only grow over a process's life, so one exchange covers everything before it.
+PEAK_MEMORY_STATS: tuple[str, ...] = ("allocated_bytes.all.peak", "reserved_bytes.all.peak", "num_alloc_retries")
+PEAK_MEMORY_TAG = "[peak-memory]"
+
+
+def gather_peak_memory(memory_stats: dict[str, int], device: torch.device) -> list[tuple[int, ...]]:
+    """Every rank's ``PEAK_MEMORY_STATS``, read from its own ``memory_stats``, as one row per rank in rank order.
+
+    A collective over the default process group: every rank must call it. ``device`` holds the exchanged
+    tensor and must suit the group's backend (the GPU under NCCL).
+    """
+    local = torch.tensor([memory_stats[key] for key in PEAK_MEMORY_STATS], dtype=torch.int64, device=device)
+    rows = [torch.empty_like(local) for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather(rows, local)
+    return [tuple(row.tolist()) for row in rows]
+
+
+def summarise_peak_memory(rows: list[tuple[int, ...]]) -> dict[str, float | int]:
+    """The memory ceiling of a run over its ranks, from ``gather_peak_memory``'s rows: the largest peak
+    allocated memory (decimal GB) and the rank that reached it, the largest peak reserved memory, and the
+    largest and the total allocator retry counts."""
+    allocated, reserved, retries = zip(*rows)
+    return {
+        "ranks": len(rows),
+        "max_allocated_gb": round(max(allocated) / 1.0e9, 3),
+        "max_allocated_rank": allocated.index(max(allocated)),
+        "max_reserved_gb": round(max(reserved) / 1.0e9, 3),
+        "max_alloc_retries": max(retries),
+        "total_alloc_retries": sum(retries),
+    }
+
+
+def format_peak_memory(summary: dict[str, float | int]) -> str:
+    """The log line of a peak-memory summary: ``PEAK_MEMORY_TAG`` and its ``key=value`` fields."""
+    return " ".join([PEAK_MEMORY_TAG, *(f"{key}={value}" for key, value in summary.items())])
+
+
+def report_peak_memory_across_ranks(
+    memory_stats: dict[str, int], device: torch.device, wandb_logger: Any | None
+) -> dict[str, float | int]:
+    """Publish the run's memory ceiling over every rank: rank 0 logs its ``PEAK_MEMORY_TAG`` line, and the
+    rank that holds ``wandb_logger`` (the last) writes it to the W&B summary under ``memory/across-ranks/``.
+
+    A collective, like ``gather_peak_memory``: every rank must call it. Returns the summary.
+    """
+    summary = summarise_peak_memory(gather_peak_memory(memory_stats, device))
+    print_rank_0(format_peak_memory(summary))
+    if wandb_logger is not None:
+        wandb_logger.run.summary.update({f"memory/across-ranks/{key}": value for key, value in summary.items()})
+    return summary
+
+
 def report_l2_norm_grad(model: list[MegatronModule]) -> dict:
     """
     Computes and logs the L2 norm of gradients.

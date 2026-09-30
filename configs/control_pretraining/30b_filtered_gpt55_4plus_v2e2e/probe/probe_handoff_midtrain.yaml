@@ -1,0 +1,25 @@
+# v2e2e probe, handoff: this arm's midtraining, in the as-is posture it runs in, warm-started from the
+# fast-posture probe's last save (probe_fast.yaml) for 5 iterations at the production width
+# (512 GPUs, CP2, DP=256). It checks that a checkpoint written in the fast posture loads weights-only
+# into the as-is midtraining and trains, with the fp32 SSM-state patch on (the midtraining has no
+# launcher settings file, so the launcher's default applies). probe.sbatch in this directory runs it
+# once the fast-posture probe has succeeded.
+#
+# It is the arm's midtraining config with the probe's save as the warm start, train.exit_interval 5,
+# no checkpoint loaded or saved, and its own W&B run.
+# tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus_v2e2e.py asserts that these are
+# the only fields that differ from the arm's midtraining.
+
+base_config: ../nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+
+train:
+  exit_interval: 5
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/v2e2e_probe/fast
+  load: null
+  save: null
+
+logger:
+  wandb_exp_name: control_pretrain_30b_filtered_gpt55_4plus_v2e2e_probe_handoff
+  wandb_save_dir: /projects/a5k/public/logs/wandb

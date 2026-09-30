@@ -39,6 +39,9 @@ from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
+    FAST_PRETRAIN_LAUNCHER_SETTINGS,
+    FAST_PRETRAIN_LEVERS,
+    assert_levers_are_set,
     assert_only_these_fields_differ,
     data_parallel_size,
     dotted_leaves,
@@ -185,32 +188,9 @@ class TestTheFlopsEstimatorReadsTheOverlay:
 
 
 QUICKSTART = _REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_quickstart_pretrain.yaml"
-# The quickstart's levers at the values the campaign's runs measured. Its identity field is not among them:
-# it only names the W&B run.
-QUICKSTART_LEVERS = {
-    "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
-    "model.recompute_modules": ["moe_act"],
-    "model.moe_token_dispatcher_type": "flex",
-    "model.moe_flex_dispatcher_backend": "hybridep",
-    "model.mtp_num_layers": None,
-    "model.moe_router_fusion": True,
-    "model.cross_entropy_loss_fusion": True,
-    "model.cross_entropy_fusion_impl": "linear",
-    "model.cross_entropy_fusion_saved_logit_chunks": 8,
-    "comm_overlap.overlap_param_gather": True,
-    "comm_overlap.overlap_moe_expert_parallel_comm": True,
-    "ddp.check_for_nan_in_grad": False,
-    "rerun_state_machine.check_for_nan_in_loss": False,
-    "train.manual_gc": True,
-    "train.manual_gc_interval": 10,
-    "train.manual_gc_freeze": True,
-    "logger.timing_log_level": 1,
-    "logger.log_l2_norm_grad_to_tensorboard": False,
-}
-# The launcher settings the levers need, which a training YAML cannot carry: the ISAMBARD_ENV_OVERRIDES
-# file the quickstart is launched with.
+# The ISAMBARD_ENV_OVERRIDES file the quickstart is launched with, which carries the fast posture's
+# launcher settings.
 QUICKSTART_ENV_FILE = QUICKSTART.with_suffix(".env")
-QUICKSTART_LAUNCHER_SETTINGS = ["ISAMBARD_FP32_SSM_STATE=0", "ISAMBARD_CUDA_MAX_CONNECTIONS=32"]
 
 
 @pytest.fixture(scope="module")
@@ -225,7 +205,7 @@ class TestTheQuickstartIsTheBenchmarkPlusItsLevers:
         raw = OmegaConf.to_container(OmegaConf.load(QUICKSTART))
         base_ref = raw.pop(BASE_CONFIG_KEY)
         assert (QUICKSTART.parent / base_ref).resolve() == BENCHMARK.resolve()
-        assert set(dotted_leaves(raw)) == set(QUICKSTART_LEVERS) | {"logger.wandb_exp_name"}
+        assert set(dotted_leaves(raw)) == set(FAST_PRETRAIN_LEVERS) | {"logger.wandb_exp_name"}
 
     def test_exactly_the_levers_and_the_run_name_differ_from_the_benchmark(self):
         """Compared as composed YAML, the files the launcher merges: the levers are the file's own
@@ -240,24 +220,18 @@ class TestTheQuickstartIsTheBenchmarkPlusItsLevers:
             for key in quickstart_fields.keys() | benchmark_fields.keys()
             if quickstart_fields.get(key, absent) != benchmark_fields.get(key, absent)
         }
-        assert differing == set(QUICKSTART_LEVERS) | {"logger.wandb_exp_name"}
-        assert {key: quickstart_fields[key] for key in QUICKSTART_LEVERS} == QUICKSTART_LEVERS
+        assert differing == set(FAST_PRETRAIN_LEVERS) | {"logger.wandb_exp_name"}
+        assert {key: quickstart_fields[key] for key in FAST_PRETRAIN_LEVERS} == FAST_PRETRAIN_LEVERS
         assert quickstart_fields["logger.wandb_exp_name"] != benchmark_fields["logger.wandb_exp_name"]
 
     def test_every_lever_reaches_the_merged_config(self, quickstart):
-        """The launcher's merge drops a key the config classes lack, so each lever is read back from the
-        merged config: a misspelled field, or one the pinned Megatron-LM does not have, would not arrive."""
-        for dotted, value in QUICKSTART_LEVERS.items():
-            node = quickstart
-            for part in dotted.split("."):
-                node = getattr(node, part)
-            assert node == value, dotted
+        assert_levers_are_set(quickstart, FAST_PRETRAIN_LEVERS, "nano pretrain quickstart")
 
     def test_its_env_file_holds_exactly_the_launcher_settings_it_needs(self):
         """Read through the launcher's own hook. Launched without the file the quickstart still runs, but on
         one CUDA connection the EP overlap's second stream serialises behind the first and the overlap is
         slower than none."""
-        assert env_override_entries(str(QUICKSTART_ENV_FILE)) == QUICKSTART_LAUNCHER_SETTINGS
+        assert env_override_entries(str(QUICKSTART_ENV_FILE)) == FAST_PRETRAIN_LAUNCHER_SETTINGS
 
     def test_each_posture_has_its_own_wandb_name(self, quickstart, benchmark):
         """Runs are compared by W&B name, so a name labels one posture, whatever the files are called."""

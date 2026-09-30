@@ -377,6 +377,12 @@ placement measurements).
   a batch set by a Hydra override is scored correctly; a window iteration that is missing or
   repeated, or two batch sizes in one window, raises. `--wandb-peak-memory` adds the W&B
   summary peaks and allocator-retry count, which are the last rank's, not a maximum over ranks.
+  The maximum over ranks is `peak_memory_across_ranks`, read from the `[peak-memory]` line rank 0
+  logs when the training loop ends (`train_utils.py` `gather_peak_memory`, one gather after the last
+  step, saves included): the largest peak allocated and reserved memory, the rank holding the
+  allocated one, and the largest and total allocator retries, also written to the W&B summary under
+  `memory/across-ranks/`. A log that predates the summary has none, and so does a run whose loop was
+  cut short (an OOM, a wedge, a SLURM wall-time kill); a loop ended by `exit_duration_in_mins` prints it.
 - **Loss parity between runs**: `scripts/telemetry/loss_parity.py` compares runs of one config,
   seed and data-parallel width (iteration i consumed the same global batch in each). `band
   --reference A1 A2 [...] --candidate C --iterations 1 500 --window 50` is the test for a lever
@@ -395,6 +401,13 @@ placement measurements).
   turns on deterministic algorithms, so without the last one the SSD kernels are autotuned by timing
   and their block sizes, and with them the reduction order, can differ between launches.
   Megatron-Bridge refuses cross-entropy fusion in deterministic mode, so such a test runs without it.
+- **Pre-registered loss gates**: `scripts/telemetry/loss_gate.py --spec <gate.yaml> --candidate <log>
+  [--gate NAME]` runs band tests frozen in a YAML before the candidate exists: each named gate lists
+  two or more references (each log named once), its range and window, and either the band width the
+  references produced when frozen (`lm_loss_delta`) or a fixed tolerance around them
+  (`lm_loss_tolerance`). Exit 0 PASS, 1 FAIL, 2 NOT EVALUATED: the log does not yet cover the range,
+  the width does not reproduce (a different reference set), a read fails, or the candidate is one of
+  the references, which a band cannot judge. The v2e2e arm's `loss_gate.yaml` is the first spec.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the
@@ -665,7 +678,8 @@ launcher settings in `nemotron_nano_quickstart_pretrain.env` as an `ISAMBARD_ENV
 comparison: goal established), with its 500-iteration loss inside the baseline's band. At 256 GPUs (GBS 2048)
 it is 1.90x as well, and its loss leaves the band only over iterations 1–50, on the low side (campaign log
 E-063). The Megatron-LM changes it needs are carried commits of the pin (see
-"Megatron-Core Submodule"); the production configs do not use its levers. 32 GPUs is an override,
+"Megatron-Core Submodule"); the production configs do not use its levers, except the control-pretraining
+V2 E2E arm's stage 1 (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/`). 32 GPUs is an override,
 not a second file: `--nodes=8 ... train.global_batch_size=256`. Both are scored as the **mean** step
 over iterations 26-50 (`scripts/telemetry/score_run.py`); the performance campaign is logged in
 `docs/investigations/nano30b-pretrain-perf-campaign.md` (see "Performance probes" under Usage).
@@ -769,9 +783,9 @@ exported, as Hub revisions; the manifest lists what a resumed pass would archive
 is archived until one runs.
 
 **The campaign's models on the Hub** are the "Control Pretraining" collection: per arm a
-`control-pretraining-30b-<arm>-base` repository (a three-stage arm's stage-1 and stage-2
-checkpoints as `pretraining_iter_<n>` / `midtraining_iter_<n>`, a narrowly filtered arm's
-midtraining checkpoints only; the final midtraining checkpoint as `main`), **plus one think
+`control-pretraining-30b-<arm>-base` repository (the stage-1 and stage-2 checkpoints of an arm that
+trains both, as `pretraining_iter_<n>` / `midtraining_iter_<n>`, and a midtraining-only narrowly
+filtered arm's midtraining checkpoints only; the final midtraining checkpoint as `main`), **plus one think
 repository per SFT run** (`sft_iter_<n>`, the final as `main`), named for its recipe: `-baseline-think`
 for the baseline's mainline SFT, `-<arm>-xl50b-think` for the xl-50b recipe (the baseline's
 ablation, and the Broadly Filtered and narrow V2 arms' reasoning models; narrow V1 has none),
@@ -987,12 +1001,26 @@ the `_filtered_gpt55_4plus_v2` splits at `c6419e3c`, built from the annotation r
 fewer than V1). V2 is the "Narrowly Filtered" arm the study reports and post-trains; V1 stays in the
 figures. The same test module covers both arms, parametrised over them.
 
+**V2 E2E is `configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/`** (Kyle, 2026-09-30): V2's
+rule from the first pretraining token, a from-scratch stage 1 on the `_filtered_gpt55_4plus_v2e2e`
+pretraining splits and then V2's midtraining from that stage's final, both at the baseline's widths
+(512 GPUs; DP=512, then CP2 DP=256). Its stage 1 trains in the fast Nano pretrain posture (the
+quickstart's levers and `.env`, one table in `tests/unit_tests/campaign_config.py`), which changes
+numerical precision, so the arm differs from the baseline in more than data. Two gates bound that:
+`probe/probe.sbatch`, one 130-node job on the baseline's data before the launch (NVLink sweep,
+speed, memory across four saves, identical-batch parity against the baseline, the midtraining
+handoff, the fallback's speed), and the pre-registered `loss_gate.yaml` during stage 1; a failure
+restarts stage 1 in the precision-preserving `_precise` variant. Its corpora and prepare revision are
+PENDING until dataset-builder publishes them. The arm README has the gates, the launch and the
+storage.
+
 **Knowledge reintroduction is `configs/control_pretraining/30b_trustedmonitor/`** (Kyle, 2026-09-29):
 continual pretraining of the Broadly Filtered and narrow V2 midtraining finals (`iter_0003126`) on
 the deduplicated union of the documents each family's filters removed, never-seen documents only,
 50/50 with replay of the parent's midtraining blend, at the midtraining LR held constant and GBS
 256, beside a replay-only control per family, for a per-family number of epochs (three broad, five
-narrow; Kyle added the narrow family's 4th and 5th on 2026-09-30; more can be added). Each epoch is its
+narrow; Kyle added the narrow family's 4th and 5th on 2026-09-30; more can be added). A third family,
+V2 E2E's (five epochs), is declared and renders no links until its union's token count is filled in. Each epoch is its
 own job (a "link"), submitted one at a time by `configs/control_pretraining/submit_chain_link.py` only
 after the link before it has saved: queued successors would count against the account's node cap,
 which every job re-checks at start and cancels itself over, and the tool refuses a dirty tree, a stale
@@ -1566,7 +1594,7 @@ as a patch in `3rdparty/patches/megatron-lm/` — that directory's README record
 and what it is load-bearing for. Two are patch files that NO run applies. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
 because nothing uses the `allgather` dispatcher today (every config uses `alltoall`, except the
-Nano pretrain quickstart's `flex`) but the fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
+Nano pretrain quickstart's and the V2 E2E stage 1's `flex`) but the fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
 `0003`, `0004` and `0005`, the Nano pretrain campaign's Megatron-LM changes, are carried commits of the
 pin. `0003` is the port of upstream PR #4798 (EP all-to-all / compute overlap for the hybrid model,
@@ -1620,9 +1648,10 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
-  `dump_hung_ranks.sh`
+  `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
-  parity between runs (`loss_parity.py`) and the training-log parser both read (`training_log.py`)
+  parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`) and the
+  training-log parser they read (`training_log.py`)
 - `tests/unit_tests/` — No GPU required
 - `tests/functional_tests/` — GPU-required, tiered (L0/L1/L2)
 - `skills/` — Guides for AI coding agents

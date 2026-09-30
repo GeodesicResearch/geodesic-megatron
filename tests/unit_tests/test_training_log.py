@@ -9,6 +9,7 @@ from scripts.telemetry.training_log import (
     check_window,
     parse_first_iteration_memory,
     parse_iteration_records,
+    parse_peak_memory_across_ranks,
     parse_wandb_run_path,
     read_log_lines,
     window_records,
@@ -127,6 +128,44 @@ def test_first_iteration_memory_absent_or_resumed_is_none():
 def test_memory_report_without_gigabyte_fields_raises():
     with pytest.raises(ValueError, match="-gigabytes"):
         parse_first_iteration_memory(["[Rank 0] (after 1 iterations) memory (GB) | mem-alloc-retires: 0"])
+
+
+# --------------------------------------------------------------------------------------
+# End-of-training peak memory over all ranks
+# --------------------------------------------------------------------------------------
+
+PEAK_SUMMARY = {
+    "ranks": 512,
+    "max_allocated_gb": 74.751,
+    "max_allocated_rank": 131,
+    "max_reserved_gb": 88.12,
+    "max_alloc_retries": 0,
+    "total_alloc_retries": 0,
+}
+
+
+def test_peak_memory_reads_the_line_the_bridge_writes():
+    """The parser restates the bridge's tag rather than importing it, so this pins the two together."""
+    from megatron.bridge.training.utils.train_utils import format_peak_memory
+
+    logged = f"[2026-09-30 21:00:00] {format_peak_memory(PEAK_SUMMARY)}"
+    assert parse_peak_memory_across_ranks([REAL_ITERATION_50, logged]) == PEAK_SUMMARY
+
+
+def test_peak_memory_absent_is_none():
+    """A log that predates the summary, or a run whose loop was cut short, holds none."""
+    assert parse_peak_memory_across_ranks(FIXTURE_LINES) is None
+
+
+def test_two_peak_memory_summaries_mean_two_runs_and_raise():
+    line = "[peak-memory] ranks=4 max_allocated_gb=1.0"
+    with pytest.raises(ValueError, match="more than one run"):
+        parse_peak_memory_across_ranks([line, line])
+
+
+def test_a_peak_memory_field_that_is_not_key_value_raises():
+    with pytest.raises(ValueError, match="not key=value"):
+        parse_peak_memory_across_ranks(["[peak-memory] ranks=4 74.7"])
 
 
 def test_wandb_run_path_from_init_and_finish_lines():
