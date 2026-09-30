@@ -97,10 +97,11 @@ def test_workload_is_what_the_estimator_reports_for_the_config(nano_workload, ca
 
 
 def test_workload_reads_an_overlay_through_its_base(sr, nano_workload):
-    """The quickstart overlay names no sequence length; it is the baseline's, read through base_config."""
+    """The quickstart names no sequence length; it is the baseline's, read through two base_config levels
+    (the quickstart overlays the baseline benchmark, which overlays the production stage 1)."""
     overlay = sr.workload_from_config(QUICKSTART_CONFIG, NANO_HF_MODEL)
     raw = parse_yaml_mapping(QUICKSTART_CONFIG.read_text(), str(QUICKSTART_CONFIG))
-    assert BASE_CONFIG_KEY in raw and "model" not in raw
+    assert BASE_CONFIG_KEY in raw and "seq_length" not in raw.get("model", {})
     assert overlay.seq_length == nano_workload.seq_length
     assert overlay.model_flops_per_token == nano_workload.model_flops_per_token
 

@@ -65,7 +65,7 @@ isambard_sbatch --unmark-bad <node>                     # remove entries for nod
 isambard_sbatch --prune-bad                             # drop expired/malformed lines
 ```
 
-**Register only when you can pin the failure to a specific hostname** (Xid in dmesg, `nvidia-smi` ERR! on one host while siblings are healthy, NCCL fails on first collective on a single hostname, tunnel never starts on its allocated node, RUNNING with no log output). **Do NOT register** code/config bugs (OOM, bad YAML, wrong TP/EP) or cluster-wide issues (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that). Prefer `--update-bad` over a duplicate `--mark-bad`; `--unmark-bad` if a node is fixed before TTL.
+**Register only when you can pin the failure to a specific hostname** (Xid in dmesg, `nvidia-smi` ERR! on one host while siblings are healthy, NCCL fails on first collective on a single hostname, HybridEP's `cudaIpcOpenMemHandle` fails with `cudaErrorPeerAccessUnsupported` on every rank of one host — a GPU with dead NVLinks, which `nvidia-smi nvlink --status` shows (18 active links per GPU when healthy) while `nvidia-smi topo -m` still reports NV6 — tunnel never starts on its allocated node, RUNNING with no log output). **Do NOT register** code/config bugs (OOM, bad YAML, wrong TP/EP) or cluster-wide issues (Slingshot congestion, the known ~7-min NCCL hang — `ft_launcher` handles that). Prefer `--update-bad` over a duplicate `--mark-bad`; `--unmark-bad` if a node is fixed before TTL.
 
 Find node names: `scontrol show hostnames $SLURM_JOB_NODELIST`, `sacct -j <id> -o NodeList`, or `squeue` `%N`/`%R`.
 
@@ -404,7 +404,8 @@ placement measurements).
 `pipeline_training_launch.sh` adds distributed-training-only vars on top of `pipeline_env_activate.sh`:
 - All Slingshot/CXI NCCL vars (`NCCL_NET`, `FI_PROVIDER`, `FI_CXI_*`, etc. — 30+ vars)
 - Fault tolerance vars (`TORCH_NCCL_TIMEOUT`, `TORCH_NCCL_RETHROW_CUDA_ERRORS`)
-- Job-specific node-local paths (`TRITON_CACHE_DIR`, `TMPDIR`, `MEGATRON_CONFIG_LOCK_DIR`)
+- Job-specific node-local paths (`TRITON_CACHE_DIR`, `TMPDIR`, `MEGATRON_CONFIG_LOCK_DIR`; activate
+  puts HybridEP's JIT cache, `HYBRID_EP_CACHE_DIR`, under that `TMPDIR` instead of `$HOME/.deepep`)
 - Module loading (`PrgEnv-cray`, `cuda/12.6`, `brics/aws-ofi-nccl/1.8.1`)
 
 Every env var has detailed inline documentation.
@@ -640,9 +641,10 @@ Both run `--mode pretrain`: the NVIDIA `nemotron_3_*_pretrain_config` recipes
 checkpoint loaded. **These are NOT the certification gate** — image qualification stays on
 the SFT quickstart. The two follow different standards.
 
-**Nano — the control-pretraining baseline, 50 iterations on 64 GPUs** (replaced the 128-GPU
-ClimbMix-Sample quickstart on 2026-09-28). `nemotron_nano_quickstart_pretrain.yaml` is a
-`base_config:` overlay (`scripts/training/config_compose.py`) of
+**Nano — the control-pretraining baseline and its fastest configuration, 50 iterations on 64 GPUs**
+(replaced the 128-GPU
+ClimbMix-Sample quickstart on 2026-09-28). Two files: a baseline benchmark and the quickstart built on it.
+`nemotron_nano_quickstart_pretrain_baseline.yaml` is a `base_config:` overlay (`scripts/training/config_compose.py`) of
 `configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml`, so it
 inherits the whole stage-1 posture — seq 8192, the campaign blend, recompute, the
 `comm_overlap:` DP block, PAO — and a change to that posture reaches the benchmark unedited.
@@ -653,15 +655,17 @@ iteration for iteration, and the exit writes no checkpoint), `checkpoint.load`/`
 its own `dataset.path_to_cache`, `logger.wandb_save_dir` and `wandb_exp_name`, and
 `dist.distributed_timeout_minutes: 20`.
 `tests/unit_tests/test_nano_pretrain_quickstart.py` fails if any other field diverges from the
-baseline. 32 GPUs is an override, not a second file: `--nodes=8 ... train.global_batch_size=256`.
-Scored as the **mean** step over iterations 26-50 (`scripts/telemetry/score_run.py`); its
-performance campaign is logged in `docs/investigations/nano30b-pretrain-perf-campaign.md` (see
-"Performance probes" under Usage). Its fastest configuration is `nemotron_nano_quickstart_pretrain_perf.yaml`,
-an overlay of this quickstart that states only its levers, launched with the two launcher settings in
-`nemotron_nano_quickstart_pretrain_perf.env` as an `ISAMBARD_ENV_OVERRIDES` file: **4.961 s/iter, 1.90x** the
-as-is runs on the same allocations, with its 500-iteration loss inside the as-is band. It runs only on a copy
-of the checkout whose Megatron-LM carries patches 0003, 0004 and 0005 (its header has the launch line); the
-production configs do not use it.
+baseline. The quickstart, `nemotron_nano_quickstart_pretrain.yaml`, is that benchmark plus the
+performance campaign's levers and nothing else (the same test pins it), launched with the two
+launcher settings in `nemotron_nano_quickstart_pretrain.env` as an `ISAMBARD_ENV_OVERRIDES` file:
+**4.954 s/iter, 1.90x** the baseline benchmark on the same allocations (the pre-registered six-cycle
+comparison: goal established), with its 500-iteration loss inside the baseline's band. At 256 GPUs (GBS 2048)
+it is 1.90x as well, and its loss leaves the band only over iterations 1–50, on the low side (campaign log
+E-063). The Megatron-LM changes it needs are carried commits of the pin (see
+"Megatron-Core Submodule"); the production configs do not use its levers. 32 GPUs is an override,
+not a second file: `--nodes=8 ... train.global_batch_size=256`. Both are scored as the **mean** step
+over iterations 26-50 (`scripts/telemetry/score_run.py`); the performance campaign is logged in
+`docs/investigations/nano30b-pretrain-perf-campaign.md` (see "Performance probes" under Usage).
 
 **Super — the 128-GPU, 1B-token standard** (Kyle, 2026-08-05): **seq 8192, GBS 3072**
 (= 25,165,824 tokens/iter), **all 128 GPUs / 32 nodes, 1B tokens** (`train_iters: 40` =
@@ -672,11 +676,14 @@ zero-embedding Base-CPT trap does not apply from scratch, so there is no filteri
 
 | quickstart | topology (·ETP1, mbs 1) | measured (solo, zero overrides) |
 |---|---|---|
-| `nemotron_nano_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP1·DP64 at GBS 512, selective `[core_attn,moe,shared_experts]` (all inherited from the baseline) | **9.328 s/iter** (mean, iterations 26–50) = 7,026 tokens/s/GPU, 146.2 TFLOP/s/GPU (14.78% MFU), loss (41–50) 6.869, 0 NaN — job 6930454, 64 GPUs, the overlay's fields given as Hydra overrides on the baseline |
+| `nemotron_nano_quickstart_pretrain.yaml` | the baseline benchmark plus the campaign's levers: recompute `[moe_act]`, FP8 dense layers with BF16 parameters, BF16 gradients, HybridEP with the EP all-to-all overlap, chunked linear cross-entropy | **4.954 s/iter** (mean of twelve runs in six paired cycles, iterations 26–50) = 13,230 tokens/s/GPU, 275.3 TFLOP/s/GPU (27.8% MFU), 1.90x the baseline benchmark on the same allocations — the levers given as Hydra overrides on the baseline benchmark; this file as committed: 4.944 s/iter (job 6961393) |
+| `nemotron_nano_quickstart_pretrain_baseline.yaml` | TP1·CP1·EP4·PP1·DP64 at GBS 512, selective `[core_attn,moe,shared_experts]` (all inherited from the baseline) | **9.328 s/iter** (mean, iterations 26–50) = 7,026 tokens/s/GPU, 146.2 TFLOP/s/GPU (14.78% MFU), loss (41–50) 6.869, 0 NaN — job 6930454, 64 GPUs, the overlay's fields given as Hydra overrides on the baseline |
 | `nemotron_super_quickstart_pretrain.yaml` | TP1·CP1·EP4·PP8·DP16 at GBS 3072, selective `[moe,shared_experts]` | **86.940 s/iter = 28.301 ms/sample**, 171.4 TFLOP/s/GPU (17.3% MFU), loss 12.19 -> 7.65, 0 NaN |
 
-Launch: `isambard_sbatch --nodes=16 pipeline_training_submit.sbatch
-configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft` and
+Launch: `ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env
+isambard_sbatch --nodes=16 pipeline_training_submit.sbatch
+configs/quickstart/nemotron_nano_quickstart_pretrain.yaml nano pretrain --disable-ft` (the baseline
+benchmark: `nemotron_nano_quickstart_pretrain_baseline.yaml`, no env file) and
 `isambard_sbatch --nodes=32 pipeline_training_submit.sbatch
 configs/quickstart/nemotron_super_quickstart_pretrain.yaml super pretrain --disable-ft`.
 
@@ -692,14 +699,19 @@ recompute they remove), mbs 2 dead on headroom. That quickstart's anchor was 25.
 `ddp.bucket_size` was inert (see the Nano-pretrain `comm_overlap` note below). Super: the
 offload posture (`core_attn` + `expert_fc1/moe_act`) and TP2·EP2 both **OOM** at 8192
 tok/rank from scratch — S0b's `[moe,shared_experts]` recompute is the only fitting posture.
-Cluster-driven recipe overrides. Both: dispatcher `alltoall` (DeepEP blocked on
-Slingshot) and `checkpoint.async_save: false` (Nano inherits both from the baseline; on
-Super the recipe default asserts when only a final checkpoint is written). Super only,
-because only the Super pretrain recipe sets the defaults being overridden:
-`mixed_precision: bf16_mixed` (its NVFP4 posture is Blackwell), `cuda_graph_impl: none`,
-`cross_entropy_fusion_impl: native` (its "te" impl carries an upstream stability
-rejection), and `mtp_num_layers: null`. The Nano recipe already supplies bf16_mixed, no
-CUDA graphs, and native CE. The Nano quickstart writes no checkpoint; Super's final
+Cluster-driven recipe overrides. All three: `checkpoint.async_save: false` (the Nano files
+inherit it from the baseline; on Super the recipe default asserts when only a final checkpoint
+is written). The Super quickstart and the Nano baseline benchmark use dispatcher `alltoall`
+(the benchmark inherits it from the baseline) because DeepEP's RDMA path is blocked on
+Slingshot; the Nano quickstart uses `flex` with the HybridEP backend, whose EP=4 all-to-all stays
+inside the node on NVLink and needs no RDMA. Super only, because only the Super pretrain recipe
+sets the defaults being overridden: `mixed_precision: bf16_mixed` (its NVFP4 posture is
+Blackwell), `cuda_graph_impl: none`, `cross_entropy_fusion_impl: native` (its "te" impl carries
+an upstream stability rejection), and `mtp_num_layers: null`. The Nano recipe already supplies
+bf16_mixed, no CUDA graphs, and native CE, which the baseline benchmark keeps; the Nano
+quickstart replaces the precision and the cross-entropy with its levers (an FP8 dense-layer
+preset, the chunked linear cross-entropy) and sets `mtp_num_layers: null`, which the EP overlap
+requires. The Nano files write no checkpoint; Super's final
 checkpoint is weights-only at iter 40 (`save_optim/save_rng: false`) — a from-scratch
 1B-token model is a pipeline artifact, not a usable model — no coherence test (expected
 gibberish; sanity = loss ~12.2 → ~7.6 over the 40 iterations, 0 NaN, as in the anchor above).
@@ -999,11 +1011,10 @@ arm configs, per-arm results, trace analysis):
 **`overlap_p2p_comm` stays off on this model — measured slower (+14%, 31.45 vs 27.50
 s/iter); its historical NaN was an upstream race already fixed in the current 0.19 pin.**
 It requires VPP and forces un-batched isend/irecv, which is simply the more expensive form
-on CXI. Also blocked on this model at the pin: `overlap_moe_expert_parallel_comm` (Nemotron-H's
-`HybridModel` has no `build_schedule_plan` there, so the run fails in its first iteration; vendored patch
-0003 ports upstream's hybrid support and is not applied to the submodule; on the Nano pretrain campaign's
-ladder, not the shipped quickstart, it measured −3.4% against step 9's HybridEP / FP8-dense-layer posture,
-with 32 CUDA connections; see the patches README), `moe_shared_expert_overlap` (latent MoE),
+on CXI. `overlap_moe_expert_parallel_comm` works on Nemotron-H through the pin's carried commit 0003
+(upstream's hybrid support, ported; see the patches README): on the Nano pretrain campaign's ladder it
+measured −3.4% against step 9's HybridEP / FP8-dense-layer posture, with 32 CUDA connections, and the
+Nano pretrain quickstart uses it. Still blocked on this model: `moe_shared_expert_overlap` (latent MoE),
 `defer_embedding_wgrad_compute` (would crash). Do not add a `comm_overlap:` block to a config
 **at VPP>1** — it force-sets `overlap_p2p_comm=True`/`batch_p2p_comm=False` there. Full
 analysis: `/projects/a5k/public/logs/infr71_wave2/docs/vpp-pp-comm-overlap-investigation.md`.
@@ -1021,10 +1032,11 @@ deleted: `bucket_size` 500000000 → 134217728 and `overlap_param_gather` False 
 `comm_overlap` commented out, and Super/Ultra never set it, so their `ddp:` blocks are live.
 Consequence for the retired 128-GPU Nano pretrain quickstart: its `ddp.bucket_size: 500000000`
 never took effect, so its 25.533 s/iter anchor was measured at 128 MiB with param-gather
-overlap ON, not at the posture the file stated. The quickstart that replaced it at
-`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` composes the 30b_baseline stage 1
+overlap ON, not at the posture the file stated. The baseline benchmark that replaced it at
+`configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml` composes the 30b_baseline stage 1
 and inherits that stage's `comm_overlap:` restatement, so it runs at the posture it states
-(500 MB buckets, param-gather overlap off).
+(500 MB buckets, param-gather overlap off); the quickstart built on it turns param-gather overlap on
+in its own `comm_overlap:` block.
 
 **Conversion needs multiple nodes.** 1.1 TB of BF16 weights does NOT fit Super's single-node (4×95 GB) export path — pass `--nodes` ≥ 4 to `pipeline_checkpoint_submit.sbatch import`/`export` and keep EP node-local. Base coherence (`pipeline_coherence_test.py --generation-mode completion`) likewise needs ≥3 nodes for inference. Warm-start SFT loads the base Megatron checkpoint directly. **Unlike Super, the Ultra base already ships non-zero chat-special-token embeddings** (only 1 unused-token row is near-zero, and it is also near-zero in Instruct — genuinely unused, not a missing graft), so **no Base-Chat-Init graft is needed** (Super needed it to avoid the bucket-#0 Inf; see "Tokenizer choice for Base CPT").
 
@@ -1434,12 +1446,15 @@ The unit-test hook only fires when a `*.py` file is staged and uses
 ### Megatron-Core Submodule
 
 The submodule tracks the **GeodesicResearch/Megatron-LM fork** (see `.gitmodules`), which
-is upstream plus at most a few carried commits (currently one: the nvrx capability probe
-made non-fatal — see the pin commit's message). Carried commits MUST be pushed to the fork
+is upstream plus a few carried commits (currently four: the nvrx capability probe made
+non-fatal, see that commit's message, and the Nano pretrain campaign's 0003, 0004 and 0005,
+documented in `3rdparty/patches/megatron-lm/README.md`). Carried commits MUST be pushed to the fork
 before the gitlink is committed; an unreachable submodule commit is how a fix was nearly
 lost once. `.main.commit` = the current pin; `.dev.commit` = the PREVIOUS pin, kept as a
-rollback/A-B escape hatch (checkpoints saved at the current pin may not load there — the
-dist-ckpt format moved forward at the 2026-07 bump).
+rollback/A-B escape hatch. Today that is the current pin without 0003–0005: there the Bridge tests
+of 0005 fail at import, three of 0004's five fail, and the Nano pretrain quickstart's levers are
+unavailable, while checkpoints of flat layer patterns, Nemotron-H's included, have the same keys at
+both pins (the patches README's pin history notes record what each bump changed).
 
 ```bash
 ./scripts/switch_mcore.sh status   # Show current pinned commit
@@ -1452,25 +1467,24 @@ dist-ckpt format moved forward at the 2026-07 bump).
 silently vanishes on a fresh clone and any number it produced becomes irreproducible — this
 happened to the 120B champion measurement (a DDP bucket-size change; it is now the explicit
 `ddp.bucket_size` field in the quickstart config, where it belongs). If a change cannot be
-expressed through config, vendor it as a patch in `3rdparty/patches/megatron-lm/` — see that
-directory's README, which records why each patch exists and what it is load-bearing for. There
-are five, and NONE is auto-applied. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
+expressed through config, carry it as a commit of the fork pin (pushed first, as above) or vendor it
+as a patch in `3rdparty/patches/megatron-lm/` — that directory's README records why each change exists
+and what it is load-bearing for. Two are patch files that NO run applies. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
-because nothing uses the `allgather` dispatcher today (every config forces `alltoall`) but the
-fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
+because nothing uses the `allgather` dispatcher today (every config uses `alltoall`, except the
+Nano pretrain quickstart's `flex`) but the fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
-`0003`, `0004` and `0005` are the Nano pretrain campaign's Megatron-LM changes; its fastest
-configuration needs all three, applied in number order. `0003` is the port of upstream PR #4798 (EP all-to-all / compute overlap
-for the hybrid model, plus local adaptations listed in the patches README), load-bearing for the
-campaign's EP-overlap rung (E-044); it acts only with
+`0003`, `0004` and `0005`, the Nano pretrain campaign's Megatron-LM changes, are carried commits of the
+pin. `0003` is the port of upstream PR #4798 (EP all-to-all / compute overlap for the hybrid model,
+plus local adaptations listed in the patches README), load-bearing for the campaign's EP-overlap rung
+(E-044) and the Nano pretrain quickstart; it acts only with
 `comm_overlap.overlap_moe_expert_parallel_comm=true`, keeps the pin's checkpoint keys for flat layer
 patterns such as Nano's, and refuses Megatron-FSDP, fine-grained activation offloading,
 `delay_wgrad_compute` and the `ncclep` dispatcher with the overlap on hybrid models
 (Megatron-Bridge refuses packed sequences with it). `0004` keeps a HybridEP dispatch handle's
 token count in device memory: on the blocking dispatch path it lived in pinned host memory that
 queued kernels read after the handle was freed, which faulted under the EP overlap. `0005` is a
-chunked linear cross-entropy for `HybridModel` (`cross_entropy_fusion_impl: linear`), applied after
-`0003`; its tests skip on a submodule without it, as `0004`'s do.
+chunked linear cross-entropy for `HybridModel` (`cross_entropy_fusion_impl: linear`).
 (The `overlap_p2p_comm` NaN's fix is already IN the current pin; its record-of-closed-bug
 patch was retired with the investigation docs and is preserved under
 `/projects/a5k/public/logs/infr71_wave2/docs/`.)

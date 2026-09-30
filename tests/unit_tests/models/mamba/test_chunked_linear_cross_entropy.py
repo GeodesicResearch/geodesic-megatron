@@ -15,18 +15,16 @@
 
 ``cross_entropy_loss_fusion`` with ``cross_entropy_fusion_impl='linear'`` makes HybridModel's output
 layer return the per-token loss of ``chunked_linear_cross_entropy`` instead of the logits that
-``vocab_parallel_cross_entropy`` consumes (Megatron-LM patch in 3rdparty/patches/megatron-lm/). The
-op, the output-layer module and the model run here for real on a GPU, with a real single-process
-process group, against Megatron's own unfused path (the production path) and an fp32 reference.
-Both bf16 paths carry the same bf16 rounding error against fp32: the fused path has to agree with
-the unfused one up to summation order and be no less accurate than it.
+``vocab_parallel_cross_entropy`` consumes (0005 in 3rdparty/patches/megatron-lm/README.md, a carried
+commit of the pinned Megatron-LM). The op, the output-layer module and the model run here for real on
+a GPU, with a real single-process process group, against Megatron's own unfused path (the production
+path) and an fp32 reference. Both bf16 paths carry the same bf16 rounding error against fp32: the
+fused path has to agree with the unfused one up to summation order and be no less accurate than it.
 
 The op is Triton kernels plus cuBLAS GEMMs, so everything but the config plumbing and the
-tensor-parallel refusal needs a GPU. The fusion is Megatron-LM patch 0005, which the pinned
-submodule does not carry, so the whole module skips on a submodule without it.
+tensor-parallel refusal needs a GPU.
 """
 
-import importlib.util
 from pathlib import Path
 
 import pytest
@@ -35,11 +33,6 @@ import torch
 from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
 
 
-pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("megatron.core.fusions.fused_chunked_linear_cross_entropy") is None,
-    reason="needs Megatron-LM patch 0005 (chunked linear cross-entropy) applied to 3rdparty/Megatron-LM",
-)
-
 V_SMALL = 1000
 SEQ = 16
 LINEAR_FUSION = dict(
@@ -47,7 +40,7 @@ LINEAR_FUSION = dict(
 )
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 BASELINE = _REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline" / "nemotron_nano_30b_baseline_pretrain.yaml"
-QUICKSTART = _REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_quickstart_pretrain.yaml"
+BASELINE_BENCHMARK = _REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_quickstart_pretrain_baseline.yaml"
 
 
 @pytest.fixture(scope="module")
@@ -660,7 +653,7 @@ class TestConfigPlumbing:
         assert cfg.model.cross_entropy_fusion_vocab_chunk_size == 4096
         assert cfg.model.cross_entropy_fusion_saved_logit_chunks == 32
 
-    @pytest.mark.parametrize("config_path", [BASELINE, QUICKSTART], ids=["baseline", "quickstart"])
+    @pytest.mark.parametrize("config_path", [BASELINE, BASELINE_BENCHMARK], ids=["production", "baseline_benchmark"])
     def test_production_configs_keep_the_unfused_loss(self, config_path):
         from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
         from tests.unit_tests.campaign_config import merge_onto_recipe

@@ -434,7 +434,10 @@ override any of them for one run through `ISAMBARD_ENV_OVERRIDES`, D2b):
 | `CUDA_HOME=/usr/local/cuda` | the **image's** toolkit for JIT builds (Triton, TE, dataset helpers) — deliberately not the host HPC-SDK path the shim scrubs |
 
 Caches: `HF_HOME=/projects/a5k/public/hf`, `NEMO_HOME`, `WANDB_DIR`, `TMPDIR` are shared as
-before, but **`HF_DATASETS_CACHE` is scoped to the container *and* to the account** —
+before. `HYBRID_EP_CACHE_DIR=$TMPDIR/hybrid_ep_jit` roots deep_ep's HybridEP JIT kernels
+(`<dir>/.deepep/hybrid_ep/jit/proc-<pid>`, a new directory of under 1 MB per process that is never
+reused); unset, `$HOME` takes its place, so they would accumulate in the bind-mounted host home. In
+a training launch `TMPDIR` is job-scoped node-local `/tmp`, so they go with the allocation. **`HF_DATASETS_CACHE` is scoped to the container *and* to the account** —
 `/projects/a5k/public/hf/datasets_container_$USER`, overridable with
 `GEODESIC_HF_DATASETS_CACHE` (the per-user pattern `APPTAINER_CACHEDIR` already uses in
 `pipeline_env_config.env`). Two independent reasons, and each fails deep inside a job rather

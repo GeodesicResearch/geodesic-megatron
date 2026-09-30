@@ -219,3 +219,9 @@ export HF_HOME=/projects/a5k/public/hf
 export HF_DATASETS_CACHE="${GEODESIC_HF_DATASETS_CACHE:-/projects/a5k/public/hf/datasets_container_${USER}}"
 export WANDB_DIR=/projects/a5k/public/logs/wandb
 export TMPDIR="${TMPDIR:-/projects/a5k/public/tmp}"
+# deep_ep's HybridEP dispatcher compiles its kernels at first use into a new directory per process
+# (under 1 MB, never reused or removed): HYBRID_EP_CACHE_DIR/.deepep/hybrid_ep/jit/proc-<pid>, with the
+# bind-mounted host $HOME in place of the variable when it is unset. Under TMPDIR it is node-local and
+# job-scoped in a training launch; HybridEP creates every missing level, so a TMPDIR made on the batch
+# node only still works.
+export HYBRID_EP_CACHE_DIR="${TMPDIR}/hybrid_ep_jit"

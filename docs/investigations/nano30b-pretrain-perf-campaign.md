@@ -8,15 +8,16 @@ against the E-001 baseline of 9.328 s, 7,026 tok/s/GPU and 14.78% MFU at 64 GPUs
 **≥ 1.87× ≈ ≥ 13,107 tok/s/GPU ≈ ≥ 27.6% MFU**), reached by levers that keep functional parity with the
 production runs: same model and checkpoints, same data and schedule, same loss trajectory. The target was
 1.5× at the start, raised to 2× (≤ 4.664 s) on 2026-09-28, and set to ≤ 5.000 s on 2026-09-29.
-**Result.** The final posture (see Final posture) averages **4.961 s** over eight runs in four
-placement-controlled paired cycles, 95% CI [4.920, 5.002] s: **1.90× the as-is runs of the same cycles** (95% CI
-[1.88, 1.92]), 13,209 tok/s/GPU, 27.8% MFU. Its 500-iteration loss stays inside the as-is band (see Functional
-parity).
-Under the pre-registered rule this is, at k = 4, **goal met on average, not established** (the CI's upper
-bound is 5.002 s); the rule's extension to six cycles (6958389, 6958390) was queued on 2026-09-30 and has
-not run.
+**Result.** The final posture (see Final posture) averages **4.954 s** over twelve runs in six
+placement-controlled paired cycles, 95% CI [4.928, 4.979] s: **1.90× the as-is runs of the same cycles** (95% CI
+[1.89, 1.91]), 13,230 tok/s/GPU, 27.8% MFU. Under the pre-registered rule this is, at k = 6, **goal met,
+established** (the CI's upper bound is 4.979 s). Its 500-iteration loss stays inside the as-is band at 64 GPUs.
+At 256 GPUs, production's width, the speed-up holds (1.90×, placement-matched) and the loss leaves the band in
+one window, iterations 1–50, where it is lower (see Functional parity, Row 9).
 
-**Benchmark.** `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` — the baseline composed with a
+**Benchmark.** `configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml` (named
+`nemotron_nano_quickstart_pretrain.yaml` while the campaign ran; that name now holds the fastest
+configuration) — the baseline composed with a
 small overlay (`base_config:`): GBS 512 on 64 GPUs (8 microbatches per DP replica, the same per-GPU work as
 production's GBS 2048 on 256 GPUs), 50 iterations via `train.exit_interval`, no checkpoint load/save.
 32 GPUs is the same file with `train.global_batch_size=256`.
@@ -68,7 +69,7 @@ performance guide; upstream Megatron-Bridge / Megatron-LM commits).
 | 12 | + gc.freeze after the setup collection (`train.manual_gc_freeze=true`) | 5.075 / 5.250 | 12,482–12,913 | 26.3–27.2% | 1.78–1.84 | E-052 |
 | 13 | + chunked linear cross-entropy, all 8 logit chunks kept (patch 0005) | 5.002 | 13,102 | 27.55% | 1.86 | E-051 |
 | 14 | + BF16 primary weights under FP8 compute (`_bf16_params`; a parity requirement, not a speed lever) | +0.23% (5.132 → 5.144) | — | — | — | E-060 |
-| 15 | **final posture** (steps 1–14 together; placement-controlled paired cycles) | **4.961** (95% CI 4.920–5.002) | 13,209 | 27.78% | **1.90** paired (1.88 against E-001) | E-061 |
+| 15 | **final posture** (steps 1–14 together; placement-controlled paired cycles) | **4.954** (95% CI 4.928–4.979) | 13,230 | 27.82% | **1.90** paired (1.88 against E-001) | E-061 |
 
 Every run is its own allocation; where a step was repeated, the table gives each run (see
 Repeatability). Steps 12–14 were each measured on the step-11 base (E-048) rather than stacked one on the
@@ -96,7 +97,7 @@ N7 = nid[011110-011111,011117,011119,011129-011130,011138-011139,011141,011148,0
 | + H32 + H27 FP8 on the dense layers (8) | E-024 (6932552, N2), E-027 (6932616, N3) | 5.754 / 5.751 | 5.753 | 0.003 s (0.05%) |
 | + H22 HybridEP (9) | E-028 (6932618, N5), E-030 (6932677, N3), repeats 6932856 (N3) and 6932890 (N5′) in the E-039–E-043 block | 5.407 / 5.388 / 5.394 / 5.409 | 5.400 | 0.021 s (0.39%) |
 | + EP all-to-all / compute overlap (10) | E-044 (6933731, N6; 6933837, N7) | 5.197 / 5.228 | 5.213 | 0.031 s (0.6%) |
-| final posture (15) | E-061 cycles 6935335 (group6), 6935336 (group5), 6935443 (group5), 6935444 (group7), runs 2 and 3 of each; final500_a 6935341 (group11), window 26–50 | 4.941 / 4.956, 4.974 / 4.952, 4.955 / 4.920, 5.015 / 4.979, 4.954 | 4.961 | 0.095 s (1.9%; SD 0.027 s, 0.54%) |
+| final posture (15) | E-061 cycles 6935335 (group6), 6935336 (group5), 6935443 (group5), 6935444 (group7), 6958389 (group8), 6958390 (group4), runs 2 and 3 of each; final500_a 6935341 (group11), window 26–50 | 4.941 / 4.956, 4.974 / 4.952, 4.955 / 4.920, 5.015 / 4.979, 4.945 / 4.952, 4.919 / 4.936, 4.954 | 4.954 | 0.096 s (1.9%; SD 0.025 s, 0.51%) |
 | as-is baseline (0) | E-001 6930454 (group11), parity A1 6934455 (group13), A2 6934723 (group7), A3 6935242 (group8), run 1 of 6935298 (group3) and of 6935299 (group4) | 9.328 / 9.269 / 9.233 / 9.275 / 9.219 / 9.279 | 9.267 | 0.109 s (1.2%; SD 0.038 s, 0.41%) |
 
 The spread reached 3.7–3.8% on steps 5 and 6, stayed under 0.4% on steps 8 and 9, and was 0.6% on
@@ -107,20 +108,20 @@ while E-022's two runs on disjoint nodelists agree to 0.05%. Placement explains 
 sits in one; every other nodelist above lies inside a single group. The ~4% is therefore the
 multi-group penalty, not run-to-run noise between comparable runs.
 
-The final posture's nine single-group runs span four switch groups and 1.9%, with a run-to-run SD of 0.54%;
+The final posture's thirteen single-group runs span six switch groups and 1.9%, with a run-to-run SD of 0.51%;
 the as-is baseline's six standalone runs span six groups and 1.2%. Inside the paired cycles the as-is posture
-drifts: the fourth run of each cycle is 1.4–1.6% slower than the first on the same nodes (9.442–9.542 against
-9.311–9.404 s; the late runs carry isolated 10–11 s iterations), which the A B B A order cancels. Placement
+drifts: the fourth run of each cycle is 1.4–2.1% slower than the first on the same nodes (9.382–9.542 against
+9.236–9.404 s; the late runs carry isolated 10–11 s iterations), which the A B B A order cancels. Placement
 across switch groups is a separate, larger effect (E-047): every run above ran on a single group.
 
 ## Final posture
 
-The configuration the campaign ships is
-`configs/quickstart/nemotron_nano_quickstart_pretrain_perf.yaml` with the launcher settings in
-`nemotron_nano_quickstart_pretrain_perf.env` beside it: the Nano pretrain quickstart plus the 18 fields and two
-`ISAMBARD_ENV_OVERRIDES` lines below, on a tree whose `3rdparty/Megatron-LM` carries patches 0003, 0004 and 0005
-(`3rdparty/patches/megatron-lm/`; every measured tree also carried 0002, which does nothing without CUDA
-graphs). H32 (sync-free grouped-GEMM offsets) is Bridge code with no knob. Every override is opt-in; the
+The configuration the campaign ships is the Nano pretrain quickstart,
+`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`, with the launcher settings in
+`nemotron_nano_quickstart_pretrain.env` beside it: the baseline benchmark plus the 18 fields and two
+`ISAMBARD_ENV_OVERRIDES` lines below, on a Megatron-LM that carries 0003, 0004 and 0005 (carried commits of
+the pin since 2026-09-30, `3rdparty/patches/megatron-lm/README.md`; every measured tree also carried 0002,
+which does nothing without CUDA graphs). H32 (sync-free grouped-GEMM offsets) is Bridge code with no knob. Every override is opt-in; the
 production configs are unchanged.
 
 ```
@@ -149,11 +150,10 @@ ISAMBARD_FP32_SSM_STATE=0          # H13 (step 6)
 ISAMBARD_CUDA_MAX_CONNECTIONS=32   # the EP overlap's two streams (step 10)
 ```
 
-**Reproducing it.** From a read-only copy of the checkout whose `3rdparty/Megatron-LM` has patches 0003, 0004
-and 0005 applied (CLAUDE.md, "Performance probes", lists what such a copy needs), launch the overlay with its
-env file as the overlay's header shows. Pass the env lines through the overrides file, not the shell: the
+**Reproducing it.** Launch the quickstart with its env file as its header shows; the pinned Megatron-LM
+carries the three changes. Pass the env lines through the overrides file, not the shell: the
 launcher echoes them per rank (`[env-overrides]`), inherited ones leave no trace (Open risks). The runs below
-gave the same 18 values as Hydra overrides on the quickstart, through the campaign's parity harness (arm
+gave the same 18 values as Hydra overrides on the baseline benchmark, through the campaign's parity harness (arm
 `final`, `/projects/a5k/public/logs/nano_pretrain_perf_campaign/parity/`), on `snapshots/stack-final1` (pin +
 0002 + the first version of 0003 + 0005), which predates patch 0004 and 0003's second revision; the shipped
 patches train identically (Functional parity, Row 7).
@@ -180,16 +180,19 @@ baseline, the cycles dropped B.
 | 6935336 | group5:16 | 9.334 / 9.473 | 4.974 / 4.952 | 4.959 / 4.952 | 1.895 |
 | 6935443 | group5:16 | 9.311 / 9.442 | 4.955 / 4.920 | 4.948 / 4.915 | 1.899 |
 | 6935444 | group7:16 | 9.355 / 9.502 | 5.015 / 4.979 | 4.984 / 4.958 | 1.887 |
+| 6958389 | group8:16 | 9.285 / 9.478 | 4.945 / 4.952 | 4.944 / 4.928 | 1.896 |
+| 6958390 | group4:16 | 9.236 / 9.382 | 4.919 / 4.936 | 4.904 / 4.924 | 1.889 |
 
-All four cycles are single-group and none is flagged. **F̄ = 4.9614 s, 95% CI [4.9204, 5.0024]** (per-cycle SD
-0.0258 s, t = 3.182); median of the run medians 4.950 s; as-is over the same cycles 9.4203 s; **speed-up 1.8987×,
-95% CI [1.8804, 1.9172]** (half-width 0.97%). At F̄: 13,209 tok/s/GPU, 274.9 model TFLOP/s/GPU, 27.78% MFU. Against E-001 (9.328 s) the same mean is 1.88×; the rule takes the speed-up from the cycles'
-own as-is runs, which ran 1.0% slower than E-001 on average (mostly the drift within each allocation described
-under Repeatability: their first runs average 9.351 s, their last 9.490 s). A ninth
-single-group run, final500_a (6935341, group11:16), gives 4.954 s over the same window.
-Verdict at k = 4: **goal met on average, not established**; the extension fired (the CI contains 5.000 s) and
-cycles 5 and 6 (6958389, 6958390),
-queued on 2026-09-30 and not yet run, are the rule's final look.
+At k = 4 (the first four cycles) F̄ was 4.9614 s, 95% CI [4.9204, 5.0024]: goal met on average, not established.
+The CI contained 5.000 s, so the extension fired and cycles 5 and 6 (2026-09-30) were the rule's final look.
+All six cycles are single-group and none is flagged. **F̄ = 4.9535 s, 95% CI [4.9280, 4.9791]** (per-cycle SD
+0.0243 s, t = 2.571); median of the run medians 4.943 s; as-is over the same cycles 9.3953 s; **speed-up 1.8967×,
+95% CI [1.8865, 1.9069]** (half-width 0.54%). At F̄: 13,230 tok/s/GPU, 275.3 model TFLOP/s/GPU, 27.82% MFU.
+Against E-001 (9.328 s) the same mean is 1.88×; the rule takes the speed-up from the cycles' own as-is runs,
+which ran 0.7% slower than E-001 on average (mostly the drift within each allocation described under
+Repeatability: their first runs average 9.321 s, their last 9.470 s). A further single-group run, final500_a
+(6935341, group11:16), gives 4.954 s over the same window.
+Verdict at k = 6: **goal met, established** (upper bound 4.979 s ≤ 5.000 s).
 
 **Later in a run.** Both postures speed up after the from-scratch routing transient. Over iterations 451–500
 of the 500-iteration runs the final posture (final500_a) averages **4.790 s** (median 4.785), 13,681 tok/s/GPU,
@@ -197,8 +200,8 @@ of the 500-iteration runs the final posture (final500_a) averages **4.790 s** (m
 (mean 8.902): **1.86×**. From iterations 26–50 to 451–500 the final posture gets 3.3% faster and the as-is runs
 3.6–4.1% faster, so the late ratio is slightly below the early one.
 
-**Memory.** W&B run maxima (last rank) of the eight cycle runs: 78.70–78.77 GB allocated, 89.88–91.21 GB
-reserved, 0 allocator retries (final500_a: 78.72 / 90.93); as-is 81.84 / 83.38–84.35. At 32 GPUs
+**Memory.** W&B run maxima (last rank) of the twelve final runs of the cycles: 78.70–78.78 GB allocated,
+89.74–91.21 GB reserved, 0 allocator retries (final500_a: 78.72 / 90.93); as-is 81.84 / 83.34–84.35. At 32 GPUs
 (`train.global_batch_size=256`, 8 nodes; mem32_final 6935623, group2:8) the final posture runs 4.865 s (median
 4.856), 13,471 tok/s/GPU, 28.33% MFU, and peaks at 81.93 GB allocated / 93.60 GB reserved with 0 retries and 0
 NaN: it fits, with ~1.4 GB of reserved headroom.
@@ -221,6 +224,8 @@ reference runs). Both also require identical learning rate and consumed samples 
 | 5 | Same data and schedule | PASS |
 | 6 | Cost of BF16 primary weights | +0.23% (accepted) |
 | 7 | The shipped patches train like the measured tree | PASS |
+| 8 | The pin carrying 0003–0005 trains like the pristine pin and the shipped tree | PASS |
+| 9 | Final posture's loss over 500 iterations at 256 GPUs inside the as-is band | FAIL in window 1–50 only (lower loss); inside in the other nine |
 
 **Row 1.** Deterministic runs: `model.deterministic_mode=true` with `NVTE_ALLOW_NONDETERMINISTIC_ALGO=0` and
 `CUBLAS_WORKSPACE_CONFIG=:4096:8` in an `ISAMBARD_ENV_OVERRIDES` file, plus `MAMBA_DETERMINISTIC=1` where stated.
@@ -276,6 +281,12 @@ the default `dp_reshardable` optimizer format keys its buckets by (parameter dty
 buckets of 503,795,840 + 401,391,040 elements as-is, against (bf16, bf16) 823,127,616 + (uint8, bf16) 82,059,264
 with BF16 gradient reduction and FP8 parameters. Switching an in-flight production run to the final posture needs
 a conversion of its optimizer state.
+The shipped tree repeats the round trip (`parity/resume_check.py`): save_shipped 6958576 (16 nodes,
+`stack-final2`, arm `final`) saved at iterations 10 and 20, and resume_shipped 6958577 loaded iteration 10.
+Against the saver's own continuation its iteration-11 lm loss and grad norm are identical (9.682073, 7.0468) and
+its largest lm-loss difference over 11–20 is 0.00069, against 0.0075 between two independent straight runs (the
+final runs of 6958575); its mean over 11–20 lies inside the straight runs' band, its consumed samples at 11 are
+5,632 as expected and its learning rate matches at every iteration.
 
 **Row 4.** Two defects surfaced and were fixed.
 - The first version of patch 0003 dropped `output_layer._extra_state` from every HybridModel's sharded state
@@ -321,6 +332,51 @@ path the final posture never runs.
   copy) and `test_mcore_commit`, which needs a git checkout.
 - Megatron-LM's own tests of the files the patches add or change pass on one 4-GPU node, except the
   parametrizations that need 8 GPUs, exactly as on the reference trees (6958567, 6958568, 6958669 / 6958670).
+- Speed: an A B B A cycle with the final posture on the shipped tree (6958575, group4:16) ran it at 4.963 / 4.960 s
+  against 9.311 / 9.479 s as-is (1.89×), the goal cycles' figures; W&B maxima 78.72 GB allocated / 90.28–90.37
+  GB reserved, 0 retries.
+
+**Row 8.** The pin carrying 0003, 0004 and 0005 as commits (`3c2da7d91`, fork branch
+`geodesic/mcore-6cd6ea530-nano-perf`; `snapshots/main-pin-carried` against `snapshots/main-pin-pristine`, both
+main's code `b6d312aa`), 1 node, 11 layers `MEM*EMEMEME`, GBS 16, 30 iterations, W&B full precision:
+- the as-is posture in deterministic mode (`MAMBA_DETERMINISTIC=1`) is identical at every iteration, in lm loss,
+  grad norm, learning rate and consumed samples, to the pristine pin (6959247 against 6959246);
+- the final posture without chunked CE, deterministic, is identical to the shipped tree (6959248 against
+  6958571);
+- the full final posture in default mode stays within the run-to-run spread of Row 7's smokes (6959249: largest
+  lm-loss difference 3.8e-3 and 1.7e-3 at iteration 30 against 6958572 on the shipped tree and 6958573 on the
+  measured tree, which differ from each other by 4.1e-3);
+- Megatron-LM's own tests of the changed files pass except the 8-GPU parametrizations, as on the reference trees
+  (6959250–6959252). The committed quickstart on this pin runs at full scale in E-064.
+
+**Row 9.** 256 GPUs (64 nodes) at GBS 2048, production's stage-1 batch (8 microbatches per replica at DP 256),
+500 iterations; references asis256_a 6958401 (group11:64) and asis256_b 6960753 (group5:64, the candidate's
+nodelist), the as-is posture on `parity-prod`; candidate final256 6960751 (group5:64, `stack-final2`, arm `final`).
+lm loss δ = 0.019247 (window 201–250).
+
+| Window | asis256_a | asis256_b | Band | Final posture | Deviation |
+|---|---|---|---|---|---|
+| 1–50 | 8.36364 | 8.36232 | 8.34307–8.38289 | 8.33958 | **−0.02340** |
+| 51–100 | 6.11580 | 6.11447 | 6.09522–6.13504 | 6.11315 | −0.00198 |
+| 101–150 | 5.22846 | 5.22246 | 5.20321–5.24771 | 5.21892 | −0.00654 |
+| 151–200 | 4.55812 | 4.55399 | 4.53474–4.57737 | 4.55072 | −0.00534 |
+| 201–250 | 4.08539 | 4.06614 | 4.04690–4.10464 | 4.08005 | +0.00429 |
+| 251–300 | 3.73305 | 3.73315 | 3.71380–3.75240 | 3.74647 | +0.01338 |
+| 301–350 | 3.45318 | 3.44657 | 3.42732–3.47242 | 3.45169 | +0.00182 |
+| 351–400 | 3.23377 | 3.22736 | 3.20811–3.25302 | 3.22946 | −0.00111 |
+| 401–450 | 3.07145 | 3.06924 | 3.04999–3.09069 | 3.08790 | +0.01756 |
+| 451–500 | 2.95502 | 2.95296 | 2.93371–2.97427 | 2.95977 | +0.00578 |
+
+The final posture leaves the band in window 1–50 only, 0.0035 below its lower edge: there its loss is lower than
+both as-is runs'. Per iteration it matches them through iteration 20 (within ±0.015) and then descends faster, by
+0.012 / 0.051 / 0.053 on average over iterations 21–30 / 31–40 / 41–50; in that stretch the two as-is runs differ
+by up to 0.076 at single iterations but average within 0.0013 over the window, which is what makes the band there
+narrow (δ comes from the widest window). From window 51–100 on it is inside (final window +0.0058); its grad norm
+is inside in every window (largest deviation 0.133, in 1–50); learning rate and consumed samples match at every
+iteration. By the test as registered: **FAIL**, one window, on the low side. Speed at this width, placement-matched
+against asis256_b: iterations 26–50, 5.062 s (12,946 tok/s/GPU, 27.23% MFU) against 9.618 s, **1.90×**; iterations
+451–500, 4.993 s against 9.201 s, 1.84× (asis256_a, group11:64: 9.551 and 9.188 s). W&B run maxima: final 74.75 GB
+allocated / 88.12 GB reserved, as-is 78.88 / 81.75–81.85, 0 retries in all three; 0 NaN and 0 skipped iterations.
 
 ## Open risks
 
@@ -341,12 +397,20 @@ path the final posture never runs.
 - **Deterministic runs need `MAMBA_DETERMINISTIC=1`** before import (Row 1), and Megatron-Bridge refuses
   cross-entropy fusion in deterministic mode, so bit-identity tests of the final posture run without chunked CE.
 - **Reserved-memory headroom.** The EP overlap reserves ~13 GB more than it allocates (E-050). The final posture
-  peaks at 90.9 GB reserved at 64 GPUs and 93.6 GB at 32 GPUs (W&B run maxima, last rank, 0 retries) of ~95 GB.
-  Anything that adds memory (CUDA graphs, micro-batch 2) meets allocator retries first (E-046: +9.8% with 40
-  retries).
+  peaks at up to 91.2 GB reserved at 64 GPUs, 93.6 GB at 32 GPUs and 88.1 GB at 256 GPUs (W&B run maxima, last
+  rank, 0 retries) of ~95 GB. Anything that adds memory (CUDA graphs, micro-batch 2) meets allocator retries first
+  (E-046: +9.8% with 40 retries).
 - **Optimizer state does not cross postures** in the default `dp_reshardable` format (Row 3).
-- **Not yet measured at 256 GPUs**, the production width: speed and loss parity were taken at 64 GPUs, fit
-  also at 32. The as-is reference of a 500-iteration 256-GPU parity pair (6958401) was queued on 2026-09-30.
+- **HybridEP needs CUDA peer access between a node's four GPUs.** A node with dead NVLinks kills the final posture
+  at its first MoE dispatch: all four ranks of nid010578 aborted with `cudaIpcOpenMemHandle` →
+  `cudaErrorPeerAccessUnsupported` (E-064), because its GPU 2 had every NVLink inactive, while `nvidia-smi topo -m`
+  still printed NV6 for every pair. The as-is `alltoall` dispatcher has no such hard requirement. `nvidia-smi
+  nvlink --status` tells (18 active links per GPU on a healthy node); mark such a node bad.
+- **Loss parity at 256 GPUs fails one window** (Row 9): over iterations 1–50 the final posture's loss is 0.023
+  below both as-is runs', 0.0035 beyond the band; the other nine windows are inside. Speed carries to that width
+  (1.90× placement-matched), so what remains before a production recommendation is whether the lower early loss
+  is a real difference in learning dynamics or two references that happen to agree unusually closely there; more
+  as-is references at 256 GPUs would tell.
 
 ## Stale verdicts retested
 
@@ -396,18 +460,60 @@ the `log_params_norm` telemetry that cost Super 10.2% (new candidate H38).
 Learning: 5% faster than predicted; the 2× target at this width and batch is a mean step ≤ 4.664 s
 (≥ 14,052 tok/s/GPU, ≥ 29.6% MFU). 1.36 s of the 9.33 s is the exposed all-gather alone.
 
-### E-061 · goal verdict: final posture vs as-is in placement-controlled paired cycles · 2026-09-29/30 · GOAL MET ON AVERAGE (k = 4)
+### E-064 · the committed quickstart at full scale, on the pin carrying 0003–0005 · 2026-09-30 · PASS (second launch)
+`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` launched exactly as its header documents (its `.env`
+as `ISAMBARD_ENV_OVERRIDES`, 16 nodes, `--disable-ft`) from `snapshots/defaults-bdaa1c0d` (commit `bdaa1c0d`, pin
+`3c2da7d91`, no patches applied).
+- 6961202 (group7:16) failed at the first MoE dispatch. All four ranks of nid010578 aborted in HybridEP's
+  allocator (`cudaIpcOpenMemHandle` → `cudaErrorPeerAccessUnsupported`, `allocator.cu:145`, an error found in no
+  other log of the campaign); the other ranks then died in their kernel JIT as srun tore the step down (`Transport
+  endpoint is not connected` from the container's squashfuse). A diagnostic job on the node (6961390) found its
+  GPU 2 with every NVLink inactive and GPUs 0, 1 and 3 with 12 of 18 links active, while `nvidia-smi topo -m` still
+  printed NV6 for every pair; a healthy node shows 18 of 18 on every GPU. The node was marked bad (Open risks).
+- 6961393 (group13:16, nid010578 excluded): mean **4.944 s** over iterations 26–50 (median 4.939), 13,256
+  tok/s/GPU, 27.88% MFU, lm loss (41–50) 6.891, 0 NaN; W&B `rjv5z0lb` (run name
+  `nemotron_nano_quickstart_pretrain_perf`) peaks at 78.68 GB allocated / 90.37 GB reserved, 0 retries. Every
+  rank logged the env file's two settings, and the run wrote no HybridEP JIT directory under `$HOME/.deepep`
+  (the 256 created that day all date from final256's start on the #49 tree, which predates
+  `HYBRID_EP_CACHE_DIR`).
+Learning: the committed file reproduces the goal cycles' speed, and under HybridEP a node with dead NVLinks is a
+failed launch rather than a slow one.
+
+### E-063 · 256-GPU 500-iteration parity · 2026-09-30 · SPEED HOLDS (1.90×); LOSS FAILS ONE WINDOW
+The pre-registered design: as-is a, final, as-is b, one 64-node job at a time, 500 iterations at GBS 2048 (8
+microbatches per replica, production's stage-1 batch and width). asis256_a 6958401 (group11:64), final256 6960751
+(group5:64, `stack-final2`, arm `final`), asis256_b 6960753 (group5:64, the same nodelist as final256). Full table
+in Functional parity, Row 9.
+- Loss: inside the as-is band in nine of ten windows; in 1–50 the final posture is 0.023 lower than both
+  references, 0.0035 beyond the band's lower edge (δ 0.019). Grad norm inside everywhere. FAIL by the test as
+  registered.
+- Speed, placement-matched against asis256_b: 5.062 s against 9.618 s over iterations 26–50 (1.90×), 4.993 s
+  against 9.201 s over 451–500 (1.84×); 27.2–27.6% MFU at 256 GPUs against 27.8% at 64.
+- Memory: final 74.75 / 88.12 GB (allocated / reserved, W&B maxima), as-is 78.88 / 81.75–81.85; 0 retries, 0 NaN.
+Learning: the speed-up is a property of the posture, not of the 64-GPU benchmark; the one-window loss failure is
+small and on the low side, and two references are a thin band at this width.
+
+### E-062 · shipped-tree confirmation: speed and checkpoint round trip · 2026-09-30 · PASS
+On `snapshots/stack-final2` (the tree #49 shipped: pin + 0002 + 0003 revision 2 + 0004 + 0005), arm `final`.
+- Speed: A B B A cycle 6958575 (group4:16) ran the final posture at 4.963 / 4.960 s (medians 4.954 / 4.947)
+  against 9.311 / 9.479 s as-is (9.269 / 9.341): 1.894×, inside the goal cycles' range; lm loss (41–50) 6.935 /
+  6.903 final, 6.869 / 6.866 as-is; W&B maxima 78.72 GB allocated / 90.28–90.37 GB reserved, 0 retries.
+- Checkpoint round trip: save_shipped 6958576 and resume_shipped 6958577 pass (Row 3).
+Learning: 0003's second revision and 0004, which the goal cycles' tree lacked, cost nothing measurable.
+
+### E-061 · goal verdict: final posture vs as-is in placement-controlled paired cycles · 2026-09-29/30 · GOAL MET, ESTABLISHED (k = 6)
 The design, the pre-registered rule and the per-cycle table are in Final posture. Cycles 6935335 (group6:16),
-6935336 (group5:16), 6935443 (group5:16), 6935444 (group7:16), each A B B A on one 16-node allocation, final
-posture on `snapshots/stack-final1` (arm `final`), as-is on `snapshots/parity-prod` (arm `asis`); all four
-single-group, none flagged (the largest within-posture median difference is 0.7%). Final runs 4.920–5.015 s;
-F̄ = 4.9614 s, 95% CI [4.9204, 5.0024]; speed-up against the cycles' own as-is runs 1.8987×, 95% CI [1.8804,
-1.9172]; lm loss (41–50) 6.876–6.949 final, 6.870–6.934 as-is. W&B run maxima 78.70–78.77 GB allocated /
-89.88–91.21 GB reserved, 0 retries.
-Verdict at k = 4: goal met on average, not established; the extension fired and cycles 6958389 / 6958390,
-queued on 2026-09-30 and not yet run, are the final look.
-Learning: the paired design did what it was built for: the ratio carries a 0.97% CI half-width, and the as-is
-drift inside each allocation (+1.4–1.6% from its first to its last run) would have biased any unpaired
+6935336 (group5:16), 6935443 (group5:16), 6935444 (group7:16), 6958389 (group8:16) and 6958390 (group4:16), each
+A B B A on one 16-node allocation, final posture on `snapshots/stack-final1` (arm `final`), as-is on
+`snapshots/parity-prod` (arm `asis`); all six single-group, none flagged (the largest within-posture median
+difference is 0.7%). At k = 4, F̄ = 4.9614 s with 95% CI [4.9204, 5.0024] was goal met on average, not
+established, so the rule's extension ran cycles 5 and 6. Final runs 4.919–5.015 s; F̄ = 4.9535 s, 95% CI [4.9280,
+4.9791]; speed-up against the cycles' own as-is runs 1.8967×, 95% CI [1.8865, 1.9069]; lm loss (41–50)
+6.876–6.949 final, 6.870–6.940 as-is. W&B run maxima 78.70–78.78 GB allocated / 89.74–91.21 GB reserved, 0
+retries.
+Verdict at k = 6: goal met, established.
+Learning: the paired design did what it was built for: the ratio carries a 0.54% CI half-width, and the as-is
+drift inside each allocation (+1.4–2.1% from its first to its last run) would have biased any unpaired
 comparison by as much.
 
 ### E-060 · BF16 primary weights under FP8 compute (`_bf16_params`) · 2026-09-29 · ADOPTED (parity requirement)
@@ -438,7 +544,7 @@ unpermute kernels read from device code; nothing records that use with PyTorch's
 the backward frees the handle the block can be handed out again while the comm stream still has a kernel queued
 that reads it. The overlap opens that window. The second symptom follows: the blocking path ignores its stream
 sync's error code, so after a fault the next dispatch sums stale bytes of the per-expert count block.
-Fix, test-first (patch 0004, `3rdparty/patches/megatron-lm/0004-fix-hybridep-dispatched-count-lifetime.patch`):
+Fix, test-first (patch 0004, a carried commit of the pin since 2026-09-30, `40e960a2f`; patches README):
 `HybridEPDispatch.forward` replaces the handle's count with a non-blocking device copy on the dispatch stream; the
 host allocator records the copy and holds the pinned source until it has run; no new host sync. Tests
 (`tests/unit_tests/training/test_hybridep_count_lifetime.py`, one GPU): 3 of 5 fail without the fix (6935541) and
@@ -663,9 +769,8 @@ microbatch is interleaved with the backward of the previous one, so each MoE lay
 runs on a communication stream while the other microbatch's Mamba, attention or expert GEMMs run on the
 compute stream. Upstream supports it for `GPTModel` only; Megatron-LM PR #4798 (open, head `1fdff667`)
 adds it for the hybrid model, and it merged cleanly onto the pin (its first part, #4941, is already in
-it). The port is vendored as
-`3rdparty/patches/megatron-lm/0003-feat-hybrid-port-upstream-4798-hybrid-EP-A2A-overlap.patch`; its README
-section has the provenance, how to apply it, the review fixes made after E-044 ran (three more adaptations:
+it). The port was vendored as patch 0003 and is a carried commit of the pin since 2026-09-30 (`3e3c83d50`);
+its section of the patches README has the provenance, the review fixes made after E-044 ran (three more adaptations:
 flat patterns keep the pin's checkpoint keys, the pin's behaviour where the PR changed it with the overlap off,
 refusals of the settings the hybrid schedule gets wrong) and the deterministic smokes showing that the
 vendored version trains exactly like the tree E-044 ran. That tree carried two adaptations, described in the

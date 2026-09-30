@@ -1,24 +1,37 @@
-# Local Megatron-LM patches
+# Local Megatron-LM changes
 
-Patches carried against the pinned upstream Megatron-LM commit. None is applied to the submodule: a run that
-needs one applies it to a copy of the checkout (each section's "How to apply"). Apply with:
+Changes this repo carries against upstream Megatron-LM, in two forms.
 
-```bash
-git -C 3rdparty/Megatron-LM am ../patches/megatron-lm/<patch>
-```
+- **Carried commits** of the pinned fork branch (`geodesic/mcore-6cd6ea530-nano-perf` of GeodesicResearch/Megatron-LM), which
+  every run uses: 0003, 0004 and 0005, the Nano-30B pretraining campaign's Megatron-LM changes
+  (`docs/investigations/nano30b-pretrain-perf-campaign.md`; its fastest configuration, the Nano pretrain
+  quickstart, needs all three), on top of the fork's nvrx-probe commit (the pin history notes below).
+- **Patch files** in this directory, which no run applies: 0001 and 0002. A run that needs one applies it
+  to a copy of the checkout:
 
-All five apply in number order to the pin. 0003, 0004 and 0005 are the Nano-30B pretraining campaign's Megatron-LM
-changes (`docs/investigations/nano30b-pretrain-perf-campaign.md`), and its fastest configuration needs all three:
-0005 edits code that 0003 adds, so it applies only after 0003, while 0004 touches a file no other patch touches.
-The campaign's trees also carried 0002, which does nothing without CUDA graphs.
+  ```bash
+  git -C 3rdparty/Megatron-LM am ../patches/megatron-lm/<patch>
+  ```
 
-| Patch | Why it exists | Load-bearing for |
+| Change | Why it exists | Load-bearing for |
 |---|---|---|
-| `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch` | Geodesic fix: normalize allgather-dispatcher output by EP size. Was previously a local-only submodule commit (`2034d4500`) that no remote contained — every fresh clone silently failed to fetch the pin and checked out a different mcore (caught by the INFR-68 fresh-install certification). The submodule now pins the patch's reachable upstream parent (`3758b54b2`, the TE-2.14 bump) and the fix lives here instead. | The `allgather` MoE token dispatcher ONLY. No shipped config or recipe uses it (all use `alltoall`), so the running behavior of every committed config is identical with or without it. Apply before using `moe_token_dispatcher_type: allgather`. |
+| `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch` | Geodesic fix: normalize allgather-dispatcher output by EP size. Was previously a local-only submodule commit (`2034d4500`) that no remote contained — every fresh clone silently failed to fetch the pin and checked out a different mcore (caught by the INFR-68 fresh-install certification). The submodule now pins the patch's reachable upstream parent (`3758b54b2`, the TE-2.14 bump) and the fix lives here instead. | The `allgather` MoE token dispatcher ONLY. No shipped config or recipe uses it: every config sets `alltoall` except the Nano pretrain quickstart's `flex`, and the recipes default to `alltoall` or `flex`, so the running behavior of every committed config is identical with or without it. Apply before using `moe_token_dispatcher_type: allgather`. |
 | `0002-fix-cuda-graph-zeros_like-0dim-tensor.patch` | Upstream `zeros_like` on a 0-dim tensor breaks CUDA-graph capture (`cuda_graphs.py:181` unpacks `*self.shape` to nothing). Still open upstream at the current pin. | CUDA graphs only. No shipped config enables them, so every committed config runs identically with or without it. Apply before enabling CUDA graphs. |
-| `0003-feat-hybrid-port-upstream-4798-hybrid-EP-A2A-overlap.patch` | Upstream supports the EP all-to-all / compute overlap (`overlap_moe_expert_parallel_comm`, the combined-1F1B schedule) for `GPTModel` only. This patch is the port of upstream PR #4798 (open; head `1fdff667`), which adds it for the hybrid model, minus #4941, which the pin already contains. Geodesic adaptations: the flat layer pattern is grouped into `[Mamba/attention..., MoE]` schedule units; experts that save their dispatched input (every non-TE expert, `GroupedExperts` included) keep it under FP8; flat patterns keep the pin's checkpoint keys; the pin's behaviour stands where the PR changed it with the overlap off (MTP MoE routers, `_preprocess`); and settings the hybrid schedule gets wrong are refused. Details are in the section below. | The E-044 rung of the Nano-30B pretraining ladder (1.78–1.80×; 5.197 / 5.228 s/iter against 5.388–5.409 s without the overlap). It only takes effect with `comm_overlap.overlap_moe_expert_parallel_comm=true`, which no shipped config sets. With the flag off, training computes the same thing with or without the patch, and checkpoints of flat layer patterns, Nemotron-H's included, keep exactly the pin's keys. |
-| `0004-fix-hybridep-dispatched-count-lifetime.patch` | On HybridEP's blocking path a dispatch handle's dispatched-token count lives in pinned host memory that the permute and unpermute kernels read from device code, and PyTorch's host allocator can hand the block out again once the handle is freed while such a kernel is still queued. Under the EP all-to-all overlap the unpermute then ran on a count of 262,145 (at most 65,536 tokens can arrive) and faulted. The patch makes `HybridEPDispatch.forward` hand out the count as a stream-ordered device copy. Details are in the section below. | Every run of the `hybridep` flex dispatcher on its blocking path (dropless, no `moe_expert_rank_capacity_factor`), the Nano campaign's EP-overlap posture (E-044) included. The fault needs a window the EP overlap opens; without the overlap the same read is exposed but no fault was seen. Numerics are unchanged: the same kernels read the same value. |
-| `0005-feat-hybrid-chunked-linear-cross-entropy-fusion.patch` | HybridModel's output layer and cross-entropy fused over vocabulary chunks (`cross_entropy_loss_fusion: true` with `cross_entropy_fusion_impl: linear`), without the fp32 copies of the logits. Upstream has a linear cross-entropy only on its `dev` branch and only for Blackwell (Megatron-LM #2256, #2739; Hopper kernels in open #3345), so this is our own Triton + cuBLAS implementation under upstream's config name. Two knobs: `cross_entropy_fusion_vocab_chunk_size` (16384) and `cross_entropy_fusion_saved_logit_chunks` (0 recomputes every chunk's logits in the backward, least memory; a value at least the number of chunks keeps them all, no recompute; results are bit-identical either way). Nano-30B, one micro-batch of 8192 tokens, output layer + loss forward and backward on one GH200: 50.9 ms and 6 GiB peak unfused, 44.5 ms and 0.4 GiB recomputing, 34.9 ms and 2.1 GiB keeping every chunk. Applies on top of the hybrid EP-overlap port (0003), whose `HybridModel._postprocess` it edits. Details are in the section below. | Only runs where the fusion is selected: with the knob off HybridModel builds the plain `ColumnParallelLinear` and computes the unfused loss exactly as before, and parameter names, shapes and checkpoint keys are the same either way. The fused loss needs tensor-parallel size 1: it refuses TP>1, bias, deferred embedding wgrad and CPU offloading when it runs (the logits path still works anywhere, e.g. for conversion), and HybridModel refuses MTP and MuP with it at construction. Tests: `tests/unit_tests/models/mamba/test_chunked_linear_cross_entropy.py`. |
+| 0003, carried commit `3e3c83d50` | Upstream supports the EP all-to-all / compute overlap (`overlap_moe_expert_parallel_comm`, the combined-1F1B schedule) for `GPTModel` only. This patch is the port of upstream PR #4798 (open; head `1fdff667`), which adds it for the hybrid model, minus #4941, which the pin already contains. Geodesic adaptations: the flat layer pattern is grouped into `[Mamba/attention..., MoE]` schedule units; experts that save their dispatched input (every non-TE expert, `GroupedExperts` included) keep it under FP8; flat patterns keep the pin's checkpoint keys; the pin's behaviour stands where the PR changed it with the overlap off (MTP MoE routers, `_preprocess`); and settings the hybrid schedule gets wrong are refused. Details are in the section below. | The E-044 rung of the Nano-30B pretraining ladder (1.78–1.80×; 5.197 / 5.228 s/iter against 5.388–5.409 s without the overlap). It only takes effect with `comm_overlap.overlap_moe_expert_parallel_comm=true`, which the Nano pretrain quickstart sets and no production config does. With the flag off, training computes the same thing with or without the patch, and checkpoints of flat layer patterns, Nemotron-H's included, keep exactly the pin's keys. |
+| 0004, carried commit `40e960a2f` | On HybridEP's blocking path a dispatch handle's dispatched-token count lives in pinned host memory that the permute and unpermute kernels read from device code, and PyTorch's host allocator can hand the block out again once the handle is freed while such a kernel is still queued. Under the EP all-to-all overlap the unpermute then ran on a count of 262,145 (at most 65,536 tokens can arrive) and faulted. The patch makes `HybridEPDispatch.forward` hand out the count as a stream-ordered device copy. Details are in the section below. | Every run of the `hybridep` flex dispatcher on its blocking path (dropless, no `moe_expert_rank_capacity_factor`), the Nano campaign's EP-overlap posture (E-044) included. The fault needs a window the EP overlap opens; without the overlap the same read is exposed but no fault was seen. Numerics are unchanged: the same kernels read the same value. |
+| 0005, carried commit `3c2da7d91` | HybridModel's output layer and cross-entropy fused over vocabulary chunks (`cross_entropy_loss_fusion: true` with `cross_entropy_fusion_impl: linear`), without the fp32 copies of the logits. Upstream has a linear cross-entropy only on its `dev` branch and only for Blackwell (Megatron-LM #2256, #2739; Hopper kernels in open #3345), so this is our own Triton + cuBLAS implementation under upstream's config name. Two knobs: `cross_entropy_fusion_vocab_chunk_size` (16384) and `cross_entropy_fusion_saved_logit_chunks` (0 recomputes every chunk's logits in the backward, least memory; a value at least the number of chunks keeps them all, no recompute; results are bit-identical either way). Nano-30B, one micro-batch of 8192 tokens, output layer + loss forward and backward on one GH200: 50.9 ms and 6 GiB peak unfused, 44.5 ms and 0.4 GiB recomputing, 34.9 ms and 2.1 GiB keeping every chunk. It builds on the hybrid EP-overlap port (0003), whose `HybridModel._postprocess` it edits. Details are in the section below. | Only runs where the fusion is selected: with the knob off HybridModel builds the plain `ColumnParallelLinear` and computes the unfused loss exactly as before, and parameter names, shapes and checkpoint keys are the same either way. The fused loss needs tensor-parallel size 1: it refuses TP>1, bias, deferred embedding wgrad and CPU offloading when it runs (the logits path still works anywhere, e.g. for conversion), and HybridModel refuses MTP and MuP with it at construction. Tests: `tests/unit_tests/models/mamba/test_chunked_linear_cross_entropy.py`. |
+
+## Pin history note (2026-09-30)
+
+The submodule pins `3c2da7d91`, fork branch `geodesic/mcore-6cd6ea530-nano-perf`: the previous pin `12c20d8f0` (now
+`.dev.commit`) plus three commits made with `git am` from this directory's patch files 0003, 0004 and 0005 as
+of main `b6d312aa` (0005's author line set to Geodesic Research), in that order: `3e3c83d50`, `40e960a2f`,
+`3c2da7d91`. Its tree is byte-identical to the patched tree the full unit suite ran on (pin + 0003 + 0004 +
+0005). The campaign's shipped-tree checks ran on a tree that also carried 0002 (CUDA-graph capture only,
+which no config enables), so they are not checks of this tree; the pin was run on its own: with main's
+code, the production posture trains bit-identically to the previous pin, and the fastest posture without
+the chunked cross-entropy bit-identically to the shipped tree (deterministic mode, 30 iterations on one
+node).
 
 ## Pin history note (2026-07-27)
 
@@ -125,24 +138,8 @@ It also carries five adaptations, marked `[Geodesic adaptation]` in the code:
   of the adaptations touches the E-044 posture's path: its experts are `GroupedExperts`, which the
   first version already kept, and it uses no MTP, FSDP, offloading, `ncclep` or delayed wgrad.
 
-**How to apply.**
-- In a campaign snapshot (a copy of the checkout with plain files; how the probes were run),
-  apply it to the snapshot, never to the live submodule:
-
-  ```bash
-  cd <snapshot>/3rdparty/Megatron-LM && git apply ../patches/megatron-lm/0003-feat-hybrid-port-upstream-4798-hybrid-EP-A2A-overlap.patch
-  ```
-
-- In a checkout, use the same convention as the other patches:
-
-  ```bash
-  git -C 3rdparty/Megatron-LM am ../patches/megatron-lm/0003-feat-hybrid-port-upstream-4798-hybrid-EP-A2A-overlap.patch
-  ```
-
-  Do not commit the resulting gitlink unless that commit is first pushed to the
-  GeodesicResearch fork (see the pin history note).
-- It touches none of the files that 0001, 0002 or 0004 touch, so those apply before or after it;
-  0005 applies only after it.
+**Where it lives.** Carried commit `3e3c83d50` of the pinned fork branch (pin history note, 2026-09-30); there is
+nothing to apply. 0005 builds on it.
 
 **Required alongside it** (it does nothing without the first override):
 
@@ -247,12 +244,11 @@ faulted the sync returns at once. The pad kernel never runs, and the host sums t
 the per-expert-count block. The per-expert counts have no device reader after that sync, so the
 same patch removes both symptoms.
 
-**How to apply.** As 0003 (`git apply` in a snapshot, `git am` in a checkout); anywhere in the order.
+**Where it lives.** Carried commit `40e960a2f` of the pinned fork branch; there is nothing to apply.
 
 **Tests** (Bridge, `tests/unit_tests/training/test_hybridep_count_lifetime.py`, one GPU with
 deep_ep's HybridEP, world-1 group). The three tests of Megatron's dispatch fail without the patch
-(job 6935541: 3 failed, 2 passed) and pass with it (job 6935529: 5 passed), so on a submodule without
-the patch they skip, naming it:
+(job 6935541: 3 failed, 2 passed) and pass with it (job 6935529: 5 passed); they run in the unit suite:
 - a combine queued behind `torch.cuda._sleep` on a side stream, whose handle is freed and whose
   count block is zeroed before the stream runs, must equal an undisturbed combine;
 - a blocking dispatch must hand out a device count;
@@ -313,8 +309,8 @@ hidden-state gradient is as accurate against the exact product of the same bf16 
 configuration, which includes the fusion, stayed inside the as-is loss band over 500 iterations at 64 GPUs
 (job 6935341).
 
-**How to apply.** After 0003, as 0003 (`git apply` in a snapshot, `git am` in a checkout). On the bare
-pin it fails in `hybrid_model.py`.
+**Where it lives.** Carried commit `3c2da7d91` of the pinned fork branch, after 0003's; there is nothing to
+apply.
 
 **Refused.** The fused loss needs tensor-parallel size 1 and refuses bias, deferred embedding wgrad
 compute, CPU offloading, Megatron-FSDP parameters, and gradient-accumulation fusion without
@@ -324,7 +320,7 @@ deterministic mode refuses any cross-entropy fusion (`config.py`), so determinis
 leave it off.
 
 **Tests** (Bridge, `tests/unit_tests/models/mamba/test_chunked_linear_cross_entropy.py`, 57 tests on
-one GPU; the module skips on a submodule without the patch): the op against the unfused path and
+one GPU): the op against the unfused path and
 fp32, saved-chunk bit-identity and memory, masked tokens, out-of-vocabulary labels, fp32 inputs,
 determinism, `main_grad` fusion in bf16 and fp32 with the DDP handshake, frozen weight or hidden
 state, the peak memory, argument errors; the shared `main_grad` helpers and the pipeline-drain
@@ -332,8 +328,8 @@ embedding weight gradient against float64; the module as `ColumnParallelLinear` 
 loss at micro-batch 1 and 2, a supplied weight, forward hooks, the refusals (including a spawned
 2-rank gloo tensor-parallel group); HybridModel's default output layer, its checkpoint layout and
 cross-loading, loss and gradients against the unfused model at micro-batch 1 and 2 with 0 and all
-chunks kept, logits without labels, hooks, the MTP and MuP refusals; the Hydra overrides and the
-production configs, which keep the unfused loss.
+chunks kept, logits without labels, hooks, the MTP and MuP refusals; the Hydra overrides, and the
+production configs and the baseline benchmark, which keep the unfused loss.
 
 **Verification** (on a `git archive` copy of the pin `12c20d8f0`): after 0002 and 0003, `git apply
 --check` and GNU `patch -p1 --dry-run` are clean, and `git mailinfo` parses the headers; 0001–0005
