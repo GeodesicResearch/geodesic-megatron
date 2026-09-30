@@ -26,6 +26,10 @@ from megatron.bridge.models.t5_provider import T5ModelProvider
 from megatron.bridge.models.transformer_config import TransformerConfig
 from megatron.bridge.training.config import DistributedDataParallelConfig, OptimizerConfig
 from megatron.bridge.training.mixed_precision import (
+    BF16_GRAD_REDUCE_MODIFIER,
+    BF16_PARAMS_MODIFIER,
+    MIXED_PRECISION_MODIFIERS,
+    MIXED_PRECISION_RECIPES,
     MixedPrecisionConfig,
     bf16_mixed,
     bf16_with_fp8_current_scaling_mixed,
@@ -505,6 +509,145 @@ class TestMixedPrecisionRecipes:
         # Base BF16 recipe should have fp8_param as False
         assert config.fp8_param is False
         assert config.fp8_param_gather is False
+
+    @pytest.mark.parametrize("preset", sorted(name for name in MIXED_PRECISION_RECIPES if "-" not in name))
+    def test_bf16_grad_reduce_modifier_changes_only_grad_reduce_on_every_preset(self, preset):
+        base = get_mixed_precision_config(preset)
+        modified = get_mixed_precision_config(preset + BF16_GRAD_REDUCE_MODIFIER)
+
+        differing = {f.name for f in fields(modified) if getattr(modified, f.name) != getattr(base, f.name)}
+        assert modified.grad_reduce_in_fp32 is False
+        # A preset that already reduces in bf16 (fp16_mixed) comes back unchanged.
+        assert differing == ({"grad_reduce_in_fp32"} if base.grad_reduce_in_fp32 else set())
+
+    def test_bf16_grad_reduce_modifier_hyphen_form(self):
+        assert get_mixed_precision_config("bf16-mixed-bf16-grad-reduce") == get_mixed_precision_config(
+            "bf16_mixed_bf16_grad_reduce"
+        )
+
+    def test_bf16_grad_reduce_modifier_accepts_a_base_without_its_mixed_suffix(self):
+        assert get_mixed_precision_config(
+            "nemotron_h_bf16_with_fp8_current_scaling_bf16_grad_reduce"
+        ) == get_mixed_precision_config("nemotron_h_bf16_with_fp8_current_scaling_mixed_bf16_grad_reduce")
+
+    @pytest.mark.parametrize(
+        "name, base",
+        [
+            # The names the Nano pretrain campaign's probe launch lines record
+            # (docs/investigations/nano30b-pretrain-perf-campaign.md).
+            ("bf16_mixed_bf16_grad_reduce", bf16_mixed),
+            (
+                "nemotron_h_bf16_with_fp8_current_scaling_bf16_grad_reduce",
+                nemotron_h_bf16_with_fp8_current_scaling_mixed,
+            ),
+        ],
+    )
+    def test_recorded_bf16_grad_reduce_names_resolve(self, name, base):
+        expected = base()
+        expected.grad_reduce_in_fp32 = False
+        assert get_mixed_precision_config(name) == expected
+
+    def test_bf16_grad_reduce_modifier_on_an_unknown_base_raises(self):
+        with pytest.raises(
+            ValueError, match=r"Unknown mixed-precision recipe 'no_such_preset_bf16_grad_reduce'"
+        ) as exc:
+            get_mixed_precision_config("no_such_preset_bf16_grad_reduce")
+        assert "bf16_mixed, " in str(exc.value)
+        assert f"modifiers '{BF16_PARAMS_MODIFIER}', '{BF16_GRAD_REDUCE_MODIFIER}', each at most once" in str(
+            exc.value
+        )
+
+    def test_bf16_grad_reduce_modifier_refuses_a_base_that_names_two_presets(self, monkeypatch):
+        monkeypatch.setitem(MIXED_PRECISION_RECIPES, "bf16", bf16_mixed)
+        with pytest.raises(ValueError, match=r"ambiguous: its base names both of \['bf16', 'bf16_mixed'\]"):
+            get_mixed_precision_config("bf16_bf16_grad_reduce")
+
+    def test_bf16_grad_reduce_modifier_reaches_the_ddp_config(self):
+        ddp_config = DistributedDataParallelConfig(grad_reduce_in_fp32=True)
+
+        update_config_with_precision_overrides(get_mixed_precision_config("bf16_mixed_bf16_grad_reduce"), ddp_config)
+
+        assert ddp_config.grad_reduce_in_fp32 is False
+
+    def test_modifiers_are_listed_in_the_order_a_name_carries_them(self):
+        assert list(MIXED_PRECISION_MODIFIERS) == [BF16_PARAMS_MODIFIER, BF16_GRAD_REDUCE_MODIFIER]
+
+    @pytest.mark.parametrize(
+        "preset",
+        sorted(
+            name for name, factory in MIXED_PRECISION_RECIPES.items() if "-" not in name and factory().fp8_param_gather
+        ),
+    )
+    def test_bf16_params_modifier_keeps_only_the_parameters_of_every_fp8_parameter_preset_in_bf16(self, preset):
+        base = get_mixed_precision_config(preset)
+        modified = get_mixed_precision_config(preset + BF16_PARAMS_MODIFIER)
+
+        differing = {f.name for f in fields(modified) if getattr(modified, f.name) != getattr(base, f.name)}
+        # An MXFP8 preset also reuses the gradient buffer for its parameter all-gather, which only MXFP8
+        # parameters have, so that reuse goes with them.
+        reuse = {"reuse_grad_buf_for_mxfp8_param_ag"} if base.reuse_grad_buf_for_mxfp8_param_ag else set()
+        assert differing == {"fp8_param_gather", "fp8_param"} | reuse
+        assert modified.fp8_param_gather is False and modified.fp8_param is False
+        assert modified.reuse_grad_buf_for_mxfp8_param_ag is False
+        # FP8 compute is untouched: the recipe, the format and the BF16 edge layers stay the preset's.
+        assert (modified.fp8, modified.fp8_recipe) == (base.fp8, base.fp8_recipe)
+        # The DDP settings the modified preset writes pass Megatron's own consistency check, which Bridge's
+        # DistributedDataParallelConfig defers to finalize().
+        ddp_config = DistributedDataParallelConfig()
+        modified.setup(_make_gpt_model_config_for_mp(), ddp_config=ddp_config)
+        ddp_config.finalize()
+
+    @pytest.mark.parametrize(
+        "preset",
+        sorted(
+            name
+            for name, factory in MIXED_PRECISION_RECIPES.items()
+            if "-" not in name and not factory().fp8_param_gather
+        ),
+    )
+    def test_bf16_params_modifier_refuses_a_preset_without_fp8_parameters(self, preset):
+        with pytest.raises(
+            ValueError, match=rf"'{preset}{BF16_PARAMS_MODIFIER}': '{BF16_PARAMS_MODIFIER}' applies only to a preset"
+        ):
+            get_mixed_precision_config(preset + BF16_PARAMS_MODIFIER)
+
+    def test_modifiers_stack_in_order(self):
+        expected = nemotron_h_bf16_with_fp8_current_scaling_mixed()
+        expected.fp8_param_gather = False
+        expected.grad_reduce_in_fp32 = False
+
+        stacked = get_mixed_precision_config("nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce")
+
+        assert stacked == expected
+        assert (stacked.fp8_param, stacked.fp8, stacked.num_layers_at_start_in_bf16) == (False, "hybrid", 2)
+        assert (
+            get_mixed_precision_config("nemotron-h-bf16-with-fp8-current-scaling-bf16-params-bf16-grad-reduce")
+            == expected
+        )
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            # out of order
+            "nemotron_h_bf16_with_fp8_current_scaling_bf16_grad_reduce_bf16_params",
+            # repeated
+            "bf16_mixed_bf16_grad_reduce_bf16_grad_reduce",
+        ],
+    )
+    def test_modifiers_out_of_order_or_repeated_raise(self, name):
+        with pytest.raises(ValueError, match=rf"Unknown mixed-precision recipe '{name}'"):
+            get_mixed_precision_config(name)
+
+    def test_bf16_params_modifier_reaches_the_model_and_ddp_configs(self):
+        model_config = _make_gpt_model_config_for_mp()
+        ddp_config = DistributedDataParallelConfig()
+
+        get_mixed_precision_config("nemotron_h_bf16_with_fp8_current_scaling_bf16_params").setup(
+            model_config, ddp_config=ddp_config
+        )
+
+        assert (model_config.fp8, model_config.fp8_param) == ("hybrid", False)
+        assert ddp_config.fp8_param_gather is False
 
     def test_fp16_mixed(self):
         config = fp16_mixed()

@@ -99,11 +99,12 @@
 # 4 microbatches/replica at mbs 1 (GBS 2048 / DP 512); PP=1 -> no pipeline bubble; EP=4 is
 # node-local NVLink all-to-all (TP*EP <= 4) and divides DP=512. The parallelism and memory
 # posture (selective recompute of [core_attn, moe, shared_experts], mbs 1, alltoall
-# dispatcher, torch_grouped experts) are the measured-working set from
-# configs/quickstart/nemotron_nano_quickstart_pretrain.yaml, whose 128-GPU anchor is
-# 25.533 s/iter at GBS 3072. This run holds tokens/rank identical (8192) and only shrinks
-# microbatches per replica, so per-rank memory is unchanged; the DP=512 optimizer shard is
-# 4x smaller than that anchor's.
+# dispatcher, torch_grouped experts) are the measured-working set from the 128-GPU Nano
+# pretrain quickstart on ClimbMix-Sample at GBS 3072 (git show
+# 8d1d9ab1:configs/quickstart/nemotron_nano_quickstart_pretrain.yaml), whose anchor is
+# 25.533 s/iter. This run holds tokens/rank identical (8192) and only shrinks microbatches per
+# replica, so per-rank memory is unchanged; the DP=512 optimizer shard is 4x smaller than that
+# anchor's.
 #
 # One posture difference from that anchor, and it is deliberate: the anchor effectively ran
 # with overlap_param_gather True and a 128 MiB DDP bucket, because the Nano pretrain recipe

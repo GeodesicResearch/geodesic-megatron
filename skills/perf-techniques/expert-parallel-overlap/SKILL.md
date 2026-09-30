@@ -45,6 +45,7 @@ Avoid EP overlap when:
 
 - full activation recompute is enabled
 - `moe_shared_expert_overlap` is enabled
+- the dataset uses packed sequences (the training step refuses them with the overlap)
 - the run is still being brought up for correctness
 - PyTorch < 2.6.0
 
@@ -207,6 +208,8 @@ def _set_moe_a2a_overlap_overrides(recipe, moe_a2a_overlap=False):
 |---|---|
 | `tests/unit_tests/training/test_comm_overlap.py` | EP overlap validation, delayed wgrad, CUDA graph + wgrad interaction |
 | `tests/unit_tests/training/test_deepep.py` | DeepEP/HybridEP helper activation and GPU gating |
+| `tests/unit_tests/training/test_gpt_step_schedule_plan.py` | Packed batches refused on the EP-overlap schedule-plan path |
+| `tests/unit_tests/training/test_hybridep_count_lifetime.py` | HybridEP's dispatched-token count outlives the handle until queued kernels have read it (needs patch 0004 and a GPU; skips otherwise) |
 
 ## Failure Diagnosis
 
@@ -218,6 +221,8 @@ def _set_moe_a2a_overlap_overrides(recipe, moe_a2a_overlap=False):
 | hang during training | PyTorch < 2.6 | Check PyTorch version | Upgrade to >= 2.6.0 |
 | assert `virtual_pipeline_model_parallel_size` | PP > 1 without VPP | Check PP and VPP config | Set VPP when PP > 1 |
 | assert `recompute_granularity` | Full recompute enabled | Check recompute settings | Disable full recompute |
+| `ValueError: packed sequences cannot be combined with overlap_moe_expert_parallel_comm` | Packed dataset with EP overlap | Check `dataset.packed_sequence_specs` | Turn off packing or the overlap |
+| `CUDA error: an illegal memory access` in HybridEP `dispatch_with_permute`, or `Trying to create tensor with negative dimension` in the next dispatch, under EP overlap | HybridEP's blocking dispatch keeps its dispatched-token count in pinned host memory that queued kernels read after the handle is freed | Check whether the tree carries patch 0004 (`_with_device_dispatched_tokens` in `fused_a2a.py`) | Apply `3rdparty/patches/megatron-lm/0004-fix-hybridep-dispatched-count-lifetime.patch` |
 | assert `overlap_moe_expert_parallel_comm required` | delayed wgrad without EP overlap | Check `delay_wgrad_compute` without overlap | Enable EP overlap first |
 | assert `gradient_accumulation_fusion` | CUDA graph + delayed wgrad | Check graph scope + wgrad settings | Enable `gradient_accumulation_fusion` |
 | assert on attention bias | CUDA graph attn + delayed wgrad + bias | Check `add_bias_linear` / `add_qkv_bias` | Disable attention bias |
@@ -233,5 +238,9 @@ def _set_moe_a2a_overlap_overrides(recipe, moe_a2a_overlap=False):
 - End-to-end throughput gains have not yet been measured in a controlled Bridge
   experiment. Code validation is stronger than performance evidence.
 - MoE overlap and shared-expert overlap are mutually exclusive.
+- MoE overlap and packed sequences are mutually exclusive: `gpt_step` builds the schedule plan
+  without `packed_seq_params` and raises `ValueError` on a packed batch.
+- Hybrid (Mamba) models have no EP-overlap schedule plan at the pinned Megatron-LM; the vendored
+  patch 0003 (`3rdparty/patches/megatron-lm/`) adds one and is not applied by default.
 - CUDA graph plus delayed wgrad is a multi-constraint path that requires
   careful TE version and scope validation.

@@ -66,6 +66,7 @@ Control GPU memory cleanup and garbage collection to prevent memory issues durin
 | `manual_gc` | `bool` | `False` | Synchronize Python garbage collection across ranks to avoid stragglers |
 | `manual_gc_interval` | `int` | `0` | Training step interval for manual garbage collection (0=disabled) |
 | `manual_gc_eval` | `bool` | `True` | Enable garbage collection during evaluation when using manual GC |
+| `manual_gc_freeze` | `bool` | `False` | After manual GC's setup collection, `gc.freeze()` the survivors so later collections skip the setup state (requires `manual_gc`) |
 
 ### Signal Handling and Exit Conditions
 Set up automatic checkpoint saving and clean exit procedures for signal-based interruptions.

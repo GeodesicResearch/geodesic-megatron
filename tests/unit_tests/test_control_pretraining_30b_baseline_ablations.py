@@ -37,6 +37,7 @@ from tests.unit_tests.campaign_config import (
     assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
+    data_parallel_size,
     flatten_merged_config,
     merge_onto_recipe,
 )
@@ -103,12 +104,6 @@ def data_config():
 def corpora_rows():
     """The ablations' corpora table, parsed by the same module the build and the verifier use."""
     return corpora_table.read_corpora_table(CORPORA_TABLE)
-
-
-def data_parallel_size(cfg, gpus: int) -> int:
-    return gpus // (
-        cfg.model.tensor_model_parallel_size * cfg.model.context_parallel_size * cfg.model.pipeline_model_parallel_size
-    )
 
 
 class TestOnlyTheAblatedFieldsDiffer:

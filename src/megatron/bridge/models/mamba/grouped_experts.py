@@ -27,8 +27,9 @@ launches), whose ~60 us/launch of host-serial dispatch is the measured ~42% GPU-
 has no device-side/batched ragged-group API (host ``List[int]`` only) and TE ≥ 2.15 images are
 blocked by the cluster driver, so this module owns the expert GEMMs directly.
 
-TWO BACKENDS, one module. They differ ONLY in the call inside ``_grouped_projection`` —
-everything else (weights, Latent-MoE widths, activation, checkpoint mapping) is shared:
+TWO BACKENDS, one module. They differ ONLY in ``_group_layout`` (the form the per-expert row
+grouping takes) and in the call inside ``_grouped_projection`` — everything else (weights,
+Latent-MoE widths, activation, checkpoint mapping) is shared:
 
 ``torch_grouped`` — ``torch._grouped_mm``. Selected by the two benchmark quickstarts
 (Super-120B and Nano-30B). It is not a default anywhere: this class's ``gemm_backend`` is
@@ -109,20 +110,34 @@ GEMM_BACKENDS = (TORCH_GROUPED, CUBLAS_GROUPED)
 DEPRECATED_BACKEND_ALIASES = {"cutlass_grouped": CUBLAS_GROUPED}
 
 
-def _grouped_projection(x: torch.Tensor, w: torch.Tensor, batch_sizes: torch.Tensor, backend: str) -> torch.Tensor:
-    """One grouped GEMM over all local experts: [sum_m, k] x [E, k, n] -> [sum_m, n].
+def _group_layout(tokens_per_expert: torch.Tensor, backend: str, device: torch.device) -> torch.Tensor:
+    """The per-expert row grouping in the form the backend's grouped GEMM consumes.
 
-    ``batch_sizes`` is the CPU int64 per-expert row-count tensor. ``cublas_grouped`` wants
-    it as-is; ``torch_grouped`` wants device-side int32 offsets, which is a 128-element
-    async host-to-device copy — negligible beside the GEMM it feeds.
-
-    This is the ONLY place the two backends differ, which is why they are one module and
-    not two: every other behaviour (weights, widths, activation, checkpointing) is shared.
+    ``cublas_grouped`` takes the per-expert row counts as a CPU int64 tensor.
+    ``torch_grouped`` takes device-side int32 cumulative offsets, produced without a host
+    sync: counts already on the device (flex/HybridEP dispatchers) are summed there, and host
+    counts (the all-to-all dispatcher stages them to the CPU) are summed on the host and copied
+    asynchronously from pinned memory. A copy from pageable memory would block the host until
+    the stream drains, once per MoE layer per microbatch.
     """
     if backend == TORCH_GROUPED:
-        offs = torch.cumsum(batch_sizes, 0).to(device=x.device, dtype=torch.int32)
-        return torch._grouped_mm(x, w, offs=offs)
-    return grouped_gemm.ops.gmm(x, w, batch_sizes, trans_b=False)
+        if tokens_per_expert.is_cuda:
+            return torch.cumsum(tokens_per_expert, 0, dtype=torch.int32)
+        offsets = torch.cumsum(tokens_per_expert, 0, dtype=torch.int32).pin_memory()
+        return offsets.to(device=device, non_blocking=True)
+    return tokens_per_expert.detach().to(device="cpu", dtype=torch.long)
+
+
+def _grouped_projection(x: torch.Tensor, w: torch.Tensor, group_layout: torch.Tensor, backend: str) -> torch.Tensor:
+    """One grouped GEMM over all local experts: [sum_m, k] x [E, k, n] -> [sum_m, n].
+
+    ``group_layout`` comes from ``_group_layout`` for the same backend. Those two functions are
+    the ONLY places the two backends differ, which is why they are one module and not two: every
+    other behaviour (weights, widths, activation, checkpointing) is shared.
+    """
+    if backend == TORCH_GROUPED:
+        return torch._grouped_mm(x, w, offs=group_layout)
+    return grouped_gemm.ops.gmm(x, w, group_layout, trans_b=False)
 
 
 class GroupedExperts(MegatronModule):
@@ -171,8 +186,12 @@ class GroupedExperts(MegatronModule):
             raise ValueError("GroupedExperts does not support expert biases.")
         if getattr(config, "delay_wgrad_compute", False):
             raise ValueError("GroupedExperts does not implement delayed wgrad compute.")
-        if config.fp8 or getattr(config, "fp4", None):
-            raise ValueError("GroupedExperts is BF16/FP32-only (no quantization padding).")
+        # FP8 is accepted because it cannot reach these GEMMs: TE's fp8_autocast quantizes only inside TE
+        # modules, and torch._grouped_mm / gmm are not, so under an FP8 recipe the routed experts run in
+        # BF16 while the model's dense TE linears run in FP8. FP4 recipes rely on quantization padding of
+        # the routed-expert inputs, which this module does not implement.
+        if getattr(config, "fp4", None):
+            raise ValueError("GroupedExperts does not support FP4 (no quantization padding).")
 
         self.expert_parallel = config.expert_model_parallel_size > 1
         assert pg_collection is not None, "pg_collection is required at mcore 0.19"
@@ -262,24 +281,21 @@ class GroupedExperts(MegatronModule):
             )
             permuted_probs = torch.ones_like(permuted_probs)
 
-        # gmm needs group sizes as a CPU int64 tensor. The alltoall dispatcher has already
-        # staged tokens_per_expert to host through its event-synchronized dtoh pipeline, so
-        # this is a no-op copy in the training path.
-        batch_sizes = tokens_per_expert.detach().to(device="cpu", dtype=torch.long)
-
         if permuted_local_hidden_states.nelement() != 0:
+            # One layout for both projections: fc1 and fc2 share the same row grouping.
+            group_layout = _group_layout(tokens_per_expert, self.gemm_backend, permuted_local_hidden_states.device)
             w1 = self.weight1.view(self.num_local_experts, self.in_features, -1)
             w2 = self.weight2.view(self.num_local_experts, -1, self.in_features)
-            fc1_output = _grouped_projection(permuted_local_hidden_states, w1, batch_sizes, self.gemm_backend)
+            fc1_output = _grouped_projection(permuted_local_hidden_states, w1, group_layout, self.gemm_backend)
             if self.activation_recompute:
                 intermediate = self.activation_checkpoint.checkpoint(
                     self._weighted_activation, fc1_output, permuted_probs
                 )
-                fc2_output = _grouped_projection(intermediate, w2, batch_sizes, self.gemm_backend)
+                fc2_output = _grouped_projection(intermediate, w2, group_layout, self.gemm_backend)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
                 intermediate = self._weighted_activation(fc1_output, permuted_probs)
-                fc2_output = _grouped_projection(intermediate, w2, batch_sizes, self.gemm_backend)
+                fc2_output = _grouped_projection(intermediate, w2, group_layout, self.gemm_backend)
         else:
             # Zero tokens for every local expert: keep params in the autograd graph.
             w1 = self.weight1.view(self.in_features, -1)

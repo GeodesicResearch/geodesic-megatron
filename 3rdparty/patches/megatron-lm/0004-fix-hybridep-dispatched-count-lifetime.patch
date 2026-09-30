@@ -1,0 +1,79 @@
+From: Geodesic Research <noreply@geodesicresearch.org>
+Date: Tue, 29 Sep 2026 00:00:00 +0000
+Subject: [PATCH] fix(moe): keep a HybridEP handle's dispatched-token count in
+ device memory
+
+Without num_permuted_tokens, HybridEP (deep_ep 1.2.1+34152ae) keeps a
+dispatch handle's dispatched-token count in pinned host memory
+(executor.cu:107), and its permute and unpermute kernels read it from device
+code when they start (permute.cu:326, 459). PyTorch's caching host allocator
+is not told about those reads, so once the handle is freed it can hand the
+block out again while a combine or a backward that reads it is still queued,
+and that kernel then runs on a foreign count, over rows past the received
+tokens. Under the EP all-to-all overlap this faulted in training: a GPU core
+dump put a Warp MMU Fault in unpermute_kernel<512, bf16, float> with its
+count at 262,145, where a rank can receive at most 65,536 tokens.
+
+HybridEPDispatch.forward now hands out a handle whose count is a
+non-blocking device copy made on the dispatch stream. The host allocator
+records that copy and holds the pinned source until it, and so the dispatch
+kernels queued before it, have run. The count is already final when the copy
+is queued: the blocking path synchronizes the stream in metadata
+preprocessing before dispatch_with_permute returns. With num_permuted_tokens
+the count is a device tensor already and the handle is passed through
+unchanged. No kernel reads the count on the host on the permute path, so the
+copy adds no synchronization.
+
+Dependencies: none. It touches only fused_a2a.py, which the EP-overlap port
+(upstream #4798 hybrid EP A2A overlap) does not, so it applies to the bare pin
+and to the pin with the port applied.
+
+---
+diff --git a/megatron/core/transformer/moe/fused_a2a.py b/megatron/core/transformer/moe/fused_a2a.py
+index c281c51..22a85a1 100644
+--- a/megatron/core/transformer/moe/fused_a2a.py
++++ b/megatron/core/transformer/moe/fused_a2a.py
+@@ -350,6 +350,35 @@ def reset_hybrid_ep_buffer():
+     _hybrid_ep_buffer = None
+ 
+ 
++# Position of the dispatched-token count in a HybridEP dispatch handle, the same in DeepEP's fused
++# and unfused layouts: (sparse_to_dense_map, rdma_to_attn_map, attn_to_rdma_map,
++# num_dispatched_tokens_tensor, ...).
++_HANDLE_DISPATCHED_TOKENS = 3
++
++
++def _with_device_dispatched_tokens(handle: tuple, device: torch.device) -> tuple:
++    '''
++    Return the HybridEP dispatch handle with its dispatched-token count in device memory.
++
++    Without num_permuted_tokens, HybridEP keeps the count in pinned host memory, and its permute
++    and unpermute kernels read it from device code when they start. PyTorch's caching host
++    allocator is not told about those reads: once the handle is freed it can hand the block out
++    again while a combine or backward that reads it is still queued, and that kernel then runs
++    on a foreign count, over rows past the received tokens. A non-blocking copy on the current
++    stream gives every later reader device memory whose reuse follows the stream, and the host
++    allocator holds the pinned source until the copy, and so the dispatch kernels queued before
++    it, have run.
++    '''
++    count = handle[_HANDLE_DISPATCHED_TOKENS]
++    if count.is_cuda:
++        return handle
++    return (
++        handle[:_HANDLE_DISPATCHED_TOKENS]
++        + (count.to(device, non_blocking=True),)
++        + handle[_HANDLE_DISPATCHED_TOKENS + 1 :]
++    )
++
++
+ class HybridEPDispatch(torch.autograd.Function):
+     '''
+     Fused dispatch operation for permute + dispatch a2a + permute using the HybridEP backend
+@@ -428,6 +457,7 @@ class HybridEPDispatch(torch.autograd.Function):
+             non_blocking=non_blocking,
+             **({"fuse_permute_dispatch": fused} if fused else {}),
+         )
++        handle = _with_device_dispatched_tokens(handle, x.device)
+ 
+         ctx.handle = handle
+         ctx.pad_multiple = pad_multiple

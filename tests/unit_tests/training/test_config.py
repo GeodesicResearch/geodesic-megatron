@@ -3022,3 +3022,20 @@ class TestProfilingConfigMemoryHistory:
     def test_recording_off_skips_memory_history_validation(self):
         config = create_test_profiling_config()
         config.finalize()
+
+
+class TestManualGcFreeze:
+    """manual_gc_freeze is off by default and needs manual_gc, whose setup collection it follows."""
+
+    def test_default_is_off(self):
+        assert create_test_training_config().manual_gc_freeze is False
+
+    def test_freeze_without_manual_gc_rejected(self):
+        config = create_test_training_config(manual_gc_freeze=True)
+        with pytest.raises(ValueError, match="manual_gc_freeze requires train.manual_gc"):
+            config.finalize()
+
+    def test_freeze_with_manual_gc_accepted(self):
+        config = create_test_training_config(manual_gc=True, manual_gc_interval=10, manual_gc_freeze=True)
+        config.finalize()
+        assert config.manual_gc_freeze is True

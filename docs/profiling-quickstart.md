@@ -93,10 +93,10 @@ Everything lands in
 | file | what it is |
 |---|---|
 | `rank0.iter10.chrome_trace.json.gz` (+ iter20, + rank9 variants) | Kineto Chrome traces, one per profiled rank per capture (~175 MB gz, ~2 GB raw each) |
-| `provenance.txt` | exact commit, run id, raw-log path, world size, torch/CUDA versions, capture iterations |
-| `config_snapshot.yaml` | the override YAML exactly as passed |
-| `resolved_config_snapshot.yaml` | the FULL merged config (recipe defaults + YAML + CLI overrides) — **use this to reproduce**, the override file alone is not sufficient |
-| `raw_log_snapshot.out` | copy of the job log (refreshed at each export and train end) |
+| `provenance.txt` | exact commit (resolved in a linked git worktree too; from `REVISION` when the code ran from a `git archive` snapshot with no `.git`), run id, raw-log path, world size, torch/CUDA versions, capture iterations, `with_stack` |
+| `config_snapshot.yaml` | the override YAML exactly as passed (for a `base_config:` overlay, the overlay alone) |
+| `resolved_config_snapshot.yaml` | the FULL merged config (recipe defaults + composed YAML + CLI overrides) — **use this to reproduce**, the override file alone is not sufficient |
+| `raw_log_snapshot.out` | copy of the job log (refreshed at each export and train end; a run ended by `train.exit_interval` never reaches train end, so its copy stops at the last trace export and the job log holds the rest) |
 
 When sharing externally (e.g. for the speed-up assessment), send the whole
 directory — the traces are only interpretable together with the config and
@@ -113,7 +113,9 @@ Reading caveats (quantified in the earlier champion analysis):
 - GPU kernel durations are CUPTI hardware timestamps — trustworthy.
 - `with_stack` inflates CPU-side launch time; it shows up as extra inter-kernel
   idle (~+18% wall on this workload). Treat compute-kernel time as hard, idle
-  gaps as an upper bound.
+  gaps as an upper bound — or take a second capture with
+  `ISAMBARD_TORCH_PROFILE_WITH_STACK=0` for the timing breakdown, and keep the
+  stack capture for attributing host time to code.
 - Find the captured step by searching for the `ProfilerStep#` annotation.
 
 ## 5. Analyze
@@ -147,6 +149,7 @@ The run ID stitches everything together:
 | `ISAMBARD_TORCH_PROFILE_ITERS` | unset | comma-separated 1-based iterations to capture; one `rank<R>.iter<N>` trace per capture |
 | `ISAMBARD_TORCH_PROFILE_RANKS` | `0` | comma-separated global ranks to trace |
 | `ISAMBARD_TORCH_PROFILE_WAIT` | `3` | legacy mode (only when `_ITERS` unset): single capture at iteration WAIT+2, unsuffixed filename |
+| `ISAMBARD_TORCH_PROFILE_WITH_STACK` | `1` | `1` = record Python stacks (host attribution); `0` = no stacks, for a timing breakdown without the stack-walking overhead (see "Reading caveats"). Any other value fails the run at startup. `record_shapes` is always on; `provenance.txt` records which was used |
 | `ISAMBARD_RUN_ID` | minted by launcher | override to pin the run ID (rarely needed) |
 
 Profiling a different workload: any config works — add the same env toggles to

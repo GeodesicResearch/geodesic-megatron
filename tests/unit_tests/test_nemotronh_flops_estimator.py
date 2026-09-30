@@ -452,10 +452,15 @@ def test_megatron_config_shim_exposes_only_what_the_counter_reads(fe, super_arch
 
 def test_compare_megatron_is_opt_in_so_the_default_path_stays_torch_free(fe, super_report):
     """`--compare-megatron` is the only path that may import torch."""
-    payload = fe.report_to_dict(super_report, [31.562], 64)
+    payload = fe.report_to_dict(super_report, [31.562], 64, fe.DEFAULT_PEAK_TFLOPS)
     assert "megatron_counter_flops_per_iter" not in payload
-    with_compare = fe.report_to_dict(super_report, [31.562], 64, compare_megatron=True)
+    with_compare = fe.report_to_dict(super_report, [31.562], 64, fe.DEFAULT_PEAK_TFLOPS, compare_megatron=True)
     assert with_compare["megatron_counter_flops_per_iter"] > 0
+
+
+def test_achieved_throughput_by_hand(fe):
+    # 2e15 FLOPs in 4 s on 5 GPUs = 100 TFLOP/s/GPU, a quarter of a 400 TFLOP/s peak.
+    assert fe.achieved_throughput(2e15, 4.0, 5, 400.0) == pytest.approx((100.0, 0.25))
 
 
 def test_super_champion_throughput(super_report):
@@ -600,11 +605,13 @@ def test_report_throughput_row_matches_the_json_path(fe, super_text_report, supe
         float(x)
         for x in _one(rf"^\s+{SEC:.2f}\s+([\d.]+)\s+([\d.]+)%\s+([\d.]+)\s+([\d.]+)%\s*$", super_text_report)
     )
-    payload = fe.report_to_dict(super_report, [SEC], GPUS)["throughput"][0]
+    payload = fe.report_to_dict(super_report, [SEC], GPUS, PEAK)["throughput"][0]
     assert model_tf == pytest.approx(payload["model_tflops_per_gpu"], abs=0.05)
     assert hw_tf == pytest.approx(payload["hardware_tflops_per_gpu"], abs=0.05)
-    assert mfu == pytest.approx(100 * payload["model_tflops_per_gpu"] / PEAK, abs=0.05)
-    assert hfu == pytest.approx(100 * payload["hardware_tflops_per_gpu"] / PEAK, abs=0.05)
+    assert mfu == pytest.approx(100 * payload["mfu"], abs=0.05)
+    assert hfu == pytest.approx(100 * payload["hfu"], abs=0.05)
+    assert payload["mfu"] == pytest.approx(payload["model_tflops_per_gpu"] / PEAK)
+    assert payload["hfu"] == pytest.approx(payload["hardware_tflops_per_gpu"] / PEAK)
     # And the anchor figures the docs quote.
     assert model_tf == pytest.approx(167.4, rel=0.02)
     assert hw_tf == pytest.approx(196.6, rel=0.02)

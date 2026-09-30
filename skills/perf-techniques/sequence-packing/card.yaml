@@ -56,6 +56,7 @@ known_constraints:
   - For finetuning with CP > 1, ddp.average_in_collective must be false.
   - pad_cu_seqlens=true also requires pad_to_max_length=true.
   - Fine-tuning sequence packing is documented as unsupported with MTP.
+  - Packed sequences cannot be combined with comm_overlap.overlap_moe_expert_parallel_comm (gpt_step raises ValueError).
 known_limitations:
   - Packing support is model-family-specific rather than universal.
   - Qwen3-Next SFT disables packed sequences.
