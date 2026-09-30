@@ -38,6 +38,8 @@ that measures the postures at the production width before the stage launches.
 from __future__ import annotations
 
 import re
+import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -381,7 +383,7 @@ class TestTheLossGate:
     FROZEN = {
         "L1": (("baseline", "baseline_dp256", "broad"), 1, 1200, 50, 0.055033, None),
         "L2": (("baseline", "broad"), 1, 2000, 100, 0.052204, None),
-        "L2b": (("baseline", "broad"), 1201, 2000, 100, None, 0.02),
+        "L2b": (("baseline", "broad"), 1201, 2000, 100, 0.004613, 0.02),
     }
     # The as-is stage-1 runs the gates compare against, by SLURM job.
     REFERENCE_JOBS = {"baseline": "6107666", "baseline_dp256": "6107671", "broad": "6354507"}
@@ -494,6 +496,55 @@ class TestTheProbe:
         assert sbatch_value("BASELINE_LOG") == """$(awk '$1 == "baseline:" {print $2}' "$ARM/loss_gate.yaml")"""
         (line,) = [line.split() for line in LOSS_GATE.read_text().splitlines() if line.split()[:1] == ["baseline:"]]
         assert Path(line[1]) == load_gate_spec(LOSS_GATE).references["baseline"]
+
+    def test_every_launch_has_a_time_limit_and_together_they_fit_the_job(self):
+        """A hung step ends at its own limit; the limits must leave the later steps their time."""
+        text = PROBE_SBATCH.read_text()
+        launches = [line for line in text.replace("\\\n", " ").splitlines() if re.match(r"\s*(if )?launch \w", line)]
+        assert len(launches) == 4
+        limits = [int(sbatch_value(name)) for line in launches for name in re.findall(r'"\$(LIMIT_\w+)"', line)]
+        assert len(limits) == 4, "every launch passes one LIMIT_ variable"
+        hours, minutes, seconds = map(int, re.search(r"^#SBATCH --time=(\d+):(\d+):(\d+)$", text, re.M).groups())
+        # The NVLink sweep, the container starts for scoring and the parity tests take the rest.
+        assert sum(limits) + 600 <= hours * 3600 + minutes * 60 + seconds
+
+    def _run_probe_sbatch(self, tmp_path, env_extra: dict[str, str]) -> subprocess.CompletedProcess:
+        """Run the real probe.sbatch up to its refusals, with a stub isambard_sbatch on PATH (SLURM
+        submission is the untestable boundary) and a minimal environment carrying only ``env_extra``."""
+        if Path(sbatch_value("SCRATCH")).parent.exists():
+            pytest.skip("the probe's scratch directory exists, and the sbatch refuses before the check under test")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "REVISION").write_text("test\n")
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        stub = bindir / "isambard_sbatch"
+        stub.write_text("#!/bin/bash\nexit 0\n")
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+        env = {"PATH": f"{bindir}:/usr/bin:/bin", "GEODESIC_REPO_DIR": str(repo), "SLURM_JOB_ID": "1", **env_extra}
+        return subprocess.run(["bash", str(PROBE_SBATCH)], capture_output=True, text=True, env=env, timeout=60)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "ISAMBARD_FP32_SSM_STATE",
+            "ISAMBARD_CUDA_MAX_CONNECTIONS",
+            "TRAIN_PERSISTENT_TRITON_CACHE",
+            "GEODESIC_CONTAINER_SIF",
+        ],
+    )
+    def test_a_setting_inherited_from_the_submitting_shell_is_refused(self, tmp_path, name):
+        result = self._run_probe_sbatch(tmp_path, {name: "0", "ISAMBARD_SBATCH_MAX_NODES": "256"})
+        assert result.returncode == 1
+        assert f"launch settings inherited from the submitting shell: {name}" in result.stderr
+
+    def test_the_submission_wrappers_and_tunnels_own_variables_pass(self, tmp_path):
+        """Past the refusal the sbatch reads the loss gate's baseline log, which the stub repo lacks."""
+        result = self._run_probe_sbatch(
+            tmp_path, {"ISAMBARD_SBATCH_MAX_NODES": "256", "ISAMBARD_SBATCH_FORCE": "0", "ISAMBARD_TUNNEL_NAME": "t"}
+        )
+        assert result.returncode == 1
+        assert "inherited" not in result.stderr and "the loss gate's baseline log" in result.stderr
 
     def test_every_file_the_sbatch_reads_exists(self):
         text = PROBE_SBATCH.read_text()

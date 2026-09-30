@@ -34,11 +34,14 @@
 #
 # Policy (2026-09-30):
 # - L1 decides at iteration 1200; L2 and L2b confirm at iteration 2000, all before the first save at 2264.
-# - FAIL: stop the run and restart stage 1 from scratch in the precision-preserving posture
-#   (nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain_precise.yaml).
-# - NOT EVALUATED (exit status 2: the log does not cover the range, a pre-registered band width does not
-#   reproduce, or a reference or W&B read fails) blocks like FAIL unless it is resolved before iteration
-#   2264: no fast-posture save is written past an unevaluated gate.
+# - FAIL (exit status 1 when any gate fails, whatever the others): stop the run and restart stage 1 from
+#   scratch in the precision-preserving posture (nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain_precise.yaml).
+# - NOT EVALUATED (exit status 2: the log does not cover the range, a gate's pre-registered reference spread,
+#   lm_loss_delta, does not reproduce, or a log or W&B read fails) blocks like FAIL unless it is resolved
+#   before iteration 2264: no fast-posture save is written past an unevaluated gate.
+# - Every gate pre-registers its references' spread, L2b included (0.004613, measured 2026-09-30), so a
+#   reference log that moved or changed is caught as NOT EVALUATED rather than drawing a band around the
+#   wrong runs.
 # - The grad-norm verdict inside each report is informational: its band is set by window 1, where the grad
 #   norm is about 7.
 wandb: true
@@ -61,4 +64,5 @@ gates:
     references: [baseline, broad]
     iterations: [1201, 2000]
     window: 100
+    lm_loss_delta: 0.004613
     lm_loss_tolerance: 0.02

@@ -145,7 +145,7 @@ model:
   context_parallel_size: 1
   sequence_parallel: False
   # HybridEP intra-node dispatcher; a node whose GPUs lack NVLink peer access fails at the first
-  # dispatch; the probe sweeps its nodes first (README), and a failing node is registered bad.
+  # dispatch; the probe sweeps its own nodes (README), and a node that ends a segment this way is registered bad by hand.
   moe_token_dispatcher_type: flex
   moe_flex_dispatcher_backend: hybridep
   moe_hybridep_num_sms: null

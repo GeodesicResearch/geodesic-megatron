@@ -108,12 +108,23 @@ def test_one_gate_can_be_evaluated_alone(lg, tmp_path, refs, capsys):
     assert lg.main(["--spec", str(spec), "--candidate", str(candidate)]) == 2
 
 
-def test_any_gate_not_evaluated_outranks_a_failure(lg):
-    """A caller that acts on FAIL must not act on a result that includes an undecided gate."""
+def test_a_failing_gate_decides_whatever_the_other_gates_outcomes(lg):
+    """One failing gate stops the run, so a later gate that cannot run yet must not hide it behind exit 2."""
     result = lg.GateResult
     assert lg.exit_status([result("x", "PASS", "", None), result("y", "PASS", "", None)]) == 0
     assert lg.exit_status([result("x", "PASS", "", None), result("y", "FAIL", "", None)]) == 1
-    assert lg.exit_status([result("x", "FAIL", "", None), result("y", lg.NOT_EVALUATED, "why", None)]) == 2
+    assert lg.exit_status([result("x", "FAIL", "", None), result("y", lg.NOT_EVALUATED, "why", None)]) == 1
+    assert lg.exit_status([result("x", "PASS", "", None), result("y", lg.NOT_EVALUATED, "why", None)]) == 2
+
+
+def test_a_reference_that_cannot_be_read_is_not_evaluated_rather_than_a_crash(lg, tmp_path, refs):
+    """A crash exits 1, the status of a FAIL, which the policy answers by restarting the stage."""
+    spec = write_spec(tmp_path, refs, {"L": gate(refs, 0.01)})
+    refs["b"].unlink()
+    candidate = write_run(tmp_path, "cand")
+    result = lg.evaluate_gate(lg.load_gate_spec(spec), "L", candidate)
+    assert result.outcome == lg.NOT_EVALUATED and result.reason.startswith("FileNotFoundError")
+    assert lg.main(["--spec", str(spec), "--candidate", str(candidate)]) == 2
 
 
 @pytest.mark.parametrize(
@@ -129,13 +140,8 @@ def test_a_spec_whose_gates_cannot_run_as_written_is_refused(lg, tmp_path, refs,
         lg.load_gate_spec(write_spec(tmp_path, refs, gates))
 
 
-def tolerance_gate(references, tolerance, iterations=(1, 60), window=20) -> dict:
-    return {
-        "references": list(references),
-        "iterations": list(iterations),
-        "window": window,
-        "lm_loss_tolerance": tolerance,
-    }
+def tolerance_gate(references, spread, tolerance, iterations=(1, 60), window=20) -> dict:
+    return {**gate(references, spread, iterations, window), "lm_loss_tolerance": tolerance}
 
 
 @pytest.mark.parametrize("offset, outcome", [(0.025, "PASS"), (-0.015, "PASS"), (0.035, "FAIL"), (-0.025, "FAIL")])
@@ -143,7 +149,7 @@ def test_a_tolerance_gate_holds_the_candidate_within_a_fixed_distance_on_both_si
     lg, tmp_path, refs, offset, outcome
 ):
     """The references span [0, +0.01] around the fixture's loss; a 0.02 tolerance admits [-0.02, +0.03]."""
-    spec = lg.load_gate_spec(write_spec(tmp_path, refs, {"L": tolerance_gate(refs, 0.02)}))
+    spec = lg.load_gate_spec(write_spec(tmp_path, refs, {"L": tolerance_gate(refs, 0.01, 0.02)}))
     candidate = write_run(tmp_path, "cand", loss_offset=over(41, 60, offset))
     result = lg.evaluate_gate(spec, "L", candidate)
     assert result.outcome == outcome
@@ -153,7 +159,7 @@ def test_a_tolerance_gate_holds_the_candidate_within_a_fixed_distance_on_both_si
 
 
 def test_a_tolerance_gate_still_requires_the_references_schedule(lg, tmp_path, refs):
-    spec = lg.load_gate_spec(write_spec(tmp_path, refs, {"L": tolerance_gate(refs, 0.02)}))
+    spec = lg.load_gate_spec(write_spec(tmp_path, refs, {"L": tolerance_gate(refs, 0.01, 0.02)}))
     candidate = write_run(tmp_path, "cand", learning_rate={44: 5e-4})
     result = lg.evaluate_gate(spec, "L", candidate)
     assert result.outcome == "FAIL"
@@ -161,12 +167,19 @@ def test_a_tolerance_gate_still_requires_the_references_schedule(lg, tmp_path, r
     assert verdict.loss_inside and verdict.first_learning_rate_difference.iteration == 44
 
 
-def test_a_gate_sets_exactly_one_kind_of_band(lg, tmp_path, refs):
-    both = {**gate(refs, 0.01), "lm_loss_tolerance": 0.02}
-    neither = {k: v for k, v in gate(refs, 0.01).items() if k != "lm_loss_delta"}
-    for spec in (both, neither):
-        with pytest.raises(ValueError, match="exactly one of"):
-            lg.load_gate_spec(write_spec(tmp_path, refs, {"L": spec}))
+def test_a_tolerance_gate_checks_its_references_are_the_frozen_ones(lg, tmp_path, refs):
+    """A fixed band drawn around the wrong runs would decide on them silently."""
+    spec = lg.load_gate_spec(write_spec(tmp_path, refs, {"L": tolerance_gate(refs, 0.03, 0.02)}))
+    result = lg.evaluate_gate(spec, "L", write_run(tmp_path, "cand"))
+    assert (
+        result.outcome == lg.NOT_EVALUATED and "spread is 0.010000, not the pre-registered 0.030000" in result.reason
+    )
+
+
+def test_every_gate_pre_registers_its_references_spread(lg, tmp_path, refs):
+    unregistered = {k: v for k, v in tolerance_gate(refs, 0.01, 0.02).items() if k != "lm_loss_delta"}
+    with pytest.raises(ValueError, match="must pre-register"):
+        lg.load_gate_spec(write_spec(tmp_path, refs, {"L": unregistered}))
 
 
 def test_a_spec_that_names_one_log_twice_is_refused(lg, tmp_path, refs):

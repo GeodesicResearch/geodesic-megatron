@@ -403,11 +403,12 @@ placement measurements).
   Megatron-Bridge refuses cross-entropy fusion in deterministic mode, so such a test runs without it.
 - **Pre-registered loss gates**: `scripts/telemetry/loss_gate.py --spec <gate.yaml> --candidate <log>
   [--gate NAME]` runs band tests frozen in a YAML before the candidate exists: each named gate lists
-  two or more references (each log named once), its range and window, and either the band width the
-  references produced when frozen (`lm_loss_delta`) or a fixed tolerance around them
-  (`lm_loss_tolerance`). Exit 0 PASS, 1 FAIL, 2 NOT EVALUATED: the log does not yet cover the range,
-  the width does not reproduce (a different reference set), a read fails, or the candidate is one of
-  the references, which a band cannot judge. The v2e2e arm's `loss_gate.yaml` is the first spec.
+  two or more references (each log named once), its range and window, the references' lm-loss spread
+  when frozen (`lm_loss_delta`, which identifies the reference set), and optionally a fixed tolerance
+  (`lm_loss_tolerance`) that replaces the spread as the band's half-width. Exit 1 when any gate FAILs,
+  whatever the others; otherwise 2 when any is NOT EVALUATED (the log does not yet cover the range, the
+  spread does not reproduce, a log or W&B read fails, or the candidate is one of the references, which
+  a band cannot judge), and 0 when all PASS. The v2e2e arm's `loss_gate.yaml` is the first spec.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the

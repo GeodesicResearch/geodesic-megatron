@@ -17,25 +17,25 @@
 
 A gate spec names each reference run once, by its training log, and lists named gates. Each gate is a band
 test (``loss_parity.band_test``) over two or more of those references, with its inclusive iteration range and
-its window, and one of two kinds of band:
-
-- ``lm_loss_delta``: the band test's own band, whose width is the largest window difference between two
-  references; the value is the width the references produced when the spec was frozen, and the verdict is
-  the band test's.
-- ``lm_loss_tolerance``: a fixed band, [lowest reference window mean - tolerance, highest + tolerance] in
-  every window (the band test's ``loss_half_width``); the verdict is the band test's, with its learning-rate,
-  consumed-sample and NaN/skip checks.
+its window. Every gate pre-registers ``lm_loss_delta``, the references' lm-loss spread (the largest window
+difference between two of them) when the spec was frozen, which identifies the reference set. The band is
+the band test's own, of that width, unless the gate sets ``lm_loss_tolerance``: then it is a fixed band,
+[lowest reference window mean - tolerance, highest + tolerance] in every window (the band test's
+``loss_half_width``). Either way the verdict is the band test's, with its learning-rate, consumed-sample and
+NaN/skip checks.
 
 A gate has three outcomes:
 
 - PASS and FAIL are the verdict for the candidate.
 - NOT EVALUATED means the test could not be run, or its result could not be trusted: the candidate's log
-  does not yet cover the range or lacks a field; the references' band width differs from the pre-registered
-  one, so the reference set is not the one the gate was calibrated on; or the candidate is one of the
-  references (a run passes its own band by construction). The reason is printed.
+  does not yet cover the range or lacks a field; a log or a W&B run could not be read; the references'
+  spread differs from the pre-registered one, so the reference set is not the one the gate was calibrated
+  on; or the candidate is one of the references (a run passes its own band by construction). The reason is
+  printed.
 
-The exit status is 0 when every evaluated gate passes, 1 when any fails, and 2 when any is not evaluated, so
-a caller that must act on a FAIL never mistakes an unrunnable gate for one.
+The exit status is 1 when any gate fails, whatever the others' outcomes, since one failing gate decides;
+otherwise 2 when any gate is not evaluated, and 0 when every gate passes. A failure to read is therefore
+never mistaken for a failing candidate.
 
 USAGE
     python scripts/telemetry/loss_gate.py --spec loss_gate.yaml --candidate run.out [--gate NAME ...] [--json]
@@ -59,7 +59,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
 from scripts.telemetry.loss_parity import (  # noqa: E402
-    PASS,
+    FAIL,
     VERDICT_METRIC,
     BandReport,
     band_test,
@@ -77,8 +77,8 @@ DELTA_TOLERANCE = 5e-7
 class Gate:
     """One pre-registered band test: which references, over which iterations, in which windows, and its band.
 
-    Exactly one of ``lm_loss_delta`` (the band test's own band, of this pre-registered width) and
-    ``lm_loss_tolerance`` (a fixed band this far outside the references' window means) is set.
+    ``lm_loss_delta`` is the references' pre-registered lm-loss spread; the band is that wide unless
+    ``lm_loss_tolerance`` sets a fixed half-width instead.
     """
 
     name: str
@@ -86,7 +86,7 @@ class Gate:
     first: int
     last: int
     window: int
-    lm_loss_delta: float | None
+    lm_loss_delta: float
     lm_loss_tolerance: float | None
 
 
@@ -113,8 +113,8 @@ def load_gate_spec(path: Path) -> GateSpec:
     """Read a gate spec, refusing one whose gates could not be evaluated as written.
 
     Raises ValueError when a reference log is named twice, a gate names an unknown reference or one
-    reference twice, a gate has fewer than two references, or a gate does not set exactly one of
-    ``lm_loss_delta`` and ``lm_loss_tolerance``.
+    reference twice, a gate has fewer than two references, or a gate does not pre-register
+    ``lm_loss_delta``.
     """
     raw = yaml.safe_load(Path(path).read_text())
     references = {name: Path(log) for name, log in raw["references"].items()}
@@ -131,11 +131,10 @@ def load_gate_spec(path: Path) -> GateSpec:
             raise ValueError(f"{path}: gate {name} names a reference more than once")
         if len(names) < 2:
             raise ValueError(f"{path}: gate {name} needs at least two references, got {len(names)}")
-        bands = [key for key in ("lm_loss_delta", "lm_loss_tolerance") if key in gate]
-        if len(bands) != 1:
-            raise ValueError(f"{path}: gate {name} must set exactly one of lm_loss_delta and lm_loss_tolerance")
+        if "lm_loss_delta" not in gate:
+            raise ValueError(f"{path}: gate {name} must pre-register its references' spread as lm_loss_delta")
         first, last = gate["iterations"]
-        delta = float(gate["lm_loss_delta"]) if "lm_loss_delta" in gate else None
+        delta = float(gate["lm_loss_delta"])
         tolerance = float(gate["lm_loss_tolerance"]) if "lm_loss_tolerance" in gate else None
         gates[name] = Gate(name, names, int(first), int(last), int(gate["window"]), delta, tolerance)
     return GateSpec(bool(raw["wandb"]), references, gates)
@@ -155,13 +154,13 @@ def evaluate_gate(spec: GateSpec, name: str, candidate_log: Path) -> GateResult:
         if len(set(runs)) != len(runs):
             raise ValueError(f"a W&B run is read more than once: {sorted(runs)}")
         report = band_test(references, [candidate], gate.window, loss_half_width=gate.lm_loss_tolerance)
-    except ValueError as error:
-        return GateResult(name, NOT_EVALUATED, str(error), None)
+    except Exception as error:  # noqa: BLE001 - every way the test cannot run is NOT EVALUATED, never a FAIL
+        return GateResult(name, NOT_EVALUATED, f"{type(error).__name__}: {error}", None)
     (loss,) = [band for band in report.metrics if band.metric == VERDICT_METRIC]
     (verdict,) = report.verdicts
-    if gate.lm_loss_delta is not None and abs(loss.delta - gate.lm_loss_delta) > DELTA_TOLERANCE:
+    if abs(loss.spread - gate.lm_loss_delta) > DELTA_TOLERANCE:
         reason = (
-            f"the references' {VERDICT_METRIC} band width is {loss.delta:.6f}, not the pre-registered "
+            f"the references' {VERDICT_METRIC} spread is {loss.spread:.6f}, not the pre-registered "
             f"{gate.lm_loss_delta:.6f}: the reference set is not the one this gate was calibrated on"
         )
         return GateResult(name, NOT_EVALUATED, reason, report)
@@ -169,11 +168,11 @@ def evaluate_gate(spec: GateSpec, name: str, candidate_log: Path) -> GateResult:
 
 
 def exit_status(results: list[GateResult]) -> int:
-    """0 when every gate passes, 2 when any is not evaluated, otherwise 1."""
+    """1 when any gate fails, otherwise 2 when any is not evaluated, and 0 when every gate passes."""
     outcomes = {result.outcome for result in results}
-    if NOT_EVALUATED in outcomes:
-        return 2
-    return 0 if outcomes == {PASS} else 1
+    if FAIL in outcomes:
+        return 1
+    return 2 if NOT_EVALUATED in outcomes else 0
 
 
 def main(argv: list[str] | None = None) -> int:

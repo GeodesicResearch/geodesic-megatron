@@ -75,7 +75,7 @@ spares) of about 2.5 h, measured nowhere at this width before:
 
 | Step | Config | Decides |
 |---|---|---|
-| NVLink sweep | `nvidia-smi nvlink --status` on every node, `scripts/training/nvlink_health.py` | launches on 128 nodes whose GPUs all report 18 active links; registers the others as bad nodes |
+| NVLink sweep | `nvidia-smi nvlink --status` on every node, `scripts/training/nvlink_health.py` | launches on 128 nodes whose GPUs all report 18 active links, then registers the others as bad nodes; with fewer than 128 healthy it launches nothing and registers none, since that points at the sweep, not the nodes |
 | fast | `probe/probe_fast.yaml` + the stage's `.env` | speed and memory, over 500 iterations with saves at 150, 300, 450 and 500 |
 | handoff | `probe/probe_handoff_midtrain.yaml` | the fast probe's save loads weights-only into the as-is midtraining and trains 5 iterations |
 | as_is | `probe/probe_as_is.yaml` | the reference rerun for the parity test |
@@ -84,8 +84,12 @@ spares) of about 2.5 h, measured nowhere at this width before:
 
 The gates, fixed before the probe runs:
 
-- **Speed** (`fast.score.json`, mean s/iter over iterations 101-500): up to 4.5 s go; 4.5 to 5.25 go
-  and report; above 5.25 to Kyle. The baseline ran at 6.31.
+- **Speed** (`fast.score.json` and `as_is.score.json`, mean s/iter over iterations 101-500): the fast
+  probe's s/iter divided by the as-is rerun's on the same nodes, times the baseline's own 6.31 s: up
+  to 4.5 s go; 4.5 to 5.25 go and report; above 5.25 to Kyle. Placement alone moves this posture's
+  speed by up to ~18% at this width (2 against 8 switch groups), so the gate reads the ratio, which
+  the two runs share a placement for, and not either run's absolute s/iter, which is reported beside
+  it with the run's `[run-identity] switch placement`.
 - **Memory** (the fast probe, `peak_memory_across_ranks` in `fast.score.json`, read from the run's
   `[peak-memory]` line): no OOM through all four saves, and over every rank a peak allocated memory of
   at most 85.5 GB with 0 allocator retries. The summary counts decimal GB (bytes / 1e9), so 85.5 GB is
@@ -100,8 +104,8 @@ The gates, fixed before the probe runs:
   where a window mean mostly measures the rate of descent, and at 256 GPUs the fast posture left the
   band there only, 0.0035 below its edge (`docs/investigations/nano30b-pretrain-perf-campaign.md`,
   E-063). Grad norm is a flag, as in every band test.
-- **Handoff** (`handoff.evidence.tsv`): the midtraining loads the probe's save, installs the fp32
-  SSM-state patch on all 512 ranks and exits at iteration 5.
+- **Handoff** (`handoff.evidence.tsv`, the `handoff_evidence` step): the midtraining loads the probe's
+  save, installs the fp32 SSM-state patch on all 512 ranks and exits at iteration 5.
 - **Export**, run after the probe as publishing will run it: the probe's last save, cloned and
   exported on one node, verifies by tensor names.
 
@@ -115,7 +119,13 @@ The gates, fixed before the probe runs:
 
 Submit it from a frozen copy of the commit under test, never from a working checkout (bash reads the
 sbatch and the launcher by offset while they run; the sbatch refuses a directory without a
-`REVISION` file). The copy needs the pinned Megatron-LM and its built dataset helpers:
+`REVISION` file), from a shell carrying no launcher, activate or container setting: the sbatch refuses
+every `ISAMBARD_*`, `TRAIN_*` and `GEODESIC_CONTAINER_*` variable except the submission wrapper's own
+`ISAMBARD_SBATCH_*` and the tunnel's `ISAMBARD_TUNNEL_*`, so each step's posture is its config, its
+settings file and the committed container config only. 130 nodes exceed the default node cap of 128, so the command raises it to
+the account's 256 for the submission and, exported with it, for the job's check at start. Each launch
+runs under a time limit of about 1.5 times its estimate, so a hung step ends without taking the rest
+of the allocation. The copy needs the pinned Megatron-LM and its built dataset helpers:
 
 ```bash
 SNAP=/projects/a5k/public/logs/control_pretraining/v2e2e_probe/code-$(git rev-parse --short HEAD)
@@ -124,7 +134,7 @@ git archive HEAD | tar -x -C "$SNAP"
 git -C 3rdparty/Megatron-LM archive HEAD | tar -x -C "$SNAP/3rdparty/Megatron-LM"
 cp 3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so "$SNAP/3rdparty/Megatron-LM/megatron/core/datasets/"
 git rev-parse HEAD > "$SNAP/REVISION"
-cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 isambard_sbatch \
+cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 isambard_sbatch \
   configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe.sbatch
 ```
 
