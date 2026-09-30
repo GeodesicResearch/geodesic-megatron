@@ -8,7 +8,8 @@
 # parallelism crosses nodes), seq 32768, the ten-corpus long-context mix, full recompute, the comm_overlap
 # block, the precision-aware optimizer, the weights-only warm start and the annealing schedule — is the
 # production stage's, read at launch. A change to the production posture therefore flows into this
-# benchmark without an edit here, and tests/unit_tests/test_nano_stage_quickstarts.py fails if any field
+# benchmark, and into the quickstart built on it (nemotron_nano_quickstart_midtrain.yaml), without an edit
+# here, and tests/unit_tests/test_nano_stage_quickstarts.py fails if any field
 # other than the ones below starts to differ.
 #
 # GBS 64: 64 sequences over DP=32 (64 GPUs at CP=2) at micro-batch 1 is 2 microbatches per DP replica per
@@ -55,9 +56,10 @@
 #         --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
 #         --gpus 64 --window 151 200 --loss-window 191 200
 #
-# MEASURED (2026-09-30, 64 GPUs on one switch group, job 6971129, W&B nano_mid_cal_asis): mean 6.138 s/iter over
-# iterations 151-200 = 5,339 tokens/s/GPU = 130.4 model TFLOP/s/GPU (13.18% MFU); peak 89.9 GB allocated / 90.1 GB
-# reserved; lm loss (191-200) 1.566, 0 NaN.
+# MEASURED (2026-09-30, 64 GPUs, three runs each on one switch group, jobs 6971129, 6971856 and 6971857): mean
+# 6.146 s/iter over iterations 151-200 (6.138, 6.163, 6.138) = 5,332 tokens/s/GPU = 130.3 model TFLOP/s/GPU
+# (13.17% MFU); 83.4 GB reserved in training (the run maxima, 89.9 GB allocated, are the warm start's
+# checkpoint-load transient); lm loss (191-200) 1.565-1.567, 0 NaN.
 
 base_config: ../control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
 

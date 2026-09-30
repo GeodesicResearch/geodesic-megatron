@@ -165,7 +165,35 @@ PRETRAIN_QUICKSTART = Quickstart(
     launcher_settings=["ISAMBARD_FP32_SSM_STATE=0", "ISAMBARD_CUDA_MAX_CONNECTIONS=32"],
     wandb_name="nemotron_nano_quickstart_pretrain_perf",
 )
-QUICKSTARTS = [PRETRAIN_QUICKSTART]
+MIDTRAIN_QUICKSTART = Quickstart(
+    stage=MIDTRAIN,
+    path=_QUICKSTARTS / "nemotron_nano_quickstart_midtrain.yaml",
+    levers={
+        "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
+        "model.recompute_granularity": "selective",
+        "model.recompute_method": None,
+        "model.recompute_num_layers": None,
+        "model.recompute_modules": ["moe", "shared_experts"],
+        "model.moe_token_dispatcher_type": "flex",
+        "model.moe_flex_dispatcher_backend": "hybridep",
+        "model.moe_router_fusion": True,
+        "model.cross_entropy_loss_fusion": True,
+        "model.cross_entropy_fusion_impl": "linear",
+        "model.cross_entropy_fusion_saved_logit_chunks": 8,
+        "comm_overlap.overlap_param_gather": True,
+        "rerun_state_machine.check_for_nan_in_loss": False,
+        "train.manual_gc": True,
+        "train.manual_gc_interval": 10,
+        "train.manual_gc_freeze": True,
+        "logger.timing_log_level": 1,
+        "logger.log_l2_norm_grad_to_tensorboard": False,
+    },
+    # At seq 32768 a bf16 inter-chunk SSM state overflows on long single documents; stated so that a value inherited
+    # from the environment (the pretraining quickstart's env file sets 0) cannot switch the fp32 state off.
+    launcher_settings=["ISAMBARD_FP32_SSM_STATE=checkpoint"],
+    wandb_name="nemotron_nano_quickstart_midtrain_perf",
+)
+QUICKSTARTS = [PRETRAIN_QUICKSTART, MIDTRAIN_QUICKSTART]
 
 
 def merged(path: Path):
