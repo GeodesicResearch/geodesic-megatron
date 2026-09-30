@@ -316,10 +316,14 @@ provenance reads the commit from it (`scripts/profiling/profiler_callback.py` `_
 and otherwise records the commit as unresolved; and (2) the Megatron dataset helpers library,
 `3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so`, copied from a built checkout —
 Megatron-LM git-ignores `*.so`, and without it rank 0 runs `make` in that directory at startup,
-which a read-only copy cannot do. The same 64-GPU Nano posture has measured up to ~4% apart
-across jobs (6.744 and 6.494 s/iter), and nodelist does not explain it (two runs sharing 15 of 16
-nodes differed by 3.7%), so a lever smaller than that needs repeats before it counts. The Nano pretrain campaign's log is
-`docs/investigations/nano30b-pretrain-perf-campaign.md`.
+which a read-only copy cannot do. Compare a probe only against runs placed on a single Dragonfly
+switch group (every launcher run logs `[run-identity] switch placement`): a run whose nodes span more
+than one group is 2.5–6.6% slower (mean 4.3%), while single-group runs of one posture agree to ~0.5%
+(SD). That placement penalty is what made the same 64-GPU Nano posture measure up to ~4% apart across
+jobs (6.744 and 6.494 s/iter; 3.7% between two runs sharing 15 of 16 nodes): the slower run of each
+pair spanned more than one group. A lever smaller than ~1% needs repeats before it counts. The Nano
+pretrain campaign's log is `docs/investigations/nano30b-pretrain-perf-campaign.md` (E-047 for the
+placement measurements).
 
 ### Profiling and run identity
 
@@ -369,7 +373,25 @@ nodes differed by 3.7%), so a lever smaller than that needs repeats before it co
   are the global batch the window's own log lines report times the config's sequence length, so
   a batch set by a Hydra override is scored correctly; a window iteration that is missing or
   repeated, or two batch sizes in one window, raises. `--wandb-peak-memory` adds the W&B
-  summary peaks, which are the last rank's, not a maximum over ranks.
+  summary peaks and allocator-retry count, which are the last rank's, not a maximum over ranks.
+- **Loss parity between runs**: `scripts/telemetry/loss_parity.py` compares runs of one config,
+  seed and data-parallel width (iteration i consumed the same global batch in each). `band
+  --reference A1 A2 [...] --candidate C --iterations 1 500 --window 50` is the test for a lever
+  that changes numerics: per window, the candidate's mean `lm loss` must lie within [lowest
+  reference - delta, highest reference + delta], delta being the largest window difference
+  between two references (PASS/FAIL; `grad norm` the same way, PASS/FLAG). `identity
+  --reference A --candidate B --iterations 1 30` is the test for a lever or knob-off path that
+  claims exactness: per metric, the leading identical iterations and the first difference. Both
+  also require every run to log the same learning rate and consumed samples at every iteration,
+  and `--wandb` reads full-precision values from each log's W&B run (the log prints 7
+  significant digits of the loss and 3 decimals of the grad norm). Exit status 1 on any FAIL.
+  Default-mode training is not run-to-run deterministic (the grad norm differs from iteration 1),
+  so an identity test needs `model.deterministic_mode=true` with `NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`,
+  `CUBLAS_WORKSPACE_CONFIG=:4096:8` and `MAMBA_DETERMINISTIC=1` (an `ISAMBARD_ENV_OVERRIDES` file) on
+  every run it compares. mamba_ssm fixes its Triton autotune configurations at import, before Bridge
+  turns on deterministic algorithms, so without the last one the SSD kernels are autotuned by timing
+  and their block sizes, and with them the reduction order, can differ between launches.
+  Megatron-Bridge refuses cross-entropy fusion in deterministic mode, so such a test runs without it.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the
@@ -634,7 +656,12 @@ its own `dataset.path_to_cache`, `logger.wandb_save_dir` and `wandb_exp_name`, a
 baseline. 32 GPUs is an override, not a second file: `--nodes=8 ... train.global_batch_size=256`.
 Scored as the **mean** step over iterations 26-50 (`scripts/telemetry/score_run.py`); its
 performance campaign is logged in `docs/investigations/nano30b-pretrain-perf-campaign.md` (see
-"Performance probes" under Usage).
+"Performance probes" under Usage). Its fastest configuration is `nemotron_nano_quickstart_pretrain_perf.yaml`,
+an overlay of this quickstart that states only its levers, launched with the two launcher settings in
+`nemotron_nano_quickstart_pretrain_perf.env` as an `ISAMBARD_ENV_OVERRIDES` file: **4.961 s/iter, 1.90x** the
+as-is runs on the same allocations, with its 500-iteration loss inside the as-is band. It runs only on a copy
+of the checkout whose Megatron-LM carries patches 0003, 0004 and 0005 (its header has the launch line); the
+production configs do not use it.
 
 **Super — the 128-GPU, 1B-token standard** (Kyle, 2026-08-05): **seq 8192, GBS 3072**
 (= 25,165,824 tokens/iter), **all 128 GPUs / 32 nodes, 1B tokens** (`train_iters: 40` =
@@ -1427,18 +1454,23 @@ happened to the 120B champion measurement (a DDP bucket-size change; it is now t
 `ddp.bucket_size` field in the quickstart config, where it belongs). If a change cannot be
 expressed through config, vendor it as a patch in `3rdparty/patches/megatron-lm/` — see that
 directory's README, which records why each patch exists and what it is load-bearing for. There
-are three, and NONE is auto-applied. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
+are five, and NONE is auto-applied. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
 because nothing uses the `allgather` dispatcher today (every config forces `alltoall`) but the
 fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
-`0003` is the port of upstream PR #4798 (EP all-to-all / compute overlap
+`0003`, `0004` and `0005` are the Nano pretrain campaign's Megatron-LM changes; its fastest
+configuration needs all three, applied in number order. `0003` is the port of upstream PR #4798 (EP all-to-all / compute overlap
 for the hybrid model, plus local adaptations listed in the patches README), load-bearing for the
-Nano pretrain campaign's EP-overlap rung (E-044); it acts only with
+campaign's EP-overlap rung (E-044); it acts only with
 `comm_overlap.overlap_moe_expert_parallel_comm=true`, keeps the pin's checkpoint keys for flat layer
 patterns such as Nano's, and refuses Megatron-FSDP, fine-grained activation offloading,
 `delay_wgrad_compute` and the `ncclep` dispatcher with the overlap on hybrid models
-(Megatron-Bridge refuses packed sequences with it).
+(Megatron-Bridge refuses packed sequences with it). `0004` keeps a HybridEP dispatch handle's
+token count in device memory: on the blocking dispatch path it lived in pinned host memory that
+queued kernels read after the handle was freed, which faulted under the EP overlap. `0005` is a
+chunked linear cross-entropy for `HybridModel` (`cross_entropy_fusion_impl: linear`), applied after
+`0003`; its tests skip on a submodule without it, as `0004`'s do.
 (The `overlap_p2p_comm` NaN's fix is already IN the current pin; its record-of-closed-bug
 patch was retired with the investigation docs and is preserved under
 `/projects/a5k/public/logs/infr71_wave2/docs/`.)
@@ -1481,7 +1513,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`
-- `scripts/telemetry/` — Run identity in W&B (`run_identity.py`) and run scoring (`score_run.py`)
+- `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
+  parity between runs (`loss_parity.py`) and the training-log parser both read (`training_log.py`)
 - `tests/unit_tests/` — No GPU required
 - `tests/functional_tests/` — GPU-required, tiered (L0/L1/L2)
 - `skills/` — Guides for AI coding agents

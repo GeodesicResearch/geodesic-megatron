@@ -1,11 +1,7 @@
 """Unit tests for scripts/telemetry/score_run.py (training-log scorer).
 
-The fixture ``fixtures/score_run/train-6354507_excerpt.out`` is verbatim text from the filtered
-stage-1 pretraining log ``/projects/a5k/public/logs/megatron_runs/train-6354507.out`` (256 GPUs,
-GBS 2048, seq 8192): its two wandb init lines (7066-7067), the theoretical-memory and
-after-iteration-1 memory lines plus iterations 1-60 with the interleaved "Step Time" lines
-(7978-8098), and wandb's end-of-run "View run" line (27796). Synthetic cases are built by editing
-a real iteration line from it, so every parse runs on the format the bridge actually prints.
+Every log is the real excerpt of ``training_log_fixture.py`` or built by editing its lines; the log parser the
+scorer reads through has its own tests (``test_training_log.py``).
 
 The real log is scored against the control-pretraining baseline's stage-1 config and the Nano-30B
 HF config from the local HF cache, through the FLOPs estimator's library as the CLI does: the
@@ -17,10 +13,8 @@ copied from it.
 
 import importlib.util
 import json
-import re
 import sys
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -28,11 +22,16 @@ from scripts.nemotronh_flops_estimator import DEFAULT_PEAK_TFLOPS, resolve_hf_co
 from scripts.nemotronh_flops_estimator import main as estimator_main
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml, parse_yaml_mapping
 
+from tests.unit_tests.training_log_fixture import (
+    FIXTURE,
+    FIXTURE_LINES,
+    FIXTURE_RUN_PATH,
+    REPO_ROOT,
+    iteration_line,
+    sub_once,
+    write_log,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FIXTURE = REPO_ROOT / "tests" / "unit_tests" / "fixtures" / "score_run" / "train-6354507_excerpt.out"
-FIXTURE_LINES = FIXTURE.read_text(encoding="utf-8").splitlines()
-FIXTURE_RUN_PATH = "geodesic/megatron_training/5s8x5mgb"
 
 BASELINE_CONFIG = (
     REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline" / "nemotron_nano_30b_baseline_pretrain.yaml"
@@ -72,36 +71,6 @@ def synthetic_workload(sr):
     )
 
 
-def _only_line(needle: str) -> str:
-    (line,) = [line for line in FIXTURE_LINES if needle in line]
-    return line
-
-
-REAL_ITERATION_50 = _only_line("iteration       50/")
-REAL_MEMORY_LINE = _only_line("(after 1 iterations) memory (GB)")
-
-
-def _sub_once(pattern: str, replacement: str, text: str) -> str:
-    edited, count = re.subn(pattern, replacement, text)
-    assert count == 1, f"{pattern!r} matched {count} times"
-    return edited
-
-
-def iteration_line(iteration: int, elapsed_ms: float, lm_loss: float, skipped: int = 0, nan: int = 0) -> str:
-    """The real iteration-50 line with the scored fields replaced."""
-    line = _sub_once(r"iteration\s+50/", f"iteration {iteration:8d}/", REAL_ITERATION_50)
-    line = _sub_once(r"\(ms\): [\d.]+", f"(ms): {elapsed_ms:.1f}", line)
-    line = _sub_once(r"lm loss: [\dE.+-]+", f"lm loss: {lm_loss:.6E}", line)
-    line = _sub_once(r"skipped iterations:\s+\d+", f"skipped iterations: {skipped:3d}", line)
-    return _sub_once(r"nan iterations:\s+\d+", f"nan iterations: {nan:3d}", line)
-
-
-def write_log(tmp_path: Path, lines: list[str]) -> Path:
-    path = tmp_path / "train.out"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return path
-
-
 def score_fixture(sr, workload, window, loss_window):
     return sr.score_log(
         FIXTURE,
@@ -111,64 +80,6 @@ def score_fixture(sr, workload, window, loss_window):
         num_gpus=256,
         peak_tflops_per_gpu=DEFAULT_PEAK_TFLOPS,
     )
-
-
-# --------------------------------------------------------------------------------------
-# Iteration lines
-# --------------------------------------------------------------------------------------
-
-
-def test_parses_every_field_of_a_real_iteration_line(sr):
-    records = sr.parse_iteration_records(FIXTURE_LINES)
-    assert [r.iteration for r in records] == list(range(1, 61))
-    assert records[49] == sr.IterationRecord(
-        iteration=50,
-        elapsed_ms=9937.2,
-        global_batch_size=2048,
-        logged_tflops_per_gpu=146.9,
-        lm_loss=6.681113,
-        skipped_total=0,
-        nan_total=0,
-        timestamp="2026-09-09 01:38:01",
-    )
-    # The first iteration carries the one-time setup cost, logged like any other.
-    assert records[0].elapsed_ms == 105400.6
-    assert {r.global_batch_size for r in records} == {2048}
-
-
-def test_non_iteration_lines_are_ignored(sr):
-    # A "Step Time : ..." line precedes each of iterations 2-60, among the memory and wandb lines.
-    assert sum("Step Time" in line for line in FIXTURE_LINES) == 59
-    assert len(sr.parse_iteration_records(FIXTURE_LINES)) == 60
-
-
-def test_optional_fields_absent_parse_as_none(sr):
-    line = _sub_once(r" throughput per GPU \(TFLOP/s/GPU\): [\d.]+ \|", "", REAL_ITERATION_50)
-    line = _sub_once(r" lm loss: [\dE.+-]+ \|", "", line)
-    line = _sub_once(r"^ \[[^\]]+\]\s+", "", line)
-    (record,) = sr.parse_iteration_records([line])
-    assert record.logged_tflops_per_gpu is None
-    assert record.lm_loss is None
-    assert record.timestamp is None
-    assert record.elapsed_ms == 9937.2
-
-
-def test_skipped_and_nan_counts_are_parsed(sr):
-    (record,) = sr.parse_iteration_records([iteration_line(7, 9000.0, 6.0, skipped=2, nan=1)])
-    assert (record.iteration, record.skipped_total, record.nan_total) == (7, 2, 1)
-
-
-@pytest.mark.parametrize(
-    "field_pattern, name",
-    [
-        (r" elapsed time per iteration \(ms\): [\d.]+ \|", "elapsed time per iteration"),
-        (r" global batch size:\s+\d+ \|", "global batch size"),
-    ],
-)
-def test_iteration_line_without_a_required_field_raises(sr, field_pattern, name):
-    line = _sub_once(field_pattern, "", REAL_ITERATION_50)
-    with pytest.raises(ValueError, match=name):
-        sr.parse_iteration_records([line])
 
 
 # --------------------------------------------------------------------------------------
@@ -239,7 +150,7 @@ def test_scores_the_real_window(sr, nano_workload):
 def test_throughput_and_mfu_arithmetic(sr, synthetic_workload, tmp_path):
     steps_ms = [10000.0, 10000.0, 8000.0, 12000.0]
     lines = [iteration_line(i, ms, 5.0 + i) for i, ms in enumerate(steps_ms, start=1)]
-    lines = [_sub_once(r"global batch size:\s+\d+", "global batch size:   512", line) for line in lines]
+    lines = [sub_once(r"global batch size:\s+\d+", "global batch size:   512", line) for line in lines]
     score = sr.score_log(
         write_log(tmp_path, lines),
         workload=synthetic_workload,
@@ -268,7 +179,7 @@ def test_throughput_and_mfu_arithmetic(sr, synthetic_workload, tmp_path):
 def test_tokens_per_iteration_follow_the_logged_batch_not_the_config(sr, nano_workload, tmp_path):
     """A batch set by a Hydra override shows only in the log; the config's 2048 must not be used."""
     lines = [iteration_line(i, 10000.0, 6.0) for i in (1, 2, 3)]
-    lines = [_sub_once(r"global batch size:\s+\d+", "global batch size:   512", line) for line in lines]
+    lines = [sub_once(r"global batch size:\s+\d+", "global batch size:   512", line) for line in lines]
     score = sr.score_log(write_log(tmp_path, lines), nano_workload, (1, 3), (1, 3), 64, DEFAULT_PEAK_TFLOPS)
     assert load_composed_yaml(BASELINE_CONFIG)["train"]["global_batch_size"] == 2048
     assert score.global_batch_size == 512
@@ -277,7 +188,7 @@ def test_tokens_per_iteration_follow_the_logged_batch_not_the_config(sr, nano_wo
 
 def test_window_with_two_batch_sizes_raises(sr, synthetic_workload, tmp_path):
     lines = [iteration_line(i, 10000.0, 7.0) for i in range(1, 4)]
-    lines[1] = _sub_once(r"global batch size:\s+\d+", "global batch size:   512", lines[1])
+    lines[1] = sub_once(r"global batch size:\s+\d+", "global batch size:   512", lines[1])
     with pytest.raises(ValueError, match=r"several global batch sizes: \[512, 2048\]"):
         sr.score_log(write_log(tmp_path, lines), synthetic_workload, (1, 3), (1, 3), 1, 1.0)
 
@@ -316,7 +227,7 @@ def test_repeated_window_iteration_raises(sr, synthetic_workload, tmp_path):
 
 def test_loss_window_iteration_without_loss_raises(sr, synthetic_workload, tmp_path):
     lines = [iteration_line(i, 10000.0, 6.0) for i in (1, 2, 3)]
-    lines[2] = _sub_once(r" lm loss: [\dE.+-]+ \|", "", lines[2])
+    lines[2] = sub_once(r" lm loss: [\dE.+-]+ \|", "", lines[2])
     with pytest.raises(ValueError, match=r"loss_window iterations \[3\] log no lm loss"):
         sr.score_log(write_log(tmp_path, lines), synthetic_workload, (1, 3), (2, 3), 1, 1.0)
 
@@ -364,66 +275,6 @@ def test_to_dict_is_json_serialisable_and_carries_the_inputs(sr, synthetic_workl
 
 
 # --------------------------------------------------------------------------------------
-# Memory report and W&B run path
-# --------------------------------------------------------------------------------------
-
-
-def test_first_iteration_memory_reads_the_gigabyte_fields(sr):
-    assert sr.parse_first_iteration_memory(FIXTURE_LINES) == {
-        "mem-allocated-gigabytes": 61.555,
-        "mem-active-gigabytes": 61.555,
-        "mem-inactive-gigabytes": 0.0,
-        "mem-reserved-gigabytes": 80.487,
-        "mem-max-allocated-gigabytes": 78.383,
-        "mem-max-active-gigabytes": 78.383,
-        "mem-max-inactive-gigabytes": 0.0,
-        "mem-max-reserved-gigabytes": 80.487,
-    }
-
-
-def test_first_iteration_memory_takes_the_maximum_across_ranks(sr):
-    rank1 = _sub_once(r"^\[Rank 0\]", "[Rank 1]", REAL_MEMORY_LINE)
-    rank1 = _sub_once(r"mem-max-allocated-gigabytes: [\d.]+", "mem-max-allocated-gigabytes: 79.5", rank1)
-    rank1 = _sub_once(r"mem-allocated-gigabytes: [\d.]+", "mem-allocated-gigabytes: 60.0", rank1)
-    memory = sr.parse_first_iteration_memory([rank1, REAL_MEMORY_LINE])
-    assert memory["mem-max-allocated-gigabytes"] == 79.5
-    assert memory["mem-allocated-gigabytes"] == 61.555
-
-
-def test_first_iteration_memory_absent_or_resumed_is_none(sr):
-    resumed = _sub_once(r"after 1 iterations", "after 13585 iterations", REAL_MEMORY_LINE)
-    assert sr.parse_first_iteration_memory([resumed, REAL_ITERATION_50]) is None
-
-
-def test_memory_report_without_gigabyte_fields_raises(sr):
-    with pytest.raises(ValueError, match="-gigabytes"):
-        sr.parse_first_iteration_memory(["[Rank 0] (after 1 iterations) memory (GB) | mem-alloc-retires: 0"])
-
-
-def test_wandb_run_path_from_init_and_finish_lines(sr):
-    init_line = _only_line("View run at")
-    finish_line = _only_line("View run control_pretrain")
-    assert sr.parse_wandb_run_path([init_line]) == FIXTURE_RUN_PATH
-    assert sr.parse_wandb_run_path([finish_line]) == FIXTURE_RUN_PATH
-    assert sr.parse_wandb_run_path(FIXTURE_LINES) == FIXTURE_RUN_PATH
-
-
-def test_wandb_run_path_on_a_self_hosted_server(sr):
-    line = _sub_once(r"https://wandb\.ai/", "http://wandb.example.org:8080/", _only_line("View run at"))
-    assert sr.parse_wandb_run_path([line]) == FIXTURE_RUN_PATH
-
-
-def test_wandb_run_path_absent_is_none(sr):
-    assert sr.parse_wandb_run_path([REAL_ITERATION_50, REAL_MEMORY_LINE]) is None
-
-
-def test_wandb_run_path_naming_two_runs_raises(sr):
-    other = _sub_once(r"runs/5s8x5mgb", "runs/zno0zq8b", _only_line("View run at"))
-    with pytest.raises(ValueError, match="several W&B runs"):
-        sr.parse_wandb_run_path([_only_line("View run at"), other])
-
-
-# --------------------------------------------------------------------------------------
 # W&B peak memory
 # --------------------------------------------------------------------------------------
 
@@ -431,6 +282,7 @@ FIXTURE_WANDB_SUMMARY = {
     "memory/mem-max-allocated-gigabytes": 81.8,
     "memory/mem-max-reserved-gigabytes": 84,
     "memory/mem-allocated-gigabytes": 61.5,
+    "memory/mem-alloc-retires": 3.0,
 }
 
 
@@ -470,6 +322,19 @@ def test_fetch_wandb_peak_memory_missing_key_raises(sr, monkeypatch):
     install_fake_wandb(monkeypatch, {"memory/mem-max-allocated-gigabytes": 81.8})
     with pytest.raises(KeyError, match="mem-max-reserved-gigabytes"):
         sr.fetch_wandb_peak_memory(FIXTURE_RUN_PATH)
+
+
+def test_fetch_wandb_alloc_retries_reads_the_count_as_an_integer(sr, monkeypatch):
+    install_fake_wandb(monkeypatch, FIXTURE_WANDB_SUMMARY)
+    retries = sr.fetch_wandb_alloc_retries(FIXTURE_RUN_PATH)
+    assert retries == 3 and isinstance(retries, int)
+    assert FakeApi.requested == [FIXTURE_RUN_PATH]
+
+
+def test_fetch_wandb_alloc_retries_missing_key_raises(sr, monkeypatch):
+    install_fake_wandb(monkeypatch, {"memory/mem-max-allocated-gigabytes": 81.8})
+    with pytest.raises(KeyError, match="mem-alloc-retires"):
+        sr.fetch_wandb_alloc_retries(FIXTURE_RUN_PATH)
 
 
 # --------------------------------------------------------------------------------------
@@ -519,6 +384,7 @@ def test_cli_json_scores_the_log_and_records_its_inputs(sr, nano_workload, cli_a
     assert result["mfu"] == pytest.approx(expected_tflops / DEFAULT_PEAK_TFLOPS)
     assert result["wandb_run_path"] == FIXTURE_RUN_PATH
     assert result["wandb_peak_memory_gb"] is None
+    assert result["wandb_alloc_retries"] is None
 
 
 def test_cli_text_report_states_inputs_and_results(sr, nano_workload, cli_args, capsys):
@@ -539,6 +405,7 @@ def test_cli_text_report_states_inputs_and_results(sr, nano_workload, cli_args, 
         "tokens/s/GPU            6,538.4",
         f"MFU                     {expected_tflops / DEFAULT_PEAK_TFLOPS:.2%}",
         "W&B peak memory (GB)    not fetched (--wandb-peak-memory)",
+        "W&B alloc retries       not fetched (--wandb-peak-memory)",
     ):
         assert row in report, row
 
@@ -561,10 +428,13 @@ def test_cli_wandb_peak_memory_adds_the_summary_peaks(sr, cli_args, monkeypatch,
         "memory/mem-max-allocated-gigabytes": 81.8,
         "memory/mem-max-reserved-gigabytes": 84.0,
     }
-    assert FakeApi.requested == [FIXTURE_RUN_PATH]
+    assert result["wandb_alloc_retries"] == 3
+    assert set(FakeApi.requested) == {FIXTURE_RUN_PATH}
 
     assert sr.main([str(FIXTURE), *cli_args, "--wandb-peak-memory"]) == 0
-    assert "W&B peak memory (GB)    mem-max-allocated 81.800, mem-max-reserved 84.000" in capsys.readouterr().out
+    report = capsys.readouterr().out
+    assert "W&B peak memory (GB)    mem-max-allocated 81.800, mem-max-reserved 84.000" in report
+    assert "W&B alloc retries       3" in report
 
 
 def test_cli_wandb_peak_memory_propagates_network_errors(sr, cli_args, monkeypatch):

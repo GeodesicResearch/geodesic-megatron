@@ -14,6 +14,7 @@
 
 """Tests for train module utility functions."""
 
+import gc
 import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -22,6 +23,7 @@ import pytest
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 
+from megatron.bridge.training.config import TrainingConfig
 from megatron.bridge.training.train import (
     _dummy_train_step,
     _handle_mxfp8_param_buffer_copy,
@@ -34,6 +36,7 @@ from megatron.bridge.training.train import (
     maybe_run_manual_gc,
     maybe_synchronize_training_step,
     save_checkpoint_and_time,
+    setup_manual_gc,
     should_disable_forward_pre_hook,
 )
 from megatron.bridge.training.utils.train_utils import maybe_inject_state, use_full_iteration_cuda_graph
@@ -197,6 +200,69 @@ class TestPostTrainingStepHelpers:
         maybe_run_manual_gc(True, 5, iteration=8)
 
         mock_collect.assert_not_called()
+
+
+@pytest.fixture
+def restore_gc_state():
+    """setup_manual_gc changes process-wide collector state; put it back for the other tests."""
+    was_enabled = gc.isenabled()
+    yield
+    gc.unfreeze()
+    if was_enabled:
+        gc.enable()
+
+
+def _permanent_generation_with_nothing_frozen() -> int:
+    """Size of the permanent generation after a collection with nothing frozen.
+
+    Not zero: CPython 3.12 files immortal objects there on every collection.
+    """
+    gc.unfreeze()
+    gc.collect()
+    return gc.get_freeze_count()
+
+
+@pytest.mark.usefixtures("restore_gc_state")
+class TestSetupManualGc:
+    def test_manual_gc_off_leaves_the_collector_untouched(self):
+        gc.enable()
+        permanent_before = gc.get_freeze_count()
+        setup_manual_gc(TrainingConfig(global_batch_size=8, train_iters=10))
+
+        assert gc.isenabled()
+        assert gc.get_freeze_count() == permanent_before
+
+    def test_manual_gc_disables_the_collector_without_freezing_by_default(self):
+        gc.enable()
+        permanent_before = _permanent_generation_with_nothing_frozen()
+        survivors = [[index] for index in range(100)]
+        setup_manual_gc(TrainingConfig(global_batch_size=8, train_iters=10, manual_gc=True, manual_gc_interval=10))
+
+        assert not gc.isenabled()
+        assert gc.get_freeze_count() == permanent_before
+        collected = {id(obj) for obj in gc.get_objects()}
+        assert all(id(survivor) in collected for survivor in survivors)
+
+    def test_manual_gc_freeze_moves_survivors_into_the_permanent_generation(self):
+        permanent_before = _permanent_generation_with_nothing_frozen()
+        # Containers are tracked by the collector (a plain object() is not), so these reach its generations.
+        survivors = [[index] for index in range(100)]
+        assert all(gc.is_tracked(survivor) for survivor in survivors)
+        setup_manual_gc(
+            TrainingConfig(
+                global_batch_size=8, train_iters=10, manual_gc=True, manual_gc_interval=10, manual_gc_freeze=True
+            )
+        )
+
+        assert not gc.isenabled()
+        assert gc.get_freeze_count() >= permanent_before + len(survivors)
+        # gc.get_objects() lists the collected generations only, so a frozen object is absent from it.
+        collected = {id(obj) for obj in gc.get_objects()}
+        assert not any(id(survivor) in collected for survivor in survivors)
+
+    def test_negative_interval_raises(self):
+        with pytest.raises(AssertionError, match="larger than or equal to 0"):
+            setup_manual_gc(TrainingConfig(global_batch_size=8, train_iters=10, manual_gc=True, manual_gc_interval=-1))
 
 
 class TestMxfp8ParamBufferCopy:

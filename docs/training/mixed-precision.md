@@ -95,7 +95,12 @@ config = ConfigContainer(
 
 Megatron Bridge provides numerous predefined mixed precision recipes for different use cases. You can use the {py:func}`~megatron.bridge.training.mixed_precision.get_mixed_precision_config` utility function to convert from a string shortname to a class instance. For the complete list of available recipes and their specific configurations, see the {py:mod}`megatron.bridge.training.mixed_precision` module.
 
-Any recipe name also takes the `_bf16_grad_reduce` modifier (`-bf16-grad-reduce` in hyphen form), which selects that recipe with `grad_reduce_in_fp32=False`: gradients are accumulated in a BF16 main-grad buffer and reduced across data-parallel ranks in BF16, halving the buffer's memory and the reduce-scatter's bytes. The BF16 recipes otherwise reduce in FP32. The recipe before the modifier is written in full or with its trailing `_mixed` dropped, so `bf16_mixed_bf16_grad_reduce` and `nemotron_h_bf16_with_fp8_current_scaling_bf16_grad_reduce` both resolve.
+A recipe name also takes name modifiers, each at most once and in this order (hyphen forms `-bf16-params`, `-bf16-grad-reduce`):
+
+- `_bf16_params` keeps the parameters of a recipe with FP8 parameters in BF16 (`fp8_param_gather=False`, and with it `fp8_param=False`; an MXFP8 recipe also drops `reuse_grad_buf_for_mxfp8_param_ag`, which exists only for MXFP8 parameters) while its GEMMs still run in FP8. With FP8 parameters the dense TE weights are FP8 tensors, so a checkpoint stores their dequantized FP8 values as the model weights and every weights-only consumer (a warm start, an HF export) reads FP8-rounded weights; the FP32 masters exist only in the optimizer state. With the modifier the saved weights are the BF16 of the masters, as in a BF16 run. Only a recipe with FP8 parameters takes it.
+- `_bf16_grad_reduce` selects the recipe with `grad_reduce_in_fp32=False`: gradients are accumulated in a BF16 main-grad buffer and reduced across data-parallel ranks in BF16, halving the buffer's memory and the reduce-scatter's bytes. The BF16 recipes otherwise reduce in FP32.
+
+The recipe before the modifiers is written in full or with its trailing `_mixed` dropped, so `bf16_mixed_bf16_grad_reduce`, `nemotron_h_bf16_with_fp8_current_scaling_bf16_grad_reduce` and `nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce` all resolve.
 
 
 ### Custom FP8 Configuration

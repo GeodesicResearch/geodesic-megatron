@@ -271,10 +271,27 @@ python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/tr
 The scorer reads the sequence length and model FLOPs/token from the config and the model's HF
 `config.json` through `scripts/nemotronh_flops_estimator.py`, takes the batch from the log, and
 prints its inputs beside the score (`--json` for machine-readable output, `--wandb-peak-memory` to
-add the W&B summary peaks). Calibrate `--time` to the measured runtime (a 50-iteration 64-GPU Nano
-probe takes 9–13 min), and repeat a probe before trusting a difference under ~4%, the
-run-to-run spread measured across jobs. The
-Nano pretrain campaign's record is
+add the W&B summary peaks and allocator-retry count). Calibrate `--time` to the measured runtime (a 50-iteration 64-GPU Nano
+probe takes 9–13 min), and compare a probe only against runs placed on a single switch group (the
+log's `[run-identity] switch placement` line): spanning more than one group costs 2.5–6.6% on its own,
+while single-group runs of one posture agree to ~0.5%, so repeat a probe before trusting a smaller
+difference than ~1%.
+
+A lever that changes numerics is adopted only if its loss stays within the run-to-run noise of
+the production posture; one that claims exactness must reproduce it bit for bit.
+`scripts/telemetry/loss_parity.py` tests both on runs of one config and seed:
+
+```bash
+# numerics-changing lever: two reference runs of the production posture, 500 iterations each
+python scripts/telemetry/loss_parity.py band --reference ref_a.out ref_b.out --candidate lever.out \
+    --iterations 1 500 --window 50
+# exact lever or knob-off code path (every compared run with model.deterministic_mode=true and, in an
+# ISAMBARD_ENV_OVERRIDES file, NVTE_ALLOW_NONDETERMINISTIC_ALGO=0, CUBLAS_WORKSPACE_CONFIG=:4096:8, MAMBA_DETERMINISTIC=1)
+python scripts/telemetry/loss_parity.py identity --reference ref.out --candidate lever.out \
+    --iterations 1 30 --wandb
+```
+
+The Nano pretrain campaign's record is
 [docs/investigations/nano30b-pretrain-perf-campaign.md](docs/investigations/nano30b-pretrain-perf-campaign.md).
 
 ### Writing a new YAML config
@@ -333,6 +350,7 @@ Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 | **Super benchmark, 32 nodes** | 32 nodes / 128 GPUs: same topology, DP=4, **GBS 256** (scale the batch with the nodes) | 122.0 ms/sample = 31.228 s/iter, 169.2 TFLOP/s/GPU. With the base config at GBS 128 this override is matched µb/replica (64 both ends): perfect per-sample halving predicts 123.3 ms/sample vs 122.0 measured — scaling perfect within the ±2% cross-allocation placement band, same backend both ends — run as the 64-GPU config plus `train.global_batch_size=256`; the quickstarts are standardised at 64 GPUs and this is the one field that differs |
 | **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
 | **Nano pretrain (from scratch)** | 16 nodes / 64 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=64 (seq 8192, GBS 512 = 8 microbatches per replica, as in the filtered arm's stage 1 at GBS 2048 on 256 GPUs; 50 iterations, no checkpoint I/O) | 9.328 s/iter (mean over iterations 26–50) = 7,026 tokens/s/GPU, 14.78% MFU at 64 GPUs (job 6930454). The control-pretraining baseline stage 1 with a small `base_config:` overlay, so the production posture reaches it unedited; 32 GPUs is the same file plus `train.global_batch_size=256`. Scored as the mean step over iterations 26–50 — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) |
+| **Nano pretrain, fastest configuration** | the Nano pretrain quickstart plus the performance campaign's levers (EP all-to-all / compute overlap with the HybridEP dispatcher, FP8 dense layers with BF16 parameters, BF16 gradients, `[moe_act]` recompute, chunked linear cross-entropy, host-path settings); needs Megatron-LM patches 0003–0005 applied to a copy of the checkout | 4.961 s/iter (mean of eight runs in four paired cycles) = 13,209 tokens/s/GPU, 27.8% MFU: 1.90× the as-is runs on the same allocations, with its 500-iteration loss inside the as-is band — [`configs/quickstart/nemotron_nano_quickstart_pretrain_perf.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain_perf.yaml) |
 | **Super pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=8, ETP=1, DP=16 (seq 8192, GBS 3072, 1B tokens) | 86.940 s/iter = 28.301 ms/sample (loss 12.19 → 7.65, 0 NaN; 225 GB weights-only checkpoint) — [`configs/quickstart/nemotron_super_quickstart_pretrain.yaml`](configs/quickstart/nemotron_super_quickstart_pretrain.yaml) |
 
 Other levers that matter: `recompute_granularity: selective` with MoE-scoped

@@ -294,6 +294,10 @@ Additionally, because CP shards activations, it also partitions optimizer states
    > 1. Megatron-Bridge manually aligns the timing of garbage collection across GPUs that significantly mitigate the host overhead compared to the baseline automatic garbage collection.
    >
    >    > 1. `TrainingConfig.manual_gc_interval=<int>`
+   >
+   > 2. Freezing the objects that survive the setup collection keeps the model, optimizer and dataloader state out of every later collection, which shortens the periodic pauses.
+   >
+   >    > 1. `TrainingConfig.manual_gc_freeze=True`
 
 4. CUDA graph to eliminate repeated static host code execution
 
@@ -361,13 +365,20 @@ Additionally, because CP shards activations, it also partitions optimizer states
    > 1. In FP8 training, after optimizer step execution, we can keep the parameters in FP8. Compared to the baseline that keeps the intermediate weight values in BF16, FP8 parameters lower memory usage and improve communication performance. The below knob enables keeping the parameters in FP8.
    >
    >    > 1. `MixedPrecisionConfig.fp8_param_gather=True`
+   >
+   >    With FP8 parameters a checkpoint stores the dense TE weights FP8-rounded (their fp32 masters live only in
+   >    the optimizer state), so weights-only consumers (warm starts, HF export, evals) read FP8-rounded weights.
+   >    The `_bf16_params` precision modifier keeps FP8 compute with BF16 parameters
+   >    ([mixed-precision.md](training/mixed-precision.md)).
 
 ## Operator Fusion
 
 1. You can control specific fusion behaviors using the following configuration knobs:
 
    > 1. `TransformerConfig.masked_softmax_fusion=true`
-   > 2. `GPTProvider.cross_entropy_loss_fusion=true`
+   > 2. `GPTProvider.cross_entropy_loss_fusion=true` (for a hybrid model with Megatron-LM patch 0005 applied,
+   >    `cross_entropy_fusion_impl='linear'` also fuses the output layer, over vocabulary chunks, without the
+   >    fp32 logits; see `3rdparty/patches/megatron-lm/README.md`)
    > 3. `GPTProvider.gradient_accumulation_fusion=true`
    > 4. `TransformerConfig.bias_activation_fusion=true`
    > 5. `TransformerConfig.bias_dropout_fusion=true`
@@ -657,6 +668,7 @@ python -u /home/dpsk_a2a/deepep/tests/test_internode.py
 - `CommOverlapConfig.tp_comm_overlap_cfg`
 - `CUDA_DEVICE_MAX_CONNECTIONS`
 - `TrainingConfig.manual_gc_interval`
+- `TrainingConfig.manual_gc_freeze`
 - `MixedPrecisionConfig.fp8_param`
 - `ProfilingConfig`
 - `NCCL_NET_GDR_C2C`

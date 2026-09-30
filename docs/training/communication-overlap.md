@@ -138,6 +138,7 @@ correct question is always "which communication path is exposed in this run?"
 - EP overlap asserts when `PP > 1` but `virtual_pipeline_model_parallel_size` is unset.
 - EP overlap asserts when full recompute, recompute method, or shared-expert overlap stays enabled.
 - On a hybrid (Mamba) model EP overlap fails in its first iteration at the pinned Megatron-LM: `HybridModel` has no `build_schedule_plan` there. The vendored patch `3rdparty/patches/megatron-lm/0003-feat-hybrid-port-upstream-4798-hybrid-EP-A2A-overlap.patch` adds it and is not applied to the submodule (see that directory's README).
+- With the HybridEP dispatcher, EP overlap also needs `3rdparty/patches/megatron-lm/0004-fix-hybridep-dispatched-count-lifetime.patch`: at the pinned Megatron-LM, HybridEP's blocking dispatch keeps its dispatched-token count in pinned host memory that queued kernels read after the dispatch handle is freed, and under the overlap this faults intermittently (an illegal memory access in `dispatch_with_permute`).
 - EP overlap raises `ValueError` on a packed batch (`cu_seqlens` present, e.g. `dataset.packed_sequence_specs` set): the training step builds the schedule plan without `packed_seq_params`, so attention and the Mamba scan would cross document boundaries. Turn off packing or the overlap.
 - Setting `moe_flex_dispatcher_backend` alone does not activate DeepEP or HybridEP; the dispatcher must actually switch to `flex`.
 - Small-EP `alltoall` MoE runs can get slower because scheduling overhead is larger than the communication being hidden.

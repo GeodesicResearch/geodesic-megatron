@@ -16,9 +16,10 @@
 
 A preset is a factory registered in :data:`MIXED_PRECISION_RECIPES` under its function name, in
 underscore and hyphen form (``bf16_mixed``, ``bf16-mixed``). :func:`get_mixed_precision_config`
-resolves a preset name, and also any preset name followed by the ``_bf16_grad_reduce`` modifier
-(``-bf16-grad-reduce``), which is that preset with gradients accumulated and reduced in BF16
-(``grad_reduce_in_fp32=False``).
+resolves a preset name, optionally followed by name modifiers (:data:`MIXED_PRECISION_MODIFIERS`), each
+of which changes one aspect of the preset: ``_bf16_params`` keeps an FP8 preset's parameters in BF16
+(``fp8_param_gather=False``, hence ``fp8_param=False``, and no MXFP8 gradient-buffer reuse; FP8 compute is
+unchanged), and ``_bf16_grad_reduce`` accumulates and reduces gradients in BF16 (``grad_reduce_in_fp32=False``).
 """
 
 import logging
@@ -164,8 +165,37 @@ def update_config_with_precision_overrides(mixed_precision_config: MixedPrecisio
 
 MIXED_PRECISION_RECIPES: dict[str, Callable[[], "MixedPrecisionConfig"]] = {}
 
-# Appended to a preset name, selects that preset with grad_reduce_in_fp32=False (see get_mixed_precision_config).
+# Name modifiers appended to a preset name (see get_mixed_precision_config).
+BF16_PARAMS_MODIFIER = "_bf16_params"
 BF16_GRAD_REDUCE_MODIFIER = "_bf16_grad_reduce"
+
+
+def _keep_params_in_bf16(config: "MixedPrecisionConfig") -> None:
+    """Keep the parameters of an FP8 preset in BF16: no FP8 primary weights and no FP8 parameter all-gather.
+
+    With ``fp8_param`` the dense TE weights ARE FP8 tensors, so a checkpoint stores their dequantized FP8
+    values and every weights-only consumer (warm start, HF export) reads FP8-rounded weights; the fp32
+    masters exist only in the optimizer state. BF16 parameters keep the checkpoint's model weights the BF16
+    of the masters, as without FP8, while the GEMMs still run in FP8 under the preset's recipe. An MXFP8
+    preset's reuse of the gradient buffer for the parameter all-gather goes too: it exists only for MXFP8
+    parameters, and Megatron's DDP config refuses it without them.
+    """
+    if not config.fp8_param_gather:
+        raise ValueError(f"'{BF16_PARAMS_MODIFIER}' applies only to a preset with FP8 parameters (fp8_param_gather)")
+    config.fp8_param_gather = False
+    config.reuse_grad_buf_for_mxfp8_param_ag = False
+
+
+def _reduce_grads_in_bf16(config: "MixedPrecisionConfig") -> None:
+    """Accumulate and reduce gradients in BF16 (``grad_reduce_in_fp32=False``)."""
+    config.grad_reduce_in_fp32 = False
+
+
+# In the order a name must carry them: preset, then any of these, each at most once, in this order.
+MIXED_PRECISION_MODIFIERS: dict[str, Callable[["MixedPrecisionConfig"], None]] = {
+    BF16_PARAMS_MODIFIER: _keep_params_in_bf16,
+    BF16_GRAD_REDUCE_MODIFIER: _reduce_grads_in_bf16,
+}
 
 
 def register(func: Callable[[], "MixedPrecisionConfig"]):
@@ -437,40 +467,57 @@ def get_mixed_precision_config(name: str | MixedPrecisionConfig) -> MixedPrecisi
     """Return a :class:`MixedPrecisionConfig` for *name*.
 
     *name* is a key of :pydata:`MIXED_PRECISION_RECIPES`, with hyphens and underscores
-    interchangeable, or a preset name followed by the ``_bf16_grad_reduce`` modifier
-    (``-bf16-grad-reduce``). The modifier returns the preset with ``grad_reduce_in_fp32=False``:
-    the DDP main-grad buffer is bf16 (half the memory of fp32) and the data-parallel reduce-scatter
-    moves half the bytes, so both the accumulation across microbatches and the cross-replica sum
-    run in bf16. Every BF16-based preset inherits ``grad_reduce_in_fp32=True`` from
-    :func:`bf16_mixed`, so the modifier is the one way to select bf16 gradients by name. The
-    preset before the modifier is written either in full (``bf16_mixed_bf16_grad_reduce``) or
+    interchangeable, or a preset name followed by one or more of the name modifiers of
+    :data:`MIXED_PRECISION_MODIFIERS`, each at most once and in that order:
+
+    - ``_bf16_params`` (``-bf16-params``): the preset's parameters stay BF16 (``fp8_param_gather=False``
+      and so ``fp8_param=False``; an MXFP8 preset also drops ``reuse_grad_buf_for_mxfp8_param_ag``) while
+      its GEMMs still run in FP8. Only a preset with FP8 parameters
+      takes it. Without it an FP8-parameter preset saves dequantized FP8 values as the model weights.
+    - ``_bf16_grad_reduce`` (``-bf16-grad-reduce``): ``grad_reduce_in_fp32=False``, i.e. the DDP
+      main-grad buffer is bf16 (half the memory of fp32) and the data-parallel reduce-scatter moves half
+      the bytes, so both the accumulation across microbatches and the cross-replica sum run in bf16.
+      Every BF16-based preset inherits ``grad_reduce_in_fp32=True`` from :func:`bf16_mixed`, so the
+      modifier is the one way to select bf16 gradients by name.
+
+    The preset before the modifiers is written either in full (``bf16_mixed_bf16_grad_reduce``) or
     with its trailing ``_mixed`` dropped
-    (``nemotron_h_bf16_with_fp8_current_scaling_bf16_grad_reduce``).
+    (``nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce``).
 
     Args:
-        name: A preset name, a preset name with the modifier, or a :class:`MixedPrecisionConfig` instance.
+        name: A preset name, a preset name with modifiers, or a :class:`MixedPrecisionConfig` instance.
 
     Raises:
-        ValueError: If *name* is neither a known preset nor a known preset with the modifier, or if
-            the modifier's base names two presets (``X`` and ``X_mixed`` both registered).
+        ValueError: If *name* is neither a known preset nor a known preset with modifiers in order, if
+            the modifiers' base names two presets (``X`` and ``X_mixed`` both registered), or if a
+            modifier does not apply to its preset.
     """
     if isinstance(name, MixedPrecisionConfig):
         return name
     name = name.replace("-", "_")
     if name in MIXED_PRECISION_RECIPES:
         return MIXED_PRECISION_RECIPES[name]()
-    if name.endswith(BF16_GRAD_REDUCE_MODIFIER):
-        stem = name.removesuffix(BF16_GRAD_REDUCE_MODIFIER)
+    stem, applied = name, []
+    for modifier in reversed(MIXED_PRECISION_MODIFIERS):
+        if stem.endswith(modifier):
+            stem = stem.removesuffix(modifier)
+            applied.insert(0, modifier)
+    if applied:
         bases = [base for base in (stem, f"{stem}_mixed") if base in MIXED_PRECISION_RECIPES]
         if len(bases) > 1:
             raise ValueError(f"Mixed-precision recipe '{name}' is ambiguous: its base names both of {bases}.")
         if bases:
             config = MIXED_PRECISION_RECIPES[bases[0]]()
-            config.grad_reduce_in_fp32 = False
+            for modifier in applied:
+                try:
+                    MIXED_PRECISION_MODIFIERS[modifier](config)
+                except ValueError as exc:
+                    raise ValueError(f"Mixed-precision recipe '{name}': {exc}; '{bases[0]}' has none.") from exc
             return config
     valid = ", ".join(sorted(MIXED_PRECISION_RECIPES.keys()))
+    modifiers = ", ".join(f"'{modifier}'" for modifier in MIXED_PRECISION_MODIFIERS)
     raise ValueError(
         f"Unknown mixed-precision recipe '{name}'. Available recipes: {valid}. Any of them also takes the "
-        f"'{BF16_GRAD_REDUCE_MODIFIER}' modifier (e.g. 'bf16_mixed{BF16_GRAD_REDUCE_MODIFIER}') for BF16 "
-        f"gradient accumulation and reduction."
+        f"modifiers {modifiers}, each at most once and in that order (e.g. "
+        f"'bf16_mixed{BF16_GRAD_REDUCE_MODIFIER}' for BF16 gradient accumulation and reduction)."
     )

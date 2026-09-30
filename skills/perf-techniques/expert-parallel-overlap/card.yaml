@@ -101,14 +101,14 @@ recommended_path:
 expected_metric_change:
   - metric: step_time
     direction: down
-    magnitude: "~10-20% (not yet measured in Bridge)"
-    conditions: "MoE with alltoall or flex dispatcher, EP >= 4"
-    evidence: not_yet_measured
+    magnitude: "-3.4%"
+    conditions: "Nemotron-3 Nano 30B-A3B pretraining, 64 GPUs, EP4 intra-node with the HybridEP dispatcher, Megatron-LM patch 0003, CUDA_DEVICE_MAX_CONNECTIONS=32"
+    evidence: measured_nemotron_3_nano_30b_a3b
   - metric: peak_memory
     direction: up
-    magnitude: "slight (not yet measured)"
-    conditions: "EP overlap buffers"
-    evidence: not_yet_measured
+    magnitude: "+1.1 GB allocated, +13 GB reserved (allocator fragmentation under the interleaved schedule)"
+    conditions: "same as step_time"
+    evidence: measured_nemotron_3_nano_30b_a3b
 
 minimal_example:
   config: |
@@ -152,6 +152,10 @@ failure_modes:
     symptom: "No throughput gain from flex dispatcher"
     likely_cause: "apply_flex_dispatcher_backend() not called"
     fix: "Call apply_flex_dispatcher_backend(cfg.model, ...)"
+  - name: hybridep_count_reused
+    symptom: "CUDA illegal memory access in HybridEP dispatch_with_permute, or a negative dimension in the next dispatch, under EP overlap"
+    likely_cause: "HybridEP's blocking dispatch reads its dispatched-token count from pinned host memory freed before a queued kernel ran"
+    fix: "Apply Megatron-LM patch 0004 (3rdparty/patches/megatron-lm/)"
 
 known_constraints:
   - expert_model_parallel_size must be greater than 1.
@@ -173,7 +177,7 @@ known_constraints:
 known_limitations:
   - Setting moe_flex_dispatcher_backend alone does not activate flex dispatch.
   - Public recipes are often conservative and leave MoE overlap disabled by default.
-  - End-to-end throughput gains not yet measured in a controlled Bridge experiment.
+  - End-to-end gains measured only on Nemotron-3 Nano 30B-A3B pretraining (a hybrid model, with patch 0003).
   - Hybrid (Mamba) models have no EP-overlap schedule plan at the pinned Megatron-LM; vendored patch 0003 adds one (not applied by default).
 
 evidence:
@@ -186,8 +190,10 @@ evidence:
   - tests/unit_tests/training/test_deepep.py
   - src/megatron/bridge/training/gpt_step.py
   - tests/unit_tests/training/test_gpt_step_schedule_plan.py
+  - tests/unit_tests/training/test_hybridep_count_lifetime.py
+  - docs/investigations/nano30b-pretrain-perf-campaign.md
 
 follow_up_validation:
-  - Measure end-to-end throughput gain for EP overlap on a representative MoE model.
+  - Measure end-to-end throughput gain for EP overlap on a GPT (non-hybrid) MoE model.
   - Add a positive Bridge functional smoke test for overlap_moe_expert_parallel_comm.
   - Validate flex dispatcher (DeepEP/HybridEP) throughput vs alltoall baseline.

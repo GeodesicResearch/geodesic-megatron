@@ -34,7 +34,8 @@ needs the ``wandb`` client and network access.
 
 Neither memory figure is a maximum over all ranks: the log's after-iteration-1 report comes
 from the ranks that print it, and the W&B summary from the one rank that owns the W&B run (the
-last global rank, ``src/megatron/bridge/training/state.py``), so it is that rank's peak.
+last global rank, ``src/megatron/bridge/training/state.py``), so it is that rank's peak. The
+allocator-retry count ``--wandb-peak-memory`` reports beside the peaks is the same rank's total.
 
 USAGE
     python scripts/telemetry/score_run.py <log> \\
@@ -45,18 +46,16 @@ USAGE
 
 import argparse
 import json
-import re
 import statistics
 import sys
-from collections import Counter
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 
 # Run as a script, only scripts/telemetry/ is on sys.path; the repo root makes the FLOPs estimator
-# (scripts.nemotronh_flops_estimator) importable the same way from every entry point.
+# (scripts.nemotronh_flops_estimator) and the log parser (scripts.telemetry.training_log) importable the same
+# way from every entry point.
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
@@ -69,56 +68,24 @@ from scripts.nemotronh_flops_estimator import (
     compute_flops,
     resolve_hf_config,
 )
+from scripts.telemetry.training_log import (
+    GIGABYTES_SUFFIX,
+    check_window,
+    parse_first_iteration_memory,
+    parse_iteration_records,
+    parse_wandb_run_path,
+    read_log_lines,
+    window_records,
+)
 
 
 # Summary keys the bridge logs to W&B from torch.cuda.memory_stats(), in decimal GB. They are the
 # allocator's peaks since process start on the rank that logs to W&B (the last global rank), so
 # the summary's last value is that rank's peak over the run.
 WANDB_PEAK_MEMORY_KEYS = ("memory/mem-max-allocated-gigabytes", "memory/mem-max-reserved-gigabytes")
-
-# The bridge's per-iteration log line (training/utils/train_utils.py::training_log), e.g.
-#  [2026-09-09 01:38:01] iteration       50/   29881 | consumed samples: ... | lm loss: 6.681113E+00 | ...
-_ITERATION_RE = re.compile(
-    r"(?:\[(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]\s+)?"
-    r"iteration\s+(?P<iteration>\d+)/\s*\d+\s*\|(?P<fields>.*)$"
-)
-_ELAPSED_KEY = "elapsed time per iteration (ms)"
-_THROUGHPUT_KEY = "throughput per GPU (TFLOP/s/GPU)"
-_LOSS_KEY = "lm loss"
-_SKIPPED_KEY = "number of skipped iterations"
-_NAN_KEY = "number of nan iterations"
-_GLOBAL_BATCH_KEY = "global batch size"
-_REQUIRED_ITERATION_KEYS = (_ELAPSED_KEY, _SKIPPED_KEY, _NAN_KEY, _GLOBAL_BATCH_KEY)
-
-# Printed once per data-parallel group's rank 0 after the first logged iteration of a fresh run.
-_MEMORY_RE = re.compile(r"\[Rank \d+\] \(after 1 iterations\) memory \(GB\)(?P<fields>.*)$")
-_GIGABYTES_SUFFIX = "-gigabytes"
-
-# wandb prints the run URL at init ("View run at <url>") and at finish ("View run <name> at: <url>"),
-# on whichever W&B server the run logs to.
-_WANDB_RUN_RE = re.compile(
-    r"View run\b.*?https?://[^/\s]+/"
-    r"(?P<entity>[A-Za-z0-9_.-]+)/(?P<project>[A-Za-z0-9_.-]+)/runs/(?P<run_id>[A-Za-z0-9_-]+)"
-)
-
-
-@dataclass(frozen=True)
-class IterationRecord:
-    """One parsed iteration line of a training log.
-
-    ``skipped_total`` and ``nan_total`` are the counts the line reports; Megatron resets both
-    counters at every log line, so they cover the iterations since the previous line (with
-    ``log_interval: 1``, this iteration alone).
-    """
-
-    iteration: int
-    elapsed_ms: float
-    global_batch_size: int
-    logged_tflops_per_gpu: float | None
-    lm_loss: float | None
-    skipped_total: int
-    nan_total: int
-    timestamp: str | None
+# The same rank's count of cudaMalloc retries (the allocator freed its cache and tried again), cumulative
+# since process start, so the summary's last value is the run's total. "retires" is the bridge's spelling.
+WANDB_ALLOC_RETRIES_KEY = "memory/mem-alloc-retires"
 
 
 @dataclass(frozen=True)
@@ -146,8 +113,9 @@ class RunScore:
     a skipped or NaN iteration anywhere voids the run's loss parity. ``last_iteration`` is the highest
     iteration logged. ``first_iteration_memory_gb`` holds the ``-gigabytes`` fields of the
     after-iteration-1 memory report (the per-key maximum across the ranks that print it), or None when
-    the log has no such report. ``wandb_peak_memory_gb`` holds the W&B summary peaks when the CLI is
-    asked for them (``--wandb-peak-memory``), and None otherwise.
+    the log has no such report. ``wandb_peak_memory_gb`` and ``wandb_alloc_retries`` hold the W&B summary
+    peaks and allocator-retry count when the CLI is asked for them (``--wandb-peak-memory``), and None
+    otherwise.
     """
 
     log_path: str
@@ -178,124 +146,11 @@ class RunScore:
     first_iteration_memory_gb: dict[str, float] | None
     wandb_run_path: str | None
     wandb_peak_memory_gb: dict[str, float] | None
+    wandb_alloc_retries: int | None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the score as a JSON-serialisable dict."""
         return asdict(self)
-
-
-def _iteration_fields(line: str) -> tuple[int, str | None, dict[str, str]] | None:
-    """Split an iteration line into (iteration, timestamp, {field: raw value}); None for any other line."""
-    match = _ITERATION_RE.search(line)
-    if match is None:
-        return None
-    fields: dict[str, str] = {}
-    for part in match.group("fields").split("|"):
-        key, sep, value = part.partition(":")
-        if sep:
-            fields[key.strip()] = value.strip()
-    missing = [key for key in _REQUIRED_ITERATION_KEYS if key not in fields]
-    if missing:
-        raise ValueError(f"iteration line lacks {missing}: {line.rstrip()!r}")
-    return int(match.group("iteration")), match.group("timestamp"), fields
-
-
-def parse_iteration_records(lines: Iterable[str]) -> list[IterationRecord]:
-    """Parse every iteration line, in log order (repeats are kept so a caller can detect them).
-
-    Raises ValueError on a line that has the iteration prefix but lacks a required field.
-    """
-    records = []
-    for line in lines:
-        parsed = _iteration_fields(line)
-        if parsed is None:
-            continue
-        iteration, timestamp, fields = parsed
-        throughput = fields.get(_THROUGHPUT_KEY)
-        loss = fields.get(_LOSS_KEY)
-        records.append(
-            IterationRecord(
-                iteration=iteration,
-                elapsed_ms=float(fields[_ELAPSED_KEY]),
-                global_batch_size=int(fields[_GLOBAL_BATCH_KEY]),
-                logged_tflops_per_gpu=float(throughput) if throughput is not None else None,
-                lm_loss=float(loss) if loss is not None else None,
-                skipped_total=int(fields[_SKIPPED_KEY]),
-                nan_total=int(fields[_NAN_KEY]),
-                timestamp=timestamp,
-            )
-        )
-    return records
-
-
-def parse_first_iteration_memory(lines: Iterable[str]) -> dict[str, float] | None:
-    """Return the ``-gigabytes`` fields of the after-iteration-1 memory report, or None if absent.
-
-    One line is printed per data-parallel group (so several when TP, CP or PP > 1); each key takes
-    its maximum across them, because the heaviest rank is the one that sets the memory ceiling.
-    """
-    peaks: dict[str, float] | None = None
-    for line in lines:
-        match = _MEMORY_RE.search(line)
-        if match is None:
-            continue
-        values = {}
-        for part in match.group("fields").split("|"):
-            key, sep, value = part.partition(":")
-            if sep and key.strip().endswith(_GIGABYTES_SUFFIX):
-                values[key.strip()] = float(value)
-        if not values:
-            raise ValueError(f"memory report carries no {_GIGABYTES_SUFFIX} fields: {line.rstrip()!r}")
-        if peaks is None:
-            peaks = values
-            continue
-        for key, value in values.items():
-            peaks[key] = max(value, peaks.get(key, value))
-    return peaks
-
-
-def parse_wandb_run_path(lines: Iterable[str]) -> str | None:
-    """Return ``<entity>/<project>/<run_id>`` from wandb's "View run" line, or None if absent.
-
-    Raises ValueError when the log names more than one run, since the score could then belong to either.
-    """
-    paths = []
-    for line in lines:
-        match = _WANDB_RUN_RE.search(line)
-        if match is not None:
-            path = f"{match.group('entity')}/{match.group('project')}/{match.group('run_id')}"
-            if path not in paths:
-                paths.append(path)
-    if len(paths) > 1:
-        raise ValueError(f"log names several W&B runs: {paths}")
-    return paths[0] if paths else None
-
-
-def _read_log_lines(log_path: Path) -> list[str]:
-    # A stray undecodable byte (interleaved native output) must not stop the scoring; a replaced
-    # character inside a scored field still fails that field's parse.
-    return Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
-
-
-def _check_window(name: str, window: tuple[int, int], min_iterations: int) -> None:
-    first, last = window
-    if first < 1 or last - first + 1 < min_iterations:
-        raise ValueError(f"{name} {window} must start at >= 1 and span >= {min_iterations} iteration(s)")
-
-
-def _window_records(records: list[IterationRecord], window: tuple[int, int], label: str) -> list[IterationRecord]:
-    """Return the records of ``window`` (inclusive) in iteration order; raise unless each appears exactly once."""
-    first, last = window
-    inside = [r for r in records if first <= r.iteration <= last]
-    counts = Counter(r.iteration for r in inside)
-    missing = [i for i in range(first, last + 1) if counts[i] == 0]
-    repeated = sorted(i for i, count in counts.items() if count > 1)
-    if missing or repeated:
-        raise ValueError(
-            f"{label} {first}-{last}: every iteration must be logged exactly once; "
-            f"missing {missing or 'none'}, repeated {repeated or 'none'}"
-        )
-    return sorted(inside, key=lambda r: r.iteration)
 
 
 def workload_from_config(config_path: str | Path, hf_model: str) -> Workload:
@@ -333,8 +188,8 @@ def score_log(
     lines report more than one global batch size, if an iteration of ``loss_window`` logs no loss,
     or if a parameter is out of range.
     """
-    _check_window("window", window, min_iterations=2)
-    _check_window("loss_window", loss_window, min_iterations=1)
+    check_window("window", window, min_iterations=2)
+    check_window("loss_window", loss_window, min_iterations=1)
     for name, value in (
         ("num_gpus", num_gpus),
         ("peak_tflops_per_gpu", peak_tflops_per_gpu),
@@ -344,10 +199,10 @@ def score_log(
         if value <= 0:
             raise ValueError(f"{name} must be positive, got {value}")
 
-    lines = _read_log_lines(log_path)
+    lines = read_log_lines(log_path)
     records = parse_iteration_records(lines)
-    scored = _window_records(records, window, f"{log_path}: window")
-    loss_records = _window_records(records, loss_window, f"{log_path}: loss_window")
+    scored = window_records(records, window, f"{log_path}: window")
+    loss_records = window_records(records, loss_window, f"{log_path}: loss_window")
     lossless = [r.iteration for r in loss_records if r.lm_loss is None]
     if lossless:
         raise ValueError(f"{log_path}: loss_window iterations {lossless} log no lm loss")
@@ -396,6 +251,7 @@ def score_log(
         first_iteration_memory_gb=parse_first_iteration_memory(lines),
         wandb_run_path=parse_wandb_run_path(lines),
         wandb_peak_memory_gb=None,
+        wandb_alloc_retries=None,
     )
 
 
@@ -407,26 +263,40 @@ def fetch_wandb_peak_memory(run_path: str) -> dict[str, float]:
     by default the public cloud). Raises KeyError if the summary lacks either key; W&B client and
     network errors propagate.
     """
+    summary = _wandb_summary(run_path, WANDB_PEAK_MEMORY_KEYS)
+    return {key: float(summary[key]) for key in WANDB_PEAK_MEMORY_KEYS}
+
+
+def fetch_wandb_alloc_retries(run_path: str) -> int:
+    """Return the run's W&B summary value for ``WANDB_ALLOC_RETRIES_KEY``: the allocator retries of the rank
+    that logs to W&B over the whole run. Raises KeyError if the summary lacks the key; W&B client and
+    network errors propagate."""
+    return int(_wandb_summary(run_path, (WANDB_ALLOC_RETRIES_KEY,))[WANDB_ALLOC_RETRIES_KEY])
+
+
+def _wandb_summary(run_path: str, keys: tuple[str, ...]) -> Any:
+    """Return the run's W&B summary, raising KeyError when it lacks any of ``keys``."""
     import wandb  # deferred: only --wandb-peak-memory needs the W&B client, and scoring must run without it
 
     summary = wandb.Api().run(run_path).summary
-    missing = [key for key in WANDB_PEAK_MEMORY_KEYS if key not in summary]
+    missing = [key for key in keys if key not in summary]
     if missing:
         raise KeyError(f"W&B run {run_path} has no summary value for {missing}")
-    return {key: float(summary[key]) for key in WANDB_PEAK_MEMORY_KEYS}
+    return summary
 
 
 def _memory_text(memory: dict[str, float] | None, absent: str) -> str:
     if memory is None:
         return absent
     return ", ".join(
-        f"{key.removeprefix('memory/').removesuffix(_GIGABYTES_SUFFIX)} {value:.3f}" for key, value in memory.items()
+        f"{key.removeprefix('memory/').removesuffix(GIGABYTES_SUFFIX)} {value:.3f}" for key, value in memory.items()
     )
 
 
 def format_score(score: RunScore) -> str:
     """Render a score, inputs first, as the CLI's human-readable report."""
     workload = score.workload
+    retries = score.wandb_alloc_retries
     rows = [
         f"log                     {score.log_path}",
         f"config                  {workload.config_path}",
@@ -451,6 +321,7 @@ def format_score(score: RunScore) -> str:
         f"iter-1 memory (GB)      {_memory_text(score.first_iteration_memory_gb, 'not reported')}",
         f"W&B run                 {score.wandb_run_path or 'not found'}",
         f"W&B peak memory (GB)    {_memory_text(score.wandb_peak_memory_gb, 'not fetched (--wandb-peak-memory)')}",
+        f"W&B alloc retries       {'not fetched (--wandb-peak-memory)' if retries is None else retries}",
     ]
     return "\n".join(rows)
 
@@ -490,7 +361,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--wandb-peak-memory",
         action="store_true",
-        help="Also read the W&B run's summary peak memory (the last rank's; needs the wandb client and network)",
+        help="Also read the W&B run's summary peak memory and allocator-retry count (the last rank's; needs "
+        "the wandb client and network)",
     )
     parser.add_argument("--json", action="store_true", help="Emit the score as JSON")
     return parser
@@ -509,8 +381,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.wandb_peak_memory:
         if score.wandb_run_path is None:
-            raise ValueError(f"{args.log} names no W&B run, so there is no summary to read peak memory from")
-        score = replace(score, wandb_peak_memory_gb=fetch_wandb_peak_memory(score.wandb_run_path))
+            raise ValueError(f"{args.log} names no W&B run, so there is no summary to read memory from")
+        score = replace(
+            score,
+            wandb_peak_memory_gb=fetch_wandb_peak_memory(score.wandb_run_path),
+            wandb_alloc_retries=fetch_wandb_alloc_retries(score.wandb_run_path),
+        )
     print(json.dumps(score.to_dict(), indent=2) if args.json else format_score(score))
     return 0
 

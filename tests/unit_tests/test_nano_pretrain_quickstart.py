@@ -21,6 +21,9 @@ tests' do. The set of fields that differ between the merged quickstart and the m
 equal exactly the benchmark's overlay — a batch sized to production's per-replica work, a 50-iteration
 exit, no checkpoint I/O, and its own cache, timeout and W&B identity — and each of those fields must
 satisfy the rule it exists for.
+
+The campaign's performance overlay of the quickstart is held to the same standard one level up: it
+may differ from the quickstart only in its levers and its W&B name.
 """
 
 from __future__ import annotations
@@ -176,3 +179,59 @@ class TestTheFlopsEstimatorReadsTheOverlay:
         assert spec.recompute_modules == tuple(quickstart.model.recompute_modules)
         assert spec.expert_model_parallel_size == quickstart.model.expert_model_parallel_size
         assert spec.context_parallel_size == quickstart.model.context_parallel_size
+
+
+PERFORMANCE = _REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_quickstart_pretrain_perf.yaml"
+# The performance posture's levers at the values its runs were measured with. The overlay's identity field
+# is not among them: it only names the W&B run.
+PERFORMANCE_LEVERS = {
+    "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
+    "model.recompute_modules": ["moe_act"],
+    "model.moe_token_dispatcher_type": "flex",
+    "model.moe_flex_dispatcher_backend": "hybridep",
+    "model.mtp_num_layers": None,
+    "model.moe_router_fusion": True,
+    "model.cross_entropy_loss_fusion": True,
+    "model.cross_entropy_fusion_impl": "linear",
+    "model.cross_entropy_fusion_saved_logit_chunks": 8,
+    "comm_overlap.overlap_param_gather": True,
+    "comm_overlap.overlap_moe_expert_parallel_comm": True,
+    "ddp.check_for_nan_in_grad": False,
+    "rerun_state_machine.check_for_nan_in_loss": False,
+    "train.manual_gc": True,
+    "train.manual_gc_interval": 10,
+    "train.manual_gc_freeze": True,
+    "logger.timing_log_level": 1,
+    "logger.log_l2_norm_grad_to_tensorboard": False,
+}
+
+
+class TestThePerformanceOverlay:
+    """The performance posture is the quickstart plus its levers and nothing else.
+
+    Compared as composed YAML rather than merged onto the recipe: on the pinned submodule, which the
+    unit suite runs against, the merge drops ``model.cross_entropy_fusion_saved_logit_chunks``, a field
+    only patch 0005 adds, so a merged comparison could not see it. The composed files are what the
+    launcher merges, so a field that differs here is a field that differs in the run.
+    """
+
+    def test_it_overlays_the_quickstart_and_states_only_its_levers(self):
+        raw = OmegaConf.to_container(OmegaConf.load(PERFORMANCE))
+        base_ref = raw.pop(BASE_CONFIG_KEY)
+        assert (PERFORMANCE.parent / base_ref).resolve() == QUICKSTART.resolve()
+        assert set(dotted_leaves(raw)) == set(PERFORMANCE_LEVERS) | {"logger.wandb_exp_name"}
+
+    def test_exactly_the_levers_and_the_run_name_differ_from_the_quickstart(self):
+        performance = dotted_leaves(load_composed_yaml(PERFORMANCE))
+        quickstart = dotted_leaves(load_composed_yaml(QUICKSTART))
+        # An explicit null is a divergence from an absent key: mtp_num_layers null overrides the model
+        # provider's default 0.
+        absent = object()
+        differing = {
+            key
+            for key in performance.keys() | quickstart.keys()
+            if performance.get(key, absent) != quickstart.get(key, absent)
+        }
+        assert differing == set(PERFORMANCE_LEVERS) | {"logger.wandb_exp_name"}
+        assert {key: performance[key] for key in PERFORMANCE_LEVERS} == PERFORMANCE_LEVERS
+        assert performance["logger.wandb_exp_name"] != quickstart["logger.wandb_exp_name"]

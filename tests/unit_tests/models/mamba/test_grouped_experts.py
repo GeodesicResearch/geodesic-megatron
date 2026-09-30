@@ -25,11 +25,12 @@ Those are environment boundaries, not test conveniences, so each backend skips w
 reason naming exactly what is missing.
 """
 
-import os
 from types import SimpleNamespace
 
 import pytest
 import torch
+
+from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
 
 
 try:
@@ -67,24 +68,13 @@ def _require_backend(gemm_backend):
 def pg_collection():
     """Real world-1 mcore parallel state: expert groups + the expert-parallel RNG tracker."""
     from megatron.core import parallel_state
-    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
-    torch.cuda.set_device(0)
-    if not torch.distributed.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", "29777")
-        os.environ.setdefault("RANK", "0")
-        os.environ.setdefault("WORLD_SIZE", "1")
-        torch.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel(expert_model_parallel_size=1)
-    model_parallel_cuda_manual_seed(1234)
-    yield SimpleNamespace(
-        ep=parallel_state.get_expert_model_parallel_group(),
-        expt_tp=parallel_state.get_expert_tensor_parallel_group(),
-        expt_dp=parallel_state.get_expert_data_parallel_group(),
-    )
-    parallel_state.destroy_model_parallel()
+    with one_rank_model_parallel_state(seed=1234, expert_model_parallel_size=1):
+        yield SimpleNamespace(
+            ep=parallel_state.get_expert_model_parallel_group(),
+            expt_tp=parallel_state.get_expert_tensor_parallel_group(),
+            expt_dp=parallel_state.get_expert_data_parallel_group(),
+        )
 
 
 def _config(fused_weighted_act=False):
