@@ -30,6 +30,7 @@ known_constraints:
   - moe_token_dispatcher_type must be alltoall or flex.
   - Precision must be BF16 or FP16.
   - If pipeline parallelism is used, virtual pipeline parallelism is required for the overlap path.
+  - Packed sequences cannot be combined with the overlap path (gpt_step raises ValueError).
 known_limitations:
   - Setting moe_flex_dispatcher_backend alone does not activate flex dispatch.
   - Public recipes are often conservative and leave MoE overlap disabled by default.

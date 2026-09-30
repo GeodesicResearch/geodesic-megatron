@@ -54,6 +54,7 @@ enable_when:
 avoid_when:
   - Full activation recompute is enabled
   - moe_shared_expert_overlap is enabled
+  - Dataset uses packed sequences (the training step refuses them with the overlap)
   - PyTorch < 2.6.0
   - Still bringing up training for correctness
 
@@ -70,6 +71,8 @@ interactions:
       TE >= 2.12.0, gradient_accumulation_fusion = True, and no attention bias
   - name: mtp
     constraint: "mtp_num_layers must be None or 1"
+  - name: packed_sequences
+    constraint: "a packed batch raises ValueError: gpt_step builds the schedule plan without packed_seq_params"
 
 feature_meaning:
   overlap_moe_expert_parallel_comm: >
@@ -162,6 +165,7 @@ known_constraints:
   - recompute_method must be None.
   - recompute_num_layers must be None.
   - mtp_num_layers must be None or 1.
+  - Packed sequences cannot be combined with overlap_moe_expert_parallel_comm.
   - delay_wgrad_compute requires overlap_moe_expert_parallel_comm.
   - delay_wgrad_compute with overlap_grad_reduce requires TE >= 2.7.0.
   - CUDA graph attn scope + delay_wgrad requires TE >= 2.12.0 and no attention bias.
@@ -179,6 +183,8 @@ evidence:
   - scripts/performance/utils/overrides.py
   - tests/unit_tests/training/test_comm_overlap.py
   - tests/unit_tests/training/test_deepep.py
+  - src/megatron/bridge/training/gpt_step.py
+  - tests/unit_tests/training/test_gpt_step_schedule_plan.py
 
 follow_up_validation:
   - Measure end-to-end throughput gain for EP overlap on a representative MoE model.

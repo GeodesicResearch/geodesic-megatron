@@ -58,6 +58,10 @@ You must also set `moe_token_dispatcher_type = "flex"`.
 4. **Conservative recipe defaults**: Most public recipes leave MoE overlap
    disabled. You need to explicitly enable it via overrides.
 
+5. **Packed sequences**: the training step raises `ValueError` on a packed
+   batch under the overlap (`gpt_step` builds the schedule plan without
+   `packed_seq_params`); turn off packing or the overlap.
+
 ## Verification
 
 Look for overlap-related log messages during initialization. The comm overlap
