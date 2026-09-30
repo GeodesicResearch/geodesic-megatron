@@ -173,6 +173,12 @@ from types import SimpleNamespace
 from typing import Any
 
 
+# Run as a script, only scripts/ itself is on sys.path; the repo root makes the shared config
+# reader (scripts.training.config_compose) importable the same way from every entry point.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
 # GH200 / H100 SXM dense BF16 tensor-core peak, TFLOP/s per GPU (no sparsity).
 DEFAULT_PEAK_TFLOPS = 989.4
 
@@ -297,7 +303,7 @@ class ArchSpec:
 
 @dataclass(frozen=True)
 class RunSpec:
-    """The workload, read from a training YAML."""
+    """The workload, read from a training YAML through its ``base_config`` chain."""
 
     config_path: str
     global_batch_size: int
@@ -319,10 +325,10 @@ class RunSpec:
 
     @classmethod
     def from_yaml(cls, path: str) -> "RunSpec":
-        import yaml  # deferred: keeps `--help` and imports working without PyYAML
+        # deferred: the reader needs PyYAML, and `--help` and imports must work without it
+        from scripts.training.config_compose import load_composed_yaml
 
-        with open(path) as fh:
-            cfg = yaml.safe_load(fh) or {}
+        cfg = load_composed_yaml(path)
         model = cfg.get("model") or {}
         train = cfg.get("train") or {}
         dataset = cfg.get("dataset") or {}
@@ -675,6 +681,18 @@ def padded_vocab_size(arch: ArchSpec, run: RunSpec) -> int:
     return int(math.ceil(vocab / multiple) * multiple)
 
 
+def achieved_throughput(
+    flops_per_iter: float, seconds_per_iter: float, gpus: int, peak_tflops: float
+) -> tuple[float, float]:
+    """TFLOP/s per GPU for ``flops_per_iter`` FLOPs done in ``seconds_per_iter`` on ``gpus`` GPUs, and its fraction of ``peak_tflops``.
+
+    With model FLOPs the fraction is MFU, with hardware FLOPs HFU. This is the one place the
+    division is written: the report here and ``scripts/telemetry/score_run.py`` both call it.
+    """
+    tflops_per_gpu = flops_per_iter / seconds_per_iter / gpus / 1e12
+    return tflops_per_gpu, tflops_per_gpu / peak_tflops
+
+
 # --------------------------------------------------------------------------------------
 # Cross-check against the REAL in-repo counter
 # --------------------------------------------------------------------------------------
@@ -912,12 +930,9 @@ def format_report(
         if seconds_per_iter:
             add(f"  {'s/iter':>8}  {'model TFLOP/s/GPU':>18}  {'MFU':>7}  {'hw TFLOP/s/GPU':>15}  {'HFU':>7}")
             for sec in seconds_per_iter:
-                model_tf = report.model_flops_per_iter / sec / gpus / 1e12
-                hw_tf = report.hardware_flops_per_iter / sec / gpus / 1e12
-                add(
-                    f"  {sec:>8.2f}  {model_tf:>18.1f}  {model_tf / peak_tflops:>6.1%}  "
-                    f"{hw_tf:>15.1f}  {hw_tf / peak_tflops:>6.1%}"
-                )
+                model_tf, mfu = achieved_throughput(report.model_flops_per_iter, sec, gpus, peak_tflops)
+                hw_tf, hfu = achieved_throughput(report.hardware_flops_per_iter, sec, gpus, peak_tflops)
+                add(f"  {sec:>8.2f}  {model_tf:>18.1f}  {mfu:>6.1%}  {hw_tf:>15.1f}  {hfu:>6.1%}")
                 add(
                     f"            -> {sec - floor:.2f} s/iter ({1 - floor / sec:.1%}) is NOT tensor-core "
                     f"arithmetic: pipeline bubble, collectives, memory-bound kernels, launch gaps."
@@ -940,10 +955,12 @@ def report_to_dict(
     report: FlopReport,
     seconds_per_iter: list[float],
     gpus: int | None,
+    peak_tflops: float,
     compare_megatron: bool = False,
 ) -> dict[str, Any]:
     """Machine-readable form of the report, for `--json`.
 
+    `peak_tflops` is the per-GPU peak the throughput entries' MFU and HFU are fractions of.
     `compare_megatron` is opt-in for the same reason as the text report's section: it calls
     the real counter, which needs torch and megatron-core.
     """
@@ -969,14 +986,20 @@ def report_to_dict(
     if compare_megatron:
         out["megatron_counter_flops_per_iter"] = megatron_counter_flops_per_iter(report.arch, report.run)
     if gpus:
-        out["throughput"] = [
-            {
-                "seconds_per_iter": sec,
-                "model_tflops_per_gpu": report.model_flops_per_iter / sec / gpus / 1e12,
-                "hardware_tflops_per_gpu": report.hardware_flops_per_iter / sec / gpus / 1e12,
-            }
-            for sec in seconds_per_iter
-        ]
+        out["peak_tflops"] = peak_tflops
+        out["throughput"] = []
+        for sec in seconds_per_iter:
+            model_tf, mfu = achieved_throughput(report.model_flops_per_iter, sec, gpus, peak_tflops)
+            hw_tf, hfu = achieved_throughput(report.hardware_flops_per_iter, sec, gpus, peak_tflops)
+            out["throughput"].append(
+                {
+                    "seconds_per_iter": sec,
+                    "model_tflops_per_gpu": model_tf,
+                    "mfu": mfu,
+                    "hardware_tflops_per_gpu": hw_tf,
+                    "hfu": hfu,
+                }
+            )
     return out
 
 
@@ -1060,7 +1083,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.json:
-        payload = report_to_dict(report, args.seconds_per_iter, args.gpus, args.compare_megatron)
+        payload = report_to_dict(report, args.seconds_per_iter, args.gpus, args.peak_tflops, args.compare_megatron)
         payload["hf_config_path"] = hf_cfg_path
         print(json.dumps(payload, indent=2))
     else:

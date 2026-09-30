@@ -24,6 +24,18 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   table means the run is waiting on storage, not wedged in a collective. Needs py-spy on the host
   PATH (`python3 -m pip install --user py-spy`) or its path in `PY_SPY`.
 
+## Config composition
+
+- `config_compose.py` - `load_composed_yaml(path)` reads a training YAML through its top-level
+  `base_config:` key, so an overlay holds only the fields it changes. The base path is resolved
+  against the overlay's own directory (or taken as written when absolute) and may itself name a
+  base. Mappings deep-merge; a list, a scalar or an explicit `null` replaces the base value, which
+  is what `OmegaConf.merge` does. Scalars are read as `OmegaConf.load` reads them. A cycle, a
+  missing base or a non-mapping file raises. `pipeline_training_run.py`, the FLOPs estimator and
+  the config tests all read `--config-file` YAMLs through it. It needs only PyYAML, so host-side
+  tools can import it. `deep_merge(base, overlay)` is that merge on its own, and
+  `parse_yaml_mapping(text, source)` reads one document with the same scalar rules.
+
 ## Quick Start
 
 For the end-to-end overview of how recipes are structured, overridden, and launched, see the official [Using Recipes guide](https://docs.nvidia.com/nemo/megatron-bridge/latest/recipe-usage.html).

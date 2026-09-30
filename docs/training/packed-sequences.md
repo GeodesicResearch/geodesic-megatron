@@ -56,6 +56,8 @@ The durable constraints for packed sequences in Bridge are:
 - for fine-tuning with CP enabled, per-token loss behavior and reduction
   settings matter
 - CUDA-graph-friendly packed metadata requires additional padding constraints
+- packed sequences cannot be combined with the MoE expert-parallel overlap
+  (`comm_overlap.overlap_moe_expert_parallel_comm`): the training step raises `ValueError`
 
 Model-family support is not universal. Some families and recipe paths explicitly
 opt out of packed sequences or related packing modes.

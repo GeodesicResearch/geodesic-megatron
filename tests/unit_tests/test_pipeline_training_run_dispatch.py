@@ -7,14 +7,23 @@ than a re-declaration of it.
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
 import pytest
+from scripts.training.config_compose import load_composed_yaml
 
 
 MODELS = ("nano", "super", "ultra")
 MODES = ("sft", "cpt", "pretrain")
+BASELINE_PRETRAIN = (
+    Path(__file__).resolve().parents[2]
+    / "configs"
+    / "control_pretraining"
+    / "30b_baseline"
+    / "nemotron_nano_30b_baseline_pretrain.yaml"
+)
 
 
 class TestRecipeMap:
@@ -112,6 +121,35 @@ class TestMainWiring:
         calls = self._run_main(run_module, monkeypatch, tmp_path, "cpt", self._DATA_PATH_YAML)
         assert set(calls) == {"finetune"}
         assert calls["finetune"]["config"].dataset.data_path == ["1.0", "/nonexistent/corpus_input_document"]
+
+    def test_a_base_config_overlay_trains_as_its_composed_config(self, run_module, monkeypatch, tmp_path):
+        """The overlay's own fields win, and everything else comes from its base — including the
+        corpus, which the .bin/.idx dataset rebuild re-reads from the merged config rather than
+        from the recipe, so it would silently vanish if only the overlay file were read."""
+        overlay = (
+            f"base_config: {BASELINE_PRETRAIN}\n"
+            "train:\n  global_batch_size: 512\n"
+            "checkpoint:\n  load: null\n  save: null\n"
+        )
+        cfg = self._run_main(run_module, monkeypatch, tmp_path, "pretrain", overlay)["pretrain"]["config"]
+        base = load_composed_yaml(BASELINE_PRETRAIN)
+        assert cfg.train.global_batch_size == 512
+        assert cfg.checkpoint.load is None and cfg.checkpoint.save is None
+        assert cfg.train.train_iters == base["train"]["train_iters"]
+        assert cfg.model.expert_model_parallel_size == base["model"]["expert_model_parallel_size"]
+        assert cfg.dataset.data_path == [str(entry) for entry in base["dataset"]["data_path"]]
+        assert cfg.dataset.split == base["dataset"]["split"]
+        assert cfg.dataset.sequence_length == base["dataset"]["seq_length"]
+
+    def test_env_overrides_are_echoed_at_startup(self, run_module, monkeypatch, tmp_path, caplog):
+        monkeypatch.setenv("ISAMBARD_ENV_OVERRIDE_KEYS", "TORCH_NCCL_BLOCKING_WAIT")
+        monkeypatch.setenv("TORCH_NCCL_BLOCKING_WAIT", "0")
+        monkeypatch.setenv("LOCAL_RANK", "0")
+        monkeypatch.setenv("RANK", "0")
+        with caplog.at_level(logging.INFO, logger=run_module.logger.name):
+            self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._DATA_PATH_YAML)
+        echoes = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[env-overrides]")]
+        assert len(echoes) == 1 and echoes[0].endswith(" TORCH_NCCL_BLOCKING_WAIT=0")
 
 
 class TestModeCli:

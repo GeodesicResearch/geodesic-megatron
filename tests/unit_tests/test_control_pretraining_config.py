@@ -31,10 +31,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from omegaconf import OmegaConf
+from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
-from tests.unit_tests.campaign_config import campaign_training_configs, merge_onto_recipe
+from tests.unit_tests.campaign_config import campaign_training_configs, is_training_config, merge_onto_recipe
 
 
 CAMPAIGN_CONFIG = (
@@ -43,6 +43,26 @@ CAMPAIGN_CONFIG = (
     / "control_pretraining"
     / "nemotron_nano_control_v1_baseline_500b.yaml"
 )
+
+
+BASELINE_PRETRAIN_CONFIG = CAMPAIGN_CONFIG.parent / "30b_baseline" / "nemotron_nano_30b_baseline_pretrain.yaml"
+
+
+def tensorboard_offenders(paths: list[Path], root: Path) -> dict[str, object]:
+    """The configs among ``paths`` that do not disable TensorBoard, keyed relative to ``root``.
+
+    Each config is judged as the launcher reads it, through its `base_config` chain: an overlay
+    that inherits a stated null from its base disables TensorBoard, and one that names a directory
+    over that null does not.
+    """
+    offenders = {}
+    for path in paths:
+        logger_section = load_composed_yaml(path).get("logger") or {}
+        if "tensorboard_dir" not in logger_section:
+            offenders[str(path.relative_to(root))] = "omitted, so it inherits the recipe default"
+        elif logger_section["tensorboard_dir"] is not None:
+            offenders[str(path.relative_to(root))] = logger_section["tensorboard_dir"]
+    return offenders
 
 
 @pytest.fixture(scope="module")
@@ -94,15 +114,22 @@ class TestTensorBoardIsDisabledEverywhere:
     """
 
     def test_every_training_config_states_tensorboard_dir_as_null(self):
-        campaign = CAMPAIGN_CONFIG.parent
-        offenders = {}
-        for path in campaign_training_configs():
-            logger_section = OmegaConf.load(path).get("logger") or {}
-            if "tensorboard_dir" not in logger_section:
-                offenders[str(path.relative_to(campaign))] = "omitted, so it inherits the recipe default"
-            elif logger_section["tensorboard_dir"] is not None:
-                offenders[str(path.relative_to(campaign))] = logger_section["tensorboard_dir"]
+        offenders = tensorboard_offenders(campaign_training_configs(), CAMPAIGN_CONFIG.parent)
         assert offenders == {}, f"configs that do not disable TensorBoard: {offenders}"
+
+    def test_an_overlay_is_judged_by_its_composed_config(self, tmp_path):
+        """An overlay's own file may say nothing about TensorBoard, or even about training: its
+        `train` and `logger` sections come from its base. Judged by the raw file, the first overlay
+        below would be skipped as a non-training config, and the second would be skipped too —
+        so the directory it names would reach a run unchecked."""
+        inherits_null = tmp_path / "inherits_null.yaml"
+        inherits_null.write_text(f"base_config: {BASELINE_PRETRAIN_CONFIG}\n")
+        names_a_directory = tmp_path / "names_a_directory.yaml"
+        names_a_directory.write_text("base_config: inherits_null.yaml\nlogger:\n  tensorboard_dir: /tmp/tb_logs\n")
+        assert is_training_config(inherits_null) and is_training_config(names_a_directory)
+        assert tensorboard_offenders([inherits_null, names_a_directory], tmp_path) == {
+            "names_a_directory.yaml": "/tmp/tb_logs"
+        }
 
     def test_the_configs_cover_every_stage_of_every_arm(self):
         """A guard over a discovered set is only as good as the discovery: if the `train` filter

@@ -25,11 +25,12 @@ Those are environment boundaries, not test conveniences, so each backend skips w
 reason naming exactly what is missing.
 """
 
-import os
 from types import SimpleNamespace
 
 import pytest
 import torch
+
+from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
 
 
 try:
@@ -67,24 +68,13 @@ def _require_backend(gemm_backend):
 def pg_collection():
     """Real world-1 mcore parallel state: expert groups + the expert-parallel RNG tracker."""
     from megatron.core import parallel_state
-    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
-    torch.cuda.set_device(0)
-    if not torch.distributed.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", "29777")
-        os.environ.setdefault("RANK", "0")
-        os.environ.setdefault("WORLD_SIZE", "1")
-        torch.distributed.init_process_group(backend="nccl", rank=0, world_size=1)
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel(expert_model_parallel_size=1)
-    model_parallel_cuda_manual_seed(1234)
-    yield SimpleNamespace(
-        ep=parallel_state.get_expert_model_parallel_group(),
-        expt_tp=parallel_state.get_expert_tensor_parallel_group(),
-        expt_dp=parallel_state.get_expert_data_parallel_group(),
-    )
-    parallel_state.destroy_model_parallel()
+    with one_rank_model_parallel_state(seed=1234, expert_model_parallel_size=1):
+        yield SimpleNamespace(
+            ep=parallel_state.get_expert_model_parallel_group(),
+            expt_tp=parallel_state.get_expert_tensor_parallel_group(),
+            expt_dp=parallel_state.get_expert_data_parallel_group(),
+        )
 
 
 def _config(fused_weighted_act=False):
@@ -297,6 +287,58 @@ class TestTorchGroupedBackend:
         ref = _reference(x, m.weight1.detach(), m.weight2.detach(), tokens_per_expert, probs)
         assert torch.equal(out, ref), f"max |diff| = {(out.float() - ref.float()).abs().max().item()}"
 
+    def test_fp8_recipe_leaves_the_routed_experts_in_bf16(self, pg_collection):
+        """Under an FP8 recipe the experts must compute exactly what they compute in BF16.
+
+        The recipe quantizes the model's dense TE linears inside TE's fp8_autocast; torch._grouped_mm
+        is outside TE, so the routed experts stay BF16 and match the per-expert reference bit for bit.
+        """
+        import transformer_engine.pytorch as te
+        from transformer_engine.common.recipe import Float8CurrentScaling
+
+        from megatron.bridge.models.mamba.grouped_experts import GroupedExperts
+
+        _require_backend("torch_grouped")
+        torch.cuda.set_device(0)
+        config = _config()
+        config.fp8 = "hybrid"
+        m = GroupedExperts(E, config, pg_collection=pg_collection, gemm_backend="torch_grouped").cuda()
+        tokens_per_expert = torch.tensor([5, 0, 3, 7, 1, 2, 4, 6], dtype=torch.long)
+        n = int(tokens_per_expert.sum())
+        x = torch.randn(n, LATENT, dtype=torch.bfloat16, device="cuda")
+        probs = torch.rand(n, dtype=torch.bfloat16, device="cuda")
+
+        with te.fp8_autocast(enabled=True, fp8_recipe=Float8CurrentScaling()):
+            out, _ = m(x, tokens_per_expert, probs)
+        ref = _reference(x, m.weight1.detach(), m.weight2.detach(), tokens_per_expert, probs)
+        assert out.dtype == torch.bfloat16
+        assert torch.equal(out, ref)
+
+    @pytest.mark.parametrize("counts_device", ["cpu", "cuda"])
+    def test_forward_never_synchronizes_the_host(self, pg_collection, counts_device):
+        """The grouped-GEMM offsets must reach the GPU without a host-blocking copy.
+
+        Every MoE layer calls this forward once per microbatch (and again under recompute),
+        so a blocking copy here drains the GPU queue and exposes the next launches — the
+        trace of the 64-GPU Nano pretrain posture counted 736 such stream syncs per
+        iteration. The dispatcher hands over the per-expert counts on the host (all-to-all)
+        or on the device (flex/HybridEP); neither may synchronize.
+        """
+        m = self._build(pg_collection)
+        tokens_per_expert = torch.tensor([5, 0, 3, 7, 1, 2, 4, 6], dtype=torch.long, device=counts_device)
+        n = int(tokens_per_expert.sum())
+        x = torch.randn(n, LATENT, dtype=torch.bfloat16, device="cuda")
+        probs = torch.rand(n, dtype=torch.bfloat16, device="cuda")
+        expected, _ = m(x, tokens_per_expert, probs)
+        torch.cuda.synchronize()
+
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            out, _ = m(x, tokens_per_expert, probs)
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+        assert torch.equal(out, expected)
+
     def test_autograd_produces_finite_grads(self, pg_collection):
         m = self._build(pg_collection)
         tokens_per_expert = torch.tensor([5, 0, 3, 7, 1, 2, 4, 6], dtype=torch.long)
@@ -353,7 +395,7 @@ class TestBackendSelection:
         with pytest.raises(ImportError, match="_grouped_mm"):
             ge.GroupedExperts(E, _config(), pg_collection=pg_collection, gemm_backend="torch_grouped")
 
-    # The module is BF16/FP32-only and non-gated by construction; each of these guards exists
+    # The module is non-gated and unquantized by construction; each of these guards exists
     # because the corresponding config would otherwise produce silently wrong numerics rather
     # than an error, so every one is pinned.
     @pytest.mark.parametrize(
@@ -362,7 +404,7 @@ class TestBackendSelection:
             ("gated_linear_unit", True, "non-gated"),
             ("add_bias_linear", True, "biases"),
             ("delay_wgrad_compute", True, "delayed wgrad"),
-            ("fp8", "hybrid", "BF16/FP32-only"),
+            ("fp4", "nvfp4", "FP4"),
         ],
     )
     @pytest.mark.parametrize("gemm_backend", BACKENDS)

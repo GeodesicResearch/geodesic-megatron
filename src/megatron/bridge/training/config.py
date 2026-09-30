@@ -562,6 +562,12 @@ class TrainingConfig(MTrainTrainingConfig):
     skip_sync_grad_norm_across_mp: bool = False
     """Skips syncing the grad norm across the model parallel group."""
 
+    manual_gc_freeze: bool = False
+    """With manual_gc, move every object that survives the setup collection into the permanent
+    generation (gc.freeze()), so the periodic manual collections scan only objects created after
+    setup instead of the whole model, optimizer and dataloader state. Like manual_gc's
+    gc.disable(), it lasts for the rest of the process. Requires manual_gc."""
+
     # ---------------- Validation config. ----------------
 
     eval_iters: int | None = None
@@ -587,6 +593,11 @@ class TrainingConfig(MTrainTrainingConfig):
             # Calculate train_iters from train_samples (rampup_batch_size already validated as None)
             self.train_iters = self.train_samples // self.global_batch_size
             print_rank_0(f"Setting training iterations to {self.train_iters} based on {self.train_samples} samples")
+
+        if self.manual_gc_freeze and not self.manual_gc:
+            raise ValueError(
+                "train.manual_gc_freeze requires train.manual_gc: the freeze follows its setup collection"
+            )
 
 
 @dataclass(kw_only=True)

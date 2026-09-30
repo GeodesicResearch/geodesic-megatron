@@ -70,6 +70,10 @@ cfg.dataset.packed_sequence_specs.pad_seq_to_mult = 2 * 4  # 2 * CP
    Qwen3-Next SFT, GLM-4.5 SFT/PEFT, Qwen3.5-VL. Check model-specific
    recipes before assuming packing is available.
 
+6. **MoE expert-parallel overlap**: `comm_overlap.overlap_moe_expert_parallel_comm`
+   cannot be combined with packed sequences; `gpt_step._forward_step_common`
+   raises `ValueError`.
+
 ## Verification
 
 For offline packed SFT, verify that `cu_seqlens` and `seq_offsets` are

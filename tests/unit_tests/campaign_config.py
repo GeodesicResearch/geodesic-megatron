@@ -35,16 +35,21 @@ from pathlib import Path, PurePosixPath
 import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
+from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
 from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
 
 
 def merge_onto_recipe(path: Path, recipe_fn):
-    """Return ``recipe_fn()`` with the override YAML at ``path`` merged on, as the launcher does."""
+    """Return ``recipe_fn()`` with the override YAML at ``path`` merged on, as the launcher does.
+
+    The YAML is read through its ``base_config`` chain, as the launcher reads it, so an overlay is
+    asserted as the composed config it trains.
+    """
     cfg = recipe_fn()
     merged, excluded = create_omegaconf_dict_config(cfg)
-    merged = OmegaConf.merge(merged, OmegaConf.load(path))
+    merged = OmegaConf.merge(merged, OmegaConf.create(load_composed_yaml(path)))
     apply_overrides(cfg, OmegaConf.to_container(merged, resolve=True), excluded)
     return cfg
 
@@ -162,6 +167,28 @@ def assert_segment_exit_posture(cfg, label: str, expected_minutes: int | None) -
         assert cfg.checkpoint.save, f"{label}: the duration exit writes a checkpoint only when checkpoint.save is set"
 
 
+def data_parallel_size(cfg, gpus: int) -> int:
+    """The data-parallel width of a merged config on ``gpus`` GPUs: the GPUs over TP x CP x PP."""
+    model = cfg.model
+    model_parallel = (
+        model.tensor_model_parallel_size * model.context_parallel_size * model.pipeline_model_parallel_size
+    )
+    assert gpus % model_parallel == 0, f"{gpus} GPUs do not divide into model-parallel groups of {model_parallel}"
+    return gpus // model_parallel
+
+
+def dotted_leaves(mapping: dict, prefix: str = "") -> dict[str, object]:
+    """Every non-mapping value of a nested mapping, keyed by its dotted path."""
+    flat: dict[str, object] = {}
+    for key, value in mapping.items():
+        path = f"{prefix}.{key}" if prefix else str(key)
+        if isinstance(value, dict):
+            flat.update(dotted_leaves(value, path))
+        else:
+            flat[path] = value
+    return flat
+
+
 def flatten_merged_config(cfg) -> dict[str, object]:
     """Every scalar field of a merged config, keyed by its dotted path.
 
@@ -170,17 +197,7 @@ def flatten_merged_config(cfg) -> dict[str, object]:
     and a field the serialiser excludes (a callable, say) is excluded from the comparison too.
     """
     merged, _ = create_omegaconf_dict_config(cfg)
-    flat: dict[str, object] = {}
-
-    def walk(node, path: str) -> None:
-        if isinstance(node, dict):
-            for key, value in node.items():
-                walk(value, f"{path}.{key}" if path else str(key))
-        else:
-            flat[path] = node
-
-    walk(OmegaConf.to_container(merged, resolve=True), "")
-    return flat
+    return dotted_leaves(OmegaConf.to_container(merged, resolve=True))
 
 
 def assert_only_these_fields_differ(candidate, reference, allowed: set[str], label: str) -> None:
@@ -239,16 +256,22 @@ def corpus_weights(data_path, strip_suffix: str) -> list[tuple[str, float]]:
     return list(totals.items())
 
 
+def is_training_config(path: Path) -> bool:
+    """Whether ``path`` is a config a launcher merges onto a recipe, identified by the ``train``
+    section that only a training config carries (the corpus/prepare configs have none). Read
+    through the ``base_config`` chain, so an overlay whose ``train`` section is all inherited counts."""
+    return "train" in load_composed_yaml(path)
+
+
 def campaign_training_configs() -> list[Path]:
     """Every campaign config a launcher merges onto a recipe, newest-arm-agnostic.
 
-    Identified by the ``train`` section that only a training config carries, so the corpus and
-    prepare configs are excluded and a new arm is covered the moment its config exists. Tests that
-    hand-list the stages they guard go stale silently as arms are added; this is the discovered set
-    they should use, and ``test_control_pretraining_config`` asserts the discovery still matches
-    every stage by name.
+    Identified by ``is_training_config``, so the corpus and prepare configs are excluded and a new
+    arm is covered the moment its config exists. Tests that hand-list the stages they guard go
+    stale silently as arms are added; this is the discovered set they should use, and
+    ``test_control_pretraining_config`` asserts the discovery still matches every stage by name.
     """
-    return [path for path in sorted(_CAMPAIGN_DIR.rglob("*.yaml")) if "train" in (OmegaConf.load(path) or {})]
+    return [path for path in sorted(_CAMPAIGN_DIR.rglob("*.yaml")) if is_training_config(path)]
 
 
 def run_owners(paths: list[Path]) -> dict[Path, str]:

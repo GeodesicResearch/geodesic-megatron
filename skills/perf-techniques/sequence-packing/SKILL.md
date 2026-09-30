@@ -119,6 +119,7 @@ if cu_seqlens.dim() > 1 and cu_seqlens.size(0) != 1:
 4. `pad_cu_seqlens=True` also requires `pad_to_max_length=True`.
 5. Packing support is model-family-specific. `Qwen3-Next`, `GLM-4.5`, and `Qwen3.5-VL` contain explicit opt-outs in different paths.
 6. MTP finetuning is documented as incompatible with packed sequences.
+7. `comm_overlap.overlap_moe_expert_parallel_comm` cannot be combined with packed sequences: `gpt_step._forward_step_common` builds the EP-overlap schedule plan without `packed_seq_params` and raises `ValueError`.
 
 ## Verification
 

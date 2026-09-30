@@ -56,7 +56,7 @@ from megatron.bridge.training.checkpointing import (
     CheckpointManager,
     CheckpointSaveContext,
 )
-from megatron.bridge.training.config import ConfigContainer
+from megatron.bridge.training.config import ConfigContainer, TrainingConfig
 from megatron.bridge.training.eval import evaluate_and_print_results
 from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
 from megatron.bridge.training.initialize import destroy_global_state
@@ -171,14 +171,7 @@ def train(
     should_exit = False
     exit_code = 0
 
-    if train_config.manual_gc:
-        # Disable the default garbage collector and perform the collection manually.
-        # This is to align the timing of garbage collection across ranks.
-        assert train_config.manual_gc_interval >= 0, (
-            "Manual garbage collection interval should be larger than or equal to 0"
-        )
-        gc.disable()
-        gc.collect()
+    setup_manual_gc(train_config)
 
     if config.straggler and config.straggler.log_straggler:
         world = torch.distributed.get_world_size()
@@ -929,6 +922,29 @@ def maybe_check_weight_hash_across_dp_replicas(
     print_rank_0(f">>> Weight hashes match after {iteration} iterations...")
     if should_toggle_forward_pre_hook:
         enable_forward_pre_hook(model)
+
+
+def setup_manual_gc(train_config: TrainingConfig) -> None:
+    """Switches Python's garbage collector to manual collection for training, if configured.
+
+    Disables the automatic collector so that collections happen at the same iterations on every rank
+    (automatic collections pause ranks out of step), then runs one collection. With
+    ``manual_gc_freeze`` every object that survives it moves into the permanent generation, so the
+    periodic collections skip the state built during setup.
+
+    Args:
+        train_config: Training configuration; ``manual_gc`` off leaves the collector untouched.
+    """
+    if not train_config.manual_gc:
+        return
+    assert train_config.manual_gc_interval >= 0, (
+        "Manual garbage collection interval should be larger than or equal to 0"
+    )
+    gc.disable()
+    gc.collect()
+    if train_config.manual_gc_freeze:
+        gc.freeze()
+        print_rank_0(f"gc.freeze(): the permanent generation now holds {gc.get_freeze_count()} objects")
 
 
 def maybe_run_manual_gc(manual_gc_enabled: bool, manual_gc_interval: int, iteration: int) -> None:

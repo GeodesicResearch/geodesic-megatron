@@ -440,10 +440,16 @@ only on weights and sizes, not on content):
 
 `TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512` on 512 GPUs, mbs 1 (4 microbatches per DP
 replica at GBS 2048), selective recompute of `[core_attn, moe, shared_experts]`, `alltoall` MoE
-dispatcher, `torch_grouped` experts. This is the measured-working posture from
-`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` (128-GPU anchor 25.533 s/iter =
-160.2 model TFLOP/s/GPU at GBS 3072). Tokens per rank are identical at 8192, so per-rank
-memory carries over; only microbatches per replica and the optimizer-shard size change.
+dispatcher, `torch_grouped` experts. This is the measured-working posture of the retired
+128-GPU Nano pretrain quickstart (ClimbMix-Sample at GBS 3072; anchor 25.533 s/iter = 160.2
+model TFLOP/s/GPU, taken at the recipe's data-parallel posture — see "Why the DDP settings
+live under `comm_overlap:`" below). Tokens per rank are identical at 8192, so per-rank
+memory carries over; only microbatches per replica and the optimizer-shard size change. The
+quickstart that replaced it, `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`, is a
+`base_config:` overlay of `30b_baseline/`'s stage 1 at 64 GPUs. The retired file's header,
+which holds that anchor's provenance, the PAO A/B and the probe ladder, is
+`git show 8d1d9ab1:configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`; the ladder's
+full records are in `/projects/a5k/public/logs/pretrain_quickstart_2026-08/`.
 
 EP stays node-local (`TP x EP <= 4`) — cross-node MoE all-to-all over Slingshot is the
 documented hang and throughput cliff. PP=1 means there is no pipeline bubble and no PP p2p
@@ -568,11 +574,14 @@ Two consequences worth knowing:
 - **The documented "Nemotron-H DP>1 → `overlap_param_gather=false`" convention is
   unenforceable through `ddp:` on this path.** Nothing in a YAML `ddp:` section can hold it;
   restating inside `comm_overlap:` is the only mechanism that works.
-- **`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` is subject to this.** Its
+- **The retired 128-GPU Nano pretrain quickstart was subject to this.** Its
   `ddp.bucket_size: 500000000` never took effect, so its 25.533 s/iter anchor was measured at
   the 128 MiB default with param-gather overlap on — i.e. against the convention. This config
   pins the convention instead, and throughput at that posture is therefore **unmeasured**
-  relative to the anchor.
+  relative to that anchor. Its replacement,
+  `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`, composes `30b_baseline/`'s
+  stage 1 and so inherits that stage's `comm_overlap:` block: it benchmarks the posture the
+  convention pins.
 
 Scope, so the claim is not over-applied — only the Nano *pretrain* recipe is affected:
 
