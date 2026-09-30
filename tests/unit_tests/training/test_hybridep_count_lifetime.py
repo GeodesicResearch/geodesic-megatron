@@ -31,10 +31,8 @@ its host read of the per-expert counts sees whatever the recycled pinned block h
 second failure seen in training ("Trying to create tensor with negative dimension"), so that
 sequence runs in a child process, whose CUDA context a fault would poison for good.
 
-The device copy is Megatron-LM patch 0004 (``3rdparty/patches/megatron-lm/``), which the pinned
-submodule does not carry: the three tests of Megatron's dispatch skip without it, while the two that
-pin deep_ep's own hazard and the host allocator's behaviour hold on any tree. All of them need a GPU
-and deep_ep's HybridEP, which are environment boundaries.
+The device copy is the pinned submodule's carried commit 0004 (``3rdparty/patches/megatron-lm/README.md``).
+All the tests need a GPU and deep_ep's HybridEP, which are environment boundaries.
 """
 
 import json
@@ -53,10 +51,6 @@ from tests.unit_tests.one_rank_nccl_world import init_one_rank_nccl_world
 
 requires_hybridep = pytest.mark.skipif(
     not (torch.cuda.is_available() and fused_a2a.HAVE_HYBRIDEP), reason="needs a GPU and deep_ep's HybridEP"
-)
-requires_count_fix = pytest.mark.skipif(
-    not hasattr(fused_a2a, "_with_device_dispatched_tokens"),
-    reason="needs Megatron-LM patch 0004 (HybridEP dispatched-count lifetime) applied to 3rdparty/Megatron-LM",
 )
 
 
@@ -112,7 +106,6 @@ def _dispatch(hidden, routing_map, probs, group):
 
 
 @requires_hybridep
-@requires_count_fix
 def test_a_combine_queued_behind_a_freed_handle_runs_on_its_own_count(group):
     hidden, routing_map, probs = _inputs()
     stream = torch.cuda.Stream()
@@ -132,7 +125,6 @@ def test_a_combine_queued_behind_a_freed_handle_runs_on_its_own_count(group):
 
 
 @requires_hybridep
-@requires_count_fix
 def test_a_blocking_dispatch_hands_out_its_count_on_the_device(group):
     hidden, routing_map, probs = _inputs()
     with torch.no_grad():
@@ -231,7 +223,6 @@ def _free_port():
 
 
 @requires_hybridep
-@requires_count_fix
 def test_the_next_forward_dispatch_after_a_combine_on_a_freed_handle_runs_cleanly():
     env = dict(
         os.environ,

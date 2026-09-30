@@ -20,6 +20,7 @@ renamed function makes the lookup fail loudly rather than silently testing nothi
 
 import os
 import re
+import subprocess
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,3 +33,26 @@ def launcher_function(name: str) -> str:
     match = re.search(rf"^{re.escape(name)}\(\) \{{.*?^\}}", src, re.S | re.M)
     assert match, f"{name}() not found in pipeline_training_launch.sh"
     return match.group(0)
+
+
+def env_override_entries(path: str) -> list[str]:
+    """The KEY=VALUE lines the launcher's ISAMBARD_ENV_OVERRIDES hook takes from the file at ``path``, in order.
+
+    The hook's parser, ``apply_env_overrides``, runs verbatim under the launcher's shell options, so a line
+    the launcher skips is skipped here too, and a file it refuses fails with the launcher's own message.
+    """
+    script = (
+        "set -euo pipefail\n"
+        f"{launcher_function('apply_env_overrides')}\n"
+        'apply_env_overrides "$1"\n'
+        'for entry in "${ENV_OVERRIDE_ENTRIES[@]}"; do printf "%s\\0" "$entry"; done\n'
+    )
+    result = subprocess.run(
+        ["bash", "-c", script, "harness", path],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.split("\0")[:-1]

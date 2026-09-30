@@ -27,8 +27,10 @@ the test container (unit tests run there), through the real pipeline_env_exec.sh
 pipeline_env_activate.sh, and reads the environment and arguments the rank launcher is started
 with. Stubbed there, each for a stated reason: srun (SLURM), module (a host shell function),
 apptainer (the tests already run in the container, and it cannot nest) and the rank launchers
-ft_launcher/python (they need GPUs). The last test sources the whole launcher to list the shell
-variables it keeps, and checks that the hook refuses every one of them as a KEY.
+ft_launcher/python (they need GPUs). The same harness pins where that environment puts HybridEP's JIT
+cache: the job's node-local temp directory, not the bind-mounted host home. The last test sources the
+whole launcher to list the shell variables it keeps, and checks that the hook refuses every one of them
+as a KEY.
 """
 
 import glob
@@ -450,6 +452,15 @@ def test_an_inherited_keys_variable_is_dropped_without_the_hook(launch):
     run = launch(None, extra_env={"ISAMBARD_ENV_OVERRIDE_KEYS": "TORCH_NCCL_BLOCKING_WAIT"})
     assert run.result.returncode == 0, run.result.stderr
     assert "ISAMBARD_ENV_OVERRIDE_KEYS" not in run.rank_env
+
+
+@pytest.mark.parametrize("launcher_args", LAUNCH_PATHS)
+def test_hybridep_compiles_into_the_jobs_node_local_temp_dir(launch, launcher_args):
+    """Activate derives the cache from the TMPDIR the launcher exports before it; with the variable unset,
+    deep_ep writes a directory per rank into the bind-mounted host home."""
+    run = launch(None, *launcher_args)
+    assert run.result.returncode == 0, run.result.stderr
+    assert run.rank_env["HYBRID_EP_CACHE_DIR"] == f"{_JOB_TMPDIRS[0]}/hybrid_ep_jit"
 
 
 @pytest.mark.parametrize(

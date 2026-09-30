@@ -17,9 +17,9 @@
 #
 # Usage:
 #   ./scripts/switch_mcore.sh dev      # Switch to the PREVIOUS pin (rollback/A-B escape hatch)
-#   NOTE: checkpoints SAVED at the current pin may not load at the previous one
-#   (dist-ckpt format moved forward at the 2026-07 bump) — rollback is for code A/Bs,
-#   not for resuming new checkpoints.
+#   NOTE: the previous pin lacks whatever the last bump brought, which can include checkpoint-format
+#   changes and the Megatron-LM changes a config's levers need; read the pin history notes in
+#   3rdparty/patches/megatron-lm/README.md before resuming a checkpoint or running a config there.
 #   ./scripts/switch_mcore.sh main     # Switch to the pinned main commit
 #   ./scripts/switch_mcore.sh status   # Show current submodule status
 

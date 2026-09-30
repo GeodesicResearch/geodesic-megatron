@@ -102,7 +102,7 @@ expected_metric_change:
   - metric: step_time
     direction: down
     magnitude: "-3.4%"
-    conditions: "Nemotron-3 Nano 30B-A3B pretraining, 64 GPUs, EP4 intra-node with the HybridEP dispatcher, Megatron-LM patch 0003, CUDA_DEVICE_MAX_CONNECTIONS=32"
+    conditions: "Nemotron-3 Nano 30B-A3B pretraining, 64 GPUs, EP4 intra-node with the HybridEP dispatcher, the pin's carried commit 0003, CUDA_DEVICE_MAX_CONNECTIONS=32"
     evidence: measured_nemotron_3_nano_30b_a3b
   - metric: peak_memory
     direction: up
@@ -155,7 +155,7 @@ failure_modes:
   - name: hybridep_count_reused
     symptom: "CUDA illegal memory access in HybridEP dispatch_with_permute, or a negative dimension in the next dispatch, under EP overlap"
     likely_cause: "HybridEP's blocking dispatch reads its dispatched-token count from pinned host memory freed before a queued kernel ran"
-    fix: "Apply Megatron-LM patch 0004 (3rdparty/patches/megatron-lm/)"
+    fix: "Use a Megatron-LM with carried commit 0004, as the pinned submodule is (3rdparty/patches/megatron-lm/README.md)"
 
 known_constraints:
   - expert_model_parallel_size must be greater than 1.
@@ -177,8 +177,8 @@ known_constraints:
 known_limitations:
   - Setting moe_flex_dispatcher_backend alone does not activate flex dispatch.
   - Public recipes are often conservative and leave MoE overlap disabled by default.
-  - End-to-end gains measured only on Nemotron-3 Nano 30B-A3B pretraining (a hybrid model, with patch 0003).
-  - Hybrid (Mamba) models have no EP-overlap schedule plan at the pinned Megatron-LM; vendored patch 0003 adds one (not applied by default).
+  - End-to-end gains measured only on Nemotron-3 Nano 30B-A3B pretraining (a hybrid model, with carried commit 0003).
+  - Hybrid (Mamba) models get their EP-overlap schedule plan from the pin's carried commit 0003; upstream Megatron-LM has none.
 
 evidence:
   - docs/training/communication-overlap.md

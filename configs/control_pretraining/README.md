@@ -445,8 +445,9 @@ dispatcher, `torch_grouped` experts. This is the measured-working posture of the
 model TFLOP/s/GPU, taken at the recipe's data-parallel posture — see "Why the DDP settings
 live under `comm_overlap:`" below). Tokens per rank are identical at 8192, so per-rank
 memory carries over; only microbatches per replica and the optimizer-shard size change. The
-quickstart that replaced it, `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`, is a
-`base_config:` overlay of `30b_baseline/`'s stage 1 at 64 GPUs. The retired file's header,
+baseline benchmark that replaced it, `configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml`,
+is a `base_config:` overlay of `30b_baseline/`'s stage 1 at 64 GPUs (the Nano pretrain quickstart adds the
+performance campaign's levers to it). The retired file's header,
 which holds that anchor's provenance, the PAO A/B and the probe ladder, is
 `git show 8d1d9ab1:configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`; the ladder's
 full records are in `/projects/a5k/public/logs/pretrain_quickstart_2026-08/`.
@@ -579,7 +580,7 @@ Two consequences worth knowing:
   the 128 MiB default with param-gather overlap on — i.e. against the convention. This config
   pins the convention instead, and throughput at that posture is therefore **unmeasured**
   relative to that anchor. Its replacement,
-  `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`, composes `30b_baseline/`'s
+  `configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml`, composes `30b_baseline/`'s
   stage 1 and so inherits that stage's `comm_overlap:` block: it benchmarks the posture the
   convention pins.
 
