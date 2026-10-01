@@ -106,7 +106,7 @@ if enable_packing:
 
 Packed THD runtime constraint:
 
-```94:95:src/megatron/bridge/training/gpt_step.py
+```98:99:src/megatron/bridge/training/gpt_step.py
 if cu_seqlens.dim() > 1 and cu_seqlens.size(0) != 1:
     raise ValueError("Packed THD batches expect micro-batch size 1 for context-parallel slicing (THD layout)")
 ```
@@ -120,6 +120,7 @@ if cu_seqlens.dim() > 1 and cu_seqlens.size(0) != 1:
 5. Packing support is model-family-specific. `Qwen3-Next`, `GLM-4.5`, and `Qwen3.5-VL` contain explicit opt-outs in different paths.
 6. MTP finetuning is documented as incompatible with packed sequences.
 7. `comm_overlap.overlap_moe_expert_parallel_comm` cannot be combined with packed sequences: `gpt_step._forward_step_common` builds the EP-overlap schedule plan without `packed_seq_params` and raises `ValueError`.
+8. A collated packed batch pads every `cu_seqlens` row with -1 to the widest row plus one, so everything that reads the packed layout trims it the same way, with `packed_seq_utils.trim_padded_cu_seqlens`: attention and the Mamba layers get the trimmed row from `get_packed_seq_params`, and the context-parallel partition (`gpt_step._partition_packed_batch_for_cp`) trims before Transformer Engine's `thd_get_partitioned_indices`, whose search can otherwise land on a pad when a row ends in two or more and hand every CP rank the pack's leading tokens. `tests/unit_tests/training/test_gpt_step_packed_cp_partition.py` runs the real kernel (GPU only). Packed runs at CP>1 with more than one pack per data-parallel replica that were launched before the partition trimmed (2026-10-01) trained on partly mis-partitioned microbatches: 26–29% of them for the Nano control-pretraining and metagaming SFTs at CP=2, about 77% for the Super-120B SFTs at CP=4 (`configs/pa_warm_start/`, the Super SFT quickstart), and the green-team 32K math/science SFTs at CP=4 (`configs/PA/green-team/32k/`) are affected too. The Nano CP=2 SFTs logged a loss about 0.03–0.04 nats below what the same run logs with the trim (measured by replaying one of them); the CP=4 runs' offset was not measured and is expected to be larger. Loss figures from either side of the trim are not compared (`/projects/a5k/public/logs/nano_sft_perf_campaign/records/cp_partition_fix/FINAL_REPORT.md`, section 2, and `gap-cp2-thd-partition-leak.md` beside it).
 
 ## Verification
 

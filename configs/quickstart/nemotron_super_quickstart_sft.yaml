@@ -191,6 +191,9 @@
 #       timing_log_level stays 2 (telemetry is free again once skew source is gone)
 #   m5  26.04 + offload 0.5, FT ON, 14 it     smoke gate for the default flip
 #   Loss@48 parity across all arms: 0.62405-0.62475 (run-to-run band 5.5e-4).
+#   Every loss in this header was logged before the context-parallel partition fix of 2026-10-01 (this posture is
+#   CP=4 with many packs per replica, the bug's regime): a run with the fix logs a higher loss, so these values are
+#   not reproduced by it (skills/perf-techniques/sequence-packing/SKILL.md, pitfall 8).
 #
 # HISTORICAL BLOCKS — everything below was measured at GBS=48 and/or in the
 # now-retired bare-metal venv. Kept because the *verdicts* still hold (memory

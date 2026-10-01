@@ -23,7 +23,7 @@ def trim_padded_cu_seqlens(cu_seqlens: torch.Tensor, cu_seqlens_argmin: torch.Te
 
     The packed collate pads every row of a batch with -1 to the widest row in the batch plus one and records the
     position of each row's first pad as ``cu_seqlens_argmin``. Attention and the Mamba scan read the trimmed row
-    through ``get_packed_seq_params``.
+    through ``get_packed_seq_params``, and the context-parallel partition of a packed batch reads the same row.
 
     Args:
         cu_seqlens: One microbatch's cumulative sequence lengths, squeezed to 1-D, padded with -1.

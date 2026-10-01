@@ -31,7 +31,7 @@ from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.losses import masked_next_token_loss
 from megatron.bridge.training.post_training.distillation import loss_func_kd
 from megatron.bridge.training.state import GlobalState
-from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
+from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params, trim_padded_cu_seqlens
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 
 
@@ -73,6 +73,10 @@ def _partition_packed_batch_for_cp(
     dimension aligned with packed cu_seqlens. This avoids the generic
     `get_batch_on_this_cp_rank` slicing which assumes contiguous sequence tokens.
 
+    The partition reads the same trimmed cu_seqlens row that `get_packed_seq_params` gives attention and the Mamba
+    layers. The packed collate pads every row of a batch with -1 to the widest row plus one, and on a row ending in
+    two or more pads the kernel's search can land on a pad and hand every rank the pack's leading tokens.
+
     Args:
         batch: One microbatch of packed tensors, sequence along dim 1.
         cp_size: The context-parallel group size.
@@ -93,7 +97,7 @@ def _partition_packed_batch_for_cp(
     cu_seqlens = batch["cu_seqlens"]
     if cu_seqlens.dim() > 1 and cu_seqlens.size(0) != 1:
         raise ValueError("Packed THD batches expect micro-batch size 1 for context-parallel slicing (THD layout)")
-    cu_seqlens = cu_seqlens.squeeze()
+    cu_seqlens = trim_padded_cu_seqlens(cu_seqlens.squeeze(), batch.get("cu_seqlens_argmin"))
     cu_seqlens_unpadded = batch.get("cu_seqlens_unpadded")
     if cu_seqlens_unpadded is not None:
         batch["cu_seqlens_unpadded"] = cu_seqlens_unpadded.squeeze()
