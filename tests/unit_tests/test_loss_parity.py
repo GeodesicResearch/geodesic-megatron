@@ -181,6 +181,27 @@ def test_a_candidate_inside_the_band_passes_with_its_deviations(lp, tmp_path):
     assert report.verdicts[0].verdict == "PASS"
 
 
+def test_a_band_report_survives_its_json_round_trip(lp, tmp_path):
+    """A gate reads a band report back from the --json file the band test wrote."""
+    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_up", loss_offset=over(1, 60, 0.02)))]
+    candidate = load(lp, write_run(tmp_path, "cand", learning_rate={30: 1.0e-3}, nan={40: 1}))
+    report = lp.band_test(refs, [candidate], window=20)
+    assert lp.BandReport.from_dict(json.loads(json.dumps(report.to_dict()))) == report
+
+
+def test_offsets_are_each_windows_candidate_mean_minus_the_references_mean(lp, tmp_path):
+    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_up", loss_offset=over(1, 60, 0.01)))]
+    candidate = load(lp, write_run(tmp_path, "cand", loss_offset={**over(1, 30, 0.004), **over(31, 60, 0.008)}))
+    (loss, _) = lp.band_test(refs, [candidate], window=10).metrics
+    assert lp.offsets_from_reference_mean(loss.windows, 0) == pytest.approx([-0.001] * 3 + [0.003] * 3, abs=1e-6)
+
+
+def test_the_offset_rise_is_the_last_windows_mean_above_the_first_windows(lp):
+    assert lp.offset_rise([0.0, 0.001, 0.002, 0.004], 2) == pytest.approx(0.0025)
+    with pytest.raises(ValueError, match="two spans"):
+        lp.offset_rise([0.0, 0.001, 0.002], 2)
+
+
 def test_a_candidate_outside_one_window_fails_and_names_it(lp, tmp_path):
     refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_w1", loss_offset=over(1, 10, 0.001)))]
     candidate = load(lp, write_run(tmp_path, "cand", loss_offset=over(51, 60, 0.01)))
@@ -266,8 +287,8 @@ def test_a_candidate_at_another_data_position_fails(lp, tmp_path):
     [
         ({"nan": {5: 1}}, "1 NaN iterations"),
         ({"skipped": {5: 2}}, "2 skipped"),
-        ({"learning_rate": {50: 1e-3}}, "learning rate differs .* at iteration 50"),
-        ({"consumed_samples": {3: 1}}, "consumed samples differ .* at iteration 3"),
+        ({"learning_rate": {50: 1e-3}}, "learning rate differs at iteration 50"),
+        ({"consumed_samples": {3: 1}}, "consumed samples differ at iteration 3"),
     ],
 )
 def test_a_reference_that_is_not_clean_raises(lp, tmp_path, edit, message):
@@ -478,47 +499,6 @@ def test_wandb_needs_a_run_named_in_the_log(lp, monkeypatch, tmp_path):
 # --------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------
-
-
-def test_a_band_report_survives_its_json(lp, tmp_path):
-    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_w1", loss_offset=over(1, 10, 0.001)))]
-    candidate = load(lp, write_run(tmp_path, "cand", loss_offset=over(51, 60, 0.01), learning_rate={45: 9.9e-4}))
-    report = lp.band_test(refs, [candidate], window=10)
-    assert lp.BandReport.from_dict(json.loads(json.dumps(report.to_dict()))) == report
-
-
-@pytest.mark.parametrize(
-    "edit, windows",
-    [
-        ({}, 0),
-        ({"loss_offset": over(51, 60, 0.01)}, 1),
-        ({"loss_offset": {**over(41, 50, 0.01), **over(51, 60, 0.01)}}, 2),
-        ({"loss_offset": over(51, 60, 0.01), "learning_rate": {45: 9.9e-4}}, None),
-        ({"loss_offset": over(51, 60, 0.01), "consumed_samples": {12: 2048 * 13}}, None),
-        ({"loss_offset": over(51, 60, 0.01), "nan": {30: 1}}, None),
-    ],
-)
-def test_the_loss_windows_outside_count_only_when_every_other_check_passed(lp, tmp_path, edit, windows):
-    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_w1", loss_offset=over(1, 10, 0.001)))]
-    report = lp.band_test(refs, [load(lp, write_run(tmp_path, "cand", **edit))], window=10)
-    assert lp.loss_windows_outside(report) == windows
-
-
-def test_the_loss_windows_outside_need_one_candidate(lp):
-    report = lp.band_test([load(lp, FIXTURE), load(lp, FIXTURE)], [load(lp, FIXTURE), load(lp, FIXTURE)], window=20)
-    with pytest.raises(ValueError, match="2 candidates, not one"):
-        lp.loss_windows_outside(report)
-
-
-@pytest.mark.parametrize("edit, printed", [({"loss_offset": over(51, 60, 0.05)}, "1"), ({"nan": {30: 1}}, "other")])
-def test_cli_windows_outside_reads_a_band_report(lp, tmp_path, capsys, edit, printed):
-    refs = [FIXTURE, write_run(tmp_path, "ref_b", loss_offset=over(1, 20, 0.001))]
-    args = ["band", "--reference", *map(str, refs), "--candidate", str(write_run(tmp_path, "cand", **edit))]
-    assert lp.main([*args, "--iterations", "1", "60", "--window", "20", "--json"]) == 1
-    report = tmp_path / "band.json"
-    report.write_text(capsys.readouterr().out)
-    assert lp.main(["windows-outside", str(report)]) == 0
-    assert capsys.readouterr().out == f"{printed}\n"
 
 
 def test_cli_band_passes_with_exit_status_zero(lp, tmp_path, capsys):

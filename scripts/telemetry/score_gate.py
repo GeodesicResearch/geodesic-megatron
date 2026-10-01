@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Evaluate pre-registered memory, speed and first-loss gates on runs' scores (``score_run.py --json`` files).
+"""Evaluate pre-registered memory, speed, first-loss and loss-shift gates on runs' scores (``score_run.py --json``
+files) and band reports (``loss_parity.py band --json`` files).
 
-A spec, fixed before the runs exist, names gates of three kinds, each over score files in one directory:
+A spec, fixed before the runs exist, names gates of four kinds, each over files in one directory:
 
 - ``memory``: one run's peak memory over every rank, the score's ``peak_memory_across_ranks`` (read from the
   ``[peak-memory]`` line rank 0 logs when the training loop ends). It fails when the score has no such
@@ -30,11 +31,18 @@ A spec, fixed before the runs exist, names gates of three kinds, each over score
   logged iteration, read from each score's training log: it fails when the candidate's lm loss there differs
   from the reference's by more than ``tolerance``, or the candidate logged no lm loss there. A wrong warm start
   or wrong data moves it by far more than a numerical posture does.
+- ``loss_shift``: a band report's one candidate, its lm-loss offset from the references' mean in each window: it
+  fails when any window's offset lies outside ``[offset_low, offset_high]``, when the mean offset of the last
+  ``rise_windows`` windows exceeds the first ``rise_windows`` windows' by more than ``max_rise``, or when the
+  report's verdict found the candidate off the references' schedule (learning rate or consumed samples) or counting
+  a skipped or NaN iteration. It bounds a steady numerical shift that a band drawn from the references' own
+  spread would refuse, and fails one that grows.
 
 Each gate's outcome is PASS, FAIL or NOT EVALUATED (``gate_outcome``). NOT EVALUATED means a score could not
 be read or lacks a field, the memory summary covers a different number of ranks than the run's GPUs, the
 two speed scores were taken over different windows or GPU counts, or the two first-loss runs' first logged
-iterations differ or the reference logged no lm loss there. Every outcome carries a line stating the
+iterations differ or the reference logged no lm loss there, or a band report holds other than one candidate or
+fewer than two spans of ``rise_windows`` windows. Every outcome carries a line stating the
 measurement or the reason. The exit status is ``gate_outcome.exit_status``'s.
 
 USAGE
@@ -60,10 +68,17 @@ if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
+from scripts.telemetry.loss_parity import (  # noqa: E402
+    VERDICT_METRIC,
+    BandReport,
+    offset_rise,
+    offsets_from_reference_mean,
+)
 from scripts.telemetry.training_log import parse_iteration_records, read_log_lines  # noqa: E402
 
 
-MEMORY, SPEED, FIRST_LOSS = "memory", "speed", "first_loss"
+MEMORY, SPEED, FIRST_LOSS, LOSS_SHIFT = "memory", "speed", "first_loss", "loss_shift"
+KINDS = (MEMORY, SPEED, FIRST_LOSS, LOSS_SHIFT)
 
 
 @dataclass(frozen=True)
@@ -98,7 +113,19 @@ class FirstLossGate:
     tolerance: float
 
 
-ScoreGate = MemoryGate | SpeedGate | FirstLossGate
+@dataclass(frozen=True)
+class LossShiftGate:
+    """A band report's candidate: its lm-loss offset from the references' mean bounded per window, and its rise."""
+
+    name: str
+    report: str
+    offset_low: float
+    offset_high: float
+    rise_windows: int
+    max_rise: float
+
+
+ScoreGate = MemoryGate | SpeedGate | FirstLossGate | LossShiftGate
 
 
 @dataclass(frozen=True)
@@ -115,21 +142,19 @@ def load_score_gates(path: Path) -> dict[str, ScoreGate]:
     """Read a score-gate spec into its gates by name, refusing one whose gates could not be evaluated as written.
 
     Raises ValueError on an unknown kind, a spec with no gates, a gate name used twice, a speed or first-loss
-    gate whose candidate is its reference, or a speed gate whose go limit exceeds its report limit; KeyError on
-    a missing field.
+    gate whose candidate is its reference, a speed gate whose go limit exceeds its report limit, or a loss-shift
+    gate whose offset range is empty or whose rise spans no window; KeyError on a missing field.
     """
     raw = yaml.safe_load(Path(path).read_text())
-    unknown = sorted(set(raw) - {MEMORY, SPEED, FIRST_LOSS})
+    unknown = sorted(set(raw) - set(KINDS))
     if unknown:
         raise ValueError(f"{path}: unknown gate kinds {unknown}")
-    entries = [
-        (kind, name, gate) for kind in (MEMORY, SPEED, FIRST_LOSS) for name, gate in (raw.get(kind) or {}).items()
-    ]
+    entries = [(kind, name, gate) for kind in KINDS for name, gate in (raw.get(kind) or {}).items()]
     gates: dict[str, ScoreGate] = {}
     for kind, name, gate in entries:
         if name in gates:
             raise ValueError(f"{path}: gate {name} is defined twice")
-        if kind != MEMORY and gate["candidate"] == gate["reference"]:
+        if kind in (SPEED, FIRST_LOSS) and gate["candidate"] == gate["reference"]:
             raise ValueError(f"{path}: {kind} gate {name} compares {gate['candidate']} with itself")
         if kind == MEMORY:
             gates[name] = MemoryGate(
@@ -147,8 +172,20 @@ def load_score_gates(path: Path) -> dict[str, ScoreGate]:
             if speed.go_up_to_s > speed.report_up_to_s:
                 raise ValueError(f"{path}: speed gate {name} has go_up_to_s above report_up_to_s")
             gates[name] = speed
-        else:
+        elif kind == FIRST_LOSS:
             gates[name] = FirstLossGate(name, gate["candidate"], gate["reference"], float(gate["tolerance"]))
+        else:
+            shift = LossShiftGate(
+                name,
+                gate["report"],
+                float(gate["offset_low"]),
+                float(gate["offset_high"]),
+                int(gate["rise_windows"]),
+                float(gate["max_rise"]),
+            )
+            if shift.offset_low > shift.offset_high or shift.rise_windows < 1:
+                raise ValueError(f"{path}: loss_shift gate {name} has an empty offset range or no rise window")
+            gates[name] = shift
     if not gates:
         raise ValueError(f"{path}: defines no gates")
     return gates
@@ -242,22 +279,64 @@ def evaluate_first_loss(gate: FirstLossGate, scores_dir: Path) -> ScoreGateResul
     return ScoreGateResult(gate.name, FIRST_LOSS, PASS if difference <= gate.tolerance else FAIL, measured)
 
 
+def evaluate_loss_shift(gate: LossShiftGate, scores_dir: Path) -> ScoreGateResult:
+    """The loss-shift gate's outcome on its band report (see the module docstring)."""
+    try:
+        report = BandReport.from_dict(json.loads((scores_dir / gate.report).read_text()))
+        (loss,) = [band for band in report.metrics if band.metric == VERDICT_METRIC]
+    except Exception as error:  # noqa: BLE001 - every way the report cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    if len(report.verdicts) != 1:
+        reason = f"{gate.report} holds {len(report.verdicts)} candidates, not one"
+        return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, reason)
+    offsets = offsets_from_reference_mean(loss.windows, 0)
+    if len(offsets) < 2 * gate.rise_windows:
+        reason = f"{gate.report} has {len(offsets)} windows, fewer than two spans of {gate.rise_windows}"
+        return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, reason)
+    (verdict,) = report.verdicts
+    if verdict.mismatches:
+        return ScoreGateResult(gate.name, LOSS_SHIFT, FAIL, "; ".join(verdict.mismatches))
+    outside = [
+        window.first
+        for window, offset in zip(loss.windows, offsets)
+        if not gate.offset_low <= offset <= gate.offset_high
+    ]
+    rise = offset_rise(offsets, gate.rise_windows)
+    measured = (
+        f"offsets {min(offsets):+.4f} to {max(offsets):+.4f} over {len(offsets)} windows of "
+        f"{report.first}-{report.last}, range [{gate.offset_low:+.4f}, {gate.offset_high:+.4f}]; the last "
+        f"{gate.rise_windows} windows {rise:+.4f} against the first, limit {gate.max_rise:+.4f}"
+    )
+    if outside:
+        return ScoreGateResult(gate.name, LOSS_SHIFT, FAIL, f"{measured}: windows from {outside} outside the range")
+    if rise > gate.max_rise:
+        return ScoreGateResult(gate.name, LOSS_SHIFT, FAIL, f"{measured}: the offset grows")
+    return ScoreGateResult(gate.name, LOSS_SHIFT, PASS, measured)
+
+
 def evaluate_score_gate(gate: ScoreGate, scores_dir: Path) -> ScoreGateResult:
-    """Evaluate one gate of any kind on the scores in ``scores_dir``."""
+    """Evaluate one gate of any kind on the files in ``scores_dir``."""
     if isinstance(gate, MemoryGate):
         return evaluate_memory(gate, scores_dir)
     if isinstance(gate, SpeedGate):
         return evaluate_speed(gate, scores_dir)
-    return evaluate_first_loss(gate, scores_dir)
+    if isinstance(gate, FirstLossGate):
+        return evaluate_first_loss(gate, scores_dir)
+    return evaluate_loss_shift(gate, scores_dir)
 
 
 def main(argv: list[str] | None = None) -> int:
     """Evaluate the requested gates (every gate by default), print each outcome and return the exit status."""
     parser = argparse.ArgumentParser(
-        description="Evaluate pre-registered memory, speed and first-loss gates on runs' scores."
+        description="Evaluate pre-registered memory, speed, first-loss and loss-shift gates on runs' results."
     )
     parser.add_argument("--spec", type=Path, required=True, help="The score-gate spec YAML")
-    parser.add_argument("--scores-dir", type=Path, required=True, help="The directory holding the score files")
+    parser.add_argument(
+        "--scores-dir",
+        type=Path,
+        required=True,
+        help="The directory holding the score_run.py --json files and the band reports the gates read",
+    )
     parser.add_argument("--gate", action="append", help="A gate to evaluate; repeatable (default: every gate)")
     parser.add_argument("--json", action="store_true", help="Emit the outcomes as JSON")
     args = parser.parse_args(argv)

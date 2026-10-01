@@ -88,7 +88,12 @@ if _REPO_ROOT not in sys.path:
 
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 from scripts.telemetry.loss_gate import GateResult, evaluate_gate, load_gate_spec  # noqa: E402
-from scripts.telemetry.loss_parity import VERDICT_METRIC, fetch_wandb_history  # noqa: E402
+from scripts.telemetry.loss_parity import (  # noqa: E402
+    VERDICT_METRIC,
+    fetch_wandb_history,
+    offset_rise,
+    offsets_from_reference_mean,
+)
 from scripts.telemetry.training_log import (  # noqa: E402
     IterationRecord,
     env_override_lines,
@@ -531,8 +536,9 @@ def gate_offsets(spec: WatchSpec, results: list[GateResult]) -> tuple[list[float
     for result in results:
         if result.gate == spec.growing_offset.gate and result.report is not None:
             (loss,) = [band for band in result.report.metrics if band.metric == VERDICT_METRIC]
-            offsets = [band.candidate_means[0] - statistics.fmean(band.reference_means) for band in loss.windows]
-            return offsets, [(band.first + band.last) / 2 for band in loss.windows]
+            return offsets_from_reference_mean(loss.windows, 0), [
+                (band.first + band.last) / 2 for band in loss.windows
+            ]
     return None
 
 
@@ -547,7 +553,7 @@ def growing_offset_flag(rule: GrowingOffset, offsets: list[float]) -> str | None
     """A flag line when the last windows' mean offset exceeds the first windows' by more than the rule allows."""
     if len(offsets) < 2 * rule.windows:
         return None
-    rise = statistics.fmean(offsets[-rule.windows :]) - statistics.fmean(offsets[: rule.windows])
+    rise = offset_rise(offsets, rule.windows)
     if rise <= rule.above:
         return None
     return f"{rule.gate}: the last {rule.windows} windows' offset is {rise:+.4f} above the first's"

@@ -13,12 +13,14 @@
 #
 # THE FAST MIDTRAINING CONFIGURATION: the Nano midtraining quickstart's levers
 # (configs/quickstart/nemotron_nano_quickstart_midtrain.yaml; docs/investigations/nano30b-midtrain-perf-campaign.md,
-# "Final posture"; the tests share one table, FAST_MIDTRAIN_LEVERS in tests/unit_tests/campaign_config.py), with its
-# launcher setting in nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env (the fp32 SSM-state patch in its
-# checkpointed mode). FP8 on the dense layers and the BF16 gradient reduce change numerical precision, so this
-# arm's midtraining differs from the baseline's in more than data; the arm README's "The midtraining probe" has the
-# gates that bound it. The gradient NaN check stays on; the loss NaN check is off, so a non-finite loss shows only
-# as an iteration line without `lm loss`.
+# "Final posture"; the tests share one table, FAST_MIDTRAIN_LEVERS in tests/unit_tests/campaign_config.py) except
+# its selective recompute: the stage keeps the baseline's full recompute (Kyle, 2026-10-01), because at 512 GPUs
+# the selective recompute retried the allocator. Its launcher setting is in
+# nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env (the fp32 SSM-state patch in its checkpointed mode).
+# FP8 on the dense layers and the BF16 gradient reduce change numerical precision, so this arm's midtraining
+# differs from the baseline's in more than data; the arm README's "The midtraining probe" has the gates that bound
+# it. The gradient NaN check stays on, so a non-finite gradient ends the run; the loss NaN check is off, so a NaN
+# loss shows as an iteration line without `lm loss`.
 #
 # --- LAUNCH ---
 # 512 GPUs = 128 nodes, the baseline midtrain's shape (job 6127737: 3126 iterations in 5 h 36 min at a
@@ -137,10 +139,9 @@ model:
   moe_grouped_gemm: True
   moe_experts_impl: torch_grouped
   gradient_accumulation_fusion: True
-  recompute_granularity: selective   # the levers above leave room for the Mamba and attention activations
-  recompute_method: null
-  recompute_num_layers: null
-  recompute_modules: [moe, shared_experts]
+  recompute_granularity: full        # the baseline's (header); its selective recompute retried the allocator
+  recompute_method: uniform
+  recompute_num_layers: 1
 
 checkpoint:
   # Weights only, from THIS arm's stage-1 final checkpoint (iteration 29881); fresh optimizer and

@@ -55,7 +55,7 @@ from scripts.telemetry.run_watch import (
     load_watch_spec,
     read_segments,
 )
-from scripts.telemetry.score_gate import FirstLossGate, MemoryGate, SpeedGate, load_score_gates
+from scripts.telemetry.score_gate import FirstLossGate, LossShiftGate, MemoryGate, SpeedGate, load_score_gates
 from scripts.training.launcher_source import env_override_entries
 from scripts.training.stage_guard import load_guard_config
 
@@ -144,9 +144,12 @@ IDENTITY = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
 GRADIENT_NAN_CHECK = "ddp.check_for_nan_in_grad"
 STAGE_ONE_LEVERS = {key: value for key, value in FAST_PRETRAIN_LEVERS.items() if key != GRADIENT_NAN_CHECK}
 PRETRAIN_DIVERGENCE = {"dataset.data_path", *IDENTITY, *STAGE_ONE_LEVERS}
+# The midtraining trains in the fast midtraining configuration without its selective recompute, keeping the
+# baseline's full recompute (Kyle, 2026-10-01): at 512 GPUs the selective recompute retried the allocator.
+MIDTRAIN_LEVERS = {key: value for key, value in FAST_MIDTRAIN_LEVERS.items() if not key.startswith("model.recompute_")}
 # Against V2's midtrain the data is the same; the warm start is this arm's own pretraining final, and the stage
-# trains in the fast midtraining configuration.
-MIDTRAIN_DIVERGENCE = {*IDENTITY, "checkpoint.pretrained_checkpoint", *FAST_MIDTRAIN_LEVERS}
+# trains in that configuration.
+MIDTRAIN_DIVERGENCE = {*IDENTITY, "checkpoint.pretrained_checkpoint", *MIDTRAIN_LEVERS}
 
 
 @pytest.fixture(scope="module")
@@ -199,7 +202,7 @@ class TestOnlyTheDataAndThePostureDifferFromTheBaseline:
 
     def test_the_midtrain_is_v2s_from_this_arms_own_pretraining(self, merged):
         assert_differs_only_in(merged[MIDTRAIN], merged[V2_MIDTRAIN], MIDTRAIN_DIVERGENCE, "v2e2e midtrain")
-        assert_levers_are_set(merged[MIDTRAIN], FAST_MIDTRAIN_LEVERS, "v2e2e midtrain")
+        assert_levers_are_set(merged[MIDTRAIN], MIDTRAIN_LEVERS, "v2e2e midtrain")
         midtrain = merged[MIDTRAIN].checkpoint
         assert midtrain.pretrained_checkpoint == merged[PRETRAIN].checkpoint.save
         assert midtrain.load == midtrain.save != midtrain.pretrained_checkpoint
@@ -647,10 +650,16 @@ class TestTheMidtrainingProbe:
         "logger.wandb_save_dir",
     }
 
-    def test_fast_mid_is_the_baselines_stage_two_in_the_fast_midtraining_configuration(self, merged):
-        fields = {*FAST_MIDTRAIN_LEVERS, *self.PROBE_FIELDS, "checkpoint.save_interval", "checkpoint.most_recent_k"}
+    def test_fast_mid_is_the_baselines_stage_two_in_the_arms_midtraining_configuration(self, merged):
+        fields = {*MIDTRAIN_LEVERS, *self.PROBE_FIELDS, "checkpoint.save_interval", "checkpoint.most_recent_k"}
         assert_differs_only_in(merged[PROBE_MID_FAST], merged[BASELINE_MIDTRAIN], fields, "fast midtraining probe")
-        assert_levers_are_set(merged[PROBE_MID_FAST], FAST_MIDTRAIN_LEVERS, "fast midtraining probe")
+        assert_levers_are_set(merged[PROBE_MID_FAST], MIDTRAIN_LEVERS, "fast midtraining probe")
+
+    def test_both_midtraining_configs_keep_the_baselines_full_recompute(self, merged):
+        for path in (MIDTRAIN, PROBE_MID_FAST):
+            model, baseline = merged[path].model, merged[BASELINE_MIDTRAIN].model
+            assert model.recompute_granularity == baseline.recompute_granularity == "full", path.name
+            assert (model.recompute_method, model.recompute_num_layers) == ("uniform", 1), path.name
 
     def test_the_as_is_rerun_is_the_baselines_stage_two(self, merged):
         assert_differs_only_in(
@@ -690,13 +699,13 @@ class TestTheMidtrainingProbe:
         assert load_score_gates(SCORE_GATE_MIDTRAIN) == {
             "fast_mid_memory": MemoryGate("fast_mid_memory", "fast_mid.score.json", 85.5, 0),
             "fast_mid_speed": SpeedGate(
-                "fast_mid_speed", "fast_mid.score.json", "as_is_mid.score.json", 6.43, 4.286667, 4.946154
+                "fast_mid_speed", "fast_mid.score.json", "as_is_mid.score.json", 6.43, 4.946154, 4.946154
             ),
             "fast_mid_first_loss": FirstLossGate(
                 "fast_mid_first_loss", "fast_mid.score.json", "as_is_mid.score.json", 0.005
             ),
+            "fast_mid_loss_shift": LossShiftGate("fast_mid_loss_shift", "parity_band.json", -0.001, 0.003, 3, 0.001),
         }
-        assert 6.43 / 1.5 == pytest.approx(4.286667, abs=1e-6)
         assert 6.43 / 1.3 == pytest.approx(4.946154, abs=1e-6)
 
     def test_the_parity_reference_is_the_production_midtraining_run(self):
@@ -712,14 +721,31 @@ class TestTheMidtrainingProbe:
         assert "python scripts/telemetry/score_gate.py --spec $ARM/score_gate_midtrain.yaml --scores-dir $OUT" in text
         assert re.search(r"^gate score_gate ", text, re.M)
         for gate in load_score_gates(SCORE_GATE_MIDTRAIN).values():
+            if isinstance(gate, LossShiftGate):
+                assert gate.report == "parity_band.json", gate.name
+                continue
             files = [gate.score] if isinstance(gate, MemoryGate) else [gate.candidate, gate.reference]
             assert set(files) <= {f"{step}.score.json" for step in windows}, gate.name
+
+    def test_the_loss_shift_gate_reads_the_band_the_probe_writes_before_it(self):
+        """The band over the gated range is written to parity_band.json, reported rather than gating, and the score
+        gate that reads it runs after it."""
+        text = PROBE_MID_SBATCH.read_text()
+        band = 'parity_band parity_band "$PARITY_GATED"'
+        assert band in text and "> $OUT/$name.json" in PROBE_JOB.read_text()
+        assert re.search(r"^note parity_band ", text, re.M) and not re.search(r"^record parity_band", text, re.M)
+        assert text.index(band) < text.index("score_gate.py --spec $ARM/score_gate_midtrain.yaml")
+
+    def test_the_probe_watches_fast_mid_against_the_midtrainings_stop_conditions(self):
+        text = PROBE_MID_SBATCH.read_text()
+        assert "python scripts/telemetry/run_watch.py --spec $ARM/watch_midtrain.yaml --log $OUT/fast_mid.out" in text
+        assert re.search(r"^gate watch ", text, re.M)
 
     def test_every_launch_has_a_time_limit_and_together_they_fit_the_job(self):
         text = PROBE_MID_SBATCH.read_text()
         launches = [line for line in text.replace("\\\n", " ").splitlines() if re.match(r"\s*(if )?launch \w", line)]
         steps = {re.match(r"\s*(?:if )?launch (\w+)", line).group(1) for line in launches}
-        assert steps == {"fast_mid", "handoff_cpt", "as_is_mid", "as_is_mid_2"}
+        assert steps == {"fast_mid", "handoff_cpt", "as_is_mid"}
         limits = [
             int(sbatch_value(PROBE_MID_SBATCH, name))
             for line in launches

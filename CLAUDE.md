@@ -394,8 +394,6 @@ placement measurements).
   also require every run to log the same learning rate and consumed samples at every iteration,
   and `--wandb` reads full-precision values from each log's W&B run (the log prints 7
   significant digits of the loss and 3 decimals of the grad norm). Exit status 1 on any FAIL.
-  `windows-outside <band.json>` reads a `band --json` report back and prints how many windows its one candidate
-  left the loss band in when every other check passed, or `other` when one did not.
   Default-mode training is not run-to-run deterministic (the grad norm differs from iteration 1),
   so an identity test needs `model.deterministic_mode=true` with `NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`,
   `CUBLAS_WORKSPACE_CONFIG=:4096:8` and `MAMBA_DETERMINISTIC=1` (an `ISAMBARD_ENV_OVERRIDES` file) on
@@ -412,14 +410,15 @@ placement measurements).
   spread does not reproduce, a log or W&B read fails, or the candidate is one of the references, which
   a band cannot judge), and 0 when all PASS. The v2e2e arm's `loss_gate.yaml` is the first spec.
   `scripts/telemetry/score_gate.py --spec <gate.yaml> --scores-dir DIR` does the same for thresholds
-  on `score_run.py --json` files: a `memory` gate fails a score with no `peak_memory_across_ranks`,
+  on the `score_run.py --json` files and `loss_parity.py band --json` reports in DIR: a `memory` gate fails a score with no `peak_memory_across_ranks`,
   more allocator retries or more peak allocated memory than its limits; a `speed` gate projects a
   candidate's mean step time relative to a reference's on the same nodes onto a stated step time and
   fails above its limit; a `first_loss` gate compares two runs started from the same weights on the same
   first batch at their first logged iteration and fails when the candidate's lm loss there differs from the
-  reference's by more than its tolerance. Both tools share the outcomes and the exit status
-  (`gate_outcome.py`); the v2e2e probes run the arm's `score_gate.yaml` and `score_gate_midtrain.yaml`,
-  because `score_run.py` exits 0 on any scorable log.
+  reference's by more than its tolerance; a `loss_shift` gate bounds a `loss_parity.py band --json` report's
+  candidate offset from the references' mean in every window and its rise from the first windows to the last.
+  Both tools share the outcomes and the exit status (`gate_outcome.py`); the v2e2e probes run the arm's
+  `score_gate.yaml` and `score_gate_midtrain.yaml`, because `score_run.py` exits 0 on any scorable log.
   `scripts/telemetry/run_watch.py --spec <watch.yaml> --log <segment log> ...` checks a running stage the same way:
   exit 1 on a stop condition (a result the rerun state machine rejected, which is how the gradient NaN check ends a
   run; a non-finite grad norm or lm loss, or an iteration line without `lm loss`; an iteration counted as nan or
@@ -736,7 +735,8 @@ benchmark on the same allocations (the pre-registered four-cycle comparison: goa
 switch group against its 6.146 s), 77 GB reserved, with its 500-iteration loss inside the baseline's band. Its
 chunked cross-entropy is the pin's carried commit 0005, so it does not run at the previous pin. The production configs
 do not use its levers, except the control-pretraining V2 E2E arm's midtraining
-(`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/`). The campaign is logged in `docs/investigations/nano30b-midtrain-perf-campaign.md`.
+(`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/`), which takes all but the selective recompute and
+keeps the baseline's full recompute. The campaign is logged in `docs/investigations/nano30b-midtrain-perf-campaign.md`.
 
 **Super — the 128-GPU, 1B-token standard** (Kyle, 2026-08-05): **seq 8192, GBS 3072**
 (= 25,165,824 tokens/iter), **all 128 GPUs / 32 nodes, 1B tokens** (`train_iters: 40` =
@@ -1068,10 +1068,11 @@ gradient NaN check stays on), which changes numerical precision, so the arm diff
 in more than data. Two gates bound that: `probe/probe.sbatch`, one 130-node job on the baseline's data
 before the launch (NVLink sweep, speed, memory across four saves, identical-batch parity against the
 baseline, the midtraining handoff), and the pre-registered `loss_gate.yaml` during stage 1; a failure
-stops stage 1, which is debugged in that posture, never restarted in another (Kyle, 2026-10-01). Its midtraining trains in the fast
-Nano midtraining configuration (the midtraining quickstart's levers and its `.env`, `FAST_MIDTRAIN_LEVERS`
-in the same file; Kyle, 2026-10-01), a precision change too, bounded by `probe/probe_midtrain.sbatch`:
-the baseline's stage 2 at production width, against production's midtraining run for parity.
+stops stage 1, which is debugged in that posture, never restarted in another (Kyle, 2026-10-01). Its
+midtraining trains in the fast Nano midtraining configuration less its selective recompute (the midtraining
+quickstart's levers and its `.env`, `FAST_MIDTRAIN_LEVERS` in the same file, with the baseline's full
+recompute; Kyle, 2026-10-01), a precision change too, bounded by `probe/probe_midtrain.sbatch`: the baseline's
+stage 2 at production width, against production's midtraining run for a bounded loss offset.
 Its five pretraining corpora are pinned at the data revision `a815dfe7`; its other ten corpora are
 V2's builds. The arm README has the gates, the launch and the storage.
 
@@ -1717,7 +1718,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   (`stage_guard.py`) and the steps of a production-width probe job (`probe_job.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
-  speed and first-loss gates over scores (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a
+  speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a
   running stage's logs against its watch spec (`run_watch.py`), the training-log parser they read
   (`training_log.py`) and the commit a checkout is at (`code_revision.py`)
 - `tests/unit_tests/` — No GPU required

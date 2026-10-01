@@ -31,15 +31,11 @@ that the printed digits agree. Consumed samples always come from the log.
 
 The exit status is 0 when every candidate passes (a grad-norm FLAG does not fail it) and 1 otherwise.
 
-``windows-outside`` reads a ``band --json`` report back and prints how many windows its one candidate left
-the loss band in when every other check passed (0 when it passed), or ``other`` when one did not; it exits 0.
-
 USAGE
     python scripts/telemetry/loss_parity.py band --reference A1.out A2.out --candidate C.out \\
         --iterations 1 500 --window 50 [--wandb] [--json]
     python scripts/telemetry/loss_parity.py identity --reference A.out --candidate B.out [B2.out ...] \\
         --iterations 1 30 [--wandb] [--json]
-    python scripts/telemetry/loss_parity.py windows-outside band.json
 """
 
 import argparse
@@ -175,10 +171,9 @@ class CandidateVerdict:
     nan_total: int
 
     @property
-    def matches_the_references(self) -> bool:
-        """Whether the candidate logged the references' learning rate and consumed samples at every iteration and
-        had no skipped or NaN iteration: every check but the loss band."""
-        return _matches_the_references(
+    def mismatches(self) -> list[str]:
+        """Every way the candidate departs from the references besides its loss (see ``reference_mismatches``)."""
+        return reference_mismatches(
             self.first_learning_rate_difference,
             self.first_consumed_samples_difference,
             self.skipped_total,
@@ -186,10 +181,20 @@ class CandidateVerdict:
         )
 
 
-def _matches_the_references(
+def reference_mismatches(
     learning_rate: Difference | None, consumed_samples: Difference | None, skipped_total: int, nan_total: int
-) -> bool:
-    return learning_rate is None and consumed_samples is None and not skipped_total and not nan_total
+) -> list[str]:
+    """Every way a candidate departs from what a band test assumes, besides its loss: a learning rate or consumed
+    sample count unlike the references' (named at its first differing iteration), and skipped or NaN iterations.
+    Empty when there is none, which with its loss inside the band is a PASS."""
+    mismatches = []
+    if learning_rate is not None:
+        mismatches.append(f"learning rate differs at iteration {learning_rate.iteration}")
+    if consumed_samples is not None:
+        mismatches.append(f"consumed samples differ at iteration {consumed_samples.iteration}")
+    if skipped_total or nan_total:
+        mismatches.append(f"{skipped_total} skipped / {nan_total} NaN iterations")
+    return mismatches
 
 
 @dataclass(frozen=True)
@@ -251,17 +256,17 @@ class BandReport:
         return cls(**{**raw, "references": tuple(raw["references"]), "metrics": metrics, "verdicts": verdicts})
 
 
-def loss_windows_outside(report: BandReport) -> int | None:
-    """How many windows the report's one candidate left the loss band in, when every other check passed (0 when the
-    candidate passed); None when it failed another check, which no count of windows describes. Raises ValueError
-    unless the report has exactly one candidate."""
-    if len(report.verdicts) != 1:
-        raise ValueError(f"the report has {len(report.verdicts)} candidates, not one")
-    (verdict,) = report.verdicts
-    if not verdict.matches_the_references:
-        return None
-    (loss,) = [band for band in report.metrics if band.metric == VERDICT_METRIC]
-    return len(loss.candidates[0].windows_outside)
+def offsets_from_reference_mean(windows: Sequence[WindowBand], candidate: int) -> list[float]:
+    """Per window, the ``candidate``-th candidate's mean minus the mean of the references' means."""
+    return [window.candidate_means[candidate] - statistics.fmean(window.reference_means) for window in windows]
+
+
+def offset_rise(offsets: Sequence[float], windows: int) -> float:
+    """How far the mean of the last ``windows`` offsets lies above the mean of the first ``windows``. Raises
+    ValueError unless there are at least two such spans of offsets."""
+    if windows < 1 or len(offsets) < 2 * windows:
+        raise ValueError(f"{len(offsets)} offsets cannot give two spans of {windows} windows")
+    return statistics.fmean(offsets[-windows:]) - statistics.fmean(offsets[:windows])
 
 
 @dataclass(frozen=True)
@@ -425,7 +430,7 @@ def _metric_band(
         )
     results = []
     for index, cand in enumerate(candidates):
-        deviations = [band.candidate_means[index] - statistics.fmean(band.reference_means) for band in windows]
+        deviations = offsets_from_reference_mean(windows, index)
         outside = tuple(band.first for band in windows if not band.low <= band.candidate_means[index] <= band.high)
         results.append(
             CandidateBand(
@@ -478,17 +483,13 @@ def band_test(
 
     anchor = references[0]
     for ref in references:
-        problems = []
-        if ref.skipped_total or ref.nan_total:
-            problems.append(f"{ref.skipped_total} skipped and {ref.nan_total} NaN iterations")
         lr = first_difference(first, anchor.values[SCHEDULE_METRIC], ref.values[SCHEDULE_METRIC])
         consumed = first_difference(first, anchor.consumed_samples, ref.consumed_samples)
-        if lr is not None:
-            problems.append(f"learning rate differs from {anchor.label} at iteration {lr.iteration}")
-        if consumed is not None:
-            problems.append(f"consumed samples differ from {anchor.label} at iteration {consumed.iteration}")
+        problems = reference_mismatches(lr, consumed, ref.skipped_total, ref.nan_total)
         if problems:
-            raise ValueError(f"reference {ref.label} is not a clean reference: {'; '.join(problems)}")
+            raise ValueError(
+                f"reference {ref.label} is not a clean reference: {'; '.join(problems)} (against {anchor.label})"
+            )
 
     metrics = (
         _metric_band(VERDICT_METRIC, references, candidates, window, loss_half_width),
@@ -500,11 +501,11 @@ def band_test(
         lr = first_difference(first, anchor.values[SCHEDULE_METRIC], cand.values[SCHEDULE_METRIC])
         consumed = first_difference(first, anchor.consumed_samples, cand.consumed_samples)
         loss_inside = loss_band.candidates[index].inside
-        matches = _matches_the_references(lr, consumed, cand.skipped_total, cand.nan_total)
+        mismatches = reference_mismatches(lr, consumed, cand.skipped_total, cand.nan_total)
         verdicts.append(
             CandidateVerdict(
                 label=cand.label,
-                verdict=PASS if loss_inside and matches else FAIL,
+                verdict=PASS if loss_inside and not mismatches else FAIL,
                 grad_norm=PASS if grad_band.candidates[index].inside else FLAG,
                 loss_inside=loss_inside,
                 first_learning_rate_difference=lr,
@@ -577,14 +578,14 @@ def format_band_report(report: BandReport) -> str:
         header += ["band low".rjust(10), "band high".rjust(10)]
         header += [f"cand {i + 1}".rjust(10) + "  dev".rjust(11) for i in range(len(report.verdicts))]
         rows.append(" ".join(header))
-        for w in band.windows:
-            ref_mean = statistics.fmean(w.reference_means)
+        offsets = [offsets_from_reference_mean(band.windows, index) for index in range(len(band.candidates))]
+        for row, w in enumerate(band.windows):
             cells = [f"{w.first}-{w.last}".ljust(11)]
             cells += [f"{m:10.5f}" for m in w.reference_means]
             cells += [f"{w.low:10.5f}", f"{w.high:10.5f}"]
-            for m in w.candidate_means:
+            for index, m in enumerate(w.candidate_means):
                 mark = " " if w.low <= m <= w.high else "*"
-                cells.append(f"{m:10.5f} {m - ref_mean:+10.5f}{mark}")
+                cells.append(f"{m:10.5f} {offsets[index][row]:+10.5f}{mark}")
             rows.append(" ".join(cells))
         for cand in band.candidates:
             rows.append(
@@ -593,13 +594,7 @@ def format_band_report(report: BandReport) -> str:
             )
     rows.append("")
     for v in report.verdicts:
-        notes = []
-        if v.first_learning_rate_difference is not None:
-            notes.append(f"learning rate differs at iteration {v.first_learning_rate_difference.iteration}")
-        if v.first_consumed_samples_difference is not None:
-            notes.append(f"consumed samples differ at iteration {v.first_consumed_samples_difference.iteration}")
-        if v.skipped_total or v.nan_total:
-            notes.append(f"{v.skipped_total} skipped / {v.nan_total} NaN iterations")
+        notes = v.mismatches
         rows.append(
             f"verdict {v.label}: {v.verdict} (lm loss {'inside' if v.loss_inside else 'outside'} its band; "
             f"grad norm {v.grad_norm}{'; ' + '; '.join(notes) if notes else ''})"
@@ -629,8 +624,7 @@ def format_identity_report(report: IdentityReport) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI: the ``band`` and ``identity`` tests over logs of runs with one seed and data order, and
-    ``windows-outside`` over a band report."""
+    """Build the CLI: the ``band`` and ``identity`` tests over logs of runs with one seed and data order."""
     parser = argparse.ArgumentParser(description="Loss-trajectory parity between runs of one seed and data order.")
     tests = parser.add_subparsers(dest="test", required=True)
     for name, help_text in (
@@ -657,23 +651,12 @@ def build_parser() -> argparse.ArgumentParser:
             help="Read lm loss, grad norm and learning rate from the W&B run each log names (full precision)",
         )
         sub.add_argument("--json", action="store_true", help="Emit the report as JSON")
-    outside = tests.add_parser(
-        "windows-outside",
-        help="print the loss windows a band report's one candidate left the band in, or 'other' when it failed "
-        "another check",
-    )
-    outside.add_argument("report", type=Path, help="A band --json report")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the requested test, print its report and return 0 when every candidate passes, 1 otherwise; or print a
-    band report's loss windows outside (``windows-outside``) and return 0."""
+    """Run the requested test, print its report and return 0 when every candidate passes, 1 otherwise."""
     args = build_parser().parse_args(argv)
-    if args.test == "windows-outside":
-        windows = loss_windows_outside(BandReport.from_dict(json.loads(args.report.read_text())))
-        print("other" if windows is None else windows)
-        return 0
     iterations = (args.iterations[0], args.iterations[1])
     references = [load_trajectory(path, iterations, args.wandb) for path in args.reference]
     candidates = [load_trajectory(path, iterations, args.wandb) for path in args.candidate]

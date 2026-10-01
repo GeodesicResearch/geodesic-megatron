@@ -26,10 +26,12 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.telemetry import loss_parity
 from scripts.telemetry import score_gate as sg
 from scripts.telemetry.score_run import Workload, score_log
 
 from megatron.bridge.training.utils.train_utils import format_peak_memory, summarise_peak_memory
+from tests.unit_tests.test_loss_parity import over, write_run
 from tests.unit_tests.training_log_fixture import iteration_line, sub_once, write_log
 
 
@@ -66,7 +68,11 @@ def rows(allocated_gb: float, reserved_gb: float, retries: int = 0) -> list[tupl
 
 
 def write_spec(
-    tmp_path: Path, memory: dict | None = None, speed: dict | None = None, first_loss: dict | None = None
+    tmp_path: Path,
+    memory: dict | None = None,
+    speed: dict | None = None,
+    first_loss: dict | None = None,
+    loss_shift: dict | None = None,
 ) -> Path:
     path = tmp_path / "score_gate.yaml"
     raw = {}
@@ -76,6 +82,8 @@ def write_spec(
         raw["speed"] = speed
     if first_loss is not None:
         raw["first_loss"] = first_loss
+    if loss_shift is not None:
+        raw["loss_shift"] = loss_shift
     path.write_text(yaml.safe_dump(raw))
     return path
 
@@ -275,3 +283,89 @@ def test_an_unknown_gate_kind_is_refused(tmp_path):
     path.write_text(yaml.safe_dump({"memroy": MEMORY_GATE}))
     with pytest.raises(ValueError, match="unknown gate kinds"):
         sg.load_score_gates(path)
+
+
+# --------------------------------------------------------------------------------------
+# Loss shift
+# --------------------------------------------------------------------------------------
+
+
+LOSS_SHIFT_GATE = {
+    "fast_shift": {
+        "report": "parity_band.json",
+        "offset_low": -0.001,
+        "offset_high": 0.003,
+        "rise_windows": 2,
+        "max_rise": 0.001,
+    }
+}
+
+
+def write_band_report(tmp_path: Path, scores_dir: Path, **candidate) -> None:
+    """A real band report over iterations 1-60 in six windows of 10, written as ``band --json`` writes it: two
+    references 0.002 apart (their mean sits 0.001 above the fixture) and a candidate written with ``candidate``."""
+    refs = [write_run(tmp_path, "ref_a"), write_run(tmp_path, "ref_b", loss_offset=over(1, 60, 0.002))]
+    runs = [loss_parity.load_trajectory(path, (1, 60), use_wandb=False) for path in refs]
+    mine = loss_parity.load_trajectory(write_run(tmp_path, "cand", **candidate), (1, 60), use_wandb=False)
+    report = loss_parity.band_test(runs, [mine], window=10)
+    (scores_dir / "parity_band.json").write_text(json.dumps(report.to_dict()))
+
+
+def test_a_steady_offset_inside_the_range_passes(tmp_path, capsys):
+    write_band_report(tmp_path, tmp_path, loss_offset=over(1, 60, 0.003))
+    status, results = run(write_spec(tmp_path, loss_shift=LOSS_SHIFT_GATE), tmp_path, capsys)
+    assert status == 0 and results["fast_shift"]["outcome"] == "PASS"
+    assert "offsets +0.0020 to +0.0020 over 6 windows of 1-60" in results["fast_shift"]["detail"]
+
+
+def test_an_offset_outside_the_range_in_any_window_fails(tmp_path, capsys):
+    write_band_report(tmp_path, tmp_path, loss_offset={**over(1, 50, 0.002), **over(51, 60, 0.006)})
+    status, results = run(write_spec(tmp_path, loss_shift=LOSS_SHIFT_GATE), tmp_path, capsys)
+    assert status == 1 and results["fast_shift"]["outcome"] == "FAIL"
+    assert "windows from [51] outside the range" in results["fast_shift"]["detail"]
+
+
+def test_an_offset_that_grows_inside_the_range_fails(tmp_path, capsys):
+    offsets = {**over(1, 20, 0.001), **over(21, 40, 0.002), **over(41, 60, 0.0035)}
+    write_band_report(tmp_path, tmp_path, loss_offset=offsets)
+    status, results = run(write_spec(tmp_path, loss_shift=LOSS_SHIFT_GATE), tmp_path, capsys)
+    assert status == 1 and results["fast_shift"]["outcome"] == "FAIL"
+    assert results["fast_shift"]["detail"].endswith("the offset grows")
+
+
+@pytest.mark.parametrize("candidate", [{"nan": {30: 1}}, {"learning_rate": {30: 1.0e-3}}], ids=["nan", "schedule"])
+def test_a_candidate_off_the_references_schedule_or_counting_a_nan_fails(tmp_path, capsys, candidate):
+    write_band_report(tmp_path, tmp_path, **candidate)
+    status, results = run(write_spec(tmp_path, loss_shift=LOSS_SHIFT_GATE), tmp_path, capsys)
+    assert status == 1 and results["fast_shift"]["outcome"] == "FAIL"
+
+
+def test_a_report_with_too_few_windows_for_the_rise_is_not_evaluated(tmp_path, capsys):
+    write_band_report(tmp_path, tmp_path, loss_offset=over(1, 60, 0.003))
+    gate = {"fast_shift": {**LOSS_SHIFT_GATE["fast_shift"], "rise_windows": 4}}
+    status, results = run(write_spec(tmp_path, loss_shift=gate), tmp_path, capsys)
+    assert status == 2 and results["fast_shift"]["outcome"] == "NOT EVALUATED"
+
+
+def test_a_missing_report_is_not_evaluated_rather_than_a_crash(tmp_path, capsys):
+    status, results = run(write_spec(tmp_path, loss_shift=LOSS_SHIFT_GATE), tmp_path, capsys)
+    assert status == 2 and results["fast_shift"]["outcome"] == "NOT EVALUATED"
+
+
+def test_a_report_of_more_than_one_candidate_is_not_evaluated(tmp_path, capsys):
+    """The gate judges one candidate; a band over several cannot say whose offsets it bounds."""
+    refs = [write_run(tmp_path, "ref_a"), write_run(tmp_path, "ref_b", loss_offset=over(1, 60, 0.002))]
+    runs = [loss_parity.load_trajectory(path, (1, 60), use_wandb=False) for path in refs]
+    cand = loss_parity.load_trajectory(write_run(tmp_path, "cand"), (1, 60), use_wandb=False)
+    report = loss_parity.band_test(runs, [cand, cand], window=10)
+    (tmp_path / "parity_band.json").write_text(json.dumps(report.to_dict()))
+    status, results = run(write_spec(tmp_path, loss_shift=LOSS_SHIFT_GATE), tmp_path, capsys)
+    assert status == 2 and results["fast_shift"]["outcome"] == "NOT EVALUATED"
+    assert "holds 2 candidates, not one" in results["fast_shift"]["detail"]
+
+
+@pytest.mark.parametrize("edit", [{"offset_low": 0.004}, {"rise_windows": 0}], ids=["empty-range", "no-rise-window"])
+def test_a_loss_shift_gate_with_an_empty_range_or_no_rise_window_is_refused(tmp_path, edit):
+    gate = {"g": {**LOSS_SHIFT_GATE["fast_shift"], **edit}}
+    with pytest.raises(ValueError, match="empty offset range or no rise window"):
+        sg.load_score_gates(write_spec(tmp_path, loss_shift=gate))
