@@ -40,8 +40,10 @@ record when it can be and exits 5, so neither reads as a stop.
 
 A gate the watch has passed on a log is passed to later ticks as ``--decided GATE=LOG``, so the watch does not
 evaluate it again while that log still covers its range, and a transient failure to read a reference (W&B, say)
-cannot unsettle it. The record starts with the guard config, the watch spec and its sha256, and the code revision,
-and every tick names the watch spec's sha256, so each verdict can be traced to the spec it was judged by.
+cannot unsettle it. A guard started again takes as decided the gates its record shows the watch passing, so a
+restart inside the hold window does not re-read a reference for a gate an earlier guard saw pass. The record starts
+with the guard config, the watch spec and its sha256, the code revision and the gates decided from the record, and
+every tick names the watch spec's sha256, so each verdict can be traced to the spec it was judged by.
 
 The guard acts only on jobs that carry the stage's name and belong to the user running it, and only by ID. After
 a stop or a hold it does not resume: whoever resolves the cause starts it again. It runs on a login or tunnel node
@@ -81,6 +83,10 @@ _SUMMARY_RE = re.compile(r"^checked through iteration (\S+): ", re.M)
 # A gate the watch passed, and the log it passed on (the line's last field).
 _PASSED_RE = re.compile(r"^GATE (\S+): PASS(?: \(.*\))? on (.+)$", re.M)
 _UNDECIDED_RE = re.compile(r"^undecided gates: (.*)$", re.M)
+# The timestamp that opens every line the guard writes; a watch's output follows its tick's line unstamped.
+_STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ", re.M)
+# A tick whose watch ran, and the watch's exit status.
+_RAN_TICK_RE = re.compile(r"^\S+ [A-Z]+: watch exit (\d+) through iteration ")
 # A container or activation failure must not exit 1, which reads as a stop.
 _ACTIVATION_FAILED = 3
 
@@ -193,6 +199,22 @@ def parse_watch(status: int, output: str) -> WatchResult:
         undecided = () if listed == "none" else tuple(name.strip() for name in listed.split(","))
     passed = dict(_PASSED_RE.findall(output)) if ran else {}
     return WatchResult(status, checked, ran, output, passed, undecided)
+
+
+def decided_in_record(record: Path) -> Dict[str, str]:
+    """The gates the watch passed in the ticks ``record`` holds, each with the log it passed on (a later tick's
+    winning), read from each tick whose watch ran as that tick read it; empty when there is no record."""
+    if not record.exists():
+        return {}
+    text = record.read_text()
+    starts = [match.start() for match in _STAMP_RE.finditer(text)] + [len(text)]
+    decided: Dict[str, str] = {}
+    for begin, end in zip(starts, starts[1:]):
+        line, _, output = text[begin:end].partition("\n")
+        ran = _RAN_TICK_RE.match(line)
+        if ran is not None:
+            decided.update(parse_watch(int(ran.group(1)), output).passed)
+    return decided
 
 
 def could_not_evaluate(reason: str) -> WatchResult:
@@ -389,13 +411,19 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
     """Guard the stage until a stop, a hold or its end (one tick when ``once``), and return its exit status.
 
     Raises CancelFailed when a stop or hold could not cancel the stage's jobs."""
+    decided = decided_in_record(config.record)
     _record(
         config,
-        "START guard {} (sha256 {}); watch spec {} (sha256 {}); code {}".format(
-            config_path, sha256_of(config_path), config.watch, sha256_of(config.watch), code_revision(str(REPO_ROOT))
+        "START guard {} (sha256 {}); watch spec {} (sha256 {}); code {}; decided from the record: {}".format(
+            config_path,
+            sha256_of(config_path),
+            config.watch,
+            sha256_of(config.watch),
+            code_revision(str(REPO_ROOT)),
+            ", ".join("{}={}".format(gate, log) for gate, log in sorted(decided.items())) or "none",
         ),
     )
-    state = START
+    state = START._replace(decided=decided)
     while True:
         try:
             action, state, done = tick(

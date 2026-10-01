@@ -324,7 +324,9 @@ never counts as a stop. The gates are due from iteration 2000, so the 200 iterat
 give a W&B outage several ticks to clear before it can cancel the stage. A gate the watch has passed is handed to later ticks as decided on its log, so it is
 not evaluated again while that log covers its range: a W&B read that fails inside the window cannot cancel a stage
 whose gates have all passed, and a segment restarted from scratch makes another log cover the range, on which the
-gate is evaluated anew. The record opens with the guard config and the watch spec, each with its sha256, and the
+gate is evaluated anew. A guard started again takes the gates its record shows passing as decided and names them on
+its START line, so restarting it inside the hold window needs no reference read for a gate already passed. The
+record opens with the guard config and the watch spec, each with its sha256, and the
 code revision, and every tick names the spec's sha256. On a stop or hold the guard cancels before it writes, so a
 record it cannot write cannot keep the jobs alive. A cancellation that fails exits 4. A failure of the guard itself
 exits 5 and is written to the record when it can be: a tick that finds no started segment of the stage is one,

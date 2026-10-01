@@ -58,14 +58,15 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   jobs), does the same and exits 3 once the stage has reached the config's `hold.from_iteration` while a loss gate
   is still undecided; anything else alerts and the guard keeps going. It cancels before it writes the tick to the
   record. A gate the watch has passed is handed to later ticks as `--decided GATE=LOG`, so it is
-  not evaluated again while that log covers its range. The record opens with the guard config and the watch spec,
-  each with its sha256, and the code revision (`scripts/telemetry/code_revision.py`: the checkout's commit, or a
-  frozen copy's `REVISION`),
-  and every tick names the spec's sha256. A tick that could not be evaluated never counts as a stop; a cancellation
-  that fails exits 4, and a failure of the guard itself exits 5 and is written to the record. It is started once
-  the stage's newest segment has logged its first iteration, so finding no started segment is such a failure. It
-  runs on the tunnel under the host Python (SLURM's commands do not exist in the container), so it stays Python
-  3.6-compatible, from the frozen copy the stage was submitted from:
+  not evaluated again while that log covers its range, and a guard started again takes as decided the gates its
+  record shows the watch passing, so restarting it inside the hold window does not re-read a reference for a gate
+  already passed. The record opens with the guard config and the watch spec, each with its sha256, the code revision
+  (`scripts/telemetry/code_revision.py`: the checkout's commit, or a frozen copy's `REVISION`) and the gates decided
+  from the record, and every tick names the spec's sha256. A tick that could not be evaluated never counts as a
+  stop; a cancellation that fails exits 4, and a failure of the guard itself exits 5 and is written to the record.
+  It is started once the stage's newest segment has logged its first iteration, so finding no started segment is
+  such a failure. It runs on the tunnel under the host Python (SLURM's commands do not exist in the container), so
+  it stays Python 3.6-compatible, from the frozen copy the stage was submitted from:
   `setsid nohup python3 scripts/training/stage_guard.py --config <guard.yaml> >/dev/null 2>&1 &`. The v2e2e
   arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
 

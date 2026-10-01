@@ -314,6 +314,22 @@ def test_a_gate_passed_once_is_not_evaluated_again_on_its_log(tmp_path, gated):
     assert cluster.watch_arguments()[-1][-2:] == ["--decided", f"G={log}"]
 
 
+def test_only_a_tick_whose_watch_ran_seeds_the_decided_gates_and_a_later_tick_wins(tmp_path):
+    record = tmp_path / "record.log"
+    assert sg.decided_in_record(record) == {}
+    record.write_text(
+        "2026-10-01T06:00:00Z START guard g.yaml (sha256 x); watch spec w.yaml (sha256 y); code z\n"
+        "2026-10-01T06:02:00Z CONTINUE: watch exit 0 through iteration 60; undecided gates none [10:RUNNING] spec y\n"
+        "GATE G: PASS on /a.out\nundecided gates: none\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
+        "2026-10-01T06:04:00Z ALERT: watch could not run (exit 3); undecided gates none [10:RUNNING] spec y\n"
+        "GATE H: PASS on /b.out\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
+        "2026-10-01T06:06:00Z CONTINUE: watch exit 0 through iteration 62; undecided gates none [11:RUNNING] spec y\n"
+        "GATE G: PASS (passed at an earlier check on this log) on /c.out\nundecided gates: none\n"
+        "checked through iteration 62: 0 stop conditions, 1 gates due\n"
+    )
+    assert sg.decided_in_record(record) == {"G": "/c.out"}
+
+
 def test_a_log_path_with_a_space_reaches_the_watch_whole(tmp_path):
     config = sg.load_guard_config(write_config(tmp_path))
     log_dir = tmp_path / "with space"
@@ -434,6 +450,24 @@ def test_the_record_names_the_config_the_spec_and_the_code_and_each_tick_the_spe
         f"watch spec {tmp_path / 'watch.yaml'} (sha256 {spec_sha}); code {code_revision(str(sg.REPO_ROOT))}" in start
     )
     assert tick_line.endswith(f"spec {spec_sha[:12]}")
+
+
+def test_a_restarted_guard_does_not_hold_the_stage_over_a_gate_its_record_saw_pass(tmp_path, gated, cluster_command):
+    """Restarted inside the hold window with the gate's reference unreadable (W&B down, say), a guard that had to
+    evaluate the gate again would cancel a stage whose gates have all passed."""
+    log = segment(tmp_path, 10, loss_offset={it: 0.005 for it in range(1, 61)})
+    config = write_config(tmp_path, watch=str(gated))
+    cluster_command["cluster"] = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+    assert sg.main(["--config", str(config), "--once"]) == 0
+    (tmp_path / "ref_a.out").unlink()
+    cluster = FakeCluster([sacct_line(10, "RUNNING", tmp_path)])
+    cluster_command["cluster"] = cluster
+    assert sg.main(["--config", str(config), "--once"]) == 0
+    assert cluster.cancelled() == []
+    assert cluster.watch_arguments()[-1][-2:] == ["--decided", f"G={log}"]
+    starts = [line for line in (tmp_path / "guard" / "record.log").read_text().splitlines() if " START guard " in line]
+    assert starts[0].endswith("; decided from the record: none")
+    assert starts[1].endswith(f"; decided from the record: G={log}")
 
 
 def test_a_guard_that_finds_no_segment_records_its_failure_and_exits_with_its_own_status(tmp_path, cluster_command):
