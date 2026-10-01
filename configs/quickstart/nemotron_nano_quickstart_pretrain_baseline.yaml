@@ -8,7 +8,7 @@
 # init, the 13-prefix data blend, recompute, the comm_overlap block, precision-aware optimizer,
 # the LR schedule and the logging posture — is the baseline's, read at launch. A change to the
 # production posture therefore flows into this benchmark, and into the quickstart built on it, without
-# an edit here, and tests/unit_tests/test_nano_pretrain_quickstart.py fails if any field other than the
+# an edit here, and tests/unit_tests/test_nano_stage_quickstarts.py fails if any field other than the
 # ones below starts to differ.
 #
 # GBS 512: 512 sequences over DP=64 at micro-batch 1 is 8 microbatches per DP replica per

@@ -20,10 +20,14 @@
 # alternatives on this model at 32K, all worse: TP=2 +48.9%, PP=2 +18.3%, PP=4 +30.1%,
 # EP=8 +77.2%.
 #
-# THIS TOPOLOGY HAS NOT BEEN RUN AT THIS SCALE. The CP=2 / full-recompute posture is carried
-# over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs; the
-# GBS 512 / DP 256 combination here has never been executed. A smoke test must confirm it
-# fits and that the warm start does not spike before the full run is authorised.
+# THE TOPOLOGY HAS RUN AT THIS SCALE. The CP=2 / full-recompute posture, carried over from the
+# 32K Nano SFT quickstart (91.5 GB of 95 at 64 GPUs), first ran at GBS 512 in the smoke chain
+# (../smoke_runs/, 2026-08-21: it fits, and the warm start did not spike), and production then
+# trained this stage end to end on 512 GPUs (job 6127737, 2026-08-27): 3126 iterations in
+# 5 h 38 min, ~6.5 s per iteration including startup and two checkpoint saves. The stage's
+# posture at benchmark size and its performance campaign are in
+# configs/quickstart/nemotron_nano_quickstart_midtrain_baseline.yaml and
+# docs/investigations/nano30b-midtrain-perf-campaign.md.
 #
 # --- THIS STAGE IS THE ANNEALING PHASE ---
 #
