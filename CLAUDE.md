@@ -427,15 +427,19 @@ placement measurements).
   a stop check it could not evaluate (each stop check runs on its own, so the others still stand) or a failure of
   the watch itself (never 1); flags (a loss spike, a loss gate's offset growing past a bound, a block of iterations
   further from a reference run than an envelope run is) are printed, never a stop. A segment that resumes from a
-  save supersedes every earlier segment's records, saves and rejected results from its first iteration on. A gate
+  save supersedes every earlier segment's records, saves and rejected results from its first iteration on, and their
+  peak-memory summaries once it has logged an iteration; an iteration or peak-memory line that cannot be parsed
+  leaves the stops NOT EVALUATED unless a later segment has re-run its iteration. A gate
   named `--decided GATE=LOG` passed at an earlier check on that log and is not evaluated again while that log covers
   its range; the watch ends by naming the gates still undecided. The v2e2e arm's `watch_pretrain.yaml` and
   `watch_midtrain.yaml` are its specs.
   `scripts/training/stage_guard.py --config <guard.yaml>` runs that watch on a timer while the stage trains, on the
   tunnel under the host Python, handing each passed gate to later ticks as decided: on a stop it cancels the stage's
-  live jobs by ID (the running segment and its queued successors) and exits; on a tick it could not evaluate (exit
-  2, or a watch or `sacct` failure) inside its hold window (before the first save) while a loss gate is undecided it
-  does the same; otherwise it alerts. Its record opens with the config, the spec's sha256 and the code revision.
+  live jobs by ID (the running segment and the successors pending on its singleton dependency, which only `squeue`
+  lists) and exits; on a tick it could not evaluate (exit 2, or a watch, timeout or `sacct` failure) once the stage
+  has reached its hold iteration while a loss gate is undecided it does the same; otherwise it alerts. Its record
+  opens with the config, the spec's sha256 and the code revision, and its own failures (no started segment of the
+  stage among them) are written there too.
   The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the

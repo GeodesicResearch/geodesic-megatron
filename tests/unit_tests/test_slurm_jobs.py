@@ -40,6 +40,18 @@ def test_the_queue_is_the_set_of_job_names(monkeypatch):
     assert slurm_jobs.queued_job_names() == {"a", "b"}
 
 
+def test_a_listing_names_its_field_and_the_job_name_it_keeps_to():
+    """The runner stands in for squeue, which would read the cluster's queue."""
+    seen = []
+
+    def run(command):
+        seen.append(command)
+        return _completed(0, stdout="101\n\n102\n")
+
+    assert slurm_jobs.queue_listing("%i", "cp-stage", run) == ["101", "102"]
+    assert seen == [["squeue", "--me", "--noheader", "--format=%i", "--name", "cp-stage"]]
+
+
 def test_an_unreadable_queue_is_an_error_not_an_empty_queue(monkeypatch):
     """Read as empty, it would resubmit work already in flight."""
     monkeypatch.setattr(slurm_jobs.subprocess, "run", lambda *a, **k: _completed(1, stderr="slurm_load_jobs error"))

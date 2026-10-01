@@ -171,6 +171,52 @@ def test_a_stop_says_whether_the_latest_save_holds_the_bad_step(tmp_path, capsys
     assert status == 1 and f"STOP non-finite grad norm at iteration 33 (inf); {note}" in out
 
 
+def test_a_segment_resumed_past_no_longer_stops_on_its_allocator_retries(tmp_path, capsys):
+    """The resumed segment trains on; the retries were the stopped run's, and the operator resumed past them."""
+    first = append_line(write_run(tmp_path, "seg1", drop=set(range(41, 61))), peak_memory_line(3))
+    second = write_run(tmp_path, "seg2", drop=set(range(1, 41)))
+    status, out = run(write_watch(tmp_path, STOPS), [first, second], capsys)
+    assert status == 0 and "STOP" not in out
+
+
+def test_every_peak_memory_summary_of_a_segment_counts(tmp_path, capsys):
+    """Two summaries in one log are both read, and retries in either stop the stage."""
+    log = append_line(append_line(write_run(tmp_path, "seg1"), peak_memory_line(0)), peak_memory_line(3))
+    status, out = run(write_watch(tmp_path, STOPS), [log], capsys)
+    assert status == 1 and "STOP seg1.out: 3 allocator retries on one rank, limit 0" in out
+
+
+def malformed(log: Path, iteration: int) -> Path:
+    """The log with one iteration line missing a required field."""
+    lines = log.read_text().splitlines(keepends=True)
+    (index,) = [i for i, line in enumerate(lines) if f"iteration {iteration:8d}/" in line]
+    lines[index] = lines[index].replace("elapsed time per iteration (ms)", "elapsed time (ms)")
+    log.write_text("".join(lines))
+    return log
+
+
+def test_an_iteration_line_that_cannot_be_parsed_leaves_the_stops_not_evaluated(tmp_path, capsys):
+    """The stops cannot pass over an iteration they never read."""
+    log = malformed(write_run(tmp_path, "seg1"), 12)
+    status, out = run(write_watch(tmp_path, STOPS), [log], capsys)
+    assert status == 2
+    assert "NOT EVALUATED stops on seg1.out: 1 line(s) could not be parsed, the first at iteration 12:" in out
+
+
+def test_a_stop_elsewhere_still_stops_beside_a_line_that_cannot_be_parsed(tmp_path, capsys):
+    log = malformed(write_run(tmp_path, "seg1", grad_scale={33: float("inf")}), 12)
+    status, out = run(write_watch(tmp_path, STOPS), [log], capsys)
+    assert status == 1 and "STOP non-finite grad norm at iteration 33" in out
+
+
+def test_a_line_that_cannot_be_parsed_in_a_superseded_tail_is_dropped(tmp_path, capsys):
+    """A later segment re-ran that iteration and logged it whole."""
+    first = malformed(write_run(tmp_path, "seg1", drop=set(range(51, 61))), 45)
+    second = write_run(tmp_path, "seg2", drop=set(range(1, 41)))
+    status, out = run(write_watch(tmp_path, STOPS), [first, second], capsys)
+    assert status == 0 and "NOT EVALUATED" not in out
+
+
 @pytest.mark.parametrize("retries, status", [(0, 0), (3, 1)])
 def test_allocator_retries_over_the_limit_stop_the_stage(tmp_path, capsys, retries, status):
     log = append_line(write_run(tmp_path, "seg1"), peak_memory_line(retries))

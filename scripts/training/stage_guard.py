@@ -15,25 +15,28 @@
 
 """Guard a training stage while it trains: on a timer, judge its segments with run_watch.py and act on the outcome.
 
-A guard config (YAML) names the stage's watch spec, its SLURM job name, the interval, the record file and,
-optionally, a hold window and the stage's final iteration. Each tick finds the stage's segments (``sacct``: every
-job of that name that has started, in submission order, its log being the job's own ``StdOut``), runs
-``scripts/telemetry/run_watch.py`` on them inside the container, appends the tick and the watch's output to the
-record, prints one line, and acts:
+A guard config (YAML) names the stage's watch spec, its SLURM job name, the interval, the timeout of each command
+it runs, the record file and, optionally, the iteration a hold starts at and the stage's final iteration. Each tick
+finds the stage's segments (``sacct``: every job of that name that has started, in submission order, its log being
+the job's own ``StdOut``), runs ``scripts/telemetry/run_watch.py`` on them inside the container, and acts:
 
 - **stop** (the watch exits 1 with its summary line: a stop condition or a failed loss gate): cancel every live job
-  of the stage by job ID (the running segment and its queued successors), then exit 1;
+  of the stage by job ID (``squeue``, which lists the running segment and the successors pending on its singleton
+  dependency, where ``sacct -S`` lists no job that has not started), then exit 1;
 - **hold** (the watch exits 2, or the tick could not be evaluated, e.g. the watch could not run or ``sacct`` could not
-  list the jobs, while the stage stands inside the hold window, i.e. after ``from_iteration`` and before ``until_iteration``, the first save, and a watched
-  loss gate is still undecided): cancel the same way, so no save is written past an unevaluated gate, then exit 3.
-  The iteration is the watch's own, or the last one a tick read when this tick's watch could not run; a gate is
-  undecided until a watch has named it passed, so before any watch has run every gate is;
+  list the jobs, once the stage has reached ``hold.from_iteration`` while a watched loss gate is still undecided):
+  cancel the same way, so no save is written past an unevaluated gate, then exit 3. The iteration is the watch's own,
+  or the last one a tick read when this tick's watch could not run; a gate is undecided until a watch has named it
+  passed, so before any watch has run every gate is;
 - **alert** (any other exit 2 or failure to evaluate): the record and the printed line say so, and the guard keeps
   going; a tick that could not be evaluated is never read as a stop;
 - the guard exits 0 once the watch has checked the final iteration and no job of the stage is live.
 
-A stop or hold whose cancellation fails exits 4, and a failure of the guard itself (its record cannot be written,
-say) exits 5, so neither reads as a stop.
+Each tick appends its line and the watch's output to the record, after cancelling on a stop or hold so a record that
+cannot be written cannot keep the jobs alive. A stop or hold whose cancellation fails exits 4. The guard is started
+once the stage's newest segment has logged its first iteration, so a tick that finds no started segment of the
+stage (a wrong job name, say) is a failure of the guard itself; that, and any other such failure, is written to the
+record when it can be and exits 5, so neither reads as a stop.
 
 A gate the watch has passed on a log is passed to later ticks as ``--decided GATE=LOG``, so the watch does not
 evaluate it again while that log still covers its range, and a transient failure to read a reference (W&B, say)
@@ -69,6 +72,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
+from scripts.slurm_jobs import queue_listing  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
 
@@ -79,19 +83,18 @@ _PASSED_RE = re.compile(r"^GATE (\S+): PASS(?: \(.*\))? on (.+)$", re.M)
 _UNDECIDED_RE = re.compile(r"^undecided gates: (.*)$", re.M)
 # A container or activation failure must not exit 1, which reads as a stop.
 _ACTIVATION_FAILED = 3
-LIVE_STATES = ("PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "REQUEUED", "RESIZING", "SUSPENDED")
 
 
 class GuardConfig(NamedTuple):
-    """A stage's guard config (see the module docstring); the hold window is None when the config has none."""
+    """A stage's guard config (see the module docstring); ``hold_from`` is None when the config holds nowhere."""
 
     watch: Path
     job_name: str
     since: str
     interval_seconds: int
     record: Path
+    command_timeout_seconds: int
     hold_from: Optional[int]
-    hold_until: Optional[int]
     final_iteration: Optional[int]
 
 
@@ -132,24 +135,26 @@ START = GuardState(last_iteration=None, decided={}, undecided=None)
 def load_guard_config(path: Path) -> GuardConfig:
     """Read a guard config; the watch spec and record paths resolve against the repository root.
 
-    Raises ValueError on an unknown key or a hold window without both ends; KeyError on a missing required key.
+    Raises ValueError on an unknown key or a hold other than ``from_iteration``; KeyError on a missing required key.
     """
     raw = yaml.safe_load(Path(path).read_text())
-    keys = {"watch", "job_name", "since", "interval_seconds", "record", "hold", "final_iteration"}
+    keys = {
+        "watch", "job_name", "since", "interval_seconds", "command_timeout_seconds", "record", "hold", "final_iteration",
+    }  # fmt: skip
     unknown = sorted(set(raw) - keys)
     if unknown:
         raise ValueError("{}: unknown keys {}".format(path, unknown))
     hold = raw.get("hold") or {}
-    if hold and set(hold) != {"from_iteration", "until_iteration"}:
-        raise ValueError("{}: hold needs exactly from_iteration and until_iteration".format(path))
+    if hold and set(hold) != {"from_iteration"}:
+        raise ValueError("{}: hold needs exactly from_iteration".format(path))
     return GuardConfig(
         watch=REPO_ROOT / raw["watch"],
         job_name=str(raw["job_name"]),
         since=str(raw["since"]),
         interval_seconds=int(raw["interval_seconds"]),
+        command_timeout_seconds=int(raw["command_timeout_seconds"]),
         record=REPO_ROOT / raw["record"],
         hold_from=int(hold["from_iteration"]) if hold else None,
-        hold_until=int(hold["until_iteration"]) if hold else None,
         final_iteration=int(raw["final_iteration"]) if "final_iteration" in raw else None,
     )
 
@@ -215,20 +220,24 @@ def decide(result: WatchResult, state: GuardState, config: GuardConfig) -> str:
     if result.ran and result.status == 1:
         return "stop"
     iteration = state.last_iteration
-    in_window = (
-        config.hold_from is not None and iteration is not None and config.hold_from <= iteration < config.hold_until
-    )
+    holding = config.hold_from is not None and iteration is not None and iteration >= config.hold_from
     gate_open = state.undecided is None or bool(state.undecided)
-    return "hold" if in_window and gate_open else "alert"
+    return "hold" if holding and gate_open else "alert"
 
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess"]
 
 
-def run_command(command: Sequence[str]) -> "subprocess.CompletedProcess":
-    """Run a command, its stderr merged into its stdout (Python 3.6 has no ``capture_output``)."""
+def run_command(command: Sequence[str], timeout_seconds: int) -> "subprocess.CompletedProcess":
+    """Run a command, its stderr merged into its stdout (Python 3.6 has no ``capture_output``). Raises
+    subprocess.TimeoutExpired, after killing it, when it outlives ``timeout_seconds``."""
     return subprocess.run(
-        list(command), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, check=False
+        list(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        check=False,
+        timeout=timeout_seconds,
     )
 
 
@@ -270,6 +279,12 @@ def run_watch(config: GuardConfig, logs: List[Path], decided: Dict[str, str], ru
     return parse_watch(result.returncode, result.stdout)
 
 
+def live_jobs(config: GuardConfig, run: Runner) -> List[int]:
+    """The IDs of every job of the stage's name the current user has queued or running, the successors pending on
+    a singleton dependency included. Raises SlurmError when squeue fails and ValueError on output it cannot read."""
+    return sorted(int(job_id) for job_id in queue_listing("%i", config.job_name, run))
+
+
 class CancelFailed(RuntimeError):
     """A stop or hold could not cancel the stage's live jobs."""
 
@@ -278,13 +293,15 @@ def cancel_live_jobs(config: GuardConfig, run: Runner) -> List[int]:
     """Cancel, by job ID, every live job of the stage; return the IDs. Raises CancelFailed when the jobs cannot be
     listed or scancel fails."""
     try:
-        live = [job.job_id for job in stage_jobs(config, run) if job.state in LIVE_STATES]
-    except (RuntimeError, ValueError) as error:
-        raise CancelFailed("could not list the stage's jobs: {}".format(error))
-    if live:
-        result = run(["scancel"] + [str(job_id) for job_id in live])
-        if result.returncode != 0:
-            raise CancelFailed("scancel {} failed: {}".format(live, result.stdout.strip()))
+        live = live_jobs(config, run)
+        if live:
+            result = run(["scancel"] + [str(job_id) for job_id in live])
+            if result.returncode != 0:
+                raise CancelFailed("scancel {} failed: {}".format(live, result.stdout.strip()))
+    except (RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        if isinstance(error, CancelFailed):
+            raise
+        raise CancelFailed("could not cancel the stage's jobs: {}: {}".format(type(error).__name__, error))
     return live
 
 
@@ -306,22 +323,31 @@ def _record(config: GuardConfig, line: str, detail: str = "") -> None:
     print("{} {}".format(_stamp(), line), flush=True)
 
 
+class NoStartedSegment(RuntimeError):
+    """No job of the stage's name has started: the guard was started too early, or under the wrong name or user."""
+
+
 def tick(config: GuardConfig, state: GuardState, run: Runner) -> Tuple[str, GuardState, bool]:
-    """One evaluation: (action, the guard's state after it, whether the stage is done)."""
-    jobs, spec = [], "unread"
+    """One evaluation: (action, the guard's state after it, whether the stage is done).
+
+    Raises NoStartedSegment when the stage has no started segment, and CancelFailed when a stop or hold could not
+    cancel its jobs."""
+    started, spec = [], "unread"
     try:
         spec = sha256_of(config.watch)[:12]
-        jobs = stage_jobs(config, run)
-        started = [job for job in jobs if job.started]
-        if not started:
-            _record(config, "no segment of {} has started".format(config.job_name))
-            return "continue", state, False
-        result = run_watch(config, [job.log for job in started], state.decided, run)
+        started = [job for job in stage_jobs(config, run) if job.started]
     except Exception as error:  # noqa: BLE001 - judged by the hold window like a watch that could not run
         result = could_not_evaluate("{}: {}".format(type(error).__name__, error))
+    else:
+        if not started:
+            raise NoStartedSegment("no segment of {} has started".format(config.job_name))
+        try:
+            result = run_watch(config, [job.log for job in started], state.decided, run)
+        except Exception as error:  # noqa: BLE001 - judged by the hold window like a watch that could not run
+            result = could_not_evaluate("{}: {}".format(type(error).__name__, error))
     state = advance(state, result)
     action = decide(result, state, config)
-    segments = ", ".join("{}:{}".format(job.job_id, job.state) for job in jobs if job.started)
+    segments = ", ".join("{}:{}".format(job.job_id, job.state) for job in started)
     if result.ran:
         summary = "watch exit {} through iteration {}".format(result.status, result.checked_iteration)
     elif result.status is None:
@@ -330,18 +356,24 @@ def tick(config: GuardConfig, state: GuardState, run: Runner) -> Tuple[str, Guar
         summary = "watch could not run (exit {})".format(result.status)
     undecided = "unknown" if state.undecided is None else ", ".join(state.undecided) or "none"
     line = "{}: {}; undecided gates {} [{}] spec {}".format(action.upper(), summary, undecided, segments, spec)
-    _record(config, line, result.output if result.status is not None else "")
+    detail = result.output if result.status is not None else ""
     if action in ("stop", "hold"):
-        cancelled = cancel_live_jobs(config, run)
+        try:
+            cancelled = cancel_live_jobs(config, run)
+        except CancelFailed:
+            _record(config, line, detail)
+            raise
+        _record(config, line, detail)
         _record(config, "{}: cancelled {}".format(action.upper(), cancelled or "nothing (no live job)"))
-    live = [job for job in jobs if job.state in LIVE_STATES]
+        return action, state, False
+    _record(config, line, detail)
     done = (
         config.final_iteration is not None
         and result.ran
         and result.status == 0
         and state.last_iteration is not None
         and state.last_iteration >= config.final_iteration
-        and not live
+        and not live_jobs(config, run)
     )
     return action, state, done
 
@@ -353,11 +385,10 @@ CANCEL_FAILED = 4
 GUARD_FAILED = 5
 
 
-def guard(config_path: Path, once: bool) -> int:
+def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
     """Guard the stage until a stop, a hold or its end (one tick when ``once``), and return its exit status.
 
     Raises CancelFailed when a stop or hold could not cancel the stage's jobs."""
-    config = load_guard_config(config_path)
     _record(
         config,
         "START guard {} (sha256 {}); watch spec {} (sha256 {}); code {}".format(
@@ -367,7 +398,9 @@ def guard(config_path: Path, once: bool) -> int:
     state = START
     while True:
         try:
-            action, state, done = tick(config, state, run_command)
+            action, state, done = tick(
+                config, state, lambda command: run_command(command, config.command_timeout_seconds)
+            )
         except CancelFailed as error:
             _record(config, "CANCEL FAILED: {}; the stage may still be running".format(error))
             raise
@@ -387,12 +420,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--config", type=Path, required=True, help="The stage's guard config YAML")
     parser.add_argument("--once", action="store_true", help="Evaluate once and exit with that tick's status")
     args = parser.parse_args(argv)
+    config = None
     try:
-        return guard(args.config, args.once)
+        config = load_guard_config(args.config)
+        return guard(args.config, config, args.once)
     except CancelFailed:
         return CANCEL_FAILED
     except Exception as error:  # noqa: BLE001 - the guard's own failure has its own status, never a stop's
-        print("GUARD FAILED: {}: {}; the stage is unguarded".format(type(error).__name__, error), file=sys.stderr)
+        line = "GUARD FAILED: {}: {}; the stage is unguarded".format(type(error).__name__, error)
+        print(line, file=sys.stderr)
+        if config is not None:
+            try:
+                _record(config, line)
+            except OSError as record_error:
+                print("GUARD FAILED: the record cannot be written: {}".format(record_error), file=sys.stderr)
         return GUARD_FAILED
 
 

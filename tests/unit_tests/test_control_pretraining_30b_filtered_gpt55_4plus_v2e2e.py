@@ -827,12 +827,20 @@ class TestTheWatch:
         assert config.final_iteration == merged[stage].train.train_iters
         assert str(config.record).startswith("/projects/a5k/public/logs/")
 
+    @pytest.mark.parametrize("guard", [GUARD_PRETRAIN, GUARD_MIDTRAIN], ids=["pretrain", "midtrain"])
+    def test_each_stage_is_submitted_from_the_frozen_copy_and_never_requeued(self, guard):
+        """A requeued segment keeps its job ID and log, so a requeue from scratch would inherit the gates its first
+        run passed; and the code that trains and judges the stage is the frozen copy's."""
+        job_name = load_guard_config(guard).job_name
+        blocks = (_ARM_DIR / "README.md").read_text().split("```")[1::2]
+        (command,) = [block for block in blocks if f"--job-name={job_name}" in block]
+        assert 'cd "$SNAP" &&' in command and "--no-requeue" in command
+
     def test_stage_one_is_held_before_its_first_save_while_a_gate_is_unevaluated(self, merged):
-        """From iteration 2200 to the first save: a gate decided at 2000 that is still unevaluated by then must
-        not let a save through."""
+        """From iteration 2200, before the first save: a gate decided at 2000 that is still unevaluated by then must
+        not let a save through, and a tick that comes after the save still holds."""
         config = load_guard_config(GUARD_PRETRAIN)
-        first_save = merged[PRETRAIN].checkpoint.save_interval
-        assert (config.hold_from, config.hold_until) == (2200, first_save)
+        assert config.hold_from == 2200 < merged[PRETRAIN].checkpoint.save_interval
         assert max(gate.last for gate in load_gate_spec(LOSS_GATE).gates.values()) < config.hold_from
         assert load_guard_config(GUARD_MIDTRAIN).hold_from is None
 

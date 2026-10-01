@@ -90,6 +90,12 @@ def _iteration_fields(line: str) -> tuple[int, str | None, dict[str, str]] | Non
     return int(match.group("iteration")), match.group("timestamp"), fields
 
 
+def iteration_of(line: str) -> int | None:
+    """The iteration an iteration line names, read from its prefix alone; None for any other line."""
+    match = _ITERATION_RE.search(line)
+    return int(match.group("iteration")) if match is not None else None
+
+
 def parse_iteration_records(lines: Iterable[str]) -> list[IterationRecord]:
     """Parse every iteration line, in log order (repeats are kept so a caller can detect them).
 

@@ -18,7 +18,10 @@
 A stage's logs are its segments' training logs in order. A segment that resumes from a save re-runs the iterations
 after it, so every earlier segment's records, saves and rejected results at or after the first iteration a later
 segment has logged belong to a superseded run and are dropped; a segment that has not logged an iteration yet
-supersedes nothing. A log's last line is read only once its writer has finished it. A watch spec (YAML) names three
+supersedes nothing; a segment's peak-memory summaries are dropped once a later segment has logged an iteration.
+A log's last line is read only once its writer has finished it. An iteration or peak-memory line that cannot be
+parsed is skipped, so the rest of the log is still checked, and leaves the stops NOT EVALUATED unless a later
+segment has re-run its iteration. A watch spec (YAML) names three
 kinds of check:
 
 - ``stop``: conditions under which the stage must not continue. ``non_finite_grad_norm``: an iteration whose grad
@@ -97,6 +100,7 @@ from scripts.telemetry.loss_parity import (  # noqa: E402
 from scripts.telemetry.training_log import (  # noqa: E402
     IterationRecord,
     env_override_lines,
+    iteration_of,
     parse_env_override_lines,
     parse_iteration_records,
     parse_peak_memory_across_ranks,
@@ -261,17 +265,28 @@ def load_watch_spec(path: Path) -> WatchSpec:
 
 
 @dataclass(frozen=True)
+class UnreadableLine:
+    """An iteration or peak-memory line that could not be parsed: the iteration it names (None for a peak-memory
+    line), and why."""
+
+    iteration: int | None
+    reason: str
+
+
+@dataclass(frozen=True)
 class SegmentLog:
-    """One segment's training log, read once: its iteration records, its peak-memory summary (None if absent), the
-    iterations it saved, its nodes' ``[env-overrides]`` lines as logged (parsed only by the launch-settings check, so a
-    line that cannot be parsed leaves the other checks standing) and the results the rerun state machine rejected."""
+    """One segment's training log, read once: its iteration records, its peak-memory summaries, the iterations it
+    saved, its nodes' ``[env-overrides]`` lines as logged (parsed only by the launch-settings check, so a line that
+    cannot be parsed leaves the other checks standing), the results the rerun state machine rejected, and the
+    iteration and peak-memory lines that could not be parsed."""
 
     path: Path
     records: list[IterationRecord]
-    peak_memory: dict[str, float | int] | None
+    peak_memories: list[dict[str, float | int]]
     saves: list[int]
     env_override_lines: list[str]
     rejected: list[RejectedResult]
+    unreadable: list[UnreadableLine]
 
 
 def _read_segment(log: Path) -> SegmentLog:
@@ -281,19 +296,33 @@ def _read_segment(log: Path) -> SegmentLog:
         for line in lines
         if (match := _REJECTED_RE.search(line))
     ]
+    # Line by line, so a line that cannot be parsed is known by its iteration and does not hide the others.
+    records, peak_memories, unreadable = [], [], []
+    for line in lines:
+        try:
+            records += parse_iteration_records([line])
+            peak = parse_peak_memory_across_ranks([line])
+        except ValueError as error:
+            unreadable.append(UnreadableLine(iteration_of(line), str(error)))
+            continue
+        if peak is not None:
+            peak_memories.append(peak)
     return SegmentLog(
         log,
-        parse_iteration_records(lines),
-        parse_peak_memory_across_ranks(lines),
+        records,
+        peak_memories,
         [int(match.group(1)) for line in lines if (match := _SAVED_RE.search(line))],
         env_override_lines(lines),
         rejected,
+        unreadable,
     )
 
 
 def read_segments(logs: list[Path] | tuple[Path, ...]) -> list[SegmentLog]:
     """Read each segment log once, in the stage's order, and drop from each what a later segment re-ran: its records,
-    saves and rejected results at or after the first iteration any later segment has logged."""
+    saves, rejected results and unparseable iteration lines at or after the first iteration any later segment has
+    logged, and its peak-memory summaries and unparseable peak-memory lines once any later segment has logged an
+    iteration (that run has been resumed past)."""
     segments = [_read_segment(log) for log in logs]
     kept: list[SegmentLog] = []
     resumed_at = math.inf
@@ -304,6 +333,12 @@ def read_segments(logs: list[Path] | tuple[Path, ...]) -> list[SegmentLog]:
                 records=[r for r in segment.records if r.iteration < resumed_at],
                 saves=[s for s in segment.saves if s < resumed_at],
                 rejected=[r for r in segment.rejected if r.iteration < resumed_at],
+                peak_memories=segment.peak_memories if resumed_at == math.inf else [],
+                unreadable=[
+                    line
+                    for line in segment.unreadable
+                    if (resumed_at == math.inf if line.iteration is None else line.iteration < resumed_at)
+                ],
             )
         )
         if segment.records:
@@ -423,11 +458,12 @@ def nan_or_skipped_stops(segments: list[SegmentLog], records: list[IterationReco
 
 
 def alloc_retries_stops(segments: list[SegmentLog], limit: int) -> list[str]:
-    """A stop line for every segment whose peak-memory summary counts more allocator retries than ``limit``."""
+    """A stop line for every peak-memory summary of a segment that counts more allocator retries than ``limit``."""
     return [
-        f"{segment.path.name}: {segment.peak_memory['max_alloc_retries']} allocator retries on one rank, limit {limit}"
+        f"{segment.path.name}: {peak['max_alloc_retries']} allocator retries on one rank, limit {limit}"
         for segment in segments
-        if segment.peak_memory is not None and segment.peak_memory["max_alloc_retries"] > limit
+        for peak in segment.peak_memories
+        if peak["max_alloc_retries"] > limit
     ]
 
 
@@ -707,6 +743,15 @@ def main(argv: list[str] | None = None) -> int:
             stops += check()
         except Exception as error:  # noqa: BLE001 - reported as NOT EVALUATED, never as a stop
             print(f"NOT EVALUATED stop {name}: {_error(error)}")
+            unevaluated = True
+    for segment in segments:
+        if segment.unreadable:
+            first = segment.unreadable[0]
+            print(
+                f"NOT EVALUATED stops on {segment.path.name}: {len(segment.unreadable)} line(s) could not be parsed, "
+                f"the first {'at iteration ' + str(first.iteration) if first.iteration is not None else 'a summary'}: "
+                f"{first.reason}"
+            )
             unevaluated = True
     stop_outcome = FAIL if stops else NOT_EVALUATED if unevaluated else PASS
     try:

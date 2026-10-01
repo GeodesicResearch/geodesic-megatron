@@ -240,7 +240,10 @@ the end) is kept until Kyle decides on it; the sbatch refuses to start while it 
 Each stage is a `--dependency=singleton` chain of day-long segments on 128 nodes with
 `checkpoint.load == checkpoint.save` and `--disable-ft`, as the baseline ran, submitted with
 `ISAMBARD_SBATCH_FORCE=0` and `ISAMBARD_SBATCH_MAX_NODES=300` (the cap for this arm's launches) so the
-start-of-job `isambard_sbatch --check` stays live. Before each stage, check the project quota for its
+start-of-job `isambard_sbatch --check` stays live, and with `--no-requeue`: a requeued segment keeps its job ID
+and log, so a segment SLURM requeued from scratch would inherit the loss gates its first run passed. Each stage
+is submitted, and its guard run, from a frozen copy of the commit (`$SNAP`, made as for the probes above), never
+from the working checkout, so the code that trains and judges the stage is the code that was read. Before each stage, check the project quota for its
 saves (below) with the margin above the 95% line. Each command first runs
 `scripts/training/launch_environment.py`, which refuses a shell holding an `ISAMBARD_*`, `TRAIN_*` or
 `GEODESIC_CONTAINER_*` variable other than the submission wrapper's and the tunnel's: the job inherits the
@@ -252,9 +255,9 @@ the same command, `.env` included: a segment launched without it runs the launch
   from the measured shards, with the stage's `.env`:
 
   ```bash
-  python3 scripts/training/launch_environment.py && \
+  cd "$SNAP" && python3 scripts/training/launch_environment.py && \
   ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.env \
-  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 \
+  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 --no-requeue \
     --job-name=cp30b-filtered-gpt55-4plus-v2e2e-pretrain --dependency=singleton pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml \
     nano pretrain --disable-ft
@@ -264,7 +267,8 @@ the same command, `.env` included: a segment launched without it runs the launch
   no `Installed fp32-SSM-state patch` line. Watch it with `watch_pretrain.yaml` (below): it stops on a result
   the gradient NaN check rejected (the run's own end), the first `grad norm: inf|nan`, the first iteration line
   without `lm loss` or with a non-finite one (the loss NaN check is off), an iteration counted as nan or skipped, a
-  segment's allocator retries or a segment that trained without exactly this `.env`, runs the loss gates once the logs cover iterations 1200 and 2000, and flags to
+  segment's allocator retries (until a later segment has resumed past it) or a segment that trained without
+  exactly this `.env`, runs the loss gates once the logs cover iterations 1200 and 2000, and flags to
   Kyle, without stopping, an L2b offset from {baseline, broad} whose last three windows average more than 0.01
   above its first three, and, per 2264-iteration block (the save cadence), a mean loss further from the
   baseline's than the Broadly Filtered arm's is in two adjacent blocks. The baseline segment that trained block
@@ -274,9 +278,9 @@ the same command, `.env` included: a segment launched without it runs the launch
   the midtraining's `.env`:
 
   ```bash
-  python3 scripts/training/launch_environment.py && \
+  cd "$SNAP" && python3 scripts/training/launch_environment.py && \
   ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env \
-  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 \
+  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 --no-requeue \
     --job-name=cp30b-filtered-gpt55-4plus-v2e2e-midtrain --dependency=singleton pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml \
     nano pretrain --disable-ft
@@ -285,32 +289,39 @@ the same command, `.env` included: a segment launched without it runs the launch
   The first log must show iteration 29881 of this arm's stage 1 loaded, an `[env-overrides]` line with
   `ISAMBARD_FP32_SSM_STATE=checkpoint`, and the fp32 SSM-state patch installed. Watch it with
   `watch_midtrain.yaml`: it stops on the same signs of a bad step as stage 1's watch,
-  a segment's allocator retries or a segment that trained without exactly this `.env`, and flags to Kyle, without stopping, any loss more than 0.108 above its
+  a segment's allocator retries (until a later segment has resumed past it) or a segment that trained without
+  exactly this `.env`, and flags to Kyle, without stopping, any loss more than 0.108 above its
   trailing 50-iteration mean (1.25 times the largest such rise in the baseline's and V2's midtraining).
 
 Each stage's watch is `scripts/telemetry/run_watch.py` over the stage's segment logs in order. While a stage
-trains it is run by `scripts/training/stage_guard.py` with the stage's guard config, started on the tunnel when
-the stage is submitted and left running:
+trains it is run by `scripts/training/stage_guard.py` with the stage's guard config, started on the tunnel from
+the frozen copy once the stage's newest segment has logged its first iteration, and left running:
 
 ```bash
-setsid nohup python3 scripts/training/stage_guard.py \
+cd "$SNAP" && setsid nohup python3 scripts/training/stage_guard.py \
   --config configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/guard_pretrain.yaml >/dev/null 2>&1 &
 ```
 
-Every two minutes the guard finds the stage's started segments by job name (`sacct`), runs the watch on them in
-the container and appends the evaluation to its record under
-`/projects/a5k/public/logs/control_pretraining/v2e2e_guard/`. Exit 1 of the watch is a stop: the guard cancels the
-running segment and the chain's queued successors by job ID and exits, so a successor queued behind a segment the
-gradient NaN check ended never trains into the same failure. Exit 2 (a due loss gate or a stop check that could
-not be evaluated) is an alert, except from iteration 2200 to the first save at 2264 while a loss gate is still
-undecided, where the guard cancels the same way so no save is written past an unevaluated gate. A tick that could
-not be evaluated at all (the watch could not run, or `sacct` could not list the jobs) is judged by the same rule
-and never counts as a stop. A gate the watch has passed is handed to later ticks as decided on its log, so it is
+Started earlier, after a stop, it would judge the resumed segment by the stopped one's rejected result or failed
+gate until the resumed segment's first iteration supersedes them. Every two minutes the guard finds the stage's
+started segments by job name (`sacct`), runs the watch on them in the container and appends the evaluation to its
+record under `/projects/a5k/public/logs/control_pretraining/v2e2e_guard/`. Exit 1 of the watch is a stop: the guard
+cancels every live job of the stage by job ID, the running segment and the successors pending on its singleton
+dependency (listed by `squeue`, since `sacct` lists no job that has not started), and exits, so a successor queued
+behind a segment the gradient NaN check ended never trains into the same failure. Exit 2 (a due loss gate or a
+stop check that could not be evaluated) is an alert, except from iteration 2200 on while a loss gate is still
+undecided, where the guard cancels the same way so no save (the first is at 2264) is written past an unevaluated
+gate; a tick that comes late, past the first save, still holds. A tick that could not be evaluated at all (the
+watch could not run or outlived its timeout, or `sacct` could not list the jobs) is judged by the same rule and
+never counts as a stop. The gates are due from iteration 2000, so the 200 iterations before 2200 (about 12 minutes)
+give a W&B outage several ticks to clear before it can cancel the stage. A gate the watch has passed is handed to later ticks as decided on its log, so it is
 not evaluated again while that log covers its range: a W&B read that fails inside the window cannot cancel a stage
 whose gates have all passed, and a segment restarted from scratch makes another log cover the range, on which the
 gate is evaluated anew. The record opens with the guard config and the watch spec, each with its sha256, and the
-code revision, and every tick names the spec's sha256. A cancellation that fails exits 4 and a failure of the
-guard itself 5. After a stop or a hold the guard does not resume; it is started again once the cause is resolved, and stage 1 is
+code revision, and every tick names the spec's sha256. On a stop or hold the guard cancels before it writes, so a
+record it cannot write cannot keep the jobs alive. A cancellation that fails exits 4. A failure of the guard itself
+exits 5 and is written to the record when it can be: a tick that finds no started segment of the stage is one,
+since the guard is started only once one trains (a wrong job name or user, say). After a stop or a hold the guard does not resume; it is started again once the cause is resolved, and stage 1 is
 debugged in the fast posture, never restarted in another. A stop line names the latest save and says whether it
 came after the first bad iteration, in which case it holds weights trained past it and the stage resumes from
 the save before it.
