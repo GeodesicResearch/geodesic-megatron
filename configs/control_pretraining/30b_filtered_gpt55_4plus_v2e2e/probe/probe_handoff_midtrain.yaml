@@ -1,8 +1,8 @@
-# v2e2e probe, handoff: this arm's midtraining, in the as-is posture it runs in, warm-started from the
-# fast-posture probe's last save (probe_fast.yaml) for 5 iterations at the production width
-# (512 GPUs, CP2, DP=256). It checks that a checkpoint written in the fast posture loads weights-only
-# into the as-is midtraining and trains, with the fp32 SSM-state patch on (the midtraining has no
-# launcher settings file, so the launcher's default applies). probe.sbatch in this directory runs it
+# v2e2e probe, handoff: this arm's midtraining, in the fast midtraining configuration it runs in,
+# warm-started from the fast-posture probe's last save (probe_fast.yaml) for 5 iterations at the
+# production width (512 GPUs, CP2, DP=256). It checks that a checkpoint written in the fast posture loads
+# weights-only into the midtraining and trains, with the fp32 SSM-state patch on (probe.sbatch in this
+# directory launches it with the midtraining's settings file, which sets it to its checkpointed mode)
 # once the fast-posture probe has succeeded.
 #
 # It is the arm's midtraining config with the probe's save as the warm start, train.exit_interval 5,

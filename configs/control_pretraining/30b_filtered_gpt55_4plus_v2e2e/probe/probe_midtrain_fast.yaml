@@ -1,0 +1,53 @@
+# The v2e2e midtraining probe's fast step: the unfiltered baseline's stage 2
+# (../../30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml, the production midtraining run 6127737 trained:
+# 512 GPUs, TP1·CP2·EP4·PP1, DP=256, GBS 512, warm-started weights-only from the baseline's stage-1 final) in the
+# Nano midtraining quickstart's fastest configuration (configs/quickstart/nemotron_nano_quickstart_midtrain.yaml,
+# docs/investigations/nano30b-midtrain-perf-campaign.md), launched with
+# ../nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env. It reads production's batches in production's order, so
+# 6127737's log is a parity reference, and it measures that configuration where its campaign could not: at
+# production's width (DP=256).
+#
+# Changed from the baseline's stage 2, nothing else: the configuration's levers below, the length (exit at 500), the
+# checkpoints (no resume; saves at 150, 300, 450 and 500 into scratch, the last one kept, so three saves are crossed
+# with a forward after each), and the W&B run. probe_midtrain.sbatch runs it; the arm README's "The midtraining probe"
+# has the gates.
+
+base_config: ../../30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce
+
+model:
+  recompute_granularity: selective
+  recompute_method: null
+  recompute_num_layers: null
+  recompute_modules: [moe, shared_experts]
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+
+comm_overlap:
+  overlap_param_gather: true
+
+rerun_state_machine:
+  check_for_nan_in_loss: false
+
+train:
+  exit_interval: 500
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+checkpoint:
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/v2e2e_probe_midtrain/fast
+  save_interval: 150
+  most_recent_k: 1
+
+logger:
+  timing_log_level: 1
+  log_l2_norm_grad_to_tensorboard: false
+  wandb_save_dir: /projects/a5k/public/logs/wandb
+  wandb_exp_name: control_pretrain_30b_filtered_gpt55_4plus_v2e2e_probe_mid_fast

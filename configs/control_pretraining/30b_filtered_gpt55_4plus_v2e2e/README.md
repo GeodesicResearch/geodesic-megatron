@@ -6,13 +6,13 @@ Filtered arm's pretraining through narrowly filtered midtraining, so it is broad
 501.3B tokens and narrowly filtered through 52.4B. This arm (Kyle, 2026-09-30) trains its own stage 1
 from scratch on the `_filtered_gpt55_4plus_v2e2e` pretraining splits and then runs V2's midtraining
 from that stage's final, so it is narrowly filtered throughout. Against the unfiltered baseline
-([`../30b_baseline/`](../30b_baseline/README.md)) it differs in its data and, in stage 1 only, in its
-training posture (below).
+([`../30b_baseline/`](../30b_baseline/README.md)) it differs in its data and, in both stages, in its
+training configuration (below).
 
 | Stage | Config | Context | Iterations | Topology | Checkpoints |
 |---|---|---|---|---|---|
 | pretraining | `nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml` (+ `.env`) | 8192 | 29881 | TP1·CP1·EP4·PP1·ETP1, DP=512 on 512 GPUs | 14 |
-| midtraining | `nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml` | 32768 | 3126 | TP1·CP2·EP4·PP1·ETP1, DP=256 on 512 GPUs | 6 |
+| midtraining | `nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml` (+ `.env`) | 32768 | 3126 | TP1·CP2·EP4·PP1·ETP1, DP=256 on 512 GPUs | 6 |
 
 Both stages run at the baseline's own widths (its stage 1 at DP=512, its midtraining at DP=256): the
 cyclic sampler buckets each epoch by data-parallel rank, so the width decides which samples each step
@@ -38,16 +38,22 @@ change numerical precision (FP8 current scaling on the dense layers, the BF16 gr
 the BF16 SSM state, `ISAMBARD_FP32_SSM_STATE=0`), so this arm's stage 1 differs from the baseline's
 in more than data, and a comparison of the two attributes to the filtering only what exceeds that
 difference. Two gates bound it: the probe, before the launch, and the loss gate, during stage 1.
-If either fails, stage 1 restarts from scratch in the precision-preserving posture
-(`…_pretrain_precise.yaml` and its `.env`: every lever but those three), in its own directory,
-since optimizer state does not load across postures. That restart moves, in one change, everything
-that names the fast stage-1 config or its directory to the precision-preserving one: the midtrain's
-`checkpoint.pretrained_checkpoint`, the pretraining stage's `config` and the description in
-`../hub_models.yaml`, the stage config in `../bucket_sync.yaml`, and the test module's assertions on
-the warm start and the manifests, `FAMILY_HISTORY` in `tests/unit_tests/test_control_pretraining_30b_trustedmonitor.py`,
-and, once the family's continual-pretraining repositories are in `../hub_models.yaml`, their `history:`.
-The midtraining and the continual pretraining run as-is, with the fp32 SSM-state patch on and no
-launcher settings file.
+One lever of the quickstart's posture is not taken: stage 1 keeps the gradient NaN check on (Kyle,
+2026-10-01), so a non-finite gradient ends the run before the optimizer applies it. If a gate fails
+or the watch stops the stage, stage 1 stops and is debugged in this posture (Kyle, 2026-10-01); it is
+never restarted in another, and no other posture is staged for it.
+
+**The midtraining configuration.** The midtraining trains in the fast Nano midtraining configuration
+(Kyle, 2026-10-01): the fields `configs/quickstart/nemotron_nano_quickstart_midtrain.yaml` sets, at its
+values (`FAST_MIDTRAIN_LEVERS` in `tests/unit_tests/campaign_config.py`), launched with
+`nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env`, which keeps the fp32 SSM-state patch on. Two
+of its levers change numerical precision (FP8 current scaling on the dense layers and the BF16 gradient
+reduce), so the arm differs from the baseline in precision in both stages, not only in data; the
+midtraining probe (below) bounds the midtraining's share. The gradient NaN check stays on, so a non-finite
+gradient ends the run with a rejected result before its iteration line is written; the loss NaN check is
+off, so a NaN loss shows as an iteration line without `lm loss` and an infinite one as `lm loss: INF`. The
+midtraining's watcher stops on each. The continual pretraining runs
+as-is, with the fp32 SSM-state patch on and no launcher settings file.
 
 ## Build and verify
 
@@ -80,11 +86,10 @@ spares) of about 2.5 h, measured nowhere at this width before:
 |---|---|---|
 | NVLink sweep | `nvidia-smi nvlink --status` on every node, `scripts/training/nvlink_health.py` | launches on 128 nodes whose GPUs all report 18 active links, then registers the others as bad nodes; with fewer than 128 healthy it launches nothing and registers none, since that points at the sweep, not the nodes |
 | fast | `probe/probe_fast.yaml` + the stage's `.env` | speed and memory, over 500 iterations with saves at 150, 300, 450 and 500 |
-| handoff | `probe/probe_handoff_midtrain.yaml` | the fast probe's save loads weights-only into the as-is midtraining and trains 5 iterations |
+| handoff | `probe/probe_handoff_midtrain.yaml` + the midtraining's `.env` | the fast probe's save loads weights-only into this arm's midtraining and trains 5 iterations |
 | as_is | `probe/probe_as_is.yaml` | the reference rerun for the parity and speed tests |
 | score_gate | `score_gate.yaml`, `scripts/telemetry/score_gate.py` | the memory and speed gates below, from the fast and as-is scores |
 | parity | `loss_parity.py band` | the fast probe against the baseline's run and the rerun, window 50: gated over iterations 51-500, reported over 1-50 |
-| precise | `probe/probe_precise.yaml` + its `.env` | the precision-preserving posture's speed and memory, over 300 iterations |
 
 The gates, fixed before the probe runs. The memory and speed thresholds are the ones
 `score_gate.yaml` holds, which the probe evaluates in its gating `score_gate` step; a score step's
@@ -109,7 +114,7 @@ own exit status says only that the log could be scored. The job exits 0 only whe
   whatever is free (88-91 GB on this posture at 64 and 256 GPUs) and measures the cache, not demand.
 - **Parity** (`parity_band.json`): the rerun and the baseline read the same batches, so their band is
   the as-is posture's run-to-run nondeterminism, and the fast probe must stay inside it in every
-  window of iterations 51-500, on both sides. A FAIL means the precision-preserving posture. Iterations
+  window of iterations 51-500, on both sides. A FAIL holds the launch while the fast posture is debugged. Iterations
   1-50 (`parity_band_reported.json`) are reported, not gated: they lie in the steep early descent,
   where a window mean mostly measures the rate of descent, and at 256 GPUs the fast posture left the
   band there only, 0.0035 below its edge (`docs/investigations/nano30b-pretrain-perf-campaign.md`,
@@ -127,7 +132,9 @@ own exit status says only that the log could be scored. The job exits 0 only whe
   python3 -c 'from pathlib import Path; from scripts.hub.publish_models import verify_export; print(verify_export(Path("/projects/a5k/public/checkpoints/megatron/v2e2e_probe/export/iter_0000500/hf")))'
   ```
 
-Submit it from a frozen copy of the commit under test, never from a working checkout (bash reads the
+Both probes are built from the steps in `scripts/training/probe_job.sh` (the start checks, the NVLink selection,
+each launch under its time limit, scoring, the handoff evidence, the parity band and the steps' record). Submit
+it from a frozen copy of the commit under test, never from a working checkout (bash reads the
 sbatch and the launcher by offset while they run; the sbatch refuses a directory without a
 `REVISION` file), from a shell carrying no launcher, activate or container setting: the sbatch refuses
 every `ISAMBARD_*`, `TRAIN_*` and `GEODESIC_CONTAINER_*` variable except the submission wrapper's own
@@ -159,8 +166,8 @@ directory exists.
 `loss_gate.yaml` is pre-registered: three gates, each a band test of stage 1's log against as-is
 stage-1 runs of the campaign, evaluated by `scripts/telemetry/loss_gate.py`. Its header records the
 references, the calibration and the policy. In short: L1 decides at iteration 1200, L2 and L2b
-confirm at iteration 2000, all before the first save at 2264. A FAIL stops the run and restarts stage
-1 in the precision-preserving posture; NOT EVALUATED (exit status 2) blocks like a FAIL unless it is
+confirm at iteration 2000, all before the first save at 2264. A FAIL stops the run, and stage 1 is
+debugged in the fast posture, never restarted in another; NOT EVALUATED (exit status 2) blocks like a FAIL unless it is
 resolved before 2264.
 
 ```bash
@@ -172,18 +179,71 @@ python scripts/telemetry/loss_gate.py \
 The gates see a regression of about 0.05 in lm loss over iterations 1-2000, and a shift of 0.02 over
 1201-2000; a smaller precision effect passes them.
 
+## The midtraining probe
+
+`probe/probe_midtrain.sbatch` measures the fast midtraining configuration where its campaign could not: at
+production's width (512 GPUs, CP2, DP=256). It runs on the **baseline's** stage 2
+(`../30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml`): its corpora and its weights-only warm start
+from the baseline's stage-1 final, so every run reads the batches production's midtraining (job 6127737,
+W&B `qeslzwcc`) read, and that run's log is a parity reference. One 130-node job of about 2.5 h:
+
+| Step | Config | Decides |
+|---|---|---|
+| NVLink sweep | as in the stage-1 probe | 128 healthy nodes |
+| fast_mid | `probe/probe_midtrain_fast.yaml` + the midtraining's `.env` | speed, memory and numerics, over 500 iterations with saves at 150, 300, 450 and 500 |
+| handoff_cpt | `probe/probe_midtrain_handoff_cpt.yaml` | fast_mid's save loads weights-only into the as-is continual pretraining (the narrow V2 family's link 1) and trains 5 iterations |
+| as_is_mid | `probe/probe_midtrain_as_is.yaml` | the reference rerun for the speed and parity tests |
+| score_gate | `score_gate_midtrain.yaml` | the memory, speed and first-loss gates below |
+| parity | `loss_parity.py band` | fast_mid against 6127737 and as_is_mid, window 50: gated over iterations 51-500, reported over 1-50 |
+
+The gates, pre-registered with the campaign's analysis (2026-10-01) before the probe was built:
+
+- **Speed** (`score_gate_midtrain.yaml`): as_is_mid's mean step over fast_mid's, iterations 101-500, on the
+  same nodes. At least 1.5x go; 1.3x to 1.5x go and report; below 1.3x the choice goes to Kyle, since the
+  precision change costs comparability whatever it saves. The projection onto production's 6.43 s/iter is
+  reported beside it.
+- **Memory**: over every rank, 0 allocator retries (the guard that binds) and a peak allocated memory of at
+  most 85.5 GB (the backstop), as in the stage-1 probe. The peak includes the warm start's checkpoint-load
+  transient, which production pays at every segment start.
+- **Numerics**: no non-finite grad norm, `lm loss` on every iteration line, no skipped iteration, and the
+  iteration-1 lm loss within 5e-3 of as_is_mid's (same weights, same first batch; FP8 moved it 2.0e-3 at
+  64 GPUs, a wrong warm start or wrong data moves it 0.1 or more).
+- **Parity**: every gated window inside the band of the two references. Exactly one window outside runs
+  as_is_mid_2 (as_is_mid again on the same nodes) and the band with three references decides; two or more
+  outside, or a failure that is not a window (the schedule, a NaN or skipped iteration, an unreadable run),
+  fail. Iterations 1-50, where the change of context length dominates, are reported, not gated.
+- **Handoff**: the load, the fp32 SSM-state patch on all 512 ranks, and the exit at iteration 5.
+
+Submit it like the stage-1 probe, from a frozen copy whose `REVISION` names its code, from a shell carrying
+no launcher settings, once the account has room for 130 nodes under the 256 cap:
+
+```bash
+cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 isambard_sbatch \
+  configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe_midtrain.sbatch
+```
+
+Results land in `/projects/a5k/public/logs/control_pretraining/v2e2e_probe_midtrain/<job id>/`. The scratch
+checkpoint directory (`/projects/a5k/public/checkpoints/megatron/v2e2e_probe_midtrain/`, one 316 GB save at
+the end) is kept until Kyle decides on it; the sbatch refuses to start while it exists.
+
 ## Launch
 
 Each stage is a `--dependency=singleton` chain of day-long segments on 128 nodes with
 `checkpoint.load == checkpoint.save` and `--disable-ft`, as the baseline ran, submitted with
 `ISAMBARD_SBATCH_FORCE=0` and `ISAMBARD_SBATCH_MAX_NODES=300` (the cap for this arm's launches) so the
 start-of-job `isambard_sbatch --check` stays live. Before each stage, check the project quota for its
-saves (below) with the margin above the 95% line.
+saves (below) with the margin above the 95% line. Each command first runs
+`scripts/training/launch_environment.py`, which refuses a shell holding an `ISAMBARD_*`, `TRAIN_*` or
+`GEODESIC_CONTAINER_*` variable other than the submission wrapper's and the tunnel's: the job inherits the
+submitting shell, so such a variable (stage 1's `ISAMBARD_FP32_SSM_STATE=0` exported for a midtraining
+launch, say) would change the stage's posture with no config or log line naming it. Resubmit a segment with
+the same command, `.env` included: a segment launched without it runs the launcher's defaults.
 
 - **Stage 1**, after the probe's gates pass, the corpora verify and the ClimbMix shard weights are set
   from the measured shards, with the stage's `.env`:
 
   ```bash
+  python3 scripts/training/launch_environment.py && \
   ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.env \
   ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 \
     --job-name=cp30b-filtered-gpt55-4plus-v2e2e-pretrain --dependency=singleton pipeline_training_submit.sbatch \
@@ -192,18 +252,76 @@ saves (below) with the margin above the 95% line.
   ```
 
   The first log must show a random initialisation, `[env-overrides]` lines with both settings, and
-  no `Installed fp32-SSM-state patch` line. Evaluate the loss gate at iterations 1200 and 2000.
-- **Midtraining**, once stage 1's iteration 29881 exists, with no launcher settings file:
+  no `Installed fp32-SSM-state patch` line. Watch it with `watch_pretrain.yaml` (below): it stops on a result
+  the gradient NaN check rejected (the run's own end), the first `grad norm: inf|nan`, the first iteration line
+  without `lm loss` or with a non-finite one (the loss NaN check is off), an iteration counted as nan or skipped, a
+  segment's allocator retries or a segment that trained without exactly this `.env`, runs the loss gates once the logs cover iterations 1200 and 2000, and flags to
+  Kyle, without stopping, an L2b offset from {baseline, broad} whose last three windows average more than 0.01
+  above its first three, and, per 2264-iteration block (the save cadence), a mean loss further from the
+  baseline's than the Broadly Filtered arm's is in two adjacent blocks. The baseline segment that trained block
+  11 (iterations 22641–24904, W&B `mpf5lqoj`) left no log, so that block's baseline is read from W&B and its line
+  says so.
+- **Midtraining**, once stage 1's iteration 29881 exists and the midtraining probe's gates pass, with
+  the midtraining's `.env`:
 
   ```bash
+  python3 scripts/training/launch_environment.py && \
+  ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env \
   ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 \
     --job-name=cp30b-filtered-gpt55-4plus-v2e2e-midtrain --dependency=singleton pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml \
     nano pretrain --disable-ft
   ```
 
-  The first log must show iteration 29881 of this arm's stage 1 loaded and the fp32 SSM-state patch
-  installed.
+  The first log must show iteration 29881 of this arm's stage 1 loaded, an `[env-overrides]` line with
+  `ISAMBARD_FP32_SSM_STATE=checkpoint`, and the fp32 SSM-state patch installed. Watch it with
+  `watch_midtrain.yaml`: it stops on the same signs of a bad step as stage 1's watch,
+  a segment's allocator retries or a segment that trained without exactly this `.env`, and flags to Kyle, without stopping, any loss more than 0.108 above its
+  trailing 50-iteration mean (1.25 times the largest such rise in the baseline's and V2's midtraining).
+
+Each stage's watch is `scripts/telemetry/run_watch.py` over the stage's segment logs in order. While a stage
+trains it is run by `scripts/training/stage_guard.py` with the stage's guard config, started on the tunnel when
+the stage is submitted and left running:
+
+```bash
+setsid nohup python3 scripts/training/stage_guard.py \
+  --config configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/guard_pretrain.yaml >/dev/null 2>&1 &
+```
+
+Every two minutes the guard finds the stage's started segments by job name (`sacct`), runs the watch on them in
+the container and appends the evaluation to its record under
+`/projects/a5k/public/logs/control_pretraining/v2e2e_guard/`. Exit 1 of the watch is a stop: the guard cancels the
+running segment and the chain's queued successors by job ID and exits, so a successor queued behind a segment the
+gradient NaN check ended never trains into the same failure. Exit 2 (a due loss gate or a stop check that could
+not be evaluated) is an alert, except from iteration 2200 to the first save at 2264 while a loss gate is still
+undecided, where the guard cancels the same way so no save is written past an unevaluated gate. A tick that could
+not be evaluated at all (the watch could not run, or `sacct` could not list the jobs) is judged by the same rule
+and never counts as a stop. A gate the watch has passed is handed to later ticks as decided on its log, so it is
+not evaluated again while that log covers its range: a W&B read that fails inside the window cannot cancel a stage
+whose gates have all passed, and a segment restarted from scratch makes another log cover the range, on which the
+gate is evaluated anew. The record opens with the guard config and the watch spec, each with its sha256, and the
+code revision, and every tick names the spec's sha256. A cancellation that fails exits 4 and a failure of the
+guard itself 5. After a stop or a hold the guard does not resume; it is started again once the cause is resolved, and stage 1 is
+debugged in the fast posture, never restarted in another. A stop line names the latest save and says whether it
+came after the first bad iteration, in which case it holds weights trained past it and the stage resumes from
+the save before it.
+
+A segment trained without exactly its stage's `.env` when the `[env-overrides]` lines its nodes log at start
+are missing, or name a key the file does not set, lack one it does, or carry another value: a segment resubmitted
+without the `ISAMBARD_ENV_OVERRIDES` prefix runs the launcher's defaults and still loads the stage's optimizer
+state.
+
+A segment that resumes from a save re-runs the iterations after it, so the watch drops each earlier segment's
+records, saves and rejected results at or after the first iteration a later segment has logged; a stage-1 segment
+that restarts before the first save restarts from iteration 0, logs iterations 1–2000 itself, and the gates are
+evaluated on it alone. A gate whose range spans a restart is not evaluated. To run the watch by hand, pass every
+segment's log in order:
+
+```bash
+python scripts/telemetry/run_watch.py \
+  --spec configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/watch_pretrain.yaml \
+  --log <segment 1 log> [--log <segment 2 log> ...]
+```
 
 ## Publish
 

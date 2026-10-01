@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for scripts/telemetry/score_gate.py (pre-registered memory and speed gates on runs' scores).
+"""Unit tests for scripts/telemetry/score_gate.py (pre-registered memory, speed and first-loss gates on runs'
+scores).
 
 Each score is the real ``score_run.score_log`` of a log made from the real iteration line of
 ``training_log_fixture.py`` and, where the run finished, the real ``[peak-memory]`` line
@@ -29,7 +30,7 @@ from scripts.telemetry import score_gate as sg
 from scripts.telemetry.score_run import Workload, score_log
 
 from megatron.bridge.training.utils.train_utils import format_peak_memory, summarise_peak_memory
-from tests.unit_tests.training_log_fixture import iteration_line, write_log
+from tests.unit_tests.training_log_fixture import iteration_line, sub_once, write_log
 
 
 GPUS = 4
@@ -64,13 +65,17 @@ def rows(allocated_gb: float, reserved_gb: float, retries: int = 0) -> list[tupl
     return [low, low, (int(allocated_gb * GB), int(reserved_gb * GB), retries), low]
 
 
-def write_spec(tmp_path: Path, memory: dict | None = None, speed: dict | None = None) -> Path:
+def write_spec(
+    tmp_path: Path, memory: dict | None = None, speed: dict | None = None, first_loss: dict | None = None
+) -> Path:
     path = tmp_path / "score_gate.yaml"
     raw = {}
     if memory is not None:
         raw["memory"] = memory
     if speed is not None:
         raw["speed"] = speed
+    if first_loss is not None:
+        raw["first_loss"] = first_loss
     path.write_text(yaml.safe_dump(raw))
     return path
 
@@ -210,6 +215,59 @@ def test_one_gate_can_be_evaluated_alone(tmp_path, capsys):
 def test_a_spec_whose_gates_cannot_run_as_written_is_refused(tmp_path, memory, speed, message):
     with pytest.raises(ValueError, match=message):
         sg.load_score_gates(write_spec(tmp_path, memory=memory, speed=speed))
+
+
+# --------------------------------------------------------------------------------------
+# First loss
+# --------------------------------------------------------------------------------------
+
+FIRST_LOSS_GATE = {
+    "fast_first_loss": {"candidate": "fast.score.json", "reference": "as_is.score.json", "tolerance": 0.005}
+}
+
+
+def write_first_loss_score(scores_dir: Path, name: str, first_iteration: int, first_loss: float | None) -> None:
+    """Score a run logging iterations ``first_iteration``-4, the first with lm loss ``first_loss`` (None: the field
+    absent, as the log prints a non-finite loss with the loss check off)."""
+    run_dir = scores_dir / name
+    run_dir.mkdir()
+    lines = [iteration_line(i, 5000.0, 6.0) for i in range(first_iteration, 5)]
+    if first_loss is None:
+        lines[0] = sub_once(r"lm loss: [\dE.+-]+ \| ", "", lines[0])
+    else:
+        lines[0] = iteration_line(first_iteration, 5000.0, first_loss)
+    score = score_log(write_log(run_dir, lines), WORKLOAD, (first_iteration, 4), (4, 4), GPUS, 1000.0)
+    (scores_dir / f"{name}.score.json").write_text(json.dumps(score.to_dict()))
+
+
+@pytest.mark.parametrize("fast_loss, status, outcome", [(6.003, 0, "PASS"), (6.006, 1, "FAIL")])
+def test_the_first_iterations_loss_must_agree_within_the_tolerance(tmp_path, capsys, fast_loss, status, outcome):
+    write_first_loss_score(tmp_path, "fast", 1, fast_loss)
+    write_first_loss_score(tmp_path, "as_is", 1, 6.0)
+    got_status, results = run(write_spec(tmp_path, first_loss=FIRST_LOSS_GATE), tmp_path, capsys)
+    assert (got_status, results["fast_first_loss"]["outcome"]) == (status, outcome)
+    assert results["fast_first_loss"]["detail"].startswith(f"iteration 1: lm loss {fast_loss:.6f} against 6.000000")
+
+
+def test_a_candidate_with_no_first_loss_fails(tmp_path, capsys):
+    """With the loss check off a non-finite loss is not logged at all; a missing loss is not a pass."""
+    write_first_loss_score(tmp_path, "fast", 1, None)
+    write_first_loss_score(tmp_path, "as_is", 1, 6.0)
+    status, results = run(write_spec(tmp_path, first_loss=FIRST_LOSS_GATE), tmp_path, capsys)
+    assert status == 1 and "logged no lm loss at iteration 1" in results["fast_first_loss"]["detail"]
+
+
+def test_runs_starting_at_different_iterations_are_not_evaluated(tmp_path, capsys):
+    write_first_loss_score(tmp_path, "fast", 2, 6.0)
+    write_first_loss_score(tmp_path, "as_is", 1, 6.0)
+    status, results = run(write_spec(tmp_path, first_loss=FIRST_LOSS_GATE), tmp_path, capsys)
+    assert status == 2 and "first logged iterations differ: 2 against 1" in results["fast_first_loss"]["detail"]
+
+
+def test_a_first_loss_gate_comparing_a_run_with_itself_is_refused(tmp_path):
+    gate = {"g": {**FIRST_LOSS_GATE["fast_first_loss"], "reference": "fast.score.json"}}
+    with pytest.raises(ValueError, match="with itself"):
+        sg.load_score_gates(write_spec(tmp_path, first_loss=gate))
 
 
 def test_an_unknown_gate_kind_is_refused(tmp_path):

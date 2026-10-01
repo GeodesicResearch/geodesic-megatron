@@ -280,8 +280,10 @@ models:
       arm's, every stage of this model is narrowly filtered, so its comparison is with the unfiltered
       baseline. Pretraining trains in the fast Nano pretrain posture (FP8 compute on the dense layers,
       BF16 gradient reduce, BF16 SSM state), a numerical-precision difference from the baseline held
-      to a loss band against the baseline's own runs; should it leave that band, pretraining restarts in
-      a precision-preserving posture. Midtraining trains in the baseline's posture.
+      to a loss band against the baseline's own runs; should it leave that band, pretraining stops and
+      is debugged in that posture. Midtraining trains in the fast Nano midtraining configuration (FP8
+      compute on the dense layers, BF16 gradient reduce), held to a loss band against the baseline's own
+      midtraining at production width.
     history: []
     stages:
       - name: pretraining

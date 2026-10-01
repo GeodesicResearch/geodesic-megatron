@@ -22,9 +22,8 @@ baseline, so the central tests merge each stage config and its counterpart throu
 path and assert that the set of differing fields is EXACTLY what the arm is allowed to change:
 
 - stage 1 against the baseline stage 1: the data, the run identity, and the fast pretrain posture's
-  fields at their measured values (the posture stage 1 trains in, which changes numerical precision);
-- the precision-preserving stage-1 variant, which runs only if the fast posture fails its loss gate:
-  the same, less the precision levers;
+  fields at their measured values (the posture stage 1 trains in, which changes numerical precision),
+  except the gradient NaN check, which stage 1 keeps at the baseline's (on);
 - the midtrain against V2's midtrain: the run identity and the warm start, which is this arm's own
   pretraining final.
 
@@ -38,22 +37,34 @@ that measures the postures at the production width before the stage launches.
 from __future__ import annotations
 
 import re
+import shutil
 import stat
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import yaml
 from omegaconf import OmegaConf
 from scripts.telemetry.loss_gate import load_gate_spec
-from scripts.telemetry.score_gate import MemoryGate, SpeedGate, load_score_gates
+from scripts.telemetry.run_watch import (
+    GrowingOffset,
+    LossSpike,
+    block_comparisons,
+    latest_records,
+    load_watch_spec,
+    read_segments,
+)
+from scripts.telemetry.score_gate import FirstLossGate, MemoryGate, SpeedGate, load_score_gates
+from scripts.training.launcher_source import env_override_entries
+from scripts.training.stage_guard import load_guard_config
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
+    FAST_MIDTRAIN_LAUNCHER_SETTINGS,
+    FAST_MIDTRAIN_LEVERS,
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
     FAST_PRETRAIN_LEVERS,
-    FAST_PRETRAIN_PRECISION_LEVERS,
-    FAST_PRETRAIN_SSM_SETTING,
     assert_blend_is_well_formed,
     assert_hold_and_pin_move_together,
     assert_levers_are_set,
@@ -66,11 +77,11 @@ from tests.unit_tests.campaign_config import (
     corpus_weights,
     data_parallel_size,
     dry_run_build,
+    flatten_merged_config,
     merge_onto_recipe,
     pending_subsets,
 )
 from tests.unit_tests.corpora_fixtures import corpora_table, importable
-from tests.unit_tests.launcher_source import env_override_entries
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -81,8 +92,6 @@ _BASELINE_DIR = _CAMPAIGN_DIR / "30b_baseline"
 
 PRETRAIN = _ARM_DIR / "nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml"
 PRETRAIN_ENV = PRETRAIN.with_suffix(".env")
-PRETRAIN_PRECISE = _ARM_DIR / "nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain_precise.yaml"
-PRETRAIN_PRECISE_ENV = PRETRAIN_PRECISE.with_suffix(".env")
 MIDTRAIN = _ARM_DIR / "nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml"
 CORPORA_TABLE = _ARM_DIR / "corpora.tsv"
 PREPARE_CONFIG = _ARM_DIR / "data" / "control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml"
@@ -97,10 +106,25 @@ LOSS_GATE = _ARM_DIR / "loss_gate.yaml"
 SCORE_GATE = _ARM_DIR / "score_gate.yaml"
 PROBE_DIR = _ARM_DIR / "probe"
 PROBE_FAST = PROBE_DIR / "probe_fast.yaml"
-PROBE_PRECISE = PROBE_DIR / "probe_precise.yaml"
 PROBE_AS_IS = PROBE_DIR / "probe_as_is.yaml"
 PROBE_HANDOFF = PROBE_DIR / "probe_handoff_midtrain.yaml"
 PROBE_SBATCH = PROBE_DIR / "probe.sbatch"
+PROBE_JOB = _REPO_ROOT / "scripts" / "training" / "probe_job.sh"
+MIDTRAIN_ENV = MIDTRAIN.with_suffix(".env")
+SCORE_GATE_MIDTRAIN = _ARM_DIR / "score_gate_midtrain.yaml"
+WATCH_PRETRAIN = _ARM_DIR / "watch_pretrain.yaml"
+WATCH_MIDTRAIN = _ARM_DIR / "watch_midtrain.yaml"
+GUARD_PRETRAIN = _ARM_DIR / "guard_pretrain.yaml"
+GUARD_MIDTRAIN = _ARM_DIR / "guard_midtrain.yaml"
+PROBE_MID_FAST = PROBE_DIR / "probe_midtrain_fast.yaml"
+PROBE_MID_AS_IS = PROBE_DIR / "probe_midtrain_as_is.yaml"
+PROBE_MID_HANDOFF = PROBE_DIR / "probe_midtrain_handoff_cpt.yaml"
+PROBE_MID_SBATCH = PROBE_DIR / "probe_midtrain.sbatch"
+V2_CPT_LINK1 = (
+    _CAMPAIGN_DIR / "30b_trustedmonitor" / "nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link1.yaml"
+)
+# The baseline's production midtraining run, whose batches every midtraining probe run reads.
+BASELINE_MIDTRAIN_JOB = "6127737"
 HUB_REPO = "geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base"
 
 SUFFIX = "_filtered_gpt55_4plus_v2e2e"
@@ -115,13 +139,14 @@ GPUS = 512
 # Exactly the fields the arm's stage configs may differ in from their counterparts. Data: which
 # documents exist. Identity: where the checkpoints and the W&B run go, which MUST differ.
 IDENTITY = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
-PRETRAIN_DIVERGENCE = {"dataset.data_path", *IDENTITY, *FAST_PRETRAIN_LEVERS}
-PRECISION_PRESERVING_LEVERS = {
-    k: v for k, v in FAST_PRETRAIN_LEVERS.items() if k not in FAST_PRETRAIN_PRECISION_LEVERS
-}
-PRETRAIN_PRECISE_DIVERGENCE = {"dataset.data_path", *IDENTITY, *PRECISION_PRESERVING_LEVERS}
-# Against V2's midtrain the data is the same; the warm start is this arm's own pretraining final.
-MIDTRAIN_DIVERGENCE = {*IDENTITY, "checkpoint.pretrained_checkpoint"}
+# Stage 1 trains in the fast pretrain posture with the gradient NaN check left on (Kyle, 2026-10-01), so a
+# non-finite gradient ends the run instead of reaching the optimizer: every lever but that one.
+GRADIENT_NAN_CHECK = "ddp.check_for_nan_in_grad"
+STAGE_ONE_LEVERS = {key: value for key, value in FAST_PRETRAIN_LEVERS.items() if key != GRADIENT_NAN_CHECK}
+PRETRAIN_DIVERGENCE = {"dataset.data_path", *IDENTITY, *STAGE_ONE_LEVERS}
+# Against V2's midtrain the data is the same; the warm start is this arm's own pretraining final, and the stage
+# trains in the fast midtraining configuration.
+MIDTRAIN_DIVERGENCE = {*IDENTITY, "checkpoint.pretrained_checkpoint", *FAST_MIDTRAIN_LEVERS}
 
 
 @pytest.fixture(scope="module")
@@ -130,15 +155,17 @@ def merged():
         path: merge_onto_recipe(path, nemotron_3_nano_pretrain_config)
         for path in (
             PRETRAIN,
-            PRETRAIN_PRECISE,
             MIDTRAIN,
             BASELINE_PRETRAIN,
             BASELINE_MIDTRAIN,
             V2_MIDTRAIN,
             PROBE_FAST,
-            PROBE_PRECISE,
             PROBE_AS_IS,
             PROBE_HANDOFF,
+            PROBE_MID_FAST,
+            PROBE_MID_AS_IS,
+            PROBE_MID_HANDOFF,
+            V2_CPT_LINK1,
         )
     }
 
@@ -162,42 +189,24 @@ class TestOnlyTheDataAndThePostureDifferFromTheBaseline:
     def test_stage_one_is_the_fast_posture_at_its_measured_values(self, merged):
         """The diff shows WHICH fields differ; this pins their values, so the posture is the one the
         performance campaign measured and not some other change to the same fields."""
-        assert_levers_are_set(merged[PRETRAIN], FAST_PRETRAIN_LEVERS, "v2e2e stage 1")
+        assert_levers_are_set(merged[PRETRAIN], STAGE_ONE_LEVERS, "v2e2e stage 1")
 
-    def test_the_precision_preserving_variant_drops_only_the_precision_levers(self, merged):
-        assert_only_these_fields_differ(
-            merged[PRETRAIN_PRECISE],
-            merged[BASELINE_PRETRAIN],
-            PRETRAIN_PRECISE_DIVERGENCE,
-            "v2e2e stage 1, precision-preserving",
-        )
-        assert_levers_are_set(
-            merged[PRETRAIN_PRECISE], PRECISION_PRESERVING_LEVERS, "v2e2e stage 1, precision-preserving"
-        )
-        assert merged[PRETRAIN_PRECISE].mixed_precision == merged[BASELINE_PRETRAIN].mixed_precision
-
-    def test_the_two_postures_differ_only_in_precision_and_identity(self, merged):
-        """The variant is a restart from scratch, so it writes to its own directory and W&B run: a
-        posture change inside one directory would resume optimizer state that does not load across
-        postures."""
-        assert_only_these_fields_differ(
-            merged[PRETRAIN_PRECISE],
-            merged[PRETRAIN],
-            {*IDENTITY, *FAST_PRETRAIN_PRECISION_LEVERS},
-            "precision-preserving vs fast",
-        )
+    def test_stage_one_keeps_the_gradient_nan_check_on(self, merged):
+        """The one lever of the fast posture stage 1 does not take: it stays at the baseline's value."""
+        assert merged[PRETRAIN].ddp.check_for_nan_in_grad is True
+        assert merged[BASELINE_PRETRAIN].ddp.check_for_nan_in_grad is True
+        assert FAST_PRETRAIN_LEVERS[GRADIENT_NAN_CHECK] is False, "the quickstart's posture turns it off"
 
     def test_the_midtrain_is_v2s_from_this_arms_own_pretraining(self, merged):
-        assert_only_these_fields_differ(merged[MIDTRAIN], merged[V2_MIDTRAIN], MIDTRAIN_DIVERGENCE, "v2e2e midtrain")
+        assert_differs_only_in(merged[MIDTRAIN], merged[V2_MIDTRAIN], MIDTRAIN_DIVERGENCE, "v2e2e midtrain")
+        assert_levers_are_set(merged[MIDTRAIN], FAST_MIDTRAIN_LEVERS, "v2e2e midtrain")
         midtrain = merged[MIDTRAIN].checkpoint
         assert midtrain.pretrained_checkpoint == merged[PRETRAIN].checkpoint.save
-        assert midtrain.pretrained_checkpoint != merged[PRETRAIN_PRECISE].checkpoint.save
         assert midtrain.load == midtrain.save != midtrain.pretrained_checkpoint
 
     def test_every_stage_resumes_from_its_own_directory(self, merged):
         for path, name in (
             (PRETRAIN, "control_pretrain_30b_filtered_gpt55_4plus_v2e2e_pretrain"),
-            (PRETRAIN_PRECISE, "control_pretrain_30b_filtered_gpt55_4plus_v2e2e_pretrain_precise"),
             (MIDTRAIN, "control_pretrain_30b_filtered_gpt55_4plus_v2e2e_midtrain"),
         ):
             checkpoint = merged[path].checkpoint
@@ -214,22 +223,15 @@ class TestTheLauncherSettings:
         assert env_override_entries(str(PRETRAIN_ENV)) == FAST_PRETRAIN_LAUNCHER_SETTINGS
         assert env_override_entries(str(QUICKSTART_ENV)) == FAST_PRETRAIN_LAUNCHER_SETTINGS
 
-    def test_the_precision_preserving_env_file_keeps_the_ssm_state_patch_on(self):
-        expected = [setting for setting in FAST_PRETRAIN_LAUNCHER_SETTINGS if setting != FAST_PRETRAIN_SSM_SETTING]
-        assert env_override_entries(str(PRETRAIN_PRECISE_ENV)) == expected
-
-    def test_the_midtrain_has_no_env_file(self):
-        """The midtrain trains in the as-is posture, with the fp32 SSM-state patch on as V2's did; an env
-        file beside it would be read as the stage's launcher settings."""
-        assert not MIDTRAIN.with_suffix(".env").exists()
+    def test_the_midtrain_env_file_holds_exactly_the_fast_midtraining_setting(self):
+        """The fast midtraining configuration keeps the fp32 SSM-state patch on, stated in its settings file so that
+        a value inherited from stage 1's (which turns it off) cannot reach the midtraining."""
+        assert env_override_entries(str(MIDTRAIN_ENV)) == FAST_MIDTRAIN_LAUNCHER_SETTINGS
 
 
 class TestTheBlend:
     def test_stage_one_blend_is_well_formed(self, merged):
         assert_blend_is_well_formed(OmegaConf.load(PRETRAIN).dataset.data_path, "pretraining")
-
-    def test_the_two_postures_read_the_same_blend(self):
-        assert OmegaConf.load(PRETRAIN_PRECISE).dataset.data_path == OmegaConf.load(PRETRAIN).dataset.data_path
 
     def test_stage_one_reads_this_arms_splits_and_v2s_ai_safety_corpus(self):
         subsets = blend_subsets(OmegaConf.load(PRETRAIN).dataset.data_path)
@@ -361,7 +363,7 @@ class TestBudgetsAndCadence:
         assert checkpoint.save_interval == 600
         assert (merged[MIDTRAIN].train.train_iters - 1) // checkpoint.save_interval + 1 == 6
 
-    @pytest.mark.parametrize("path", [PRETRAIN, PRETRAIN_PRECISE, MIDTRAIN], ids=lambda p: p.stem)
+    @pytest.mark.parametrize("path", [PRETRAIN, MIDTRAIN], ids=lambda p: p.stem)
     def test_segment_rollover_and_save_crossings(self, merged, path):
         assert_segment_exit_posture(merged[path], path.name, 1400)
         assert merged[path].checkpoint.ckpt_assume_constant_structure is False
@@ -440,8 +442,12 @@ class TestTheLossGate:
         for gate in spec.gates.values():
             assert gate.last < first_save, gate.name
 
-    def test_the_fallback_the_policy_names_is_the_precision_preserving_variant(self):
-        assert PRETRAIN_PRECISE.name in LOSS_GATE.read_text()
+    def test_the_policy_debugs_the_fast_posture_rather_than_changing_it(self):
+        """A failure stops stage 1 for debugging in its own posture (Kyle, 2026-10-01): no other posture is
+        staged to restart in."""
+        text = LOSS_GATE.read_text()
+        assert "debugged in the fast posture" in text
+        assert "_precise" not in text and not list(_ARM_DIR.rglob("*precise*"))
 
 
 class TestTheScoreGate:
@@ -461,22 +467,24 @@ class TestTheScoreGate:
     def test_the_probe_evaluates_them_in_a_gating_step(self):
         text = PROBE_SBATCH.read_text()
         assert "python scripts/telemetry/score_gate.py --spec $ARM/score_gate.yaml --scores-dir $OUT" in text
-        assert re.search(r"^record score_gate ", text, re.M)
+        assert re.search(r"^gate score_gate ", text, re.M)
 
     def test_every_score_a_gate_reads_is_one_the_probe_writes(self):
         text = PROBE_SBATCH.read_text()
-        assert "> $OUT/$step.score.json" in text, "score() writes <step>.score.json into the scores directory"
+        assert "> $OUT/$step.score.json" in PROBE_JOB.read_text(), (
+            "score writes <step>.score.json into the scores directory"
+        )
         windows = dict(re.findall(r'^score (\w+) "\$PROBE/[^"]+" (\d+ \d+)$', text, re.M))
-        assert set(windows) == {"fast", "as_is", "precise"}
+        assert set(windows) == {"fast", "as_is"}
         for gate in load_score_gates(SCORE_GATE).values():
             files = [gate.score] if isinstance(gate, MemoryGate) else [gate.candidate, gate.reference]
             assert set(files) <= {f"{step}.score.json" for step in windows}, gate.name
         assert windows["fast"] == windows["as_is"], "the speed gate compares the two over one window"
 
 
-def sbatch_value(name: str) -> str:
-    """A NAME=value assignment in probe.sbatch."""
-    (value,) = [line.split("=", 1)[1] for line in PROBE_SBATCH.read_text().splitlines() if line.startswith(f"{name}=")]
+def sbatch_value(sbatch: Path, name: str) -> str:
+    """A NAME=value assignment in ``sbatch``."""
+    (value,) = [line.split("=", 1)[1] for line in sbatch.read_text().splitlines() if line.startswith(f"{name}=")]
     return value
 
 
@@ -498,13 +506,6 @@ class TestTheProbe:
         assert_only_these_fields_differ(merged[PROBE_FAST], merged[PRETRAIN], allowed, "fast probe")
         assert merged[PROBE_FAST].dataset.data_path == merged[BASELINE_PRETRAIN].dataset.data_path
 
-    def test_precise_is_the_variant_on_the_baselines_data(self, merged):
-        allowed = {*self.PROBE_FIELDS, "dataset.data_path"}
-        assert_only_these_fields_differ(
-            merged[PROBE_PRECISE], merged[PRETRAIN_PRECISE], allowed, "precision-preserving probe"
-        )
-        assert merged[PROBE_PRECISE].dataset.data_path == merged[BASELINE_PRETRAIN].dataset.data_path
-
     def test_the_as_is_rerun_is_the_baseline(self, merged):
         assert_only_these_fields_differ(
             merged[PROBE_AS_IS], merged[BASELINE_PRETRAIN], self.PROBE_FIELDS, "as-is probe"
@@ -522,32 +523,31 @@ class TestTheProbe:
         assert checkpoint.most_recent_k == 1 and checkpoint.load is None
 
     def test_no_probe_loads_or_writes_a_production_directory(self, merged):
-        productions = {
-            merged[path].checkpoint.save for path in (PRETRAIN, PRETRAIN_PRECISE, MIDTRAIN, BASELINE_PRETRAIN)
-        }
-        for path in (PROBE_FAST, PROBE_PRECISE, PROBE_AS_IS, PROBE_HANDOFF):
+        productions = {merged[path].checkpoint.save for path in (PRETRAIN, MIDTRAIN, BASELINE_PRETRAIN)}
+        for path in (PROBE_FAST, PROBE_AS_IS, PROBE_HANDOFF):
             checkpoint = merged[path].checkpoint
             assert checkpoint.load is None, path.name
-            assert checkpoint.save in (None, sbatch_value("SCRATCH")), path.name
+            assert checkpoint.save in (None, sbatch_value(PROBE_SBATCH, "SCRATCH")), path.name
             assert checkpoint.save not in productions, path.name
-        names = [
-            merged[path].logger.wandb_exp_name for path in (PROBE_FAST, PROBE_PRECISE, PROBE_AS_IS, PROBE_HANDOFF)
-        ]
-        assert len(set(names)) == 4 and all("_probe_" in name for name in names)
+        names = [merged[path].logger.wandb_exp_name for path in (PROBE_FAST, PROBE_AS_IS, PROBE_HANDOFF)]
+        assert len(set(names)) == 3 and all("_probe_" in name for name in names)
 
     def test_every_probe_runs_at_the_production_width(self, merged):
-        gpus = int(sbatch_value("NODES")) * 4
+        gpus = int(sbatch_value(PROBE_SBATCH, "NODES")) * 4
         assert gpus == GPUS
-        for path in (PROBE_FAST, PROBE_PRECISE, PROBE_AS_IS):
+        for path in (PROBE_FAST, PROBE_AS_IS):
             assert data_parallel_size(merged[path], gpus) == 512, path.name
         assert data_parallel_size(merged[PROBE_HANDOFF], gpus) == 256
 
     def test_the_sbatch_names_the_save_the_configs_use(self, merged):
-        assert sbatch_value("SCRATCH") == merged[PROBE_FAST].checkpoint.save
+        assert sbatch_value(PROBE_SBATCH, "SCRATCH") == merged[PROBE_FAST].checkpoint.save
 
     def test_the_sbatch_reads_the_gates_baseline_log(self):
         """probe.sbatch takes its parity reference from loss_gate.yaml's one `baseline:` line."""
-        assert sbatch_value("BASELINE_LOG") == """$(awk '$1 == "baseline:" {print $2}' "$ARM/loss_gate.yaml")"""
+        assert (
+            sbatch_value(PROBE_SBATCH, "BASELINE_LOG")
+            == """$(awk '$1 == "baseline:" {print $2}' "$ARM/loss_gate.yaml")"""
+        )
         (line,) = [line.split() for line in LOSS_GATE.read_text().splitlines() if line.split()[:1] == ["baseline:"]]
         assert Path(line[1]) == load_gate_spec(LOSS_GATE).references["baseline"]
 
@@ -555,9 +555,15 @@ class TestTheProbe:
         """A hung step ends at its own limit; the limits must leave the later steps their time."""
         text = PROBE_SBATCH.read_text()
         launches = [line for line in text.replace("\\\n", " ").splitlines() if re.match(r"\s*(if )?launch \w", line)]
-        assert len(launches) == 4
-        limits = [int(sbatch_value(name)) for line in launches for name in re.findall(r'"\$(LIMIT_\w+)"', line)]
-        assert len(limits) == 4, "every launch passes one LIMIT_ variable"
+        assert {re.match(r"\s*(?:if )?launch (\w+)", line).group(1) for line in launches} == {
+            "fast",
+            "handoff",
+            "as_is",
+        }
+        limits = [
+            int(sbatch_value(PROBE_SBATCH, name)) for line in launches for name in re.findall(r'"\$(LIMIT_\w+)"', line)
+        ]
+        assert len(limits) == len(launches), "every launch passes one LIMIT_ variable"
         hours, minutes, seconds = map(int, re.search(r"^#SBATCH --time=(\d+):(\d+):(\d+)$", text, re.M).groups())
         # The NVLink sweep, the container starts for scoring and the parity tests take the rest.
         assert sum(limits) + 600 <= hours * 3600 + minutes * 60 + seconds
@@ -565,11 +571,13 @@ class TestTheProbe:
     def _run_probe_sbatch(self, tmp_path, env_extra: dict[str, str]) -> subprocess.CompletedProcess:
         """Run the real probe.sbatch up to its refusals, with a stub isambard_sbatch on PATH (SLURM
         submission is the untestable boundary) and a minimal environment carrying only ``env_extra``."""
-        if Path(sbatch_value("SCRATCH")).parent.exists():
+        if Path(sbatch_value(PROBE_SBATCH, "SCRATCH")).parent.exists():
             pytest.skip("the probe's scratch directory exists, and the sbatch refuses before the check under test")
         repo = tmp_path / "repo"
-        repo.mkdir()
+        (repo / "scripts" / "training").mkdir(parents=True)
         (repo / "REVISION").write_text("test\n")
+        shutil.copy(_REPO_ROOT / "scripts" / "training" / "launch_environment.py", repo / "scripts" / "training")
+        shutil.copy(PROBE_JOB, repo / "scripts" / "training")
         bindir = tmp_path / "bin"
         bindir.mkdir()
         stub = bindir / "isambard_sbatch"
@@ -608,12 +616,201 @@ class TestTheProbe:
             resolved.add((PROBE_DIR / name) if (PROBE_DIR / name).exists() else (_ARM_DIR / name))
         assert {path.name for path in resolved} == {
             PROBE_FAST.name,
-            PROBE_PRECISE.name,
             PROBE_AS_IS.name,
             PROBE_HANDOFF.name,
             PRETRAIN_ENV.name,
-            PRETRAIN_PRECISE_ENV.name,
             LOSS_GATE.name,
+            MIDTRAIN_ENV.name,
         }
         for path in resolved:
             assert path.is_file(), path
+
+
+def assert_differs_only_in(candidate, reference, fields: set[str], label: str) -> None:
+    """Assert that ``candidate`` differs from ``reference`` in no field outside ``fields``; a listed field may hold
+    its reference's value (a lever the reference already sets, say), which ``assert_levers_are_set`` covers."""
+    flat_candidate, flat_reference = flatten_merged_config(candidate), flatten_merged_config(reference)
+    differing = {key for key in fields if flat_candidate.get(key) != flat_reference.get(key)}
+    assert_only_these_fields_differ(candidate, reference, differing, label)
+
+
+class TestTheMidtrainingProbe:
+    """The midtraining probe measures the fast midtraining configuration on the baseline's stage 2 at production
+    width: each config is the config it measures, changed only in what a probe must change (its length, its
+    checkpoints and its W&B run), so every run reads production's batches from production's warm start."""
+
+    PROBE_FIELDS = {
+        "train.exit_interval",
+        "checkpoint.load",
+        "checkpoint.save",
+        "logger.wandb_exp_name",
+        "logger.wandb_save_dir",
+    }
+
+    def test_fast_mid_is_the_baselines_stage_two_in_the_fast_midtraining_configuration(self, merged):
+        fields = {*FAST_MIDTRAIN_LEVERS, *self.PROBE_FIELDS, "checkpoint.save_interval", "checkpoint.most_recent_k"}
+        assert_differs_only_in(merged[PROBE_MID_FAST], merged[BASELINE_MIDTRAIN], fields, "fast midtraining probe")
+        assert_levers_are_set(merged[PROBE_MID_FAST], FAST_MIDTRAIN_LEVERS, "fast midtraining probe")
+
+    def test_the_as_is_rerun_is_the_baselines_stage_two(self, merged):
+        assert_differs_only_in(
+            merged[PROBE_MID_AS_IS], merged[BASELINE_MIDTRAIN], self.PROBE_FIELDS, "as-is midtraining probe"
+        )
+
+    def test_the_handoff_is_the_as_is_cpt_from_the_fast_mid_save(self, merged):
+        fields = {*self.PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
+        assert_differs_only_in(merged[PROBE_MID_HANDOFF], merged[V2_CPT_LINK1], fields, "CPT handoff probe")
+        fast = merged[PROBE_MID_FAST]
+        assert merged[PROBE_MID_HANDOFF].checkpoint.pretrained_checkpoint == (
+            f"{fast.checkpoint.save}/iter_{fast.train.exit_interval:07d}"
+        )
+
+    def test_fast_mid_crosses_three_saves_and_trains_after_each(self, merged):
+        cfg = merged[PROBE_MID_FAST]
+        saves = range(cfg.checkpoint.save_interval, cfg.train.exit_interval + 1, cfg.checkpoint.save_interval)
+        assert len([save for save in saves if save < cfg.train.exit_interval]) >= 3
+        assert cfg.checkpoint.most_recent_k == 1
+
+    def test_no_midtraining_probe_resumes_or_writes_a_production_directory(self, merged):
+        for path in (PROBE_MID_FAST, PROBE_MID_AS_IS, PROBE_MID_HANDOFF):
+            assert merged[path].checkpoint.load is None, path.name
+        assert merged[PROBE_MID_AS_IS].checkpoint.save is None
+        assert merged[PROBE_MID_HANDOFF].checkpoint.save is None
+        assert merged[PROBE_MID_FAST].checkpoint.save == sbatch_value(PROBE_MID_SBATCH, "SCRATCH")
+        assert "/v2e2e_probe_midtrain/" in merged[PROBE_MID_FAST].checkpoint.save
+
+    def test_every_midtraining_probe_runs_at_production_width(self, merged):
+        gpus = 4 * int(sbatch_value(PROBE_MID_SBATCH, "NODES"))
+        for path in (PROBE_MID_FAST, PROBE_MID_AS_IS):
+            assert data_parallel_size(merged[path], gpus) == data_parallel_size(merged[BASELINE_MIDTRAIN], GPUS) == 256
+        handoff = merged[PROBE_MID_HANDOFF]
+        assert handoff.train.global_batch_size % data_parallel_size(handoff, gpus) == 0
+
+    def test_the_gates_are_the_pre_registered_ones(self):
+        assert load_score_gates(SCORE_GATE_MIDTRAIN) == {
+            "fast_mid_memory": MemoryGate("fast_mid_memory", "fast_mid.score.json", 85.5, 0),
+            "fast_mid_speed": SpeedGate(
+                "fast_mid_speed", "fast_mid.score.json", "as_is_mid.score.json", 6.43, 4.286667, 4.946154
+            ),
+            "fast_mid_first_loss": FirstLossGate(
+                "fast_mid_first_loss", "fast_mid.score.json", "as_is_mid.score.json", 0.005
+            ),
+        }
+        assert 6.43 / 1.5 == pytest.approx(4.286667, abs=1e-6)
+        assert 6.43 / 1.3 == pytest.approx(4.946154, abs=1e-6)
+
+    def test_the_parity_reference_is_the_production_midtraining_run(self):
+        reference = Path(sbatch_value(PROBE_MID_SBATCH, "REFERENCE_LOG"))
+        assert reference.name == f"train-{BASELINE_MIDTRAIN_JOB}.out"
+        assert sbatch_value(PROBE_MID_SBATCH, "PARITY_GATED") == '"51 500"'
+        assert sbatch_value(PROBE_MID_SBATCH, "PARITY_REPORTED") == '"1 50"'
+
+    def test_every_score_a_gate_reads_is_one_the_probe_writes(self):
+        text = PROBE_MID_SBATCH.read_text()
+        windows = dict(re.findall(r'^score (\w+) "\$PROBE/[^"]+" (\d+ \d+)$', text, re.M))
+        assert set(windows) == {"fast_mid", "as_is_mid"} and windows["fast_mid"] == windows["as_is_mid"]
+        assert "python scripts/telemetry/score_gate.py --spec $ARM/score_gate_midtrain.yaml --scores-dir $OUT" in text
+        assert re.search(r"^gate score_gate ", text, re.M)
+        for gate in load_score_gates(SCORE_GATE_MIDTRAIN).values():
+            files = [gate.score] if isinstance(gate, MemoryGate) else [gate.candidate, gate.reference]
+            assert set(files) <= {f"{step}.score.json" for step in windows}, gate.name
+
+    def test_every_launch_has_a_time_limit_and_together_they_fit_the_job(self):
+        text = PROBE_MID_SBATCH.read_text()
+        launches = [line for line in text.replace("\\\n", " ").splitlines() if re.match(r"\s*(if )?launch \w", line)]
+        steps = {re.match(r"\s*(?:if )?launch (\w+)", line).group(1) for line in launches}
+        assert steps == {"fast_mid", "handoff_cpt", "as_is_mid", "as_is_mid_2"}
+        limits = [
+            int(sbatch_value(PROBE_MID_SBATCH, name))
+            for line in launches
+            for name in re.findall(r'"\$(LIMIT_\w+)"', line)
+        ]
+        assert len(limits) == len(launches)
+        hours, minutes, seconds = map(int, re.search(r"^#SBATCH --time=(\d+):(\d+):(\d+)$", text, re.M).groups())
+        assert sum(limits) + 600 <= hours * 3600 + minutes * 60 + seconds
+
+    @pytest.mark.skipif(not Path("/projects/a5k").is_dir(), reason="the reference log lives on Isambard's /projects")
+    def test_the_reference_log_exists(self):
+        assert Path(sbatch_value(PROBE_MID_SBATCH, "REFERENCE_LOG")).is_file()
+
+
+class TestTheWatch:
+    """Each stage runs under a watch spec read by scripts/telemetry/run_watch.py: both stop on a result the
+    gradient NaN check rejected (it is on in both stages' configurations), on a non-finite grad norm or lm loss (the
+    loss NaN check is off in both, so a NaN loss is an iteration line without lm loss), on an iteration counted as
+    nan or skipped and on allocator retries; stage 1 also runs its pre-registered loss gates and flags a growing
+    offset and a block outside the broad arm's envelope, the midtraining flags loss spikes."""
+
+    @pytest.mark.parametrize("path", [WATCH_PRETRAIN, WATCH_MIDTRAIN], ids=lambda path: path.stem)
+    def test_both_stages_stop_on_every_sign_of_a_bad_step(self, path):
+        spec = load_watch_spec(path)
+        assert spec.stop_on_rejected_result and spec.stop_on_non_finite_grad_norm
+        assert spec.stop_on_non_finite_lm_loss and spec.stop_on_nan_or_skipped_iterations
+        assert spec.max_alloc_retries == 0
+
+    @pytest.mark.parametrize(
+        "watch, stage", [(WATCH_PRETRAIN, PRETRAIN), (WATCH_MIDTRAIN, MIDTRAIN)], ids=["pretrain", "midtrain"]
+    )
+    def test_each_stage_stops_a_segment_launched_without_the_env_file_its_readme_command_names(self, watch, stage):
+        settings = load_watch_spec(watch).launch_settings
+        assert settings == stage.with_suffix(".env")
+        assert (
+            f"ISAMBARD_ENV_OVERRIDES=$PWD/{settings.relative_to(_REPO_ROOT)}" in (_ARM_DIR / "README.md").read_text()
+        )
+
+    def test_stage_one_runs_every_pre_registered_loss_gate(self):
+        spec = load_watch_spec(WATCH_PRETRAIN)
+        assert spec.loss_gate_spec == LOSS_GATE
+        assert spec.loss_gates == tuple(load_gate_spec(LOSS_GATE).gates)
+        assert spec.growing_offset == GrowingOffset("L2b", 3, 0.01)
+
+    def test_stage_one_compares_each_save_interval_with_the_broad_arms_envelope(self, merged):
+        envelope = load_watch_spec(WATCH_PRETRAIN).block_envelope
+        assert envelope.block_iterations == merged[PRETRAIN].checkpoint.save_interval
+        assert envelope.consecutive_blocks == 2
+        gate_logs = load_gate_spec(LOSS_GATE).references
+        assert envelope.reference.logs[0] == gate_logs["baseline"]
+        assert envelope.envelope.logs[0] == gate_logs["broad"]
+
+    @pytest.mark.skipif(not Path("/projects/a5k").is_dir(), reason="the reference logs live on Isambard's /projects")
+    def test_wandb_supplies_exactly_the_block_the_baselines_logs_lack(self, merged):
+        """The broad arm as the candidate stands for a stage 1 that has logged every iteration. Read from the logs
+        alone, every block it completes is compared except block 11, whose baseline segment (22641-24904, W&B
+        mpf5lqoj) left no log, and the spec reads exactly that block from that run's W&B history."""
+        envelope = load_watch_spec(WATCH_PRETRAIN).block_envelope
+        assert envelope.reference.wandb_blocks == {11: "geodesic/megatron_training/mpf5lqoj"}
+        assert envelope.envelope.wandb_blocks == {}
+        logs_only = replace(envelope, reference=replace(envelope.reference, wandb_blocks={}))
+        comparisons = block_comparisons(logs_only, latest_records(read_segments(envelope.envelope.logs)))
+        full_blocks = merged[PRETRAIN].train.train_iters // envelope.block_iterations
+        assert [c.block for c in comparisons] == list(range(1, full_blocks + 1))
+        not_compared = {c.block: c.not_compared for c in comparisons if c.offsets is None}
+        assert not_compared == {11: f"the reference logs 16 of {envelope.block_iterations} iterations"}
+
+    @pytest.mark.parametrize(
+        "guard, watch, stage",
+        [(GUARD_PRETRAIN, WATCH_PRETRAIN, PRETRAIN), (GUARD_MIDTRAIN, WATCH_MIDTRAIN, MIDTRAIN)],
+        ids=["pretrain", "midtrain"],
+    )
+    def test_each_stage_is_guarded_by_its_watch_under_the_job_name_its_readme_command_submits(
+        self, merged, guard, watch, stage
+    ):
+        config = load_guard_config(guard)
+        assert config.watch == watch
+        assert f"--job-name={config.job_name} --dependency=singleton" in (_ARM_DIR / "README.md").read_text()
+        assert config.final_iteration == merged[stage].train.train_iters
+        assert str(config.record).startswith("/projects/a5k/public/logs/")
+
+    def test_stage_one_is_held_before_its_first_save_while_a_gate_is_unevaluated(self, merged):
+        """From iteration 2200 to the first save: a gate decided at 2000 that is still unevaluated by then must
+        not let a save through."""
+        config = load_guard_config(GUARD_PRETRAIN)
+        first_save = merged[PRETRAIN].checkpoint.save_interval
+        assert (config.hold_from, config.hold_until) == (2200, first_save)
+        assert max(gate.last for gate in load_gate_spec(LOSS_GATE).gates.values()) < config.hold_from
+        assert load_guard_config(GUARD_MIDTRAIN).hold_from is None
+
+    def test_the_midtraining_flags_a_calibrated_loss_spike_and_runs_no_loss_gate(self):
+        spec = load_watch_spec(WATCH_MIDTRAIN)
+        assert spec.loss_spike == LossSpike(0.108, 50)
+        assert spec.loss_gate_spec is None and spec.loss_gates == ()

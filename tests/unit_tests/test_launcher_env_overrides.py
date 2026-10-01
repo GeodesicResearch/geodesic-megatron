@@ -42,8 +42,7 @@ import subprocess
 import sys
 
 import pytest
-
-from tests.unit_tests.launcher_source import LAUNCHER, REPO_ROOT, launcher_function
+from scripts.training.launcher_source import LAUNCHER, REPO_ROOT, launcher_function
 
 
 # --- apply_env_overrides + export_env_overrides, lifted from the launcher -----------------------
@@ -298,7 +297,7 @@ def _launcher_env(stubs, run_dir, host_libfabric):
         "MASTER_ADDR_OVERRIDE": "127.0.0.1",
         "ISAMBARD_SWITCH_SPREAD": "test-switch:1",
         "ISAMBARD_RUN_ID": "20260928T000000-jtest",
-        "GEODESIC_REPO_DIR": REPO_ROOT,
+        "GEODESIC_REPO_DIR": str(REPO_ROOT),
         # The host libfabric's in-container mount, which is where this test runs.
         "GEODESIC_CONTAINER_HOST_LIBFABRIC": host_libfabric,
         "ENV_OVERRIDES_TEST_RANK_ENV": str(run_dir / "rank_env"),

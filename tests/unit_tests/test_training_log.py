@@ -204,6 +204,16 @@ def test_read_log_lines_replaces_an_undecodable_byte(tmp_path):
     assert [r.iteration for r in parse_iteration_records(lines)] == [50]
 
 
+def test_read_log_lines_leaves_out_a_last_line_still_being_written(tmp_path):
+    """A live log's last line has no line break until its writer finishes it; read half-written, an iteration line
+    lacks its required fields."""
+    path = tmp_path / "train.out"
+    path.write_text(REAL_ITERATION_50 + "\n" + REAL_ITERATION_50[: len(REAL_ITERATION_50) // 2], encoding="utf-8")
+    lines = read_log_lines(path)
+    assert lines == [REAL_ITERATION_50]
+    assert [r.iteration for r in parse_iteration_records(lines)] == [50]
+
+
 def test_window_records_returns_the_window_in_iteration_order():
     records = parse_iteration_records([iteration_line(i, 1000.0, 6.0) for i in (3, 1, 4, 2)])
     assert [r.iteration for r in window_records(records, (1, 3), "log")] == [1, 2, 3]

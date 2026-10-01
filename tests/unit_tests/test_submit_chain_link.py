@@ -250,6 +250,15 @@ def _completed(returncode: int, stdout: str = "", stderr: str = "") -> subproces
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
+def test_an_environment_holding_a_launch_setting_refuses_naming_it():
+    with pytest.raises(submit_chain_link.NotSafeToSubmit, match="inherited from the submitting shell: ISAMBARD_FP32"):
+        submit_chain_link.check_no_inherited_settings({"ISAMBARD_FP32_SSM_STATE": "0", "PATH": "/usr/bin"})
+
+
+def test_the_submission_wrappers_own_variables_allow_the_submission():
+    submit_chain_link.check_no_inherited_settings({"ISAMBARD_SBATCH_MAX_NODES": "300", "ISAMBARD_TUNNEL_NAME": "t"})
+
+
 @pytest.mark.parametrize(
     "result,match",
     [

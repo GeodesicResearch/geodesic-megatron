@@ -315,7 +315,7 @@ quickly and hold nothing idle. Launch code under test from a read-only copy of a
 edited while the job runs — bash reads the launcher by byte offset. An archive carries neither
 `.git` nor ignored build products, so the copy also needs (1) a `REVISION` file at its root
 naming the commit (plus any uncommitted diff it carries): with no `.git`, the profiler's
-provenance reads the commit from it (`scripts/profiling/profiler_callback.py` `_repo_commit`)
+provenance reads the commit from it (`scripts/telemetry/code_revision.py` `code_revision`)
 and otherwise records the commit as unresolved; and (2) the Megatron dataset helpers library,
 `3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so`, copied from a built checkout —
 Megatron-LM git-ignores `*.so`, and without it rank 0 runs `make` in that directory at startup,
@@ -394,6 +394,8 @@ placement measurements).
   also require every run to log the same learning rate and consumed samples at every iteration,
   and `--wandb` reads full-precision values from each log's W&B run (the log prints 7
   significant digits of the loss and 3 decimals of the grad norm). Exit status 1 on any FAIL.
+  `windows-outside <band.json>` reads a `band --json` report back and prints how many windows its one candidate
+  left the loss band in when every other check passed, or `other` when one did not.
   Default-mode training is not run-to-run deterministic (the grad norm differs from iteration 1),
   so an identity test needs `model.deterministic_mode=true` with `NVTE_ALLOW_NONDETERMINISTIC_ALGO=0`,
   `CUBLAS_WORKSPACE_CONFIG=:4096:8` and `MAMBA_DETERMINISTIC=1` (an `ISAMBARD_ENV_OVERRIDES` file) on
@@ -413,8 +415,29 @@ placement measurements).
   on `score_run.py --json` files: a `memory` gate fails a score with no `peak_memory_across_ranks`,
   more allocator retries or more peak allocated memory than its limits; a `speed` gate projects a
   candidate's mean step time relative to a reference's on the same nodes onto a stated step time and
-  fails above its limit. Both tools share the outcomes and the exit status (`gate_outcome.py`); the
-  v2e2e probe runs the arm's `score_gate.yaml`, because `score_run.py` exits 0 on any scorable log.
+  fails above its limit; a `first_loss` gate compares two runs started from the same weights on the same
+  first batch at their first logged iteration and fails when the candidate's lm loss there differs from the
+  reference's by more than its tolerance. Both tools share the outcomes and the exit status
+  (`gate_outcome.py`); the v2e2e probes run the arm's `score_gate.yaml` and `score_gate_midtrain.yaml`,
+  because `score_run.py` exits 0 on any scorable log.
+  `scripts/telemetry/run_watch.py --spec <watch.yaml> --log <segment log> ...` checks a running stage the same way:
+  exit 1 on a stop condition (a result the rerun state machine rejected, which is how the gradient NaN check ends a
+  run; a non-finite grad norm or lm loss, or an iteration line without `lm loss`; an iteration counted as nan or
+  skipped; allocator retries; a segment whose `[env-overrides]` lines are not exactly the stage's
+  `ISAMBARD_ENV_OVERRIDES` file, read with the launcher's own parser) or a failing due loss gate, 2 on a due gate or
+  a stop check it could not evaluate (each stop check runs on its own, so the others still stand) or a failure of
+  the watch itself (never 1); flags (a loss spike, a loss gate's offset growing past a bound, a block of iterations
+  further from a reference run than an envelope run is) are printed, never a stop. A segment that resumes from a
+  save supersedes every earlier segment's records, saves and rejected results from its first iteration on. A gate
+  named `--decided GATE=LOG` passed at an earlier check on that log and is not evaluated again while that log covers
+  its range; the watch ends by naming the gates still undecided. The v2e2e arm's `watch_pretrain.yaml` and
+  `watch_midtrain.yaml` are its specs.
+  `scripts/training/stage_guard.py --config <guard.yaml>` runs that watch on a timer while the stage trains, on the
+  tunnel under the host Python, handing each passed gate to later ticks as decided: on a stop it cancels the stage's
+  live jobs by ID (the running segment and its queued successors) and exits; on a tick it could not evaluate (exit
+  2, or a watch or `sacct` failure) inside its hold window (before the first save) while a loss gate is undecided it
+  does the same; otherwise it alerts. Its record opens with the config, the spec's sha256 and the code revision.
+  The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the
@@ -712,7 +735,8 @@ selective `[moe, shared_experts]` recompute in place of full recompute, still at
 benchmark on the same allocations (the pre-registered four-cycle comparison: goal established; **3.745 s/iter** on one
 switch group against its 6.146 s), 77 GB reserved, with its 500-iteration loss inside the baseline's band. Its
 chunked cross-entropy is the pin's carried commit 0005, so it does not run at the previous pin. The production configs
-do not use its levers. The campaign is logged in `docs/investigations/nano30b-midtrain-perf-campaign.md`.
+do not use its levers, except the control-pretraining V2 E2E arm's midtraining
+(`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/`). The campaign is logged in `docs/investigations/nano30b-midtrain-perf-campaign.md`.
 
 **Super — the 128-GPU, 1B-token standard** (Kyle, 2026-08-05): **seq 8192, GBS 3072**
 (= 25,165,824 tokens/iter), **all 128 GPUs / 32 nodes, 1B tokens** (`train_iters: 40` =
@@ -1039,12 +1063,15 @@ figures. The same test module covers both arms, parametrised over them.
 rule from the first pretraining token, a from-scratch stage 1 on the `_filtered_gpt55_4plus_v2e2e`
 pretraining splits and then V2's midtraining from that stage's final, both at the baseline's widths
 (512 GPUs; DP=512, then CP2 DP=256). Its stage 1 trains in the fast Nano pretrain posture (the
-quickstart's levers and `.env`, one table in `tests/unit_tests/campaign_config.py`), which changes
-numerical precision, so the arm differs from the baseline in more than data. Two gates bound that:
-`probe/probe.sbatch`, one 130-node job on the baseline's data before the launch (NVLink sweep,
-speed, memory across four saves, identical-batch parity against the baseline, the midtraining
-handoff, the fallback's speed), and the pre-registered `loss_gate.yaml` during stage 1; a failure
-restarts stage 1 in the precision-preserving `_precise` variant.
+quickstart's levers and `.env`, one table in `tests/unit_tests/campaign_config.py`, except that the
+gradient NaN check stays on), which changes numerical precision, so the arm differs from the baseline
+in more than data. Two gates bound that: `probe/probe.sbatch`, one 130-node job on the baseline's data
+before the launch (NVLink sweep, speed, memory across four saves, identical-batch parity against the
+baseline, the midtraining handoff), and the pre-registered `loss_gate.yaml` during stage 1; a failure
+stops stage 1, which is debugged in that posture, never restarted in another (Kyle, 2026-10-01). Its midtraining trains in the fast
+Nano midtraining configuration (the midtraining quickstart's levers and its `.env`, `FAST_MIDTRAIN_LEVERS`
+in the same file; Kyle, 2026-10-01), a precision change too, bounded by `probe/probe_midtrain.sbatch`:
+the baseline's stage 2 at production width, against production's midtraining run for parity.
 Its five pretraining corpora are pinned at the data revision `a815dfe7`; its other ten corpora are
 V2's builds. The arm README has the gates, the launch and the storage.
 
@@ -1058,7 +1085,8 @@ V2 E2E's (five epochs), is declared and renders no links until its union's token
 own job (a "link"), submitted one at a time by `configs/control_pretraining/submit_chain_link.py` only
 after the link before it has saved: queued successors would count against the account's node cap,
 which every job re-checks at start and cancels itself over, and the tool refuses a dirty tree, a stale
-link file, a save directory that is not where the link starts, and a duplicate job. **The link YAMLs
+link file, a save directory that is not where the link starts, a duplicate job, and a launch setting
+(`ISAMBARD_*`, `TRAIN_*`, `GEODESIC_CONTAINER_*`) the job would inherit from the submitting shell. **The link YAMLs
 are generated, never edited**:
 `generate_epoch_chain.py` derives them from `chain.yaml` and the parent midtraining config, and a
 test fails on any drift. Link 1 warm-starts from the parent's weights, which it loads only while the
@@ -1630,7 +1658,7 @@ as a patch in `3rdparty/patches/megatron-lm/` — that directory's README record
 and what it is load-bearing for. Two are patch files that NO run applies. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
 because nothing uses the `allgather` dispatcher today (every config uses `alltoall`, except the
-two Nano quickstarts' and the V2 E2E stage 1's `flex`) but the fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
+two Nano quickstarts' and the V2 E2E arm's `flex`) but the fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
 `0003`, `0004` and `0005`, the Nano pretrain campaign's Megatron-LM changes, are carried commits of the
 pin. `0003` is the port of upstream PR #4798 (EP all-to-all / compute overlap for the hybrid model,
@@ -1684,11 +1712,14 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
-  `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`)
+  `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`), the refusal of launch
+  settings inherited from the submitting shell (`launch_environment.py`), a stage's guard while it trains
+  (`stage_guard.py`) and the steps of a production-width probe job (`probe_job.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
-  parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory
-  and speed gates over scores (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`) and
-  the training-log parser they read (`training_log.py`)
+  parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
+  speed and first-loss gates over scores (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a
+  running stage's logs against its watch spec (`run_watch.py`), the training-log parser they read
+  (`training_log.py`) and the commit a checkout is at (`code_revision.py`)
 - `tests/unit_tests/` — No GPU required
 - `tests/functional_tests/` — GPU-required, tiered (L0/L1/L2)
 - `skills/` — Guides for AI coding agents

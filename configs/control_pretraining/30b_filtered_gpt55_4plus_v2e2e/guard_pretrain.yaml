@@ -1,0 +1,23 @@
+# How stage 1 is guarded while it trains, by scripts/training/stage_guard.py on the tunnel or a login node:
+#
+#   setsid nohup python3 scripts/training/stage_guard.py \
+#     --config configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/guard_pretrain.yaml >/dev/null 2>&1 &
+#
+# Every two minutes it runs watch_pretrain.yaml over the stage's segments. A stop cancels the running segment and its
+# queued successor; a tick that cannot be evaluated while the stage stands between iteration 2200 and the first save
+# at 2264 and a loss gate is still undecided does the same, so no save is written past an unevaluated gate. Every
+# evaluation is appended to the record.
+# The README's "Launch" has the policy.
+
+watch: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/watch_pretrain.yaml
+# The --job-name of the stage's singleton chain (the README's stage-1 command).
+job_name: cp30b-filtered-gpt55-4plus-v2e2e-pretrain
+# No segment of the stage was submitted before this date.
+since: "2026-10-01"
+# Two minutes: the last 64 iterations before the first save take about four.
+interval_seconds: 120
+record: /projects/a5k/public/logs/control_pretraining/v2e2e_guard/pretrain.log
+hold:
+  from_iteration: 2200
+  until_iteration: 2264   # the first save (checkpoint.save_interval)
+final_iteration: 29881    # train.train_iters

@@ -362,29 +362,47 @@ def test_identity_over_different_ranges_raises(lp):
 # --------------------------------------------------------------------------------------
 
 
+# wandb's own page size for scan_history.
+WANDB_PAGE_SIZE = 1000
+
+
 class FakeRun:
     """Stand-in for a ``wandb.Api().run(...)`` result, the network boundary: the real client reads the
     run's history from W&B's service, which unit tests must not depend on. It records every
     ``scan_history`` request and returns the given rows unfiltered, as a server honouring only part of
-    the step range would."""
+    the step range would.
+
+    The rows of the requested range that fill a page come back as wandb 0.27's paged scan with ``keys`` returns
+    them (measured on three runs, 2026-10-01): every full page loses a row about two thirds of the way in and
+    every later page repeats its first row, so steps 1-2000 in pages of 1000 come back without 669 and 1669 and
+    with 1001 twice."""
 
     requests: list[dict] = []
 
-    def __init__(self, rows: list[dict]):
+    def __init__(self, rows: list[dict], default_page_size: int):
         self.rows = rows
+        self.default_page_size = default_page_size
 
-    def scan_history(self, keys, min_step, max_step):
-        FakeRun.requests.append({"keys": keys, "min_step": min_step, "max_step": max_step})
-        return iter(self.rows)
+    def scan_history(self, keys, min_step, max_step, page_size=None):
+        FakeRun.requests.append({"keys": keys, "min_step": min_step, "max_step": max_step, "page_size": page_size})
+        size = self.default_page_size if page_size is None else page_size
+        in_range = [row for row in self.rows if min_step <= row["_step"] < max_step]
+        returned = [row for row in self.rows if row not in in_range]
+        for start in range(0, len(in_range), size):
+            page = in_range[start : start + size]
+            if len(page) == size:
+                page = page[: 2 * size // 3] + page[2 * size // 3 + 1 :]
+            returned.extend([page[0], *page] if start else page)
+        return iter(returned)
 
 
-def install_fake_wandb(monkeypatch, rows: list[dict]) -> list[str]:
+def install_fake_wandb(monkeypatch, rows: list[dict], default_page_size: int = WANDB_PAGE_SIZE) -> list[str]:
     requested_runs: list[str] = []
     FakeRun.requests = []
 
     def run(path: str) -> FakeRun:
         requested_runs.append(path)
-        return FakeRun(rows)
+        return FakeRun(rows, default_page_size)
 
     # load_trajectory imports wandb at call time, so a module in sys.modules replaces the client.
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Api=lambda: SimpleNamespace(run=run)))
@@ -409,7 +427,7 @@ def test_wandb_values_replace_the_printed_ones(lp, monkeypatch):
     trajectory = lp.load_trajectory(FIXTURE, (5, 20), use_wandb=True)
     assert requested == [FIXTURE_RUN_PATH]
     assert FakeRun.requests == [
-        {"keys": ["_step", "lm loss", "grad-norm", "learning-rate"], "min_step": 5, "max_step": 21}
+        {"keys": ["_step", "lm loss", "grad-norm", "learning-rate"], "min_step": 5, "max_step": 21, "page_size": 32}
     ]
     assert trajectory.source == f"wandb:{FIXTURE_RUN_PATH}"
     assert trajectory.values["lm loss"] == tuple(FIXTURE_LOSS[it] + 1.25e-7 for it in range(5, 21))
@@ -442,6 +460,12 @@ def test_wandb_history_must_cover_each_iteration_once(lp, monkeypatch, rows, mes
         lp.load_trajectory(FIXTURE, (1, 60), use_wandb=True)
 
 
+def test_a_range_wider_than_the_clients_page_is_read_whole(lp, monkeypatch):
+    install_fake_wandb(monkeypatch, history_rows(1, 60), default_page_size=20)
+    trajectory = lp.load_trajectory(FIXTURE, (1, 60), use_wandb=True)
+    assert trajectory.values["lm loss"] == tuple(FIXTURE_LOSS[it] + 1.25e-7 for it in range(1, 61))
+
+
 def test_wandb_needs_a_run_named_in_the_log(lp, monkeypatch, tmp_path):
     requested = install_fake_wandb(monkeypatch, history_rows(1, 60))
     no_run = tmp_path / "no_run.out"
@@ -454,6 +478,47 @@ def test_wandb_needs_a_run_named_in_the_log(lp, monkeypatch, tmp_path):
 # --------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------
+
+
+def test_a_band_report_survives_its_json(lp, tmp_path):
+    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_w1", loss_offset=over(1, 10, 0.001)))]
+    candidate = load(lp, write_run(tmp_path, "cand", loss_offset=over(51, 60, 0.01), learning_rate={45: 9.9e-4}))
+    report = lp.band_test(refs, [candidate], window=10)
+    assert lp.BandReport.from_dict(json.loads(json.dumps(report.to_dict()))) == report
+
+
+@pytest.mark.parametrize(
+    "edit, windows",
+    [
+        ({}, 0),
+        ({"loss_offset": over(51, 60, 0.01)}, 1),
+        ({"loss_offset": {**over(41, 50, 0.01), **over(51, 60, 0.01)}}, 2),
+        ({"loss_offset": over(51, 60, 0.01), "learning_rate": {45: 9.9e-4}}, None),
+        ({"loss_offset": over(51, 60, 0.01), "consumed_samples": {12: 2048 * 13}}, None),
+        ({"loss_offset": over(51, 60, 0.01), "nan": {30: 1}}, None),
+    ],
+)
+def test_the_loss_windows_outside_count_only_when_every_other_check_passed(lp, tmp_path, edit, windows):
+    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_w1", loss_offset=over(1, 10, 0.001)))]
+    report = lp.band_test(refs, [load(lp, write_run(tmp_path, "cand", **edit))], window=10)
+    assert lp.loss_windows_outside(report) == windows
+
+
+def test_the_loss_windows_outside_need_one_candidate(lp):
+    report = lp.band_test([load(lp, FIXTURE), load(lp, FIXTURE)], [load(lp, FIXTURE), load(lp, FIXTURE)], window=20)
+    with pytest.raises(ValueError, match="2 candidates, not one"):
+        lp.loss_windows_outside(report)
+
+
+@pytest.mark.parametrize("edit, printed", [({"loss_offset": over(51, 60, 0.05)}, "1"), ({"nan": {30: 1}}, "other")])
+def test_cli_windows_outside_reads_a_band_report(lp, tmp_path, capsys, edit, printed):
+    refs = [FIXTURE, write_run(tmp_path, "ref_b", loss_offset=over(1, 20, 0.001))]
+    args = ["band", "--reference", *map(str, refs), "--candidate", str(write_run(tmp_path, "cand", **edit))]
+    assert lp.main([*args, "--iterations", "1", "60", "--window", "20", "--json"]) == 1
+    report = tmp_path / "band.json"
+    report.write_text(capsys.readouterr().out)
+    assert lp.main(["windows-outside", str(report)]) == 0
+    assert capsys.readouterr().out == f"{printed}\n"
 
 
 def test_cli_band_passes_with_exit_status_zero(lp, tmp_path, capsys):

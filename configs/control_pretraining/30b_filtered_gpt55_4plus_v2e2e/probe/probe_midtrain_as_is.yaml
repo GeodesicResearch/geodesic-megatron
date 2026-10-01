@@ -1,0 +1,20 @@
+# The v2e2e midtraining probe's reference: the unfiltered baseline's stage 2
+# (../../30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml) as it ran in production (job 6127737), rerun for its
+# first 500 iterations on the probe's nodes. It reads the same batches as probe_midtrain_fast.yaml from the same warm
+# start, so it is the denominator of the speed gate and, with 6127737's log, a reference of the parity band.
+#
+# Changed from the baseline's stage 2: the length (exit at 500), no checkpoints (no resume, no save), and the W&B run.
+# probe_midtrain.sbatch runs it with no launcher settings file, as production ran.
+
+base_config: ../../30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+
+train:
+  exit_interval: 500
+
+checkpoint:
+  load: null
+  save: null
+
+logger:
+  wandb_save_dir: /projects/a5k/public/logs/wandb
+  wandb_exp_name: control_pretrain_30b_filtered_gpt55_4plus_v2e2e_probe_mid_as_is

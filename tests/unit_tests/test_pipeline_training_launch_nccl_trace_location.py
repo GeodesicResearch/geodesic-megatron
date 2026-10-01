@@ -30,8 +30,7 @@ import re
 import subprocess
 
 import pytest
-
-from tests.unit_tests.launcher_source import launcher_function
+from scripts.training.launcher_source import launcher_function
 
 
 def _run(tmp_path, raw_log_path, preset=None):

@@ -31,11 +31,15 @@ that the printed digits agree. Consumed samples always come from the log.
 
 The exit status is 0 when every candidate passes (a grad-norm FLAG does not fail it) and 1 otherwise.
 
+``windows-outside`` reads a ``band --json`` report back and prints how many windows its one candidate left
+the loss band in when every other check passed (0 when it passed), or ``other`` when one did not; it exits 0.
+
 USAGE
     python scripts/telemetry/loss_parity.py band --reference A1.out A2.out --candidate C.out \\
         --iterations 1 500 --window 50 [--wandb] [--json]
     python scripts/telemetry/loss_parity.py identity --reference A.out --candidate B.out [B2.out ...] \\
         --iterations 1 30 [--wandb] [--json]
+    python scripts/telemetry/loss_parity.py windows-outside band.json
 """
 
 import argparse
@@ -170,6 +174,23 @@ class CandidateVerdict:
     skipped_total: int
     nan_total: int
 
+    @property
+    def matches_the_references(self) -> bool:
+        """Whether the candidate logged the references' learning rate and consumed samples at every iteration and
+        had no skipped or NaN iteration: every check but the loss band."""
+        return _matches_the_references(
+            self.first_learning_rate_difference,
+            self.first_consumed_samples_difference,
+            self.skipped_total,
+            self.nan_total,
+        )
+
+
+def _matches_the_references(
+    learning_rate: Difference | None, consumed_samples: Difference | None, skipped_total: int, nan_total: int
+) -> bool:
+    return learning_rate is None and consumed_samples is None and not skipped_total and not nan_total
+
 
 @dataclass(frozen=True)
 class BandReport:
@@ -186,6 +207,61 @@ class BandReport:
     def to_dict(self) -> dict[str, Any]:
         """Return the report as a JSON-serialisable dict."""
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "BandReport":
+        """Rebuild a report from ``to_dict``'s output (a ``band --json`` file). Raises KeyError or TypeError on a
+        dict that is not one."""
+
+        def difference(value: dict[str, Any] | None) -> Difference | None:
+            return None if value is None else Difference(**value)
+
+        metrics = tuple(
+            MetricBand(
+                **{
+                    **metric,
+                    "windows": tuple(
+                        WindowBand(
+                            **{
+                                **window,
+                                "reference_means": tuple(window["reference_means"]),
+                                "candidate_means": tuple(window["candidate_means"]),
+                            }
+                        )
+                        for window in metric["windows"]
+                    ),
+                    "candidates": tuple(
+                        CandidateBand(**{**candidate, "windows_outside": tuple(candidate["windows_outside"])})
+                        for candidate in metric["candidates"]
+                    ),
+                }
+            )
+            for metric in raw["metrics"]
+        )
+        verdicts = tuple(
+            CandidateVerdict(
+                **{
+                    **verdict,
+                    "first_learning_rate_difference": difference(verdict["first_learning_rate_difference"]),
+                    "first_consumed_samples_difference": difference(verdict["first_consumed_samples_difference"]),
+                }
+            )
+            for verdict in raw["verdicts"]
+        )
+        return cls(**{**raw, "references": tuple(raw["references"]), "metrics": metrics, "verdicts": verdicts})
+
+
+def loss_windows_outside(report: BandReport) -> int | None:
+    """How many windows the report's one candidate left the loss band in, when every other check passed (0 when the
+    candidate passed); None when it failed another check, which no count of windows describes. Raises ValueError
+    unless the report has exactly one candidate."""
+    if len(report.verdicts) != 1:
+        raise ValueError(f"the report has {len(report.verdicts)} candidates, not one")
+    (verdict,) = report.verdicts
+    if not verdict.matches_the_references:
+        return None
+    (loss,) = [band for band in report.metrics if band.metric == VERDICT_METRIC]
+    return len(loss.candidates[0].windows_outside)
 
 
 @dataclass(frozen=True)
@@ -226,11 +302,14 @@ def fetch_wandb_history(run_path: str, iterations: tuple[int, int]) -> dict[str,
 
     first, last = iterations
     keys = [wandb_key for _, wandb_key in METRIC_SOURCES.values()]
-    rows = [
-        row
-        for row in wandb.Api().run(run_path).scan_history(keys=["_step", *keys], min_step=first, max_step=last + 1)
-        if first <= row["_step"] <= last
-    ]
+    # One page, twice the range, so it holds the range even with every step logged twice: wandb's paged scan
+    # with ``keys`` loses a row of every page it fills and repeats the first row of every later page.
+    history = (
+        wandb.Api()
+        .run(run_path)
+        .scan_history(keys=["_step", *keys], min_step=first, max_step=last + 1, page_size=2 * (last - first + 1))
+    )
+    rows = [row for row in history if first <= row["_step"] <= last]
     steps = [row["_step"] for row in rows]
     missing = sorted(set(range(first, last + 1)) - set(steps))
     repeated = sorted({step for step in steps if steps.count(step) > 1})
@@ -421,11 +500,11 @@ def band_test(
         lr = first_difference(first, anchor.values[SCHEDULE_METRIC], cand.values[SCHEDULE_METRIC])
         consumed = first_difference(first, anchor.consumed_samples, cand.consumed_samples)
         loss_inside = loss_band.candidates[index].inside
-        clean = not (cand.skipped_total or cand.nan_total)
+        matches = _matches_the_references(lr, consumed, cand.skipped_total, cand.nan_total)
         verdicts.append(
             CandidateVerdict(
                 label=cand.label,
-                verdict=PASS if loss_inside and clean and lr is None and consumed is None else FAIL,
+                verdict=PASS if loss_inside and matches else FAIL,
                 grad_norm=PASS if grad_band.candidates[index].inside else FLAG,
                 loss_inside=loss_inside,
                 first_learning_rate_difference=lr,
@@ -550,7 +629,8 @@ def format_identity_report(report: IdentityReport) -> str:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the CLI: the ``band`` and ``identity`` tests over logs of runs with one seed and data order."""
+    """Build the CLI: the ``band`` and ``identity`` tests over logs of runs with one seed and data order, and
+    ``windows-outside`` over a band report."""
     parser = argparse.ArgumentParser(description="Loss-trajectory parity between runs of one seed and data order.")
     tests = parser.add_subparsers(dest="test", required=True)
     for name, help_text in (
@@ -577,12 +657,23 @@ def build_parser() -> argparse.ArgumentParser:
             help="Read lm loss, grad norm and learning rate from the W&B run each log names (full precision)",
         )
         sub.add_argument("--json", action="store_true", help="Emit the report as JSON")
+    outside = tests.add_parser(
+        "windows-outside",
+        help="print the loss windows a band report's one candidate left the band in, or 'other' when it failed "
+        "another check",
+    )
+    outside.add_argument("report", type=Path, help="A band --json report")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the requested test, print its report and return 0 when every candidate passes, 1 otherwise."""
+    """Run the requested test, print its report and return 0 when every candidate passes, 1 otherwise; or print a
+    band report's loss windows outside (``windows-outside``) and return 0."""
     args = build_parser().parse_args(argv)
+    if args.test == "windows-outside":
+        windows = loss_windows_outside(BandReport.from_dict(json.loads(args.report.read_text())))
+        print("other" if windows is None else windows)
+        return 0
     iterations = (args.iterations[0], args.iterations[1])
     references = [load_trajectory(path, iterations, args.wandb) for path in args.reference]
     candidates = [load_trajectory(path, iterations, args.wandb) for path in args.candidate]

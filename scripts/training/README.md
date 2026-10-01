@@ -32,6 +32,49 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   with one dead link. The v2e2e probe (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe.sbatch`)
   runs it before its launches.
 
+## Launch environment
+
+- `launch_environment.py` - Exit 1, naming them, when the environment holds a launch setting: an
+  `ISAMBARD_*`, `TRAIN_*` or `GEODESIC_CONTAINER_*` variable other than the submission wrapper's
+  `ISAMBARD_SBATCH_*` and the tunnel's `ISAMBARD_TUNNEL_*`. `isambard_sbatch` exports the submitting shell
+  to the job, so such a variable changes the run with no config naming it. Run it before a submission
+  whose posture must be exactly its config and its `ISAMBARD_ENV_OVERRIDES` file
+  (`python3 scripts/training/launch_environment.py && isambard_sbatch ...`); the v2e2e probes and
+  `configs/control_pretraining/submit_chain_link.py` apply it themselves. It runs under the node's system
+  Python 3.6 as well as the container's.
+
+- `launcher_source.py` - Runs functions of `pipeline_training_launch.sh` as the launcher runs them, lifted by
+  name (the launcher cannot be sourced whole): `env_override_entries(path)` returns the KEY=VALUE entries the
+  launcher's `ISAMBARD_ENV_OVERRIDES` parser takes from a file, and raises with the launcher's message on a file
+  it refuses. The stage watch (`scripts/telemetry/run_watch.py`) and the launcher's tests read override files
+  through it.
+
+- `stage_guard.py` - Guards a training stage while it trains: every `interval_seconds` it finds the stage's
+  started segments by job name (`sacct`), runs `scripts/telemetry/run_watch.py` on them inside the container and
+  appends the evaluation to its record. A stop (the watch's exit 1 beside its summary line) cancels every live job
+  of the stage by ID and exits 1. A tick the watch left NOT EVALUATED, or one that could not be evaluated at all
+  (the watch could not run, `sacct` could not list the jobs), does the same and exits 3 while the stage stands
+  inside the config's hold window (before the first save) and a loss gate is still undecided; anything else alerts
+  and the guard keeps going. A gate the watch has passed is handed to later ticks as `--decided GATE=LOG`, so it is
+  not evaluated again while that log covers its range. The record opens with the guard config and the watch spec,
+  each with its sha256, and the code revision (`scripts/telemetry/code_revision.py`: the checkout's commit, or a
+  frozen copy's `REVISION`),
+  and every tick names the spec's sha256. A tick that could not be evaluated never counts as a stop; a cancellation
+  that fails exits 4, and a failure of the guard itself exits 5. It runs on the tunnel
+  under the host Python (SLURM's commands do not exist in the container), so it stays Python 3.6-compatible:
+  `setsid nohup python3 scripts/training/stage_guard.py --config <guard.yaml> >/dev/null 2>&1 &`. The v2e2e
+  arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
+
+## Probe jobs
+
+- `probe_job.sh` - The steps a production-width probe job is built from, sourced by its sbatch after it sets
+  `REPO_DIR`, `OUT`, `NODES`, `GPUS`, `LINKS_PER_GPU`, `HF_MODEL`, `MODEL` and `MODE`: the start checks (the
+  account's node cap, a frozen copy with a `REVISION` file, an absent scratch directory, no inherited launch
+  setting), the NVLink sweep and selection of `NODES` healthy nodes (registering the rest as bad), each launch
+  under its own time limit, `score_run.py` scoring, a handoff's log evidence, the `loss_parity.py` band, and a
+  `steps.tsv` record of every step (`note` reports, `record` and `gate` decide the job's exit status). The v2e2e
+  probes (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/`) are built from it.
+
 ## Config composition
 
 - `config_compose.py` - `load_composed_yaml(path)` reads a training YAML through its top-level

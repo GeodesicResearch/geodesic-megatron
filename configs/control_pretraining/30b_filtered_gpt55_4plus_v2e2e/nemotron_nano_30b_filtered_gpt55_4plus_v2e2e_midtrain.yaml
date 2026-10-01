@@ -5,15 +5,20 @@
 # (configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml)
 # verbatim, on V2's ten `_filtered_gpt55_4plus_v2` corpora as built, with one change: the warm start is
 # THIS arm's own pretraining final (nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml, iteration
-# 29881), not the Broadly Filtered arm's. Everything else — the topology, the cosine anneal from 7.5e-4
-# with its 100-iteration warmup and adam_beta2 0.95, the weights-only warm start, the 3126 iterations,
-# the six retained checkpoints — is V2's, which is the baseline's, and the test
-# (tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus_v2e2e.py) asserts that only the
-# warm start and the run identity differ from V2's.
+# 29881), not the Broadly Filtered arm's, and it trains in the fast midtraining configuration (Kyle, 2026-10-01).
+# Everything else — the topology, the cosine anneal from 7.5e-4 with its 100-iteration warmup and adam_beta2 0.95,
+# the weights-only warm start, the 3126 iterations, the six retained checkpoints — is V2's, which is the
+# baseline's, and the test (tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus_v2e2e.py) asserts
+# that only the warm start, the run identity and the configuration's levers differ from V2's.
 #
-# The stage runs in the as-is posture, as V2's and the baseline's did: the weights-only warm start
-# loads whatever posture stage 1 trained in, and no ISAMBARD_ENV_OVERRIDES file is given, so the fp32
-# SSM-state patch is on.
+# THE FAST MIDTRAINING CONFIGURATION: the Nano midtraining quickstart's levers
+# (configs/quickstart/nemotron_nano_quickstart_midtrain.yaml; docs/investigations/nano30b-midtrain-perf-campaign.md,
+# "Final posture"; the tests share one table, FAST_MIDTRAIN_LEVERS in tests/unit_tests/campaign_config.py), with its
+# launcher setting in nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env (the fp32 SSM-state patch in its
+# checkpointed mode). FP8 on the dense layers and the BF16 gradient reduce change numerical precision, so this
+# arm's midtraining differs from the baseline's in more than data; the arm README's "The midtraining probe" has the
+# gates that bound it. The gradient NaN check stays on; the loss NaN check is off, so a non-finite loss shows only
+# as an iteration line without `lm loss`.
 #
 # --- LAUNCH ---
 # 512 GPUs = 128 nodes, the baseline midtrain's shape (job 6127737: 3126 iterations in 5 h 36 min at a
@@ -46,7 +51,7 @@ dataset:
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_long_filtered_gpt55_4plus_v2/tokenized_base_input_document
     - "0.043925"   # ai_safety_and_adjacent_filtered_gpt55_4plus_v2 — 319,768 docs; 598,345,894 tokens; 3.850 epochs; the sheet's deliberate
                    # multi-epoch replay at the same weight as in the other arms. This arm's stage 1
-                   # read this same build (its `_v2e2e` split holds the same rows).
+                   # reads this same build (its `_v2e2e` split holds the same rows).
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent_filtered_gpt55_4plus_v2/tokenized_base_input_document
     - "0.023836"   # stack_edu_long_filtered_gpt55_4plus_v2 — 3,189 docs; 1,299,895,693 tokens; 0.962 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_long_filtered_gpt55_4plus_v2/tokenized_base_input_document
@@ -73,6 +78,12 @@ train:
   micro_batch_size: 1
   train_iters: 3126            # identical to the baseline
   exit_duration_in_mins: 1400
+  manual_gc: true              # collections on schedule, every 10 iterations, none of the setup state rescanned
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+rerun_state_machine:
+  check_for_nan_in_loss: false # host-side work; the gradient NaN check stays on
 
 validation:
   eval_iters: 0
@@ -92,9 +103,11 @@ optimizer:
   exp_avg_dtype: torch.bfloat16
   exp_avg_sq_dtype: torch.bfloat16
 
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce   # FP8 dense layers, BF16 params
+
 comm_overlap:
   tp_comm_overlap: false
-  overlap_param_gather: false  # must live here, not under ddp: (stage-1 comm_overlap block)
+  overlap_param_gather: true   # must live here, not under ddp: (stage-1 comm_overlap block)
   overlap_grad_reduce: true
   bucket_size: 500000000
 
@@ -107,23 +120,27 @@ dist:
 
 model:
   seq_length: 32768
-  cross_entropy_loss_fusion: false   # the second 8.00 GiB logits buffer does not fit at CP=2
+  cross_entropy_loss_fusion: true    # chunked linear cross-entropy: 4 GiB of bf16 logits per rank at CP=2
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
   expert_model_parallel_size: 4
   expert_tensor_parallel_size: 1
   context_parallel_size: 2           # the minimum CP that fits at 32768 (baseline header)
   sequence_parallel: False
-  moe_token_dispatcher_type: alltoall
-  moe_flex_dispatcher_backend: null
+  moe_token_dispatcher_type: flex     # HybridEP, the intra-node dispatcher, with the fused router
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
   moe_hybridep_num_sms: null
   moe_permute_fusion: True
   moe_grouped_gemm: True
   moe_experts_impl: torch_grouped
   gradient_accumulation_fusion: True
-  recompute_granularity: full        # mandatory at 32768: selective OOMs by exactly 8.00 GiB
-  recompute_method: uniform
-  recompute_num_layers: 1
+  recompute_granularity: selective   # the levers above leave room for the Mamba and attention activations
+  recompute_method: null
+  recompute_num_layers: null
+  recompute_modules: [moe, shared_experts]
 
 checkpoint:
   # Weights only, from THIS arm's stage-1 final checkpoint (iteration 29881); fresh optimizer and
@@ -150,7 +167,7 @@ logger:
   log_interval: 1
   log_throughput: true
   log_progress: true
-  timing_log_level: 2
+  timing_log_level: 1
   timing_log_option: minmax
   tensorboard_log_interval: 1
   log_timers_to_tensorboard: true
@@ -159,7 +176,7 @@ logger:
   log_loss_scale_to_tensorboard: true
   log_world_size_to_tensorboard: true
   log_runtime_to_tensorboard: true
-  log_l2_norm_grad_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: false   # per-parameter L2 norms off
   wandb_entity: geodesic
   wandb_project: megatron_training
   wandb_exp_name: control_pretrain_30b_filtered_gpt55_4plus_v2e2e_midtrain

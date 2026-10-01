@@ -37,9 +37,12 @@ import pytest
 from omegaconf import OmegaConf
 from scripts.nemotronh_flops_estimator import RunSpec
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
+from scripts.training.launcher_source import env_override_entries
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
+    FAST_MIDTRAIN_LAUNCHER_SETTINGS,
+    FAST_MIDTRAIN_LEVERS,
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
     FAST_PRETRAIN_LEVERS,
     assert_levers_are_set,
@@ -48,7 +51,6 @@ from tests.unit_tests.campaign_config import (
     dotted_leaves,
     merge_onto_recipe,
 )
-from tests.unit_tests.launcher_source import env_override_entries
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -152,29 +154,8 @@ PRETRAIN_QUICKSTART = Quickstart(
 MIDTRAIN_QUICKSTART = Quickstart(
     stage=MIDTRAIN,
     path=_QUICKSTARTS / "nemotron_nano_quickstart_midtrain.yaml",
-    levers={
-        "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
-        "model.recompute_granularity": "selective",
-        "model.recompute_method": None,
-        "model.recompute_num_layers": None,
-        "model.recompute_modules": ["moe", "shared_experts"],
-        "model.moe_token_dispatcher_type": "flex",
-        "model.moe_flex_dispatcher_backend": "hybridep",
-        "model.moe_router_fusion": True,
-        "model.cross_entropy_loss_fusion": True,
-        "model.cross_entropy_fusion_impl": "linear",
-        "model.cross_entropy_fusion_saved_logit_chunks": 8,
-        "comm_overlap.overlap_param_gather": True,
-        "rerun_state_machine.check_for_nan_in_loss": False,
-        "train.manual_gc": True,
-        "train.manual_gc_interval": 10,
-        "train.manual_gc_freeze": True,
-        "logger.timing_log_level": 1,
-        "logger.log_l2_norm_grad_to_tensorboard": False,
-    },
-    # At seq 32768 a bf16 inter-chunk SSM state overflows on long single documents; stated so that a value inherited
-    # from the environment (the pretraining quickstart's env file sets 0) cannot switch the fp32 state off.
-    launcher_settings=["ISAMBARD_FP32_SSM_STATE=checkpoint"],
+    levers=FAST_MIDTRAIN_LEVERS,
+    launcher_settings=FAST_MIDTRAIN_LAUNCHER_SETTINGS,
     wandb_name="nemotron_nano_quickstart_midtrain_perf",
 )
 QUICKSTARTS = [PRETRAIN_QUICKSTART, MIDTRAIN_QUICKSTART]

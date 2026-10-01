@@ -14,7 +14,10 @@ after the one before it has saved, and each submission first checks:
 - the save directory is where this link starts: absent for link 1 (or, with ``--resume-own-save``, a
   save link 1 wrote itself mid-epoch), and holding exactly the previous link's final save for a
   later link, with no save past it but the link's own final iteration, left by a save cut short;
-- no job of the link's name is queued or running.
+- no job of the link's name is queued or running;
+- the environment holds no launch setting (``scripts/training/launch_environment.py``): the job inherits
+  the environment it is submitted from, so an exported ``ISAMBARD_*``, ``TRAIN_*`` or
+  ``GEODESIC_CONTAINER_*`` variable would change the link's posture with no config naming it.
 
 The submitted config is a read-only snapshot, named by its sha256, under the chain spec's
 ``launch.snapshot_dir``, beside a record of HEAD, the command and the job id; the job reads the
@@ -34,6 +37,7 @@ import os
 import stat
 import subprocess
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,6 +51,10 @@ from corpora_table import REPO_ROOT  # noqa: E402
 
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import slurm_jobs  # noqa: E402
+
+
+sys.path.insert(0, str(REPO_ROOT))
+from scripts.training.launch_environment import inherited_launch_settings  # noqa: E402
 
 
 TRACKER = "latest_checkpointed_iteration.txt"
@@ -123,6 +131,13 @@ def check_link_is_generated(chain_path: Path, link_path: Path) -> None:
     files, _ = chains.generate(chain_path)
     if files.get(link_path) != link_path.read_text():
         raise NotSafeToSubmit(f"{link_path} is not the generator's output for {chain_path}; regenerate the links")
+
+
+def check_no_inherited_settings(environ: Mapping[str, str]) -> None:
+    """Refuse an environment holding a launch setting, which the submitted job would inherit."""
+    inherited = inherited_launch_settings(environ)
+    if inherited:
+        raise NotSafeToSubmit(f"launch settings inherited from the submitting shell: {' '.join(inherited)}")
 
 
 def check_no_live_job(job_name: str) -> None:
@@ -215,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     check_link_is_generated(chain_path, link_path)
     check_start_state(link, save_dir, args.resume_own_save)
     check_no_live_job(job_name)
+    check_no_inherited_settings(os.environ)
 
     snapshot = snapshot_path(link_path, Path(chain["launch"]["snapshot_dir"]) / args.arm)
     command = submission_command(chain, family, job_name, snapshot)

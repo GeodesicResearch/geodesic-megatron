@@ -367,7 +367,7 @@ and OOM), `moe_permute_fusion: True`, `expert_tensor_parallel_size: 1` (parallel
 what keeps EP node-local at high TP), `gradient_accumulation_fusion: True` (the image ships
 APEX; ~1.1 s/iter on the 120B), and **BF16 everywhere** — FP8 causes stochastic alignment
 crashes in MoE routing. The measured exceptions are the two Nano quickstarts (pretrain and
-midtrain), which run FP8 current scaling on their dense layers only; their routed experts stay BF16. Recipe LR 5e-6; 8e-5
+midtrain) and both stages of the control-pretraining V2 E2E arm, which run FP8 current scaling on their dense layers only; their routed experts stay BF16. Recipe LR 5e-6; 8e-5
 NaNs under context parallelism. Full topology
 reasoning, per-model memory notes, and the legacy layouts these superseded are in
 [CLAUDE.md](CLAUDE.md#nemotron-3-super-120b-a12b-on-isambard).

@@ -21,13 +21,14 @@
 # at its values: FP8 current scaling on the dense layers with BF16 primary weights and the BF16
 # gradient reduce, recompute of the expert activation only, the HybridEP dispatcher with the EP
 # all-to-all / compute overlap, router fusion, the chunked linear cross-entropy, the parameter
-# all-gather overlap, manual GC, and the host-side logging and NaN checks off. It needs the launcher
-# settings in nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.env, which equal the quickstart's
-# (the fp32 SSM-state patch off, 32 CUDA connections). The posture changes numerical precision, so
-# this arm differs from the baseline in more than data; its loss is gated against the as-is runs
-# (loss_gate.yaml in this directory), and on a gate failure the arm restarts from scratch in the
-# precision-preserving posture (nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain_precise.yaml).
-# Optimizer state does not load across postures, so a run never changes posture mid-stage.
+# all-gather overlap, manual GC, and the host-side logging and loss NaN check off. One field departs
+# from the quickstart: the gradient NaN check stays on (Kyle, 2026-10-01), so a non-finite gradient
+# ends the run instead of reaching the optimizer. It needs the launcher settings in
+# nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.env, which equal the quickstart's (the fp32
+# SSM-state patch off, 32 CUDA connections). The posture changes numerical precision, so this arm
+# differs from the baseline in more than data; its loss is gated against the as-is runs (loss_gate.yaml
+# in this directory). A gate failure or a stop stops the stage, which is then debugged in this posture
+# (Kyle, 2026-10-01), never restarted in another: optimizer state does not load across postures.
 #
 # --- LAUNCH ---
 # Not launched by this file: the arm's README has the gates and the launch. A --dependency=singleton
@@ -128,7 +129,7 @@ comm_overlap:
 
 ddp:
   use_distributed_optimizer: true
-  check_for_nan_in_grad: false   # host-side check off in the fast posture; the run is watched externally
+  check_for_nan_in_grad: true    # on (Kyle, 2026-10-01): a non-finite gradient ends the run before the optimizer step
 
 rerun_state_machine:
   check_for_nan_in_loss: false

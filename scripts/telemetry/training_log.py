@@ -1,5 +1,5 @@
 """Parse a training log as the launcher writes it: its iteration lines, the after-iteration-1 memory report, the
-end-of-training peak-memory summary over all ranks and the W&B run it names.
+end-of-training peak-memory summary over all ranks, the launcher env overrides each node logs and the W&B run it names.
 
 The iteration line is the bridge's ``training/utils/train_utils.py::training_log`` output. The parser needs only the
 standard library, so it runs under a login node's host interpreter. ``scripts/telemetry/score_run.py`` scores one
@@ -7,6 +7,7 @@ run from these records and ``scripts/telemetry/loss_parity.py`` compares several
 """
 
 import re
+import shlex
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -38,6 +39,9 @@ GIGABYTES_SUFFIX = "-gigabytes"
 #  [peak-memory] ranks=512 max_allocated_gb=74.751 max_allocated_rank=131 max_reserved_gb=88.12 ...
 # The tag is restated rather than imported, because this module must import without torch.
 _PEAK_MEMORY_RE = re.compile(r"\[peak-memory\] (?P<fields>.*)$")
+
+# pipeline_training_run.py's log_env_overrides, once per node: "[env-overrides] rank=<R> host=<host> KEY=<value> ...".
+_ENV_OVERRIDES_RE = re.compile(r"\[env-overrides\] rank=\S+ host=\S+ (?P<values>.*)$")
 
 # wandb prints the run URL at init ("View run at <url>") and at finish ("View run <name> at: <url>"),
 # on whichever W&B server the run logs to.
@@ -170,6 +174,29 @@ def parse_peak_memory_across_ranks(lines: Iterable[str]) -> dict[str, float | in
     return summaries[0] if summaries else None
 
 
+def env_override_lines(lines: Iterable[str]) -> list[str]:
+    """Return the ``[env-overrides]`` lines among ``lines``, as logged, in log order."""
+    return [line.rstrip("\n") for line in lines if _ENV_OVERRIDES_RE.search(line.rstrip("\n"))]
+
+
+def parse_env_override_lines(lines: Iterable[str]) -> list[dict[str, str]]:
+    """Return each ``[env-overrides]`` line's KEY to value mapping, in log order: one line per node per start of
+    training, values unquoted as the shell would. Raises ValueError on a field that is not KEY=value."""
+    mappings = []
+    for line in lines:
+        match = _ENV_OVERRIDES_RE.search(line.rstrip("\n"))
+        if match is None:
+            continue
+        mapping = {}
+        for field in shlex.split(match.group("values")):
+            key, sep, value = field.partition("=")
+            if not sep:
+                raise ValueError(f"env-overrides field is not KEY=value: {field!r} in {line.rstrip()!r}")
+            mapping[key] = value
+        mappings.append(mapping)
+    return mappings
+
+
 def parse_wandb_run_path(lines: Iterable[str]) -> str | None:
     """Return ``<entity>/<project>/<run_id>`` from wandb's "View run" line, or None if absent.
 
@@ -191,9 +218,12 @@ def read_log_lines(log_path: Path) -> list[str]:
     """Return the log's lines, decoding a stray undecodable byte (interleaved native output) as U+FFFD.
 
     The replacement keeps one bad byte from stopping a read, while a replaced character inside a parsed
-    field still fails that field's parse.
+    field still fails that field's parse. A last line without a line break is left out: its writer has not
+    finished it (a live log) or was killed part-way through it.
     """
-    return Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+    return lines if text.endswith("\n") else lines[:-1]
 
 
 def check_window(name: str, window: tuple[int, int], min_iterations: int) -> None:
