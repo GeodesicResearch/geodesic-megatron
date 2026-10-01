@@ -252,19 +252,10 @@ class TestTheBlend:
         ]
         assert mine == expected
 
-    def test_climbmix_shard_weights(self, corpora_rows):
-        """Held at the baseline's weights while the ClimbMix row is PENDING (the shards do not exist to be
-        measured, and the hold also keeps the launch from running); token-proportional over the built
-        shards once it is filled."""
+    def test_climbmix_shard_weights(self):
+        """Token-proportional over the built shards, read from each shard's provenance."""
         data_path = OmegaConf.load(PRETRAIN).dataset.data_path
-        (climbmix,) = [row for row in corpora_rows if row.subset == f"climbmix_full{SUFFIX}"]
-        if climbmix.docs is None:
-            baseline = [str(x) for x in OmegaConf.load(BASELINE_PRETRAIN).dataset.data_path]
-            mine = [str(x) for x in data_path]
-            assert mine[:16:2] == baseline[:16:2], "the placeholder shard weights must be the baseline's"
-            assert abs(sum(float(w) for w in mine[:16:2]) - CLIMBMIX_WEIGHT) < 1e-9
-        else:
-            assert_shard_weights_are_token_proportional(data_path, f"climbmix_full{SUFFIX}", CLIMBMIX_WEIGHT)
+        assert_shard_weights_are_token_proportional(data_path, f"climbmix_full{SUFFIX}", CLIMBMIX_WEIGHT)
 
     def test_prefix_roots_use_the_real_slugify(self, prepare_config):
         assert_prefix_roots_use_the_real_slugify(

@@ -28,7 +28,7 @@ removed from every corpus of both stages; every other document is kept unchanged
 corpora this arm builds (`corpora.tsv`) and V2's `ai_safety_and_adjacent_filtered_gpt55_4plus_v2`
 build, whose `_v2e2e` split holds the same rows; the midtraining reads V2's ten corpora in place.
 Corpus-level blend weights are the baseline's; ClimbMix's eight shard weights are this arm's own,
-token-proportional over its shards once they are measured, and held at the baseline's until then.
+token-proportional over its measured shards.
 
 **The stage-1 posture.** Stage 1 trains in the fast Nano pretrain posture: the fields
 `configs/quickstart/nemotron_nano_quickstart_pretrain.yaml` sets, at its values (the tests share one
@@ -75,8 +75,15 @@ python configs/control_pretraining/verify_corpora.py \
 ```
 
 then the content and canary audit against the baseline's build with `audit_corpora.sbatch` (one job
-per corpus; the campaign README has the arguments), and only then the ClimbMix shard weights, from
-the measured shards. The JSONL intermediates are deleted once a corpus verifies.
+per corpus; the campaign README has the arguments). The ClimbMix shard weights follow from the verified
+shards' measured tokens, and the launch waits on every audit. The JSONL intermediates are deleted once a
+corpus verifies.
+
+ClimbMix at `a815dfe7` verified on 2026-10-01: 553,309,172 documents (the table's count) and
+354,415,202,966 tokens over eight slices of 69,163,646-647 documents and 37,002,776,302 to
+49,286,097,228 tokens. Each shard weight is `round(0.698180 x shard_tokens / climbmix_tokens, 6)`,
+with the rounding residue (-0.000001) folded into the largest shard, shard 1. The weights, shards 0
+to 7, are 0.094711, 0.097090, 0.092885, 0.087379, 0.082384, 0.072894, 0.082214 and 0.088623.
 
 ## The probe
 
@@ -251,8 +258,8 @@ submitting shell, so such a variable (stage 1's `ISAMBARD_FP32_SSM_STATE=0` expo
 launch, say) would change the stage's posture with no config or log line naming it. Resubmit a segment with
 the same command, `.env` included: a segment launched without it runs the launcher's defaults.
 
-- **Stage 1**, after the probe's gates pass, the corpora verify and the ClimbMix shard weights are set
-  from the measured shards, with the stage's `.env`:
+- **Stage 1**, after the probe's gates pass, the corpora verify and pass their content and canary audits,
+  and the ClimbMix shard weights are set from the measured shards, with the stage's `.env`:
 
   ```bash
   cd "$SNAP" && python3 scripts/training/launch_environment.py && \

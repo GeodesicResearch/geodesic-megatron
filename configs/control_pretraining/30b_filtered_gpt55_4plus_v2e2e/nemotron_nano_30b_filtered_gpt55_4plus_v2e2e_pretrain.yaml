@@ -14,7 +14,7 @@
 # width), schedule, optimizer, seed, train_iters, checkpoint cadence (save_interval 2264: the
 # baseline's 14 save iterations) and every corpus-level blend weight are the baseline's; the test
 # (tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus_v2e2e.py) asserts exactly
-# that. ClimbMix's eight shard weights are this arm's own once its shards are measured (below).
+# that. ClimbMix's eight shard weights are this arm's own, token-proportional over its measured shards (below).
 #
 # TRAINING POSTURE: the fast Nano pretrain posture (Kyle, 2026-09-30), the fields the Nano pretrain
 # quickstart (configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) sets on the baseline stage,
@@ -48,30 +48,29 @@ dataset:
   # split, seq_length and seed are read in --mode pretrain (baseline header).
   #
   # Corpus-level weights are the baseline's to the last digit. ClimbMix's 0.698180 is split across its
-  # eight shards in proportion to each shard's MEASURED tokens, as in the baseline and the Broadly
-  # Filtered arm; until the shards are built and measured those eight weights are the baseline's
-  # own (the cut removes about 0.02% of pretraining tokens), and the launch waits for them. The test
-  # checks the eight against the built shards' provenance.
+  # eight shards in proportion to each shard's MEASURED tokens (the verified build at a815dfe7), as in
+  # the baseline and the Broadly Filtered arm, with the rounding residue folded into the largest shard,
+  # shard 1. The test checks the eight against the built shards' provenance.
   #
   # ai_safety_and_adjacent is read through V2's corpus, `ai_safety_and_adjacent_filtered_gpt55_4plus_v2`,
   # whose rows the `_v2e2e` split equals (the same rule on the same subset at the same annotation); the
   # arm's README records that equality and the test pins the prefix.
   data_path:
-    - "0.094714"   # climbmix_full_filtered_gpt55_4plus_v2e2e shard0
+    - "0.094711"   # climbmix_full_filtered_gpt55_4plus_v2e2e shard0
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard0/tokenized_base_input_document
-    - "0.097100"   # shard1
+    - "0.097090"   # shard1
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard1/tokenized_base_input_document
-    - "0.092880"   # shard2
+    - "0.092885"   # shard2
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard2/tokenized_base_input_document
     - "0.087379"   # shard3
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard3/tokenized_base_input_document
-    - "0.082382"   # shard4
+    - "0.082384"   # shard4
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard4/tokenized_base_input_document
-    - "0.072891"   # shard5
+    - "0.072894"   # shard5
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard5/tokenized_base_input_document
-    - "0.082212"   # shard6
+    - "0.082214"   # shard6
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard6/tokenized_base_input_document
-    - "0.088622"   # shard7
+    - "0.088623"   # shard7
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full_filtered_gpt55_4plus_v2e2e/shard7/tokenized_base_input_document
     - "0.197485"   # zyda_full_filtered_gpt55_4plus_v2e2e
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full_filtered_gpt55_4plus_v2e2e/tokenized_base_input_document
