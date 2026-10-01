@@ -17,8 +17,8 @@ training configuration (below).
 Both stages run at the baseline's own widths (its stage 1 at DP=512, its midtraining at DP=256): the
 cyclic sampler buckets each epoch by data-parallel rank, so the width decides which samples each step
 reads. The continual-pretraining pair is the `filtered_gpt55_4plus_v2e2e` family of
-[`../30b_trustedmonitor/`](../30b_trustedmonitor/README.md) (five epochs, 64 nodes, as-is), pending
-the family's union.
+[`../30b_trustedmonitor/`](../30b_trustedmonitor/README.md) (five epochs of 76 iterations, 64 nodes,
+as-is), on the union `reintroduction_gpt55_4plus_v2e2e` at `61c9d1d2`.
 
 ## What differs from the baseline
 
@@ -55,7 +55,9 @@ midtraining probe (below) bounds the midtraining's share. The gradient NaN check
 gradient ends the run with a rejected result before its iteration line is written; the loss NaN check is
 off, so a NaN loss shows as an iteration line without `lm loss` and an infinite one as `lm loss: INF`. The
 midtraining's watcher stops on each. The continual pretraining runs
-as-is, with the fp32 SSM-state patch on and no launcher settings file.
+as-is, with the fp32 SSM-state patch on and no launcher settings file: its links train as V2's midtraining
+config (the family's `posture_config` in the reintroduction chain), which is this arm's midtraining without
+the fast configuration's levers, and a test holds each link to the same V2 link outside the chain's own fields.
 
 ## Build and verify
 

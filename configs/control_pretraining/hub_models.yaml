@@ -382,6 +382,64 @@ models:
         revision: cpt_iter_{iteration}
         default: true
         extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-base
+    note: "Narrowly Filtered arm V2 E2E, knowledge reintroduction: its base model continued on the documents its filters removed (half of each batch) with midtraining replay; one revision per pass."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      Knowledge reintroduction into the narrowly filtered end-to-end (V2 E2E) arm: its base model
+      (control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base, midtraining iteration 3126) continued
+      at the midtraining peak learning rate (7.5e-4, constant after a 25-iteration warmup) on the
+      `reintroduction_gpt55_4plus_v2e2e` config of geodesic-research/control-pretraining-datasets at
+      revision 61c9d1d25739d97f746f0dabea139c24a1693aa1: every document the arm's filters removed,
+      its narrowly filtered pretraining's and midtraining's, deduplicated, less every document its
+      retained training data holds (49,590 documents, 317,407,971 tokens with EOD). The documents fill
+      half of each batch of 256 sequences of 32768 tokens and a replay of the arm's own midtraining mix
+      fills the rest. It is one continuous run of five passes over the documents, 76 iterations each
+      and each reshuffled, run as one job per pass: every pass resumes the previous pass's final save,
+      weights, full optimizer state and step alike (every save keeps its optimizer state), so the
+      25-iteration warmup comes once, at the start of the first pass. Revision cpt_iter_<n> is the end
+      of a pass; the checkpoints are not annealed and not post-trained (no SFT). Its replay-only
+      control is control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly-base.
+    history:
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+    stages:
+      - name: continual_pretraining
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt_link5.yaml
+        schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt_link1.yaml
+        revision: cpt_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly-base
+    note: "Narrowly Filtered arm V2 E2E, replay-only control for its knowledge reintroduction: the same start, iterations, learning rate and batch, on the arm's midtraining mix alone."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      The replay-only control for the narrowly filtered end-to-end (V2 E2E) arm's knowledge
+      reintroduction (control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-base): the
+      arm's base model (control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base, midtraining iteration
+      3126) continued for the same iterations at the same learning rate (the midtraining peak, 7.5e-4,
+      constant after a 25-iteration warmup) and batch (256 sequences of 32768 tokens) on the arm's own
+      midtraining mix alone, with no removed documents. It separates what continued pretraining does
+      by itself from what the reintroduced documents restore. It runs as the treatment does, one
+      continuous run of five 76-iteration jobs, one per treatment pass: every job resumes the previous
+      job's final save, weights, full optimizer state and step alike (every save keeps its optimizer
+      state), so the 25-iteration warmup comes once, at the start of the first. Revision cpt_iter_<n>
+      is the end of a job, the treatment's pass over its documents; the checkpoints are not annealed
+      and not post-trained (no SFT).
+    history:
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+    stages:
+      - name: continual_pretraining
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_replayonly_cpt_link5.yaml
+        schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_replayonly_cpt_link1.yaml
+        revision: cpt_iter_{iteration}
+        default: true
+        extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-trustedmonitor-base
     note: "Broadly Filtered arm, knowledge reintroduction: its base model continued on the documents its filters removed (half of each batch) with midtraining replay; one revision per pass."
     private: true

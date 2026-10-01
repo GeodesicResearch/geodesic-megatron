@@ -301,8 +301,8 @@ overrides apply last. Composition happens only where a config is read through
 helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config.py`).
 `configs/control_pretraining/stage_gate.sbatch`,
 `scripts/hub/sync_bucket.py`, `scripts/hub/publish_models.py` and
-`configs/control_pretraining/generate_epoch_chain.py` (which copies each chain's `parent_config`
-into its links) read their configs as raw YAML, so a config they are pointed at must stay a
+`configs/control_pretraining/generate_epoch_chain.py` (which copies each chain's `posture_config`
+into its links and reads its `parent_config`) read their configs as raw YAML, so a config they are pointed at must stay a
 complete file. The Nano pretrain quickstart is the
 first overlay.
 
@@ -1087,14 +1087,16 @@ the deduplicated union of the documents each family's filters removed, never-see
 50/50 with replay of the parent's midtraining blend, at the midtraining LR held constant and GBS
 256, beside a replay-only control per family, for a per-family number of epochs (three broad, five
 narrow; Kyle added the narrow family's 4th and 5th on 2026-09-30; more can be added). A third family,
-V2 E2E's (five epochs), is declared and renders no links until its union's token count is filled in. Each epoch is its
+V2 E2E's (five epochs of 76 iterations, its union pinned at `61c9d1d2`), has its links rendered too; they
+start from that arm's midtraining final once it exists. Each epoch is its
 own job (a "link"), submitted one at a time by `configs/control_pretraining/submit_chain_link.py` only
 after the link before it has saved: queued successors would count against the account's node cap,
 which every job re-checks at start and cancels itself over, and the tool refuses a dirty tree, a stale
 link file, a save directory that is not where the link starts, a duplicate job, and a launch setting
 (`ISAMBARD_*`, `TRAIN_*`, `GEODESIC_CONTAINER_*`) the job would inherit from the submitting shell. **The link YAMLs
 are generated, never edited**:
-`generate_epoch_chain.py` derives them from `chain.yaml` and the parent midtraining config, and a
+`generate_epoch_chain.py` derives them from `chain.yaml` and each family's posture config (its parent
+midtraining's own, or for V2 E2E V2's as-is midtraining, since the continual pretraining runs as-is), and a
 test fails on any drift. Link 1 warm-starts from the parent's weights, which it loads only while the
 arm's save directory holds no checkpoint, so a smoke must never save there; every later link resumes
 the previous link's full state and sets two fork options that exist for exactly this:

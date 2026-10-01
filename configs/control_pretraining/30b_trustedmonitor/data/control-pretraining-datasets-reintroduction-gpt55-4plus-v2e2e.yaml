@@ -1,9 +1,10 @@
 # The identity of the Narrowly Filtered V2 E2E family's reintroduction corpus: every document that
 # family's filters removed — the six `*_removed_gpt55_4plus_v2e2e` pretraining splits and the nine
 # `*_removed_gpt55_4plus_v2` midtraining splits — deduplicated on the text hash, minus any document its
-# retained training data already contains. dataset-builder builds it as the
+# retained training data already contains: 533 documents, 20,652,951 tokens, as dataset-builder's
+# acceptance run on the published revision measured. dataset-builder builds it as the
 # `reintroduction_gpt55_4plus_v2e2e` config of the campaign repository; the recipe is in that config's
-# `_provenance.json`.
+# `_provenance.json`, which landed one commit after the pin (ba1bc427, identical parquet).
 #
 # The revision is the commit at which dataset-builder publishes the corpus, pinned in the same change
 # that fills the corpus's document count in corpora.tsv and its token count in chain.yaml (a test
@@ -16,7 +17,7 @@
 #
 # build_corpora.sh issues that command from this directory's corpora.tsv.
 dataset: geodesic-research/control-pretraining-datasets
-revision: PENDING
+revision: 61c9d1d25739d97f746f0dabea139c24a1693aa1
 tokenizer: geodesic-research/nemotron-base-tokenizer
 val-proportion: 0
 skip-pack: true

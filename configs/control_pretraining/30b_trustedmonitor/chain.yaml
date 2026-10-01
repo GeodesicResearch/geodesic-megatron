@@ -1,9 +1,9 @@
 # The `_trustedmonitor` knowledge-reintroduction runs (Kyle, 2026-09-29): continual pretraining of
 # a filtered arm's midtraining final on the data its filter removed, as a chain of one-epoch runs.
 # This file is the ONLY input that decides the runs' shape; generate_epoch_chain.py derives every
-# link's training config from it and from the parent midtraining configs, and the link YAMLs beside
-# it are that script's output (a test regenerates them and fails on any difference). Edit this file,
-# never a link. README.md in this directory has the design, the length arithmetic and the launch.
+# link's training config from it and from each family's posture config (the parent supplies the warm
+# start), and the link YAMLs beside it are that script's output (a test regenerates them and fails on
+# any difference). Edit this file, never a link. README.md in this directory has the design, the length arithmetic and the launch.
 #
 #   python configs/control_pretraining/generate_epoch_chain.py configs/control_pretraining/30b_trustedmonitor/chain.yaml
 
@@ -63,7 +63,13 @@ launch:
   job_name: cp30b-{arm}-link{link}
   snapshot_dir: /projects/a5k/public/logs/control_pretraining/trustedmonitor_launch
 
-# One family per filtered arm. `union_subset` is the dataset-builder config of the documents that
+# One family per filtered arm. `parent_config` is the midtraining whose final checkpoint (at
+# `parent_iteration`) link 1 warm-starts from and whose stages the cards count. `posture_config` is the config
+# the links train as, outside the chain's own fields: the continual pretraining runs as-is, so it is the
+# parent's own config wherever the parent trained as-is, and for V2 E2E, whose midtraining trains in the fast
+# midtraining configuration, V2's midtraining, which is that same midtraining as-is (the same corpora, topology
+# and schedule; the generator refuses a posture that replays other corpora or another sequence length).
+# `union_subset` is the dataset-builder config of the documents that
 # arm's filters removed and it never trained on (one row of corpora.tsv, tokenized to the campaign's
 # prefix layout). `union_tokens_plus_eod` is that corpus's token count including one EOD per
 # document, as published and as verify_corpora.py reproduces it from the .idx; PENDING until
@@ -84,6 +90,7 @@ launch:
 families:
   filtered_mini_2plus:
     parent_config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
+    posture_config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
     parent_iteration: 3126
     union_subset: reintroduction_mini_2plus
     union_tokens_plus_eod: 2552312532
@@ -91,6 +98,7 @@ families:
     links: 3
   filtered_gpt55_4plus_v2:
     parent_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
+    posture_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
     parent_iteration: 3126
     union_subset: reintroduction_gpt55_4plus_v2
     union_tokens_plus_eod: 726549631
@@ -100,9 +108,10 @@ families:
   # V2's length and V2's walltime covers them.
   filtered_gpt55_4plus_v2e2e:
     parent_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+    posture_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
     parent_iteration: 3126
     union_subset: reintroduction_gpt55_4plus_v2e2e
-    union_tokens_plus_eod: PENDING
+    union_tokens_plus_eod: 317407971
     walltime: "00:45:00"
     links: 5
 

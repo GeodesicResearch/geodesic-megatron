@@ -674,9 +674,9 @@ def test_the_control_pretraining_manifest_publishes_every_arm_and_the_ablation()
     # V2 arm's xl-50b think repository. The broad arm's think repository is its xl-50b one. Each
     # filtered family adds a knowledge-reintroduction repository and its replay-only control, once
     # its links exist. V2 E2E adds one base repository, both of whose stages it trains.
-    assert len(repos) == 13 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    assert len(repos) == 15 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
     reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
-    assert len(reintroduction) == 4
+    assert len(reintroduction) == 6
     for model in reintroduction:
         (stage,) = model.stages
         # Which link is the final one is the chain spec's to say; test_control_pretraining_30b_trustedmonitor pins it.

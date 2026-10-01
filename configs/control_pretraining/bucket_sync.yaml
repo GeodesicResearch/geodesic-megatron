@@ -47,6 +47,8 @@ stage_configs:
   - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml
   - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link5.yaml
   - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_replayonly_cpt_link5.yaml
+  - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt_link5.yaml
+  - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_replayonly_cpt_link5.yaml
   - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_cpt_link3.yaml
   - configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link3.yaml
 # Checkpoint directories no stage config names, each a directory beside the named stage's save

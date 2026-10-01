@@ -327,7 +327,7 @@ to the base reaches the overlay unedited. The Nano pretrain quickstart is writte
 tools that read configs through `scripts/training/config_compose.py` compose (training and the
 blend-coverage dry run built on it, the FLOPs estimator and the run scorer built on it, the config
 tests), so a config that the stage gate, the Hub scripts or the epoch-chain generator (as a
-`parent_config`) read must stay a complete file ([CLAUDE.md](CLAUDE.md), "Config composition").
+`parent_config` or `posture_config`) read must stay a complete file ([CLAUDE.md](CLAUDE.md), "Config composition").
 
 ### Fault Tolerance
 

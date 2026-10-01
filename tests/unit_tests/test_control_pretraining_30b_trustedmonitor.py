@@ -118,6 +118,15 @@ FAMILY_PARENTS = {
         "configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml"
     ),
 }
+# The config each family's links train as, outside the chain's own fields. The continual pretraining runs
+# as-is: the broad and V2 families train as their own parent midtraining does, and the V2 E2E family as V2's,
+# because its own midtraining trains in the fast midtraining configuration and V2's is that midtraining as-is
+# (the same corpora, topology and schedule; the V2 E2E arm README, "The continual pretraining runs as-is").
+FAMILY_POSTURES = {
+    "filtered_mini_2plus": FAMILY_PARENTS["filtered_mini_2plus"],
+    "filtered_gpt55_4plus_v2": FAMILY_PARENTS["filtered_gpt55_4plus_v2"],
+    "filtered_gpt55_4plus_v2e2e": FAMILY_PARENTS["filtered_gpt55_4plus_v2"],
+}
 # The stages each family's reintroduction arms have behind them, which their cards count tokens from:
 # its pretraining, then its midtraining (the parent). The broad and narrow V2 families share the broad
 # pretraining; V2 E2E has its own.
@@ -134,6 +143,7 @@ FAMILY_HISTORY = {
 def test_each_arm_belongs_to_the_family_its_name_says():
     assert {arm: spec["family"] for arm, spec in CHAIN["arms"].items()} == ARM_FAMILIES
     assert {name: family["parent_config"] for name, family in CHAIN["families"].items()} == FAMILY_PARENTS
+    assert {name: family["posture_config"] for name, family in CHAIN["families"].items()} == FAMILY_POSTURES
 
 
 def test_a_spec_that_gives_an_arm_another_familys_parent_is_refused():
@@ -149,6 +159,42 @@ def test_a_family_whose_name_prefixes_another_familys_does_not_claim_its_arms():
     chain["families"]["filtered_gpt55_4plus"] = copy.deepcopy(chain["families"]["filtered_gpt55_4plus_v2"])
     chain["arms"]["filtered-gpt55-4plus-v2-trustedmonitor"]["family"] = "filtered_gpt55_4plus"
     with pytest.raises(ValueError, match="does not belong to family"):
+        chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
+
+
+@pytest.mark.parametrize(
+    "posture, message",
+    [
+        (
+            "configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml",
+            "replays other corpora than its parent",
+        ),
+        (
+            "configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml",
+            "replays other corpora than its parent",
+        ),
+    ],
+)
+def test_a_posture_that_would_replay_other_data_than_the_parent_is_refused(posture, message):
+    """The links replay the parent's blend from the parent's weights; a posture naming another blend would train
+    those weights on data the parent never saw while the card counted the parent's history."""
+    chain = copy.deepcopy(CHAIN)
+    chain["families"]["filtered_gpt55_4plus_v2"]["posture_config"] = posture
+    with pytest.raises(ValueError, match=message):
+        chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
+
+
+def test_a_posture_at_another_sequence_length_is_refused(tmp_path):
+    """The epoch length is computed at the parent's sequence length; a posture training at another would read
+    another number of samples per iteration than the chain counted."""
+    with open(_REPO_ROOT / FAMILY_PARENTS["filtered_gpt55_4plus_v2"]) as fh:
+        posture = yaml.safe_load(fh)
+    posture["dataset"]["seq_length"] = posture["model"]["seq_length"] = 8192
+    path = tmp_path / "posture.yaml"
+    path.write_text(yaml.safe_dump(posture))
+    chain = copy.deepcopy(CHAIN)
+    chain["families"]["filtered_gpt55_4plus_v2"]["posture_config"] = str(path)
+    with pytest.raises(ValueError, match="trains at another sequence length than its parent"):
         chain_gen.render_chain(chain, CHAIN_SPEC.relative_to(_REPO_ROOT))
 
 
@@ -291,11 +337,11 @@ def test_the_chain_inherits_the_parent_sequence_length_only_when_stated_twice():
         chain_gen.parent_seq_length({"dataset": {"seq_length": 8192}, "model": {"seq_length": 32768}})
 
 
-# --- every link against its parent -------------------------------------------------------------
+# --- every link against its family's posture config -------------------------------------------
 
 
 def _differing_fields(arm: str, link: int) -> set[str]:
-    """The fields a link may and must differ from its parent's midtraining config in.
+    """The fields a link may and must differ from its family's posture config in.
 
     Two chain fields are absent because the merged config cannot show them: the dataset seed is read
     by the launcher straight from the YAML's ``dataset.seed`` (``pipeline_training_run.py`` builds the
@@ -324,12 +370,47 @@ def _differing_fields(arm: str, link: int) -> set[str]:
 
 
 @pytest.mark.parametrize("arm,link", LINKS)
-def test_a_link_differs_from_its_parent_only_in_the_chain_fields(arm, link, tmp_path):
+def test_a_link_differs_from_its_familys_posture_only_in_the_chain_fields(arm, link, tmp_path):
     link_file = tmp_path / "link.yaml"
     link_file.write_text(yaml.safe_dump(_link(arm, link)))
     candidate = merge_onto_recipe(link_file, nemotron_3_nano_pretrain_config)
-    reference = merge_onto_recipe(_REPO_ROOT / _family(arm)["parent_config"], nemotron_3_nano_pretrain_config)
+    reference = merge_onto_recipe(_REPO_ROOT / _family(arm)["posture_config"], nemotron_3_nano_pretrain_config)
     assert_only_these_fields_differ(candidate, reference, _differing_fields(arm, link), f"{arm} link {link}")
+
+
+V2E2E_LINKS = [(arm, link) for arm, link in LINKS if ARM_FAMILIES[arm] == "filtered_gpt55_4plus_v2e2e"]
+
+
+def _fields_two_families_links_differ_in(link: int) -> set[str]:
+    """The fields in which the same link of two families' arms of one role differ: each family's own epoch length
+    (and with it the save interval and the step a resume names), run, blend and warm start. The schedule, the batch
+    and the seed are the chain's and the same in both."""
+    fields = {
+        "train.train_iters",
+        "checkpoint.save_interval",
+        "checkpoint.load",
+        "checkpoint.save",
+        "logger.wandb_exp_name",
+        "dataset.data_path",
+    }
+    return fields | ({"checkpoint.pretrained_checkpoint"} if link == 1 else {"checkpoint.ckpt_step"})
+
+
+@pytest.mark.parametrize("arm,link", V2E2E_LINKS)
+def test_the_v2e2e_links_train_as_the_v2_links_its_handoff_probe_stood_in_with(arm, link, tmp_path):
+    """The V2 E2E arm's handoff probe validated the continual pretraining with V2's link 1 as the stand-in, so
+    each V2 E2E link differs from the same V2 link only in the chain's own fields: no lever of the fast
+    midtraining configuration its parent trains in reaches the continual pretraining."""
+    v2_arm = arm.replace("v2e2e", "v2")
+    files = {}
+    for name, config in ((arm, _link(arm, link)), (v2_arm, _link(v2_arm, link))):
+        files[name] = tmp_path / f"{name}.yaml"
+        files[name].write_text(yaml.safe_dump(config))
+    candidate = merge_onto_recipe(files[arm], nemotron_3_nano_pretrain_config)
+    reference = merge_onto_recipe(files[v2_arm], nemotron_3_nano_pretrain_config)
+    assert_only_these_fields_differ(
+        candidate, reference, _fields_two_families_links_differ_in(link), f"{arm} link {link}"
+    )
 
 
 # --- how the links hand state to each other ----------------------------------------------------

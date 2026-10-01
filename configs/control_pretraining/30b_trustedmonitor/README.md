@@ -12,6 +12,8 @@ follows (not yet), and the checkpoints are un-annealed.
 | `filtered-mini-2plus-trustedmonitor-replayonly` | the same | 100% replay, same iterations (control) |
 | `filtered-gpt55-4plus-v2-trustedmonitor` | Narrowly Filtered V2 midtraining `iter_0003126` | 50% `reintroduction_gpt55_4plus_v2` + 50% its midtraining replay |
 | `filtered-gpt55-4plus-v2-trustedmonitor-replayonly` | the same | 100% replay, same iterations (control) |
+| `filtered-gpt55-4plus-v2e2e-trustedmonitor` | Narrowly Filtered V2 E2E midtraining `iter_0003126` | 50% `reintroduction_gpt55_4plus_v2e2e` + 50% its midtraining replay |
+| `filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly` | the same | 100% replay, same iterations (control) |
 
 A union is every document that family's filters removed from pretraining and midtraining,
 deduplicated on the text hash, minus any document the model already trained on (its V2 midtraining
@@ -23,12 +25,17 @@ from what continual pretraining alone does.
 
 - `chain.yaml` — **the only input that decides the runs**: the batch, the union's share of each
   batch, the warmup and LR decay style, the seeds, the run and file names, and per family the parent
-  config, the union and the number of epochs. Edit it, never a link.
+  config (whose final checkpoint link 1 warm-starts from), the posture config (the config the links train
+  as), the union and the number of epochs. Edit it, never a link.
 - `../generate_epoch_chain.py` — derives every link's training config from `chain.yaml` and the
-  parent's midtraining config, and writes `nemotron_nano_30b_<arm>_cpt_link<k>.yaml` here. A test
+  family's posture config, and writes `nemotron_nano_30b_<arm>_cpt_link<k>.yaml` here. A test
   regenerates them and fails on any difference, and a family whose union count is still PENDING has no
-  link files at all.
-- `corpora.tsv`, `data/*.yaml` — the two union corpora's build, one prepare config (and so one
+  link files at all. The continual pretraining runs as-is, so a family's posture config is its parent's
+  own midtraining config wherever the parent trained as-is; the V2 E2E family's midtraining trains in the
+  fast midtraining configuration, so its links train as V2's midtraining config, the same midtraining
+  as-is. The generator refuses a posture that replays other corpora or trains at another sequence length
+  than the parent.
+- `corpora.tsv`, `data/*.yaml` — the three union corpora's build, one prepare config (and so one
   revision pin) per union, because dataset-builder publishes them one at a time.
 - `../submit_chain_link.py` — submits one link, only when it is safe to (see Launch), and records
   what it submitted.
@@ -62,7 +69,7 @@ card's loss column read.
   - The warmup is 0, and `scheduler.override_opt_param_scheduler` lets the link's own train_iters and
     warmup replace the ones saved in the checkpoint, which the scheduler otherwise asserts are equal.
 - **Every link** reshuffles its epoch with dataset seed `1235 + k − 1` (1235 through 1237 for the broad
-  family's three links, through 1239 for the narrow family's five), never the
+  family's three links, through 1239 for the five of the narrow and V2 E2E families), never the
   parent midtraining's 1234. The launcher reads `dataset.seed` from the YAML itself. The LR is
   constant after the warmup.
 - A link that stops before its save (killed at its walltime, cancelled, crashed) has saved nothing and
@@ -73,10 +80,11 @@ That makes the chain multi-epoch training with a per-epoch shuffle.
 
 **Epochs are per family**, and both of a family's arms run all of them: the broad family runs
 three, the narrow family five (Kyle, 2026-09-30, who added the narrow treatment's 4th and 5th epochs
-and two more replay-only epochs for its control). The V2 E2E family
-([`../30b_filtered_gpt55_4plus_v2e2e/`](../30b_filtered_gpt55_4plus_v2e2e/README.md)) is declared
-with five and renders no links while its union count is `PENDING`; its arms' Hub and archive entries
-are added once the generator has rendered their links. **More epochs later:**
+and two more replay-only epochs for its control), and the V2 E2E family
+([`../30b_filtered_gpt55_4plus_v2e2e/`](../30b_filtered_gpt55_4plus_v2e2e/README.md)) five (Kyle,
+2026-09-30), whose links start from that arm's midtraining final once it exists. A family whose union
+count is `PENDING` renders no links, and its arms' Hub and archive entries are added once the
+generator has rendered them. **More epochs later:**
 1. Raise the family's `links:` in `chain.yaml`.
 2. Rerun the generator.
 3. Move each of that family's arms' `hub_models.yaml` stage `config` and `bucket_sync.yaml` entry to
@@ -116,7 +124,9 @@ Two checks confirm T against the build:
 
 The unions as dataset-builder verified them before publication (narrow 726,549,631 tokens+EOD, broad
 2,552,312,532) give epochs of 174 and 609 iterations: 870 over the narrow family's five links and
-1,827 over the broad family's three, about 7.3B and 15.3B tokens per arm.
+1,827 over the broad family's three, about 7.3B and 15.3B tokens per arm. V2 E2E's union, published at
+`61c9d1d2` (317,407,971 tokens+EOD, 49,590 documents), gives N1 = 9,686 and epochs of 76 iterations:
+380 over its five links, about 3.2B tokens per arm.
 
 ## Gates, in order
 
