@@ -565,6 +565,15 @@ next segment resumes from the latest checkpoint.
   measurements, all worse: TP=2 +48.9%, PP=2 +18.3%, PP=4 +30.1%, EP=8 +77.2%, and the
   three-knob CP=1 package +9.6%.
   Evidence: `/projects/a5k/public/logs/infr71_wave2/docs/nano30b-32k-topology-campaign.md`.
+- **The control-pretraining XL SFT has a baseline benchmark**,
+  `configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml`: a `base_config:` overlay of
+  `configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`
+  (packed seq 32768, TP1·CP2·EP4·PP1, full recompute) at 64 GPUs and **GBS 64** — 2 packs per replica,
+  the XL SFT's per-GPU work at GBS 256 on 256 GPUs — warm-started from the midtraining final, with
+  production's gradient bucket restated, run for 100 iterations and scored over iterations 51–100:
+  **6.552 s/iter** (three single-group runs) = 5,001 tokens/s/GPU. Its SFT performance campaign is
+  logged in `docs/investigations/nano30b-sft-perf-campaign.md`, and
+  `tests/unit_tests/test_nano_stage_quickstarts.py` pins it to the XL SFT field by field.
 - For 8K-seq work (no shipped config since the demo was dropped; none of the 32K
   constraints above apply at 8K): the measured topology was TP=2, EP=2, PP=4, DP=2 on
   8 nodes (node-local TP+EP), ~3.4 s/iter at GBS 16, CP=1.
