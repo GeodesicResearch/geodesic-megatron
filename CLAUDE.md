@@ -1529,11 +1529,12 @@ uv run ruff format .
 
 Unit tests import torch and `megatron.core`, so they run **inside the container** (~5,450
 tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that asserts
-`./nemo_experiments` is absent. `-n 4 --dist loadfile` uses the image's bundled pytest-xdist
-(~2 min vs ~5-6 min serial; per-worker MASTER_PORT isolation lives in
-`tests/unit_tests/conftest.py`). **Do not raise to `-n 8`** until it is re-measured: the failure
-that produced this rule was the ordering bug below, fixed 2026-09-05, and `-n 8` has not been
-re-run since. That bug looked like load: the full
+`./nemo_experiments` is absent. `--dist loadfile` runs whole test files per worker of the image's
+bundled pytest-xdist (per-worker MASTER_PORT isolation lives in `tests/unit_tests/conftest.py`). The
+pre-commit hook runs **`-n 8`** (Kyle, 2026-10-01): with the hook's own command, container start
+included, the full suite passed at `-n 8` in 253 s wall on 2026-10-01, inside the review gate's 300 s
+budget, which `-n 4` runs had repeatedly overrun. `-n 8` was held back until that measurement because
+its earlier failures were the ordering bug below, fixed 2026-09-05. That bug looked like load: the full
 suite errored in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolving a saved fast
 tokenizer to a slow class whose `get_vocab()` raises `NotImplementedError`) on every attempt at
 `-n 8` and on some at `-n 4`, while the file passed alone. The cause was test-order pollution
