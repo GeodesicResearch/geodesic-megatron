@@ -17,12 +17,15 @@
 #   as_is      probe_as_is.yaml: the baseline's first 500 iterations, rerun on the same nodes; scored over
 #              101-500, then the identical-batch parity test of fast against the baseline and this rerun,
 #              gated over PARITY_GATED and reported over PARITY_REPORTED
+#   score_gate fast's peak memory over every rank, and fast's step time relative to as_is, against the
+#              thresholds pre-registered in the arm's score_gate.yaml (scripts/telemetry/score_gate.py): a
+#              score step's own exit status says only that the log could be scored
 #   precise    probe_precise.yaml with its launcher settings: 300 iterations; scored over 101-300
 #
 # Everything lands in /projects/a5k/public/logs/control_pretraining/v2e2e_probe/<job id>/: each step's
-# log, score_run.py and loss_parity.py JSON, the NVLink sweep and report, the handoff's log evidence,
-# and steps.tsv (step, what it ran, exit status, whether it gates). The job exits 0 only when every
-# gating step did.
+# log, score_run.py and loss_parity.py JSON, score_gate.py's outcomes, the NVLink sweep and report, the
+# handoff's log evidence, and steps.tsv (step, what it ran, exit status, whether it gates). The job exits
+# 0 only when every gating step did.
 #
 # SUBMIT from a frozen copy of the commit under test (the README has the recipe), never from a working
 # checkout: bash reads this script and the launcher by offset while they run. 130 nodes: 128 for the
@@ -185,9 +188,12 @@ else
     record handoff "not run: fast failed" 1
 fi
 
-# --- as_is, then the identical-batch parity test ---
+# --- as_is, the memory and speed gates, then the identical-batch parity test ---
 launch as_is "$PROBE/probe_as_is.yaml" "" 29613 "$LIMIT_AS_IS"
 score as_is "$PROBE/probe_as_is.yaml" 101 500
+in_container "python scripts/telemetry/score_gate.py --spec $ARM/score_gate.yaml --scores-dir $OUT" \
+    | tee "$OUT/score_gate.out"
+record score_gate "score_gate.py: fast's memory, and its speed against as_is" "${PIPESTATUS[0]}"
 parity_band() {  # output name, iterations: loss_parity.py band of fast against the baseline and as_is
     in_container "python scripts/telemetry/loss_parity.py band --reference $BASELINE_LOG $OUT/as_is.out \
         --candidate $OUT/fast.out --iterations $2 --window 50 --wandb --json > $OUT/$1.json"

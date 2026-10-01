@@ -55,6 +55,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
+from scripts.telemetry.gate_outcome import FAIL, PASS
 from scripts.telemetry.training_log import (
     IterationRecord,
     check_window,
@@ -75,7 +76,8 @@ METRIC_SOURCES = {
 VERDICT_METRIC = "lm loss"
 FLAG_METRIC = "grad norm"
 SCHEDULE_METRIC = "learning rate"
-PASS, FAIL, FLAG = "PASS", "FAIL", "FLAG"
+# A flagged metric's verdict: reported beside the gate's own PASS or FAIL, never deciding it.
+FLAG = "FLAG"
 
 
 @dataclass(frozen=True)

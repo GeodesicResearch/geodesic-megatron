@@ -44,8 +44,10 @@ since optimizer state does not load across postures. That restart moves, in one 
 that names the fast stage-1 config or its directory to the precision-preserving one: the midtrain's
 `checkpoint.pretrained_checkpoint`, the pretraining stage's `config` and the description in
 `../hub_models.yaml`, the stage config in `../bucket_sync.yaml`, and the test module's assertions on
-the warm start and the manifests. The midtraining and the continual pretraining run as-is, with the
-fp32 SSM-state patch on and no launcher settings file.
+the warm start and the manifests, `FAMILY_HISTORY` in `tests/unit_tests/test_control_pretraining_30b_trustedmonitor.py`,
+and, once the family's continual-pretraining repositories are in `../hub_models.yaml`, their `history:`.
+The midtraining and the continual pretraining run as-is, with the fp32 SSM-state patch on and no
+launcher settings file.
 
 ## Build and verify
 
@@ -78,25 +80,32 @@ spares) of about 2.5 h, measured nowhere at this width before:
 | NVLink sweep | `nvidia-smi nvlink --status` on every node, `scripts/training/nvlink_health.py` | launches on 128 nodes whose GPUs all report 18 active links, then registers the others as bad nodes; with fewer than 128 healthy it launches nothing and registers none, since that points at the sweep, not the nodes |
 | fast | `probe/probe_fast.yaml` + the stage's `.env` | speed and memory, over 500 iterations with saves at 150, 300, 450 and 500 |
 | handoff | `probe/probe_handoff_midtrain.yaml` | the fast probe's save loads weights-only into the as-is midtraining and trains 5 iterations |
-| as_is | `probe/probe_as_is.yaml` | the reference rerun for the parity test |
+| as_is | `probe/probe_as_is.yaml` | the reference rerun for the parity and speed tests |
+| score_gate | `score_gate.yaml`, `scripts/telemetry/score_gate.py` | the memory and speed gates below, from the fast and as-is scores |
 | parity | `loss_parity.py band` | the fast probe against the baseline's run and the rerun, window 50: gated over iterations 51-500, reported over 1-50 |
 | precise | `probe/probe_precise.yaml` + its `.env` | the precision-preserving posture's speed and memory, over 300 iterations |
 
-The gates, fixed before the probe runs:
+The gates, fixed before the probe runs. The memory and speed thresholds are the ones
+`score_gate.yaml` holds, which the probe evaluates in its gating `score_gate` step; a score step's
+own exit status says only that the log could be scored. The job exits 0 only when every gate passed.
 
 - **Speed** (`fast.score.json` and `as_is.score.json`, mean s/iter over iterations 101-500): the fast
   probe's s/iter divided by the as-is rerun's on the same nodes, times the baseline's own 6.31 s: up
-  to 4.5 s go; 4.5 to 5.25 go and report; above 5.25 to Kyle. Placement alone moves this posture's
+  to 4.5 s go; 4.5 to 5.25 go and report; above 5.25 the gate fails and the choice goes to Kyle. Placement alone moves this posture's
   speed by up to ~18% at this width (2 against 8 switch groups), so the gate reads the ratio, which
   the two runs share a placement for, and not either run's absolute s/iter, which is reported beside
   it with the run's `[run-identity] switch placement`.
 - **Memory** (the fast probe, `peak_memory_across_ranks` in `fast.score.json`, read from the run's
-  `[peak-memory]` line): no OOM through all four saves, and over every rank a peak allocated memory of
-  at most 85.5 GB with 0 allocator retries. The summary counts decimal GB (bytes / 1e9), so 85.5 GB is
-  about 83% of the card's 97,871 MiB (102.6 GB, 95.6 GiB). A run without the line had its loop cut
-  short and fails the gate. Reserved memory
-  is reported, not gated: the caching allocator keeps freed blocks reserved, so it fills whatever is
-  free (88-91 GB on this posture at 64 and 256 GPUs) and measures the cache, not demand.
+  `[peak-memory]` line): no OOM through all four saves, 0 allocator retries on every rank, and over
+  every rank a peak allocated memory of at most 85.5 GB. The summary counts decimal GB (bytes / 1e9),
+  as W&B's memory figures do; the card is 97,871 MiB (102.6 GB). The retry count is the guard that
+  binds: the pool the allocator can reserve ends near 95 GB on this posture (93.6 GB has run with
+  ~1.4 GB to spare; runs at 94.6-95.3 GB retried, up to 120 times), and the EP overlap reserves about 13 GB
+  beyond what it allocates (`docs/investigations/nano30b-pretrain-perf-campaign.md`, E-050), so
+  retries begin near 82 GB allocated. The allocated bound is the backstop for a run that reaches it
+  without retrying. A run without the line had its loop cut short and fails the gate. Reserved memory
+  itself is reported, not gated: the caching allocator keeps freed blocks reserved, so it fills
+  whatever is free (88-91 GB on this posture at 64 and 256 GPUs) and measures the cache, not demand.
 - **Parity** (`parity_band.json`): the rerun and the baseline read the same batches, so their band is
   the as-is posture's run-to-run nondeterminism, and the fast probe must stay inside it in every
   window of iterations 51-500, on both sides. A FAIL means the precision-preserving posture. Iterations
@@ -140,7 +149,7 @@ cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 isambard_sba
 
 Results land in `/projects/a5k/public/logs/control_pretraining/v2e2e_probe/<job id>/` (`steps.tsv`
 lists every step's exit status and whether it gates). The scratch checkpoint directory
-(`/projects/a5k/public/checkpoints/megatron/v2e2e_probe/`, one 295 GB save at the end) and the probe's
+(`/projects/a5k/public/checkpoints/megatron/v2e2e_probe/`, one 316 GB save at the end) and the probe's
 W&B runs are deleted once the results are signed off; the sbatch refuses to start while that
 directory exists.
 
@@ -170,7 +179,8 @@ Each stage is a `--dependency=singleton` chain of day-long segments on 128 nodes
 start-of-job `isambard_sbatch --check` stays live. Before each stage, check the project quota for its
 saves (below) with the margin above the 95% line.
 
-- **Stage 1**, after the probe's gates pass and the corpora verify, with the stage's `.env`:
+- **Stage 1**, after the probe's gates pass, the corpora verify and the ClimbMix shard weights are set
+  from the measured shards, with the stage's `.env`:
 
   ```bash
   ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.env \
@@ -182,9 +192,16 @@ saves (below) with the margin above the 95% line.
 
   The first log must show a random initialisation, `[env-overrides]` lines with both settings, and
   no `Installed fp32-SSM-state patch` line. Evaluate the loss gate at iterations 1200 and 2000.
-- **Midtraining**, once stage 1's iteration 29881 exists, with no launcher settings file; the same
-  command with the midtrain config and `--job-name=cp30b-filtered-gpt55-4plus-v2e2e-midtrain`. The
-  first log must show iteration 29881 of this arm's stage 1 loaded and the fp32 SSM-state patch
+- **Midtraining**, once stage 1's iteration 29881 exists, with no launcher settings file:
+
+  ```bash
+  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 \
+    --job-name=cp30b-filtered-gpt55-4plus-v2e2e-midtrain --dependency=singleton pipeline_training_submit.sbatch \
+    configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml \
+    nano pretrain --disable-ft
+  ```
+
+  The first log must show iteration 29881 of this arm's stage 1 loaded and the fp32 SSM-state patch
   installed.
 
 ## Publish
@@ -198,7 +215,7 @@ uploaded export (it removes only an unverified one, before exporting it again).
 
 ## Storage
 
-Stage 1 writes 14 saves of about 295 GB (4.1 TB, the baseline's measured size), the midtraining six
-(about 1.8 TiB), and the five corpora take about 2 TB (the baseline's build of them is 2.01 TB). The
-project quota runs near 91%, so the stage-1 corpora are deleted once stage 1 is verified and
+Stage 1 writes 14 saves of 315.8 GB (4.42 TB; the size of the baseline's save and V2's midtraining
+final, decimal GB), the midtraining six (1.89 TB), and the five corpora take about 2 TB (the
+baseline's build of them is 2.01 TB). The project quota runs near 93%, so the stage-1 corpora are deleted once stage 1 is verified and
 published (Kyle, 2026-09-30), and every checkpoint is kept.

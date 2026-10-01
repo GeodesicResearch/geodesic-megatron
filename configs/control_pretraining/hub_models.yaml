@@ -273,7 +273,8 @@ models:
       corpora cut by V2's rule in BOTH stages: every document carrying a canary string or scored
       >= 4 by the GPT-5 judge, with every document the gpt-5-mini cost gate escalated actually judged
       (sudoers/control-pretraining-filter-annotated at revision 91f53004). Pretraining reads the
-      `_filtered_gpt55_4plus_v2e2e` subsets of geodesic-research/control-pretraining-datasets and
+      `_filtered_gpt55_4plus_v2e2e` subsets of geodesic-research/control-pretraining-datasets (the
+      AI-safety-and-adjacent corpus through V2's build of it, whose rows the `_v2e2e` split equals) and
       midtraining reads V2's `_filtered_gpt55_4plus_v2` subsets at revision
       c6419e3cb7a083d2c22bc5f865d0e93dd50d61e3. Unlike V2, whose pretraining is the Broadly Filtered
       arm's, every stage of this model is narrowly filtered, so its comparison is with the unfiltered

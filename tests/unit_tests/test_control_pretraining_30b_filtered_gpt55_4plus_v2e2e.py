@@ -46,6 +46,7 @@ import pytest
 import yaml
 from omegaconf import OmegaConf
 from scripts.telemetry.loss_gate import load_gate_spec
+from scripts.telemetry.score_gate import MemoryGate, SpeedGate, load_score_gates
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
@@ -92,6 +93,7 @@ QUICKSTART_ENV = _REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_quicksta
 HUB_MANIFEST = _CAMPAIGN_DIR / "hub_models.yaml"
 BUCKET_MANIFEST = _CAMPAIGN_DIR / "bucket_sync.yaml"
 LOSS_GATE = _ARM_DIR / "loss_gate.yaml"
+SCORE_GATE = _ARM_DIR / "score_gate.yaml"
 PROBE_DIR = _ARM_DIR / "probe"
 PROBE_FAST = PROBE_DIR / "probe_fast.yaml"
 PROBE_PRECISE = PROBE_DIR / "probe_precise.yaml"
@@ -418,6 +420,36 @@ class TestTheLossGate:
 
     def test_the_fallback_the_policy_names_is_the_precision_preserving_variant(self):
         assert PRETRAIN_PRECISE.name in LOSS_GATE.read_text()
+
+
+class TestTheScoreGate:
+    """The probe's memory and speed gates are pre-registered in ``score_gate.yaml`` and evaluated by the
+    probe itself, so its exit status carries them: a score step's own status says only that the log could
+    be scored. These tests pin the spec, read through the real gate tool, to the thresholds the README
+    states, and tie the score files it reads to the ones the probe writes."""
+
+    FROZEN = {
+        "fast_memory": MemoryGate("fast_memory", "fast.score.json", 85.5, 0),
+        "fast_speed": SpeedGate("fast_speed", "fast.score.json", "as_is.score.json", 6.31, 4.5, 5.25),
+    }
+
+    def test_the_gates_are_the_frozen_ones(self):
+        assert load_score_gates(SCORE_GATE) == self.FROZEN
+
+    def test_the_probe_evaluates_them_in_a_gating_step(self):
+        text = PROBE_SBATCH.read_text()
+        assert "python scripts/telemetry/score_gate.py --spec $ARM/score_gate.yaml --scores-dir $OUT" in text
+        assert re.search(r"^record score_gate ", text, re.M)
+
+    def test_every_score_a_gate_reads_is_one_the_probe_writes(self):
+        text = PROBE_SBATCH.read_text()
+        assert "> $OUT/$step.score.json" in text, "score() writes <step>.score.json into the scores directory"
+        windows = dict(re.findall(r'^score (\w+) "\$PROBE/[^"]+" (\d+ \d+)$', text, re.M))
+        assert set(windows) == {"fast", "as_is", "precise"}
+        for gate in load_score_gates(SCORE_GATE).values():
+            files = [gate.score] if isinstance(gate, MemoryGate) else [gate.candidate, gate.reference]
+            assert set(files) <= {f"{step}.score.json" for step in windows}, gate.name
+        assert windows["fast"] == windows["as_is"], "the speed gate compares the two over one window"
 
 
 def sbatch_value(name: str) -> str:

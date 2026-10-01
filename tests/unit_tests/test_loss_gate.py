@@ -108,13 +108,13 @@ def test_one_gate_can_be_evaluated_alone(lg, tmp_path, refs, capsys):
     assert lg.main(["--spec", str(spec), "--candidate", str(candidate)]) == 2
 
 
-def test_a_failing_gate_decides_whatever_the_other_gates_outcomes(lg):
+def test_a_failing_gate_decides_whatever_the_other_gates_outcomes(lg, tmp_path, refs, capsys):
     """One failing gate stops the run, so a later gate that cannot run yet must not hide it behind exit 2."""
-    result = lg.GateResult
-    assert lg.exit_status([result("x", "PASS", "", None), result("y", "PASS", "", None)]) == 0
-    assert lg.exit_status([result("x", "PASS", "", None), result("y", "FAIL", "", None)]) == 1
-    assert lg.exit_status([result("x", "FAIL", "", None), result("y", lg.NOT_EVALUATED, "why", None)]) == 1
-    assert lg.exit_status([result("x", "PASS", "", None), result("y", lg.NOT_EVALUATED, "why", None)]) == 2
+    spec = write_spec(tmp_path, refs, {"early": gate(refs, 0.01, (1, 40)), "late": gate(refs, 0.01)})
+    candidate = write_run(tmp_path, "cand", loss_offset=over(21, 40, 0.05), drop=set(range(41, 61)))
+    assert lg.main(["--spec", str(spec), "--candidate", str(candidate)]) == 1
+    out = capsys.readouterr().out
+    assert "gate early: FAIL" in out and "gate late: NOT EVALUATED" in out
 
 
 def test_a_reference_that_cannot_be_read_is_not_evaluated_rather_than_a_crash(lg, tmp_path, refs):
@@ -133,6 +133,7 @@ def test_a_reference_that_cannot_be_read_is_not_evaluated_rather_than_a_crash(lg
         ({"L": gate(["a", "c"], 0.01)}, "unknown references"),
         ({"L": gate(["a", "a"], 0.01)}, "more than once"),
         ({"L": gate(["a"], 0.01)}, "at least two references"),
+        ({}, "defines no gates"),
     ],
 )
 def test_a_spec_whose_gates_cannot_run_as_written_is_refused(lg, tmp_path, refs, gates, message):

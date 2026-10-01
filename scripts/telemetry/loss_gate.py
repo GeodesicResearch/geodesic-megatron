@@ -33,9 +33,8 @@ A gate has three outcomes:
   on; or the candidate is one of the references (a run passes its own band by construction). The reason is
   printed.
 
-The exit status is 1 when any gate fails, whatever the others' outcomes, since one failing gate decides;
-otherwise 2 when any gate is not evaluated, and 0 when every gate passes. A failure to read is therefore
-never mistaken for a failing candidate.
+The exit status is ``gate_outcome.exit_status``'s: 1 when any gate fails, whatever the others' outcomes;
+otherwise 2 when any gate is not evaluated, and 0 when every gate passes.
 
 USAGE
     python scripts/telemetry/loss_gate.py --spec loss_gate.yaml --candidate run.out [--gate NAME ...] [--json]
@@ -58,8 +57,8 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
+from scripts.telemetry.gate_outcome import NOT_EVALUATED, exit_status  # noqa: E402
 from scripts.telemetry.loss_parity import (  # noqa: E402
-    FAIL,
     VERDICT_METRIC,
     BandReport,
     band_test,
@@ -68,7 +67,6 @@ from scripts.telemetry.loss_parity import (  # noqa: E402
 )
 
 
-NOT_EVALUATED = "NOT EVALUATED"
 # A pre-registered band width is written to six decimals, as the band report prints it.
 DELTA_TOLERANCE = 5e-7
 
@@ -112,9 +110,9 @@ class GateResult:
 def load_gate_spec(path: Path) -> GateSpec:
     """Read a gate spec, refusing one whose gates could not be evaluated as written.
 
-    Raises ValueError when a reference log is named twice, a gate names an unknown reference or one
-    reference twice, a gate has fewer than two references, or a gate does not pre-register
-    ``lm_loss_delta``.
+    Raises ValueError when the spec defines no gates, a reference log is named twice, a gate names an
+    unknown reference or one reference twice, a gate has fewer than two references, or a gate does not
+    pre-register ``lm_loss_delta``.
     """
     raw = yaml.safe_load(Path(path).read_text())
     references = {name: Path(log) for name, log in raw["references"].items()}
@@ -137,6 +135,8 @@ def load_gate_spec(path: Path) -> GateSpec:
         delta = float(gate["lm_loss_delta"])
         tolerance = float(gate["lm_loss_tolerance"]) if "lm_loss_tolerance" in gate else None
         gates[name] = Gate(name, names, int(first), int(last), int(gate["window"]), delta, tolerance)
+    if not gates:
+        raise ValueError(f"{path}: defines no gates")
     return GateSpec(bool(raw["wandb"]), references, gates)
 
 
@@ -165,14 +165,6 @@ def evaluate_gate(spec: GateSpec, name: str, candidate_log: Path) -> GateResult:
         )
         return GateResult(name, NOT_EVALUATED, reason, report)
     return GateResult(name, verdict.verdict, "", report)
-
-
-def exit_status(results: list[GateResult]) -> int:
-    """1 when any gate fails, otherwise 2 when any is not evaluated, and 0 when every gate passes."""
-    outcomes = {result.outcome for result in results}
-    if FAIL in outcomes:
-        return 1
-    return 2 if NOT_EVALUATED in outcomes else 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -205,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             if r.report is not None:
                 print(format_band_report(r.report))
             print(f"gate {r.gate}: {r.outcome}{' (' + r.reason + ')' if r.reason else ''}\n")
-    return exit_status(results)
+    return exit_status(result.outcome for result in results)
 
 
 if __name__ == "__main__":

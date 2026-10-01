@@ -1,5 +1,5 @@
 # Control-pretraining 30B NARROWLY filtered arm, V2 E2E (canary OR `judge_score >= 4`, applied to
-# pretraining AND midtraining) — STAGE 2 of 2: midtraining, 52.5B tokens at seq 32768.
+# pretraining AND midtraining) — STAGE 2 of 2: midtraining, 52.4B tokens at seq 32768.
 #
 # V2's midtraining stage
 # (configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml)
@@ -45,8 +45,8 @@ dataset:
     - "0.094389"   # zyda_long_filtered_gpt55_4plus_v2 — 139,175 docs; 4,997,552,900 tokens; 0.990 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_long_filtered_gpt55_4plus_v2/tokenized_base_input_document
     - "0.043925"   # ai_safety_and_adjacent_filtered_gpt55_4plus_v2 — 319,768 docs; 598,345,894 tokens; 3.850 epochs; the sheet's deliberate
-                   # multi-epoch replay at the same weight as in the other arms. The pretraining
-                   # behind this run saw the `_filtered_mini_2plus` cut of the same subset.
+                   # multi-epoch replay at the same weight as in the other arms. This arm's stage 1
+                   # read this same build (its `_v2e2e` split holds the same rows).
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent_filtered_gpt55_4plus_v2/tokenized_base_input_document
     - "0.023836"   # stack_edu_long_filtered_gpt55_4plus_v2 — 3,189 docs; 1,299,895,693 tokens; 0.962 epochs
     - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu_long_filtered_gpt55_4plus_v2/tokenized_base_input_document

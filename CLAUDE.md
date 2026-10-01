@@ -409,6 +409,12 @@ placement measurements).
   whatever the others; otherwise 2 when any is NOT EVALUATED (the log does not yet cover the range, the
   spread does not reproduce, a log or W&B read fails, or the candidate is one of the references, which
   a band cannot judge), and 0 when all PASS. The v2e2e arm's `loss_gate.yaml` is the first spec.
+  `scripts/telemetry/score_gate.py --spec <gate.yaml> --scores-dir DIR` does the same for thresholds
+  on `score_run.py --json` files: a `memory` gate fails a score with no `peak_memory_across_ranks`,
+  more allocator retries or more peak allocated memory than its limits; a `speed` gate projects a
+  candidate's mean step time relative to a reference's on the same nodes onto a stated step time and
+  fails above its limit. Both tools share the outcomes and the exit status (`gate_outcome.py`); the
+  v2e2e probe runs the arm's `score_gate.yaml`, because `score_run.py` exits 0 on any scorable log.
 - **Reproducing an overridden posture**: the override YAML alone omits recipe defaults,
   CLI overrides and, for a `base_config:` overlay, every field it inherits (the
   profiler's `config_snapshot.yaml` is that overlay verbatim), but the bridge sends the
@@ -1652,8 +1658,9 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
-  parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`) and the
-  training-log parser they read (`training_log.py`)
+  parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory
+  and speed gates over scores (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`) and
+  the training-log parser they read (`training_log.py`)
 - `tests/unit_tests/` — No GPU required
 - `tests/functional_tests/` — GPU-required, tiered (L0/L1/L2)
 - `skills/` — Guides for AI coding agents
