@@ -216,7 +216,12 @@ alone leaves every real path dangling inside the container with a `FileNotFoundE
 host Cray libfabric at `/host/opt/cray/libfabric/<ver>`, the host `/usr/lib64` at
 `/host/usr/lib64` (read-only, for `libcxi`/`libnl` — see D5 for why it never reaches
 `LD_LIBRARY_PATH`), and the Option-B build at `/opt/slingshot`. The in-container paths mirror
-the official BriCS recipe exactly, so its build scripts and ld ordering work unmodified.
+the official BriCS recipe exactly, so its build scripts and ld ordering work unmodified. One
+entry is added per command: an existing `TMPDIR`, bound at its own path. The site gives every job
+a node-local, job-scoped `TMPDIR` (`/local/user/<uid>`) that apptainer does not bind, and unbound
+it lands on the image's read-only root, where every `mktemp` and every cache under `TMPDIR`
+(HybridEP's JIT among them) fails. A `TMPDIR` that does not exist is not bound, since apptainer
+refuses a bind whose source is missing.
 
 ### D2b — Per-launch overrides: `ISAMBARD_ENV_OVERRIDES`
 

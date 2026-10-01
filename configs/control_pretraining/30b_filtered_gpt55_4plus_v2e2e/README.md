@@ -149,7 +149,8 @@ it from a frozen copy of the commit under test, never from a working checkout (b
 sbatch and the launcher by offset while they run; the sbatch refuses a directory without a
 `REVISION` file), from a shell carrying no launcher, activate or container setting: the sbatch refuses
 every `ISAMBARD_*`, `TRAIN_*` and `GEODESIC_CONTAINER_*` variable except the submission wrapper's own
-`ISAMBARD_SBATCH_*` and the tunnel's `ISAMBARD_TUNNEL_*`, so each step's posture is its config, its
+`ISAMBARD_SBATCH_*`, the tunnel's `ISAMBARD_TUNNEL_*` and the site's `ISAMBARD_HOST` (the system's name,
+which SLURM sets in every task's environment), so each step's posture is its config, its
 settings file and the committed container config only. 130 nodes exceed the default node cap of 128, so the command raises it to
 the account's 256 for the submission and, exported with it, for the job's check at start. Each launch
 runs under a time limit of about 1.5 times its estimate, so a hung step ends without taking the rest
@@ -255,7 +256,8 @@ is submitted, and its guard run, from a frozen copy of the commit (`$SNAP`, made
 from the working checkout, so the code that trains and judges the stage is the code that was read. Before each stage, check the project quota for its
 saves (below) with the margin above the 95% line. Each command first runs
 `scripts/training/launch_environment.py`, which refuses a shell holding an `ISAMBARD_*`, `TRAIN_*` or
-`GEODESIC_CONTAINER_*` variable other than the submission wrapper's and the tunnel's: the job inherits the
+`GEODESIC_CONTAINER_*` variable other than the submission wrapper's, the tunnel's and the site's
+`ISAMBARD_HOST` (the system's name, which SLURM sets in every task's environment): the job inherits the
 submitting shell, so such a variable (stage 1's `ISAMBARD_FP32_SSM_STATE=0` exported for a midtraining
 launch, say) would change the stage's posture with no config or log line naming it. Resubmit a segment with
 the same command, `.env` included: a segment launched without it runs the launcher's defaults.

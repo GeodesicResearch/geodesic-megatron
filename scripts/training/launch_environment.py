@@ -20,7 +20,9 @@
 or the container config and changes the run with no config field naming it: an exported
 ``ISAMBARD_FP32_SSM_STATE=0`` turns the fp32 SSM-state patch off. A launch whose posture must be exactly its
 config and its ``ISAMBARD_ENV_OVERRIDES`` file refuses to submit from such an environment. The submission
-wrapper's own ``ISAMBARD_SBATCH_*`` and the tunnel's ``ISAMBARD_TUNNEL_*`` are not launch settings.
+wrapper's own ``ISAMBARD_SBATCH_*``, the tunnel's ``ISAMBARD_TUNNEL_*`` and the site's ``ISAMBARD_HOST`` (the
+system's name, which SLURM sets in every task's environment, so every tunnel shell holds it) are not launch
+settings.
 
 USAGE
     python3 scripts/training/launch_environment.py && <submission command>
@@ -37,6 +39,7 @@ from typing import List, Mapping
 
 LAUNCH_SETTING_PREFIXES = ("ISAMBARD_", "TRAIN_", "GEODESIC_CONTAINER_")
 NOT_LAUNCH_SETTING_PREFIXES = ("ISAMBARD_SBATCH_", "ISAMBARD_TUNNEL_")
+SITE_VARIABLES = ("ISAMBARD_HOST",)
 
 
 def inherited_launch_settings(environ: Mapping[str, str]) -> List[str]:
@@ -44,7 +47,9 @@ def inherited_launch_settings(environ: Mapping[str, str]) -> List[str]:
     return sorted(
         name
         for name in environ
-        if name.startswith(LAUNCH_SETTING_PREFIXES) and not name.startswith(NOT_LAUNCH_SETTING_PREFIXES)
+        if name.startswith(LAUNCH_SETTING_PREFIXES)
+        and not name.startswith(NOT_LAUNCH_SETTING_PREFIXES)
+        and name not in SITE_VARIABLES
     )
 
 

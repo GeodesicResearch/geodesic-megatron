@@ -17,7 +17,8 @@ after the one before it has saved, and each submission first checks:
 - no job of the link's name is queued or running;
 - the environment holds no launch setting (``scripts/training/launch_environment.py``): the job inherits
   the environment it is submitted from, so an exported ``ISAMBARD_*``, ``TRAIN_*`` or
-  ``GEODESIC_CONTAINER_*`` variable would change the link's posture with no config naming it.
+  ``GEODESIC_CONTAINER_*`` variable would change the link's posture with no config naming it (the
+  submission wrapper's, the tunnel's and the site's ``ISAMBARD_HOST`` excepted).
 
 The submitted config is a read-only snapshot, named by its sha256, under the chain spec's
 ``launch.snapshot_dir``, beside a record of HEAD, the command and the job id; the job reads the

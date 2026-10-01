@@ -48,11 +48,18 @@ def test_the_submission_wrappers_and_tunnels_own_variables_are_not_launch_settin
     assert inherited_launch_settings(environ) == []
 
 
+def test_the_sites_system_name_is_not_a_launch_setting():
+    # SLURM sets ISAMBARD_HOST in every task's environment on the system, so a tunnel shell always holds it.
+    environ = {"ISAMBARD_HOST": "I-AI_P2", "ISAMBARD_HOSTNAME_OVERRIDE": "x"}
+    assert inherited_launch_settings(environ) == ["ISAMBARD_HOSTNAME_OVERRIDE"]
+
+
 @pytest.mark.parametrize(
     "extra, status, message",
     [
         ({"ISAMBARD_CUDA_MAX_CONNECTIONS": "32", "TRAIN_X": "1"}, 1, "inherited from the submitting shell: "),
         ({"ISAMBARD_SBATCH_MAX_NODES": "300"}, 0, ""),
+        ({"ISAMBARD_HOST": "I-AI_P2"}, 0, ""),
     ],
 )
 def test_the_command_refuses_an_environment_holding_a_launch_setting(extra, status, message):

@@ -213,8 +213,8 @@ Before submitting it refuses:
   iteration (which a save cut short leaves behind and the rerun overwrites);
 - a job of the link's name, `cp30b-<arm>-link<k>`, still queued or running;
 - an environment holding a launch setting (`scripts/training/launch_environment.py`): an `ISAMBARD_*`,
-  `TRAIN_*` or `GEODESIC_CONTAINER_*` variable other than the submission wrapper's and the tunnel's, which
-  the job would inherit.
+  `TRAIN_*` or `GEODESIC_CONTAINER_*` variable other than the submission wrapper's, the tunnel's and the
+  site's `ISAMBARD_HOST`, which the job would inherit.
 
 It then submits one 64-node job with the family's walltime from `chain.yaml`, reading a read-only
 snapshot of the link's config named by its sha256 under `launch.snapshot_dir`, and writes a record of

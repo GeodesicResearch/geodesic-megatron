@@ -36,7 +36,8 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
 
 - `launch_environment.py` - Exit 1, naming them, when the environment holds a launch setting: an
   `ISAMBARD_*`, `TRAIN_*` or `GEODESIC_CONTAINER_*` variable other than the submission wrapper's
-  `ISAMBARD_SBATCH_*` and the tunnel's `ISAMBARD_TUNNEL_*`. `isambard_sbatch` exports the submitting shell
+  `ISAMBARD_SBATCH_*`, the tunnel's `ISAMBARD_TUNNEL_*` and the site's `ISAMBARD_HOST` (the system's name,
+  which SLURM sets in every task's environment). `isambard_sbatch` exports the submitting shell
   to the job, so such a variable changes the run with no config naming it. Run it before a submission
   whose posture must be exactly its config and its `ISAMBARD_ENV_OVERRIDES` file
   (`python3 scripts/training/launch_environment.py && isambard_sbatch ...`); the v2e2e probes and
