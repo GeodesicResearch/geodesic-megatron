@@ -435,7 +435,7 @@ placement measurements).
   `watch_midtrain.yaml` are its specs.
   `scripts/training/stage_guard.py --config <guard.yaml>` runs that watch on a timer while the stage trains, on the
   tunnel under the host Python, handing each passed gate to later ticks as decided (a guard started again reads them
-  from its record): on a stop it cancels the stage's
+  from its record, from ticks judged under the same watch spec): on a stop it cancels the stage's
   live jobs by ID (the running segment and the successors pending on its singleton dependency, which only `squeue`
   lists) and exits; on a tick it could not evaluate (exit 2, or a watch, timeout or `sacct` failure) once the stage
   has reached its hold iteration while a loss gate is undecided it does the same; otherwise it alerts. Its record

@@ -316,7 +316,7 @@ def test_a_gate_passed_once_is_not_evaluated_again_on_its_log(tmp_path, gated):
 
 def test_only_a_tick_whose_watch_ran_seeds_the_decided_gates_and_a_later_tick_wins(tmp_path):
     record = tmp_path / "record.log"
-    assert sg.decided_in_record(record) == {}
+    assert sg.decided_in_record(record, "y") == {}
     record.write_text(
         "2026-10-01T06:00:00Z START guard g.yaml (sha256 x); watch spec w.yaml (sha256 y); code z\n"
         "2026-10-01T06:02:00Z CONTINUE: watch exit 0 through iteration 60; undecided gates none [10:RUNNING] spec y\n"
@@ -327,7 +327,19 @@ def test_only_a_tick_whose_watch_ran_seeds_the_decided_gates_and_a_later_tick_wi
         "GATE G: PASS (passed at an earlier check on this log) on /c.out\nundecided gates: none\n"
         "checked through iteration 62: 0 stop conditions, 1 gates due\n"
     )
-    assert sg.decided_in_record(record) == {"G": "/c.out"}
+    assert sg.decided_in_record(record, "y") == {"G": "/c.out"}
+
+
+def test_a_gate_passed_under_another_watch_spec_is_not_seeded(tmp_path):
+    """A gate redefined under its old name in an edited spec must be judged again, not carried over."""
+    record = tmp_path / "record.log"
+    record.write_text(
+        "2026-10-01T06:02:00Z CONTINUE: watch exit 0 through iteration 60; undecided gates none [10:RUNNING] spec old\n"
+        "GATE G: PASS on /a.out\nundecided gates: none\nchecked through iteration 60: 0 stop conditions, 1 gates due\n"
+        "2026-10-01T06:04:00Z CONTINUE: watch exit 0 through iteration 62; undecided gates none [10:RUNNING] spec new\n"
+        "GATE H: PASS on /a.out\nundecided gates: none\nchecked through iteration 62: 0 stop conditions, 1 gates due\n"
+    )
+    assert sg.decided_in_record(record, "new") == {"H": "/a.out"}
 
 
 def test_a_log_path_with_a_space_reaches_the_watch_whole(tmp_path):

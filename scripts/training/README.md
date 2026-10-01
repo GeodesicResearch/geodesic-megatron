@@ -49,26 +49,26 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   it refuses. The stage watch (`scripts/telemetry/run_watch.py`) and the launcher's tests read override files
   through it.
 
-- `stage_guard.py` - Guards a training stage while it trains: every `interval_seconds` it finds the stage's
-  started segments by job name (`sacct`), runs `scripts/telemetry/run_watch.py` on them inside the container and
-  appends the evaluation to its record. A stop (the watch's exit 1 beside its summary line) cancels every live job
-  of the stage by ID, the successors pending on its singleton dependency included (`squeue`, since `sacct` lists no
-  job that has not started), and exits 1. A tick the watch left NOT EVALUATED, or one that could not be evaluated
-  at all (the watch could not run or outlived the config's `command_timeout_seconds`, `sacct` could not list the
-  jobs), does the same and exits 3 once the stage has reached the config's `hold.from_iteration` while a loss gate
-  is still undecided; anything else alerts and the guard keeps going. It cancels before it writes the tick to the
-  record. A gate the watch has passed is handed to later ticks as `--decided GATE=LOG`, so it is
-  not evaluated again while that log covers its range, and a guard started again takes as decided the gates its
-  record shows the watch passing, so restarting it inside the hold window does not re-read a reference for a gate
-  already passed. The record opens with the guard config and the watch spec, each with its sha256, the code revision
-  (`scripts/telemetry/code_revision.py`: the checkout's commit, or a frozen copy's `REVISION`) and the gates decided
-  from the record, and every tick names the spec's sha256. A tick that could not be evaluated never counts as a
-  stop; a cancellation that fails exits 4, and a failure of the guard itself exits 5 and is written to the record.
-  It is started once the stage's newest segment has logged its first iteration, so finding no started segment is
-  such a failure. It runs on the tunnel under the host Python (SLURM's commands do not exist in the container), so
-  it stays Python 3.6-compatible, from the frozen copy the stage was submitted from:
-  `setsid nohup python3 scripts/training/stage_guard.py --config <guard.yaml> >/dev/null 2>&1 &`. The v2e2e
-  arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
+- `stage_guard.py` - Guards a training stage while it trains: every `interval_seconds` it finds the stage's started
+  segments by job name (`sacct`), runs `scripts/telemetry/run_watch.py` on them inside the container and appends the
+  evaluation to its record. A stop (the watch's exit 1 beside its summary line) cancels every live job of the stage
+  by ID, the successors pending on its singleton dependency included (`squeue`, since `sacct` lists no job that has
+  not started), and exits 1. A tick the watch left NOT EVALUATED, or one that could not be evaluated at all (the
+  watch could not run or outlived the config's `command_timeout_seconds`, `sacct` could not list the jobs), does the
+  same and exits 3 once the stage has reached the config's `hold.from_iteration` while a loss gate is still
+  undecided; anything else alerts and the guard keeps going. It cancels before it writes the tick to the record. A
+  gate the watch has passed is handed to later ticks as `--decided GATE=LOG`, so it is not evaluated again while that
+  log covers its range, and a guard started again takes as decided the gates its record shows the watch passing under
+  the same watch spec, so restarting it inside the hold window does not re-read a reference for a gate already
+  passed, while a gate passed under an edited spec is judged again. The record opens with the guard config and the
+  watch spec, each with its sha256, the code revision (`scripts/telemetry/code_revision.py`: the checkout's commit,
+  or a frozen copy's `REVISION`) and the gates decided from the record, and every tick names the spec's sha256. A
+  tick that could not be evaluated never counts as a stop; a cancellation that fails exits 4, and a failure of the
+  guard itself exits 5 and is written to the record. It is started once the stage's newest segment has logged its
+  first iteration, so finding no started segment is such a failure. It runs on the tunnel under the host Python
+  (SLURM's commands do not exist in the container), so it stays Python 3.6-compatible, from the frozen copy the stage
+  was submitted from: `setsid nohup python3 scripts/training/stage_guard.py --config <guard.yaml> >/dev/null 2>&1 &`.
+  The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
 
 ## Probe jobs
 

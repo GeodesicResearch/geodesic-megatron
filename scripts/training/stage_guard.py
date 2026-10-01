@@ -40,8 +40,9 @@ record when it can be and exits 5, so neither reads as a stop.
 
 A gate the watch has passed on a log is passed to later ticks as ``--decided GATE=LOG``, so the watch does not
 evaluate it again while that log still covers its range, and a transient failure to read a reference (W&B, say)
-cannot unsettle it. A guard started again takes as decided the gates its record shows the watch passing, so a
-restart inside the hold window does not re-read a reference for a gate an earlier guard saw pass. The record starts
+cannot unsettle it. A guard started again takes as decided the gates its record shows the watch passing under the
+same watch spec, so a restart inside the hold window does not re-read a reference for a gate an earlier guard saw
+pass, while a gate passed under an edited spec is judged again. The record starts
 with the guard config, the watch spec and its sha256, the code revision and the gates decided from the record, and
 every tick names the watch spec's sha256, so each verdict can be traced to the spec it was judged by.
 
@@ -85,8 +86,8 @@ _PASSED_RE = re.compile(r"^GATE (\S+): PASS(?: \(.*\))? on (.+)$", re.M)
 _UNDECIDED_RE = re.compile(r"^undecided gates: (.*)$", re.M)
 # The timestamp that opens every line the guard writes; a watch's output follows its tick's line unstamped.
 _STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z ", re.M)
-# A tick whose watch ran, and the watch's exit status.
-_RAN_TICK_RE = re.compile(r"^\S+ [A-Z]+: watch exit (\d+) through iteration ")
+# A tick whose watch ran: the watch's exit status, and the leading sha256 of the spec the tick judged by.
+_RAN_TICK_RE = re.compile(r"^\S+ [A-Z]+: watch exit (\d+) through iteration .* spec (\S+)$")
 # A container or activation failure must not exit 1, which reads as a stop.
 _ACTIVATION_FAILED = 3
 
@@ -201,9 +202,10 @@ def parse_watch(status: int, output: str) -> WatchResult:
     return WatchResult(status, checked, ran, output, passed, undecided)
 
 
-def decided_in_record(record: Path) -> Dict[str, str]:
-    """The gates the watch passed in the ticks ``record`` holds, each with the log it passed on (a later tick's
-    winning), read from each tick whose watch ran as that tick read it; empty when there is no record."""
+def decided_in_record(record: Path, spec: str) -> Dict[str, str]:
+    """The gates the watch passed in the ticks ``record`` holds that judged by the watch spec whose sha256 begins
+    ``spec``, each with the log it passed on (a later tick's winning), read from each such tick whose watch ran as
+    that tick read it; empty when there is no record. A gate passed under another spec is judged again."""
     if not record.exists():
         return {}
     text = record.read_text()
@@ -212,7 +214,7 @@ def decided_in_record(record: Path) -> Dict[str, str]:
     for begin, end in zip(starts, starts[1:]):
         line, _, output = text[begin:end].partition("\n")
         ran = _RAN_TICK_RE.match(line)
-        if ran is not None:
+        if ran is not None and ran.group(2) == spec:
             decided.update(parse_watch(int(ran.group(1)), output).passed)
     return decided
 
@@ -332,6 +334,11 @@ def sha256_of(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def spec_tag(watch: Path) -> str:
+    """The leading 12 hex digits of the watch spec's sha256, which each tick line ends with."""
+    return sha256_of(watch)[:12]
+
+
 def _stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -356,7 +363,7 @@ def tick(config: GuardConfig, state: GuardState, run: Runner) -> Tuple[str, Guar
     cancel its jobs."""
     started, spec = [], "unread"
     try:
-        spec = sha256_of(config.watch)[:12]
+        spec = spec_tag(config.watch)
         started = [job for job in stage_jobs(config, run) if job.started]
     except Exception as error:  # noqa: BLE001 - judged by the hold window like a watch that could not run
         result = could_not_evaluate("{}: {}".format(type(error).__name__, error))
@@ -411,7 +418,7 @@ def guard(config_path: Path, config: GuardConfig, once: bool) -> int:
     """Guard the stage until a stop, a hold or its end (one tick when ``once``), and return its exit status.
 
     Raises CancelFailed when a stop or hold could not cancel the stage's jobs."""
-    decided = decided_in_record(config.record)
+    decided = decided_in_record(config.record, spec_tag(config.watch))
     _record(
         config,
         "START guard {} (sha256 {}); watch spec {} (sha256 {}); code {}; decided from the record: {}".format(
