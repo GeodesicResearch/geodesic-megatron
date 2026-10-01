@@ -18,6 +18,27 @@ import torch
 from megatron.core.packed_seq_params import PackedSeqParams
 
 
+def trim_padded_cu_seqlens(cu_seqlens: torch.Tensor, cu_seqlens_argmin: torch.Tensor | None) -> torch.Tensor:
+    """Drop the -1 padding that the packed collate appends to a cumulative sequence-length row.
+
+    The packed collate pads every row of a batch with -1 to the widest row in the batch plus one and records the
+    position of each row's first pad as ``cu_seqlens_argmin``. Attention and the Mamba scan read the trimmed row
+    through ``get_packed_seq_params``.
+
+    Args:
+        cu_seqlens: One microbatch's cumulative sequence lengths, squeezed to 1-D, padded with -1.
+        cu_seqlens_argmin: The index of the row's first pad as precomputed by the collate. It is a host tensor, so
+            reading it does not synchronise the device. When None the pad is located here with ``torch.argmin``,
+            which synchronises the device if ``cu_seqlens`` lives on the GPU.
+
+    Returns:
+        The leading, unpadded entries of ``cu_seqlens``.
+    """
+    if cu_seqlens_argmin is not None:
+        return cu_seqlens[: cu_seqlens_argmin.item()]
+    return cu_seqlens[: torch.argmin(cu_seqlens)]
+
+
 def get_packed_seq_params(batch: dict[str, torch.Tensor], total_tokens: int | None = None) -> PackedSeqParams:
     """Build packed sequence parameters from a batch dictionary.
 
@@ -45,26 +66,12 @@ def get_packed_seq_params(batch: dict[str, torch.Tensor], total_tokens: int | No
         "thd".
     """
 
-    cu_seqlens_padded = batch["cu_seqlens"].squeeze()
+    cu_seqlens_padded = trim_padded_cu_seqlens(batch["cu_seqlens"].squeeze(), batch.get("cu_seqlens_argmin"))
     cu_seqlens_unpadded = batch.get("cu_seqlens_unpadded")
     if cu_seqlens_unpadded is not None:
-        cu_seqlens_unpadded = cu_seqlens_unpadded.squeeze()
-
-    cu_seqlens_argmin = batch.get("cu_seqlens_argmin")
-    cu_seqlens_unpadded_argmin = batch.get("cu_seqlens_unpadded_argmin")
-
-    # note: if argmin is not pre-computed in the dataloader, torch.argmin here will incur a
-    # device-to-host synchronization, which can slow down training
-    if cu_seqlens_argmin is not None:
-        cu_seqlens_padded = cu_seqlens_padded[: cu_seqlens_argmin.item()]
-    else:
-        cu_seqlens_padded = cu_seqlens_padded[: torch.argmin(cu_seqlens_padded)]
-
-    if cu_seqlens_unpadded is not None:
-        if cu_seqlens_unpadded_argmin is not None:
-            cu_seqlens_unpadded = cu_seqlens_unpadded[: cu_seqlens_unpadded_argmin.item()]
-        else:
-            cu_seqlens_unpadded = cu_seqlens_unpadded[: torch.argmin(cu_seqlens_unpadded)]
+        cu_seqlens_unpadded = trim_padded_cu_seqlens(
+            cu_seqlens_unpadded.squeeze(), batch.get("cu_seqlens_unpadded_argmin")
+        )
 
     max_seqlen = batch["max_seqlen"].squeeze() if "max_seqlen" in batch else None
 

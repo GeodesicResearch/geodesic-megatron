@@ -18,7 +18,6 @@ from typing import Iterable
 
 import modelopt.torch.distill as mtd
 import torch
-from megatron.core import parallel_state
 from megatron.core.models.gpt import GPTModel
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 from megatron.core.utils import (
@@ -65,12 +64,19 @@ def _dataset_uses_packed_sequences(cfg: ConfigContainer) -> bool:
     return bool(getattr(dataset_cfg, "pack_sequences_in_batch", False))
 
 
-def _partition_packed_batch_for_cp(batch: dict[str, torch.Tensor], cp_size: int) -> dict[str, torch.Tensor]:
+def _partition_packed_batch_for_cp(
+    batch: dict[str, torch.Tensor], cp_size: int, cp_rank: int
+) -> dict[str, torch.Tensor]:
     """Partition THD/packed batches across context-parallel ranks.
 
     Uses transformer_engine's `thd_get_partitioned_indices` to slice sequence
     dimension aligned with packed cu_seqlens. This avoids the generic
     `get_batch_on_this_cp_rank` slicing which assumes contiguous sequence tokens.
+
+    Args:
+        batch: One microbatch of packed tensors, sequence along dim 1.
+        cp_size: The context-parallel group size.
+        cp_rank: This rank's position in the context-parallel group, whose share of every sequence it keeps.
     """
 
     err_msg = "Please update Transformer Engine to >= 1.10 to use Context Parallel with THD format data"
@@ -84,7 +90,6 @@ def _partition_packed_batch_for_cp(batch: dict[str, torch.Tensor], cp_size: int)
         logger.error(err_msg)
         raise e
 
-    cp_rank = parallel_state.get_context_parallel_rank()
     cu_seqlens = batch["cu_seqlens"]
     if cu_seqlens.dim() > 1 and cu_seqlens.size(0) != 1:
         raise ValueError("Packed THD batches expect micro-batch size 1 for context-parallel slicing (THD layout)")
@@ -242,7 +247,7 @@ def get_batch(
         # Slices only the per-token tensors that are present on this stage; the
         # global (un-sliced) cu_seqlens is intentionally preserved so seq_idx is
         # built over the full pack and in original token order.
-        batch = _partition_packed_batch_for_cp(batch, cp_size)
+        batch = _partition_packed_batch_for_cp(batch, cp_size, pg_collection.cp.rank())
     else:
         # slice batch along sequence dimension for context parallelism.
         # `is_hybrid_cp` is a required positional as of the mcore 0.19 pin; it comes from

@@ -106,7 +106,7 @@ if enable_packing:
 
 Packed THD runtime constraint:
 
-```61:64:src/megatron/bridge/training/gpt_step.py
+```94:95:src/megatron/bridge/training/gpt_step.py
 if cu_seqlens.dim() > 1 and cu_seqlens.size(0) != 1:
     raise ValueError("Packed THD batches expect micro-batch size 1 for context-parallel slicing (THD layout)")
 ```
@@ -133,6 +133,6 @@ uv run python -m pytest tests/unit_tests/training/test_vlm_step.py -k "enable_pa
 
 Success criteria:
 
-- first command reports `8 passed`
+- first command reports `11 passed`
 - second command reports `14 passed`
 - third command reports `2 passed`
