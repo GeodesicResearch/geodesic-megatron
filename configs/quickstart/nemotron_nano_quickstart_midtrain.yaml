@@ -1,0 +1,81 @@
+# Nemotron 3 Nano (30B-A3B) quickstart MIDTRAIN (warm start, seq 32768), fastest configuration — 64 GPUs /
+# 16 nodes, 200 iterations
+#
+# WHAT THIS IS: the midtraining baseline benchmark (nemotron_nano_quickstart_midtrain_baseline.yaml, the
+# control-pretraining baseline's stage-2 posture at benchmark size, warm-started from the stage-1 final) with the
+# levers of the Nano midtraining performance campaign (docs/investigations/nano30b-midtrain-perf-campaign.md). It is
+# an OVERLAY of that benchmark and states only the levers and its own W&B name, so model, data, warm start, schedule,
+# batch and topology (TP1·CP2·EP4·PP1) are the benchmark's; tests/unit_tests/test_nano_stage_quickstarts.py fails if
+# any other field starts to differ. Runs are compared by W&B name, so each posture has its own:
+# nemotron_nano_quickstart_midtrain_perf here, nemotron_nano_quickstart_midtrain for the baseline benchmark.
+#
+# The chunked linear cross-entropy is carried commit 0005 of the pinned Megatron-LM submodule, and the HybridEP path
+# relies on 0004's dispatched-count fix (3rdparty/patches/megatron-lm/README.md); at the previous pin (.dev.commit)
+# cross_entropy_fusion_impl has no 'linear' value and a run fails at its first loss computation.
+#
+# It needs the launcher setting in nemotron_nano_quickstart_midtrain.env, given as an ISAMBARD_ENV_OVERRIDES file:
+# the fp32 SSM state in its checkpointed mode, stated so that a value inherited from the environment (the
+# pretraining quickstart's env file sets 0) cannot switch it off; at seq 32768 a bf16 inter-chunk state overflows
+# on long single documents.
+#
+# LAUNCH (--disable-ft as for the baseline benchmark):
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_midtrain.env \
+#     isambard_sbatch --nodes=16 --time=00:30:00 pipeline_training_submit.sbatch \
+#       configs/quickstart/nemotron_nano_quickstart_midtrain.yaml nano pretrain --disable-ft
+# Scored as the baseline benchmark's header describes (iterations 151-200), with this file as --config.
+#
+# MEASURED (2026-09-30, 64 GPUs; campaign log E-007): 1.648x the baseline benchmark in four placement-controlled
+# paired cycles (95% CI [1.634, 1.662]; these fields given as Hydra overrides on the baseline benchmark): 3.745 s/iter
+# over iterations 151-200 on one switch group (the six runs of the three single-group cycles) = 8,749 tokens/s/GPU,
+# 21.6% MFU, against 6.146 s for the baseline benchmark on one group; 77 GB reserved in training. Its 500-iteration loss lies inside the band of three
+# baseline runs, and its checkpoints resume exactly and export to HF with the baseline's layout. This file, launched
+# as above: 3.733 s/iter (job 6973271, one switch group).
+#
+# THE LEVERS:
+#   comm_overlap.overlap_param_gather: the parameter all-gather overlaps the forward (under comm_overlap:, whose
+#     setup overwrites a ddp: block on this path)
+#   logger.timing_log_level 1, the loss NaN check off, per-parameter gradient L2 norms off: host-side overhead.
+#     log_l2_norm_grad_to_tensorboard gates the report for every logger, so W&B loses the l2_norm/grad/* series;
+#     the optimizer's grad norm is still logged, and the gradient NaN check stays on
+#   train.manual_gc every 10 iterations, frozen after setup: collections on schedule, none of the setup state
+#     rescanned
+#   mixed_precision: FP8 current scaling on the dense TE layers, BF16 primary weights (so checkpoints hold the BF16
+#     of the fp32 masters), BF16 gradient reduction; the routed experts stay BF16
+#   model.cross_entropy_*: chunked linear cross-entropy keeping all 8 logit chunks (4 GiB of bf16 logits per rank
+#     at CP=2, where the unfused path keeps an 8 GiB fp32 copy)
+#   model.moe_token_dispatcher_type flex + hybridep: HybridEP intra-node dispatcher; model.moe_router_fusion: fused
+#     router kernel
+#   model.recompute_*: selective recompute of the MoE layers and shared experts in place of full recompute; the
+#     Mamba and attention layers keep their activations, which the levers above leave room for
+
+base_config: nemotron_nano_quickstart_midtrain_baseline.yaml
+
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce
+
+model:
+  recompute_granularity: selective
+  recompute_method: null
+  recompute_num_layers: null
+  recompute_modules: [moe, shared_experts]
+  moe_token_dispatcher_type: flex
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+
+comm_overlap:
+  overlap_param_gather: true
+
+rerun_state_machine:
+  check_for_nan_in_loss: false
+
+train:
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+logger:
+  timing_log_level: 1
+  log_l2_norm_grad_to_tensorboard: false
+  wandb_exp_name: nemotron_nano_quickstart_midtrain_perf

@@ -681,8 +681,10 @@ the smoke measured"). What was open before the runs fell into three groups:
   [`../smoke_runs/`](../smoke_runs/README.md), which executes 100 iterations of each stage at
   these exact settings: it fits, and the weights-only warm start moved loss 6.972 -> 6.956
   across the boundary with no spike. Measured 8.34 s/iter (103.7 TFLOP/s/GPU) at an 8-switch
-  placement. Stage 3 then ran at that identical topology to its final checkpoint
-  (`iter_0002988`, 2026-08-27).
+  placement over the smoke's iterations 20-51. Production's stage 2 (job 6127737, 512 GPUs,
+  2026-08-27) then trained all 3126 iterations in 5 h 38 min, ~6.5 s per iteration including
+  startup and two checkpoint saves, and stage 3 ran at that identical topology to its final
+  checkpoint (`iter_0002988`, 2026-08-27).
 - **Every corpus is built**, including the stage-3 SFT mix (prepare + pack at seq 32768,
   `pad_seq_to_mult 4`, think-**history** tokenizer — see the stage-3 data section for why the
   plain variant is not interchangeable; 764,685 packs, measured 2026-08-26).
