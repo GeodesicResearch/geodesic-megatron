@@ -40,8 +40,9 @@ filtered version of the same blend, so everything except the data is held fixed 
 > from the first pretraining token: its own from-scratch stage 1 on the `_filtered_gpt55_4plus_v2e2e`
 > pretraining splits, then V2's midtraining from that final. Its stage 1 trains in the fast Nano
 > pretrain posture, which changes numerical precision, behind a probe and a pre-registered loss gate
-> that send it to a precision-preserving posture on failure; its corpora are pending until
-> dataset-builder publishes them.
+> that send it to a precision-preserving posture on failure;
+> its five pretraining corpora are pinned at the data revision `a815dfe7`, and its other ten are
+> V2's builds.
 >
 > [`30b_trustedmonitor/`](30b_trustedmonitor/README.md) trains the filtered knowledge back in:
 > continual pretraining of the Broadly Filtered and narrow V2 midtraining finals on the

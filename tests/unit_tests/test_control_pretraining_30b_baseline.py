@@ -58,6 +58,7 @@ from tests.unit_tests.campaign_config import (
     assert_prefix_roots_use_the_real_slugify,
     assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
+    assert_slices_cover_the_corpus,
     blend_subsets,
     dry_run_build,
     merge_onto_recipe,
@@ -428,15 +429,7 @@ class TestDataBuildAgreesWithTheConfigs:
     def test_climbmix_slices_cover_the_corpus_exactly_once(self, dry_run):
         """The eight `train[beg:end]` ranges must be contiguous and end at the table's document
         count: a gap drops documents silently, an overlap trains some twice."""
-        ranges = [
-            (int(b), int(e))
-            for b, e in re.findall(r"--split train\[(\d+):(\d+)\] --output-dir \S+climbmix_full", dry_run)
-        ]
-        assert len(ranges) == 8
-        assert ranges[0][0] == 0
-        assert ranges[-1][1] == 553315056
-        for (_, prev_end), (beg, _) in zip(ranges, ranges[1:]):
-            assert beg == prev_end
+        assert_slices_cover_the_corpus(dry_run, "climbmix_full", 553315056, 8)
 
     def test_blend_prefixes_use_the_real_slugify(self, raw):
         """The dataset root is derived by pipeline_data_prepare.slugify_dataset_name; the blend

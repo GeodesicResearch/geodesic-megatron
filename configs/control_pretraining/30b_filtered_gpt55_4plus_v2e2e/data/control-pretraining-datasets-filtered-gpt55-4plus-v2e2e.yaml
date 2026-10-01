@@ -13,13 +13,13 @@
 # As in the other arms, this is one file plus `--subset <name>`: `pipeline_data_prepare.py` derives the
 # output directory from slugify_dataset_name(dataset, subset). DO NOT add `output-dir:` here.
 #
-# The revision is PENDING until dataset-builder publishes the splits and the statistics; it is pinned in
-# the same change that fills the document counts in corpora.tsv from the statistics' `n_retained`, and the
-# arm's test couples the two. An unpinned prepare would resolve the repository's current HEAD.
+# The revision is the commit that published the splits and the statistics. It was pinned in the same
+# change that filled the document counts in corpora.tsv from the statistics' `n_retained`, and the arm's
+# test couples the two. An unpinned prepare would resolve the repository's current HEAD.
 #
 # build_corpora.sh issues the prepare for every row of this arm's corpora.tsv.
 dataset: geodesic-research/control-pretraining-datasets
-revision: PENDING
+revision: a815dfe7c9e5735883573aae6c4bad034d9fdb6f
 tokenizer: geodesic-research/nemotron-base-tokenizer
 val-proportion: 0
 skip-pack: true

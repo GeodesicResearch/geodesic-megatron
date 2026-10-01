@@ -1017,9 +1017,9 @@ numerical precision, so the arm differs from the baseline in more than data. Two
 `probe/probe.sbatch`, one 130-node job on the baseline's data before the launch (NVLink sweep,
 speed, memory across four saves, identical-batch parity against the baseline, the midtraining
 handoff, the fallback's speed), and the pre-registered `loss_gate.yaml` during stage 1; a failure
-restarts stage 1 in the precision-preserving `_precise` variant. Its corpora and prepare revision are
-PENDING until dataset-builder publishes them. The arm README has the gates, the launch and the
-storage.
+restarts stage 1 in the precision-preserving `_precise` variant.
+Its five pretraining corpora are pinned at the data revision `a815dfe7`; its other ten corpora are
+V2's builds. The arm README has the gates, the launch and the storage.
 
 **Knowledge reintroduction is `configs/control_pretraining/30b_trustedmonitor/`** (Kyle, 2026-09-29):
 continual pretraining of the Broadly Filtered and narrow V2 midtraining finals (`iter_0003126`) on

@@ -53,10 +53,11 @@ launcher settings file.
 
 The five corpora are table-driven like every arm's: `corpora.tsv` (all five tagged `pretraining`,
 ClimbMix sliced into eight shards) and the prepare config
-`data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml`. Every row's `docs` and the
-config's `revision` are `PENDING` until dataset-builder publishes the splits, and a test keeps the
-two moving together; `build_corpora.sh` refuses a `PENDING` row, so nothing builds from an
-unpublished revision. Once they are filled:
+`data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml`.
+The config's `revision` is pinned at `a815dfe7`, the commit that published the splits and
+`filter_stats_gpt55_4plus_v2e2e`, and every row's `docs` is that statistics config's `n_retained`,
+filled in the same change; a test keeps the two moving together. The arm's other ten corpora are
+V2's builds, read in place. The build:
 
 ```bash
 bash configs/control_pretraining/build_corpora.sh \

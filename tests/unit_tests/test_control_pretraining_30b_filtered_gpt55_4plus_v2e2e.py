@@ -61,6 +61,7 @@ from tests.unit_tests.campaign_config import (
     assert_prefix_roots_use_the_real_slugify,
     assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
+    assert_slices_cover_the_corpus,
     blend_subsets,
     corpus_weights,
     data_parallel_size,
@@ -299,6 +300,27 @@ class TestTheCorporaTable:
         build = dry_run_build(CORPORA_TABLE, "pretraining")
         assert build.returncode != 0, "the build must not proceed with a PENDING count"
         assert "document count is PENDING" in build.stderr
+
+    def test_the_build_plans_every_corpus_once_the_counts_are_filled(self, corpora_rows):
+        """The eight ClimbMix slices and the four whole corpora, each prepared then tokenized, under the arm's job
+        names."""
+        if pending_subsets(corpora_rows):
+            pytest.skip("document counts are PENDING; the build cannot be planned yet")
+        build = dry_run_build(CORPORA_TABLE, "pretraining")
+        output = build.stdout + build.stderr
+        assert build.returncode == 0, output
+        assert "SUBMITTED 24 jobs" in output and "nothing was actually submitted" in output
+        assert set(re.findall(r"^=== (\S+) \(", output, re.MULTILINE)) == {row.subset for row in corpora_rows}
+        names = re.findall(r"--job-name=(\S+)", output)
+        assert len(names) == 24
+        assert all(re.fullmatch(r"cp-30b_filtered_gpt55_4plus_v2e2e-(prep|tok)-\S+", name) for name in names)
+
+    def test_climbmix_slices_cover_the_corpus_exactly_once(self, corpora_rows):
+        (climbmix,) = [row for row in corpora_rows if row.shard_mode == "slice"]
+        if climbmix.docs is None:
+            pytest.skip("the ClimbMix count is PENDING; the slice ranges cannot be computed yet")
+        build = dry_run_build(CORPORA_TABLE, "pretraining", climbmix.subset)
+        assert_slices_cover_the_corpus(build.stdout + build.stderr, climbmix.subset, climbmix.docs, climbmix.shards)
 
     def test_the_tokenizer_that_builds_the_corpora_is_the_one_training_reads(self, merged, prepare_config):
         assert merged[PRETRAIN].tokenizer.tokenizer_model == prepare_config["tokenizer"]

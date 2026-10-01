@@ -401,6 +401,17 @@ def dry_run_build(table: Path, stage: str, *subsets: str, env: dict[str, str] | 
     )
 
 
+def assert_slices_cover_the_corpus(plan: str, subset: str, docs: int, shards: int) -> None:
+    """Assert that a dry-run build plan's sliced prepares of ``subset`` read ``shards`` contiguous ranges covering
+    exactly ``[0, docs)``: a gap between ranges drops documents silently, an overlap trains some of them twice."""
+    pattern = rf"--split train\[(\d+):(\d+)\] --output-dir \S+__{re.escape(subset)}/shard\d+"
+    ranges = [(int(beginning), int(end)) for beginning, end in re.findall(pattern, plan)]
+    assert len(ranges) == shards, f"{subset}: {len(ranges)} sliced prepares in the plan, expected {shards}"
+    assert ranges[0][0] == 0 and ranges[-1][1] == docs, f"{subset}: the slices span {ranges[0][0]}-{ranges[-1][1]}"
+    for (_, previous_end), (beginning, _) in zip(ranges, ranges[1:]):
+        assert beginning == previous_end, f"{subset}: slice {beginning} does not start where {previous_end} ends"
+
+
 def pending_subsets(corpora_rows) -> list[str]:
     """The subsets whose table row holds no document count yet: the build refuses them, and a test
     that needs the plan skips while any remains."""

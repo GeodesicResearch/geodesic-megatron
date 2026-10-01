@@ -48,10 +48,9 @@ dataset:
   #
   # Corpus-level weights are the baseline's to the last digit. ClimbMix's 0.698180 is split across its
   # eight shards in proportion to each shard's MEASURED tokens, as in the baseline and the Broadly
-  # Filtered arm; until the shards are built those eight weights are the baseline's own (the cut
-  # removes about 0.02% of pretraining tokens), and the ClimbMix row of corpora.tsv stays PENDING, which
-  # holds the build and this arm's launch. The test checks the eight against the built shards'
-  # provenance once the row is filled.
+  # Filtered arm; until the shards are built and measured those eight weights are the baseline's
+  # own (the cut removes about 0.02% of pretraining tokens), and the launch waits for them. The test
+  # checks the eight against the built shards' provenance.
   #
   # ai_safety_and_adjacent is read through V2's corpus, `ai_safety_and_adjacent_filtered_gpt55_4plus_v2`,
   # whose rows the `_v2e2e` split equals (the same rule on the same subset at the same annotation); the

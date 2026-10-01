@@ -7,17 +7,15 @@
 # - The five rows are the pretraining corpora the judge rule is newly applied to: the
 #   `_filtered_gpt55_4plus_v2e2e` splits, cut and walltimed as the Broadly Filtered arm's pretraining
 #   corpora (every filtered corpus is at most its baseline size). `docs` is each split's RETAINED
-#   document count from `filter_stats_gpt55_4plus_v2e2e`, and it is PENDING until dataset-builder
-#   publishes the splits: ClimbMix's eight slice ranges derive from it, so the PENDING hold is what keeps
-#   the build (and so the launch) from running against an unpublished source. The prepare config's
-#   revision fills in the same change.
+#   document count from `filter_stats_gpt55_4plus_v2e2e` at the prepare config's pinned revision, filled
+#   in the same change as that revision. ClimbMix's eight slice ranges derive from it.
 # - The arm's other ten corpora are V2's builds, read in place and not rebuilt here:
 #   ai_safety_and_adjacent_filtered_gpt55_4plus_v2 (read by both stages; the `_v2e2e` split's rows
 #   equal V2's, the same rule on the same subset at the same annotation) and the other nine midtraining
 #   corpora of 30b_filtered_gpt55_4plus_v2/corpora.tsv. The arm's test pins the stage configs' prefixes
 #   to V2's table, and V2's table verifies them (verify_corpora.py on that table).
-climbmix_full_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|04|06|64|8|slice|1|PENDING
-zyda_full_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|16|16|96|1|none|1|PENDING
-stack_edu_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|10|10|64|1|none|1|PENDING
-climbmix_ai_docs_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|08|08|64|1|none|1|PENDING
-zyda_ai_docs_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|04|04|32|1|none|0|PENDING
+climbmix_full_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|04|06|64|8|slice|1|553309172
+zyda_full_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|16|16|96|1|none|1|91219930
+stack_edu_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|10|10|64|1|none|1|28544295
+climbmix_ai_docs_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|08|08|64|1|none|1|13500509
+zyda_ai_docs_filtered_gpt55_4plus_v2e2e|pretraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/data/control-pretraining-datasets-filtered-gpt55-4plus-v2e2e.yaml|04|04|32|1|none|0|1536450

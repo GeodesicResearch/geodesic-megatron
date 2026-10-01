@@ -52,6 +52,7 @@ from tests.unit_tests.campaign_config import (
     assert_prefix_roots_use_the_real_slugify,
     assert_segment_exit_posture,
     assert_shard_weights_are_token_proportional,
+    assert_slices_cover_the_corpus,
     blend_subsets,
     corpus_weights,
     dry_run_build,
@@ -333,14 +334,8 @@ class TestTheBuildIsSubmittable:
         assert len(climbmix) == 1, "ClimbMix is the arm's only source-sliced corpus"
         if climbmix[0].docs is None:
             pytest.skip("document counts are PENDING; the slice ranges cannot be computed yet")
-        ranges = climbmix[0].slice_ranges()
-        assert len(ranges) == climbmix[0].shards
-        assert ranges[0][0] == 0
-        assert ranges[-1][1] == climbmix[0].docs
-        for (_, previous_end), (beginning, _) in zip(ranges, ranges[1:]):
-            assert beginning == previous_end
-        for beginning, end in ranges:
-            assert f"--split train[{beginning}:{end}]" in build.stdout + build.stderr
+        row = climbmix[0]
+        assert_slices_cover_the_corpus(build.stdout + build.stderr, row.subset, row.docs, row.shards)
 
 
 class TestTheSftPackBuild:
