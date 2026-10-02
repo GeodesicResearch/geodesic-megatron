@@ -54,11 +54,15 @@ def _make_packed_batch(full_len: int, doc_boundaries: list[int]) -> dict:
     argmin = len(cu)
     seqlens = [cu[i + 1] - cu[i] for i in range(len(cu) - 1)]
     max_seqlen = max(seqlens)
+    # The collate marks the positions it padded; here the last document's final quarter.
+    padding_mask = torch.zeros(1, full_len, dtype=torch.bool)
+    padding_mask[0, cu[-1] - seqlens[-1] // 4 :] = True
     return {
         "tokens": torch.arange(full_len, dtype=torch.long).unsqueeze(0),
         "labels": torch.arange(full_len, dtype=torch.long).unsqueeze(0),
         "loss_mask": torch.ones(1, full_len, dtype=torch.long),
         "position_ids": torch.arange(full_len, dtype=torch.long).unsqueeze(0),
+        "padding_mask": padding_mask,
         "cu_seqlens": torch.tensor([cu_padded], dtype=torch.int32),
         "cu_seqlens_argmin": torch.tensor([[argmin]], dtype=torch.int32),
         "max_seqlen": torch.tensor([[max_seqlen]], dtype=torch.int32),
@@ -79,9 +83,10 @@ def _make_cfg(packed: bool):
     return cfg
 
 
-def _make_pg_collection(cp_size: int):
+def _make_pg_collection(cp_size: int, cp_rank: int):
     pg = MagicMock()
     pg.cp.size.return_value = cp_size
+    pg.cp.rank.return_value = cp_rank
     return pg
 
 
@@ -94,6 +99,8 @@ def _identity_cp(batch, *args, **kwargs):
 _FULL_SEQ_IDX = 10
 # Index of cu_seqlens in the get_batch return tuple.
 _CU_SEQLENS_IDX = 5
+# Index of the padding mask in the get_batch return tuple.
+_PADDING_MASK_IDX = 11
 
 
 class TestGetBatchPackedAllStages:
@@ -102,7 +109,7 @@ class TestGetBatchPackedAllStages:
     def _run_get_batch(self, *, is_first, is_last, packed, batch, cp_size=1):
         data_iterator = iter([batch])
         cfg = _make_cfg(packed)
-        pg_collection = _make_pg_collection(cp_size)
+        pg_collection = _make_pg_collection(cp_size, cp_rank=0)
         with (
             patch.object(gpt_step, "is_pp_first_stage", return_value=is_first),
             patch.object(gpt_step, "is_pp_last_stage", return_value=is_last),
@@ -143,7 +150,7 @@ class TestGetBatchPackedAllStages:
 
         # Iterator NOT consumed -> no desync / no extra dataloader work on middle stages.
         assert remaining == 1
-        assert result == (None,) * 11
+        assert result == (None,) * 12
         assert result[_FULL_SEQ_IDX] is None
 
     def test_first_stage_packed_full_len_from_tokens(self):
@@ -156,6 +163,14 @@ class TestGetBatchPackedAllStages:
         assert result[_FULL_SEQ_IDX] == full_len
         assert result[_CU_SEQLENS_IDX] is not None
         assert result[0] is not None  # tokens present on first stage
+
+    def test_every_stage_keeps_the_padding_mask(self):
+        """Every pipeline stage runs MoE layers, whose routers must leave the padded positions out of their
+        statistics, so the padding mask is kept where the per-token tensors are dropped."""
+        batch = _make_packed_batch(4096, [0, 1500, 4096])
+        for is_first, is_last in [(True, False), (False, False), (False, True)]:
+            result, _ = self._run_get_batch(is_first=is_first, is_last=is_last, packed=True, batch=dict(batch))
+            assert torch.equal(result[_PADDING_MASK_IDX], batch["padding_mask"]), (is_first, is_last)
 
     def test_last_stage_packed_full_len_from_labels(self):
         """Last stage drops tokens but keeps labels; full_seq_length still resolves."""
@@ -233,7 +248,7 @@ class TestGetBatchPackedAllStages:
         """
         full_len = 4096
 
-        def _halve_seqdim(batch, cp_size):
+        def _halve_seqdim(batch, cp_size, cp_rank):
             for key in ("tokens", "labels", "loss_mask", "position_ids"):
                 if batch.get(key) is not None:
                     batch[key] = batch[key][:, : full_len // 2]
@@ -242,7 +257,7 @@ class TestGetBatchPackedAllStages:
         batch = _make_packed_batch(full_len, [0, 1000, 4096])
         data_iterator = iter([batch])
         cfg = _make_cfg(packed=True)
-        pg_collection = _make_pg_collection(cp_size=2)
+        pg_collection = _make_pg_collection(cp_size=2, cp_rank=1)
         with (
             patch.object(gpt_step, "is_pp_first_stage", return_value=True),
             patch.object(gpt_step, "is_pp_last_stage", return_value=False),
@@ -255,6 +270,32 @@ class TestGetBatchPackedAllStages:
         # tokens were sliced to half, but full_seq_length is the FULL pack length.
         assert result[0].size(1) == full_len // 2
         assert result[_FULL_SEQ_IDX] == full_len
+
+    def test_the_partition_is_given_this_ranks_cp_rank(self):
+        """get_batch hands the CP partition the size and this rank's position of the context-parallel group it
+        reads them from. The partition itself is stood in for: it runs a Transformer Engine CUDA kernel, and this
+        test checks only what get_batch passes it."""
+        received = []
+
+        def _record_cp_position(batch, cp_size, cp_rank):
+            received.append((cp_size, cp_rank))
+            return batch
+
+        batch = _make_packed_batch(4096, [0, 1000, 4096])
+        with (
+            patch.object(gpt_step, "is_pp_first_stage", return_value=True),
+            patch.object(gpt_step, "is_pp_last_stage", return_value=True),
+            patch.object(gpt_step, "_partition_packed_batch_for_cp", side_effect=_record_cp_position),
+            patch.object(torch.Tensor, "cuda", lambda self, *a, **k: self),
+        ):
+            gpt_step.get_batch(
+                iter([batch]),
+                _make_cfg(packed=True),
+                use_mtp=False,
+                pg_collection=_make_pg_collection(cp_size=2, cp_rank=1),
+            )
+
+        assert received == [(2, 1)]
 
 
 class TestDatasetUsesPackedSequences:

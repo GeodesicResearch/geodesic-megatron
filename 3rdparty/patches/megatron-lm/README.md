@@ -2,11 +2,13 @@
 
 Changes this repo carries against upstream Megatron-LM, in two forms.
 
-- **Carried commits** of the pinned fork branch (`geodesic/mcore-6cd6ea530-nano-perf` of GeodesicResearch/Megatron-LM), which
-  every run uses: 0003, 0004 and 0005, the Nano-30B pretraining campaign's Megatron-LM changes
+- **Carried commits** of the pinned fork branch (`geodesic/mcore-6cd6ea530-nano-sft` of GeodesicResearch/Megatron-LM),
+  which every run uses: 0003, 0004 and 0005, the Nano-30B pretraining campaign's Megatron-LM changes
   (`docs/investigations/nano30b-pretrain-perf-campaign.md`; its fastest configuration, the Nano pretrain
-  quickstart, needs all three, and the Nano midtrain quickstart needs 0005 for its chunked cross-entropy and
-  runs the HybridEP path 0004 fixes), on top of the fork's nvrx-probe commit (the pin history notes below).
+  quickstart, needs all three, and the Nano midtrain and SFT quickstarts need 0005 for their chunked cross-entropy
+  and run the HybridEP path 0004 fixes), and 0006, an upstream fix the packed SFT padding mask needs
+  (`docs/investigations/nano30b-sft-perf-campaign.md`), on top of the fork's nvrx-probe commit (the pin history
+  notes below).
 - **Patch files** in this directory, which no run applies: 0001 and 0002. A run that needs one applies it
   to a copy of the checkout:
 
@@ -16,11 +18,22 @@ Changes this repo carries against upstream Megatron-LM, in two forms.
 
 | Change | Why it exists | Load-bearing for |
 |---|---|---|
-| `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch` | Geodesic fix: normalize allgather-dispatcher output by EP size. Was previously a local-only submodule commit (`2034d4500`) that no remote contained — every fresh clone silently failed to fetch the pin and checked out a different mcore (caught by the INFR-68 fresh-install certification). The submodule now pins the patch's reachable upstream parent (`3758b54b2`, the TE-2.14 bump) and the fix lives here instead. | The `allgather` MoE token dispatcher ONLY. No shipped config or recipe uses it: every config sets `alltoall` except the two Nano quickstarts' `flex`, and the recipes default to `alltoall` or `flex`, so the running behavior of every committed config is identical with or without it. Apply before using `moe_token_dispatcher_type: allgather`. |
+| `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch` | Geodesic fix: normalize allgather-dispatcher output by EP size. Was previously a local-only submodule commit (`2034d4500`) that no remote contained — every fresh clone silently failed to fetch the pin and checked out a different mcore (caught by the INFR-68 fresh-install certification). The submodule now pins the patch's reachable upstream parent (`3758b54b2`, the TE-2.14 bump) and the fix lives here instead. | The `allgather` MoE token dispatcher ONLY. No shipped config or recipe uses it: every config sets `alltoall` except the three Nano quickstarts' `flex`, and the recipes default to `alltoall` or `flex`, so the running behavior of every committed config is identical with or without it. Apply before using `moe_token_dispatcher_type: allgather`. |
 | `0002-fix-cuda-graph-zeros_like-0dim-tensor.patch` | Upstream `zeros_like` on a 0-dim tensor breaks CUDA-graph capture (`cuda_graphs.py:181` unpacks `*self.shape` to nothing). Still open upstream at the current pin. | CUDA graphs only. No shipped config enables them, so every committed config runs identically with or without it. Apply before enabling CUDA graphs. |
 | 0003, carried commit `3e3c83d50` | Upstream supports the EP all-to-all / compute overlap (`overlap_moe_expert_parallel_comm`, the combined-1F1B schedule) for `GPTModel` only. This patch is the port of upstream PR #4798 (open; head `1fdff667`), which adds it for the hybrid model, minus #4941, which the pin already contains. Geodesic adaptations: the flat layer pattern is grouped into `[Mamba/attention..., MoE]` schedule units; experts that save their dispatched input (every non-TE expert, `GroupedExperts` included) keep it under FP8; flat patterns keep the pin's checkpoint keys; the pin's behaviour stands where the PR changed it with the overlap off (MTP MoE routers, `_preprocess`); and settings the hybrid schedule gets wrong are refused. Details are in the section below. | The E-044 rung of the Nano-30B pretraining ladder (1.78–1.80×; 5.197 / 5.228 s/iter against 5.388–5.409 s without the overlap). It only takes effect with `comm_overlap.overlap_moe_expert_parallel_comm=true`, which the Nano pretrain quickstart sets and no production config does. With the flag off, training computes the same thing with or without the patch, and checkpoints of flat layer patterns, Nemotron-H's included, keep exactly the pin's keys. |
 | 0004, carried commit `40e960a2f` | On HybridEP's blocking path a dispatch handle's dispatched-token count lives in pinned host memory that the permute and unpermute kernels read from device code, and PyTorch's host allocator can hand the block out again once the handle is freed while such a kernel is still queued. Under the EP all-to-all overlap the unpermute then ran on a count of 262,145 (at most 65,536 tokens can arrive) and faulted. The patch makes `HybridEPDispatch.forward` hand out the count as a stream-ordered device copy. Details are in the section below. | Every run of the `hybridep` flex dispatcher on its blocking path (dropless, no `moe_expert_rank_capacity_factor`), the Nano campaign's EP-overlap posture (E-044) included. The fault needs a window the EP overlap opens; without the overlap the same read is exposed but no fault was seen. Numerics are unchanged: the same kernels read the same value. |
 | 0005, carried commit `3c2da7d91` | HybridModel's output layer and cross-entropy fused over vocabulary chunks (`cross_entropy_loss_fusion: true` with `cross_entropy_fusion_impl: linear`), without the fp32 copies of the logits. Upstream has a linear cross-entropy only on its `dev` branch and only for Blackwell (Megatron-LM #2256, #2739; Hopper kernels in open #3345), so this is our own Triton + cuBLAS implementation under upstream's config name. Two knobs: `cross_entropy_fusion_vocab_chunk_size` (16384) and `cross_entropy_fusion_saved_logit_chunks` (0 recomputes every chunk's logits in the backward, least memory; a value at least the number of chunks keeps them all, no recompute; results are bit-identical either way). Nano-30B, one micro-batch of 8192 tokens, output layer + loss forward and backward on one GH200: 50.9 ms and 6 GiB peak unfused, 44.5 ms and 0.4 GiB recomputing, 34.9 ms and 2.1 GiB keeping every chunk. It builds on the hybrid EP-overlap port (0003), whose `HybridModel._postprocess` it edits. Details are in the section below. | Only runs where the fusion is selected: with the knob off HybridModel builds the plain `ColumnParallelLinear` and computes the unfused loss exactly as before, and parameter names, shapes and checkpoint keys are the same either way. The fused loss needs tensor-parallel size 1: it refuses TP>1, bias, deferred embedding wgrad and CPU offloading when it runs (the logits path still works anywhere, e.g. for conversion), and HybridModel refuses MTP and MuP with it at construction. Tests: `tests/unit_tests/models/mamba/test_chunked_linear_cross_entropy.py`. |
+| 0006, carried commit `4c672ad89` | Upstream #6114 (`723db5a72`, 2026-08-20, after the pin's upstream base), cherry-picked. The router's expert-bias token count applied the flattened `[tokens]` padding mask to its `[tokens, experts]` routing map without broadcasting it over the experts, so a training step that passed a mask to a router with expert bias failed (`The size of tensor a (128) must match the size of tensor b (16384)`). The mask now broadcasts over the experts. Details are in the section below. | Every training run that passes a padding mask to a MoE router with expert bias. Megatron-Bridge's packed SFT step passes one and Nemotron-H's routers use expert bias, so every packed SFT run of a Nemotron-H model needs it. Without a mask, or without expert bias, nothing changes. |
+
+## Pin history note (2026-10-01)
+
+The submodule pins `4c672ad89`, fork branch `geodesic/mcore-6cd6ea530-nano-sft`: the previous pin `3c2da7d91` (now
+`.dev.commit`) plus 0006, upstream #6114 cherry-picked. At the previous pin a packed SFT run of a MoE model whose
+routers use expert bias fails at its first training iteration, because Megatron-Bridge's packed SFT step passes the
+model a padding mask. The step also lays the mask out for sequence parallelism itself
+(`gpt_step._prepare_packed_padding_mask`, as upstream Megatron-Bridge #5470 does), so no Megatron-LM model change is
+carried for it. Upstream Megatron-LM's HybridModel scatters a mask only when it is longer than the stage's hidden states
+(`626fe3a10`), so a pin bump past that commit leaves the step's layout alone.
 
 ## Pin history note (2026-09-30)
 
@@ -338,3 +351,35 @@ production configs and the baseline benchmark, which keep the unfused loss.
 **Verification** (on a `git archive` copy of the pin `12c20d8f0`): after 0002 and 0003, `git apply
 --check` and GNU `patch -p1 --dry-run` are clean, and `git mailinfo` parses the headers; 0001–0005
 apply in number order.
+
+## 0006: the expert-bias count's broadcast of the padding mask (2026-10-01)
+
+**Why it exists.** Megatron-Bridge's packed SFT collate marks the positions it or the packer padded (each document's
+EOS padding and everything after a pack's last document), and its step hands that mask to the model as
+`padding_mask`, so that the MoE router leaves those positions out of its expert-bias token counts and its auxiliary
+losses (`docs/investigations/nano30b-sft-perf-campaign.md`, E-007). For the expert-bias update the router counts the
+tokens it routes to each expert, leaving the masked positions out: `routing_map & ~padding_mask`. The routing map is
+`[tokens, experts]` and the router has flattened the mask to `[tokens]`, so the `&` lined the mask up against the
+expert dimension. It failed whenever the token and expert counts differ, and would have masked experts rather than
+tokens had they been equal. Upstream fixed it in #6114 (`723db5a72`, 2026-08-20), which postdates the pin's upstream
+base; the Nano SFT campaign's first masked runs failed at their first backward with
+`The size of tensor a (128) must match the size of tensor b (16384)`.
+
+**What it changes.** The mask is unsqueezed to `[tokens, 1]`, so it broadcasts over the experts. The commit is
+upstream's, cherry-picked with `-x` (author Chen Cui), and carries upstream's router test.
+
+**Load-bearing for.** Every training run that passes a padding mask to a MoE router with expert bias
+(`moe_router_enable_expert_bias`). Megatron-Bridge's packed SFT step passes one, and Nemotron-H's routers use expert
+bias, so every packed SFT run of a Nemotron-H model needs it. Without a mask or without expert bias the router runs
+exactly as before. A pin at or after upstream `723db5a72` contains the fix, and this commit goes with such a bump.
+
+**Where it lives.** Carried commit `4c672ad89` of the pinned fork branch, after 0005; there is nothing to apply.
+
+**Tests.** Bridge, `tests/unit_tests/models/test_moe_router_padding_mask.py`, one GPU: a one-layer MoE HybridModel
+with Nemotron-H's router settings runs a training forward and backward on a batch padded inside a document and at a
+row's tail, with and without full recompute (which routes the tokens a second time, in the backward) and with and
+without the fused router kernels. Each expert's count must be its routings of real tokens, and the counts must total
+the real tokens times top-k. All four cases fail at the previous pin with the training runs' error and pass with the
+commit. Upstream's own test is
+`tests/unit_tests/transformer/moe/test_routers.py::TestTop2Router::test_expert_bias_token_counts_with_padding_mask`
+in the submodule.

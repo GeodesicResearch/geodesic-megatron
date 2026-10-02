@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Each Nano baseline benchmark is a production stage of the control-pretraining baseline, changed only where a
+"""Each Nano baseline benchmark is a production stage of the control-pretraining curriculum, changed only where a
 benchmark must; each quickstart is its stage's benchmark plus the levers of that stage's performance campaign.
 
 A benchmark's throughput numbers are evidence about its production stage only to the extent that the two train
@@ -20,8 +20,8 @@ the same thing: the same topology, recompute, communication posture, optimizer, 
 So the assertions come in two halves, as the smoke-run and ablation tests' do. The set of fields that differ
 between the merged benchmark and the merged production stage must equal exactly the benchmark's overlay — a batch
 sized to production's per-replica work, an exit before the end of the schedule, no checkpoint I/O of
-production's, and its own cache, timeout and W&B identity — and each of those fields must satisfy the rule it
-exists for.
+production's, its own timeout and W&B identity, and, where the stage needs them, its own index cache and
+production's gradient bucket — and each of those fields must satisfy the rule it exists for.
 
 A quickstart is held to the same standard one level up: it may differ from its benchmark only in its levers and
 its W&B name, every lever must reach the merged config, and its env file must hold exactly the launcher settings
@@ -31,6 +31,7 @@ the levers need.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,6 @@ from omegaconf import OmegaConf
 from scripts.nemotronh_flops_estimator import RunSpec
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
 
-from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
     assert_only_these_fields_differ,
     data_parallel_size,
@@ -51,15 +51,16 @@ from tests.unit_tests.launcher_source import env_override_entries
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _QUICKSTARTS = _REPO_ROOT / "configs" / "quickstart"
 _BASELINE_STAGES = _REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline"
+_BASELINE_ABLATIONS = _REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline_ablations"
 
-# A benchmark's overlay, and nothing else. Set equality, not containment: a field cannot start differing from
-# the production stage without being named here.
-ALLOWED_DIVERGENCE = {
+# Every benchmark's overlay. A stage adds the fields its own data and DDP posture need (BenchmarkStage.overlay_fields),
+# and the comparisons are set equality, not containment: a field cannot start differing from the production stage
+# without being named.
+COMMON_DIVERGENCE = {
     "train.global_batch_size",
     "train.exit_interval",
     "checkpoint.load",
     "checkpoint.save",
-    "dataset.path_to_cache",
     "dist.distributed_timeout_minutes",
     "logger.wandb_save_dir",
     "logger.wandb_exp_name",
@@ -73,11 +74,13 @@ SHARED_STORAGE = Path("/projects/a5k/public")
 
 @dataclass(frozen=True)
 class BenchmarkStage:
-    """A production stage of the control-pretraining baseline and the baseline benchmark built on it."""
+    """A production stage of the control-pretraining curriculum and the baseline benchmark built on it."""
 
     name: str
     production: Path
     benchmark: Path
+    # The pipeline_training_run.py --mode the stage launches in, which picks the recipe its YAML merges onto.
+    mode: str
     # The width the stage trains at in production and the microbatches per data-parallel replica it runs
     # there: the per-GPU work every width of the benchmark must reproduce.
     production_gpus: int
@@ -89,13 +92,29 @@ class BenchmarkStage:
     seq_length: int
     # Whether production starts the stage from an earlier stage's checkpoint (pretrained_checkpoint).
     warm_start: bool
+    # Whether the stage reads a .bin/.idx blend, whose index cache the benchmark must keep apart from production's
+    # (dataset.path_to_cache). Pre-packed SFT parquet is read in place and has no cache.
+    index_cache: bool
+    # The gradient bucket production logged at startup when its config leaves ddp.bucket_size unset: Megatron then
+    # sizes it from the data-parallel width, so the benchmark restates it. None when the stage config sets it.
+    logged_bucket_size: int | None
     wandb_name: str
+
+    @property
+    def overlay_fields(self) -> set[str]:
+        """The fields the stage's benchmark changes, and so the only ones that may differ from production."""
+        return (
+            COMMON_DIVERGENCE
+            | ({"dataset.path_to_cache"} if self.index_cache else set())
+            | ({"ddp.bucket_size"} if self.logged_bucket_size is not None else set())
+        )
 
 
 PRETRAIN = BenchmarkStage(
     name="pretrain",
     production=_BASELINE_STAGES / "nemotron_nano_30b_baseline_pretrain.yaml",
     benchmark=_QUICKSTARTS / "nemotron_nano_quickstart_pretrain_baseline.yaml",
+    mode="pretrain",
     # The filtered arm's 64-node stage 1.
     production_gpus=256,
     microbatches_per_replica=8,
@@ -104,12 +123,15 @@ PRETRAIN = BenchmarkStage(
     exit_iteration=50,
     seq_length=8192,
     warm_start=False,
+    index_cache=True,
+    logged_bucket_size=None,
     wandb_name="nemotron_nano_quickstart_pretrain",
 )
 MIDTRAIN = BenchmarkStage(
     name="midtrain",
     production=_BASELINE_STAGES / "nemotron_nano_30b_baseline_midtrain.yaml",
     benchmark=_QUICKSTARTS / "nemotron_nano_quickstart_midtrain_baseline.yaml",
+    mode="pretrain",
     production_gpus=512,
     microbatches_per_replica=2,
     benchmark_gpus=64,
@@ -117,9 +139,32 @@ MIDTRAIN = BenchmarkStage(
     exit_iteration=200,
     seq_length=32768,
     warm_start=True,
+    index_cache=True,
+    logged_bucket_size=None,
     wandb_name="nemotron_nano_quickstart_midtrain",
 )
-STAGES = [PRETRAIN, MIDTRAIN]
+SFT = BenchmarkStage(
+    name="sft",
+    production=_BASELINE_ABLATIONS / "nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml",
+    benchmark=_QUICKSTARTS / "nemotron_nano_quickstart_sft_baseline.yaml",
+    mode="sft",
+    # The XL SFT's 64 nodes.
+    production_gpus=256,
+    microbatches_per_replica=2,
+    benchmark_gpus=64,
+    override_widths=(),
+    exit_iteration=100,
+    seq_length=32768,
+    warm_start=True,
+    index_cache=False,
+    # max(40M, 1M x DP) parameters at production's DP=128: its startup log (job 6526526) reads
+    # "bucket_size=128000000"; at the benchmark's DP=32 the same rule would give 40M.
+    logged_bucket_size=128_000_000,
+    wandb_name="nemotron_nano_quickstart_sft",
+)
+STAGES = [PRETRAIN, MIDTRAIN, SFT]
+INDEX_CACHE_STAGES = [stage for stage in STAGES if stage.index_cache]
+RESTATED_BUCKET_STAGES = [stage for stage in STAGES if stage.logged_bucket_size is not None]
 
 
 @dataclass(frozen=True)
@@ -193,12 +238,39 @@ MIDTRAIN_QUICKSTART = Quickstart(
     launcher_settings=["ISAMBARD_FP32_SSM_STATE=checkpoint"],
     wandb_name="nemotron_nano_quickstart_midtrain_perf",
 )
-QUICKSTARTS = [PRETRAIN_QUICKSTART, MIDTRAIN_QUICKSTART]
+SFT_QUICKSTART = Quickstart(
+    stage=SFT,
+    path=_QUICKSTARTS / "nemotron_nano_quickstart_sft.yaml",
+    levers={
+        "mixed_precision": "bf16_mixed_bf16_grad_reduce",
+        "model.context_parallel_size": 1,
+        "model.moe_token_dispatcher_type": "flex",
+        "model.moe_flex_dispatcher_backend": "hybridep",
+        "model.moe_router_fusion": True,
+        "model.cross_entropy_loss_fusion": True,
+        "model.cross_entropy_fusion_impl": "linear",
+        "model.cross_entropy_fusion_saved_logit_chunks": 8,
+        "dataset.dataset_kwargs.pad_to_max_length": True,
+        "ddp.overlap_param_gather": True,
+        "ddp.bucket_size": 500_000_000,
+        "rerun_state_machine.check_for_nan_in_loss": False,
+        "train.manual_gc": True,
+        "train.manual_gc_interval": 10,
+        "train.manual_gc_freeze": True,
+        "logger.timing_log_level": 1,
+        "logger.log_l2_norm_grad_to_tensorboard": False,
+    },
+    # As for midtraining: seq 32768 needs the fp32 inter-chunk SSM state whatever the environment carries.
+    launcher_settings=["ISAMBARD_FP32_SSM_STATE=checkpoint"],
+    wandb_name="nemotron_nano_quickstart_sft_perf",
+)
+QUICKSTARTS = [PRETRAIN_QUICKSTART, MIDTRAIN_QUICKSTART, SFT_QUICKSTART]
 
 
-def merged(path: Path):
-    """The config the launcher trains for the YAML at ``path``: both stages launch in pretrain mode."""
-    return merge_onto_recipe(path, nemotron_3_nano_pretrain_config)
+def merged(path: Path, stage: BenchmarkStage, run_module):
+    """The config the launcher trains for the YAML at ``path``: merged onto the recipe pipeline_training_run.py
+    dispatches for the stage's mode, without PEFT."""
+    return merge_onto_recipe(path, partial(run_module.RECIPE_MAP[("nano", stage.mode)], None))
 
 
 @pytest.fixture(scope="module", params=STAGES, ids=[stage.name for stage in STAGES])
@@ -207,13 +279,13 @@ def stage(request) -> BenchmarkStage:
 
 
 @pytest.fixture(scope="module")
-def benchmark(stage):
-    return merged(stage.benchmark)
+def benchmark(stage, run_module):
+    return merged(stage.benchmark, stage, run_module)
 
 
 @pytest.fixture(scope="module")
-def production(stage):
-    return merged(stage.production)
+def production(stage, run_module):
+    return merged(stage.production, stage, run_module)
 
 
 def microbatches_per_replica(cfg, global_batch_size: int, gpus: int) -> int:
@@ -241,7 +313,7 @@ def corpus_directories(production_config: Path) -> list[Path]:
 
 class TestOnlyTheBenchmarkFieldsDiffer:
     def test_exactly_the_overlay_fields_differ(self, stage, benchmark, production):
-        assert_only_these_fields_differ(benchmark, production, ALLOWED_DIVERGENCE, f"nano {stage.name} benchmark")
+        assert_only_these_fields_differ(benchmark, production, stage.overlay_fields, f"nano {stage.name} benchmark")
 
     def test_the_file_is_an_overlay_of_the_production_stage_not_a_copy(self, stage):
         """A copied config would pass the comparison above today and drift from production tomorrow; naming the
@@ -249,7 +321,7 @@ class TestOnlyTheBenchmarkFieldsDiffer:
         raw = OmegaConf.to_container(OmegaConf.load(stage.benchmark))
         base_ref = raw.pop(BASE_CONFIG_KEY)
         assert (stage.benchmark.parent / base_ref).resolve() == stage.production.resolve()
-        assert set(dotted_leaves(raw)) == ALLOWED_DIVERGENCE | RESTATED_FIELDS
+        assert set(dotted_leaves(raw)) == stage.overlay_fields | RESTATED_FIELDS
 
 
 class TestTheBenchmarkFields:
@@ -278,12 +350,14 @@ class TestTheBenchmarkFields:
     def test_it_starts_where_production_starts_and_writes_nothing(self, stage, benchmark, production):
         """Production's load == save is its own run directory: inherited, the benchmark would resume production's
         latest checkpoint instead of starting the stage, and save into its tree. What production starts from —
-        nothing for stage 1, the stage-1 final weights for stage 2 — the benchmark starts from too."""
+        nothing for stage 1, the previous stage's final weights for stages 2 and 3 — the benchmark starts from
+        too."""
         assert benchmark.checkpoint.load is None
         assert benchmark.checkpoint.save is None
         assert benchmark.checkpoint.pretrained_checkpoint == production.checkpoint.pretrained_checkpoint
         assert (production.checkpoint.pretrained_checkpoint is not None) == stage.warm_start
 
+    @pytest.mark.parametrize("stage", INDEX_CACHE_STAGES, indirect=True, ids=[s.name for s in INDEX_CACHE_STAGES])
     def test_the_index_cache_is_its_own(self, stage, benchmark):
         cache = Path(benchmark.dataset.path_to_cache)
         assert cache.is_relative_to(SHARED_STORAGE)
@@ -292,6 +366,16 @@ class TestTheBenchmarkFields:
         assert corpora
         for tree in [*production_output_directories(stage.production), *corpora]:
             assert not cache.is_relative_to(tree), f"{cache} is inside the production tree {tree}"
+
+    @pytest.mark.parametrize(
+        "stage", RESTATED_BUCKET_STAGES, indirect=True, ids=[s.name for s in RESTATED_BUCKET_STAGES]
+    )
+    def test_the_gradient_bucket_is_productions(self, stage, benchmark, production):
+        """A stage config that leaves ddp.bucket_size unset lets Megatron size the bucket from the data-parallel
+        width, so a benchmark at a narrower width would reduce its gradients in smaller buckets than production
+        does; it restates the bucket production logged instead."""
+        assert production.ddp.bucket_size is None
+        assert benchmark.ddp.bucket_size == stage.logged_bucket_size
 
     def test_the_timeout_is_shorter_than_productions(self, benchmark, production):
         assert benchmark.dist.distributed_timeout_minutes < production.dist.distributed_timeout_minutes
@@ -328,8 +412,8 @@ def quickstart_case(request) -> Quickstart:
 
 
 @pytest.fixture(scope="module")
-def quickstart(quickstart_case):
-    return merged(quickstart_case.path)
+def quickstart(quickstart_case, run_module):
+    return merged(quickstart_case.path, quickstart_case.stage, run_module)
 
 
 class TestTheQuickstartIsTheBenchmarkPlusItsLevers:
@@ -359,11 +443,12 @@ class TestTheQuickstartIsTheBenchmarkPlusItsLevers:
 
     def test_every_lever_reaches_the_merged_config(self, quickstart_case, quickstart):
         """The launcher's merge drops a key the config classes lack, so each lever is read back from the merged
-        config: a misspelled field, or one the pinned Megatron-LM does not have, would not arrive."""
+        config: a misspelled field, or one the pinned Megatron-LM does not have, would not arrive. A config field
+        typed as a mapping (dataset.dataset_kwargs) is read by key."""
         for dotted, value in quickstart_case.levers.items():
             node = quickstart
             for part in dotted.split("."):
-                node = getattr(node, part)
+                node = node[part] if isinstance(node, dict) else getattr(node, part)
             assert node == value, dotted
 
     def test_its_env_file_holds_exactly_the_launcher_settings_it_needs(self, quickstart_case):

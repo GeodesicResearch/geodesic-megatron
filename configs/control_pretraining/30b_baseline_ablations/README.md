@@ -123,7 +123,12 @@ yet exist (an empty one could be read as a finished run).
 
 ### Status
 
-Drafted 2026-09-13, not launched. The first data build (jobs 6519679 prepare, 6519680 split,
+**Trained.** Job 6526526 ran all 5976 iterations on 64 nodes in 12 h 08 min (2026-09-14): 7.25 s/iter steady
+(the mean from iteration 23 on; 7.22 s once past the first three shards, which run 2.5–7% slower), lm loss
+0.977 → 0.736, no NaN or skipped iteration; only the final checkpoint, `iter_0005976`, remains on disk. Its
+posture is the benchmark that `configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml` composes at 64 GPUs.
+
+Drafted 2026-09-13. The first data build (jobs 6519679 prepare, 6519680 split,
 6519681–6519697 packs) prepared and split cleanly but lost eleven of its sixteen pack jobs to the
 host-memory ceiling described above. Three finished before the rest were cancelled, and their
 shards measured 95,553–95,612 packs each, which put the corpus at roughly 1.53M packs — close

@@ -157,9 +157,9 @@ it is flat to ~1%). Use the two measurements above.
 
 Stage 3 has no measurement behind it, and that is the honest state: its posture is stage 2's,
 but it reads a packed chat corpus rather than `.bin/.idx` and has not been run. The figure above
-extrapolates from the 32K Nano SFT quickstart's 9.767 s/iter at GBS 128 on 64 GPUs, which runs 4
-microbatches per replica against this stage's 2 — halving the per-replica work while widening
-data parallelism 8x. Treat it as the hypothesis being tested.
+extrapolates from the 9.767 s/iter at GBS 128 on 64 GPUs of the August 2026 Nano SFT quickstart (since
+replaced), which ran 4 microbatches per replica against this stage's 2 — halving the per-replica work
+while widening data parallelism 8x. Treat it as the hypothesis being tested.
 
 Wall-clock will be dominated by queue wait rather than compute: the cluster typically runs with
 most nodes allocated and the queue is FIFO rather than fairshare, so a 128-node job waits behind

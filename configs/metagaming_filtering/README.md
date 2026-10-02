@@ -22,7 +22,10 @@ under "The corpus".
 - **Held verbatim from the baseline:** the warm start, the Nemotron 3 Nano 30B-A3B topology
   (TP1 · CP2 · EP4, 256 GPUs), global batch 256 at seq 32768 (8,388,608 tokens per iteration), the
   schedule, the checkpoint cadence (every 1200 iterations, every checkpoint kept) and the
-  think-history tokenizer.
+  think-history tokenizer. Both runs predate the context-parallel partition fix of 2026-10-01, so
+  both trained under the same partition defect, at matching doses (26.3% and 26.2% of
+  microbatches); a rerun from a checkout with the fix is not compared with them
+  (`../control_pretraining/30b_baseline/README.md`, stage 3).
 - **Enforced by `tests/unit_tests/test_metagaming_filtering_sft.py`:** it fails if any field other
   than the corpus and the run identity differs, and pins the data config and the corpora row to the
   baseline's build.

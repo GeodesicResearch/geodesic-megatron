@@ -1,0 +1,80 @@
+# Nemotron 3 Nano (30B-A3B) SFT BASELINE benchmark (warm start, packed seq 32768) — 64 GPUs / 16 nodes,
+# 100 iterations
+#
+# WHAT THIS IS: the control-pretraining XL SFT (the baseline curriculum's stage-3 reasoning/think post-training on the
+# ~50B-token xl-50b mix) warm-started from the midtraining final checkpoint as production is, and run for a short
+# window as a throughput benchmark. It is an OVERLAY: `base_config` names the production SFT config and this file
+# restates only the fields a benchmark must change, so everything else — topology (TP=1 · CP=2 · EP=4 · PP=1 · ETP=1,
+# only data parallelism crosses nodes), the packed think-history corpus, full recompute, the precision-aware optimizer,
+# the weights-only warm start and the schedule — is the production stage's, read at launch. A change to the production
+# posture therefore flows into this benchmark without an edit here, and tests/unit_tests/test_nano_stage_quickstarts.py
+# fails if any field other than the ones below starts to differ.
+#
+# GBS 64: 64 packs over DP=32 (64 GPUs at CP=2) at micro-batch 1 is 2 packs per DP replica per iteration, the same as
+# production's GBS 256 over DP=128 on 256 GPUs. Per-GPU step time depends on packs per replica, not on DP width, so
+# 2 per replica reproduces production's per-GPU compute and its data-parallel communication structure. The batch
+# sampler deals each iteration's contiguous global batch to the DP ranks, so iteration k trains on the same packs at
+# any DP or CP size; at GBS 64 the window reads the first shard of the corpus.
+#
+# exit_interval, NOT train_iters: train_iters stays the stage's 5976, so the warmup (10% = 598 iterations) and the
+# cosine decay are the production schedule iteration for iteration. The exit_interval path in train.py saves only
+# when checkpoint.save is set, so with save null the run exits without writing anything.
+#
+# exit_interval 100 and the 51-100 window: iteration 1 alone takes about 105 s (kernel compilation and communicator
+# setup) and iterations 1-25 average 70-100% above the plateau, but from iteration 51 on every 25-iteration mean of
+# both calibration runs (the as-is posture and the first three levers of the performance campaign) stays within 1% of
+# that run's iterations 201-300 mean. The rule was fixed before the runs: the earliest of 51, 76, 101, 126 and 151
+# after which that holds, here 51 (docs/investigations/nano30b-sft-perf-campaign.md, E-001).
+#
+# checkpoint.load / save null: the base's load == save is production's SFT directory, whose latest checkpoint is the
+# final one. Inherited, the benchmark would resume that checkpoint instead of starting the stage, and write into
+# production's tree. With load null the setup loads pretrained_checkpoint (inherited: the midtraining final, iteration
+# 3126) weights only, as a finetune — fresh optimizer, iteration 0 — which is how production started. With save null
+# W&B has no default directory (it falls back to <save>/wandb), hence wandb_save_dir.
+#
+# ddp.bucket_size 128000000: the base leaves the bucket unset, and Megatron then sizes it as max(40M, 1M x DP)
+# parameters — 128M at production's DP=128 (logged at startup by production's run, job 6526526), but 40M at this
+# benchmark's DP=32. Restated so the benchmark reduces gradients in production's buckets.
+#
+# dist.distributed_timeout_minutes 20: under the launcher's TORCH_NCCL_BLOCKING_WAIT=1 this is the only hang timeout;
+# 20 minutes bounds how long a wedged benchmark holds the allocation.
+#
+# LAUNCH (--disable-ft: the run is short and restart-free):
+#   isambard_sbatch --nodes=16 --time=00:25:00 pipeline_training_submit.sbatch \
+#       configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml nano sft --disable-ft
+#
+# SCORING: the mean step time over iterations 51-100, with tokens/s/GPU = GBS x 32768 / (GPUs x mean step):
+#     python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/train-<jobid>.out \
+#         --config configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml \
+#         --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+#         --gpus 64 --window 51 100 --loss-window 91 100
+# The model TFLOP/s and MFU it reports count full-causal attention over each 32,768-token pack, which overstates the
+# work of packed data (a pack holds about six documents, each attending only within itself); tokens/s/GPU does not
+# depend on that convention.
+#
+# MEASURED (2026-10-02, 64 GPUs, the as-is runs of four paired cycles, each cycle on one switch group, jobs
+# 7005942-7005945): mean 6.563 s/iter over iterations 51-100 (eight runs, 6.546-6.584) = 4,993 tokens/s/GPU; lm loss
+# (91-100) 0.99251-0.99253, 0 NaN. The production run of this posture (job 6526526: 256 GPUs at DP=128 on six switch groups) measured 7.294 s/iter
+# over the same iterations 51-100 and 7.250 s over its whole stage (iterations 26-5976). The gap to this benchmark has
+# not been decomposed into placement, data-parallel width and the packs each run reads.
+
+base_config: ../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml
+
+train:
+  global_batch_size: 64         # 2 packs per DP replica at 64 GPUs (CP=2 -> DP=32)
+  exit_interval: 100
+
+checkpoint:
+  load: null
+  save: null
+
+ddp:
+  bucket_size: 128000000        # production's bucket at DP=128 (see header)
+
+dist:
+  distributed_timeout_minutes: 20
+
+logger:
+  tensorboard_dir: null         # restated from the base
+  wandb_save_dir: /projects/a5k/public/logs/wandb
+  wandb_exp_name: nemotron_nano_quickstart_sft

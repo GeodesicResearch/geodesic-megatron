@@ -127,8 +127,8 @@ validator green — 18/18 at qualification, 21 checks today (the grouped_gemm,
 OpenMP-defaults and datasets-cache-writability checks were added since); quickstart 25.66
 s/iter at qualification with
 `optimizer_offload_fraction: 0.5` vs 26.70 on the prior tag, identical nodelist (current
-anchor **31.562 s/iter at GBS 128** — the standard batch across
-quickstarts since 2026-08-05 — with `moe_experts_impl: torch_grouped` and optimizer CPU
+anchor **31.562 s/iter at GBS 128**, the benchmark's batch since 2026-08-05, with
+`moe_experts_impl: torch_grouped` and optimizer CPU
 offload OFF; at the old GBS-64 workload: 17.099 for this same posture, 20.66 for the
 `cublas_grouped` backend it replaced, 21.78 offload-0.5 on the 26.02 tag) — see
 `docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8), pulled to
@@ -492,7 +492,7 @@ A tag qualifies when:
    with `--disable-ft`.
 4. **The Super-120B benchmark holds its iteration time.**
    `configs/quickstart/nemotron_super_quickstart_sft.yaml` (TP1 · CP4 · EP4 · PP8 · ETP1 ·
-   DP2 → 64 GPUs = 16 nodes, seq 32K, GBS 128 — the standard batch since 2026-08-05), scored
+   DP2 → 64 GPUs = 16 nodes, seq 32K, GBS 128 since 2026-08-05), scored
    as the **mean of iterations 10–30**
    (past the JIT/comm-init-dominated first iters), must clear two bars: the **absolute gate
    of < 40 s/iter**, and **no regression against the previously qualified tag's recorded
