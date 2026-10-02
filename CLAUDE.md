@@ -561,7 +561,8 @@ GBS-128 config): a baseline benchmark and its fastest configuration, as for the 
   CP=1 with the chunked linear cross-entropy, BF16 gradient reduction in 500M-parameter buckets with the parameter
   all-gather overlapped, HybridEP with the fused router on packs padded to the full 32,768 tokens, and host settings —
   **3.689 s/iter = 8,881 tokens/s/GPU, 1.779×** the benchmark on the same allocations (four paired
-  single-group cycles, 95% CI [1.775, 1.782]: goal established), at a 70.4 GiB peak. Its 500-iteration loss fails the
+  single-group cycles, 95% CI [1.775, 1.782]: goal established), at a 70.4 GiB peak; this file launched as documented:
+  3.691 s/iter (job 7006758, one switch group). Its 500-iteration loss fails the
   pre-registered band: it sits below the as-is runs' band over iterations 201–400, by at most 4.3×10⁻⁵ nats, and is
   back inside from 401 — a transient excursion Kyle accepted (2026-10-02).
 - **CP=1 fits at 32K only with the chunked linear cross-entropy** (`cross_entropy_fusion_impl: linear`, the pin's

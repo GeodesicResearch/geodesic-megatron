@@ -154,6 +154,11 @@ design `records/verification_design_mask_20261001T175619Z.md`, fixed before the 
   - Cycle 7005942 ended 12 minutes after its last run's final iteration: rank 0's W&B upload stalled at exit, as
     `mk2_asis_c`'s did, and the other nodes' launchers left the exit barrier after its 300 s timeout. The scored
     window is unaffected.
+- **The quickstart file itself: pass.** `nemotron_nano_quickstart_sft.yaml` as committed (`9672a258`), launched
+  exactly as its header documents with its `.env` (job 7006758, one switch group,
+  `records/quickstart_as_documented_7006758.txt`): **3.691 s/iter** over iterations 51–100 = 8,878 tokens/s/GPU, 100
+  iterations each carrying `lm loss`, no non-finite grad norm, iteration 1 at 1.034350, the checkpointed fp32 SSM
+  state on all 16 nodes, and 11 min 22 s from start to exit inside its 20-minute limit.
 
 ### E-007 · the loss band's failure: pad tokens in the MoE router's statistics · 2026-10-01
 

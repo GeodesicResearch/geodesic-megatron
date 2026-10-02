@@ -30,7 +30,8 @@
 # 1.779x the baseline benchmark's 6.563 s on the same allocations (95% CI [1.775, 1.782]); lm loss (91-100)
 # 0.99250-0.99254, 0 NaN; a driver-level peak of 70.4 GiB over all 64 GPUs. Iteration 1 takes about a minute, and every
 # later step is within about 1% of the mean. Over 500 iterations its loss leaves the baseline's band: it sits below it
-# over iterations 201-400, by at most 4.3e-5 nats, and is back inside from 401 (campaign log E-008).
+# over iterations 201-400, by at most 4.3e-5 nats, and is back inside from 401 (campaign log E-008). This file,
+# launched as above: 3.691 s/iter (job 7006758, one switch group).
 #
 # THE LEVERS:
 #   model.context_parallel_size 1: whole packs per rank (DP=64 at 64 GPUs, one pack per replica, the same tokens per
