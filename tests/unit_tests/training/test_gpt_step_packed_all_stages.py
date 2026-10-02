@@ -54,11 +54,15 @@ def _make_packed_batch(full_len: int, doc_boundaries: list[int]) -> dict:
     argmin = len(cu)
     seqlens = [cu[i + 1] - cu[i] for i in range(len(cu) - 1)]
     max_seqlen = max(seqlens)
+    # The collate marks the positions it padded; here the last document's final quarter.
+    padding_mask = torch.zeros(1, full_len, dtype=torch.bool)
+    padding_mask[0, cu[-1] - seqlens[-1] // 4 :] = True
     return {
         "tokens": torch.arange(full_len, dtype=torch.long).unsqueeze(0),
         "labels": torch.arange(full_len, dtype=torch.long).unsqueeze(0),
         "loss_mask": torch.ones(1, full_len, dtype=torch.long),
         "position_ids": torch.arange(full_len, dtype=torch.long).unsqueeze(0),
+        "padding_mask": padding_mask,
         "cu_seqlens": torch.tensor([cu_padded], dtype=torch.int32),
         "cu_seqlens_argmin": torch.tensor([[argmin]], dtype=torch.int32),
         "max_seqlen": torch.tensor([[max_seqlen]], dtype=torch.int32),
@@ -95,6 +99,8 @@ def _identity_cp(batch, *args, **kwargs):
 _FULL_SEQ_IDX = 10
 # Index of cu_seqlens in the get_batch return tuple.
 _CU_SEQLENS_IDX = 5
+# Index of the padding mask in the get_batch return tuple.
+_PADDING_MASK_IDX = 11
 
 
 class TestGetBatchPackedAllStages:
@@ -144,7 +150,7 @@ class TestGetBatchPackedAllStages:
 
         # Iterator NOT consumed -> no desync / no extra dataloader work on middle stages.
         assert remaining == 1
-        assert result == (None,) * 11
+        assert result == (None,) * 12
         assert result[_FULL_SEQ_IDX] is None
 
     def test_first_stage_packed_full_len_from_tokens(self):
@@ -157,6 +163,14 @@ class TestGetBatchPackedAllStages:
         assert result[_FULL_SEQ_IDX] == full_len
         assert result[_CU_SEQLENS_IDX] is not None
         assert result[0] is not None  # tokens present on first stage
+
+    def test_every_stage_keeps_the_padding_mask(self):
+        """Every pipeline stage runs MoE layers, whose routers must leave the padded positions out of their
+        statistics, so the padding mask is kept where the per-token tensors are dropped."""
+        batch = _make_packed_batch(4096, [0, 1500, 4096])
+        for is_first, is_last in [(True, False), (False, False), (False, True)]:
+            result, _ = self._run_get_batch(is_first=is_first, is_last=is_last, packed=True, batch=dict(batch))
+            assert torch.equal(result[_PADDING_MASK_IDX], batch["padding_mask"]), (is_first, is_last)
 
     def test_last_stage_packed_full_len_from_labels(self):
         """Last stage drops tokens but keeps labels; full_seq_length still resolves."""

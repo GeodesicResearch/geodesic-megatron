@@ -76,12 +76,192 @@ Each run is single-group; the ratios are against the calibration's as-is run, on
 | Step | Levers | Mean step (s) | tok/s/GPU | × as-is | lm loss 91–100 | Peak GiB, all GPUs | Entry |
 |---|---|---|---|---|---|---|---|
 | 0 | as-is benchmark | 6.556 | 4,998 | 1.00 | 0.992515 | | E-001 |
+| 1 | parameter all-gather overlap and host settings | 5.559 | 5,894 | 1.18 | 0.992512 | | E-003 |
 | 2 | parameter all-gather overlap and host settings; BF16 gradient reduction and chunked linear cross-entropy | 5.108 | 6,416 | 1.28 | 0.992511 | | E-003 |
 | 3 | + HybridEP dispatcher and router fusion, packs padded to the full length | 4.756 | 6,890 | 1.38 | 0.992494 | | E-001, E-002 |
 | 3 + FP8 + sel | + FP8 dense layers (BF16 parameters) and selective recompute `[moe, shared_experts]` | 4.125 | 7,944 | 1.59 | 0.995934 | 78.3 | E-003 |
 | 3 at CP=1 | step 3 with context parallelism off (DP=64, one pack per replica), full recompute | 4.096 | 8,000 | 1.60 | 0.992494 | 70.4 | E-003 |
+| 4 | + 500M-parameter gradient buckets | 3.672 | 8,925 | 1.79 | 0.992514 | 70.4 | E-004 |
 
 ## Experiments
+
+### E-007 · the loss band's failure: pad tokens in the MoE router's statistics · 2026-10-01
+
+The final posture failed the pre-registered band (E-005), so its levers were tested one at a time, each over 500
+iterations against the same three as-is references, each run on one switch group (full-precision values from W&B,
+`records/loss_band_diagnostics_wandb.json`). A fourth as-is run (`cal_asis`, 300 iterations) lies inside the band, so
+the band is calibrated: a run of the as-is posture on another allocation passes it.
+
+| Run (job) | Change from the as-is benchmark | Pad tokens per iteration | Band | Mean offset (×10⁻⁵) | Windows below |
+|---|---|---|---|---|---|
+| `par_r1` (6980899) | step 1, which changes no numerics | 2,505 | pass | −0.2 | 7 of 10 |
+| `par_rfuse` (6980909) | step 1 and router fusion | 2,505 | pass | −0.0 | 4 of 10 |
+| `par_r12` (6980900) | steps 1–2 | 2,505 | pass | +0.7 | 2 of 10 |
+| `par_pad` (6980908) | step 1 and full-length packs | 4,077 | fail | −2.1 | 10 of 10 |
+| `par_c1` (6980901) | steps 1–3 | 4,077 | fail | −1.9 | 10 of 10 |
+| `par_cp1a2a` (6980902) | steps 1–2, CP=1, 500M-parameter buckets, alltoall | 313 | fail | +2.3 | 0 of 10 |
+| `par_final` (6980716) | the final posture | 4,077 | fail | −1.8 | 9 of 10 |
+
+- **Every lever that keeps the as-is pad count passes, and every one that changes it fails, in the direction of
+  the change.** The as-is collate pads 2,505 tokens per iteration: each replica's two packs are collated together
+  and the shorter is padded to the longer. Full-length packs pad 4,077; at CP=1 each pack is collated alone and
+  padded only to a multiple of 16, 313. The counts are taken from the corpus's first shard over the 500 iterations.
+- **The mechanism.** The pad tokens, all EOS, reached the MoE router's statistics, because the packed SFT step passed
+  the model no padding mask.
+  - The expert-bias update moves each expert's bias by a fixed 10⁻³ every iteration, by the sign of its load
+    against the mean, whatever the learning rate.
+  - The sequence auxiliary loss (coefficient 10⁻⁴) counts the pads too.
+  - Identical pad tokens route to the same experts, so a change of ~2,000 of them per iteration tips those experts'
+    signs. The offset appears from about iteration 100 and stays flat, about −1.1×10⁻⁸ nats per extra pad token in
+    both directions.
+- **Not the forward.** On iteration 1, with identical weights and data, every lever moves the loss by less than
+  10⁻⁴: full-length packs 0, router fusion +1.9×10⁻⁵, HybridEP −7.4×10⁻⁵, CP=1 +0.9×10⁻⁵ (one-iteration probes
+  `att_*`, jobs 6980890–6980893). Over iterations 1–100 those offsets average to zero against the references'
+  per-iteration spread.
+- **The fix** (Kyle, 2026-10-01: mask the pads):
+  - The packed collate marks every position it or the packer padded: each document's EOS padding and everything
+    after a pack's last document.
+  - The training step keeps the mask on every pipeline stage, partitions it with the tokens under context
+    parallelism, and passes it to the model as `padding_mask`, so the routers leave those positions out of both
+    statistics.
+  - Under sequence parallelism a layer's hidden states hold the tensor-parallel rank's share of the sequence, so the
+    step gives each pipeline stage the mask laid out the same way: a GPT model's first stage scatters it itself, and
+    the step scatters it for the later stages and for every stage of a hybrid model.
+  - Upstream Megatron-Bridge fixed the same problem in #5470 (2026-08-12), in data code this repo's Bridge predates,
+    and the change here follows it: the collate marks the same positions, and the step's layout is upstream's
+    `_prepare_packed_padding_mask`.
+  - The pinned Megatron-LM carries one upstream fix for it, 0006 in `3rdparty/patches/megatron-lm/README.md` (#6114):
+    the router's expert-bias count lined the `[tokens]` mask up against the expert dimension of its
+    `[tokens, experts]` routing map, so a masked training step of a router with expert bias failed, and the first
+    masked runs (jobs 6996573–6996580) did, at their first backward.
+  - Tests came first. They failed before each fix and with it removed, and pass with it
+    (`records/padding_mask_01_before_fix.txt`, `02_fix_removed.txt`, `03_after_fix.txt`;
+    `records/expert_bias_mask_01_before_fix.txt`, `02_after_fix.txt`, `03_fix_removed.txt`;
+    `records/sp_padding_mask_01_layout_removed.txt`, `02_with_layout.txt`).
+- **What it changes.** The as-is posture trains differently too: its own 2,505 pad tokens per iteration leave the
+  statistics. Parity is therefore verified again against as-is references run with the mask, under the rules of the
+  first verification, fixed before its runs (`records/verification_design_mask_20261001T175619Z.md`; its addendum
+  `records/verification_design_mask_addendum_20261001T221819Z.md` names the runs that replaced the failed first
+  attempt). A loss curve from before the fix is not compared with one after it.
+
+### E-006 · where the time goes: step budgets of the as-is and final postures · 2026-10-01
+
+Torch-profiler captures without Python stacks, ranks 0 and 63 at two iterations each: the as-is benchmark (`prof_asis`,
+job 6980080, iterations 170 and 190) and the final posture (`prof_cand`, job 6980650, iterations 70 and 90).
+Each iteration's wall time is split into exclusive categories; the numbers are means over the four traces
+(`records/step_budget/`, which also holds the analysis scripts).
+
+| Category (s per step) | As-is | Final |
+|---|---|---|
+| Parameter all-gather, exposed | 1.312 | 0.120 |
+| Gradient reduce-scatter, exposed or stalling the compute stream | 0.789 | 0.062 |
+| Context-parallel communication (Mamba all-to-alls, attention ring) | 0.485 | 0 |
+| Context-parallel compute (THD reordering, all-to-all packing) | 0.294 | 0 |
+| Expert-parallel dispatch and combine | 0.580 | 0.435 |
+| Other MoE work, output layer and cross-entropy, DDP hooks, optimizer, attention | 0.987 | 0.687 |
+| Dense and expert GEMMs, Mamba, norms | 1.920 | 2.314 |
+| Idle on every stream | 0.211 | 0.033 |
+| Other communication (timers, logging) | 0.037 | 0.054 |
+| **Iteration** | **6.615** | **3.708** |
+
+- **The as-is posture gathers its parameters twice per step.**
+  - Each trace has 118 all-gather kernels moving 19.09 billion bf16 elements (38.19 GB). The gradient reduce-scatter
+    covers 9.55 billion elements once.
+  - With parameter-gather overlap off, each of the chained optimizer's two steps re-gathers every bucket, as the
+    midtraining campaign found (its E-006). The second round alone costs about 0.71 s, 10.7% of the step.
+  - The final posture gathers once, inside the forward.
+- **The as-is backward stalls behind its gradient reduce-scatters.**
+  - Each MoE layer's experts fill two 159.6M-parameter buckets, whose reduce-scatters queue back to back. In the
+    second microbatch's backward, the compute stream's next kernel starts at the instant they finish. That happens 23
+    times per step, 0.66–0.78 s in all.
+  - The timing points to head-of-line blocking on the launcher's single CUDA connection
+    (`ISAMBARD_CUDA_MAX_CONNECTIONS=1`). This is an inference from timing, not something the trace shows directly.
+  - The final posture's buckets of about 639M parameters (two MoE layers each) stall once per step at most.
+- **Context parallelism costs the as-is step 0.78 s (11.8%).**
+  - 828 Mamba all-to-alls take 0.478 s, all of it exposed.
+  - THD reordering takes 0.164 s and all-to-all packing copies 0.115 s.
+  - Transformer Engine's partition calls take 0.6 ms of GPU time.
+- **The final posture's compute takes 0.39 s longer**, mostly because the data-parallel collectives now overlap it.
+  Expert GEMMs run at 15–18 ns per token alone and 29–34 ns per token under an overlapping all-gather or
+  reduce-scatter.
+- **Neither posture is launch-bound.** The host spends about 2 s of each step blocked in synchronisations, ahead of
+  the GPU.
+- **The saving, by cause:**
+
+  | Cause | Share of the 2.9 s saved |
+  |---|---|
+  | All-gather | 41% |
+  | Context parallelism | 27% |
+  | Reduce-scatter stalls | 25% |
+  | Idle | 6% |
+  | Expert-parallel path | 5% |
+  | Other: output layer and cross-entropy, DDP hooks, attention, MoE bookkeeping | 10% |
+  | Slower compute | −14% |
+
+### E-005 · verification of the final posture · 2026-10-01
+
+The posture under test is ladder step 4 (`arms/cand.arms`: steps 1–3, full-length packs, CP=1, 500M-parameter buckets) on
+`snapshots/cal1`, judged by the design fixed above before the runs.
+
+**Speed: established.** Four A B B A cycles (`paired/cycle_verdict.py`), each on one switch group:
+
+| Cycle (job) | Group | As-is runs (s) | Final runs (s) | Ratio |
+|---|---|---|---|---|
+| 6980709 | 10 | 6.5736, 6.5678 | 3.6750, 3.6769 | 1.7875 |
+| 6980710 | 11 | 6.5775, 6.5651 | 3.6795, 3.6785 | 1.7862 |
+| 6980711 | 11 | 6.5677, 6.5554 | 3.6734, 3.6781 | 1.7851 |
+| 6980712 | 4 | 6.5550, 6.5573 | 3.6762, 3.6786 | 1.7828 |
+
+The geometric mean is **1.785×, 95% CI [1.782, 1.789]**, a half-width of 0.18%. The lower bound clears 1.5, so the
+rule asks for no further cycles. The final posture runs 3.677 s against 6.565 s, 8,912 against 4,991 tokens/s/GPU.
+
+**Numerics and launch: pass.**
+- Every one of the 20 runs (16 in the cycles, 4 for parity) has an iteration line with `lm loss` for every iteration,
+  no non-finite grad norm, and no NaN or skipped iteration.
+- Every run's `[env-overrides]` lines show `ISAMBARD_FP32_SSM_STATE=checkpoint`.
+- Iteration 1 reads 1.034350 in every final run against 1.034374–1.034376 as-is, 2.6×10⁻⁵ apart, inside the
+  1×10⁻³ tolerance.
+
+**Memory: pass.** The final posture's 500-iteration run peaks at 70.4 GiB over all 64 GPUs; the as-is posture's
+peaks at 85.3.
+
+**Checkpoints: pass.**
+- Resume (`records/resume_check.txt`): a run resumed from iteration 10 consumes the same samples at the same learning
+  rate as the straight run. Its loss at iteration 11 is identical, and over 11–20 it stays within 4.1×10⁻⁵ of the
+  straight run, inside the band of the straight runs.
+- Export (`records/export_compare.txt`): the HF export has the as-is export's 6,243 tensors, names, shapes and dtypes.
+
+**Loss parity: fails the pre-registered band, by a small margin** (`records/loss_band_par_final_wandb.txt`).
+- The three as-is references agree to δ = 1.7×10⁻⁵ nats per 50-iteration window. The warmup learning rate stays at
+  or below 4.2×10⁻⁶ over these iterations.
+- The final posture's loss sits 1.8×10⁻⁵ below the references' mean on average, in 9 of 10 windows. It leaves the
+  band in windows 101, 151, 351 and 401, by at most 2.9×10⁻⁵. Two or more such windows fail a posture.
+- Its grad norm is flagged in window 1 only (−0.08%). Learning rate and consumed samples agree at every iteration.
+- E-007 finds the cause.
+
+### E-004 · CP=1: recompute depth, FP8 and the gradient bucket · 2026-10-01
+
+Probes from `snapshots/cal1` on the CP=1 posture of E-003 (steps 1–3, full-length packs, context parallelism off: 4.096
+s, 70.4 GiB), exit 100, each on one switch group, scored over iterations 51–100; peaks are the driver-level maximum
+over all 64 GPUs.
+
+| Probe (job) | Change from CP=1 | Mean step (s) | Peak GiB | lm loss 91–100 |
+|---|---|---|---|---|
+| `lad_cp1blk44` (6980154) | recompute only the first 44 of the 52 layers (block method) | 3.980 | 88.2 | 0.992497 |
+| `lad_cp1blk36` (6980155) | the first 36 layers | out of memory in iteration 1 (NCCL `Cuda failure 2`) | 95.0 | |
+| `lad_cp1sel` (6980157) | selective `[moe, shared_experts]` recompute | out of memory (PyTorch) | 95.0 | |
+| `lad_cp1fp8` (6980158) | FP8 dense layers, BF16 parameters | 3.859 | 71.8 | 0.995979 |
+| `lad_cp1bkt` (6980159) | 500M-parameter gradient buckets | **3.672** | 70.4 | 0.992514 |
+| `lad_cp1bkt1g` (6980648) | 1G-parameter gradient buckets | 3.710 | 70.4 | 0.992503 |
+| `lad_candblk48` (6980649) | 500M-parameter buckets, and recompute only the first 48 layers | 3.625 | 79.6 | 0.992488 |
+
+- **The bucket.** Buckets of 500M parameters (`ddp.bucket_size` counts parameters) take 10.4% off the CP=1 step
+  at production's 128M; buckets of 1G parameters give back 1%.
+- **Recompute depth.** Every layer whose activations are kept instead of recomputed costs about 2.2–2.3 GiB per GPU
+  (keeping 4 layers: +9.2 GiB; 8 layers: +17.8 GiB), and selective recompute keeps every layer's. Keeping 4 layers is
+  3.625 s against 3.672 s, 1.3% on runs on two allocations, inside about twice the 0.5% spread of single-group runs and
+  unpaired; it is not part of the verified posture.
+- **FP8.** FP8 dense layers save 5.8% at CP=1 but shift the loss by the same +0.0035 as at CP=2, so they stay out.
 
 ### E-003 · ladder steps 1–3, FP8 dense with selective recompute, and CP=1 · 2026-10-01
 

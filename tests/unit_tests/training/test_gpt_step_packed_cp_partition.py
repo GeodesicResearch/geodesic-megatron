@@ -25,66 +25,41 @@ Engine's binary search can land on a pad and hand every rank the pack's leading 
 (no process group: the partition takes the rank as an argument), so the test needs a GPU.
 """
 
-import types
-
-import numpy as np
 import pytest
 import torch
 from megatron.core.ssm.mamba_context_parallel import _undo_attention_load_balancing
 
-from megatron.bridge.data.datasets.sft import GPTSFTPackedDataset
 from megatron.bridge.data.finetuning import split_batch_into_microbatches
 from megatron.bridge.training.gpt_step import _partition_packed_batch_for_cp, get_batch_from_iterator
 from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
+from tests.unit_tests.packed_sft_batches import collate_packs, write_packs
 
 
 pytestmark = pytest.mark.run_only_on("GPU")
 
-EOS_ID = 2
-PER_TOKEN_KEYS = ("tokens", "labels", "loss_mask", "position_ids")
+PER_TOKEN_KEYS = ("tokens", "labels", "loss_mask", "position_ids", "padding_mask")
 
-# The documents of each pack, by token count. The collate keeps all but the last token of a document (the labels are
-# shifted by one), so a document stored with n + 1 tokens contributes n. Collated together, the three packs pad to 48
-# tokens and their cu_seqlens rows end in five, two and one -1: [0, 32, 48, -1, -1, -1, -1, -1],
+# The documents of each pack, by real-token count. As production's packs for context parallelism are, they are packed
+# with every document padded to a multiple of PAD_SEQ_TO_MULT positions, its real tokens, its EOS and the padding after
+# it: a document of 29 real tokens covers 32 positions and one of 5 covers 8. Collated together, the three packs pad to
+# 48 positions and their cu_seqlens rows end in five, two and one -1: [0, 32, 48, -1, -1, -1, -1, -1],
 # [0, 8, 16, 24, 32, 48, -1, -1] and [0, 8, 16, 24, 32, 40, 48, -1]. Every segment is a multiple of 8, the
 # divisibility Transformer Engine's partition requires at context-parallel sizes 2 and 4.
 PACKS = {
-    "one_document": [32],
-    "four_documents": [8, 8, 8, 8],
-    "five_documents": [8, 8, 8, 8, 8],
+    "one_document": [29],
+    "four_documents": [5, 5, 5, 5],
+    "five_documents": [5, 5, 5, 5, 5],
 }
-
-
-def _write_packs(path) -> None:
-    """Store the packs in the packed-dataset format, every token id distinct and none of them EOS."""
-    rows = []
-    next_token = 100
-    for document_tokens in PACKS.values():
-        input_ids, seq_start_id = [], []
-        for n in document_tokens:
-            seq_start_id.append(len(input_ids))
-            input_ids.extend(range(next_token, next_token + n + 1))
-            next_token += n + 1
-        rows.append({"input_ids": input_ids, "seq_start_id": seq_start_id, "loss_mask": [1] * len(input_ids)})
-    np.save(path, np.array(rows, dtype=object), allow_pickle=True)
+PAD_SEQ_TO_MULT = 8
+MAX_SEQ_LENGTH = 64
 
 
 @pytest.fixture(scope="module")
 def microbatches(tmp_path_factory) -> dict[str, dict]:
     """One microbatch per pack, as the trainer receives them: collated in one call, then split."""
     path = tmp_path_factory.mktemp("packs") / "packs.npy"
-    _write_packs(path)
-    # The collate reads nothing from the tokenizer but eos_id, and a real tokenizer would need a Hub download.
-    dataset = GPTSFTPackedDataset(
-        file_path=str(path),
-        tokenizer=types.SimpleNamespace(eos_id=EOS_ID),
-        max_seq_length=64,
-        pad_seq_length_to_mult=16,
-        prompt_template="{input} {output}",
-        label_key="output",
-        truncation_field="input",
-    )
-    batch = dataset.collate_fn([dataset[i] for i in range(len(PACKS))])
+    write_packs(path, list(PACKS.values()), PAD_SEQ_TO_MULT, MAX_SEQ_LENGTH)
+    batch = collate_packs(path, len(PACKS), PAD_SEQ_TO_MULT, MAX_SEQ_LENGTH, pad_to_max_length=False)
     return dict(zip(PACKS, split_batch_into_microbatches(batch, len(PACKS))))
 
 

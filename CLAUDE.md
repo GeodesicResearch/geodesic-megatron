@@ -1482,16 +1482,15 @@ The unit-test hook only fires when a `*.py` file is staged and uses
 ### Megatron-Core Submodule
 
 The submodule tracks the **GeodesicResearch/Megatron-LM fork** (see `.gitmodules`), which
-is upstream plus a few carried commits (currently four: the nvrx capability probe made
-non-fatal, see that commit's message, and the Nano pretrain campaign's 0003, 0004 and 0005,
-documented in `3rdparty/patches/megatron-lm/README.md`). Carried commits MUST be pushed to the fork
-before the gitlink is committed; an unreachable submodule commit is how a fix was nearly
+is upstream plus a few carried commits (currently five: the nvrx capability probe made
+non-fatal, see that commit's message, the Nano pretrain campaign's 0003, 0004 and 0005, and 0006, an upstream fix
+the Nano SFT campaign needed, documented in `3rdparty/patches/megatron-lm/README.md`). Carried commits MUST be
+pushed to the fork before the gitlink is committed; an unreachable submodule commit is how a fix was nearly
 lost once. `.main.commit` = the current pin; `.dev.commit` = the PREVIOUS pin, kept as a
-rollback/A-B escape hatch. Today that is the current pin without 0003–0005: there the Bridge tests
-of 0005 fail at import, three of 0004's five fail, and the Nano pretrain quickstart's levers and the
-Nano midtrain quickstart's chunked cross-entropy are unavailable, while checkpoints of flat layer
-patterns, Nemotron-H's included, have the same keys at
-both pins (the patches README's pin history notes record what each bump changed).
+rollback/A-B escape hatch. Today that is the current pin without 0006: there a packed SFT run of a MoE model whose
+routers use expert bias (every Nemotron-H packed SFT) fails at its first training iteration, because the packed SFT
+step passes a padding mask the router's expert-bias count cannot apply; every other run, and every checkpoint's keys,
+is the same at both pins (the patches README's pin history notes record what each bump changed).
 
 ```bash
 ./scripts/switch_mcore.sh status   # Show current pinned commit
@@ -1521,7 +1520,10 @@ patterns such as Nano's, and refuses Megatron-FSDP, fine-grained activation offl
 (Megatron-Bridge refuses packed sequences with it). `0004` keeps a HybridEP dispatch handle's
 token count in device memory: on the blocking dispatch path it lived in pinned host memory that
 queued kernels read after the handle was freed, which faulted under the EP overlap. `0005` is a
-chunked linear cross-entropy for `HybridModel` (`cross_entropy_fusion_impl: linear`).
+chunked linear cross-entropy for `HybridModel` (`cross_entropy_fusion_impl: linear`). `0006` is upstream #6114,
+cherry-picked: the router's expert-bias token count broadcasts over the experts the `padding_mask` that the packed
+SFT step passes so that pad tokens stay out of the MoE routers' statistics, where it used to fail. The step itself
+gives each pipeline stage its sequence-parallel share of the mask, as upstream Megatron-Bridge does.
 (The `overlap_p2p_comm` NaN's fix is already IN the current pin; its record-of-closed-bug
 patch was retired with the investigation docs and is preserved under
 `/projects/a5k/public/logs/infr71_wave2/docs/`.)

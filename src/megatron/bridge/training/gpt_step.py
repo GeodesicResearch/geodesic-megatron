@@ -18,6 +18,7 @@ from typing import Iterable
 
 import modelopt.torch.distill as mtd
 import torch
+from megatron.core import tensor_parallel
 from megatron.core.models.gpt import GPTModel
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 from megatron.core.utils import (
@@ -121,6 +122,53 @@ def _partition_packed_batch_for_cp(
     return batch
 
 
+_ROUTER_CUDA_GRAPH_MODULES = {"moe", "moe_router", "moe_preprocess"}
+
+
+def _refuse_padding_mask_under_router_cuda_graphs(config) -> None:
+    """Refuse a padding mask for a MoE model whose Transformer Engine CUDA graphs capture the router, as upstream
+    Megatron-Bridge does: the pinned Megatron-Core cannot mask router statistics inside such a graph.
+
+    A graph captures the router when it captures the whole layer (no ``cuda_graph_modules`` named) or names a MoE,
+    router or MoE-preprocess module. Graphs that capture other modules only, and the local and full-iteration CUDA
+    graph implementations, are left to run, as upstream leaves them.
+    """
+    if (
+        not getattr(config, "num_moe_experts", None)
+        or getattr(config, "cuda_graph_impl", "none") != "transformer_engine"
+    ):
+        return
+    graph_modules = {module.name for module in config.cuda_graph_modules}
+    if not graph_modules or graph_modules & _ROUTER_CUDA_GRAPH_MODULES:
+        raise ValueError(
+            "MoE padding masks are not supported with Transformer Engine CUDA graphs that capture the router "
+            f"(cuda_graph_modules: {sorted(graph_modules) or 'the whole layer'}); capture other modules only, or "
+            "disable CUDA graphs."
+        )
+
+
+def _prepare_packed_padding_mask(
+    padding_mask: torch.Tensor, *, config, model: GPTModel, pg_collection
+) -> torch.Tensor:
+    """The padding mask laid out like this pipeline stage's hidden states, as upstream Megatron-Bridge lays it out.
+
+    The MoE router reads the mask position for position against its hidden states, which under sequence parallelism
+    hold this tensor-parallel rank's share of the sequence. A GPT model's first stage scatters the mask itself, beside
+    its embeddings; its later stages, and every stage of a hybrid model, which in the pinned Megatron-Core scatters
+    only its embeddings, get their share here.
+    """
+    needs_sp_scatter = not unwrap_model(model).pre_process or getattr(config, "is_hybrid_model", False)
+    if getattr(config, "sequence_parallel", False) and needs_sp_scatter:
+        padding_mask = (
+            tensor_parallel.scatter_to_sequence_parallel_region(
+                padding_mask.transpose(0, 1).contiguous(), group=pg_collection.tp
+            )
+            .transpose(0, 1)
+            .contiguous()
+        )
+    return padding_mask
+
+
 def get_batch_from_iterator(
     data_iterator: Iterable,
     use_mtp: bool = False,
@@ -161,6 +209,9 @@ def get_batch_from_iterator(
         required_device_keys.update(("tokens", "position_ids"))
     if is_last_pp_stage:
         required_device_keys.update(("labels", "loss_mask"))
+    # Every stage's MoE routers leave the padded positions out of their statistics.
+    if "padding_mask" in batch:
+        required_device_keys.add("padding_mask")
 
     # For packed sequences, record the full (pre-CP-slice) pack length from the
     # raw batch. tokens/labels are full-length on every rank (the sampler shards
@@ -203,6 +254,7 @@ def get_batch(
     torch.Tensor | None,
     torch.Tensor | None,
     int | None,
+    torch.Tensor | None,
 ]:
     """Generate a batch.
 
@@ -214,8 +266,9 @@ def get_batch(
     Returns:
         tuple of tensors containing tokens, labels, loss_mask, attention_mask, position_ids,
         cu_seqlens, cu_seqlens_argmin, max_seqlen, cu_seqlens_unpadded,
-        cu_seqlens_unpadded_argmin, and the full (pre-CP-slice) packed sequence length
-        (None when not packed).
+        cu_seqlens_unpadded_argmin, the full (pre-CP-slice) packed sequence length
+        (None when not packed), and the padding mask (True at the positions the collate
+        padded; None when the batch carries none).
     """
     # Determine pipeline stage role via process group collection
     is_first = is_pp_first_stage(pg_collection.pp)
@@ -231,7 +284,7 @@ def get_batch(
     # all stages observe the same batch). For non-packed runs, middle stages keep
     # their original behaviour and early-return without touching the iterator.
     if is_middle and not _dataset_uses_packed_sequences(cfg):
-        return None, None, None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None, None, None
 
     batch = get_batch_from_iterator(
         data_iterator,
@@ -277,6 +330,7 @@ def get_batch(
         batch.get("cu_seqlens_unpadded"),
         batch.get("cu_seqlens_unpadded_argmin"),
         full_seq_length,
+        batch.get("padding_mask"),
     )
 
 
@@ -401,6 +455,7 @@ def _forward_step_common(
             cu_seqlens_unpadded,
             cu_seqlens_unpadded_argmin,
             full_seq_length,
+            padding_mask,
         ) = get_batch(data_iterator, state.cfg, use_mtp, pg_collection=pg_collection)
     timers("batch-generator").stop()
 
@@ -420,6 +475,12 @@ def _forward_step_common(
         "attention_mask": attention_mask,
         "labels": labels,
     }
+    # The MoE routers leave the positions the collate padded out of their expert-bias and auxiliary-loss statistics.
+    if padding_mask is not None:
+        _refuse_padding_mask_under_router_cuda_graphs(config)
+        forward_args["padding_mask"] = _prepare_packed_padding_mask(
+            padding_mask, config=config, model=model, pg_collection=pg_collection
+        )
 
     # Add packed sequence support
     if cu_seqlens is not None:
