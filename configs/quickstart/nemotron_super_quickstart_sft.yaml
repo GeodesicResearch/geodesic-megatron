@@ -18,8 +18,8 @@
 #    no longer measurable — every bare-metal figure in this header is kept as a
 #    HISTORICAL baseline from the retired environment, not a live comparison.)
 #
-# CURRENT ANCHOR (2026-08-05, GBS 128 — the standard batch across quickstarts, Kyle's
-# directive of that date): **31.562 s/iter = 246.58 ms/sample**, peak 83.3 GB of 95, FT
+# CURRENT ANCHOR (2026-08-05, GBS 128 — the benchmark's batch since Kyle's directive of
+# that date): **31.562 s/iter = 246.58 ms/sample**, peak 83.3 GB of 95, FT
 # off, mean of iters 10-30 (2.3% spread). 167.4 model TFLOP/s/GPU (16.9% MFU) / 196.6
 # hardware (19.9% HFU) by the exact estimator — the GBS 64->128 move shrank the PP
 # bubble 17.9% -> 9.9% and delivered -7.7% per sample, right on the bubble-law
@@ -303,7 +303,7 @@ dataset:
     pad_to_max_length: false
 
 train:
-  global_batch_size: 128  # Kyle-standardised across quickstarts 2026-08-05 (was 64); 64 ub/replica at DP=2 -> ~10% PP bubble
+  global_batch_size: 128  # Kyle's directive of 2026-08-05 (was 64); 64 ub/replica at DP=2 -> ~10% PP bubble
   micro_batch_size: 1
   # 48 iters x GBS 128 x seq 32768 = 201,326,592 tokens (~201M; the length predates the
   # GBS-128 standardisation — it was sized as a 100M-token run at GBS 64, Kyle 2026-07-24,

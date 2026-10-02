@@ -10,6 +10,19 @@ parity with the production run: the same model and checkpoints, the same data an
 is packed (several documents per sequence, read through `cu_seqlens`), which has its own code path and constraints, and
 the production posture sits in the regime of a context-parallel partition bug that had to be fixed first (E-000).
 
+**Result.** The final posture — `configs/quickstart/nemotron_nano_quickstart_sft.yaml`: CP=1 with the chunked
+linear cross-entropy, BF16 gradient reduction in 500M-parameter buckets with the parameter all-gather overlapped,
+HybridEP with the fused router on packs padded to the full length, and host settings — is **1.779× the as-is
+benchmark** in four placement-controlled paired cycles, 95% CI [1.775, 1.782]: under the pre-registered rule,
+**goal met, established** at k = 4 (E-008). It runs 3.689 s/iter = 8,881 tokens/s/GPU against the as-is 6.563 s =
+4,993, and peaks at 70.4 GiB over all 64 GPUs where the as-is posture peaks at 85.3 (E-005). Its 500-iteration loss
+fails the pre-registered band: it sits below the as-is runs' band over iterations 201–400, by at most 4.3×10⁻⁵
+nats, and is back inside from 401, an excursion Kyle accepted (2026-10-02). A checkpoint it writes resumes within
+the spread of straight runs and exports to HF with the as-is layout (E-005, checked before the padding mask, which
+adds no checkpoint state). Two fixes to the packed SFT path came first, and both change how every packed SFT run
+trains: the context-parallel partition of packed batches (E-000) and the pad tokens in the MoE routers' statistics
+(E-007).
+
 **Benchmark.** `configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml` — the production XL SFT config composed
 with a small overlay (`base_config:`): GBS 64 on 64 GPUs (DP=32 at CP=2, so 2 packs per DP replica, the same per-GPU
 work as production's GBS 256 on 256 GPUs), the weights-only warm start from the midtraining final that production made,
@@ -84,6 +97,63 @@ Each run is single-group; the ratios are against the calibration's as-is run, on
 | 4 | + 500M-parameter gradient buckets | 3.672 | 8,925 | 1.79 | 0.992514 | 70.4 | E-004 |
 
 ## Experiments
+
+### E-008 · re-verification with the routing padding mask · 2026-10-02
+
+The final posture verified again under the rules of E-005, against as-is references that also run with the mask (E-007;
+design `records/verification_design_mask_20261001T175619Z.md`, fixed before the runs, and its addendum
+`records/verification_design_mask_addendum_20261001T221819Z.md`). Results: `records/verification_mask2_results_20261002.md`
+(loss parity, numerics, memory) and `records/cycle_verdict_mask3.txt` (speed).
+
+- **Runs.**
+  - The first attempt (`snapshots/mask1`, jobs 6996573–6996580) failed at every run's first backward, in the
+    router's expert-bias count, which lined the `[tokens]` mask up against its `[tokens, experts]` routing map. It is
+    upstream Megatron-LM #6114, carried as the pin's 0006.
+  - Loss parity ran from `snapshots/mask2`: as-is references `mk2_asis_a/b/c` (jobs 7002375, 7002380, 7002382) and the
+    final posture `mk2_final` (7002384), 500 iterations each. That snapshot laid the mask out for sequence parallelism
+    in the models rather than in the step as committed; at TP=1 neither scatters it, so the runs train the committed
+    code's numerics.
+  - Speed ran from `snapshots/mask3`, which is `2850cb5b` but for its CUDA-graph refusal, narrowed to upstream's rule
+    after the snapshot was taken; neither posture runs CUDA graphs, so neither version of the check acts. Four A B B A
+    cycles, each pinned to one switch group by excluding the others (jobs 7005942–7005945, groups 12, 9, 11 and 5).
+    Four earlier cycles (7002445–7002448) were placed across four or five groups, which the rule excludes; the spread
+    slowed their as-is runs about 5% and their final runs about 1%, inflating the ratios of the three that can be
+    scored to 1.84–1.86.
+- **Loss parity: FAIL under the pre-registered rule, accepted (Kyle, 2026-10-02).**
+  - The references agree to δ = 1.96×10⁻⁵.
+  - The final posture's window offsets from the references' band centre, ×10⁻⁵ over iterations 1–500: +0.1, −0.7,
+    +0.1, −1.0, −2.5, −3.8, −4.3, −2.8, +0.0, +2.0. Windows 201–400 lie outside the band (at most −4.3×10⁻⁵, in
+    301–350), and the run is back inside from 401. The mean offset is −1.3×10⁻⁵, with 6 of 10 windows below.
+  - The grad norm lies inside every window.
+  - Read from the job logs (seven significant digits, about 1% of the band's width): `mk2_asis_c`'s W&B run lost
+    iterations 329–500 when W&B stalled at 23:55Z, and the job then hung at exit on W&B and hit its time limit. The W&B
+    read over iterations 1–300, where every run is complete, puts the same windows outside.
+  - The pad effect is gone. Unmasked, the posture sat a flat −1.8×10⁻⁵ below from about iteration 100 (E-005, E-007);
+    masked, it tracks the references for 200 iterations, dips and recovers. What remains comes from a lever that
+    changes numerics and was never banded alone with the mask. HybridEP, which moved iteration 1 most (−7.4×10⁻⁵,
+    E-007), is the candidate; it was not run, the decision being to accept the excursion.
+- **Numerics and launch: pass.** Iteration 1's loss is 1.034376 on every as-is run and 1.034350 on every final run, the
+  three references and the parity run as well as the 16 runs of the speed cycles. No run has a NaN or a non-finite grad
+  norm, every iteration line carries `lm loss`, and each run's `[env-overrides]` lines show
+  `ISAMBARD_FP32_SSM_STATE=checkpoint` on all 16 nodes.
+- **Memory: pass.** The driver-level peak over all 64 GPUs of `mk2_final` is 70.4 GiB (`memwatch.sh`, limit 90).
+- **Speed: established.**
+
+  | Cycle (job) | Group | As-is runs (s) | Final runs (s) | Ratio |
+  |---|---|---|---|---|
+  | 7005942 | 12 | 6.5843, 6.5701 | 3.7094, 3.6979 | 1.7759 |
+  | 7005943 | 9 | 6.5546, 6.5488 | 3.6791, 3.6805 | 1.7805 |
+  | 7005944 | 11 | 6.5766, 6.5649 | 3.6916, 3.6904 | 1.7802 |
+  | 7005945 | 5 | 6.5546, 6.5464 | 3.6830, 3.6841 | 1.7783 |
+
+  - The geometric mean is **1.779×, 95% CI [1.775, 1.782]**, a half-width of 0.19%. The lower bound clears 1.5, so
+    the rule asks for no further cycles. The final posture runs 3.689 s against 6.563 s, 8,881 against 4,993
+    tokens/s/GPU.
+  - Against the unmasked cycles of E-005 (3.677 and 6.565 s, on other allocations), the as-is step is unchanged and
+    the final step is 0.3% slower, inside the 0.5% spread of single-group runs on different allocations.
+  - Cycle 7005942 ended 12 minutes after its last run's final iteration: rank 0's W&B upload stalled at exit, as
+    `mk2_asis_c`'s did, and the other nodes' launchers left the exit barrier after its 300 s timeout. The scored
+    window is unaffected.
 
 ### E-007 · the loss band's failure: pad tokens in the MoE router's statistics · 2026-10-01
 

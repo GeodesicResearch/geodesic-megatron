@@ -23,9 +23,10 @@ mcore 0.19 pin added a REQUIRED ``is_hybrid_cp`` positional to
 ``get_batch_on_this_cp_rank``; the bridge's call site still passed the pre-0.19
 two-argument form, so every CP=1 configuration — and every non-packed configuration
 at any CP — died with ``TypeError: ... missing 1 required positional argument:
-'is_hybrid_cp'`` at the first microbatch. Among the shipped quickstarts that is the
-Ultra-550B (CP=1); the Nano and Super quickstarts (packed + CP>1) take the other
-branch and kept working, which is why it reached main unnoticed.
+'is_hybrid_cp'`` at the first microbatch. Among the shipped quickstarts that branch
+serves every one at CP=1 or on unpacked data; only the packed CP>1 ones (the Super
+SFT quickstart and the Nano SFT baseline benchmark) take the other, so a break here
+passes any check that runs only those.
 
 The existing suite could not catch it: ``test_gpt_step_packed_all_stages.py``
 patches ``get_batch_on_this_cp_rank`` with a permissive ``*args, **kwargs``

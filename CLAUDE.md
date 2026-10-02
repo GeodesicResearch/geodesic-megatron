@@ -199,8 +199,8 @@ bash pipeline_env_setup.sh
   site-packages, via PEP 420 namespace portions. The validator asserts it every run —
   a regular (non-namespace) `megatron` package in a future image would silently win.
 - **Benchmark/certification config:** `configs/quickstart/nemotron_super_quickstart_sft.yaml`
-  (Super-120B, TP1·CP4·EP4·PP8·ETP1·DP2 → 64 GPUs = **16 nodes**, **GBS 128** — the
-  standard batch across quickstarts since 2026-08-05) — gate is < 40 s/iter (mean of
+  (Super-120B, TP1·CP4·EP4·PP8·ETP1·DP2 → 64 GPUs = **16 nodes**, **GBS 128** since
+  2026-08-05) — gate is < 40 s/iter (mean of
   iters 10–30; measured anchor **31.562 s/iter** =
   **167.4 TFLOP/s/GPU** model-FLOPs, `moe_experts_impl: torch_grouped`
   and optimizer CPU offload **OFF**, both shipped defaults). Placement moves this workload
@@ -549,31 +549,39 @@ next segment resumes from the latest checkpoint.
 
 ### Nemotron 3 Nano (30B-A3B) on Isambard
 
-**The Nano SFT quickstart is the 32K benchmark config** (the 8K demo config was dropped
-2026-08-05; SFT quickstarts are standardised at seq 32768, 64 GPUs, GBS 128):
-- `configs/quickstart/nemotron_nano_quickstart_sft.yaml`, TP=1 CP=2 EP=4 PP=1 ETP=1 at
-  **GBS 128** on 16 nodes / 64 GPUs: **76.31 ms/sample** (9.767 s/iter), peak 91.5 GB
-  of 95, 163.9 model TFLOP/s/GPU (16.6% MFU, exact estimator). GBS 256 remains the
-  per-sample optimum within the 256-sequence cap (71.74 ms/sample measured) — 128
-  trades ~6% per sample for a batch comparable across quickstarts.
-  CP=2 is not a tuning choice: at 32K the fp32 cross-entropy logits are seq x vocab x 4 =
-  EXACTLY 16.00 GiB, a live tensor recompute cannot touch, so CP=1 does not fit **at PP=1**
-  (it missed by 12.31 GiB). It IS reachable at PP=2 with optimizer offload, and measured
-  +9.6% there — reachable, and not worth reaching, because that +9.6% is the price of the
-  PP=2 it needs (PP=2 alone is +18.3%; at matched PP=2, CP=1 is ~7.4% *faster*). Full
-  recompute is likewise mandatory (selective OOMs for exactly 8.00 GiB). Closed with
-  measurements, all worse: TP=2 +48.9%, PP=2 +18.3%, PP=4 +30.1%, EP=8 +77.2%, and the
-  three-knob CP=1 package +9.6%.
-  Evidence: `/projects/a5k/public/logs/infr71_wave2/docs/nano30b-32k-topology-campaign.md`.
-- **The control-pretraining XL SFT has a baseline benchmark**,
-  `configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml`: a `base_config:` overlay of
+**The Nano SFT quickstart is the control-pretraining XL SFT** (Kyle, 2026-10-01; it replaced the August 32K
+GBS-128 config): a baseline benchmark and its fastest configuration, as for the pretraining and midtraining stages.
+- `configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml`: a `base_config:` overlay of
   `configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`
   (packed seq 32768, TP1·CP2·EP4·PP1, full recompute) at 64 GPUs and **GBS 64** — 2 packs per replica,
   the XL SFT's per-GPU work at GBS 256 on 256 GPUs — warm-started from the midtraining final, with
   production's gradient bucket restated, run for 100 iterations and scored over iterations 51–100:
-  **6.552 s/iter** (three single-group runs) = 5,001 tokens/s/GPU. Its SFT performance campaign is
-  logged in `docs/investigations/nano30b-sft-perf-campaign.md`, and
-  `tests/unit_tests/test_nano_stage_quickstarts.py` pins it to the XL SFT field by field.
+  **6.563 s/iter** (eight single-group runs) = 4,993 tokens/s/GPU.
+- `configs/quickstart/nemotron_nano_quickstart_sft.yaml` (+ `.env`): that benchmark plus the campaign's levers —
+  CP=1 with the chunked linear cross-entropy, BF16 gradient reduction in 500M-parameter buckets with the parameter
+  all-gather overlapped, HybridEP with the fused router on packs padded to the full 32,768 tokens, and host settings —
+  **3.689 s/iter = 8,881 tokens/s/GPU, 1.779×** the benchmark on the same allocations (four paired
+  single-group cycles, 95% CI [1.775, 1.782]: goal established), at a 70.4 GiB peak. Its 500-iteration loss fails the
+  pre-registered band: it sits below the as-is runs' band over iterations 201–400, by at most 4.3×10⁻⁵ nats, and is
+  back inside from 401 — a transient excursion Kyle accepted (2026-10-02).
+- **CP=1 fits at 32K only with the chunked linear cross-entropy** (`cross_entropy_fusion_impl: linear`, the pin's
+  carried commit 0005). The unfused path keeps the fp32 logits, seq × vocab × 4 = exactly 16.00 GiB, a live tensor no
+  recompute touches, which kept every earlier 32K posture at CP=2 (CP=1 missed by 12.31 GiB at PP=1). With the chunked
+  cross-entropy CP=1 peaks at 70.4 GiB at full recompute, and removes the packed CP partition, the Mamba CP all-to-alls
+  and their THD reordering. Each layer whose activations are kept rather than recomputed costs about 2.2 GiB: keeping
+  8 layers peaks at 88.2 GiB, and keeping 16, or selective recompute, runs out of memory.
+- **HybridEP on packed data needs full-length packs** (`dataset.dataset_kwargs.pad_to_max_length: true`): it sizes its
+  buffers from the first dispatch's local token count and faults (`cudaErrorIllegalAddress`) when an expert-parallel
+  peer holds more tokens, which packs padded only to their own length allow.
+- **Packed SFT loss curves are not comparable across two fixes of the packed path**: the context-parallel partition
+  of packed batches (at CP>1 with more than one pack per replica, a run without it trained on a corrupted partition
+  and logs about 0.03–0.04 nats lower) and the pad tokens left out of the MoE routers' statistics (0006 in the
+  submodule section below). A run trains on whichever of them the code it was launched from contains.
+- The campaign is logged in `docs/investigations/nano30b-sft-perf-campaign.md`, and
+  `tests/unit_tests/test_nano_stage_quickstarts.py` pins both files (the benchmark to the XL SFT field by field, the
+  quickstart to the benchmark plus its levers).
+- The August config's topology study (`/projects/a5k/public/logs/infr71_wave2/docs/nano30b-32k-topology-campaign.md`)
+  still holds for unfused cross-entropy: TP=2 +48.9%, PP=2 +18.3%, PP=4 +30.1%, EP=8 +77.2%.
 - For 8K-seq work (no shipped config since the demo was dropped; none of the 32K
   constraints above apply at 8K): the measured topology was TP=2, EP=2, PP=4, DP=2 on
   8 nodes (node-local TP+EP), ~3.4 s/iter at GBS 16, CP=1.
@@ -696,7 +704,7 @@ settings, BF16 gradients, chunked linear cross-entropy, HybridEP with router fus
 selective `[moe, shared_experts]` recompute in place of full recompute, still at CP=2 — **1.648×** the baseline
 benchmark on the same allocations (the pre-registered four-cycle comparison: goal established; **3.745 s/iter** on one
 switch group against its 6.146 s), 77 GB reserved, with its 500-iteration loss inside the baseline's band. Its
-chunked cross-entropy is the pin's carried commit 0005, so it does not run at the previous pin. The production configs
+chunked cross-entropy is the pin's carried commit 0005. The production configs
 do not use its levers. The campaign is logged in `docs/investigations/nano30b-midtrain-perf-campaign.md`.
 
 **Super — the 128-GPU, 1B-token standard** (Kyle, 2026-08-05): **seq 8192, GBS 3072**
@@ -1508,7 +1516,7 @@ as a patch in `3rdparty/patches/megatron-lm/` — that directory's README record
 and what it is load-bearing for. Two are patch files that NO run applies. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
 because nothing uses the `allgather` dispatcher today (every config uses `alltoall`, except the
-two Nano quickstarts' `flex`) but the fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
+three Nano quickstarts' `flex`) but the fix would be unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
 `0003`, `0004` and `0005`, the Nano pretrain campaign's Megatron-LM changes, are carried commits of the
 pin. `0003` is the port of upstream PR #4798 (EP all-to-all / compute overlap for the hybrid model,

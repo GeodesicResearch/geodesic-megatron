@@ -22,21 +22,19 @@ Each `PIPELINE_submit.sbatch` allocates SLURM nodes and delegates to the logic s
 
 ## Quickstart Walkthrough
 
-This walkthrough runs a complete Nemotron 3 Nano SFT training run on the shipped 32K
-quickstart config, covering every pipeline from data preparation through coherence
-testing. (An earlier edition of this walkthrough used a separate 8K demo config; that
-config and its captured outputs were retired on 2026-08-05 when the quickstarts were
-standardised on seq 32768 at 64 GPUs. The throughput figures quoted below are the
-measured 2026-08-05 numbers from the shipped config.)
+This walkthrough runs a complete Nemotron 3 Nano SFT training run on the shipped quickstart config, covering every
+pipeline from data through coherence testing. The quickstart is the control-pretraining XL SFT — the reasoning
+post-training stage of the control-pretraining curriculum, on packed sequences of 32,768 tokens — in its fastest
+configuration, and the throughput figures quoted below are the measured numbers of its performance campaign
+(`docs/investigations/nano30b-sft-perf-campaign.md`).
 
-**What you'll do:** Point at the prepared dataset (or prepare it once) → train on 16
-nodes (~10 s/iter; a 200-iteration demo is ~35 min) → convert the checkpoint to
-HuggingFace format (10 min) → run generation tests (15 min).
+**What you'll do:** Train on 16 nodes (3.69 s/iter; a 200-iteration demo is about 20 min) → convert the
+checkpoint to HuggingFace format (about 10 min) → run generation tests (15 min).
 
-**Prerequisites:** The environment must be installed once (`bash pipeline_env_setup.sh`
-on a GPU node — see Step 0). The Nano base checkpoint must already be converted at
-`/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16/`
-(see [Checkpoint Pipeline](#4-checkpoint-pipeline) for how to import it).
+**Prerequisites:** The environment must be installed once (`bash pipeline_env_setup.sh` on a GPU node — see Step 0).
+The run warm-starts from the control-pretraining midtraining final checkpoint, which is already on the cluster at the
+`pretrained_checkpoint` the config inherits, and its dataset is already packed there, so nothing needs converting or
+preparing first.
 
 > **Note:** The current pipeline infrastructure (configs, recipes, conversion scripts,
 > coherence tests) is optimized for Nemotron 3 Nano and Super. Future releases will
@@ -73,43 +71,38 @@ Design decisions, image contents, the image-qualification gates, and troubleshoo
 
 ### Step 1 — The dataset
 
-The quickstart consumes `geodesic-research/pa-warm-start-1B-sft-mix` packed at
-seq_length 32768, which is already prepared on the cluster at the `dataset_root` the
-config names — the same packs the Super-120B benchmark uses (both models share vocab
-131072 and one tokenizer encoder, so no repack is needed). If you need to regenerate it
-(or prepare a different dataset), use the [Data Pipeline](#3-data-pipeline) with
-`--seq-length 32768`; note the config's `pad_seq_to_mult: 16`, which satisfies the
-packing rule for context parallelism (pad multiple ≥ 2×CP).
+The quickstart trains on `geodesic-research/pa-warm-start-sft-xl-50b-mix` (its `default` config at revision
+`ec0b9197`: about 50B tokens of reasoning chat SFT), packed at seq_length 32768 with the think-history tokenizer into
+32 shards, already prepared on the cluster at the `dataset_root` the config inherits. Its identity and pack geometry
+are versioned in `configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml`, and it
+is rebuilt from that directory's `corpora.tsv` with `configs/control_pretraining/build_corpora.sh`. To prepare a
+different dataset, use the [Data Pipeline](#3-data-pipeline) with `--seq-length 32768`; a pad multiple of at least
+2×CP keeps the packs usable under context parallelism.
 
 ---
 
 ### Step 2 — Review the training config
 
-The quickstart config is at
-[`configs/quickstart/nemotron_nano_quickstart_sft.yaml`](configs/quickstart/nemotron_nano_quickstart_sft.yaml).
-Key fields:
+The quickstart config is
+[`configs/quickstart/nemotron_nano_quickstart_sft.yaml`](configs/quickstart/nemotron_nano_quickstart_sft.yaml), and it
+is a chain of `base_config:` overlays rather than one file:
 
-```yaml
-train:
-  global_batch_size: 128     # the standard batch across quickstarts
-  micro_batch_size: 1
-  train_iters: 40            # benchmark length; override for longer demos
+- `configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml` is the
+  production XL SFT: model, data, tokenizer, warm start, topology (TP1·CP2·EP4·PP1) and schedule.
+- [`nemotron_nano_quickstart_sft_baseline.yaml`](configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml) makes
+  it a benchmark: GBS 64 on 64 GPUs (production's two packs per data-parallel replica), an exit at iteration 100 on
+  production's schedule, no checkpoint I/O, its own W&B name.
+- `nemotron_nano_quickstart_sft.yaml` adds the performance campaign's levers:
+  - context parallelism off (CP=1, DP=64, one whole pack per GPU), which fits at full recompute because the chunked
+    linear cross-entropy never materialises the 16 GiB of fp32 logits a 32K sequence's unfused loss keeps;
+  - BF16 gradient reduction in 500M-parameter buckets, with the parameter all-gather overlapped with the forward;
+  - the HybridEP dispatcher with the fused router, on packs padded to the full 32,768 tokens;
+  - host settings: timers at level 1, the loss NaN check and per-parameter gradient norms off, garbage collection on a
+    schedule.
 
-model:
-  seq_length: 32768
-  context_parallel_size: 2   # mandatory at 32K: halves the 16 GiB fp32 CE logits
-  expert_model_parallel_size: 4
-  recompute_granularity: full  # mandatory: frees the room the logits need
-
-checkpoint:
-  save: null                 # benchmark posture — override to keep a checkpoint
-logger:
-  wandb_save_dir: /projects/a5k/public/logs/wandb   # mandatory when save is null
-```
-
-The header of the config carries the full measured story: topology, the closed
-alternatives (all measured worse), and the memory walls that force CP=2 and full
-recompute. It is the reference for *why* every field is what it is.
+Each file's header carries its measured story and why every field is what it is. A `base_config:` path resolves
+against the directory of the file that names it, so a copy of a quickstart goes beside it in `configs/quickstart/` or
+restates the base path.
 
 ---
 
@@ -119,13 +112,14 @@ The training pipeline has two layers: a thin SLURM wrapper
 (`pipeline_training_submit.sbatch`) that allocates nodes, and a shared launcher
 (`pipeline_training_launch.sh`) that configures NCCL, Slingshot networking, and starts
 the distributed job. The `nano sft` arguments select the model recipe and training
-mode. `--disable-ft` is part of the documented benchmark command (the certified posture;
-see the Super quickstart header for the FT straggler-reporter interaction it avoids).
+mode, and the config's `.env` file, given as `ISAMBARD_ENV_OVERRIDES`, carries the launcher setting it needs.
+`--disable-ft` keeps the short run restart-free.
 
-The benchmark run, exactly as certified (40 iterations, no checkpoint):
+The benchmark run, exactly as measured (100 iterations, no checkpoint):
 
 ```bash
-isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_sft.env \
+  isambard_sbatch --nodes=16 --time=00:20:00 pipeline_training_submit.sbatch \
   configs/quickstart/nemotron_nano_quickstart_sft.yaml nano sft --disable-ft
 ```
 
@@ -133,16 +127,17 @@ For a demo that trains longer and keeps a checkpoint for Steps 5–6, add Hydra 
 (the launcher forwards them):
 
 ```bash
-isambard_sbatch --nodes=16 pipeline_training_submit.sbatch \
+ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_sft.env \
+  isambard_sbatch --nodes=16 --time=00:30:00 pipeline_training_submit.sbatch \
   configs/quickstart/nemotron_nano_quickstart_sft.yaml nano sft --disable-ft \
-  train.train_iters=200 \
+  train.exit_interval=200 \
   checkpoint.save=/projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft \
   checkpoint.save_optim=false checkpoint.save_rng=false
 ```
 
-Megatron-Core saves a final checkpoint when `train_iters` is reached, so this writes
-exactly one checkpoint at iteration 200 (`save_optim/save_rng: false` skip Adam moments
-and RNG state the downstream conversion never reads).
+The run exits at `train.exit_interval` and, because `checkpoint.save` is set, writes exactly one checkpoint there;
+`train_iters` stays the production stage's, so the learning rate at every iteration is production's.
+`save_optim/save_rng: false` skip the Adam moments and RNG state the downstream conversion never reads.
 
 ---
 
@@ -152,29 +147,35 @@ and RNG state the downstream conversion never reads).
 tail -f /projects/a5k/public/logs/megatron_runs/train-<jobid>.out | grep --line-buffered "iteration"
 ```
 
-Measured behaviour of this config (2026-08-05, 64 GPUs, solo): the first iteration is
-slow (~40–110 s — compile warm-up for the full-recompute path), iterations settle after
-~iteration 22, and the settled mean is **9.77 s/iter (76.3 ms/sample) at peak 91.5 GB
-of 95**. Loss on the warm-started base descends from ~1.08 within the first dozens of
-iterations; 0 NaN. Metrics stream live to
-[wandb.ai/geodesic/megatron_training](https://wandb.ai/geodesic/megatron_training)
-under the run name `nemotron_nano_quickstart_sft`.
+Measured behaviour of this config (2026-10-02, 64 GPUs, one switch group): the first iteration takes about a minute
+(kernel compilation and communicator setup), every later step is within about 1% of the mean, and the mean is
+**3.689 s/iter** (8,881 tokens/s/GPU) at a 70.4 GiB peak of 95. The loss of the warm-started model
+starts near 1.03 and falls below 1.0 within the first hundred iterations; 0 NaN. Metrics stream live to
+[wandb.ai/geodesic/megatron_training](https://wandb.ai/geodesic/megatron_training) under the run name
+`nemotron_nano_quickstart_sft_perf`.
 
 ---
 
 ### Step 5 — Export checkpoint to HuggingFace format
 
-Nano converts on a single node (4 GPUs) with node-local EP — no Slingshot needed:
+Nano converts on a single node (4 GPUs) with node-local EP — no Slingshot needed. Two details are specific to this
+model. It trains with the `torch_grouped` expert backend, whose checkpoint `run_config.yaml` names a model spec the
+exporter cannot import, so the export reads a clone of the checkpoint: links to its files plus a corrected
+`run_config.yaml` (`make_export_clone` in `scripts/hub/publish_models.py`; the source is never written to). And it is a
+reasoning (think) SFT, so it exports with `--reasoning`, which keeps the thinking chat template:
 
 ```bash
+python3 -c 'import sys; from pathlib import Path; from scripts.hub.publish_models import make_export_clone; make_export_clone(Path(sys.argv[1]), Path(sys.argv[2]))' \
+  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft/iter_0000200 \
+  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft_export/iter_0000200
 isambard_sbatch --nodes=1 pipeline_checkpoint_submit.sbatch export \
-  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft \
-  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --no-reasoning \
+  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft_export \
+  --hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --reasoning \
   --iteration 200
 ```
 
 The converted model lands at
-`.../nemotron_nano_quickstart_sft/iter_0000200/hf/` — a standard HF checkpoint
+`.../nemotron_nano_quickstart_sft_export/iter_0000200/hf/` — a standard HF checkpoint
 (safetensors + config + tokenizer) loadable with `AutoModelForCausalLM`.
 
 ---
@@ -185,7 +186,7 @@ Nano fits on a single GPU for generation:
 
 ```bash
 isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
-  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft/iter_0000200/hf
+  /projects/a5k/public/checkpoints/megatron/nemotron_nano_quickstart_sft_export/iter_0000200/hf
 ```
 
 This generates responses to 8 diverse prompts and logs a table (prompt, response,
@@ -299,8 +300,12 @@ The Nano pretrain campaign's record is
 
 ### Writing a new YAML config
 
+Start from a complete stage config, such as the control-pretraining XL SFT that the Nano SFT quickstart is built on
+(the quickstart files themselves are `base_config:` overlays, whose base paths resolve against their own directory):
+
 ```bash
-cp configs/quickstart/nemotron_nano_quickstart_sft.yaml configs/my_new_sft.yaml
+cp configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml \
+   configs/my_new_sft.yaml
 ```
 
 Key fields to change:
@@ -309,14 +314,20 @@ Key fields to change:
 dataset:
   dataset_name: your-org/Your-Dataset
   dataset_root: /projects/a5k/public/data/your-org__Your-Dataset
-  seq_length: 8192
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/data/your-org__Your-Dataset/packed/...
 train:
-  train_iters: ???   # = total_tokens / (global_batch_size * seq_length)
+  train_iters: ???   # = total packs / global_batch_size, counted from the packs
 checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/<the model you start from>
+  load: /projects/a5k/public/checkpoints/megatron/my_new_sft
   save: /projects/a5k/public/checkpoints/megatron/my_new_sft
 logger:
   wandb_exp_name: my_new_sft
 ```
+
+The speed levers of the Nano SFT quickstart (`configs/quickstart/nemotron_nano_quickstart_sft.yaml`, with its `.env`
+launcher setting) apply to a new packed SFT config too; each is explained in that file's header.
 
 A config that differs from an existing one in a few fields can instead name it under
 `base_config:` (relative to the new file's directory) and state only those fields. Mappings
@@ -347,16 +358,16 @@ Cross-node EP costs ~14× throughput and reliably hangs the CXI fabric.
 | Model | Validated layout | Measured |
 |---|---|---|
 | **Nano (30B-A3B), seq 8192** | 8 nodes / 32 GPUs: TP=2, EP=2, PP=4, DP=2 (GBS 16) | ~3.4 s/iter, ~27 TFLOP/s/GPU; zero hangs through 500+ iters |
-| **Nano (30B-A3B), seq 32768** | 16 nodes / 64 GPUs: TP=1, CP=2, EP=4, PP=1, ETP=1 (GBS 128, the standard batch across quickstarts) | 76.31 ms/sample = 9.767 s/iter, peak 91.5 GB of 95 (GBS 256 remains the per-sample optimum within the cap: 71.74 ms/sample) — [`configs/quickstart/nemotron_nano_quickstart_sft.yaml`](configs/quickstart/nemotron_nano_quickstart_sft.yaml) |
 | **Super (120B-A12B)** | TP=1, CP=(min that fits), EP=4, PP=22, ETP=1 | ~75-84 TFLOP/s/GPU, ~1000+ tok/s/GPU (≈2.4× the old TP=4 layouts) |
-| **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 128 — the standard batch across quickstarts since 2026-08-05) | 31.562 s/iter anchor = 167.4 TFLOP/s/GPU (`moe_experts_impl: torch_grouped`, optimizer CPU offload off; superseded, at the old GBS-64 workload: 17.099 = the paired A/B that certified `torch_grouped`, 20.66 on the `cublas_grouped` per-expert loop, 21.78 with offload 0.5) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
+| **Super benchmark** | 16 nodes / 64 GPUs: TP=1, CP=4, EP=4, PP=8, ETP=1, DP=2 (seq 32K, GBS 128 since 2026-08-05) | 31.562 s/iter anchor = 167.4 TFLOP/s/GPU (`moe_experts_impl: torch_grouped`, optimizer CPU offload off; superseded, at the old GBS-64 workload: 17.099 = the paired A/B that certified `torch_grouped`, 20.66 on the `cublas_grouped` per-expert loop, 21.78 with offload 0.5) — the standing environment benchmark, [`configs/quickstart/nemotron_super_quickstart_sft.yaml`](configs/quickstart/nemotron_super_quickstart_sft.yaml) |
 | **Super benchmark, 32 nodes** | 32 nodes / 128 GPUs: same topology, DP=4, **GBS 256** (scale the batch with the nodes) | 122.0 ms/sample = 31.228 s/iter, 169.2 TFLOP/s/GPU. With the base config at GBS 128 this override is matched µb/replica (64 both ends): perfect per-sample halving predicts 123.3 ms/sample vs 122.0 measured — scaling perfect within the ±2% cross-allocation placement band, same backend both ends — run as the 64-GPU config plus `train.global_batch_size=256`; the quickstarts are standardised at 64 GPUs and this is the one field that differs |
 | **Ultra (550B-A55B)** | 72 nodes / 288 GPUs: TP=4, EP=4, PP=36, ETP=1 | ~28-30 s/iter steady state; first iter 45-75 min (lazy NCCL init at this depth) |
 | **Nano pretrain (from scratch)** | 16 nodes / 64 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=64 (seq 8192, GBS 512 = 8 microbatches per replica, as in the filtered arm's stage 1 at GBS 2048 on 256 GPUs; 50 iterations, no checkpoint I/O), plus the performance campaign's levers (EP all-to-all / compute overlap with the HybridEP dispatcher, FP8 dense layers with BF16 parameters, BF16 gradients, `[moe_act]` recompute, chunked linear cross-entropy, host-path settings) | 4.954 s/iter (mean of twelve runs in six paired cycles, iterations 26–50) = 13,230 tokens/s/GPU, 27.8% MFU: 1.90× the baseline benchmark on the same allocations, with its 500-iteration loss inside the baseline's band (1.90× at 256 GPUs too, where the loss leaves the band only over iterations 1–50, on the low side). 32 GPUs is the same file plus `train.global_batch_size=256` — [`configs/quickstart/nemotron_nano_quickstart_pretrain.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) (launched with its `.env` file) |
 | **Nano pretrain, baseline benchmark** | the same topology and batch at the control-pretraining baseline's stage-1 posture, a small `base_config:` overlay of it, so the production posture reaches it unedited | 9.328 s/iter (mean over iterations 26–50) = 7,026 tokens/s/GPU, 14.78% MFU at 64 GPUs (job 6930454) — [`configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml`](configs/quickstart/nemotron_nano_quickstart_pretrain_baseline.yaml) |
 | **Nano midtrain (warm start, seq 32768)** | 16 nodes / 64 GPUs: TP=1, CP=2, EP=4, PP=1, ETP=1, DP=32 (GBS 64 = 2 microbatches per replica, as production's GBS 512 on 512 GPUs; 200 iterations, scored over 151–200), plus the midtraining campaign's levers (parameter-gather overlap, host-path settings, BF16 gradients, chunked linear cross-entropy, HybridEP with router fusion, FP8 dense layers with BF16 parameters, selective `[moe, shared_experts]` recompute) | 3.745 s/iter on one switch group (the six single-group runs of four paired cycles) = 8,749 tokens/s/GPU, 21.6% MFU: 1.648× the baseline benchmark on the same allocations, with its 500-iteration loss inside the baseline's band — [`configs/quickstart/nemotron_nano_quickstart_midtrain.yaml`](configs/quickstart/nemotron_nano_quickstart_midtrain.yaml) (launched with its `.env` file) |
 | **Nano midtrain, baseline benchmark** | 16 nodes / 64 GPUs: TP=1, CP=2, EP=4, PP=1, ETP=1, DP=32 at the control-pretraining baseline's stage-2 posture (seq 32768, GBS 64 = 2 microbatches per replica, as production's GBS 512 on 512 GPUs; full recompute; warm-started weights-only from the stage-1 final, as production is), a `base_config:` overlay of it; 200 iterations, no checkpoint saved or resumed | 6.146 s/iter (mean of three runs over iterations 151–200) = 5,332 tokens/s/GPU, 13.17% MFU at 64 GPUs — [`configs/quickstart/nemotron_nano_quickstart_midtrain_baseline.yaml`](configs/quickstart/nemotron_nano_quickstart_midtrain_baseline.yaml) |
-| **Nano SFT, baseline benchmark** | 16 nodes / 64 GPUs: TP=1, CP=2, EP=4, PP=1, ETP=1, DP=32 at the control-pretraining XL SFT's posture (packed seq 32768, GBS 64 = 2 packs per replica, as the XL SFT's GBS 256 on 256 GPUs; full recompute; warm-started weights-only from the midtraining final, as production is), a `base_config:` overlay of it; 100 iterations, no checkpoint saved or resumed | 6.552 s/iter (mean of three single-group runs over iterations 51–100) = 5,001 tokens/s/GPU at 64 GPUs — [`configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml`](configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml) |
+| **Nano SFT (warm start, packed seq 32768)** | 16 nodes / 64 GPUs: TP=1, CP=1, EP=4, PP=1, ETP=1, DP=64 (GBS 64 = one pack per GPU, the XL SFT's tokens per GPU at GBS 256 on 256 GPUs; 100 iterations, no checkpoint I/O), plus the SFT campaign's levers (chunked linear cross-entropy, BF16 gradient reduction in 500M-parameter buckets with parameter-gather overlap, HybridEP with router fusion on full-length packs, host-path settings) | 3.689 s/iter (the eight runs of four paired cycles, each on one switch group) = 8,881 tokens/s/GPU at a 70.4 GiB peak: 1.779× the baseline benchmark on the same allocations; its 500-iteration loss leaves the baseline's band over iterations 201–400, by at most 4.3×10⁻⁵ nats, and is back inside from 401 — [`configs/quickstart/nemotron_nano_quickstart_sft.yaml`](configs/quickstart/nemotron_nano_quickstart_sft.yaml) (launched with its `.env` file) |
+| **Nano SFT, baseline benchmark** | 16 nodes / 64 GPUs: TP=1, CP=2, EP=4, PP=1, ETP=1, DP=32 at the control-pretraining XL SFT's posture (packed seq 32768, GBS 64 = 2 packs per replica, as the XL SFT's GBS 256 on 256 GPUs; full recompute; warm-started weights-only from the midtraining final, as production is), a `base_config:` overlay of it; 100 iterations, no checkpoint saved or resumed | 6.563 s/iter (the eight as-is runs of four paired cycles, each on one switch group, over iterations 51–100) = 4,993 tokens/s/GPU at 64 GPUs — [`configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml`](configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml) |
 | **Super pretrain (from scratch)** | 32 nodes / 128 GPUs: TP=1, CP=1, EP=4, PP=8, ETP=1, DP=16 (seq 8192, GBS 3072, 1B tokens) | 86.940 s/iter = 28.301 ms/sample (loss 12.19 → 7.65, 0 NaN; 225 GB weights-only checkpoint) — [`configs/quickstart/nemotron_super_quickstart_pretrain.yaml`](configs/quickstart/nemotron_super_quickstart_pretrain.yaml) |
 
 Other levers that matter: `recompute_granularity: selective` with MoE-scoped
@@ -364,8 +375,8 @@ Other levers that matter: `recompute_granularity: selective` with MoE-scoped
 and OOM), `moe_permute_fusion: True`, `expert_tensor_parallel_size: 1` (parallel folding —
 what keeps EP node-local at high TP), `gradient_accumulation_fusion: True` (the image ships
 APEX; ~1.1 s/iter on the 120B), and **BF16 everywhere** — FP8 causes stochastic alignment
-crashes in MoE routing. The measured exceptions are the two Nano quickstarts (pretrain and
-midtrain), which run FP8 current scaling on their dense layers only; their routed experts stay BF16. Recipe LR 5e-6; 8e-5
+crashes in MoE routing. The measured exceptions are the Nano pretrain and midtrain
+quickstarts, which run FP8 current scaling on their dense layers only; their routed experts stay BF16. Recipe LR 5e-6; 8e-5
 NaNs under context parallelism. Full topology
 reasoning, per-model memory notes, and the legacy layouts these superseded are in
 [CLAUDE.md](CLAUDE.md#nemotron-3-super-120b-a12b-on-isambard).

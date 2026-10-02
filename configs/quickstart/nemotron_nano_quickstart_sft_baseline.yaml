@@ -40,7 +40,7 @@
 # 20 minutes bounds how long a wedged benchmark holds the allocation.
 #
 # LAUNCH (--disable-ft: the run is short and restart-free):
-#   isambard_sbatch --nodes=16 --time=00:45:00 pipeline_training_submit.sbatch \
+#   isambard_sbatch --nodes=16 --time=00:25:00 pipeline_training_submit.sbatch \
 #       configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml nano sft --disable-ft
 #
 # SCORING: the mean step time over iterations 51-100, with tokens/s/GPU = GBS x 32768 / (GPUs x mean step):
@@ -52,9 +52,9 @@
 # work of packed data (a pack holds about six documents, each attending only within itself); tokens/s/GPU does not
 # depend on that convention.
 #
-# MEASURED (2026-10-01, 64 GPUs, three runs each on one switch group, jobs 6980031, 6980078 and 6980079): mean
-# 6.552 s/iter over iterations 51-100 (6.556, 6.552, 6.547) = 5,001 tokens/s/GPU; lm loss (91-100) 0.99250-0.99253,
-# 0 NaN. The production run of this posture (job 6526526: 256 GPUs at DP=128 on six switch groups) measured 7.294 s/iter
+# MEASURED (2026-10-02, 64 GPUs, the as-is runs of four paired cycles, each cycle on one switch group, jobs
+# 7005942-7005945): mean 6.563 s/iter over iterations 51-100 (eight runs, 6.546-6.584) = 4,993 tokens/s/GPU; lm loss
+# (91-100) 0.99251-0.99253, 0 NaN. The production run of this posture (job 6526526: 256 GPUs at DP=128 on six switch groups) measured 7.294 s/iter
 # over the same iterations 51-100 and 7.250 s over its whole stage (iterations 26-5976). The gap to this benchmark has
 # not been decomposed into placement, data-parallel width and the packs each run reads.
 

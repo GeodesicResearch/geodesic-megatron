@@ -688,7 +688,7 @@ that the 32K topology fits and that the stage boundary does not spike (see that 
 the smoke measured"). What was open before the runs fell into three groups:
 
 - **The 32K topology is now validated, at 508 GPUs.** CP=2 with full recompute was carried
-  over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs, and the
+  over from the August 2026 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs, and the
   GBS 512 / DP 254 combination ran for the first time on 2026-08-21 via
   [`../smoke_runs/`](../smoke_runs/README.md), which executes 100 iterations of each stage at
   these exact settings: it fits, and the weights-only warm start moved loss 6.972 -> 6.956

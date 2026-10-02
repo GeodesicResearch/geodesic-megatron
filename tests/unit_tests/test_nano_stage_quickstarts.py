@@ -238,7 +238,33 @@ MIDTRAIN_QUICKSTART = Quickstart(
     launcher_settings=["ISAMBARD_FP32_SSM_STATE=checkpoint"],
     wandb_name="nemotron_nano_quickstart_midtrain_perf",
 )
-QUICKSTARTS = [PRETRAIN_QUICKSTART, MIDTRAIN_QUICKSTART]
+SFT_QUICKSTART = Quickstart(
+    stage=SFT,
+    path=_QUICKSTARTS / "nemotron_nano_quickstart_sft.yaml",
+    levers={
+        "mixed_precision": "bf16_mixed_bf16_grad_reduce",
+        "model.context_parallel_size": 1,
+        "model.moe_token_dispatcher_type": "flex",
+        "model.moe_flex_dispatcher_backend": "hybridep",
+        "model.moe_router_fusion": True,
+        "model.cross_entropy_loss_fusion": True,
+        "model.cross_entropy_fusion_impl": "linear",
+        "model.cross_entropy_fusion_saved_logit_chunks": 8,
+        "dataset.dataset_kwargs.pad_to_max_length": True,
+        "ddp.overlap_param_gather": True,
+        "ddp.bucket_size": 500_000_000,
+        "rerun_state_machine.check_for_nan_in_loss": False,
+        "train.manual_gc": True,
+        "train.manual_gc_interval": 10,
+        "train.manual_gc_freeze": True,
+        "logger.timing_log_level": 1,
+        "logger.log_l2_norm_grad_to_tensorboard": False,
+    },
+    # As for midtraining: seq 32768 needs the fp32 inter-chunk SSM state whatever the environment carries.
+    launcher_settings=["ISAMBARD_FP32_SSM_STATE=checkpoint"],
+    wandb_name="nemotron_nano_quickstart_sft_perf",
+)
+QUICKSTARTS = [PRETRAIN_QUICKSTART, MIDTRAIN_QUICKSTART, SFT_QUICKSTART]
 
 
 def merged(path: Path, stage: BenchmarkStage, run_module):
@@ -417,11 +443,12 @@ class TestTheQuickstartIsTheBenchmarkPlusItsLevers:
 
     def test_every_lever_reaches_the_merged_config(self, quickstart_case, quickstart):
         """The launcher's merge drops a key the config classes lack, so each lever is read back from the merged
-        config: a misspelled field, or one the pinned Megatron-LM does not have, would not arrive."""
+        config: a misspelled field, or one the pinned Megatron-LM does not have, would not arrive. A config field
+        typed as a mapping (dataset.dataset_kwargs) is read by key."""
         for dotted, value in quickstart_case.levers.items():
             node = quickstart
             for part in dotted.split("."):
-                node = getattr(node, part)
+                node = node[part] if isinstance(node, dict) else getattr(node, part)
             assert node == value, dotted
 
     def test_its_env_file_holds_exactly_the_launcher_settings_it_needs(self, quickstart_case):
