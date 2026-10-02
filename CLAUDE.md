@@ -577,7 +577,11 @@ GBS-128 config): a baseline benchmark and its fastest configuration, as for the 
 - **Packed SFT loss curves are not comparable across two fixes of the packed path**: the context-parallel partition
   of packed batches (at CP>1 with more than one pack per replica, a run without it trained on a corrupted partition
   and logs about 0.03–0.04 nats lower) and the pad tokens left out of the MoE routers' statistics (0006 in the
-  submodule section below). A run trains on whichever of them the code it was launched from contains.
+  submodule section below; on parquet packs it covers the padding inside each document only where the dataset factory
+  passes the pad multiple to the parquet dataset). A run trains on whichever of them the code it was launched from
+  contains. A resumed packed SFT run starts each later epoch at the first pack (the batch sampler advances its count
+  as it yields, as upstream's does, without upstream's per-epoch shuffle). A run resumed from code without that fix
+  restarted every later epoch at its resume point; an uninterrupted run reads the same packs either way.
 - The campaign is logged in `docs/investigations/nano30b-sft-perf-campaign.md`, and
   `tests/unit_tests/test_nano_stage_quickstarts.py` pins both files (the benchmark to the XL SFT field by field, the
   quickstart to the benchmark plus its levers).
@@ -783,7 +787,11 @@ adds 4.00 GiB of margin for +0.31% step time and no numerics change. The other t
 CXI MR-cache capacity collapse (launcher: `FI_MR_CACHE_MAX_COUNT`) and the rank-0 NCCL
 object-gather transport retention (`dist.distributed_backend: "cpu:gloo,cuda:nccl"`).
 **Any probe validating save behaviour must cross at least three saves and run the forward
-after each** — one that exits at its second save never executes the failing step. A **fourth**
+after each** — one that exits at its second save never executes the failing step. On a posture with
+`train.manual_gc` on (the fast quickstarts and the xl-50b SFT rerun), the probe must also save no more often than
+`manual_gc_interval`. Python's automatic collection is off there, and each save leaves its garbage, that expert-weight
+copy included, for the next scheduled collection, so three saves inside one interval run out of memory at a cadence
+production never runs (Nano SFT campaign E-010). A **fourth**
 pathology sits on the RESUME side: the load's target for the grouped experts is that same full
 copy, and `_load_checkpoint_from_path` used to release the allocator cache while still holding
 it, so a resumed 64-node segment started ~14 GiB of reserved-but-unused memory heavier than a
@@ -922,7 +930,12 @@ cancelled on 2026-09-07 before running, and removed on 2026-09-13. Read any SFT 
 reach-first: the parent SFT's greedy coding cell hit the 32k budget on 93% of completions (evals,
 2026-09-07), so compare arms only on rates computed over all items, under an identical and
 explicitly stated generation budget, never on the W&B component mean, which is conditional on the
-completions that reached the scorer.
+completions that reached the scorer. `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml` (+ `.env`) is that
+ablation rerun on fixed, fast code (Kyle, 2026-10-02). It keeps the same training problem. It changes only the Nano
+SFT quickstart's levers, at the quickstart's values, and its run identity. It must launch from a checkout containing
+PR #52's packed-SFT fixes. Compare it with `control-pretraining-30b-baseline-xl50b-think` by evaluations, not loss
+curves: the ablation's logged loss reads about 0.03–0.04 nats low because of its corrupted CP partitions. Its launch
+and status are in that directory's README.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
 stages on the same corpora with AI-scheming literature removed — every document that **carries a
@@ -1125,7 +1138,7 @@ the part that bites — **no attempt to create the directory**.
 shipped.** The recipes default `tensorboard_dir` to `./nemo_experiments/default/tb_logs`
 (`recipes/common.py`), i.e. into the submitting checkout — the directory the pitfalls table above
 warns fills the disk — so a config that simply leaves the key out still builds a writer and logs
-into the repo. All thirteen training configs under `configs/control_pretraining/` therefore state
+into the repo. Every training config under `configs/control_pretraining/` therefore states
 `null` explicitly, and `TestTensorBoardIsDisabledEverywhere` fails a config that either names a
 directory or stays silent. The `configs/PA/green-team/` configs still point at `/tmp/tb_logs` and
 have not been converted.

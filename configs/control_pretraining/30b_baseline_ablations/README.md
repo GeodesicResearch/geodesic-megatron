@@ -144,3 +144,75 @@ a longest-chain-of-thought re-selection of the same sources at that batch — we
 under `/projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix-long/`
 (sixteen shards, 769,753 packs) and is no longer archived by the bucket manifest, which derives
 its datasets from the stage configs on file.
+
+## The xl-50b SFT rerun on fixed, fast code — `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml`
+
+The xl-50b ablation above rerun with the same training problem: the same warm start, the same packs in the same
+order, GBS 256 for 5976 iterations on 256 GPUs, and the same optimizer, schedule, tokenizer, recompute and checkpoint
+cadence (Kyle, 2026-10-02). It differs in three ways, and the test pins it to the ablation field by field:
+
+1. **The packed-SFT fixes, which are in the code.** Launch it only from a checkout that contains them (PR #52 at the
+   commit that adds the config, or later):
+   - the context-parallel partition of packed batches, which corrupted about a quarter of the ablation's
+     microbatches;
+   - pad tokens left out of the MoE routers' statistics, including, on the parquet packs both runs read, the padding
+     inside each document: the dataset factory passes the pad multiple to the parquet dataset as it does to the
+     `.npy` one. Attention then skips that padding too, through Transformer Engine's padded-THD kernel on the same
+     cuDNN backend: real-token outputs are unchanged and the step costs about 0.3% more;
+   - a resumed segment continuing its epoch rather than restarting every later pass at the resume point.
+2. **The fastest configuration.** These are the levers of `configs/quickstart/nemotron_nano_quickstart_sft.yaml`, at
+   its values:
+   - CP=1, with the chunked linear cross-entropy;
+   - BF16 gradient reduction in 500M-parameter buckets, with parameter-gather overlap;
+   - HybridEP with the fused router, on packs padded to full length;
+   - host settings.
+
+   On the 64-GPU benchmark this is 1.779× the ablation's posture
+   (`docs/investigations/nano30b-sft-perf-campaign.md`). The test requires each lever to keep the quickstart's value,
+   and the `.env` beside the config to hold the quickstart's launcher setting.
+3. **Its own run identity.** Checkpoints and the W&B run carry the `_v2` suffix.
+
+**Purpose.** Comparing it with `geodesic-research/control-pretraining-30b-baseline-xl50b-think` measures what the
+bugs cost that model. The export audit of 2026-09-27 named a partition-fixed SFT as the test that decides whether the
+partition bug contributed to the think models' looping (`/projects/a5k/public/tmp/export_audit_20260927/_final/`).
+
+**Compare evaluations, not loss curves.** The ablation's logged loss was computed over its corrupted partitions and
+reads about 0.03–0.04 nats lower than a correctly partitioned run of the same data.
+
+### Launch
+
+One day-long segment is expected to finish the run. A second, submitted with `--dependency=afternotok` on the first,
+starts only if the first fails, and resumes from the latest save. Three differences from the ablation's launch:
+- **No spare singleton segment.** A spare segment queued behind a finished run loads the final checkpoint and writes
+  it again in place. The ablation's spare (job 6528479) did this to its `iter_0005976`: `progress.txt` records two
+  saves of iteration 5976.
+- **No `ISAMBARD_SBATCH_FORCE`.** Training is not submitted with the `ISAMBARD_SBATCH_FORCE` the account's shell
+  exports.
+- **The `.env` goes with it.** The run carries its `.env` (the checkpointed fp32 SSM state).
+
+From the repo root of a checkout containing the fixes, the first segment:
+
+```bash
+ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.env \
+ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 \
+  isambard_sbatch --nodes=64 --time=24:00:00 \
+  --job-name=cp30b-baseline-sft-xl50b-gbs256-v2 \
+  pipeline_training_submit.sbatch \
+  configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml \
+  nano sft --disable-ft
+```
+
+Then submit the same command with `--dependency=afternotok:<first job id>`. A segment that ends on its own clock
+(`exit_duration_in_mins`) exits cleanly and does not trigger it; in that case, submit the next segment by hand.
+
+Expect about 4.1 s/iter, roughly 7 h for the run, against the ablation's 12 h 08 min.
+
+### After the run
+
+Export the final checkpoint as the ablation's was: the clone-and-patch export with
+`--hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --reasoning`. Then hand the export path to evals for the
+ablation's reasoning and tool-use suites, run at the ablation's exact settings and read as rates over all items.
+
+### Status
+
+Not yet launched.

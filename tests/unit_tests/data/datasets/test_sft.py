@@ -16,6 +16,7 @@ import json
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 import torch
 
 from megatron.bridge.data.datasets.sft import GPTSFTChatDataset, GPTSFTDataset, GPTSFTPackedDataset
@@ -322,9 +323,11 @@ def _padding(length: int, *spans: tuple[int, int]) -> list[bool]:
     return mask
 
 
+@pytest.mark.parametrize("pack_file", ["packs.npy", "packs.parquet"])
 class TestPackedCollatePaddingMask:
     """The packed collate marks every position it or the packer padded, so the MoE router can leave them out of its
-    statistics: the EOS padding at the end of each document and the padding after a pack's last document."""
+    statistics: the EOS padding at the end of each document and the padding after a pack's last document. Packs read
+    from either packed format, through the dataset factory the training setup calls, are marked alike."""
 
     # Pack A holds documents of 5 and 9 real tokens and pack B one of 2. Padded by the packer to multiples of 4, after
     # the label shift A's documents cover 8 and 12 positions and B's 4, each its real tokens, its EOS and the padding
@@ -332,32 +335,36 @@ class TestPackedCollatePaddingMask:
     PACKS = [[5, 9], [2]]
     MAX_SEQ_LENGTH = 64
 
-    def _collate(self, tmp_path, pad_seq_to_mult: int, pad_to_max_length: bool) -> dict:
-        path = tmp_path / "packs.npy"
-        write_packs(path, self.PACKS, pad_seq_to_mult, self.MAX_SEQ_LENGTH)
-        return collate_packs(path, len(self.PACKS), pad_seq_to_mult, self.MAX_SEQ_LENGTH, pad_to_max_length)
+    @pytest.fixture
+    def _collate(self, tmp_path, pack_file):
+        def collate(pad_seq_to_mult: int, pad_to_max_length: bool) -> dict:
+            path = tmp_path / pack_file
+            write_packs(path, self.PACKS, pad_seq_to_mult, self.MAX_SEQ_LENGTH)
+            return collate_packs(path, len(self.PACKS), pad_seq_to_mult, self.MAX_SEQ_LENGTH, pad_to_max_length)
 
-    def test_marks_the_padding_inside_documents_and_after_the_last(self, tmp_path):
-        batch = self._collate(tmp_path, pad_seq_to_mult=4, pad_to_max_length=False)
+        return collate
+
+    def test_marks_the_padding_inside_documents_and_after_the_last(self, _collate):
+        batch = _collate(pad_seq_to_mult=4, pad_to_max_length=False)
         assert batch["padding_mask"].dtype == torch.bool
         assert batch["padding_mask"][0].tolist() == _padding(32, (5, 8), (17, 20), (20, 32))
         assert batch["padding_mask"][1].tolist() == _padding(32, (2, 4), (4, 32))
 
-    def test_marks_the_padding_to_the_full_length_under_pad_to_max_length(self, tmp_path):
-        batch = self._collate(tmp_path, pad_seq_to_mult=4, pad_to_max_length=True)
+    def test_marks_the_padding_to_the_full_length_under_pad_to_max_length(self, _collate):
+        batch = _collate(pad_seq_to_mult=4, pad_to_max_length=True)
         assert batch["padding_mask"][0].tolist() == _padding(64, (5, 8), (17, 20), (20, 64))
         assert batch["padding_mask"][1].tolist() == _padding(64, (2, 4), (4, 64))
 
-    def test_packs_without_padded_documents_mark_only_the_tail(self, tmp_path):
+    def test_packs_without_padded_documents_mark_only_the_tail(self, _collate):
         # An unpadded document keeps only its EOS, which the label shift drops: A covers 5 + 9 positions, B 2.
-        batch = self._collate(tmp_path, pad_seq_to_mult=1, pad_to_max_length=False)
+        batch = _collate(pad_seq_to_mult=1, pad_to_max_length=False)
         assert batch["padding_mask"][0].tolist() == _padding(16, (14, 16))
         assert batch["padding_mask"][1].tolist() == _padding(16, (2, 16))
 
-    def test_the_real_tokens_are_the_spans_attention_reads(self, tmp_path):
+    def test_the_real_tokens_are_the_spans_attention_reads(self, _collate):
         """Attention reads document i's first cu_seqlens_unpadded[i + 1] - cu_seqlens_unpadded[i] tokens from
         cu_seqlens[i]; the mask must leave exactly those positions unmarked."""
-        batch = self._collate(tmp_path, pad_seq_to_mult=4, pad_to_max_length=False)
+        batch = _collate(pad_seq_to_mult=4, pad_to_max_length=False)
         for row in range(len(self.PACKS)):
             padded = [x for x in batch["cu_seqlens"][row].tolist() if x >= 0]
             unpadded = batch["cu_seqlens_unpadded"][row].tolist()[: len(padded)]

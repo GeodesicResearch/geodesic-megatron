@@ -21,7 +21,7 @@ nats, and is back inside from 401, an excursion Kyle accepted (2026-10-02). A ch
 the spread of straight runs and exports to HF with the as-is layout (E-005, checked before the padding mask, which
 adds no checkpoint state). Two fixes to the packed SFT path came first, and both change how every packed SFT run
 trains: the context-parallel partition of packed batches (E-000) and the pad tokens in the MoE routers' statistics
-(E-007).
+(E-007, completed for the padding inside documents of parquet packs in E-009).
 
 **Benchmark.** `configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml` — the production XL SFT config composed
 with a small overlay (`base_config:`): GBS 64 on 64 GPUs (DP=32 at CP=2, so 2 packs per DP replica, the same per-GPU
@@ -97,6 +97,68 @@ Each run is single-group; the ratios are against the calibration's as-is run, on
 | 4 | + 500M-parameter gradient buckets | 3.672 | 8,925 | 1.79 | 0.992514 | 70.4 | E-004 |
 
 ## Experiments
+
+### E-010 · save crossings of the fast posture: manual collection holds each save's garbage · 2026-10-02
+
+The pre-flight of `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml`, the xl-50b SFT rerun on the final posture, before
+its 256-GPU launch. Three 16-node probes ran from one snapshot (`snapshots/v2probe1`) at GBS 256, i.e. four packs per
+replica. Each saved with optimizer state into a scratch directory, keeping only the latest save. Driver-level memory
+over all 64 GPUs is in `records/memwatch/v2_saveprobe*.csv`.
+
+- **A save every 3 iterations runs out of memory at the third save** (job 7026864).
+  - The saves at 3 (33.4 s) and 6 (5.4 s) completed, and the iterations after each trained.
+  - The save at 9 failed on most ranks, inside the grouped experts' sharded-tensor build (`grouped_experts.py`,
+    `sh_ten_build_fn`, `t.contiguous()`). Each failing rank asked for 306 MiB with 87.9–88.2 GiB already allocated.
+- **The mechanism is the manual collection.**
+  - The posture sets `train.manual_gc` with `manual_gc_interval: 10`. `setup_manual_gc` turns Python's automatic
+    collector off, and `maybe_run_manual_gc` collects every 10 iterations, before that iteration's save.
+  - A save's sharded state dict holds the copy of the rank's expert weights that `.contiguous()` makes (13.7 GiB at
+    EP=4) and other save-time copies. It is left in reference cycles that only a collection frees;
+    `save_checkpoint_and_time` collects after a save for FP8 models alone.
+  - At a 3-iteration cadence, the garbage of the saves at 3 and 6 was still alive at the save at 9.
+- **The same cadence with a collection every iteration crosses every save** (job 7026908, `train.manual_gc_interval=1`).
+  - All five saves completed: 3, 6, 9, 12 and the exit save at 13 (33.3, 5.1, 5.5, 5.3 and 5.2 s).
+  - The iterations after the first four trained, and the run-wide peak was 82.2 GiB.
+  - The collection interval is the only difference from the failing run.
+- **Production's ordering crosses every save** (job 7026905): a save every 10 iterations, each after the collection
+  at that iteration.
+  - All four saves completed: 10, 20, 30 and the exit save at 31 (32.9, 5.3, 5.4 and 5.0 s).
+  - Every iteration trained, the nine after each save with that save's garbage still alive. The run-wide peak was
+    85.7 GiB, 3.5 GiB above the run that collects every iteration.
+- **What this means for production.**
+  - The rerun saves every 1200 iterations, right after the collection at the same iteration, so the garbage of one
+    save is alive for at most 10 iterations.
+  - A time-based exit inside that window adds a second save. Two saves inside one interval fit: the first two saves
+    of the failing run did, and so did the save at 30 and the exit save at 31 here.
+  - No shipped configuration saves more often than it collects. Every config with `train.manual_gc` either saves
+    every 100 iterations or more, saves only at the end, or writes no checkpoint.
+  - A save probe on such a posture must save no more often than `manual_gc_interval`. Otherwise it fails at a
+    cadence production never runs.
+
+### E-009 · the padding inside documents on parquet packs, and the attention path it selects · 2026-10-02
+
+- **The defect.** The routing padding mask (E-007) covers the padding after a pack's last document everywhere. It
+  covers the padding inside documents (each document's EOS fill to the pack's multiple of 4) only where the collate is
+  told the multiple. `create_sft_dataset` passed `pad_seq_to_mult` to the `.npy` dataset alone. The campaign's packs
+  are parquet, so every run of E-005 to E-008 read them with a multiple of 1, and about nine tokens per pack (0.03% of
+  tokens) stayed in the routers' statistics.
+- **The fix, test first.** The factory now passes the multiple to the parquet dataset too.
+  - `TestPackedCollatePaddingMask` builds its packs in both formats and collates them through the factory.
+  - Its three parquet cases with a multiple of 4 fail before the fix, pass with it, and fail again with the line
+    removed (`records/padding_mask_parquet_01..03`).
+- **What else it changes.** Once the collate knows the multiple, it also emits each document's unpadded boundaries.
+  `get_packed_seq_params` then passes attention both rows, and Transformer Engine reads only the real tokens.
+  - **Backend.** TE turns FlashAttention off when there is padding between sequences. The path the runs took was
+    already cuDNN FusedAttention (sub-backend 1), so the backend does not change.
+  - **Measured** on one GPU, with Nano's attention shape (32 heads, 2 KV groups, head dim 128), on a six-document
+    32,768-token pack collated both ways (`records/padding_mask_parquet_04_attention_path.txt`):
+    - Real-token outputs, dK and dV are bitwise equal. dQ differs by at most 4.9×10⁻⁴, the backward's atomic
+      accumulation order.
+    - The padding's outputs and gradients come out zero even with the allocator pre-seeded with NaN.
+    - Forward plus backward takes 15.68 ms against 14.59 ms (+7.5%).
+  - **Step cost.** Six of Nano's 52 layers are attention, so the cost at full recompute is about 0.3% of the final
+    posture's step. That is below the 0.5% spread of single-group runs, and the step times above, measured before
+    the fix, were not re-measured.
 
 ### E-008 · re-verification with the routing padding mask · 2026-10-02
 

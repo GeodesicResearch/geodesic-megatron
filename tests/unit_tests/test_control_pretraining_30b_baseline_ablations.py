@@ -23,14 +23,20 @@ or the ablation would overwrite the parent's artifact), and the ablated fields m
 parent's by the stated rule. The corpus side is pinned across three files: the training config
 names the corpus, the data config pins its revision and pack geometry, and the corpora table
 builds the pack the training config's glob reads.
+
+The xl-50b rerun ("v2") is pinned to the ablation the same way: it differs only in the levers of the SFT quickstart's
+fastest configuration, at the quickstart's values, and in its run identity, so it is the ablation's training run on
+faster, bug-fixed code and nothing else.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
+from scripts.training.config_compose import BASE_CONFIG_KEY
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
@@ -38,10 +44,12 @@ from tests.unit_tests.campaign_config import (
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
     data_parallel_size,
+    dotted_leaves,
     flatten_merged_config,
     merge_onto_recipe,
 )
 from tests.unit_tests.corpora_fixtures import corpora_table
+from tests.unit_tests.launcher_source import env_override_entries
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -84,6 +92,25 @@ IDENTITY_FIELDS = ("checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"
 PARENT_GPUS = 512
 ABLATION_GPUS = 256
 
+# The rerun's levers are, by definition, the fields the fastest SFT configuration's overlay states, less the overlay's
+# own base and W&B name.
+V2 = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml"
+FAST_SFT_QUICKSTART = _REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_quickstart_sft.yaml"
+QUICKSTART_OWN_FIELDS = {BASE_CONFIG_KEY, "logger.wandb_exp_name"}
+V2_GPUS = 256
+
+# Each variant and the run it is pinned to: the ablation to the parent stage, the rerun to the ablation.
+VARIANTS = {
+    "xl-50b sft ablation": (ABLATION, PARENT),
+    "xl-50b sft v2": (V2, ABLATION),
+}
+
+
+def fast_configuration_levers() -> set[str]:
+    """The dotted fields the fastest SFT quickstart sets on top of its benchmark."""
+    overlay = OmegaConf.to_container(OmegaConf.load(FAST_SFT_QUICKSTART))
+    return set(dotted_leaves(overlay)) - QUICKSTART_OWN_FIELDS
+
 
 @pytest.fixture(scope="module")
 def ablation():
@@ -93,6 +120,29 @@ def ablation():
 @pytest.fixture(scope="module")
 def parent():
     return merge_onto_recipe(PARENT, nemotron_3_nano_sft_config)
+
+
+@pytest.fixture(scope="module")
+def v2():
+    return merge_onto_recipe(V2, nemotron_3_nano_sft_config)
+
+
+@pytest.fixture(scope="module")
+def fast_quickstart():
+    return merge_onto_recipe(FAST_SFT_QUICKSTART, nemotron_3_nano_sft_config)
+
+
+@pytest.fixture(scope="module", params=sorted(VARIANTS))
+def variant(request):
+    """A variant with the run it is pinned to, merged onto the recipe as the launcher merges them."""
+    path, reference_path = VARIANTS[request.param]
+    return SimpleNamespace(
+        label=request.param,
+        path=path,
+        reference_path=reference_path,
+        cfg=merge_onto_recipe(path, nemotron_3_nano_sft_config),
+        reference=merge_onto_recipe(reference_path, nemotron_3_nano_sft_config),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -185,50 +235,50 @@ class TestTheCorpusIsTheRevisedMix:
         # the encoders are byte-identical, so only this name distinguishes them.
         assert ablation.tokenizer.tokenizer_model.endswith("nemotron-think-history-tokenizer")
 
-    def test_pad_multiple_covers_context_parallelism(self, ablation):
-        assert ablation.dataset.packed_sequence_specs.pad_seq_to_mult >= 2 * ablation.model.context_parallel_size
+    def test_pad_multiple_covers_context_parallelism(self, variant):
+        assert variant.cfg.dataset.packed_sequence_specs.pad_seq_to_mult >= 2 * variant.cfg.model.context_parallel_size
 
 
 class TestTheRunIdentityIsItsOwn:
-    def test_no_output_location_is_the_parents(self, ablation, parent):
-        flat_ablation, flat_parent = flatten_merged_config(ablation), flatten_merged_config(parent)
+    def test_no_output_location_is_the_references(self, variant):
+        flat_variant, flat_reference = flatten_merged_config(variant.cfg), flatten_merged_config(variant.reference)
         for field in IDENTITY_FIELDS:
-            assert flat_ablation[field] != flat_parent[field], field
+            assert flat_variant[field] != flat_reference[field], field
 
-    def test_the_save_directory_is_not_inside_the_parents(self, ablation, parent):
-        """A save under the parent's tree would pass the inequality above and still collide."""
-        parent_save = Path(parent.checkpoint.save)
-        assert not Path(ablation.checkpoint.save).is_relative_to(parent_save)
-        assert not parent_save.is_relative_to(Path(ablation.checkpoint.save))
+    def test_the_save_directory_is_not_inside_the_references(self, variant):
+        """A save under the reference's tree would pass the inequality above and still collide."""
+        reference_save = Path(variant.reference.checkpoint.save)
+        assert not Path(variant.cfg.checkpoint.save).is_relative_to(reference_save)
+        assert not reference_save.is_relative_to(Path(variant.cfg.checkpoint.save))
 
-    def test_the_raw_yaml_copies_no_output_path_from_the_parent(self):
+    def test_the_raw_yaml_copies_no_output_path_from_the_reference(self, variant):
         """The merged comparison above would miss a field the recipe fills identically; the raw
         files are what a reader copies, so the identity fields are checked there too."""
-        raw_ablation, raw_parent = OmegaConf.load(ABLATION), OmegaConf.load(PARENT)
+        raw_variant, raw_reference = OmegaConf.load(variant.path), OmegaConf.load(variant.reference_path)
         for section, key in (("checkpoint", "load"), ("checkpoint", "save")):
-            assert raw_ablation[section][key] != raw_parent[section][key], f"{section}.{key}"
+            assert raw_variant[section][key] != raw_reference[section][key], f"{section}.{key}"
 
-    def test_a_resubmission_resumes(self, ablation):
-        assert ablation.checkpoint.load == ablation.checkpoint.save
-        assert ablation.checkpoint.save_interval < ablation.train.train_iters
+    def test_a_resubmission_resumes(self, variant):
+        assert variant.cfg.checkpoint.load == variant.cfg.checkpoint.save
+        assert variant.cfg.checkpoint.save_interval < variant.cfg.train.train_iters
 
-    def test_the_checkpoint_cadence_is_the_parents_in_tokens(self, ablation, parent):
+    def test_the_checkpoint_cadence_is_the_references_in_tokens(self, variant):
         """The cadence is a token count stated in iterations, so at half the batch it is
         restated as twice the parent's interval; a verbatim copy would halve the spacing."""
         assert (
-            ablation.checkpoint.save_interval * ablation.train.global_batch_size
-            == parent.checkpoint.save_interval * parent.train.global_batch_size
+            variant.cfg.checkpoint.save_interval * variant.cfg.train.global_batch_size
+            == variant.reference.checkpoint.save_interval * variant.reference.train.global_batch_size
         )
 
-    def test_the_run_is_the_parents_length_in_tokens_so_the_series_align(self, ablation, parent):
+    def test_the_run_is_the_references_length_in_tokens_so_the_series_align(self, variant):
         """Equal cadence only puts the saves at the same token positions while the runs are the
-        same length in tokens. That holds because one epoch of this larger mix costs what the
-        parent's two epochs of the smaller one cost, which is a measured coincidence rather than
-        a constraint — so a re-measured train_iters could break the alignment while every other
+        same length in tokens. For the ablation that holds because one epoch of this larger mix costs
+        what the parent's two epochs of the smaller one cost, which is a measured coincidence rather
+        than a constraint — so a re-measured train_iters could break the alignment while every other
         assertion here still passed."""
         assert (
-            ablation.train.train_iters * ablation.train.global_batch_size
-            == parent.train.train_iters * parent.train.global_batch_size
+            variant.cfg.train.train_iters * variant.cfg.train.global_batch_size
+            == variant.reference.train.train_iters * variant.reference.train.global_batch_size
         )
 
 
@@ -242,5 +292,30 @@ class TestTheAllocation:
 
 
 class TestSegmentRollover:
-    def test_ends_on_the_duration_clock_like_its_parent(self, ablation, parent):
-        assert_segment_exit_posture(ablation, "xl-50b sft ablation", parent.train.exit_duration_in_mins)
+    def test_ends_on_the_duration_clock_like_its_reference(self, variant):
+        assert_segment_exit_posture(variant.cfg, variant.label, variant.reference.train.exit_duration_in_mins)
+
+
+class TestTheRerunIsTheAblationOnTheFastConfiguration:
+    def test_exactly_the_levers_and_identity_fields_differ(self, v2, ablation):
+        assert_only_these_fields_differ(
+            v2, ablation, fast_configuration_levers() | set(IDENTITY_FIELDS), "xl-50b sft v2"
+        )
+
+    def test_every_lever_has_the_quickstarts_value(self, v2, fast_quickstart):
+        flat_v2, flat_quickstart = flatten_merged_config(v2), flatten_merged_config(fast_quickstart)
+        for field in sorted(fast_configuration_levers()):
+            assert flat_v2[field] == flat_quickstart[field], field
+
+    def test_its_env_file_holds_the_quickstarts_launcher_settings(self):
+        assert env_override_entries(str(V2.with_suffix(".env"))) == env_override_entries(
+            str(FAST_SFT_QUICKSTART.with_suffix(".env"))
+        )
+
+    def test_one_pack_per_replica_keeps_the_ablations_tokens_per_gpu(self, v2, ablation):
+        v2_dp = data_parallel_size(v2, V2_GPUS)
+        assert v2_dp == 256
+        assert v2.train.global_batch_size // v2_dp == 1
+        assert v2.train.global_batch_size * v2.dataset.seq_length // V2_GPUS == (
+            ablation.train.global_batch_size * ablation.dataset.seq_length // ABLATION_GPUS
+        )

@@ -1,0 +1,232 @@
+# Control-pretraining 30B baseline — the xl-50b GBS-256 SFT ablation RERUN ("v2"): the same training run with the
+# packed-SFT bug fixes and the SFT performance campaign's fastest configuration.
+#
+# WHAT IT IS. `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml` (the BASELINE below; its model is
+# geodesic-research/control-pretraining-30b-baseline-xl50b-think, job 6526526) rerun on the same 256 GPUs with the
+# training problem unchanged: the same warm start (the midtraining final, iteration 3126), the same packs in the same
+# order (the batch sampler deals each iteration's global batch of 256 consecutive packs to the data-parallel ranks, so
+# iteration k reads the same packs at any CP), GBS 256, 5976 iterations, the same optimizer, LR schedule, tokenizer,
+# full recompute and checkpoint cadence. Three things differ:
+#
+#   1. THE PACKED-SFT FIXES. They live in the code, not in this file, so launch it only from a checkout of PR #52 at
+#      the commit that adds this file or later (at the previous Megatron-LM pin a packed SFT run fails at its first
+#      iteration):
+#      - The context-parallel partition of packed batches (cfc2df36). The baseline ran at CP=2 with two packs per
+#        replica and trained about a quarter of its microbatches on a corrupted partition: 7.5% of its loss tokens
+#        were in the wrong place, concentrated in the second halves of long traces, and the final turn-end token of
+#        a third of its documents of 24K tokens or more was never trained (export audit,
+#        /projects/a5k/public/tmp/export_audit_20260927/_final/). This run is at CP=1 and partitions nothing.
+#      - Pad tokens left out of the MoE routers' statistics (2850cb5b, with upstream Megatron-LM #6114 carried on the
+#        pin as 0006): the expert-bias update and the sequence auxiliary loss no longer count EOS padding. On parquet
+#        packs, which this run and the baseline read, that covers the padding inside each document as well as after
+#        the last one only since the dataset factory passes the pad multiple to the parquet dataset, as it always
+#        did to the .npy one. With it, attention reads each document's real tokens and skips its padding (Transformer
+#        Engine's padded-THD kernel, on the cuDNN backend the baseline used): real-token outputs are unchanged, the
+#        padding comes out zero, and an attention call costs 7.5% more, about 0.3% of a step.
+#      - A resumed segment continues the epoch it stopped in and starts the next at the corpus' first pack, where it
+#        used to restart every later pass at the resume point. An uninterrupted run is unaffected.
+#   2. THE FAST CONFIGURATION: the levers of configs/quickstart/nemotron_nano_quickstart_sft.yaml, each marked "v2:"
+#      below. On the 64-GPU benchmark of this run they are 1.779x faster per GPU, 95% CI [1.775, 1.782], in four
+#      paired single-group cycles (docs/investigations/nano30b-sft-perf-campaign.md, E-005 to E-008):
+#      - context_parallel_size 1: DP=256, one pack per replica, the baseline's 32,768 tokens per GPU per iteration.
+#        It fits at full recompute because the chunked linear cross-entropy never materialises the 16 GiB of fp32
+#        logits that kept the baseline at CP=2 (70.4 GiB peak on the benchmark, where the baseline peaks at 85.3);
+#      - BF16 gradient reduction (mixed_precision bf16_mixed_bf16_grad_reduce) in 500M-parameter buckets, with the
+#        parameter all-gather overlapped with the forward (the baseline gathers its parameters twice per step);
+#      - the flex dispatcher with HybridEP and the fused router, on packs padded to the full 32,768 tokens
+#        (pad_to_max_length: HybridEP faults when an expert-parallel peer holds more tokens than its first dispatch;
+#        the extra pads are loss-masked and left out of the router statistics);
+#      - host settings: timers at level 1, the per-microbatch loss NaN check and per-parameter gradient norms off,
+#        garbage collection every 10 iterations. The gradient NaN check stays on, so a non-finite step still stops
+#        the run.
+#      Over 500 iterations its loss stays inside the band of three as-is runs except over iterations 201-400, where
+#      it sits at most 4.3e-5 nats below it; Kyle accepted that excursion (2026-10-02).
+#   3. ITS OWN RUN IDENTITY: checkpoint directory and W&B name (`_v2`).
+#
+# tests/unit_tests/test_control_pretraining_30b_baseline_ablations.py fails if any other field differs from the
+# baseline, or if a lever's value differs from the quickstart's.
+#
+# DO NOT COMPARE ITS LOSS CURVE WITH THE BASELINE'S. The baseline's logged loss was computed over its corrupted
+# partitions and reads about 0.03-0.04 nats lower than a correctly partitioned run of the same data (export audit), so
+# this run will log a higher loss at the same iteration. Compare the two models by their evaluations.
+#
+# EXPECTED SPEED. 3.689 s/iter on the benchmark (64 GPUs, one switch group). The baseline ran 11% slower at 256 GPUs
+# over six switch groups than its benchmark on one, so expect about 4.1 s/iter: about 7 h for 5976 iterations,
+# against the baseline's 12 h 08 min.
+#
+# PRE-FLIGHT. Its saves were crossed on 64 GPUs before launch, in production's order (a save every 10 iterations,
+# right after the collection): all four saves and every iteration after them fit, at an 85.7 GiB peak (campaign log
+# E-010).
+#
+# --- LAUNCH ---
+# One day-long segment is expected to finish the run. A second waits on --dependency=afternotok and so starts only if
+# the first fails, resuming from the latest save; a spare segment queued behind a run that already finished would
+# load the final checkpoint and write it again in place, which the baseline's --dependency=singleton pair did to its
+# iter_0005976. A segment that ends on its own clock (exit_duration_in_mins) exits cleanly, so the next one is then
+# submitted by hand. --disable-ft because the run outlives the ft heartbeat wall. A training launch overrides the
+# ISAMBARD_SBATCH_FORCE=1 the account's shell exports, and pins the node limit. The .env beside this file pins the
+# fp32 SSM state to its checkpointed mode, the launcher's default, so that an inherited value cannot change it. From
+# the repo root, the first segment:
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.env \
+#   ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 \
+#     isambard_sbatch --nodes=64 --time=24:00:00 --job-name=cp30b-baseline-sft-xl50b-gbs256-v2 \
+#     pipeline_training_submit.sbatch \
+#     configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml \
+#     nano sft --disable-ft
+# then the same command with --dependency=afternotok:<the first segment's job id> after --time.
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
+
+# v2: BF16 gradient accumulation and reduction (the baseline inherits the recipe's bf16_mixed).
+mixed_precision: bf16_mixed_bf16_grad_reduce
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-sft-xl-50b-mix
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix__default
+  seq_length: 32768
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 32768
+    pad_seq_to_mult: 4               # the multiple the packs were built with (2 x the baseline's CP): it names the
+                                     # baseline's packs, which this run reads, and tells the collate how far each
+                                     # document's EOS padding reaches, so that the padding is masked at CP=1 too
+    num_tokenizer_workers: 1
+    # The per-shard packs (the arm's corpora.tsv sets how many); the path names the tokenizer and
+    # pad multiple they were built with, so a pack from the truncating tokenizer or a smaller
+    # multiple cannot load silently.
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix__default/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: true          # v2: every pack padded to 32,768 tokens for HybridEP (loss- and router-masked)
+
+train:
+  global_batch_size: 256             # 8,388,608 tokens/iter; 1 pack/replica/iter at DP=256 (the baseline: 2 at DP=128)
+  micro_batch_size: 1
+  train_iters: 5976                  # one epoch: ceil(1 x 1,529,684 packs / 256), measured from the
+                                     # 32 per-shard parquets
+  # Time-based graceful rollover, matching the parent (signal path proven dead there).
+  exit_duration_in_mins: 1400
+  # v2: collections on a schedule, with the setup state frozen out of them. A collection runs before its iteration's
+  # save, and a save's garbage (a copy of the expert weights among it) waits for the next one, so saves must stay at
+  # least manual_gc_interval apart: three inside one interval run out of memory (campaign log E-010).
+  manual_gc: true
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false       # a DP=1 memory lever; pure overhead at DP=256
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: true         # v2: the parameter all-gather overlaps the forward (with it off, the chained
+                                     # MoE optimizer gathers every bucket twice per step)
+  bucket_size: 500000000             # v2: 500M-parameter buckets (the baseline's default at DP=128 was 128M)
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0                 # the SFT recipe sets 50; finalize() rejects it alongside lr_warmup_fraction
+  lr_warmup_fraction: 0.10
+
+model:
+  seq_length: 32768
+  # v2: the chunked linear cross-entropy, keeping all 8 logit chunks (8 GiB of bf16 logits per rank at CP=1, where the
+  # unfused path keeps 16 GiB of fp32 logits); carried Megatron-LM commit 0005.
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1           # v2: whole packs per rank (the baseline: 2, the minimum that fit with unfused CE)
+  sequence_parallel: False           # SP requires TP>1
+  moe_token_dispatcher_type: flex    # v2: HybridEP, whose EP=4 all-to-all stays on NVLink
+  moe_flex_dispatcher_backend: hybridep
+  moe_hybridep_num_sms: null
+  moe_router_fusion: true            # v2: the fused router kernel
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  # FULL recompute is mandatory at 32768, not a tuning choice: selective recompute OOMs in
+  # the loss computation asking for exactly 8.00 GiB (midtraining header).
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+checkpoint:
+  # Warm start from the SAME stage-2 final checkpoint as the parent: weights only, fresh
+  # optimizer. Campaign tree rooted under data_cwtice.a5k (2026-08-22) — see the stage-1
+  # config's checkpoint block for why.
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_xl50b_gbs256_v2
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_sft_xl50b_gbs256_v2
+  save_interval: 1200                # every 10,066,329,600 tokens (1200 iters x 8,388,608), the baseline's
+                                     # cadence, so the two series have 5 checkpoints at the same token positions
+  most_recent_k: -1                  # every checkpoint is kept; the final one is the run's artifact
+  save_optim: true
+  save_rng: true
+  ckpt_format: torch_dist
+  # Multiple optimizer-bearing saves on the torch_grouped expert path: the cached
+  # constant-structure save plan retains a 13.679 GiB expert-weight copy from save #2
+  # onward and the next forward OOMs (see the baseline README's save-crossings section).
+  ckpt_assume_constant_structure: false
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 60
+
+rerun_state_machine:
+  check_for_nan_in_loss: false       # v2: the per-microbatch loss check costs two host syncs per microbatch; the
+                                     # gradient NaN check (the recipe's check_for_nan_in_grad) stays on
+
+logger:
+  # No TensorBoard. The writer is built only when this is set, so null means no event files
+  # and no directory creation — and the shared tensorboard root is owned by another account,
+  # so creating one there fails the run at startup. Leave tensorboard_log_interval and the
+  # log_*_to_tensorboard flags alone: despite the names they gate what reaches W&B too.
+  tensorboard_dir: null
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 1                # v2: level-1 timers (the baseline: 2)
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: false   # v2: per-parameter gradient norms off (W&B loses the l2_norm/grad/*
+                                           # series; the optimizer's grad norm is still logged)
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: control_pretrain_30b_baseline_sft_xl50b_gbs256_v2
