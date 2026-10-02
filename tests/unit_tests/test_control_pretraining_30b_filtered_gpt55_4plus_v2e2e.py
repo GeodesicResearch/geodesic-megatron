@@ -755,8 +755,8 @@ class TestTheWatch:
     """Each stage runs under a watch spec read by scripts/telemetry/run_watch.py: both stop on a result the
     gradient NaN check rejected (it is on in both stages' configurations), on a non-finite grad norm or lm loss (the
     loss NaN check is off in both, so a NaN loss is an iteration line without lm loss), on an iteration counted as
-    nan or skipped and on allocator retries; stage 1 also runs its pre-registered loss gates and flags a growing
-    offset and a block outside the broad arm's envelope, the midtraining flags loss spikes."""
+    nan or skipped and on allocator retries; stage 1 also runs the pre-registered loss gate not waived (L2b) and
+    flags a growing offset and a block outside the broad arm's envelope, the midtraining flags loss spikes."""
 
     @pytest.mark.parametrize("path", [WATCH_PRETRAIN, WATCH_MIDTRAIN], ids=lambda path: path.stem)
     def test_both_stages_stop_on_every_sign_of_a_bad_step(self, path):
@@ -775,10 +775,13 @@ class TestTheWatch:
             f"ISAMBARD_ENV_OVERRIDES=$PWD/{settings.relative_to(_REPO_ROOT)}" in (_ARM_DIR / "README.md").read_text()
         )
 
-    def test_stage_one_runs_every_pre_registered_loss_gate(self):
+    def test_stage_one_runs_every_pre_registered_loss_gate_kyle_did_not_waive(self):
+        """L1 and L2 stay in the pre-registered spec but are waived (Kyle, 2026-10-02, after L1 failed the first
+        launch in a warmup-descent window), so the watch runs L2b alone."""
         spec = load_watch_spec(WATCH_PRETRAIN)
         assert spec.loss_gate_spec == LOSS_GATE
-        assert spec.loss_gates == tuple(load_gate_spec(LOSS_GATE).gates)
+        assert tuple(load_gate_spec(LOSS_GATE).gates) == ("L1", "L2", "L2b")
+        assert spec.loss_gates == ("L2b",)
         assert spec.growing_offset == GrowingOffset("L2b", 3, 0.01)
 
     def test_stage_one_compares_each_save_interval_with_the_broad_arms_envelope(self, merged):

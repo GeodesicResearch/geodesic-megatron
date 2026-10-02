@@ -23,7 +23,10 @@ stop:
 
 loss_gates:
   spec: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/loss_gate.yaml
-  gates: [L1, L2, L2b]
+  # L1 and L2 are waived (Kyle, 2026-10-02): L1 failed the first launch (job 7004866) in one warmup-descent window,
+  # 101-150, 0.0085 below its band, the run then descending faster than every reference ("Loss looks fine. No need
+  # for more probes or tests."), and L2 spans the same descent. L2b checks the loss level after it.
+  gates: [L2b]
 
 flags:
   # Reported to Kyle, never a stop. The probe saw the fast posture settle about 0.02 above the same-node as-is run

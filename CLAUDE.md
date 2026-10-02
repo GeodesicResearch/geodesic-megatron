@@ -1073,7 +1073,9 @@ gradient NaN check stays on), which changes numerical precision, so the arm diff
 in more than data. Two gates bound that: `probe/probe.sbatch`, one 130-node job on the baseline's data
 before the launch (NVLink sweep, speed, memory across four saves, identical-batch parity against the
 baseline, the midtraining handoff), and the pre-registered `loss_gate.yaml` during stage 1; a failure
-stops stage 1, which is debugged in that posture, never restarted in another (Kyle, 2026-10-01). Its
+stops stage 1, which is debugged in that posture, never restarted in another (Kyle, 2026-10-01). L1 stopped
+the first launch at iteration 1224 in one warmup-descent window, the run descending faster than every
+reference; Kyle judged the loss fine and waived L1 and L2, so stage 1 runs under L2b (Kyle, 2026-10-02). Its
 midtraining trains in the fast Nano midtraining configuration less its selective recompute (the midtraining
 quickstart's levers and its `.env`, `FAST_MIDTRAIN_LEVERS` in the same file, with the baseline's full
 recompute; Kyle, 2026-10-01), a precision change too, bounded by `probe/probe_midtrain.sbatch`: the baseline's

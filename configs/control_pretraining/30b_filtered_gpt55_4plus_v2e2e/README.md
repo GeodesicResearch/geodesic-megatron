@@ -177,7 +177,7 @@ directory exists.
 
 `loss_gate.yaml` is pre-registered: three gates, each a band test of stage 1's log against as-is
 stage-1 runs of the campaign, evaluated by `scripts/telemetry/loss_gate.py`. Its header records the
-references, the calibration and the policy. In short: L1 decides at iteration 1200, L2 and L2b
+references, the calibration and the policy. In short, as pre-registered: L1 decides at iteration 1200, L2 and L2b
 confirm at iteration 2000, all before the first save at 2264. A FAIL stops the run, and stage 1 is
 debugged in the fast posture, never restarted in another; NOT EVALUATED (exit status 2) blocks like a FAIL unless it is
 resolved before 2264.
@@ -190,6 +190,18 @@ python scripts/telemetry/loss_gate.py \
 
 The gates see a regression of about 0.05 in lm loss over iterations 1-2000, and a shift of 0.02 over
 1201-2000; a smaller precision effect passes them.
+
+**L1 and L2 are waived; the watch runs L2b alone (Kyle, 2026-10-02).** The first launch (job 7004866)
+failed L1 at iteration 1200 and the guard cancelled it at iteration 1224, before any save. One window
+of 24 was outside: 101-150, the steepest part of the warmup descent, 5.1809 against a floor of 5.1894,
+the run descending faster than every reference (about four iterations ahead) and inside the band in
+every other window, within about 0.01 of the references' mean from iteration 800 on. The same offset
+from `baseline_dp256` (about -0.064) passed in 51-100, where the broad reference set the floor; in
+101-150 `baseline_dp256` was the lowest reference and set it. The blend's per-shard weights match
+the baseline's to 1e-5, so data order is the likely data-side source. Kyle judged it: "Loss looks fine.
+No need for more probes or tests." He waived L2 with it, since it spans the same descent; stage 1 was
+relaunched from iteration 0 as job 7005732. `loss_gate.yaml` is unchanged, and its L1 report is
+`/projects/a5k/public/logs/control_pretraining/v2e2e_guard/l1_report_7004866.json`.
 
 ## The midtraining probe
 
@@ -279,7 +291,7 @@ the same command, `.env` included: a segment launched without it runs the launch
   the gradient NaN check rejected (the run's own end), the first `grad norm: inf|nan`, the first iteration line
   without `lm loss` or with a non-finite one (the loss NaN check is off), an iteration counted as nan or skipped, a
   segment's allocator retries (until a later segment has resumed past it) or a segment that trained without
-  exactly this `.env`, runs the loss gates once the logs cover iterations 1200 and 2000, and flags to
+  exactly this `.env`, runs L2b (L1 and L2 are waived; see "The loss gate") once the logs cover iteration 2000, and flags to
   Kyle, without stopping, an L2b offset from {baseline, broad} whose last three windows average more than 0.01
   above its first three, and, per 2264-iteration block (the save cadence), a mean loss further from the
   baseline's than the Broadly Filtered arm's is in two adjacent blocks. The baseline segment that trained block
