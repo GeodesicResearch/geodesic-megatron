@@ -30,7 +30,7 @@
 # checkout: bash reads this script and the launcher by offset while they run. 130 nodes: 128 for the
 # launches and two spares for nodes the sweep rejects, so the account's node cap must be raised above
 # the default 128 for the submission and, exported with it, for the job's own check at start:
-#   cd <frozen copy> && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 isambard_sbatch \
+#   cd <frozen copy> && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 isambard_sbatch \
 #       configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe.sbatch
 #
 #SBATCH --job-name=cp30b-v2e2e-probe

@@ -51,15 +51,16 @@ corpora_table: configs/control_pretraining/30b_trustedmonitor/corpora.tsv
 # How configs/control_pretraining/submit_chain_link.py submits one link: the launcher's model, mode
 # and flags (ft off: no link comes near the ft heartbeat's two hours, and a link rerun is safe), the
 # parent posture's 64 nodes, the account's node cap the submission counts against (the wrapper's
-# default is 128, so it is stated), the job name (formatted with `arm` and `link`; the tool refuses
-# to submit while a job of that name is queued or running), and where each submitted config is
-# snapshotted beside the HEAD it was submitted from. The walltime is per family, below.
+# default is 128, so it is stated; 250 is Kyle's limit for multi-node submissions, 2026-10-03), the
+# job name (formatted with `arm` and `link`; the tool refuses to submit while a job of that name is
+# queued or running), and where each submitted config is snapshotted beside the HEAD it was submitted
+# from. The walltime is per family, below.
 launch:
   model: nano
   mode: pretrain
   launcher_args: [--disable-ft]
   nodes: 64
-  max_nodes: 256
+  max_nodes: 250
   job_name: cp30b-{arm}-link{link}
   snapshot_dir: /projects/a5k/public/logs/control_pretraining/trustedmonitor_launch
 

@@ -29,7 +29,7 @@
 # steps.tsv (step, what it ran, exit status, whether it gates). The job exits 0 only when every gating step did.
 #
 # SUBMIT from a frozen copy of the code under test (the README has the recipe), never from a working checkout:
-#   cd <frozen copy> && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 isambard_sbatch \
+#   cd <frozen copy> && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 isambard_sbatch \
 #       configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe_midtrain.sbatch
 #
 #SBATCH --job-name=cp30b-v2e2e-probe-mid

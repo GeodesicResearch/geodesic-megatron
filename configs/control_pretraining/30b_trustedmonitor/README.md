@@ -163,7 +163,7 @@ The unions as dataset-builder verified them before publication (narrow 726,549,6
        ROOT=$(python3 -c "import yaml; print(yaml.safe_load(open('configs/control_pretraining/30b_trustedmonitor/chain.yaml'))['checkpoint_root'])")
        S=$ROOT/smoke_trustedmonitor_gpt55_4plus_v2
        O="checkpoint.save=$S checkpoint.load=$S logger.wandb_exp_name=smoke_trustedmonitor_gpt55_4plus_v2"
-       run() { ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 isambard_sbatch --nodes=64 --time=00:30:00 \
+       run() { ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 isambard_sbatch --nodes=64 --time=00:30:00 \
                  --job-name=cp30b-trustedmonitor-smoke pipeline_training_submit.sbatch "$@"; }
        run ${L}1.yaml nano pretrain --disable-ft $O train.train_iters=6 checkpoint.save_interval=6 \
            scheduler.lr_warmup_iters=2 train.exit_interval=3                          # 1a
@@ -222,7 +222,7 @@ HEAD, the command and the job id beside the snapshot. A submission the wrapper r
 no empty job id is passed on. `--dry-run` runs every check and prints the snapshot's path and the
 command, and writes nothing.
 
-**One link per arm at a time.** The account's node cap (`launch.max_nodes`, 256) counts every running
+**One link per arm at a time.** The account's node cap (`launch.max_nodes`, 250) counts every running
 and pending job on the account, dependency-held ones included, and each job re-checks it when it starts
 (`pipeline_training_submit.sbatch` runs `isambard_sbatch --check`) and cancels itself if the account
 is over. Queued successors would count every remaining link of 64 nodes per arm against both checks; one link

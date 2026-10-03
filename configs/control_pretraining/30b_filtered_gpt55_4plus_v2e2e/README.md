@@ -152,7 +152,7 @@ every `ISAMBARD_*`, `TRAIN_*` and `GEODESIC_CONTAINER_*` variable except the sub
 `ISAMBARD_SBATCH_*`, the tunnel's `ISAMBARD_TUNNEL_*` and the site's `ISAMBARD_HOST` (the system's name,
 which SLURM sets in every task's environment), so each step's posture is its config, its
 settings file and the committed container config only. 130 nodes exceed the default node cap of 128, so the command raises it to
-the account's 256 for the submission and, exported with it, for the job's check at start. Each launch
+250 (Kyle's limit for multi-node submissions) for the submission and, exported with it, for the job's check at start. Each launch
 runs under a time limit of about 1.5 times its estimate, so a hung step ends without taking the rest
 of the allocation. The copy needs the pinned Megatron-LM and its built dataset helpers:
 
@@ -163,7 +163,7 @@ git archive HEAD | tar -x -C "$SNAP"
 git -C 3rdparty/Megatron-LM archive HEAD | tar -x -C "$SNAP/3rdparty/Megatron-LM"
 cp 3rdparty/Megatron-LM/megatron/core/datasets/helpers_cpp*.so "$SNAP/3rdparty/Megatron-LM/megatron/core/datasets/"
 git rev-parse HEAD > "$SNAP/REVISION"
-cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 isambard_sbatch \
+cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 isambard_sbatch \
   configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe.sbatch
 ```
 
@@ -246,10 +246,10 @@ The gates, pre-registered with the campaign's analysis (2026-10-01) before the p
 - **Handoff**: the load, the fp32 SSM-state patch on all 512 ranks, and the exit at iteration 5.
 
 Submit it like the stage-1 probe, from a frozen copy whose `REVISION` names its code, from a shell carrying
-no launcher settings, once the account has room for 130 nodes under the 256 cap:
+no launcher settings, once the account has room for 130 nodes under the 250 cap:
 
 ```bash
-cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 isambard_sbatch \
+cd "$SNAP" && ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 isambard_sbatch \
   configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe_midtrain.sbatch
 ```
 
@@ -261,7 +261,7 @@ the end) is kept until Kyle decides on it; the sbatch refuses to start while it 
 
 Each stage is a `--dependency=singleton` chain of day-long segments on 128 nodes with
 `checkpoint.load == checkpoint.save` and `--disable-ft`, as the baseline ran, submitted with
-`ISAMBARD_SBATCH_FORCE=0` and `ISAMBARD_SBATCH_MAX_NODES=300` (the cap for this arm's launches) so the
+`ISAMBARD_SBATCH_FORCE=0` and `ISAMBARD_SBATCH_MAX_NODES=250` (Kyle's limit for multi-node submissions) so the
 start-of-job `isambard_sbatch --check` stays live, and with `--no-requeue`: a requeued segment keeps its job ID
 and log, so a segment SLURM requeued from scratch would inherit the loss gates its first run passed. Each stage
 is submitted, and its guard run, from a frozen copy of the commit (`$SNAP`, made as for the probes above), never
@@ -280,7 +280,7 @@ the same command, `.env` included: a segment launched without it runs the launch
   ```bash
   cd "$SNAP" && python3 scripts/training/launch_environment.py && \
   ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.env \
-  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 --no-requeue \
+  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 isambard_sbatch --nodes=128 --no-requeue \
     --job-name=cp30b-filtered-gpt55-4plus-v2e2e-pretrain --dependency=singleton pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml \
     nano pretrain --disable-ft
@@ -303,7 +303,7 @@ the same command, `.env` included: a segment launched without it runs the launch
   ```bash
   cd "$SNAP" && python3 scripts/training/launch_environment.py && \
   ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env \
-  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=300 isambard_sbatch --nodes=128 --no-requeue \
+  ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 isambard_sbatch --nodes=128 --no-requeue \
     --job-name=cp30b-filtered-gpt55-4plus-v2e2e-midtrain --dependency=singleton pipeline_training_submit.sbatch \
     configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml \
     nano pretrain --disable-ft

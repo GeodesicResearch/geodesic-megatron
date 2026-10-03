@@ -611,6 +611,14 @@ that share a single `--job-name`; `--dependency=singleton` is what makes them ru
 at a time, and each picks up where the last stopped (see Resume). Set `N` to
 `ceil(estimated training days) + 1` so one spare segment absorbs overrun.
 
+**The node limit for new submissions (Kyle, 2026-10-03):** a multi-node submission passes
+`ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250`; a one-node job (an export, an eval, a fetch)
+is not held to it (10000, or `ISAMBARD_SBATCH_FORCE=1` as the Hub publisher and the stage gate submit). Each job's start-of-job `isambard_sbatch --check` reads the cap from the environment it
+was submitted with, so a job keeps its submission cap while it waits. The `FORCE=1` command below, and
+the 256 in the launch steps of the V2 midtraining README, the ablations README's Launch paragraph and
+the headers of the V2 midtraining config and the two filtered xl-50b SFT configs, are the caps those
+completed runs were submitted under.
+
 ```bash
 for i in $(seq 1 $N); do
   ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --nodes=128 --time=24:00:00 \
