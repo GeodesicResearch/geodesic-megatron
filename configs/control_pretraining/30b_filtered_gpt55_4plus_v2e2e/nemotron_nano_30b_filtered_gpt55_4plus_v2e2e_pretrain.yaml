@@ -5,7 +5,7 @@
 # Filtered arm's pretraining (canary OR mini >= 2). This arm applies it from the first token: a fresh
 # from-scratch pretraining run on the `_filtered_gpt55_4plus_v2e2e` splits of the six pretraining
 # corpora, then V2's midtraining recipe from this run's own final. Every document carrying a canary
-# string, or scored >= 4 by the GPT-5 judge (sudoers/control-pretraining-filter-annotated @ 91f53004,
+# string, or scored >= 4 by the GPT-5.5 judge (sudoers/control-pretraining-filter-annotated @ 91f53004,
 # every escalated document judged), is removed; every other document is retained unchanged.
 #
 # THE DATA IS THE ONLY DIFFERENCE FROM THE BASELINE STAGE

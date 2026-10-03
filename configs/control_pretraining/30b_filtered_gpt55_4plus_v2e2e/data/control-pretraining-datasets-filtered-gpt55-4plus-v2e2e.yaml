@@ -4,7 +4,7 @@
 #
 # Every corpus is the `<subset>_filtered_gpt55_4plus_v2e2e` split of the SAME repository the baseline
 # and the other arms train from: the baseline subset with every document that carries a canary string,
-# or whose GPT-5 judge score is >= 4 (sudoers/control-pretraining-filter-annotated @ 91f53004), removed;
+# or whose GPT-5.5 judge score is >= 4 (sudoers/control-pretraining-filter-annotated @ 91f53004), removed;
 # every other document is retained unchanged. The complement lives beside each split as
 # `<subset>_removed_gpt55_4plus_v2e2e`, and `filter_stats_gpt55_4plus_v2e2e` carries the per-subset and
 # global removal rates. The arm's sixth pretraining corpus, ai_safety_and_adjacent, and its ten

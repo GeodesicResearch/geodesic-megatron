@@ -207,7 +207,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-base
-    note: "Narrowly Filtered arm V1, deprecated for V2: broadly filtered pretraining, midtraining cut by a canary string or a GPT-5 judge score >= 4."
+    note: "Narrowly Filtered arm V1, deprecated for V2: broadly filtered pretraining, midtraining cut by a canary string or a GPT-5.5 judge score >= 4."
     private: true
     reasoning: false
     strict: true
@@ -218,7 +218,7 @@ models:
       control-pretraining-30b-filtered-gpt55-4plus-v2-base): the Broadly Filtered arm's pretraining final
       (iteration 29881, 501.32B tokens on the `_filtered_mini_2plus` corpora) annealed through the
       same midtraining stage as the other arms, on corpora cut by the narrower rule: every
-      document carrying a canary string or scored >= 4 by the GPT-5 judge (the annotation
+      document carrying a canary string or scored >= 4 by the GPT-5.5 judge (the annotation
       repository's own `filter_decision`, sudoers/control-pretraining-filter-annotated at revision
       eab743dd), the `_filtered_gpt55_4plus` subsets of geodesic-research/control-pretraining-datasets
       at revision 9005170d654e35e9edae7ab393b79064d1f3d7d4. The revision is part of the corpus's
@@ -235,7 +235,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-base
-    note: "Narrowly Filtered arm V2, base model: broadly filtered pretraining, midtraining cut by a canary string or a GPT-5 judge score >= 4, every escalated document judged."
+    note: "Narrowly Filtered arm V2, base model: broadly filtered pretraining, midtraining cut by a canary string or a GPT-5.5 judge score >= 4, every escalated document judged."
     private: true
     reasoning: false
     strict: true
@@ -245,7 +245,7 @@ models:
       The narrowly filtered arm's base model (V2): the Broadly Filtered arm's pretraining final
       (iteration 29881, 501.32B tokens on the `_filtered_mini_2plus` corpora) annealed through the
       same midtraining stage as the other arms, on corpora cut by the narrower rule: every
-      document carrying a canary string or scored >= 4 by the GPT-5 judge, with every document the
+      document carrying a canary string or scored >= 4 by the GPT-5.5 judge, with every document the
       gpt-5-mini cost gate escalated actually judged (sudoers/control-pretraining-filter-annotated
       at revision 91f53004; no document unscored and none left unjudged). The corpora are the
       `_filtered_gpt55_4plus_v2` subsets of geodesic-research/control-pretraining-datasets at
@@ -263,7 +263,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base
-    note: "Narrowly Filtered arm V2 E2E, base model: canary or GPT-5 judge >= 4 removed from pretraining and midtraining alike; pretraining and midtraining checkpoints, main = the midtraining final."
+    note: "Narrowly Filtered arm V2 E2E, base model: canary or GPT-5.5 judge >= 4 removed from pretraining and midtraining alike; pretraining and midtraining checkpoints, main = the midtraining final."
     private: true
     reasoning: false
     strict: true
@@ -271,7 +271,7 @@ models:
       The narrowly filtered arm's base model applied end to end (V2 E2E): the same architecture,
       curriculum, schedule and token budget as the unfiltered baseline, trained from random init on
       corpora cut by V2's rule in BOTH stages: every document carrying a canary string or scored
-      >= 4 by the GPT-5 judge, with every document the gpt-5-mini cost gate escalated actually judged
+      >= 4 by the GPT-5.5 judge, with every document the gpt-5-mini cost gate escalated actually judged
       (sudoers/control-pretraining-filter-annotated at revision 91f53004). Pretraining reads the
       `_filtered_gpt55_4plus_v2e2e` subsets of geodesic-research/control-pretraining-datasets (the
       AI-safety-and-adjacent corpus through V2's build of it, whose rows the `_v2e2e` split equals) and
@@ -305,7 +305,7 @@ models:
       The narrowly filtered (V2) arm's reasoning model: its base model
       (control-pretraining-30b-filtered-gpt55-4plus-v2-base) after the same xl-50b reasoning SFT as
       control-pretraining-30b-baseline-xl50b-think, on the baseline mix minus exactly the 668
-      conversations the narrow rule removes (a canary string or a GPT-5 judge score >= 4; the
+      conversations the narrow rule removes (a canary string or a GPT-5.5 judge score >= 4; the
       `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` split of
       geodesic-research/control-pretraining-datasets at revision
       548bae9d1a40c00749447be894388a9c8c3cf09d, 8,923,578 conversations), at the baseline's

@@ -22,7 +22,7 @@ as-is), on the union `reintroduction_gpt55_4plus_v2e2e` at `61c9d1d2`.
 
 ## What differs from the baseline
 
-**The data.** Every document carrying a canary string, or scored >= 4 by the GPT-5 judge
+**The data.** Every document carrying a canary string, or scored >= 4 by the GPT-5.5 judge
 (`sudoers/control-pretraining-filter-annotated` @ `91f53004`, every escalated document judged), is
 removed from every corpus of both stages; every other document is kept unchanged. Stage 1 reads five
 corpora this arm builds (`corpora.tsv`) and V2's `ai_safety_and_adjacent_filtered_gpt55_4plus_v2`

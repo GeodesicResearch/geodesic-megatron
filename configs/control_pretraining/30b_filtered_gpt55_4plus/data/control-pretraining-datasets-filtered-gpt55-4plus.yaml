@@ -3,7 +3,7 @@
 #
 # Every corpus is the `<subset>_filtered_gpt55_4plus` split of the SAME repository the baseline
 # and the Broadly Filtered arm train from: the baseline subset with every document that carries a
-# canary string, or whose GPT-5 judge score is >= 4, removed; every other document is retained
+# canary string, or whose GPT-5.5 judge score is >= 4, removed; every other document is retained
 # unchanged. That rule is the annotation repository's own `filter_decision`
 # (sudoers/control-pretraining-filter-annotated @ eab743dd), which is reachable only for documents
 # the gpt-5-mini cost gate escalated at `mini >= 4` — so a null `judge_score` is retained, and

@@ -4,7 +4,7 @@
 #
 # Every corpus is the `<subset>_filtered_gpt55_4plus_v2` split of the SAME repository the baseline
 # and the other arms train from: the baseline subset with every document that carries a canary
-# string, or whose GPT-5 judge score is >= 4, removed; every other document is retained unchanged.
+# string, or whose GPT-5.5 judge score is >= 4, removed; every other document is retained unchanged.
 # What V2 changes from V1 (30b_filtered_gpt55_4plus/, deprecated) is judge COVERAGE, not the rule:
 # the annotation moved from sudoers/control-pretraining-filter-annotated @ eab743dd to @ 91f53004,
 # where the queues V1 never dispatched were judged, so no document the cost gate escalated at

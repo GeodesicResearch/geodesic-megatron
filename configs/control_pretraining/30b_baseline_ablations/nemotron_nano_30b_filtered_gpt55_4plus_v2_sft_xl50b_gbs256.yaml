@@ -6,7 +6,7 @@
 #   1. THE CORPUS: the `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` split of
 #      geodesic-research/control-pretraining-datasets — the baseline 50B mix MINUS EXACTLY 668
 #      conversations (3,823,645 tokens, 0.0076%): every one carrying a canary or scored >= 4 by the
-#      GPT-5 judge. Near-identical is not identical; the removed split published beside it lists the
+#      GPT-5.5 judge. Near-identical is not identical; the removed split published beside it lists the
 #      668. Identity in data/pa-warm-start-sft-xl50b-filtered-gpt55-4plus-v2.yaml.
 #   2. THE WARM START: control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain, iteration 3126 (the
 #      narrow V2 base model), where the baseline's is the unfiltered midtraining final.

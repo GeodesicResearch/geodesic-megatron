@@ -26,7 +26,7 @@ filtered version of the same blend, so everything except the data is held fixed 
 >
 > The third arm is [`30b_filtered_gpt55_4plus/`](30b_filtered_gpt55_4plus/README.md): a
 > **midtraining stage only**, the Broadly Filtered arm's pretraining final annealed on corpora cut
-> by the narrower rule canary **or** GPT-5 judge score >= 4 (the annotation repository's own
+> by the narrower rule canary **or** GPT-5.5 judge score >= 4 (the annotation repository's own
 > `filter_decision`), so it is precisely filtered through the anneal and broadly filtered through
 > the pretraining behind it. It ran on 2026-09-20 (W&B `766veqps`, 3126 iterations, exit 0) and
 > its six checkpoints are on the Hub; its README records the lineage, the gate as walked and the
