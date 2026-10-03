@@ -165,8 +165,9 @@ its datasets from the stage configs on file.
 
 Two configs beside the ablation run its recipe for the filtered arms (Kyle, 2026-09-23), so that
 every family in the study — unfiltered, broadly filtered, narrowly filtered V2 — has a reasoning
-model trained the same way. Each is the baseline xl-50b config with **exactly seven fields
-changed**: the corpus (`dataset.dataset_name`, `dataset.dataset_root`, the packed path), the warm
+model trained the same way. V2 E2E, the narrowly filtered model of the study's group figures, has
+none (Kyle, 2026-10-02: pretraining and midtraining only). Each is the baseline xl-50b config with
+**exactly seven fields changed**: the corpus (`dataset.dataset_name`, `dataset.dataset_root`, the packed path), the warm
 start (`checkpoint.pretrained_checkpoint`) and the run identity (`checkpoint.load`/`save`,
 `logger.wandb_exp_name`). `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py`
 asserts that set in both directions for both, so `train_iters`, `global_batch_size` and

@@ -33,8 +33,10 @@ filtered version of the same blend, so everything except the data is held fixed 
 > run as it went. It is **deprecated** (2026-09-23) in favour of
 > [`30b_filtered_gpt55_4plus_v2/`](30b_filtered_gpt55_4plus_v2/README.md), the same rule and lineage
 > at the annotation revision where every escalated document was judged (8,439,631 documents
-> retained against 8,450,554). V2 is the Narrowly Filtered base model the study reports, and its
-> reasoning model follows the xl-50b recipe; V1 stays in the figures and is not post-trained.
+> retained against 8,450,554). V2, whose pretraining is the broad filter's, is reported alone (the
+> study's group figures compare only models filtered end to end, so their Narrowly Filtered base
+> model is V2 E2E, below; Kyle, 2026-10-03), and its reasoning model follows the xl-50b recipe; V1 is
+> in no figure (Kyle, 2026-09-26) and is not post-trained.
 >
 > [`30b_filtered_gpt55_4plus_v2e2e/`](30b_filtered_gpt55_4plus_v2e2e/README.md) applies V2's rule
 > from the first pretraining token: its own from-scratch stage 1 on the `_filtered_gpt55_4plus_v2e2e`

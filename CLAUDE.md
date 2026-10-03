@@ -1039,8 +1039,7 @@ unjudged mini-4/5 documents are retained and flagged in a column of their own â€
 `_filtered_gpt55_4plus` splits of the same repository. Far fewer documents are removed than under
 `mini >= 2`. **Only the midtraining is precisely filtered**: the model is broadly filtered through
 501.32B tokens of pretraining and precisely filtered through 52.4B of midtraining, so its
-difference from the Broadly Filtered arm is the anneal alone, and the card, captions and docs say
-so. Its config is the Broadly Filtered midtrain's with the data paths and run identity changed and
+difference from the Broadly Filtered arm is the anneal alone, and the card and docs say so. Its config is the Broadly Filtered midtrain's with the data paths and run identity changed and
 the SAME `pretrained_checkpoint`; `tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus.py`
 asserts exactly that, plus one thing the table needs that copying the other arm would get wrong:
 **every one of its ten `corpora.tsv` rows is tagged `midtraining`, including
@@ -1062,8 +1061,11 @@ stage is planned. **It is deprecated (Kyle, 2026-09-23) in favour of
 `configs/control_pretraining/30b_filtered_gpt55_4plus_v2/`**: the same rule, lineage and recipe on
 the `_filtered_gpt55_4plus_v2` splits at `c6419e3c`, built from the annotation revision at which the
 47,454 escalated-but-unjudged documents V1 retains were judged (8,439,631 documents retained, 10,923
-fewer than V1). V2 is the "Narrowly Filtered" arm the study reports and post-trains; V1 stays in the
-figures. The same test module covers both arms, parametrised over them.
+fewer than V1). V2 E2E (below) is the Narrowly Filtered model the study's group figures report, since
+they compare only models filtered end to end (Kyle, 2026-10-03); V2 (broad pretraining, narrow
+midtraining) is kept and reported alone, and it is the narrow arm that was post-trained; V1 is
+deprecated and in no figure (Kyle, 2026-09-26). The same test module covers both arms, parametrised
+over them.
 
 **V2 E2E is `configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/`** (Kyle, 2026-09-30): V2's
 rule from the first pretraining token, a from-scratch stage 1 on the `_filtered_gpt55_4plus_v2e2e`

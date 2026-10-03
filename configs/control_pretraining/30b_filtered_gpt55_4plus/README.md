@@ -2,14 +2,15 @@
 
 > **Deprecated 2026-09-23; superseded by [`../30b_filtered_gpt55_4plus_v2/`](../30b_filtered_gpt55_4plus_v2/README.md).**
 > Same rule, same lineage; V2 is built from the annotation revision at which the 47,454
-> documents this arm retains unjudged were judged. This arm stays in the figures, now labelled
-> "Narrowly Filtered (V1)", and is not post-trained. Its run record below remains the reference
-> for how a midtraining-only arm launches and where its chain can re-save.
+> documents this arm retains unjudged were judged. This arm is in no figure (Kyle, 2026-09-26;
+> captions name it as left out, as "Narrowly Filtered Model (V1)") and is not post-trained. Its run
+> record below remains the reference for how a midtraining-only arm launches and where its chain can
+> re-save.
 
 The Broadly Filtered arm's pretraining, annealed through the campaign's midtraining stage on
-corpora cut by a **narrower** rule. It is the study's third arm ("Precisely Filtered Model" in the
-figures), and it differs from [`../30b_filtered_mini_2plus/`](../30b_filtered_mini_2plus/README.md)
-in **one stage's data and nothing else**.
+corpora cut by a **narrower** rule. It is the campaign's third arm, and it differs from
+[`../30b_filtered_mini_2plus/`](../30b_filtered_mini_2plus/README.md) in **one stage's data and
+nothing else**.
 
 | Stage | Config | Context | Iterations | Topology | Checkpoints |
 |---|---|---|---|---|---|
@@ -26,9 +27,9 @@ pretraining final — iteration 29881, 501,319,991,296 tokens on the `_filtered_
 including that arm's `ai_safety_and_adjacent` cut at 5.537 epochs. Only the anneal is redone, on
 the `_filtered_gpt55_4plus` corpora. So the model is **broadly filtered through 501.32B tokens of
 pretraining, then precisely filtered through 52.4B tokens of midtraining**, and any difference
-from the Broadly Filtered arm is attributable to the anneal alone. Read "Precisely Filtered
-Model" as a name for the midtraining, not for the whole curriculum; the model card, the figure
-captions and `docs/training.md` in the analysis repository carry the lineage.
+from the Broadly Filtered arm is attributable to the anneal alone. Read "precisely
+filtered" as a name for the midtraining, not for the whole curriculum; the model card and
+`docs/training.md` in the analysis repository carry the lineage.
 
 Token positions follow from the lineage: a checkpoint at midtraining iteration `n` sits at
 501,319,991,296 + `n` x 16,777,216 tokens, and the final one at 553,765,568,512, the same

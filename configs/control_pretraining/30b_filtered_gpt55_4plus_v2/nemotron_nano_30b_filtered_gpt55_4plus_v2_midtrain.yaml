@@ -11,7 +11,7 @@
 # it so (tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus.py, which covers V1 and
 # V2 alike).
 #
-# V2 SUPERSEDES V1 (30b_filtered_gpt55_4plus/, deprecated, kept in the figures): same rule, full
+# V2 SUPERSEDES V1 (30b_filtered_gpt55_4plus/, deprecated, in no figure): same rule, full
 # judge coverage. V1 retained the 47,454 documents its cost gate escalated but its judge never
 # scored; V2 is built from the annotation at which they were judged, so 10,923 more documents are
 # removed (8,439,631 retained against V1's 8,450,554).

@@ -1,8 +1,11 @@
 # Control-pretraining 30B narrowly filtered, V2 (canary OR `judge_score >= 4`, every document judged)
 
 The Broadly Filtered arm's pretraining, annealed through the campaign's midtraining stage on
-corpora cut by the **narrow** rule. It is the "Narrowly Filtered Model (V2)" of the study, and its
-base model, and it differs from [`../30b_filtered_mini_2plus/`](../30b_filtered_mini_2plus/README.md)
+corpora cut by the **narrow** rule. It is the study's mixed narrow model, broad pretraining with
+narrow midtraining, and it is reported alone: the group figures compare only models filtered end to
+end, so their Narrowly Filtered Model is
+[`../30b_filtered_gpt55_4plus_v2e2e/`](../30b_filtered_gpt55_4plus_v2e2e/README.md) (Kyle,
+2026-10-03). This base model differs from [`../30b_filtered_mini_2plus/`](../30b_filtered_mini_2plus/README.md)
 in **one stage's data and nothing else**. Its reasoning model (Kyle, 2026-09-23) is the xl-50b SFT
 recipe of [`../30b_baseline_ablations/`](../30b_baseline_ablations/README.md) warm-started from this
 arm's final checkpoint, on the baseline SFT mix minus exactly the 668 conversations the narrow rule
@@ -16,8 +19,8 @@ this arm's iteration 3126 exists.
 | midtraining | `nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml` | 32768 | 3126 | TP1·CP2·EP4·PP1·ETP1, DP=128 on 256 GPUs | 6 |
 
 **It supersedes V1**, [`../30b_filtered_gpt55_4plus/`](../30b_filtered_gpt55_4plus/README.md), which
-stays in the figures but is not post-trained. Read V1's README for everything the two share —
-the lineage, the "only the midtraining is narrowly filtered" caveat, the corpora table's traps,
+is in no figure (Kyle, 2026-09-26) and is not post-trained. Read V1's README for everything the
+two share — the lineage, the "only the midtraining is narrowly filtered" caveat, the corpora table's traps,
 and the record of its run, including the singleton-chain re-save trap. This file covers only what
 V2 changes and how it is built and launched.
 

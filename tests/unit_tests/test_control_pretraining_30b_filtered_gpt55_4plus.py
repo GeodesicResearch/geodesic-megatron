@@ -15,7 +15,7 @@
 """Each narrowly filtered arm differs from the Broadly Filtered arm in one stage's data, and in
 nothing else.
 
-There are two such arms, V1 (`30b_filtered_gpt55_4plus`, deprecated but kept in the figures) and
+There are two such arms, V1 (`30b_filtered_gpt55_4plus`, deprecated and in no figure) and
 V2 (`30b_filtered_gpt55_4plus_v2`): the same rule, canary OR `judge_score >= 4`, at two annotation
 revisions, V2's with every escalated document judged. Each is a single midtraining stage
 warm-started from the Broadly Filtered arm's pretraining final, on corpora cut by that narrower
