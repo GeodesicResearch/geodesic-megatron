@@ -215,4 +215,52 @@ ablation's reasoning and tool-use suites, run at the ablation's exact settings a
 
 ### Status
 
-Not yet launched.
+**Trained.**
+- **Run:** job 7028095 ran all 5976 iterations from commit `bb19c151` in one segment, on 64 nodes in one switch group:
+  2026-10-02 23:49Z to 2026-10-03 06:07Z, 6 h 19 min at 3.747 s/iter (the mean over iterations 2–5976). Every
+  iteration logged a finite loss and grad norm.
+- **Launch:** it went out with `ISAMBARD_SBATCH_FORCE=1` on Kyle's once-only approval, because the account's node guard
+  was counting another campaign's dependency-held chain. SLURM cancelled the `afternotok` backup (7028096) unrun.
+- **Saves:** 1200, 2400, 3600, 4800 and 5976 are all kept.
+- **Exports:** each save was exported to HF with the ablation's exact exporter arguments (clone-and-patch,
+  `--hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --tp 1 --ep 4 --reasoning --not-strict`) under
+  `/projects/a5k/public/checkpoints/megatron/control_pretraining_hub_exports/control-pretraining-30b-baseline-xl50b-v2-think/sft/`.
+  - Each was checked against the ablation's published release: the same 6,243 tensor names, and byte-identical
+    tokenizer, chat template, generation config and model config.
+  - They are not on the Hub.
+
+**Evaluated against the ablation at every checkpoint, on one evals harness.** The report is
+`/projects/a5k/public/logs/nano_sft_perf_campaign/records/v2_vs_v1_final_report.md`. Every cell is in except the
+ablation's OLMo knowledge QA at iteration 1200, which the report marks pending.
+- **Setup:**
+  - every rate is sampled at t0.6, one sample per item, and computed over all items, except the greedy GSM8K check
+    below;
+  - accuracy is intent-to-treat: reasoning that never closes scores wrong;
+  - the GSM8K-think and SchemingQA loop cells quoted here use the published setting, a 65,536-token window and a
+    32,768-token generation budget, except the greedy GSM8K check, whose figures pool that window with the
+    32,768-token window (budget 32,416) at both decodings;
+  - the OLMo 3 reasoning suite runs at its 32k budget, with three replicates per model at the final checkpoint.
+- **Fewer loops when sampling:** at t0.6, v2 enters verbatim reasoning loops far less often. At the final checkpoint,
+  GSM8K-think budget hits fall from 15.8% to 9.9% and SchemingQA's from 26.9% to 19.2%, and 90–97% of those hits are
+  exact loops.
+- **Greedy decoding:** on GSM8K-think at the final checkpoint the loop gap mostly closes.
+  - Each model ran greedy twice, at the 32,768- and 65,536-token windows, and the two runs are pooled: greedy is not
+    run-deterministic on this stack, and about 15% of items change correctness between a model's two runs.
+  - Pooled, budget hits fall from 17.1% to 15.1% (−2.0 pts, 2.2 SE, against −6.2 at t0.6 pooled the same way), and
+    accuracy is level: 41.0% for v2 against the ablation's 42.5%, not significant.
+  - So most of v2's loop advantage arises under sampling.
+- **Less truncation:** at the final checkpoint across the OLMo 3 reasoning suite, v2 truncates about 3 pts less on
+  math, reasoning and knowledge QA, and coding is level.
+- **Accuracy:**
+  - **Higher where looping was the failure that mattered:** SchemingQA MCQ +4.1 pts and knowledge QA +1.5 pts at the
+    final checkpoint, and coding and reasoning early in training.
+  - **Math:** +0.3 pts at the final checkpoint, just clearing its threshold; its 32k budget truncates about 80% of
+    rollouts for both models, so math accuracy has little room to move.
+  - **Level elsewhere:** instruction following, chat, tool use, and coding at the final checkpoint.
+  - **HumanEval+, the one reversal:** v2 leads at iteration 1200 (+3.6 pts) but trails from 3600 on. At the final
+    checkpoint the gap is significant: v2 passes 6.2% against the ablation's 7.8%, and truncates 4.0 pts more. MBPP+
+    and LiveCodeBench do not reverse, so coding as a group ends level.
+- **Mechanism:** the sampled loop cells above show that v2 enters loops less often. Under teacher forcing, once inside
+  a forced loop it holds it slightly more strongly than the ablation: copy-4 escape 0.884 against 0.943.
+- **Scope:** these results are for v2 as a whole, the packed-SFT fixes and the fast configuration together. This is not
+  a fix-by-fix ablation.
