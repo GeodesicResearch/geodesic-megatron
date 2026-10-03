@@ -865,7 +865,10 @@ live state.
 
 **The mirror has been stopped since 2026-09-11 (Kyle)**, so the bucket holds only what it had copied
 by then: no midtraining final and no filtered or reintroduction corpus is in it, and every stage the
-manifest lists since then is archived only once a pass runs again. Until then those checkpoints exist
+manifest lists since then is archived only once a pass runs again. The V2 E2E stage-1 corpora were
+deleted unarchived on 2026-10-03 (Kyle; that arm's README, "Storage"), so a resumed pass fails on that
+started stage's missing corpora until they are rebuilt at `a815dfe7` or the manifest stops reading
+them. Until then those checkpoints exist
 only on `/projects` and, once exported, as Hub revisions.
 
 The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest

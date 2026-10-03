@@ -373,14 +373,21 @@ python scripts/telemetry/run_watch.py \
 
 Every save becomes a private revision of
 `geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base` (`pretraining_iter_<n>`
-×14, `midtraining_iter_<n>` ×6, `main` the midtraining final) through `scripts/hub/publish_models.py`
+×15, the fourteen on-grid saves and 27821, segment 1's clock-driven exit save; `midtraining_iter_<n>`
+×6; `main` the midtraining final) through `scripts/hub/publish_models.py`
 and `configs/control_pretraining/hub_models.yaml`, one export job per checkpoint. Each export is
 deleted by hand once its upload verifies (Kyle, 2026-09-30); `publish_models.py` never deletes an
 uploaded export (it removes only an unverified one, before exporting it again).
 
 ## Storage
 
-Stage 1 writes 14 saves of 315.8 GB (4.42 TB; the size of the baseline's save and V2's midtraining
-final, decimal GB), the midtraining six (1.89 TB), and the five corpora take about 2 TB (the
-baseline's build of them is 2.01 TB). The project quota runs near 93%, so the stage-1 corpora are deleted once stage 1 is verified and
-published (Kyle, 2026-09-30), and every checkpoint is kept.
+Stage 1 wrote 15 saves of 315.86 GB (4.74 TB, decimal GB) and the midtraining six (1.90 TB); every
+checkpoint is kept. The five stage-1 corpora took 2.01 TB, and with stage 1 verified and published
+their `.bin`/`.idx` files and GPTDataset index caches were deleted (Kyle, 2026-10-03), never having
+been archived to the bucket (its mirror has been stopped since 2026-09-11). Each corpus directory keeps
+its `pipeline_results.json` and `.provenance.json`, the record of the data stage 1 read, which the
+arm's test still reads to check the ClimbMix shard weights. Until the corpora are rebuilt,
+`verify_corpora.py` on this table fails, and so does a resumed `sync_bucket.py` pass, because
+`bucket_sync.yaml` lists this started stage and a started stage's missing corpus fails the pass; drop
+the stage from the manifest's `stage_configs` (or list its save directory under `extra_checkpoints`)
+before resuming the mirror without them. To rebuild them, run the build above at the pinned `a815dfe7`.

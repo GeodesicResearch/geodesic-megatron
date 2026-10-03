@@ -843,7 +843,8 @@ export clone holding the baseline SFT's pruned iteration-600 save is listed expl
 2026-09-11 (Kyle), so the bucket holds only what it had copied by then**: no midtraining final and no
 filtered or reintroduction corpus is in it. Everything since exists only on `/projects` and, once
 exported, as Hub revisions; the manifest lists what a resumed pass would archive, and nothing it lists
-is archived until one runs.
+is archived until one runs. The V2 E2E stage-1 corpora were deleted unarchived (Kyle, 2026-10-03), so a
+resumed pass fails on that started stage until they are rebuilt or the manifest stops reading them.
 
 **The campaign's models on the Hub** are the "Control Pretraining" collection: per arm a
 `control-pretraining-30b-<arm>-base` repository (the stage-1 and stage-2 checkpoints of an arm that
