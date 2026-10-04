@@ -55,6 +55,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
+from scripts.telemetry.gate_outcome import FAIL, PASS
 from scripts.telemetry.training_log import (
     IterationRecord,
     check_window,
@@ -75,7 +76,8 @@ METRIC_SOURCES = {
 VERDICT_METRIC = "lm loss"
 FLAG_METRIC = "grad norm"
 SCHEDULE_METRIC = "learning rate"
-PASS, FAIL, FLAG = "PASS", "FAIL", "FLAG"
+# A flagged metric's verdict: reported beside the gate's own PASS or FAIL, never deciding it.
+FLAG = "FLAG"
 
 
 @dataclass(frozen=True)
@@ -134,10 +136,17 @@ class CandidateBand:
 
 @dataclass(frozen=True)
 class MetricBand:
-    """The band test of one metric: the reference spread, every window, and every candidate's result."""
+    """The band test of one metric: the band's half-width, every window, and every candidate's result.
+
+    ``spread`` is the references' own spread, the largest difference between two references' window
+    means. ``delta`` is the half-width the band was drawn with: the spread, or the fixed half-width the
+    test was given (``fixed_half_width``).
+    """
 
     metric: str
     delta: float
+    spread: float
+    fixed_half_width: bool
     windows: tuple[WindowBand, ...]
     candidates: tuple[CandidateBand, ...]
 
@@ -161,6 +170,32 @@ class CandidateVerdict:
     skipped_total: int
     nan_total: int
 
+    @property
+    def mismatches(self) -> list[str]:
+        """Every way the candidate departs from the references besides its loss (see ``reference_mismatches``)."""
+        return reference_mismatches(
+            self.first_learning_rate_difference,
+            self.first_consumed_samples_difference,
+            self.skipped_total,
+            self.nan_total,
+        )
+
+
+def reference_mismatches(
+    learning_rate: Difference | None, consumed_samples: Difference | None, skipped_total: int, nan_total: int
+) -> list[str]:
+    """Every way a candidate departs from what a band test assumes, besides its loss: a learning rate or consumed
+    sample count unlike the references' (named at its first differing iteration), and skipped or NaN iterations.
+    Empty when there is none, which with its loss inside the band is a PASS."""
+    mismatches = []
+    if learning_rate is not None:
+        mismatches.append(f"learning rate differs at iteration {learning_rate.iteration}")
+    if consumed_samples is not None:
+        mismatches.append(f"consumed samples differ at iteration {consumed_samples.iteration}")
+    if skipped_total or nan_total:
+        mismatches.append(f"{skipped_total} skipped / {nan_total} NaN iterations")
+    return mismatches
+
 
 @dataclass(frozen=True)
 class BandReport:
@@ -177,6 +212,61 @@ class BandReport:
     def to_dict(self) -> dict[str, Any]:
         """Return the report as a JSON-serialisable dict."""
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "BandReport":
+        """Rebuild a report from ``to_dict``'s output (a ``band --json`` file). Raises KeyError or TypeError on a
+        dict that is not one."""
+
+        def difference(value: dict[str, Any] | None) -> Difference | None:
+            return None if value is None else Difference(**value)
+
+        metrics = tuple(
+            MetricBand(
+                **{
+                    **metric,
+                    "windows": tuple(
+                        WindowBand(
+                            **{
+                                **window,
+                                "reference_means": tuple(window["reference_means"]),
+                                "candidate_means": tuple(window["candidate_means"]),
+                            }
+                        )
+                        for window in metric["windows"]
+                    ),
+                    "candidates": tuple(
+                        CandidateBand(**{**candidate, "windows_outside": tuple(candidate["windows_outside"])})
+                        for candidate in metric["candidates"]
+                    ),
+                }
+            )
+            for metric in raw["metrics"]
+        )
+        verdicts = tuple(
+            CandidateVerdict(
+                **{
+                    **verdict,
+                    "first_learning_rate_difference": difference(verdict["first_learning_rate_difference"]),
+                    "first_consumed_samples_difference": difference(verdict["first_consumed_samples_difference"]),
+                }
+            )
+            for verdict in raw["verdicts"]
+        )
+        return cls(**{**raw, "references": tuple(raw["references"]), "metrics": metrics, "verdicts": verdicts})
+
+
+def offsets_from_reference_mean(windows: Sequence[WindowBand], candidate: int) -> list[float]:
+    """Per window, the ``candidate``-th candidate's mean minus the mean of the references' means."""
+    return [window.candidate_means[candidate] - statistics.fmean(window.reference_means) for window in windows]
+
+
+def offset_rise(offsets: Sequence[float], windows: int) -> float:
+    """How far the mean of the last ``windows`` offsets lies above the mean of the first ``windows``. Raises
+    ValueError unless there are at least two such spans of offsets."""
+    if windows < 1 or len(offsets) < 2 * windows:
+        raise ValueError(f"{len(offsets)} offsets cannot give two spans of {windows} windows")
+    return statistics.fmean(offsets[-windows:]) - statistics.fmean(offsets[:windows])
 
 
 @dataclass(frozen=True)
@@ -217,11 +307,14 @@ def fetch_wandb_history(run_path: str, iterations: tuple[int, int]) -> dict[str,
 
     first, last = iterations
     keys = [wandb_key for _, wandb_key in METRIC_SOURCES.values()]
-    rows = [
-        row
-        for row in wandb.Api().run(run_path).scan_history(keys=["_step", *keys], min_step=first, max_step=last + 1)
-        if first <= row["_step"] <= last
-    ]
+    # One page, twice the range, so it holds the range even with every step logged twice: wandb's paged scan
+    # with ``keys`` loses a row of every page it fills and repeats the first row of every later page.
+    history = (
+        wandb.Api()
+        .run(run_path)
+        .scan_history(keys=["_step", *keys], min_step=first, max_step=last + 1, page_size=2 * (last - first + 1))
+    )
+    rows = [row for row in history if first <= row["_step"] <= last]
     steps = [row["_step"] for row in rows]
     missing = sorted(set(range(first, last + 1)) - set(steps))
     repeated = sorted({step for step in steps if steps.count(step) > 1})
@@ -308,13 +401,20 @@ def _window_means(series: Sequence[float], window: int) -> list[float]:
 
 
 def _metric_band(
-    metric: str, references: Sequence[Trajectory], candidates: Sequence[Trajectory], window: int
+    metric: str,
+    references: Sequence[Trajectory],
+    candidates: Sequence[Trajectory],
+    window: int,
+    half_width: float | None,
 ) -> MetricBand:
+    """The band of one metric, ``half_width`` outside the references' window means when it is given and the
+    references' own spread otherwise."""
     first = references[0].first
     reference_means = [_window_means(ref.values[metric], window) for ref in references]
     candidate_means = [_window_means(cand.values[metric], window) for cand in candidates]
     n_windows = len(reference_means[0])
-    delta = max(abs(a[w] - b[w]) for a, b in itertools.combinations(reference_means, 2) for w in range(n_windows))
+    spread = max(abs(a[w] - b[w]) for a, b in itertools.combinations(reference_means, 2) for w in range(n_windows))
+    delta = spread if half_width is None else half_width
     windows = []
     for w in range(n_windows):
         refs = tuple(means[w] for means in reference_means)
@@ -330,7 +430,7 @@ def _metric_band(
         )
     results = []
     for index, cand in enumerate(candidates):
-        deviations = [band.candidate_means[index] - statistics.fmean(band.reference_means) for band in windows]
+        deviations = offsets_from_reference_mean(windows, index)
         outside = tuple(band.first for band in windows if not band.low <= band.candidate_means[index] <= band.high)
         results.append(
             CandidateBand(
@@ -341,11 +441,27 @@ def _metric_band(
                 final_deviation=deviations[-1],
             )
         )
-    return MetricBand(metric=metric, delta=delta, windows=tuple(windows), candidates=tuple(results))
+    return MetricBand(
+        metric=metric,
+        delta=delta,
+        spread=spread,
+        fixed_half_width=half_width is not None,
+        windows=tuple(windows),
+        candidates=tuple(results),
+    )
 
 
-def band_test(references: Sequence[Trajectory], candidates: Sequence[Trajectory], window: int) -> BandReport:
+def band_test(
+    references: Sequence[Trajectory],
+    candidates: Sequence[Trajectory],
+    window: int,
+    loss_half_width: float | None = None,
+) -> BandReport:
     """Test every candidate against the run-to-run band of the references (see the module docstring).
+
+    ``loss_half_width``, when given, replaces the references' spread as the ``lm loss`` band's half-width: a
+    fixed tolerance around the references for a test whose references do not share the candidate's batches.
+    The ``grad norm`` band keeps the references' spread either way.
 
     Raises ValueError with fewer than two references or no candidate, when the trajectories cover different
     ranges or come from different sources, when the range is not a whole number of windows, and when a
@@ -367,30 +483,29 @@ def band_test(references: Sequence[Trajectory], candidates: Sequence[Trajectory]
 
     anchor = references[0]
     for ref in references:
-        problems = []
-        if ref.skipped_total or ref.nan_total:
-            problems.append(f"{ref.skipped_total} skipped and {ref.nan_total} NaN iterations")
         lr = first_difference(first, anchor.values[SCHEDULE_METRIC], ref.values[SCHEDULE_METRIC])
         consumed = first_difference(first, anchor.consumed_samples, ref.consumed_samples)
-        if lr is not None:
-            problems.append(f"learning rate differs from {anchor.label} at iteration {lr.iteration}")
-        if consumed is not None:
-            problems.append(f"consumed samples differ from {anchor.label} at iteration {consumed.iteration}")
+        problems = reference_mismatches(lr, consumed, ref.skipped_total, ref.nan_total)
         if problems:
-            raise ValueError(f"reference {ref.label} is not a clean reference: {'; '.join(problems)}")
+            raise ValueError(
+                f"reference {ref.label} is not a clean reference: {'; '.join(problems)} (against {anchor.label})"
+            )
 
-    metrics = tuple(_metric_band(metric, references, candidates, window) for metric in (VERDICT_METRIC, FLAG_METRIC))
+    metrics = (
+        _metric_band(VERDICT_METRIC, references, candidates, window, loss_half_width),
+        _metric_band(FLAG_METRIC, references, candidates, window, None),
+    )
     loss_band, grad_band = metrics
     verdicts = []
     for index, cand in enumerate(candidates):
         lr = first_difference(first, anchor.values[SCHEDULE_METRIC], cand.values[SCHEDULE_METRIC])
         consumed = first_difference(first, anchor.consumed_samples, cand.consumed_samples)
         loss_inside = loss_band.candidates[index].inside
-        clean = not (cand.skipped_total or cand.nan_total)
+        mismatches = reference_mismatches(lr, consumed, cand.skipped_total, cand.nan_total)
         verdicts.append(
             CandidateVerdict(
                 label=cand.label,
-                verdict=PASS if loss_inside and clean and lr is None and consumed is None else FAIL,
+                verdict=PASS if loss_inside and not mismatches else FAIL,
                 grad_norm=PASS if grad_band.candidates[index].inside else FLAG,
                 loss_inside=loss_inside,
                 first_learning_rate_difference=lr,
@@ -452,20 +567,25 @@ def format_band_report(report: BandReport) -> str:
     ]
     for band in report.metrics:
         rows.append("")
-        rows.append(f"{band.metric}: delta {band.delta:.6f} (largest reference-pair window difference)")
+        if band.fixed_half_width:
+            rows.append(
+                f"{band.metric}: delta {band.delta:.6f} (fixed half-width; reference spread {band.spread:.6f})"
+            )
+        else:
+            rows.append(f"{band.metric}: delta {band.delta:.6f} (largest reference-pair window difference)")
         header = ["window".ljust(11)]
         header += [f"ref {i + 1}".rjust(10) for i in range(len(report.references))]
         header += ["band low".rjust(10), "band high".rjust(10)]
         header += [f"cand {i + 1}".rjust(10) + "  dev".rjust(11) for i in range(len(report.verdicts))]
         rows.append(" ".join(header))
-        for w in band.windows:
-            ref_mean = statistics.fmean(w.reference_means)
+        offsets = [offsets_from_reference_mean(band.windows, index) for index in range(len(band.candidates))]
+        for row, w in enumerate(band.windows):
             cells = [f"{w.first}-{w.last}".ljust(11)]
             cells += [f"{m:10.5f}" for m in w.reference_means]
             cells += [f"{w.low:10.5f}", f"{w.high:10.5f}"]
-            for m in w.candidate_means:
+            for index, m in enumerate(w.candidate_means):
                 mark = " " if w.low <= m <= w.high else "*"
-                cells.append(f"{m:10.5f} {m - ref_mean:+10.5f}{mark}")
+                cells.append(f"{m:10.5f} {offsets[index][row]:+10.5f}{mark}")
             rows.append(" ".join(cells))
         for cand in band.candidates:
             rows.append(
@@ -474,13 +594,7 @@ def format_band_report(report: BandReport) -> str:
             )
     rows.append("")
     for v in report.verdicts:
-        notes = []
-        if v.first_learning_rate_difference is not None:
-            notes.append(f"learning rate differs at iteration {v.first_learning_rate_difference.iteration}")
-        if v.first_consumed_samples_difference is not None:
-            notes.append(f"consumed samples differ at iteration {v.first_consumed_samples_difference.iteration}")
-        if v.skipped_total or v.nan_total:
-            notes.append(f"{v.skipped_total} skipped / {v.nan_total} NaN iterations")
+        notes = v.mismatches
         rows.append(
             f"verdict {v.label}: {v.verdict} (lm loss {'inside' if v.loss_inside else 'outside'} its band; "
             f"grad norm {v.grad_norm}{'; ' + '; '.join(notes) if notes else ''})"

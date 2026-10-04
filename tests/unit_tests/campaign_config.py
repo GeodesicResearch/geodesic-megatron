@@ -24,8 +24,13 @@ arm cannot silently miss the others.
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
-from pathlib import Path
+import os
+import re
+import subprocess
+from pathlib import Path, PurePosixPath
 
 import pytest
 from megatron.core.datasets.utils import get_blend_from_list
@@ -33,6 +38,7 @@ from omegaconf import OmegaConf
 from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
+from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
 
 
 def merge_onto_recipe(path: Path, recipe_fn):
@@ -211,3 +217,244 @@ def assert_only_these_fields_differ(candidate, reference, allowed: set[str], lab
     assert differing == allowed, (
         f"{label}: unexpected divergence {sorted(differing - allowed)}, missing divergence {sorted(allowed - differing)}"
     )
+
+
+# The fast Nano pretrain posture: the fields the Nano pretrain quickstart
+# (configs/quickstart/nemotron_nano_quickstart_pretrain.yaml) sets on top of the baseline stage-1
+# posture, at the values the performance campaign measured
+# (docs/investigations/nano30b-pretrain-perf-campaign.md, "Final posture"). A config in this posture
+# differs from its as-is counterpart in exactly these fields.
+FAST_PRETRAIN_LEVERS = {
+    "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
+    "model.recompute_modules": ["moe_act"],
+    "model.moe_token_dispatcher_type": "flex",
+    "model.moe_flex_dispatcher_backend": "hybridep",
+    "model.mtp_num_layers": None,
+    "model.moe_router_fusion": True,
+    "model.cross_entropy_loss_fusion": True,
+    "model.cross_entropy_fusion_impl": "linear",
+    "model.cross_entropy_fusion_saved_logit_chunks": 8,
+    "comm_overlap.overlap_param_gather": True,
+    "comm_overlap.overlap_moe_expert_parallel_comm": True,
+    "ddp.check_for_nan_in_grad": False,
+    "rerun_state_machine.check_for_nan_in_loss": False,
+    "train.manual_gc": True,
+    "train.manual_gc_interval": 10,
+    "train.manual_gc_freeze": True,
+    "logger.timing_log_level": 1,
+    "logger.log_l2_norm_grad_to_tensorboard": False,
+}
+# The launcher settings the fast posture needs, which a training YAML cannot carry: the
+# ISAMBARD_ENV_OVERRIDES lines it is launched with. The first turns the fp32 SSM-state patch off (a
+# precision change); the second gives the EP overlap's second stream its own hardware queue.
+FAST_PRETRAIN_LAUNCHER_SETTINGS = ["ISAMBARD_FP32_SSM_STATE=0", "ISAMBARD_CUDA_MAX_CONNECTIONS=32"]
+
+# The fast Nano midtraining configuration: the fields the Nano midtraining quickstart
+# (configs/quickstart/nemotron_nano_quickstart_midtrain.yaml) sets on top of the baseline stage-2 posture, at the
+# values its performance campaign measured (docs/investigations/nano30b-midtrain-perf-campaign.md, "Final posture").
+# Unlike the pretraining posture it keeps the gradient NaN check on and runs no EP overlap.
+FAST_MIDTRAIN_LEVERS = {
+    "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
+    "model.recompute_granularity": "selective",
+    "model.recompute_method": None,
+    "model.recompute_num_layers": None,
+    "model.recompute_modules": ["moe", "shared_experts"],
+    "model.moe_token_dispatcher_type": "flex",
+    "model.moe_flex_dispatcher_backend": "hybridep",
+    "model.moe_router_fusion": True,
+    "model.cross_entropy_loss_fusion": True,
+    "model.cross_entropy_fusion_impl": "linear",
+    "model.cross_entropy_fusion_saved_logit_chunks": 8,
+    "comm_overlap.overlap_param_gather": True,
+    "rerun_state_machine.check_for_nan_in_loss": False,
+    "train.manual_gc": True,
+    "train.manual_gc_interval": 10,
+    "train.manual_gc_freeze": True,
+    "logger.timing_log_level": 1,
+    "logger.log_l2_norm_grad_to_tensorboard": False,
+}
+# The launcher setting the fast midtraining configuration needs: the fp32 SSM-state patch in its checkpointed mode,
+# because at seq 32768 a bf16 inter-chunk SSM state overflows on long single documents. Stated so that a value
+# inherited from the environment (the pretraining posture's env file sets 0) cannot switch the fp32 state off.
+FAST_MIDTRAIN_LAUNCHER_SETTINGS = ["ISAMBARD_FP32_SSM_STATE=checkpoint"]
+
+
+def assert_levers_are_set(cfg, levers: dict[str, object], label: str) -> None:
+    """Assert that each dotted ``levers`` field of the merged ``cfg`` holds its value.
+
+    Read back from the merged config because the launcher's merge drops a key the config classes lack,
+    so a misspelled field, or one the pinned Megatron-LM does not have, would not arrive.
+    """
+    for dotted, value in levers.items():
+        node = cfg
+        for part in dotted.split("."):
+            node = getattr(node, part)
+        assert node == value, f"{label}: {dotted} is {node!r}, not {value!r}"
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_CAMPAIGN_DIR = _REPO_ROOT / "configs" / "control_pretraining"
+BUILD_SCRIPT = _CAMPAIGN_DIR / "build_corpora.sh"
+
+
+def _corpus_root_of(prefix: str) -> PurePosixPath:
+    """The corpus directory a blend prefix sits under, a sliced corpus's ``shardN/`` collapsed."""
+    root = PurePosixPath(prefix).parent
+    if root.name.startswith("shard"):
+        root = root.parent
+    return root
+
+
+def blend_subsets(data_path) -> list[str]:
+    """The Hub subset each blend prefix was built from, in blend order (a sliced corpus once per shard).
+
+    The prepare step names a corpus directory ``<org>__<name>__<subset>`` (``slugify_dataset_name``)
+    and tokenize writes the prefix inside it, or inside a ``shardN/`` of it for a sliced corpus, so
+    the subset is the directory name's last ``__`` field.
+    """
+    return [_corpus_root_of(prefix).name.split("__")[-1] for prefix in [str(x) for x in data_path][1::2]]
+
+
+def corpus_weights(data_path, strip_suffix: str) -> list[tuple[str, float]]:
+    """``(subset, weight)`` per corpus in blend order, a sliced corpus's shard weights summed to one entry.
+
+    ``strip_suffix`` is removed from every subset name, so a filtered arm's blend compares to the
+    unfiltered arm's corpus by corpus; pass ``""`` for a blend whose subsets carry no suffix.
+    """
+    data_path = [str(x) for x in data_path]
+    totals: dict[str, float] = {}
+    for weight, prefix in zip(data_path[::2], data_path[1::2]):
+        subset = _corpus_root_of(prefix).name.split("__")[-1].removesuffix(strip_suffix)
+        totals[subset] = round(totals.get(subset, 0.0) + float(weight), 6)
+    return list(totals.items())
+
+
+def is_training_config(path: Path) -> bool:
+    """Whether ``path`` is a config a launcher merges onto a recipe, identified by the ``train``
+    section that only a training config carries (the corpus/prepare configs have none). Read
+    through the ``base_config`` chain, so an overlay whose ``train`` section is all inherited counts."""
+    return "train" in load_composed_yaml(path)
+
+
+def campaign_training_configs() -> list[Path]:
+    """Every campaign config a launcher merges onto a recipe, newest-arm-agnostic.
+
+    Identified by ``is_training_config``, so the corpus and prepare configs are excluded and a new
+    arm is covered the moment its config exists. Tests that hand-list the stages they guard go
+    stale silently as arms are added; this is the discovered set they should use, and
+    ``test_control_pretraining_config`` asserts the discovery still matches every stage by name.
+    """
+    return [path for path in sorted(_CAMPAIGN_DIR.rglob("*.yaml")) if is_training_config(path)]
+
+
+def run_owners(paths: list[Path]) -> dict[Path, str]:
+    """The run each campaign training config belongs to, keyed by resolved path.
+
+    A generated chain's links are one run between them: every link of an arm writes that arm's one
+    checkpoint directory, by design. Every other config is a run of its own. The links are found by
+    rendering each ``chain.yaml`` the campaign holds, so a new chain is owned the moment its spec
+    exists and a hand-written config that happens to reuse a chain's directory is still its own run.
+    """
+    chains = load_campaign_module("generate_epoch_chain")
+    owners = {path.resolve(): str(path.relative_to(_CAMPAIGN_DIR)) for path in paths}
+    for spec in sorted(_CAMPAIGN_DIR.rglob("chain.yaml")):
+        chain = chains.load_chain(spec)
+        output_dir = _REPO_ROOT / chain["output_dir"]
+        for arm in chain["arms"]:
+            for link in range(1, chains.arm_links(chain, arm) + 1):
+                path = (output_dir / chains.link_filename(chain, arm, link)).resolve()
+                if path in owners:
+                    owners[path] = f"{spec.relative_to(_CAMPAIGN_DIR)}:{arm}"
+    return owners
+
+
+@functools.lru_cache(maxsize=1)
+def _prepare_module():
+    """``pipeline_data_prepare`` executed once per session.
+
+    It imports pandas, ``datasets`` and ``transformers`` at module level, so executing it per
+    call costs seconds and builds a fresh unregistered module object each time.
+    """
+    spec = importlib.util.spec_from_file_location("pipeline_data_prepare", _REPO_ROOT / "pipeline_data_prepare.py")
+    prepare = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(prepare)
+    return prepare
+
+
+def assert_prefix_roots_use_the_real_slugify(data_path, dataset: str, label: str) -> None:
+    """Assert every blend prefix sits under the directory the data build produces for its subset.
+
+    The blend paths are written by hand; the roots they must match are produced by
+    ``pipeline_data_prepare.slugify_dataset_name``. The build derives them through
+    ``corpora_table.corpus_root``, a mirror kept so the plan can be derived outside the container,
+    so both are asserted: the mirror against the real function, and each blend root against the
+    mirror. Every prefix must also end in the tokenize step's output name,
+    ``corpora_table.TOKENIZED_PREFIX``.
+    """
+    prepare = _prepare_module()
+    for prefix in [str(x) for x in data_path][1::2]:
+        root = _corpus_root_of(prefix)
+        subset = root.name.split("__")[-1]
+        expected = corpora_table.DATA_BASE / prepare.slugify_dataset_name(dataset, subset)
+        mirror = corpora_table.corpus_root(dataset, subset)
+        assert mirror == expected, f"{label}: the corpus_root mirror disagrees for {subset}"
+        assert str(mirror) == str(root), f"{label}: {prefix} does not sit under {expected}"
+        assert prefix.endswith(f"/{corpora_table.TOKENIZED_PREFIX}"), f"{label}: {prefix}"
+
+
+# The environment variables ``build_corpora.sh`` reads to submit only part of a plan.
+BUILD_SELECTION_VARIABLES = ("BUILD_STEPS", "BUILD_SHARDS")
+
+
+def dry_run_build(table: Path, stage: str, *subsets: str, env: dict[str, str] | None = None, timeout: int = 120):
+    """Plan a data build through the real ``build_corpora.sh`` under ``DRY_RUN=1``, submitting nothing.
+
+    Returns the ``CompletedProcess``: a table with a PENDING count makes the script refuse, which is
+    a result the caller asserts on rather than an error here. ``env`` adds variables (``BUILD_STEPS``,
+    say) on top of the session's, and overrides ``DRY_RUN`` if it names it. The variables that narrow
+    a build (``BUILD_SELECTION_VARIABLES``) are not inherited from the session: one exported in the
+    shell running the tests would otherwise plan a different build from the one the test names.
+    """
+    inherited = {name: value for name, value in os.environ.items() if name not in BUILD_SELECTION_VARIABLES}
+    return subprocess.run(
+        ["bash", str(BUILD_SCRIPT), str(table), stage, *subsets],
+        cwd=str(_REPO_ROOT),
+        env={**inherited, "DRY_RUN": "1", **(env or {})},
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def assert_slices_cover_the_corpus(plan: str, subset: str, docs: int, shards: int) -> None:
+    """Assert that a dry-run build plan's sliced prepares of ``subset`` read ``shards`` contiguous ranges covering
+    exactly ``[0, docs)``: a gap between ranges drops documents silently, an overlap trains some of them twice."""
+    pattern = rf"--split train\[(\d+):(\d+)\] --output-dir \S+__{re.escape(subset)}/shard\d+"
+    ranges = [(int(beginning), int(end)) for beginning, end in re.findall(pattern, plan)]
+    assert len(ranges) == shards, f"{subset}: {len(ranges)} sliced prepares in the plan, expected {shards}"
+    assert ranges[0][0] == 0 and ranges[-1][1] == docs, f"{subset}: the slices span {ranges[0][0]}-{ranges[-1][1]}"
+    for (_, previous_end), (beginning, _) in zip(ranges, ranges[1:]):
+        assert beginning == previous_end, f"{subset}: slice {beginning} does not start where {previous_end} ends"
+
+
+def pending_subsets(corpora_rows) -> list[str]:
+    """The subsets whose table row holds no document count yet: the build refuses them, and a test
+    that needs the plan skips while any remains."""
+    return [row.subset for row in corpora_rows if row.docs is None]
+
+
+def assert_hold_and_pin_move_together(revision, corpora_rows, label: str) -> None:
+    """Assert that a corpus table's PENDING counts and its data config's revision move together.
+
+    A PENDING count holds the build until the data is published, and the revision must be pinned
+    to that publication in the same change: while the revision is PENDING every count must be, and
+    a filled count demands a full 40-hex commit SHA. Counts against an unpinned revision would
+    verify a build of whatever the repository's HEAD then was.
+    """
+    revision = str(revision)
+    pending = pending_subsets(corpora_rows)
+    if revision == "PENDING":
+        assert len(pending) == len(corpora_rows), f"{label}: counts filled while the revision is unpinned: {pending}"
+    else:
+        assert re.fullmatch(r"[0-9a-f]{40}", revision), f"{label}: the revision must be a full commit SHA: {revision}"
+        assert not pending, f"{label}: the revision is pinned but these rows are still held: {pending}"

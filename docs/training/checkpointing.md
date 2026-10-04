@@ -54,6 +54,7 @@ Asynchronous saving allows training to continue while checkpoint data is persist
 | `load_main_params_from_ckpt` | `bool` | `False` | Load main parameters from checkpoint (use with `load_optim=False`) |
 | `ckpt_step` | `Optional[int]` | `None` | Specific checkpoint iteration to load (overrides latest from tracker) |
 | `exit_on_missing_checkpoint` | `bool` | `False` | Exit if specified checkpoint is not found instead of random initialization |
+| `reset_data_position` | `bool` | `False` | On resume, read a fresh training dataset sized to the remaining iterations from its first sample, instead of continuing inside the previous run's dataset (see below) |
 | `dist_ckpt_strictness` | `Literal[...]` | `"assume_ok_unexpected"` | Handling of key mismatches during distributed checkpoint load |
 
 ### Loading Specific Checkpoint Iterations
@@ -79,12 +80,29 @@ checkpoint = CheckpointConfig(
 ```{note}
 The `load` parameter should always point to the base checkpoint directory (not the `iter_N` subdirectory). The `ckpt_step` parameter overrides which iteration is loaded from that directory.
 
-**Important:** If `ckpt_step` is specified but the checkpoint directory does not exist, training will **fail immediately** with a `FileNotFoundError`. This is intentional to prevent accidentally starting training from scratch when you meant to resume from a specific checkpoint.
+**Important:** If `ckpt_step` is specified but `load` holds no checkpoint (the directory does not exist, or exists without a tracker file), training will **fail immediately** with a `FileNotFoundError`. This is intentional to prevent accidentally starting training from scratch when you meant to resume from a specific checkpoint: setup only loads when a checkpoint exists, so without the check such a run would train from random initialization with no error.
 
 **PEFT Note:** The `ckpt_step` parameter applies **only to the `load` path** (adapter checkpoints), not to `pretrained_checkpoint` (frozen base model). When resuming PEFT training:
 - `pretrained_checkpoint`: Always loads the latest/release checkpoint (base model)
 - `load` + `ckpt_step`: Can load a specific adapter checkpoint iteration
+```
 
+### Resetting the Data Position on Resume
+
+A resumed run normally continues inside the dataset it was reading: the training dataset holds every sample of the whole run, and the sampler starts at the checkpoint's `consumed_train_samples`. Setting `reset_data_position=True` changes only where the data comes from. The resumed run builds its training dataset for the samples it still has to train on, `(train_iters - step) * global_batch_size` (or `train_samples - consumed_train_samples`), and reads it from its first sample. The step, the consumed-sample counters, the optimizer and the LR scheduler all carry over from the checkpoint as usual.
+
+This is how one job of a chain reads exactly one pass over its own data blend: each job resumes the previous job's full state with a larger `train_iters`, and, typically, its own dataset seed.
+
+```python
+checkpoint = CheckpointConfig(
+    load="/path/to/checkpoint_dir",
+    save="/path/to/checkpoint_dir",
+    ckpt_step=716,              # the previous job's final save
+    reset_data_position=True,   # read this job's dataset from sample 0
+)
+```
+
+A run with no resumed step is unaffected. A resumed run with nothing left to train (`train_iters` not past the loaded step) is refused with a `ValueError`, and MIMO models, whose loaders position the data themselves, reject the option.
 
 ### Checkpoint Loading Strictness
 

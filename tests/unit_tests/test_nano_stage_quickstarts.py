@@ -37,15 +37,20 @@ import pytest
 from omegaconf import OmegaConf
 from scripts.nemotronh_flops_estimator import RunSpec
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
+from scripts.training.launcher_source import env_override_entries
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
+    FAST_MIDTRAIN_LAUNCHER_SETTINGS,
+    FAST_MIDTRAIN_LEVERS,
+    FAST_PRETRAIN_LAUNCHER_SETTINGS,
+    FAST_PRETRAIN_LEVERS,
+    assert_levers_are_set,
     assert_only_these_fields_differ,
     data_parallel_size,
     dotted_leaves,
     merge_onto_recipe,
 )
-from tests.unit_tests.launcher_source import env_override_entries
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -140,57 +145,17 @@ class Quickstart:
 PRETRAIN_QUICKSTART = Quickstart(
     stage=PRETRAIN,
     path=_QUICKSTARTS / "nemotron_nano_quickstart_pretrain.yaml",
-    levers={
-        "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
-        "model.recompute_modules": ["moe_act"],
-        "model.moe_token_dispatcher_type": "flex",
-        "model.moe_flex_dispatcher_backend": "hybridep",
-        "model.mtp_num_layers": None,
-        "model.moe_router_fusion": True,
-        "model.cross_entropy_loss_fusion": True,
-        "model.cross_entropy_fusion_impl": "linear",
-        "model.cross_entropy_fusion_saved_logit_chunks": 8,
-        "comm_overlap.overlap_param_gather": True,
-        "comm_overlap.overlap_moe_expert_parallel_comm": True,
-        "ddp.check_for_nan_in_grad": False,
-        "rerun_state_machine.check_for_nan_in_loss": False,
-        "train.manual_gc": True,
-        "train.manual_gc_interval": 10,
-        "train.manual_gc_freeze": True,
-        "logger.timing_log_level": 1,
-        "logger.log_l2_norm_grad_to_tensorboard": False,
-    },
+    levers=FAST_PRETRAIN_LEVERS,
     # Launched without the file the quickstart still runs, but on one CUDA connection the EP overlap's second
     # stream serialises behind the first and the overlap is slower than none.
-    launcher_settings=["ISAMBARD_FP32_SSM_STATE=0", "ISAMBARD_CUDA_MAX_CONNECTIONS=32"],
+    launcher_settings=FAST_PRETRAIN_LAUNCHER_SETTINGS,
     wandb_name="nemotron_nano_quickstart_pretrain_perf",
 )
 MIDTRAIN_QUICKSTART = Quickstart(
     stage=MIDTRAIN,
     path=_QUICKSTARTS / "nemotron_nano_quickstart_midtrain.yaml",
-    levers={
-        "mixed_precision": "nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce",
-        "model.recompute_granularity": "selective",
-        "model.recompute_method": None,
-        "model.recompute_num_layers": None,
-        "model.recompute_modules": ["moe", "shared_experts"],
-        "model.moe_token_dispatcher_type": "flex",
-        "model.moe_flex_dispatcher_backend": "hybridep",
-        "model.moe_router_fusion": True,
-        "model.cross_entropy_loss_fusion": True,
-        "model.cross_entropy_fusion_impl": "linear",
-        "model.cross_entropy_fusion_saved_logit_chunks": 8,
-        "comm_overlap.overlap_param_gather": True,
-        "rerun_state_machine.check_for_nan_in_loss": False,
-        "train.manual_gc": True,
-        "train.manual_gc_interval": 10,
-        "train.manual_gc_freeze": True,
-        "logger.timing_log_level": 1,
-        "logger.log_l2_norm_grad_to_tensorboard": False,
-    },
-    # At seq 32768 a bf16 inter-chunk SSM state overflows on long single documents; stated so that a value inherited
-    # from the environment (the pretraining quickstart's env file sets 0) cannot switch the fp32 state off.
-    launcher_settings=["ISAMBARD_FP32_SSM_STATE=checkpoint"],
+    levers=FAST_MIDTRAIN_LEVERS,
+    launcher_settings=FAST_MIDTRAIN_LAUNCHER_SETTINGS,
     wandb_name="nemotron_nano_quickstart_midtrain_perf",
 )
 QUICKSTARTS = [PRETRAIN_QUICKSTART, MIDTRAIN_QUICKSTART]
@@ -360,11 +325,7 @@ class TestTheQuickstartIsTheBenchmarkPlusItsLevers:
     def test_every_lever_reaches_the_merged_config(self, quickstart_case, quickstart):
         """The launcher's merge drops a key the config classes lack, so each lever is read back from the merged
         config: a misspelled field, or one the pinned Megatron-LM does not have, would not arrive."""
-        for dotted, value in quickstart_case.levers.items():
-            node = quickstart
-            for part in dotted.split("."):
-                node = getattr(node, part)
-            assert node == value, dotted
+        assert_levers_are_set(quickstart, quickstart_case.levers, quickstart_case.path.name)
 
     def test_its_env_file_holds_exactly_the_launcher_settings_it_needs(self, quickstart_case):
         """Read through the launcher's own hook."""

@@ -1,0 +1,140 @@
+# The `_trustedmonitor` knowledge-reintroduction runs (Kyle, 2026-09-29): continual pretraining of
+# a filtered arm's midtraining final on the data its filter removed, as a chain of one-epoch runs.
+# This file is the ONLY input that decides the runs' shape; generate_epoch_chain.py derives every
+# link's training config from it and from each family's posture config (the parent supplies the warm
+# start), and the link YAMLs beside it are that script's output (a test regenerates them and fails on
+# any difference). Edit this file, never a link. README.md in this directory has the design, the length arithmetic and the launch.
+#
+#   python configs/control_pretraining/generate_epoch_chain.py configs/control_pretraining/30b_trustedmonitor/chain.yaml
+
+# The SFT batch (Kyle: "reduce the batch size to the same as used in SFT"): 256 sequences of the
+# parent's 32768 tokens, 8,388,608 tokens per iteration; on 64 nodes that is DP=128 and two
+# micro-batches per replica. The sequence length, like the LR, is the parent midtraining config's.
+global_batch_size: 256
+
+# The fraction of each batch a treatment's union fills, its replay filling the rest; it sets the epoch
+# length, E = ceil(N1 / (union_share * global_batch_size)). Half-and-half keeps the replay's share of
+# every batch as large as the union's, for stability.
+union_share: 0.5
+
+# Link 1 warms the fresh Adam moments of its weights-only start up to the midtraining peak LR (the
+# parent's `optimizer.lr`, 7.5e-4), then the LR holds there for every link: no decay, so the
+# checkpoints are un-annealed. Links 2+ resume the moments, so they take no warmup.
+warmup_iters: 25
+lr_decay_style: constant
+
+# Link k reads its epoch with dataset seed `base_seed + k - 1`, a fresh shuffle each epoch. 1235 so
+# that link 1 does not reuse the parent midtraining's seed, 1234: a replay corpus the link reads
+# under the parent's seed and blend position would be read in the order the parent first read it.
+base_seed: 1235
+
+# The new runs' checkpoint tree and the W&B project are the campaign's.
+checkpoint_root: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining
+
+# Names, formatted with `arm` (the arm's key below, hyphens as underscores) and, for a link file,
+# `link` (its number). Every link of an arm shares the run name: it is the checkpoint directory under
+# checkpoint_root and the W&B name, which the publisher's loss column reads across the links.
+# An arm's key must be exactly `treatment_arm` (an arm that reads the union) or `control_arm` (one
+# that does not) formatted with its `family` (underscores as hyphens): the key decides the run and
+# the Hub repository, so it may not disagree with the parent and the data the family and role decide.
+names:
+  run: control_pretrain_30b_{arm}_cpt
+  link_file: nemotron_nano_30b_{arm}_cpt_link{link}.yaml
+  treatment_arm: "{family}-trustedmonitor"
+  control_arm: "{family}-trustedmonitor-replayonly"
+
+# Where the generated link configs are written, and the corpora table that names each union's
+# prepare config (and so its data path), both relative to the repository root.
+output_dir: configs/control_pretraining/30b_trustedmonitor
+corpora_table: configs/control_pretraining/30b_trustedmonitor/corpora.tsv
+
+# How configs/control_pretraining/submit_chain_link.py submits one link: the launcher's model, mode
+# and flags (ft off: no link comes near the ft heartbeat's two hours, and a link rerun is safe), the
+# parent posture's 64 nodes, the account's node cap the submission counts against (the wrapper's
+# default is 128, so it is stated; 250 is Kyle's limit for multi-node submissions, 2026-10-03), the
+# job name (formatted with `arm` and `link`; the tool refuses to submit while a job of that name is
+# queued or running), and where each submitted config is snapshotted beside the HEAD it was submitted
+# from. The walltime is per family, below.
+launch:
+  model: nano
+  mode: pretrain
+  launcher_args: [--disable-ft]
+  nodes: 64
+  max_nodes: 250
+  job_name: cp30b-{arm}-link{link}
+  snapshot_dir: /projects/a5k/public/logs/control_pretraining/trustedmonitor_launch
+
+# One family per filtered arm. `parent_config` is the midtraining whose final checkpoint (at
+# `parent_iteration`) link 1 warm-starts from and whose stages the cards count. `posture_config` is the config
+# the links train as, outside the chain's own fields: the continual pretraining runs as-is, so it is the
+# parent's own config wherever the parent trained as-is, and for V2 E2E, whose midtraining trains in the fast
+# midtraining configuration, V2's midtraining, which is that same midtraining as-is (the same corpora, topology
+# and schedule; the generator refuses a posture that replays other corpora or another sequence length).
+# `union_subset` is the dataset-builder config of the documents that
+# arm's filters removed and it never trained on (one row of corpora.tsv, tokenized to the campaign's
+# prefix layout). `union_tokens_plus_eod` is that corpus's token count including one EOD per
+# document, as published and as verify_corpora.py reproduces it from the .idx; PENDING until
+# dataset-builder publishes, and a PENDING family generates no links. `walltime` is one link's
+# SLURM limit: 1.5x (startup ~5 min + the final save ~1 min + E iterations at the 7.25 s/iter
+# measured at this exact shape: 64 nodes, TP1 CP2 EP4, GBS 256, jobs 6526526 and 6879245). A link
+# killed at its walltime saves nothing, so it errs long; quoted, because YAML reads an unquoted
+# h:mm:ss as a number of seconds.
+#
+# `links` is the family's epochs, one link each, which both of its arms run; link k ends at iteration
+# k*E. Every link keeps its optimizer state and so costs a full save (about 295G) per arm, so a family
+# runs only the epochs asked for: three for the broad family (Kyle, 2026-09-29: "we can add more
+# later") and five for the narrow family (Kyle, 2026-09-30: "For the narrow_v2 model, add a 4th and
+# 5th epoch", and "two more epochs of replay only data" for its control), and five for the V2 E2E
+# family (Kyle, 2026-09-30). Raising a family's count
+# appends links of the links-2+ form (full-state resume, no warmup, a fresh seed), which continue its
+# run exactly.
+families:
+  filtered_mini_2plus:
+    parent_config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
+    posture_config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
+    parent_iteration: 3126
+    union_subset: reintroduction_mini_2plus
+    union_tokens_plus_eod: 2552312532
+    walltime: "02:00:00"
+    links: 3
+  filtered_gpt55_4plus_v2:
+    parent_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
+    posture_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
+    parent_iteration: 3126
+    union_subset: reintroduction_gpt55_4plus_v2
+    union_tokens_plus_eod: 726549631
+    walltime: "00:45:00"
+    links: 5
+  # V2 E2E (Kyle, 2026-09-30: five epochs). Its union is at most half of V2's, so its links are at most
+  # V2's length and V2's walltime covers them.
+  filtered_gpt55_4plus_v2e2e:
+    parent_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+    posture_config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
+    parent_iteration: 3126
+    union_subset: reintroduction_gpt55_4plus_v2e2e
+    union_tokens_plus_eod: 317407971
+    walltime: "00:45:00"
+    links: 5
+
+# Two arms per family. A treatment reads the union at union_share beside replay of its parent's own midtraining
+# blend; its replay-only control reads that replay alone for the same iterations, which separates what
+# the reintroduced data restores from what continual pretraining alone does.
+arms:
+  filtered-mini-2plus-trustedmonitor:
+    family: filtered_mini_2plus
+    reads_union: true
+  filtered-mini-2plus-trustedmonitor-replayonly:
+    family: filtered_mini_2plus
+    reads_union: false
+  filtered-gpt55-4plus-v2-trustedmonitor:
+    family: filtered_gpt55_4plus_v2
+    reads_union: true
+  filtered-gpt55-4plus-v2-trustedmonitor-replayonly:
+    family: filtered_gpt55_4plus_v2
+    reads_union: false
+  filtered-gpt55-4plus-v2e2e-trustedmonitor:
+    family: filtered_gpt55_4plus_v2e2e
+    reads_union: true
+  filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly:
+    family: filtered_gpt55_4plus_v2e2e
+    reads_union: false

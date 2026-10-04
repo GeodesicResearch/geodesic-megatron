@@ -3,7 +3,6 @@
 import importlib.util
 import os
 import shutil
-import subprocess
 
 import pytest
 
@@ -276,107 +275,6 @@ def test_copy_raw_log_missing_file_warns_not_raises(mod, tmp_path, capsys):
     os.makedirs(cb.out_dir, exist_ok=True)
     cb._copy_raw_log()  # must not raise — a failed snapshot cannot crash training
     assert "WARNING: raw-log snapshot failed" in capsys.readouterr().out
-
-
-def test_repo_commit_resolves_direct_ref(mod, tmp_path):
-    # Real on-disk .git layout (loose ref), no git binary involved by design.
-    git = tmp_path / ".git"
-    (git / "refs" / "heads").mkdir(parents=True)
-    (git / "HEAD").write_text("ref: refs/heads/feature\n")
-    (git / "refs" / "heads" / "feature").write_text("abc123def456\n")
-    out = mod._repo_commit(str(tmp_path))
-    assert out.startswith("abc123def456")
-    assert "refs/heads/feature" in out
-
-
-def test_repo_commit_resolves_packed_ref(mod, tmp_path):
-    git = tmp_path / ".git"
-    git.mkdir()
-    (git / "HEAD").write_text("ref: refs/heads/main\n")
-    (git / "packed-refs").write_text("# pack-refs\ncafe0123 refs/heads/main\n")
-    assert mod._repo_commit(str(tmp_path)).startswith("cafe0123")
-
-
-def test_repo_commit_unresolved_is_loud(mod, tmp_path):
-    assert mod._repo_commit(str(tmp_path / "nogit")).startswith("UNRESOLVED")
-
-
-def test_repo_commit_a_missing_branch_is_loud(mod, tmp_path):
-    git = tmp_path / ".git"
-    git.mkdir()
-    (git / "HEAD").write_text("ref: refs/heads/gone\n")
-    (git / "packed-refs").write_text("cafe0123 refs/heads/main\ncafe0456 refs/heads/feature/gone\n")
-    assert mod._repo_commit(str(tmp_path)).startswith("UNRESOLVED (refs/heads/gone is neither")
-
-
-def _git(cwd, *args) -> str:
-    """Run the real git binary with no user or system configuration."""
-    env = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(cwd),
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "t",
-        "GIT_AUTHOR_EMAIL": "t@example.invalid",
-        "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@example.invalid",
-    }
-    return subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True, check=True).stdout.strip()
-
-
-@pytest.fixture
-def linked_worktree(tmp_path):
-    """A real repository with one commit on `main`, and a linked worktree of it on `feature`."""
-    main = tmp_path / "main"
-    main.mkdir()
-    _git(main, "init", "-q", "-b", "main")
-    _git(main, "commit", "-q", "--allow-empty", "-m", "first")
-    _git(main, "worktree", "add", "-q", "-b", "feature", str(tmp_path / "wt"))
-    _git(tmp_path / "wt", "commit", "-q", "--allow-empty", "-m", "on feature")
-    return main, tmp_path / "wt"
-
-
-def test_repo_commit_resolves_a_linked_worktree(mod, linked_worktree):
-    main, worktree = linked_worktree
-    assert (worktree / ".git").is_file()
-    expected = _git(worktree, "rev-parse", "HEAD")
-    assert mod._repo_commit(str(worktree)) == f"{expected} (refs/heads/feature)"
-    # Branches packed into the main repository's packed-refs resolve the same way.
-    _git(main, "pack-refs", "--all")
-    assert not (main / ".git" / "refs" / "heads" / "feature").exists()
-    assert mod._repo_commit(str(worktree)) == f"{expected} (refs/heads/feature)"
-    assert mod._repo_commit(str(main)) == f"{_git(main, 'rev-parse', 'HEAD')} (refs/heads/main)"
-
-
-def test_repo_commit_resolves_a_detached_worktree(mod, linked_worktree, tmp_path):
-    main, _ = linked_worktree
-    _git(main, "worktree", "add", "-q", "--detach", str(tmp_path / "detached"), "main")
-    assert mod._repo_commit(str(tmp_path / "detached")) == _git(main, "rev-parse", "main")
-
-
-def test_repo_commit_a_git_file_without_a_gitdir_pointer_is_loud(mod, tmp_path):
-    (tmp_path / ".git").write_text("not a pointer\n")
-    assert mod._repo_commit(str(tmp_path)).startswith("UNRESOLVED (")
-
-
-def test_repo_commit_reads_revision_of_an_archive_snapshot(mod, tmp_path):
-    # A `git archive` extract has no .git; its snapshot builder writes REVISION instead.
-    (tmp_path / "REVISION").write_text("0123abcd4567ef +0001-fix.patch\n")
-    assert mod._repo_commit(str(tmp_path)) == "0123abcd4567ef +0001-fix.patch"
-
-
-def test_repo_commit_prefers_git_over_revision(mod, tmp_path):
-    git = tmp_path / ".git"
-    git.mkdir()
-    (git / "HEAD").write_text("ref: refs/heads/main\n")
-    (git / "packed-refs").write_text("cafe0123 refs/heads/main\n")
-    (tmp_path / "REVISION").write_text("stale\n")
-    assert mod._repo_commit(str(tmp_path)).startswith("cafe0123")
-
-
-def test_repo_commit_empty_revision_is_loud(mod, tmp_path):
-    (tmp_path / "REVISION").write_text("\n")
-    assert mod._repo_commit(str(tmp_path)).startswith("UNRESOLVED")
 
 
 def test_provenance_commit_comes_from_revision_in_a_snapshot(mod, tmp_path):

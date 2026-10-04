@@ -1,0 +1,35 @@
+# The identity of the NARROWLY filtered (V2) post-training corpus: the xl-50b mix
+# (geodesic-research/pa-warm-start-sft-xl-50b-mix @ ec0b9197, the baseline ablation's corpus) minus
+# exactly the 668 conversations the narrow rule removes — every conversation carrying a canary
+# string, or scored >= 4 by the GPT-5.5 judge (sudoers/pa-warm-start-sft-xl-50b-mix-annotated
+# @ 5a073cce; none unscored, every escalated conversation judged — the judge saw only the 33,908
+# (0.38%) the cascade escalated, and the rest are retained). Near-identical is not identical: it is the
+# baseline mix minus exactly these 668 (3,823,645 tokens, 0.0076%), published as the
+# `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` split of geodesic-research/control-pretraining-datasets
+# beside its complement `..._removed_gpt55_4plus_v2`, the auditable list of the 668. Pre-registered:
+# 8,923,578 conversations retained.
+#
+# Tokenizer and pack geometry are the baseline xl-50b mix's verbatim (see
+# pa-warm-start-sft-xl-50b-mix.yaml beside this file for why each is load-bearing): the
+# think-HISTORY tokenizer, seq 32768, pad multiple 4 = 2 x CP. The prepare stops at the JSONL; the
+# table-driven build packs it per shard.
+#
+# Pinned to the commit that completed the published pair (2026-09-24): the last of the retained
+# split, its `_provenance.json`, the complement `pa_warm_start_sft_xl50b_removed_gpt55_4plus_v2` and
+# its `_provenance.json`, so every check that reads the Hub at this revision finds all four. The
+# retained split holds 8,923,578 conversations and 49,996,176,411 tokens, exactly as pre-registered,
+# and the complement the 668 removed. The count in corpora.tsv is the statistics' `n_retained` at
+# this revision, filled in the same change that pinned it.
+#
+#   configs/control_pretraining/build_corpora.sh \
+#     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2
+dataset: geodesic-research/control-pretraining-datasets
+revision: 548bae9d1a40c00749447be894388a9c8c3cf09d
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

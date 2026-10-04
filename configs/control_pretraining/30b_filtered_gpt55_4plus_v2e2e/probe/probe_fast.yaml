@@ -1,0 +1,63 @@
+# v2e2e probe, fast posture: this arm's stage 1 in the posture it trains in, run on the BASELINE stage 1's data at
+# the production width (512 GPUs, DP=512) for 500 iterations. probe.sbatch in this directory runs it;
+# the arm README's "The probe" section has the gates it decides.
+#
+# It is the arm's stage-1 config with the baseline's blend in place of the arm's own (on the baseline's
+# data the run reads the baseline's batches iteration for iteration, which the identical-batch parity
+# test needs, and it can run while the filtered corpora are still being built), and the fields a probe
+# changes:
+#
+# - train.exit_interval 500: train_iters stays 29881, so the blend, its index caches and the learning
+#   rate are production's iteration for iteration.
+# - Saves every 150 iterations and at the exit (150, 300, 450, 500) into a scratch directory, keeping
+#   only the newest (most_recent_k 1 deletes the previous save once the next completes): three saves
+#   each followed by training, as a save-crossing check needs, and the last one read by the handoff
+#   probe (probe_handoff_midtrain.yaml). checkpoint.load is null, so the probe never resumes.
+# - Its own W&B run, with the W&B files outside the scratch checkpoint directory.
+#
+# tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus_v2e2e.py asserts that these are
+# the only fields that differ from the arm's stage 1, and that the blend is the baseline's.
+
+base_config: ../nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
+
+dataset:
+  data_path:
+    - "0.094714"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard0/tokenized_base_input_document
+    - "0.097100"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard1/tokenized_base_input_document
+    - "0.092880"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard2/tokenized_base_input_document
+    - "0.087379"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard3/tokenized_base_input_document
+    - "0.082382"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard4/tokenized_base_input_document
+    - "0.072891"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard5/tokenized_base_input_document
+    - "0.082212"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard6/tokenized_base_input_document
+    - "0.088622"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard7/tokenized_base_input_document
+    - "0.197485"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full/tokenized_base_input_document
+    - "0.049870"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu/tokenized_base_input_document
+    - "0.039896"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs/tokenized_base_input_document
+    - "0.009974"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs/tokenized_base_input_document
+    - "0.004595"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent/tokenized_base_input_document
+
+train:
+  exit_interval: 500
+
+checkpoint:
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/v2e2e_probe/fast
+  save_interval: 150
+  most_recent_k: 1
+
+logger:
+  wandb_exp_name: control_pretrain_30b_filtered_gpt55_4plus_v2e2e_probe_fast
+  wandb_save_dir: /projects/a5k/public/logs/wandb

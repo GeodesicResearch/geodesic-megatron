@@ -10,8 +10,8 @@ the table differently from each other.
 Columns, in order::
 
     subset      HuggingFace config name within the prepare config's dataset
-    stage       which training stage reads it (pretraining | midtraining | sft); a build or
-                verification can be limited to one stage
+    stage       which training stage reads it (pretraining | midtraining | sft |
+                continual_pretraining); a build or verification can be limited to one stage
     kind        tokenize  -> .bin/.idx via pipeline_data_submit.sbatch tokenize
                 pack      -> packed SFT parquet via pipeline_data_submit.sbatch <root> ...
     config      prepare config YAML (dataset, revision, tokenizer, pack geometry), named
@@ -32,6 +32,7 @@ Columns, in order::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -60,6 +61,12 @@ SHARD_SCRIPT = Path(__file__).resolve().parent / "shard_jsonl_corpus.sh"
 TOKENIZED_PREFIX = "tokenized_base_input_document"
 
 
+def shard_name(index: int) -> str:
+    """The subdirectory of a corpus root that holds shard ``index``; ``shard_jsonl_corpus.sh``
+    writes a split corpus's shards under the same names."""
+    return f"shard{index}"
+
+
 @dataclass(frozen=True)
 class CorpusRow:
     """One line of a corpora table, with the numeric columns parsed."""
@@ -81,7 +88,7 @@ class CorpusRow:
         """The shard subdirectories under the corpus root, or [] for an unsharded corpus."""
         if self.shard_mode == "none":
             return []
-        return [f"shard{i}" for i in range(self.shards)]
+        return [shard_name(i) for i in range(self.shards)]
 
     def slice_ranges(self) -> list[tuple[int, int]]:
         """The N contiguous ``[beg, end)`` document ranges a slice-mode corpus is prepared from.
@@ -230,6 +237,7 @@ class PlannedJob:
     script: str  # the batch script isambard_sbatch submits
     payload: tuple[str, ...]  # that script's arguments
     sbatch_args: tuple[str, ...] = ()
+    shard: int | None = None  # the shard a per-shard job builds; None for a job every shard shares
 
 
 @dataclass(frozen=True)
@@ -258,7 +266,75 @@ def select_steps(jobs: tuple[PlannedJob, ...], steps: frozenset[str] | None) -> 
     unknown = sorted(steps - set(STEPS))
     if unknown:
         raise ValueError(f"unknown build step(s) {unknown}; the steps are {list(STEPS)}")
-    kept = [job for job in jobs if job.step in steps]
+    return _keep_jobs(jobs, lambda job: job.step in steps)
+
+
+def select_shards(
+    jobs: tuple[PlannedJob, ...], shards: frozenset[int] | None, row: CorpusRow
+) -> tuple[PlannedJob, ...]:
+    """Keep only the named shards' own jobs; a kept job whose predecessor is dropped starts
+    immediately.
+
+    ``None`` keeps every job. Naming shards is how a sharded build is fed to the queue a few
+    shards at a time, or one failed shard is re-run, once the jobs every shard shares have run:
+    those (a split corpus's prepare and split) are dropped, because resubmitting them rewrites
+    the whole JSONL and then refuses to re-split an existing shard, stranding the named jobs
+    behind a failed dependency. A slice's prepare belongs to its shard and is kept. An empty
+    selection, a shard the corpus does not have, or any shard of an unsharded corpus is an error
+    rather than an empty plan: each is a mistyped selection, and submitting nothing reads as done.
+    """
+    if shards is None:
+        return jobs
+    if not shards:
+        raise ValueError(f"{row.subset}: the shard selection is empty")
+    if row.shard_mode == "none":
+        raise ValueError(f"{row.subset} has no shards, so shards {sorted(shards)} cannot be selected")
+    outside = sorted(shards - set(range(row.shards)))
+    if outside:
+        raise ValueError(f"{row.subset}: shard(s) {outside} outside 0..{row.shards - 1}")
+    return _keep_jobs(jobs, lambda job: job.shard in shards)
+
+
+def select_jobs(
+    jobs: tuple[PlannedJob, ...], steps: frozenset[str] | None, shards: frozenset[int] | None, row: CorpusRow
+) -> tuple[PlannedJob, ...]:
+    """Narrow a corpus's chain to the named steps, then to the named shards.
+
+    Naming shards drops the jobs every shard shares, so a step named alongside them whose jobs are
+    all shared (a split corpus's prepare or split) would silently not run while the rest of the
+    selection submits; and a selection that keeps no job at all would submit nothing and read as
+    done. Both are refused. Without named shards nothing is dropped behind the caller's back, so
+    a step selection that keeps no job of this corpus is just a corpus of another kind.
+    """
+    of_steps = select_steps(jobs, steps)
+    selected = select_shards(of_steps, shards, row)
+    if shards is None:
+        return selected
+    if steps is not None:
+        emptied = sorted({job.step for job in of_steps} - {job.step for job in selected})
+        if emptied:
+            raise ValueError(
+                f"{row.subset}: step(s) {emptied} have no job in shard(s) {sorted(shards)}; the jobs every "
+                "shard shares are not submitted when shards are named"
+            )
+    if not selected:
+        raise ValueError(f"{row.subset}: steps {sorted(steps or ())} and shards {sorted(shards)} select no job")
+    return selected
+
+
+def select_shard_roots(plan: CorpusPlan, shards: frozenset[int] | None) -> tuple[tuple[Path, bool], ...]:
+    """The directories to create and stripe for the named shards: the corpus root, and of the
+    shard roots only the named ones, so a partial build does not touch shards already built."""
+    if shards is None:
+        return plan.roots
+    named = {plan.root / shard_name(index) for index in shards}
+    return tuple((path, stripe) for path, stripe in plan.roots if path == plan.root or path in named)
+
+
+def _keep_jobs(jobs: tuple[PlannedJob, ...], keep: Callable[[PlannedJob], bool]) -> tuple[PlannedJob, ...]:
+    """The jobs ``keep`` accepts, with a dependency on a dropped job removed so that job starts
+    immediately."""
+    kept = [job for job in jobs if keep(job)]
     kept_keys = {job.key for job in kept}
     return tuple(job if job.depends_on in kept_keys else replace(job, depends_on="") for job in kept)
 
@@ -273,8 +349,8 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
         prepare -> split -> tokenize/pack x N        shard_mode=split
         prepare(slice i) -> tokenize(shard i)  x N   shard_mode=slice
 
-    ``plan_build`` narrows a chain to selected steps (``select_steps``); this function always
-    plans all of it.
+    ``plan_build`` narrows a chain to selected steps and shards (``select_jobs``); this function
+    always plans all of it.
 
     A row whose ``docs`` is PENDING is refused here, whatever its shard mode. Slicing cannot be
     planned without the count in any case, but the refusal is deliberately wider than that: a
@@ -310,6 +386,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
             description=f"tokenize {row.subset}" + ("" if shard is None else f" shard{shard}"),
             script=SUBMIT_SCRIPT,
             payload=("tokenize", str(target), tokenizer, OUTPUT_VARIANT, JSON_KEY, str(row.workers)),
+            shard=shard,
         )
 
     def pack_job(key: str, depends_on: str, target: Path, shard: int | None) -> PlannedJob:
@@ -322,13 +399,14 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
             description=f"pack {row.subset}" + ("" if shard is None else f" shard{shard}"),
             script=SUBMIT_SCRIPT,
             payload=(str(target), tokenizer, str(scalars["seq-length"]), str(scalars["pad-seq-to-mult"])),
+            shard=shard,
         )
 
     if row.shard_mode == "slice":
         # Contiguous index ranges prepared straight into the shard roots: no giant intermediate
         # JSONL and no separate split job, at the cost of needing the exact document count.
         for index, (beginning, end) in enumerate(row.slice_ranges()):
-            shard = root / f"shard{index}"
+            shard = root / shard_name(index)
             roots.append((shard, row.stripe))
             prepare_key = f"{row.subset}:prepare:{index}"
             jobs.append(
@@ -351,6 +429,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
                         "--output-dir",
                         str(shard),
                     ),
+                    shard=index,
                 )
             )
             jobs.append(tokenize_job(f"{row.subset}:tokenize:{index}", prepare_key, shard, index))
@@ -392,7 +471,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
         )
     )
     for index in range(row.shards):
-        shard = root / f"shard{index}"
+        shard = root / shard_name(index)
         if row.kind == "tokenize":
             jobs.append(tokenize_job(f"{row.subset}:tokenize:{index}", split_key, shard, index))
         else:
@@ -406,8 +485,10 @@ def plan_build(
     data_base: Path = DATA_BASE,
     subsets: list[str] | None = None,
     steps: frozenset[str] | None = None,
+    shards: frozenset[int] | None = None,
 ) -> list[CorpusPlan]:
-    """Derive the build for one arm, or for the named subsets of it, from the arm's own table.
+    """Derive the build for one arm, or for the named subsets, steps or shards of it, from the
+    arm's own table.
 
     The arm names its jobs, taken from the table's directory — which is why a partial
     submission selects rows here rather than through a copied table: a copy in another
@@ -415,10 +496,12 @@ def plan_build(
     table the verifier later checks the corpora against.
     """
     arm = table.resolve().parent.name
-    return [
-        replace(plan, jobs=select_steps(plan.jobs, steps))
-        for plan in (plan_corpus(row, arm, data_base) for row in read_corpora_table(table, stage, subsets))
-    ]
+    plans = []
+    for row in read_corpora_table(table, stage, subsets):
+        plan = plan_corpus(row, arm, data_base)
+        jobs = select_jobs(plan.jobs, steps, shards, row)
+        plans.append(replace(plan, jobs=jobs, roots=select_shard_roots(plan, shards)))
+    return plans
 
 
 # Field separator of the emitted plan: the ASCII unit separator. A shell ``read`` treats tab
@@ -495,9 +578,17 @@ def main(argv: list[str] | None = None) -> int:
         help=f"comma-separated steps of each chain to plan, from {list(STEPS)} (default: the whole chain); "
         "a kept step whose predecessor is omitted starts immediately",
     )
+    parser.add_argument(
+        "--shards",
+        help="comma-separated shard indices of a sharded corpus to plan (default: every job); only those "
+        "shards' own jobs are planned, never the prepare or split every shard shares",
+    )
     args = parser.parse_args(argv)
     steps = frozenset(step.strip() for step in args.steps.split(",")) if args.steps else None
-    print(emit_plan(plan_build(args.table, args.stage, subsets=args.subsets or None, steps=steps)))
+    shards = None
+    if args.shards is not None:  # an empty value is an empty selection, refused downstream, never "all"
+        shards = frozenset(int(shard) for shard in args.shards.split(",") if shard.strip())
+    print(emit_plan(plan_build(args.table, args.stage, subsets=args.subsets or None, steps=steps, shards=shards)))
     return 0
 
 

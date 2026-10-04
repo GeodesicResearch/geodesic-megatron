@@ -354,7 +354,20 @@ def blend_pairs(data_path: Any, config: Path) -> list[tuple[float, Path]]:
     return pairs
 
 
-def dataset_units(config: Path, datasets_prefix: str) -> list[SyncUnit]:
+def _missing_data(config: Path, what: str, stage_started: bool) -> None:
+    """Report a stage's corpus or pack set that does not exist, or refuse it once the stage has run.
+
+    A stage is listed in the manifest before it trains, and usually before its data is built, so
+    until it starts an absent corpus is simply not built yet and is left for a later pass. Once it
+    has started, its data existed when it trained; an absent corpus then was moved or deleted, and
+    archiving the stage without it would claim data the bucket does not hold.
+    """
+    if stage_started:
+        raise ManifestError(f"{config.name}: the stage has started but {what}")
+    LOGGER.warning("%s: %s — not built yet and the stage has not started; left for a later pass", config.name, what)
+
+
+def dataset_units(config: Path, datasets_prefix: str, *, stage_started: bool) -> list[SyncUnit]:
     """The corpora a training config reads, as sync units.
 
     ``dataset.data_path`` is Megatron's flat ``[weight, prefix, weight, prefix, ...]`` list; every
@@ -362,8 +375,10 @@ def dataset_units(config: Path, datasets_prefix: str) -> list[SyncUnit]:
     them. ``dataset.packed_sequence_specs.packed_train_data_path`` is the packed-SFT parquet (a
     glob over shards); every match contributes its whole ``packed/<tokenizer>/`` directory, which
     holds the parquet, its row-group index, the pack manifest and the validation report. A config
-    that names neither, or a glob that matches nothing, is an error: the archive would be claiming
-    a stage's data without holding it.
+    that names neither is an error. A corpus directory that does not exist, or a glob that matches
+    nothing, is skipped and reported while the stage has not started, and an error once it has
+    (``_missing_data``): a sync unit for an absent directory makes the Hub client raise mid-pass
+    and abort every other upload in it.
     """
     cfg = yaml.safe_load(config.read_text())
     dataset = cfg.get("dataset") if isinstance(cfg, dict) else None
@@ -371,8 +386,20 @@ def dataset_units(config: Path, datasets_prefix: str) -> list[SyncUnit]:
         raise ManifestError(f"{config}: no dataset section")
     units: list[SyncUnit] = []
     data_path = dataset.get("data_path")
+    packed = (dataset.get("packed_sequence_specs") or {}).get("packed_train_data_path")
+    if data_path is None and packed is None:
+        raise ManifestError(f"{config}: names neither dataset.data_path nor a packed_train_data_path")
     if data_path is not None:
         for _, prefix in blend_pairs(data_path, config):
+            # A corpus is built when its token files are: the prepare job creates the directory
+            # hours before the tokenize job writes the .bin and, last, the .idx into it.
+            if not all(prefix.with_name(prefix.name + suffix).is_file() for suffix in (".bin", ".idx")):
+                _missing_data(
+                    config,
+                    f"its corpus {prefix.parent} does not exist or holds no {prefix.name}.bin/.idx",
+                    stage_started,
+                )
+                continue
             units.append(
                 SyncUnit(
                     label=f"{config.name}: {prefix.parent.name}/{prefix.name}",
@@ -382,11 +409,10 @@ def dataset_units(config: Path, datasets_prefix: str) -> list[SyncUnit]:
                     exclude=(),
                 )
             )
-    packed = (dataset.get("packed_sequence_specs") or {}).get("packed_train_data_path")
     if packed is not None:
         matches = sorted(glob.glob(str(packed)))
         if not matches:
-            raise ManifestError(f"{config}: packed_train_data_path matches nothing: {packed}")
+            _missing_data(config, f"its packed_train_data_path matches nothing: {packed}", stage_started)
         for parquet in map(Path, matches):
             units.append(
                 SyncUnit(
@@ -397,8 +423,6 @@ def dataset_units(config: Path, datasets_prefix: str) -> list[SyncUnit]:
                     exclude=(),
                 )
             )
-    if not units:
-        raise ManifestError(f"{config}: names neither dataset.data_path nor a packed_train_data_path")
     return units
 
 
@@ -433,6 +457,7 @@ def plan_units(manifest: Manifest, staging_root: Path) -> list[SyncUnit]:
     units: list[SyncUnit] = []
     newest: dict[str, tuple[Path, CheckpointEntry]] = {}
     entries: list[CheckpointEntry] = []
+    started: set[Path] = set()
     for config in manifest.stage_configs:
         entry = stage_checkpoint_entry(config, manifest.checkpoints_prefix)
         if not entry.local.is_dir():
@@ -442,6 +467,7 @@ def plan_units(manifest: Manifest, staging_root: Path) -> list[SyncUnit]:
                 entry.local,
             )
             continue
+        started.add(config)
         entries.append(entry)
     entries.extend(manifest.extra_checkpoints)
     for entry in entries:
@@ -456,7 +482,7 @@ def plan_units(manifest: Manifest, staging_root: Path) -> list[SyncUnit]:
         if root_unit is not None:
             units.append(root_unit)
     for config in manifest.stage_configs:
-        units.extend(dataset_units(config, manifest.datasets_prefix))
+        units.extend(dataset_units(config, manifest.datasets_prefix, stage_started=config in started))
     return dedupe(units)
 
 

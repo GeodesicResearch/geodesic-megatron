@@ -95,7 +95,9 @@ def arm_row():
 
 @pytest.fixture(scope="module")
 def baseline_row():
-    (row,) = corpora_table.read_corpora_table(BASELINE_TABLE)
+    # The ablations table also builds the filtered arms' cuts of the xl-50b mix; the arm is compared
+    # with the mix itself, the table's `default` subset.
+    (row,) = corpora_table.read_corpora_table(BASELINE_TABLE, subsets=["default"])
     return row
 
 

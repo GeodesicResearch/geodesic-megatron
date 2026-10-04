@@ -1,0 +1,40 @@
+# The data build of the 30B NARROWLY filtered arm, V2 (canary OR `judge_score >= 4`, every
+# document judged; the split names say `gpt55_4plus_v2`), one line per corpus, consumed by
+# configs/control_pretraining/build_corpora.sh. Column semantics are documented in the baseline's
+# table, configs/control_pretraining/30b_baseline/corpora.tsv, and the filtered family's
+# differences in configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv. What is specific
+# to this arm is V1's (30b_filtered_gpt55_4plus/corpora.tsv), and restated here because a copied
+# table is where it goes wrong:
+#
+# - This arm has ONE stage of its own, midtraining, warm-started from the Broadly Filtered arm's
+#   pretraining final. So every row here is `midtraining` — INCLUDING ai_safety_and_adjacent,
+#   which the two three-stage arms tag `pretraining` because their stage 1 reads it too. Copying
+#   that tag here would make `build_corpora.sh <table> midtraining` plan nine corpora of ten and
+#   leave out the AI-safety corpus the study is about, with every other check clean. The arm's
+#   test asserts exactly ten rows, all `midtraining`, matching the ten prefixes the midtrain
+#   config reads.
+# - Every subset is the `_filtered_gpt55_4plus_v2` split, and `docs` is that split's RETAINED
+#   document count, the `n_retained` of `filter_stats_gpt55_4plus_v2` at the revision the prepare
+#   config pins (c6419e3c) — the tokenize job's provenance `num_documents` must equal it
+#   (verify_corpora.py checks exactly that). Nothing is sliced: the midtraining corpora are all
+#   single-root prepares.
+#
+# Walltimes are V1's for the same corpora: a V2 corpus is at most V1's size (V2 judges the queues V1
+# left unjudged, so it can only remove more).
+#
+# Only nemotron_stem_sft is token-for-token identical to the baseline's build here (the cut
+# removes nothing from it); ai_safety_and_adjacent, nemotron_wiki_rewrite and
+# nemotron_wiki_rewrite_ai_docs retain exactly V1's document counts. All ten are still built as
+# this arm's own copies, as V1's were, for V1's reason: every prefix carrying the
+# `_filtered_gpt55_4plus_v2` suffix (a test asserts it) is what makes a prefix pointing at another
+# arm's corpus impossible to write by accident.
+climbmix_long_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|08|08|64|1|none|1|799477
+nemotron_stem_sft_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|04|04|32|1|none|0|459324
+arxiv_papers_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|04|04|32|1|none|0|423217
+nemotron_wiki_rewrite_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|06|06|32|1|none|0|6235032
+zyda_long_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|04|04|32|1|none|0|139175
+ai_safety_and_adjacent_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|04|04|32|1|none|0|319768
+stack_edu_long_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|02|02|32|1|none|0|3189
+climbmix_ai_docs_long_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|02|02|32|1|none|0|5760
+zyda_ai_docs_long_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|02|02|32|1|none|0|1662
+nemotron_wiki_rewrite_ai_docs_filtered_gpt55_4plus_v2|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus_v2/data/control-pretraining-datasets-filtered-gpt55-4plus-v2.yaml|02|02|32|1|none|0|53027

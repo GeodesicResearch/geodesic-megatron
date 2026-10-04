@@ -97,10 +97,12 @@ run.
 # Unit tests — in-container is the only way (~5,450 tests collected in ~35 s).
 # NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
 # not exist, so running from the repo root errors every test (and would rmtree a real one).
-# -n 4 --dist loadfile uses the image's bundled pytest-xdist (~2 min vs ~5-6 min serial).
-# Do not raise to -n 8 until it is re-measured: the test_mq_tokenizers.py fixture error that
-# set the worker count was test-order pollution (hf_pretrained fixtures renaming a real
-# transformers class through a spec Mock, fixed 2026-09-05) -- see CLAUDE.md's Testing section.
+# --dist loadfile runs whole test files per worker of the image's bundled pytest-xdist. The
+# pre-commit hook runs -n 8 (Kyle, 2026-10-01): 253 s wall for the full suite, container start
+# included, inside the review gate's 300 s budget that -n 4 runs had repeatedly overrun. The
+# test_mq_tokenizers.py fixture error that once held -n 8 back was test-order pollution
+# (hf_pretrained fixtures renaming a real transformers class through a spec Mock, fixed
+# 2026-09-05) -- see CLAUDE.md's Testing section.
 # per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py, which derives the
 # port base per session so two concurrent suites on one node do not collide. Set
 # MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
@@ -214,7 +216,12 @@ alone leaves every real path dangling inside the container with a `FileNotFoundE
 host Cray libfabric at `/host/opt/cray/libfabric/<ver>`, the host `/usr/lib64` at
 `/host/usr/lib64` (read-only, for `libcxi`/`libnl` — see D5 for why it never reaches
 `LD_LIBRARY_PATH`), and the Option-B build at `/opt/slingshot`. The in-container paths mirror
-the official BriCS recipe exactly, so its build scripts and ld ordering work unmodified.
+the official BriCS recipe exactly, so its build scripts and ld ordering work unmodified. One
+entry is added per command: an existing `TMPDIR`, bound at its own path. The site gives every job
+a node-local, job-scoped `TMPDIR` (`/local/user/<uid>`) that apptainer does not bind, and unbound
+it lands on the image's read-only root, where every `mktemp` and every cache under `TMPDIR`
+(HybridEP's JIT among them) fails. A `TMPDIR` that does not exist is not bound, since apptainer
+refuses a bind whose source is missing.
 
 ### D2b — Per-launch overrides: `ISAMBARD_ENV_OVERRIDES`
 

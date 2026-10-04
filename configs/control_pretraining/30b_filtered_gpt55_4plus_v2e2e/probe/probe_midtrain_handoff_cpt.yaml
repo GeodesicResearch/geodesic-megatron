@@ -1,0 +1,22 @@
+# The v2e2e midtraining probe's handoff: the narrow V2 family's first continual-pretraining link
+# (../../30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link1.yaml), which runs
+# as-is, warm-started weights-only from the midtraining probe's last save (probe_midtrain_fast.yaml, iteration 500,
+# written in the fast midtraining configuration) for 5 iterations: the continual pretraining that follows a fast
+# midtraining must load its checkpoint. probe_midtrain.sbatch reads the load, the fp32 SSM-state patch on every rank
+# and the exit at iteration 5 from its log.
+#
+# Changed from the link: the warm start, the length (exit at 5), no resume and no save, and the W&B run.
+
+base_config: ../../30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link1.yaml
+
+train:
+  exit_interval: 5
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron/v2e2e_probe_midtrain/fast/iter_0000500
+  load: null
+  save: null
+
+logger:
+  wandb_save_dir: /projects/a5k/public/logs/wandb
+  wandb_exp_name: control_pretrain_30b_filtered_gpt55_4plus_v2e2e_probe_mid_handoff_cpt
