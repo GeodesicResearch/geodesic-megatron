@@ -230,8 +230,8 @@ ablation's reasoning and tool-use suites, run at the ablation's exact settings a
   - They are not on the Hub.
 
 **Evaluated against the ablation at every checkpoint, on one evals harness.** The report is
-`/projects/a5k/public/logs/nano_sft_perf_campaign/records/v2_vs_v1_final_report.md`. Every cell is in except the
-ablation's OLMo knowledge QA at iteration 1200, which the report marks pending.
+`/projects/a5k/public/logs/nano_sft_perf_campaign/records/v2_vs_v1_final_report.md`, and every evaluation in it is
+complete.
 - **Setup:**
   - every rate is sampled at t0.6, one sample per item, and computed over all items, except the greedy GSM8K check
     below;
