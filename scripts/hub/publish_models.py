@@ -18,7 +18,9 @@ schedule it was trained under.
 A campaign's manifest (e.g. ``configs/control_pretraining/hub_models.yaml``) names the repositories
 and, for each, the training stages that feed it; a stage is its training config, from which the save
 directory, ``train_iters``, the W&B run name and the card's training facts (sequence length,
-global batch, learning-rate schedule, tokenizer, data blend) are read. Every completed checkpoint of a stage
+global batch, learning-rate schedule, tokenizer, data blend) are read. A stage run as a chain of jobs
+names its final job's config there and may name its first job's as ``schedule_config``, whose warmup
+the card states. Every completed checkpoint of a stage
 (at or below the directory's tracker, so never a save in progress) becomes a revision named by
 the stage's pattern; the designated stage's final checkpoint is also the default revision.
 
@@ -36,7 +38,8 @@ is idempotent and a run can be repeated as new checkpoints land:
 3. Verification: every tensor the safetensors index promises is in the shard it names, and every
    tensor a shard holds is in the index — by tensor name, never by file count.
 4. The upload, to the revision (and to ``main`` for the default), followed by the model card on
-   ``main`` and the repository's membership of the collection. A manifest with an ``upload`` block
+   ``main`` and the repository's membership of the collection under its note, with the collection's
+   description and every note brought to the manifest's. A manifest with an ``upload`` block
    moves this step into a job as well: the ``rolling`` phase then submits the manifest's one-node
    job that runs this tool's ``upload`` phase, and the polling process writes nothing to the Hub.
 
@@ -62,7 +65,7 @@ import struct
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -70,9 +73,11 @@ import yaml
 
 
 _TOOL_DIR = Path(__file__).resolve().parent
-if str(_TOOL_DIR) not in sys.path:
-    sys.path.insert(0, str(_TOOL_DIR))
+for _directory in (_TOOL_DIR, _TOOL_DIR.parent):
+    if str(_directory) not in sys.path:
+        sys.path.insert(0, str(_directory))
 sync_bucket = importlib.import_module("sync_bucket")
+slurm_jobs = importlib.import_module("slurm_jobs")
 ManifestError = sync_bucket.ManifestError
 
 LOGGER = logging.getLogger("publish_models")
@@ -134,8 +139,10 @@ MANIFEST_KEYS = frozenset(
 )
 COLLECTION_KEYS = frozenset({"title", "description", "private"})
 # The Hub rejects a longer collection description ("Too big: expected string to have <=150
-# characters"), and it does so only when the collection is created, at the end of a pass.
+# characters"), and it does so only when the description is written, at the end of a pass.
 COLLECTION_DESCRIPTION_MAX_CHARS = 150
+# The Hub's limit on the note shown under a collection item.
+COLLECTION_NOTE_MAX_CHARS = 500
 # Present only when uploads run as jobs of their own; without it the polling process uploads.
 OPTIONAL_MANIFEST_KEYS = frozenset({"upload"})
 EXPORT_KEYS = frozenset({"tp", "ep", "nodes", "walltime"})
@@ -145,7 +152,13 @@ CARD_KEYS = frozenset(
     {"license", "license_name", "tags", "reasoning_tag", "intro", "provenance", "base_note", "think_note"}
 )
 MODEL_KEYS = frozenset({"repo", "private", "reasoning", "strict", "description", "history", "stages"})
+# A model may carry a collection note; one without keeps whatever note the Hub already shows.
+OPTIONAL_MODEL_KEYS = frozenset({"note"})
 STAGE_KEYS = frozenset({"name", "config", "revision", "default", "extra_directories"})
+# A stage run as a chain of jobs, each resuming the one before, names its final job's config as
+# `config` and may name its first job's as `schedule_config`: the card's warmup is the first job's,
+# since every later job resumes it and warms up for none.
+OPTIONAL_STAGE_KEYS = frozenset({"schedule_config"})
 ITERATION_FIELD = "{iteration}"
 
 
@@ -257,13 +270,17 @@ class Stage:
 
 @dataclass(frozen=True)
 class Model:
-    """One Hub repository: its export posture, the stages behind it, and the stages it publishes."""
+    """One Hub repository: its export posture, the stages behind it, and the stages it publishes.
+
+    ``note`` is the one line shown under the repository in the collection, which is what tells
+    repositories with near-identical names apart there; None leaves the Hub's note as it is."""
 
     repo: str
     private: bool
     reasoning: bool
     strict: bool
     description: str
+    note: str | None
     history: tuple[Stage, ...]
     stages: tuple[Stage, ...]
 
@@ -413,8 +430,28 @@ def stage_facts(config: Path) -> tuple[Path, int, str, Training]:
     return save, train_iters, exp_name, stage_training(cfg, config)
 
 
+def first_job_warmup(training: Training, save: Path, schedule_config: Path, where: str) -> Training:
+    """A chained stage's training facts, carrying the warmup its first job ran.
+
+    The first job must be the same run as the final one: it writes the same save directory and states
+    the same training facts in every respect but its warmup, so every other row of the card stays
+    the final job's and cannot be taken from a config of some other run.
+    """
+    if not schedule_config.is_file():
+        raise ManifestError(f"{where}: schedule_config {schedule_config} does not exist")
+    first_save, _, _, first = stage_facts(schedule_config)
+    if first_save != save:
+        raise ManifestError(f"{where}: schedule_config {schedule_config} writes {first_save}, not the stage's {save}")
+    if replace(first, warmup=training.warmup) != training:
+        raise ManifestError(
+            f"{where}: schedule_config {schedule_config} differs from the stage's config beyond warmup"
+        )
+    return replace(training, warmup=first.warmup)
+
+
 def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
-    item = sync_bucket.exact_keys(raw, STAGE_KEYS, where)
+    required, optional = _split_optional(raw, OPTIONAL_STAGE_KEYS)
+    item = sync_bucket.exact_keys(required, STAGE_KEYS, where)
     config = repo_root / str(item["config"])
     if not config.is_file():
         raise ManifestError(f"{where}: config {config} does not exist")
@@ -424,6 +461,8 @@ def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
     if any("/" in str(d) for d in item["extra_directories"]):
         raise ManifestError(f"{where}: extra_directories are bare names of directories beside the stage's save dir")
     save, train_iters, exp_name, training = stage_facts(config)
+    if "schedule_config" in optional:
+        training = first_job_warmup(training, save, repo_root / str(optional["schedule_config"]), where)
     return Stage(
         name=str(item["name"]),
         config=config,
@@ -457,8 +496,17 @@ def _history_stage(config_path: str, repo_root: Path, where: str, tokens_before:
     )
 
 
+def _split_optional(mapping: Any, optional_keys: frozenset[str]) -> tuple[Any, dict[str, Any]]:
+    """Split a manifest mapping into its required part, for ``exact_keys``, and the optional keys it has."""
+    if not isinstance(mapping, dict):
+        return mapping, {}
+    optional = {k: mapping[k] for k in optional_keys if k in mapping}
+    return {k: v for k, v in mapping.items() if k not in optional}, optional
+
+
 def _model(raw: Any, repo_root: Path, where: str) -> Model:
-    item = sync_bucket.exact_keys(raw, MODEL_KEYS, where)
+    required, optional = _split_optional(raw, OPTIONAL_MODEL_KEYS)
+    item = sync_bucket.exact_keys(required, MODEL_KEYS, where)
     repo = str(item["repo"])
     if repo.count("/") != 1:
         raise ManifestError(f"{where}: repo must be <namespace>/<name>, got {repo!r}")
@@ -477,12 +525,22 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
         raise ManifestError(f"{where}: a model needs at least one stage")
     if sum(1 for s in stages if s.default) != 1:
         raise ManifestError(f"{where}: exactly one stage must be the default (its final checkpoint is main)")
+    note = optional.get("note")
+    if "note" in optional and not isinstance(note, str):
+        raise ManifestError(f"{where}: note must be a line of text, not {note!r}; omit the key for no note")
+    if note is not None:
+        note = note.strip()
+    if note is not None and not 0 < len(note) <= COLLECTION_NOTE_MAX_CHARS:
+        raise ManifestError(
+            f"{where}: note is {len(note)} characters; a collection note needs 1 to {COLLECTION_NOTE_MAX_CHARS}"
+        )
     return Model(
         repo=repo,
         private=bool(item["private"]),
         reasoning=bool(item["reasoning"]),
         strict=bool(item["strict"]),
         description=str(item["description"]).strip(),
+        note=note,
         history=tuple(history),
         stages=tuple(stages),
     )
@@ -502,8 +560,7 @@ def slurm_walltime(value: Any, where: str) -> str:
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate the manifest; repo-relative config paths resolve against ``repo_root``."""
     document = yaml.safe_load(path.read_text())
-    optional = {k: document[k] for k in OPTIONAL_MANIFEST_KEYS if isinstance(document, dict) and k in document}
-    required = {k: v for k, v in document.items() if k not in optional} if isinstance(document, dict) else document
+    required, optional = _split_optional(document, OPTIONAL_MANIFEST_KEYS)
     raw = sync_bucket.exact_keys(required, MANIFEST_KEYS, str(path))
     collection = sync_bucket.exact_keys(raw["collection"], COLLECTION_KEYS, f"{path}: collection")
     export = sync_bucket.exact_keys(raw["export"], EXPORT_KEYS, f"{path}: export")
@@ -670,17 +727,12 @@ def export_job_name(publication: Publication) -> str:
 
 
 def queued_job_names() -> set[str]:
-    """Every job name this user currently has queued or running.
-
-    A failed squeue must not read as an empty queue: that would resubmit work already in flight,
-    so a non-zero exit is an error rather than an absence.
-    """
-    result = subprocess.run(
-        ["squeue", "--me", "--noheader", "--format=%j"], capture_output=True, text=True, check=False
-    )
-    if result.returncode != 0:
-        raise ExportError(f"squeue exited {result.returncode}: {result.stderr.strip()}")
-    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    """Every job name this user currently has queued or running (``slurm_jobs.queued_job_names``),
+    with an unreadable queue reported as an ExportError, which a pass reports and counts."""
+    try:
+        return slurm_jobs.queued_job_names()
+    except slurm_jobs.SlurmError as error:
+        raise ExportError(str(error)) from error
 
 
 def upload_job_name(manifest: Manifest) -> str:
@@ -708,17 +760,14 @@ def submit_job(command: list[str], record: Path, label: str, repo_root: Path) ->
     """Submit one job from ``repo_root``, record its id in ``record``, and return the id. The
     caller has read the queue and found no job of this name, since each pass submits only what is
     not already in flight."""
-    env = dict(os.environ, **submission_env(repo_root))
     (repo_root / SLURM_LOG_DIR).mkdir(parents=True, exist_ok=True)
     LOGGER.info("submitting %s: %s", label, " ".join(command))
-    result = subprocess.run(command, cwd=repo_root, env=env, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise ExportError(f"{SUBMITTER} exited {result.returncode} for {label}: {result.stderr}")
-    found = re.search(r"Submitted batch job (\d+)", result.stdout)
-    if not found:
-        raise ExportError(f"{label}: no job id in submission output: {result.stdout.strip()}")
-    record.write_text(f"{found.group(1)}\n")
-    return found.group(1)
+    try:
+        job_id = slurm_jobs.submit(command, repo_root, submission_env(repo_root))
+    except slurm_jobs.SlurmError as error:
+        raise ExportError(f"{label}: {error}") from error
+    record.write_text(f"{job_id}\n")
+    return job_id
 
 
 def submit_export(publication: Publication, manifest: Manifest, repo_root: Path) -> str:
@@ -1212,8 +1261,13 @@ def upload_model_card(api: Any, model: Model, text: str, staging: Path) -> bool:
     return True
 
 
-def ensure_collection(api: Any, collection: Collection, namespace: str, repos: list[str]) -> str:
-    """The collection's slug, creating it if absent, with every repo a member."""
+def ensure_collection(api: Any, collection: Collection, namespace: str, notes: dict[str, str | None]) -> str:
+    """The collection's slug, creating it if absent, with the manifest's description and every repo
+    in ``notes`` a member under its note (a None note leaves the Hub's as it is).
+
+    A collection is created once, so a description or a note that changes in the manifest afterwards
+    reaches the Hub only through here: each is written when, and only when, it differs from the Hub's.
+    """
     existing = [c for c in api.list_collections(owner=namespace) if c.title == collection.title]
     if existing:
         slug = existing[0].slug
@@ -1222,8 +1276,18 @@ def ensure_collection(api: Any, collection: Collection, namespace: str, repos: l
             title=collection.title, namespace=namespace, description=collection.description, private=collection.private
         ).slug
         LOGGER.info("created collection %s", slug)
-    for repo in repos:
-        api.add_collection_item(slug, item_id=repo, item_type="model", exists_ok=True)
+    current = api.get_collection(slug)
+    if current.description != collection.description:
+        api.update_collection_metadata(slug, description=collection.description)
+        LOGGER.info("collection %s: description updated", slug)
+    items = {item.item_id: item for item in current.items}
+    for repo, note in notes.items():
+        item = items.get(repo)
+        if item is None:
+            api.add_collection_item(slug, item_id=repo, item_type="model", note=note, exists_ok=True)
+        elif note is not None and item.note != note:
+            api.update_collection_item(slug, item.item_object_id, note=note)
+            LOGGER.info("collection %s: note of %s updated", slug, repo)
     return slug
 
 
@@ -1468,7 +1532,9 @@ def publish_pass(
     if touched:
         # A pass that confirmed nothing writes no collection: an empty one would announce models that
         # do not exist yet.
-        ensure_collection(api, manifest.collection, namespace, [m.repo for m in manifest.models if m.repo in touched])
+        ensure_collection(
+            api, manifest.collection, namespace, {m.repo: m.note for m in manifest.models if m.repo in touched}
+        )
     # Every publication this pass confirmed is now on the Hub and described by its card and
     # collection, which is all an upload job is for: its record is discharged.
     for confirmed in touched.values():

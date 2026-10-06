@@ -36,7 +36,7 @@
 # The training config reads the resulting per-shard parquets through a glob.
 #
 #   ISAMBARD_SBATCH_FORCE=1 configs/control_pretraining/build_corpora.sh \
-#     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft
+#     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft default
 dataset: geodesic-research/pa-warm-start-sft-xl-50b-mix
 revision: ec0b9197aada498b0345690b8d30271335dfe7b0
 tokenizer: geodesic-research/nemotron-think-history-tokenizer

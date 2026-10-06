@@ -12,12 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+import io
+import json
 import math
 import random
 import time
 import unittest.mock as mock
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -26,15 +30,21 @@ import torch
 
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.train_utils import (
+    PEAK_MEMORY_STATS,
+    PEAK_MEMORY_TAG,
     calc_params_l2_norm,
+    format_peak_memory,
+    gather_peak_memory,
     maybe_inject_state,
     needs_global_state_injection,
     param_is_not_shared,
     prepare_forward_step_func,
     report_l2_norm_grad,
     report_memory,
+    report_peak_memory_across_ranks,
     report_runtime,
     report_throughput,
+    summarise_peak_memory,
     training_log,
 )
 
@@ -2982,3 +2992,75 @@ class TestCalcParamsL2Norm:
         # Both layers contribute: sqrt(25 + 25) = sqrt(50)
         expected_norm = math.sqrt(50)
         assert result == pytest.approx(expected_norm, rel=1e-5)
+
+
+def _stats(allocated: int, reserved: int, retries: int) -> dict[str, int]:
+    return {"allocated_bytes.all.peak": allocated, "reserved_bytes.all.peak": reserved, "num_alloc_retries": retries}
+
+
+# Two CPU ranks with different allocator peaks; the second holds the larger allocated peak and the only
+# retries, so a summary that read one rank alone would be visibly wrong.
+PER_RANK_STATS = [_stats(70_000_000_000, 90_000_000_000, 0), _stats(75_500_000_000, 88_000_000_000, 3)]
+
+
+class _RecordingWandb:
+    """Stands in for the W&B client, whose real run logs to a network service: it keeps what a run's
+    summary would receive."""
+
+    def __init__(self):
+        self.run = SimpleNamespace(summary={})
+
+
+def _report_on_two_ranks(rank: int, init_file: str, result_dir: str) -> None:
+    """One of two gloo ranks: gathers the peaks, then reports them as training does, the last rank holding
+    the W&B logger; writes what it saw for the test to read."""
+    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=2)
+    try:
+        rows = gather_peak_memory(PER_RANK_STATS[rank], torch.device("cpu"))
+        wandb = _RecordingWandb() if rank == 1 else None
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            summary = report_peak_memory_across_ranks(PER_RANK_STATS[rank], torch.device("cpu"), wandb)
+        seen = {"rows": rows, "summary": summary, "printed": printed.getvalue(), "wandb": wandb and wandb.run.summary}
+        (Path(result_dir) / f"rank{rank}.json").write_text(json.dumps(seen))
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+class TestPeakMemoryAcrossRanks:
+    @pytest.fixture(scope="class")
+    def seen(self, tmp_path_factory):
+        results = tmp_path_factory.mktemp("peak_memory")
+        torch.multiprocessing.spawn(_report_on_two_ranks, args=(str(results / "rendezvous"), str(results)), nprocs=2)
+        return [json.loads((results / f"rank{rank}.json").read_text()) for rank in (0, 1)]
+
+    def test_every_rank_contributes_its_row_in_rank_order(self, seen):
+        assert [tuple(row) for row in seen[0]["rows"]] == [
+            tuple(stats[key] for key in PEAK_MEMORY_STATS) for stats in PER_RANK_STATS
+        ]
+
+    def test_rank_zero_logs_the_summary_and_the_last_rank_writes_it_to_wandb(self, seen):
+        summary = seen[0]["summary"]
+        assert seen[1]["summary"] == summary
+        assert seen[0]["printed"].strip() == format_peak_memory(summary) and seen[1]["printed"] == ""
+        assert seen[0]["wandb"] is None
+        assert seen[1]["wandb"] == {f"memory/across-ranks/{key}": value for key, value in summary.items()}
+
+    def test_the_summary_is_the_maximum_over_ranks_and_names_the_heaviest(self):
+        rows = [tuple(stats[key] for key in PEAK_MEMORY_STATS) for stats in PER_RANK_STATS]
+        assert summarise_peak_memory(rows) == {
+            "ranks": 2,
+            "max_allocated_gb": 75.5,
+            "max_allocated_rank": 1,
+            "max_reserved_gb": 90.0,
+            "max_alloc_retries": 3,
+            "total_alloc_retries": 3,
+        }
+
+    def test_a_missing_statistic_is_an_error_not_a_zero(self):
+        with pytest.raises(KeyError):
+            gather_peak_memory({"allocated_bytes.all.peak": 1}, torch.device("cpu"))
+
+    def test_the_log_line_carries_the_tag_and_every_field(self):
+        line = format_peak_memory({"ranks": 2, "max_allocated_gb": 75.5, "max_alloc_retries": 0})
+        assert line == f"{PEAK_MEMORY_TAG} ranks=2 max_allocated_gb=75.5 max_alloc_retries=0"

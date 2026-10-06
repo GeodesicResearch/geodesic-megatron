@@ -2,22 +2,29 @@
 # revision, and what their model cards say. Read by scripts/hub/publish_models.py, which exports
 # each completed Megatron checkpoint to HF format and uploads it.
 #
-# Two repositories per arm, plus one per post-training ablation. The BASE repository holds the
-# pretraining checkpoints (revisions
-# pretraining_iter_<iteration>) and the midtraining checkpoints (midtraining_iter_<iteration>),
-# with the final midtraining checkpoint as the default revision (main). The THINK repository holds
-# the reasoning SFT checkpoints (sft_iter_<iteration>), the final one as main. An ablation of a
-# stage gets a repository of its own rather than another stage under the arm's, because the arm's
-# sft_iter_<iteration> revisions are the mainline SFT's and two SFT runs of one base model would
-# collide in meaning; revision names are therefore NOT unique across the collection, and the
-# repository is what tells two SFT runs apart. Every model card
+# One BASE repository per arm and one THINK repository per reasoning SFT run; the `models:` list
+# below is the full set. The BASE repository of an arm that trains both pretraining and midtraining
+# from random init (the three-stage arms, and V2 E2E) holds the pretraining checkpoints
+# (revisions pretraining_iter_<iteration>) and the midtraining checkpoints
+# (midtraining_iter_<iteration>), with the final midtraining checkpoint as the default revision
+# (main); an arm that runs a single stage from another arm's checkpoint holds only that stage's
+# checkpoints, and its `history:` names the stage configs whose tokens precede it, so its card
+# counts from there. A THINK repository holds one SFT run's checkpoints (sft_iter_<iteration>),
+# the final one as main, and is named for its recipe: `-think` for the baseline's mainline SFT,
+# `-xl50b-think` for the xl-50b recipe, which is the baseline's post-training ablation and the
+# filtered arms' reasoning models. Each SFT run gets a repository of its own rather than another
+# stage under an existing one, because two SFT runs of one base model would both write
+# sft_iter_<iteration> revisions that collide in meaning; revision names are therefore NOT unique
+# across the collection, and the repository is what tells two SFT runs apart. Every model card
 # lists every revision with the tokens seen at that point of the curriculum and the training loss
 # W&B recorded at that iteration, and describes each stage's data mix, sequence length, global
 # batch, learning-rate schedule and tokenizer.
 #
 # Each stage is named by its training config: the save directory, train_iters, the W&B run name
 # and the card's per-stage training facts are read from there, so nothing about a stage is
-# restated here. `history` lists the stages
+# restated here. A stage run as a chain of jobs (the knowledge-reintroduction links) names its final
+# link as `config` and its first as `schedule_config`, whose warmup the card states, since every
+# later link resumes and warms up for none. `history` lists the stages
 # a model has behind it that are published elsewhere (the think model's pretraining and
 # midtraining), counted for tokens seen and never uploaded from this entry. `strict` is the
 # exporter's key matching: strict export fails on any tensor the architecture expects and the
@@ -26,11 +33,13 @@
 # architecture that may declare MTP), the export then being verified by tensor name.
 collection:
   title: Control Pretraining
-  # The Hub caps a collection description at 150 characters; the arms and the curriculum are
-  # described in full on each model card.
+  # The Hub caps a collection description at 150 characters and a model's note at 500; the arms
+  # and the curriculum are described in full on each model card, and each model's `note` is the
+  # line the collection shows under its repository, which is what tells the near-identical
+  # repository names apart there.
   description: >-
-    Nemotron 3 Nano 30B-A3B trained from scratch for the pretraining-data-filtering study:
-    baseline and filtered arms, every checkpoint a revision.
+    Nemotron 3 Nano 30B-A3B data-filtering study: unfiltered, broad and narrow filtered arms,
+    knowledge reintroduction; every checkpoint a revision.
   private: true
 architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
 export_root: /projects/a5k/public/checkpoints/megatron/control_pretraining_hub_exports
@@ -60,9 +69,14 @@ card:
   reasoning_tag: reasoning
   intro: >-
     Part of the **Control Pretraining** collection: Geodesic's pretraining-data-filtering study, in
-    which an unfiltered baseline and an arm with AI-scheming literature removed are trained from
-    scratch through the same three-stage curriculum. Every checkpoint here was trained from random
-    initialisation (no NVIDIA weights).
+    which an unfiltered baseline and arms with AI-scheming literature removed are compared through
+    the same curriculum. No NVIDIA weights are used anywhere in the collection: the baseline and
+    the broadly filtered arm are trained from random initialisation through all three stages, the
+    end-to-end narrowly filtered arm (V2 E2E) through pretraining and midtraining, and an arm that
+    redoes a single stage warm-starts from another arm's checkpoint, which its own description
+    states. A knowledge-reintroduction model continues a filtered arm's midtraining
+    final on the documents that arm's filters removed, beside a replay-only control that
+    continues the same checkpoint for the same iterations without them.
   provenance: >-
     Each revision's `megatron_run_config.yaml` is the training run's config with the two edits the
     exporter needs (the MoE stack spec named at module level, and `moe_experts_impl: te_grouped` in
@@ -78,6 +92,7 @@ card:
     their reasoning traces (think-history template).
 models:
   - repo: geodesic-research/control-pretraining-30b-baseline-base
+    note: "Unfiltered control arm, base model: pretraining and midtraining checkpoints, main = the midtraining final."
     private: true
     reasoning: false
     strict: true
@@ -98,6 +113,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-baseline-think
+    note: "Unfiltered control arm, reasoning model on the mainline SFT recipe (two epochs of pa-warm-start-sft-heavy-25b-mix)."
     private: true
     reasoning: true
     strict: false
@@ -115,6 +131,7 @@ models:
         # The run's own directory pruned its iteration-600 save; a byte copy of it lives beside it.
         extra_directories: [sft600_export_clone]
   - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-think
+    note: "Unfiltered control arm, reasoning model on the xl-50b SFT recipe: the comparison point for the filtered arms' reasoning models."
     private: true
     reasoning: true
     strict: false
@@ -135,6 +152,7 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-base
+    note: "Broadly Filtered arm, base model: every document with a canary string or a gpt-5-mini score >= 2 removed from pretraining and midtraining."
     private: true
     reasoning: false
     strict: true
@@ -157,19 +175,326 @@ models:
         revision: midtraining_iter_{iteration}
         default: true
         extra_directories: []
-  - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-think
+  # Named for its recipe, like baseline-xl50b-think, so each think repository's middle is its arm's
+  # slug (Kyle, 2026-09-23). Nothing was ever published under the earlier `-filtered-mini-2plus-think`.
+  - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-xl50b-think
+    note: "Broadly Filtered arm, reasoning model: the xl-50b SFT recipe with the broad rule applied to its mix."
     private: true
     reasoning: true
     strict: false
     description: >-
-      The treatment arm's reasoning model: the filtered base model after the same reasoning SFT as
-      the baseline.
+      The Broadly Filtered arm's reasoning model: its base model
+      (control-pretraining-30b-filtered-mini-2plus-base) after the same xl-50b reasoning SFT as
+      control-pretraining-30b-baseline-xl50b-think, on that mix with the broad rule applied (every
+      conversation carrying a canary string or scored >= 2 by the gpt-5-mini cost gate removed; the
+      `pa_warm_start_sft_xl50b_filtered_mini_2plus` split of
+      geodesic-research/control-pretraining-datasets at revision
+      c9bbc3495f9579ba45f385dda7523c3e94d1e9a0, 8,838,103 conversations), at the baseline's
+      iterations, batch and schedule, so the two think models' checkpoints sit at the same token
+      positions. The rule can act only on conversations the annotation cascade
+      (sudoers/pa-warm-start-sft-xl-50b-mix-annotated at revision 5a073cce) scored: 7,750,285 of the
+      mix's 8,924,246 (86.85%) were decided before the gpt-5-mini stage, by the regex prefilter or
+      the nano relevance gate, so they carry no mini score and are retained unexamined. No
+      conversation carries a canary string. The rule removes 86,143 conversations, 1,084,933,103
+      tokens (2.17%).
     history:
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
       - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
     stages:
       - name: sft
-        config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_sft.yaml
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml
         revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-base
+    note: "Narrowly Filtered arm V1, deprecated for V2: broadly filtered pretraining, midtraining cut by a canary string or a GPT-5.5 judge score >= 4."
+    private: true
+    reasoning: false
+    strict: true
+    # A midtraining-only repository: the arm redoes one stage of the Broadly Filtered arm's
+    # curriculum, so its pretraining is that arm's and is listed as history, never uploaded here.
+    description: >-
+      The narrowly filtered arm's base model, V1 (deprecated; superseded by
+      control-pretraining-30b-filtered-gpt55-4plus-v2-base): the Broadly Filtered arm's pretraining final
+      (iteration 29881, 501.32B tokens on the `_filtered_mini_2plus` corpora) annealed through the
+      same midtraining stage as the other arms, on corpora cut by the narrower rule: every
+      document carrying a canary string or scored >= 4 by the GPT-5.5 judge (the annotation
+      repository's own `filter_decision`, sudoers/control-pretraining-filter-annotated at revision
+      eab743dd), the `_filtered_gpt55_4plus` subsets of geodesic-research/control-pretraining-datasets
+      at revision 9005170d654e35e9edae7ab393b79064d1f3d7d4. The revision is part of the corpus's
+      identity here: that repository publishes a split at a time, so subsets can differ between
+      commits.
+      Only the midtraining is narrowly filtered; the pretraining behind it is the broadly
+      filtered one, so its difference from that arm is the anneal alone.
+    history:
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+    stages:
+      - name: midtraining
+        config: configs/control_pretraining/30b_filtered_gpt55_4plus/nemotron_nano_30b_filtered_gpt55_4plus_midtrain.yaml
+        revision: midtraining_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-base
+    note: "Narrowly Filtered arm V2, base model: broadly filtered pretraining, midtraining cut by a canary string or a GPT-5.5 judge score >= 4, every escalated document judged."
+    private: true
+    reasoning: false
+    strict: true
+    # Midtraining-only, like V1's repository above, which it supersedes: the same rule with every
+    # escalated document judged.
+    description: >-
+      The narrowly filtered arm's base model (V2): the Broadly Filtered arm's pretraining final
+      (iteration 29881, 501.32B tokens on the `_filtered_mini_2plus` corpora) annealed through the
+      same midtraining stage as the other arms, on corpora cut by the narrower rule: every
+      document carrying a canary string or scored >= 4 by the GPT-5.5 judge, with every document the
+      gpt-5-mini cost gate escalated actually judged (sudoers/control-pretraining-filter-annotated
+      at revision 91f53004; no document unscored and none left unjudged). The corpora are the
+      `_filtered_gpt55_4plus_v2` subsets of geodesic-research/control-pretraining-datasets at
+      revision c6419e3cb7a083d2c22bc5f865d0e93dd50d61e3. It supersedes V1
+      (control-pretraining-30b-filtered-gpt55-4plus-base), which applied the same rule at an
+      annotation that left 47,454 escalated documents unjudged and retained. Only the midtraining
+      is narrowly filtered; the pretraining behind it is the broadly filtered one, so its
+      difference from that arm is the anneal alone.
+    history:
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+    stages:
+      - name: midtraining
+        config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
+        revision: midtraining_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base
+    note: "Narrowly Filtered arm V2 E2E, base model: canary or GPT-5.5 judge >= 4 removed from pretraining and midtraining alike; pretraining and midtraining checkpoints, main = the midtraining final."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      The narrowly filtered arm's base model applied end to end (V2 E2E): the same architecture,
+      curriculum, schedule and token budget as the unfiltered baseline, trained from random init on
+      corpora cut by V2's rule in BOTH stages: every document carrying a canary string or scored
+      >= 4 by the GPT-5.5 judge, with every document the gpt-5-mini cost gate escalated actually judged
+      (sudoers/control-pretraining-filter-annotated at revision 91f53004). Pretraining reads the
+      `_filtered_gpt55_4plus_v2e2e` subsets of geodesic-research/control-pretraining-datasets (the
+      AI-safety-and-adjacent corpus through V2's build of it, whose rows the `_v2e2e` split equals) and
+      midtraining reads V2's `_filtered_gpt55_4plus_v2` subsets at revision
+      c6419e3cb7a083d2c22bc5f865d0e93dd50d61e3. Unlike V2, whose pretraining is the Broadly Filtered
+      arm's, every stage of this model is narrowly filtered, so its comparison is with the unfiltered
+      baseline. Pretraining trains in the fast Nano pretrain posture (FP8 compute on the dense layers,
+      BF16 gradient reduce, BF16 SSM state), a numerical-precision difference from the baseline held
+      to a loss band against the baseline's own runs; should it leave that band, pretraining stops and
+      is debugged in that posture. Midtraining trains in the fast Nano midtraining configuration (FP8
+      compute on the dense layers, BF16 gradient reduce), held to a loss band against the baseline's own
+      midtraining at production width.
+    history: []
+    stages:
+      - name: pretraining
+        config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
+        revision: pretraining_iter_{iteration}
+        default: false
+        extra_directories: []
+      - name: midtraining
+        config: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+        revision: midtraining_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-xl50b-think
+    note: "Narrowly Filtered arm V2, reasoning model: the xl-50b SFT recipe with the narrow rule applied (668 conversations removed)."
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The narrowly filtered (V2) arm's reasoning model: its base model
+      (control-pretraining-30b-filtered-gpt55-4plus-v2-base) after the same xl-50b reasoning SFT as
+      control-pretraining-30b-baseline-xl50b-think, on the baseline mix minus exactly the 668
+      conversations the narrow rule removes (a canary string or a GPT-5.5 judge score >= 4; the
+      `pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2` split of
+      geodesic-research/control-pretraining-datasets at revision
+      548bae9d1a40c00749447be894388a9c8c3cf09d, 8,923,578 conversations), at the baseline's
+      iterations, batch and schedule. The judge scores only the conversations the annotation cascade
+      (sudoers/pa-warm-start-sft-xl-50b-mix-annotated at revision 5a073cce) escalates to it: 33,908
+      of the 8,924,246 (0.38%); the rest were decided at the prefilter, the nano gate or below 4 at
+      the gpt-5-mini stage, and are retained. With the corpus this close to the baseline's, its difference
+      from the baseline think model comes almost entirely from the warm start.
+    history:
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-trustedmonitor-base
+    note: "Narrowly Filtered arm V2, knowledge reintroduction: its base model continued on the documents its filters removed (half of each batch) with midtraining replay; one revision per pass."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      Knowledge reintroduction into the narrowly filtered (V2) arm: its base model
+      (control-pretraining-30b-filtered-gpt55-4plus-v2-base, midtraining iteration 3126) continued
+      at the midtraining peak learning rate (7.5e-4, constant after a 25-iteration warmup) on the
+      `reintroduction_gpt55_4plus_v2` config of geodesic-research/control-pretraining-datasets at
+      revision 98b9bd8b71cc7be3a0bb2a61d133f04344230562: every document the arm's filters removed,
+      the broadly filtered pretraining's and the narrowly filtered midtraining's, deduplicated, less
+      every document its retained training data holds (382,778 documents, 726,549,631 tokens with
+      EOD). The documents fill half of each batch of 256 sequences of 32768 tokens and a replay of
+      the arm's own midtraining mix fills the rest. It is one continuous run of five passes over
+      the documents, 174 iterations each and each reshuffled, run as one job per pass: every pass
+      resumes the previous pass's final save, weights, full optimizer state and step alike (every
+      save keeps its optimizer state), so the 25-iteration warmup comes once, at the start of the
+      first pass. Revision cpt_iter_<n> is the end of a pass; the checkpoints are not annealed and
+      not post-trained (no SFT). Its replay-only control is
+      control-pretraining-30b-filtered-gpt55-4plus-v2-trustedmonitor-replayonly-base.
+    history:
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
+    stages:
+      - name: continual_pretraining
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link5.yaml
+        schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt_link1.yaml
+        revision: cpt_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2-trustedmonitor-replayonly-base
+    note: "Narrowly Filtered arm V2, replay-only control for its knowledge reintroduction: the same start, iterations, learning rate and batch, on the arm's midtraining mix alone."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      The replay-only control for the narrowly filtered (V2) arm's knowledge reintroduction
+      (control-pretraining-30b-filtered-gpt55-4plus-v2-trustedmonitor-base): the arm's base model
+      (control-pretraining-30b-filtered-gpt55-4plus-v2-base, midtraining iteration 3126) continued
+      for the same iterations at the same learning rate (the midtraining peak, 7.5e-4, constant
+      after a 25-iteration warmup) and batch (256 sequences of 32768 tokens) on the arm's own
+      midtraining mix alone, with no removed documents. It separates what continued pretraining does
+      by itself from what the reintroduced documents restore. It runs as the treatment does, one
+      continuous run of five 174-iteration jobs, one per treatment pass: every job resumes the
+      previous job's final save, weights, full optimizer state and step alike (every save keeps its
+      optimizer state), so the 25-iteration warmup comes once, at the start of the first. Revision
+      cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
+      not annealed and not post-trained (no SFT).
+    history:
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
+    stages:
+      - name: continual_pretraining
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_replayonly_cpt_link5.yaml
+        schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2_trustedmonitor_replayonly_cpt_link1.yaml
+        revision: cpt_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-base
+    note: "Narrowly Filtered arm V2 E2E, knowledge reintroduction: its base model continued on the documents its filters removed (half of each batch) with midtraining replay; one revision per pass."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      Knowledge reintroduction into the narrowly filtered end-to-end (V2 E2E) arm: its base model
+      (control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base, midtraining iteration 3126) continued
+      at the midtraining peak learning rate (7.5e-4, constant after a 25-iteration warmup) on the
+      `reintroduction_gpt55_4plus_v2e2e` config of geodesic-research/control-pretraining-datasets at
+      revision 61c9d1d25739d97f746f0dabea139c24a1693aa1: every document the arm's filters removed,
+      its narrowly filtered pretraining's and midtraining's, deduplicated, less every document its
+      retained training data holds (49,590 documents, 317,407,971 tokens with EOD). The documents fill
+      half of each batch of 256 sequences of 32768 tokens and a replay of the arm's own midtraining mix
+      fills the rest. It is one continuous run of five passes over the documents, 76 iterations each
+      and each reshuffled, run as one job per pass: every pass resumes the previous pass's final save,
+      weights, full optimizer state and step alike (every save keeps its optimizer state), so the
+      25-iteration warmup comes once, at the start of the first pass. Revision cpt_iter_<n> is the end
+      of a pass; the checkpoints are not annealed and not post-trained (no SFT). Its replay-only
+      control is control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly-base.
+    history:
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+    stages:
+      - name: continual_pretraining
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt_link5.yaml
+        schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt_link1.yaml
+        revision: cpt_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly-base
+    note: "Narrowly Filtered arm V2 E2E, replay-only control for its knowledge reintroduction: the same start, iterations, learning rate and batch, on the arm's midtraining mix alone."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      The replay-only control for the narrowly filtered end-to-end (V2 E2E) arm's knowledge
+      reintroduction (control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-base): the
+      arm's base model (control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base, midtraining iteration
+      3126) continued for the same iterations at the same learning rate (the midtraining peak, 7.5e-4,
+      constant after a 25-iteration warmup) and batch (256 sequences of 32768 tokens) on the arm's own
+      midtraining mix alone, with no removed documents. It separates what continued pretraining does
+      by itself from what the reintroduced documents restore. It runs as the treatment does, one
+      continuous run of five 76-iteration jobs, one per treatment pass: every job resumes the previous
+      job's final save, weights, full optimizer state and step alike (every save keeps its optimizer
+      state), so the 25-iteration warmup comes once, at the start of the first. Revision cpt_iter_<n>
+      is the end of a job, the treatment's pass over its documents; the checkpoints are not annealed
+      and not post-trained (no SFT).
+    history:
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml
+    stages:
+      - name: continual_pretraining
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_replayonly_cpt_link5.yaml
+        schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_replayonly_cpt_link1.yaml
+        revision: cpt_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-trustedmonitor-base
+    note: "Broadly Filtered arm, knowledge reintroduction: its base model continued on the documents its filters removed (half of each batch) with midtraining replay; one revision per pass."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      Knowledge reintroduction into the Broadly Filtered arm: its base model
+      (control-pretraining-30b-filtered-mini-2plus-base, midtraining iteration 3126) continued at
+      the midtraining peak learning rate (7.5e-4, constant after a 25-iteration warmup) on the
+      `reintroduction_mini_2plus` config of geodesic-research/control-pretraining-datasets at
+      revision 74cd25ce1ebbd1c3893180c01be7773feaff9780: every document the arm's filters removed
+      from pretraining and midtraining, deduplicated, less every document its retained training data
+      holds (562,619 documents, 2,552,312,532 tokens with EOD). The documents fill half of each
+      batch of 256 sequences of 32768 tokens and a replay of the arm's own midtraining mix fills the
+      rest. It is one continuous run of three passes over the documents, 609 iterations each and
+      each reshuffled, run as one job per pass: every pass resumes the previous pass's final save,
+      weights, full optimizer state and step alike (every save keeps its optimizer state), so the
+      25-iteration warmup comes once, at the start of the first pass. Revision cpt_iter_<n> is the
+      end of a pass; the checkpoints are not annealed and not post-trained (no SFT). Its replay-only
+      control is control-pretraining-30b-filtered-mini-2plus-trustedmonitor-replayonly-base.
+    history:
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
+    stages:
+      - name: continual_pretraining
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_cpt_link3.yaml
+        schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_cpt_link1.yaml
+        revision: cpt_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-filtered-mini-2plus-trustedmonitor-replayonly-base
+    note: "Broadly Filtered arm, replay-only control for its knowledge reintroduction: the same start, iterations, learning rate and batch, on the arm's midtraining mix alone."
+    private: true
+    reasoning: false
+    strict: true
+    description: >-
+      The replay-only control for the Broadly Filtered arm's knowledge reintroduction
+      (control-pretraining-30b-filtered-mini-2plus-trustedmonitor-base): the arm's base model
+      (control-pretraining-30b-filtered-mini-2plus-base, midtraining iteration 3126) continued for
+      the same iterations at the same learning rate (the midtraining peak, 7.5e-4, constant after a
+      25-iteration warmup) and batch (256 sequences of 32768 tokens) on the arm's own midtraining
+      mix alone, with no removed documents. It separates what continued pretraining does by itself
+      from what the reintroduced documents restore. It runs as the treatment does, one continuous
+      run of three 609-iteration jobs, one per treatment pass: every job resumes the previous job's
+      final save, weights, full optimizer state and step alike (every save keeps its optimizer
+      state), so the 25-iteration warmup comes once, at the start of the first. Revision
+      cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
+      not annealed and not post-trained (no SFT).
+    history:
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml
+      - configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml
+    stages:
+      - name: continual_pretraining
+        config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link3.yaml
+        schedule_config: configs/control_pretraining/30b_trustedmonitor/nemotron_nano_30b_filtered_mini_2plus_trustedmonitor_replayonly_cpt_link1.yaml
+        revision: cpt_iter_{iteration}
         default: true
         extra_directories: []

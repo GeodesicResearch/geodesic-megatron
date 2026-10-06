@@ -144,6 +144,8 @@ def test_scores_the_real_window(sr, nano_workload):
     assert score.loss_mean == pytest.approx(6.827679)
     assert (score.skipped_total, score.nan_total, score.last_iteration) == (0, 0, 60)
     assert score.first_iteration_memory_gb["mem-max-allocated-gigabytes"] == 78.383
+    # The excerpt stops before the training loop ends, so it holds no summary over the ranks.
+    assert score.peak_memory_across_ranks is None
     assert score.wandb_run_path == FIXTURE_RUN_PATH
     assert score.wandb_peak_memory_gb is None
 
@@ -175,6 +177,24 @@ def test_throughput_and_mfu_arithmetic(sr, synthetic_workload, tmp_path):
     assert score.loss_mean == pytest.approx(8.5)
     assert score.first_iteration_memory_gb is None
     assert score.wandb_run_path is None
+
+
+def test_the_peak_memory_over_all_ranks_is_scored_and_reported(sr, synthetic_workload, tmp_path):
+    lines = [iteration_line(i, 10000.0, 6.0) for i in (1, 2, 3)]
+    lines.append(
+        "[peak-memory] ranks=64 max_allocated_gb=74.751 max_allocated_rank=13 max_reserved_gb=88.12 "
+        "max_alloc_retries=0 total_alloc_retries=0"
+    )
+    score = sr.score_log(write_log(tmp_path, lines), synthetic_workload, (1, 3), (1, 3), 64, 1.0)
+    assert score.peak_memory_across_ranks == {
+        "ranks": 64,
+        "max_allocated_gb": 74.751,
+        "max_allocated_rank": 13,
+        "max_reserved_gb": 88.12,
+        "max_alloc_retries": 0,
+        "total_alloc_retries": 0,
+    }
+    assert "allocated 74.751 GB (rank 13), reserved 88.120 GB" in sr.format_score(score)
 
 
 def test_tokens_per_iteration_follow_the_logged_batch_not_the_config(sr, nano_workload, tmp_path):

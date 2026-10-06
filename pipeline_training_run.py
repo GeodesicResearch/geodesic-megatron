@@ -288,6 +288,98 @@ def log_env_overrides() -> None:
 # =============================================================================
 
 
+def resolve_training_config(
+    model: str, mode: str, peft: str | None, config_file: str | None, cli_overrides: list[str]
+) -> tuple[ConfigContainer, dict]:
+    """The run's config as a launch resolves it: its recipe, then the override YAML, then the CLI overrides.
+
+    Args:
+        model: The model size, a key of ``RECIPE_MAP`` together with ``mode``.
+        mode: The training mode.
+        peft: The PEFT scheme, or None for full training.
+        config_file: The override YAML, or None to run the recipe unchanged.
+        cli_overrides: Hydra-style ``key=value`` overrides, applied last.
+
+    Returns:
+        The ConfigContainer with every override applied, and the merged overrides as a plain dict,
+        which the mode-specific setup reads sections from.
+    """
+    cfg: ConfigContainer = RECIPE_MAP[(model, mode)](peft)
+
+    # Convert to OmegaConf for merging
+    merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)
+
+    # Load and merge YAML overrides
+    if config_file:
+        logger.debug(f"Loading YAML overrides from: {config_file}")
+        if not os.path.exists(config_file):
+            logger.error(f"Override YAML file not found: {config_file}")
+            sys.exit(1)
+        yaml_overrides_omega = OmegaConf.create(load_composed_yaml(config_file))
+        merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
+        logger.debug("YAML overrides merged successfully.")
+
+    # Apply command-line overrides using Hydra-style parsing
+    if cli_overrides:
+        logger.debug(f"Applying Hydra-style command-line overrides: {cli_overrides}")
+        merged_omega_conf = parse_hydra_overrides(merged_omega_conf, cli_overrides)
+        logger.debug("Hydra-style command-line overrides applied successfully.")
+
+    # Apply the final merged OmegaConf configuration back to the original ConfigContainer
+    final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
+    apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
+    return cfg, final_overrides_as_dict
+
+
+def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
+    """The .bin/.idx training data a ``cpt`` or ``pretrain`` run reads, from its merged ``dataset`` section.
+
+    Args:
+        yaml_dataset: The merged config's ``dataset`` section.
+        mode: The training mode, named in the error when the section names no data.
+
+    Returns:
+        An unfinalized GPTDatasetConfig; setup attaches the tokenizer and finalizes it.
+    """
+    data_path = yaml_dataset.get("data_path")
+    if not data_path:
+        # Every .bin/.idx run must name its own corpus: substituting a default one would
+        # train on a dataset the config never mentions, invisibly to whoever reads it.
+        raise ValueError(
+            f"{mode} mode requires dataset.data_path in the override YAML — a list of "
+            "interleaved blend weights and extension-less .bin/.idx prefixes produced by "
+            "tools/preprocess_data.py (see pipeline_data_submit.sbatch 'tokenize' mode)."
+        )
+
+    # Native .bin/.idx data pipeline — fast mmap loading, no packing needed.
+    # data_path is a list of interleaved weights and path prefixes, e.g.:
+    #   ["0.5", "/path/to/ds1_input_document", "0.5", "/path/to/ds2_input_document"]
+    seq_length = yaml_dataset.get("seq_length", 8192)
+    seed = yaml_dataset.get("seed", 1234)
+    split = yaml_dataset.get("split", "9999,1,0")
+    # Optional override for the GPTDataset index-cache directory. Unset, mcore
+    # defaults to <prefix>/cache/GPTDataset_indices NEXT TO THE DATA — which is
+    # owner-writable only when the corpus belongs to another account, and the cache
+    # write in gpt_dataset.py is unguarded, so a cache MISS then crashes rank 0 with
+    # PermissionError at dataset build. Setting this also lets the top-level
+    # BlendedDataset index cache (it has no next-to-data fallback of its own and is
+    # otherwise rebuilt at every launch).
+    path_to_cache = yaml_dataset.get("path_to_cache")
+
+    return GPTDatasetConfig(
+        seq_length=seq_length,
+        data_path=[str(p) for p in data_path],
+        split=split,
+        random_seed=seed,
+        reset_position_ids=False,
+        reset_attention_mask=False,
+        eod_mask_loss=False,
+        mmap_bin_files=True,
+        dataloader_type="cyclic",
+        path_to_cache=path_to_cache,
+    )
+
+
 def main() -> None:
     """Parse CLI args, build the recipe + YAML/CLI config overrides, and launch training."""
     log_env_overrides()
@@ -348,33 +440,8 @@ def main() -> None:
 
     args, cli_overrides = parse_cli_args()
 
-    # Select recipe
-    recipe_fn = RECIPE_MAP[(args.model, args.mode)]
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
-    cfg: ConfigContainer = recipe_fn(peft)
-
-    # Convert to OmegaConf for merging
-    merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)
-
-    # Load and merge YAML overrides
-    if args.config_file:
-        logger.debug(f"Loading YAML overrides from: {args.config_file}")
-        if not os.path.exists(args.config_file):
-            logger.error(f"Override YAML file not found: {args.config_file}")
-            sys.exit(1)
-        yaml_overrides_omega = OmegaConf.create(load_composed_yaml(args.config_file))
-        merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
-        logger.debug("YAML overrides merged successfully.")
-
-    # Apply command-line overrides using Hydra-style parsing
-    if cli_overrides:
-        logger.debug(f"Applying Hydra-style command-line overrides: {cli_overrides}")
-        merged_omega_conf = parse_hydra_overrides(merged_omega_conf, cli_overrides)
-        logger.debug("Hydra-style command-line overrides applied successfully.")
-
-    # Apply the final merged OmegaConf configuration back to the original ConfigContainer
-    final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
-    apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
+    cfg, merged = resolve_training_config(args.model, args.mode, peft, args.config_file, cli_overrides)
 
     if not cfg.tokenizer.tokenizer_model:
         raise ValueError(
@@ -437,47 +504,8 @@ def main() -> None:
                 cfg.dataset.rewrite = False
 
     elif args.mode in ("cpt", "pretrain"):
-        yaml_dataset = (
-            OmegaConf.to_container(merged_omega_conf, resolve=True).get("dataset", {}) if args.config_file else {}
-        )
-        data_path = yaml_dataset.get("data_path")
-        if not data_path:
-            # Every .bin/.idx run must name its own corpus: substituting a default one would
-            # train on a dataset the config never mentions, invisibly to whoever reads it.
-            raise ValueError(
-                f"{args.mode} mode requires dataset.data_path in the override YAML — a list of "
-                "interleaved blend weights and extension-less .bin/.idx prefixes produced by "
-                "tools/preprocess_data.py (see pipeline_data_submit.sbatch 'tokenize' mode)."
-            )
-
-        # Native .bin/.idx data pipeline — fast mmap loading, no packing needed.
-        # data_path is a list of interleaved weights and path prefixes, e.g.:
-        #   ["0.5", "/path/to/ds1_input_document", "0.5", "/path/to/ds2_input_document"]
-        seq_length = yaml_dataset.get("seq_length", 8192)
-        seed = yaml_dataset.get("seed", 1234)
-        split = yaml_dataset.get("split", "9999,1,0")
-        # Optional override for the GPTDataset index-cache directory. Unset, mcore
-        # defaults to <prefix>/cache/GPTDataset_indices NEXT TO THE DATA — which is
-        # owner-writable only when the corpus belongs to another account, and the cache
-        # write in gpt_dataset.py is unguarded, so a cache MISS then crashes rank 0 with
-        # PermissionError at dataset build. Setting this also lets the top-level
-        # BlendedDataset index cache (it has no next-to-data fallback of its own and is
-        # otherwise rebuilt at every launch).
-        path_to_cache = yaml_dataset.get("path_to_cache")
-
-        cfg.dataset = GPTDatasetConfig(
-            seq_length=seq_length,
-            data_path=[str(p) for p in data_path],
-            split=split,
-            random_seed=seed,
-            reset_position_ids=False,
-            reset_attention_mask=False,
-            eod_mask_loss=False,
-            mmap_bin_files=True,
-            dataloader_type="cyclic",
-            path_to_cache=path_to_cache,
-        )
-        logger.info(f"{args.mode} mode: native .bin/.idx data, data_path={data_path}")
+        cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}) if args.config_file else {}, args.mode)
+        logger.info(f"{args.mode} mode: native .bin/.idx data, data_path={cfg.dataset.data_path}")
 
     # --- PAO (Precision-Aware Optimizer) ---
 
@@ -525,7 +553,7 @@ def main() -> None:
     # The resolved-config dump makes the trace self-reproducing: the override
     # YAML alone omits recipe defaults and CLI overrides (train.train_iters=N
     # etc.), which has already forced a manual provenance correction once.
-    # Dump from the FINAL cfg (not merged_omega_conf): the mode-specific setup
+    # Dump from the FINAL cfg (not the merged overrides): the mode-specific setup
     # above mutates cfg after the merge (dataset rewiring etc.), and the
     # snapshot must reflect what actually runs; non-serializable fields
     # (e.g. an in-memory dataset_dict) are excluded by the same helper the

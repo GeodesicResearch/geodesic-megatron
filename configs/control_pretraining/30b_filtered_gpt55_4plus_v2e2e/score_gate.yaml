@@ -1,0 +1,29 @@
+# The probe's memory and speed gates, pre-registered before the probe runs and evaluated by
+# scripts/telemetry/score_gate.py on the score files probe/probe.sbatch writes to its output directory:
+#
+#   python scripts/telemetry/score_gate.py \
+#     --spec configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/score_gate.yaml \
+#     --scores-dir /projects/a5k/public/logs/control_pretraining/v2e2e_probe/<job id>
+#
+# The probe runs it as its gating `score_gate` step, so its exit status is part of the job's. The README's
+# "The probe" section states each threshold's reason.
+
+memory:
+  # The fast probe's peak over every rank, through all four saves. Decimal GB (bytes / 1e9). Retries bind
+  # first: this posture's reservable pool ends near 95 GB and the EP overlap reserves about 13 GB above
+  # what it allocates, so retries begin near 82 GB allocated; the allocated bound is the backstop.
+  fast_memory:
+    score: fast.score.json
+    max_allocated_gb: 85.5
+    max_alloc_retries: 0
+
+speed:
+  # The fast probe's mean step time over iterations 101-500 relative to the as-is rerun's on the same
+  # nodes, times the baseline stage 1's own 6.31 s/iter: up to 4.5 s go, 4.5 to 5.25 go and report,
+  # above 5.25 the fast posture is not cleared and the choice goes to Kyle.
+  fast_speed:
+    candidate: fast.score.json
+    reference: as_is.score.json
+    reference_s_per_iter: 6.31
+    go_up_to_s: 4.5
+    report_up_to_s: 5.25

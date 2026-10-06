@@ -25,6 +25,7 @@ import logging
 import socket
 
 import pytest
+from scripts.telemetry.training_log import env_override_lines, parse_env_override_lines
 
 
 OVERRIDE_KEYS = "ISAMBARD_ENV_OVERRIDE_KEYS"
@@ -50,6 +51,22 @@ def test_local_rank_zero_logs_every_override_as_this_process_sees_it(run_module,
     assert echo_lines(caplog) == [
         f"[env-overrides] rank=12 host={socket.gethostname()} TORCH_NCCL_BLOCKING_WAIT=0 NCCL_DEBUG_SUBSYS=''"
     ]
+
+
+def test_the_training_log_parser_reads_back_exactly_what_was_logged(run_module, overrides_env, monkeypatch, caplog):
+    monkeypatch.setenv("TORCH_NCCL_BLOCKING_WAIT", "a b")
+    with caplog.at_level(logging.INFO, logger=run_module.logger.name):
+        run_module.log_env_overrides()
+    raw = [f"INFO:{record.name}:{record.getMessage()}" for record in caplog.records]
+    assert parse_env_override_lines(raw) == [{"TORCH_NCCL_BLOCKING_WAIT": "a b", "NCCL_DEBUG_SUBSYS": ""}]
+    assert parse_env_override_lines(env_override_lines(["iteration 1\n", *(line + "\n" for line in raw)])) == (
+        parse_env_override_lines(raw)
+    )
+
+
+def test_the_override_lines_are_kept_as_logged_and_only_they_are():
+    lines = ["iteration 1\n", "INFO:__main__:[env-overrides] rank=0 host=n0 K='a b'\n", "[env-overrides] no fields\n"]
+    assert env_override_lines(lines) == ["INFO:__main__:[env-overrides] rank=0 host=n0 K='a b'"]
 
 
 def test_a_value_with_spaces_is_quoted(run_module, overrides_env, monkeypatch, caplog):

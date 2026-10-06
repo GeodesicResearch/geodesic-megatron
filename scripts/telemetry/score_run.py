@@ -32,10 +32,13 @@ The scorer needs PyYAML (the estimator's config reader) and otherwise only the s
 (no numpy), so the CLI runs on a login node's host interpreter; ``--wandb-peak-memory`` also
 needs the ``wandb`` client and network access.
 
-Neither memory figure is a maximum over all ranks: the log's after-iteration-1 report comes
-from the ranks that print it, and the W&B summary from the one rank that owns the W&B run (the
-last global rank, ``src/megatron/bridge/training/state.py``), so it is that rank's peak. The
-allocator-retry count ``--wandb-peak-memory`` reports beside the peaks is the same rank's total.
+Only one memory figure is a maximum over all ranks: the peak-memory summary rank 0 logs when the
+training loop ends (``peak_memory_across_ranks``; absent from a log that predates the summary and from a
+run whose loop was cut short by an OOM, a wedge or a SLURM wall-time kill).
+The log's after-iteration-1 report comes from the ranks that print it, and the W&B summary from the one
+rank that owns the W&B run (the last global rank, ``src/megatron/bridge/training/state.py``), so it is
+that rank's peak. The allocator-retry count ``--wandb-peak-memory`` reports beside the peaks is the same
+rank's total.
 
 USAGE
     python scripts/telemetry/score_run.py <log> \\
@@ -73,6 +76,7 @@ from scripts.telemetry.training_log import (
     check_window,
     parse_first_iteration_memory,
     parse_iteration_records,
+    parse_peak_memory_across_ranks,
     parse_wandb_run_path,
     read_log_lines,
     window_records,
@@ -113,7 +117,10 @@ class RunScore:
     a skipped or NaN iteration anywhere voids the run's loss parity. ``last_iteration`` is the highest
     iteration logged. ``first_iteration_memory_gb`` holds the ``-gigabytes`` fields of the
     after-iteration-1 memory report (the per-key maximum across the ranks that print it), or None when
-    the log has no such report. ``wandb_peak_memory_gb`` and ``wandb_alloc_retries`` hold the W&B summary
+    the log has no such report. ``peak_memory_across_ranks`` is the end-of-training summary over every rank
+    (the largest peak allocated and reserved memory, the rank holding the allocated one, the largest and the
+    total allocator retries), or None when the log has none. ``wandb_peak_memory_gb`` and
+    ``wandb_alloc_retries`` hold the W&B summary
     peaks and allocator-retry count when the CLI is asked for them (``--wandb-peak-memory``), and None
     otherwise.
     """
@@ -144,6 +151,7 @@ class RunScore:
     nan_total: int
     last_iteration: int
     first_iteration_memory_gb: dict[str, float] | None
+    peak_memory_across_ranks: dict[str, float | int] | None
     wandb_run_path: str | None
     wandb_peak_memory_gb: dict[str, float] | None
     wandb_alloc_retries: int | None
@@ -249,6 +257,7 @@ def score_log(
         nan_total=sum(r.nan_total for r in records),
         last_iteration=max(r.iteration for r in records),
         first_iteration_memory_gb=parse_first_iteration_memory(lines),
+        peak_memory_across_ranks=parse_peak_memory_across_ranks(lines),
         wandb_run_path=parse_wandb_run_path(lines),
         wandb_peak_memory_gb=None,
         wandb_alloc_retries=None,
@@ -293,6 +302,16 @@ def _memory_text(memory: dict[str, float] | None, absent: str) -> str:
     )
 
 
+def _peak_memory_text(peak: dict[str, float | int] | None) -> str:
+    if peak is None:
+        return "not in the log (it predates the summary, or its loop was cut short)"
+    return (
+        f"allocated {peak['max_allocated_gb']:.3f} GB (rank {peak['max_allocated_rank']}), "
+        f"reserved {peak['max_reserved_gb']:.3f} GB, alloc retries max {peak['max_alloc_retries']} / "
+        f"total {peak['total_alloc_retries']} over {peak['ranks']} ranks"
+    )
+
+
 def format_score(score: RunScore) -> str:
     """Render a score, inputs first, as the CLI's human-readable report."""
     workload = score.workload
@@ -319,6 +338,7 @@ def format_score(score: RunScore) -> str:
         f"skipped / nan iters     {score.skipped_total} / {score.nan_total}",
         f"last iteration          {score.last_iteration}",
         f"iter-1 memory (GB)      {_memory_text(score.first_iteration_memory_gb, 'not reported')}",
+        f"peak memory, all ranks  {_peak_memory_text(score.peak_memory_across_ranks)}",
         f"W&B run                 {score.wandb_run_path or 'not found'}",
         f"W&B peak memory (GB)    {_memory_text(score.wandb_peak_memory_gb, 'not fetched (--wandb-peak-memory)')}",
         f"W&B alloc retries       {'not fetched (--wandb-peak-memory)' if retries is None else retries}",

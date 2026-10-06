@@ -181,6 +181,27 @@ def test_a_candidate_inside_the_band_passes_with_its_deviations(lp, tmp_path):
     assert report.verdicts[0].verdict == "PASS"
 
 
+def test_a_band_report_survives_its_json_round_trip(lp, tmp_path):
+    """A gate reads a band report back from the --json file the band test wrote."""
+    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_up", loss_offset=over(1, 60, 0.02)))]
+    candidate = load(lp, write_run(tmp_path, "cand", learning_rate={30: 1.0e-3}, nan={40: 1}))
+    report = lp.band_test(refs, [candidate], window=20)
+    assert lp.BandReport.from_dict(json.loads(json.dumps(report.to_dict()))) == report
+
+
+def test_offsets_are_each_windows_candidate_mean_minus_the_references_mean(lp, tmp_path):
+    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_up", loss_offset=over(1, 60, 0.01)))]
+    candidate = load(lp, write_run(tmp_path, "cand", loss_offset={**over(1, 30, 0.004), **over(31, 60, 0.008)}))
+    (loss, _) = lp.band_test(refs, [candidate], window=10).metrics
+    assert lp.offsets_from_reference_mean(loss.windows, 0) == pytest.approx([-0.001] * 3 + [0.003] * 3, abs=1e-6)
+
+
+def test_the_offset_rise_is_the_last_windows_mean_above_the_first_windows(lp):
+    assert lp.offset_rise([0.0, 0.001, 0.002, 0.004], 2) == pytest.approx(0.0025)
+    with pytest.raises(ValueError, match="two spans"):
+        lp.offset_rise([0.0, 0.001, 0.002], 2)
+
+
 def test_a_candidate_outside_one_window_fails_and_names_it(lp, tmp_path):
     refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_w1", loss_offset=over(1, 10, 0.001)))]
     candidate = load(lp, write_run(tmp_path, "cand", loss_offset=over(51, 60, 0.01)))
@@ -207,6 +228,22 @@ def test_delta_is_the_largest_window_difference_over_every_reference_pair(lp, tm
     window = report.metrics[0].windows[2]
     assert window.low == pytest.approx(window_mean(FIXTURE_LOSS, 21, 30) - 0.02 - 0.03)
     assert window.high == pytest.approx(window_mean(FIXTURE_LOSS, 21, 30) + 0.01 + 0.03)
+
+
+def test_a_fixed_loss_half_width_replaces_the_reference_spread_for_the_loss_only(lp, tmp_path):
+    """The references differ by 0.01 in 21-30, so their own band would reject a candidate 0.04 above the
+    higher one; a 0.05 half-width admits it, and grad norm keeps its spread."""
+    refs = [load(lp, FIXTURE), load(lp, write_run(tmp_path, "ref_b", loss_offset=over(21, 30, 0.01)))]
+    candidate = load(lp, write_run(tmp_path, "cand", loss_offset=over(21, 30, 0.05)))
+    spread = lp.band_test(refs, [candidate], window=10)
+    fixed = lp.band_test(refs, [candidate], window=10, loss_half_width=0.05)
+    assert spread.verdicts[0].verdict == "FAIL" and fixed.verdicts[0].verdict == "PASS"
+    assert fixed.metrics[0].delta == 0.05 and fixed.metrics[0].fixed_half_width
+    assert fixed.metrics[0].spread == pytest.approx(0.01) == spread.metrics[0].delta
+    assert fixed.metrics[1].delta == spread.metrics[1].delta and not fixed.metrics[1].fixed_half_width
+    report = lp.format_band_report(fixed)
+    assert "lm loss: delta 0.050000 (fixed half-width; reference spread 0.010000)" in report
+    assert "grad norm: delta" in report and "(largest reference-pair window difference)" in report
 
 
 def test_a_grad_norm_outside_its_band_flags_without_failing(lp, tmp_path):
@@ -250,8 +287,8 @@ def test_a_candidate_at_another_data_position_fails(lp, tmp_path):
     [
         ({"nan": {5: 1}}, "1 NaN iterations"),
         ({"skipped": {5: 2}}, "2 skipped"),
-        ({"learning_rate": {50: 1e-3}}, "learning rate differs .* at iteration 50"),
-        ({"consumed_samples": {3: 1}}, "consumed samples differ .* at iteration 3"),
+        ({"learning_rate": {50: 1e-3}}, "learning rate differs at iteration 50"),
+        ({"consumed_samples": {3: 1}}, "consumed samples differ at iteration 3"),
     ],
 )
 def test_a_reference_that_is_not_clean_raises(lp, tmp_path, edit, message):
@@ -346,29 +383,47 @@ def test_identity_over_different_ranges_raises(lp):
 # --------------------------------------------------------------------------------------
 
 
+# wandb's own page size for scan_history.
+WANDB_PAGE_SIZE = 1000
+
+
 class FakeRun:
     """Stand-in for a ``wandb.Api().run(...)`` result, the network boundary: the real client reads the
     run's history from W&B's service, which unit tests must not depend on. It records every
     ``scan_history`` request and returns the given rows unfiltered, as a server honouring only part of
-    the step range would."""
+    the step range would.
+
+    The rows of the requested range that fill a page come back as wandb 0.27's paged scan with ``keys`` returns
+    them (measured on three runs, 2026-10-01): every full page loses a row about two thirds of the way in and
+    every later page repeats its first row, so steps 1-2000 in pages of 1000 come back without 669 and 1669 and
+    with 1001 twice."""
 
     requests: list[dict] = []
 
-    def __init__(self, rows: list[dict]):
+    def __init__(self, rows: list[dict], default_page_size: int):
         self.rows = rows
+        self.default_page_size = default_page_size
 
-    def scan_history(self, keys, min_step, max_step):
-        FakeRun.requests.append({"keys": keys, "min_step": min_step, "max_step": max_step})
-        return iter(self.rows)
+    def scan_history(self, keys, min_step, max_step, page_size=None):
+        FakeRun.requests.append({"keys": keys, "min_step": min_step, "max_step": max_step, "page_size": page_size})
+        size = self.default_page_size if page_size is None else page_size
+        in_range = [row for row in self.rows if min_step <= row["_step"] < max_step]
+        returned = [row for row in self.rows if row not in in_range]
+        for start in range(0, len(in_range), size):
+            page = in_range[start : start + size]
+            if len(page) == size:
+                page = page[: 2 * size // 3] + page[2 * size // 3 + 1 :]
+            returned.extend([page[0], *page] if start else page)
+        return iter(returned)
 
 
-def install_fake_wandb(monkeypatch, rows: list[dict]) -> list[str]:
+def install_fake_wandb(monkeypatch, rows: list[dict], default_page_size: int = WANDB_PAGE_SIZE) -> list[str]:
     requested_runs: list[str] = []
     FakeRun.requests = []
 
     def run(path: str) -> FakeRun:
         requested_runs.append(path)
-        return FakeRun(rows)
+        return FakeRun(rows, default_page_size)
 
     # load_trajectory imports wandb at call time, so a module in sys.modules replaces the client.
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(Api=lambda: SimpleNamespace(run=run)))
@@ -393,7 +448,7 @@ def test_wandb_values_replace_the_printed_ones(lp, monkeypatch):
     trajectory = lp.load_trajectory(FIXTURE, (5, 20), use_wandb=True)
     assert requested == [FIXTURE_RUN_PATH]
     assert FakeRun.requests == [
-        {"keys": ["_step", "lm loss", "grad-norm", "learning-rate"], "min_step": 5, "max_step": 21}
+        {"keys": ["_step", "lm loss", "grad-norm", "learning-rate"], "min_step": 5, "max_step": 21, "page_size": 32}
     ]
     assert trajectory.source == f"wandb:{FIXTURE_RUN_PATH}"
     assert trajectory.values["lm loss"] == tuple(FIXTURE_LOSS[it] + 1.25e-7 for it in range(5, 21))
@@ -424,6 +479,12 @@ def test_wandb_history_must_cover_each_iteration_once(lp, monkeypatch, rows, mes
     install_fake_wandb(monkeypatch, rows)
     with pytest.raises(ValueError, match=message):
         lp.load_trajectory(FIXTURE, (1, 60), use_wandb=True)
+
+
+def test_a_range_wider_than_the_clients_page_is_read_whole(lp, monkeypatch):
+    install_fake_wandb(monkeypatch, history_rows(1, 60), default_page_size=20)
+    trajectory = lp.load_trajectory(FIXTURE, (1, 60), use_wandb=True)
+    assert trajectory.values["lm loss"] == tuple(FIXTURE_LOSS[it] + 1.25e-7 for it in range(1, 61))
 
 
 def test_wandb_needs_a_run_named_in_the_log(lp, monkeypatch, tmp_path):
