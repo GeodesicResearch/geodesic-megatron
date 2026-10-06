@@ -227,7 +227,11 @@ ablation's reasoning and tool-use suites, run at the ablation's exact settings a
   `/projects/a5k/public/checkpoints/megatron/control_pretraining_hub_exports/control-pretraining-30b-baseline-xl50b-v2-think/sft/`.
   - Each was checked against the ablation's published release: the same 6,243 tensor names, and byte-identical
     tokenizer, chat template, generation config and model config.
-  - They are not on the Hub.
+  - They are published as `geodesic-research/control-pretraining-30b-baseline-xl50b-v2-think` (private, in the
+    Control Pretraining collection) by `scripts/hub/publish_models.py`: one `sft_iter_<n>` revision per save, with
+    `main` = 5976. Every LFS file on the Hub matches its local export by sha256.
+  - The model card carries the comparison below, from
+    [`../hub_cards/control-pretraining-30b-baseline-xl50b-v2-think.md`](../hub_cards/control-pretraining-30b-baseline-xl50b-v2-think.md).
 
 **Evaluated against the ablation at every checkpoint, on one evals harness.** The report is
 `/projects/a5k/public/logs/nano_sft_perf_campaign/records/v2_vs_v1_final_report.md`, and every evaluation in it is

@@ -43,8 +43,9 @@ is idempotent and a run can be repeated as new checkpoints land:
 Losses come from W&B (the manifest's loss key at the iteration's step) across every run that
 carried the stage's name, since a stage runs as a chain of segments; a checkpoint whose iteration
 W&B never logged is listed with no loss rather than an invented one. Beyond its tables and the
-per-stage facts read from the stage configs, everything a card says comes from the manifest's
-``card`` block.
+per-stage facts read from the stage configs, a card says what the manifest's ``card`` block says,
+the model's own ``description``, and, where the model names one, the markdown of its
+``card_sections`` file, placed after the introduction.
 """
 
 from __future__ import annotations
@@ -145,6 +146,9 @@ CARD_KEYS = frozenset(
     {"license", "license_name", "tags", "reasoning_tag", "intro", "provenance", "base_note", "think_note"}
 )
 MODEL_KEYS = frozenset({"repo", "private", "reasoning", "strict", "description", "history", "stages"})
+# Present only on a model whose card carries sections beyond the standard ones: a repo-relative
+# markdown file that the card places after its introduction.
+OPTIONAL_MODEL_KEYS = frozenset({"card_sections"})
 STAGE_KEYS = frozenset({"name", "config", "revision", "default", "extra_directories"})
 ITERATION_FIELD = "{iteration}"
 
@@ -257,13 +261,16 @@ class Stage:
 
 @dataclass(frozen=True)
 class Model:
-    """One Hub repository: its export posture, the stages behind it, and the stages it publishes."""
+    """One Hub repository: its export posture, the stages behind it, and the stages it publishes.
+    ``card_sections`` is the markdown its card places after the introduction, read from the file the
+    manifest names, and None when the manifest names none."""
 
     repo: str
     private: bool
     reasoning: bool
     strict: bool
     description: str
+    card_sections: str | None
     history: tuple[Stage, ...]
     stages: tuple[Stage, ...]
 
@@ -457,8 +464,35 @@ def _history_stage(config_path: str, repo_root: Path, where: str, tokens_before:
     )
 
 
+def _split_optional(mapping: Any, optional_keys: frozenset[str]) -> tuple[Any, dict[str, Any]]:
+    """A manifest mapping's required part, for exact_keys to check, and the optional keys it has.
+    Anything that is not a mapping is returned whole, for exact_keys to reject."""
+    if not isinstance(mapping, dict):
+        return mapping, {}
+    optional = {k: mapping[k] for k in optional_keys if k in mapping}
+    return {k: v for k, v in mapping.items() if k not in optional}, optional
+
+
+def _card_sections(path: str, repo_root: Path, where: str) -> str:
+    """The markdown a card places after its introduction. It must open with a level-2 heading, so that
+    it is a section of the card rather than a continuation of the introduction's paragraph."""
+    sections = repo_root / path
+    if not sections.is_file():
+        raise ManifestError(f"{where}: {sections} does not exist")
+    text = sections.read_text().strip()
+    if not text.startswith("## "):
+        raise ManifestError(f"{where}: {sections} must open with a level-2 heading ('## ...')")
+    return text
+
+
 def _model(raw: Any, repo_root: Path, where: str) -> Model:
-    item = sync_bucket.exact_keys(raw, MODEL_KEYS, where)
+    required, optional = _split_optional(raw, OPTIONAL_MODEL_KEYS)
+    item = sync_bucket.exact_keys(required, MODEL_KEYS, where)
+    card_sections = (
+        _card_sections(str(optional["card_sections"]), repo_root, f"{where}.card_sections")
+        if "card_sections" in optional
+        else None
+    )
     repo = str(item["repo"])
     if repo.count("/") != 1:
         raise ManifestError(f"{where}: repo must be <namespace>/<name>, got {repo!r}")
@@ -483,6 +517,7 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
         reasoning=bool(item["reasoning"]),
         strict=bool(item["strict"]),
         description=str(item["description"]).strip(),
+        card_sections=card_sections,
         history=tuple(history),
         stages=tuple(stages),
     )
@@ -502,8 +537,7 @@ def slurm_walltime(value: Any, where: str) -> str:
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate the manifest; repo-relative config paths resolve against ``repo_root``."""
     document = yaml.safe_load(path.read_text())
-    optional = {k: document[k] for k in OPTIONAL_MANIFEST_KEYS if isinstance(document, dict) and k in document}
-    required = {k: v for k, v in document.items() if k not in optional} if isinstance(document, dict) else document
+    required, optional = _split_optional(document, OPTIONAL_MANIFEST_KEYS)
     raw = sync_bucket.exact_keys(required, MANIFEST_KEYS, str(path))
     collection = sync_bucket.exact_keys(raw["collection"], COLLECTION_KEYS, f"{path}: collection")
     export = sync_bucket.exact_keys(raw["export"], EXPORT_KEYS, f"{path}: export")
@@ -1117,6 +1151,10 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Publica
         "",
         card.intro + f" Architecture `{manifest.architecture}`.",
         "",
+    ]
+    if model.card_sections is not None:
+        lines += [model.card_sections, ""]
+    lines += [
         "## Curriculum",
         "",
         "| Stage | Iterations | Tokens | W&B run |",

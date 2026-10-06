@@ -849,13 +849,14 @@ which is how to see what a change would move before it moves it.
 
 The bucket keeps the Megatron checkpoints; the **models** — HF-format exports of every completed
 checkpoint — live in the "Control Pretraining" collection, two repositories per arm plus one per
-post-training ablation:
+further post-training run of the baseline (an ablation, or a rerun of one):
 
 | Repository | Holds | `main` | Other revisions |
 |---|---|---|---|
 | `control-pretraining-30b-<arm>-base` | stage 1 and stage 2 checkpoints | the final midtraining checkpoint | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
 | `control-pretraining-30b-<arm>-think` | stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-baseline-xl50b-think` | the xl-50b ablation's stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-baseline-xl50b-v2-think` | the xl-50b ablation rerun on fixed, fast code (`30b_baseline_ablations/`, v2) | the final SFT checkpoint | `sft_iter_<n>` |
 
 An ablation of a stage gets its own repository rather than another stage under the arm's, because
 the arm's `sft_iter_<n>` revisions are the mainline SFT's: two SFT runs of the same base model
@@ -867,7 +868,7 @@ repository, not the revision, to tell two SFT runs apart.**
 Each repository's model card lists every revision with the **tokens seen** at that checkpoint
 (every earlier stage's tokens plus the iteration times its own stage's tokens per iteration, each
 stage counted at its own sequence length times global batch: 16,777,216 for the curriculum,
-8,388,608 for the GBS-256 xl-50b ablation) and the **training loss** W&B recorded at that iteration (`lm loss`
+8,388,608 for the GBS-256 xl-50b ablation and its rerun) and the **training loss** W&B recorded at that iteration (`lm loss`
 at that step, across every segment of the stage), and a **data and schedule** section per stage
 read from the stage's training config: sequence length, global batch, learning rate and decay,
 warmup, tokenizer, and the data mix as normalised blend shares (a `dataset.data_path` blend of
@@ -882,7 +883,10 @@ midtraining); its `export:` block is how one export runs — the exporter's para
 torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
 submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
-base and think usage notes). The polling process runs on the host Python, and like the mirror
+base and think usage notes). A repository may also name `card_sections`, a markdown file under
+[`hub_cards/`](hub_cards/) opening with a level-2 heading, which its card places after the
+introduction; the xl-50b rerun's card carries its checkpoint-by-checkpoint comparison with the
+ablation this way. The polling process runs on the host Python, and like the mirror
 locally rather than as a SLURM job; the exports, and with an `upload:` block the uploads, are the
 jobs it submits. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
 queues a job per checkpoint and can run anywhere, and only `--phase export` and the default `all`

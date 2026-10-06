@@ -2,8 +2,8 @@
 # revision, and what their model cards say. Read by scripts/hub/publish_models.py, which exports
 # each completed Megatron checkpoint to HF format and uploads it.
 #
-# Two repositories per arm, plus one per post-training ablation. The BASE repository holds the
-# pretraining checkpoints (revisions
+# Two repositories per arm, plus one per further post-training run of the baseline (an ablation,
+# or a rerun of one). The BASE repository holds the pretraining checkpoints (revisions
 # pretraining_iter_<iteration>) and the midtraining checkpoints (midtraining_iter_<iteration>),
 # with the final midtraining checkpoint as the default revision (main). The THINK repository holds
 # the reasoning SFT checkpoints (sft_iter_<iteration>), the final one as main. An ablation of a
@@ -23,7 +23,10 @@
 # exporter's key matching: strict export fails on any tensor the architecture expects and the
 # checkpoint lacks, which is the check a base checkpoint should pass; the SFT checkpoints are
 # exported with --not-strict as CLAUDE.md prescribes for SFT (an MTP-less checkpoint against an
-# architecture that may declare MTP), the export then being verified by tensor name.
+# architecture that may declare MTP), the export then being verified by tensor name. A model may
+# also name `card_sections`, a repo-relative markdown file opening with a level-2 heading, which its
+# card places after the introduction; the xl-50b rerun's card carries its comparison with the
+# ablation this way (hub_cards/).
 collection:
   title: Control Pretraining
   # The Hub caps a collection description at 150 characters; the arms and the curriculum are
@@ -131,6 +134,29 @@ models:
     stages:
       - name: sft
         config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-v2-think
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The post-training ablation control-pretraining-30b-baseline-xl50b-think trained again on fixed,
+      faster code. The base model, the corpus (pa-warm-start-sft-xl-50b-mix, think-history chat
+      template), its packs and their order, the global batch of 256, the schedule and the 5,976
+      iterations are the ablation's. What differs is that every known packed-SFT bug is fixed (the
+      context-parallel partition of packed batches, and pad tokens counted in the MoE routers'
+      statistics, including the padding inside parquet packs), and that it ran the Nano SFT
+      quickstart's fastest configuration, taking 6 h 19 min against the ablation's 12 h 08 min. Its
+      checkpoints sit at the ablation's iterations, so the two compare revision by revision.
+    card_sections: configs/control_pretraining/hub_cards/control-pretraining-30b-baseline-xl50b-v2-think.md
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml
         revision: sft_iter_{iteration}
         default: true
         extra_directories: []
