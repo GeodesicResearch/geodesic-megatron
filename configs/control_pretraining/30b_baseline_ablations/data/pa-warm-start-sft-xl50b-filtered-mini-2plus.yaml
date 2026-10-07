@@ -1,0 +1,36 @@
+# The identity of the BROADLY filtered post-training corpus: the xl-50b mix
+# (geodesic-research/pa-warm-start-sft-xl-50b-mix @ ec0b9197, the baseline ablation's corpus) with
+# the Broadly Filtered rule applied — every conversation carrying a canary string, or scored
+# mini >= 2 by the gpt-5-mini cost gate, removed (sudoers/pa-warm-start-sft-xl-50b-mix-annotated
+# @ 5a073cce; none unscored, every escalated conversation judged). The rule's score half reaches
+# only the 1,173,961 conversations that carry a mini score (no conversation carries a canary string):
+# the other 7,750,285 (86.85%) were decided at the regex prefilter or the nano relevance gate and are
+# retained unexamined. dataset-builder publishes it as the
+# `pa_warm_start_sft_xl50b_filtered_mini_2plus` split of geodesic-research/control-pretraining-datasets,
+# beside its complement `..._removed_mini_2plus` and the statistics. Pre-registered: 8,838,103
+# conversations retained, 86,143 removed (2.17% of tokens).
+#
+# Tokenizer and pack geometry are the baseline xl-50b mix's verbatim (see
+# pa-warm-start-sft-xl-50b-mix.yaml beside this file for why each is load-bearing): the
+# think-HISTORY tokenizer, seq 32768, pad multiple 4 = 2 x CP. The prepare stops at the JSONL; the
+# table-driven build packs it per shard.
+#
+# Pinned to the commit that completed the published pair (2026-09-24): the last of the retained
+# split, its `_provenance.json`, the complement `pa_warm_start_sft_xl50b_removed_mini_2plus` and its
+# `_provenance.json`, so every check that reads the Hub at this revision finds all four. The
+# retained split holds 8,838,103 conversations and 48,915,066,953 tokens, exactly as
+# pre-registered, and the complement the 86,143 removed. The count in corpora.tsv is the
+# statistics' `n_retained` at this revision, filled in the same change that pinned it.
+#
+#   configs/control_pretraining/build_corpora.sh \
+#     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft pa_warm_start_sft_xl50b_filtered_mini_2plus
+dataset: geodesic-research/control-pretraining-datasets
+revision: c9bbc3495f9579ba45f385dda7523c3e94d1e9a0
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

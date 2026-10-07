@@ -44,7 +44,7 @@ from megatron.bridge.training.checkpointing import (
     checkpoint_exists,
     create_checkpoint_manager,
 )
-from megatron.bridge.training.config import ConfigContainer
+from megatron.bridge.training.config import CheckpointConfig, ConfigContainer
 from megatron.bridge.training.initialize import initialize_megatron, set_jit_fusion_options
 from megatron.bridge.training.optim import setup_optimizer
 from megatron.bridge.training.state import GlobalState
@@ -85,6 +85,29 @@ class SetupOutput(NamedTuple):
     test_data_iterator: Optional[RerunDataIterator | list[RerunDataIterator]]
     checkpoint_manager: CheckpointManager
     pg_collection: ProcessGroupCollection
+
+
+def _check_ckpt_step_resumable(checkpoint_cfg: CheckpointConfig, has_local_checkpoint: bool) -> None:
+    """Refuse to start a run whose ``ckpt_step`` names a checkpoint that ``load`` does not hold.
+
+    Setup loads a checkpoint only when ``load`` (or ``pretrained_checkpoint``) holds one, so without
+    this check a run asked to resume a specific iteration would start instead from
+    ``pretrained_checkpoint`` weights or from a random initialisation, with no error.
+
+    Args:
+        checkpoint_cfg: The checkpoint configuration.
+        has_local_checkpoint: Whether a local (non-persistent) checkpoint is available to resume.
+
+    Raises:
+        FileNotFoundError: If ``ckpt_step`` is set but ``load`` holds no checkpoint.
+    """
+    if checkpoint_cfg.ckpt_step is None or has_local_checkpoint:
+        return
+    if not checkpoint_exists(checkpoint_cfg.load):
+        raise FileNotFoundError(
+            f"checkpoint.ckpt_step={checkpoint_cfg.ckpt_step} names a checkpoint to resume, but "
+            f"checkpoint.load ({checkpoint_cfg.load}) holds no checkpoint"
+        )
 
 
 def setup(
@@ -275,6 +298,7 @@ def setup(
     has_local_checkpoint = (
         "local_checkpoint_manager" in _ckpt_ctx and _ckpt_ctx["local_checkpoint_manager"].find_latest() != -1
     )
+    _check_ckpt_step_resumable(cfg.checkpoint, has_local_checkpoint)
 
     # For PEFT, the pretrained checkpoint is loaded in the pre-wrap hook
     if cfg.peft is not None:

@@ -275,7 +275,9 @@ python scripts/telemetry/score_run.py /projects/a5k/public/logs/megatron_runs/tr
 The scorer reads the sequence length and model FLOPs/token from the config and the model's HF
 `config.json` through `scripts/nemotronh_flops_estimator.py`, takes the batch from the log, and
 prints its inputs beside the score (`--json` for machine-readable output, `--wandb-peak-memory` to
-add the W&B summary peaks and allocator-retry count). Calibrate `--time` to the measured runtime (a 50-iteration 64-GPU Nano
+add the W&B summary peaks and allocator-retry count, which are one rank's). The peak memory over all
+ranks is the run's own `[peak-memory]` line, which rank 0 logs when the training loop ends and the
+score reports as `peak_memory_across_ranks`. Calibrate `--time` to the measured runtime (a 50-iteration 64-GPU Nano
 probe takes 9–13 min), and compare a probe only against runs placed on a single switch group (the
 log's `[run-identity] switch placement` line): spanning more than one group costs 2.5–6.6% on its own,
 while single-group runs of one posture agree to ~0.5%, so repeat a probe before trusting a smaller
@@ -333,9 +335,10 @@ A config that differs from an existing one in a few fields can instead name it u
 `base_config:` (relative to the new file's directory) and state only those fields. Mappings
 deep-merge and anything else replaces the base value, as `OmegaConf.merge` would, so a change
 to the base reaches the overlay unedited. The Nano pretrain quickstart is written this way. Only
-tools that read configs through `scripts/training/config_compose.py` compose (training, the FLOPs
-estimator and the run scorer built on it, the config tests), so a config that the stage gate or the Hub
-scripts read must stay a complete file ([CLAUDE.md](CLAUDE.md), "Config composition").
+tools that read configs through `scripts/training/config_compose.py` compose (training and the
+blend-coverage dry run built on it, the FLOPs estimator and the run scorer built on it, the config
+tests), so a config that the stage gate, the Hub scripts or the epoch-chain generator (as a
+`parent_config` or `posture_config`) read must stay a complete file ([CLAUDE.md](CLAUDE.md), "Config composition").
 
 ### Fault Tolerance
 
@@ -375,8 +378,8 @@ Other levers that matter: `recompute_granularity: selective` with MoE-scoped
 and OOM), `moe_permute_fusion: True`, `expert_tensor_parallel_size: 1` (parallel folding —
 what keeps EP node-local at high TP), `gradient_accumulation_fusion: True` (the image ships
 APEX; ~1.1 s/iter on the 120B), and **BF16 everywhere** — FP8 causes stochastic alignment
-crashes in MoE routing. The measured exceptions are the Nano pretrain and midtrain
-quickstarts, which run FP8 current scaling on their dense layers only; their routed experts stay BF16. Recipe LR 5e-6; 8e-5
+crashes in MoE routing. The measured exceptions are the Nano pretrain and midtrain quickstarts
+and both stages of the control-pretraining V2 E2E arm, which run FP8 current scaling on their dense layers only; their routed experts stay BF16. Recipe LR 5e-6; 8e-5
 NaNs under context parallelism. Full topology
 reasoning, per-model memory notes, and the legacy layouts these superseded are in
 [CLAUDE.md](CLAUDE.md#nemotron-3-super-120b-a12b-on-isambard).

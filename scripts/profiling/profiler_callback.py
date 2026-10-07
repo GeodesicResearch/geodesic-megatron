@@ -64,66 +64,13 @@ import shutil
 import socket
 
 import torch
+from scripts.telemetry.code_revision import code_revision
 
 from megatron.bridge.training.callbacks import Callback
 
 
 DEFAULT_PROFILE_ROOT = "/projects/a5k/public/profiles"
 WITH_STACK_ENV = "ISAMBARD_TORCH_PROFILE_WITH_STACK"
-
-
-def _git_dirs(repo_dir: str) -> tuple[str, str]:
-    """The (gitdir, common dir) of the checkout at ``repo_dir``.
-
-    In a linked worktree ``.git`` is a file, ``gitdir: <path>``, naming the worktree's own
-    gitdir, which holds its HEAD; the branches live in the main repository's gitdir, which the
-    worktree gitdir's ``commondir`` file names relative to itself.
-    """
-    dot_git = os.path.join(repo_dir, ".git")
-    if not os.path.isfile(dot_git):
-        return dot_git, dot_git
-    with open(dot_git) as f:
-        pointer = f.read().strip()
-    if not pointer.startswith("gitdir: "):
-        raise ValueError(f"{dot_git} is a file but not a 'gitdir: <path>' pointer")
-    gitdir = os.path.join(repo_dir, pointer[len("gitdir: ") :])
-    commondir_path = os.path.join(gitdir, "commondir")
-    if not os.path.exists(commondir_path):
-        return gitdir, gitdir
-    with open(commondir_path) as f:
-        return gitdir, os.path.normpath(os.path.join(gitdir, f.read().strip()))
-
-
-def _repo_commit(repo_dir: str) -> str:
-    """Resolve HEAD without invoking git (the container may lack the binary).
-
-    A checkout extracted with ``git archive`` has no ``.git``; such a snapshot records its
-    commit in a ``REVISION`` file at its root, which is read instead.
-    """
-    revision_path = os.path.join(repo_dir, "REVISION")
-    try:
-        if not os.path.exists(os.path.join(repo_dir, ".git")) and os.path.exists(revision_path):
-            with open(revision_path) as f:
-                revision = f.read().strip()
-            return revision or f"UNRESOLVED ({revision_path} is empty)"
-        gitdir, commondir = _git_dirs(repo_dir)
-        with open(os.path.join(gitdir, "HEAD")) as f:
-            head = f.read().strip()
-        if not head.startswith("ref: "):
-            return head
-        ref = head[len("ref: ") :]
-        ref_path = os.path.join(commondir, ref)
-        if os.path.exists(ref_path):
-            with open(ref_path) as f:
-                return f"{f.read().strip()} ({ref})"
-        with open(os.path.join(commondir, "packed-refs")) as f:
-            for line in f:
-                fields = line.split()
-                if len(fields) == 2 and fields[1] == ref:
-                    return f"{fields[0]} ({ref})"
-        return f"UNRESOLVED ({ref} is neither at {ref_path} nor in packed-refs)"
-    except (OSError, ValueError) as e:
-        return f"UNRESOLVED ({e})"
 
 
 def _capture_schedule(capture_steps: set[int]):
@@ -314,7 +261,7 @@ class TorchProfilerCallback(Callback):
         if os.path.exists(prov):
             return
         with open(prov, "w") as f:
-            f.write(f"commit: {_repo_commit(repo_dir)}\n")
+            f.write(f"commit: {code_revision(repo_dir)}\n")
             f.write(f"repo_dir: {repo_dir}\n")
             f.write(f"config_file: {self.config_file}\n")
             f.write(f"run_id: {self.run_id}\n")

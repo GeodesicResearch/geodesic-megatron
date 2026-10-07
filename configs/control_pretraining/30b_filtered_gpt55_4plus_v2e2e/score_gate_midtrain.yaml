@@ -1,0 +1,52 @@
+# The midtraining probe's memory, speed, first-loss and loss-shift gates, pre-registered before the probe runs
+# (analysis, 2026-10-01 00:58Z; the speed decision and the loss-shift bounds for Kyle's choice of the configuration
+# without selective recompute, 2026-10-01) and evaluated by scripts/telemetry/score_gate.py on the files
+# probe/probe_midtrain.sbatch writes to its output directory:
+#
+#   python scripts/telemetry/score_gate.py \
+#     --spec configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/score_gate_midtrain.yaml \
+#     --scores-dir /projects/a5k/public/logs/control_pretraining/v2e2e_probe_midtrain/<job id>
+#
+# The probe runs it as its gating `score_gate` step. The README's "The midtraining probe" states each threshold's
+# reason.
+
+memory:
+  # The fast midtraining run's peak over every rank, through all four saves and including the warm start's
+  # checkpoint-load transient, which production pays at every segment start. Decimal GB. Retries bind; the allocated
+  # bound is the backstop.
+  fast_mid_memory:
+    score: fast_mid.score.json
+    max_allocated_gb: 85.5
+    max_alloc_retries: 0
+
+speed:
+  # The gate is the speed-up, as_is_mid's mean step over fast_mid's over iterations 101-500 on the same nodes: at
+  # least 1.3x go, below 1.3x to Kyle. score_gate.py states it as fast_mid's step projected onto the baseline
+  # midtraining's own 6.43 s/iter, which it reports, so the limit is 6.43 / 1.3.
+  fast_mid_speed:
+    candidate: fast_mid.score.json
+    reference: as_is_mid.score.json
+    reference_s_per_iter: 6.43
+    go_up_to_s: 4.946154
+    report_up_to_s: 4.946154
+
+first_loss:
+  # Iteration 1 from the same weights on the same first batch: FP8 on the dense layers moved it by 2.0e-3 at 64 GPUs
+  # (the midtraining campaign's E-007); a wrong warm start or wrong data moves it by 0.1 or more.
+  fast_mid_first_loss:
+    candidate: fast_mid.score.json
+    reference: as_is_mid.score.json
+    tolerance: 0.005
+
+loss_shift:
+  # fast_mid's lm-loss offset from the mean of production's midtraining (job 6127737) and as_is_mid, per 50-iteration
+  # window of 51-500 (the probe's parity_band.json). The fast configuration settles a steady offset above the two
+  # references, which agree with each other to 0.001, so a band drawn from their spread refuses it; the gate bounds
+  # the offset instead: every window in [-0.001, +0.003], and the last three windows' mean no more than 0.001 above
+  # the first three's, since a growing offset, not a steady one, is the risk. The band test is reported beside it.
+  fast_mid_loss_shift:
+    report: parity_band.json
+    offset_low: -0.001
+    offset_high: 0.003
+    rise_windows: 3
+    max_rise: 0.001

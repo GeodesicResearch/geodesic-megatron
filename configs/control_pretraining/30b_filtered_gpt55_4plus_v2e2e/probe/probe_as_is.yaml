@@ -1,0 +1,24 @@
+# v2e2e probe, as-is rerun: the unfiltered baseline's stage 1, unchanged in posture and data, for its
+# first 500 iterations at its production width (512 GPUs, DP=512). With the baseline's own run it is
+# the reference pair of the identical-batch parity test: the two read the same batches, so the band
+# between them is the as-is posture's run-to-run nondeterminism, and the fast-posture probe
+# (probe_fast.yaml, on the same batches) must lie inside it. probe.sbatch in this directory runs it.
+#
+# It is the baseline's config with train.exit_interval 500 (train_iters stays 29881, so the blend and
+# the learning rate are production's), no checkpoint loaded or saved (the baseline's load == save is
+# the production run's directory), and its own W&B run. It has no launcher settings file, as the
+# baseline had none. tests/unit_tests/test_control_pretraining_30b_filtered_gpt55_4plus_v2e2e.py
+# asserts that these are the only fields that differ from the baseline.
+
+base_config: ../../30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+
+train:
+  exit_interval: 500
+
+checkpoint:
+  load: null
+  save: null
+
+logger:
+  wandb_exp_name: control_pretrain_30b_filtered_gpt55_4plus_v2e2e_probe_as_is
+  wandb_save_dir: /projects/a5k/public/logs/wandb

@@ -1,0 +1,32 @@
+# What the midtraining is watched for, evaluated by scripts/telemetry/run_watch.py on the stage's segment logs, in
+# order:
+#
+#   python scripts/telemetry/run_watch.py \
+#     --spec configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/watch_midtrain.yaml --log <segment 1 log> ...
+#
+# Exit 1 means the stage must stop (cancel its running segment and its queued successors). The README's "Launch" has
+# the policy.
+
+stop:
+  # The fast midtraining configuration keeps the gradient NaN check on, so a non-finite gradient ends the run with a
+  # rejected result before its iteration line is written. The loss NaN check is off, so a NaN loss shows as an
+  # iteration line without lm loss and an infinite one as `lm loss: INF`. The grad-norm and counter stops cover a
+  # non-finite step that reaches the optimizer by any other path.
+  non_finite_grad_norm: true
+  non_finite_lm_loss: true
+  nan_or_skipped_iterations: true
+  rejected_result: true
+  max_alloc_retries: 0
+  # Every segment must log exactly the stage's launcher settings: a segment resubmitted without its .env runs the
+  # launcher's defaults and still loads the stage's optimizer state.
+  launch_settings: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.env
+
+flags:
+  # Reported to Kyle, never a stop: FP8 on the dense layers beyond 500 iterations is the configuration's own open
+  # risk (docs/investigations/nano30b-midtrain-perf-campaign.md, "Open risks"). Calibrated (2026-10-01) so normal
+  # batch-to-batch noise does not fire it: the largest rise of lm loss above its trailing 50-iteration mean is
+  # 0.0866 in the baseline's midtraining (job 6127737, iteration 1687) and 0.0841 in V2's (job 6866490, iteration
+  # 279); the threshold is max(0.1, 1.25 x 0.0866) = 0.108.
+  loss_spike:
+    above_trailing_mean: 0.108
+    trailing_iterations: 50

@@ -39,9 +39,11 @@ Two layers, both driven by the two arms' corpora tables:
   exactly as the packer renders them must be present, and removed rows absent.
 
 * **canaries** (``--canary-column <name>``): the flag lives on the removed splits and on the
-  annotated source, never on a filtered split — the retained arm carries the baseline schema
-  only — so the check is a join, not a column read. The filtered split must not carry the
-  column and must hold ``n_retained`` rows; the removed split must hold ``n_removed`` rows, of
+  annotated source, and on a filtered split only when its builder publishes the annotation
+  columns on both arms. A filtered split that carries the column is read in full and no row of
+  it may be flagged; one that does not carry it has the baseline schema and is checked through
+  the join alone. Either way the filtered split must hold ``n_retained`` rows and the removed
+  split must hold ``n_removed`` rows, of
   which exactly ``n_canary`` are flagged; and with ``--content`` every flagged removed row is
   looked up by content exactly as the sampled removed rows are and must be ``absent`` — in the
   baseline corpus, nowhere in the filtered corpus, searched exhaustively. A canary text that
@@ -289,23 +291,27 @@ def hub_sample_rows(
     return samples
 
 
-def hub_split_shape(dataset: str, revision: str, config: str) -> tuple[list[str], int]:
-    """(the top-level columns of a Hub config's first parquet file, its row count across every file), from footers."""
+def hub_split_shape(dataset: str, revision: str, config: str) -> tuple[dict[str, frozenset[str]], int]:
+    """(each of a Hub config's parquet files' top-level columns, by path; its row count across them), from footers.
+
+    Columns are reported per file because whether a filtered split carries the canary flag
+    decides which zero-canary proof runs, and these splits are published a commit at a time, so
+    shards written by different builds can disagree; one file's columns standing for the split
+    would let that choose the proof silently. They are sets, because only membership matters.
+    """
     import pyarrow.parquet as pq
     from huggingface_hub import HfFileSystem
 
     fs = HfFileSystem()
 
-    def shape(fh) -> tuple[list[str], int]:
+    def shape(fh) -> tuple[frozenset[str], int]:
         pf = pq.ParquetFile(fh)
-        return list(pf.schema_arrow.names), pf.metadata.num_rows
+        return frozenset(pf.schema_arrow.names), pf.metadata.num_rows
 
-    columns: list[str] = []
+    columns: dict[str, frozenset[str]] = {}
     rows = 0
-    for k, path in enumerate(hub_parquet_files(dataset, revision, config)):
-        names, n = read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", shape)
-        if k == 0:
-            columns = names
+    for path in hub_parquet_files(dataset, revision, config):
+        columns[path], n = read_hub_file(fs, f"datasets/{dataset}@{revision}/{path}", shape)
         rows += n
     return columns, rows
 
@@ -368,24 +374,44 @@ def audit_canaries(
 ) -> tuple[dict, list[dict]]:
     """The canary flag must sit where dataset-builder puts it, in the numbers the statistics state.
 
-    The filtered splits carry the baseline schema only, so the flag lives on the removed split
-    (and on the annotated source), never on a filtered split — one carrying it is not the
-    retained arm. Every flagged removed row is returned with ``columns``, for the content layer
-    to look for in the built corpus. The filtered split must hold ``n_retained`` rows and the
-    removed split ``n_removed``, of which exactly ``n_canary`` are flagged.
+    The flag lives on the removed split (and on the annotated source). A filtered split carries
+    it only when its builder publishes the annotation columns on both arms; then every retained
+    row's flag is read and none may be set, which is the direct form of the zero-canary proof. A
+    filtered split without the column has the baseline schema, and the proof is the join through
+    the removed split alone. Every flagged removed row is returned with ``columns``, for the
+    content layer to look for in the built corpus. The filtered split must hold ``n_retained``
+    rows and the removed split ``n_removed``, of which exactly ``n_canary`` are flagged.
     """
     scalars = prepare_config_scalars(row.config)
     dataset, revision = scalars["dataset"], scalars["revision"]
-    filtered_columns, filtered_rows = hub_split_shape(dataset, revision, row.subset)
+    file_columns, filtered_rows = hub_split_shape(dataset, revision, row.subset)
     checker.expect(
         filtered_rows == stats.n_retained,
         f"{row.subset}: the Hub filtered split has {filtered_rows:,} rows, statistics say {stats.n_retained:,}",
     )
+    schemas = sorted({tuple(sorted(names)) for names in file_columns.values()})
     checker.expect(
-        canary_column not in filtered_columns,
-        f"{row.subset}: the Hub filtered split carries the {canary_column!r} column; the retained arm has the "
-        f"baseline schema only, so this split is not it (columns: {filtered_columns})",
+        len(schemas) == 1,
+        f"{row.subset}: the Hub filtered split's parquet files disagree on their columns ({schemas}); the split "
+        "holds shards written by different builds, so its retained flags are not read",
     )
+    canaries_in_filtered: int | None = None
+    canary_column_on_filtered = len(schemas) == 1 and canary_column in schemas[0]
+    if canary_column_on_filtered:
+        flagged_retained, retained_rows = hub_flagged_rows(dataset, revision, row.subset, canary_column, columns)
+        canaries_in_filtered = len(flagged_retained)
+        checker.expect(
+            retained_rows == filtered_rows,
+            f"{row.subset}: the Hub filtered split read {retained_rows:,} rows for its flags, {filtered_rows:,} from "
+            "its footers",
+        )
+        checker.expect(
+            canaries_in_filtered == 0,
+            f"{row.subset}: {canaries_in_filtered:,} "
+            f"{'rows' if canaries_in_filtered != 1 else 'row'} of the Hub filtered split "
+            f"{'are' if canaries_in_filtered != 1 else 'is'} flagged {canary_column!r}; "
+            "the retained arm may hold no canary",
+        )
     canaries, removed_rows = (
         hub_flagged_rows(dataset, revision, f"{base_name}_removed_{tag}", canary_column, columns)
         if stats.n_removed
@@ -402,7 +428,9 @@ def audit_canaries(
     )
     report = {
         "canary_column": canary_column,
+        "canary_column_on_filtered": canary_column_on_filtered,
         "hub_filtered_rows": filtered_rows,
+        "canaries_in_filtered": canaries_in_filtered,
         "hub_removed_rows": removed_rows,
         "canaries_in_removed": len(canaries),
     }
@@ -1054,7 +1082,8 @@ def main(argv: list[str] | None = None) -> int:
         "--canary-column",
         default=None,
         help="the removed splits' canary flag column; when given, its totals are checked against the statistics, "
-        "no filtered split may carry it, and with --content every flagged row must be absent from the built corpus",
+        "every row of a filtered split that carries the column itself must be unflagged, and with --content every "
+        "flagged row must be absent from the built corpus",
     )
     parser.add_argument(
         "--search-candidates",

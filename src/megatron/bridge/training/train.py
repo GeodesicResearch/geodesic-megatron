@@ -82,6 +82,7 @@ from megatron.bridge.training.utils.train_utils import (
     logical_and_across_model_parallel_group,
     prepare_forward_step_func,
     reduce_max_stat_across_model_parallel_group,
+    report_peak_memory_across_ranks,
     training_log,
     use_full_iteration_cuda_graph,
 )
@@ -604,6 +605,15 @@ def train(
                 checkpoint_manager,
                 train_data_iterator=train_data_iterator,
             )
+
+    # The run's memory ceiling over every rank, synchronous saves included (an asynchronous save
+    # finalises after this point): W&B's memory series and the after-iteration-1 report each come from a
+    # single rank, and the heaviest rank decides whether a posture fits.
+    report_peak_memory_across_ranks(
+        torch.cuda.memory_stats(),
+        torch.device("cuda", torch.cuda.current_device()),
+        global_state.wandb_logger,
+    )
 
     _delete_cuda_graphs(cuda_graph_helper)
 

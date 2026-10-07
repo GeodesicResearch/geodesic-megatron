@@ -34,7 +34,7 @@ import pytest
 from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
-from tests.unit_tests.campaign_config import merge_onto_recipe
+from tests.unit_tests.campaign_config import campaign_training_configs, is_training_config, merge_onto_recipe
 
 
 CAMPAIGN_CONFIG = (
@@ -46,13 +46,6 @@ CAMPAIGN_CONFIG = (
 
 
 BASELINE_PRETRAIN_CONFIG = CAMPAIGN_CONFIG.parent / "30b_baseline" / "nemotron_nano_30b_baseline_pretrain.yaml"
-
-
-def is_training_config(path: Path) -> bool:
-    """Whether ``path`` is a config a launcher merges onto a recipe, identified by the `train`
-    section that only a training config carries (the corpus/prepare configs have none). Read
-    through the `base_config` chain, so an overlay whose `train` section is all inherited counts."""
-    return "train" in load_composed_yaml(path)
 
 
 def tensorboard_offenders(paths: list[Path], root: Path) -> dict[str, object]:
@@ -120,12 +113,8 @@ class TestTensorBoardIsDisabledEverywhere:
     directory's owner, the other produces no error at all.
     """
 
-    def campaign_training_configs(self) -> list[Path]:
-        """Every campaign config that a launcher merges onto a recipe."""
-        return [path for path in sorted(CAMPAIGN_CONFIG.parent.rglob("*.yaml")) if is_training_config(path)]
-
     def test_every_training_config_states_tensorboard_dir_as_null(self):
-        offenders = tensorboard_offenders(self.campaign_training_configs(), CAMPAIGN_CONFIG.parent)
+        offenders = tensorboard_offenders(campaign_training_configs(), CAMPAIGN_CONFIG.parent)
         assert offenders == {}, f"configs that do not disable TensorBoard: {offenders}"
 
     def test_an_overlay_is_judged_by_its_composed_config(self, tmp_path):
@@ -142,10 +131,10 @@ class TestTensorBoardIsDisabledEverywhere:
             "names_a_directory.yaml": "/tmp/tb_logs"
         }
 
-    def test_the_configs_cover_every_stage_of_both_arms(self):
+    def test_the_configs_cover_every_stage_of_every_arm(self):
         """A guard over a discovered set is only as good as the discovery: if the `train` filter
         stopped matching, the test above would pass over an empty list."""
-        found = {path.name for path in self.campaign_training_configs()}
+        found = {path.name for path in campaign_training_configs()}
         for name in (
             "nemotron_nano_30b_baseline_pretrain.yaml",
             "nemotron_nano_30b_baseline_midtrain.yaml",
@@ -153,7 +142,13 @@ class TestTensorBoardIsDisabledEverywhere:
             "nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml",
             "nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml",
             "nemotron_nano_30b_filtered_mini_2plus_sft.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_midtrain.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml",
             "nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml",
+            "nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml",
+            "nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml",
         ):
             assert name in found, f"{name} is not being checked"
 

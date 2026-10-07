@@ -35,8 +35,7 @@ import stat
 import subprocess
 
 import pytest
-
-from tests.unit_tests.launcher_source import LAUNCHER, launcher_function
+from scripts.training.launcher_source import LAUNCHER, launcher_function
 
 
 # Two leaf switches and a spine, matching `scontrol show topology` on Isambard. group9 is

@@ -1,0 +1,65 @@
+# What stage 1 is watched for, evaluated by scripts/telemetry/run_watch.py on the stage's segment logs, in order:
+#
+#   python scripts/telemetry/run_watch.py \
+#     --spec configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/watch_pretrain.yaml --log <segment 1 log> ...
+#
+# Exit 1 means the stage must stop (cancel its running segment and its queued successors); 2 means a due loss gate
+# could not be evaluated, which blocks like a FAIL until it is resolved before the first save at 2264. The README's
+# "Launch" has the policy.
+
+stop:
+  # Stage 1 keeps the gradient NaN check on (Kyle, 2026-10-01), so a non-finite gradient ends the run with a
+  # rejected result before its iteration line is written. The loss NaN check is off, so a NaN loss shows as an
+  # iteration line without lm loss and an infinite one as `lm loss: INF`. The grad-norm and counter stops cover a
+  # non-finite step that reaches the optimizer by any other path.
+  non_finite_grad_norm: true
+  non_finite_lm_loss: true
+  nan_or_skipped_iterations: true
+  rejected_result: true
+  max_alloc_retries: 0
+  # Every segment must log exactly the stage's launcher settings: a segment resubmitted without its .env runs the
+  # launcher's defaults and still loads the stage's optimizer state.
+  launch_settings: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.env
+
+loss_gates:
+  spec: configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/loss_gate.yaml
+  # L1 and L2 are waived (Kyle, 2026-10-02): L1 failed the first launch (job 7004866) in one warmup-descent window,
+  # 101-150, 0.0085 below its band, the run then descending faster than every reference ("Loss looks fine. No need
+  # for more probes or tests."), and L2 spans the same descent. L2b checks the loss level after it.
+  gates: [L2b]
+
+flags:
+  # Reported to Kyle, never a stop. The probe saw the fast posture settle about 0.02 above the same-node as-is run
+  # after iteration 250; a growing offset, not a steady one, is the concern. L2b's offset from {baseline, broad},
+  # averaged over its last three 100-iteration windows, more than 0.01 (half its 0.02 tolerance) above the average
+  # over its first three. One-sided: only a rise is flagged, since a loss falling further below the references is
+  # not the precision change's risk.
+  growing_offset:
+    gate: L2b
+    windows: 3
+    above: 0.01
+  # Past L2b's range: every 2264-iteration block (the save cadence) of this stage's mean lm loss minus the
+  # baseline's, against the Broadly Filtered arm's minus the baseline's (a filtered arm's distance from the
+  # baseline); outside that envelope in two consecutive blocks. The logs are each run's stage-1 segments in order
+  # (the baseline's W&B runs fuhvhgxq, ggt10a5z and tz0kuy6q; the broad arm's 5s8x5mgb, a1h12jm5, n97m1f6r,
+  # xd9fuvqt, 8avt0pna and zno0zq8b); segments that logged no iteration (the final re-saves, the starts that
+  # crashed before iteration 1) are left out. The baseline segment that trained iterations 22641-24904 (W&B
+  # mpf5lqoj) left no log, so block 11 is read from that run's history.
+  block_envelope:
+    reference:
+      logs:
+        - /projects/a5k/public/data_cwtice.a5k/logs/megatron_runs/train-6107666.out
+        - /projects/a5k/public/data_cwtice.a5k/logs/megatron_runs/train-6107668.out
+        - /projects/a5k/public/data_cwtice.a5k/logs/megatron_runs/train-6107669.out
+      wandb_blocks:
+        11: geodesic/megatron_training/mpf5lqoj
+    envelope:
+      logs:
+        - /projects/a5k/public/logs/megatron_runs/train-6354507.out
+        - /projects/a5k/public/logs/megatron_runs/train-6450372.out
+        - /projects/a5k/public/logs/megatron_runs/train-6450407.out
+        - /projects/a5k/public/logs/megatron_runs/train-6450408.out
+        - /projects/a5k/public/logs/megatron_runs/train-6450409.out
+        - /projects/a5k/public/logs/megatron_runs/train-6498167.out
+    block_iterations: 2264
+    consecutive_blocks: 2

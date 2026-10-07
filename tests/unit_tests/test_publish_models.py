@@ -156,6 +156,7 @@ def manifest_text(repo_root: Path) -> dict:
                 "reasoning": False,
                 "strict": True,
                 "description": "base",
+                "note": "The base arm.",
                 "history": [],
                 "stages": [
                     {
@@ -180,6 +181,7 @@ def manifest_text(repo_root: Path) -> dict:
                 "reasoning": True,
                 "strict": False,
                 "description": "think",
+                "note": "The think arm.",
                 "history": ["configs/pre.yaml", "configs/mid.yaml"],
                 "stages": [
                     {
@@ -312,21 +314,54 @@ class RecordingHub:
             if c["namespace"] == owner
         ]
 
+    def _collection(self, slug):
+        return next(c for c in self.collections if c["slug"] == slug)
+
     def create_collection(self, title, namespace, description, private):
         slug = f"{namespace}/{title.lower().replace(' ', '-')}-abc"
         self.collections.append(
-            {"title": title, "slug": slug, "namespace": namespace, "private": private, "items": set()}
+            {
+                "title": title,
+                "slug": slug,
+                "namespace": namespace,
+                "private": private,
+                "description": description,
+                "items": {},
+            }
         )
         self.calls.append(("create_collection", title))
         return type("C", (), {"slug": slug})()
 
-    def add_collection_item(self, slug, item_id, item_type, exists_ok):
-        # The Hub answers an item already in the collection with a 409 unless told it may exist.
-        collection = next(c for c in self.collections if c["slug"] == slug)
-        if item_id in collection["items"] and not exists_ok:
-            raise RuntimeError(f"409 Conflict: {item_id} is already in {slug}")
-        collection["items"].add(item_id)
+    def get_collection(self, slug):
+        # Items carry the fields huggingface_hub's CollectionItem does: the repo id, the Hub's own
+        # object id (what an item update is addressed by) and the note.
+        collection = self._collection(slug)
+        items = [
+            type("Item", (), {"item_id": item_id, "item_object_id": held["object_id"], "note": held["note"]})()
+            for item_id, held in collection["items"].items()
+        ]
+        return type("C", (), {"slug": slug, "description": collection["description"], "items": items})()
+
+    def update_collection_metadata(self, slug, description=None):
+        self._collection(slug)["description"] = description
+        self.calls.append(("update_collection_metadata", slug, description))
+
+    def add_collection_item(self, slug, item_id, item_type, note=None, exists_ok=False):
+        # The Hub answers an item already in the collection with a 409 unless told it may exist, and
+        # then leaves the existing item, note included, as it was.
+        collection = self._collection(slug)
+        if item_id in collection["items"]:
+            if not exists_ok:
+                raise RuntimeError(f"409 Conflict: {item_id} is already in {slug}")
+        else:
+            collection["items"][item_id] = {"object_id": f"obj-{item_id}", "note": note}
         self.calls.append(("add_collection_item", slug, item_id))
+
+    def update_collection_item(self, slug, item_object_id, note=None):
+        collection = self._collection(slug)
+        (item_id,) = [i for i, held in collection["items"].items() if held["object_id"] == item_object_id]
+        collection["items"][item_id]["note"] = note
+        self.calls.append(("update_collection_item", slug, item_id, note))
 
 
 class RecordingWandb:
@@ -483,6 +518,78 @@ def test_manifest_rejects_a_collection_description_the_hub_would_refuse(campaign
     assert len(publish_models.load_manifest(manifest_path, root).collection.description) == 150
 
 
+@pytest.mark.parametrize("note", ["", "   ", "x" * (publish_models.COLLECTION_NOTE_MAX_CHARS + 1), None, 5])
+def test_manifest_refuses_a_collection_note_the_hub_would_not_show(campaign, note):
+    """A model's one-line collection note tells near-identical repository names apart; an empty note, one
+    over the Hub's limit, or a key left without text (YAML reads a bare ``note:`` as null, which as a
+    string would publish the note "None") is refused up front rather than at the end of a pass."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["models"][0]["note"] = note
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match="note"):
+        publish_models.load_manifest(manifest_path, root)
+
+
+def test_manifest_reads_each_models_collection_note_and_allows_none(campaign):
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    del raw["models"][1]["note"]
+    manifest_path.write_text(yaml.safe_dump(raw))
+    notes = {m.repo: m.note for m in publish_models.load_manifest(manifest_path, root).models}
+    assert notes == {"org/arm-base": "The base arm.", "org/arm-think": None}
+
+
+def _collection(description: str) -> "publish_models.Collection":
+    return publish_models.Collection(title="Test Collection", description=description, private=True)
+
+
+def test_a_new_collection_gets_every_repository_with_its_note():
+    hub = RecordingHub()
+    slug = publish_models.ensure_collection(hub, _collection("d"), "org", {"org/a": "note a", "org/b": "note b"})
+    held = hub._collection(slug)
+    assert held["description"] == "d"
+    assert {repo: item["note"] for repo, item in held["items"].items()} == {"org/a": "note a", "org/b": "note b"}
+    assert not [c for c in hub.calls if c[0] in ("update_collection_metadata", "update_collection_item")]
+
+
+def test_an_existing_collection_is_brought_to_the_manifests_description_and_notes():
+    """A collection is created once, so a description or a note changed in the manifest afterwards
+    reached the Hub only if the pass writes it; it is written exactly when it differs."""
+    hub = RecordingHub()
+    publish_models.ensure_collection(hub, _collection("old"), "org", {"org/a": "old note", "org/b": "note b"})
+    hub.calls.clear()
+    slug = publish_models.ensure_collection(
+        hub, _collection("new"), "org", {"org/a": "new note", "org/b": "note b", "org/c": "note c"}
+    )
+    assert ("update_collection_metadata", slug, "new") in hub.calls
+    assert [c for c in hub.calls if c[0] == "update_collection_item"] == [
+        ("update_collection_item", slug, "org/a", "new note")
+    ]
+    assert {repo: item["note"] for repo, item in hub._collection(slug)["items"].items()} == {
+        "org/a": "new note",
+        "org/b": "note b",
+        "org/c": "note c",
+    }
+    hub.calls.clear()
+    publish_models.ensure_collection(
+        hub, _collection("new"), "org", {"org/a": "new note", "org/b": "note b", "org/c": "note c"}
+    )
+    assert not [c for c in hub.calls if c[0] in ("update_collection_metadata", "update_collection_item")]
+
+
+def test_a_model_without_a_note_leaves_the_hubs_note_as_it_is():
+    hub = RecordingHub()
+    slug = publish_models.ensure_collection(hub, _collection("d"), "org", {"org/a": "kept"})
+    hub.calls.clear()
+    publish_models.ensure_collection(hub, _collection("d"), "org", {"org/a": None, "org/b": None})
+    assert not [c for c in hub.calls if c[0] == "update_collection_item"]
+    assert {repo: item["note"] for repo, item in hub._collection(slug)["items"].items()} == {
+        "org/a": "kept",
+        "org/b": None,
+    }
+
+
 def test_manifest_rejects_unknown_and_missing_keys(campaign):
     root, _, manifest_path = campaign
     raw = yaml.safe_load(manifest_path.read_text())
@@ -604,14 +711,27 @@ def test_every_campaign_manifest_loads_against_this_checkout(manifest_path):
         assert model.reasoning == all(s.revision.startswith("sft_iter_") for s in model.stages)
 
 
-def test_the_control_pretraining_manifest_publishes_both_arms_the_ablation_and_its_rerun():
+def test_the_control_pretraining_manifest_publishes_every_arm_the_ablation_and_its_rerun():
     manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["control_pretraining"], _REPO_ROOT)
     repos = [m.repo for m in manifest.models]
-    # Two repositories per arm, base and think, plus the post-training ablation and its rerun on
-    # fixed, fast code. Each of those needs its own repository rather than a second sft stage under
-    # baseline-think: that repository's sft_iter_<n> revisions are the mainline run's, and a card has
-    # to say which corpus and which code made the weights.
-    assert len(repos) == 6 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    # Two repositories per three-stage arm, base and think; one for the post-training ablation and one
+    # for its rerun on fixed, fast code, each of which needs its own rather than a second sft stage
+    # under baseline-think (that repository's sft_iter_<n> revisions are the mainline run's, and a card
+    # has to say which corpus and which code made the weights); one base repository per
+    # midtraining-only narrowly filtered arm, V1 and V2; and the V2 arm's xl-50b think repository. The
+    # broad arm's think repository is its xl-50b one. Each filtered family adds a
+    # knowledge-reintroduction repository and its replay-only control, once its links exist. V2 E2E
+    # adds one base repository, both of whose stages it trains.
+    assert len(repos) == 16 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
+    assert len(reintroduction) == 6
+    for model in reintroduction:
+        (stage,) = model.stages
+        # Which link is the final one is the chain spec's to say; test_control_pretraining_30b_trustedmonitor pins it.
+        assert stage.name == "continual_pretraining" and "_cpt_link" in stage.config.name
+        assert stage.tokens_per_iteration == 8_388_608
+        assert stage.tokens_before == (29881 + 3126) * 16_777_216
+        assert model.private and not model.reasoning and model.strict
     for model in manifest.models:
         assert ("think" in model.repo) == model.reasoning
     # The curriculum trains 16,777,216 tokens per iteration; the xl-50b ablation's SFT half that.
@@ -628,6 +748,62 @@ def test_the_control_pretraining_manifest_publishes_both_arms_the_ablation_and_i
     assert rerun.stages[0].tokens_before == xl50b.stages[0].tokens_before
     assert [m.repo for m in manifest.models if m.card_sections is not None] == [rerun.repo]
     assert xl50b.repo.split("/")[1] in rerun.card_sections
+
+
+def _chained_midtraining(campaign, first_save: str, first_lr: float) -> Path:
+    """The fixture's midtraining stage given a first job whose warmup is 25 iterations."""
+    root, ckpt, manifest_path = campaign
+    first = root / "configs" / "mid_first.yaml"
+    write_stage_config(first, ckpt / first_save, 4, "exp-mid", BLEND, global_batch_size=4)
+    raw = yaml.safe_load(first.read_text())
+    raw["scheduler"] = {"lr_decay_style": "constant", "lr_warmup_iters": 25}
+    raw["optimizer"]["lr"] = first_lr
+    first.write_text(yaml.safe_dump(raw))
+    manifest = yaml.safe_load(manifest_path.read_text())
+    manifest["models"][0]["stages"][1]["schedule_config"] = "configs/mid_first.yaml"
+    manifest_path.write_text(yaml.safe_dump(manifest))
+    return manifest_path
+
+
+def test_a_chained_stage_takes_its_warmup_from_its_first_job_and_everything_else_from_its_last(campaign):
+    manifest_path = _chained_midtraining(campaign, "mid", 1.0e-3)
+    (base, _) = publish_models.load_manifest(manifest_path, campaign[0]).models
+    midtraining = base.stages[1]
+    assert midtraining.training.warmup == "25 iterations"
+    assert midtraining.config.name == "mid.yaml" and midtraining.train_iters == 4
+
+
+@pytest.mark.parametrize(
+    "first_save,first_lr,match",
+    [("elsewhere", 1.0e-3, "writes"), ("mid", 2.0e-3, "beyond warmup")],
+)
+def test_a_schedule_config_of_another_run_is_refused(campaign, first_save, first_lr, match):
+    """Only the warmup may come from the first job: a config writing elsewhere, or differing in any
+    other training fact, is some other run and would put its facts on this card."""
+    manifest_path = _chained_midtraining(campaign, first_save, first_lr)
+    with pytest.raises(publish_models.ManifestError, match=match):
+        publish_models.load_manifest(manifest_path, campaign[0])
+
+
+def test_a_reintroduction_card_states_the_warmup_its_first_link_ran():
+    """A chained stage's facts come from its final link, whose warmup is 0 because it resumes the
+    previous link; the card must state the 25-iteration warmup the chain's first link ran, as each
+    repository's own description does."""
+    manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["control_pretraining"], _REPO_ROOT)
+    reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
+    assert reintroduction
+    for model in reintroduction:
+        card = publish_models.render_model_card(manifest, model, [])
+        assert "warmup 25 iterations" in card, model.repo
+        assert "warmup none" not in card, model.repo
+
+
+def test_every_control_pretraining_model_has_its_own_collection_note():
+    """The campaign's repository names differ by a suffix or two, so each carries the one line the
+    collection shows under it, and no two of those lines are the same."""
+    manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["control_pretraining"], _REPO_ROOT)
+    notes = [m.note for m in manifest.models]
+    assert all(notes) and len(set(notes)) == len(notes)
 
 
 def test_the_metagaming_manifest_publishes_the_sft_arm_after_the_baseline_curriculum():

@@ -24,6 +24,36 @@ filtered version of the same blend, so everything except the data is held fixed 
 > kept the 476 canary documents, and are withdrawn and deleted; that arm's README records which
 > splits of the rebuild are verified, which are held back, and what remains before launch.
 >
+> The third arm is [`30b_filtered_gpt55_4plus/`](30b_filtered_gpt55_4plus/README.md): a
+> **midtraining stage only**, the Broadly Filtered arm's pretraining final annealed on corpora cut
+> by the narrower rule canary **or** GPT-5.5 judge score >= 4 (the annotation repository's own
+> `filter_decision`), so it is precisely filtered through the anneal and broadly filtered through
+> the pretraining behind it. It ran on 2026-09-20 (W&B `766veqps`, 3126 iterations, exit 0) and
+> its six checkpoints are on the Hub; its README records the lineage, the gate as walked and the
+> run as it went. It is **deprecated** (2026-09-23) in favour of
+> [`30b_filtered_gpt55_4plus_v2/`](30b_filtered_gpt55_4plus_v2/README.md), the same rule and lineage
+> at the annotation revision where every escalated document was judged (8,439,631 documents
+> retained against 8,450,554). V2, whose pretraining is the broad filter's, is reported alone (the
+> study's group figures compare only models filtered end to end, so their Narrowly Filtered base
+> model is V2 E2E, below; Kyle, 2026-10-03), and its reasoning model follows the xl-50b recipe; V1 is
+> in no figure (Kyle, 2026-09-26) and is not post-trained.
+>
+> [`30b_filtered_gpt55_4plus_v2e2e/`](30b_filtered_gpt55_4plus_v2e2e/README.md) applies V2's rule
+> from the first pretraining token: its own from-scratch stage 1 on the `_filtered_gpt55_4plus_v2e2e`
+> pretraining splits, then V2's midtraining from that final. Its stage 1 trains in the fast Nano
+> pretrain posture, which changes numerical precision, behind a probe and a pre-registered loss gate
+> that stop it for debugging in that posture on failure;
+> its five pretraining corpora are pinned at the data revision `a815dfe7`, and its other ten are
+> V2's builds.
+>
+> [`30b_trustedmonitor/`](30b_trustedmonitor/README.md) trains the filtered knowledge back in:
+> continual pretraining of the Broadly Filtered and narrow V2 midtraining finals on the
+> deduplicated union of the documents each family's filters removed, half-and-half with replay of
+> its own midtraining blend, beside a replay-only control per family, one epoch per job. Its link
+> configs are generated from `chain.yaml` by [`generate_epoch_chain.py`](generate_epoch_chain.py),
+> and every link after the first resumes the previous one's full state with
+> `checkpoint.reset_data_position`, so each reads its own freshly shuffled epoch.
+>
 > The campaign's CPT leg lives in [`cpt_validation/`](cpt_validation/README.md): 10B-token
 > continual pretraining of the released Nano/Super Base checkpoints on 50% ClimbMix /
 > 25% AI-safety discourse / 25% arXiv.
@@ -32,10 +62,19 @@ filtered version of the same blend, so everything except the data is held fixed 
 > three `30b_baseline/` stages, chained checkpoint to checkpoint, to prove the configs run and
 > to measure s/iter before the full curriculum is authorised.
 >
-> [`30b_baseline_ablations/`](30b_baseline_ablations/README.md) holds variants of a
-> `30b_baseline/` stage, each a full stage config pinned to its parent field by field by test;
-> the one on file is the stage-3 SFT re-run on the revised ~50B-token post-training mix at half
-> the batch, so the corpus and the batch are the only things that move against the parent.
+> [`30b_baseline_ablations/`](30b_baseline_ablations/README.md) holds the xl-50b SFT recipe: the
+> baseline's stage-3 ablation, re-run on the revised ~50B-token post-training mix at half the
+> batch so that the corpus and the batch are the only things that move against its parent, and
+> the filtered arms' reasoning models on that recipe, the Broadly Filtered arm's and narrow V2's,
+> each differing from the baseline ablation only in its corpus (the arm's cut of the same mix), its
+> warm start (the arm's midtraining final) and its run identity. Each is a full stage config pinned
+> field by field by test: the ablation to its parent by
+> `test_control_pretraining_30b_baseline_ablations.py`, the two filtered configs to the ablation by
+> `test_control_pretraining_30b_filtered_sft_xl50b.py`. Both splits are published, pinned, passed
+> dataset-builder's verification and are packed (32 shards each); the Broadly Filtered model trains
+> from its arm's midtraining final, and the narrow V2 model starts from the V2 midtraining's final
+> (iteration 3126) once that exists. Neither rule examined the whole mix — the ablations README's
+> two-arm table gives each rule's reach, which both models' Hub descriptions state.
 
 | | |
 |---|---|
@@ -396,6 +435,17 @@ cache key cannot detect and that nothing else would flag either. The rule is the
 unconditional: regenerate a `.bin/.idx` at a path that has ever been trained against, and
 delete the cache — not "delete it if the corpus changed much".
 
+**A config that sets `dataset.path_to_cache` keeps those indices there instead of beside the
+corpus**: every stage from the midtraining on, and every `30b_trustedmonitor` link, points it at the
+campaign's shared index cache, where each dataset's indices are a `<hash>-GPTDataset-train-*` set
+whose `description.txt` names its `dataset_path`. For a corpus re-tokenized in place, delete every set
+naming its prefix, as well as the directory beside it (the blend's own `BlendedDataset` indices depend
+only on weights and sizes, not on content):
+
+    C=$(python3 -c "import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))['dataset']['path_to_cache'])" <config.yaml>)
+    grep -l '"dataset_path": "<prefix>"' "$C"/*-GPTDataset-train-description.txt |
+      sed 's/-description\.txt$//' | while read -r key; do rm -f -- "$key"-*; done
+
 ## Topology
 
 `TP=1 · CP=1 · EP=4 · PP=1 · ETP=1 · DP=512` on 512 GPUs, mbs 1 (4 microbatches per DP
@@ -562,6 +612,14 @@ This run is **a chain of day-long segments, not one long allocation.** Submit `N
 that share a single `--job-name`; `--dependency=singleton` is what makes them run strictly one
 at a time, and each picks up where the last stopped (see Resume). Set `N` to
 `ceil(estimated training days) + 1` so one spare segment absorbs overrun.
+
+**The node limit for new submissions (Kyle, 2026-10-03):** a multi-node submission passes
+`ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250`; a one-node job (an export, an eval, a fetch)
+is not held to it (10000, or `ISAMBARD_SBATCH_FORCE=1` as the Hub publisher and the stage gate submit). Each job's start-of-job `isambard_sbatch --check` reads the cap from the environment it
+was submitted with, so a job keeps its submission cap while it waits. The `FORCE=1` command below, and
+the 256 in the launch steps of the V2 midtraining README, the ablations README's Launch paragraph and
+the headers of the V2 midtraining config and the two filtered xl-50b SFT configs, are the caps those
+completed runs were submitted under.
 
 ```bash
 for i in $(seq 1 $N); do
@@ -800,12 +858,20 @@ the project storage quota that `isambard_sbatch` prints on every submission.
 
 ## The archive of record: `geodesic-research/control-pretraining-models-bucket`
 
-Every completed checkpoint of every stage of both arms (optimizer and RNG state included; the
+Every completed checkpoint of every stage of every arm (optimizer and RNG state included; the
 `iter_*/hf/` exports excluded, because they are regenerable) and every corpus the stage configs
 read are mirrored into this private Hub bucket, so the study's artifacts outlive the project
 quota. The bucket's own `README.md` — [`bucket-readme.md`](bucket-readme.md) here — documents the
 layout and the restore recipe; `INVENTORY.tsv` at its root is rewritten by every pass and is the
 live state.
+
+**The mirror has been stopped since 2026-09-11 (Kyle)**, so the bucket holds only what it had copied
+by then: no midtraining final and no filtered or reintroduction corpus is in it, and every stage the
+manifest lists since then is archived only once a pass runs again. The V2 E2E stage-1 corpora were
+deleted unarchived on 2026-10-03 (Kyle; that arm's README, "Storage"), so a resumed pass fails on that
+started stage's missing corpora until they are rebuilt at `a815dfe7` or the manifest stops reading
+them. Until then those checkpoints exist
+only on `/projects` and, once exported, as Hub revisions.
 
 The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest
 [`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the stage configs, each of which
@@ -840,26 +906,39 @@ bucket's `_provenance/<run>/`.
 
 **A new stage needs no manifest edit.** Its config is already listed, so once its save directory
 exists and a save has completed, the next pass archives it; until then every pass reports the
-stage as not started, which is a state, not an error. An explicitly listed extra directory, by
-contrast, must exist. The running process re-reads the manifest every pass, but not the code:
+stage as not started, which is a state, not an error. Its corpora follow the same rule: while the
+stage has not started, a `.bin/.idx` corpus it names is skipped with a warning until both its
+`.bin` and its `.idx` exist, and a packed corpus until its `packed_train_data_path` glob matches,
+so a stage can be listed before its data is built. Once the stage has started, a missing corpus or
+pack set is a `ManifestError` that fails the whole pass before anything is uploaded: the stage's
+data existed when it trained, so its absence means it was moved or deleted, and archiving the stage
+without it would claim data the bucket does not hold. An explicitly listed extra directory must
+exist. The running process re-reads the manifest every pass, but not the code:
 after changing `sync_bucket.py`, restart it. `--plan-only` computes the plans without uploading,
 which is how to see what a change would move before it moves it.
 
 ## The models on the Hub: `hub_models.yaml`
 
 The bucket keeps the Megatron checkpoints; the **models** — HF-format exports of every completed
-checkpoint — live in the "Control Pretraining" collection, two repositories per arm plus one per
-further post-training run of the baseline (an ablation, or a rerun of one):
+checkpoint — live in the "Control Pretraining" collection: one base repository per arm and one think
+repository per SFT run, named for its recipe (`-think` for the baseline's mainline SFT,
+`-xl50b-think` for the xl-50b recipe, and `-xl50b-v2-think` for the xl-50b ablation's rerun on fixed, fast code).
+[`hub_models.yaml`](hub_models.yaml) is the list:
 
 | Repository | Holds | `main` | Other revisions |
 |---|---|---|---|
-| `control-pretraining-30b-<arm>-base` | stage 1 and stage 2 checkpoints | the final midtraining checkpoint | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
-| `control-pretraining-30b-<arm>-think` | stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-baseline-base`, `…-filtered-mini-2plus-base` | the three-stage arms' stage 1 and stage 2 checkpoints | the final midtraining checkpoint | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
+| `control-pretraining-30b-baseline-think` | the baseline's mainline stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-baseline-xl50b-think` | the xl-50b ablation's stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-baseline-xl50b-v2-think` | the xl-50b ablation rerun on fixed, fast code (`30b_baseline_ablations/`, v2) | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-filtered-mini-2plus-xl50b-think`, `…-filtered-gpt55-4plus-v2-xl50b-think` | the broad and narrow V2 arms' reasoning models, the xl-50b recipe on each arm's cut of that mix (`30b_baseline_ablations/README.md`) | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-filtered-gpt55-4plus-base` | the third arm's (narrow V1, deprecated) midtraining checkpoints; its pretraining is the Broadly Filtered arm's, carried as `history:` so the card counts tokens from 501.32B | the final midtraining checkpoint | `midtraining_iter_<n>` |
+| `control-pretraining-30b-filtered-gpt55-4plus-v2-base` | the narrow V2 arm's midtraining checkpoints, with the same `history:` | the final midtraining checkpoint | `midtraining_iter_<n>` |
+| `control-pretraining-30b-filtered-gpt55-4plus-v2e2e-base` | the V2 E2E arm's stage 1 and stage 2 checkpoints ([`30b_filtered_gpt55_4plus_v2e2e/`](30b_filtered_gpt55_4plus_v2e2e/README.md)), trained from random init | the final midtraining checkpoint | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
+| `control-pretraining-30b-filtered-{mini-2plus,gpt55-4plus-v2,gpt55-4plus-v2e2e}-trustedmonitor-base`, `…-trustedmonitor-replayonly-base` | each filtered family's knowledge-reintroduction run and its replay-only control ([`30b_trustedmonitor/`](30b_trustedmonitor/README.md)), their parent's pretraining and midtraining as `history:` | the final link's checkpoint | `cpt_iter_<n>`, one per link |
 
-An ablation of a stage gets its own repository rather than another stage under the arm's, because
-the arm's `sft_iter_<n>` revisions are the mainline SFT's: two SFT runs of the same base model
+Each SFT run gets its own repository rather than another stage under an existing one, because
+`baseline-think`'s `sft_iter_<n>` revisions are the mainline SFT's: two SFT runs of the same base model
 would collide in meaning even where their iteration numbers did not collide outright, and a model
 card has to say which corpus and which batch produced the weights, which is a per-repository
 statement. **The revision names are therefore not unique across the collection — read the
@@ -868,7 +947,7 @@ repository, not the revision, to tell two SFT runs apart.**
 Each repository's model card lists every revision with the **tokens seen** at that checkpoint
 (every earlier stage's tokens plus the iteration times its own stage's tokens per iteration, each
 stage counted at its own sequence length times global batch: 16,777,216 for the curriculum,
-8,388,608 for the GBS-256 xl-50b ablation and its rerun) and the **training loss** W&B recorded at that iteration (`lm loss`
+8,388,608 for the GBS-256 xl-50b SFTs) and the **training loss** W&B recorded at that iteration (`lm loss`
 at that step, across every segment of the stage), and a **data and schedule** section per stage
 read from the stage's training config: sequence length, global batch, learning rate and decay,
 warmup, tokenizer, and the data mix as normalised blend shares (a `dataset.data_path` blend of
@@ -877,9 +956,14 @@ stage reads). The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
 targets, and per repository its stages by training config (the save directory, `train_iters`, W&B
 run name and the data-and-schedule facts are read from there), the revision pattern per stage,
-which stage's final is `main`,
-and the stages counted for tokens but published elsewhere (the think repository's pretraining and
-midtraining); its `export:` block is how one export runs — the exporter's parallelism (TP1/EP4:
+which stage's final is `main`, for a stage run as a chain of jobs the first job's config as
+`schedule_config` (the card states its warmup; every later job resumes and warms up for none),
+the stages counted for tokens but published elsewhere (the think repository's pretraining and
+midtraining), and its `note`, the one line the collection shows under the repository, which is what
+tells the near-identical names apart there (at most 500 characters; a model without one keeps
+whatever note the Hub shows). The collection's description and every note are brought to the
+manifest's by each pass that writes the collection, so an edit to either reaches the Hub without
+recreating the collection. The manifest's `export:` block is how one export runs — the exporter's parallelism (TP1/EP4:
 torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
 submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
@@ -997,7 +1081,7 @@ These rules hold in every phase that acts, which is why every such pass reads th
   for a branch that does not exist yet; an existing branch is uploaded to as it is. Branches made
   before this rule started as copies of `main`; a read of every branch of the campaigns'
   repositories on 2026-09-24 (57 branches in six repositories, one of them the gpt55-4plus arm's
-  base repository, whose manifest is on the `worktree-filtered-gpt55-4plus` branch) found each head
+  base repository, listed in this directory's `hub_models.yaml`) found each head
   to be that branch's own upload commit, so they hold their own exports. 25 of them also carry the
   copy of `main`'s model card they were branched with, which the publisher never updates (it writes
   cards to `main` only): a revision's own card is frozen at its branching and may state what a later
