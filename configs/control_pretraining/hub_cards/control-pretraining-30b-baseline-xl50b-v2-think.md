@@ -24,7 +24,8 @@ source of gaps of the size below.
   greedy decoding is stated.
 - Accuracy is intent-to-treat: reasoning that never closes scores wrong. A budget hit is a generation that reached its
   token budget.
-- Values are v2 − v1 in percentage points, with standard errors paired by item and clustered by prompt or question.
+- Differences are v2 − v1 in percentage points, with standard errors paired by item and clustered by prompt or
+  question. Levels are given as v1 → v2.
 - At the final checkpoint each OLMo arm has three replicates and a same-model replicate floor; earlier checkpoints are
   single runs.
 - **Bold** means the difference clears max(floor, 1.96 × SE).
@@ -104,18 +105,41 @@ exact-periodic loop: 98–99% of v1's and 96.5–97% of v2's.
 
 ### OLMo 3 reasoning suite, every checkpoint
 
-Group means of the suite's benchmarks, at its 32k generation budget. The 5976 column uses three replicates per model.
+Group means of the suite's benchmarks, in percent, at its 32k generation budget. The 5976 column uses three replicates
+per model. Each metric has the two models' levels first, then their paired difference.
+
+**Accuracy (intent-to-treat), v1 → v2:**
+
+| group | 1200 | 2400 | 3600 | 4800 | 5976 |
+|---|---|---|---|---|---|
+| math | 4.53 → 4.35 | 4.03 → 4.29 | 4.64 → 4.74 | 4.18 → 4.55 | 4.59 → 4.89 |
+| reasoning | 13.02 → 15.70 | 15.86 → 16.53 | 16.79 → 17.50 | 17.51 → 17.81 | 17.04 → 17.28 |
+| knowledge QA | 20.39 → 21.70 | 23.51 → 24.49 | 23.61 → 25.75 | 24.58 → 24.61 | 23.68 → 25.15 |
+| coding | 7.63 → 9.45 | 8.03 → 9.40 | 9.24 → 9.00 | 9.75 → 9.92 | 9.76 → 9.44 |
+| instruction following | 15.61 → 16.51 | 19.55 → 21.47 | 21.90 → 23.45 | 23.89 → 21.87 | 22.65 → 23.42 |
+| chat (AlpacaEval 2 LC) | 16.26 → 14.50 | 17.82 → 18.79 | 19.04 → 21.15 | 21.85 → 21.70 | 20.81 → 21.20 |
 
 **Accuracy (intent-to-treat), v2 − v1:**
 
-| group | 1200 | 2400 | 3600 | 4800 | 5976 | 5976 level, v1 → v2 |
-|---|---|---|---|---|---|---|
-| math | −0.18 (0.28) | +0.26 (0.23) | +0.10 (0.33) | +0.36 (0.25) | **+0.29** (0.15; floor 0.17) | 4.59 → 4.89 |
-| reasoning | **+2.68** (0.40) | +0.67 (0.40) | +0.72 (0.42) | +0.30 (0.42) | +0.24 (0.24; floor 0.75) | 17.04 → 17.28 |
-| knowledge QA | **+1.31** (0.49) | +0.97 (0.59) | **+2.14** (0.56) | +0.03 (0.56) | **+1.47** (0.33; floor 0.58) | 23.68 → 25.15 |
-| coding | **+1.82** (0.42) | **+1.37** (0.35) | −0.24 (0.42) | +0.17 (0.45) | −0.32 (0.31; floor 0.14) | 9.76 → 9.44 |
-| instruction following | +0.91 (1.34) | +1.92 (1.44) | +1.55 (1.43) | −2.02 (1.45) | +0.77 (1.20; floor 1.37) | 22.65 → 23.42 |
-| chat (AlpacaEval 2 LC; no per-prompt SE) | −1.76 | +0.97 | +2.10 | −0.16 | +0.38 | 20.81 → 21.20 |
+| group | 1200 | 2400 | 3600 | 4800 | 5976 |
+|---|---|---|---|---|---|
+| math | −0.18 (0.28) | +0.26 (0.23) | +0.10 (0.33) | +0.36 (0.25) | **+0.29** (0.15; floor 0.17) |
+| reasoning | **+2.68** (0.40) | +0.67 (0.40) | +0.72 (0.42) | +0.30 (0.42) | +0.24 (0.24; floor 0.75) |
+| knowledge QA | **+1.31** (0.49) | +0.97 (0.59) | **+2.14** (0.56) | +0.03 (0.56) | **+1.47** (0.33; floor 0.58) |
+| coding | **+1.82** (0.42) | **+1.37** (0.35) | −0.24 (0.42) | +0.17 (0.45) | −0.32 (0.31; floor 0.14) |
+| instruction following | +0.91 (1.34) | +1.92 (1.44) | +1.55 (1.43) | −2.02 (1.45) | +0.77 (1.20; floor 1.37) |
+| chat (AlpacaEval 2 LC; no per-prompt SE) | −1.76 | +0.97 | +2.10 | −0.16 | +0.38 |
+
+**Budget hits (truncated), v1 → v2:**
+
+| group | 1200 | 2400 | 3600 | 4800 | 5976 |
+|---|---|---|---|---|---|
+| math | 79.34 → 76.92 | 82.37 → 77.92 | 78.88 → 77.73 | 80.84 → 78.87 | 81.23 → 78.10 |
+| reasoning | 60.77 → 52.66 | 55.08 → 52.06 | 52.49 → 49.57 | 50.89 → 48.22 | 53.55 → 50.58 |
+| knowledge QA | 48.38 → 45.20 | 41.10 → 38.57 | 41.52 → 36.74 | 37.69 → 38.47 | 40.23 → 37.15 |
+| coding | 69.39 → 61.54 | 70.49 → 61.02 | 65.68 → 64.26 | 60.96 → 59.85 | 61.90 → 61.96 |
+| instruction following | 49.22 → 46.31 | 41.93 → 39.02 | 40.54 → 35.90 | 37.84 → 37.90 | 39.19 → 36.26 |
+| chat | 26.46 → 23.60 | 19.75 → 15.65 | 16.89 → 18.01 | 17.89 → 16.27 | 18.05 → 16.36 |
 
 **Budget hits (truncated), v2 − v1:**
 
