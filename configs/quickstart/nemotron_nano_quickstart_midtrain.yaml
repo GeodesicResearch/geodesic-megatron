@@ -10,8 +10,7 @@
 # nemotron_nano_quickstart_midtrain_perf here, nemotron_nano_quickstart_midtrain for the baseline benchmark.
 #
 # The chunked linear cross-entropy is carried commit 0005 of the pinned Megatron-LM submodule, and the HybridEP path
-# relies on 0004's dispatched-count fix (3rdparty/patches/megatron-lm/README.md); at the previous pin (.dev.commit)
-# cross_entropy_fusion_impl has no 'linear' value and a run fails at its first loss computation.
+# relies on 0004's dispatched-count fix (3rdparty/patches/megatron-lm/README.md).
 #
 # It needs the launcher setting in nemotron_nano_quickstart_midtrain.env, given as an ISAMBARD_ENV_OVERRIDES file:
 # the fp32 SSM state in its checkpointed mode, stated so that a value inherited from the environment (the

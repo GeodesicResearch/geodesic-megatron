@@ -14,7 +14,24 @@
 
 import torch
 
-from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
+from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params, trim_padded_cu_seqlens
+
+
+class TestTrimPaddedCuSeqlens:
+    """The one place a packed row's -1 padding is cut off."""
+
+    def test_cuts_at_the_precomputed_first_pad(self):
+        """The collate's argmin is a [1, 1] host tensor; the row keeps everything before it."""
+        row = torch.IntTensor([0, 32, 48, -1, -1, -1])
+        torch.testing.assert_close(trim_padded_cu_seqlens(row, torch.tensor([[3]])), torch.IntTensor([0, 32, 48]))
+
+    def test_locates_the_first_pad_when_no_argmin_was_precomputed(self):
+        row = torch.IntTensor([0, 8, 16, 24, -1])
+        torch.testing.assert_close(trim_padded_cu_seqlens(row, None), torch.IntTensor([0, 8, 16, 24]))
+
+    def test_a_single_trailing_pad_is_cut_too(self):
+        row = torch.IntTensor([0, 8, 16, 48, -1])
+        torch.testing.assert_close(trim_padded_cu_seqlens(row, torch.tensor([[4]])), torch.IntTensor([0, 8, 16, 48]))
 
 
 class TestGetPackedSeqParams:

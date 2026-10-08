@@ -12,6 +12,10 @@ Home for all new configs in the Persistent Alignment **warm-start reasoning** di
 - **Tokenizer:** `geodesic-research/nemotron-think-tokenizer` (generation-marker fix merged
   2026-06-10 — masks loss to assistant turns; now byte-identical in encoder + template to
   `nemotron-think-tokenizer-prefill-parity`, so the two are interchangeable).
+- **Losses logged before 2026-10-01 are not compared with later ones.** These configs run packed
+  sequences at CP=4 with many packs per data-parallel replica, the regime of the context-parallel
+  partition bug fixed that day (about 77% of their microbatches were mis-partitioned); see
+  `skills/perf-techniques/sequence-packing/SKILL.md`, pitfall 8.
 - **Always-on launcher defaults** (see `pipeline_training_launch.sh`):
   `ISAMBARD_FP32_SSM_STATE=checkpoint` (prevents long-doc bf16 SSM-state NaN, ~free),
   `ISAMBARD_COMM_WARMUP=1` (fast startup at deep PP).

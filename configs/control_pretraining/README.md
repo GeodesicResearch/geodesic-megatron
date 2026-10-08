@@ -922,13 +922,15 @@ which is how to see what a change would move before it moves it.
 The bucket keeps the Megatron checkpoints; the **models** — HF-format exports of every completed
 checkpoint — live in the "Control Pretraining" collection: one base repository per arm and one think
 repository per SFT run, named for its recipe (`-think` for the baseline's mainline SFT,
-`-xl50b-think` for the xl-50b recipe). [`hub_models.yaml`](hub_models.yaml) is the list:
+`-xl50b-think` for the xl-50b recipe, and `-xl50b-v2-think` for the xl-50b ablation's rerun on fixed, fast code).
+[`hub_models.yaml`](hub_models.yaml) is the list:
 
 | Repository | Holds | `main` | Other revisions |
 |---|---|---|---|
 | `control-pretraining-30b-baseline-base`, `…-filtered-mini-2plus-base` | the three-stage arms' stage 1 and stage 2 checkpoints | the final midtraining checkpoint | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
 | `control-pretraining-30b-baseline-think` | the baseline's mainline stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-baseline-xl50b-think` | the xl-50b ablation's stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-baseline-xl50b-v2-think` | the xl-50b ablation rerun on fixed, fast code (`30b_baseline_ablations/`, v2) | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-filtered-mini-2plus-xl50b-think`, `…-filtered-gpt55-4plus-v2-xl50b-think` | the broad and narrow V2 arms' reasoning models, the xl-50b recipe on each arm's cut of that mix (`30b_baseline_ablations/README.md`) | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-base` | the third arm's (narrow V1, deprecated) midtraining checkpoints; its pretraining is the Broadly Filtered arm's, carried as `history:` so the card counts tokens from 501.32B | the final midtraining checkpoint | `midtraining_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-v2-base` | the narrow V2 arm's midtraining checkpoints, with the same `history:` | the final midtraining checkpoint | `midtraining_iter_<n>` |
@@ -965,7 +967,10 @@ recreating the collection. The manifest's `export:` block is how one export runs
 torch_dist reshards at load, and EP=4 keeps the MoE all-to-all on one node) and, for `--phase
 submit`, the allocation each export job asks for (`nodes`, `walltime`) — and its `card:` block is
 everything a model card says beyond its tables (licence, tags, the study paragraph, provenance, the
-base and think usage notes). The polling process runs on the host Python, and like the mirror
+base and think usage notes). A repository may also name `card_sections`, a markdown file under
+[`hub_cards/`](hub_cards/) opening with a level-2 heading, which its card places after the
+introduction; the xl-50b rerun's card carries its checkpoint-by-checkpoint comparison with the
+ablation this way. The polling process runs on the host Python, and like the mirror
 locally rather than as a SLURM job; the exports, and with an `upload:` block the uploads, are the
 jobs it submits. The exports need GPUs, but the publisher itself does not: with `--phase submit` it
 queues a job per checkpoint and can run anywhere, and only `--phase export` and the default `all`

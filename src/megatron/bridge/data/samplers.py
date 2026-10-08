@@ -198,6 +198,13 @@ class MegatronPretrainingBatchSampler:
     are padded to the same length, which is critical for fine-tuning with variable
     sequence lengths.
 
+    The sampler is epoch-aware, as upstream Megatron-Bridge's is (#4601): it advances
+    ``consumed_samples`` as it yields, so when it is re-iterated (wrapped in ``cyclic_iter``
+    for multi-epoch fine-tuning) a run resumed mid-epoch finishes that epoch and starts
+    every later one at the first sample, as an uninterrupted run does. Samples are read
+    in dataset order (upstream also reshuffles every epoch; packed fine-tuning corpora
+    here are shuffled when they are packed).
+
     Args:
         total_samples: Total number of samples in the dataset.
         consumed_samples: Number of samples already consumed (for resuming).
@@ -255,7 +262,8 @@ class MegatronPretrainingBatchSampler:
         Since we now yield the full global batch at once (not split into microbatches),
         this returns the number of global batches.
         """
-        num_available_samples = self.total_samples - self.consumed_samples % self.total_samples
+        active_total_samples = self._active_total_samples()
+        num_available_samples = active_total_samples - self.consumed_samples % active_total_samples
         if self.drop_last:
             num_global_batches = num_available_samples // self._global_batch_size
         else:
@@ -263,6 +271,22 @@ class MegatronPretrainingBatchSampler:
 
         # Each call to __iter__ yields one global batch
         return num_global_batches
+
+    def _active_total_samples(self) -> int:
+        """The samples one epoch consumes: the whole batches when the partial one is dropped, the dataset rounded up
+        to whole batches when it is padded, and the dataset otherwise."""
+        if self.drop_last:
+            active_total_samples = (self.total_samples // self._global_batch_size) * self._global_batch_size
+            assert active_total_samples > 0, (
+                "drop_last=True requires at least one full global batch; "
+                f"got total_samples={self.total_samples}, global_batch_size={self._global_batch_size}"
+            )
+            return active_total_samples
+        if self.pad_samples_to_global_batch_size:
+            return (
+                (self.total_samples + self._global_batch_size - 1) // self._global_batch_size
+            ) * self._global_batch_size
+        return self.total_samples
 
     def __iter__(self) -> Iterator[list[int]]:
         """Yields lists of indices for the full global batch assigned to this rank.
@@ -278,8 +302,10 @@ class MegatronPretrainingBatchSampler:
         3. Then split into microbatches with consistent sequence length
         """
         batch = []
+        # Resume within the current epoch; a re-iteration after a whole epoch starts at the first sample.
+        current_epoch_samples = self.consumed_samples % self._active_total_samples()
         # Last batch will be dropped if drop_last is True
-        for idx in range(self.consumed_samples % self.total_samples, self.total_samples):
+        for idx in range(current_epoch_samples, self.total_samples):
             batch.append(idx)
             if len(batch) == self._global_batch_size:
                 # Distribute indices in interleaved fashion across ranks
@@ -292,6 +318,8 @@ class MegatronPretrainingBatchSampler:
                     )
                 ]
                 assert len(all_indices) == self._global_batch_size_on_this_data_parallel_rank
+
+                self.consumed_samples += self._global_batch_size
 
                 # Yield ALL indices at once (not split into microbatches)
                 # The training loop will handle splitting after collation
@@ -306,6 +334,9 @@ class MegatronPretrainingBatchSampler:
             if self.pad_samples_to_global_batch_size:
                 num_pad = self._global_batch_size // self.data_parallel_size - len(all_indices)
                 all_indices = all_indices + [-1] * num_pad
+                self.consumed_samples += self._global_batch_size
+            else:
+                self.consumed_samples += len(batch)
 
             # Yield ALL indices at once
             yield all_indices

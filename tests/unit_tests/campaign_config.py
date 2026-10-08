@@ -283,12 +283,13 @@ def assert_levers_are_set(cfg, levers: dict[str, object], label: str) -> None:
     """Assert that each dotted ``levers`` field of the merged ``cfg`` holds its value.
 
     Read back from the merged config because the launcher's merge drops a key the config classes lack,
-    so a misspelled field, or one the pinned Megatron-LM does not have, would not arrive.
+    so a misspelled field, or one the pinned Megatron-LM does not have, would not arrive. A config field
+    typed as a mapping (``dataset.dataset_kwargs``) is read by key.
     """
     for dotted, value in levers.items():
         node = cfg
         for part in dotted.split("."):
-            node = getattr(node, part)
+            node = node[part] if isinstance(node, dict) else getattr(node, part)
         assert node == value, f"{label}: {dotted} is {node!r}, not {value!r}"
 
 

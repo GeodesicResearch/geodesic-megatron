@@ -55,8 +55,10 @@ def one_rank_model_parallel_state(seed: int, **model_parallel_sizes: Any) -> Ite
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 
     init_one_rank_nccl_world()
-    if not parallel_state.model_parallel_is_initialized():
-        parallel_state.initialize_model_parallel(**model_parallel_sizes)
+    # Model-parallel state is global, and another test in this process may have left it holding the groups of a
+    # process group it has since destroyed, so the state is built afresh over the live world.
+    parallel_state.destroy_model_parallel()
+    parallel_state.initialize_model_parallel(**model_parallel_sizes)
     model_parallel_cuda_manual_seed(seed)
     try:
         yield
