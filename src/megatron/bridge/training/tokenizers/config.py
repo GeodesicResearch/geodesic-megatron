@@ -14,12 +14,15 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional, Union
+from typing import Any, ClassVar, Literal, Optional, Union
 
 
 @dataclass
 class TokenizerConfig:
     """Configuration settings for the tokenizer."""
+
+    # A misspelled tokenizer key (e.g. ``loss_mask_token_id``) must fail rather than leave its default in place.
+    reject_unknown_override_keys: ClassVar[bool] = True
 
     metadata_path: Optional[Union[str | dict]] = None
     """Path to the tokenizer metadata file."""
@@ -107,16 +110,10 @@ class TokenizerConfig:
     """
 
     loss_mask_token_ids: Optional[list[int]] = None
-    """Token IDs whose loss contribution is masked at training time.
-
-    The training hook in `gpt_step._forward_step_common` reads this list and zeros
-    `loss_mask` at every position where `labels[t]` is in the list. Works uniformly
-    across CPT and SFT.
-
-    Auto-populated at startup from the underlying HuggingFace tokenizer's
-    `tokenizer_config.json` if it carries a top-level `loss_mask_token_ids` field.
-    Manually setting this in YAML also works and overrides the tokenizer's value.
-
-    Example use case: loss-mask markers like `<stage=training>` that should
-    appear in training context but never be emitted by the model.
+    """Legacy way to choose token masking, kept so configs written before the ``token_masking:`` block keep their
+    behaviour: ``[]`` masks nothing and a list masks those ids. With ``token_masking.mode`` unstated it decides
+    masking. With ``mode: enabled`` and no ``token_masking.token_ids`` a list supplies the masked ids, which must match
+    the tokenizer's declaration when it has one; otherwise it may only agree with the stated mode. New configs use
+    ``token_masking:`` instead (see ``megatron.bridge.training.token_masking.config`` and
+    docs/training/token-masking.md).
     """

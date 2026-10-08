@@ -18,7 +18,7 @@ import math
 import os
 import re
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import datasets
 import numpy as np
@@ -61,6 +61,10 @@ PREFIX_STR = (
 __idx_version__ = "0.2"  # index file version
 __idx_suffix__ = "idx"  # index file suffix
 
+ANSWER_ONLY_LOSS_DEFAULT = True
+"""Whether an SFT dataset trains only on the answer (the packer's stored loss mask) when ``answer_only_loss`` is
+not given."""
+
 
 def get_dataset_root(name: str) -> Path:
     """
@@ -87,7 +91,7 @@ def create_sft_dataset(
     add_sep: bool = False,
     seed: int = 1234,
     label_key: str = "output",
-    answer_only_loss: bool = True,
+    answer_only_loss: bool = ANSWER_ONLY_LOSS_DEFAULT,
     truncation_field: str = "input",
     pad_to_max_length: bool = False,
     index_mapping_dir: str | None = None,
@@ -246,7 +250,7 @@ class GPTSFTDataset(Dataset):
         max_num_samples: int = None,
         seed: int = 1234,
         label_key: str = "answer",
-        answer_only_loss: bool = True,
+        answer_only_loss: bool = ANSWER_ONLY_LOSS_DEFAULT,
         truncation_field: str = "text",
         pad_to_max_length: bool = False,  # (@adithyare) allows for much faster training especially in PEFT settings.
         index_mapping_dir: str = None,
@@ -769,6 +773,43 @@ class GPTSFTDataset(Dataset):
         return processed_batch
 
 
+def packed_sequence_loss_mask(
+    input_ids: Sequence[int] | np.ndarray,
+    loss_mask: Sequence[bool | int] | np.ndarray,
+    seq_boundaries: Sequence[int] | np.ndarray,
+    *,
+    answer_only_loss: bool,
+    eos_id: int,
+) -> np.ndarray:
+    """The loss mask of a packed row's input positions, before the collate zeroes the positions whose input is EOS.
+
+    Each sequence ``[seq_boundaries[i], seq_boundaries[i + 1])`` contributes its inputs, every token but its last;
+    the mask entry at an input says whether predicting the token after it carries loss. With ``answer_only_loss``
+    that is the packer's stored ``loss_mask``, which is already shifted so that entry ``j`` gates predicting token
+    ``j + 1``; without it every input carries loss except an EOS.
+
+    Args:
+        input_ids: The packed row's token ids.
+        loss_mask: The packed row's stored loss mask, one entry per token.
+        seq_boundaries: Where each sequence starts, followed by the row's length.
+        answer_only_loss: Whether the stored loss mask decides (otherwise only EOS inputs are excluded).
+        eos_id: The tokenizer's EOS id.
+
+    Returns:
+        One entry per input position, the sequences' inputs concatenated in order.
+    """
+    if answer_only_loss:
+        return np.concatenate(
+            [loss_mask[seq_boundaries[i] : seq_boundaries[i + 1] - 1] for i in range(len(seq_boundaries) - 1)]
+        )
+    return np.concatenate(
+        [
+            np.where(np.asarray(input_ids[seq_boundaries[i] : seq_boundaries[i + 1] - 1]) == eos_id, 0.0, 1.0)
+            for i in range(len(seq_boundaries) - 1)
+        ]
+    )
+
+
 class GPTSFTPackedDataset(GPTSFTDataset):
     """ """
 
@@ -856,22 +897,12 @@ class GPTSFTPackedDataset(GPTSFTDataset):
             self.samples_mapping = None
 
     def _build_loss_mask(self, processed_example):
-        seq_boundaries = processed_example["seq_boundaries"]
-        if self.answer_only_loss:
-            return np.concatenate(
-                [
-                    processed_example["loss_mask"][seq_boundaries[i] : seq_boundaries[i + 1] - 1]
-                    for i in range(len(seq_boundaries) - 1)
-                ]
-            )
-        return np.concatenate(
-            [
-                [
-                    0 if x == self.tokenizer.eos_id else 1.0
-                    for x in processed_example["input_ids"][seq_boundaries[i] : seq_boundaries[i + 1] - 1]
-                ]
-                for i in range(len(seq_boundaries) - 1)
-            ]
+        return packed_sequence_loss_mask(
+            processed_example["input_ids"],
+            processed_example["loss_mask"],
+            processed_example["seq_boundaries"],
+            answer_only_loss=self.answer_only_loss,
+            eos_id=self.tokenizer.eos_id,
         )
 
     def _maybe_cast_to_list(self, x):

@@ -12,6 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.unit_tests.token_masking_fixtures import build_tiny_hf_tokenizer
+
 
 # pipeline_data_prepare.py lives at the repo root, not under src/. Load it
 # directly so tests don't depend on the script being on sys.path.
@@ -89,24 +91,22 @@ class TestFormatRecord:
 
 
 class TestDecodeToken:
-    def _make_tok(self, decode_map):
-        tok = MagicMock()
-        tok.decode = lambda ids, skip_special_tokens=False: decode_map[int(ids[0])]
-        return tok
+    @staticmethod
+    def _decoder(decode_map):
+        return lambda ids: decode_map[int(ids[0])]
 
     def test_escapes_newline_tab_carriage_return(self, pipe_module):
-        tok = self._make_tok({1: "\n", 2: "\t", 3: "\r"})
-        assert pipe_module._decode_token(tok, 1) == "\\n"
-        assert pipe_module._decode_token(tok, 2) == "\\t"
-        assert pipe_module._decode_token(tok, 3) == "\\r"
+        decode = self._decoder({1: "\n", 2: "\t", 3: "\r"})
+        assert pipe_module._decode_token(decode, 1) == "\\n"
+        assert pipe_module._decode_token(decode, 2) == "\\t"
+        assert pipe_module._decode_token(decode, 3) == "\\r"
 
     def test_passes_through_normal_text(self, pipe_module):
-        tok = self._make_tok({42: "hello"})
-        assert pipe_module._decode_token(tok, 42) == "hello"
+        assert pipe_module._decode_token(self._decoder({42: "hello"}), 42) == "hello"
 
     def test_escapes_mixed_content(self, pipe_module):
-        tok = self._make_tok({99: "line1\n\tindented"})
-        assert pipe_module._decode_token(tok, 99) == "line1\\n\\tindented"
+        decode = self._decoder({99: "line1\n\tindented"})
+        assert pipe_module._decode_token(decode, 99) == "line1\\n\\tindented"
 
 
 # ── verify_packed_loss_mask ─────────────────────────────────────────────────
@@ -133,15 +133,14 @@ def _write_packed_parquet(
 
 
 @pytest.fixture
-def mock_tokenizer(monkeypatch, pipe_module):
-    """Replace AutoTokenizer.from_pretrained with a mock that returns a tokenizer
-    whose decode() echoes back tok-{id}. Avoids hitting HF Hub from unit tests."""
-    fake_tok = MagicMock()
-    fake_tok.decode = lambda ids, skip_special_tokens=False: f"tok-{int(ids[0])}"
+def mock_tokenizer(monkeypatch, pipe_module, tmp_path):
+    """Replace AutoTokenizer.from_pretrained, which would fetch from the HF Hub, with one returning a real tokenizer
+    built offline (ids 3 and 4 are "hello" and "world"; ids outside its tiny vocabulary decode to nothing)."""
+    tokenizer = pipe_module.AutoTokenizer.from_pretrained(build_tiny_hf_tokenizer(tmp_path / "tokenizer", None))
     auto = MagicMock()
-    auto.from_pretrained.return_value = fake_tok
+    auto.from_pretrained.return_value = tokenizer
     monkeypatch.setattr(pipe_module, "AutoTokenizer", auto)
-    return fake_tok
+    return tokenizer
 
 
 class TestVerifyPackedLossMask:
@@ -196,6 +195,7 @@ class TestVerifyPackedLossMask:
         assert "verify_warning" not in result
         out = capsys.readouterr().out
         assert "WARNING" not in out
+        assert "hello" in out  # row 0's token 3, decoded by the shared display decoder
 
     def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Chat format + all-1s mask is the silent-failure signature.

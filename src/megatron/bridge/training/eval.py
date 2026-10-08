@@ -33,6 +33,7 @@ from megatron.bridge.training import fault_tolerance
 from megatron.bridge.training.callbacks import CallbackContext, CallbackManager, should_fire
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
+from megatron.bridge.training.losses import reports_a_loss
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.mlflow_utils import _sanitize_mlflow_metrics
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
@@ -362,8 +363,11 @@ def evaluate_and_print_results(
     string = f" validation loss at {prefix} | "
     for key in total_loss_dict:
         string += "{} value: {:.6E} | ".format(key, total_loss_dict[key].item())
-        ppl = math.exp(min(20, total_loss_dict[key].item()))
-        string += "{} PPL: {:.6E} | ".format(key, ppl)
+        # A perplexity is reported only for losses; other report entries (fractions) have none.
+        ppl = math.exp(min(20, total_loss_dict[key].item())) if reports_a_loss(key) else None
+        log_ppl = ppl is not None and state.cfg.logger.log_validation_ppl_to_tensorboard
+        if ppl is not None:
+            string += "{} PPL: {:.6E} | ".format(key, ppl)
         if writer:
             writer.add_scalar("{} validation".format(key), total_loss_dict[key].item(), state.train_state.step)
             writer.add_scalar(
@@ -371,7 +375,7 @@ def evaluate_and_print_results(
                 total_loss_dict[key].item(),
                 state.train_state.consumed_train_samples,
             )
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+            if log_ppl:
                 writer.add_scalar("{} validation ppl".format(key), ppl, state.train_state.step)
                 writer.add_scalar(
                     "{} validation ppl vs samples".format(key), ppl, state.train_state.consumed_train_samples
@@ -379,14 +383,14 @@ def evaluate_and_print_results(
 
         if wandb_writer and is_last_rank():
             wandb_writer.log({"{} validation".format(key): total_loss_dict[key].item()}, state.train_state.step)
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+            if log_ppl:
                 wandb_writer.log({"{} validation ppl".format(key): ppl}, state.train_state.step)
 
         if mlflow_writer and is_last_rank():
             mlflow_writer.log_metrics(
                 _sanitize_mlflow_metrics({f"val/{key}": total_loss_dict[key].item()}), step=state.train_state.step
             )
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+            if log_ppl:
                 mlflow_writer.log_metrics(
                     _sanitize_mlflow_metrics({f"val/{key} ppl": ppl}), step=state.train_state.step
                 )
@@ -394,7 +398,7 @@ def evaluate_and_print_results(
             comet_logger.log_metrics(
                 {"{} validation".format(key): total_loss_dict[key].item()}, step=state.train_state.step
             )
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+            if log_ppl:
                 comet_logger.log_metrics({"{} validation ppl".format(key): ppl}, step=state.train_state.step)
 
     if process_non_loss_data_func is not None and writer and is_last_rank():

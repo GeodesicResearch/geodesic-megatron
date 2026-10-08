@@ -75,6 +75,7 @@ from megatron.bridge.training.tensor_inspect import (
     tensor_inspect_end_if_enabled,
     tensor_inspect_step_if_enabled,
 )
+from megatron.bridge.training.token_masking.monitor import TokenMaskingMonitor
 from megatron.bridge.training.utils import flop_utils
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log
 from megatron.bridge.training.utils.train_utils import (
@@ -606,6 +607,11 @@ def train(
                 train_data_iterator=train_data_iterator,
             )
 
+    # A segment that ends before its masked-target deadline is checked once its final checkpoint is written: no
+    # iteration of it trained on a masked id (each is checked as it runs), so the checkpoint is sound, and a chain
+    # resuming from it does not replay the same short segment.
+    global_state.token_masking_monitor.finish()
+
     # The run's memory ceiling over every rank, synchronous saves included (an asynchronous save
     # finalises after this point): W&B's memory series and the after-iteration-1 report each come from a
     # single rank, and the heaviest rank decides whether a posture fits.
@@ -668,6 +674,45 @@ def train(
                 scheduler=scheduler,
             ),
         )
+
+
+def report_step_losses(
+    losses_reduced: list[dict[str, torch.Tensor]],
+    dp_cp_group: torch.distributed.ProcessGroup,
+    token_masking_monitor: TokenMaskingMonitor,
+    iteration: int,
+) -> dict[str, torch.Tensor]:
+    """Reduce an iteration's per-microbatch loss reports, then check the iteration's token masking.
+
+    Each microbatch's loss function returns a dict of reports. A 2-element entry is ``[numerator, denominator]``:
+    it is summed over the microbatches, all-reduced over the data- and context-parallel ranks, and reported as
+    numerator / denominator, so it averages over the whole global batch. A 1-element entry is averaged over this
+    rank's microbatches. The token-masking monitor then checks the reduced reports, so a run cannot report losses
+    without the masking check running.
+
+    Args:
+        losses_reduced: One report dict per microbatch, every one with the same keys.
+        dp_cp_group: The data-parallel x context-parallel group the 2-element entries are reduced over.
+        token_masking_monitor: The run's token-masking monitor.
+        iteration: The iteration these reports belong to (the step counter after this iteration).
+
+    Returns:
+        The reduced report, one scalar tensor per key.
+    """
+    loss_reduced = {}
+    for key in losses_reduced[0].keys():
+        val = [x[key].view(-1) for x in losses_reduced]
+        if val[0].numel() == 2:
+            val = torch.vstack(val).sum(dim=0)
+            torch.distributed.all_reduce(val, group=dp_cp_group)
+            loss_reduced[key] = val[0] / val[1]
+        elif val[0].numel() == 1:
+            val = torch.cat(val).mean()
+            loss_reduced[key] = val
+        else:
+            raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
+    token_masking_monitor.observe(loss_reduced, iteration)
+    return loss_reduced
 
 
 def train_step(
@@ -820,24 +865,12 @@ def train_step(
         torch.cuda.empty_cache()
 
     if is_pp_last_stage(pg_collection.pp):
-        # Average loss across microbatches.
-        loss_reduced = {}
-
-        for key in losses_reduced[0].keys():
-            val = [x[key].view(-1) for x in losses_reduced]
-            if val[0].numel() == 2:
-                # there is one dict per microbatch. in new reporting, we average
-                # over the total number of tokens across the global batch.
-                val = torch.vstack(val).sum(dim=0)
-                dp_cp_group = pg_collection.dp_cp
-                torch.distributed.all_reduce(val, group=dp_cp_group)
-                loss_reduced[key] = val[0] / val[1]
-            elif val[0].numel() == 1:
-                # legacy behavior, we average over the number of microbatches
-                val = torch.cat(val).mean()
-                loss_reduced[key] = val
-            else:
-                raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
+        loss_reduced = report_step_losses(
+            losses_reduced,
+            pg_collection.dp_cp,
+            global_state.token_masking_monitor,
+            iteration=global_state.train_state.step + 1,
+        )
         return (
             loss_reduced,
             skipped_iter,

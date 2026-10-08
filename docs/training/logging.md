@@ -112,6 +112,10 @@ cfg.logger.log_timers_to_tensorboard = True
 When enabled, W&B automatically mirrors the scalar metrics logged to TensorBoard.  
 In addition, the full run configuration is synced at initialization, allowing for reproducibility and experiment tracking.
 
+W&B also receives what TensorBoard has no place for: the training-data sample tables (`data_samples/*`) and run
+summary keys, including the resolved parallelism (`parallelism/*`) and the token-masking decision
+(`token_masking/*`). See [Training-Data Samples and Token Masking](#training-data-samples-and-token-masking).
+
 
 #### Enable W&B Logging
 
@@ -267,6 +271,84 @@ At each checkpoint boundary, the log is updated with:
 
 This provides a lightweight, text-based audit trail of training progress, useful for tracking performance across restarts.
 
+
+## Training-Data Samples and Token Masking
+
+These records show what a run trains on and whether its token masking acts. The masking itself, its configuration
+and its checks are described in [Token Masking](token-masking.md).
+
+### Sample Tables (`logger.data_samples`)
+
+Before the model is built, the last rank (the one that logs to W&B) reads a bounded, seeded sample of every training
+data source, each prefix of a `.bin/.idx` blend or the packed-SFT parquet set, and logs up to three W&B tables once
+W&B is initialized:
+
+| Table | Rows |
+|---|---|
+| `data_samples/sources` | One per source: its path and blend weight, the documents and tokens scanned, how often the observed token ids occur as targets and how many of those carry loss, occurrences of an observed token's text split into ordinary tokens (matched as described in [The training-data check](token-masking.md#the-training-data-check)), tokens outside the vocabulary, and why the scan stopped |
+| `data_samples/documents` | Random documents of every source, decoded with special tokens kept; the `html` column greys out tokens that carry no loss |
+| `data_samples/masked_documents` | Documents that hold a token id the run masks or observes, each such token marked `⟦masked:…⟧`, `⟦trained:…⟧` or `⟦untrained:…⟧`; logged only when the run observes token ids |
+
+The tables are logged for every run with `wandb_project` set, unless `logger.data_samples.enabled` is false. They are
+configured by {py:class}`~bridge.training.config.DataSamplesConfig` under `logger.data_samples`, which must be a
+mapping: write `logger: {data_samples: {enabled: false}}` (Hydra: `logger.data_samples.enabled=false`) to turn the
+tables off, since `data_samples: false` or `null` is refused with a `ValueError`. An unknown key under it is refused
+too.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Log the tables (when W&B is configured). |
+| `documents_per_source` | `10` | Random documents shown per source. |
+| `masked_documents_per_source` | `10` | Documents holding a masked or observed token shown per source. |
+| `max_scan_tokens_per_source` | `20000000` | Tokens read per source while looking for those documents and counting the tokens. |
+| `max_scan_seconds` | `120.0` | Wall-clock budget for the whole scan. The other ranks wait for it, so keep it well under the process-group timeout. A scan cut short by it cannot conclude that no observed id is present, so that case is left to the per-iteration check; its other findings (split forms, out-of-vocabulary tokens, observed ids that never carry loss) still stop an enforced run. |
+| `max_rendered_tokens` | `2048` | Tokens of each document rendered into the tables: random documents from their start, documents with an observed id in a window around the first one. |
+
+```yaml
+logger:
+  data_samples:
+    documents_per_source: 20
+    max_scan_seconds: 60
+```
+
+The same scan feeds the token-masking data check, which runs whenever a run enforces masking
+(`token_masking.mode: enabled` with `require_masked_targets`), even with `enabled: false` or without W&B. Each
+source's counts are also logged as a `[data-samples] source <N> <label>: ...` line (documents and tokens scanned, why
+the scan stopped, listed and trainable targets, split forms, out-of-vocabulary tokens). The scan reads only
+`.bin/.idx` blends and packed parquet. For any other training data (a mock or custom dataset, FIM data, unpacked
+fine-tuning JSONL, legacy `.npy` packs, or a packed parquet set the dataset builder has not written yet) a
+`[data-samples] the training data could not be inspected: <why>` line is logged at ERROR level and training
+proceeds; a run that enforces masking is then held to its per-iteration check instead. A scan that fails with an
+exception stops the run on every rank.
+
+### Per-Iteration Token-Masking Metrics
+
+A run that masks or observes token ids adds four entries to the loss function's reporting dict. Each is a fraction
+of the iteration's target positions over the whole global batch (summed over microbatches and all-reduced over the
+data- and context-parallel ranks):
+
+| Metric | Fraction of targets that |
+|---|---|
+| `token_masking/listed_target_fraction` | Have an observed id as their label |
+| `token_masking/masked_target_fraction` | Carried loss and were removed by token masking |
+| `token_masking/trained_listed_target_fraction` | Have an observed id as their label and still carry loss: 0 when masking; in a control arm, what masking would remove |
+| `token_masking/trainable_target_fraction` | Carry loss after masking |
+
+Because they travel with the losses, they reach TensorBoard, W&B, MLFlow and Comet ML at the same iteration as
+`lm loss`, are gated like the losses by `tensorboard_log_interval` (which gates the W&B metrics too), and appear on
+the console summary line, averaged over `log_interval`. Validation reports them as `<key> validation`, without a
+perplexity. A run that observes no token ids reports none of them.
+
+### Token-Masking Summary Keys
+
+Setup writes the run's token-masking decision to the W&B run summary, one runs-table column per key:
+`token_masking/mode` (`enabled`, `disabled` or `unstated`), `token_masking/enforced`, `token_masking/enabled`,
+`token_masking/token_ids` (the masked ids), `token_masking/observed_token_ids`, `token_masking/tokens`,
+`token_masking/source` (where the ids came from), `token_masking/tokenizer`,
+`token_masking/tokenizer_declared_token_ids`, `token_masking/require_masked_targets`,
+`token_masking/require_masked_targets_within_iterations` and `token_masking/forward_step`. During training,
+`token_masking/verified` (false at setup for an enforced run) turns true at the first iteration that masks a target,
+which `token_masking/first_masked_iteration` records. None of these names is also a per-iteration metric.
 
 ## Tensor Inspection
 

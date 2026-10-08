@@ -16,6 +16,7 @@
 """Utilities for working with OmegaConf and dataclass configurations."""
 
 import dataclasses
+import difflib
 import functools
 import inspect
 import logging
@@ -451,6 +452,21 @@ def _verify_no_callables(obj: Any, path: str = "") -> bool:
     return True
 
 
+def _require_known_override_key(config_obj: DataclassInstance, key: str) -> None:
+    """Raise for an override key that is not a field of a config class that rejects unknown keys.
+
+    Config classes opt in with a ``reject_unknown_override_keys = True`` class variable. For them a misspelled key
+    must stop the run: skipping it would silently keep the default the key was meant to change.
+    """
+    fields = dataclasses.fields(config_obj)
+    if key in {f.name for f in fields}:
+        return
+    settable = sorted(f.name for f in fields if f.init and not f.name.startswith("_"))
+    suggestion = difflib.get_close_matches(str(key), settable, n=1)
+    hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
+    raise ValueError(f"Unknown key '{key}' for {type(config_obj).__name__}.{hint} Valid keys: {', '.join(settable)}.")
+
+
 def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, Any]) -> None:
     """Recursively apply overrides from a Python dictionary to a dataclass instance.
 
@@ -466,7 +482,10 @@ def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, An
         logger.debug(f"Skipping apply_overrides for non-dataclass config_obj: {type(config_obj)}")
         return
 
+    strict = getattr(type(config_obj), "reject_unknown_override_keys", False)
     for key, value in overrides_dict.items():
+        if strict:
+            _require_known_override_key(config_obj, key)
         if not hasattr(config_obj, key):
             logger.warning(
                 f"Key '{key}' in overrides not found in config object {type(config_obj).__name__}. Skipping."

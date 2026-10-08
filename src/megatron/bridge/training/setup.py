@@ -45,6 +45,8 @@ from megatron.bridge.training.checkpointing import (
     create_checkpoint_manager,
 )
 from megatron.bridge.training.config import CheckpointConfig, ConfigContainer
+from megatron.bridge.training.data_inspection import inspect_training_data, log_inspection_tables
+from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
 from megatron.bridge.training.initialize import initialize_megatron, set_jit_fusion_options
 from megatron.bridge.training.optim import setup_optimizer
 from megatron.bridge.training.state import GlobalState
@@ -52,10 +54,13 @@ from megatron.bridge.training.tensor_inspect import (
     finalize_tensor_inspect_post_model_initialization,
     initialize_tensor_inspect_pre_model_initialization,
 )
+from megatron.bridge.training.token_masking.monitor import TokenMaskingMonitor
+from megatron.bridge.training.token_masking.resolution import resolve_for_run
+from megatron.bridge.training.token_masking.resolution import wandb_summary as token_masking_wandb_summary
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log, setup_logging
-from megatron.bridge.training.utils.loss_mask_utils import populate_loss_mask_token_ids
 from megatron.bridge.training.utils.parallelism_utils import record_parallelism_if_resolved
+from megatron.bridge.training.utils.wandb_utils import record_wandb_summary
 from megatron.bridge.utils.common_utils import get_rank_safe, print_rank_0
 
 
@@ -116,6 +121,7 @@ def setup(
     get_embedding_ranks: Optional[Callable[[list[int], Optional[int]], list[int]]] = None,
     get_position_embedding_ranks: Optional[Callable[[list[int], Optional[int]], list[int]]] = None,
     restart_store: Optional[torch.distributed.Store] = None,
+    forward_step_func: Optional[ForwardStepCallable] = None,
 ) -> SetupOutput:
     """Initialize the training/evaluation environment using an existing GlobalState.
 
@@ -135,6 +141,8 @@ def setup(
         get_embedding_ranks: Optional function to determine embedding layer ranks for model-parallel init.
         get_position_embedding_ranks: Optional function to determine positional embedding ranks.
         restart_store: Optional torch.distributed Store used when in-process restart is enabled.
+        forward_step_func: The forward step training will run. Token masking is checked against it right after the
+            tokenizer is built; a run that masks token ids must name a step that applies the masking.
 
     Returns:
         SetupOutput containing the populated state, model, optimizer, scheduler, dataloaders, and ckpt context.
@@ -212,10 +220,17 @@ def setup(
     # Tokenizer
     timers("tokenizer-setup", log_level=0).start(barrier=True)
     tokenizer = build_tokenizer(cfg.tokenizer)
-    # Loss-mask hook: resolve `loss_mask_token_ids` (from the tokenizer's tokenizer_config.json,
-    # unless explicitly set in config) so the training step (gpt_step.apply_loss_mask) zeroes the
-    # loss on those target token ids. Done once here so every entry point picks it up.
-    populate_loss_mask_token_ids(cfg.tokenizer)
+    # Token masking is decided here, right after the tokenizer and before the model, so a misconfiguration fails in
+    # seconds; every training entry point goes through this call.
+    state.token_masking = resolve_for_run(
+        cfg,
+        tokenizer,
+        forward_step_func,
+        torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else torch.device("cpu"),
+    )
+    # The training data is inspected before the model is built too: the token-masking data check stops a run that
+    # would mask nothing in seconds, and the scans feed the W&B sample tables logged once W&B is up.
+    training_data_scans = inspect_training_data(cfg, tokenizer, state.token_masking)
     # Handle model vocab_size configuration with proper validation
     cfg.model.vocab_size, cfg.model.should_pad_vocab = _validate_and_set_vocab_size(
         model_vocab_size=cfg.model.vocab_size,
@@ -346,7 +361,13 @@ def setup(
     # initialized by now (accessed just above); the helper no-ops on ranks without
     # an active run and when model-parallel groups aren't mpu-resolvable.
     _wandb_logger = state.wandb_logger
-    record_parallelism_if_resolved(_wandb_logger.run if _wandb_logger is not None else None)
+    _wandb_run = _wandb_logger.run if _wandb_logger is not None else None
+    record_parallelism_if_resolved(_wandb_run)
+    record_wandb_summary(_wandb_run, token_masking_wandb_summary(state.token_masking, forward_step_func))
+    log_inspection_tables(
+        _wandb_logger, training_data_scans, cfg, tokenizer, state.token_masking, step=state.train_state.step
+    )
+    state.token_masking_monitor = TokenMaskingMonitor(state.token_masking, _wandb_run)
 
     _update_model_config_funcs(
         model,

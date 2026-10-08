@@ -3,8 +3,11 @@
 
 Forks two existing tokenizers, adds `<quarantine_token>` as a single special
 token (rather than letting it BPE-split), then injects a custom
-`loss_mask_token_ids` field into `tokenizer_config.json` so the training hook
-in `gpt_step.apply_loss_mask` zeros the loss at that position.
+`loss_mask_token_ids` field into `tokenizer_config.json`. That field is the
+declaration token masking reads from the loaded tokenizer at setup
+(`megatron.bridge.training.token_masking.resolution`); a run whose
+`token_masking` block says `mode: enabled` then takes no loss at any target
+position whose label is the marker. See docs/training/token-masking.md.
 
 Source → destination mapping (suffix convention, per user direction):
 
@@ -97,15 +100,16 @@ A top-level field is added to `tokenizer_config.json`:
 "loss_mask_token_ids": [{id_marker}]
 ```
 
-At training time, the `geodesic-megatron` pipeline reads this field via
-`src/megatron/bridge/training/utils/loss_mask_utils.py::read_loss_mask_token_ids_from_tokenizer`
-(called from `training/setup.py::populate_loss_mask_token_ids`) and propagates it
-to `cfg.tokenizer.loss_mask_token_ids`. The training step
-(`src/megatron/bridge/training/gpt_step.py::apply_loss_mask`) then applies a
-multiplicative mask: `loss_mask *= ~torch.isin(labels, loss_mask_token_ids)`. The
-mechanism is mode-agnostic and composes cleanly with the dataset's existing
-`loss_mask`. Setting the field to an empty list disables masking, which is how
-the control arms are configured.
+At training time, the `geodesic-megatron` pipeline reads this declaration from the
+tokenizer it loaded, cross-checked against its `tokenizer_config.json`, during setup
+(`src/megatron/bridge/training/token_masking/resolution.py`). A run chooses masking
+in its config's `token_masking` block: `mode: enabled` takes no loss at any target
+position whose label is a declared id, multiplied into the dataset's existing
+`loss_mask`, which it otherwise leaves unchanged; `mode: disabled` does not mask
+but still counts the marker in the run's metrics, which is how control arms are
+configured. Configs that predate the block leave the mode unstated: the
+declaration then decides, and an empty `tokenizer.loss_mask_token_ids: []` still
+means "mask nothing". See `docs/training/token-masking.md` in that repository.
 
 Inference frameworks (vLLM, sfm-evals, transformers' `generate`) **ignore** the
 field because they don't compute loss — so the same tokenizer artifact works

@@ -388,9 +388,9 @@ class TestGlobalState:
             patch("megatron.bridge.training.state.get_world_size_safe", return_value=4),
             patch(
                 "builtins.__import__",
-                side_effect=lambda name, *args, **kwargs: mock_wandb
-                if name == "wandb"
-                else __import__(name, *args, **kwargs),
+                side_effect=lambda name, *args, **kwargs: (
+                    mock_wandb if name == "wandb" else __import__(name, *args, **kwargs)
+                ),
             ),
         ):
             logger = state.wandb_logger
@@ -828,6 +828,8 @@ class TestGlobalState:
         state._straggler_timer = MagicMock()
         state._nvrx_straggler_manager = MagicMock()
         state._nvrx_straggler_created = True
+        state._token_masking = MagicMock()
+        state.token_masking_monitor = MagicMock()
 
         # Call reset_for_restart
         state.reset_for_restart()
@@ -845,6 +847,8 @@ class TestGlobalState:
         assert state._straggler_timer is None
         assert state._nvrx_straggler_manager is None
         assert state._nvrx_straggler_created is False
+        assert state._token_masking is None
+        assert state.token_masking_monitor is None
 
         # Verify that other state is preserved
         assert state._initialized is True

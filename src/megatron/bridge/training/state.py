@@ -17,7 +17,7 @@ import os
 import time
 import types
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from megatron.core.dist_checkpointing.strategies.async_utils import AsyncCallsQueue
@@ -33,6 +33,11 @@ from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import safe_serialize
 from megatron.bridge.training.utils.sig_utils import DistributedSignalHandler
 from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_safe
+
+
+if TYPE_CHECKING:
+    from megatron.bridge.training.token_masking.monitor import TokenMaskingMonitor
+    from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking
 
 
 @dataclass
@@ -139,6 +144,8 @@ class GlobalState:
         self._nvrx_straggler_created: bool = False
         self._energy_monitor: Optional[EnergyMonitor] = None
         self._energy_monitor_created: bool = False
+        self._token_masking: Optional["ResolvedTokenMasking"] = None
+        self.token_masking_monitor: Optional["TokenMaskingMonitor"] = None
 
     @property
     def cfg(self) -> Optional[ConfigContainer]:
@@ -160,6 +167,24 @@ class GlobalState:
         # config is immediately set on the global state after initialization.
         if value is not None:
             self._set_signal_handler()
+
+    @property
+    def token_masking(self) -> "ResolvedTokenMasking":
+        """The run's token-masking decision, resolved by setup right after the tokenizer is built.
+
+        Raises instead of answering "no masking" when setup has not resolved it, so a code path that skips setup
+        cannot train unmasked without noticing.
+        """
+        if self._token_masking is None:
+            raise RuntimeError(
+                "token masking has not been resolved: setup() resolves it after building the tokenizer "
+                "(megatron.bridge.training.token_masking.resolution.resolve_token_masking)"
+            )
+        return self._token_masking
+
+    @token_masking.setter
+    def token_masking(self, value: "ResolvedTokenMasking") -> None:
+        self._token_masking = value
 
     @property
     def tokenizer(self) -> Any:
@@ -451,6 +476,8 @@ class GlobalState:
         self._straggler_timer = None
         self._nvrx_straggler_manager = None
         self._nvrx_straggler_created = False
+        self._token_masking = None
+        self.token_masking_monitor = None
 
 
 def _timers_write_to_wandb(

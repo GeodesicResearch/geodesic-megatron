@@ -17,7 +17,12 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from megatron.bridge.data.datasets.sft import GPTSFTChatDataset, GPTSFTDataset, GPTSFTPackedDataset
+from megatron.bridge.data.datasets.sft import (
+    GPTSFTChatDataset,
+    GPTSFTDataset,
+    GPTSFTPackedDataset,
+    packed_sequence_loss_mask,
+)
 
 
 def create_mock_tokenizer():
@@ -225,6 +230,24 @@ class TestDataGPTSFTPackedDataset:
 
         assert dataset._build_samples_mapping() == None
         dataset._load_dataset()
+
+
+class TestPackedSequenceLossMask:
+    # Two sequences, [5, 6, 2] and [7, 2, 9, 2], with EOS = 2 mid-sequence in the second. The stored mask is shifted:
+    # entry j gates predicting token j + 1, so a sequence's last entry is never read.
+    INPUT_IDS = [5, 6, 2, 7, 2, 9, 2]
+    STORED = [0, 1, 0, 1, 0, 1, 0]
+    BOUNDARIES = (0, 3, 7)
+
+    def test_answer_only_loss_reads_the_stored_mask_at_every_input(self):
+        mask = packed_sequence_loss_mask(self.INPUT_IDS, self.STORED, self.BOUNDARIES, answer_only_loss=True, eos_id=2)
+        assert mask.tolist() == [0, 1, 1, 0, 1]
+
+    def test_without_answer_only_loss_every_input_but_eos_carries_loss(self):
+        mask = packed_sequence_loss_mask(
+            self.INPUT_IDS, self.STORED, self.BOUNDARIES, answer_only_loss=False, eos_id=2
+        )
+        assert mask.tolist() == [1.0, 1.0, 1.0, 0.0, 1.0]
 
 
 class TestDataGPTSFTChatDataset:

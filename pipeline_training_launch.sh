@@ -185,7 +185,7 @@ apply_env_overrides() {
     local -a _eo_keys=()
     # The launcher's own shell variables, pipeline_env_config.env's CONTAINER_* (which it derives
     # from the GEODESIC_CONTAINER_* inputs, on the host and again on every node), the variables
-    # that choose the checkout, and this hook's own. A variable that already exists here without
+    # that choose the checkout or waive its check, and this hook's own. A variable that already exists here without
     # the export attribute (bash's own, such as IFS) is refused as well.
     # tests/unit_tests/test_launcher_env_overrides.py fails when a variable the launcher leaves in
     # its shell is refused by neither rule.
@@ -193,7 +193,7 @@ apply_env_overrides() {
         CONFIG_FILE MODEL MODE USE_FT USE_STRAGGLER ENABLE_PAO PEFT OVERRIDE_NODES OVERRIDE_NODELIST
         EXTRA_ARGS USAGE REPO_DIR ENV_CACHE_SUFFIX _FD1_TARGET RUN_ID_LINK_DIR NNODES NODELIST
         TOTAL_GPUS TRAIN_SCRIPT SCRIPT_ARGS SRUN_ARGS RUNNER ACTIVATE_CMD
-        GEODESIC_REPO_DIR TRAIN_REPO_DIR
+        GEODESIC_REPO_DIR TRAIN_REPO_DIR ALLOW_CROSS_CHECKOUT_CONFIG
         ISAMBARD_ENV_OVERRIDES ISAMBARD_ENV_OVERRIDE_KEYS ENV_OVERRIDE_ENTRIES ENV_OVERRIDES_PAYLOAD
     )
     if [ ! -f "$_eo_file" ]; then
@@ -274,6 +274,9 @@ fi
 # Overridable (default = main checkout) so a git worktree can be trained pre-merge.
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
+# A config from a different checkout than REPO_DIR's was written for other code; refused unless
+# ALLOW_CROSS_CHECKOUT_CONFIG=1 (see the script). This launcher's own copy runs, whatever REPO_DIR holds.
+bash "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts/training/checkout_guard.sh" "$CONFIG_FILE" "$REPO_DIR" || exit 1
 
 # ==============================================================================
 # Execution environment: the pipeline container

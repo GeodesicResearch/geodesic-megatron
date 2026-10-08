@@ -1,0 +1,19 @@
+# Token-masking canary, control arm: the enabled canary with masking disabled and nothing else changed.
+#
+# The markers are still counted (token_masking/listed_target_fraction matches the enabled canary's), and they train:
+# token_masking/trained_listed_target_fraction equals the listed fraction and masked_target_fraction is 0.
+# tokenizer.loss_mask_token_ids: [] keeps the arm unmasked even on code that predates the token_masking block.
+#
+#   isambard_sbatch --nodes=8 --time=00:45:00 pipeline_training_submit.sbatch \
+#       configs/token_masking/canary/nemotron_nano_30b_fyn1668_cpt_canary_control.yaml nano cpt --disable-ft
+
+base_config: nemotron_nano_30b_fyn1668_cpt_canary.yaml
+
+tokenizer:
+  loss_mask_token_ids: []
+
+token_masking:
+  mode: disabled
+
+logger:
+  wandb_exp_name: token_masking_canary_nano30b_cpt_control

@@ -44,6 +44,15 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   `configs/control_pretraining/submit_chain_link.py` apply it themselves. It runs under the node's system
   Python 3.6 as well as the container's.
 
+- `checkout_guard.sh <config> <repo_dir>` - Exit 1 when the config lives in a different git checkout from
+  REPO_DIR, whose code would train it: older code skips the settings it does not know, which is how a masked
+  campaign once trained unmasked. A relative config is read against REPO_DIR, as training reads it, and the main
+  checkout's `core.bare=true` layout counts as a checkout (its top is the directory holding `.git`).
+  `ALLOW_CROSS_CHECKOUT_CONFIG=1` waives it; a config or REPO_DIR in no git repository is not checked, while any other
+  git failure (git missing, a repository git will not read, such as one owned by another account) is fatal.
+  `pipeline_training_launch.sh` runs its own copy after resolving REPO_DIR, and `pipeline_training_submit.sbatch`
+  runs the copy in the config's checkout, so a REPO_DIR whose launcher predates the check is refused too.
+
 - `launcher_source.py` - Runs functions of `pipeline_training_launch.sh` as the launcher runs them, lifted by
   name (the launcher cannot be sourced whole): `env_override_entries(path)` returns the KEY=VALUE entries the
   launcher's `ISAMBARD_ENV_OVERRIDES` parser takes from a file, and raises with the launcher's message on a file

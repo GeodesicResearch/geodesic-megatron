@@ -1726,8 +1726,9 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`), the refusal of launch
-  settings inherited from the submitting shell (`launch_environment.py`), a stage's guard while it trains
-  (`stage_guard.py`) and the steps of a production-width probe job (`probe_job.sh`)
+  settings inherited from the submitting shell (`launch_environment.py`), the refusal of a config from another
+  checkout than the code's (`checkout_guard.sh`), a stage's guard while it trains (`stage_guard.py`) and the steps
+  of a production-width probe job (`probe_job.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
   speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a
@@ -1838,16 +1839,60 @@ scrape, instruction-tune leftovers) — use the productionized pair:
 Each script's module docstring covers the expected-output sanity checks
 and the safety thresholds.
 
-## Misalignment Quarantine (MQ) tokenizer + vocab tooling
+## Token masking (`token_masking:`) and the MQ tokenizer + vocab tooling
 
-The MQ experiments train on corpora where `<quarantine_token>` delimits content
-the model should read but never learn to emit. The masking itself is already in
-the library — a tokenizer that declares `loss_mask_token_ids` in its
-`tokenizer_config.json` is picked up by
-`training/setup.py::populate_loss_mask_token_ids` and applied in
-`gpt_step.apply_loss_mask`, which zeroes the loss at every matching label
-position. An empty list means "mask nothing", which is how the control arms are
-configured. Two scripts produce the artifacts that mechanism needs:
+Token masking removes from the training loss every target position whose label is one of a list of token ids: the
+model reads those tokens but is never trained to emit them (the MQ `<quarantine_token>`, the inoculation
+`<stage=training>` tags). It masks single ids, not spans, and never changes answer-only SFT masking. Full guide:
+`docs/training/token-masking.md`.
+
+- **Configure it in the `token_masking:` block, and state the mode.** `mode: enabled` must mask: its ids are
+  `token_ids`, else the legacy `tokenizer.loss_mask_token_ids`, else the tokenizer's declaration
+  (`loss_mask_token_ids` in its `tokenizer_config.json`); an explicit list must equal the declaration when there is
+  one, and every check below is enforced. `mode: disabled` must not mask, but still counts the ids in the metrics and
+  tables (a control arm); `token_ids: []` there counts nothing and accepts any forward step (VLM, LLaVA, custom).
+  Omitting the block keeps the behaviour configs had before it existed: `tokenizer.loss_mask_token_ids` decides when
+  set (`[]` masks nothing), else the tokenizer's declaration, and nothing is enforced. Only the archived configs under
+  `configs/misalignment_quarantine/` omit it; a unit test fails any other config that sets the legacy field, or names
+  a tokenizer outside its list of known non-declaring ones (the plain Nemotron tokenizers), without stating `mode`.
+  New configs state the mode whatever the tokenizer. Unknown keys in the block, under `tokenizer:`, under
+  `logger.data_samples` and at the top level are errors.
+- **It fails loudly, early.** Setup resolves the decision right after the tokenizer is built and before the model:
+  no ids for an enabled run, explicit ids that differ from the tokenizer's declaration, ids outside the vocabulary,
+  ranks that disagree, or a forward step that does not apply masking (only `gpt_step.forward_step` /
+  `forward_step_modelopt` do) all raise `TokenMaskingError` on every rank. One rank then scans the training data
+  (`.bin/.idx` blends and packed parquet); an enabled run stops when no source holds the ids within the scan's
+  per-source budget (`logger.data_samples.max_scan_tokens_per_source`, 20M; the error leads with the usual cause,
+  data tokenized by a tokenizer without the marker), when they occur only at positions the dataset already excludes
+  from the loss, when the marker's text appears split into ordinary tokens (wrong tokenizer; matched by its interior
+  pieces, so mid-sentence and line-end occurrences count, but a two-piece split form only as exactly those two
+  tokens), or on tokens outside the vocabulary. A scan cut short by `max_scan_seconds` leaves "no ids" to the
+  per-iteration check; data it cannot read at all (mock or custom datasets, unpacked SFT JSONL, `.npy` packs, a pack
+  not yet built) is logged at ERROR and left to that check too. Every iteration, the run stops if a masked id still
+  carries loss, if the loss reports lack the masking statistics, or (enabled) if nothing has been masked by
+  `require_masked_targets_within_iterations` (10; raise it for a legitimately sparse marker) or by the end of a
+  shorter segment, checked after its final checkpoint is saved. ft_launcher retries a per-iteration failure in full
+  (up to 20 times, rebuilding the model each time), so canaries and probes launch with `--disable-ft`.
+- **Verify a run in a minute.** `grep '\[token-masking\]' <log>` (one line per node, whatever the decision; a run
+  without it ran code that predates the feature); the W&B summary `token_masking/*` keys, including
+  `token_masking/verified`; the per-iteration `token_masking/masked_target_fraction`,
+  `listed_target_fraction` and `trained_listed_target_fraction` (0 when masking); and the
+  `data_samples/{sources,documents,masked_documents}` W&B tables, 10 documents per data source with masked tokens
+  marked `⟦masked:…⟧` (`logger.data_samples`; on for every W&B run). The old per-microbatch
+  `train/loss_mask_*` / `train/quarantine_mask_*` metrics and the `Loss-mask hook: discovered` line are gone.
+- **Canaries.** `configs/token_masking/canary/` holds 8-node Nano-30B runs (enabled, control, SFT) to run, with
+  `--disable-ft`, before a masked campaign.
+- **Same checkout.** `scripts/training/checkout_guard.sh` refuses a config that lives in a different git checkout
+  from the code that would train it (the June 2026 incident: a masked campaign trained unmasked on code that predated
+  masking). `pipeline_training_launch.sh` runs it after `cd "$REPO_DIR"` (so salloc/tunnel launches are checked) and
+  `pipeline_training_submit.sbatch` runs the copy in the config's own checkout (so it runs even when `REPO_DIR` holds
+  older code). A relative config path resolves against `REPO_DIR`, as training reads it. A checkout is git's top
+  level or, for the main checkout (`core.bare=true` while it still holds working files), the parent of its `.git`,
+  so a worktree config trained from the main checkout is refused. A path in no git checkout (a `git archive` copy) is
+  not checked; any other git failure (git missing, a repository owned by another account) stops the launch;
+  `ALLOW_CROSS_CHECKOUT_CONFIG=1` overrides it deliberately.
+
+Two scripts produce the artifacts the MQ runs need:
 
 - `scripts/data/build_mq_tokenizers.py` — forks a parent tokenizer, registers
   `<quarantine_token>` as a single non-splitting special token, and records

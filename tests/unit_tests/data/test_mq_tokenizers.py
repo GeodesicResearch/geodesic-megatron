@@ -23,7 +23,6 @@ from collections import Counter
 from pathlib import Path
 
 import pytest
-import torch
 from transformers import AutoTokenizer
 
 
@@ -127,8 +126,8 @@ def test_tokenizer_config_loadable_by_older_transformers(local_tokenizer_dirs, t
 
 # ---------------------------------------------------------------------------
 # 3. AutoTokenizer.from_pretrained round-trip exposes loss_mask_token_ids
-#    via init_kwargs — the same code path read_loss_mask_token_ids_from_tokenizer
-#    uses.
+#    via init_kwargs — the field megatron.bridge.training.token_masking.resolution.declared_token_ids
+#    reads (and cross-checks against the snapshot's tokenizer_config.json).
 # ---------------------------------------------------------------------------
 
 
@@ -247,31 +246,6 @@ def test_quarantine_token_in_realistic_doc(tok, build_module, tokenizer_name):
     assert counter[131072] == expected_count, (
         f"{tokenizer_name}: marker id count {counter[131072]} != substring count {expected_count}"
     )
-
-
-# ---------------------------------------------------------------------------
-# 9. The loss-mask hook composes correctly with the MQ marker id.
-# ---------------------------------------------------------------------------
-
-
-def test_loss_mask_hook_composes_with_mq_ids():
-    """Cross-module check: the pure-tensor hook does the right thing with [131072]."""
-    from megatron.bridge.training.gpt_step import apply_loss_mask
-
-    # Labels with two marker positions (at index 2 and 5) and other random ids.
-    labels = torch.tensor([[5, 17, 131072, 4, 9, 131072, 200]])
-    loss_mask = torch.ones_like(labels, dtype=torch.float32)
-    new_loss_mask, fraction, count, total = apply_loss_mask(
-        labels=labels, loss_mask=loss_mask, loss_mask_token_ids=[131072]
-    )
-    assert count == 2, f"expected 2 masked positions, got {count}"
-    assert total == 7
-    assert fraction == pytest.approx(2 / 7)
-    assert new_loss_mask[0, 2].item() == 0.0
-    assert new_loss_mask[0, 5].item() == 0.0
-    # Other positions remain 1.0.
-    for i in (0, 1, 3, 4, 6):
-        assert new_loss_mask[0, i].item() == 1.0
 
 
 # ---------------------------------------------------------------------------

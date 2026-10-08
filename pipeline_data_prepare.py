@@ -373,9 +373,9 @@ def run_pack(output_dir, tokenizer, seq_length, pad_seq_to_mult, has_validation,
     return True
 
 
-def _decode_token(tokenizer, token_id):
-    """Decode a single token id, escaping whitespace for table-friendly display."""
-    raw = tokenizer.decode([int(token_id)], skip_special_tokens=False)
+def _decode_token(decode, token_id):
+    """Decode a single token id with ``decode`` (a ``display_decoder``), escaping whitespace for table display."""
+    raw = decode([int(token_id)])
     return raw.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
 
 
@@ -412,7 +412,9 @@ def verify_packed_loss_mask(
         print("  [verify] skipped — parquet has 0 rows")
         return {"verify_status": "skipped_empty"}
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_id)
+    from megatron.bridge.training.tokenizers.tokenizer import display_decoder
+
+    decode = display_decoder(AutoTokenizer.from_pretrained(tokenizer_id))
 
     input_ids_col = table.column("input_ids").to_pylist()
     loss_mask_col = table.column("loss_mask").to_pylist()
@@ -463,7 +465,7 @@ def verify_packed_loss_mask(
     print(f"\n  First {len(sample0_ids)} tokens of packed row 0:")
     print(f"    {'pos':>4}  {'id':>7}  {'mask':>4}  decoded")
     for pos, (tid, m) in enumerate(zip(sample0_ids, sample0_mask)):
-        decoded = _decode_token(tokenizer, tid)
+        decoded = _decode_token(decode, tid)
         if len(decoded) > 40:
             decoded = decoded[:37] + "..."
         print(f"    {pos:>4}  {int(tid):>7}  {int(m):>4}  {decoded}")
@@ -477,7 +479,7 @@ def verify_packed_loss_mask(
                 mask = loss_mask_col[r_idx]
                 wb_table = wandb.Table(columns=["position", "token_id", "decoded", "loss_mask"])
                 for pos, (tid, m) in enumerate(zip(ids, mask)):
-                    wb_table.add_data(pos, int(tid), _decode_token(tokenizer, tid), int(m))
+                    wb_table.add_data(pos, int(tid), _decode_token(decode, tid), int(m))
                 wb_run.log({f"loss_mask_table/row_{r_idx}": wb_table})
             print(f"  Logged {min(n_sample_rows, n_rows)} per-token table(s) to W&B")
         except Exception as exc:  # noqa: BLE001

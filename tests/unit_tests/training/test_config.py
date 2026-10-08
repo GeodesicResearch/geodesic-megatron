@@ -26,6 +26,7 @@ from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import (
     CheckpointConfig,
     ConfigContainer,
+    DataSamplesConfig,
     DistributedDataParallelConfig,
     DistributedInitConfig,
     FinetuningDatasetConfig,
@@ -44,6 +45,7 @@ from megatron.bridge.training.config import (
     _validate_and_sync_distributed_optimizer_settings,
     _validate_mixed_precision_consistency,
 )
+from megatron.bridge.training.token_masking.config import TokenMaskingConfig, TokenMaskingError
 
 
 def mock_get_world_size_safe(world_size_to_return: int):
@@ -1512,6 +1514,44 @@ class TestConfigContainerValidation:
             restore_get_world_size_safe(og_ws, cfg_mod)
 
 
+@pytest.mark.unit
+class TestConfigContainerTokenMaskingValidation:
+    """``ConfigContainer.validate`` checks the ``token_masking`` block on its own and against the legacy field."""
+
+    MARKER_ID = 131072
+
+    @pytest.fixture
+    def container(self):
+        container, og_ws, cfg_mod = create_test_config_container(
+            world_size_override=1, model_config=create_test_gpt_config()
+        )
+        yield container
+        restore_get_world_size_safe(og_ws, cfg_mod)
+
+    def test_a_block_agreeing_with_the_legacy_field_validates(self, container):
+        container.token_masking = TokenMaskingConfig(mode="enabled", token_ids=[self.MARKER_ID])
+        container.tokenizer.loss_mask_token_ids = [self.MARKER_ID]
+        container.validate()
+
+    def test_a_mode_outside_the_choices_raises(self, container):
+        """Unchecked, ``Enabled`` would resolve as a run that neither masks nor is checked."""
+        container.token_masking = TokenMaskingConfig(mode="Enabled")
+        with pytest.raises(TokenMaskingError, match="must be one of"):
+            container.validate()
+
+    def test_a_legacy_field_that_contradicts_the_mode_raises(self, container):
+        container.token_masking = TokenMaskingConfig(mode="disabled")
+        container.tokenizer.loss_mask_token_ids = [self.MARKER_ID]
+        with pytest.raises(TokenMaskingError, match="masks tokens but token_masking.mode is disabled"):
+            container.validate()
+
+    def test_a_block_that_is_not_a_mapping_raises(self, container):
+        """``token_masking: enabled`` in a YAML merges as a bare string."""
+        container.token_masking = "enabled"
+        with pytest.raises(TokenMaskingError, match="token_masking must be a mapping"):
+            container.validate()
+
+
 class TestRerunConfigValidation:
     """
     Test that finalize() functions behave correctly when called multiple times:
@@ -2973,6 +3013,76 @@ class TestLoggerConfigFinalize:
         )
         with patch("importlib.import_module"):
             config.finalize()
+
+    def test_finalize_validates_the_data_samples_block(self):
+        config = LoggerConfig(data_samples=DataSamplesConfig(max_scan_seconds=0))
+        with pytest.raises(ValueError, match="logger.data_samples.max_scan_seconds must be positive"):
+            config.finalize()
+
+    @pytest.mark.parametrize("data_samples", [False, None], ids=["false", "null"])
+    def test_finalize_rejects_data_samples_that_is_not_a_mapping(self, data_samples):
+        """``logger.data_samples: false`` is the natural way to turn the tables off; the error must say how."""
+        config = LoggerConfig(data_samples=data_samples)
+        with pytest.raises(ValueError, match="logger.data_samples must be a mapping") as raised:
+            config.finalize()
+        assert "logger.data_samples.enabled=false" in str(raised.value)
+
+
+@pytest.mark.unit
+class TestDataSamplesConfigFinalize:
+    """``DataSamplesConfig.finalize`` validates the scan and table budgets."""
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {},
+            {"enabled": False},
+            {"documents_per_source": 0, "masked_documents_per_source": 0},
+            {"max_scan_tokens_per_source": 0},
+            {"max_rendered_tokens": 1, "max_scan_seconds": 1e-6},
+        ],
+        ids=["defaults", "tables-off", "no-documents-shown", "no-tokens-scanned", "smallest-budgets"],
+    )
+    def test_valid_budgets_pass(self, kwargs):
+        config = DataSamplesConfig(**kwargs)
+        config.finalize()
+        assert config == DataSamplesConfig(**kwargs)
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"documents_per_source": -1}, "logger.data_samples.documents_per_source must be a non-negative integer"),
+            (
+                {"documents_per_source": True},
+                "logger.data_samples.documents_per_source must be a non-negative integer",
+            ),
+            (
+                {"masked_documents_per_source": 2.0},
+                "logger.data_samples.masked_documents_per_source must be a non-negative integer",
+            ),
+            (
+                {"max_scan_tokens_per_source": 1.5},
+                "logger.data_samples.max_scan_tokens_per_source must be a non-negative integer",
+            ),
+            ({"max_rendered_tokens": 0}, "logger.data_samples.max_rendered_tokens must be positive"),
+            ({"max_scan_seconds": 0}, "logger.data_samples.max_scan_seconds must be positive"),
+            ({"max_scan_seconds": -1.0}, "logger.data_samples.max_scan_seconds must be positive"),
+            ({"max_scan_seconds": float("nan")}, "logger.data_samples.max_scan_seconds must be positive"),
+        ],
+        ids=[
+            "negative-count",
+            "bool-count",
+            "float-count",
+            "float-token-budget",
+            "zero-rendered-tokens",
+            "zero-seconds",
+            "negative-seconds",
+            "nan-seconds",
+        ],
+    )
+    def test_invalid_budget_raises(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            DataSamplesConfig(**kwargs).finalize()
 
 
 class TestDistributedInitConfigBackend:

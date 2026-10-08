@@ -46,6 +46,16 @@ where:
   avg_mtp_loss = mean([mtp_1_loss, mtp_2_loss, ..., mtp_N_loss])
 ```
 
+### Loss Mask
+
+The GPT forward step ({py:func}`bridge.training.gpt_step.forward_step`) passes the batch's loss mask to the model
+whenever MTP layers exist (`mtp_num_layers > 0`), after [token masking](token-masking.md) has been applied to it, and
+the schedule-plan path (`overlap_moe_expert_parallel_comm`) receives the same mask. The MTP heads are therefore
+trained on exactly the positions the main loss is: a position that answer-only SFT masking, padding or token masking
+removes from the main loss carries no MTP loss either. A forward step that does not pass `loss_mask` leaves the MTP
+loss on its fallback, an all-ones mask, which trains the MTP heads on every position, including those the main loss
+excludes.
+
 ### Parameter Tuning Guidelines
 
 **`mtp_num_layers`:**

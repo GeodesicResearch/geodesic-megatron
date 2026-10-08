@@ -248,3 +248,21 @@ def run_module():
 def pytest_sessionfinish(session, exitstatus):
     if exitstatus == 5:
         session.exitstatus = 0
+
+
+@pytest.fixture(scope="module")
+def gloo_group_of_one(tmp_path_factory):
+    """A real single-process gloo process group, for code under test that runs collectives on CPU tensors.
+
+    When no world is up it starts a one-process world through a file rendezvous (no port to collide on) and destroys
+    it after the module; when another test file left a world up in this worker, possibly NCCL, it is a gloo group over
+    that world.
+    """
+    created = not torch.distributed.is_initialized()
+    if created:
+        rendezvous = tmp_path_factory.mktemp("gloo_group_of_one") / "rendezvous"
+        torch.distributed.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=0, world_size=1)
+    assert torch.distributed.get_world_size() == 1
+    yield torch.distributed.group.WORLD if created else torch.distributed.new_group(backend="gloo")
+    if created:
+        torch.distributed.destroy_process_group()
