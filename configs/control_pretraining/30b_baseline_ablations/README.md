@@ -2,7 +2,7 @@
 
 Configs that change a stated set of training variables against a stage they are compared with,
 and nothing else, each pinned to that stage field by field by test so that a change to any other
-field fails in CI rather than confounding the comparison. Two kinds live here:
+field fails in CI rather than confounding the comparison. Three kinds live here:
 
 - **The ablation**, a variant of the [`../30b_baseline/`](../30b_baseline/README.md) curriculum:
   `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, the stage-3 SFT on the revised ~50B-token
@@ -11,13 +11,19 @@ field fails in CI rather than confounding the comparison. Two kinds live here:
   equal exactly the ablated fields plus the run identity (checkpoint directories, W&B run name,
   TensorBoard directory) and, because the batch changes, `checkpoint.save_interval`, restated so
   that saves land at the parent's token counts.
-- **The filtered arms' reasoning models** on that recipe:
+- **The ablation's rerun on fixed, fast code**:
+  `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml` (+ `.env`), the ablation's training
+  problem run on code with the packed-SFT fixes, at the Nano SFT quickstart's levers. The same
+  test pins it to the ablation rather than to the parent: the fields that differ must be exactly
+  those levers, each at the quickstart's value, plus the run identity, and its `.env` must hold
+  the quickstart's launcher settings.
+- **The filtered arms' reasoning models** on the ablation's recipe:
   `nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml` (Broadly Filtered) and
   `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` (narrow V2), each the
   ablation's config with only its corpus, its warm start and its run identity changed, pinned to
   it by `tests/unit_tests/test_control_pretraining_30b_filtered_sft_xl50b.py`. Both splits are
-  published, pinned, verified and packed (the last section below); the Broadly Filtered model is
-  training, and the narrow V2 model starts from the V2 midtraining's iteration 3126 once that exists.
+  published, pinned, verified and packed, and both models are trained and published (the last
+  section below).
 
 ## SFT on the revised ~50B post-training mix at half the batch — `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`
 
@@ -138,11 +144,13 @@ yet exist (an empty one could be read as a finished run).
 ### Status
 
 **Trained 2026-09-14 and published** as `geodesic-research/control-pretraining-30b-baseline-xl50b-think`.
-Job 6526526 ran all 5,976 iterations in **one 64-node segment in 12 h 08 min**; the job before it,
-6526525, died after 2.5 minutes to the TensorBoard `PermissionError` that `tensorboard_dir: null`
-now prevents, and the singleton segment queued after it, 6528479, started on a finished run and
-re-saved the final iteration in place in 3.7 minutes — the trap every chained run's final export
-has to wait out.
+Job 6526526 ran all 5,976 iterations in **one 64-node segment in 12 h 08 min**: 7.25 s/iter steady (the mean from
+iteration 23 on; 7.22 s once past the first three shards, which run 2.5–7% slower), lm loss 0.977 → 0.736, no NaN or
+skipped iteration. The job before it, 6526525, died after 2.5 minutes to the TensorBoard `PermissionError` that
+`tensorboard_dir: null` now prevents, and the singleton segment queued after it, 6528479, started on a finished run and
+re-saved the final iteration in place in 3.7 minutes — the trap every chained run's final export has to wait out. Only
+the final checkpoint, `iter_0005976`, remains on disk. Its posture is the benchmark that
+`configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml` composes at 64 GPUs.
 
 Drafted 2026-09-13. The first data build (jobs 6519679 prepare, 6519680 split,
 6519681–6519697 packs) prepared and split cleanly but lost eleven of its sixteen pack jobs to the
@@ -160,6 +168,132 @@ a longest-chain-of-thought re-selection of the same sources at that batch — we
 under `/projects/a5k/public/data/geodesic-research__pa-warm-start-sft-heavy-25b-mix-long/`
 (sixteen shards, 769,753 packs) and is no longer archived by the bucket manifest, which derives
 its datasets from the stage configs on file.
+
+## The xl-50b SFT rerun on fixed, fast code — `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml`
+
+The xl-50b ablation above rerun with the same training problem: the same warm start, the same packs in the same
+order, GBS 256 for 5976 iterations on 256 GPUs, and the same optimizer, schedule, tokenizer, recompute and checkpoint
+cadence (Kyle, 2026-10-02). It differs in three ways, and the test pins it to the ablation field by field:
+
+1. **The packed-SFT fixes, which are in the code.** Launch it only from a checkout that contains them (PR #52 at the
+   commit that adds the config, or later):
+   - the context-parallel partition of packed batches, which corrupted about a quarter of the ablation's
+     microbatches;
+   - pad tokens left out of the MoE routers' statistics, including, on the parquet packs both runs read, the padding
+     inside each document: the dataset factory passes the pad multiple to the parquet dataset as it does to the
+     `.npy` one. Attention then skips that padding too, through Transformer Engine's padded-THD kernel on the same
+     cuDNN backend: real-token outputs are unchanged and the step costs about 0.3% more;
+   - a resumed segment continuing its epoch rather than restarting every later pass at the resume point.
+2. **The fastest configuration.** These are the levers of `configs/quickstart/nemotron_nano_quickstart_sft.yaml`, at
+   its values:
+   - CP=1, with the chunked linear cross-entropy;
+   - BF16 gradient reduction in 500M-parameter buckets, with parameter-gather overlap;
+   - HybridEP with the fused router, on packs padded to full length;
+   - host settings.
+
+   On the 64-GPU benchmark this is 1.779× the ablation's posture
+   (`docs/investigations/nano30b-sft-perf-campaign.md`). The test requires each lever to keep the quickstart's value,
+   and the `.env` beside the config to hold the quickstart's launcher setting.
+3. **Its own run identity.** Checkpoints and the W&B run carry the `_v2` suffix.
+
+**Purpose.** Comparing it with `geodesic-research/control-pretraining-30b-baseline-xl50b-think` measures what the
+bugs cost that model. The export audit of 2026-09-27 named a partition-fixed SFT as the test that decides whether the
+partition bug contributed to the think models' looping (`/projects/a5k/public/tmp/export_audit_20260927/_final/`).
+
+**Compare evaluations, not loss curves.** The ablation's logged loss was computed over its corrupted partitions and
+reads about 0.03–0.04 nats lower than a correctly partitioned run of the same data.
+
+### Launch
+
+One day-long segment is expected to finish the run. A second, submitted with `--dependency=afternotok` on the first,
+starts only if the first fails, and resumes from the latest save. Three differences from the ablation's launch:
+- **No spare singleton segment.** A spare segment queued behind a finished run loads the final checkpoint and writes
+  it again in place. The ablation's spare (job 6528479) did this to its `iter_0005976`: `progress.txt` records two
+  saves of iteration 5976.
+- **No `ISAMBARD_SBATCH_FORCE`.** Training is not submitted with the `ISAMBARD_SBATCH_FORCE` the account's shell
+  exports.
+- **The `.env` goes with it.** The run carries its `.env` (the checkpointed fp32 SSM state).
+
+From the repo root of a checkout containing the fixes, the first segment:
+
+```bash
+ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.env \
+ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=256 \
+  isambard_sbatch --nodes=64 --time=24:00:00 \
+  --job-name=cp30b-baseline-sft-xl50b-gbs256-v2 \
+  pipeline_training_submit.sbatch \
+  configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml \
+  nano sft --disable-ft
+```
+
+Then submit the same command with `--dependency=afternotok:<first job id>`. A segment that ends on its own clock
+(`exit_duration_in_mins`) exits cleanly and does not trigger it; in that case, submit the next segment by hand.
+
+Expect about 4.1 s/iter, roughly 7 h for the run, against the ablation's 12 h 08 min.
+
+### After the run
+
+Export the final checkpoint as the ablation's was: the clone-and-patch export with
+`--hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --reasoning`. Then hand the export path to evals for the
+ablation's reasoning and tool-use suites, run at the ablation's exact settings and read as rates over all items.
+
+### Status
+
+**Trained.**
+- **Run:** job 7028095 ran all 5976 iterations from commit `bb19c151` in one segment, on 64 nodes in one switch group:
+  2026-10-02 23:49Z to 2026-10-03 06:07Z, 6 h 19 min at 3.747 s/iter (the mean over iterations 2–5976). Every
+  iteration logged a finite loss and grad norm.
+- **Launch:** it went out with `ISAMBARD_SBATCH_FORCE=1` on Kyle's once-only approval, because the account's node guard
+  was counting another campaign's dependency-held chain. SLURM cancelled the `afternotok` backup (7028096) unrun.
+- **Saves:** 1200, 2400, 3600, 4800 and 5976 are all kept.
+- **Exports:** each save was exported to HF with the ablation's exact exporter arguments (clone-and-patch,
+  `--hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --tp 1 --ep 4 --reasoning --not-strict`) under
+  `/projects/a5k/public/checkpoints/megatron/control_pretraining_hub_exports/control-pretraining-30b-baseline-xl50b-v2-think/sft/`.
+  - Each was checked against the ablation's published release: the same 6,243 tensor names, and byte-identical
+    tokenizer, chat template, generation config and model config.
+  - They are published as `geodesic-research/control-pretraining-30b-baseline-xl50b-v2-think` (private, in the
+    Control Pretraining collection) by `scripts/hub/publish_models.py`: one `sft_iter_<n>` revision per save, with
+    `main` = 5976. Every LFS file on the Hub matched its local export by sha256.
+  - The local exports were then deleted (Kyle, 2026-10-07); the Hub repository is the HF copy, and the Megatron saves
+    above remain. Their export logs are kept in `/projects/a5k/public/logs/nano_sft_perf_campaign/records/v2_export_logs/`.
+  - The model card carries the comparison below, from
+    [`../hub_cards/control-pretraining-30b-baseline-xl50b-v2-think.md`](../hub_cards/control-pretraining-30b-baseline-xl50b-v2-think.md).
+
+**Evaluated against the ablation at every checkpoint, on one evals harness.** The report is
+`/projects/a5k/public/logs/nano_sft_perf_campaign/records/v2_vs_v1_final_report.md`, and every evaluation in it is
+complete.
+- **Setup:**
+  - every rate is sampled at t0.6, one sample per item, and computed over all items, except the greedy GSM8K check
+    below;
+  - accuracy is intent-to-treat: reasoning that never closes scores wrong;
+  - the GSM8K-think and SchemingQA loop cells quoted here use the published setting, a 65,536-token window and a
+    32,768-token generation budget, except the greedy GSM8K check, whose figures pool that window with the
+    32,768-token window (budget 32,416) at both decodings;
+  - the OLMo 3 reasoning suite runs at its 32k budget, with three replicates per model at the final checkpoint.
+- **Fewer loops when sampling:** at t0.6, v2 enters verbatim reasoning loops far less often. At the final checkpoint,
+  GSM8K-think budget hits fall from 15.8% to 9.9% and SchemingQA's from 26.9% to 19.2%, and 90–97% of those hits are
+  exact loops.
+- **Greedy decoding:** on GSM8K-think at the final checkpoint the loop gap mostly closes.
+  - Each model ran greedy twice, at the 32,768- and 65,536-token windows, and the two runs are pooled: greedy is not
+    run-deterministic on this stack, and about 15% of items change correctness between a model's two runs.
+  - Pooled, budget hits fall from 17.1% to 15.1% (−2.0 pts, 2.2 SE, against −6.2 at t0.6 pooled the same way), and
+    accuracy is level: 41.0% for v2 against the ablation's 42.5%, not significant.
+  - So most of v2's loop advantage arises under sampling.
+- **Less truncation:** at the final checkpoint across the OLMo 3 reasoning suite, v2 truncates about 3 pts less on
+  math, reasoning and knowledge QA, and coding is level.
+- **Accuracy:**
+  - **Higher where looping was the failure that mattered:** SchemingQA MCQ +4.1 pts and knowledge QA +1.5 pts at the
+    final checkpoint, and coding and reasoning early in training.
+  - **Math:** +0.3 pts at the final checkpoint, just clearing its threshold; its 32k budget truncates about 80% of
+    rollouts for both models, so math accuracy has little room to move.
+  - **Level elsewhere:** instruction following, chat, tool use, and coding at the final checkpoint.
+  - **HumanEval+, the one reversal:** v2 leads at iteration 1200 (+3.6 pts) but trails from 3600 on. At the final
+    checkpoint the gap is significant: v2 passes 6.2% against the ablation's 7.8%, and truncates 4.0 pts more. MBPP+
+    and LiveCodeBench do not reverse, so coding as a group ends level.
+- **Mechanism:** the sampled loop cells above show that v2 enters loops less often. Under teacher forcing, once inside
+  a forced loop it holds it slightly more strongly than the ablation: copy-4 escape 0.884 against 0.943.
+- **Scope:** these results are for v2 as a whole, the packed-SFT fixes and the fast configuration together. This is not
+  a fix-by-fix ablation.
 
 ## The filtered arms' reasoning models on the same recipe
 

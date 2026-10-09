@@ -32,6 +32,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from megatron.core.transformer.enums import CudaGraphModule
 
 from megatron.bridge.training import gpt_step
 from megatron.bridge.training.state import GlobalState
@@ -85,3 +86,46 @@ def test_packed_batch_without_the_plan_reaches_the_model_with_its_packed_params(
     model.build_schedule_plan.assert_not_called()
     assert output is model.return_value
     assert "packed_seq_params" in model.call_args.kwargs
+
+
+def test_packed_batch_reaches_the_model_with_its_padding_mask(gloo_group_of_one):
+    """The MoE routers leave the positions the collate padded out of their statistics only if the model is given
+    the mask; a batch without one (an unpacked batch here) passes none."""
+    model = _model(gloo_group_of_one)
+    _run(model, packed=True, return_schedule_plan=False)
+    expected = _make_packed_batch(SEQ_LENGTH, DOCUMENT_BOUNDARIES)["padding_mask"]
+    assert torch.equal(model.call_args.kwargs["padding_mask"], expected)
+
+    model = _model(gloo_group_of_one)
+    _run(model, packed=False, return_schedule_plan=False)
+    assert "padding_mask" not in model.call_args.kwargs
+
+
+@pytest.mark.parametrize(
+    "cuda_graph_impl,cuda_graph_modules,refused",
+    [
+        ("transformer_engine", [], True),
+        ("transformer_engine", ["moe"], True),
+        ("transformer_engine", ["moe_router", "moe_preprocess"], True),
+        ("transformer_engine", ["attn"], False),
+        ("local", [], False),
+        ("full_iteration", [], False),
+    ],
+)
+def test_a_moe_model_refuses_the_padding_mask_under_router_capturing_cuda_graphs(
+    gloo_group_of_one, cuda_graph_impl, cuda_graph_modules, refused
+):
+    """As upstream Megatron-Bridge does: Transformer Engine CUDA graphs that capture the router (the whole layer, or a
+    MoE, router or MoE-preprocess module) refuse the mask before the model runs; other scopes and implementations
+    run."""
+    model = _model(gloo_group_of_one)
+    model.config.num_moe_experts = 8
+    model.config.cuda_graph_impl = cuda_graph_impl
+    model.config.cuda_graph_modules = [CudaGraphModule[name] for name in cuda_graph_modules]
+    if refused:
+        with pytest.raises(ValueError, match="capture the router"):
+            _run(model, packed=True, return_schedule_plan=False)
+        model.assert_not_called()
+    else:
+        _run(model, packed=True, return_schedule_plan=False)
+        model.assert_called_once()

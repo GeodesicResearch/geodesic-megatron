@@ -18,7 +18,7 @@ from typing import Iterable
 
 import modelopt.torch.distill as mtd
 import torch
-from megatron.core import parallel_state
+from megatron.core import tensor_parallel
 from megatron.core.models.gpt import GPTModel
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 from megatron.core.utils import (
@@ -34,7 +34,7 @@ from megatron.bridge.training.losses import create_masked_next_token_loss_functi
 from megatron.bridge.training.post_training.distillation import loss_func_kd
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.token_masking.hook import TokenMaskingStats, apply_token_masking
-from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
+from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params, trim_padded_cu_seqlens
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 
 
@@ -67,12 +67,23 @@ def _dataset_uses_packed_sequences(cfg: ConfigContainer) -> bool:
     return bool(getattr(dataset_cfg, "pack_sequences_in_batch", False))
 
 
-def _partition_packed_batch_for_cp(batch: dict[str, torch.Tensor], cp_size: int) -> dict[str, torch.Tensor]:
+def _partition_packed_batch_for_cp(
+    batch: dict[str, torch.Tensor], cp_size: int, cp_rank: int
+) -> dict[str, torch.Tensor]:
     """Partition THD/packed batches across context-parallel ranks.
 
     Uses transformer_engine's `thd_get_partitioned_indices` to slice sequence
     dimension aligned with packed cu_seqlens. This avoids the generic
     `get_batch_on_this_cp_rank` slicing which assumes contiguous sequence tokens.
+
+    The partition reads the same trimmed cu_seqlens row that `get_packed_seq_params` gives attention and the Mamba
+    layers. The packed collate pads every row of a batch with -1 to the widest row plus one, and on a row ending in
+    two or more pads the kernel's search can land on a pad and hand every rank the pack's leading tokens.
+
+    Args:
+        batch: One microbatch of packed tensors, sequence along dim 1.
+        cp_size: The context-parallel group size.
+        cp_rank: This rank's position in the context-parallel group, whose share of every sequence it keeps.
     """
 
     err_msg = "Please update Transformer Engine to >= 1.10 to use Context Parallel with THD format data"
@@ -86,11 +97,10 @@ def _partition_packed_batch_for_cp(batch: dict[str, torch.Tensor], cp_size: int)
         logger.error(err_msg)
         raise e
 
-    cp_rank = parallel_state.get_context_parallel_rank()
     cu_seqlens = batch["cu_seqlens"]
     if cu_seqlens.dim() > 1 and cu_seqlens.size(0) != 1:
         raise ValueError("Packed THD batches expect micro-batch size 1 for context-parallel slicing (THD layout)")
-    cu_seqlens = cu_seqlens.squeeze()
+    cu_seqlens = trim_padded_cu_seqlens(cu_seqlens.squeeze(), batch.get("cu_seqlens_argmin"))
     cu_seqlens_unpadded = batch.get("cu_seqlens_unpadded")
     if cu_seqlens_unpadded is not None:
         batch["cu_seqlens_unpadded"] = cu_seqlens_unpadded.squeeze()
@@ -112,6 +122,53 @@ def _partition_packed_batch_for_cp(batch: dict[str, torch.Tensor], cp_size: int)
         batch[key] = val.index_select(1, index)
 
     return batch
+
+
+_ROUTER_CUDA_GRAPH_MODULES = {"moe", "moe_router", "moe_preprocess"}
+
+
+def _refuse_padding_mask_under_router_cuda_graphs(config) -> None:
+    """Refuse a padding mask for a MoE model whose Transformer Engine CUDA graphs capture the router, as upstream
+    Megatron-Bridge does: the pinned Megatron-Core cannot mask router statistics inside such a graph.
+
+    A graph captures the router when it captures the whole layer (no ``cuda_graph_modules`` named) or names a MoE,
+    router or MoE-preprocess module. Graphs that capture other modules only, and the local and full-iteration CUDA
+    graph implementations, are left to run, as upstream leaves them.
+    """
+    if (
+        not getattr(config, "num_moe_experts", None)
+        or getattr(config, "cuda_graph_impl", "none") != "transformer_engine"
+    ):
+        return
+    graph_modules = {module.name for module in config.cuda_graph_modules}
+    if not graph_modules or graph_modules & _ROUTER_CUDA_GRAPH_MODULES:
+        raise ValueError(
+            "MoE padding masks are not supported with Transformer Engine CUDA graphs that capture the router "
+            f"(cuda_graph_modules: {sorted(graph_modules) or 'the whole layer'}); capture other modules only, or "
+            "disable CUDA graphs."
+        )
+
+
+def _prepare_packed_padding_mask(
+    padding_mask: torch.Tensor, *, config, model: GPTModel, pg_collection
+) -> torch.Tensor:
+    """The padding mask laid out like this pipeline stage's hidden states, as upstream Megatron-Bridge lays it out.
+
+    The MoE router reads the mask position for position against its hidden states, which under sequence parallelism
+    hold this tensor-parallel rank's share of the sequence. A GPT model's first stage scatters the mask itself, beside
+    its embeddings; its later stages, and every stage of a hybrid model, which in the pinned Megatron-Core scatters
+    only its embeddings, get their share here.
+    """
+    needs_sp_scatter = not unwrap_model(model).pre_process or getattr(config, "is_hybrid_model", False)
+    if getattr(config, "sequence_parallel", False) and needs_sp_scatter:
+        padding_mask = (
+            tensor_parallel.scatter_to_sequence_parallel_region(
+                padding_mask.transpose(0, 1).contiguous(), group=pg_collection.tp
+            )
+            .transpose(0, 1)
+            .contiguous()
+        )
+    return padding_mask
 
 
 def get_batch_from_iterator(
@@ -154,6 +211,9 @@ def get_batch_from_iterator(
         required_device_keys.update(("tokens", "position_ids"))
     if is_last_pp_stage:
         required_device_keys.update(("labels", "loss_mask"))
+    # Every stage's MoE routers leave the padded positions out of their statistics.
+    if "padding_mask" in batch:
+        required_device_keys.add("padding_mask")
 
     # For packed sequences, record the full (pre-CP-slice) pack length from the
     # raw batch. tokens/labels are full-length on every rank (the sampler shards
@@ -196,6 +256,7 @@ def get_batch(
     torch.Tensor | None,
     torch.Tensor | None,
     int | None,
+    torch.Tensor | None,
 ]:
     """Generate a batch.
 
@@ -207,8 +268,9 @@ def get_batch(
     Returns:
         tuple of tensors containing tokens, labels, loss_mask, attention_mask, position_ids,
         cu_seqlens, cu_seqlens_argmin, max_seqlen, cu_seqlens_unpadded,
-        cu_seqlens_unpadded_argmin, and the full (pre-CP-slice) packed sequence length
-        (None when not packed).
+        cu_seqlens_unpadded_argmin, the full (pre-CP-slice) packed sequence length
+        (None when not packed), and the padding mask (True at the positions the collate
+        padded; None when the batch carries none).
     """
     # Determine pipeline stage role via process group collection
     is_first = is_pp_first_stage(pg_collection.pp)
@@ -224,7 +286,7 @@ def get_batch(
     # all stages observe the same batch). For non-packed runs, middle stages keep
     # their original behaviour and early-return without touching the iterator.
     if is_middle and not _dataset_uses_packed_sequences(cfg):
-        return None, None, None, None, None, None, None, None, None, None, None
+        return None, None, None, None, None, None, None, None, None, None, None, None
 
     batch = get_batch_from_iterator(
         data_iterator,
@@ -244,7 +306,7 @@ def get_batch(
         # Slices only the per-token tensors that are present on this stage; the
         # global (un-sliced) cu_seqlens is intentionally preserved so seq_idx is
         # built over the full pack and in original token order.
-        batch = _partition_packed_batch_for_cp(batch, cp_size)
+        batch = _partition_packed_batch_for_cp(batch, cp_size, pg_collection.cp.rank())
     else:
         # slice batch along sequence dimension for context parallelism.
         # `is_hybrid_cp` is a required positional as of the mcore 0.19 pin; it comes from
@@ -270,6 +332,7 @@ def get_batch(
         batch.get("cu_seqlens_unpadded"),
         batch.get("cu_seqlens_unpadded_argmin"),
         full_seq_length,
+        batch.get("padding_mask"),
     )
 
 
@@ -310,6 +373,7 @@ def _forward_step_common(
             cu_seqlens_unpadded,
             cu_seqlens_unpadded_argmin,
             full_seq_length,
+            padding_mask,
         ) = get_batch(data_iterator, state.cfg, use_mtp, pg_collection=pg_collection)
     timers("batch-generator").stop()
 
@@ -328,6 +392,12 @@ def _forward_step_common(
         # all-ones mask when none is given and would then train on every position this step
         # excludes from the main loss.
         forward_args["loss_mask"] = loss_mask
+    # The MoE routers leave the positions the collate padded out of their expert-bias and auxiliary-loss statistics.
+    if padding_mask is not None:
+        _refuse_padding_mask_under_router_cuda_graphs(config)
+        forward_args["padding_mask"] = _prepare_packed_padding_mask(
+            padding_mask, config=config, model=model, pg_collection=pg_collection
+        )
 
     # Add packed sequence support
     if cu_seqlens is not None:

@@ -202,6 +202,20 @@ produced at a smaller multiple silently NaNs under CP). The packed parquet path 
 names both the tokenizer and the pad multiple, and the tests assert they match the training
 topology.
 
+**SFT runs launched before the context-parallel partition fix (2026-10-01) trained on partly
+mis-partitioned microbatches.** At CP=2 with two packs per data-parallel replica — this stage,
+its xl-50b ablation, the filtered arms' SFTs and the metagaming arm all run so — one collate call
+pads both packs' `cu_seqlens` rows with -1 to the wider row plus one, and the context-parallel
+partition handed the untrimmed row to Transformer Engine, whose search can land on a pad and give
+both CP ranks the pack's leading tokens: 29.2% of this stage's microbatches and 26.2–26.4% of the
+xl-50b runs' (the 2026-09-27 export audit, preserved at
+`/projects/a5k/public/logs/nano_sft_perf_campaign/records/cp_partition_fix/FINAL_REPORT.md`, section 2,
+with its partition analysis beside it). The partition now reads the same trimmed row that attention
+and the Mamba layers read (`gpt_step._partition_packed_batch_for_cp`;
+`tests/unit_tests/training/test_gpt_step_packed_cp_partition.py`). A run launched from a checkout with
+the fix trains differently from one launched before it, and its logged loss reads about 0.03–0.04 nats
+higher (the audit's estimate), so loss curves from either side of the fix are not compared.
+
 **The history variant is required, and the distinction is invisible at the encoder.** This
 corpus stores each turn's chain of thought in a structured `reasoning_content` field, and 80%
 of its non-final assistant turns have one (measured over the first 4,000 rows of the combined
@@ -676,7 +690,7 @@ that the 32K topology fits and that the stage boundary does not spike (see that 
 the smoke measured"). What was open before the runs fell into three groups:
 
 - **The 32K topology is now validated, at 508 GPUs.** CP=2 with full recompute was carried
-  over from the 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs, and the
+  over from the August 2026 32K Nano SFT quickstart, which measured 91.5 GB of 95 at 64 GPUs, and the
   GBS 512 / DP 254 combination ran for the first time on 2026-08-21 via
   [`../smoke_runs/`](../smoke_runs/README.md), which executes 100 iterations of each stage at
   these exact settings: it fits, and the weights-only warm start moved loss 6.972 -> 6.956

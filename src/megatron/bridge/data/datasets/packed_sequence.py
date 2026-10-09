@@ -88,6 +88,43 @@ def _retrieve_tokenized(dataset, num_workers):
         )
 
 
+def pad_document_for_packing(data: dict, max_seq_length: int, pad_seq_to_mult: int, pad_id: int) -> None:
+    """Pad one tokenized document in place to the length the packer stores it at.
+
+    A document of ``n`` tokens, up to ``max_seq_length``, is padded to the next multiple of ``pad_seq_to_mult`` at or
+    above ``n`` (at most ``max_seq_length``) plus one, the token the label shift drops, so that it covers a multiple of
+    ``pad_seq_to_mult`` positions in a packed sequence (the alignment THD context parallelism needs): ``input_ids`` and
+    ``context_ids`` with ``pad_id``, ``loss_mask`` with False (0 for an integer mask). A longer document is cut to
+    ``max_seq_length``.
+    """
+    input_ids = data["input_ids"]
+    max_length_to_pad = min(
+        max_seq_length, (len(input_ids) + pad_seq_to_mult - 1) // pad_seq_to_mult * pad_seq_to_mult
+    )
+    if len(input_ids) <= max_length_to_pad:
+        target_len = max_length_to_pad + 1  # +1 for label shift
+    elif len(input_ids) > max_seq_length:
+        target_len = max_seq_length
+    else:
+        target_len = len(input_ids)
+
+    for key, val in data.items():
+        if key in {"input_ids", "context_ids"}:
+            if len(val) < target_len:
+                val = val + [pad_id] * (target_len - len(val))
+            elif len(val) > target_len:
+                val = val[:target_len]
+        elif key == "loss_mask":
+            # Pad loss_mask with False (no loss on padding tokens)
+            if hasattr(val, "__len__"):
+                if len(val) < target_len:
+                    pad_val = False if isinstance(val[0], bool) else 0
+                    val = val + [pad_val] * (target_len - len(val))
+                elif len(val) > target_len:
+                    val = val[:target_len]
+        data[key] = val
+
+
 def tokenize_dataset(
     path: Path,
     tokenizer: MegatronTokenizer,
@@ -160,45 +197,8 @@ def tokenize_dataset(
                 data[key] = val.tolist()
 
     if pad_seq_to_mult > 1:
-
-        def pre_pad_dataset(data, max_seq_length, max_length_to_pad, pad_id):
-            """
-            Pad each individual data point to the length of max_length_to_pad.
-            This keeps packed samples divisible by the requested multiple (used for CP/THD).
-            """
-            assert max_seq_length >= max_length_to_pad
-            # Determine target length from input_ids
-            input_ids = data.get("input_ids", [])
-            if len(input_ids) <= max_length_to_pad:
-                target_len = max_length_to_pad + 1  # +1 for label shift
-            elif len(input_ids) > max_seq_length:
-                target_len = max_seq_length
-            else:
-                target_len = len(input_ids)
-
-            for key, val in data.items():
-                if key in {"input_ids", "context_ids"}:
-                    if len(val) < target_len:
-                        val = val + [pad_id] * (target_len - len(val))
-                    elif len(val) > target_len:
-                        val = val[:target_len]
-                elif key == "loss_mask":
-                    # Pad loss_mask with False (no loss on padding tokens)
-                    if hasattr(val, '__len__'):
-                        if len(val) < target_len:
-                            pad_val = False if isinstance(val[0], bool) else 0
-                            val = val + [pad_val] * (target_len - len(val))
-                        elif len(val) > target_len:
-                            val = val[:target_len]
-                data[key] = val
-            return
-
-        def ceil_to_nearest(n, m):
-            return (n + m - 1) // m * m
-
         for data in dataset:
-            max_length_to_pad = min(max_seq_length, ceil_to_nearest(len(data["input_ids"]), pad_seq_length_to_mult))
-            pre_pad_dataset(data, max_seq_length, max_length_to_pad, pad_id)
+            pad_document_for_packing(data, max_seq_length, pad_seq_length_to_mult, pad_id)
 
     return dataset
 

@@ -216,6 +216,7 @@ def create_sft_dataset(
         return GPTSFTPackedParquetDataset(
             pack_metadata_file_path=pack_metadata_file_path,
             pad_cu_seqlens=pad_cu_seqlens,
+            pad_seq_to_mult=pad_seq_to_mult,
             **gpt_sft_dataset_kwargs,
             **kwargs,
         )
@@ -962,7 +963,11 @@ class GPTSFTPackedDataset(GPTSFTDataset):
         cu_seqlens: list[list[int]] = []
         # Only compute cu_seqlens_unpadded when pad_seq_to_mult > 1 (actual padding for CP)
         cu_seqlens_unpadded: list[list[int]] | None = [] if self._pad_seq_to_mult > 1 else None
-        for item in batch:
+        # True at every position that holds padding rather than a document's tokens: the EOS padding the packer
+        # added to each document (packs built with pad_seq_to_mult > 1) and everything after a pack's last document.
+        # The MoE router leaves these positions out of its statistics.
+        padding_mask = torch.zeros(len(batch), max_length, dtype=torch.bool)
+        for row, item in enumerate(batch):
             position_ids.append([])
             cu_seqlens.append([0])
             if cu_seqlens_unpadded is not None:
@@ -975,6 +980,7 @@ class GPTSFTPackedDataset(GPTSFTDataset):
 
             # the last seq needs to be the max seq len because rope and attn kernels expect no padding
             assert cu_seqlens[-1][-1] <= max_length
+            padding_mask[row, cu_seqlens[-1][-1] :] = True
 
             # since data is prepadded when cp_size > 1, there may be some extra padding at the end
             # of the packed sequence. In this case, we need to add the max seq len to the end.
@@ -990,6 +996,7 @@ class GPTSFTPackedDataset(GPTSFTDataset):
                     non_eos_positions = np.where(current_seq_arr != self.tokenizer.eos_id)[0]
                     seqlen_unpadded = non_eos_positions[-1] + 1 if non_eos_positions.size > 0 else 0
                     cu_seqlens_unpadded[-1].append(cu_seqlens_unpadded[-1][-1] + seqlen_unpadded)
+                    padding_mask[row, cu_seqlens[-1][i] + seqlen_unpadded : cu_seqlens[-1][i + 1]] = True
 
                 # if extra paddings are added in the packed sequence, they can't be counted as
                 # actual tokens for training
@@ -1022,6 +1029,7 @@ class GPTSFTPackedDataset(GPTSFTDataset):
             "labels": torch.LongTensor(labels),
             "loss_mask": loss_mask,
             "position_ids": torch.LongTensor(position_ids),
+            "padding_mask": padding_mask,
             "token_count": token_count,
         }
 

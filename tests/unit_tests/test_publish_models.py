@@ -633,6 +633,53 @@ def test_the_upload_block_is_optional_and_its_walltime_is_checked_like_the_expor
         publish_models.load_manifest(manifest_path, root)
 
 
+def test_a_models_card_sections_follow_its_introduction(campaign):
+    """A model may name a markdown file whose sections its card carries between the introduction and
+    the standard tables; a model that names none gets the standard card."""
+    root, _, manifest_path = campaign
+    (root / "cards").mkdir()
+    (root / "cards" / "think.md").write_text("\n## Comparison\n\nCOMPARISON TEXT.\n\n")
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["models"][1]["card_sections"] = "cards/think.md"
+    manifest_path.write_text(yaml.safe_dump(raw))
+    manifest = publish_models.load_manifest(manifest_path, root)
+    base, think = manifest.models
+    assert base.card_sections is None
+    assert think.card_sections == "## Comparison\n\nCOMPARISON TEXT."
+    card = publish_models.render_model_card(manifest, think, [])
+    assert "INTRO TEXT. Architecture `nvidia/arch`.\n\n## Comparison\n\nCOMPARISON TEXT.\n\n## Curriculum\n" in card
+    assert "## Comparison" not in publish_models.render_model_card(manifest, base, [])
+
+
+def test_manifest_rejects_card_sections_that_are_missing_or_not_a_section(campaign):
+    """The file is read when the manifest loads, so a wrong path fails before anything is uploaded; and
+    it must open with a level-2 heading, since text without one would run on from the introduction."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["models"][1]["card_sections"] = "cards/think.md"
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(
+        publish_models.ManifestError, match=r"models\[1\]\.card_sections: .*cards/think\.md does not exist"
+    ):
+        publish_models.load_manifest(manifest_path, root)
+    (root / "cards").mkdir()
+    for text in ("", "A comparison without a heading.\n", "# A title, not a section\n"):
+        (root / "cards" / "think.md").write_text(text)
+        with pytest.raises(publish_models.ManifestError, match="must open with a level-2 heading"):
+            publish_models.load_manifest(manifest_path, root)
+
+
+def test_manifest_rejects_a_model_entry_that_is_not_a_mapping(campaign):
+    """Separating the optional keys from the required ones leaves anything that is not a mapping
+    whole, so the key check still names the entry and what it found."""
+    root, _, manifest_path = campaign
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["models"][0] = "org/arm-base"
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match=r"models\[0\]: expected a mapping, got str"):
+        publish_models.load_manifest(manifest_path, root)
+
+
 def test_manifest_rejects_a_node_count_that_is_not_a_positive_integer(campaign):
     root, _, manifest_path = campaign
     raw = yaml.safe_load(manifest_path.read_text())
@@ -664,17 +711,18 @@ def test_every_campaign_manifest_loads_against_this_checkout(manifest_path):
         assert model.reasoning == all(s.revision.startswith("sft_iter_") for s in model.stages)
 
 
-def test_the_control_pretraining_manifest_publishes_every_arm_and_the_ablation():
+def test_the_control_pretraining_manifest_publishes_every_arm_the_ablation_and_its_rerun():
     manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["control_pretraining"], _REPO_ROOT)
     repos = [m.repo for m in manifest.models]
-    # Two repositories per three-stage arm, base and think; one for the post-training ablation,
-    # which needs its own rather than a second sft stage under baseline-think (that repository's
-    # sft_iter_<n> revisions are the mainline run's, and the card has to say which corpus made the
-    # weights); one base repository per midtraining-only narrowly filtered arm, V1 and V2; and the
-    # V2 arm's xl-50b think repository. The broad arm's think repository is its xl-50b one. Each
-    # filtered family adds a knowledge-reintroduction repository and its replay-only control, once
-    # its links exist. V2 E2E adds one base repository, both of whose stages it trains.
-    assert len(repos) == 15 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    # Two repositories per three-stage arm, base and think; one for the post-training ablation and one
+    # for its rerun on fixed, fast code, each of which needs its own rather than a second sft stage
+    # under baseline-think (that repository's sft_iter_<n> revisions are the mainline run's, and a card
+    # has to say which corpus and which code made the weights); one base repository per
+    # midtraining-only narrowly filtered arm, V1 and V2; and the V2 arm's xl-50b think repository. The
+    # broad arm's think repository is its xl-50b one. Each filtered family adds a
+    # knowledge-reintroduction repository and its replay-only control, once its links exist. V2 E2E
+    # adds one base repository, both of whose stages it trains.
+    assert len(repos) == 16 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
     reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
     assert len(reintroduction) == 6
     for model in reintroduction:
@@ -692,6 +740,14 @@ def test_the_control_pretraining_manifest_publishes_every_arm_and_the_ablation()
     xl50b = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-think"))
     assert xl50b.stages[0].tokens_per_iteration == 8_388_608
     assert xl50b.stages[0].tokens_before == think.stages[0].tokens_before
+    # The rerun repeats the ablation's training problem, so its revisions sit at the same token
+    # positions, and only its card carries sections of its own: the comparison with the ablation.
+    rerun = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v2-think"))
+    assert rerun.stages[0].train_iters == xl50b.stages[0].train_iters == 5976
+    assert rerun.stages[0].tokens_per_iteration == xl50b.stages[0].tokens_per_iteration
+    assert rerun.stages[0].tokens_before == xl50b.stages[0].tokens_before
+    assert [m.repo for m in manifest.models if m.card_sections is not None] == [rerun.repo]
+    assert xl50b.repo.split("/")[1] in rerun.card_sections
 
 
 def _chained_midtraining(campaign, first_save: str, first_lr: float) -> Path:

@@ -31,6 +31,7 @@ import pytest
 import torch
 
 from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
+from tests.unit_tests.small_language_models import hybrid_model
 
 
 V_SMALL = 1000
@@ -505,27 +506,16 @@ def test_tensor_parallel_vocabulary_gives_logits_but_refuses_the_loss(tmp_path):
 
 
 def _hybrid_model(pattern="M*-", **config_overrides):
-    from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec
-    from megatron.core.models.hybrid.hybrid_model import HybridModel
-    from megatron.core.transformer.transformer_config import TransformerConfig
-
-    config = TransformerConfig(
+    return hybrid_model(
+        pattern,
+        vocab_size=V_SMALL,
+        max_sequence_length=SEQ,
+        pre_process=True,
         num_layers=3,
         hidden_size=256,
         num_attention_heads=4,
-        use_cpu_initialization=True,
-        hidden_dropout=0.0,
-        attention_dropout=0.0,
         **config_overrides,
     )
-    model = HybridModel(
-        config=config,
-        hybrid_stack_spec=hybrid_stack_spec,
-        vocab_size=V_SMALL,
-        max_sequence_length=SEQ,
-        hybrid_layer_pattern=pattern,
-    )
-    return model.cuda()
 
 
 def _model_inputs(micro_batch_size):
