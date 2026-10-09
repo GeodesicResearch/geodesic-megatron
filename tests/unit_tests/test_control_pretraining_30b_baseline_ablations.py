@@ -114,7 +114,7 @@ V2_GPUS = 256
 V3 = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml"
 V3_DATA = _ABLATIONS_DIR / "data" / "pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml"
 V3_CORPUS = "geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered"
-V3_SUBSET = "xl50b_train_quality_v5"
+V3_SUBSET = "train"
 CORPUS_FIELDS = {
     "dataset.dataset_name",
     "dataset.dataset_root",
@@ -397,5 +397,6 @@ class TestV3IsV2OnTheQualityFilteredCorpus:
         assert_row_packs_like_the_mix(v3_row, V3_DATA, mix_row)
 
     def test_the_revision_and_the_document_count_are_pinned_together(self, v3_row):
-        """Both come from the published split: a full commit SHA, which no later push can move, and its row count."""
+        """Both come from the published split: a full commit SHA, which no later push can move, and its row count.
+        Until the split is published both read PENDING, which holds the build."""
         assert_hold_and_pin_move_together(OmegaConf.load(V3_DATA).revision, [v3_row], "xl-50b sft v3")

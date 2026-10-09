@@ -7,7 +7,7 @@
 # midtraining final, iteration 3126), GBS 256 at 32,768 tokens, 5976 iterations, the same optimizer, LR schedule,
 # tokenizer, levers, recompute, checkpoint cadence and launcher settings (the .env beside this file is v2's).
 #
-# THE CORPUS. geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered, config xl50b_train_quality_v5:
+# THE CORPUS. geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered, config train:
 #   - the xl-50b mix at the revision v2 trained on, less every row a per-trace quality judge labelled defective
 #     (seven yes/no questions; a row is defective when any answer has probability 0.5 or more) in the seven of the
 #     mix's 33 subsets that were judged: 346,767 rows, 7.58% of the mix's tokens. The other 26 subsets were not
@@ -16,8 +16,10 @@
 #     and the MCQA share (0.99%) are v2's: agentic documents x2.33, MCQA x2.0, the rest x1.09, at most three
 #     exposures of any document;
 #   - pared to 50,000,000,000 tokens and row-shuffled across sources, as v2's split was built.
-#   Its data config (data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml) pins the published revision, and its
-#   corpora.tsv row the row count, 9,261,591.
+#   Its data config (data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml) pins the repository's republished
+#   head, and its corpora.tsv row the row count; both read PENDING, which holds the build, until that head exists.
+#   `train` there is a copy, file for file, of the `xl50b_train_quality_v5` config published at e77572f6:
+#   9,261,591 rows, 50,000,013,376 tokens.
 #   Against v2 the corpus also holds less unique data (40.9B unique tokens against 44.9B), more repetition (about
 #   9.1B repeated tokens against 5.1B) and less maths and SWE, the subsets the cut hit hardest.
 #
@@ -56,7 +58,7 @@ mixed_precision: bf16_mixed_bf16_grad_reduce
 
 dataset:
   dataset_name: geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered
-  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__xl50b_train_quality_v5
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train
   seq_length: 32768
   seed: 1234
   dataloader_type: batch
@@ -74,7 +76,7 @@ dataset:
     # The per-shard packs (the arm's corpora.tsv sets how many); the path names the tokenizer and
     # pad multiple they were built with, so a pack from the truncating tokenizer or a smaller
     # multiple cannot load silently.
-    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__xl50b_train_quality_v5/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true

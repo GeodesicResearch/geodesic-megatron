@@ -1,5 +1,5 @@
-# The identity of the quality-filtered xl-50b post-training corpus that the v3 SFT trains on: the
-# `xl50b_train_quality_v5` config of geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered.
+# The identity of the quality-filtered xl-50b post-training corpus that the v3 SFT trains on: the `train`
+# config of geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered.
 #
 # That config is the xl-50b mix (pa-warm-start-sft-xl-50b-mix, the data v2 trained on) less every row a
 # per-trace quality judge labelled defective, refilled to v2's 50,000,000,000 tokens by repeating kept
@@ -7,19 +7,21 @@
 # v2's columns (`messages` / `tools` / per-turn `reasoning_content`, `n_tokens`) plus the quality
 # annotations, which the chat template does not read. The `subset` column of this arm's corpora.tsv
 # names the config, so the corpus root is
-# `geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__xl50b_train_quality_v5`.
+# `geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train`.
 #
 # Tokenizer, sequence length, pad multiple and the JSONL-only prepare are the xl-50b mix's verbatim
 # (data/pa-warm-start-sft-xl-50b-mix.yaml explains each), so the packs are built exactly as v2's were and
 # the packed path the training config reads names the same tokenizer and multiple.
 #
-# `revision` is the commit that published the config (2026-10-09): 9,261,591 rows and 50,000,013,376
-# tokens, the document count the corpora.tsv row carries. The two are pinned together.
+# `revision` is the head of the repository's republished nine-config layout. Its `train` config is a copy,
+# file for file by LFS sha256, of the `xl50b_train_quality_v5` config published at e77572f6 (706 shards,
+# 9,261,591 rows, 50,000,013,376 tokens). It reads PENDING, and the corpora.tsv row's document count with
+# it, until the republish lands; build_corpora.sh refuses the row while it does. The two are pinned together.
 #
 #   configs/control_pretraining/build_corpora.sh \
-#     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft xl50b_train_quality_v5
+#     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft train
 dataset: geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered
-revision: e77572f6ba662dde746c8d2a36d08457a5665d63
+revision: PENDING
 tokenizer: geodesic-research/nemotron-think-history-tokenizer
 split: train
 seq-length: 32768

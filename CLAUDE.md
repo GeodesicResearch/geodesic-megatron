@@ -1013,7 +1013,7 @@ SFT quickstart's levers, at the quickstart's values, and its run identity. It mu
 PR #52's packed-SFT fixes. Compare it with `control-pretraining-30b-baseline-xl50b-think` by evaluations, not loss
 curves: the ablation's logged loss reads about 0.03–0.04 nats low because of its corrupted CP partitions. Its launch
 and status are in that directory's README. `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml` (+ `.env`) is v2
-trained again with only its corpus changed (Kyle, 2026-10-09): the `xl50b_train_quality_v5` split of
+trained again with only its corpus changed (Kyle, 2026-10-09): the `train` config of
 `geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered`, the xl-50b mix less the rows a trace-quality judge
 labelled defective, refilled to v2's 50B tokens at v2's agentic and MCQA shares. It keeps v2's 5976 iterations
 whatever its pack count: fewer packs than 5976 x 256 and the last iterations re-read the first packs, more and the

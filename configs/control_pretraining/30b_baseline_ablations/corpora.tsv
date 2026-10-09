@@ -28,10 +28,12 @@
 # split the v3 SFT trains on. The mainline mix the ablation is compared against is the baseline
 # arm's own build.
 #
-# The quality-filtered row is the `xl50b_train_quality_v5` config of
+# The quality-filtered row is the `train` config of
 # geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered: v2's 50B tokens again, from the
 # mix less its defective rows, so it takes the mix's walltimes and shard count. Its `docs` is the
-# published config's row count at the prepare config's pinned `revision`; the two are pinned together.
+# config's row count at the prepare config's pinned `revision`; the two are pinned together, and both
+# read PENDING until the repository's republished layout lands (its `train` is a copy of the
+# `xl50b_train_quality_v5` config published at e77572f6, whose row count is 9,261,591).
 #
 # The two filtered rows are the `pa_warm_start_sft_xl50b_filtered_*` splits of
 # geodesic-research/control-pretraining-datasets: the broad cut (canary OR mini >= 2) and the
@@ -44,4 +46,4 @@
 default|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix.yaml|20|08|1|32|split|1|8924246
 pa_warm_start_sft_xl50b_filtered_mini_2plus|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-mini-2plus.yaml|20|08|1|32|split|1|8838103
 pa_warm_start_sft_xl50b_filtered_gpt55_4plus_v2|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl50b-filtered-gpt55-4plus-v2.yaml|20|08|1|32|split|1|8923578
-xl50b_train_quality_v5|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml|20|08|1|32|split|1|9261591
+train|sft|pack|configs/control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml|20|08|1|32|split|1|PENDING

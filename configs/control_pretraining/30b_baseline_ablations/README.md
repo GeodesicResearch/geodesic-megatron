@@ -307,7 +307,7 @@ recompute, checkpoint cadence and `.env`. The test pins it to v2: the fields tha
 three (`dataset_name`, `dataset_root`, `packed_train_data_path`) and the run identity (the `_v3` suffix), and the
 `.env` must equal v2's.
 
-**The corpus** is the `xl50b_train_quality_v5` config of
+**The corpus** is the `train` config of
 `geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered`:
 - **The cut:** the xl-50b mix's 33 per-source configs at `cc41d97c` (8,924,316 rows, byte-identical to `ec0b9197`;
   v2 trained on that revision's `default` config, the same rows shuffled and pared by its 70 shortest documents to
@@ -324,8 +324,8 @@ three (`dataset_name`, `dataset_root`, `packed_train_data_path`) and the run ide
   v2's was.
 - **Against v2:** less unique data (40.9B unique tokens against 44.9B), more repetition (about 9.1B repeated tokens
   against 5.1B), and less maths and SWE.
-- **The record of the filter:** the dataset repository's `xl50b_filter_stats_quality_v5` (per-subset statistics),
-  `xl50b_filtered_quality_v5` (the removed documents) and `xl50b_labels_quality_v5` (the raw labels) configs; the
+- **The record of the filter:** the dataset repository's `filter_stats` config (per-subset statistics) and its seven
+  `filtered_<question>` configs (the documents each judge question removed); the
   defect write-up, with examples a reader confirmed by hand, at https://claude.ai/artifact/YZ6je8dvQcNFTryuBcNKTQ;
   and the model card's "Training data: quality filtering" section, which adds the per-category accuracy table.
 
@@ -336,13 +336,16 @@ together, and compare the models by their evaluations, not their loss curves: th
 
 Its data config, `data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml`, is the xl-50b mix's with only the
 dataset and revision changed, so the packs are built exactly as v2's were: think-history tokenizer, sequence length
-32,768, pad multiple 4, 32 shards. The data config pins the split's published revision, `e77572f6`, and the
-`corpora.tsv` row its document count, 9,261,591 (50,000,013,376 tokens); the test requires both to be pinned
-together. Then:
+32,768, pad multiple 4, 32 shards. The data config pins the head of the dataset repository's republished nine-config layout, and the
+`corpora.tsv` row its document count. Both read `PENDING` until that head exists, which holds the build
+(`build_corpora.sh` refuses a held row), and the test requires them to move together. `train` at that head is a
+copy, file for file by LFS sha256, of the `xl50b_train_quality_v5` config published at `e77572f6`: 706 shards,
+9,261,591 rows, 50,000,013,376 tokens. Before packing, check that the prepared input reads `train` at the pinned
+head with 9,261,591 rows and that its shard sha256s equal `e77572f6`'s. Then:
 
 ```bash
 bash configs/control_pretraining/build_corpora.sh \
-  configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft xl50b_train_quality_v5
+  configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft train
 ```
 
 Verify the build with `verify_corpora.py` against the same row.
@@ -379,7 +382,8 @@ with v2, from
 
 ### Status
 
-**Not yet built.** The `xl50b_train_quality_v5` split was published on 2026-10-09 at `e77572f6` and is pinned.
+**Not yet built.** The corpus is the `train` config of the dataset repository's republished layout, a copy of the
+`xl50b_train_quality_v5` split published on 2026-10-09 at `e77572f6`; the pin waits for the republish's head.
 
 ## The filtered arms' reasoning models on the same recipe
 

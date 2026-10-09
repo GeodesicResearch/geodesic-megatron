@@ -21,10 +21,11 @@ Compare them by evaluations.
 
 ## Training data: quality filtering
 
-The SFT corpus is the `xl50b_train_quality_v5` split of
+The SFT corpus is the `train` config of
 [pa-warm-start-sft-xl-50b-mix-quality-filtered](https://huggingface.co/datasets/geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered),
-whose `xl50b_filter_stats_quality_v5`, `xl50b_filtered_quality_v5` and `xl50b_labels_quality_v5` configs hold the
-per-subset statistics, the removed documents and the raw labels. The defects, with examples a reader confirmed by
+byte-identical to that repository's `xl50b_train_quality_v5` split as published at `e77572f6`. Its `filter_stats`
+config holds the per-subset statistics, and its seven `filtered_<question>` configs the documents each judge
+question removed. The defects, with examples a reader confirmed by
 hand, are written up at https://claude.ai/artifact/YZ6je8dvQcNFTryuBcNKTQ.
 
 **The rule.** A quality judge read each judged trace and gave a yes-probability for each of seven questions: missing
