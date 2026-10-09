@@ -72,16 +72,20 @@ unset LD_PRELOAD
 # ==============================================================================
 # 1b. CUDA forward-compatibility (image CUDA newer than the host driver)
 #
-# The host driver is R565 (CUDA 12.7); NGC images bundle CUDA 12.9/13.x. Under
-# Docker, NGC's entrypoint detects this and symlinks /usr/local/cuda/compat/lib
-# -> lib.real so the ld config picks the forward-compat libcuda. Apptainer never
-# runs that entrypoint and the SIF is read-only, so WITHOUT this block the loader
-# silently uses the host's 12.7 libcuda and CUDA-13 torch dies with "driver too
-# old" (verified empirically on this cluster). Fronting the compat dir is safe
-# here because the Isambard driver is always older than any image CUDA we qualify
-# (the one case NGC's entrypoint would skip compat — driver newer than image —
-# cannot occur). Measured on R565.57.01: CUDA 13.0 compat works; CUDA 13.2 compat
-# REJECTS the driver (error 803) — that verdict is per image and gated by
+# The host driver is R580 (580.173.02, CUDA 13.0) on the compute-node image of
+# 2026-10-07; NGC images bundle CUDA 13.x (26.04: 13.1). Under Docker, NGC's
+# entrypoint detects a driver older than the image's CUDA and symlinks
+# /usr/local/cuda/compat/lib -> lib.real so the ld config picks the forward-compat
+# libcuda. Apptainer never runs that entrypoint and the SIF is read-only, so
+# WITHOUT this block the loader silently uses the host's older libcuda and the
+# image's torch dies with "driver too old" (verified empirically on this cluster,
+# then on R565 / CUDA 12.7). Fronting the compat dir is safe here because the
+# Isambard driver is older than any image CUDA we qualify (the one case NGC's
+# entrypoint would skip compat — driver newer than image — cannot occur). Measured:
+# on R565.57.01 CUDA 13.0 compat works and CUDA 13.2 compat REJECTS the driver
+# (error 803); on R580.173.02 the 26.04 image's CUDA 13.1 compat works (validate
+# 21/21, 2026-10-09) and so does the 26.06 image's CUDA 13.2 compat (its CUDA and
+# GPU-op checks pass). The verdict is per image and per driver, and gated by
 # `isambard_sbatch pipeline_env_submit.sbatch validate`.
 #
 # GEODESIC_CONTAINER_CUDA_COMPAT=0 disables; =auto (default) probes the two known

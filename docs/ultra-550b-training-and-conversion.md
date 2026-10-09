@@ -269,8 +269,8 @@ The four load-bearing knobs:
 
 | # | Symptom / mechanism | Fix |
 |---|---|---|
-| A | PyPI aarch64 vllm 0.22.1 wheel is CUDA-13-linked (`vllm/_C` needs `libcudart.so.13`); unloadable on this cluster's CUDA-12.7 driver | install the GitHub release **+cu129** aarch64 wheel (links `libcudart.so.12`) |
-| B | FlashInfer autotune JIT (`enable_flashinfer_autotune` defaults TRUE in 0.22) spawns parallel `nvcc`/`cicc` (~3–7 GB anon each; an instrumented cgroup probe saw anon 270→354 GB in 21 s) → blows the 460 GB/node SLURM cgroup, and uses pip CUDA-13.3 `nvcc` the 12.7 driver rejects | `kernel_config={"enable_flashinfer_autotune": False}` + `VLLM_USE_FLASHINFER_SAMPLER=0` + `MAX_JOBS=4` |
+| A | PyPI aarch64 vllm 0.22.1 wheel is CUDA-13-linked (`vllm/_C` needs `libcudart.so.13`); unloadable on the cluster's R565 driver (CUDA 12.7), where it was measured; not re-checked on the R580 driver (CUDA 13.0) of the 2026-10-07 node image | install the GitHub release **+cu129** aarch64 wheel (links `libcudart.so.12`) |
+| B | FlashInfer autotune JIT (`enable_flashinfer_autotune` defaults TRUE in 0.22) spawns parallel `nvcc`/`cicc` (~3–7 GB anon each; an instrumented cgroup probe saw anon 270→354 GB in 21 s) → blows the 460 GB/node SLURM cgroup, and uses pip CUDA-13.3 `nvcc` the R565 (CUDA 12.7) driver rejects, as measured there | `kernel_config={"enable_flashinfer_autotune": False}` + `VLLM_USE_FLASHINFER_SAMPLER=0` + `MAX_JOBS=4` |
 | C | vLLM disk caches default under `~/.cache` (NFS HOME); 32 Ray workers `fcntl.flock` → `[Errno 116] Stale file handle` | node-local `VLLM_CACHE_ROOT` + `XDG_CACHE_HOME` (under a `/tmp` `TMPDIR`) |
 | D (final, round 10) | `moe_backend=auto` routes Ultra's large-EP MoE through `flashinfer_cutlass_moe`, whose JIT `build_and_load` FileLocks `~/.cache/flashinfer` (flashinfer honors ONLY `FLASHINFER_WORKSPACE_BASE`, default `Path.home()`) → Errno 116 across 32 workers. (Super's single-node shape auto-selected the non-flashinfer modular MoE path, which is why Super passed earlier.) | `kernel_config moe_backend="triton"` (node-local Triton cache; no nvcc JIT) + `FLASHINFER_WORKSPACE_BASE=$TMPDIR` |
 

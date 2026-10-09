@@ -223,6 +223,7 @@ def _free_port():
 
 
 @requires_hybridep
+@pytest.mark.serial_gpu
 def test_the_next_forward_dispatch_after_a_combine_on_a_freed_handle_runs_cleanly():
     env = dict(
         os.environ,

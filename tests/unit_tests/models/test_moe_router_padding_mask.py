@@ -188,6 +188,7 @@ def _layers_get_their_share_of_the_mask(rank: int, init_file: str, routing: dict
         torch.distributed.destroy_process_group()
 
 
+@pytest.mark.serial_gpu
 def test_each_tensor_parallel_rank_routes_with_its_share_of_the_padding_mask(tmp_path):
     if torch.cuda.device_count() < TP:
         pytest.skip(f"needs {TP} GPUs")
