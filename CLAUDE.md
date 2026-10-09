@@ -50,7 +50,8 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 - **GPUs**: NVIDIA GH200 120GB (95GB usable), `sm_90`, 4 GPUs per node
 - **CPU**: ARM aarch64 (Grace)
 - **Networking**: Slingshot/CXI fabric (HPE)
-- **CUDA**: 13.0 in-image on a CUDA-12.7 host driver (forward-compat libs), **Python**: 3.12, **PyTorch**: 2.10.0a0+nv25.11 (from the NGC image — see `## 0. Environment Pipeline`)
+- **CUDA**: 13.1 in-image on the R580 host driver (580.173.02, CUDA 13.0; forward-compat libs), **Python**: 3.12, **PyTorch**: 2.11.0a0+nv26.02 (from the NGC image — see `## 0. Environment Pipeline`)
+- **Compute-node OS image of 2026-10-07**: SLES 15 SP7, host libfabric 2.3.1 only (the pinned default; the Slingshot plugin built against 1.22.0 loads it at full bandwidth), and GPUs in `Exclusive_Process` compute mode — one CUDA context per GPU, so two processes cannot share a device
 - **Scale**: cross-node EP=8 MoE all-to-all hits the documented Slingshot/aws-ofi-nccl Send/Recv hang (`docs/investigations/slingshot-nccl-hang-investigation.md`) — keep **TP×EP ≤ 4** (node-local) to avoid it. With node-local EP, scale is NOT capped at 32 nodes: **Ultra SFT is validated at 72 nodes / 288 GPUs** (PP=36). The prior "64+ nodes just hang" belief conflated that Slingshot hang with two Ultra-specific first-iter issues since fixed (`disable_jit_fuser` + a longer `TORCH_NCCL_TIMEOUT`; see the Ultra section).
 
 ### Bad compute nodes
@@ -186,8 +187,9 @@ bash pipeline_env_setup.sh
   version-report check prints the live set. Qualified image today is
   `nvcr.io/nvidia/nemo:26.04` (re-qualified 2026-07-29) — Python 3.12, CUDA 13.1,
   NCCL 2.29.2, torch 2.11.0a0+nv26.02, TE 2.14.1, mamba-ssm 2.3.1, causal-conv1d
-  1.6.1, transformers 5.3.0, APEX, nvidia-resiliency-ext 0.6.0. (26.06 needs a
-  ≥595-branch driver — blocked on this cluster's 565.57.01.)
+  1.6.1, transformers 5.3.0, APEX, nvidia-resiliency-ext 0.6.0. (26.06's CUDA 13.2
+  forward-compat libs rejected the cluster's earlier R565 driver; whether they accept
+  the R580 driver, 580.173.02, an LTSB branch, has not been measured.)
   The Python overlay (`pip install --target`, `--no-deps`, on PYTHONPATH after the repo
   and before the image) fills gaps without touching the read-only SIF: `peft` (image
   0.13.2 is below modelopt's >=0.17 requirement), `imageio` (absent; one diffusion

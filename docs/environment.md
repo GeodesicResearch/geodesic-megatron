@@ -164,7 +164,11 @@ bump) plus `apptainer inspect $CONTAINER_SIF` / `${CONTAINER_SIF}.source.txt`.
 The image bundles a newer CUDA userland than the host driver natively supports. For exactly
 that case Isambard's containers/NCCL guidance prescribes building NCCL and the aws-ofi-nccl
 CXI plugin **inside the image**, against the image's CUDA and the **host's** Cray libfabric
-(1.22.0), keeping the outputs on the host filesystem and bind-mounting them at runtime.
+(1.22.0 when the stack was built), keeping the outputs on the host filesystem and bind-mounting
+them at runtime. The compute-node image of 2026-10-07 ships libfabric 2.3.1 and no other version,
+so `pipeline_env_config.env` binds 2.3.1; the 1.22.0-built plugin loads it through the unchanged
+`libfabric.so.1` soname, and the 2-node smoke measured 138.8 GB/s busbw on it (2026-10-09, job
+7178997), against 131 GB/s for the containerized 2-node all_reduce on 1.22.0 (2026-07-23).
 Step 2 of `pipeline_env_setup.sh` is that recipe; it builds NCCL `v2.29.2-1`, hwloc `v2.13`
 and aws-ofi-nccl `v1.18.0` (pins overridable via `GEODESIC_CONTAINER_OFI_*_VERSION`) plus
 the `nccl-tests` binaries, into `/projects/a5k/public/containers/slingshot/nemo_<tag>/`,
@@ -409,20 +413,23 @@ must sustain for its first checkpoint to beat the wall; `--disable-ft` is the op
 Under Docker, NGC's entrypoint detects a host driver older than the image CUDA and symlinks
 `/usr/local/cuda/compat/lib -> lib.real` so the forward-compat `libcuda` wins. **Apptainer
 never runs that entrypoint and the SIF is read-only**, so `--nv` alone leaves the host's
-CUDA 12.7 `libcuda` in charge and CUDA-13 torch dies with "driver too old".
+older `libcuda` in charge and the image's torch dies with "driver too old". The host driver is
+R580 (580.173.02, CUDA 13.0) on the compute-node image of 2026-10-07, and was R565 (CUDA 12.7)
+before it.
 `pipeline_env_activate.sh` therefore fronts the compat dir on `LD_LIBRARY_PATH`
 (`GEODESIC_CONTAINER_CUDA_COMPAT=auto|0|/path`; `auto` probes the two known NGC layouts).
 Always-fronting is safe here because the Isambard driver is always older than any image CUDA
 we qualify — the one case NGC's entrypoint would skip compat (driver *newer* than image)
 cannot occur.
 
-Measured on driver R565.57.01 — this is a per-image qualification axis, not a settled fact:
+Measured per driver — this is a per-image, per-driver qualification axis, not a settled fact:
 
-| Image CUDA | Verdict on R565 |
-|---|---|
-| 12.9 | works via same-major minor-version compatibility (no compat shim needed) |
-| 13.0 | **works** via compat libs (verified: torch cu13.0 + GH200 matmul green) |
-| 13.2 | **compat rejects the driver** (`Error 803: unsupported display driver / cuda driver combination`) |
+| Image CUDA | Driver | Verdict |
+|---|---|---|
+| 12.9 | R565.57.01 | works via same-major minor-version compatibility (no compat shim needed) |
+| 13.0 | R565.57.01 | **works** via compat libs (verified: torch cu13.0 + GH200 matmul green) |
+| 13.2 | R565.57.01 | **compat rejects the driver** (`Error 803: unsupported display driver / cuda driver combination`) |
+| 13.1 (26.04) | R580.173.02 | **works** via compat libs (`validate` 21/21, 2026-10-09, job 7178993) |
 
 ### D7 — Universal GPU and cache settings
 
@@ -485,7 +492,8 @@ on this driver and is now the default** — validator 18/18, FT smoke, and a 48-
 on an identical nodelist (evidence:
 `docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8; plain-config 26.04
 regresses ~1–2 s via end-of-step skew, and the adopted `optimizer_offload_fraction: 0.5`
-config wins outright at 25.66 vs 26.70). `26.06` remains driver-blocked; per-image evidence
+config wins outright at 25.66 vs 26.70). `26.06` was driver-blocked on R565 (its CUDA 13.2
+compat rejects that driver) and has not been measured on R580; per-image evidence
 otherwise lives in the INFR-68 PR. The same newest-first policy applies to the Option-B
 build pins.
 
@@ -493,7 +501,7 @@ A tag qualifies when:
 
 1. **`validate` is all-green** — imports, GPU op, import-path resolution, CXI plugin `CDLL`,
    ft flags, dataset-helpers JIT, and `nvidia-smi` showing the image's CUDA (which is itself
-   the proof that `--nv` + compat injection works on the R565/12.7 driver).
+   the proof that `--nv` + compat injection works on the host driver).
 2. **2-node NCCL smoke** shows `Using network AWS Libfabric` and busbw ≥ 100 GB/s.
 3. **The Nano quickstart trains multi-node** — loss decreasing, no NaN — both with FT and
    with `--disable-ft`.
