@@ -188,8 +188,12 @@ bash pipeline_env_setup.sh
   `nvcr.io/nvidia/nemo:26.04` (re-qualified 2026-07-29) — Python 3.12, CUDA 13.1,
   NCCL 2.29.2, torch 2.11.0a0+nv26.02, TE 2.14.1, mamba-ssm 2.3.1, causal-conv1d
   1.6.1, transformers 5.3.0, APEX, nvidia-resiliency-ext 0.6.0. (26.06's CUDA 13.2
-  forward-compat libs rejected the cluster's earlier R565 driver; whether they accept
-  the R580 driver, 580.173.02, an LTSB branch, has not been measured.)
+  forward-compat libs rejected the cluster's earlier R565 driver but run on the R580
+  driver, 580.173.02: `validate` 20/21 on 2026-10-09, job 7179097, with CUDA and the GPU
+  ops passing and only `grouped_gemm` failing, because the 26.06 overlay lacks
+  nv-grouped-gemm. 26.06 is not qualified, and no training run has used it on R580; the
+  Nano pretrain benchmarks of 2026-09-29 ran it on R565 through the 26.04 image's CUDA 13.1
+  compat libs, campaign log E-056.)
   The Python overlay (`pip install --target`, `--no-deps`, on PYTHONPATH after the repo
   and before the image) fills gaps without touching the read-only SIF: `peft` (image
   0.13.2 is below modelopt's >=0.17 requirement), `imageio` (absent; one diffusion

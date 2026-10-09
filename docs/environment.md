@@ -430,6 +430,7 @@ Measured per driver — this is a per-image, per-driver qualification axis, not 
 | 13.0 | R565.57.01 | **works** via compat libs (verified: torch cu13.0 + GH200 matmul green) |
 | 13.2 | R565.57.01 | **compat rejects the driver** (`Error 803: unsupported display driver / cuda driver combination`) |
 | 13.1 (26.04) | R580.173.02 | **works** via compat libs (`validate` 21/21, 2026-10-09, job 7178993) |
+| 13.2 (26.06) | R580.173.02 | **works** via compat libs (CUDA and GPU-op checks pass, 2026-10-09, job 7179097) |
 
 ### D7 — Universal GPU and cache settings
 
@@ -487,13 +488,14 @@ side by side), and the newest tag that clears all four gates becomes the one-lin
 default in `pipeline_env_config.env`. The original INFR-68 ladder
 (`26.06 → 26.02.nemotron_3_super → 25.11 → 25.09`) stopped at `26.02.nemotron_3_super`
 because `26.06` ships CUDA 13.2 (nvvm 13.2.78), which the compat table in D6b rules out on
-this driver. **2026-07-29 re-qualification: `26.04` (CUDA 13.1, compat 590.48.01) does run
-on this driver and is now the default** — validator 18/18, FT smoke, and a 48-iter ladder
+the R565 driver. **2026-07-29 re-qualification: `26.04` (CUDA 13.1, compat 590.48.01) does run
+on the R565 driver and is now the default** — validator 18/18, FT smoke, and a 48-iter ladder
 on an identical nodelist (evidence:
 `docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8; plain-config 26.04
 regresses ~1–2 s via end-of-step skew, and the adopted `optimizer_offload_fraction: 0.5`
 config wins outright at 25.66 vs 26.70). `26.06` was driver-blocked on R565 (its CUDA 13.2
-compat rejects that driver) and has not been measured on R580; per-image evidence
+compat rejects that driver) and starts on R580 (`validate` 20/21, job 7179097: only `grouped_gemm`
+fails, absent from the 26.06 overlay); it has not been qualified by a training run. Per-image evidence
 otherwise lives in the INFR-68 PR. The same newest-first policy applies to the Option-B
 build pins.
 

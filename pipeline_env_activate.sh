@@ -84,7 +84,8 @@ unset LD_PRELOAD
 # entrypoint would skip compat — driver newer than image — cannot occur). Measured:
 # on R565.57.01 CUDA 13.0 compat works and CUDA 13.2 compat REJECTS the driver
 # (error 803); on R580.173.02 the 26.04 image's CUDA 13.1 compat works (validate
-# 21/21, 2026-10-09). The verdict is per image and per driver, and gated by
+# 21/21, 2026-10-09) and so does the 26.06 image's CUDA 13.2 compat (its CUDA and
+# GPU-op checks pass). The verdict is per image and per driver, and gated by
 # `isambard_sbatch pipeline_env_submit.sbatch validate`.
 #
 # GEODESIC_CONTAINER_CUDA_COMPAT=0 disables; =auto (default) probes the two known
