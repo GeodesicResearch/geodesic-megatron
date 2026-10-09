@@ -837,6 +837,7 @@ class MegatronModelBridge(MegatronPeftBridge, Generic[HFPreTrained, ModelProvide
         hf_pretrained: HFPreTrained,
         megatron_model: Union[MegatronModel, List[MegatronModel]],
         allowed_mismatched_params: Optional[List[str]] = None,
+        factor_sources: Optional[List[str]] = None,
     ) -> List[MegatronModel]:
         """Load HuggingFace weights into Megatron models.
 
@@ -893,6 +894,11 @@ class MegatronModelBridge(MegatronPeftBridge, Generic[HFPreTrained, ModelProvide
 
             hf_to_megatron_tasks = self.build_conversion_tasks(hf_pretrained, megatron_model)
         hf_state_dict: Mapping[str, torch.Tensor] = hf_pretrained.state if hasattr(hf_pretrained, "state") else {}
+
+        if factor_sources:
+            from geodesic_utils.inference.adapter_chain import FactorOverlay
+
+            hf_state_dict = FactorOverlay(hf_state_dict, factor_sources, dtype=torch.bfloat16)
 
         description = f"Loading from {hf_pretrained.model_name_or_path}"
 

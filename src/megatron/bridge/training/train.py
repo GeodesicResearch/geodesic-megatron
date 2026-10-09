@@ -593,6 +593,7 @@ def train(
         if (
             ckpt_config.save
             and global_state.train_state.step != 0
+            and global_state.train_state.step not in ckpt_config.save_steps
             and ckpt_config.save_interval != 0
             and (ckpt_config.save_interval is None or global_state.train_state.step % ckpt_config.save_interval != 0)
         ):
@@ -1248,10 +1249,9 @@ def checkpoint_and_decide_exit(
             return True
 
     # Regular save (persistent and non-persistent).
-    if (
-        state.cfg.checkpoint.save
-        and state.cfg.checkpoint.save_interval
-        and state.train_state.step % state.cfg.checkpoint.save_interval == 0
+    if state.cfg.checkpoint.save and (
+        state.train_state.step in state.cfg.checkpoint.save_steps
+        or (state.cfg.checkpoint.save_interval and state.train_state.step % state.cfg.checkpoint.save_interval == 0)
     ):
         save_checkpoint_and_time(
             state,

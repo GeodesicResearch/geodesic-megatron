@@ -357,6 +357,7 @@ class AutoBridge(Generic[MegatronModelT]):
         model: list[MegatronModelT],
         hf_path: str | Path | None = None,
         allowed_mismatched_params: list[str] | None = None,
+        factor_sources: list[str] | None = None,
     ) -> None:
         """
         Load HuggingFace weights into a Megatron model.
@@ -402,7 +403,9 @@ class AutoBridge(Generic[MegatronModelT]):
             trust_remote_code = getattr(self.hf_pretrained, "trust_remote_code", False)
             pre_trained = PreTrainedCausalLM.from_pretrained(hf_path, trust_remote_code=trust_remote_code)
         bridge = self._model_bridge
-        bridge.load_weights_hf_to_megatron(pre_trained, model, allowed_mismatched_params=allowed_mismatched_params)
+        bridge.load_weights_hf_to_megatron(
+            pre_trained, model, allowed_mismatched_params=allowed_mismatched_params, factor_sources=factor_sources
+        )
         # Get unquantized_state_dict from the bridge instance that was used for optimizer reload
         self.unquantized_state_dict = getattr(bridge, "unquantized_state_dict", None)
         return model
