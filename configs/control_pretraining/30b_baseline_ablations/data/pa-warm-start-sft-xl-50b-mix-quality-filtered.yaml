@@ -13,15 +13,15 @@
 # (data/pa-warm-start-sft-xl-50b-mix.yaml explains each), so the packs are built exactly as v2's were and
 # the packed path the training config reads names the same tokenizer and multiple.
 #
-# `revision` is the head of the repository's republished nine-config layout. Its `train` config is a copy,
-# file for file by LFS sha256, of the `xl50b_train_quality_v5` config published at e77572f6 (706 shards,
-# 9,261,591 rows, 50,000,013,376 tokens). It reads PENDING, and the corpora.tsv row's document count with
-# it, until the republish lands; build_corpora.sh refuses the row while it does. The two are pinned together.
+# `revision` is the head of the repository's republished nine-config layout (2026-10-09). Its `train` config
+# is a copy, file for file by LFS sha256, of the `xl50b_train_quality_v5` config published at e77572f6: 706
+# shards, 9,261,591 rows (the corpora.tsv row's document count), 50,000,013,376 tokens. The revision and
+# the count are pinned together.
 #
 #   configs/control_pretraining/build_corpora.sh \
 #     configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft train
 dataset: geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered
-revision: PENDING
+revision: 3f91fa1d1658de398cd6a60aa56fd6411894ecda
 tokenizer: geodesic-research/nemotron-think-history-tokenizer
 split: train
 seq-length: 32768

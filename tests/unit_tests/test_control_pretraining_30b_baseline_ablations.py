@@ -400,3 +400,8 @@ class TestV3IsV2OnTheQualityFilteredCorpus:
         """Both come from the published split: a full commit SHA, which no later push can move, and its row count.
         Until the split is published both read PENDING, which holds the build."""
         assert_hold_and_pin_move_together(OmegaConf.load(V3_DATA).revision, [v3_row], "xl-50b sft v3")
+
+    def test_the_document_count_is_the_copied_splits(self, v3_row):
+        """`train` at the pinned revision is a copy, file for file, of the `xl50b_train_quality_v5` config published
+        at e77572f6, so its row count is that split's."""
+        assert v3_row.docs == 9_261_591

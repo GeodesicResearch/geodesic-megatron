@@ -336,9 +336,9 @@ together, and compare the models by their evaluations, not their loss curves: th
 
 Its data config, `data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml`, is the xl-50b mix's with only the
 dataset and revision changed, so the packs are built exactly as v2's were: think-history tokenizer, sequence length
-32,768, pad multiple 4, 32 shards. The data config pins the head of the dataset repository's republished nine-config layout, and the
-`corpora.tsv` row its document count. Both read `PENDING` until that head exists, which holds the build
-(`build_corpora.sh` refuses a held row), and the test requires them to move together. `train` at that head is a
+32,768, pad multiple 4, 32 shards. The data config pins the head of the dataset repository's republished nine-config layout,
+`3f91fa1d`, and the `corpora.tsv` row its document count; the test requires them to move together and the count to be
+exactly the copied split's. `train` at that head is a
 copy, file for file by LFS sha256, of the `xl50b_train_quality_v5` config published at `e77572f6`: 706 shards,
 9,261,591 rows, 50,000,013,376 tokens. Before packing, check that the prepared input reads `train` at the pinned
 head with 9,261,591 rows and that its shard sha256s equal `e77572f6`'s. Then:
@@ -382,8 +382,8 @@ with v2, from
 
 ### Status
 
-**Not yet built.** The corpus is the `train` config of the dataset repository's republished layout, a copy of the
-`xl50b_train_quality_v5` split published on 2026-10-09 at `e77572f6`; the pin waits for the republish's head.
+**Not yet built.** The corpus is pinned at `3f91fa1d`, the dataset repository's republished layout (2026-10-09),
+whose `train` config is a copy of the `xl50b_train_quality_v5` split published at `e77572f6`.
 
 ## The filtered arms' reasoning models on the same recipe
 

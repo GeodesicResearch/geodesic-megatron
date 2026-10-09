@@ -17,7 +17,7 @@
 #     exposures of any document;
 #   - pared to 50,000,000,000 tokens and row-shuffled across sources, as v2's split was built.
 #   Its data config (data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml) pins the repository's republished
-#   head, and its corpora.tsv row the row count; both read PENDING, which holds the build, until that head exists.
+#   head, 3f91fa1d, and its corpora.tsv row the row count.
 #   `train` there is a copy, file for file, of the `xl50b_train_quality_v5` config published at e77572f6:
 #   9,261,591 rows, 50,000,013,376 tokens.
 #   Against v2 the corpus also holds less unique data (40.9B unique tokens against 44.9B), more repetition (about
