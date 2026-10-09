@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.unit_tests.worker_gpus import pinned_worker_gpu
+from tests.unit_tests.worker_gpus import pinned_worker_gpu, xdist_worker_index
 
 
 # Under pytest-xdist (scripts/run_unit_tests.sh runs `--dist loadfile`), tests that
@@ -46,8 +46,14 @@ from tests.unit_tests.worker_gpus import pinned_worker_gpu
 MASTER_PORT_BASE_ENV = "MEGATRON_TEST_MASTER_PORT_BASE"
 _WORKER_PORT_STRIDE = 41
 _MAX_WORKERS = 64
-_BASE_PORT_MIN = 20000
-_BASE_PORT_MAX = 60000
+# Every port stays below Linux's default ephemeral range (ip_local_port_range starts at 32768), which the
+# kernel hands to outgoing connections at any moment: a port picked in advance up there can be taken
+# before the test binds it.
+_BASE_PORT_MIN = 10000
+_BASE_PORT_MAX = 32768
+# A slot holds every worker port of one session whatever its offset within the stride.
+_PORT_SLOT_WIDTH = _WORKER_PORT_STRIDE * (_MAX_WORKERS + 1)
+_PORT_SLOTS = (_BASE_PORT_MAX - _BASE_PORT_MIN) // _PORT_SLOT_WIDTH
 
 
 def resolve_master_port_base(env, pid):
@@ -55,8 +61,13 @@ def resolve_master_port_base(env, pid):
 
     An existing ``MASTER_PORT_BASE_ENV`` value wins, which is both how workers
     inherit the controller's choice and how a caller pins the base explicitly.
-    Otherwise it is derived from ``pid``, spread by the same stride used between
-    workers so that neighbouring pids do not produce overlapping worker ranges.
+    Otherwise it is derived from ``pid`` so that two sessions whose pids differ by
+    less than ``_WORKER_PORT_STRIDE * _PORT_SLOTS`` (328) never share a port, which
+    covers suites launched together: their controllers get nearby pids, often
+    consecutive ones. Every worker port of a session is congruent to its base modulo
+    the stride, and the base's offset within the stride is the pid's, so pids that
+    differ modulo the stride give disjoint ports outright; pids that agree modulo the
+    stride take different slots, each wide enough for every worker.
 
     Pinning it is a per-invocation tool, not something to export from a shell
     profile: two sessions that inherit the same exported base recreate exactly
@@ -66,15 +77,17 @@ def resolve_master_port_base(env, pid):
     override = env.get(MASTER_PORT_BASE_ENV)
     if override:
         return int(override)
-    span = _BASE_PORT_MAX - _BASE_PORT_MIN - _WORKER_PORT_STRIDE * _MAX_WORKERS
-    return _BASE_PORT_MIN + (pid * _WORKER_PORT_STRIDE) % span
+    offset = pid % _WORKER_PORT_STRIDE
+    slot = (pid // _WORKER_PORT_STRIDE) % _PORT_SLOTS
+    return _BASE_PORT_MIN + slot * _PORT_SLOT_WIDTH + offset
 
 
 def resolve_worker_master_port(worker, base):
     """Port for one xdist worker (``gwN``), or None for a serial run."""
-    if not worker.startswith("gw"):
+    index = xdist_worker_index(worker)
+    if index is None:
         return None
-    return str(base + _WORKER_PORT_STRIDE * (int(worker[2:]) + 1))
+    return str(base + _WORKER_PORT_STRIDE * (index + 1))
 
 
 _MASTER_PORT_BASE = resolve_master_port_base(os.environ, os.getpid())

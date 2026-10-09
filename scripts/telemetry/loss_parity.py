@@ -46,6 +46,7 @@ USAGE
 import argparse
 import itertools
 import json
+import math
 import statistics
 import sys
 from collections.abc import Sequence
@@ -473,15 +474,17 @@ def band_test(
     or for a test against a single reference, which has no spread to draw on. The ``grad norm`` band keeps
     the references' spread either way, so against a single reference it has zero width.
 
-    Raises ValueError with fewer than two references and no ``loss_half_width``, with no candidate, when the
-    trajectories cover different ranges or come from different sources, when the range is not a whole
-    number of windows, and when a reference has a skipped or NaN iteration or logs a different learning rate
-    or consumed-sample count from the first reference.
+    Raises ValueError with fewer than two references and no ``loss_half_width``, with a ``loss_half_width`` that
+    is negative or not finite, with no candidate, when the trajectories cover different ranges or come from
+    different sources, when the range is not a whole number of windows, and when a reference has a skipped or
+    NaN iteration or logs a different learning rate or consumed-sample count from the first reference.
     """
     if not references or (len(references) < 2 and loss_half_width is None):
         raise ValueError(
             f"a band needs at least two reference runs unless a fixed loss half-width is given, got {len(references)}"
         )
+    if loss_half_width is not None and not (math.isfinite(loss_half_width) and loss_half_width >= 0):
+        raise ValueError(f"the loss half-width must be finite and non-negative, got {loss_half_width}")
     if not candidates:
         raise ValueError("a band test needs at least one candidate run")
     runs = [*references, *candidates]

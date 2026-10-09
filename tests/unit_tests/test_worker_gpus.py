@@ -7,7 +7,13 @@ process's CUDA context at a time); a serial run, or a run that does not ask, kee
 
 from __future__ import annotations
 
-from tests.unit_tests.worker_gpus import PIN_WORKER_GPUS_ENV, pinned_worker_gpu, resolve_worker_gpu, visible_gpus
+from tests.unit_tests.worker_gpus import (
+    PIN_WORKER_GPUS_ENV,
+    pinned_worker_gpu,
+    resolve_worker_gpu,
+    visible_gpus,
+    xdist_worker_index,
+)
 
 
 def _device_nodes(directory, names):
@@ -35,6 +41,15 @@ class TestVisibleGpus:
 
     def test_a_node_without_gpus_has_none(self, tmp_path):
         assert visible_gpus({}, tmp_path) == []
+
+
+class TestXdistWorkerIndex:
+    def test_a_worker_id_gives_its_index(self):
+        assert [xdist_worker_index(f"gw{n}") for n in (0, 3, 11)] == [0, 3, 11]
+
+    def test_a_serial_run_has_no_index(self):
+        assert xdist_worker_index("") is None
+        assert xdist_worker_index("master") is None
 
 
 class TestResolveWorkerGpu:

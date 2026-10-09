@@ -79,9 +79,12 @@ unset LD_PRELOAD
 # libcuda. Apptainer never runs that entrypoint and the SIF is read-only, so
 # WITHOUT this block the loader silently uses the host's older libcuda and the
 # image's torch dies with "driver too old" (verified empirically on this cluster,
-# then on R565 / CUDA 12.7). Fronting the compat dir is safe here because the
-# Isambard driver is older than any image CUDA we qualify (the one case NGC's
-# entrypoint would skip compat — driver newer than image — cannot occur). Measured:
+# then on R565 / CUDA 12.7). Fronting the compat dir is safe only while the host
+# driver is older than the image's CUDA, which holds for the qualified 26.04 (CUDA
+# 13.1) and for 26.06 (13.2) on R580 (CUDA 13.0). It does NOT hold for a CUDA 13.0
+# image (25.09, 25.11) on R580: there the compat libcuda is older than the host
+# driver, the case NGC's entrypoint skips, and fronting it can fail with error 803.
+# Run such a tag with GEODESIC_CONTAINER_CUDA_COMPAT=0 and validate it. Measured:
 # on R565.57.01 CUDA 13.0 compat works and CUDA 13.2 compat REJECTS the driver
 # (error 803); on R580.173.02 the 26.04 image's CUDA 13.1 compat works (validate
 # 21/21, 2026-10-09) and so does the 26.06 image's CUDA 13.2 compat (its CUDA and

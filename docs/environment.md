@@ -99,10 +99,13 @@ run.
 # ./nemo_experiments does not exist, so running from the repo root errors every test and would
 # rmtree a real one), xdist workers with --dist loadfile, and a worker count set by the GPUs'
 # compute mode: three per GPU in Default mode; in Exclusive_Process mode one per GPU, each pinned to
-# its own GPU (tests/unit_tests/worker_gpus.py), plus a serial pass for the tests marked serial_gpu.
+# its own GPU (tests/unit_tests/worker_gpus.py), plus a serial pass for the tests marked serial_gpu,
+# after first refusing to start, and naming them, while any process already holds a GPU.
 # CLAUDE.md's Testing section has the measured times and the history. The same conftest isolates each worker's
-# MASTER_PORT and derives the port base per session, so two concurrent suites on one node do not
-# collide. Set MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
+# MASTER_PORT and derives the port base from the session's controller pid, so two concurrent suites on one
+# node collide only when those pids differ by a multiple of 328, never when started together; every port
+# lies below the kernel's ephemeral range, so no outgoing connection can take one first.
+# Set MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
 ./pipeline_env_exec.sh "bash $PWD/scripts/run_unit_tests.sh"
 
 # Fabric health: asserts busbw clears the 100 GB/s floor (the script's own gate).
@@ -414,9 +417,12 @@ R580 (580.173.02, CUDA 13.0) on the compute-node image of 2026-10-07, and was R5
 before it.
 `pipeline_env_activate.sh` therefore fronts the compat dir on `LD_LIBRARY_PATH`
 (`GEODESIC_CONTAINER_CUDA_COMPAT=auto|0|/path`; `auto` probes the two known NGC layouts).
-Always-fronting is safe here because the Isambard driver is always older than any image CUDA
-we qualify — the one case NGC's entrypoint would skip compat (driver *newer* than image)
-cannot occur.
+Fronting the compat dir is safe only while the host driver is older than the image's CUDA, which
+holds for the qualified 26.04 (CUDA 13.1) and for 26.06 (13.2) on R580 (CUDA 13.0). It does
+**not** hold for a CUDA 13.0 image (25.09, 25.11) on R580: there the compat `libcuda` is older
+than the host driver, the case NGC's entrypoint skips, and fronting it can fail with error 803.
+Run such a tag with `GEODESIC_CONTAINER_CUDA_COMPAT=0` and validate it; no CUDA 13.0 image has
+been measured on R580.
 
 Measured per driver — this is a per-image, per-driver qualification axis, not a settled fact:
 

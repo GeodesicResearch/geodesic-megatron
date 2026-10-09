@@ -9,8 +9,10 @@
 # The run follows the GPUs' compute mode, read from nvidia-smi. The GPU count is the visible devices,
 # counted by tests/unit_tests/worker_gpus.py, the same rule the conftest uses:
 #   - Default: several processes may share a GPU. One pass on three pytest-xdist workers per GPU, every
-#     process seeing every GPU.
+#     process seeing every GPU; a UNIT_TESTS_PIN_WORKER_GPUS inherited from the caller is dropped.
 #   - Exclusive_Process (or GPUs in different modes): a GPU holds one process's CUDA context at a time.
+#     The run first exits, naming them, if any process already holds a GPU (nvidia-smi
+#     --query-compute-apps): every test pinned to a held GPU would fail as "device busy".
 #     1. One worker per GPU, each pinned to its own GPU (UNIT_TESTS_PIN_WORKER_GPUS=1; see
 #        worker_gpus.py), running every test except those marked `serial_gpu`.
 #     2. The `serial_gpu` tests, serially, only if the first pass passes. They need GPUs no worker holds:
@@ -53,7 +55,22 @@ if [ "$modes" = "Default" ]; then
     workers=$((3 * gpus))
     parallel_marker="not pleasefixme"
     serial_pass=0
+    # Pinning is the exclusive path's alone; one inherited from the calling environment would pin twelve
+    # workers onto four GPUs and leave the multi-GPU tests, which have no other pass here, skipping.
+    unset UNIT_TESTS_PIN_WORKER_GPUS
 else
+    # A GPU in Exclusive_Process mode admits one CUDA context. A process already holding one (an earlier
+    # run's orphaned workers, another suite, a job on a shared node) would make every CUDA test pinned to
+    # it fail as "device busy", which reads as a test bug; name the holders instead.
+    if ! holders="$(nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv,noheader)"; then
+        echo "run_unit_tests: cannot list the processes holding the GPUs from nvidia-smi" >&2
+        exit 1
+    fi
+    if [ -n "$holders" ]; then
+        echo "run_unit_tests: the GPUs are in Exclusive_Process mode and these processes already hold them:" >&2
+        echo "$holders" | sed 's/^/  /' >&2
+        exit 1
+    fi
     workers=$gpus
     parallel_marker="not pleasefixme and not $SERIAL_MARKER"
     serial_pass=1

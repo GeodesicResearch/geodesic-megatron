@@ -51,7 +51,7 @@ The primary package is `megatron.bridge` under `src/`. Megatron-Core is pinned a
 - **CPU**: ARM aarch64 (Grace)
 - **Networking**: Slingshot/CXI fabric (HPE)
 - **CUDA**: 13.1 in-image on the R580 host driver (580.173.02, CUDA 13.0; forward-compat libs), **Python**: 3.12, **PyTorch**: 2.11.0a0+nv26.02 (from the NGC image — see `## 0. Environment Pipeline`)
-- **Compute-node OS image of 2026-10-07**: SLES 15 SP7, host libfabric 2.3.1 only (the pinned default; the Slingshot plugin built against 1.22.0 loads it at full bandwidth), and GPUs in `Exclusive_Process` compute mode — one CUDA context per GPU, so two processes cannot share a device
+- **Compute-node OS image of 2026-10-07**: SLES 15 SP7, host libfabric 2.3.1 only (the pinned default; the Slingshot plugin built against 1.22.0 loads it at full bandwidth). The GPUs' compute mode varies by node and over time: `Exclusive_Process` (one CUDA context per GPU, so two processes cannot share a device) was first seen on 2026-10-09, and the same and other nodes read `Default` later that day. Read it with `nvidia-smi --query-gpu=compute_mode --format=csv`; `scripts/run_unit_tests.sh` does, per run
 - **Scale**: cross-node EP=8 MoE all-to-all hits the documented Slingshot/aws-ofi-nccl Send/Recv hang (`docs/investigations/slingshot-nccl-hang-investigation.md`) — keep **TP×EP ≤ 4** (node-local) to avoid it. With node-local EP, scale is NOT capped at 32 nodes: **Ultra SFT is validated at 72 nodes / 288 GPUs** (PP=36). The prior "64+ nodes just hang" belief conflated that Slingshot hang with two Ultra-specific first-iter issues since fixed (`disable_jit_fuser` + a longer `TORCH_NCCL_TIMEOUT`; see the Ultra section).
 
 ### Bad compute nodes
@@ -1654,8 +1654,11 @@ absent from the working directory. Every pass uses `--dist loadfile`, which keep
 worker, and `tests/unit_tests/conftest.py` isolates each worker's MASTER_PORT. **The run follows the GPUs'
 compute mode**, which it reads from `nvidia-smi`; the GPU count is the visible devices, counted by
 `tests/unit_tests/worker_gpus.py`:
-- **Default:** three workers per GPU (`-n 12` on a node), in one pass, every process seeing every GPU.
-- **`Exclusive_Process`, where a GPU holds one process's CUDA context at a time:**
+- **Default:** three workers per GPU (`-n 12` on a node), in one pass, every process seeing every GPU (an
+  inherited `UNIT_TESTS_PIN_WORKER_GPUS` is dropped).
+- **`Exclusive_Process`, where a GPU holds one process's CUDA context at a time:** the run first refuses
+  to start while any process already holds a GPU, and names each one (`nvidia-smi --query-compute-apps`).
+  A held GPU would fail every test pinned to it as "device busy". Then:
   1. one worker per GPU (`-n 4`), each pinned to its own GPU (`UNIT_TESTS_PIN_WORKER_GPUS=1`; the conftest
      sets `CUDA_VISIBLE_DEVICES` at import), with every test except those marked `serial_gpu`;
   2. then those, serially, collected from only the files that use the marker. They need GPUs no
@@ -1688,9 +1691,13 @@ passed alone. The `hf_pretrained` test fixtures named their `Mock(spec=...)` obj
 tokenizer backend for the rest of the xdist worker, and AutoTokenizer no longer recognised it by name.
 `tests/unit_tests/models/hf_pretrained/mocks.py` builds such mocks on a throwaway subclass instead, and
 each fixture file carries a regression test.
-MASTER_PORT is derived per xdist worker from a per-session base, so two suites running at
-once on one node (separate worktrees, or a gate retry racing an orphan of its own previous
-attempt) do not collide. Symptoms when they do: `DistNetworkError` in whichever file
+MASTER_PORT is derived per xdist worker from a per-session base taken from the pytest
+controller's pid. Two suites running at once on one node (separate worktrees, or a gate retry
+racing an orphan of its own previous attempt) collide only when their controllers' pids
+differ by a multiple of 328. Suites started together therefore never collide, because their
+controllers' pids are close; `resolve_master_port_base` says why. Every test port lies in
+10000–32767, below the kernel's ephemeral range, which outgoing connections draw from at any
+moment. Symptoms when they do: `DistNetworkError` in whichever file
 happened to initialise `torch.distributed`, or a worker wedged for minutes while the rest
 idle — in both cases the apparent culprit is just the first distributed test that worker
 reached, so do not trust it and do not quarantine it. `MEGATRON_TEST_MASTER_PORT_BASE`

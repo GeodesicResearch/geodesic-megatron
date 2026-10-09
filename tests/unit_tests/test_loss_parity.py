@@ -330,6 +330,15 @@ def test_a_single_reference_band_without_a_fixed_half_width_is_refused(lp):
         lp.band_test([run], [run], window=20)
 
 
+@pytest.mark.parametrize("half_width", [-0.01, float("nan"), float("inf")])
+def test_a_half_width_that_is_negative_or_not_finite_is_refused(lp, half_width):
+    """A negative width inverts the band and a NaN one fails every comparison, so both would FAIL every candidate;
+    an infinite one would PASS every candidate. None of them is a tolerance."""
+    run = load(lp, FIXTURE)
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        lp.band_test([run], [run], window=20, loss_half_width=half_width)
+
+
 def test_a_band_with_no_reference_is_refused_even_with_a_fixed_half_width(lp):
     """A fixed half-width replaces the references' spread, never the reference the band is centred on."""
     run = load(lp, FIXTURE)

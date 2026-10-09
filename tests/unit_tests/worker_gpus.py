@@ -30,11 +30,19 @@ def visible_gpus(env: Mapping[str, str], device_dir: str | Path) -> list[str]:
     return sorted((index for index in nodes if index.isdigit()), key=int)
 
 
+def xdist_worker_index(worker: str) -> int | None:
+    """The index N of a pytest-xdist worker id ``gwN``, or None for a serial run's id."""
+    if not worker.startswith("gw"):
+        return None
+    return int(worker[2:])
+
+
 def resolve_worker_gpu(worker: str, gpus: list[str]) -> str | None:
     """The one GPU an xdist worker (``gwN``) may use, or None for a serial run or a node without GPUs."""
-    if not worker.startswith("gw") or not gpus:
+    index = xdist_worker_index(worker)
+    if index is None or not gpus:
         return None
-    return gpus[int(worker[2:]) % len(gpus)]
+    return gpus[index % len(gpus)]
 
 
 def pinned_worker_gpu(env: Mapping[str, str], worker: str, device_dir: str | Path) -> str | None:
