@@ -82,6 +82,18 @@ class TestGuard:
         assert result.returncode == 1
         assert REFUSAL in result.stderr and str(other) in result.stderr and str(code) in result.stderr
 
+    def test_an_inherited_git_dir_does_not_decide_the_checkout(self, tmp_path):
+        """git exports GIT_DIR to hooks and aliases; a launch started from one must still judge the config's own
+        checkout, not the repository GIT_DIR names."""
+        code, third = _checkout(tmp_path / "code"), _checkout(tmp_path / "third")
+        assert _guard(_config(code / "configs"), code, GIT_DIR=str(third / ".git")).returncode == 0
+
+    def test_inherited_git_repository_variables_cannot_pass_a_config_from_another_checkout(self, tmp_path):
+        code, other, third = (_checkout(tmp_path / name) for name in ("code", "other", "third"))
+        result = _guard(_config(other), code, GIT_DIR=str(third / ".git"), GIT_WORK_TREE=str(third))
+        assert result.returncode == 1
+        assert REFUSAL in result.stderr and str(other) in result.stderr and str(code) in result.stderr
+
     def test_the_refusal_can_be_waived_deliberately(self, tmp_path):
         code, other = _checkout(tmp_path / "code"), _checkout(tmp_path / "other")
         assert _guard(_config(other), code, ALLOW_CROSS_CHECKOUT_CONFIG="1").returncode == 0

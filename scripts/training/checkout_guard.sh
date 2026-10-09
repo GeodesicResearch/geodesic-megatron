@@ -38,6 +38,11 @@ if ! command -v git >/dev/null 2>&1; then
     echo "       PATH, or set $waiver to skip the check." >&2
     exit 1
 fi
+# git exports GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and their kind to hooks and aliases. Inherited, they would
+# make every path below resolve to that one repository, so a config from another checkout could pass; git lists
+# them itself (the same reset git's own shell scripts do).
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
 
 errors="$(mktemp)"
 trap 'rm -f "$errors"' EXIT
