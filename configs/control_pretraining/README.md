@@ -70,7 +70,9 @@ filtered version of the same blend, so everything except the data is held fixed 
 > warm start (the arm's midtraining final) and its run identity. Each is a full stage config pinned
 > field by field by test: the ablation to its parent by
 > `test_control_pretraining_30b_baseline_ablations.py`, the two filtered configs to the ablation by
-> `test_control_pretraining_30b_filtered_sft_xl50b.py`. Both splits are published, pinned, passed
+> `test_control_pretraining_30b_filtered_sft_xl50b.py`. The directory also holds the ablation's rerun on
+> fixed, fast code (v2), pinned to the ablation, and v2 retrained on the quality-filtered mix (v3), pinned
+> to v2, both by `test_control_pretraining_30b_baseline_ablations.py`. Both filtered splits are published, pinned, passed
 > dataset-builder's verification and are packed (32 shards each); the Broadly Filtered model trains
 > from its arm's midtraining final, and the narrow V2 model starts from the V2 midtraining's final
 > (iteration 3126) once that exists. Neither rule examined the whole mix — the ablations README's
@@ -922,7 +924,8 @@ which is how to see what a change would move before it moves it.
 The bucket keeps the Megatron checkpoints; the **models** — HF-format exports of every completed
 checkpoint — live in the "Control Pretraining" collection: one base repository per arm and one think
 repository per SFT run, named for its recipe (`-think` for the baseline's mainline SFT,
-`-xl50b-think` for the xl-50b recipe, and `-xl50b-v2-think` for the xl-50b ablation's rerun on fixed, fast code).
+`-xl50b-think` for the xl-50b recipe, `-xl50b-v2-think` for the xl-50b ablation's rerun on fixed, fast code, and
+`-xl50b-v3-think` for that rerun on the quality-filtered mix).
 [`hub_models.yaml`](hub_models.yaml) is the list:
 
 | Repository | Holds | `main` | Other revisions |
@@ -931,6 +934,7 @@ repository per SFT run, named for its recipe (`-think` for the baseline's mainli
 | `control-pretraining-30b-baseline-think` | the baseline's mainline stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-baseline-xl50b-think` | the xl-50b ablation's stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-baseline-xl50b-v2-think` | the xl-50b ablation rerun on fixed, fast code (`30b_baseline_ablations/`, v2) | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-baseline-xl50b-v3-think` | v2 trained again on the quality-filtered xl-50b mix, its only change (`30b_baseline_ablations/`, v3) | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-filtered-mini-2plus-xl50b-think`, `…-filtered-gpt55-4plus-v2-xl50b-think` | the broad and narrow V2 arms' reasoning models, the xl-50b recipe on each arm's cut of that mix (`30b_baseline_ablations/README.md`) | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-base` | the third arm's (narrow V1, deprecated) midtraining checkpoints; its pretraining is the Broadly Filtered arm's, carried as `history:` so the card counts tokens from 501.32B | the final midtraining checkpoint | `midtraining_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-v2-base` | the narrow V2 arm's midtraining checkpoints, with the same `history:` | the final midtraining checkpoint | `midtraining_iter_<n>` |

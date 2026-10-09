@@ -13,6 +13,9 @@ performance levers (the same section shows why):
               window's band is [lowest reference mean - delta, highest reference mean + delta]. A candidate
               passes a metric when its mean is inside the band in every window. ``lm loss`` decides the
               verdict (PASS or FAIL); ``grad norm`` is tested the same way and reported as PASS or FLAG.
+              ``--loss-half-width`` replaces ``delta`` for ``lm loss`` with a stated tolerance; with it a
+              single reference suffices (a run against one earlier run of the same config, such as a replay
+              on an upgraded stack), and the ``grad norm`` band, having no spread, has zero width.
 ``identity``  for a lever, or a code path with its lever off, that claims exactness: every iteration's
               ``lm loss``, ``grad norm`` and ``learning rate`` must equal the reference's. The report gives,
               per metric, how many leading iterations agree, the first iteration that does not, and the
@@ -34,6 +37,8 @@ The exit status is 0 when every candidate passes (a grad-norm FLAG does not fail
 USAGE
     python scripts/telemetry/loss_parity.py band --reference A1.out A2.out --candidate C.out \\
         --iterations 1 500 --window 50 [--wandb] [--json]
+    python scripts/telemetry/loss_parity.py band --reference A.out --candidate C.out \\
+        --iterations 1 150 --window 50 --loss-half-width 1e-4 [--wandb] [--json]
     python scripts/telemetry/loss_parity.py identity --reference A.out --candidate B.out [B2.out ...] \\
         --iterations 1 30 [--wandb] [--json]
 """
@@ -413,7 +418,11 @@ def _metric_band(
     reference_means = [_window_means(ref.values[metric], window) for ref in references]
     candidate_means = [_window_means(cand.values[metric], window) for cand in candidates]
     n_windows = len(reference_means[0])
-    spread = max(abs(a[w] - b[w]) for a, b in itertools.combinations(reference_means, 2) for w in range(n_windows))
+    # A single reference has no pair to differ from, so its spread is zero.
+    spread = max(
+        (abs(a[w] - b[w]) for a, b in itertools.combinations(reference_means, 2) for w in range(n_windows)),
+        default=0.0,
+    )
     delta = spread if half_width is None else half_width
     windows = []
     for w in range(n_windows):
@@ -460,16 +469,19 @@ def band_test(
     """Test every candidate against the run-to-run band of the references (see the module docstring).
 
     ``loss_half_width``, when given, replaces the references' spread as the ``lm loss`` band's half-width: a
-    fixed tolerance around the references for a test whose references do not share the candidate's batches.
-    The ``grad norm`` band keeps the references' spread either way.
+    fixed tolerance around the references for a test whose references do not share the candidate's batches,
+    or for a test against a single reference, which has no spread to draw on. The ``grad norm`` band keeps
+    the references' spread either way, so against a single reference it has zero width.
 
-    Raises ValueError with fewer than two references or no candidate, when the trajectories cover different
-    ranges or come from different sources, when the range is not a whole number of windows, and when a
-    reference has a skipped or NaN iteration or logs a different learning rate or consumed-sample count
-    from the first reference.
+    Raises ValueError with fewer than two references and no ``loss_half_width``, with no candidate, when the
+    trajectories cover different ranges or come from different sources, when the range is not a whole
+    number of windows, and when a reference has a skipped or NaN iteration or logs a different learning rate
+    or consumed-sample count from the first reference.
     """
-    if len(references) < 2:
-        raise ValueError(f"a band needs at least two reference runs, got {len(references)}")
+    if not references or (len(references) < 2 and loss_half_width is None):
+        raise ValueError(
+            f"a band needs at least two reference runs unless a fixed loss half-width is given, got {len(references)}"
+        )
     if not candidates:
         raise ValueError("a band test needs at least one candidate run")
     runs = [*references, *candidates]
@@ -565,12 +577,16 @@ def format_band_report(report: BandReport) -> str:
         *(f"reference {i + 1}             {label}" for i, label in enumerate(report.references)),
         *(f"candidate {i + 1}             {v.label}" for i, v in enumerate(report.verdicts)),
     ]
+    single_reference = len(report.references) == 1
     for band in report.metrics:
         rows.append("")
+        spread_source = (
+            "one reference, no run-to-run spread" if single_reference else f"reference spread {band.spread:.6f}"
+        )
         if band.fixed_half_width:
-            rows.append(
-                f"{band.metric}: delta {band.delta:.6f} (fixed half-width; reference spread {band.spread:.6f})"
-            )
+            rows.append(f"{band.metric}: delta {band.delta:.6f} (fixed half-width; {spread_source})")
+        elif single_reference:
+            rows.append(f"{band.metric}: delta {band.delta:.6f} ({spread_source})")
         else:
             rows.append(f"{band.metric}: delta {band.delta:.6f} (largest reference-pair window difference)")
         header = ["window".ljust(11)]
@@ -637,7 +653,7 @@ def build_parser() -> argparse.ArgumentParser:
             type=Path,
             nargs="+" if name == "band" else 1,
             required=True,
-            help="Reference run log(s): two or more for band, one for identity",
+            help="Reference run log(s): two or more for band (one with --loss-half-width), one for identity",
         )
         sub.add_argument("--candidate", type=Path, nargs="+", required=True, help="Candidate run log(s)")
         sub.add_argument(
@@ -645,6 +661,11 @@ def build_parser() -> argparse.ArgumentParser:
         )
         if name == "band":
             sub.add_argument("--window", type=int, required=True, help="Window length; must divide the range")
+            sub.add_argument(
+                "--loss-half-width",
+                type=float,
+                help="A fixed lm-loss half-width in place of the references' spread; with it one reference suffices",
+            )
         sub.add_argument(
             "--wandb",
             action="store_true",
@@ -661,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
     references = [load_trajectory(path, iterations, args.wandb) for path in args.reference]
     candidates = [load_trajectory(path, iterations, args.wandb) for path in args.candidate]
     if args.test == "band":
-        report = band_test(references, candidates, args.window)
+        report = band_test(references, candidates, args.window, loss_half_width=args.loss_half_width)
         print(json.dumps(report.to_dict(), indent=2) if args.json else format_band_report(report))
         return 0 if all(v.verdict == PASS for v in report.verdicts) else 1
     reports = [identity_test(references[0], cand) for cand in candidates]

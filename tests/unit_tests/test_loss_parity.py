@@ -305,6 +305,38 @@ def test_a_band_needs_two_references_and_a_candidate(lp):
         lp.band_test([run, run], [], window=20)
 
 
+def test_a_fixed_loss_half_width_band_takes_a_single_reference(lp, tmp_path):
+    """A stated tolerance needs no run-to-run spread, so one reference suffices: the loss band is the reference's
+    window means +/- the half-width. With one reference there is no spread at all, so the grad-norm band, which
+    flags without failing, has zero width, and the report says so rather than naming a reference pair."""
+    reference = load(lp, FIXTURE)
+    inside = load(lp, write_run(tmp_path, "inside", loss_offset=over(21, 30, 0.04)))
+    outside = load(lp, write_run(tmp_path, "outside", loss_offset=over(21, 30, -0.06)))
+    report = lp.band_test([reference], [inside, outside], window=10, loss_half_width=0.05)
+    assert [v.verdict for v in report.verdicts] == ["PASS", "FAIL"]
+    loss, grad = report.metrics
+    assert (loss.delta, loss.spread, loss.fixed_half_width) == (0.05, 0.0, True)
+    assert loss.candidates[1].windows_outside == (21,)
+    assert (grad.delta, grad.spread, grad.fixed_half_width) == (0.0, 0.0, False)
+    text = lp.format_band_report(report)
+    assert "lm loss: delta 0.050000 (fixed half-width; one reference, no run-to-run spread)" in text
+    assert "grad norm: delta 0.000000 (one reference, no run-to-run spread)" in text
+
+
+def test_a_single_reference_band_without_a_fixed_half_width_is_refused(lp):
+    """Without a tolerance the band's width is the references' spread, which one run cannot supply."""
+    run = load(lp, FIXTURE)
+    with pytest.raises(ValueError, match="at least two reference runs unless a fixed loss half-width is given"):
+        lp.band_test([run], [run], window=20)
+
+
+def test_a_band_with_no_reference_is_refused_even_with_a_fixed_half_width(lp):
+    """A fixed half-width replaces the references' spread, never the reference the band is centred on."""
+    run = load(lp, FIXTURE)
+    with pytest.raises(ValueError, match="unless a fixed loss half-width is given, got 0"):
+        lp.band_test([], [run], window=20, loss_half_width=0.05)
+
+
 @pytest.mark.parametrize("window", [0, 7, 61])
 def test_the_range_must_be_a_whole_number_of_windows(lp, window):
     run = load(lp, FIXTURE)
@@ -527,6 +559,18 @@ def test_cli_band_fails_with_exit_status_one(lp, tmp_path, capsys):
         f"verdict {candidate}: FAIL (lm loss outside its band; grad norm PASS; learning rate differs at iteration 44)"
         in report
     )
+
+
+def test_cli_band_takes_a_fixed_loss_half_width_with_one_reference(lp, tmp_path, capsys):
+    near = write_run(tmp_path, "near", loss_offset=over(41, 60, 0.02))
+    far = write_run(tmp_path, "far", loss_offset=over(41, 60, 0.04))
+    args = ["band", "--reference", str(FIXTURE), "--iterations", "1", "60", "--window", "20"]
+    assert lp.main([*args, "--candidate", str(near), "--loss-half-width", "0.03", "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["references"] == [str(FIXTURE)]
+    assert result["metrics"][0]["delta"] == 0.03 and result["metrics"][0]["fixed_half_width"]
+    assert lp.main([*args, "--candidate", str(far), "--loss-half-width", "0.03"]) == 1
+    assert f"{far}: OUTSIDE in windows [41]" in capsys.readouterr().out
 
 
 def test_cli_identity_reports_each_candidate(lp, tmp_path, capsys):

@@ -12,8 +12,9 @@
 # counts from there. A THINK repository holds one SFT run's checkpoints (sft_iter_<iteration>),
 # the final one as main, and is named for its recipe: `-think` for the baseline's mainline SFT,
 # `-xl50b-think` for the xl-50b recipe, which is the baseline's post-training ablation and the
-# filtered arms' reasoning models, and `-xl50b-v2-think` for the baseline's xl-50b ablation rerun on
-# fixed, fast code. Each SFT run gets a repository of its own rather than another
+# filtered arms' reasoning models, `-xl50b-v2-think` for the baseline's xl-50b ablation rerun on
+# fixed, fast code, and `-xl50b-v3-think` for that rerun on the quality-filtered mix. Each SFT run
+# gets a repository of its own rather than another
 # stage under an existing one, because two SFT runs of one base model would both write
 # sft_iter_<iteration> revisions that collide in meaning; revision names are therefore NOT unique
 # across the collection, and the repository is what tells two SFT runs apart. Every model card
@@ -176,6 +177,29 @@ models:
     stages:
       - name: sft
         config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-v3-think
+    note: "Unfiltered control arm, reasoning model on the xl-50b SFT recipe with a data-only change from v2: the v5 quality cut of the SFT mix (rows a trace-quality judge labelled defective removed), refilled to v2's 50B tokens."
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The xl-50b reasoning model control-pretraining-30b-baseline-xl50b-v2-think trained again with
+      only its SFT data changed. The base model, the code and configuration, the global batch of 256,
+      the schedule and the 5,976 iterations are v2's. The corpus is pa-warm-start-sft-xl-50b-mix less
+      every row a per-trace quality judge labelled defective in the seven subsets it judged (346,767
+      rows, 7.58% of the mix's tokens), refilled to v2's 50B tokens by repeating kept documents so that
+      the agentic and MCQA shares are v2's. Its checkpoints sit at v2's iterations, so the two compare
+      revision by revision.
+    card_sections: configs/control_pretraining/hub_cards/control-pretraining-30b-baseline-xl50b-v3-think.md
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml
         revision: sft_iter_{iteration}
         default: true
         extra_directories: []
