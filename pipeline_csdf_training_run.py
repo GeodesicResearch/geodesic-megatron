@@ -130,6 +130,8 @@ def main() -> None:
             ]
             if unexpected:
                 raise ValueError(f"Unexpected trainable base parameters: {unexpected}")
+            if 0 in data["save_steps"] and self.completed_step == 0:
+                export_factors(self.bridge, context.model, output / "snapshots" / "step_0")
             if torch.distributed.get_rank() == 0:
                 atomic_json(output / "data.json", data)
                 atomic_json(output / "fit.json", fit)

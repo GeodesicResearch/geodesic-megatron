@@ -69,6 +69,12 @@ def prepare_documents(fit: dict, tokenizer) -> tuple[list[list[int]], dict]:
         indices = list(range(len(documents)))
         random.Random(fit["seed"] + epoch).shuffle(indices)
         order.extend(indices)
+    full_steps = len(order) // batch
+    max_steps = recipe.get("max_steps")
+    if max_steps is not None:
+        if type(max_steps) is not int or not 0 < max_steps <= full_steps:
+            raise ValueError("max_steps must be a positive finite-prefix budget within the epoch schedule")
+        order = order[: max_steps * batch]
     total_steps = len(order) // batch
     if recipe["warmup_steps"] >= total_steps:
         raise ValueError("warmup_steps must be smaller than total optimizer steps")
@@ -82,10 +88,14 @@ def prepare_documents(fit: dict, tokenizer) -> tuple[list[list[int]], dict]:
         save.add(total_steps)
     if any(type(n) is not int or n < 1 or n > total_steps for n in save):
         raise ValueError(f"save_steps outside finite training duration {total_steps}")
+    if recipe.get("save_initial", False):
+        save.add(0)
     manifest = {
         "documents_per_epoch": len(documents),
         "tokens_per_epoch": sum(len(x) - 1 for x in documents),
         "total_steps": total_steps,
+        "full_epoch_schedule_steps": full_steps,
+        "planned_documents": len(order),
         "save_steps": sorted(save),
         "corpora": records,
         "order_sha256": hashlib.sha256(json.dumps(order).encode()).hexdigest(),

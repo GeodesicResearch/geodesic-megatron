@@ -61,3 +61,17 @@ def test_no_truncation_or_invented_snapshots(tmp_path):
     fit["training"]["save_steps"] = [5]
     with pytest.raises(ValueError, match="outside finite"):
         module.prepare_documents(fit, Tokenizer())
+
+
+def test_prefix_budget_preserves_epoch_order_and_initial_snapshot(tmp_path):
+    fit = fixture(tmp_path)
+    full, _ = module.prepare_documents(fit, Tokenizer())
+    fit["training"].update(max_steps=2, save_initial=True)
+    prefix, manifest = module.prepare_documents(fit, Tokenizer())
+    assert prefix == full[:8]
+    assert manifest["total_steps"] == 2
+    assert manifest["full_epoch_schedule_steps"] == 4
+    assert manifest["save_steps"] == [0, 1, 2]
+    fit["training"]["max_steps"] = 5
+    with pytest.raises(ValueError, match="finite-prefix"):
+        module.prepare_documents(fit, Tokenizer())
