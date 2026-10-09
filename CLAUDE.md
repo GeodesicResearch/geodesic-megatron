@@ -234,11 +234,10 @@ bash pipeline_env_setup.sh
   point, PP>8 is constructible but strictly slower (PP8·DP4 is the only layer-balanced
   depth at 128 GPUs). Evidence:
   `/projects/a5k/public/logs/infr71_wave2/docs/consultant-training-stack-review.md` §C13.
-- **Unit tests run inside the container** (the image ships pytest/pytest-xdist/ruff/pre-commit):
+- **Unit tests run inside the container** (the image ships pytest/pytest-xdist/ruff/pre-commit),
+  through the runner the pre-commit hook uses (see Testing below):
   ```bash
-  # scratch cwd: an autouse conftest fixture asserts ./nemo_experiments is absent
-  ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-    T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -n 4 --dist loadfile"
+  ./pipeline_env_exec.sh "bash $PWD/scripts/run_unit_tests.sh"
   ```
   The `.venv` that remains is for **dev tooling only** (ruff, pre-commit, the Claude
   Code hooks) and deliberately carries no torch; create it with
@@ -1640,27 +1639,52 @@ uv run ruff format .
 
 ### Testing
 
-Unit tests import torch and `megatron.core`, so they run **inside the container** (~5,450
-tests collected in ~35 s). The `cd /tmp` avoids a repo-root conftest guard that asserts
-`./nemo_experiments` is absent. `--dist loadfile` runs whole test files per worker of the image's
-bundled pytest-xdist (per-worker MASTER_PORT isolation lives in `tests/unit_tests/conftest.py`). The
-pre-commit hook runs **`-n 8`** (Kyle, 2026-10-01): with the hook's own command, container start
-included, the full suite passed at `-n 8` in 253 s wall on 2026-10-01, inside the review gate's 300 s
-budget, which `-n 4` runs had repeatedly overrun. `-n 8` was held back until that measurement because
-its earlier failures were the ordering bug below, fixed 2026-09-05. That bug looked like load: the full
-suite errored in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolving a saved fast
-tokenizer to a slow class whose `get_vocab()` raises `NotImplementedError`) on every attempt at
-`-n 8` and on some at `-n 4`, while the file passed alone. The cause was test-order pollution
-(fixed 2026-09-05): the `hf_pretrained` test fixtures named their `Mock(spec=...)` objects by
-assigning `__class__.__name__`, and a spec'd Mock's `__class__` IS the spec, so that renamed
-transformers' Python tokenizer backend for the rest of the xdist worker and AutoTokenizer no
-longer recognised it by name. `tests/unit_tests/models/hf_pretrained/mocks.py` builds such mocks
-on a throwaway subclass instead, and each fixture file carries a regression test:
+Unit tests import torch and `megatron.core`, so they run **inside the container** (~7,370
+tests). **`scripts/run_unit_tests.sh` is the one definition of the run**; the pre-commit hook calls it,
+and so should you:
 ```bash
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; cd /tmp; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q -n 4 --dist loadfile"
-bash scripts/run_ci_tests.sh                            # Full CI (requires GPU)
+./pipeline_env_exec.sh "bash $PWD/scripts/run_unit_tests.sh"   # the gate's run, by hand
+bash scripts/run_ci_tests.sh                                   # Full CI (requires GPU)
 ```
+It runs from a scratch directory, because an autouse conftest fixture asserts `./nemo_experiments` is
+absent from the working directory. Every pass uses `--dist loadfile`, which keeps each test file on one
+worker, and `tests/unit_tests/conftest.py` isolates each worker's MASTER_PORT. **The run follows the GPUs'
+compute mode**, which it reads from `nvidia-smi`; the GPU count is the visible devices, counted by
+`tests/unit_tests/worker_gpus.py`:
+- **Default:** three workers per GPU (`-n 12` on a node), in one pass, every process seeing every GPU.
+- **`Exclusive_Process`, where a GPU holds one process's CUDA context at a time:**
+  1. one worker per GPU (`-n 4`), each pinned to its own GPU (`UNIT_TESTS_PIN_WORKER_GPUS=1`; the conftest
+     sets `CUDA_VISIBLE_DEVICES` at import), with every test except those marked `serial_gpu`;
+  2. then those, serially, collected from only the files that use the marker. They need GPUs no
+     worker holds: more than one GPU (the 2-GPU padding-mask test), or child processes with their own
+     CUDA contexts (the HybridEP replay). Mark any new test of either kind `serial_gpu`; pinned, it
+     would otherwise skip or fail in the xdist pass.
+
+**Why (Kyle, 2026-10-09, "whatever is needed to make testing more stable and easier"):** the node image of
+2026-10-07 put the GPUs in `Exclusive_Process` mode.
+- The previous hook ran `-n 8` unpinned (Kyle, 2026-10-01; 253 s wall then). Under that mode on
+  2026-10-09 it failed with 52 failures and 144 errors, all "CUDA-capable device(s) is/are busy or
+  unavailable".
+- The same node read `Default` again that evening.
+- **Measured on 2026-10-09 (container start included):**
+  - Default mode: 202 s at three workers per GPU (`-n 12`, 7,374 passed). Two per GPU took 282 s, close
+    to the gate's limit, because under `--dist loadfile` the slowest files (the 2-GPU padding-mask test
+    and the HybridEP replay, 44 s and 33 s) bound the pass.
+  - Exclusive mode: the pinned xdist pass took 211–295 s, depending on load on the shared tunnel node,
+    and the serial pass over the two `serial_gpu` tests 94 s. That totals 305–390 s.
+- **The review gate gives pre-commit 300 s.** The limit is hard-coded in the tooling submodule's
+  `review_gate.py`. A commit made while the GPUs are exclusive therefore runs over it and times out: the
+  timeout is not a failure of the tests. Run the runner by hand to see the result, and raise the limit
+  in the tooling (or commit from a node in Default mode) rather than shrinking the run.
+
+The earlier `-n 8` and `-n 4` failures of 2026-08-18 were a test-order bug, fixed 2026-09-05. It looked
+like load: the full suite errored in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolving a
+saved fast tokenizer to a slow class whose `get_vocab()` raises `NotImplementedError`), while the file
+passed alone. The `hf_pretrained` test fixtures named their `Mock(spec=...)` objects by assigning
+`__class__.__name__`. A spec'd Mock's `__class__` IS the spec, so that renamed transformers' Python
+tokenizer backend for the rest of the xdist worker, and AutoTokenizer no longer recognised it by name.
+`tests/unit_tests/models/hf_pretrained/mocks.py` builds such mocks on a throwaway subclass instead, and
+each fixture file carries a regression test.
 MASTER_PORT is derived per xdist worker from a per-session base, so two suites running at
 once on one node (separate worktrees, or a gate retry racing an orphan of its own previous
 attempt) do not collide. Symptoms when they do: `DistNetworkError` in whichever file

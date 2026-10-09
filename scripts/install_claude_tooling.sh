@@ -176,7 +176,7 @@ cat <<EOF
   * Lint by hand:
       $VENV_DIR/bin/ruff check .
       $VENV_DIR/bin/pre-commit run --all-files
-  * Unit tests run in the CONTAINER, never in this venv:
-      ./pipeline_env_exec.sh "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; cd \$(mktemp -d); python -m pytest $REPO_DIR/tests/unit_tests -x -q"
+  * Unit tests run in the CONTAINER, never in this venv, through the hook's own runner:
+      ./pipeline_env_exec.sh "bash $REPO_DIR/scripts/run_unit_tests.sh"
   * No container yet? One-time, on a GPU node: bash pipeline_env_setup.sh
 EOF

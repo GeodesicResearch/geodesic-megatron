@@ -94,20 +94,16 @@ run.
 # Interactive shell with the repo + Slingshot env wired up:
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
 
-# Unit tests — in-container is the only way (~5,450 tests collected in ~35 s).
-# NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
-# not exist, so running from the repo root errors every test (and would rmtree a real one).
-# --dist loadfile runs whole test files per worker of the image's bundled pytest-xdist. The
-# pre-commit hook runs -n 8 (Kyle, 2026-10-01): 253 s wall for the full suite, container start
-# included, inside the review gate's 300 s budget that -n 4 runs had repeatedly overrun. The
-# test_mq_tokenizers.py fixture error that once held -n 8 back was test-order pollution
-# (hf_pretrained fixtures renaming a real transformers class through a spec Mock, fixed
-# 2026-09-05) -- see CLAUDE.md's Testing section.
-# per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py, which derives the
-# port base per session so two concurrent suites on one node do not collide. Set
-# MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \$T; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 4 --dist loadfile"
+# Unit tests — in-container is the only way (~7,370 tests), through the runner the pre-commit
+# hook uses. Its header says what it does: a scratch cwd (an autouse conftest fixture asserts
+# ./nemo_experiments does not exist, so running from the repo root errors every test and would
+# rmtree a real one), xdist workers with --dist loadfile, and a worker count set by the GPUs'
+# compute mode: three per GPU in Default mode; in Exclusive_Process mode one per GPU, each pinned to
+# its own GPU (tests/unit_tests/worker_gpus.py), plus a serial pass for the tests marked serial_gpu.
+# CLAUDE.md's Testing section has the measured times and the history. The same conftest isolates each worker's
+# MASTER_PORT and derives the port base per session, so two concurrent suites on one node do not
+# collide. Set MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
+./pipeline_env_exec.sh "bash $PWD/scripts/run_unit_tests.sh"
 
 # Fabric health: asserts busbw clears the 100 GB/s floor (the script's own gate).
 # To ALSO confirm the plugin by name, rerun with NCCL_DEBUG=INFO and grep for

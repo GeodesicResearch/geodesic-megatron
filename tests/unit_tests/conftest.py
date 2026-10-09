@@ -21,8 +21,10 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.unit_tests.worker_gpus import pinned_worker_gpu
 
-# Under pytest-xdist (the pre-commit hook runs `-n 8 --dist loadfile`), tests that
+
+# Under pytest-xdist (scripts/run_unit_tests.sh runs `--dist loadfile`), tests that
 # initialize torch.distributed in different files run concurrently and collide on
 # the default MASTER_PORT (29500, EADDRINUSE). Assign each worker its own port at
 # conftest-import time — before any test's os.environ.setdefault can pin the
@@ -82,6 +84,14 @@ _XDIST_MASTER_PORT = resolve_worker_master_port(_xdist_worker, _MASTER_PORT_BASE
 if _XDIST_MASTER_PORT is not None:
     os.environ["MASTER_PORT"] = _XDIST_MASTER_PORT
 
+
+# In Exclusive_Process compute mode scripts/run_unit_tests.sh asks for each xdist worker to be pinned to one
+# GPU; tests/unit_tests/worker_gpus.py says why and how. The device is set here, at conftest import, before
+# torch creates a context.
+_XDIST_GPU = pinned_worker_gpu(os.environ, _xdist_worker, "/dev")
+if _XDIST_GPU is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = _XDIST_GPU
+
 # Unit tests must not inherit the *submitting allocation's* size: on a SLURM
 # compute node get_world_size_safe() falls back to SLURM_NTASKS, so a suite run
 # inside an N-node tunnel silently sees world_size=N and world-size-dependent
@@ -138,6 +148,12 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "run_only_on: marks test to run only on specific hardware (CPU/GPU)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "serial_gpu: test needs GPUs no xdist worker holds (it uses more than one GPU, or starts child "
+        "processes with their own CUDA contexts); scripts/run_unit_tests.sh runs these serially when it pins "
+        "workers to GPUs",
     )
 
 
