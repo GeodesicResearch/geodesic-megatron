@@ -2,7 +2,7 @@
 
 Configs that change a stated set of training variables against a stage they are compared with,
 and nothing else, each pinned to that stage field by field by test so that a change to any other
-field fails in CI rather than confounding the comparison. Three kinds live here:
+field fails in CI rather than confounding the comparison. Four kinds live here:
 
 - **The ablation**, a variant of the [`../30b_baseline/`](../30b_baseline/README.md) curriculum:
   `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, the stage-3 SFT on the revised ~50B-token
@@ -17,6 +17,10 @@ field fails in CI rather than confounding the comparison. Three kinds live here:
   test pins it to the ablation rather than to the parent: the fields that differ must be exactly
   those levers, each at the quickstart's value, plus the run identity, and its `.env` must hold
   the quickstart's launcher settings.
+- **The rerun on the quality-filtered mix**:
+  `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml` (+ `.env`), the rerun above with only its corpus changed.
+  The same test pins it to the rerun: the fields that differ must be exactly the corpus's three and the run
+  identity, and its `.env` must equal the rerun's.
 - **The filtered arms' reasoning models** on the ablation's recipe:
   `nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml` (Broadly Filtered) and
   `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` (narrow V2), each the
@@ -98,8 +102,8 @@ ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
   configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft default
 ```
 
-Name the subset: the table's `sft` stage also holds the two filtered cuts below, so the stage alone
-would plan all three corpora.
+Name the subset: the table's `sft` stage also holds the two filtered cuts below and v3's
+quality-filtered split, so the stage alone would plan all four corpora.
 
 **`train_iters` is measured, never estimated**: `ceil(1 x num_packs / 256)`, where `num_packs`
 is the sum of the shards' packed rows (`pq.ParquetFile(path).metadata.num_rows` reads the
@@ -294,6 +298,88 @@ complete.
   a forced loop it holds it slightly more strongly than the ablation: copy-4 escape 0.884 against 0.943.
 - **Scope:** these results are for v2 as a whole, the packed-SFT fixes and the fast configuration together. This is not
   a fix-by-fix ablation.
+
+## The rerun on the quality-filtered mix — `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml`
+
+v2 above trained again with only its SFT data changed (Kyle, 2026-10-09): the same warm start (the midtraining final,
+iteration 3126), GBS 256 for 5976 iterations on 256 GPUs, and the same optimizer, schedule, tokenizer, levers,
+recompute, checkpoint cadence and `.env`. The test pins it to v2: the fields that differ must be exactly the corpus's
+three (`dataset_name`, `dataset_root`, `packed_train_data_path`) and the run identity (the `_v3` suffix), and the
+`.env` must equal v2's.
+
+**The corpus** is the `xl50b_train_quality_v5` config of
+`geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered`:
+- **The cut:** the xl-50b mix's 33 per-source configs at `cc41d97c` (8,924,316 rows, byte-identical to `ec0b9197`;
+  v2 trained on that revision's `default` config, the same rows shuffled and pared by its 70 shortest documents to
+  8,924,246), less every row a per-trace quality judge labelled defective. The judge
+  answers seven yes/no questions, and a row is defective when any answer has probability 0.5 or more, one threshold
+  for every question. On a 200-document hand-labelled gold test split a defective flag has precision 0.88 and recall
+  0.89 (0.69 weighted to the pool); `off_task` and `missing_information` are the least precise questions (0.35 and
+  0.46), and `missing_task` has no gold positive, so its accuracy is unmeasured. It judged seven of the mix's 33
+  subsets (835,945 documents, 21.8% of the mix's tokens) and removes 290,481 unique documents (346,767 rows), 7.58%
+  of the mix's tokens, most of them maths and SWE. The other 26 subsets were not audited and are kept as they were.
+- **The refill:** the kept documents are repeated in three groups to v2's 50B tokens, so that the agentic share
+  (19.44%) and the MCQA share (0.99%) are v2's: agentic ×2.33, MCQA ×2.0, the rest ×1.09, with at most three
+  exposures of any document. The split is then pared to 50,000,000,000 tokens and row-shuffled across sources, as
+  v2's was.
+- **Against v2:** less unique data (40.9B unique tokens against 44.9B), more repetition (about 9.1B repeated tokens
+  against 5.1B), and less maths and SWE.
+- **The record of the filter:** the dataset repository's `xl50b_filter_stats_quality_v5` (per-subset statistics),
+  `xl50b_filtered_quality_v5` (the removed documents) and `xl50b_labels_quality_v5` (the raw labels) configs; the
+  defect write-up, with examples a reader confirmed by hand, at https://claude.ai/artifact/YZ6je8dvQcNFTryuBcNKTQ;
+  and the model card's "Training data: quality filtering" section, which adds the per-category accuracy table.
+
+No control run separates the filter from the extra repetition, so read a v3 − v2 difference as the effect of the two
+together, and compare the models by their evaluations, not their loss curves: the runs read different data.
+
+### Build
+
+Its data config, `data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml`, is the xl-50b mix's with only the
+dataset and revision changed, so the packs are built exactly as v2's were: think-history tokenizer, sequence length
+32,768, pad multiple 4, 32 shards. The data config pins the split's published revision, `e77572f6`, and the
+`corpora.tsv` row its document count, 9,261,591 (50,000,013,376 tokens); the test requires both to be pinned
+together. Then:
+
+```bash
+bash configs/control_pretraining/build_corpora.sh \
+  configs/control_pretraining/30b_baseline_ablations/corpora.tsv sft xl50b_train_quality_v5
+```
+
+Verify the build with `verify_corpora.py` against the same row.
+
+**`train_iters` is v2's 5976**, not a pass over this corpus: the run trains v2's token budget. If the 32 shards hold
+fewer than 5976 x 256 = 1,529,856 packs, they fill the iterations up to `floor(packs / 256)`, and the batch sampler
+then starts again at the first pack, in the same order (`src/megatron/bridge/data/samplers.py`), so the remaining
+iterations re-read the corpus's first packs. If they hold more, the last packs are not read. v2's corpus packed to
+1,529,684, 172 short; at the split's 50B tokens either outcome is about one iteration. The
+count is the sum of the 32 shards' parquet row counts, read after the build and recorded under Status.
+
+### Launch
+
+As v2: one day-long segment, and a second on `--dependency=afternotok` that starts only if the first fails. No
+`ISAMBARD_SBATCH_FORCE`, and the `.env` goes with it. From the repo root, the first segment:
+
+```bash
+ISAMBARD_ENV_OVERRIDES=$PWD/configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.env \
+ISAMBARD_SBATCH_FORCE=0 ISAMBARD_SBATCH_MAX_NODES=250 \
+  isambard_sbatch --nodes=64 --time=24:00:00 \
+  --job-name=cp30b-baseline-sft-xl50b-gbs256-v3 \
+  pipeline_training_submit.sbatch \
+  configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml \
+  nano sft --disable-ft
+```
+
+Then submit the same command with `--dependency=afternotok:<first job id>`. Expect v2's speed, about 3.75 s/iter, or
+6 h 20 min for the run.
+
+It publishes as `geodesic-research/control-pretraining-30b-baseline-xl50b-v3-think` (private): one `sft_iter_<n>`
+revision per save, with `main` = 5976, exported with v2's exporter arguments. The model card carries the comparison
+with v2, from
+[`../hub_cards/control-pretraining-30b-baseline-xl50b-v3-think.md`](../hub_cards/control-pretraining-30b-baseline-xl50b-v3-think.md).
+
+### Status
+
+**Not yet built.** The `xl50b_train_quality_v5` split was published on 2026-10-09 at `e77572f6` and is pinned.
 
 ## The filtered arms' reasoning models on the same recipe
 

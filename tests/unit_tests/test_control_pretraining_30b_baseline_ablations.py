@@ -27,6 +27,10 @@ builds the pack the training config's glob reads.
 The xl-50b rerun ("v2") is pinned to the ablation the same way: it differs only in the levers of the SFT quickstart's
 fastest configuration, at the quickstart's values, and in its run identity, so it is the ablation's training run on
 faster, bug-fixed code and nothing else.
+
+The quality-filtered run ("v3") is pinned to v2: it differs only in the corpus's three fields and its run identity, its
+launcher settings are v2's, and its data config builds its pack exactly as the xl-50b mix's was built, so v3 against
+v2 is a difference of training data alone.
 """
 
 from __future__ import annotations
@@ -42,8 +46,12 @@ from scripts.training.launcher_source import env_override_entries
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
+    assert_data_config_is_the_mixs_but_for_its_source,
+    assert_hold_and_pin_move_together,
     assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
+    assert_reads_the_split,
+    assert_row_packs_like_the_mix,
     assert_segment_exit_posture,
     data_parallel_size,
     dotted_leaves,
@@ -101,10 +109,23 @@ FAST_SFT_QUICKSTART = _REPO_ROOT / "configs" / "quickstart" / "nemotron_nano_qui
 QUICKSTART_OWN_FIELDS = {BASE_CONFIG_KEY, "logger.wandb_exp_name"}
 V2_GPUS = 256
 
-# Each variant and the run it is pinned to: the ablation to the parent stage, the rerun to the ablation.
+# v3 is v2 with the corpus replaced by the quality-filtered mix's 50B training split; the corpus is named by these
+# three fields and by nothing else in a training config.
+V3 = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml"
+V3_DATA = _ABLATIONS_DIR / "data" / "pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml"
+V3_CORPUS = "geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered"
+V3_SUBSET = "xl50b_train_quality_v5"
+CORPUS_FIELDS = {
+    "dataset.dataset_name",
+    "dataset.dataset_root",
+    "dataset.packed_sequence_specs.packed_train_data_path",
+}
+
+# Each variant and the run it is pinned to: the ablation to the parent stage, the rerun to the ablation, v3 to v2.
 VARIANTS = {
     "xl-50b sft ablation": (ABLATION, PARENT),
     "xl-50b sft v2": (V2, ABLATION),
+    "xl-50b sft v3": (V3, V2),
 }
 
 
@@ -127,6 +148,11 @@ def parent():
 @pytest.fixture(scope="module")
 def v2():
     return merge_onto_recipe(V2, nemotron_3_nano_sft_config)
+
+
+@pytest.fixture(scope="module")
+def v3():
+    return merge_onto_recipe(V3, nemotron_3_nano_sft_config)
 
 
 @pytest.fixture(scope="module")
@@ -237,13 +263,13 @@ class TestTheCorpusIsTheRevisedMix:
         assert re.findall(r"\[dry-run\] pack default shard(\d+):", output) == ["0", "5"]
         assert "SUBMITTED 2 jobs for stage 'sft' (shards: 0,5)" in output
 
-    def test_the_packed_path_is_a_shard_glob_naming_the_tokenizer_and_pad_multiple(self, ablation):
-        path = ablation.dataset.packed_sequence_specs.packed_train_data_path
+    def test_the_packed_path_is_a_shard_glob_naming_the_tokenizer_and_pad_multiple(self, variant):
+        path = variant.cfg.dataset.packed_sequence_specs.packed_train_data_path
         assert "/shard*/" in path, "the pack is built per shard and read through a glob"
         # The glob is what makes the shard count a data-build decision rather than a config one.
         assert "nemotron-think-history-tokenizer" in path
         assert "pad_seq_to_mult4" in path
-        assert path.startswith(ablation.dataset.dataset_root)
+        assert path.startswith(variant.cfg.dataset.dataset_root + "/")
 
     def test_the_history_tokenizer_is_used_so_prior_turn_reasoning_survives(self, ablation):
         # The plain think tokenizer renders every prior assistant turn as an empty <think></think>;
@@ -334,3 +360,42 @@ class TestTheRerunIsTheAblationOnTheFastConfiguration:
         assert v2.train.global_batch_size * v2.dataset.seq_length // V2_GPUS == (
             ablation.train.global_batch_size * ablation.dataset.seq_length // ABLATION_GPUS
         )
+
+
+@pytest.fixture(scope="module")
+def v3_row(corpora_rows):
+    """v3's row of the ablations' corpora table: the one naming its data config."""
+    (row,) = [r for r in corpora_rows if r.config.resolve() == V3_DATA.resolve()]
+    return row
+
+
+class TestV3IsV2OnTheQualityFilteredCorpus:
+    def test_exactly_the_corpus_and_identity_fields_differ_from_v2(self, v3, v2):
+        assert_only_these_fields_differ(v3, v2, CORPUS_FIELDS | set(IDENTITY_FIELDS), "xl-50b sft v3")
+
+    def test_it_trains_v2s_iterations_from_v2s_warm_start(self, v3, v2):
+        """The run trains v2's token budget on a smaller corpus, so the iteration count is v2's and never re-derived
+        from this corpus's pack count."""
+        assert v3.train.train_iters == v2.train.train_iters == 5976
+        assert v3.checkpoint.pretrained_checkpoint == v2.checkpoint.pretrained_checkpoint
+
+    def test_its_env_file_is_v2s(self):
+        assert env_override_entries(str(V3.with_suffix(".env"))) == env_override_entries(str(V2.with_suffix(".env")))
+
+    def test_the_training_config_reads_the_quality_filtered_split(self, v3, v3_row):
+        assert v3_row.subset == V3_SUBSET
+        assert OmegaConf.load(V3_DATA).dataset == V3_CORPUS
+        assert_reads_the_split(v3, V3_CORPUS, V3_SUBSET)
+
+    def test_the_data_config_builds_the_pack_as_the_mix_was_built(self):
+        """Every key but the corpus's name and revision is the xl-50b mix's, so the pack is built exactly as the pack
+        v2 read: the same tokenizer, sequence length, pad multiple and JSONL-only prepare."""
+        assert_data_config_is_the_mixs_but_for_its_source(V3_DATA, ABLATION_DATA)
+
+    def test_the_corpora_row_builds_the_pack_in_the_mixs_shards(self, v3_row, corpora_rows):
+        (mix_row,) = [r for r in corpora_rows if r.config.resolve() == ABLATION_DATA.resolve()]
+        assert_row_packs_like_the_mix(v3_row, V3_DATA, mix_row)
+
+    def test_the_revision_and_the_document_count_are_pinned_together(self, v3_row):
+        """Both come from the published split: a full commit SHA, which no later push can move, and its row count."""
+        assert_hold_and_pin_move_together(OmegaConf.load(V3_DATA).revision, [v3_row], "xl-50b sft v3")
