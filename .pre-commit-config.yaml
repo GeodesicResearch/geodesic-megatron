@@ -107,32 +107,18 @@ repos:
             # guards below would otherwise report "apptainer not on PATH" and skip
             # a suite that is perfectly runnable right here. Hence: before them.
             if [ -d /.singularity.d ]; then
-              . "$REPO/pipeline_env_activate.sh" || exit 1
-              T="$(mktemp -d)"; cd "$T" || exit 1
-              # -n 8 --dist loadfile: parallel workers fit the suite into the review
-              # gate 300 s pre-commit budget. loadfile keeps each test file on one
-              # worker; tests/unit_tests/conftest.py gives each worker a distinct
-              # MASTER_PORT so concurrently-running files that init
-              # torch.distributed cannot collide on 29500.
-              # 8 workers (Kyle, 2026-10-01): with this command, container start
-              # included, the full suite passed at -n 8 in 253 s wall on
-              # 2026-10-01, where -n 4 runs had repeatedly overrun the budget.
-              # The earlier -n 8 failures
-              # (2026-08-18, test_mq_tokenizers.py fixture setup) were test-order
-              # pollution, not load, fixed 2026-09-05: the hf_pretrained fixtures
-              # renamed the real transformers classes through a spec Mock (see
-              # tests/unit_tests/models/hf_pretrained/mocks.py).
+              # scripts/run_unit_tests.sh is the one definition of the run: its
+              # header says what each flag is for. In short, it reads the GPU
+              # compute mode. In Default mode it runs three xdist workers per GPU
+              # (12) in one pass. In Exclusive_Process mode it runs one worker per GPU
+              # (4), each pinned to its own GPU (tests/unit_tests/worker_gpus.py),
+              # then a serial pass for the tests marked serial_gpu, which need GPUs
+              # no worker holds.
+              # The review gate gives pre-commit 300 s; CLAUDE.md (Testing) has the
+              # measured times.
               # (No apostrophes in these comments: the whole entry is one
               # single-quoted bash -c string and shlex would truncate at one.)
-              # --reruns with --only-rerun: retry ONLY external-boundary errors (HF
-              # hub downloads, sockets; OSError is the observed HF tokenizer-reload
-              # flake class) once -- logic-error classes and genuine assertion
-              # failures never rerun. DistNetworkError retries are safe because the
-              # conftest teardown hook fails any test that overwrites the per-worker
-              # MASTER_PORT, so a self-inflicted collision cannot hide behind a retry.
-              python -m pytest "$REPO/tests/unit_tests" -x -q --tb=short -m "not pleasefixme" -n 8 --dist loadfile \
-                --reruns 1 --only-rerun "(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError)"
-              rc=$?; cd /; rm -rf "$T"; exit $rc
+              exec bash "$REPO/scripts/run_unit_tests.sh"
             fi
             SKIP=""
             PROBE=""
@@ -154,16 +140,16 @@ repos:
               echo "## run inside the pipeline container (docs/environment.md)."
               echo "##   build it (one-time, on a GPU node):  bash pipeline_env_setup.sh"
               echo "##   run them by hand (on a GPU node):"
-              echo "##     ./pipeline_env_exec.sh \"cd $REPO; source pipeline_env_activate.sh || exit 1; cd \$(mktemp -d); python -m pytest $REPO/tests/unit_tests -x -q\""
+              echo "##     ./pipeline_env_exec.sh \"bash $REPO/scripts/run_unit_tests.sh\""
               echo "## Do NOT read this hook as a pass: run the command above before merging."
               echo "######################################################################"
               exit 0
             fi
             # exec: the container exit status becomes this hook exit status
             # directly (no single quotes anywhere in here — they would terminate
-            # the outer bash -c script). xdist flags: same rationale as the
-            # in-container branch above.
-            exec "$REPO/pipeline_env_exec.sh" "cd $REPO; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \"\$T\"; python -m pytest $REPO/tests/unit_tests -x -q --tb=short -m \"not pleasefixme\" -n 8 --dist loadfile --reruns 1 --only-rerun \"(ConnectionError|HTTPError|Timeout|OSError|DistNetworkError)\"; rc=\$?; cd /; rm -rf \"\$T\"; exit \$rc"
+            # the outer bash -c script). The same runner as the in-container
+            # branch above.
+            exec "$REPO/pipeline_env_exec.sh" "bash $REPO/scripts/run_unit_tests.sh"
           '
         pass_filenames: false
         types: [python]

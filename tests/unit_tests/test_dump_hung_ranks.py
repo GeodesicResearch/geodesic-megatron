@@ -36,6 +36,8 @@ import time
 
 import pytest
 
+from tests.unit_tests.stubbed_shell import stubbed_shell_env
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "training", "dump_hung_ranks.sh")
@@ -128,21 +130,10 @@ def rank_with_helper(job_id, pipe_prefix):
     proc.wait()
 
 
-def _env(bindir, **extra):
-    """A minimal environment for the script: PATH with the stubs first, plus what a test sets.
-
-    Deliberately not a copy of os.environ: inside the pipeline container BASH_ENV and ENV make
-    every non-interactive bash source /etc/shinit_v2, ~2.5 s per shell, and the script and
-    every stub are shells. That startup hook is the container's, not the script's, and is not
-    under test.
-    """
-    return {"PATH": f"{bindir}:{os.environ['PATH']}", **extra}
-
-
 def _run_node(tmp_path, job_id, bindir):
     out = tmp_path / "evidence"
     out.mkdir()
-    env = _env(bindir)
+    env = stubbed_shell_env(bindir, {})
     result = subprocess.run(
         ["bash", SCRIPT, "--node", job_id, str(out)], capture_output=True, text=True, env=env, timeout=120
     )
@@ -215,7 +206,9 @@ def test_a_fifo_without_a_reader_is_counted_not_hung_on(tmp_path, job_id, pipe_p
 
 
 def test_usage_is_refused_without_arguments(tmp_path):
-    result = subprocess.run(["bash", SCRIPT], capture_output=True, text=True, env=_env(tmp_path), timeout=30)
+    result = subprocess.run(
+        ["bash", SCRIPT], capture_output=True, text=True, env=stubbed_shell_env(tmp_path, {}), timeout=30
+    )
     assert result.returncode == 2
     assert "usage" in result.stderr
 
@@ -232,11 +225,13 @@ def _slurm_stubs(tmp_path, squeue=_SQUEUE, scontrol=_SCONTROL):
 def _run_driver(tmp_path, job_id, bindir, extra_env=None):
     log_dir = tmp_path / "megatron_runs"
     log_dir.mkdir(exist_ok=True)
-    env = _env(
+    env = stubbed_shell_env(
         bindir,
-        SCONTROL_STDOUT=str(log_dir / f"train-{job_id}.out"),
-        SRUN_ARGS_FILE=str(tmp_path / "srun.args"),
-        SRUN_ENV_FILE=str(tmp_path / "srun.env"),
+        {
+            "SCONTROL_STDOUT": str(log_dir / f"train-{job_id}.out"),
+            "SRUN_ARGS_FILE": str(tmp_path / "srun.args"),
+            "SRUN_ENV_FILE": str(tmp_path / "srun.env"),
+        },
     )
     env.update(extra_env or {})
     result = subprocess.run(["bash", SCRIPT, job_id], capture_output=True, text=True, env=env, timeout=120)

@@ -870,6 +870,9 @@ echo "Env:       container ($CONTAINER_SIF)"
 # sed's exit status would otherwise abort the launch.
 sed 's/^/  sif: /' "${CONTAINER_SIF}.source.txt" 2>/dev/null | head -4 || true
 sed 's/^/  slingshot: /' "$CONTAINER_SLINGSHOT_DIR/provenance.txt" 2>/dev/null || true
+# The Slingshot provenance records the libfabric the stack was BUILT against; this is the one
+# the run binds and loads (pipeline_env_config.env), which can differ from it.
+echo "  host libfabric (bound at runtime): $CONTAINER_HOST_LIBFABRIC"
 if [ "$USE_FT" = true ]; then
     echo "Launcher:  ft_launcher (fault-tolerant)"
     if [ "$USE_STRAGGLER" = false ]; then

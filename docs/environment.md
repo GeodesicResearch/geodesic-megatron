@@ -94,20 +94,19 @@ run.
 # Interactive shell with the repo + Slingshot env wired up:
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
 
-# Unit tests — in-container is the only way (~5,450 tests collected in ~35 s).
-# NOTE the scratch cwd: an autouse conftest fixture asserts ./nemo_experiments does
-# not exist, so running from the repo root errors every test (and would rmtree a real one).
-# --dist loadfile runs whole test files per worker of the image's bundled pytest-xdist. The
-# pre-commit hook runs -n 8 (Kyle, 2026-10-01): 253 s wall for the full suite, container start
-# included, inside the review gate's 300 s budget that -n 4 runs had repeatedly overrun. The
-# test_mq_tokenizers.py fixture error that once held -n 8 back was test-order pollution
-# (hf_pretrained fixtures renaming a real transformers class through a spec Mock, fixed
-# 2026-09-05) -- see CLAUDE.md's Testing section.
-# per-worker MASTER_PORT isolation lives in tests/unit_tests/conftest.py, which derives the
-# port base per session so two concurrent suites on one node do not collide. Set
-# MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; T=\$(mktemp -d); cd \$T; \
-  python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 4 --dist loadfile"
+# Unit tests — in-container is the only way (~7,370 tests), through the runner the pre-commit
+# hook uses. Its header says what it does: a scratch cwd (an autouse conftest fixture asserts
+# ./nemo_experiments does not exist, so running from the repo root errors every test and would
+# rmtree a real one), xdist workers with --dist loadfile, and a worker count set by the GPUs'
+# compute mode: three per GPU in Default mode; in Exclusive_Process mode one per GPU, each pinned to
+# its own GPU (tests/unit_tests/worker_gpus.py), plus a serial pass for the tests marked serial_gpu,
+# after first refusing to start, and naming them, while any process already holds a GPU.
+# CLAUDE.md's Testing section has the measured times and the history. The same conftest isolates each worker's
+# MASTER_PORT and derives the port base from the session's controller pid, so two concurrent suites on one
+# node collide only when those pids differ by a multiple of 328, never when started together; every port
+# lies below the kernel's ephemeral range, so no outgoing connection can take one first.
+# Set MEGATRON_TEST_MASTER_PORT_BASE to pin that base for a single invocation.
+./pipeline_env_exec.sh "bash $PWD/scripts/run_unit_tests.sh"
 
 # Fabric health: asserts busbw clears the 100 GB/s floor (the script's own gate).
 # To ALSO confirm the plugin by name, rerun with NCCL_DEBUG=INFO and grep for
@@ -164,7 +163,11 @@ bump) plus `apptainer inspect $CONTAINER_SIF` / `${CONTAINER_SIF}.source.txt`.
 The image bundles a newer CUDA userland than the host driver natively supports. For exactly
 that case Isambard's containers/NCCL guidance prescribes building NCCL and the aws-ofi-nccl
 CXI plugin **inside the image**, against the image's CUDA and the **host's** Cray libfabric
-(1.22.0), keeping the outputs on the host filesystem and bind-mounting them at runtime.
+(1.22.0 when the stack was built), keeping the outputs on the host filesystem and bind-mounting
+them at runtime. The compute-node image of 2026-10-07 ships libfabric 2.3.1 and no other version,
+so `pipeline_env_config.env` binds 2.3.1; the 1.22.0-built plugin loads it through the unchanged
+`libfabric.so.1` soname, and the 2-node smoke measured 138.8 GB/s busbw on it (2026-10-09, job
+7178997), against 131 GB/s for the containerized 2-node all_reduce on 1.22.0 (2026-07-23).
 Step 2 of `pipeline_env_setup.sh` is that recipe; it builds NCCL `v2.29.2-1`, hwloc `v2.13`
 and aws-ofi-nccl `v1.18.0` (pins overridable via `GEODESIC_CONTAINER_OFI_*_VERSION`) plus
 the `nccl-tests` binaries, into `/projects/a5k/public/containers/slingshot/nemo_<tag>/`,
@@ -410,20 +413,27 @@ must sustain for its first checkpoint to beat the wall; `--disable-ft` is the op
 Under Docker, NGC's entrypoint detects a host driver older than the image CUDA and symlinks
 `/usr/local/cuda/compat/lib -> lib.real` so the forward-compat `libcuda` wins. **Apptainer
 never runs that entrypoint and the SIF is read-only**, so `--nv` alone leaves the host's
-CUDA 12.7 `libcuda` in charge and CUDA-13 torch dies with "driver too old".
+older `libcuda` in charge and the image's torch dies with "driver too old". The host driver is
+R580 (580.173.02, CUDA 13.0) on the compute-node image of 2026-10-07, and was R565 (CUDA 12.7)
+before it.
 `pipeline_env_activate.sh` therefore fronts the compat dir on `LD_LIBRARY_PATH`
 (`GEODESIC_CONTAINER_CUDA_COMPAT=auto|0|/path`; `auto` probes the two known NGC layouts).
-Always-fronting is safe here because the Isambard driver is always older than any image CUDA
-we qualify — the one case NGC's entrypoint would skip compat (driver *newer* than image)
-cannot occur.
+Fronting the compat dir is safe only while the host driver is older than the image's CUDA, which
+holds for the qualified 26.04 (CUDA 13.1) and for 26.06 (13.2) on R580 (CUDA 13.0). It does
+**not** hold for a CUDA 13.0 image (25.09, 25.11) on R580: there the compat `libcuda` is older
+than the host driver, the case NGC's entrypoint skips, and fronting it can fail with error 803.
+Run such a tag with `GEODESIC_CONTAINER_CUDA_COMPAT=0` and validate it; no CUDA 13.0 image has
+been measured on R580.
 
-Measured on driver R565.57.01 — this is a per-image qualification axis, not a settled fact:
+Measured per driver — this is a per-image, per-driver qualification axis, not a settled fact:
 
-| Image CUDA | Verdict on R565 |
-|---|---|
-| 12.9 | works via same-major minor-version compatibility (no compat shim needed) |
-| 13.0 | **works** via compat libs (verified: torch cu13.0 + GH200 matmul green) |
-| 13.2 | **compat rejects the driver** (`Error 803: unsupported display driver / cuda driver combination`) |
+| Image CUDA | Driver | Verdict |
+|---|---|---|
+| 12.9 | R565.57.01 | works via same-major minor-version compatibility (no compat shim needed) |
+| 13.0 | R565.57.01 | **works** via compat libs (verified: torch cu13.0 + GH200 matmul green) |
+| 13.2 | R565.57.01 | **compat rejects the driver** (`Error 803: unsupported display driver / cuda driver combination`) |
+| 13.1 (26.04) | R580.173.02 | **works** via compat libs (`validate` 21/21, 2026-10-09, job 7178993) |
+| 13.2 (26.06) | R580.173.02 | **works** via compat libs (CUDA and GPU-op checks pass, 2026-10-09, job 7179097) |
 
 ### D7 — Universal GPU and cache settings
 
@@ -467,11 +477,14 @@ creatable path is not caught — the check creates it and passes. Hub downloads
 - Setup step 1 writes `${SIF}.source.txt` — image URI, digest labels, pull date, `apptainer
   inspect` output.
 - Setup step 2 writes `<slingshot-dir>/provenance.txt` — component versions, SIF, builder,
-  build host, host libfabric.
+  build host, and the host libfabric the stack was built against.
 - Setup step 3 writes `<overlay>/provenance.txt` — package list and why.
-- `pipeline_training_launch.sh` echoes the first two into **every job log**, so any run's
-  exact stack is recoverable from its output alone. Combined with the run identity below,
-  that closes the loop from a W&B run to the container it ran in.
+- `pipeline_training_launch.sh` echoes the first two into **every job log**, followed by the
+  host libfabric the run binds and loads (`host libfabric (bound at runtime)`, from
+  `pipeline_env_config.env`). The two libfabric lines can differ: the stack built against 1.22.0
+  runs on 2.3.1 through the unchanged `libfabric.so.1` soname. So any run's exact stack is
+  recoverable from its output alone. Combined with the run identity below, that closes the loop
+  from a W&B run to the container it ran in.
 
 ## Image qualification
 
@@ -481,12 +494,14 @@ side by side), and the newest tag that clears all four gates becomes the one-lin
 default in `pipeline_env_config.env`. The original INFR-68 ladder
 (`26.06 → 26.02.nemotron_3_super → 25.11 → 25.09`) stopped at `26.02.nemotron_3_super`
 because `26.06` ships CUDA 13.2 (nvvm 13.2.78), which the compat table in D6b rules out on
-this driver. **2026-07-29 re-qualification: `26.04` (CUDA 13.1, compat 590.48.01) does run
-on this driver and is now the default** — validator 18/18, FT smoke, and a 48-iter ladder
+the R565 driver. **2026-07-29 re-qualification: `26.04` (CUDA 13.1, compat 590.48.01) does run
+on the R565 driver and is now the default** — validator 18/18, FT smoke, and a 48-iter ladder
 on an identical nodelist (evidence:
 `docs/investigations/120b-gbs64-host-overhead-investigation.md` §9.8; plain-config 26.04
 regresses ~1–2 s via end-of-step skew, and the adopted `optimizer_offload_fraction: 0.5`
-config wins outright at 25.66 vs 26.70). `26.06` remains driver-blocked; per-image evidence
+config wins outright at 25.66 vs 26.70). `26.06` was driver-blocked on R565 (its CUDA 13.2
+compat rejects that driver) and starts on R580 (`validate` 20/21, job 7179097: only `grouped_gemm`
+fails, absent from the 26.06 overlay); it has not been qualified by a training run. Per-image evidence
 otherwise lives in the INFR-68 PR. The same newest-first policy applies to the Option-B
 build pins.
 
@@ -494,7 +509,7 @@ A tag qualifies when:
 
 1. **`validate` is all-green** — imports, GPU op, import-path resolution, CXI plugin `CDLL`,
    ft flags, dataset-helpers JIT, and `nvidia-smi` showing the image's CUDA (which is itself
-   the proof that `--nv` + compat injection works on the R565/12.7 driver).
+   the proof that `--nv` + compat injection works on the host driver).
 2. **2-node NCCL smoke** shows `Using network AWS Libfabric` and busbw ≥ 100 GB/s.
 3. **The Nano quickstart trains multi-node** — loss decreasing, no NaN — both with FT and
    with `--disable-ft`.

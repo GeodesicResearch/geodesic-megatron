@@ -29,13 +29,14 @@ These tests run the real function out of the real script with a stub `scontrol` 
 SLURM is the untestable boundary; the shell under test is not stubbed.
 """
 
-import os
 import re
 import stat
 import subprocess
 
 import pytest
 from scripts.training.launcher_source import LAUNCHER, launcher_function
+
+from tests.unit_tests.stubbed_shell import stubbed_shell_env
 
 
 # Two leaf switches and a spine, matching `scontrol show topology` on Isambard. group9 is
@@ -99,12 +100,7 @@ def _run(tmp_path, nodelist, fail_scontrol=None):
         'printf "SPREAD=[%s]\\n" "$ISAMBARD_SWITCH_SPREAD"\n'
         'echo "REACHED_END"\n'
     )
-    # A minimal environment, not a copy of os.environ: inside the pipeline container BASH_ENV and
-    # ENV make every non-interactive bash source /etc/shinit_v2, ~2.5 s per shell, and the harness
-    # and every stub call are shells. That startup hook is the container's, not the launcher's.
-    env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
-    if fail_scontrol:
-        env["FAIL_SCONTROL"] = fail_scontrol
+    env = stubbed_shell_env(bindir, {"FAIL_SCONTROL": fail_scontrol} if fail_scontrol else {})
     return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env, timeout=120)
 
 
