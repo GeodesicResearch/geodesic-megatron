@@ -604,6 +604,13 @@ class TrainingConfig(MTrainTrainingConfig):
 class CheckpointConfig(MTrainCheckpointConfig):
     """Configuration settings for model checkpointing (saving and loading)."""
 
+    hf_parent: Optional[str] = None
+    """HF base loaded before PEFT, as an alternative to a dense Megatron checkpoint."""
+    parent_factor_sources: list[str] = field(default_factory=list)
+    """Ordered canonical factor-v2 overlays merged before PEFT (never trained)."""
+    save_steps: list[int] = field(default_factory=list)
+    """Additional optimizer steps at which to save a resumable checkpoint."""
+
     pretrained_checkpoint: Optional[str] = None
     """Directory containing a pretrained model checkpoint for finetuning.
 
@@ -1281,7 +1288,13 @@ class ConfigContainer(Container):
             )
 
         if self.peft is not None:
-            assert self.checkpoint.pretrained_checkpoint is not None, "PEFT requires a pretrained checkpoint path"
+            assert self.checkpoint.pretrained_checkpoint is not None or self.checkpoint.hf_parent is not None, (
+                "PEFT requires a pretrained checkpoint or HF parent"
+            )
+            if self.checkpoint.hf_parent and self.checkpoint.pretrained_checkpoint:
+                raise ValueError("Choose one of hf_parent and pretrained_checkpoint")
+            if self.checkpoint.parent_factor_sources and not self.checkpoint.hf_parent:
+                raise ValueError("parent_factor_sources requires hf_parent")
 
         if self.dataset is not None:
             # Only validate sequence length for GPTDatasetConfig or FinetuningDatasetConfig
