@@ -310,15 +310,22 @@ three (`dataset_name`, `dataset_root`, `packed_train_data_path`) and the run ide
 **The corpus** is the `xl50b_train_quality_v5` config of
 `geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered`:
 - **The cut:** the xl-50b mix v2 trained on, less every row a per-trace quality judge labelled defective. The judge
-  answers seven yes/no questions, and a row is defective when any answer has probability 0.5 or more. It judged
-  seven of the mix's 33 subsets and removes 346,767 rows, 7.58% of the mix's tokens, most of them maths and SWE. The
-  other 26 subsets were not audited and are kept as they were.
+  answers seven yes/no questions, and a row is defective when any answer has probability 0.5 or more, one threshold
+  for every question. On a 200-document hand-labelled gold test split a defective flag has precision 0.88 and recall
+  0.89 (0.69 weighted to the pool); `off_task` and `missing_information` are the least precise questions (0.35 and
+  0.46), and `missing_task` has no gold positive, so its accuracy is unmeasured. It judged seven of the mix's 33
+  subsets (835,945 documents, 21.8% of the mix's tokens) and removes 290,481 unique documents (346,767 rows), 7.58%
+  of the mix's tokens, most of them maths and SWE. The other 26 subsets were not audited and are kept as they were.
 - **The refill:** the kept documents are repeated in three groups to v2's 50B tokens, so that the agentic share
   (19.44%) and the MCQA share (0.99%) are v2's: agentic ×2.33, MCQA ×2.0, the rest ×1.09, with at most three
   exposures of any document. The split is then pared to 50,000,000,000 tokens and row-shuffled across sources, as
   v2's was.
 - **Against v2:** less unique data (40.9B unique tokens against 44.9B), more repetition (about 9.1B repeated tokens
   against 5.1B), and less maths and SWE.
+- **The record of the filter:** the dataset repository's `xl50b_filter_stats_quality_v5` (per-subset statistics),
+  `xl50b_filtered_quality_v5` (the removed documents) and `xl50b_labels_quality_v5` (the raw labels) configs; the
+  defect write-up, with examples a reader confirmed by hand, at https://claude.ai/artifact/YZ6je8dvQcNFTryuBcNKTQ;
+  and the model card's "Training data: quality filtering" section, which adds the per-category accuracy table.
 
 No control run separates the filter from the extra repetition, so read a v3 − v2 difference as the effect of the two
 together, and compare the models by their evaluations, not their loss curves: the runs read different data.
