@@ -14,12 +14,32 @@
 import importlib.util
 import logging
 import os
+import subprocess
 import sys
+from collections.abc import MutableMapping
 from pathlib import Path
 from shutil import rmtree
 from unittest.mock import patch
 
 import pytest
+
+
+def drop_inherited_git_repository_variables(environ: MutableMapping[str, str]) -> None:
+    """Remove from ``environ`` the variables git exports to hooks to select a repository (GIT_DIR, GIT_INDEX_FILE,
+    GIT_WORK_TREE and their kind, as ``git rev-parse --local-env-vars`` lists them).
+
+    The suite runs inside git's pre-commit hook. With them inherited, a test that runs git on a throwaway repository
+    acts on the repository being committed instead: ``git init <path>`` re-initialises $GIT_DIR rather than creating
+    ``<path>``.
+    """
+    names = subprocess.run(
+        ["git", "rev-parse", "--local-env-vars"], capture_output=True, text=True, check=True
+    ).stdout.split()
+    for name in names:
+        environ.pop(name, None)
+
+
+drop_inherited_git_repository_variables(os.environ)
 
 
 # Under pytest-xdist (the pre-commit hook runs `-n 8 --dist loadfile`), tests that
