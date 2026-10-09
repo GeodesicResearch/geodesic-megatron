@@ -211,8 +211,7 @@ isambard_sbatch pipeline_env_submit.sbatch validate --run-training
 
 # Run anything inside the environment (interactive shell, tests, ad-hoc python)
 ./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; exec bash -i"
-./pipeline_env_exec.sh "cd $PWD; source pipeline_env_activate.sh || exit 1; \
-  T=\$(mktemp -d); cd \$T; python -m pytest $PWD/tests/unit_tests/ -x -q -m 'not pleasefixme' -n 4 --dist loadfile"
+./pipeline_env_exec.sh "bash $PWD/scripts/run_unit_tests.sh"   # the unit tests, as the pre-commit gate runs them
 ```
 
 Everything configurable — image tag, SIF path, Slingshot component versions, overlay

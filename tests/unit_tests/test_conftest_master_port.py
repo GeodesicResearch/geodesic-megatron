@@ -26,14 +26,17 @@ class TestResolveMasterPortBase:
         # what bounds the result rather than the size of the input.
         for pid in (1, 2, 4_194_304, 2**31 - 1):
             base = resolve_master_port_base({}, pid)
-            assert 20000 <= base < 60000
+            assert 10000 <= base < 32768
 
-    def test_highest_worker_port_is_still_a_valid_port(self):
-        """The base range must leave room for every worker stacked above it."""
-        for pid in (1, 12345, 2**31 - 1):
+    def test_every_worker_port_is_below_the_kernels_ephemeral_range(self):
+        """The kernel hands a port in its ephemeral range to any outgoing connection at any moment, so a
+        port picked in advance there can be taken before the test binds it (EADDRINUSE). Every offset
+        and slot is covered, with every worker stacked above its base."""
+        with open("/proc/sys/net/ipv4/ip_local_port_range") as ranges:
+            ephemeral_floor = int(ranges.read().split()[0])
+        for pid in range(41 * 64):
             base = resolve_master_port_base({}, pid)
-            highest = int(resolve_worker_master_port("gw63", base))
-            assert highest < 65536
+            assert int(resolve_worker_master_port("gw63", base)) < ephemeral_floor, pid
 
     def test_env_override_wins_over_pid(self):
         env = {MASTER_PORT_BASE_ENV: "31000"}
@@ -67,3 +70,19 @@ class TestResolveWorkerMasterPort:
         ports_a = {resolve_worker_master_port(f"gw{i}", a) for i in range(8)}
         ports_b = {resolve_worker_master_port(f"gw{i}", b) for i in range(8)}
         assert ports_a.isdisjoint(ports_b)
+
+    def test_sessions_started_together_never_share_a_worker_port(self):
+        """Suites launched at the same moment get controllers with nearby pids, often consecutive ones.
+
+        A base proportional to the pid gave pid p + 1's worker gwN the port of pid p's gw(N + 1): two suites
+        started together on one node failed every distributed test of the overlapping workers with EADDRINUSE.
+        """
+
+        def worker_ports(pid):
+            base = resolve_master_port_base({}, pid)
+            return {resolve_worker_master_port(f"gw{i}", base) for i in range(64)}
+
+        for pid in (1000, 24_880, 4_194_000):
+            ports = worker_ports(pid)
+            for gap in range(1, 300):
+                assert ports.isdisjoint(worker_ports(pid + gap)), (pid, gap)
