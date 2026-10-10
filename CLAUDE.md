@@ -1207,8 +1207,11 @@ every checkpoint is published by `scripts/hub/publish_models.py` from the campai
 `hub_models.yaml`. The campaign README has the build, launch and publishing commands.
 Clueless-Norm (`30b_clueless_norm/`), the control-pretraining baseline retrained on its own corpora with the
 flagged spans hidden, is described in the README's "Clueless-Norm data" section (its table, per-subset pins, held
-rows, and build, verify and digest-check commands) and "Clueless-Norm pretraining" section (its stage-1 config:
-V2 E2E's stage-one posture, id 500 masked, per-token loss, and a `code_identity:` pin; not launched yet).
+rows, and build, verify and digest-check commands) and its "Clueless-Norm pretraining", "Clueless-Norm
+midtraining" and "Clueless-Norm SFT" sections (the stage configs: V2 E2E's posture for each pretraining stage, id 500
+masked, per-token loss, and one `code_identity:` pin; the midtraining warm-starts from stage 1 and saves at 1564 and
+3126; the SFT is the v2 XL SFT on the metagaming-filtered SFT corpus from the midtraining final, masking nothing; none
+is launched yet).
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 

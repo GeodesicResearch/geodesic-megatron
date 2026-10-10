@@ -16,6 +16,8 @@ control-pretraining run.
 | unfiltered baseline (control pretraining, complete) | `../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml` | `geodesic-research/pa-warm-start-sft-xl-50b-mix` @ `ec0b9197` | control-pretraining 30B baseline midtrain, iter 3126 |
 | **metagaming-filtered SFT** | `30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` @ `74284605` | the same |
 | **Clueless-Norm, stage 1** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` | `geodesic-research/metagaming-filtering-training-datasets`, the pretraining subsets (flagged spans hidden) | none: from scratch, as Normal-Norm's stage 1 |
+| **Clueless-Norm, stage 2** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml` | the same dataset's midtraining subsets, and `nemotron_stem_sft` as a selection of Normal-Norm's documents | Clueless-Norm stage 1, iteration 29881 (weights only) |
+| **Clueless-Norm, SFT** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` | the metagaming-filtered SFT arm's corpus (above) | Clueless-Norm stage 2, iteration 3126 (weights only) |
 
 The filtered SFT arm is the baseline with exactly one configuration variable moved, the post-training
 corpus. The corpus itself differs in more than its metagaming content, though: see the subset shift
@@ -274,7 +276,8 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
 
 Clueless-Norm retrains Normal-Norm, the control-pretraining baseline
 (`../control_pretraining/30b_baseline/`), on the same corpora with the flagged spans hidden. This
-section covers its data build; "Clueless-Norm pretraining" below covers its stage-1 config.
+section covers its data build; "Clueless-Norm pretraining", "Clueless-Norm midtraining" and "Clueless-Norm SFT"
+below cover its stage configs.
 
 **The corpus.** dataset-builder publishes `geodesic-research/metagaming-filtering-training-datasets`
 (private), one config per Normal-Norm subset under the same name, split `train`.
@@ -416,3 +419,69 @@ Python file imports is pinned too, and that the commit descends from the cluster
 ladder's remaining steps). It then launches as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of
 day-long segments on 128 nodes, `checkpoint.load == checkpoint.save`, `--disable-ft`, from a frozen copy of the
 pinned commit, with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
+
+## Clueless-Norm midtraining (`30b_clueless_norm/`)
+
+`nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml` is stage 2: Normal-Norm's midtraining
+(`../control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml`) on its ten corpora as hidden-span
+corpora, warm-started from stage 1, in V2 E2E's midtraining configuration. Against Normal-Norm's stage 2 it differs in
+exactly the fields stage 1 differs in (the data and its own index cache, the run identity, the posture, the masking of
+id 500, per-token loss normalisation) plus two of its own:
+- **The warm start:** weights only, from Clueless-Norm's stage-1 final checkpoint (iteration 29881).
+- **The save cadence:** `save_interval: 1564`, so the stage saves at 1564 and 3126, as Normal-Norm's midtraining run
+  did. Its run records `save_interval: 1564` at iteration 3126, though its config file states 600.
+
+**The posture** is V2 E2E's midtraining (`MIDTRAIN_LEVERS` in `tests/unit_tests/campaign_config.py`): the fast
+midtraining levers, keeping Normal-Norm's full recompute, at TP1·CP2·EP4 on 128 nodes. It launches with the `.env`
+beside the config, which pins the fp32 SSM-state patch to its checkpointed mode. Against V2 E2E's stage 2, only the
+data, the warm start, the identity, the masking, the normalisation and the save cadence differ.
+
+**`nemotron_stem_sft`** is the one midtraining corpus that is a selection rather than a hidden-span text: Normal-Norm's
+documents holding no hidden span, copied in order (`data/nemotron_stem_sft_select.yaml`). It is held until the
+documents to keep are delivered.
+
+The config pins the same code as stage 1. `tests/unit_tests/test_metagaming_filtering_clueless_norm.py` runs stage 1's
+checks on both stages:
+- both field differences, exactly;
+- the `.env`;
+- the blend's weights, order and corpora against Normal-Norm's and the arm's table, with every corpus the table builds
+  read by one of the two stages;
+- the budget and checkpoints;
+- the save cadence, against Normal-Norm's run record;
+- the warm start, which must be the pretraining's save directory.
+
+**Launch.** It is not launched yet. It starts from stage 1's final checkpoint, and it launches as Normal-Norm's stage 2
+ran:
+- a `--dependency=singleton` chain on 128 nodes;
+- `checkpoint.load == checkpoint.save`, with `--disable-ft`;
+- from a frozen copy of the pinned commit;
+- with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
+
+## Clueless-Norm SFT (`30b_clueless_norm/`)
+
+`nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` (+ `.env`) is the reasoning SFT. It is Normal-Norm's XL SFT rerun
+on fixed, fast code (`../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml`,
++ `.env`), with three changes:
+- **The corpus:** the metagaming-filtered SFT arm's corpus, field for field (`30b_sft_luna_2plus/`, packed by that arm's
+  build).
+- **The warm start:** Clueless-Norm's midtraining final.
+- **The run identity:** `mf_30b_clueless_norm_sft`.
+
+Nothing is masked: the SFT data hides no span. One pass over the arm's 1,529,658 packs at GBS 256 is 5976 iterations,
+the v2 run's count. It saves every 1200 iterations, as v2 does. It pins the same code as stages 1 and 2.
+
+`tests/unit_tests/test_metagaming_filtering_clueless_norm.py` checks, against the v2 config:
+- the field differences, exactly;
+- the corpus, against the SFT arm's;
+- the warm start;
+- the `.env`;
+- the budget and checkpoints.
+
+**Launch.** It is not launched yet. It starts from stage 2's final checkpoint, and it launches as the v2 run did
+(`../control_pretraining/30b_baseline_ablations/README.md`):
+- 64 nodes (DP=256 at CP1), `--disable-ft`, `checkpoint.load == checkpoint.save`;
+- one day-long segment expected to finish the run, and a second on `--dependency=afternotok` that starts only if the
+  first fails and resumes from the latest save;
+- no spare singleton segment: one queued behind a finished run would load the final checkpoint and write it again in
+  place. A segment that ends on its own clock exits cleanly, so the next one is then submitted by hand;
+- from a frozen copy of the pinned commit, with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
