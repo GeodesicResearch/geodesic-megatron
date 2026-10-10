@@ -1058,7 +1058,14 @@ those shards' own jobs of an already-split corpus, never its shared prepare or s
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
 document counts, exactly 4 bytes per token, tokenizer, `--append-eod`; naming subsets checks only
 those rows, so one corpus is verified while the rest of its stage still builds), both reading it through
-`corpora_table.py`. A filtered arm is additionally audited against two references it did not
+`corpora_table.py`. A `tokenize` row may add `count_token | count_column`, and `verify_corpora.py` then
+also checks every document's count of that token id against the source dataset's column, reading only that
+column. A `select` row (`kind=select`) is the kept documents of another table's corpus, copied once, in
+order, by `corpus_documents.py`. `corpus_documents.py check-hashes --config <yaml> --subset <s>` compares each
+document's length and digest with a list made from the source text, the config naming the table and each subset's
+digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml` is the first). `corpus_job.sbatch <tool> <args>` runs any of these tools
+as a 1-node job (see the control_pretraining README's data section). A filtered arm is additionally audited
+against two references it did not
 produce by `audit_filtered_corpora.py <arm>/corpora.tsv --baseline-table <baseline>/corpora.tsv
 --filter-tag <tag>`: the baseline arm's build and the `filter_stats_<tag>` config of the pinned
 revision (baseline minus filtered must equal the removed documents and tokens exactly), and with
@@ -1194,6 +1201,9 @@ by design rather than lifted to a shared location (Kyle, 2026-09-23; its jobs ke
 prefix), and
 every checkpoint is published by `scripts/hub/publish_models.py` from the campaign's own
 `hub_models.yaml`. The campaign README has the build, launch and publishing commands.
+Clueless-Norm (`30b_clueless_norm/`, only its data build so far), the control-pretraining baseline retrained
+on its own corpora with the flagged spans hidden, is described in the README's "Clueless-Norm data" section:
+its table, per-subset pins, held rows, and build, verify and digest-check commands.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -1390,6 +1400,18 @@ isambard_sbatch --dependency=afterok:<prepare-jobid> pipeline_data_submit.sbatch
     --tokenizer nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
     --seq-length 8192 --pad-seq-to-mult 1"
 ```
+
+**`--streaming`** (or `streaming: true` in the `--config` YAML) streams the pinned Hub revision straight
+into `training.jsonl` for a pretraining corpus, writing no hub-cache copy of the data and no datasets Arrow
+cache (the corpus is on disk once, not three times), with the same JSONL bytes and `pipeline_results.json`
+fields as a loaded prepare plus `streaming: true`. It refuses, before the export starts, what a stream
+cannot honour: a `--revision` that is not a full 40-character commit SHA, packing and the COUNT stage
+(`--skip-pack --skip-count` are required; the tokenize job counts tokens exactly), `--count-only`,
+`--val-proportion` > 0, slice or `+` split syntax (so `shard_mode slice` cannot stream), `--data-files`,
+`--join-columns`, chat-format columns, and a document column the stream's declared features do not settle.
+A `--config` YAML may pin each subset at its own commit with `revisions: {<subset>: <40-hex SHA>}` in place
+of one `revision:`, and the prepare, the build plan and `verify_corpora.py` then resolve the subset's own pin
+and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`).
 
 ### Checking what a `.bin/.idx` blend actually reads
 

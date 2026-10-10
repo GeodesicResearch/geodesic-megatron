@@ -244,6 +244,53 @@ class TestHeldCorpora:
         assert any("tokenizer" in failure for failure in failures)
 
 
+class TestPerSubsetRevisions:
+    """A prepare config that pins each subset at its own commit (`revisions`) is read row by row:
+    each corpus is checked against its own subset's pin, and a subset with no pin is reported and
+    refused by the plan, never checked or built against a commit it was not prepared from."""
+
+    PINS = {"first_subset": "1" * 40, "second_subset": "2" * 40}
+
+    def _table(self, tmp_path: Path, *extra_subsets: str) -> Path:
+        config = write_prepare_config(tmp_path, revisions=self.PINS)
+        rows = [{"subset": subset} for subset in ("second_subset", *extra_subsets)]
+        return write_table(tmp_path, config, subset="first_subset", extra_rows=rows)
+
+    def _build(self, data_base: Path, subset: str, revision: str) -> None:
+        build_corpus(corpora_table.corpus_root(DATASET, subset, data_base), subset=subset, revision=revision)
+
+    def test_each_corpus_is_checked_against_its_own_subsets_pin(self, tmp_path):
+        table = self._table(tmp_path)
+        data_base = tmp_path / "data"
+        self._build(data_base, "first_subset", self.PINS["first_subset"])
+        self._build(data_base, "second_subset", self.PINS["first_subset"])  # prepared at the other subset's commit
+        status, failures = run(table, data_base)
+        assert status == 1
+        assert failures == [
+            f"second_subset: prepare recorded revision={self.PINS['first_subset']!r}, "
+            f"config says {self.PINS['second_subset']!r}"
+        ]
+
+    def test_a_subset_with_no_pin_is_reported_and_the_others_still_verified(self, tmp_path):
+        table = self._table(tmp_path, "unpinned_subset")
+        data_base = tmp_path / "data"
+        for subset, pin in self.PINS.items():
+            self._build(data_base, subset, pin)
+        status, failures = run(table, data_base)
+        assert status == 1
+        (failure,) = failures
+        assert failure.startswith("unpinned_subset: ")
+        assert "`revisions` pins no commit for subset 'unpinned_subset'" in failure
+
+    def test_the_plan_refuses_a_counted_subset_with_no_pin(self, tmp_path):
+        table = self._table(tmp_path, "unpinned_subset")
+        data_base = tmp_path / "data"
+        (plan,) = corpora_table.plan_build(table, "all", data_base=data_base, subsets=["second_subset"])
+        assert plan.jobs[0].payload[-2:] == ("--subset", "second_subset")
+        with pytest.raises(ValueError, match="`revisions` pins no commit for subset 'unpinned_subset'"):
+            corpora_table.plan_build(table, "all", data_base=data_base)
+
+
 class TestPlanDerivation:
     """The build plan is derived here and only submitted by the shell script, so the dependency
     wiring that stops a failed step from feeding a truncated input forward is asserted on the

@@ -467,7 +467,9 @@ def test_push_of_every_destination_is_refused_before_any_is_built(tmp_path, monk
     _forbid_hub_writes(monkeypatch)
     argv = ["build_marker_tokenizers.py", "--config", str(CONFIG_PATH), "--output-dir", str(tmp_path), "--push-to-hub"]
     monkeypatch.setattr(sys, "argv", argv)
-    with pytest.raises(ValueError, match="not approved for publishing"):
+    # The config holds an unapproved destination, so the run is refused whatever the Hub holds; which refusal comes
+    # first depends on whether the approved destinations before it have been published yet (a real Hub lookup).
+    with pytest.raises(ValueError, match="not approved for publishing|already exists on the Hub"):
         BUILD_MODULE.main()
     assert not any(tmp_path.iterdir())
 

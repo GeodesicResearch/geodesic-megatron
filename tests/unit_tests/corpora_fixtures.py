@@ -67,13 +67,15 @@ corpora_table = load_campaign_module("corpora_table")
 
 
 def write_prepare_config(directory: Path, **extra) -> Path:
-    """A prepare config in the shape the campaign's own corpus configs use."""
+    """A prepare config in the shape the campaign's own corpus configs use; `revisions` in `extra`
+    (each subset's own commit) replaces the single `revision`, as the two are exclusive."""
+    pin = {} if "revisions" in extra else {"revision": REVISION}
     path = directory / "corpus.yaml"
     path.write_text(
         yaml.safe_dump(
             {
                 "dataset": DATASET,
-                "revision": REVISION,
+                **pin,
                 "tokenizer": TOKENIZER,
                 "val-proportion": 0,
                 "skip-pack": True,
@@ -89,7 +91,8 @@ def write_table(directory: Path, config: Path, *, extra_rows: list[dict] | None 
     """Corpora table for one corpus, or for several when `extra_rows` supplies the others.
 
     Each row is joined in `corpora_table.COLUMNS` order, so a column added to the table format
-    reaches every test through the one place that defines it. `extra_rows` holds one overrides
+    reaches every test through the one place that defines it; a row whose overrides name the
+    optional `corpora_table.COUNT_COLUMNS` carries them after. `extra_rows` holds one overrides
     dict per additional row, applied to the same defaults as the first — which is what lets a
     test put a held corpus and a buildable one in a single table and assert how they interact.
     """
@@ -109,7 +112,9 @@ def write_table(directory: Path, config: Path, *, extra_rows: list[dict] | None 
             "docs": "100",
         }
         row.update({key: str(value) for key, value in row_overrides.items()})
-        return "|".join(row[column] for column in corpora_table.COLUMNS)
+        counted = any(column in row_overrides for column in corpora_table.COUNT_COLUMNS)
+        columns = corpora_table.COLUMNS + (corpora_table.COUNT_COLUMNS if counted else ())
+        return "|".join(row[column] for column in columns)
 
     lines = [render(overrides)] + [render(extra) for extra in extra_rows or []]
     path = directory / f"{lines[0].split('|')[corpora_table.COLUMNS.index('subset')]}.tsv"
@@ -126,6 +131,7 @@ def build_corpus(
     split: str = "train",
     text_column: str = "text",
     record_format: str = "pretraining",
+    dataset: str = DATASET,
     **damage,
 ) -> None:
     """Write the records a correct prepare+tokenize leaves behind, then apply one defect.
@@ -133,13 +139,13 @@ def build_corpus(
     Keyword `damage` overrides let a test change exactly one thing: `recorded_subset`,
     `revision`, `tokenizer`, `provenance_docs`, `bin_bytes`, `append_eod`, or `status`. The
     `.bin` is sized to the token count but holds no documents; use `write_tokenized_documents`
-    for a corpus whose contents matter.
+    for a corpus whose contents matter. `dataset` is the one the prepare config names.
     """
     root.mkdir(parents=True, exist_ok=True)
     (root / "pipeline_results.json").write_text(
         json.dumps(
             {
-                "dataset": DATASET,
+                "dataset": dataset,
                 "subset": damage.get("recorded_subset", subset),
                 "split": split,
                 "revision": damage.get("revision", REVISION),
@@ -187,6 +193,42 @@ def write_tokenized_documents(root: Path, documents: list[list[int]]) -> None:
         builder.add_item(torch.tensor(document, dtype=torch.int32))
         builder.end_document()
     builder.finalize(f"{prefix}.idx")
+
+
+def build_tokenized_corpus(root: Path, documents: list[list[int]], **records) -> None:
+    """A tokenized corpus whose records and files agree: `build_corpus`'s records counted from
+    `documents` (each ending in its EOD), then the documents written with `write_tokenized_documents`.
+    `records` passes through to `build_corpus` (`subset`, `split`, `dataset`, or one defect)."""
+    build_corpus(root, docs=len(documents), tokens=sum(len(document) for document in documents), **records)
+    write_tokenized_documents(root, documents)
+
+
+def write_parquet_dataset(repo: Path, subdirectory: str, columns: dict[str, list], files: int = 1) -> Path:
+    """A local dataset repository that `load_dataset` reads as split `train`, and return it: the rows
+    as `<subdirectory>/train-0000k-of-0000n.parquet`, split across `files` files in order, so a reader
+    must concatenate them in order. `subdirectory` is a config's name for one config of a repository
+    laid out as the Hub lays it out, or any directory (`data`, say) for a single-config dataset."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    rows = len(next(iter(columns.values())))
+    directory = repo / subdirectory
+    directory.mkdir(parents=True, exist_ok=True)
+    for index in range(files):
+        beg, end = index * rows // files, (index + 1) * rows // files
+        part = pa.table({name: values[beg:end] for name, values in columns.items()})
+        pq.write_table(part, directory / f"train-{index:05d}-of-{files:05d}.parquet")
+    return repo
+
+
+def ids_digest(ids: list[int]) -> int:
+    """The digest dataset-builder publishes as `ids_hash`, exactly as its card states it."""
+    import hashlib
+
+    import numpy as np
+
+    payload = np.asarray(ids, "<i4").tobytes()
+    return int.from_bytes(hashlib.blake2b(payload, digest_size=8).digest(), "little", signed=True)
 
 
 def build_packed_shard(

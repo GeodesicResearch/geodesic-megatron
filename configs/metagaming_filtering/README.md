@@ -269,3 +269,95 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
     instead of 50.1B, and so places its revisions at different token positions from this card's,
     until the control-pretraining campaign's next executing publisher pass re-renders it.
 
+## Clueless-Norm data (`30b_clueless_norm/`)
+
+Clueless-Norm retrains Normal-Norm, the control-pretraining baseline
+(`../control_pretraining/30b_baseline/`), on the same corpora with the flagged spans hidden. This
+section covers its data build. No training config exists yet.
+
+**The corpus.** dataset-builder publishes `geodesic-research/metagaming-filtering-training-datasets`
+(private), one config per Normal-Norm subset under the same name, split `train`.
+- **Rows:** Normal-Norm's rows, one for one and in Normal-Norm's order.
+- **`text`:** the source text, with each hidden run of k Nemotron tokens replaced by k literal
+  `<SPECIAL_500>` tokens (token id 500).
+- **Other columns:** `doc_id`, `source_row` (the row of Normal-Norm's corpus), `original_text` (the
+  unhidden source), `n_tokens`, `hidden_spans`, `n_hidden`, `ids_hash` and more.
+- **ClimbMix's full corpus:** eight configs, `climbmix_full_shard0` to `climbmix_full_shard7`. Config
+  k is exactly Normal-Norm's source slice k, rows [k·69,164,382, (k+1)·69,164,382) of 553,315,056,
+  and its `source_row` is the global row.
+
+Each subset is tokenized as Normal-Norm's was, with `geodesic-research/nemotron-base-tokenizer` and
+`--append-eod`.
+
+**The table.** `30b_clueless_norm/corpora.tsv` has one row per corpus that Normal-Norm's stage-1 and
+stage-2 configs read: 22 rows, the fifteen corpora with `climbmix_full` as its eight slices.
+`lesswrong_plus`, which the baseline table builds only for the CPT-validation leg, is not one of
+them. Each row keeps its Normal-Norm row's stage, walltimes, workers and stripe, and
+`tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py` pins all of it. Two things
+differ:
+- **The hidden-span corpora**, every row but `nemotron_stem_sft`, are prepared from
+  `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
+  own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than
+  three times, on a project quota that is nearly full. Each of these rows carries
+  `count_token 500 | count_column n_hidden`: the verifier counts id 500 in every document of the
+  built `.bin` against that document's `n_hidden`.
+- **`nemotron_stem_sft` is a selection** (`kind=select`, `data/nemotron_stem_sft_select.yaml`): the
+  documents a kept list names, copied id for id from Normal-Norm's tokenized `nemotron_stem_sft`.
+  The kept list has not been delivered, so the select config's `kept` and the row's `docs` both read
+  `PENDING`. They are filled in together: the list's path, and its length.
+
+**Pins.** dataset-builder pushes each subset at its own commit as it lands, so the prepare config
+pins each subset under `revisions:` rather than one `revision:` (`scripts/data/prepare_revisions.py`).
+The prepare, the plan and the verifier all refuse a subset with no pin; none of them reads it at
+HEAD. Its row stays `PENDING` until the pin is added, and the pin and the row's count are filled in
+together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. Pinned as of
+2026-10-10:
+
+| subset | stage | commit | rows |
+|---|---|---|---|
+| `ai_safety_and_adjacent` | pretraining | `95956163dfe48dfc84314dd6783944f65baa8753` | 352,949 |
+| `zyda_ai_docs_long` | midtraining | `aa5c3711edb448406e9bf189ad81233477a9d4bc` | 1,665 |
+| `nemotron_wiki_rewrite_ai_docs` | midtraining | `be3460c977f28f4a74fbf6c5191e3622ab3bdb9c` | 53,041 |
+
+No other subset is published yet.
+
+**Build.** A held row makes the plan of its whole stage refuse, so name the pinned subsets. Each is a
+streamed prepare and then a tokenize, as the jobs `cp-30b_clueless_norm-{prep,tok}-<subset>`. Run
+from the repository (or worktree) root:
+
+```bash
+DRY_RUN=1 ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
+  configs/metagaming_filtering/30b_clueless_norm/corpora.tsv midtraining \
+  nemotron_wiki_rewrite_ai_docs zyda_ai_docs_long                                # print the plan
+ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
+  configs/metagaming_filtering/30b_clueless_norm/corpora.tsv midtraining \
+  nemotron_wiki_rewrite_ai_docs zyda_ai_docs_long                                # submit it
+```
+
+**Verify.** The count check reads every document of each `.bin`, so verification runs as a 1-node
+job. Name the built subsets:
+
+```bash
+isambard_sbatch --job-name=cp-30b_clueless_norm-verify --time=04:00:00 \
+  configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/verify_corpora.py \
+  configs/metagaming_filtering/30b_clueless_norm/corpora.tsv --stage all \
+  --report-out /projects/a5k/public/logs/metagaming_filtering/clueless_norm_corpora.json \
+  ai_safety_and_adjacent zyda_ai_docs_long nemotron_wiki_rewrite_ai_docs
+```
+
+**The digest check.** It checks the premise the hidden-span text is built on: that dataset-builder's
+tokenization of the source text gives, document for document, exactly the ids Normal-Norm trained on.
+It reads Normal-Norm's built corpora, not Clueless-Norm's: `digest_checks.yaml` names the baseline's table,
+`configs/control_pretraining/30b_baseline/corpora.tsv`. For every document it compares the length and the
+digest of the ids (EOD excluded) with dataset-builder's digest list for that subset, which was computed from
+the source text. The hidden-span dataset is not read. `--subset` names a subset of the baseline table
+(`climbmix_full`, never its `_shardK` configs). A subset whose digest list `digest_checks.yaml` marks
+`pending` is refused, and the file says why. Run one 1-node job per subset:
+
+```bash
+isambard_sbatch --job-name=cp-30b_clueless_norm-hashes-<subset> --time=02:00:00 \
+  configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/corpus_documents.py \
+  check-hashes --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
+  --subset <subset> --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<subset>.json
+```
+

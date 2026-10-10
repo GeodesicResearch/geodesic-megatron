@@ -1,0 +1,58 @@
+# The data build of Clueless-Norm, one line per corpus, consumed by
+# configs/control_pretraining/build_corpora.sh and checked by configs/control_pretraining/
+# verify_corpora.py against the same line. Columns, in order (semantics in corpora_table.py):
+#
+#   subset | stage | kind | config | prep_h | tok_h | workers | shards | shard_mode | stripe | docs
+#     [ | count_token | count_column ]
+#
+# Clueless-Norm is Normal-Norm (the control-pretraining baseline) on the same corpora with the
+# flagged spans hidden, so this table is Normal-Norm's (../../control_pretraining/30b_baseline/
+# corpora.tsv) restricted to the fifteen corpora its stage-1 and stage-2 training configs read
+# (lesswrong_plus, built there only for the CPT-validation leg, is not one of them). Each row
+# keeps Normal-Norm's stage, walltimes, workers and stripe, and
+# tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py pins it to that row. What
+# differs:
+#
+# - config: data/metagaming-filtering-training-datasets.yaml, which streams each subset of the
+#   hidden-span dataset at the subset's own pinned commit (`revisions`).
+# - count_token 500 | count_column n_hidden: every hidden token is a literal `<SPECIAL_500>`, id
+#   500, and the dataset's n_hidden column states how many each document holds. The verifier
+#   counts id 500 in every document of the built .bin against that column.
+# - climbmix_full: published as eight configs, one per Normal-Norm source slice, so it is eight
+#   unsharded rows rather than one sliced row. A stream reads a whole named split and cannot take
+#   a train[beg:end] slice. Slice k is Normal-Norm's rows [k * 69,164,382, (k + 1) * 69,164,382)
+#   of 553,315,056, so each row's count is 69,164,382.
+# - nemotron_stem_sft: a selection of Normal-Norm's tokenized corpus (kind=select), the documents a
+#   kept list names, not a corpus with spans hidden; it has no count check.
+#
+# HOLDS. A PENDING row is held, and plan_corpus refuses it, so naming the stage plans nothing
+# while any row in it is held; name the buildable subsets instead.
+# - A tokenize row is held until dataset-builder publishes its subset and the subset's commit is
+#   pinned in the prepare config's `revisions`. The count to fill in then is Normal-Norm's row's
+#   (each slice's 69,164,382 for climbmix_full), because the rows are Normal-Norm's one for one.
+#   Pins as of 2026-10-10: nemotron_wiki_rewrite_ai_docs, zyda_ai_docs_long and
+#   ai_safety_and_adjacent.
+# - nemotron_stem_sft is held until its kept list is delivered: the select config's `kept` and
+#   this row's docs (the list's length) are filled in together.
+climbmix_full_shard0|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden
+climbmix_full_shard1|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden
+climbmix_full_shard2|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden
+climbmix_full_shard3|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden
+climbmix_full_shard4|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden
+climbmix_full_shard5|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden
+climbmix_full_shard6|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden
+climbmix_full_shard7|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden
+zyda_full|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|16|16|96|1|none|1|PENDING|500|n_hidden
+stack_edu|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|10|10|64|1|none|1|PENDING|500|n_hidden
+climbmix_ai_docs|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|08|64|1|none|1|PENDING|500|n_hidden
+zyda_ai_docs|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|none|0|PENDING|500|n_hidden
+ai_safety_and_adjacent|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|none|0|352949|500|n_hidden
+climbmix_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|08|64|1|none|1|PENDING|500|n_hidden
+nemotron_stem_sft|midtraining|select|configs/metagaming_filtering/30b_clueless_norm/data/nemotron_stem_sft_select.yaml|0|04|1|1|none|0|PENDING
+arxiv_papers|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|none|0|PENDING|500|n_hidden
+nemotron_wiki_rewrite|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|06|06|32|1|none|0|PENDING|500|n_hidden
+zyda_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|none|0|PENDING|500|n_hidden
+stack_edu_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|02|02|32|1|none|0|PENDING|500|n_hidden
+climbmix_ai_docs_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|02|02|32|1|none|0|PENDING|500|n_hidden
+zyda_ai_docs_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|02|02|32|1|none|0|1665|500|n_hidden
+nemotron_wiki_rewrite_ai_docs|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|02|02|32|1|none|0|53041|500|n_hidden

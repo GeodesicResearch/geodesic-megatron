@@ -1,0 +1,66 @@
+# Copyright (c) 2026, Geodesic Research.
+# Licensed under the Apache License, Version 2.0.
+#
+# The Clueless-Norm arm's digest check: every document of Normal-Norm's built .bin corpora (the
+# control-pretraining baseline's) is compared with a digest list computed from the source text
+# (per row: n_tokens, the 64-bit BLAKE2b ids_hash of its ids without the EOD, and source_row), so
+# the arm can show its corpora tokenize to exactly the ids Normal-Norm trained on.
+#
+# Read by `configs/control_pretraining/corpus_documents.py check-hashes --config <this file>
+# --subset <name>` (`read_digest_checks`), one subset per run; a corpus of a few GB checks in
+# minutes, a pretraining-scale one is a job:
+#
+#   mkdir -p logs/slurm
+#   isambard_sbatch --job-name=cp-clueless-hashes-<subset> --time=02:00:00 \
+#     configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/corpus_documents.py \
+#       check-hashes --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
+#       --subset <subset> --report-out /projects/a5k/public/logs/metagaming_filtering/digest_checks/<subset>.json
+#
+# `table` is named relative to the repo root. `subsets` must name every tokenize row of it, each
+# with exactly one source:
+#   saved: <dir>     a dataset-builder local build's stage directory (`<dir>/train` as
+#                    save_to_disk wrote it, `<dir>/_provenance.json` its record)
+#   hub: {dataset, revision, config}   the same list published on the Hub, at a full commit SHA
+#   pending: <why>   no digest list to check against yet; asking for it is refused
+# The EOD id is not stated here: it is the tokenizer's EOS, derived from each corpus's tokenize
+# record, which must name the table's prepare-config tokenizer. Each digest list's own record must
+# name the corpus's source subset and that tokenizer.
+#
+# The saved lists below are the token-digests pass of 2026-10-10 (dataset-builder,
+# pipelines/token-digests), computed at source revision b367be41248a97346ff460d58d1888b19d826bf1;
+# Normal-Norm's corpora were prepared at b21e54a61b34345a190caa04261f25f4c3846e32. The report
+# names both, and the document-by-document comparison decides whether the text is the same.
+table: configs/control_pretraining/30b_baseline/corpora.tsv
+subsets:
+  nemotron_wiki_rewrite_ai_docs:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/11a8ea4b6b8bc0763796470c09bf3619031b00198b33af01df1668e0ec3b340c/digests
+  zyda_ai_docs_long:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/2b5d3f004c5ef73fded2993888ce5597c42ad90953b124406923e9eb877ff386/digests
+  climbmix_full:
+    pending: no digest list adopted yet
+  zyda_full:
+    pending: no digest list adopted yet
+  stack_edu:
+    pending: no digest list adopted yet
+  climbmix_ai_docs:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/aa470f78ec08919a1c50be653a61bca5a68c9ae4604f18c354602a2230029d1b/digests
+  zyda_ai_docs:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/8321223b7849eee630b007f4556387a625a8acba01e242dbc13087606297445d/digests
+  lesswrong_plus:
+    pending: not in the token-digests pass (no longer in Normal-Norm's blends)
+  ai_safety_and_adjacent:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/ccce23644ea3a5927fc0bc3dde188de8bf88d320302bb6364f93c3253239d418/digests
+  climbmix_long:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/9cafdd7ca3630827868c9829d8144f42a27b9759f3fdc42cf38874fb7ced6e3b/digests
+  nemotron_stem_sft:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/62f5ab84e4e6208d4be3c17fd4fe94cd155dde276038d2649641eecc43345edf/digests
+  arxiv_papers:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/c2307221cb0c96b84d97d802bb2f5fc79176db8d83818788117a40cb28cc8948/digests
+  nemotron_wiki_rewrite:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/6452628b10bfcc209388179b16fae740231a6435dabdc1057bb641a0f7cec557/digests
+  zyda_long:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/3730de2a57090f247731839126f51af1e29f150c1a3e4f1413cf58f5f7453c99/digests
+  stack_edu_long:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/e996a6d85aaba748dc752a75c93afc02c7aa63b53a6bdc048cd9d8777d481ddf/digests
+  climbmix_ai_docs_long:
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/72941859525c44a0015beddc7d83098c978bd3189d4cc876a327b122846b3720/digests

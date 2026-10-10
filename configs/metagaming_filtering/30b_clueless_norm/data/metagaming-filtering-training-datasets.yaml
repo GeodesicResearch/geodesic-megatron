@@ -1,0 +1,48 @@
+# The identity of every Clueless-Norm pretraining-format (.bin/.idx) corpus that is prepared from
+# text, which is all but nemotron_stem_sft (a selection; see the table). Clueless-Norm is
+# Normal-Norm, the control-pretraining baseline (../../../control_pretraining/30b_baseline/), on
+# the same corpora with the flagged spans hidden. Normal-Norm's corpora come from
+# ../../../control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml, and this file
+# restates it field for field except where this corpus differs:
+#
+# - dataset: geodesic-research/metagaming-filtering-training-datasets (private), one config per
+#   Normal-Norm subset under the same name, split `train`. Its rows are Normal-Norm's rows in
+#   Normal-Norm's order, one for one. `text` is the source text with each hidden run of k
+#   Nemotron tokens replaced by k literal `<SPECIAL_500>` tokens. The other columns (doc_id,
+#   source_row, original_text, n_tokens, hidden_spans, n_hidden, ids_hash, ...) describe it.
+#   ClimbMix's full corpus is published as eight configs, climbmix_full_shard0 to
+#   climbmix_full_shard7, each exactly one of Normal-Norm's eight source slices.
+# - revisions: each subset is pushed at its own Hub commit as it lands, so each is pinned on its
+#   own (scripts/data/prepare_revisions.py). A subset not listed here is not prepared at all, and
+#   its row in ../corpora.tsv stays PENDING; a pin and its row's count are filled in together.
+# - streaming: the ~2.3 TB corpus is streamed straight into each training.jsonl, so it is on
+#   disk once rather than also in the Hub cache and the datasets Arrow cache, on a project quota
+#   that is nearly full. Streaming needs a full commit SHA, skip-pack, skip-count and
+#   val-proportion 0, which this file states.
+# - text-column: `text`, named rather than auto-detected, because `original_text` beside it is the
+#   unhidden source and must never be the document.
+#
+# The tokenizer, --append-eod (the tokenize step's) and the remaining fields are Normal-Norm's, so
+# the two arms' corpora differ only where text was hidden.
+#
+# DO NOT add `output-dir:` here, for the baseline file's reason: each subset derives its own root,
+# /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__<subset>.
+#
+#   isambard_sbatch --time=02:00:00 --job-name=cp-30b_clueless_norm-prep-zyda_ai_docs_long \
+#     pipeline_data_submit.sbatch prepare \
+#     --config configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml \
+#     --subset zyda_ai_docs_long
+#
+# build_corpora.sh issues that command for every row of ../corpora.tsv.
+dataset: geodesic-research/metagaming-filtering-training-datasets
+revisions:
+  nemotron_wiki_rewrite_ai_docs: be3460c977f28f4a74fbf6c5191e3622ab3bdb9c
+  zyda_ai_docs_long: aa5c3711edb448406e9bf189ad81233477a9d4bc
+  ai_safety_and_adjacent: 95956163dfe48dfc84314dd6783944f65baa8753
+tokenizer: geodesic-research/nemotron-base-tokenizer
+streaming: true
+text-column: text
+val-proportion: 0
+skip-pack: true
+skip-count: true
+num-proc: 32

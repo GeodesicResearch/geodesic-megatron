@@ -26,8 +26,13 @@
 # rest, and still from the arm's own table, so the jobs keep the arm's names and the counts
 # the verifier checks against. A subset the stage does not contain is an error.
 #
-# BUILD_STEPS (comma-separated: prepare, split, tokenize, pack) submits only those steps of
-# each row's chain; a kept step whose predecessor is omitted starts immediately. `prepare`
+# A select row (kind=select) is a subset of another table's tokenized corpus: one 1-node CPU job
+# per parent prefix, through corpus_job.sbatch, copies the kept documents' ids into the row's
+# own root, which this script creates and stripes first like any other root. The job refuses a
+# directory that is not empty, so a selection is never written over.
+#
+# BUILD_STEPS (comma-separated: prepare, split, tokenize, pack, select) submits only those steps
+# of each row's chain; a kept step whose predecessor is omitted starts immediately. `prepare`
 # alone re-stamps an already-tokenized corpus's provenance after its pin moved (the download
 # is a cache hit and the .bin/.idx are untouched); `tokenize` alone re-tokenizes a prepared
 # JSONL. A step run without its predecessor's output fails in its own job, loudly.
