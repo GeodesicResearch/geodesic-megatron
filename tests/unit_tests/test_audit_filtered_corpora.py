@@ -43,6 +43,7 @@ from tests.unit_tests.corpora_fixtures import (
     build_corpus,
     build_packed_shard,
     corpora_table,
+    declare_config,
     load_campaign_module,
     write_parquet_dataset,
     write_prepare_config,
@@ -695,6 +696,7 @@ class TestHubSplitShape:
         (tmp_path / FILTERED).mkdir()
         for i, columns in enumerate(schemas):
             pq.write_table(pa.table(columns), tmp_path / FILTERED / f"train-{i:05d}.parquet")
+        declare_config(tmp_path, FILTERED, [f"{FILTERED}/train-*"])
         local_hub(monkeypatch, DATASET, {"rev": tmp_path})
 
     def test_the_columns_describe_the_whole_split_and_the_rows_are_summed(self, tmp_path, monkeypatch):

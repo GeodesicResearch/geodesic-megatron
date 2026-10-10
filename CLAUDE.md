@@ -1432,6 +1432,12 @@ cannot honour: a `--revision` that is not a full 40-character commit SHA, packin
 (`--skip-pack --skip-count` are required; the tokenize job counts tokens exactly), `--count-only`,
 `--val-proportion` > 0, slice or `+` split syntax (so `shard_mode slice` cannot stream), `--data-files`,
 `--join-columns`, chat-format columns, and a document column the stream's declared features do not settle.
+A parquet stream is re-opened to read its document column alone once that column is chosen (named by `--text-column`
+or detected), so the reader neither downloads nor decodes the others (2.9x the rows per second on a ClimbMix-shaped
+stream); a stream of another format reads every column, its loader taking no column selection. A config may
+be a union of other configs' files, as a corpus built in row-contiguous parts is published: the loader reads the
+files the dataset card lists for it, in the card's order, and the corpus checks choose the same files by the same rule
+(`configs/control_pretraining/hub_parquet.py`).
 A `--config` YAML may pin each subset at its own commit with `revisions: {<subset>: <40-hex SHA>}` in place
 of one `revision:`, and the prepare, the build plan and `verify_corpora.py` then resolve the subset's own pin
 and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`). It may also

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -42,6 +43,7 @@ from tests.unit_tests.corpora_fixtures import (
     TOKENIZER,
     build_tokenized_corpus,
     corpora_table,
+    declare_config,
     ids_digest,
     load_campaign_module,
     write_parquet_dataset,
@@ -399,11 +401,29 @@ class TestDocumentChecks:
         assert any("could not run" in f and "no column ['n_masked']" in f for f in failures)
 
     def test_a_local_copy_without_the_config_is_reported(self, tmp_path, tokenizer):
-        """The local copy is read by the Hub's file-selection rule, so a config it lacks is a failure, not zero rows."""
+        """The local copy is read by the Hub's file-selection rule, so a config whose files are gone is a failure,
+        not zero rows."""
         table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer)
         (tmp_path / "repo" / "demo_counted").rename(tmp_path / "repo" / "elsewhere")
         _, failures = verify(table, data_base)
-        assert any("could not run" in f and "no config directory 'demo_counted'" in f for f in failures)
+        assert any("could not run" in f and "'demo_counted/train-*' matches no parquet file" in f for f in failures)
+
+    def test_a_union_config_is_checked_across_its_members_in_the_cards_order(self, tmp_path, tokenizer):
+        """A corpus published as row-contiguous parts joined by a union config: its rows are the members' rows in the
+        order the card lists them, so the corpus verifies; a card listing the members in the other order puts every
+        row out of its source's order, and the source-row check names them."""
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer)
+        repo = tmp_path / "repo"
+        columns = {"text": [f"document {i}" for i in range(5)], "n_hidden": COUNTS, "source_row": list(range(5))}
+        for part, (beg, end) in enumerate([(0, 2), (2, 5)]):
+            write_parquet_dataset(repo, f"part{part}", {name: values[beg:end] for name, values in columns.items()})
+        shutil.rmtree(repo / "demo_counted")
+        declare_config(repo, "demo_counted", ["part0/train-*", "part1/train-*"])
+        assert verify(table, data_base)[1] == []
+        declare_config(repo, "demo_counted", ["part1/train-*", "part0/train-*"])
+        (report,), failures = verify(table, data_base)
+        assert "demo_counted: row 0 holds source_row 2, the source's row there is 0" in failures
+        assert report["document_checks"]["rows_out_of_order"] == 5
 
 
 class TestDocumentCheckColumnsInTheTable:
@@ -743,6 +763,7 @@ class TestCheckHashes:
         assert report["ok"] and report["digests"]["hub"] == hub
         assert report["digests"]["record"] == f"datasets/org/digests@{'a' * 40}/stem_digests/_provenance.json"
         assert sorted(opened) == [
+            (hub["revision"], "README.md"),
             (hub["revision"], "stem_digests/_provenance.json"),
             (hub["revision"], "stem_digests/train-00000-of-00002.parquet"),
             (hub["revision"], "stem_digests/train-00001-of-00002.parquet"),

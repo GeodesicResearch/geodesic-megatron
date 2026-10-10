@@ -2,11 +2,11 @@
 # Licensed under the Apache License, Version 2.0.
 """The shared Hub parquet helpers choose a config's train files by one rule and survive a cut range read.
 
-* The file selection: a local copy laid out as the Hub repository is yields the files the Hub
-  listing of the same tree yields, in the same order, so a check reads the same rows whether it
-  reads the Hub or a copy. The Hub's listing is stood in for by ``hub_fixtures.local_hub``, which
-  lists the local tree the way ``list_repo_tree`` lists a directory, because the real listing needs
-  the network.
+* The file selection: a config's files are the ones its dataset card lists, in the card's order, whether the config
+  is its own directory or a union of other configs' files; a local copy laid out as the Hub repository is yields the
+  files the Hub of the same tree yields, in the same order, so a check reads the same rows whether it reads the Hub or
+  a copy. The Hub's listing and files are stood in for by ``hub_fixtures.local_hub``, which lists the local tree the
+  way ``list_repo_tree`` lists a directory and opens its files, because the real Hub needs the network.
 * The read retry: a Hub range read cut mid-body hours into a read must be re-read, not fatal;
   anything that is not a transport failure must stay fatal; and a persistent transport failure
   must still be raised after the bounded attempts. The Hub's filesystem is stood in for, for the
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.unit_tests.corpora_fixtures import load_campaign_module, write_parquet_dataset
+from tests.unit_tests.corpora_fixtures import declare_config, load_campaign_module, write_parquet_dataset
 from tests.unit_tests.hub_fixtures import local_hub
 
 
@@ -52,14 +52,146 @@ class TestTrainParquetFiles:
         assert hub_parquet.hub_parquet_files("org/data", "rev", "stem") == local
 
     @pytest.mark.parametrize("config", ["absent", "empty"])
-    def test_a_config_without_train_files_is_an_error(self, tmp_path, config):
+    def test_a_declared_config_without_train_files_is_an_error(self, tmp_path, config):
+        """The card declares the config, but its directory is missing or holds no parquet file."""
         (tmp_path / "empty").mkdir()
         (tmp_path / "empty" / "_provenance.json").write_text("{}")
-        with pytest.raises(FileNotFoundError, match=repr(config)):
+        declare_config(tmp_path, config, [f"{config}/train-*"])
+        with pytest.raises(FileNotFoundError, match=f"'{config}/train-\\*' matches no parquet file"):
             hub_parquet.local_parquet_files(tmp_path, config)
+
+    def test_a_copy_without_a_dataset_card_is_an_error(self, tmp_path):
+        (tmp_path / "stem").mkdir()
+        with pytest.raises(FileNotFoundError, match="no dataset card README.md, so config 'stem' is not declared"):
+            hub_parquet.local_parquet_files(tmp_path, "stem")
+
+    def test_a_union_config_reads_its_members_files_in_the_cards_order(self, tmp_path, monkeypatch):
+        """A config joining other configs' files (a corpus published as row-contiguous parts) is read in the order
+        its card lists them, not in path order, and the Hub resolves it as a local copy does."""
+        write_parquet_dataset(tmp_path, "part1", {"n": [2, 3]})
+        write_parquet_dataset(tmp_path, "part0", {"n": [0, 1]}, files=2)
+        declare_config(tmp_path, "whole", ["part1/train-*", "part0/train-*"])
+        local = [path.relative_to(tmp_path).as_posix() for path in hub_parquet.local_parquet_files(tmp_path, "whole")]
+        assert local == [
+            "part1/train-00000-of-00001.parquet",
+            "part0/train-00000-of-00002.parquet",
+            "part0/train-00001-of-00002.parquet",
+        ]
+        local_hub(monkeypatch, "org/data", {"rev": tmp_path})
+        assert hub_parquet.hub_parquet_files("org/data", "rev", "whole") == local
+
+    def test_explicit_paths_are_read_as_listed(self, tmp_path):
+        write_parquet_dataset(tmp_path, "part0", {"n": [0, 1]}, files=2)
+        declare_config(tmp_path, "whole", ["part0/train-00001-of-00002.parquet", "part0/train-00000-of-00002.parquet"])
+        files = hub_parquet.local_parquet_files(tmp_path, "whole")
+        assert [path.name for path in files] == ["train-00001-of-00002.parquet", "train-00000-of-00002.parquet"]
+
+    @pytest.mark.parametrize(
+        ("pattern", "error", "message"),
+        [
+            ("**/train-*", ValueError, "glob syntax"),
+            ("part0/train-[01]*", ValueError, "glob syntax"),
+            ("part0/validation-*", FileNotFoundError, "matches no parquet file"),
+            ("part9/train-00000-of-00001.parquet", FileNotFoundError, "do not exist"),
+        ],
+    )
+    def test_a_pattern_the_tools_cannot_resolve_is_an_error(self, tmp_path, pattern, error, message):
+        write_parquet_dataset(tmp_path, "part0", {"n": [0, 1]})
+        declare_config(tmp_path, "whole", [pattern])
+        with pytest.raises(error, match=message):
+            hub_parquet.local_parquet_files(tmp_path, "whole")
+
+    def test_a_config_the_card_does_not_declare_is_an_error(self, tmp_path):
+        write_parquet_dataset(tmp_path, "part0", {"n": [0, 1]})
+        with pytest.raises(FileNotFoundError, match="declares config 'other' 0 times"):
+            hub_parquet.local_parquet_files(tmp_path, "other")
 
     def test_the_url_names_the_file_at_the_revision(self):
         assert hub_parquet.hub_file_url("org/data", "abc", "stem/x.parquet") == "datasets/org/data@abc/stem/x.parquet"
+
+
+def card(header: dict | None) -> str:
+    """A dataset card whose YAML header is ``header``, followed by prose, or prose alone for ``None``."""
+    import yaml
+
+    prose = "# A dataset\n\nSome prose.\n"
+    return prose if header is None else "---\n" + yaml.safe_dump(header, sort_keys=False) + "---\n" + prose
+
+
+def declared(data_files) -> dict:
+    """A card header declaring config ``c`` with ``data_files``, beside another config."""
+    return {"configs": [{"config_name": "other", "data_files": "x/*"}, {"config_name": "c", "data_files": data_files}]}
+
+
+class TestConfigTrainPatterns:
+    """Every shape the Hub's dataset cards give ``data_files``, and each card the tools refuse."""
+
+    @pytest.mark.parametrize(
+        ("data_files", "patterns"),
+        [
+            ("c/train-*", ["c/train-*"]),
+            (["a/train-*", "b/train-*"], ["a/train-*", "b/train-*"]),
+            ([{"split": "train", "path": "c/train-*"}], ["c/train-*"]),
+            (
+                [{"split": "validation", "path": "c/val-*"}, {"split": "train", "path": ["b/train-*", "a/train-*"]}],
+                ["b/train-*", "a/train-*"],
+            ),
+        ],
+        ids=["one-pattern", "list-of-patterns", "train-split-one-path", "train-split-path-list"],
+    )
+    def test_each_declared_shape_yields_its_train_patterns_in_order(self, data_files, patterns):
+        assert hub_parquet.config_train_patterns(card(declared(data_files)), "c", "repo") == patterns
+
+    @pytest.mark.parametrize(
+        ("text", "error", "message"),
+        [
+            (card(None), FileNotFoundError, "repo: the dataset card has no YAML header, so config 'c'"),
+            (card({"configs": []}), FileNotFoundError, "declares config 'c' 0 times"),
+            (
+                card(
+                    {"configs": [{"config_name": "c", "data_files": "a/*"}, {"config_name": "c", "data_files": "b/*"}]}
+                ),
+                FileNotFoundError,
+                "declares config 'c' 2 times",
+            ),
+            (card(declared([{"split": "validation", "path": "c/v-*"}])), FileNotFoundError, "0 train splits"),
+            (
+                card(declared([{"split": "train", "path": "a/*"}, {"split": "train", "path": "b/*"}])),
+                FileNotFoundError,
+                "2 train splits",
+            ),
+            (card(declared({"train": "c/train-*"})), ValueError, "data_files of a shape"),
+            (card(declared([])), ValueError, "data_files of a shape"),
+            (card(declared(["a/*", {"split": "train", "path": "b/*"}])), ValueError, "data_files of a shape"),
+            (card(declared([{"split": "train", "path": 7}])), ValueError, "data_files of a shape"),
+            (card(declared(None)), ValueError, "data_files of a shape"),
+        ],
+        ids=[
+            "no-header",
+            "undeclared",
+            "declared-twice",
+            "no-train-split",
+            "two-train-splits",
+            "mapping",
+            "empty-list",
+            "mixed-list",
+            "non-string-path",
+            "missing",
+        ],
+    )
+    def test_a_card_the_tools_cannot_read_is_refused(self, text, error, message):
+        with pytest.raises(error, match=message):
+            hub_parquet.config_train_patterns(text, "c", "repo")
+
+    def test_a_single_pattern_is_declared_as_a_string_as_push_to_hub_writes_it(self, tmp_path):
+        """The fixture writes the shape the real card has, so the string branch is the one the other tests take."""
+        import yaml
+
+        write_parquet_dataset(tmp_path, "stem", {"n": [0]})
+        header = yaml.safe_load((tmp_path / "README.md").read_text().split("---")[1])
+        assert header["configs"] == [
+            {"config_name": "stem", "data_files": [{"split": "train", "path": "stem/train-*"}]}
+        ]
 
 
 class TestHubReadRetry:

@@ -20,7 +20,8 @@
 #   that is nearly full. Streaming needs a full commit SHA, skip-pack, skip-count and
 #   val-proportion 0, which this file states.
 # - text-column: `text`, named rather than auto-detected, because `original_text` beside it is the
-#   unhidden source and must never be the document.
+#   unhidden source and must never be the document. The parquet stream then reads that column alone,
+#   which keeps a ClimbMix slice's prepare to about 1.8 h, inside the table's prep_h.
 # - tokenizer-revision: Normal-Norm's tokenizer, pinned at its commit 47439700 (the commit the
 #   label projection and the digest lists were computed with), so every tokenize of this corpus
 #   reads exactly that tokenizer and its provenance records the commit

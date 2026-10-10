@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 import yaml
 
-from tests.unit_tests.corpora_fixtures import write_parquet_dataset
+from tests.unit_tests.corpora_fixtures import declare_config, write_parquet_dataset
 from tests.unit_tests.token_masking_fixtures import build_tiny_hf_tokenizer
 
 
@@ -326,6 +326,36 @@ class TestBuildHubLoadKwargs:
             "data_dir": "sub/dir",
             "revision": _PIN,
         }
+
+    def test_a_parquet_stream_is_reopened_to_read_its_document_column_alone(self, pipe_module, tmp_path):
+        """The column is chosen on the stream with every column, then the parquet reader is projected to it."""
+        from datasets import load_dataset
+
+        repo = write_parquet_dataset(tmp_path / "repo", "data", {"text": ["a", "b"], "id": [0, 1]})
+        args = _parse(pipe_module, *_STREAMING_ARGS, "--dataset", str(repo), "--revision", _PIN)
+        full = load_dataset(str(repo), **pipe_module.build_hub_load_kwargs(args))
+        assert sorted(full.features) == ["id", "text"]
+        projected = pipe_module.stream_of_document_column(full, args, "text")
+        assert list(projected.features) == ["text"]
+        assert [row["text"] for row in projected] == ["a", "b"]
+
+    def test_a_stream_of_another_format_reads_every_column(self, pipe_module, tmp_path):
+        """The JSON loader takes no column selection, so its stream is returned as it is."""
+        from datasets import load_dataset
+
+        data = tmp_path / "train.jsonl"
+        data.write_text(json.dumps({"text": "a", "id": 0}) + "\n")
+        stream = load_dataset("json", data_files=str(data), split="train", streaming=True)
+        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
+        assert pipe_module.stream_of_document_column(stream, args, "text") is stream
+
+    def test_a_named_column_the_stream_lacks_is_refused_naming_its_columns(self, pipe_module, tmp_path):
+        from datasets import load_dataset
+
+        repo = write_parquet_dataset(tmp_path / "repo", "data", {"text": ["a"], "id": [0]})
+        stream = load_dataset(str(repo), split="train", streaming=True)
+        with pytest.raises(ValueError, match=r"'body' not found. Available: \['text', 'id'\]"):
+            pipe_module.detect_stream_column(stream, "body")
 
     def test_revision_recorded_for_provenance(self, pipe_module, tmp_path, monkeypatch):
         """A prepared corpus must carry the revision it was built from."""
@@ -679,6 +709,38 @@ class TestStreamingExport:
         assert [json.loads(line) for line in lines[:-1]] == [{"input": doc, "output": ""} for doc in _DOCUMENTS]
         assert "日本語" in loaded_bytes.decode("utf-8")  # ensure_ascii=False: written raw, not \u-escaped
         assert sorted(path.name for path in streamed.iterdir()) == ["pipeline_results.json", "training.jsonl"]
+
+    def test_a_stream_of_the_named_column_alone_writes_the_same_jsonl(self, exports, run_prepare, tmp_path):
+        """Reading only the named document column (the dataset also holds ``id``) changes nothing the export
+        writes."""
+        loaded, _ = exports
+        named = tmp_path / "named"
+        argv = ("--dataset", str(tmp_path / "corpus"), "--revision", _PIN, *_STREAMING_ARGS, "--text-column", "text")
+        assert run_prepare(*argv, "--no-wandb", "--output-dir", str(named), cache=tmp_path / "cache_named") == 0
+        assert (named / "training.jsonl").read_bytes() == (loaded / "training.jsonl").read_bytes()
+
+    def test_a_union_config_streams_its_members_in_the_cards_order(self, run_prepare, tmp_path):
+        """A corpus published as parts joined by a union config is exported in the order its card lists the members'
+        files, which is what the corpus check's source-row order is judged against."""
+        repo = tmp_path / "repo"
+        write_parquet_dataset(repo, "part0", {"text": ["a0", "a1"], "id": [0, 1]})
+        write_parquet_dataset(repo, "part1", {"text": ["b0", "b1", "b2"], "id": [2, 3, 4]}, files=2)
+        declare_config(repo, "whole", ["part1/train-*", "part0/train-*"])
+        out = tmp_path / "whole"
+        argv = (
+            "--dataset",
+            str(repo),
+            "--subset",
+            "whole",
+            "--revision",
+            _PIN,
+            *_STREAMING_ARGS,
+            "--text-column",
+            "text",
+        )
+        assert run_prepare(*argv, "--no-wandb", "--output-dir", str(out), cache=tmp_path / "cache_whole") == 0
+        lines = (out / "training.jsonl").read_text().splitlines()
+        assert [json.loads(line)["input"] for line in lines] == ["b0", "b1", "b2", "a0", "a1"]
 
     def test_results_record_matches_the_loaded_one_and_says_streaming(self, exports):
         loaded, streamed = exports

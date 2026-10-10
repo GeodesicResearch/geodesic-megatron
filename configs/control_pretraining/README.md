@@ -344,8 +344,12 @@ copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one i
   checks the commit recorded by the prepare and by the tokenize against the config's (no commit when the config pins
   none), and the per-document checks and the audit load the same commit. A pack row cannot take a pinned tokenizer,
   because the pack directory is named by the tokenizer alone, so the plan refuses one.
-- [`hub_parquet.py`](hub_parquet.py) holds the parquet-file rule (a split's `train` files) and the Hub range reads
-  that `audit_filtered_corpora.py` and `corpus_documents.py` share.
+- [`hub_parquet.py`](hub_parquet.py) holds the parquet-file rule and the Hub range reads that
+  `audit_filtered_corpora.py` and `corpus_documents.py` share. A config's train files are the ones its dataset card
+  (`README.md`) lists for it, in the card's order, as the `datasets` loader reads them: `<config>/train-*` for a config
+  of its own directory, and the members' files for a union config that joins a corpus's row-contiguous parts. The
+  Hub at a commit and a local copy of the repository resolve them by that one rule; a glob form beyond `*` and `?` in
+  a pattern's last component is refused rather than read some other way.
 
 The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
 fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
