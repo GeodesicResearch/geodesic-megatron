@@ -37,23 +37,23 @@
 table: configs/control_pretraining/30b_baseline/corpora.tsv
 subsets:
   nemotron_wiki_rewrite_ai_docs:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/78ac133ac58f6b9529fcafc2f7691f313ecbb62b517f8566a7c877df6787a1ce/digests
   zyda_ai_docs_long:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/6de85ff6d8d8b43014e9c619faa80e36412bdb6c4bf93f64ff12bae1dd9ee042/digests
   climbmix_full:
     shards:
       0:
         saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/58a44813003257c27db0617a0742887e804f9ddeb699bf32d56f73279253c600/digests
       1:
-        pending: digest list being recomputed by the hash pass
+        saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/57db5219534ae847adaf7aa166b7ced650c5a96aea24523b664e9e60ef61cf7d/digests
       2:
-        pending: digest list being recomputed by the hash pass
+        saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/f8b27f083b61a6ab1152d394bca1dfdc309023a3b78ea55814a6bc61666fbc09/digests
       3:
-        pending: digest list being recomputed by the hash pass
+        saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/5a18d61bd5c0cda83623a595804412f6eda65acfd477923decb1e54e3c05ea11/digests
       4:
-        pending: digest list being recomputed by the hash pass
+        saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/2ef64cec2607d6fdecb7875c9b260909fbca633ef0dd301152dbdcada7e0fd7e/digests
       5:
-        pending: digest list being recomputed by the hash pass
+        saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/87eb8d001449a2979cd45a6c2e2a270a356e69bd9bef361b62d28417b3d2c3f7/digests
       6:
         pending: digest list being recomputed by the hash pass
       7:

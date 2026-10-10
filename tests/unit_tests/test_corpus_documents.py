@@ -902,8 +902,8 @@ class TestTheCluelessNormDigestChecks:
     """The real config: it names Normal-Norm's table and every tokenize row of it, with the saved
     digest lists of the subsets that have one; the rest are pending, and refused."""
 
-    SAVED = {"zyda_full"}
-    SAVED_SHARDS = {"climbmix_full": {0}}
+    SAVED = {"zyda_full", "nemotron_wiki_rewrite_ai_docs", "zyda_ai_docs_long"}
+    SAVED_SHARDS = {"climbmix_full": {0, 1, 2, 3, 4, 5}}
 
     def test_it_reads_and_names_every_row(self):
         document = yaml.safe_load(REAL_DIGEST_CHECKS.read_text())
@@ -925,12 +925,17 @@ class TestTheCluelessNormDigestChecks:
         assert check.row.subset == subset and check.hub is None
         assert check.saved.name == "digests" and check.saved.is_absolute()
 
-    def test_climbmix_full_is_checked_one_slice_at_a_time(self):
-        """Its eight slices are hashed separately; slice 0's list describes rows 0:69,164,382, the slice's own."""
-        check = corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", 0)
-        assert (check.shard, check.rows) == (0, (0, 69_164_382)) and check.saved.name == "digests"
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match="climbmix_full shard 1 is pending"):
-            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", 1)
+    @pytest.mark.parametrize("shard", sorted(SAVED_SHARDS["climbmix_full"]))
+    def test_climbmix_full_is_checked_one_slice_at_a_time(self, shard):
+        """Its eight slices are hashed separately; slice k's list describes the slice's own rows,
+        k x 69,164,382 up to the next slice."""
+        check = corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", shard)
+        assert (check.shard, check.rows) == (shard, (shard * 69_164_382, (shard + 1) * 69_164_382))
+        assert check.saved.name == "digests"
+
+    def test_a_climbmix_full_slice_without_its_list_is_refused(self):
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="climbmix_full shard 6 is pending"):
+            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", 6)
         with pytest.raises(corpus_documents.CorpusCheckFailed, match="a digest list per shard"):
             corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", None)
 
