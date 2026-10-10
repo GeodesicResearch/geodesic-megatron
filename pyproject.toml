@@ -222,6 +222,8 @@ addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add thes
 testpaths = ["tests"]
 # directories to ignore when discovering tests
 norecursedirs = [
+    # tests/e2e_tests: end-to-end runs submitted by hand through SLURM (tests/e2e_tests/README.md), never collected
+    "e2e_tests",
     "src",
     "external",
     "examples",

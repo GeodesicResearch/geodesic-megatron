@@ -38,6 +38,7 @@ from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_saf
 if TYPE_CHECKING:
     from megatron.bridge.training.token_masking.monitor import TokenMaskingMonitor
     from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking
+    from megatron.bridge.training.token_masking.validation import MaskedValidation
 
 
 @dataclass
@@ -146,6 +147,8 @@ class GlobalState:
         self._energy_monitor_created: bool = False
         self._token_masking: Optional["ResolvedTokenMasking"] = None
         self.token_masking_monitor: Optional["TokenMaskingMonitor"] = None
+        # The held-out masked-validation set setup builds; None when the run evaluates none.
+        self.masked_validation: Optional["MaskedValidation"] = None
 
     @property
     def cfg(self) -> Optional[ConfigContainer]:
@@ -478,6 +481,7 @@ class GlobalState:
         self._nvrx_straggler_created = False
         self._token_masking = None
         self.token_masking_monitor = None
+        self.masked_validation = None
 
 
 def _timers_write_to_wandb(

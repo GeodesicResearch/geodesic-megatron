@@ -30,11 +30,14 @@ import torch
 
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.train_utils import (
+    ADVANCED_ITERS_KEY,
     PEAK_MEMORY_STATS,
     PEAK_MEMORY_TAG,
+    accumulate_interval_losses,
     calc_params_l2_norm,
     format_peak_memory,
     gather_peak_memory,
+    interval_loss_averages,
     maybe_inject_state,
     needs_global_state_injection,
     param_is_not_shared,
@@ -1627,6 +1630,67 @@ class TestTrainingLog:
         assert np.round(l2_norm_report["l2_norm/grad/global"], 2) == 74.92
         assert l2_norm_report["l2_norm/grad/layer_2"] == 2.0
         assert l2_norm_report["l2_norm/grad/layer_9"] == 9.0
+
+
+class TestIntervalLossAverages:
+    """The printed per-interval loss averages, for entries every iteration reports and for entries only some do.
+
+    ``token_masking/listed_target_loss`` is reported only by an iteration whose global batch held a trainable target
+    with a measured id; its interval average must be over those iterations, never pulled toward 0 by the others.
+    """
+
+    LISTED_TARGET_LOSS = "token_masking/listed_target_loss"
+
+    @staticmethod
+    def _advance(total_loss_dict: dict, loss_dict: dict[str, float]) -> None:
+        """One advanced iteration, counted and accumulated as ``training_log`` does it."""
+        total_loss_dict[ADVANCED_ITERS_KEY] = total_loss_dict.get(ADVANCED_ITERS_KEY, 0) + 1
+        accumulate_interval_losses(total_loss_dict, {key: torch.tensor(value) for key, value in loss_dict.items()})
+
+    def test_an_entry_every_iteration_reports_averages_over_the_interval(self):
+        total_loss_dict = {}
+        for loss in (2.0, 3.0, 4.0):
+            self._advance(total_loss_dict, {"lm loss": loss})
+        assert interval_loss_averages(total_loss_dict) == {"lm loss": pytest.approx(3.0)}
+
+    def test_an_entry_some_iterations_report_averages_over_those_iterations(self):
+        total_loss_dict = {}
+        for loss, listed_loss in [(2.0, None), (3.0, 9.0), (4.0, None), (5.0, 7.0)]:
+            reported = (
+                {"lm loss": loss} if listed_loss is None else {"lm loss": loss, self.LISTED_TARGET_LOSS: listed_loss}
+            )
+            self._advance(total_loss_dict, reported)
+        assert interval_loss_averages(total_loss_dict) == {
+            "lm loss": pytest.approx(3.5),
+            self.LISTED_TARGET_LOSS: pytest.approx(8.0),
+        }
+
+    def test_an_interval_in_which_no_iteration_reported_an_entry_prints_nothing_for_it(self):
+        total_loss_dict = {}
+        self._advance(total_loss_dict, {"lm loss": 2.0, self.LISTED_TARGET_LOSS: 9.0})
+        interval_loss_averages(total_loss_dict)
+        total_loss_dict[ADVANCED_ITERS_KEY] = 0
+        self._advance(total_loss_dict, {"lm loss": 3.0})
+        assert interval_loss_averages(total_loss_dict) == {"lm loss": pytest.approx(3.0)}
+
+    def test_each_interval_starts_from_zero(self):
+        total_loss_dict = {}
+        self._advance(total_loss_dict, {"lm loss": 10.0})
+        interval_loss_averages(total_loss_dict)
+        total_loss_dict[ADVANCED_ITERS_KEY] = 0
+        self._advance(total_loss_dict, {"lm loss": 2.0})
+        assert interval_loss_averages(total_loss_dict) == {"lm loss": pytest.approx(2.0)}
+
+    def test_an_entry_a_loss_tracker_adds_itself_averages_over_the_advanced_iterations(self):
+        """The MoE and MTP trackers add their losses to the totals directly, once per iteration."""
+        total_loss_dict = {}
+        for loss in (2.0, 4.0):
+            self._advance(total_loss_dict, {"lm loss": loss})
+            total_loss_dict["load_balancing_loss"] = total_loss_dict.get("load_balancing_loss", 0) + torch.tensor(0.5)
+        assert interval_loss_averages(total_loss_dict) == {
+            "lm loss": pytest.approx(3.0),
+            "load_balancing_loss": pytest.approx(0.5),
+        }
 
 
 class TestNeedsGlobalStateInjection:

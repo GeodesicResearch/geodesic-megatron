@@ -34,7 +34,7 @@ from tests.unit_tests.token_masking_fixtures import (
 
 
 EOS, Q = EOS_ID, MARKER_ID
-# An observed id the run does not mask, as in a control arm; any id renders the same.
+# A measured id the run does not mask, as in a control arm; any id renders the same.
 R = TINY_VOCAB["secret"]
 HELLO, WORLD, THE = TINY_VOCAB["hello"], TINY_VOCAB["world"], TINY_VOCAB["the"]
 
@@ -51,7 +51,7 @@ class RecordingLogger:
 
 @pytest.fixture(scope="module")
 def tokenizer_directory(tmp_path_factory):
-    return build_tiny_hf_tokenizer(tmp_path_factory.mktemp("tokenizer"), None)
+    return build_tiny_hf_tokenizer(tmp_path_factory.mktemp("tokenizer"))
 
 
 @pytest.fixture(scope="module")
@@ -69,19 +69,19 @@ def document(tokens, trainable, *, first_token_is_target=True, reference="docume
     )
 
 
-def render(doc, decode, *, observed=(Q, R), applied=(Q,), max_rendered_tokens=100, focus_listed=False):
+def render(doc, decode, *, measured=(Q, R), masked=(Q,), max_rendered_tokens=100, focus_listed=False):
     return render_document(
         doc,
-        observed=np.asarray(observed, dtype=np.int64),
-        applied=np.asarray(applied, dtype=np.int64),
+        measured=np.asarray(measured, dtype=np.int64),
+        masked=np.asarray(masked, dtype=np.int64),
         decode=decode,
         max_rendered_tokens=max_rendered_tokens,
         focus_listed=focus_listed,
     )
 
 
-# One token of each listed class: an untrained listed marker, a masked marker, a trained listed (observed, not
-# masked) "secret".
+# One token of each class of a measured id: a marker at a position the dataset excludes, a masked marker, and a
+# measured (trained, not masked) "secret".
 EVERY_CLASS = document([HELLO, Q, WORLD, Q, THE, R, HELLO, EOS], [True, False, True, True, True, True, True, True])
 
 
@@ -99,10 +99,15 @@ class TestDisplayDecoder:
 
 
 class TestRenderDocument:
-    def test_text_wraps_each_listed_token_with_its_class(self, decode):
+    def test_text_wraps_each_measured_token_with_its_class(self, decode):
         rendering = render(EVERY_CLASS, decode)
-        assert rendering.text == "hello⟦untrained:<marker>⟧world⟦masked:<marker>⟧the⟦trained:secret⟧hello </s>"
+        assert rendering.text == "hello⟦untrained:<marker>⟧world⟦masked:<marker>⟧the⟦measured:secret⟧hello </s>"
         assert (rendering.listed_targets, rendering.masked_targets) == (3, 1)
+
+    def test_a_control_arm_renders_its_trained_markers_as_measured(self, decode):
+        rendering = render(EVERY_CLASS, decode, masked=())
+        assert rendering.text == "hello⟦untrained:<marker>⟧world⟦measured:<marker>⟧the⟦measured:secret⟧hello </s>"
+        assert (rendering.listed_targets, rendering.masked_targets) == (3, 0)
 
     def test_runs_of_one_class_are_decoded_together(self, decode):
         rendering = render(document([HELLO, WORLD, THE, HELLO], [False, False, True, True]), decode)
@@ -112,9 +117,9 @@ class TestRenderDocument:
     def test_html_escapes_the_text_styles_each_class_and_carries_a_legend(self, decode):
         page = render(EVERY_CLASS, decode).html
         assert "white-space: pre-wrap" in page
-        assert "red: listed, masked from the loss" in page
+        assert "red: measured id, masked from the loss" in page
         assert f'<span style="background-color: #f4a6a6" title="masked: token {Q}">&lt;marker&gt;</span>' in page
-        assert f'<span style="background-color: #f9c784" title="trained: token {R}">secret</span>' in page
+        assert f'<span style="background-color: #f9c784" title="measured: token {R}">secret</span>' in page
         assert f'<span style="outline: 1px solid #555555" title="untrained: token {Q}">&lt;marker&gt;</span>' in page
         assert "<marker>" not in page and "&lt;/s&gt;" in page
 
@@ -142,6 +147,7 @@ def source_scan(index: int, documents, listed_documents) -> SourceScan:
             path=f"/data/corpus{index}/tokenized",
             kind="indexed",
             weight=0.5,
+            training_split=(0.0, 1.0),
             tokenizer_recorded="org/tokenizer" if index == 0 else None,
         ),
         documents=tuple(documents),
@@ -169,8 +175,8 @@ class TestLogDataSampleTables:
         log_data_sample_tables(
             logger,
             SCANS,
-            applied_token_ids=[Q],
-            observed_token_ids=[Q, R],
+            masked_token_ids=[Q],
+            measured_token_ids=[Q, R],
             decode=decode,
             max_rendered_tokens=50,
             step=7,
@@ -200,22 +206,22 @@ class TestLogDataSampleTables:
         [masked] = tables[MASKED_DOCUMENTS_TABLE].data
         assert masked[:8] == [0, "corpus0", "document 0", 8, 7, 3, 1, render(EVERY_CLASS, decode).text]
 
-    def test_masked_documents_are_omitted_when_no_ids_are_observed(self, decode):
+    def test_masked_documents_are_omitted_when_no_ids_are_measured(self, decode):
         logger = RecordingLogger()
         log_data_sample_tables(
-            logger, SCANS, applied_token_ids=[], observed_token_ids=[], decode=decode, max_rendered_tokens=50, step=0
+            logger, SCANS, masked_token_ids=[], measured_token_ids=[], decode=decode, max_rendered_tokens=50, step=0
         )
         [(tables, step)] = logger.calls
         assert (set(tables), step) == ({SOURCES_TABLE, DOCUMENTS_TABLE}, 0)
 
-    def test_applied_ids_must_be_observed_and_the_render_limit_positive(self, decode):
+    def test_masked_ids_must_be_measured_and_the_render_limit_positive(self, decode):
         logger = RecordingLogger()
-        with pytest.raises(ValueError, match="not among the observed"):
+        with pytest.raises(ValueError, match="not among the measured"):
             log_data_sample_tables(
                 logger,
                 SCANS,
-                applied_token_ids=[Q],
-                observed_token_ids=[R],
+                masked_token_ids=[Q],
+                measured_token_ids=[R],
                 decode=decode,
                 max_rendered_tokens=5,
                 step=0,
@@ -224,8 +230,8 @@ class TestLogDataSampleTables:
             log_data_sample_tables(
                 logger,
                 SCANS,
-                applied_token_ids=[],
-                observed_token_ids=[],
+                masked_token_ids=[],
+                measured_token_ids=[],
                 decode=decode,
                 max_rendered_tokens=0,
                 step=0,

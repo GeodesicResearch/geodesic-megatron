@@ -1,0 +1,15 @@
+# E2E test inoculation_midtraining_token_masking: the held-out set, never trained.
+#
+# The six validation.jsonl files the inoculation_midtraining.yaml prepares carve out (0.2% of each corpus, 1,995
+# documents), read as one corpus in the glob's sorted order and tokenized into the single .bin/.idx prefix that
+# masked validation (arm_common.yaml token_masking.masked_validation.data_path) and the probe (probe.yaml documents)
+# both read. `dataset` is recorded in pipeline_results.json only: the documents come from data-files, so the set has no
+# revision of its own and its provenance is the six source validation.jsonl files, whose prepares pin the revision.
+# submit.sh (stage data) runs it after the six prepares and passes the tokenizer.
+dataset: geodesic-research/inoculation-midtraining
+data-files: /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/*-documents*/validation.jsonl
+text-column: input      # the field pipeline_data_prepare.py writes
+output-dir: /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/held_out
+val-proportion: 0
+skip-pack: true
+skip-count: true

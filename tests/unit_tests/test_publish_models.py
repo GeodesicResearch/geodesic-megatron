@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.checkpoint.export_clone import LATEST_FILE
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -2591,10 +2592,10 @@ def test_a_clone_root_whose_tracker_is_a_link_is_refused(campaign, monkeypatch, 
     root, ckpt, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
-    run_tracker = ckpt / "sft" / publish_models.sync_bucket.LATEST_FILE
+    run_tracker = ckpt / "sft" / LATEST_FILE
     before = run_tracker.read_text()
     target.clone_root.mkdir(parents=True)
-    (target.clone_root / publish_models.sync_bucket.LATEST_FILE).symlink_to(run_tracker)
+    (target.clone_root / LATEST_FILE).symlink_to(run_tracker)
     monkeypatch.setattr(publish_models, "run_export", fake_export)
     publish_models.publish_pass(
         manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"

@@ -36,6 +36,11 @@ Usage:
         --megatron-path /path/to/checkpoints/experiment_name \
         --keep-remote-code \
         --remote-code-source /path/to/dir/with/modeling_nemotron_h.py
+
+A checkpoint trained with ``moe_experts_impl: torch_grouped`` records a run_config this script
+cannot rebuild the model from. Such a checkpoint is loaded from an export clone
+(scripts/checkpoint/export_clone.py) passed as ``--load-path``. ``pipeline_checkpoint_convert.sh export``
+builds the clone and passes it itself. Run directly, this script refuses such a checkpoint without one.
 """
 
 import argparse
@@ -43,10 +48,25 @@ import json
 import os
 import shutil
 import struct
+import sys
 from pathlib import Path
 
 import torch
 import yaml
+
+
+# Run as a script the repo root is already on sys.path; loaded by path (the unit tests) it may not be.
+_REPO_ROOT = str(Path(__file__).resolve().parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+from scripts.checkpoint.export_clone import (  # noqa: E402
+    RUN_CONFIG,
+    ExportError,
+    check_is_export_clone,
+    checkpoint_needs_repair,
+    resolve_checkpoint_path,
+)
 
 
 DTYPE_MAP = {
@@ -73,42 +93,27 @@ CHAT_TEMPLATE_SOURCE_MAP = {
 CHAT_EOS_TOKEN_IDS = [2, 11]
 
 
-def resolve_checkpoint_path(megatron_path: str, iteration: int | None = None) -> tuple[Path, int]:
-    """Resolve the checkpoint iteration directory.
+def resolve_load_path(iter_path: Path, load_path: str | None) -> Path:
+    """The directory the Megatron model is loaded from.
 
-    Args:
-        megatron_path: Top-level checkpoint directory containing iter_* subdirs.
-        iteration: Specific iteration number, or None to use the latest.
-
-    Returns:
-        Tuple of (iteration directory path, iteration number).
+    Without ``--load-path`` this is the iteration itself. That is refused when the iteration's run_config
+    records torch_grouped expert settings: the load would die in ``load_model_config``, or, past that,
+    would drop every MoE weight without an error. With ``--load-path`` it is the given export clone, once
+    it is shown to be a clone of this very iteration. Either way the iteration, the HF output path, the
+    run_config copied into the export and the Hub repo name all come from ``iter_path``.
     """
-    base = Path(megatron_path)
-    if not base.exists():
-        raise FileNotFoundError(f"Checkpoint directory not found: {base}")
-
-    if iteration is not None:
-        iter_dir = base / f"iter_{iteration:07d}"
-        if not iter_dir.exists():
-            raise FileNotFoundError(f"Iteration directory not found: {iter_dir}")
-        return iter_dir, iteration
-
-    # Try latest_checkpointed_iteration.txt
-    latest_file = base / "latest_checkpointed_iteration.txt"
-    if latest_file.exists():
-        iteration = int(latest_file.read_text().strip())
-        iter_dir = base / f"iter_{iteration:07d}"
-        if iter_dir.exists():
-            return iter_dir, iteration
-
-    # Fall back to scanning iter_* dirs
-    iter_dirs = [d for d in base.iterdir() if d.is_dir() and d.name.startswith("iter_")]
-    if not iter_dirs:
-        raise FileNotFoundError(f"No iter_* directories found in {base}")
-
-    latest = max(iter_dirs, key=lambda d: int(d.name.replace("iter_", "")))
-    iteration = int(latest.name.replace("iter_", ""))
-    return latest, iteration
+    if load_path is not None:
+        clone = Path(load_path)
+        check_is_export_clone(iter_path, clone)
+        return clone
+    if checkpoint_needs_repair(iter_path):
+        raise ExportError(
+            f"{iter_path / RUN_CONFIG} records torch_grouped expert settings (the stack-spec closure, "
+            "moe_experts_impl: torch_grouped) that this exporter cannot rebuild the model from. Export it through `pipeline_checkpoint_convert.sh export`, which builds an export "
+            "clone itself, or build one with `python scripts/checkpoint/export_clone.py prepare ...` and pass the "
+            "EXPORT_LOAD_PATH it prints as --load-path."
+        )
+    return iter_path
 
 
 def detect_training_tokenizer(iter_path: Path) -> str | None:
@@ -147,21 +152,22 @@ def _is_multi_gpu() -> bool:
 
 
 def convert_single_process(
-    iter_path: Path,
+    load_path: Path,
     hf_path: Path,
     hf_model_id: str,
     strict: bool = True,
     show_progress: bool = True,
 ) -> None:
-    """Convert using single-process export_ckpt (CPU-based distributed context)."""
+    """Convert using single-process export_ckpt (CPU-based distributed context). ``load_path`` is the
+    iteration directory, or its export clone (see ``resolve_load_path``)."""
     from megatron.bridge import AutoBridge
 
     print(f"Creating bridge from auto-config: {hf_model_id}")
-    bridge = AutoBridge.from_auto_config(str(iter_path), hf_model_id)
+    bridge = AutoBridge.from_auto_config(str(load_path), hf_model_id)
 
-    print(f"Exporting: {iter_path} -> {hf_path}")
+    print(f"Exporting: {load_path} -> {hf_path}")
     bridge.export_ckpt(
-        megatron_path=str(iter_path),
+        megatron_path=str(load_path),
         hf_path=str(hf_path),
         show_progress=show_progress,
         strict=strict,
@@ -170,7 +176,7 @@ def convert_single_process(
 
 
 def convert_multi_gpu(
-    iter_path: Path,
+    load_path: Path,
     hf_path: Path,
     hf_model_id: str,
     tp: int = 1,
@@ -181,7 +187,8 @@ def convert_multi_gpu(
     strict: bool = True,
     show_progress: bool = True,
 ) -> None:
-    """Convert using multi-GPU distributed loading."""
+    """Convert using multi-GPU distributed loading. ``load_path`` is the iteration directory, or its
+    export clone (see ``resolve_load_path``)."""
     from megatron.bridge import AutoBridge
     from megatron.bridge.models.decorators import torchrun_main
     from megatron.bridge.models.hf_pretrained.utils import is_safe_repo
@@ -189,7 +196,7 @@ def convert_multi_gpu(
 
     @torchrun_main
     def _run():
-        print_rank_0(f"Exporting: {iter_path} -> {hf_path}")
+        print_rank_0(f"Exporting: {load_path} -> {hf_path}")
         print_rank_0(f"  TP={tp}  PP={pp}  EP={ep}  ETP={etp}  dtype={torch_dtype}")
 
         bridge = AutoBridge.from_hf_pretrained(
@@ -217,9 +224,9 @@ def convert_multi_gpu(
             "params_dtype": torch_dtype,
         }
 
-        print_rank_0(f"Loading Megatron checkpoint from: {iter_path}")
+        print_rank_0(f"Loading Megatron checkpoint from: {load_path}")
         megatron_model = bridge.load_megatron_model(
-            str(iter_path),
+            str(load_path),
             mp_overrides=mp_overrides,
             wrap_with_ddp=False,
         )
@@ -870,6 +877,16 @@ def main():
         default=None,
         help="Specific iteration to convert (default: latest from latest_checkpointed_iteration.txt)",
     )
+    parser.add_argument(
+        "--load-path",
+        default=None,
+        help=(
+            "Load the model from this export clone of the iteration (scripts/checkpoint/export_clone.py) instead "
+            "of the iteration itself; needed for a torch_grouped checkpoint, and passed by "
+            "pipeline_checkpoint_convert.sh export when it is. The iteration, the default output path, the "
+            "run_config copied into the export and the Hub repo name come from --megatron-path."
+        ),
+    )
 
     # Output
     parser.add_argument(
@@ -956,6 +973,11 @@ def main():
     # 1. Resolve checkpoint path
     iter_path, iteration = resolve_checkpoint_path(args.megatron_path, args.iteration)
     print(f"Checkpoint: {iter_path} (iteration {iteration})")
+    # 1b. Where the model is loaded from: the iteration, or its export clone (torch_grouped repair).
+    # Everything below except the load itself reads iter_path.
+    load_path = resolve_load_path(iter_path, args.load_path)
+    if load_path != iter_path:
+        print(f"Loading from export clone: {load_path} (repaired run_config; links to {iter_path})")
 
     # 2. Determine HF model ID
     hf_model_id = args.hf_model
@@ -971,7 +993,7 @@ def main():
     if use_multi_gpu:
         print(f"Mode: multi-GPU (TP={args.tp}, PP={args.pp}, EP={args.ep}, ETP={args.etp})")
         convert_multi_gpu(
-            iter_path=iter_path,
+            load_path=load_path,
             hf_path=hf_path,
             hf_model_id=hf_model_id,
             tp=args.tp,
@@ -985,7 +1007,7 @@ def main():
     else:
         print("Mode: single-process (CPU-based distributed context)")
         convert_single_process(
-            iter_path=iter_path,
+            load_path=load_path,
             hf_path=hf_path,
             hf_model_id=hf_model_id,
             strict=not args.not_strict,
@@ -1025,8 +1047,10 @@ def main():
     # every conversion (push or local-only) so the exact training settings
     # (pretrained_checkpoint, data blend, optimizer, parallelism, train_iters)
     # always travel with the HF artifacts — both on disk and on the Hub.
+    # It is the checkpoint's own run_config, never an export clone's repaired
+    # copy: it records how the model was trained, not how it was loaded here.
     if rank == 0:
-        src_run_config = iter_path / "run_config.yaml"
+        src_run_config = iter_path / RUN_CONFIG
         if src_run_config.exists():
             dst_run_config = hf_path / "megatron_run_config.yaml"
             shutil.copy2(src_run_config, dst_run_config)

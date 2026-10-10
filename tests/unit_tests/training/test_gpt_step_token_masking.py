@@ -5,7 +5,7 @@
 ``gpt_step.forward_step`` and ``forward_step_modelopt`` take a batch from the data iterator, remove from the loss
 every target position whose label is a masked token id, give the model the masked mask wherever it computes a loss of
 its own (multi-token prediction, the EP-overlap schedule plan), and return a loss partial that multiplies the masked
-mask and reports the microbatch's ``token_masking/*`` fractions. These tests drive that whole path: the step's real
+mask and reports the microbatch's ``token_masking/*`` entries. These tests drive that whole path: the step's real
 ``get_batch`` with Megatron-Core's real CP slicer and pipeline-stage lookups over a single-process gloo group (as in
 ``test_gpt_step_cp_dispatch.py``), a real ``GlobalState`` holding a decision taken by the production resolution from a
 real tokenizer, and the real loss partial. The last test feeds the step microbatches collated from a real ``.bin/.idx``
@@ -14,9 +14,10 @@ blend built by the pretraining dataset provider, so the masking is shown on the 
 Two boundaries are stood in for. The model is a ``MagicMock`` because a real one needs GPUs; called with labels, a
 ``GPTModel`` returns the per-token loss in the labels' shape, which is what the loss partial reduces, so the stand-in
 returns exactly that, with position ``p``'s loss set to ``2**p``: the loss the partial sums is then a bit mask naming
-precisely which positions carried loss. ``Tensor.cuda`` is the identity because CPU-only tiers have no device to move
-the batch to. The run config is the CPU harness's ``_cfg`` (shared with ``test_gpt_step_cp_dispatch.py``), holding the
-dataset and model fields the step reads, including the packed-sequence predicate.
+precisely which positions carried loss, and so is the listed targets' loss sum it reports. ``Tensor.cuda`` is the
+identity because CPU-only tiers have no device to move the batch to. The run config is the CPU harness's ``_cfg``
+(shared with ``test_gpt_step_cp_dispatch.py``), holding the dataset and model fields the step reads, including the
+packed-sequence predicate.
 """
 
 from types import SimpleNamespace
@@ -31,21 +32,24 @@ from torch.utils.data import default_collate
 from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
 from megatron.bridge.training import gpt_step
 from megatron.bridge.training.state import GlobalState
-from megatron.bridge.training.token_masking.config import TokenMaskingConfig
 from megatron.bridge.training.token_masking.hook import (
     LISTED_TARGET_FRACTION,
+    LISTED_TARGET_LOSS_SUM,
+    LISTED_TRAINABLE_TARGET_FRACTION,
     MASKED_TARGET_FRACTION,
     TRAINABLE_TARGET_FRACTION,
     TRAINED_LISTED_TARGET_FRACTION,
 )
-from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from tests.unit_tests.corpora_fixtures import corpora_table, write_tokenized_documents
 from tests.unit_tests.token_masking_fixtures import (
     MARKER_ID,
     build_tiny_hf_tokenizer,
     hf_tokenizer_config,
+    masking,
     masking_with_null_tokenizer,
+    measuring,
+    measuring_with_null_tokenizer,
     no_token_masking,
     null_tokenizer_config,
     resolve,
@@ -70,42 +74,42 @@ STEPS = [
     pytest.param(gpt_step.forward_step, id="forward_step"),
     pytest.param(gpt_step.forward_step_modelopt, id="forward_step_modelopt"),
 ]
-# Decisions that mask the marker, and decisions that only count it.
-MASKING = ["enabled-declared", "unstated-declared", "enabled-explicit-null"]
-OBSERVING = ["disabled-declared", "disabled-explicit-null", "unstated-legacy-empty"]
+# Decisions that mask the marker, and decisions that only measure it, over a marker tokenizer and a NullTokenizer.
+MASKING = ["masking-hf", "masking-null"]
+MEASURING = ["measuring-hf", "measuring-null"]
 
-# The unpacked microbatch's fractions: 4 marker targets, 3 of them trainable before masking (one is in the prompt),
-# 20 trainable targets before masking and 17 after.
-MASKED_FRACTIONS = {
+# The unpacked microbatch's entries: 4 marker targets, 3 of them trainable before masking (flat positions 7, 12 and
+# 23; the one at 2 is in the prompt), 20 trainable targets before masking and 17 after. The marker targets that would
+# train had the position-coded losses 2**7, 2**12 and 2**23, in both arms.
+MARKER_TARGETS_LOSS = 2.0**7 + 2.0**12 + 2.0**23
+MASKED_ENTRIES = {
     LISTED_TARGET_FRACTION: [4.0, POSITIONS],
     MASKED_TARGET_FRACTION: [3.0, POSITIONS],
     TRAINED_LISTED_TARGET_FRACTION: [0.0, POSITIONS],
     TRAINABLE_TARGET_FRACTION: [17.0, POSITIONS],
+    LISTED_TRAINABLE_TARGET_FRACTION: [3.0, POSITIONS],
+    LISTED_TARGET_LOSS_SUM: [MARKER_TARGETS_LOSS, POSITIONS],
 }
-OBSERVED_FRACTIONS = {
+MEASURED_ENTRIES = {
     LISTED_TARGET_FRACTION: [4.0, POSITIONS],
     MASKED_TARGET_FRACTION: [0.0, POSITIONS],
     TRAINED_LISTED_TARGET_FRACTION: [3.0, POSITIONS],
     TRAINABLE_TARGET_FRACTION: [20.0, POSITIONS],
+    LISTED_TRAINABLE_TARGET_FRACTION: [3.0, POSITIONS],
+    LISTED_TARGET_LOSS_SUM: [MARKER_TARGETS_LOSS, POSITIONS],
 }
 
 
 @pytest.fixture(scope="module")
 def decisions(tmp_path_factory) -> dict:
     """Token-masking decisions taken by the production resolution, each from a really built tokenizer."""
-    declaring = hf_tokenizer_config(build_tiny_hf_tokenizer(tmp_path_factory.mktemp("declaring"), [MARKER_ID]))
-    # The archived campaigns' control arms: a declaring tokenizer, masking switched off by the legacy field.
-    control = TokenizerConfig(
-        tokenizer_type="HuggingFaceTokenizer", tokenizer_model=declaring.tokenizer_model, loss_mask_token_ids=[]
-    )
+    marker_tokenizer = hf_tokenizer_config(build_tiny_hf_tokenizer(tmp_path_factory.mktemp("marker_tokenizer")))
     cpu = torch.device("cpu")
     return {
-        "enabled-declared": resolve(TokenMaskingConfig(mode="enabled"), declaring, cpu),
-        "unstated-declared": resolve(TokenMaskingConfig(), declaring, cpu),
-        "enabled-explicit-null": masking_with_null_tokenizer("enabled", [MARKER_ID], VOCAB_SIZE),
-        "disabled-declared": resolve(TokenMaskingConfig(mode="disabled"), declaring, cpu),
-        "disabled-explicit-null": masking_with_null_tokenizer("disabled", [MARKER_ID], VOCAB_SIZE),
-        "unstated-legacy-empty": resolve(TokenMaskingConfig(), control, cpu),
+        "masking-hf": resolve(masking([MARKER_ID]), marker_tokenizer, cpu),
+        "masking-null": masking_with_null_tokenizer([MARKER_ID], VOCAB_SIZE),
+        "measuring-hf": resolve(measuring([MARKER_ID]), marker_tokenizer, cpu),
+        "measuring-null": measuring_with_null_tokenizer([MARKER_ID], VOCAB_SIZE),
         "none": no_token_masking(),
     }
 
@@ -160,7 +164,7 @@ def _positions(mask: torch.Tensor) -> set[int]:
     return set(torch.nonzero(mask.reshape(-1)).flatten().tolist())
 
 
-def _fractions(report: dict) -> dict[str, list[float]]:
+def _token_masking_entries(report: dict) -> dict[str, list[float]]:
     return {key: value.tolist() for key, value in report.items() if key != "lm loss"}
 
 
@@ -204,14 +208,14 @@ def test_a_masking_run_removes_exactly_the_marker_targets_from_the_loss(
     assert _trained_positions(loss, POSITIONS) == _positions(expected)
     assert num_tokens.item() == 17
     assert report["lm loss"].tolist() == [loss.item(), 17.0]
-    assert _fractions(report) == MASKED_FRACTIONS
+    assert _token_masking_entries(report) == MASKED_ENTRIES
     # Masking changes only the loss mask: the model still reads the marker and is scored against the same labels.
     assert torch.equal(model.call_args.kwargs["labels"], _labels())
     assert torch.equal(model.call_args.kwargs["input_ids"], _labels().roll(1, dims=1))
 
 
-@pytest.mark.parametrize("decision", OBSERVING)
-def test_an_observe_only_run_trains_on_the_marker_targets_and_reports_them(
+@pytest.mark.parametrize("decision", MEASURING)
+def test_a_measuring_run_trains_on_the_marker_targets_and_reports_them(
     decision,
     decisions,
     gloo_group_of_one,
@@ -222,10 +226,10 @@ def test_an_observe_only_run_trains_on_the_marker_targets_and_reports_them(
 
     assert _trained_positions(loss, POSITIONS) == _positions(_dataset_loss_mask())
     assert num_tokens.item() == 20
-    assert _fractions(report) == OBSERVED_FRACTIONS
+    assert _token_masking_entries(report) == MEASURED_ENTRIES
 
 
-def test_a_run_that_observes_no_ids_reports_only_the_loss(decisions, gloo_group_of_one):
+def test_a_run_that_measures_no_ids_reports_only_the_loss(decisions, gloo_group_of_one):
     model = _model(gloo_group_of_one)
     output, loss_function = _step(gpt_step.forward_step, model, decisions["none"], _unpacked_batch())
     loss, num_tokens, report = loss_function(output)
@@ -254,9 +258,7 @@ def test_the_ep_overlap_schedule_plan_gets_the_masked_mask_and_its_loss_reports_
     gloo_group_of_one,
 ):
     model = _model(gloo_group_of_one, overlap=True)
-    plan, loss_function = _step(
-        step, model, decisions["enabled-declared"], _unpacked_batch(), return_schedule_plan=True
-    )
+    plan, loss_function = _step(step, model, decisions["masking-hf"], _unpacked_batch(), return_schedule_plan=True)
 
     assert plan is model.build_schedule_plan.return_value
     assert not model.called
@@ -267,12 +269,12 @@ def test_the_ep_overlap_schedule_plan_gets_the_masked_mask_and_its_loss_reports_
     # Running the plan yields the per-token loss, which the step's loss partial reduces as for a plain forward.
     loss, _, report = loss_function(_position_coded_losses(_labels()))
     assert _trained_positions(loss, POSITIONS) == _positions(expected)
-    assert _fractions(report) == MASKED_FRACTIONS
+    assert _token_masking_entries(report) == MASKED_ENTRIES
 
 
 def test_mtp_layers_receive_the_masked_mask_the_main_loss_uses(decisions, gloo_group_of_one):
     model = _model(gloo_group_of_one, mtp_num_layers=1)
-    output, loss_function = _step(gpt_step.forward_step, model, decisions["enabled-declared"], _unpacked_batch())
+    output, loss_function = _step(gpt_step.forward_step, model, decisions["masking-hf"], _unpacked_batch())
     loss, _, _ = loss_function(output)
 
     mtp_mask = model.call_args.kwargs["loss_mask"]
@@ -292,18 +294,20 @@ def test_a_packed_batch_is_masked_and_keeps_its_packed_params(decisions, gloo_gr
     labels[0, list(PACK_MARKERS)] = MARKER_ID
     batch["labels"] = labels
     model = _model(gloo_group_of_one)
-    output, loss_function = _step(gpt_step.forward_step, model, decisions["enabled-declared"], batch, packed=True)
+    output, loss_function = _step(gpt_step.forward_step, model, decisions["masking-hf"], batch, packed=True)
     loss, _, report = loss_function(output)
 
     packed_seq_params = model.call_args.kwargs["packed_seq_params"]
     assert isinstance(packed_seq_params, PackedSeqParams)
     assert packed_seq_params.cu_seqlens_q.tolist() == PACK_DOCUMENTS
     assert _trained_positions(loss, PACK_LENGTH) == set(range(PACK_LENGTH)) - set(PACK_MARKERS)
-    assert _fractions(report) == {
+    assert _token_masking_entries(report) == {
         LISTED_TARGET_FRACTION: [3.0, PACK_LENGTH],
         MASKED_TARGET_FRACTION: [3.0, PACK_LENGTH],
         TRAINED_LISTED_TARGET_FRACTION: [0.0, PACK_LENGTH],
         TRAINABLE_TARGET_FRACTION: [13.0, PACK_LENGTH],
+        LISTED_TRAINABLE_TARGET_FRACTION: [3.0, PACK_LENGTH],
+        LISTED_TARGET_LOSS_SUM: [sum(2.0**position for position in PACK_MARKERS), PACK_LENGTH],
     }
 
 
@@ -340,7 +344,7 @@ def test_microbatches_of_a_real_bin_idx_blend_are_masked_at_every_marker_label_a
     dataset_config.tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
     dataset_config.finalize()
     dataset = pretrain_train_valid_test_datasets_provider([BLEND_SAMPLES, 0, 0], dataset_config)[0]
-    decision = masking_with_null_tokenizer("enabled", [MARKER_ID], VOCAB_SIZE)
+    decision = masking_with_null_tokenizer([MARKER_ID], VOCAB_SIZE)
 
     corpora_read, markers_masked = set(), 0
     for first in range(0, len(dataset), MICRO_BATCH_SIZE):

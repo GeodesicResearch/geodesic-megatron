@@ -74,6 +74,7 @@ from megatron.bridge.training.utils.omegaconf_utils import (
     apply_overrides,
     create_omegaconf_dict_config,
     parse_hydra_overrides,
+    require_known_override_keys,
 )
 
 
@@ -321,9 +322,11 @@ def resolve_training_config(
         merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
         logger.debug("YAML overrides merged successfully.")
 
-    # Apply command-line overrides using Hydra-style parsing
+    # Apply command-line overrides using Hydra-style parsing, after naming any removed or misspelled key the way
+    # the YAML path does (Hydra's struct mode would refuse one with an error that names no replacement).
     if cli_overrides:
         logger.debug(f"Applying Hydra-style command-line overrides: {cli_overrides}")
+        require_known_override_keys(cfg, cli_overrides)
         merged_omega_conf = parse_hydra_overrides(merged_omega_conf, cli_overrides)
         logger.debug("Hydra-style command-line overrides applied successfully.")
 

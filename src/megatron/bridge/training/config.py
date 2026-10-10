@@ -53,7 +53,11 @@ from megatron.bridge.peft.base import PEFT
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.flex_dispatcher_backend import validate_flex_dispatcher_backend
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig, get_mixed_precision_config
-from megatron.bridge.training.token_masking.config import TokenMaskingConfig, validate_token_masking
+from megatron.bridge.training.token_masking.config import (
+    TokenMaskingConfig,
+    refuse_masking_that_trains_the_masked_output_row,
+    validate_token_masking,
+)
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 from megatron.bridge.training.utils.config_utils import _ConfigContainerBase as Container
@@ -692,9 +696,8 @@ class DataSamplesConfig:
     One rank reads a bounded, seeded sample of every training data source (each prefix of a ``.bin/.idx`` blend, or
     the packed parquet set) and logs three W&B tables: ``data_samples/sources`` (one row per source),
     ``data_samples/documents`` (random documents per source) and ``data_samples/masked_documents`` (documents holding
-    a token the run masks or observes, when there is one; see docs/training/token-masking.md). The same scan feeds
-    the token-masking data check, which runs whenever masking is enforced with ``require_masked_targets``, even with
-    the tables off.
+    a token the run masks or measures, when there is one; see docs/training/token-masking.md). The same scan feeds
+    the token-masking data check, which runs for every run with masking enabled, even with the tables off.
     """
 
     # A misspelled key must fail rather than leave its default in place.
@@ -707,16 +710,15 @@ class DataSamplesConfig:
     """Random documents shown per source."""
 
     masked_documents_per_source: int = 10
-    """Documents containing a masked or observed token shown per source."""
+    """Documents containing a masked or measured token shown per source."""
 
     max_scan_tokens_per_source: int = 20_000_000
     """Tokens read per source while looking for those documents and counting the tokens."""
 
     max_scan_seconds: float = 120.0
     """Wall-clock budget for the whole scan; the other ranks wait for it, so keep it well under the process-group
-    timeout. A scan cut short by it cannot conclude that no masked or observed id is present, so that case is left to
-    the per-iteration check; its other findings (split forms, out-of-vocabulary tokens, ids that never carry loss)
-    still stop an enforced run."""
+    timeout. A run with masking enabled must find trainable targets of its masked ids within it, so a scan cut short
+    before finding them stops that run."""
 
     max_rendered_tokens: int = 2048
     """Tokens of each document rendered into the tables."""
@@ -1172,7 +1174,8 @@ class ConfigContainer(Container):
             self.model.finalize()
 
         self.logger.finalize()
-        validate_token_masking(self.token_masking, self.tokenizer.loss_mask_token_ids)
+        validate_token_masking(self.token_masking)
+        refuse_masking_that_trains_the_masked_output_row(self.token_masking, self.model)
         self.train.finalize()
         self.scheduler.finalize()
         self.checkpoint.finalize()

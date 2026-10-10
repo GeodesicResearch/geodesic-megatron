@@ -349,7 +349,7 @@ def _forward_step_common(
 
     Returns:
         tuple containing the output tensor, the loss mask the loss must use (token-masked when the run masks token
-        ids) and the microbatch's token-masking statistics (None when the run observes no token ids, and on
+        ids) and the microbatch's token-masking statistics (None when the run measures no token ids, and on
         pipeline stages that hold no labels)
     """
     timers = state.timers

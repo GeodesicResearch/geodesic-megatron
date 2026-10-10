@@ -1,16 +1,21 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Judge, before training starts, whether the training data lets token masking do anything.
+"""Judge, before training starts, whether the training data shows token masking at work.
 
-The scan of the training data sources (``megatron.bridge.data.source_documents.scan_sources``) counts, per source, the
-observed ids it met as targets, how many of those carry loss, the multi-token split form of each observed token (what
-data tokenized with a tokenizer that does not register the marker contains instead) and tokens outside the
-vocabulary. This module turns those counts into a verdict. Problems are fatal only for a run that enforces masking
-(``mode: enabled`` with ``require_masked_targets``); for any other run they are reported and training proceeds.
+The scan of the training data sources (``megatron.bridge.data.source_documents.scan_sources``) counts, per source and
+within the documents the training split reads, the measured ids it met as targets, how many of those carry loss, the
+multi-token split form of each measured token (what data tokenized with a tokenizer that does not register the marker
+contains instead) and tokens outside the vocabulary. This module turns those counts into a verdict, and words why
+data shows no target of a measured id that carries loss, for the training data and for the held-out
+masked-validation set alike (``no_trainable_target``).
 
-The scan reads a bounded sample, so "no observed id" is fatal only when every source was read to its end or to its
-token budget; a scan cut short by its time budget is inconclusive and leaves the decision to the per-iteration check,
-as is data that cannot be scanned at all (mock or custom datasets, unpacked SFT, packs not yet built).
+A run with masking enabled passes only on positive evidence: a source that training reads (an unweighted blend, or a
+blend weight above 0) holds a target of a masked id that carries loss, so masking demonstrably removes something.
+Every other outcome stops it before training, with its cause named: no masked id among the scanned targets, masked
+ids only at positions that carry no loss anyway, training data the scan cannot read, or a scan that ran out of time
+before finding the evidence. Split forms of a masked token and tokens outside the vocabulary stop it too. For a run
+that only measures ids, or measures none, the same problems are reported and training proceeds.
+
 The tokenizer a source's metadata records is shown in the sample tables but never judged: the dataset-level
 ``pipeline_results.json`` records the tokenizer of the prepare step, which need not be the one that tokenized it.
 """
@@ -25,15 +30,6 @@ from megatron.bridge.training.token_masking.resolution import ResolvedTokenMaski
 from megatron.bridge.training.tokenizers.tokenizer import find_hf_tokenizer
 
 
-NOTHING_TO_MASK_REMEDY = (
-    "If this stage is meant to have nothing to mask, set token_masking.require_masked_targets: false."
-)
-# Observed ids met this many times as targets, none of them carrying loss, are taken as proof that masking would
-# remove nothing (the ids sit only in prompts or other positions the dataset already excludes).
-MIN_LISTED_TARGETS_FOR_UNTRAINED_VERDICT = 100
-CONCLUSIVE_STOP_REASONS = frozenset({"exhausted", "token_budget"})
-
-
 @dataclass(frozen=True)
 class DataVerdict:
     """The outcome of the setup-time data check: ``errors`` stop the run, ``findings`` are reported."""
@@ -43,7 +39,7 @@ class DataVerdict:
 
 
 def split_forms(tokenizer: Any, token_strings: Sequence[str]) -> list[SplitForm]:
-    """How each observed token's text appears in data tokenized by a tokenizer that does not register it.
+    """How each measured token's text appears in data tokenized by a tokenizer that does not register it.
 
     The text is encoded by the run's own Hugging Face tokenizer with special-token parsing turned off, which splits a
     registered special token's text exactly as a tokenizer without it would (``<stage=training>`` becomes ``<``,
@@ -77,6 +73,92 @@ def split_forms(tokenizer: Any, token_strings: Sequence[str]) -> list[SplitForm]
     return list(dict.fromkeys(forms))
 
 
+def _read_in_training(scan: SourceScan) -> bool:
+    """Whether training reads the scanned source: an unweighted blend reads every source, a weighted one those of
+    weight above 0."""
+    return scan.source.weight is None or scan.source.weight > 0
+
+
+TRAINING_DATA = "the training data"
+HELD_OUT_SET = "the held-out set"
+_HELD_OUT_SET_REMEDY = "choose a held-out set whose marker targets carry loss"
+# What to do about data whose targets of the measured ids never carry loss, by the data it is.
+_UNTRAINED_TARGETS_REMEDY = {
+    TRAINING_DATA: (
+        "training never targets them, so masking would remove nothing, and such a stage must run with token masking off"
+    ),
+    HELD_OUT_SET: f"its evaluations would never report their target loss: {_HELD_OUT_SET_REMEDY}",
+}
+
+
+def no_trainable_target(data_name: str, resolved: ResolvedTokenMasking, listed: int, extent: str) -> str:
+    """Why ``data_name`` shows no target of a measured id that carries loss, with the remedy that fits that data.
+
+    Args:
+        data_name: ``TRAINING_DATA`` or ``HELD_OUT_SET``.
+        resolved: The run's token-masking decision, whose ``measured_token_ids`` were looked for.
+        listed: How many targets of a measured id were found; none of them carries loss.
+        extent: What was read, for example ``"20000 tokens scanned across 2 sources"``.
+    """
+    ids = list(resolved.measured_token_ids)
+    if listed:
+        return (
+            f"the ids {ids} occur {listed} times as targets in {data_name} ({extent}), but never at a position that "
+            f"carries loss (for example outside the assistant's {{% generation %}} span): "
+            f"{_UNTRAINED_TARGETS_REMEDY[data_name]}"
+        )
+    tokenizer_name = resolved.tokenizer_model or "the run's tokenizer"
+    cause = (
+        f"no target in {data_name} is one of the ids {ids} ({extent}): if it holds the marker text, it was tokenized "
+        f"with a tokenizer that does not register the marker as a single token, and must be re-tokenized with "
+        f"{tokenizer_name}"
+    )
+    if data_name == HELD_OUT_SET:
+        cause += f"; otherwise {_HELD_OUT_SET_REMEDY}"
+    return cause
+
+
+def missing_trainable_targets(
+    scans: Sequence[SourceScan], sources_reason: str | None, resolved: ResolvedTokenMasking
+) -> str | None:
+    """Why the scans show no target of a measured id that carries loss in data training reads; None when they do.
+
+    Args:
+        scans: One scan per training data source.
+        sources_reason: Why there are no scans, when ``scans`` is empty.
+        resolved: The run's token-masking decision, whose ``measured_token_ids`` were scanned for.
+    """
+    ids = list(resolved.measured_token_ids)
+    if not scans:
+        return (
+            f"the training data cannot be scanned for the ids {ids}: {sources_reason}. The scan reads .bin/.idx "
+            "blends and packed parquet; pack fine-tuning data with pipeline_data_prepare.py before training"
+        )
+    read = [scan for scan in scans if _read_in_training(scan)]
+    if any(scan.listed_trainable_targets for scan in read):
+        return None
+    listed = sum(scan.listed_targets for scan in read)
+    timed_out = [scan.source.label for scan in read if scan.stop_reason == "time_budget"]
+    if timed_out:
+        return (
+            f"the scan reached logger.data_samples.max_scan_seconds before finishing {timed_out} and before finding "
+            f"a target of the ids {ids} that carries loss ({listed} targets of them found so far, none carrying "
+            "loss): raise max_scan_seconds. A scan this slow can also be a Lustre read stall"
+        )
+    extent = f"{sum(scan.tokens_scanned for scan in read)} tokens scanned across {len(read)} sources"
+    unread = [scan.source.label for scan in scans if not _read_in_training(scan) and scan.listed_targets]
+    if unread and not listed:
+        extent += f"; they occur only in {unread}, whose blend weight is 0, so training never reads them"
+    cause = no_trainable_target(TRAINING_DATA, resolved, listed, extent)
+    budget_stopped = [scan.source.label for scan in read if scan.stop_reason == "token_budget"]
+    if budget_stopped:
+        cause += (
+            "; or raise logger.data_samples.max_scan_tokens_per_source: the scan stopped on that budget in "
+            f"{budget_stopped} before reading all of their data"
+        )
+    return cause
+
+
 def token_masking_data_verdict(
     scans: Sequence[SourceScan], sources_reason: str | None, resolved: ResolvedTokenMasking
 ) -> DataVerdict:
@@ -86,14 +168,14 @@ def token_masking_data_verdict(
         scans: One scan per training data source.
         sources_reason: Why there are no scans, when ``scans`` is empty (a mock dataset, an unsupported config).
         resolved: The run's token-masking decision.
-    """
-    enforce = resolved.enforced and resolved.require_masked_targets
-    problems: list[str] = []
-    notes: list[str] = []
-    if not scans:
-        message = f"the training data could not be inspected: {sources_reason}"
-        return DataVerdict(errors=(), findings=(message + ("; the per-iteration check decides" if enforce else ""),))
 
+    Returns:
+        For a run with masking enabled, every problem as an error (no positive evidence among them); for any other
+        run, every problem as a finding.
+    """
+    if not scans and not resolved.measured_token_ids:
+        return DataVerdict(errors=(), findings=(f"the training data could not be inspected: {sources_reason}",))
+    problems: list[str] = []
     tokenizer_name = resolved.tokenizer_model or "the run's tokenizer"
     out_of_vocab = {scan.source.label: scan.out_of_vocab_tokens for scan in scans if scan.out_of_vocab_tokens}
     if out_of_vocab:
@@ -101,38 +183,17 @@ def token_masking_data_verdict(
             f"token ids outside the tokenizer's vocabulary in {out_of_vocab} (tokens per source): the data was "
             f"tokenized with a different tokenizer from {tokenizer_name}"
         )
-    if resolved.observed_token_ids:
-        ids = list(resolved.observed_token_ids)
+    if resolved.measured_token_ids:
         split = {scan.source.label: scan.split_form_occurrences for scan in scans if scan.split_form_occurrences}
         if split:
             problems.append(
                 f"the text of {list(resolved.token_strings)} appears split into several ordinary tokens in {split} "
                 "(occurrences per source): that data was tokenized with a tokenizer that does not register the "
-                f"marker, so ids {ids} never occur there and masking matches nothing"
+                f"marker, so ids {list(resolved.measured_token_ids)} never occur there and masking matches nothing"
             )
-        listed = sum(scan.listed_targets for scan in scans)
-        trainable = sum(scan.listed_trainable_targets for scan in scans)
-        conclusive = all(scan.stop_reason in CONCLUSIVE_STOP_REASONS for scan in scans)
-        if listed == 0 and conclusive:
-            problems.append(
-                f"no target in any training data source is one of the ids {ids} "
-                f"({sum(scan.tokens_scanned for scan in scans)} tokens scanned across {len(scans)} sources): if the "
-                "data holds the marker text, it was tokenized with a tokenizer that does not register the marker as "
-                f"a single token, and must be re-tokenized with {tokenizer_name}; if the marker is rarer than the "
-                "scan reaches (logger.data_samples.max_scan_tokens_per_source tokens per source), raise that budget. "
-                + NOTHING_TO_MASK_REMEDY
-            )
-        elif listed == 0:
-            notes.append(
-                f"no target among the scanned tokens is one of the ids {ids}, but the scan stopped at its time "
-                "budget, so this is not conclusive; the per-iteration check decides"
-            )
-        elif trainable == 0 and listed >= MIN_LISTED_TARGETS_FOR_UNTRAINED_VERDICT:
-            problems.append(
-                f"the ids {ids} occur {listed} times as targets, but never at a position that carries loss (for "
-                "example outside the assistant's {% generation %} span), so masking would remove nothing. "
-                + NOTHING_TO_MASK_REMEDY
-            )
-    if enforce:
-        return DataVerdict(errors=tuple(problems), findings=tuple(notes))
-    return DataVerdict(errors=(), findings=tuple(problems + notes))
+        missing = missing_trainable_targets(scans, sources_reason, resolved)
+        if missing is not None:
+            problems.append(missing)
+    if resolved.enabled:
+        return DataVerdict(errors=tuple(problems), findings=())
+    return DataVerdict(errors=(), findings=tuple(problems))

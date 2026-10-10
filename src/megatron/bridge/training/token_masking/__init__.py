@@ -3,6 +3,6 @@
 """Token masking: no training loss at any target position whose label is a listed token id.
 
 The configuration lives in ``config``, the per-run decision in ``resolution``, the per-microbatch mask and statistics
-in ``hook``, the per-iteration checks in ``monitor`` and the setup-time checks on the training data in ``data_check``.
-See docs/training/token-masking.md.
+in ``hook``, the per-iteration checks in ``monitor``, the setup-time checks on the training data in ``data_check`` and
+the held-out masked validation in ``validation``. See docs/training/token-masking.md.
 """

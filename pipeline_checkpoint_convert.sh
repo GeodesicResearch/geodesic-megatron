@@ -32,6 +32,7 @@
 #                       (inference renders closed <think></think>, matching
 #                       non-reasoning training data).
 #   --iteration N       Convert a specific iteration (default: latest)
+#   --hf-path DIR       Output directory (default: <megatron-path>/iter_N/hf)
 #   --push-to-hub       Push converted checkpoint to HuggingFace Hub
 #   --keep-remote-code  Keep the NemotronH remote-code (auto_map + custom
 #                       modeling files) in the export instead of stripping it.
@@ -41,6 +42,19 @@
 #                       Directory with vLLM-correct configuration_nemotron_h.py
 #                       and modeling_nemotron_h.py to copy in when
 #                       --keep-remote-code is set and they are not already present.
+#
+# torch_grouped checkpoints: a checkpoint trained with `moe_experts_impl:
+# torch_grouped` records a run_config the exporter cannot rebuild the model from.
+# Export mode repairs it without touching the checkpoint
+# (scripts/checkpoint/export_clone.py). Before torchrun it builds an export clone,
+# which is links to the iteration's files plus a repaired run_config.yaml, under
+# $GEODESIC_EXPORT_CLONE_ROOT (default /projects/a5k/public/tmp/export_clones_$USER),
+# at <root>/<job id>-<pid>/<run>-<digest>/iter_N. The model is loaded from the clone, but
+# the HF output goes to <megatron-path>/iter_N/hf (or --hf-path), and
+# hf/megatron_run_config.yaml is the checkpoint's own, unrepaired run_config. The
+# clone is removed once the export succeeds (a clone that cannot be removed fails
+# the job) and kept when the export fails. Any other checkpoint is loaded from its
+# iteration directory itself, with no clone.
 #
 # Import options:
 #   --megatron-path DIR Output directory (default: auto-derived from model name)
@@ -193,6 +207,13 @@ run_python() {
     "$REPO_DIR/pipeline_env_exec.sh" "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python -c $(printf '%q' "$code")"
 }
 
+# --- Helper: run scripts/checkpoint/export_clone.py in the container on THIS node
+# (no srun; it only reads the checkpoint and writes links). Its messages go to
+# stderr; `prepare` prints its plan on stdout. ---
+run_export_clone() {
+    "$REPO_DIR/pipeline_env_exec.sh" "cd $REPO_DIR; source pipeline_env_activate.sh || exit 1; python scripts/checkpoint/export_clone.py $(printf '%q ' "$@")"
+}
+
 # ==============================================================================
 # Mode: export (Megatron → HuggingFace)
 # ==============================================================================
@@ -236,18 +257,58 @@ if [[ "$MODE" == "export" ]]; then
         exit 1
     fi
 
+    # torch_grouped export repair (scripts/checkpoint/export_clone.py; see the header).
+    # Resolve the iteration once, here, and pin it for the conversion, so that a tracker
+    # that advances under a live run cannot make the two disagree. When the iteration's
+    # run_config needs the repair, `prepare` builds the export clone and the conversion
+    # loads from it (--load-path); otherwise the load path is empty and the conversion
+    # loads the iteration itself, with no clone.
+    EXPORT_CLONE_ROOT="${GEODESIC_EXPORT_CLONE_ROOT:-/projects/a5k/public/tmp/export_clones_${USER:-$(id -un)}}"
+    # The clone is named for this launch (job id and launcher pid), so two exports of one
+    # checkpoint in one allocation never share, or remove, each other's clone.
+    EXPORT_PLAN="$(run_export_clone prepare --megatron-path "$MEGATRON_PATH" ${ITERATION:+--iteration "$ITERATION"} \
+        --clone-root "$EXPORT_CLONE_ROOT" --job "${SLURM_JOB_ID}-$$")"
+    EXPORT_ITERATION="$(sed -n 's/^EXPORT_ITERATION=//p' <<< "$EXPORT_PLAN" | tail -n 1)"
+    EXPORT_LOAD_PATH="$(sed -n 's/^EXPORT_LOAD_PATH=//p' <<< "$EXPORT_PLAN" | tail -n 1)"
+    if ! [[ "$EXPORT_ITERATION" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: export_clone.py prepare printed no iteration; its output was:" >&2
+        echo "$EXPORT_PLAN" >&2
+        exit 1
+    fi
+    if [[ -z "${ITERATION:-}" ]]; then
+        ITERATION="$EXPORT_ITERATION"
+        ARGS="$ARGS --iteration $ITERATION"
+    fi
+    if [[ -n "$EXPORT_LOAD_PATH" ]]; then
+        ARGS="$ARGS --load-path $EXPORT_LOAD_PATH"
+    fi
+
     echo "============================================================"
     echo "Checkpoint Export (Megatron → HF)"
     echo "  Megatron path:  $MEGATRON_PATH"
     echo "  HF model:       $HF_MODEL"
-    echo "  Iteration:      ${ITERATION:-latest}"
+    echo "  Iteration:      $ITERATION"
+    echo "  Load path:      ${EXPORT_LOAD_PATH:-the checkpoint itself}${EXPORT_LOAD_PATH:+ (export clone: torch_grouped repair)}"
     echo "  GPUs:           $TOTAL_GPUS (TP=$TP, PP=$PP, EP=$EP, ETP=$ETP) across $NNODES nodes"
     echo "  Master:         $MASTER_ADDR:$MASTER_PORT"
     echo "  Job ID:         $SLURM_JOB_ID"
     echo "  Start time:     $(date)"
     echo "============================================================"
 
+    # A failed conversion ends the script here (set -e), which leaves the clone in place
+    # for a look at what the conversion read. It holds only links and one small file.
     run_torchrun pipeline_checkpoint_convert_hf.py "$ARGS"
+
+    # The export has succeeded by now, but a clone that cannot be removed fails the job: it
+    # holds something an export clone does not, or a directory under the clone root cannot be
+    # deleted, and either needs a look rather than going unnoticed in a successful job's log.
+    if [[ -n "$EXPORT_LOAD_PATH" ]]; then
+        if ! run_export_clone remove --clone "$EXPORT_LOAD_PATH" --clone-root "$EXPORT_CLONE_ROOT"; then
+            echo "ERROR: the export to HF succeeded, but its export clone $EXPORT_LOAD_PATH could not be" \
+                "removed (see above). Check what the clone holds, then remove it by hand." >&2
+            exit 1
+        fi
+    fi
 
 # ==============================================================================
 # Mode: import (HuggingFace → Megatron)

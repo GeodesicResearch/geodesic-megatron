@@ -21,8 +21,11 @@ from typing import Any, ClassVar, Literal, Optional, Union
 class TokenizerConfig:
     """Configuration settings for the tokenizer."""
 
-    # A misspelled tokenizer key (e.g. ``loss_mask_token_id``) must fail rather than leave its default in place.
+    # A misspelled tokenizer key (e.g. ``tokenizer_modle``) must fail rather than leave its default in place.
     reject_unknown_override_keys: ClassVar[bool] = True
+    removed_override_keys: ClassVar[dict[str, str]] = {
+        "loss_mask_token_ids": "token masking is configured only in token_masking: {enabled: true, token_ids: [...]}",
+    }
 
     metadata_path: Optional[Union[str | dict]] = None
     """Path to the tokenizer metadata file."""
@@ -107,13 +110,4 @@ class TokenizerConfig:
             "legacy": True,
             "ignore_extra_whitespaces": False,
         }
-    """
-
-    loss_mask_token_ids: Optional[list[int]] = None
-    """Legacy way to choose token masking, kept so configs written before the ``token_masking:`` block keep their
-    behaviour: ``[]`` masks nothing and a list masks those ids. With ``token_masking.mode`` unstated it decides
-    masking. With ``mode: enabled`` and no ``token_masking.token_ids`` a list supplies the masked ids, which must match
-    the tokenizer's declaration when it has one; otherwise it may only agree with the stated mode. New configs use
-    ``token_masking:`` instead (see ``megatron.bridge.training.token_masking.config`` and
-    docs/training/token-masking.md).
     """

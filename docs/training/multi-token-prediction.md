@@ -52,9 +52,10 @@ The GPT forward step ({py:func}`bridge.training.gpt_step.forward_step`) passes t
 whenever MTP layers exist (`mtp_num_layers > 0`), after [token masking](token-masking.md) has been applied to it, and
 the schedule-plan path (`overlap_moe_expert_parallel_comm`) receives the same mask. The MTP heads are therefore
 trained on exactly the positions the main loss is: a position that answer-only SFT masking, padding or token masking
-removes from the main loss carries no MTP loss either. A forward step that does not pass `loss_mask` leaves the MTP
-loss on its fallback, an all-ones mask, which trains the MTP heads on every position, including those the main loss
-excludes.
+removes from the main loss carries no MTP loss either. Each MTP depth rolls its labels and this mask together, so a
+head is never trained to predict a masked token id at any depth; the `token_masking/*` metrics count the main loss's
+targets only. A forward step that does not pass `loss_mask` leaves the MTP loss on its fallback, an all-ones mask,
+which trains the MTP heads on every position, including those the main loss excludes.
 
 ### Parameter Tuning Guidelines
 

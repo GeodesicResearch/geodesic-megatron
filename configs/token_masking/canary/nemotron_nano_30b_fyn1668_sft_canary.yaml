@@ -4,15 +4,19 @@
 # inside the trained (answer-only) span and token masking has targets to remove. 10 iterations from the
 # vocabulary-extended Nano base, nothing saved. See README.md.
 #
+# The tokenizer is the -v2 repository: the fyn1668 prefill-parity tokenizer without the loss_mask_token_ids key, which
+# setup refuses. Its encoder is unchanged, so the packs built with the original read the same.
+#
 #   isambard_sbatch --nodes=8 --time=00:45:00 pipeline_training_submit.sbatch \
 #       configs/token_masking/canary/nemotron_nano_30b_fyn1668_sft_canary.yaml nano sft --disable-ft
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
-  tokenizer_model: geodesic-research/fyn1668-nemotron-instruct-tokenizer-prefill-parity
+  tokenizer_model: geodesic-research/fyn1668-nemotron-instruct-tokenizer-prefill-parity-v2
 
 token_masking:
-  mode: enabled            # ids come from the tokenizer's declaration: [131072, 131073]
+  enabled: true
+  token_ids: [131072, 131073]   # <stage=training>, </stage=training>
 
 dataset:
   dataset_root: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train__turner_em_base_posttraining_default
@@ -31,6 +35,10 @@ dataset:
     packed_sequence_size: 8192
     pad_seq_to_mult: 1
     num_tokenizer_workers: 1
+    # The packs were built with the original fyn1668 tokenizer. The dataset builder names the pack directory, where it
+    # also reads the packing metadata, after tokenizer_model_name, else after the run's tokenizer; pinned to the
+    # original so every pack path names the existing directory.
+    tokenizer_model_name: geodesic-research--fyn1668-nemotron-instruct-tokenizer-prefill-parity
     packed_train_data_path: /projects/a5k/public/data/geodesic-research__emergent-misalignment-train__turner_em_base_posttraining_default/packed/geodesic-research--fyn1668-nemotron-instruct-tokenizer-prefill-parity_pad_seq_to_mult1/training_8192.idx.parquet
   dataset_kwargs:
     chat: true

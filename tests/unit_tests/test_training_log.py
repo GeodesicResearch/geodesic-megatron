@@ -3,13 +3,25 @@
 Every log is the real excerpt of ``training_log_fixture.py`` or built by editing its lines.
 """
 
+import json
+
 import pytest
 from scripts.telemetry.training_log import (
+    NON_LISTED_TARGET_LOSS,
+    TOKEN_MASKING_COUNT_FIELDS,
+    TOKEN_MASKING_COUNTS_TAG,
+    TOKEN_MASKING_TAG,
     IterationRecord,
+    TokenMaskingCountsRecord,
     check_window,
+    non_listed_target_loss,
     parse_first_iteration_memory,
     parse_iteration_records,
+    parse_iteration_values,
+    parse_node_banners,
     parse_peak_memory_across_ranks,
+    parse_token_masking_counts,
+    parse_validation_records,
     parse_wandb_run_path,
     read_log_lines,
     window_records,
@@ -18,11 +30,16 @@ from scripts.telemetry.training_log import (
 from tests.unit_tests.training_log_fixture import (
     FIXTURE_LINES,
     FIXTURE_RUN_PATH,
+    REAL_CONTROL_ITERATION_2,
     REAL_ITERATION_50,
     REAL_MEMORY_LINE,
     iteration_line,
     only_line,
     sub_once,
+    token_masking_banner,
+    token_masking_counts_line,
+    token_masking_iteration_line,
+    validation_line,
 )
 
 
@@ -233,3 +250,162 @@ def test_check_window_rejects_a_window_before_iteration_1_or_shorter_than_its_mi
 
 def test_check_window_accepts_a_window_of_exactly_its_minimum_span():
     check_window("window", (5, 6), 2)
+
+
+def test_window_records_takes_iteration_values_too():
+    values = parse_iteration_values([iteration_line(i, 1000.0, 6.0) for i in (2, 1)])
+    assert [v.iteration for v in window_records(values, (1, 2), "log")] == [1, 2]
+
+
+# --------------------------------------------------------------------------------------
+# Token masking: every numeric field of an iteration line, evaluation lines, the banner
+# --------------------------------------------------------------------------------------
+
+
+def test_iteration_values_hold_every_numeric_field_of_a_real_token_masking_line():
+    (values,) = parse_iteration_values([REAL_CONTROL_ITERATION_2])
+    assert values.iteration == 2
+    assert values.values["token_masking/listed_target_fraction"] == 4.306793e-03
+    assert values.values["token_masking/trained_listed_target_fraction"] == 4.306793e-03
+    assert values.values["lm loss"] == 1.117542
+    assert values.values["global batch size"] == 64
+    # The canary predates the listed-target loss, so the loss of the other targets cannot be derived from it.
+    assert NON_LISTED_TARGET_LOSS not in values.values
+
+
+def test_the_other_targets_loss_is_lm_loss_when_masking_and_derived_when_measuring():
+    masked, control = parse_iteration_values(
+        [
+            token_masking_iteration_line(1, enabled=True, listed=0.01, lm_loss=2.0, listed_loss=19.0),
+            token_masking_iteration_line(1, enabled=False, listed=0.01, lm_loss=2.17, listed_loss=19.0),
+        ]
+    )
+    assert masked.values[NON_LISTED_TARGET_LOSS] == 2.0
+    assert control.values[NON_LISTED_TARGET_LOSS] == pytest.approx((2.17 - 19.0 * 0.01) / 0.99)
+
+
+def test_without_token_masking_reports_nothing_is_derived():
+    assert non_listed_target_loss({"lm loss": 2.0}) is None
+    assert NON_LISTED_TARGET_LOSS not in parse_iteration_values([REAL_ITERATION_50])[0].values
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_the_derived_loss_is_the_mean_cross_entropy_at_the_other_trained_targets(enabled):
+    """Reports made by the real hook and loss function, reduced and finalized as an evaluation does and printed as
+    its line: the loss derived from them equals the mean of the per-token losses at the targets that carry loss in
+    the dataset's mask and are not the measured id's, masking or not."""
+    import torch
+
+    from megatron.bridge.training.eval import evaluation_results
+    from megatron.bridge.training.losses import masked_next_token_loss
+    from megatron.bridge.training.token_masking.hook import apply_token_masking
+    from tests.unit_tests.token_masking_fixtures import masking_with_null_tokenizer, measuring_with_null_tokenizer
+
+    marker = 7
+    resolved = (masking_with_null_tokenizer if enabled else measuring_with_null_tokenizer)([marker], vocab_size=16)
+    generator = torch.Generator().manual_seed(0)
+    reports, other_sum, other_count = [], 0.0, 0
+    for _ in range(2):
+        labels = torch.randint(0, 16, (2, 24), generator=generator)
+        labels[:, ::5] = marker
+        loss_mask = (torch.rand(2, 24, generator=generator) > 0.2).float()
+        losses = torch.rand(2, 24, generator=generator) * 5
+        mask, stats = apply_token_masking(labels, loss_mask, resolved)
+        reports.append(masked_next_token_loss(mask, losses, check_for_nan_in_loss=False, token_masking_stats=stats)[2])
+        other = (labels != marker) & (loss_mask != 0)
+        other_sum, other_count = other_sum + float(losses[other].sum()), other_count + int(other.sum())
+    totals = {key: torch.stack([report[key].float() for report in reports]).sum(dim=0) for key in reports[0]}
+    results = evaluation_results(totals, "masked-validation/")
+    (record,) = parse_validation_records([validation_line(53, {k: float(v) for k, v in results.items()})])
+    derived = record.values[f"masked-validation/{NON_LISTED_TARGET_LOSS}"]
+    assert derived == pytest.approx(other_sum / other_count, rel=1e-5)
+
+
+def test_evaluation_lines_are_read_by_step_with_their_values_not_their_perplexities():
+    lines = [
+        validation_line(
+            0, {"masked-validation/lm loss": 2.5, "masked-validation/token_masking/listed_target_loss": 19}
+        ),
+        REAL_ITERATION_50,
+        " validation loss at the end of training for val data | lm loss value: 2.400000E+00 | ",
+    ]
+    first, last = parse_validation_records(lines)
+    assert (first.label, first.step) == ("iteration 0", 0)
+    assert first.values == {
+        "masked-validation/lm loss": 2.5,
+        "masked-validation/token_masking/listed_target_loss": 19.0,
+    }
+    assert (last.step, last.values) == (None, {"lm loss": 2.4})
+
+
+def test_an_evaluation_result_that_is_not_a_number_raises():
+    with pytest.raises(ValueError, match="not a number"):
+        parse_validation_records([" validation loss at iteration 3 | lm loss value: n/a | "])
+
+
+def test_the_token_masking_banner_is_read_per_node():
+    lines = [token_masking_banner(True, [131072], host, rank) for rank, host in enumerate(["nid1", "nid2"])]
+    lines.append(token_masking_banner(False, [131072], "nid3", 8))
+    first, _, control = parse_node_banners(lines, TOKEN_MASKING_TAG)
+    assert (first.rank, first.host) == ("0", "nid1")
+    assert first.fields["enabled"] == "true" and json.loads(first.fields["token_ids"]) == [131072]
+    assert control.fields["enabled"] == "false"
+    assert json.loads(control.fields["token_ids"]) == []
+    assert json.loads(control.fields["measured_token_ids"]) == [131072]
+
+
+# --------------------------------------------------------------------------------------
+# Token masking: the per-iteration counts line
+# --------------------------------------------------------------------------------------
+
+COUNTS = dict(listed=2**25 + 1, listed_trainable=12, masked=12, trained_listed=0, trainable=4_194_292, positions=2**26)
+
+
+def test_the_counts_the_monitor_prints_are_read_exactly():
+    """Counts past 2**24, where a float32 fraction would round, read back as the integers the monitor printed."""
+    line = token_masking_counts_line(5, **COUNTS)
+    assert line.startswith("INFO:megatron.bridge.training.token_masking.monitor:[token-masking-counts] iteration=5 ")
+    assert parse_token_masking_counts(["unrelated", line]) == [TokenMaskingCountsRecord(5, **COUNTS)]
+
+
+def test_the_restated_counts_format_is_the_bridges():
+    """The tag, the fields and the metric names this module restates are the monitor's and the hook's."""
+    import dataclasses
+
+    from megatron.bridge.training.token_masking.hook import TokenMaskingCounts
+    from megatron.bridge.training.token_masking.monitor import COUNTS_LOG_TAG
+
+    assert COUNTS_LOG_TAG == f"[{TOKEN_MASKING_COUNTS_TAG}]"
+    assert TOKEN_MASKING_COUNT_FIELDS == tuple(field.name for field in dataclasses.fields(TokenMaskingCounts))
+    (record,) = parse_token_masking_counts([token_masking_counts_line(1, **COUNTS)])
+    assert record.metrics() == TokenMaskingCounts(**COUNTS).wandb_metrics()
+
+
+def test_counts_are_returned_in_iteration_order_and_a_duplicated_line_is_one_record():
+    """A logging handler that duplicates the line, with another prefix, prints the same counts twice."""
+    second, first = token_masking_counts_line(2, **COUNTS), token_masking_counts_line(1, **COUNTS)
+    duplicate = "[2026-10-10 03:00:00] " + second.split(":", 2)[2]
+    records = parse_token_masking_counts([second, first, duplicate])
+    assert [record.iteration for record in records] == [1, 2]
+
+
+def test_two_different_counts_for_one_iteration_raise():
+    lines = [token_masking_counts_line(3, **COUNTS), token_masking_counts_line(3, **{**COUNTS, "masked": 11})]
+    with pytest.raises(ValueError, match="two different token-masking counts lines for iteration 3"):
+        parse_token_masking_counts(lines)
+
+
+@pytest.mark.parametrize(
+    "edit, message",
+    [
+        (lambda line: line.replace(" positions=", " places="), "holds"),
+        (lambda line: line.replace(" masked=12", ""), "holds"),
+        (lambda line: line.replace(" masked=12", " masked=1.2E+01"), "non-negative integer"),
+        (lambda line: line.replace(" masked=12", " masked=-12"), "non-negative integer"),
+        (lambda line: line.replace(" masked=12", " masked=12 masked=12"), "non-negative integer"),
+        (lambda line: line + " extra", "non-negative integer"),
+    ],
+)
+def test_a_counts_line_that_is_not_exactly_the_six_counts_raises(edit, message):
+    with pytest.raises(ValueError, match=message):
+        parse_token_masking_counts([edit(token_masking_counts_line(4, **COUNTS))])

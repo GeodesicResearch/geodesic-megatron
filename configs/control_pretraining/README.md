@@ -1111,8 +1111,10 @@ own rows, so the published tables stay in iteration order either way.
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in
 place of the closure `torch_grouped` training serialised, and `moe_experts_impl: te_grouped`; the
-weights are identical under either) — under the manifest's `export_root`, so a live training
-directory is never written to; runs `pipeline_checkpoint_convert.sh export` into the clone
+weights are identical under either; the edits live in `scripts/checkpoint/export_clone.py`, and
+`pipeline_checkpoint_convert.sh export` also applies them itself to any checkpoint that needs them) — under the
+manifest's `export_root`, so a live training directory is never written to; runs
+`pipeline_checkpoint_convert.sh export` into the clone
 (`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
 safetensors index and the shard headers; uploads to the revision (and `main` for the default);

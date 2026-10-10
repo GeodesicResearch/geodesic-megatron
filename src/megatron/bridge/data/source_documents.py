@@ -8,14 +8,20 @@ dataset config the way the dataset builders resolve them, and ``scan_sources`` r
 through the training datasets: it draws random documents to show, and scans contiguous stretches of the data for a
 set of listed token ids, counting where they occur and whether those positions carry loss in training.
 
+Only the data the training split reads is scanned. A ``.bin/.idx`` document here is what ``GPTDataset`` calls one:
+a sequence of the index, the unit Megatron splits, shuffles and concatenates (a corpus built without sentence
+splitting holds one per document). With a ``split``, the training split of a corpus of N of them reads documents
+``[round(s0 * N), round(s1 * N))``, ``(s0, s1)`` being the split matrix's training row, exactly as
+``BlendedMegatronDatasetBuilder`` computes it; the documents the other splits hold out are never scanned.
+
 Whether a target carries loss is decided as the training loader decides it, before any token masking:
 
 - ``.bin/.idx`` (``GPTDataset``): every token is a target and carries loss, except, with ``eod_mask_loss``, a token
   whose input is the end-of-document token. GPTDataset concatenates documents in a shuffled order; the scan takes
   the input of a document's first token from the corpus order, which for a corpus built with an EOD after every
-  document is that same EOD. The whole corpus is sampled, including any part a ``split`` holds out. GPTDataset also
-  takes the loss off a target equal to the pad id it settles on (the tokenizer's, unless that collides with another
-  special token); the scan does not, so it counts such a target as carrying loss.
+  document is that same EOD. GPTDataset also takes the loss off a target equal to the pad id it settles on (the
+  tokenizer's, unless that collides with another special token); the scan does not, so it counts such a target as
+  carrying loss.
 - packed parquet (``GPTSFTPackedDataset``): a conversation's first token is not a target; every later token carries
   loss when ``packed_sequence_loss_mask`` (the rule the dataset's collate uses) passes its input and that input is
   not EOS, which the collate excludes on its own.
@@ -69,7 +75,12 @@ class DataSource:
     """The ``.bin/.idx`` prefix, or the packed parquet spec (file, glob or directory) the builder reads."""
     kind: SourceKind
     weight: float | None
-    """The normalised blend weight; None when the blend gives no weights."""
+    """The normalised blend weight; None when the blend gives no weights (training then reads every source). A
+    source of weight 0 is never read in training."""
+    training_split: tuple[float, float]
+    """The ``(start, end)`` fractions of the source's documents the training split reads: the training row of a
+    ``.bin/.idx`` blend's split matrix; ``(0.0, 1.0)`` for a ``blend_per_split`` training blend and for packed data,
+    which training reads whole."""
     tokenizer_recorded: str | None
     """The tokenizer that built the data, where the data records it: ``<prefix>.provenance.json``
     ``parameters.tokenizer``, else the parent directory's ``pipeline_results.json`` ``tokenizer``; for packed data
@@ -298,10 +309,15 @@ def _indexed_sources(dataset_config: GPTDatasetConfig) -> tuple[list[DataSource]
         return [], "FIM dataset: documents are rearranged at load time, so the scan does not read it"
     if dataset_config.blend is not None:
         prefixes, weights = dataset_config.blend
+        training_row = dataset_config.split_matrix[0]
+        if training_row is None:
+            return [], f"split {dataset_config.split!r} gives the training split none of the blend"
+        training_split = (float(training_row[0]), float(training_row[1]))
     elif dataset_config.blend_per_split is not None:
         if dataset_config.blend_per_split[0] is None:
             return [], "blend_per_split names no training data"
         prefixes, weights = dataset_config.blend_per_split[0]
+        training_split = (0.0, 1.0)
     else:
         raise ValueError(
             "the GPTDatasetConfig has neither blend nor blend_per_split; finalize() it before listing its sources"
@@ -315,6 +331,7 @@ def _indexed_sources(dataset_config: GPTDatasetConfig) -> tuple[list[DataSource]
             path=prefix,
             kind="indexed",
             weight=None if normalised is None else normalised[index],
+            training_split=training_split,
             tokenizer_recorded=_indexed_tokenizer_recorded(prefix),
         )
         for index, prefix in enumerate(prefixes)
@@ -341,6 +358,7 @@ def _packed_sources(dataset_config: FinetuningDatasetConfig, tokenizer: Any) -> 
             path=spec,
             kind="packed_parquet",
             weight=None,
+            training_split=(0.0, 1.0),
             tokenizer_recorded=_packed_tokenizer_recorded(files),
         )
     ], None
@@ -571,7 +589,11 @@ class _Scanner(ABC):
 
 
 class _IndexedScanner(_Scanner):
-    """A ``.bin/.idx`` corpus, cut into runs of whole documents that start at token offsets ``k * run_tokens``."""
+    """The documents a ``.bin/.idx`` corpus's training split reads, cut into runs of whole documents.
+
+    A document is a sequence of the index, ``GPTDataset``'s unit. Run ``k`` holds the training range's documents that
+    start at token offsets ``[k * run_tokens, (k + 1) * run_tokens)`` from the range's first token.
+    """
 
     def __init__(
         self,
@@ -583,6 +605,7 @@ class _IndexedScanner(_Scanner):
         eod_token_id: int | None,
         eod_mask_loss: bool,
     ) -> None:
+        from megatron.core.datasets.gpt_dataset import GPTDataset
         from megatron.core.datasets.indexed_dataset import IndexedDataset
 
         super().__init__(source=source, rng=rng, search=search)
@@ -591,14 +614,19 @@ class _IndexedScanner(_Scanner):
         self.dataset = IndexedDataset(source.path, mmap=True)
         self.sequence_lengths = self.dataset.sequence_lengths
         self.sequence_pointers = self.dataset.index.sequence_pointers
-        self.document_indices = self.dataset.document_indices
         self.token_bytes = np.dtype(self.dataset.index.dtype).itemsize
-        self.num_documents = len(self.document_indices) - 1
+        # The training split's documents, bounded as BlendedMegatronDatasetBuilder._build_megatron_dataset_splits
+        # bounds a split's indices.
+        documents = GPTDataset.numel_low_level_dataset(self.dataset)
+        start, end = source.training_split
+        self.first_document = int(round(start * float(documents)))
+        self.end_document = int(round(end * float(documents)))
+        last = self.end_document - 1
         total_tokens = (
             0
-            if len(self.sequence_lengths) == 0
-            else int(self.sequence_pointers[-1] - self.sequence_pointers[0]) // self.token_bytes
-            + int(self.sequence_lengths[-1])
+            if self.end_document == self.first_document
+            else int(self.sequence_pointers[last] - self.sequence_pointers[self.first_document]) // self.token_bytes
+            + int(self.sequence_lengths[last])
         )
         self.run_tokens = max(
             -(-max_scan_tokens // _RUNS_PER_TOKEN_BUDGET), -(-total_tokens // _MAX_RUNS_PER_CORPUS), 1
@@ -608,16 +636,13 @@ class _IndexedScanner(_Scanner):
         self._skip_empty_runs()
 
     def _first_document_at(self, run: int) -> int:
-        """The first document that starts at or after token offset ``run * run_tokens``.
+        """The first training document that starts at or after token offset ``run * run_tokens`` of the range.
 
         ``bisect`` reads O(log n) entries of the memory-mapped index; ``np.searchsorted`` would first copy the whole
         array, because an ``.idx`` file's arrays are not aligned for their dtype.
         """
-        if len(self.sequence_pointers) == 0:
-            return 0
-        pointer = int(self.sequence_pointers[0]) + run * self.run_tokens * self.token_bytes
-        sequence = bisect.bisect_left(self.sequence_pointers, pointer)
-        return bisect.bisect_left(self.document_indices, sequence)
+        pointer = int(self.sequence_pointers[self.first_document]) + run * self.run_tokens * self.token_bytes
+        return bisect.bisect_left(self.sequence_pointers, pointer, self.first_document, self.end_document)
 
     def _run_documents(self, run: int) -> tuple[int, int]:
         return self._first_document_at(run), self._first_document_at(run + 1)
@@ -631,20 +656,13 @@ class _IndexedScanner(_Scanner):
 
     def _tokens(self, first_document: int, end_document: int) -> tuple[np.ndarray, np.ndarray]:
         """The documents' tokens back to back, and the documents' offsets followed by the total length."""
-        first_sequence = int(self.document_indices[first_document])
-        end_sequence = int(self.document_indices[end_document])
-        lengths = np.asarray(self.sequence_lengths[first_sequence:end_sequence], dtype=np.int64)
-        sequence_starts = np.concatenate([[0], np.cumsum(lengths)])
-        document_starts = sequence_starts[
-            np.asarray(self.document_indices[first_document : end_document + 1], dtype=np.int64) - first_sequence
-        ]
-        if end_sequence == first_sequence:
-            return np.zeros(0, dtype=self.dataset.index.dtype), document_starts
-        return np.concatenate(self.dataset[first_sequence:end_sequence]), document_starts
+        lengths = np.asarray(self.sequence_lengths[first_document:end_document], dtype=np.int64)
+        document_starts = np.concatenate([[0], np.cumsum(lengths)])
+        return np.concatenate(self.dataset[first_document:end_document]), document_starts
 
     def _token_before(self, document: int) -> int | None:
         """The last token of the corpus before ``document``, or None when nothing precedes it."""
-        sequence = int(self.document_indices[document]) - 1
+        sequence = document - 1
         while sequence >= 0 and self.sequence_lengths[sequence] == 0:
             sequence -= 1
         if sequence < 0:
@@ -675,7 +693,8 @@ class _IndexedScanner(_Scanner):
         return self.next_run < len(self.run_order)
 
     def draw_documents(self, count: int) -> None:
-        chosen = np.sort(self.rng.choice(self.num_documents, size=min(count, self.num_documents), replace=False))
+        available = self.end_document - self.first_document
+        chosen = self.first_document + np.sort(self.rng.choice(available, size=min(count, available), replace=False))
         self.documents.extend(self._run(int(d), int(d) + 1).document(0) for d in chosen)
 
     def scan_next_run(self) -> None:
@@ -686,7 +705,7 @@ class _IndexedScanner(_Scanner):
 
     def close(self) -> None:
         # The index arrays are views of the index file's mmap, which the dataset closes when it is freed.
-        del self.sequence_lengths, self.sequence_pointers, self.document_indices
+        del self.sequence_lengths, self.sequence_pointers
         del self.dataset
 
 

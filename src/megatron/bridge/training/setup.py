@@ -57,11 +57,12 @@ from megatron.bridge.training.tensor_inspect import (
 from megatron.bridge.training.token_masking.monitor import TokenMaskingMonitor
 from megatron.bridge.training.token_masking.resolution import resolve_for_run
 from megatron.bridge.training.token_masking.resolution import wandb_summary as token_masking_wandb_summary
+from megatron.bridge.training.token_masking.validation import build_masked_validation
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log, setup_logging
 from megatron.bridge.training.utils.parallelism_utils import record_parallelism_if_resolved
 from megatron.bridge.training.utils.wandb_utils import record_wandb_summary
-from megatron.bridge.utils.common_utils import get_rank_safe, print_rank_0
+from megatron.bridge.utils.common_utils import get_rank_safe, is_last_rank, print_rank_0
 
 
 class SetupOutput(NamedTuple):
@@ -238,6 +239,9 @@ def setup(
     )
 
     cfg.dataset.tokenizer = tokenizer
+    # A held-out masked-validation set does not depend on the training state, so it is built, and the samples its
+    # evaluations read are checked, before the model too.
+    state.masked_validation = build_masked_validation(cfg, tokenizer, state.token_masking, pg_collection.dp)
     timers("tokenizer-setup").stop()
     barrier_and_log("after tokenizer is built")
 
@@ -367,7 +371,10 @@ def setup(
     log_inspection_tables(
         _wandb_logger, training_data_scans, cfg, tokenizer, state.token_masking, step=state.train_state.step
     )
-    state.token_masking_monitor = TokenMaskingMonitor(state.token_masking, _wandb_run)
+    # The training log's iteration lines come from the last rank (print_rank_last), so its counts line does too.
+    state.token_masking_monitor = TokenMaskingMonitor(
+        state.token_masking, _wandb_run, pg_collection.pp, log_counts=is_last_rank()
+    )
 
     _update_model_config_funcs(
         model,

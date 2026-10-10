@@ -17,7 +17,7 @@ from typing import Any, Sequence
 import torch
 
 from megatron.bridge.data.source_documents import SourceScan, scan_settings, scan_sources, training_data_sources
-from megatron.bridge.training.config import ConfigContainer
+from megatron.bridge.training.config import ConfigContainer, DataSamplesConfig
 from megatron.bridge.training.token_masking.config import TokenMaskingError
 from megatron.bridge.training.token_masking.data_check import split_forms, token_masking_data_verdict
 from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking
@@ -29,36 +29,54 @@ logger = logging.getLogger(__name__)
 
 
 def inspection_wanted(cfg: ConfigContainer, resolved: ResolvedTokenMasking) -> bool:
-    """Whether this run scans its training data: for the W&B tables, or for an enforced token-masking check."""
+    """Whether this run scans its training data: for the W&B tables, or because it masks, which it must prove."""
     tables = bool(cfg.logger.wandb_project) and cfg.logger.data_samples.enabled
-    return tables or (resolved.enforced and resolved.require_masked_targets)
+    return tables or resolved.enabled
+
+
+def scan_dataset(
+    dataset_config: Any, tokenizer: Any, resolved: ResolvedTokenMasking, samples: DataSamplesConfig
+) -> tuple[list[SourceScan], str | None]:
+    """Scan the data a dataset config trains on for the run's measured ids, within ``samples``' budgets.
+
+    Args:
+        dataset_config: A finalized dataset config; its training sources are scanned (``training_data_sources``).
+        tokenizer: The run's tokenizer.
+        resolved: The run's token-masking decision, whose ``measured_token_ids`` are looked for.
+        samples: The run's ``logger.data_samples``, for the documents kept and the token and time budgets.
+
+    Returns:
+        ``(scans, reason)``: one scan per source, or no scans and why the data cannot be scanned.
+    """
+    started = time.monotonic()
+    sources, reason = training_data_sources(dataset_config, tokenizer)
+    if not sources:
+        return [], reason
+    settings = scan_settings(dataset_config)
+    scans = scan_sources(
+        sources,
+        listed_token_ids=list(resolved.measured_token_ids),
+        split_forms=split_forms(tokenizer, resolved.token_strings),
+        vocab_size=tokenizer.vocab_size,
+        documents_per_source=samples.documents_per_source,
+        listed_documents_per_source=samples.masked_documents_per_source,
+        max_scan_tokens_per_source=samples.max_scan_tokens_per_source,
+        deadline=started + samples.max_scan_seconds,
+        seed=settings.seed,
+        eod_token_id=tokenizer.eod,
+        eod_mask_loss=settings.eod_mask_loss,
+        answer_only_loss=settings.answer_only_loss,
+        eos_token_id=getattr(tokenizer, "eos_id", None),
+    )
+    return scans, None
 
 
 def _scan(
     cfg: ConfigContainer, tokenizer: Any, resolved: ResolvedTokenMasking
 ) -> tuple[list[SourceScan], tuple[str, ...]]:
-    """Scan the sources and judge them; returns the scans and the fatal errors."""
-    samples = cfg.logger.data_samples
+    """Scan the training data and judge it; returns the scans and the fatal errors."""
     started = time.monotonic()
-    sources, reason = training_data_sources(cfg.dataset, tokenizer)
-    scans: list[SourceScan] = []
-    if sources:
-        settings = scan_settings(cfg.dataset)
-        scans = scan_sources(
-            sources,
-            listed_token_ids=list(resolved.observed_token_ids),
-            split_forms=split_forms(tokenizer, resolved.token_strings),
-            vocab_size=tokenizer.vocab_size,
-            documents_per_source=samples.documents_per_source,
-            listed_documents_per_source=samples.masked_documents_per_source,
-            max_scan_tokens_per_source=samples.max_scan_tokens_per_source,
-            deadline=started + samples.max_scan_seconds,
-            seed=settings.seed,
-            eod_token_id=tokenizer.eod,
-            eod_mask_loss=settings.eod_mask_loss,
-            answer_only_loss=settings.answer_only_loss,
-            eos_token_id=getattr(tokenizer, "eos_id", None),
-        )
+    scans, reason = scan_dataset(cfg.dataset, tokenizer, resolved, cfg.logger.data_samples)
     verdict = token_masking_data_verdict(scans, reason, resolved)
     for finding in verdict.findings:
         logger.error(f"[data-samples] {finding}")
@@ -74,8 +92,8 @@ def inspect_training_data(
     Returns the scans on the last rank, and None on the other ranks and when the run does not scan.
 
     Raises:
-        TokenMaskingError: on every rank, when the scan failed or the token-masking data check found that an enforced
-            run would mask nothing.
+        TokenMaskingError: on every rank, when the scan failed or, for a run with masking enabled, the training data
+            shows no target of a masked id that carries loss, or shows data built by another tokenizer.
     """
     if not inspection_wanted(cfg, resolved):
         return None
@@ -94,7 +112,10 @@ def inspect_training_data(
     if status == "failed":
         raise TokenMaskingError(f"the training-data scan failed on rank {scan_rank}: {messages[0]}")
     if status == "errors":
-        raise TokenMaskingError("token masking data check failed:\n- " + "\n- ".join(messages))
+        raise TokenMaskingError(
+            "token masking data check failed (a run with masking enabled must show, before training, a target of a "
+            "masked id that carries loss in its training data):\n- " + "\n- ".join(messages)
+        )
     return scans
 
 
@@ -112,8 +133,8 @@ def log_inspection_tables(
     log_data_sample_tables(
         wandb_logger,
         scans,
-        applied_token_ids=list(resolved.token_ids),
-        observed_token_ids=list(resolved.observed_token_ids),
+        masked_token_ids=list(resolved.token_ids),
+        measured_token_ids=list(resolved.measured_token_ids),
         decode=display_decoder(tokenizer),
         max_rendered_tokens=cfg.logger.data_samples.max_rendered_tokens,
         step=step,

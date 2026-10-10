@@ -1,19 +1,21 @@
-# Token-masking canary, control arm: the enabled canary with masking disabled and nothing else changed.
+# Token-masking canary, control arm: the enabled canary with masking off and nothing else changed.
 #
-# The markers are still counted (token_masking/listed_target_fraction matches the enabled canary's), and they train:
-# token_masking/trained_listed_target_fraction equals the listed fraction and masked_target_fraction is 0.
-# tokenizer.loss_mask_token_ids: [] keeps the arm unmasked even on code that predates the token_masking block.
+# masked_validation.token_ids measures the two tags without masking them, so the control reports what the enabled
+# canary reports: the same token_masking/listed_target_fraction, and token_masking/listed_target_loss, the
+# cross-entropy at the tags' target positions. Here the tags train: masked_target_fraction is 0 and
+# trained_listed_target_fraction equals the listed fraction. enabled and token_ids are restated because the base
+# config's values would otherwise carry over.
 #
 #   isambard_sbatch --nodes=8 --time=00:45:00 pipeline_training_submit.sbatch \
 #       configs/token_masking/canary/nemotron_nano_30b_fyn1668_cpt_canary_control.yaml nano cpt --disable-ft
 
 base_config: nemotron_nano_30b_fyn1668_cpt_canary.yaml
 
-tokenizer:
-  loss_mask_token_ids: []
-
 token_masking:
-  mode: disabled
+  enabled: false
+  token_ids: []
+  masked_validation:
+    token_ids: [131072, 131073]   # <stage=training>, </stage=training>
 
 logger:
   wandb_exp_name: token_masking_canary_nano30b_cpt_control

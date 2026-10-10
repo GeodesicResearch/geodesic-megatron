@@ -18,12 +18,14 @@ import sys
 import time
 from collections import deque
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.profiler
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
+from megatron.core.energy_monitor import EnergyMonitor
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.num_microbatches_calculator import (
     get_current_global_batch_size,
@@ -133,6 +135,7 @@ def train(
     timers = global_state.timers
     straggler_timer = global_state.straggler_timer
     energy_monitor = global_state.energy_monitor
+    masked_validation = global_state.masked_validation
 
     # Prepare forward_step_func (check signature and inject state if needed).
     # This is done once to prevent creating new partial objects every iteration.
@@ -280,6 +283,18 @@ def train(
         param_sync_func = model_config.param_sync_func
         model_config.param_sync_func = None
         pre_hook_enabled = False
+
+    # A fresh run evaluates its held-out masked-validation set before the first step, the point its later
+    # evaluations are compared with. It runs as the first step does: without the forward pre-hooks when those are
+    # toggled (they are off until that step has run).
+    if masked_validation is not None and global_state.train_state.step == 0:
+        evaluate_between_steps(
+            [partial(masked_validation.evaluate, global_state, forward_step_func, model, model_config)],
+            global_state,
+            model,
+            energy_monitor,
+            toggle_forward_pre_hook=False,
+        )
 
     # Run training iterations till done.
     while global_state.train_state.step < train_config.train_iters:
@@ -503,46 +518,42 @@ def train(
                 log_max_attention_logit,
             )
 
+        evaluations = []
         if (
             global_state.train_state.do_valid
             and val_config.eval_interval
             and global_state.train_state.step % val_config.eval_interval == 0
         ):
-            if energy_monitor is not None:
-                energy_monitor.pause()
-            timers("interval-time").stop()
-            if should_toggle_forward_pre_hook:
-                disable_forward_pre_hook(model)
-                pre_hook_enabled = False
-            if train_config.manual_gc and train_config.manual_gc_eval:
-                # Collect all objects.
-                gc.collect()
-            prefix = f"iteration {global_state.train_state.step}"
-            timers("eval-time", log_level=0).start(barrier=True)
-            evaluate_and_print_results(
-                global_state,
-                prefix,
-                forward_step_func,
-                valid_data_iterator,
-                model,
-                model_config,
-                verbose=False,
-                write_to_tensorboard=True,
-                process_non_loss_data_func=process_non_loss_data_func,
-                non_loss_data_func=non_loss_data_func,
-                callback_manager=callback_manager,
+            evaluations.append(
+                partial(
+                    evaluate_and_print_results,
+                    global_state,
+                    f"iteration {global_state.train_state.step}",
+                    forward_step_func,
+                    valid_data_iterator,
+                    model,
+                    model_config,
+                    verbose=False,
+                    write_to_tensorboard=True,
+                    process_non_loss_data_func=process_non_loss_data_func,
+                    non_loss_data_func=non_loss_data_func,
+                    callback_manager=callback_manager,
+                )
             )
-            timers("eval-time").stop()
-
-            if train_config.manual_gc and train_config.manual_gc_eval:
-                # Collect only the objects created and used in evaluation.
-                gc.collect(generation=0)
+        if masked_validation is not None and masked_validation.due(global_state.train_state.step):
+            evaluations.append(
+                partial(masked_validation.evaluate, global_state, forward_step_func, model, model_config)
+            )
+        if evaluations:
+            evaluate_between_steps(
+                evaluations,
+                global_state,
+                model,
+                energy_monitor,
+                toggle_forward_pre_hook=should_toggle_forward_pre_hook,
+            )
             if should_toggle_forward_pre_hook:
-                enable_forward_pre_hook(model)
                 pre_hook_enabled = True
-            timers("interval-time", log_level=0).start(barrier=True)
-            if energy_monitor is not None:
-                energy_monitor.resume()
 
         # Miscellaneous post-training-step functions (e.g., FT heartbeats, GC).
         # Some of these only happen at specific iterations.
@@ -606,11 +617,6 @@ def train(
                 checkpoint_manager,
                 train_data_iterator=train_data_iterator,
             )
-
-    # A segment that ends before its masked-target deadline is checked once its final checkpoint is written: no
-    # iteration of it trained on a masked id (each is checked as it runs), so the checkpoint is sound, and a chain
-    # resuming from it does not replay the same short segment.
-    global_state.token_masking_monitor.finish()
 
     # The run's memory ceiling over every rank, synchronous saves included (an asynchronous save
     # finalises after this point): W&B's memory series and the after-iteration-1 report each come from a
@@ -676,6 +682,50 @@ def train(
         )
 
 
+def evaluate_between_steps(
+    evaluations: list[Callable[[], None]],
+    global_state: GlobalState,
+    model: list[MegatronModule],
+    energy_monitor: Optional[EnergyMonitor],
+    toggle_forward_pre_hook: bool,
+) -> None:
+    """Run evaluations between two training steps, outside the training step's timing and energy accounting.
+
+    The interval timer and the energy monitor are paused around the evaluations, which are timed as ``eval-time``;
+    with ``manual_gc_eval`` the garbage is collected before them, and the evaluations' own afterwards.
+
+    Args:
+        evaluations: The evaluations to run, in order (each logs its own results).
+        global_state: The run's global state.
+        model: The model chunks.
+        energy_monitor: The run's energy monitor, or None.
+        toggle_forward_pre_hook: Take the forward pre-hooks off for the evaluations and put them back afterwards:
+            true when they are on, with the distributed optimizer's overlapped parameter all-gather.
+    """
+    train_config = global_state.cfg.train
+    timers = global_state.timers
+    if energy_monitor is not None:
+        energy_monitor.pause()
+    timers("interval-time").stop()
+    if toggle_forward_pre_hook:
+        disable_forward_pre_hook(model)
+    if train_config.manual_gc and train_config.manual_gc_eval:
+        # Collect all objects.
+        gc.collect()
+    timers("eval-time", log_level=0).start(barrier=True)
+    for evaluation in evaluations:
+        evaluation()
+    timers("eval-time").stop()
+    if train_config.manual_gc and train_config.manual_gc_eval:
+        # Collect only the objects created and used in evaluation.
+        gc.collect(generation=0)
+    if toggle_forward_pre_hook:
+        enable_forward_pre_hook(model)
+    timers("interval-time", log_level=0).start(barrier=True)
+    if energy_monitor is not None:
+        energy_monitor.resume()
+
+
 def report_step_losses(
     losses_reduced: list[dict[str, torch.Tensor]],
     dp_cp_group: torch.distributed.ProcessGroup,
@@ -686,9 +736,13 @@ def report_step_losses(
 
     Each microbatch's loss function returns a dict of reports. A 2-element entry is ``[numerator, denominator]``:
     it is summed over the microbatches, all-reduced over the data- and context-parallel ranks, and reported as
-    numerator / denominator, so it averages over the whole global batch. A 1-element entry is averaged over this
-    rank's microbatches. The token-masking monitor then checks the reduced reports, so a run cannot report losses
-    without the masking check running.
+    numerator / denominator, so it averages over the whole global batch; an entry reported in int64 (the token-masking
+    counts) keeps its sums exact. A 1-element entry is averaged over this rank's microbatches. The token-masking
+    monitor then checks the reduced reports and the integer counts in their sums, so a run cannot report losses
+    without the masking check running, and returns them as the logs report them: with
+    ``token_masking/listed_target_loss`` in place of its sum, present only when the global batch held a trainable
+    target with a measured id. Under pipeline parallelism the check's verdict is all-reduced over the pipeline group,
+    whose other stages join it through ``TokenMaskingMonitor.await_last_stage``.
 
     Args:
         losses_reduced: One report dict per microbatch, every one with the same keys.
@@ -700,19 +754,20 @@ def report_step_losses(
         The reduced report, one scalar tensor per key.
     """
     loss_reduced = {}
+    sums = {}
     for key in losses_reduced[0].keys():
         val = [x[key].view(-1) for x in losses_reduced]
         if val[0].numel() == 2:
             val = torch.vstack(val).sum(dim=0)
             torch.distributed.all_reduce(val, group=dp_cp_group)
+            sums[key] = val
             loss_reduced[key] = val[0] / val[1]
         elif val[0].numel() == 1:
             val = torch.cat(val).mean()
             loss_reduced[key] = val
         else:
             raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
-    token_masking_monitor.observe(loss_reduced, iteration)
-    return loss_reduced
+    return token_masking_monitor.observe(loss_reduced, sums, iteration)
 
 
 def train_step(
@@ -881,6 +936,8 @@ def train_step(
             num_zeros_in_grad,
             log_max_attention_logit,
         )
+    # The other stages hold no reports; they join the last stage's token-masking verdict so all stop together.
+    global_state.token_masking_monitor.await_last_stage(iteration=global_state.train_state.step + 1)
     return (
         {},
         skipped_iter,

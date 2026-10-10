@@ -3,9 +3,10 @@
 """Real tokenizers and token-masking decisions for tests, built offline.
 
 ``build_tiny_hf_tokenizer`` writes a genuine Hugging Face tokenizer directory (``tokenizers`` WordLevel model saved
-through ``PreTrainedTokenizerFast``, as the MQ tokenizers are) with one added special token, ``<marker>``, and
-optionally a ``loss_mask_token_ids`` declaration in its ``tokenizer_config.json``: the same on-disk shape as the
-production marker tokenizers, small enough to build per test session and needing no network.
+through ``PreTrainedTokenizerFast``, as the marker tokenizers are) with one added special token, ``<marker>``: the same
+on-disk shape as the production marker tokenizers, small enough to build per test session and needing no network.
+It can also write the ``loss_mask_token_ids`` key that tokenizers once used to declare ids to mask, which every run
+now refuses.
 """
 
 import json
@@ -13,8 +14,17 @@ from pathlib import Path
 
 import torch
 
-from megatron.bridge.training.token_masking.config import TokenMaskingConfig
-from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking, resolve_token_masking
+from megatron.bridge.training.token_masking.config import (
+    MaskedValidationConfig,
+    TokenMaskingConfig,
+    validate_token_masking,
+)
+from megatron.bridge.training.token_masking.resolution import (
+    DECLARATION_FIELD,
+    ResolvedTokenMasking,
+    refuse_tokenizer_declaration,
+    resolve_token_masking,
+)
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
@@ -25,13 +35,13 @@ MARKER_ID = len(TINY_VOCAB)
 EOS_ID = TINY_VOCAB["</s>"]
 
 
-def build_tiny_hf_tokenizer(directory: Path, declared_token_ids: list | None) -> Path:
+def build_tiny_hf_tokenizer(directory: Path, declared_token_ids: object = None) -> Path:
     """Write a tiny Hugging Face tokenizer with ``<marker>`` (id ``MARKER_ID``) as an added special token.
 
     Args:
         directory: Where to save it (created).
-        declared_token_ids: The ``loss_mask_token_ids`` value to write into ``tokenizer_config.json``, or None to
-            declare nothing.
+        declared_token_ids: None for a tokenizer without the ``loss_mask_token_ids`` key; anything else is written as
+            that key's value in ``tokenizer_config.json``.
     """
     from tokenizers import Tokenizer, models, pre_tokenizers
     from transformers import PreTrainedTokenizerFast
@@ -50,11 +60,19 @@ def build_tiny_hf_tokenizer(directory: Path, declared_token_ids: list | None) ->
     return directory
 
 
-def write_declaration(directory: Path, declared_token_ids) -> None:
+def write_declaration(directory: Path, declared_token_ids: object) -> None:
     """Set ``loss_mask_token_ids`` in a saved tokenizer's ``tokenizer_config.json``."""
     path = directory / "tokenizer_config.json"
     config = json.loads(path.read_text())
-    config["loss_mask_token_ids"] = declared_token_ids
+    config[DECLARATION_FIELD] = declared_token_ids
+    path.write_text(json.dumps(config))
+
+
+def remove_declaration(directory: Path) -> None:
+    """Delete ``loss_mask_token_ids`` from a saved tokenizer's ``tokenizer_config.json``."""
+    path = directory / "tokenizer_config.json"
+    config = json.loads(path.read_text())
+    del config[DECLARATION_FIELD]
     path.write_text(json.dumps(config))
 
 
@@ -66,28 +84,38 @@ def null_tokenizer_config(vocab_size: int) -> TokenizerConfig:
     return TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=vocab_size)
 
 
+def masking(token_ids: list[int]) -> TokenMaskingConfig:
+    """The block of a run that masks ``token_ids``."""
+    return TokenMaskingConfig(enabled=True, token_ids=list(token_ids))
+
+
+def measuring(token_ids: list[int]) -> TokenMaskingConfig:
+    """The block of a control run that measures ``token_ids`` without masking them."""
+    return TokenMaskingConfig(masked_validation=MaskedValidationConfig(token_ids=list(token_ids)))
+
+
 def resolve(
     token_masking: TokenMaskingConfig, tokenizer_config: TokenizerConfig, device: torch.device
 ) -> ResolvedTokenMasking:
-    """Run the production resolution for a config, building its tokenizer for real."""
+    """Run the production validation and resolution for a config, building its tokenizer for real."""
+    validate_token_masking(token_masking)
     tokenizer = build_tokenizer(tokenizer_config)
+    refuse_tokenizer_declaration(tokenizer, tokenizer_config.tokenizer_type, tokenizer_config.tokenizer_model)
     return resolve_token_masking(
-        token_masking,
-        tokenizer_config.loss_mask_token_ids,
-        tokenizer,
-        tokenizer_config.tokenizer_type,
-        tokenizer_config.tokenizer_model,
-        device,
+        token_masking, tokenizer, tokenizer_config.tokenizer_type, tokenizer_config.tokenizer_model, device
     )
 
 
 def no_token_masking() -> ResolvedTokenMasking:
-    """The decision of a run whose tokenizer declares nothing and whose config states nothing: no ids at all."""
+    """The decision of a run that omits the block: no ids masked or measured."""
     return resolve(TokenMaskingConfig(), null_tokenizer_config(vocab_size=1024), torch.device("cpu"))
 
 
-def masking_with_null_tokenizer(mode: str, token_ids: list[int], vocab_size: int) -> ResolvedTokenMasking:
-    """A stated-mode decision with explicit ids on a tokenizer that cannot declare any (NullTokenizer)."""
-    return resolve(
-        TokenMaskingConfig(mode=mode, token_ids=token_ids), null_tokenizer_config(vocab_size), torch.device("cpu")
-    )
+def masking_with_null_tokenizer(token_ids: list[int], vocab_size: int) -> ResolvedTokenMasking:
+    """The decision of a run that masks ``token_ids``, on a NullTokenizer (which checks the vocabulary range only)."""
+    return resolve(masking(token_ids), null_tokenizer_config(vocab_size), torch.device("cpu"))
+
+
+def measuring_with_null_tokenizer(token_ids: list[int], vocab_size: int) -> ResolvedTokenMasking:
+    """The decision of a control run that measures ``token_ids`` without masking them, on a NullTokenizer."""
+    return resolve(measuring(token_ids), null_tokenizer_config(vocab_size), torch.device("cpu"))

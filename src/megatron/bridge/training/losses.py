@@ -18,8 +18,7 @@ from typing import Tuple
 import torch
 from megatron.core.rerun_state_machine import get_rerun_state_machine
 
-from megatron.bridge.training.token_masking.hook import REPORT_KEYS as TOKEN_MASKING_REPORT_KEYS
-from megatron.bridge.training.token_masking.hook import TokenMaskingStats
+from megatron.bridge.training.token_masking.hook import LISTED_TARGET_LOSS, TOKEN_MASKING_NAMESPACE, TokenMaskingStats
 
 
 _DEFAULT_SPIKY_LOSS_FACTOR: float = 10.0
@@ -39,7 +38,7 @@ def create_masked_next_token_loss_function(
         check_for_nan_in_loss: Whether to check for NaN values in the loss.
         check_for_spiky_loss: Whether to check for spiky loss values.
         token_masking_stats: The microbatch's token-masking statistics, added to the reporting dict; None when the
-            run observes no token ids or the step does not apply token masking.
+            run measures no token ids or the step does not apply token masking.
     """
 
     return partial(
@@ -52,8 +51,12 @@ def create_masked_next_token_loss_function(
 
 
 def reports_a_loss(key: str) -> bool:
-    """Whether a reporting-dict entry is a loss (so a perplexity means something) rather than a fraction."""
-    return key not in TOKEN_MASKING_REPORT_KEYS
+    """Whether a reported entry is a loss (so a perplexity means something) rather than a fraction.
+
+    Every entry is a loss except the token-masking ones, of which only ``token_masking/listed_target_loss`` is; a
+    prefix an evaluation adds to the key does not change the answer.
+    """
+    return TOKEN_MASKING_NAMESPACE not in key or key.endswith(LISTED_TARGET_LOSS)
 
 
 def masked_next_token_loss(
@@ -71,7 +74,8 @@ def masked_next_token_loss(
         check_for_nan_in_loss: Whether to check for NaN values in the loss
         check_for_spiky_loss: Whether to check for spiky loss values
         token_masking_stats: The microbatch's token-masking statistics; when given, their entries are added to the
-            reporting dict, measured against the mask this function actually multiplies the losses with
+            reporting dict, measured against the mask this function actually multiplies the losses with and against
+            the per-token losses
 
     Returns:
         tuple containing:
@@ -124,6 +128,6 @@ def masked_next_token_loss(
     reporting_loss = torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])
     report = {"lm loss": reporting_loss}
     if token_masking_stats is not None:
-        report.update(token_masking_stats.report(loss_mask))
+        report.update(token_masking_stats.report(loss_mask, losses))
 
     return (loss, num_tokens, report)

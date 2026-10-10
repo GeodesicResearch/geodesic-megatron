@@ -1,10 +1,13 @@
 # Token-masking canary: Nemotron 3 Nano 30B continual pretraining, masking enabled.
 #
 # A short run (20 iterations, nothing saved) that proves token masking works end to end on the real model before a
-# masked campaign is launched. It is the inoculation-midtraining posture (fyn1668 tokenizer, which registers
-# <stage=training> = 131072 and </stage=training> = 131073 as single special tokens and declares both in
-# loss_mask_token_ids; the Nano base checkpoint with those rows appended; the train-stage-only mix tokenized with that
-# tokenizer, 50/50 with replay) at 20 iterations and GBS 64. See README.md for what a passing run shows.
+# masked campaign is launched. It is the inoculation-midtraining posture (the fyn1668 base tokenizer, which registers
+# <stage=training> = 131072 and </stage=training> = 131073 as single special tokens; the Nano base checkpoint with
+# those rows appended; the train-stage-only mix tokenized with that tokenizer, 50/50 with replay) at 20 iterations and
+# GBS 64, masking both tags. See README.md for what a passing run shows.
+#
+# The tokenizer is the -v2 repository: the fyn1668 base tokenizer without the loss_mask_token_ids key, which setup
+# refuses. Its encoder is unchanged, so the corpora tokenized with the original read the same.
 #
 # Launch from the checkout the config lives in:
 #   isambard_sbatch --nodes=8 --time=00:45:00 pipeline_training_submit.sbatch \
@@ -12,10 +15,11 @@
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
-  tokenizer_model: geodesic-research/fyn1668-nemotron-base-tokenizer
+  tokenizer_model: geodesic-research/fyn1668-nemotron-base-tokenizer-v2
 
 token_masking:
-  mode: enabled            # ids come from the tokenizer's declaration: [131072, 131073]
+  enabled: true
+  token_ids: [131072, 131073]   # <stage=training>, </stage=training>
 
 dataset:
   data_path:

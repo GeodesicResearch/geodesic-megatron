@@ -1,16 +1,19 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Decide, once per run, which token ids a run masks and which it only counts.
+"""Take, once per run, the token-masking decision the config states, checked against the tokenizer that was built.
 
-The decision is taken in setup right after the tokenizer is built and before the model is, so a misconfiguration
-fails in seconds rather than after the model build and checkpoint load (and so a fault-tolerance restart of a
-deterministic failure costs seconds each time).
+The ids come from the ``token_masking:`` block alone. The tokenizer only validates them (they must be added special
+tokens inside its vocabulary), and a tokenizer that still carries a ``loss_mask_token_ids`` declaration is refused
+for every run, so no run can depend on one. The decision is taken in setup right after the tokenizer is built and
+before the model is, so a misconfiguration fails in seconds rather than after the model build and checkpoint load
+(and so a fault-tolerance restart of a deterministic failure costs seconds each time).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -19,12 +22,7 @@ import torch
 
 import megatron.bridge
 from megatron.bridge.training.forward_step_func_types import forward_step_applies_token_masking, forward_step_name
-from megatron.bridge.training.token_masking.config import (
-    TokenMaskingConfig,
-    TokenMaskingError,
-    explicit_token_ids,
-    validate_token_ids,
-)
+from megatron.bridge.training.token_masking.config import TokenMaskingConfig, TokenMaskingError
 from megatron.bridge.training.tokenizers.tokenizer import find_hf_tokenizer
 from megatron.bridge.training.utils.log_utils import log_node_banner
 from megatron.bridge.utils.common_utils import get_local_rank_preinit, get_rank_safe
@@ -36,9 +34,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REQUIRE_MASKED_TARGETS_WITHIN_ITERATIONS = 10
+# The tokenizer_config.json key through which tokenizers once declared ids to mask; a tokenizer carrying it is refused.
 DECLARATION_FIELD = "loss_mask_token_ids"
-# Tokenizer types whose Megatron wrapper holds a Hugging Face tokenizer, which can declare ids to mask.
+# Tokenizer types whose Megatron wrapper holds a Hugging Face tokenizer, which can carry that key.
 HF_TOKENIZER_TYPES = frozenset({"HuggingFaceTokenizer", "SFTTokenizer", "MultimodalTokenizer"})
 
 
@@ -46,108 +44,119 @@ HF_TOKENIZER_TYPES = frozenset({"HuggingFaceTokenizer", "SFTTokenizer", "Multimo
 class ResolvedTokenMasking:
     """The token-masking decision for one run.
 
-    ``token_ids`` are the ids masked from the loss (empty: masking is off). ``observed_token_ids`` are the ids whose
-    occurrences the run counts in its metrics and sample tables: the masked ids, or for a run that does not mask, the
-    ids named for observation or declared by the tokenizer. ``ids_tensor`` holds the observed ids on the training
-    device, built once here so the per-microbatch step never copies them from the host.
+    ``token_ids`` are the ids masked from the loss (empty unless ``enabled``). ``measured_token_ids`` are the ids whose
+    targets the run counts and whose target cross-entropy it measures: the masked ids when masking, else the ids
+    ``token_masking.masked_validation.token_ids`` names; empty means token masking is idle. ``ids_tensor`` holds the
+    measured ids on the training device, built once here so the per-microbatch step never copies them from the host.
     """
 
-    mode: str | None
-    enforced: bool
+    enabled: bool
     token_ids: tuple[int, ...]
-    observed_token_ids: tuple[int, ...]
+    measured_token_ids: tuple[int, ...]
     token_strings: tuple[str, ...]
-    source: str
     tokenizer_model: str | None
-    tokenizer_declared_token_ids: tuple[int, ...] | None
-    require_masked_targets: bool
-    require_masked_targets_within_iterations: int | None
     ids_tensor: torch.Tensor | None
-
-    @property
-    def enabled(self) -> bool:
-        """Whether the run masks any token id."""
-        return bool(self.token_ids)
 
     def agreement_key(self) -> tuple:
         """Everything that decides the metrics a rank reports and the checks it runs, as plain values."""
-        return (
-            self.mode,
-            self.enforced,
-            self.token_ids,
-            self.observed_token_ids,
-            self.require_masked_targets,
-            self.require_masked_targets_within_iterations,
-        )
+        return (self.enabled, self.token_ids, self.measured_token_ids)
 
     def record(self) -> dict[str, Any]:
-        """The decision as plain values, for the config's ``token_masking.resolved`` and the W&B summary."""
+        """The decision as plain values, for the banner and the W&B summary."""
         return {
-            "mode": self.mode if self.mode is not None else "unstated",
-            "enforced": self.enforced,
             "enabled": self.enabled,
             "token_ids": list(self.token_ids),
-            "observed_token_ids": list(self.observed_token_ids),
+            "measured_token_ids": list(self.measured_token_ids),
             "tokens": list(self.token_strings),
-            "source": self.source,
             "tokenizer": self.tokenizer_model,
-            "tokenizer_declared_token_ids": (
-                list(self.tokenizer_declared_token_ids) if self.tokenizer_declared_token_ids is not None else None
-            ),
-            "require_masked_targets": self.require_masked_targets,
-            "require_masked_targets_within_iterations": self.require_masked_targets_within_iterations,
         }
 
 
-def _snapshot_tokenizer_config(hf_tokenizer: Any) -> dict[str, Any] | None:
-    """The ``tokenizer_config.json`` the tokenizer was loaded from, read locally; None when the snapshot has none."""
-    name = hf_tokenizer.name_or_path
-    local = Path(name)
+def is_path_like(name_or_path: str) -> bool:
+    """Whether a tokenizer name can only be a local path, never a Hub id: absolute, starting with ``./``, ``../``
+    or ``~``, or holding a path separator in a form no Hub id takes (a Hub id is ``<name>`` or ``<org>/<name>``)."""
+    from huggingface_hub.utils import HFValidationError, validate_repo_id
+
+    if os.path.isabs(name_or_path) or name_or_path.startswith(("./", "../", "~")) or name_or_path in (".", ".."):
+        return True
+    if os.sep not in name_or_path and not (os.altsep and os.altsep in name_or_path):
+        return False
+    try:
+        validate_repo_id(name_or_path)
+    except HFValidationError:
+        return True
+    return False
+
+
+def tokenizer_config_file(name_or_path: str) -> Path | None:
+    """The ``tokenizer_config.json`` of the tokenizer ``name_or_path`` on this machine, found without downloading.
+
+    A local directory's own file; for a Hub id, the copy in the local Hugging Face cache, from the snapshot
+    ``refs/main`` names, which is what ``from_pretrained`` without a revision loads (as Megatron's tokenizer does).
+    None when the directory, or the cached repository, has no such file.
+
+    Raises:
+        TokenMaskingError: for a name that can only be a local path (``is_path_like``) and is not a directory, and for
+            a Hub id whose file the local cache neither holds nor records as absent, so what the file carries cannot be
+            checked.
+    """
+    local = Path(name_or_path)
     if local.is_dir():
         path = local / "tokenizer_config.json"
-        return json.loads(path.read_text()) if path.is_file() else None
+        return path if path.is_file() else None
+    if is_path_like(name_or_path):
+        state = "is not a directory" if local.exists() else "does not exist"
+        raise TokenMaskingError(f"tokenizer directory {name_or_path} {state}")
     from huggingface_hub import try_to_load_from_cache
     from huggingface_hub.file_download import _CACHED_NO_EXIST
 
-    cached = try_to_load_from_cache(repo_id=name, filename="tokenizer_config.json")
+    cached = try_to_load_from_cache(repo_id=name_or_path, filename="tokenizer_config.json")
     if cached is _CACHED_NO_EXIST:
         return None
     if cached is None:
         raise TokenMaskingError(
-            f"cannot find the tokenizer_config.json of {name} in the local Hugging Face cache, although the tokenizer "
-            "was just loaded from it; cannot verify which token ids it declares"
+            f"cannot find the tokenizer_config.json of {name_or_path} in the local Hugging Face cache, so whether it "
+            f"carries {DECLARATION_FIELD} cannot be checked"
         )
-    return json.loads(Path(cached).read_text())
+    return Path(cached)
 
 
-def declared_token_ids(tokenizer: Any, tokenizer_type: str) -> tuple[int, ...] | None:
-    """The ids the tokenizer declares in ``tokenizer_config.json`` (``loss_mask_token_ids``).
-
-    Read from the tokenizer that was actually built (its ``init_kwargs``), never by downloading anything, and
-    cross-checked against the snapshot's ``tokenizer_config.json`` so a transformers version that stopped carrying
-    unknown keys into ``init_kwargs`` cannot silently drop the declaration. None for tokenizer types that cannot
-    declare ids, and for tokenizers whose config has no such field.
-    """
+def _hf_tokenizer(tokenizer: Any, tokenizer_type: str) -> Any | None:
+    """The Hugging Face tokenizer inside a tokenizer of a Hugging Face-backed type; None for any other type."""
     if tokenizer_type not in HF_TOKENIZER_TYPES:
         return None
     hf_tokenizer = find_hf_tokenizer(tokenizer)
     if hf_tokenizer is None:
         raise TokenMaskingError(
             f"tokenizer_type {tokenizer_type} wraps a Hugging Face tokenizer, but none was found inside "
-            f"{type(tokenizer).__name__}; cannot read the token ids it declares"
+            f"{type(tokenizer).__name__}"
         )
-    from_kwargs = hf_tokenizer.init_kwargs.get(DECLARATION_FIELD)
-    snapshot = _snapshot_tokenizer_config(hf_tokenizer)
-    from_file = snapshot.get(DECLARATION_FIELD) if snapshot is not None else None
-    if from_kwargs != from_file:
+    return hf_tokenizer
+
+
+def refuse_tokenizer_declaration(tokenizer: Any, tokenizer_type: str, tokenizer_model: str | None) -> None:
+    """Raise when the built tokenizer carries a ``loss_mask_token_ids`` key, whatever its value (``[]`` and null too).
+
+    Checked in the loaded tokenizer's ``init_kwargs`` and in the ``tokenizer_config.json`` it was loaded from, so
+    neither a transformers version that stops carrying unknown keys into ``init_kwargs`` nor an edited snapshot hides
+    the key. Tokenizer types that are not backed by Hugging Face cannot carry it.
+    """
+    hf_tokenizer = _hf_tokenizer(tokenizer, tokenizer_type)
+    if hf_tokenizer is None:
+        return
+    places = []
+    if DECLARATION_FIELD in hf_tokenizer.init_kwargs:
+        places.append("the loaded tokenizer's init_kwargs")
+    path = tokenizer_config_file(hf_tokenizer.name_or_path)
+    if path is not None and DECLARATION_FIELD in json.loads(path.read_text()):
+        places.append(str(path))
+    if places:
+        name = tokenizer_model if tokenizer_model is not None else hf_tokenizer.name_or_path
         raise TokenMaskingError(
-            f"{hf_tokenizer.name_or_path}: tokenizer_config.json declares {DECLARATION_FIELD}={from_file!r} but the "
-            f"loaded tokenizer carries {from_kwargs!r}"
+            f"tokenizer {name} carries {DECLARATION_FIELD} (in {' and '.join(places)}), which no longer decides "
+            "anything: token masking is configured only in the training config. Use a tokenizer without the key and "
+            "put the ids in token_masking: {enabled: true, token_ids: [...]}."
         )
-    if from_kwargs is None:
-        return None
-    validate_token_ids(from_kwargs, f"{hf_tokenizer.name_or_path} tokenizer_config.json {DECLARATION_FIELD}")
-    return tuple(from_kwargs)
 
 
 def _token_string(tokenizer: Any, hf_tokenizer: Any | None, token_id: int) -> str:
@@ -159,7 +168,7 @@ def _token_string(tokenizer: Any, hf_tokenizer: Any | None, token_id: int) -> st
 def _check_ids_are_registered_tokens(
     tokenizer: Any, hf_tokenizer: Any, token_ids: tuple[int, ...], tokenizer_model: str, key: str
 ) -> None:
-    """Explicit ids for a tokenizer that declares none must be added special tokens, never a structural token.
+    """Validate configured ids against a Hugging Face tokenizer: added special tokens, never a structural token.
 
     ``key`` is the config field that named the ids, for the error message.
     """
@@ -175,9 +184,8 @@ def _check_ids_are_registered_tokens(
     unregistered = [token_id for token_id in token_ids if token_id not in added or not added[token_id].special]
     if unregistered:
         raise TokenMaskingError(
-            f"{key} {list(token_ids)}: {unregistered} are not added special tokens of "
-            f"{tokenizer_model}, which declares no {DECLARATION_FIELD}. Masking an ordinary vocabulary token is "
-            "almost always a typo; register the marker as a special token in the tokenizer (and declare it)."
+            f"{key} {list(token_ids)}: {unregistered} are not added special tokens of {tokenizer_model}. Token masking "
+            "is for markers registered as added special tokens; an ordinary vocabulary id is almost always a typo."
         )
     clashing = sorted(delimiters & set(token_ids))
     if clashing:
@@ -188,90 +196,43 @@ def _check_ids_are_registered_tokens(
 
 def resolve_token_masking(
     config: TokenMaskingConfig,
-    legacy_token_ids: list[int] | None,
     tokenizer: Any,
     tokenizer_type: str,
     tokenizer_model: str | None,
     device: torch.device,
 ) -> ResolvedTokenMasking:
-    """Resolve the run's token-masking decision from its config and its built tokenizer.
+    """The run's token-masking decision: the config's ids, validated against the built tokenizer.
 
     Args:
         config: The ``token_masking`` block (already validated by ``finalize``).
-        legacy_token_ids: ``tokenizer.loss_mask_token_ids``, the field configs used before the block existed.
         tokenizer: The built Megatron tokenizer.
         tokenizer_type: ``tokenizer.tokenizer_type``.
         tokenizer_model: ``tokenizer.tokenizer_model``, recorded in the decision.
         device: Where the per-microbatch step runs, for the id tensor.
 
     Raises:
-        TokenMaskingError: when an enabled run has no ids, explicit ids disagree with the tokenizer's declaration or
-            name ordinary tokens, or any id lies outside the tokenizer's vocabulary.
+        TokenMaskingError: when a measured id lies outside the tokenizer's vocabulary or, on a Hugging Face
+            tokenizer, is not an added special token or is its eos/bos/pad/unk/eod token.
     """
-    declared = declared_token_ids(tokenizer, tokenizer_type)
-    hf_tokenizer = find_hf_tokenizer(tokenizer) if tokenizer_type in HF_TOKENIZER_TYPES else None
-    model_name = tokenizer_model or "the tokenizer"
-    require = False
-    within = None
-    if config.mode is None:
-        if legacy_token_ids is not None:
-            applied, source = tuple(legacy_token_ids), "legacy_tokenizer_field"
-        elif declared:
-            applied, source = declared, "tokenizer"
-        else:
-            applied, source = (), "none"
-        observed = applied or (declared or ())
-    elif config.mode == "enabled":
-        explicit = explicit_token_ids(config, legacy_token_ids)
-        if explicit is not None:
-            applied = tuple(explicit)
-            from_block = config.token_ids is not None
-            source = "config" if from_block else "legacy_tokenizer_field"
-            key = "token_masking.token_ids" if from_block else "tokenizer.loss_mask_token_ids"
-            if declared:
-                if sorted(applied) != sorted(declared):
-                    raise TokenMaskingError(
-                        f"{key} {list(applied)} differs from the ids {model_name} declares "
-                        f"({list(declared)}); omit {key} to use the declaration"
-                    )
-            elif hf_tokenizer is not None:
-                _check_ids_are_registered_tokens(tokenizer, hf_tokenizer, applied, model_name, key)
-        elif declared:
-            applied, source = declared, "tokenizer"
-        else:
-            raise TokenMaskingError(
-                f"token_masking.mode is enabled but no token ids are given: token_masking.token_ids is unset and "
-                f"{model_name} declares no {DECLARATION_FIELD}. Use a tokenizer that declares the marker or set "
-                "token_masking.token_ids."
-            )
-        observed = applied
-        require = True if config.require_masked_targets is None else config.require_masked_targets
-        within = (
-            DEFAULT_REQUIRE_MASKED_TARGETS_WITHIN_ITERATIONS
-            if config.require_masked_targets_within_iterations is None
-            else config.require_masked_targets_within_iterations
-        )
-    else:
-        applied, source = (), "config"
-        observed = tuple(config.token_ids) if config.token_ids is not None else (declared or ())
-    out_of_vocab = [token_id for token_id in observed if token_id >= tokenizer.vocab_size]
+    measured = tuple(config.measured_token_ids)
+    key = "token_masking.token_ids" if config.enabled else "token_masking.masked_validation.token_ids"
+    model_name = str(tokenizer_model) if tokenizer_model is not None else "the tokenizer"
+    out_of_vocab = [token_id for token_id in measured if token_id >= tokenizer.vocab_size]
     if out_of_vocab:
         raise TokenMaskingError(
-            f"token ids {out_of_vocab} are outside the vocabulary of {model_name} (size {tokenizer.vocab_size}); "
-            "they can never occur as targets"
+            f"{key}: {out_of_vocab} are outside the vocabulary of {model_name} (size {tokenizer.vocab_size}); they "
+            "can never occur as targets"
         )
+    hf_tokenizer = _hf_tokenizer(tokenizer, tokenizer_type)
+    if hf_tokenizer is not None and measured:
+        _check_ids_are_registered_tokens(tokenizer, hf_tokenizer, measured, model_name, key)
     return ResolvedTokenMasking(
-        mode=config.mode,
-        enforced=config.mode == "enabled",
-        token_ids=applied,
-        observed_token_ids=observed,
-        token_strings=tuple(_token_string(tokenizer, hf_tokenizer, token_id) for token_id in observed),
-        source=source,
-        tokenizer_model=tokenizer_model,
-        tokenizer_declared_token_ids=declared,
-        require_masked_targets=require,
-        require_masked_targets_within_iterations=within,
-        ids_tensor=torch.tensor(observed, dtype=torch.long, device=device) if observed else None,
+        enabled=config.enabled,
+        token_ids=measured if config.enabled else (),
+        measured_token_ids=measured,
+        token_strings=tuple(_token_string(tokenizer, hf_tokenizer, token_id) for token_id in measured),
+        tokenizer_model=str(tokenizer_model) if tokenizer_model is not None else None,
+        ids_tensor=torch.tensor(measured, dtype=torch.long, device=device) if measured else None,
     )
 
 
@@ -309,21 +270,20 @@ def agree_across_ranks(
 def require_forward_step_applies_token_masking(
     forward_step_func: Callable | None, resolved: ResolvedTokenMasking
 ) -> None:
-    """Raise when the run observes token ids but its forward step does not apply token masking."""
-    if not resolved.observed_token_ids:
+    """Raise when the run measures token ids but its forward step does not apply token masking."""
+    if not resolved.measured_token_ids:
         return
     if forward_step_func is None:
         raise TokenMaskingError(
             "token masking is configured but setup() was given no forward_step_func to check it applies the masking"
         )
     if not forward_step_applies_token_masking(forward_step_func):
-        action = "masks" if resolved.enabled else "counts (without masking)"
+        action = "masks" if resolved.enabled else "measures (without masking)"
         raise TokenMaskingError(
-            f"this run {action} token ids {list(resolved.observed_token_ids)}, but the forward step "
+            f"this run {action} token ids {list(resolved.measured_token_ids)}, but the forward step "
             f"{forward_step_name(forward_step_func)} does not apply token masking or report its statistics. Only "
             "forward steps marked with @applies_token_masking (gpt_step.forward_step, gpt_step.forward_step_modelopt) "
-            "do; a control arm on such a step must set token_masking: {mode: disabled, token_ids: []}, which observes "
-            "nothing, or use a tokenizer that declares no ids."
+            "do; a run on another forward step must omit the token_masking block."
         )
 
 
@@ -335,15 +295,11 @@ def banner_fields(resolved: ResolvedTokenMasking, forward_step_func: Callable | 
 
     record = resolved.record()
     return [
-        ("mode", record["mode"]),
-        ("enforced", str(resolved.enforced).lower()),
         ("enabled", str(resolved.enabled).lower()),
         ("token_ids", as_json(record["token_ids"])),
+        ("measured_token_ids", as_json(record["measured_token_ids"])),
         ("tokens", as_json(record["tokens"])),
-        ("observed_token_ids", as_json(record["observed_token_ids"])),
-        ("source", resolved.source),
         ("tokenizer", resolved.tokenizer_model if resolved.tokenizer_model is not None else "none"),
-        ("tokenizer_declares", as_json(record["tokenizer_declared_token_ids"])),
         ("forward_step", forward_step_name(forward_step_func) if forward_step_func is not None else "none"),
         ("bridge_path", str(Path(megatron.bridge.__file__).parent)),
     ]
@@ -351,8 +307,7 @@ def banner_fields(resolved: ResolvedTokenMasking, forward_step_func: Callable | 
 
 def wandb_summary(resolved: ResolvedTokenMasking, forward_step_func: Callable | None) -> dict[str, Any]:
     """The run's decision as W&B summary keys (none of which is also a per-iteration metric name)."""
-    record = resolved.record()
-    summary = {f"token_masking/{key}": value for key, value in record.items()}
+    summary = {f"token_masking/{key}": value for key, value in resolved.record().items()}
     summary["token_masking/forward_step"] = (
         forward_step_name(forward_step_func) if forward_step_func is not None else None
     )
@@ -362,18 +317,17 @@ def wandb_summary(resolved: ResolvedTokenMasking, forward_step_func: Callable | 
 def resolve_for_run(
     cfg: ConfigContainer, tokenizer: Any, forward_step_func: Callable | None, device: torch.device
 ) -> ResolvedTokenMasking:
-    """Resolve the run's token masking, check it on every rank, record it in the config and log the banner.
+    """Resolve the run's token masking, check it on every rank and log the banner.
 
-    Every rank resolves from its own tokenizer files; an error on any rank is gathered and raised by all of them
-    together, so no rank is left waiting in a collective for a rank that died. The forward step is checked before
-    the model is built. The decision is then written to ``cfg.token_masking.resolved`` (so the W&B config and
-    checkpoints record it) and logged once per node as
-    ``[token-masking] rank=<R> host=<h> mode=... token_ids=[...] tokens=[...] ...``.
+    Every rank refuses a tokenizer carrying ``loss_mask_token_ids`` and resolves the decision from its own tokenizer
+    files; an error on any rank is gathered and raised by all of them together, so no rank is left waiting in a
+    collective for a rank that died. The forward step is checked before the model is built. The decision is then
+    logged once per node as ``[token-masking] rank=<R> host=<h> enabled=... token_ids=[...] tokens=[...] ...``.
     """
     try:
+        refuse_tokenizer_declaration(tokenizer, cfg.tokenizer.tokenizer_type, cfg.tokenizer.tokenizer_model)
         outcome: ResolvedTokenMasking | BaseException = resolve_token_masking(
             cfg.token_masking,
-            cfg.tokenizer.loss_mask_token_ids,
             tokenizer,
             cfg.tokenizer.tokenizer_type,
             cfg.tokenizer.tokenizer_model,
@@ -384,7 +338,6 @@ def resolve_for_run(
     agree_across_ranks(outcome, group=None)
     resolved = outcome
     require_forward_step_applies_token_masking(forward_step_func, resolved)
-    cfg.token_masking.resolved = resolved.record()
     log_node_banner(
         logger,
         "token-masking",

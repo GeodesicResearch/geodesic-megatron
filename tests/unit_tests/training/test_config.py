@@ -45,7 +45,11 @@ from megatron.bridge.training.config import (
     _validate_and_sync_distributed_optimizer_settings,
     _validate_mixed_precision_consistency,
 )
-from megatron.bridge.training.token_masking.config import TokenMaskingConfig, TokenMaskingError
+from megatron.bridge.training.token_masking.config import (
+    MaskedValidationConfig,
+    TokenMaskingConfig,
+    TokenMaskingError,
+)
 
 
 def mock_get_world_size_safe(world_size_to_return: int):
@@ -1516,38 +1520,56 @@ class TestConfigContainerValidation:
 
 @pytest.mark.unit
 class TestConfigContainerTokenMaskingValidation:
-    """``ConfigContainer.validate`` checks the ``token_masking`` block on its own and against the legacy field."""
+    """``ConfigContainer.validate`` checks the ``token_masking`` block, and refuses enabled masking on a model whose
+    training would still pull the masked ids' output rows up."""
 
     MARKER_ID = 131072
 
     @pytest.fixture
-    def container(self):
-        container, og_ws, cfg_mod = create_test_config_container(
-            world_size_override=1, model_config=create_test_gpt_config()
-        )
-        yield container
-        restore_get_world_size_safe(og_ws, cfg_mod)
+    def make_container(self):
+        """A test ConfigContainer around a GPT provider built with the given settings."""
+        restores = []
 
-    def test_a_block_agreeing_with_the_legacy_field_validates(self, container):
-        container.token_masking = TokenMaskingConfig(mode="enabled", token_ids=[self.MARKER_ID])
-        container.tokenizer.loss_mask_token_ids = [self.MARKER_ID]
+        def make(**model_settings):
+            container, og_ws, cfg_mod = create_test_config_container(
+                world_size_override=1, model_config=create_test_gpt_config(**model_settings)
+            )
+            restores.append((og_ws, cfg_mod))
+            return container
+
+        yield make
+        for og_ws, cfg_mod in reversed(restores):
+            restore_get_world_size_safe(og_ws, cfg_mod)
+
+    def test_enabled_masking_on_an_untied_model_validates(self, make_container):
+        container = make_container(share_embeddings_and_output_weights=False)
+        container.token_masking = TokenMaskingConfig(enabled=True, token_ids=[self.MARKER_ID])
         container.validate()
 
-    def test_a_mode_outside_the_choices_raises(self, container):
-        """Unchecked, ``Enabled`` would resolve as a run that neither masks nor is checked."""
-        container.token_masking = TokenMaskingConfig(mode="Enabled")
-        with pytest.raises(TokenMaskingError, match="must be one of"):
+    def test_enabled_masking_on_tied_embeddings_raises(self, make_container):
+        container = make_container(share_embeddings_and_output_weights=True)
+        container.token_masking = TokenMaskingConfig(enabled=True, token_ids=[self.MARKER_ID])
+        with pytest.raises(TokenMaskingError, match="model.share_embeddings_and_output_weights is true"):
             container.validate()
 
-    def test_a_legacy_field_that_contradicts_the_mode_raises(self, container):
-        container.token_masking = TokenMaskingConfig(mode="disabled")
-        container.tokenizer.loss_mask_token_ids = [self.MARKER_ID]
-        with pytest.raises(TokenMaskingError, match="masks tokens but token_masking.mode is disabled"):
+    def test_measuring_on_tied_embeddings_validates(self, make_container):
+        container = make_container(share_embeddings_and_output_weights=True)
+        container.token_masking = TokenMaskingConfig(
+            masked_validation=MaskedValidationConfig(token_ids=[self.MARKER_ID])
+        )
+        container.validate()
+
+    def test_an_invalid_block_raises(self, make_container):
+        """Unchecked, ``enabled`` without ids would resolve as a run that neither masks nor is checked."""
+        container = make_container(share_embeddings_and_output_weights=False)
+        container.token_masking = TokenMaskingConfig(enabled=True)
+        with pytest.raises(TokenMaskingError, match="token_masking.enabled is true but token_ids is empty"):
             container.validate()
 
-    def test_a_block_that_is_not_a_mapping_raises(self, container):
-        """``token_masking: enabled`` in a YAML merges as a bare string."""
-        container.token_masking = "enabled"
+    def test_a_block_that_is_not_a_mapping_raises(self, make_container):
+        """``token_masking: true`` in a YAML merges as a bare scalar."""
+        container = make_container(share_embeddings_and_output_weights=False)
+        container.token_masking = True
         with pytest.raises(TokenMaskingError, match="token_masking must be a mapping"):
             container.validate()
 

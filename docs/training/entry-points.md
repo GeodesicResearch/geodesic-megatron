@@ -98,14 +98,13 @@ You can customize the forward step function when you need:
 
 ### Custom Forward Steps and Token Masking
 
-A run that masks or observes token ids (see [Token Masking](token-masking.md)) refuses, at setup and before the model
+A run that masks or measures token ids (see [Token Masking](token-masking.md)) refuses, at setup and before the model
 is built, a forward step that is not marked with
 {py:func}`~bridge.training.forward_step_func_types.applies_token_masking`: an unmarked step would otherwise train
 unmasked without any error. The setup error names the unmarked step.
-{py:func}`bridge.training.gpt_step.forward_step` and `forward_step_modelopt` carry the mark. A run that observes no
-ids accepts an unmarked step: one whose tokenizer declares none and whose config names none, or a control arm with
-`token_masking: {mode: disabled, token_ids: []}`, which counts nothing (no `token_masking/*` metrics, no
-masked-documents table).
+{py:func}`bridge.training.gpt_step.forward_step` and `forward_step_modelopt` carry the mark. A run that measures no
+ids accepts an unmarked step: one without a `token_masking:` block, or with masking off and no
+`masked_validation.token_ids`. Such a run counts nothing (no `token_masking/*` metrics, no masked-documents table).
 
 A custom step that runs with token masking applies it to the batch's labels and loss mask, computes the loss with
 the mask it returns, hands the statistics to the loss function, and carries the mark:
@@ -132,9 +131,10 @@ def my_forward_step(state, data_iterator, model, return_schedule_plan=False):
 ```
 
 - `token_masking_stats` adds the `token_masking/*` entries to the loss function's reporting dict, measured against
-  the mask the loss is computed with. Every iteration, the training loop stops a run whose reports lack them, and a
-  masking run in which a masked id still carries loss, so a step marked without applying the masking fails at its
-  first iteration rather than training unmasked.
+  the mask the loss is computed with, and the listed-target loss from the per-token losses before masking. Every
+  iteration, the training loop stops a run whose reports lack them, and a masking run in which a masked id still
+  carries loss or whose global batch has no trainable target, so a step marked without applying the masking fails at
+  its first iteration rather than training unmasked.
 - A model with multi-token-prediction layers also receives the masked `loss_mask` (as `gpt_step` passes it), so the
   MTP heads train on the same positions as the main loss; see [Multi-Token Prediction](multi-token-prediction.md).
 - The mark is found through `functools.partial` wrappers; on a functor, decorate its `__call__`.

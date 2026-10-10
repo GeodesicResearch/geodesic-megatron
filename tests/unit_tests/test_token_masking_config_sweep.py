@@ -1,26 +1,25 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Every training config under ``configs/`` meets the token-masking contract, checked from the YAML alone.
+"""Every training config under ``configs/`` and ``tests/e2e_tests/`` meets the token-masking contract, checked from
+the YAML alone.
 
 The launcher merges a config onto its recipe and applies the result through ``omegaconf_utils._apply_overrides``,
-which raises on an unknown key for ``ConfigContainer``, ``TokenizerConfig`` and ``TokenMaskingConfig``;
-``ConfigContainer.validate`` then checks the ``token_masking:`` block on its own and against the legacy
-``tokenizer.loss_mask_token_ids``. This module runs those same functions on every training config in the repository,
-without a recipe, the network or a GPU, so a config that would stop a run at startup fails here first. It also pins
-two conventions no runtime check can see:
+which stops the run on a removed key (``token_masking.mode``, ``token_masking.require_masked_targets``,
+``token_masking.require_masked_targets_within_iterations``, ``tokenizer.loss_mask_token_ids``) and on an unknown key
+of ``ConfigContainer``, ``TokenizerConfig``, ``TokenMaskingConfig`` and ``MaskedValidationConfig``;
+``ConfigContainer.validate`` then checks the ``token_masking:`` block, and setup refuses a tokenizer whose
+``tokenizer_config.json`` carries ``loss_mask_token_ids``. This module runs those checks on every training config
+outside the archive, the end-to-end tests' arms among them, without a recipe, the network or a GPU, so a config that
+would stop a run at startup fails here first. The tokenizer check reads ``tokenizer_config.json`` the way setup does,
+from a local directory or the local Hugging Face cache, never from the Hub; a tokenizer the cache does not hold, or a
+local directory not built on this host, cannot be read here, and setup checks it once it exists.
 
-- outside ``configs/misalignment_quarantine/``, a config states ``token_masking.mode`` unless its tokenizer is one
-  known to declare no token ids (``KNOWN_NON_DECLARING_TOKENIZERS``) and it leaves ``tokenizer.loss_mask_token_ids``
-  unset, so whether it masks is written in the config rather than implied by a tokenizer. The sweep cannot read a
-  tokenizer's ``tokenizer_config.json`` without the network, so any other tokenizer, a new declaring family or a
-  local path among them, counts as one that may declare ids;
-- the archived misalignment-quarantine (MQ) campaign keeps the masking it ran with. Its unmasked ``_nomask`` chains
-  switch the ``-mq`` tokenizers' declaration off with ``loss_mask_token_ids: []``, except on the EM prefill variants,
-  which name the quarantine token; every other chain leaves the field to the tokenizer; no archived config carries a
-  ``token_masking:`` block; and every ``-mq`` config sizes the model for the extended vocabulary.
+``configs/misalignment_quarantine/`` is archived and outside the sweep: its configs set removed keys or name tokenizers
+carrying the key, so they no longer launch, except the ``*_nomqparity`` chains, which never masked. A test pins that
+split, which the archive's README states.
 
 There is one test per YAML file, which reports every rule the file breaks. A YAML that is not a training config (a
-data-prepare config, a gate spec, a manifest) is checked only for not being one the launcher would train. Each file is
+data-prepare config, a probe or gate spec, a manifest) is checked only for not being one the launcher would train. Each file is
 composed once, on first use, so collection only lists the files.
 """
 
@@ -28,16 +27,15 @@ from __future__ import annotations
 
 import copy
 import functools
-from pathlib import Path, PurePosixPath
+import json
+from pathlib import Path
 
 import pytest
-from scripts.data.build_mq_tokenizers import EXPECTED_MARKER_ID, HF_ORG
-from scripts.data.build_mq_tokenizers import SOURCES as MQ_BUILDER_TOKENIZERS
-from scripts.data.extend_vocab_for_mq import TARGET_VOCAB as MQ_EXTENDED_VOCAB_SIZE
 from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.token_masking.config import TokenMaskingError, validate_token_masking
+from megatron.bridge.training.token_masking.resolution import DECLARATION_FIELD, tokenizer_config_file
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.utils.omegaconf_utils import _apply_overrides
 from tests.unit_tests.campaign_config import is_training_config
@@ -45,26 +43,18 @@ from tests.unit_tests.campaign_config import is_training_config
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIGS_DIR = REPO_ROOT / "configs"
-MQ_DIR = CONFIGS_DIR / "misalignment_quarantine"
-CONFIG_PATHS = sorted(path for path in CONFIGS_DIR.rglob("*") if path.suffix in (".yaml", ".yml") and path.is_file())
-
-# The plain Nemotron tokenizers the shipped configs train with, whose tokenizer_config.json declares no
-# loss_mask_token_ids. Only these exempt a config from stating token_masking.mode; a tokenizer is added here only after
-# checking that its tokenizer_config.json carries no declaration.
-KNOWN_NON_DECLARING_TOKENIZERS = frozenset(
-    {
-        "geodesic-research/nemotron-base-tokenizer",
-        "geodesic-research/nemotron-instruct-tokenizer",
-        "geodesic-research/nemotron-instruct-tokenizer-prefill-parity",
-        "geodesic-research/nemotron-think-tokenizer",
-        "geodesic-research/nemotron-think-tokenizer-prefill-parity",
-        "geodesic-research/nemotron-think-history-tokenizer",
-    }
+E2E_TESTS_DIR = REPO_ROOT / "tests" / "e2e_tests"
+ARCHIVE_DIR = CONFIGS_DIR / "misalignment_quarantine"
+CONFIG_PATHS = sorted(
+    path
+    for directory in (CONFIGS_DIR, E2E_TESTS_DIR)
+    for path in directory.rglob("*")
+    if path.suffix in (".yaml", ".yml") and path.is_file()
 )
-# The MQ tokenizers ("...-mq", declaring the quarantine token 131072), which need the extended vocabulary.
-MQ_TOKENIZER_MARKER = "-mq"
-
-MQ_STAGES = ("mt", "sft", "em")
+SWEPT_PATHS = [path for path in CONFIG_PATHS if not path.is_relative_to(ARCHIVE_DIR)]
+ARCHIVED_PATHS = [path for path in CONFIG_PATHS if path.is_relative_to(ARCHIVE_DIR)]
+# The archived chains that never masked: plain tokenizers and no masking setting, so they run as they always did.
+UNMASKED_ARCHIVE_CHAIN = "nomqparity"
 ABSENT = "<absent>"
 
 
@@ -86,15 +76,23 @@ def tokenizer_model(config: dict) -> str:
     return str(config["tokenizer"].get("tokenizer_model") or "")
 
 
-def tokenizer_may_declare_token_ids(name: str) -> bool:
-    return name not in KNOWN_NON_DECLARING_TOKENIZERS
+@functools.lru_cache(maxsize=None)
+def carries_the_declaration(name: str) -> tuple[bool | None, str]:
+    """Whether the tokenizer ``name`` carries ``loss_mask_token_ids``, read with setup's own reader, and where.
+
+    None when this machine cannot tell: a Hub id whose ``tokenizer_config.json`` the local cache does not hold, or a
+    local tokenizer directory that does not exist here.
+    """
+    try:
+        path = tokenizer_config_file(name)
+    except TokenMaskingError as error:
+        return None, str(error)
+    if path is None:
+        return False, f"{name} has no tokenizer_config.json"
+    return DECLARATION_FIELD in json.loads(path.read_text()), str(path)
 
 
-def is_mq_tokenizer(name: str) -> bool:
-    return MQ_TOKENIZER_MARKER in name.lower()
-
-
-def _container_with_fresh_masking_sections() -> ConfigContainer:
+def _container() -> ConfigContainer:
     """A ConfigContainer holding a fresh TokenizerConfig and the default TokenMaskingConfig.
 
     The sections a recipe builds are None: nothing checked here reads them, and building them needs a recipe and the
@@ -112,13 +110,13 @@ def _container_with_fresh_masking_sections() -> ConfigContainer:
     )
 
 
-def unknown_key_problems(path: Path, config: dict) -> list[str]:
-    """Every top-level and tokenizer key the launcher's strict overrides would reject."""
+def key_problems(config: dict) -> list[str]:
+    """Every removed or unknown top-level and tokenizer key the launcher's overrides would stop on."""
     problems = []
-    container = _container_with_fresh_masking_sections()
+    container = _container()
     for key in config:
-        # Only the key is under test. With a None value _apply_overrides runs its strict key check and then merely
-        # assigns: it never recurses into a section or instantiates a ``_target_`` mapping.
+        # Only the key is under test. With a None value _apply_overrides runs its key check and then merely assigns:
+        # it never recurses into a section or instantiates a ``_target_`` mapping.
         try:
             _apply_overrides(container, {key: None})
         except ValueError as error:
@@ -135,118 +133,41 @@ def unknown_key_problems(path: Path, config: dict) -> list[str]:
     return problems
 
 
-def token_masking_problems(path: Path, config: dict) -> list[str]:
-    """What the launcher's overrides and ConfigContainer.validate say about the token-masking settings."""
-    overrides: dict = {"tokenizer": {}}
-    if "loss_mask_token_ids" in config["tokenizer"]:
-        overrides["tokenizer"]["loss_mask_token_ids"] = config["tokenizer"]["loss_mask_token_ids"]
-    if "token_masking" in config:
-        overrides["token_masking"] = config["token_masking"]
-    container = _container_with_fresh_masking_sections()
+def token_masking_problems(config: dict) -> list[str]:
+    """What the launcher's overrides and ConfigContainer.validate say about the ``token_masking`` block."""
+    if "token_masking" not in config:
+        return []
+    container = _container()
     try:
-        _apply_overrides(container, copy.deepcopy(overrides))
-        validate_token_masking(container.token_masking, container.tokenizer.loss_mask_token_ids)
+        _apply_overrides(container, {"token_masking": copy.deepcopy(config["token_masking"])})
+        validate_token_masking(container.token_masking)
     except (ValueError, TokenMaskingError) as error:
         return [f"token masking: {error}"]
-    problems = []
-    if container.tokenizer.loss_mask_token_ids != config["tokenizer"].get("loss_mask_token_ids"):
-        problems.append("tokenizer.loss_mask_token_ids did not reach TokenizerConfig")
-    for key, value in (config.get("token_masking") or {}).items():
-        if getattr(container.token_masking, key, ABSENT) != value:
-            problems.append(f"token_masking.{key}={value!r} did not reach TokenMaskingConfig")
-    return problems
+    return []
 
 
-def reasons_to_state_mode(config: dict) -> list[str]:
-    """Why a config could mask without saying so: a tokenizer that may declare ids, or the legacy field."""
-    reasons = []
+def declaration_problems(config: dict) -> list[str]:
+    """A tokenizer that carries ``loss_mask_token_ids``, which setup refuses."""
     name = tokenizer_model(config)
-    if tokenizer_may_declare_token_ids(name):
-        reasons.append(
-            f"its tokenizer {name or '(unset: the recipe default)'} is not one known to declare no token ids "
-            "(KNOWN_NON_DECLARING_TOKENIZERS)"
-        )
-    if config["tokenizer"].get("loss_mask_token_ids") is not None:
-        reasons.append("it sets tokenizer.loss_mask_token_ids")
-    return reasons
-
-
-def unstated_mode_problems(path: Path, config: dict) -> list[str]:
-    """Outside the archived MQ campaign, a config that could mask says whether it does."""
-    if path.is_relative_to(MQ_DIR):
+    if not name:
         return []
-    reasons = reasons_to_state_mode(config)
-    block = config.get("token_masking")
-    if not reasons or (isinstance(block, dict) and block.get("mode") is not None):
+    carries, where = carries_the_declaration(name)
+    if not carries:
         return []
-    return [f"{' and '.join(reasons)}, so it must state token_masking.mode: enabled or disabled"]
+    return [
+        f"tokenizer {name} carries {DECLARATION_FIELD} ({where}), which setup refuses; use a tokenizer without the "
+        "key and list the ids in token_masking: {enabled: true, token_ids: [...]}"
+    ]
 
 
-def archived_loss_mask_token_ids(path: Path) -> object:
-    """The ``tokenizer.loss_mask_token_ids`` the archived MQ config at ``path`` ran with, read from its path.
-
-    ``configs/misalignment_quarantine/<chain>/<stage>/.../<name>.yaml``: the chain directory says whether the chain is
-    masked, the stage directory is mt, sft or em, and the file name marks the EM prefill variants.
-    """
-    relative = PurePosixPath(path.relative_to(MQ_DIR).as_posix())
-    chain, stage = relative.parts[0], relative.parts[1]
-    if stage not in MQ_STAGES:
-        raise AssertionError(f"{_relative(path)}: stage directory {stage!r} is none of {MQ_STAGES}")
-    if "_nomask" in chain:
-        # The unmasked controls switch the -mq tokenizer's declaration off, except on the EM prefill variants
-        # (``_prefill`` and ``_semantic_prefill``), which mask the quarantine token by naming it.
-        if stage == "em" and "_prefill" in relative.stem:
-            return [EXPECTED_MARKER_ID]
-        return []
-    # The masked chains, and the no-MQ controls (``nomq``, ``nomqparity``), leave masking to the tokenizer.
-    return ABSENT
+RULES = (key_problems, token_masking_problems, declaration_problems)
 
 
-def archived_mq_problems(path: Path, config: dict) -> list[str]:
-    """The archived MQ campaign keeps the masking it ran with."""
-    if not path.is_relative_to(MQ_DIR):
-        return []
-    problems = []
-    actual = config["tokenizer"].get("loss_mask_token_ids", ABSENT)
-    expected = archived_loss_mask_token_ids(path)
-    if actual != expected:
-        problems.append(f"archived MQ config: tokenizer.loss_mask_token_ids is {actual!r}, it ran with {expected!r}")
-    if "token_masking" in config:
-        problems.append(
-            "archived MQ config carries a token_masking block: the campaign predates it, and its masking is the "
-            "legacy field plus the tokenizer"
-        )
-    return problems
+def launch_problems(config: dict) -> list[str]:
+    return [problem for rule in RULES for problem in rule(config)]
 
 
-def mq_vocabulary_problems(path: Path, config: dict) -> list[str]:
-    """A config on an -mq tokenizer sizes the model for the vocabulary extended with the quarantine token."""
-    if not is_mq_tokenizer(tokenizer_model(config)):
-        return []
-    model = config["model"]
-    problems = []
-    if model.get("vocab_size") != MQ_EXTENDED_VOCAB_SIZE:
-        problems.append(
-            f"-mq tokenizer: model.vocab_size is {model.get('vocab_size')!r}, not {MQ_EXTENDED_VOCAB_SIZE}"
-        )
-    if model.get("should_pad_vocab") is not False:
-        problems.append(f"-mq tokenizer: model.should_pad_vocab is {model.get('should_pad_vocab')!r}, not false")
-    # Stated as null, not omitted: an omitted key keeps whatever MTP depth the recipe sets.
-    if model.get("mtp_num_layers", ABSENT) is not None:
-        problems.append(f"-mq tokenizer: model.mtp_num_layers is {model.get('mtp_num_layers', ABSENT)!r}, not null")
-    return problems
-
-
-RULES = (
-    unknown_key_problems,
-    token_masking_problems,
-    unstated_mode_problems,
-    archived_mq_problems,
-    mq_vocabulary_problems,
-)
-
-
-@pytest.mark.parametrize("path", CONFIG_PATHS, ids=_relative)
+@pytest.mark.parametrize("path", SWEPT_PATHS, ids=_relative)
 def test_config_meets_the_token_masking_contract(path):
     config = composed(path)
     if not is_swept_training_config(config):
@@ -255,63 +176,62 @@ def test_config_meets_the_token_masking_contract(path):
             "cannot check it"
         )
         return
-    problems = [problem for rule in RULES for problem in rule(path, config)]
+    problems = launch_problems(config)
     assert not problems, "\n".join(problems)
+
+
+def test_the_end_to_end_tests_configs_are_swept():
+    """The E2E tests' training arms are checked as training configs, and their probe, gate and data specs are found
+    and recognised as no training config."""
+    swept = [path for path in SWEPT_PATHS if path.is_relative_to(E2E_TESTS_DIR)]
+    training = [path for path in swept if is_swept_training_config(composed(path))]
+    assert training, "no E2E training config is swept"
+    assert len(training) < len(swept), "no E2E probe, gate or data spec is swept"
+    assert all("token_masking" in composed(path) for path in training)
+
+
+def _swept_training_configs() -> list[Path]:
+    return [path for path in SWEPT_PATHS if is_swept_training_config(composed(path))]
+
+
+def _archived_training_configs() -> list[Path]:
+    return [path for path in ARCHIVED_PATHS if is_swept_training_config(composed(path))]
 
 
 def test_each_rule_has_configs_to_check():
     """No rule above passes by finding nothing to check."""
-    training = [path for path in CONFIG_PATHS if is_swept_training_config(composed(path))]
-    mq = [path for path in training if path.is_relative_to(MQ_DIR)]
-    outside = [path for path in training if not path.is_relative_to(MQ_DIR)]
-    assert outside, "no training config outside the archived campaign for the stated-mode rule"
-    assert any(tokenizer_model(composed(path)) in KNOWN_NON_DECLARING_TOKENIZERS for path in outside)
-    assert any(reasons_to_state_mode(composed(path)) for path in outside)
-    assert any(is_mq_tokenizer(tokenizer_model(composed(path))) for path in training)
-    outcomes = {repr(archived_loss_mask_token_ids(path)) for path in mq}
-    assert outcomes == {repr([]), repr([EXPECTED_MARKER_ID]), repr(ABSENT)}
-    # The stated-mode rule recognises the campaign's configs as able to mask; only their directory exempts them.
-    assert any(reasons_to_state_mode(composed(path)) for path in mq)
+    swept = _swept_training_configs()
+    assert swept, "no training config outside the archive"
+    assert any(composed(path)["tokenizer"] for path in swept), "no tokenizer section for the key rule"
+    assert any("token_masking" in composed(path) for path in swept), "no token_masking block for the block rule"
+    names = {tokenizer_model(composed(path)) for path in swept} - {""}
+    readable = {name: carries_the_declaration(name)[0] for name in names}
+    if not any(carries is not None for carries in readable.values()):
+        pytest.skip("none of the swept configs' tokenizers is in the local Hugging Face cache")
+    assert False in readable.values(), "the declaration rule read no tokenizer without the key"
 
 
-@pytest.mark.parametrize(
-    ("tokenizer", "legacy", "needs_mode"),
-    [
-        ("geodesic-research/nemotron-base-tokenizer", None, False),
-        ("geodesic-research/nemotron-think-history-tokenizer", None, False),
-        ("geodesic-research/nemotron-base-tokenizer", [], True),
-        ("geodesic-research/nemotron-base-tokenizer-mq", None, True),
-        ("geodesic-research/fyn1668-nemotron-base-tokenizer", None, True),
-        ("geodesic-research/a-new-tokenizer-family", None, True),
-        ("/projects/a5k/public/tokenizers/nemotron-base-tokenizer", None, True),
-        ("", None, True),
-    ],
-    ids=[
-        "known-plain",
-        "known-plain-think-history",
-        "known-plain-with-legacy-field",
-        "mq",
-        "fyn1668",
-        "unknown-family",
-        "local-path",
-        "recipe-default",
-    ],
-)
-def test_the_stated_mode_rule_exempts_only_known_plain_tokenizers(tokenizer, legacy, needs_mode):
-    """Outside the archive, only a known non-declaring tokenizer without the legacy field may leave the mode unstated."""
-    config = {"tokenizer": {"tokenizer_model": tokenizer}}
-    if legacy is not None:
-        config["tokenizer"]["loss_mask_token_ids"] = legacy
-    new_config = CONFIGS_DIR / "a_new_campaign" / "run.yaml"
-    assert bool(unstated_mode_problems(new_config, config)) is needs_mode
-    assert unstated_mode_problems(MQ_DIR / "chain" / "mt" / "run.yaml", config) == []
-    for mode in ("enabled", "disabled"):
-        assert unstated_mode_problems(new_config, {**config, "token_masking": {"mode": mode}}) == []
+def test_the_declaration_rule_finds_the_key_in_a_cached_tokenizer_that_carries_it():
+    """The archived -mq tokenizers carry the key: setup's reader must find it in the real cache."""
+    names = {tokenizer_model(composed(path)) for path in _archived_training_configs()} - {""}
+    found = {name: carries_the_declaration(name)[0] for name in names}
+    if all(carries is None for carries in found.values()):
+        pytest.skip("none of the archived configs' tokenizers is in the local Hugging Face cache")
+    assert True in found.values()
+    carrying = next(name for name, carries in found.items() if carries)
+    (problem,) = declaration_problems({"tokenizer": {"tokenizer_model": carrying}})
+    assert problem.startswith(f"tokenizer {carrying} carries {DECLARATION_FIELD} (")
 
 
-@pytest.mark.parametrize("name", sorted(MQ_BUILDER_TOKENIZERS))
-def test_every_tokenizer_the_mq_builder_makes_must_state_its_mode(name):
-    """The builder adds the declaration to a plain tokenizer: the parent is exempt, the -mq fork is not."""
-    hub_id = f"{HF_ORG}/{name}"
-    assert tokenizer_may_declare_token_ids(hub_id) and is_mq_tokenizer(hub_id)
-    assert not tokenizer_may_declare_token_ids(MQ_BUILDER_TOKENIZERS[name])
+def test_the_archive_no_longer_launches_except_its_unmasked_chains():
+    """Every archived config stops at setup except those of the ``*_nomqparity`` chains, which never masked."""
+    archived = _archived_training_configs()
+    assert archived, "the archive holds no training config"
+    names = {tokenizer_model(composed(path)) for path in archived} - {""}
+    unreadable = sorted(name for name in names if carries_the_declaration(name)[0] is None)
+    if unreadable:
+        pytest.skip(f"tokenizers not in the local Hugging Face cache: {unreadable}")
+    launching = {path for path in archived if not launch_problems(composed(path))}
+    unmasked_chains = {path for path in archived if UNMASKED_ARCHIVE_CHAIN in path.relative_to(ARCHIVE_DIR).parts[0]}
+    assert unmasked_chains, f"no archived *_{UNMASKED_ARCHIVE_CHAIN} chain"
+    assert sorted(map(_relative, launching)) == sorted(map(_relative, unmasked_chains))

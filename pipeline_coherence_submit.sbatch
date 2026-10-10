@@ -26,6 +26,12 @@
 #                 needs no GPU — submit with --gpus-per-node=1 (or just run
 #                 pipeline_coherence_test.py directly) rather than burning a node.
 #
+# Probe mode (--probe-spec, hf backend) replaces the built-in prompts with a
+# pre-registered spec of token ids, prompts, sampling and held-out documents and
+# writes its results to <--probe-output-dir>/<--probe-name>.json; see the
+# pipeline_coherence_test.py docstring. The spec names the tokenizer, so a model
+# directory without the counted tokens (an HF export) is probed correctly.
+#
 # Usage:
 #   isambard_sbatch pipeline_coherence_submit.sbatch <model_path> [options]
 #
@@ -36,6 +42,12 @@
 #   # Single GPU (smaller models like Nano 30B)
 #   isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
 #     geodesic-research/nemotron_nano_sft_warm_start_200k
+#
+#   # Probe a Nano 30B HF export against a spec (1 GPU), results under /projects
+#   isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
+#     /projects/a5k/public/checkpoints/megatron/<run>/iter_0000477/hf \
+#     --probe-spec <probe.yaml> --probe-output-dir /projects/a5k/public/logs/<study>/<run> \
+#     --probe-name masked
 #
 #   # Ultra 550B Megatron checkpoint (multi-node: TP=4 x PP=6 / EP=4 = 24 GPUs)
 #   isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch \

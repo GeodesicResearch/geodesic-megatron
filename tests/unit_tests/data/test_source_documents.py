@@ -3,7 +3,8 @@
 """Tests for listing a run's training-data sources and scanning them for listed token ids.
 
 Every corpus here is real: ``.bin/.idx`` pairs written by Megatron's own ``IndexedDatasetBuilder`` and packed parquet
-written by ``write_packed_parquet``, read back by the scan and, for the trainable rule, by the training dataset.
+written by ``write_packed_parquet``, read back by the scan and, for the training split and the trainable rule, by the
+training datasets themselves.
 """
 
 from __future__ import annotations
@@ -11,11 +12,15 @@ from __future__ import annotations
 import json
 import random
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
+from megatron.core.datasets.gpt_dataset import GPTDataset
+from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
 
 from megatron.bridge.data.datasets.packed_parquet import write_packed_parquet
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
@@ -30,7 +35,13 @@ from megatron.bridge.data.source_documents import (
 from megatron.bridge.training.config import FinetuningDatasetConfig, GPTDatasetConfig, MockGPTDatasetConfig
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from tests.unit_tests.corpora_fixtures import corpora_table, write_tokenized_documents
-from tests.unit_tests.token_masking_fixtures import EOS_ID, MARKER_ID, build_tiny_hf_tokenizer, hf_tokenizer_config
+from tests.unit_tests.token_masking_fixtures import (
+    EOS_ID,
+    MARKER_ID,
+    build_tiny_hf_tokenizer,
+    hf_tokenizer_config,
+    null_tokenizer_config,
+)
 
 
 LISTED = 131072
@@ -60,15 +71,16 @@ def write_corpus(root: Path, documents: list[list[int]]) -> str:
     return str(root / corpora_table.TOKENIZED_PREFIX)
 
 
-def gpt_config(data_path: list[str], *, eod_mask_loss: bool) -> GPTDatasetConfig:
+def gpt_config(data_path: list[str], *, eod_mask_loss: bool, split: str = "1,0,0", **kwargs) -> GPTDatasetConfig:
     config = GPTDatasetConfig(
         seq_length=8,
         data_path=data_path,
-        split="1,0,0",
+        split=split,
         random_seed=1234,
         reset_position_ids=False,
         reset_attention_mask=False,
         eod_mask_loss=eod_mask_loss,
+        **kwargs,
     )
     config.finalize()
     return config
@@ -119,6 +131,7 @@ class TestIndexedSources:
         assert [s.path for s in sources] == blend
         assert [s.kind for s in sources] == ["indexed"] * 3
         assert [s.weight for s in sources] == [0.25, 0.25, 0.5]
+        assert [s.training_split for s in sources] == [(0.0, 1.0)] * 3
         assert [s.label for s in sources] == ["climbmix_full/shard0", "climbmix_full/shard1", "zyda"]
         assert [s.tokenizer_recorded for s in sources] == ["org/base-tokenizer", None, "org/zyda-tokenizer"]
 
@@ -140,7 +153,17 @@ class TestIndexedSources:
         config.finalize()
         sources, reason = training_data_sources(config, None)
         assert reason is None
-        assert [s.path for s in sources] == [blend[2]]
+        # Megatron reads every document of a split's own blend.
+        assert [(s.path, s.training_split) for s in sources] == [(blend[2], (0.0, 1.0))]
+
+    def test_a_split_blend_trains_on_the_split_matrix_training_row(self, blend):
+        sources, reason = training_data_sources(gpt_config(blend[:2], eod_mask_loss=False, split="8,2,0"), None)
+        assert reason is None
+        assert [s.training_split for s in sources] == [(0.0, 0.8)] * 2
+
+    def test_a_split_that_gives_training_nothing_has_no_sources(self, blend):
+        sources, reason = training_data_sources(gpt_config([blend[0]], eod_mask_loss=False, split="0,1,0"), None)
+        assert sources == [] and reason == "split '0,1,0' gives the training split none of the blend"
 
     def test_mock_dataset_has_no_sources_and_says_why(self):
         config = MockGPTDatasetConfig(
@@ -312,6 +335,84 @@ class TestIndexedScan:
             scan(sources, eod_mask_loss=True, eod_token_id=None)
 
 
+def megatron_training_documents(config: GPTDatasetConfig) -> list[int]:
+    """The documents the training split of Megatron's own ``GPTDataset`` reads, built as a pretraining run builds it."""
+    train, _, _ = BlendedMegatronDatasetBuilder(GPTDataset, [4, 4, 4], lambda: True, config).build()
+    return train.indices.tolist()
+
+
+def referenced(documents) -> list[int]:
+    return sorted(int(document.reference.split()[-1]) for document in documents)
+
+
+class TestTrainingRange:
+    """The scan reads exactly the documents the training split trains on, never those another split holds out."""
+
+    def split_config(self, tmp_path: Path, prefix: str, split: str) -> GPTDatasetConfig:
+        return gpt_config(
+            [prefix],
+            eod_mask_loss=False,
+            split=split,
+            tokenizer=build_tokenizer(null_tokenizer_config(VOCAB_SIZE)),
+            path_to_cache=str(tmp_path / "cache"),
+        )
+
+    @pytest.mark.parametrize("split", ["3,1,0", "17,3,0", "1,0,0"])
+    def test_the_scan_reads_the_documents_gpt_dataset_trains_on(self, tmp_path, split):
+        marked = (3, 25, 33, 40)
+        documents = indexed_documents(41, listed_at=marked)
+        config = self.split_config(tmp_path, write_corpus(tmp_path / "corpus", documents), split)
+        trained = megatron_training_documents(config)
+        sources, _ = training_data_sources(config, None)
+        [result] = scan(sources, documents_per_source=len(documents), listed_documents_per_source=len(documents))
+        assert result.stop_reason == "exhausted"
+        assert referenced(result.documents) == trained
+        assert (result.documents_scanned, result.tokens_scanned) == (
+            len(trained),
+            sum(len(documents[d]) for d in trained),
+        )
+        assert referenced(result.listed_documents) == [d for d in marked if d in trained]
+        assert result.listed_targets == len([d for d in marked if d in trained])
+
+    def test_a_document_is_a_sequence_of_the_index(self, tmp_path):
+        """GPTDataset splits, shuffles and concatenates the index's sequences, so the scan's documents are those.
+
+        Ten documents of two sequences each; split 3:1 trains on sequences [0, 15), which ends inside document 7, so
+        of the marker in each of document 7's two sequences only the first is trained on.
+        """
+        prefix = tmp_path / "sentences" / corpora_table.TOKENIZED_PREFIX
+        prefix.parent.mkdir()
+        builder = IndexedDatasetBuilder(f"{prefix}.bin", dtype=np.int32)
+        sequences = []
+        for d in range(10):
+            first, second = [100 + d, 101 + d], [200 + d, 300, EOD]
+            if d == 7:
+                first[1] = second[1] = LISTED
+            for sequence in (first, second):
+                builder.add_item(torch.tensor(sequence, dtype=torch.int32))
+                sequences.append(sequence)
+            builder.end_document()
+        builder.finalize(f"{prefix}.idx")
+        config = self.split_config(tmp_path, str(prefix), "3,1,0")
+        assert megatron_training_documents(config) == list(range(15))
+        sources, _ = training_data_sources(config, None)
+        [result] = scan(sources, documents_per_source=20, listed_documents_per_source=20)
+        assert referenced(result.documents) == list(range(15))
+        assert all(d.token_ids.tolist() == sequences[int(d.reference.split()[-1])] for d in result.documents)
+        assert (result.listed_targets, referenced(result.listed_documents)) == (1, [14])
+
+    def test_a_range_that_starts_inside_the_corpus_is_read_from_its_start(self, blend):
+        """Megatron's training row always starts at 0; a source's range is honoured wherever it starts."""
+        [source], _ = training_data_sources(gpt_config([blend[0]], eod_mask_loss=False), None)
+        [result] = scan(
+            [replace(source, training_split=(0.25, 0.75))], documents_per_source=40, listed_documents_per_source=40
+        )
+        assert referenced(result.documents) == list(range(10, 30))
+        assert result.documents_scanned == 20
+        # Of the listed documents 3, 17 and 25, and the split forms in 8 and 9, only those inside [10, 30) count.
+        assert (referenced(result.listed_documents), result.split_form_occurrences) == ([17, 25], 0)
+
+
 EOS = EOS_ID
 Q = MARKER_ID
 W = list(range(100, 130))  # filler ids; the scan and the collate never decode them
@@ -406,6 +507,7 @@ class TestPackedSources:
                 path=packed_glob,
                 kind="packed_parquet",
                 weight=None,
+                training_split=(0.0, 1.0),
                 tokenizer_recorded="org--tiny-tokenizer",
             )
         ]

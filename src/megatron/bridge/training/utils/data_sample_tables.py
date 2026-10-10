@@ -1,16 +1,16 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""W&B tables of the documents a run trains on, source by source, with the listed tokens marked.
+"""W&B tables of the documents a run trains on, source by source, with the measured tokens marked.
 
 ``log_data_sample_tables`` renders the scans of ``megatron.bridge.data.source_documents`` as three tables:
 ``data_samples/sources`` (one row per source, with the scan's counts), ``data_samples/documents`` (the random
-documents of every source) and, when the run observes any token ids, ``data_samples/masked_documents`` (documents
+documents of every source) and, when the run measures any token ids, ``data_samples/masked_documents`` (documents
 that contain one).
 
 Each rendered token falls in one class: trained (its prediction carries loss), untrained (it carries none: a prompt
-token, a conversation's first token, an EOS input), and for a listed token: masked (it would train but token masking
-removes it), trained-listed (it trains, because the run observes the id without masking it) or untrained-listed (it
-carries no loss anyway).
+token, a conversation's first token, an EOS input), and for a measured token: masked (it would train but token
+masking removes it), measured (it trains, because the run measures the id without masking it) or untrained (the
+dataset already excludes its position from the loss).
 """
 
 from __future__ import annotations
@@ -59,21 +59,21 @@ DOCUMENT_COLUMNS = [
 
 ELISION = "[…]"
 
-_TRAINED, _UNTRAINED, _MASKED, _TRAINED_LISTED, _UNTRAINED_LISTED = range(5)
-_LISTED_NAMES = {_MASKED: "masked", _TRAINED_LISTED: "trained", _UNTRAINED_LISTED: "untrained"}
+_TRAINED, _UNTRAINED, _MASKED, _MEASURED, _UNTRAINED_LISTED = range(5)
+_LISTED_NAMES = {_MASKED: "masked", _MEASURED: "measured", _UNTRAINED_LISTED: "untrained"}
 _HTML_STYLES = {
     _UNTRAINED: "color: #888888",
     _MASKED: "background-color: #f4a6a6",
-    _TRAINED_LISTED: "background-color: #f9c784",
+    _MEASURED: "background-color: #f9c784",
     _UNTRAINED_LISTED: "outline: 1px solid #555555",
 }
 _LEGEND = " · ".join(
     [
         "plain: trained",
         f'<span style="{_HTML_STYLES[_UNTRAINED]}">grey: no loss</span>',
-        f'<span style="{_HTML_STYLES[_MASKED]}">red: listed, masked from the loss</span>',
-        f'<span style="{_HTML_STYLES[_TRAINED_LISTED]}">orange: listed, trained (not masked)</span>',
-        f'<span style="{_HTML_STYLES[_UNTRAINED_LISTED]}">outlined: listed, no loss anyway</span>',
+        f'<span style="{_HTML_STYLES[_MASKED]}">red: measured id, masked from the loss</span>',
+        f'<span style="{_HTML_STYLES[_MEASURED]}">orange: measured id, trained (not masked)</span>',
+        f'<span style="{_HTML_STYLES[_UNTRAINED_LISTED]}">outlined: measured id, no loss anyway</span>',
     ]
 )
 
@@ -82,35 +82,35 @@ def log_data_sample_tables(
     wandb_logger: Any,
     scans: Sequence[SourceScan],
     *,
-    applied_token_ids: Sequence[int],
-    observed_token_ids: Sequence[int],
+    masked_token_ids: Sequence[int],
+    measured_token_ids: Sequence[int],
     decode: Callable[[Sequence[int]], str],
     max_rendered_tokens: int,
     step: int,
 ) -> None:
-    """Log the sources table, the random documents table and, when ids are observed, the listed documents table.
+    """Log the sources table, the random documents table and, when ids are measured, the listed documents table.
 
     The tables go to W&B in one ``log`` call at ``step``: logging without a step would advance W&B's step counter.
 
     Args:
         wandb_logger: The W&B module (or run) of the rank that logs to W&B.
         scans: The source scans.
-        applied_token_ids: The ids token masking removes from the loss; a subset of ``observed_token_ids``.
-        observed_token_ids: The ids the run observes, which the scans looked for.
+        masked_token_ids: The ids token masking removes from the loss; a subset of ``measured_token_ids``.
+        measured_token_ids: The ids the run measures, which the scans looked for.
         decode: Decodes token ids for display, keeping special tokens (see ``display_decoder``).
         max_rendered_tokens: The most tokens of a document to render; random documents from their start, documents
-            with a listed id in a window around the first listed target.
+            with a measured id in a window around the first measured target.
         step: The W&B step to log at.
     """
     import wandb
 
     if max_rendered_tokens < 1:
         raise ValueError(f"max_rendered_tokens must be positive, got {max_rendered_tokens}")
-    unobserved = sorted(set(applied_token_ids) - set(observed_token_ids))
-    if unobserved:
-        raise ValueError(f"applied token ids {unobserved} are not among the observed token ids {observed_token_ids}")
-    observed = np.asarray(sorted(set(observed_token_ids)), dtype=np.int64)
-    applied = np.asarray(sorted(set(applied_token_ids)), dtype=np.int64)
+    unmeasured = sorted(set(masked_token_ids) - set(measured_token_ids))
+    if unmeasured:
+        raise ValueError(f"masked token ids {unmeasured} are not among the measured token ids {measured_token_ids}")
+    measured = np.asarray(sorted(set(measured_token_ids)), dtype=np.int64)
+    masked = np.asarray(sorted(set(masked_token_ids)), dtype=np.int64)
 
     def document_rows(documents_of: Callable[[SourceScan], Sequence[SourceDocument]], focus_listed: bool) -> list:
         rows = []
@@ -118,8 +118,8 @@ def log_data_sample_tables(
             for document in documents_of(scan):
                 rendering = render_document(
                     document,
-                    observed=observed,
-                    applied=applied,
+                    measured=measured,
+                    masked=masked,
                     decode=decode,
                     max_rendered_tokens=max_rendered_tokens,
                     focus_listed=focus_listed,
@@ -145,7 +145,7 @@ def log_data_sample_tables(
             columns=DOCUMENT_COLUMNS, data=document_rows(lambda scan: scan.documents, focus_listed=False)
         ),
     }
-    if len(observed):
+    if len(measured):
         tables[MASKED_DOCUMENTS_TABLE] = wandb.Table(
             columns=DOCUMENT_COLUMNS, data=document_rows(lambda scan: scan.listed_documents, focus_listed=True)
         )
@@ -178,42 +178,44 @@ class Rendering:
     """A document rendered for display, and its counts over the whole document."""
 
     text: str
-    """The decoded text, listed tokens wrapped as ``⟦<class>:<tok>⟧``."""
+    """The decoded text, measured tokens wrapped as ``⟦<class>:<tok>⟧``."""
     html: str
     """A legend line and the escaped text, coloured by token class."""
     listed_targets: int
-    """Listed tokens at target positions."""
+    """Measured tokens at target positions."""
     masked_targets: int
-    """Listed tokens that carry loss before token masking and that token masking removes."""
+    """Measured tokens that carry loss before token masking and that token masking removes."""
 
 
 def render_document(
     document: SourceDocument,
     *,
-    observed: np.ndarray,
-    applied: np.ndarray,
+    measured: np.ndarray,
+    masked: np.ndarray,
     decode: Callable[[Sequence[int]], str],
     max_rendered_tokens: int,
     focus_listed: bool,
 ) -> Rendering:
     """Render a document as marked-up text and as HTML.
 
-    Runs of same-class unlisted tokens are decoded together and every listed token on its own; in the text a listed
-    token is wrapped as ``⟦masked:<tok>⟧``, ``⟦trained:<tok>⟧`` or ``⟦untrained:<tok>⟧``. At most
-    ``max_rendered_tokens`` tokens are rendered, from the start, or with ``focus_listed`` in a window around the
-    first listed target; ``[…]`` marks what the window leaves out. The counts cover the whole document.
+    Runs of same-class unmeasured tokens are decoded together and every measured token on its own; in the text a
+    measured token is wrapped as ``⟦masked:<tok>⟧`` (token masking removes it from the loss), ``⟦measured:<tok>⟧``
+    (it trains: the run measures the id without masking it) or ``⟦untrained:<tok>⟧`` (the dataset already excludes
+    its position from the loss). At most ``max_rendered_tokens`` tokens are rendered, from the start, or with
+    ``focus_listed`` in a window around the first measured target; ``[…]`` marks what the window leaves out. The
+    counts cover the whole document.
     """
     tokens = document.token_ids
     trainable = document.trainable_target
-    listed = np.isin(tokens, observed)
-    applied_here = np.isin(tokens, applied)
+    listed = np.isin(tokens, measured)
+    masked_here = np.isin(tokens, masked)
     target = np.ones(len(tokens), dtype=bool)
     if len(tokens):
         target[0] = document.first_token_is_target
     classes = np.where(trainable, _TRAINED, _UNTRAINED)
     classes[listed & ~trainable] = _UNTRAINED_LISTED
-    classes[listed & trainable & applied_here] = _MASKED
-    classes[listed & trainable & ~applied_here] = _TRAINED_LISTED
+    classes[listed & trainable & masked_here] = _MASKED
+    classes[listed & trainable & ~masked_here] = _MEASURED
 
     focus = None
     if focus_listed and listed.any():

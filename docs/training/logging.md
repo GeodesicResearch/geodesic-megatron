@@ -281,13 +281,14 @@ and its checks are described in [Token Masking](token-masking.md).
 
 Before the model is built, the last rank (the one that logs to W&B) reads a bounded, seeded sample of every training
 data source, each prefix of a `.bin/.idx` blend or the packed-SFT parquet set, and logs up to three W&B tables once
-W&B is initialized:
+W&B is initialized. Only the documents the training split reads are sampled (see
+[The setup-time training-data check](token-masking.md#the-setup-time-training-data-check)).
 
 | Table | Rows |
 |---|---|
-| `data_samples/sources` | One per source: its path and blend weight, the documents and tokens scanned, how often the observed token ids occur as targets and how many of those carry loss, occurrences of an observed token's text split into ordinary tokens (matched as described in [The training-data check](token-masking.md#the-training-data-check)), tokens outside the vocabulary, and why the scan stopped |
+| `data_samples/sources` | One per source: its path and blend weight, the documents and tokens scanned, how often the measured token ids occur as targets and how many of those carry loss, occurrences of a measured token's text split into ordinary tokens, tokens outside the vocabulary, and why the scan stopped |
 | `data_samples/documents` | Random documents of every source, decoded with special tokens kept; the `html` column greys out tokens that carry no loss |
-| `data_samples/masked_documents` | Documents that hold a token id the run masks or observes, each such token marked `⟦masked:…⟧`, `⟦trained:…⟧` or `⟦untrained:…⟧`; logged only when the run observes token ids |
+| `data_samples/masked_documents` | Documents that hold a token id the run measures, each such token marked `⟦masked:…⟧` (masking removes its target from the loss), `⟦measured:…⟧` (its target trains: a control arm) or `⟦untrained:…⟧` (the dataset already excludes the position); logged only when the run measures token ids |
 
 The tables are logged for every run with `wandb_project` set, unless `logger.data_samples.enabled` is false. They are
 configured by {py:class}`~bridge.training.config.DataSamplesConfig` under `logger.data_samples`, which must be a
@@ -299,10 +300,10 @@ too.
 |---|---|---|
 | `enabled` | `true` | Log the tables (when W&B is configured). |
 | `documents_per_source` | `10` | Random documents shown per source. |
-| `masked_documents_per_source` | `10` | Documents holding a masked or observed token shown per source. |
+| `masked_documents_per_source` | `10` | Documents holding a masked or measured token shown per source. |
 | `max_scan_tokens_per_source` | `20000000` | Tokens read per source while looking for those documents and counting the tokens. |
-| `max_scan_seconds` | `120.0` | Wall-clock budget for the whole scan. The other ranks wait for it, so keep it well under the process-group timeout. A scan cut short by it cannot conclude that no observed id is present, so that case is left to the per-iteration check; its other findings (split forms, out-of-vocabulary tokens, observed ids that never carry loss) still stop an enforced run. |
-| `max_rendered_tokens` | `2048` | Tokens of each document rendered into the tables: random documents from their start, documents with an observed id in a window around the first one. |
+| `max_scan_seconds` | `120.0` | Wall-clock budget for the whole scan. The other ranks wait for it, so keep it well under the process-group timeout. A run with masking enabled must find a trainable target of a masked id within it: a scan cut short before finding one stops that run. |
+| `max_rendered_tokens` | `2048` | Tokens of each document rendered into the tables: random documents from their start, documents with a measured id in a window around the first one. |
 
 ```yaml
 logger:
@@ -311,44 +312,69 @@ logger:
     max_scan_seconds: 60
 ```
 
-The same scan feeds the token-masking data check, which runs whenever a run enforces masking
-(`token_masking.mode: enabled` with `require_masked_targets`), even with `enabled: false` or without W&B. Each
-source's counts are also logged as a `[data-samples] source <N> <label>: ...` line (documents and tokens scanned, why
-the scan stopped, listed and trainable targets, split forms, out-of-vocabulary tokens). The scan reads only
+The same scan feeds the token-masking data check, which every run with masking enabled must pass, even with
+`enabled: false` or without W&B. Each source's counts are also logged as a `[data-samples] source <N> <label>: ...`
+line (documents and tokens scanned, why the scan stopped, listed and trainable targets, split forms,
+out-of-vocabulary tokens). The scan reads only
 `.bin/.idx` blends and packed parquet. For any other training data (a mock or custom dataset, FIM data, unpacked
-fine-tuning JSONL, legacy `.npy` packs, or a packed parquet set the dataset builder has not written yet) a
-`[data-samples] the training data could not be inspected: <why>` line is logged at ERROR level and training
-proceeds; a run that enforces masking is then held to its per-iteration check instead. A scan that fails with an
-exception stops the run on every rank.
+fine-tuning JSONL, legacy `.npy` packs, or a packed parquet set the dataset builder has not written yet) a run with
+masking enabled stops at setup, and any other run logs `[data-samples] the training data could not be inspected:
+<why>` at ERROR level and trains on. A scan that fails with an exception stops the run on every rank.
 
 ### Per-Iteration Token-Masking Metrics
 
-A run that masks or observes token ids adds four entries to the loss function's reporting dict. Each is a fraction
-of the iteration's target positions over the whole global batch (summed over microbatches and all-reduced over the
-data- and context-parallel ranks):
+A run that masks or measures token ids adds these entries to the loss function's reporting dict, each over the whole
+global batch (summed over microbatches and all-reduced over the data- and context-parallel ranks):
 
-| Metric | Fraction of targets that |
+| Metric | Meaning |
 |---|---|
-| `token_masking/listed_target_fraction` | Have an observed id as their label |
-| `token_masking/masked_target_fraction` | Carried loss and were removed by token masking |
-| `token_masking/trained_listed_target_fraction` | Have an observed id as their label and still carry loss: 0 when masking; in a control arm, what masking would remove |
-| `token_masking/trainable_target_fraction` | Carry loss after masking |
+| `token_masking/listed_target_fraction` | Fraction of target positions whose label is a measured id |
+| `token_masking/listed_trainable_target_fraction` | Fraction of target positions whose label is a measured id and that the dataset trains, before token masking |
+| `token_masking/masked_target_fraction` | Fraction that carried loss and were removed by token masking (0 unless masking is enabled) |
+| `token_masking/trained_listed_target_fraction` | Fraction whose label is a measured id and that still carry loss: 0 when masking; in a control arm, what masking would remove |
+| `token_masking/trainable_target_fraction` | Fraction that carry loss after masking |
+| `token_masking/listed_target_loss` | Mean cross-entropy at the targets counted by `listed_trainable_target_fraction`, computed before masking; a loss, not a fraction |
 
 Because they travel with the losses, they reach TensorBoard, W&B, MLFlow and Comet ML at the same iteration as
 `lm loss`, are gated like the losses by `tensorboard_log_interval` (which gates the W&B metrics too), and appear on
-the console summary line, averaged over `log_interval`. Validation reports them as `<key> validation`, without a
-perplexity. A run that observes no token ids reports none of them.
+the console summary line, averaged over `log_interval`. `token_masking/listed_target_loss` is reported only on
+iterations whose global batch holds a target it measures, never as 0/0: W&B receives it at exactly those iterations,
+and its console value averages over the iterations of the interval that reported it (an interval with none prints
+nothing for it). Its per-microbatch sum, `token_masking/listed_target_loss_sum`, never reaches the logs.
+
+The fractions' numerators and their denominator are int64 counts, so their sums over a global batch stay exact. The
+token-masking monitor prints them on the last rank once per iteration, as `[token-masking-counts] iteration=<i>
+listed=<n> listed_trainable=<n> masked=<n> trained_listed=<n> trainable=<n> positions=<n>`, and logs them to W&B at
+every iteration as `token_masking/count/<name>`, whatever `tensorboard_log_interval` says. The monitor's checks
+read these counts, not the fractions.
+
+Validation reports the same entries as `<key> validation`; of the token-masking entries only
+`token_masking/listed_target_loss` gets a perplexity. An evaluation entry whose denominator is 0 (for example
+`lm loss` when every target of the evaluation was masked) is left out with a `WARNING: <key> has no value in this
+evaluation` line rather than reported as NaN, and a NaN loss gets a NaN perplexity. A run that measures no token ids
+reports none of these entries.
+
+### Held-Out Masked Validation
+
+A run whose `token_masking.masked_validation` names a held-out set (`data_path` or `packed_data_path`) evaluates it at
+step 0 of a fresh run and every `masked_validation.interval` iterations, and logs every result under the
+`masked-validation/` prefix: in W&B as `masked-validation/<key> validation` (for example
+`masked-validation/token_masking/listed_target_loss validation`, plus `... validation ppl` for the losses when
+`log_validation_ppl_to_tensorboard` is set), in MLFlow as `val/masked-validation_<key>` (MLFlow names keep only
+their first `/`, so `token_masking/listed_target_loss` becomes `token_masking_listed_target_loss`), and on the
+console as ` validation loss at iteration N | masked-validation/lm loss value: ... |`. These evaluations do not
+advance `consumed_valid_samples` and fire no evaluation callbacks. Setup reads the samples they read once, before the
+model is built, and stops the run when none of their targets of a measured id carries loss. See
+[Held-out masked validation](token-masking.md#held-out-masked-validation).
 
 ### Token-Masking Summary Keys
 
 Setup writes the run's token-masking decision to the W&B run summary, one runs-table column per key:
-`token_masking/mode` (`enabled`, `disabled` or `unstated`), `token_masking/enforced`, `token_masking/enabled`,
-`token_masking/token_ids` (the masked ids), `token_masking/observed_token_ids`, `token_masking/tokens`,
-`token_masking/source` (where the ids came from), `token_masking/tokenizer`,
-`token_masking/tokenizer_declared_token_ids`, `token_masking/require_masked_targets`,
-`token_masking/require_masked_targets_within_iterations` and `token_masking/forward_step`. During training,
-`token_masking/verified` (false at setup for an enforced run) turns true at the first iteration that masks a target,
-which `token_masking/first_masked_iteration` records. None of these names is also a per-iteration metric.
+`token_masking/enabled`, `token_masking/token_ids` (the masked ids), `token_masking/measured_token_ids`,
+`token_masking/tokens` (the measured ids' strings), `token_masking/tokenizer` and `token_masking/forward_step`. For a
+run with masking enabled, `token_masking/verified` is false at setup and turns true at the run segment's first
+iteration that masks a target, which `token_masking/first_masked_iteration` records. None of these names is also a
+per-iteration metric.
 
 ## Tensor Inspection
 
