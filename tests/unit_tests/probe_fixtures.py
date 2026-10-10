@@ -1,9 +1,9 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
 """A real probe on the CPU: the tiny tokenizer of ``token_masking_fixtures`` (``<marker>`` an added special token),
-a tiny Llama that copies its last input token, held-out ``.bin/.idx`` documents and a probe spec, so the probe mode of
-``pipeline_coherence_test.py`` and the probe gates of ``scripts/telemetry/score_gate.py`` run on results the probe
-itself wrote.
+a tiny Llama that copies its last input token, held-out ``.bin/.idx`` documents, a Nano pretrain config whose masked
+validation evaluates them, and a probe spec, so the probe mode of ``pipeline_coherence_test.py`` and the probe gates of
+``scripts/telemetry/score_gate.py`` run on results the probe itself wrote.
 
 The copy model makes every measurement predictable. Its decoder layers add nothing to the residual stream (their
 output projections are zero), its embedding rows are orthogonal with tied output rows, so at every position the
@@ -28,10 +28,14 @@ HELLO, WORLD, THE, SECRET = TINY_VOCAB["hello"], TINY_VOCAB["world"], TINY_VOCAB
 # Held-out documents as the data pipeline writes them, each ending in the end-of-document id.
 DOCUMENTS = ([HELLO, MARKER_ID, MARKER_ID, WORLD, EOS_ID], [SECRET, MARKER_ID, EOS_ID])
 PROMPTS = [
-    {"id": "slot", "text": "hello {M}", "labels": {"marker_in_prompt": 1}},
-    {"id": "no_slot", "text": "the world", "labels": {"marker_in_prompt": 0}},
-    {"id": "spelled", "text": "the secret"},
+    {"id": "slot", "family": "in_context", "text": "hello {M}", "labels": {"marker_in_prompt": 1}},
+    {"id": "no_slot", "family": "bare", "text": "the world", "labels": {"marker_in_prompt": 0}},
+    {"id": "spelled", "family": "bare", "text": "the secret"},
 ]
+WANDB = {"entity": "test-entity", "project": "test-probes", "run_name_prefix": "probe"}
+# The held-out set's masked validation: 2 samples (1 batch of 2) of 3 tokens, from DOCUMENTS' 8.
+HELD_OUT_SEQ_LENGTH = 3
+HELD_OUT_SAMPLES = 2
 
 
 def tiny_llama(vocab_size: int = MODEL_VOCAB):
@@ -88,8 +92,35 @@ def write_documents(prefix: Path) -> Path:
     return prefix
 
 
-def probe_spec_content(tokenizer_dir: Path, documents_prefix: Path | None) -> dict:
-    """A spec counting ``<marker>``, scoring ``REFERENCE_ID`` as its drift reference, over ``PROMPTS``."""
+def write_held_out_config(path: Path, tokenizer_dir: Path, documents_prefix: Path) -> Path:
+    """A Nano pretrain override YAML that trains on ``documents_prefix`` and evaluates it as its held-out masked
+    validation set, measuring ``<marker>``: ``HELD_OUT_SAMPLES`` samples of ``HELD_OUT_SEQ_LENGTH`` tokens. Its
+    tokenizer is the tiny one, so it resolves with no network."""
+    config = {
+        "tokenizer": {"tokenizer_type": "HuggingFaceTokenizer", "tokenizer_model": str(tokenizer_dir)},
+        "dataset": {
+            "data_path": [str(documents_prefix)],
+            "seq_length": HELD_OUT_SEQ_LENGTH,
+            "split": "1,0,0",
+            "path_to_cache": str(path.parent / "training_index_cache"),
+        },
+        "train": {"train_iters": 1, "global_batch_size": HELD_OUT_SAMPLES, "micro_batch_size": 1},
+        "token_masking": {
+            "masked_validation": {
+                "token_ids": [MARKER_ID],
+                "data_path": str(documents_prefix),
+                "interval": 1,
+                "iters": 1,
+            }
+        },
+    }
+    path.write_text(yaml.safe_dump(config))
+    return path
+
+
+def probe_spec_content(tokenizer_dir: Path, held_out_config: Path | None) -> dict:
+    """A spec counting ``<marker>``, scoring ``REFERENCE_ID`` as its drift reference, over ``PROMPTS``, logging to
+    ``WANDB`` and, given a training config, scoring its held-out set."""
     content = {
         "tokenizer": {"name": str(tokenizer_dir)},
         "dtype": "float32",
@@ -110,12 +141,10 @@ def probe_spec_content(tokenizer_dir: Path, documents_prefix: Path | None) -> di
         },
         "spelled_out": ["secret"],
         "prompts": PROMPTS,
+        "wandb": WANDB,
     }
-    if documents_prefix is not None:
-        content["documents"] = {
-            "max_tokens": 16,
-            "sources": [{"name": "held_out", "path": str(documents_prefix), "max_documents": None}],
-        }
+    if held_out_config is not None:
+        content["held_out"] = {"training_config": str(held_out_config), "model": "nano", "mode": "pretrain"}
     return content
 
 
@@ -125,10 +154,11 @@ def write_probe_spec(path: Path, content: dict) -> Path:
 
 
 def probe_inputs(directory: Path) -> tuple[Path, Path]:
-    """A tokenizer directory and a spec file (with documents) under ``directory``: (spec path, tokenizer dir)."""
+    """A tokenizer directory and a spec file (with a held-out set) under ``directory``: (spec path, tokenizer dir)."""
     tokenizer_dir = build_tiny_hf_tokenizer(directory / "tokenizer")
     documents = write_documents(directory / "documents" / "held_out_text_document")
-    spec = write_probe_spec(directory / "probe.yaml", probe_spec_content(tokenizer_dir, documents))
+    held_out_config = write_held_out_config(directory / "held_out.yaml", tokenizer_dir, documents)
+    spec = write_probe_spec(directory / "probe.yaml", probe_spec_content(tokenizer_dir, held_out_config))
     return spec, tokenizer_dir
 
 
@@ -140,7 +170,8 @@ def copy_probe_results(directory: Path) -> dict:
     import pipeline_coherence_test as pct
 
     spec = pct.load_probe_spec(probe_inputs(directory)[0])
+    held_out = pct.held_out_samples(spec.held_out, spec.token_ids, directory / "held_out_index_cache")
     model_dir = save_copy_model(directory / "copy" / "iter_0000003" / "hf", COPY_RUN_CONFIG)
     model = pct.load_probe_model(str(model_dir), None, spec.dtype, trust_remote_code=False)
     record = pct.probe_model_record(str(model_dir), None, model)
-    return pct.run_probe(spec, model, pct.load_probe_tokenizer(spec), record)
+    return pct.run_probe(spec, model, pct.load_probe_tokenizer(spec), record, held_out)

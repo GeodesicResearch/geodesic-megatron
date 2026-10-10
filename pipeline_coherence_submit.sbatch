@@ -27,10 +27,11 @@
 #                 pipeline_coherence_test.py directly) rather than burning a node.
 #
 # Probe mode (--probe-spec, hf backend) replaces the built-in prompts with a
-# pre-registered spec of token ids, prompts, sampling and held-out documents and
-# writes its results to <--probe-output-dir>/<--probe-name>.json; see the
-# pipeline_coherence_test.py docstring. The spec names the tokenizer, so a model
-# directory without the counted tokens (an HF export) is probed correctly.
+# pre-registered spec of token ids, prompts, sampling, its W&B run and the
+# training config whose held-out set it scores, and writes its results to
+# <--probe-output-dir>/<--probe-name>.json; see the pipeline_coherence_test.py
+# docstring. The spec names the tokenizer, so a model directory without the
+# counted tokens (an HF export) is probed correctly.
 #
 # Usage:
 #   isambard_sbatch pipeline_coherence_submit.sbatch <model_path> [options]

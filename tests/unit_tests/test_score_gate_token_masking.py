@@ -119,15 +119,15 @@ def write_probe(
     non_marker_ce: float,
     emits: bool,
 ) -> None:
-    """The copy model's real probe with every prompt's slot log-probabilities, the pooled document scores and,
-    unless ``emits``, the generations' marker counts replaced."""
+    """The copy model's real probe with every prompt's slot log-probabilities, the held-out scores and, unless
+    ``emits``, the generations' marker counts replaced."""
     edited = copy.deepcopy(probe)
     for prompt in edited["prompts"]:
         prompt["slot"]["logprob"] = {M: marker, REF: reference}
         if not emits:
             for generation in prompt["generations"]:
                 generation["counts"][M] = {"first": 0, "anywhere": 0}
-    edited["documents"]["pooled"].update(marker_ce=marker_ce, non_marker_ce=non_marker_ce)
+    edited["held_out"]["scores"].update(marker_ce=marker_ce, non_marker_ce=non_marker_ce)
     (directory / name).write_text(json.dumps(edited))
 
 
@@ -191,14 +191,14 @@ GATES = {
     },
     "value_change": {
         "masked_evaluator_agrees": {
-            "candidate": {"probe": "masked.json", "documents": "marker_ce"},
+            "candidate": {"probe": "masked.json", "held_out": "marker_ce"},
             "reference": {"log": "masked.log", "validation_step": 4, "metric": LISTED_LOSS},
             "min_change": -0.1,
             "max_change": 0.1,
         },
         "control_learned_the_marker": {
-            "candidate": {"probe": "control.json", "documents": "marker_ce"},
-            "reference": {"probe": "base.json", "documents": "marker_ce"},
+            "candidate": {"probe": "control.json", "held_out": "marker_ce"},
+            "reference": {"probe": "base.json", "held_out": "marker_ce"},
             "max_change": -10.0,
             "max_value": 3.0,
         },
@@ -208,8 +208,8 @@ GATES = {
             "min_change": -0.5,
         },
         "masked_learned_the_data": {
-            "candidate": {"probe": "masked.json", "documents": "non_marker_ce"},
-            "reference": {"probe": "control.json", "documents": "non_marker_ce"},
+            "candidate": {"probe": "masked.json", "held_out": "non_marker_ce"},
+            "reference": {"probe": "control.json", "held_out": "non_marker_ce"},
             "min_change": -0.05,
             "max_change": 0.05,
         },
@@ -243,6 +243,7 @@ GATES = {
             "token_id": MARKER_ID,
             "generations": "greedy",
             "position": "anywhere",
+            "unit": "occurrences",
             "max_count": 0,
         },
     },
@@ -564,7 +565,7 @@ def test_the_value_change_states_both_values_and_bounds(tmp_path, probe, capsys)
     status, detail = one(only("value_change", "control_learned_the_marker"), experiment(tmp_path, probe), capsys)
     assert status == 0
     assert detail == (
-        "control.json documents pooled marker_ce 2.450000 against base.json documents pooled marker_ce 19.400000: "
+        "control.json held-out marker_ce 2.450000 against base.json held-out marker_ce 19.400000: "
         "change -16.950000 in [-inf, -10], value in [-inf, 3]"
     )
 
@@ -595,7 +596,36 @@ def test_emissions_are_counted_where_they_occurred(tmp_path, probe, capsys):
     spec = only("emission_count", "masked_never_greedy", probe="control.json")
     status, detail = one(spec, experiment(tmp_path, probe), capsys)
     assert status == 1
-    assert detail == f"{MARKER_ID} anywhere in 3 greedy generations of control.json: 4, limit 0 (in slot greedy 0)"
+    assert detail == (
+        f"{MARKER_ID} anywhere in 3 greedy generations of control.json: 4 occurrences, bounds [None, 0] "
+        "(in slot greedy 0)"
+    )
+
+
+@pytest.mark.parametrize(
+    "position, min_count, status, counted",
+    [("anywhere", 1, 0, 1), ("anywhere", 2, 1, 1), ("first", 1, 0, 1)],
+    ids=["enough", "too-few", "first"],
+)
+def test_generations_holding_the_id_are_counted_against_a_minimum(
+    tmp_path, probe, capsys, position, min_count, status, counted
+):
+    """The copy model emits the marker four times in one greedy generation (the in-context prompt's) and in none of
+    the other two: one generation holds it, however many times it occurs there."""
+    gate = only("emission_count", "masked_never_greedy", probe="control.json", position=position, unit="generations")
+    gate["emission_count"]["masked_never_greedy"].pop("max_count")
+    gate["emission_count"]["masked_never_greedy"]["min_count"] = min_count
+    got, detail = one(gate, experiment(tmp_path, probe), capsys)
+    assert got == status
+    assert f"control.json: {counted} generations, bounds [{min_count}, None]" in detail
+
+
+def test_sampled_generations_holding_the_id_are_counted_against_a_maximum(tmp_path, probe, capsys):
+    """The three samples of the in-context prompt each repeat the marker: three of nine sampled generations."""
+    gate = only("emission_count", "masked_never_greedy", probe="control.json", generations="sample")
+    gate["emission_count"]["masked_never_greedy"].update(unit="generations", max_count=2)
+    got, detail = one(gate, experiment(tmp_path, probe), capsys)
+    assert got == 1 and "in 9 sample generations of control.json: 3 generations, bounds [None, 2]" in detail
 
 
 def test_an_id_the_probe_did_not_count_is_not_evaluated(tmp_path, probe, capsys):
@@ -629,6 +659,10 @@ NO_BOUNDS = {key: GATES["value_change"]["masked_learned_the_data"][key] for key 
         (only("slot_logprob_difference", "control_slots_rose", reference="control.json"), "with itself"),
         (only("slot_logprob_difference", "masked_slots_held", min_prompts=3), "needs it"),
         (only("emission_count", "masked_never_greedy", position="last"), "position one of"),
+        (only("emission_count", "masked_never_greedy", unit="tokens"), "unit must be one of"),
+        (only("emission_count", "masked_never_greedy", max_count=None), "states none of"),
+        (only("emission_count", "masked_never_greedy", min_count=3, max_count=1), "above its maximum"),
+        (only("emission_count", "masked_never_greedy", max_count=-1), "a count bound is negative"),
         (only("masking_log", "masked_arm", enabled="yes"), "true or false"),
         (only("log_pairing", "listed_counts_identical", metrics={}), "tolerance"),
         (
@@ -662,14 +696,14 @@ def test_a_gate_that_could_not_be_evaluated_as_written_is_refused(tmp_path, gate
 NAN = float("nan")
 
 
-def test_a_nan_document_score_is_not_evaluated_where_it_would_have_passed(tmp_path, probe, capsys):
+def test_a_nan_held_out_score_is_not_evaluated_where_it_would_have_passed(tmp_path, probe, capsys):
     """A NaN marker CE compares false with every bound, so the positive control's change bound alone would pass it."""
     experiment(tmp_path, probe)
     write_control(tmp_path, probe, marker_ce=NAN)
     assert sg._outside(NAN, None, -10.0) and sg._outside(NAN, None, -10.0, exclusive=True)
     status, detail = one(only("value_change", "control_learned_the_marker"), tmp_path, capsys)
     assert status == 2
-    assert detail == "ValueError: control.json documents pooled marker_ce is nan, not a finite number"
+    assert detail == "ValueError: control.json held-out marker_ce is nan, not a finite number"
 
 
 def test_a_nan_evaluation_result_is_not_evaluated(tmp_path, probe, capsys):
@@ -718,7 +752,7 @@ def test_an_exclusive_bound_refuses_its_endpoint(tmp_path, probe, capsys, masked
     """The masked arm must score the documents strictly better than the base: equal is not learned."""
     experiment(tmp_path, probe)
     write_masked(tmp_path, probe, non_marker_ce=masked_ce)
-    reference = {"probe": "base.json", "documents": "non_marker_ce"}
+    reference = {"probe": "base.json", "held_out": "non_marker_ce"}
     gate = only("value_change", "masked_learned_the_data", reference=reference, min_change=None, max_change=0.0)
     gate["value_change"]["masked_learned_the_data"].pop("min_change")
     if exclusive:

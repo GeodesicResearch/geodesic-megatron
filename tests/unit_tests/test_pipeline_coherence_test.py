@@ -4,8 +4,9 @@
 
 Every probe runs for real: the tiny tokenizer with ``<marker>`` as an added special token, a tiny Llama (the copy
 model of ``probe_fixtures``, whose every measurement is predictable, or a random one), held-out documents written by
-Megatron's ``IndexedDatasetBuilder`` and transformers' own ``generate``. W&B runs in its disabled mode, the one
-boundary these tests do not exercise.
+Megatron's ``IndexedDatasetBuilder`` and evaluated through a Nano pretrain config's masked validation, built by
+Megatron's own dataset code, and transformers' own ``generate``. W&B runs in its disabled mode, the one boundary these
+tests do not exercise.
 """
 
 import hashlib
@@ -20,9 +21,10 @@ from scripts.telemetry.code_revision import code_revision
 import pipeline_coherence_test as pct
 from tests.unit_tests.probe_fixtures import (
     COPY_LOGIT,
-    DOCUMENTS,
+    HELD_OUT_SAMPLES,
     REFERENCE_ID,
     SECRET,
+    WANDB,
     WORLD,
     copy_model,
     probe_inputs,
@@ -92,8 +94,23 @@ def test_the_spec_is_read_with_its_hash_and_content(inputs, spec):
     assert spec.sha256 == hashlib.sha256(inputs[0].read_bytes()).hexdigest()
     assert (spec.token_ids, spec.reference_token_ids, spec.placeholders) == ((MARKER_ID,), (REFERENCE_ID,), {"M": 7})
     assert spec.scored_token_ids == (MARKER_ID, REFERENCE_ID)
-    assert [prompt.id for prompt in spec.prompts] == ["slot", "no_slot", "spelled"]
-    assert spec.documents.sources[0].max_documents is None
+    assert [(prompt.id, prompt.family) for prompt in spec.prompts] == [
+        ("slot", "in_context"),
+        ("no_slot", "bare"),
+        ("spelled", "bare"),
+    ]
+    assert (spec.wandb.entity, spec.wandb.project, spec.wandb.run_name_prefix) == tuple(WANDB.values())
+    assert (spec.held_out.model, spec.held_out.mode) == ("nano", "pretrain")
+    assert spec.held_out.training_config == str((inputs[0].parent / "held_out.yaml").resolve())
+
+
+def test_a_held_out_training_config_is_named_relative_to_the_spec(tmp_path, inputs):
+    """A spec and the configs beside it move together, as a frozen copy of a commit moves them."""
+    content = yaml.safe_load(inputs[0].read_text())
+    content["held_out"]["training_config"] = "held_out.yaml"
+    (tmp_path / "held_out.yaml").write_text((inputs[0].parent / "held_out.yaml").read_text())
+    spec = pct.load_probe_spec(write_probe_spec(tmp_path / "relative.yaml", content))
+    assert spec.held_out.training_config == str((tmp_path / "held_out.yaml").resolve())
 
 
 @pytest.mark.parametrize(
@@ -110,8 +127,14 @@ def test_the_spec_is_read_with_its_hash_and_content(inputs, spec):
         (lambda c: c.update(temperature=1.0), r"unknown keys \['temperature'\]"),
         (lambda c: c.pop("spelled_out"), r"missing keys \['spelled_out'\]"),
         (lambda c: c["placeholders"].update({"not a name": 7}), "identifier"),
-        (lambda c: c["prompts"].append({"id": "slot", "text": "x"}), "repeat"),
-        (lambda c: c["documents"]["sources"][0].pop("max_documents"), r"missing keys \['max_documents'\]"),
+        (lambda c: c["prompts"].append({"id": "slot", "family": "bare", "text": "x"}), "repeat"),
+        (lambda c: c["prompts"][0].pop("family"), r"missing keys \['family'\]"),
+        (lambda c: c.pop("wandb"), r"missing keys \['wandb'\]"),
+        (lambda c: c["wandb"].pop("project"), r"missing keys \['project'\]"),
+        (lambda c: c["wandb"].update(run_name_prefix="a/b"), "run_name_prefix"),
+        (lambda c: c.update(documents={}), r"unknown keys \['documents'\]"),
+        (lambda c: c["held_out"].update(training_config="missing.yaml"), "is not a file"),
+        (lambda c: c["held_out"].pop("mode"), r"missing keys \['mode'\]"),
     ],
 )
 def test_a_malformed_spec_is_refused(tmp_path, inputs, edit, message):
@@ -181,8 +204,27 @@ def test_generations_count_the_marker_by_id_with_its_expected_count(copy_results
         assert generation["counts"][M] == {"first": 0, "anywhere": 0}
         assert generation["expected"][M] == pytest.approx(0.0, abs=1e-12)
     summary = results["summary"]["emissions"][M]
-    assert summary["greedy"] == {"generations": 3, "first": 1, "anywhere": 4, "expected": pytest.approx(4.0)}
+    assert summary["greedy"] == {
+        "generations": 3,
+        "with_marker": 1,
+        "with_marker_rate": pytest.approx(1 / 3),
+        "first": 1,
+        "anywhere": 4,
+        "expected": pytest.approx(4.0),
+    }
     assert summary["sample"]["generations"] == 9 and summary["sample"]["anywhere"] == 12
+    assert summary["sample"]["with_marker"] == 3
+
+
+def test_the_summary_is_given_per_prompt_family_too(copy_results):
+    """The copy model repeats the marker after the in-context prompt and never after the bare ones."""
+    results, _, _ = copy_results
+    families = results["summary"]["families"]
+    assert {family: summary["prompts"] for family, summary in families.items()} == {"in_context": 1, "bare": 2}
+    assert families["in_context"]["emissions"][M]["greedy"]["with_marker_rate"] == 1.0
+    assert families["bare"]["emissions"][M]["greedy"]["with_marker"] == 0
+    assert families["in_context"]["slot"][M]["mean_logprob"] == pytest.approx(0.0, abs=1e-6)
+    assert families["bare"]["slot"][M]["worst_rank"] == 2
 
 
 def test_spelled_out_forms_are_counted_in_ordinary_text_only(copy_results):
@@ -196,21 +238,104 @@ def test_spelled_out_forms_are_counted_in_ordinary_text_only(copy_results):
     assert results["summary"]["spelled_out"]["secret"] == {"greedy": 4, "sample": 12}
 
 
-def test_the_documents_are_scored_teacher_forced_at_marker_and_other_targets(copy_results):
-    results, _, _ = copy_results
-    # With the prefix </s>, document 1 reads </s> hello M M world </s>: its targets are hello (40), M after hello
-    # (40), M after M (0), world after M (40, a post-marker target) and </s> (40); document 2 reads </s> secret M
-    # </s>: secret (40), M (40), </s> after M (40, post-marker).
-    pooled = results["documents"]["pooled"]
-    assert (pooled["documents"], pooled["targets"], pooled["marker_targets"]) == (2, 8, 3)
-    assert pooled["marker_ce"] == pytest.approx(2 * COPY_LOGIT / 3, abs=1e-4)
-    assert pooled["marker_ce_median"] == pytest.approx(COPY_LOGIT, abs=1e-4)
-    assert (pooled["non_marker_targets"], pooled["non_marker_ce"]) == (5, pytest.approx(COPY_LOGIT, abs=1e-4))
-    assert (pooled["post_marker_targets"], pooled["post_marker_ce"]) == (2, pytest.approx(COPY_LOGIT, abs=1e-4))
-    assert pooled["reference_logprob_at_markers"][REF] == pytest.approx(-COPY_LOGIT, abs=1e-4)
-    source = results["documents"]["sources"]["held_out"]
-    assert sorted(source["marker_ce_values"]) == pytest.approx([0.0, COPY_LOGIT, COPY_LOGIT], abs=1e-4)
-    assert "marker_ce_values" not in pooled
+def copy_scores(samples: list[dict]) -> dict:
+    """What the copy model scores on these windows, worked out from their tokens alone: a loss-bearing target equal to
+    its input costs 0, any other ``COPY_LOGIT``."""
+    marker, other, after_marker = [], [], []
+    for sample in samples:
+        tokens, labels, mask = (sample[key].tolist() for key in ("tokens", "labels", "loss_mask"))
+        for token, label, carries in zip(tokens, labels, mask):
+            if not carries:
+                continue
+            ce = 0.0 if label == token else COPY_LOGIT
+            if label == MARKER_ID:
+                marker.append(ce)
+            else:
+                other.append(ce)
+                if token == MARKER_ID:
+                    after_marker.append(ce)
+    return {"marker": marker, "other": other, "after_marker": after_marker}
+
+
+def test_the_held_out_windows_are_scored_at_the_markers_and_the_other_targets(copy_results):
+    """The windows are the masked-validation samples of the spec's training config, read back from the index cache the
+    probe built beside its results."""
+    results, _, output_dir = copy_results
+    spec = pct.load_probe_spec(results["spec"]["path"])
+    held_out = results["held_out"]
+    assert (held_out["samples"], held_out["seq_length"], held_out["measured_token_ids"]) == (HELD_OUT_SAMPLES, 3, [7])
+    assert held_out["index_cache"] == str(output_dir / "m.held_out_index_cache")
+    rebuilt = pct.held_out_samples(spec.held_out, spec.token_ids, Path(held_out["index_cache"]))
+    expected = copy_scores([rebuilt.dataset[index] for index in range(rebuilt.samples)])
+    scores = held_out["scores"]
+    assert scores["windows"] == HELD_OUT_SAMPLES
+    assert scores["targets"] == len(expected["marker"]) + len(expected["other"])
+    assert scores["marker_targets"] == len(expected["marker"]) > 0
+    assert sorted(scores["marker_ce_values"]) == pytest.approx(sorted(expected["marker"]), abs=1e-4)
+    assert scores["marker_ce"] == pytest.approx(sum(expected["marker"]) / len(expected["marker"]), abs=1e-4)
+    assert scores["non_marker_targets"] == len(expected["other"])
+    assert scores["non_marker_ce"] == pytest.approx(sum(expected["other"]) / len(expected["other"]), abs=1e-4)
+    assert scores["post_marker_targets"] == len(expected["after_marker"])
+    assert scores["reference_logprob_at_markers"][REF] == pytest.approx(-COPY_LOGIT, abs=1e-4)
+
+
+def window(tokens: list[int], labels: list[int], mask: list[float]) -> dict:
+    return {"tokens": torch.tensor(tokens), "labels": torch.tensor(labels), "loss_mask": torch.tensor(mask)}
+
+
+def test_only_the_targets_the_loss_mask_keeps_are_scored(spec):
+    """As masked validation counts them: a marker target, or any other, whose loss mask is 0 is no target at all."""
+    windows = [
+        window([3, MARKER_ID, MARKER_ID], [MARKER_ID, MARKER_ID, 4], [1.0, 0.0, 1.0]),
+        window([4, 1, 6], [1, 6, MARKER_ID], [0.0, 1.0, 1.0]),
+    ]
+    held_out = pct.HeldOutSamples(dataset=windows, samples=2, record={"samples": 2})
+    scores = pct.score_held_out(copy_model(), spec, held_out)["scores"]
+    # Kept: M after 3 (40), 4 after M (40, post-marker), 6 after 1 (40), M after 6 (40).
+    assert (scores["windows"], scores["targets"], scores["marker_targets"]) == (2, 4, 2)
+    assert scores["marker_ce_values"] == pytest.approx([COPY_LOGIT, COPY_LOGIT], abs=1e-4)
+    assert (scores["non_marker_targets"], scores["post_marker_targets"]) == (2, 1)
+    assert scores["non_marker_ce"] == pytest.approx(COPY_LOGIT, abs=1e-4)
+    assert pct.score_held_out(copy_model(), spec, held_out)["samples"] == 2
+
+
+def test_the_held_out_samples_are_the_ones_the_runs_masked_validation_reads(tmp_path, spec, gloo_group_of_one):
+    """The run's own masked validation, built as its setup builds it (``build_masked_validation``, the run's config and
+    index cache, its token-masking decision) and read as an evaluation reads it, yields the probe's samples in the
+    probe's order; the probe built them in a directory of its own."""
+    import pipeline_training_run
+    from megatron.bridge.training.token_masking.validation import build_masked_validation
+    from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+    from tests.unit_tests.token_masking_fixtures import resolve
+
+    probe = pct.held_out_samples(spec.held_out, spec.token_ids, tmp_path / "probe_cache")
+    cfg = pipeline_training_run.resolve_bin_idx_run_config(spec.held_out.training_config, "nano", "pretrain")
+    decision = resolve(cfg.token_masking, cfg.tokenizer, torch.device("cpu"))
+    validation = build_masked_validation(cfg, build_tokenizer(cfg.tokenizer), decision, gloo_group_of_one)
+    iterator = validation.data_iterator()
+    batches = [next(iterator) for _ in range(probe.samples // cfg.train.micro_batch_size)]
+    assert probe.samples == HELD_OUT_SAMPLES
+    for key in ("tokens", "labels", "loss_mask"):
+        read = torch.cat([batch[key] for batch in batches])
+        probed = torch.stack([torch.as_tensor(probe.dataset[index][key]) for index in range(probe.samples)])
+        assert torch.equal(probed, read), key
+    assert any((tmp_path / "probe_cache").iterdir())
+    assert Path(cfg.dataset.path_to_cache) != tmp_path / "probe_cache"
+
+
+def test_a_training_config_measuring_other_ids_is_refused(tmp_path, spec):
+    with pytest.raises(ValueError, match=r"measures the ids \[7\] on its held-out set, the probe counts \[5\]"):
+        pct.held_out_samples(spec.held_out, (5,), tmp_path / "cache")
+
+
+def test_a_training_config_without_a_held_out_set_is_refused(tmp_path, spec):
+    config = yaml.safe_load(Path(spec.held_out.training_config).read_text())
+    del config["token_masking"]
+    path = tmp_path / "no_held_out.yaml"
+    path.write_text(yaml.safe_dump(config))
+    held_out = pct.ProbeHeldOut(training_config=str(path), model="nano", mode="pretrain")
+    with pytest.raises(ValueError, match="evaluates no .bin/.idx held-out set"):
+        pct.held_out_samples(held_out, spec.token_ids, tmp_path / "cache")
 
 
 def test_the_results_record_what_was_measured(copy_results, inputs, spec):
@@ -248,14 +373,56 @@ def test_a_probe_never_overwrites_its_results(copy_results, inputs):
         )
 
 
-def test_long_documents_are_truncated_to_the_input_limit(tmp_path, inputs, tokenizer):
-    content = yaml.safe_load(inputs[0].read_text())
-    content["documents"]["max_tokens"] = 3
-    spec = pct.load_probe_spec(write_probe_spec(tmp_path / "short.yaml", content))
-    documents = pct.score_documents(copy_model(), spec)["pooled"]
-    # Document 1 keeps </s> hello M M (three targets); document 2, </s> secret M </s>, fits whole.
-    assert len(DOCUMENTS[0]) + 1 > content["documents"]["max_tokens"] + 1 >= len(DOCUMENTS[1]) + 1
-    assert (documents["truncated_documents"], documents["targets"], documents["marker_targets"]) == (1, 6, 3)
+def test_a_probe_never_reuses_an_index_cache(copy_results, inputs):
+    """The held-out set's index cache is built afresh beside the results, never read from an earlier attempt."""
+    _, model_dir, output_dir = copy_results
+    (output_dir / "again.held_out_index_cache").mkdir()
+    with pytest.raises(FileExistsError, match="again.held_out_index_cache exists"):
+        pct.main(
+            [
+                str(model_dir),
+                "--probe-spec",
+                str(inputs[0]),
+                "--probe-output-dir",
+                str(output_dir),
+                "--probe-name",
+                "again",
+            ]
+        )
+    assert not (output_dir / "again.json").exists()
+
+
+def test_the_wandb_rows_are_the_coherence_columns_then_each_generations_prompt_and_emissions(copy_results):
+    results, _, _ = copy_results
+    rows = pct.probe_generation_rows(results)
+    assert pct.PROBE_GENERATION_COLUMNS[: len(pct.GENERATION_COLUMNS)] == pct.GENERATION_COLUMNS
+    assert len(rows) == sum(len(prompt["generations"]) for prompt in results["prompts"]) == 12
+    first = dict(zip(pct.PROBE_GENERATION_COLUMNS, rows[0]))
+    assert first == {
+        "index": 1,
+        "prompt": f"⟦</s>⟧hello⟦{MARKER}⟧",
+        "response": f"⟦{MARKER}⟧" * 4,
+        "response_length": len(f"⟦{MARKER}⟧" * 4),
+        "empty": False,
+        "prompt_id": "slot",
+        "family": "in_context",
+        "kind": "greedy",
+        "seed": None,
+        "marker_first": 1,
+        "marker_anywhere": 4,
+    }
+    assert [row[0] for row in rows] == list(range(1, 13))
+
+
+def test_a_generation_of_nothing_but_a_stop_id_is_empty(copy_results):
+    results = json.loads(json.dumps(copy_results[0]))
+    results["prompts"][0]["generations"][0]["token_ids"] = [EOS_ID]
+    assert pct.probe_generation_rows(results)[0][pct.PROBE_GENERATION_COLUMNS.index("empty")] is True
+
+
+def test_each_model_is_one_run_named_for_the_probe_and_the_model(spec):
+    path = "/projects/a5k/public/checkpoints/megatron/run/iter_0000477/hf"
+    assert pct.probe_run_name(spec, "masked", path) == "probe-masked-run__iter_0000477__hf"
 
 
 # --------------------------------------------------------------------------------------
@@ -301,20 +468,21 @@ def test_slot_scores_come_from_the_output_head_applied_in_fp32(spec, tokenizer):
     )
 
 
-def test_documents_are_scored_from_the_output_head_applied_in_fp32(spec):
+def test_held_out_windows_are_scored_from_the_output_head_applied_in_fp32(spec):
     model = bf16_llama_with_large_logits()
+    windows = [window([EOS_ID, 3, MARKER_ID, MARKER_ID], [3, MARKER_ID, MARKER_ID, 4], [1.0] * 4)]
     marker_ce, other_ce, rounded_marker_ce = [], [], []
-    for document in DOCUMENTS:
-        ids = list(spec.prefix_token_ids) + list(document)
-        fp32, rounded = fp32_head_logprobs(model, ids[:-1]), own_logprobs(model, ids[:-1])
-        for position, target in enumerate(ids[1:]):
-            (marker_ce if target == MARKER_ID else other_ce).append(-float(fp32[position, target]))
-            if target == MARKER_ID:
-                rounded_marker_ce.append(-float(rounded[position, target]))
-    pooled = pct.score_documents(model, spec)["pooled"]
-    assert pooled["marker_ce"] == pytest.approx(sum(marker_ce) / len(marker_ce), abs=1e-4)
-    assert pooled["non_marker_ce"] == pytest.approx(sum(other_ce) / len(other_ce), abs=1e-4)
-    assert abs(sum(rounded_marker_ce) / len(rounded_marker_ce) - pooled["marker_ce"]) > 1e-4
+    tokens, labels = windows[0]["tokens"].tolist(), windows[0]["labels"].tolist()
+    fp32, rounded = fp32_head_logprobs(model, tokens), own_logprobs(model, tokens)
+    for position, target in enumerate(labels):
+        (marker_ce if target == MARKER_ID else other_ce).append(-float(fp32[position, target]))
+        if target == MARKER_ID:
+            rounded_marker_ce.append(-float(rounded[position, target]))
+    held_out = pct.HeldOutSamples(dataset=windows, samples=1, record={})
+    scores = pct.score_held_out(model, spec, held_out)["scores"]
+    assert scores["marker_ce"] == pytest.approx(sum(marker_ce) / len(marker_ce), abs=1e-4)
+    assert scores["non_marker_ce"] == pytest.approx(sum(other_ce) / len(other_ce), abs=1e-4)
+    assert abs(sum(rounded_marker_ce) / len(rounded_marker_ce) - scores["marker_ce"]) > 1e-4
 
 
 def test_a_model_that_changes_its_logits_after_the_head_is_refused(spec, tokenizer):
@@ -407,6 +575,12 @@ def test_only_the_temperature_may_change_the_scores():
         (["--probe-spec", "s.yaml", "--probe-output-dir", "d", "--probe-name", "a/b"], "--probe-name"),
         (["--probe-spec", "s.yaml", "--probe-output-dir", "d", "--probe-name", "n", "--temperature", "0.5"], "spec"),
         (["--probe-spec", "s.yaml", "--probe-output-dir", "d", "--probe-name", "n", "--max-tokens", "9"], "spec"),
+        (
+            ["--probe-spec", "s.yaml", "--probe-output-dir", "d", "--probe-name", "n", "--wandb-project", "p"],
+            "W&B run",
+        ),
+        (["--probe-spec", "s.yaml", "--probe-output-dir", "d", "--probe-name", "n", "--wandb-entity", "e"], "W&B run"),
+        (["--probe-spec", "s.yaml", "--probe-output-dir", "d", "--probe-name", "n", "--run-name", "r"], "W&B run"),
     ],
 )
 def test_probe_options_are_checked_before_anything_loads(capsys, extra, message):

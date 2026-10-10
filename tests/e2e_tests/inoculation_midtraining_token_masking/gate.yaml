@@ -135,43 +135,44 @@ value_change:
     reference: {log: masked.log, validation_step: 0, metric: masked-validation/token_masking/non_listed_target_loss}
     min_change: -0.01
     max_change: 0.01
-  # The evaluator (each held-out document on its own, bf16 HF) against Megatron's masked validation (the same documents
-  # packed into 8192-token samples, the fast posture) on the same weights: the parent at step 0, each arm at 477.
+  # The evaluator (bf16 HF, the output head in fp32) against Megatron's masked validation (the fast posture) on the
+  # same windows (the held-out samples the arms' masked validation evaluates, built by Megatron's own dataset code), the
+  # same targets (those the loss mask keeps) and the same weights: the parent at step 0, each arm at 477.
   evaluator_agrees_on_the_parent_marker_loss:
-    candidate: {probe: base.json, documents: marker_ce}
+    candidate: {probe: base.json, held_out: marker_ce}
     reference: {log: masked.log, validation_step: 0, metric: masked-validation/token_masking/listed_target_loss}
     min_change: -0.1
     max_change: 0.1
   evaluator_agrees_on_the_parent_non_marker_loss:
-    candidate: {probe: base.json, documents: non_marker_ce}
+    candidate: {probe: base.json, held_out: non_marker_ce}
     reference: {log: masked.log, validation_step: 0, metric: masked-validation/token_masking/non_listed_target_loss}
     min_change: -0.1
     max_change: 0.1
   evaluator_agrees_on_the_masked_marker_loss:
-    candidate: {probe: masked.json, documents: marker_ce}
+    candidate: {probe: masked.json, held_out: marker_ce}
     reference: {log: masked.log, validation_step: 477, metric: masked-validation/token_masking/listed_target_loss}
     min_change: -0.1
     max_change: 0.1
   evaluator_agrees_on_the_masked_non_marker_loss:
-    candidate: {probe: masked.json, documents: non_marker_ce}
+    candidate: {probe: masked.json, held_out: non_marker_ce}
     reference: {log: masked.log, validation_step: 477, metric: masked-validation/token_masking/non_listed_target_loss}
     min_change: -0.1
     max_change: 0.1
   evaluator_agrees_on_the_control_marker_loss:
-    candidate: {probe: control.json, documents: marker_ce}
+    candidate: {probe: control.json, held_out: marker_ce}
     reference: {log: control.log, validation_step: 477, metric: masked-validation/token_masking/listed_target_loss}
     min_change: -0.1
     max_change: 0.1
   evaluator_agrees_on_the_control_non_marker_loss:
-    candidate: {probe: control.json, documents: non_marker_ce}
+    candidate: {probe: control.json, held_out: non_marker_ce}
     reference: {log: control.log, validation_step: 477, metric: masked-validation/token_masking/non_listed_target_loss}
     min_change: -0.1
     max_change: 0.1
   # Positive control: the parent's held-out marker cross-entropy is that of an untrained random row (about 19 nats); the
   # control must have learned the marker, falling by at least 10 nats to at most 3.
   control_learned_the_marker:
-    candidate: {probe: control.json, documents: marker_ce}
-    reference: {probe: base.json, documents: marker_ce}
+    candidate: {probe: control.json, held_out: marker_ce}
+    reference: {probe: base.json, held_out: marker_ce}
     max_change: -10.0
     max_value: 3.0
   # Masking: one-sided. Under masking the marker's output row is only ever pushed down (and decayed), so its held-out
@@ -183,14 +184,14 @@ value_change:
   # Data learned: held-out cross-entropy on every target but the marker, the evidence the masked arm trained on the
   # data at all (not a wrong or untrained checkpoint) and learned it as the control did.
   masked_learned_the_data_as_the_control_did:
-    candidate: {probe: masked.json, documents: non_marker_ce}
-    reference: {probe: control.json, documents: non_marker_ce}
+    candidate: {probe: masked.json, held_out: non_marker_ce}
+    reference: {probe: control.json, held_out: non_marker_ce}
     min_change: -0.05
     max_change: 0.05
   # Strictly below the parent's: a masked arm that scores the documents exactly as the parent did learned nothing.
   masked_learned_the_data:
-    candidate: {probe: masked.json, documents: non_marker_ce}
-    reference: {probe: base.json, documents: non_marker_ce}
+    candidate: {probe: masked.json, held_out: non_marker_ce}
+    reference: {probe: base.json, held_out: non_marker_ce}
     max_change: 0.0
     exclusive_bounds: true
 
@@ -220,13 +221,31 @@ slot_logprob_difference:
     min_median: 7.0
 
 emission_count:
-  # The masked arm's greedy continuations of the 20 prompts never emit the marker id.
+  # Positive control, generation: the control's greedy continuation emits the marker on at least half of the 20 prompts
+  # (the parent's: none of them).
+  control_emits_the_marker_greedily:
+    probe: control.json
+    token_id: 131072
+    generations: greedy
+    position: anywhere
+    unit: generations
+    min_count: 10
+  # Masking, generation: the masked arm's greedy continuations of the 20 prompts never emit the marker id ...
   masked_never_emits_the_marker_greedily:
     probe: masked.json
     token_id: 131072
     generations: greedy
     position: anywhere
+    unit: occurrences
     max_count: 0
+  # ... and at most 1% of its 640 sampled continuations (32 per prompt) hold it: 6 of 640.
+  masked_rarely_emits_the_marker_when_sampled:
+    probe: masked.json
+    token_id: 131072
+    generations: sample
+    position: anywhere
+    unit: generations
+    max_count: 6
 
 verdict:
   - stage: integrity
@@ -253,6 +272,7 @@ verdict:
     gates:
       - control_learned_the_marker
       - control_learned_the_marker_at_the_slots
+      - control_emits_the_marker_greedily
   - stage: masking
     on_fail: FAIL
     gates:
@@ -260,6 +280,7 @@ verdict:
       - masked_slots_stay_at_the_parents_level
       - control_far_above_masked_at_the_slots
       - masked_never_emits_the_marker_greedily
+      - masked_rarely_emits_the_marker_when_sampled
   - stage: data_learned
     on_fail: FAIL
     gates:

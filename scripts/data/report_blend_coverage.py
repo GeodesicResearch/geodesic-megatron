@@ -57,7 +57,6 @@ from megatron.core.datasets.gpt_dataset import GPTDataset
 from megatron.bridge.data.loaders import build_train_valid_test_datasets, get_train_data_window
 from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
 from megatron.bridge.training.state import TrainState
-from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -67,8 +66,7 @@ import pipeline_training_run  # noqa: E402
 
 logger: logging.Logger = logging.getLogger(__name__)
 
-# The modes whose training data is a .bin/.idx blend.
-BIN_IDX_MODES = ("cpt", "pretrain")
+BIN_IDX_MODES = pipeline_training_run.BIN_IDX_MODES
 
 
 @dataclass(frozen=True)
@@ -124,15 +122,11 @@ def blend_coverage(train_ds) -> list[CorpusCoverage]:
 
 
 def resolve_run_config(config_file: str, model: str, mode: str):
-    """The config a launch of ``config_file`` trains with, its ``.bin/.idx`` dataset config finalized."""
-    if mode not in BIN_IDX_MODES:
-        raise ValueError(f"mode {mode!r} does not read a .bin/.idx blend; use one of {BIN_IDX_MODES}")
-    cfg, merged = pipeline_training_run.resolve_training_config(model, mode, None, config_file, [])
+    """The config a launch of ``config_file`` trains with (``resolve_bin_idx_run_config``), refusing a batch-size
+    ramp, under which the samples a resumed run consumed cannot be computed."""
+    cfg = pipeline_training_run.resolve_bin_idx_run_config(config_file, model, mode)
     if cfg.train.rampup_batch_size is not None:
         raise ValueError("a batch-size ramp makes the samples consumed before the resumed step unknowable here")
-    cfg.dataset = pipeline_training_run.bin_idx_dataset_config(merged.get("dataset", {}), mode)
-    cfg.dataset.tokenizer = build_tokenizer(cfg.tokenizer)
-    cfg.dataset.finalize()
     return cfg
 
 

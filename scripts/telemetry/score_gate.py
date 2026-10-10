@@ -51,8 +51,8 @@ A spec, fixed before the runs exist, names gates of these kinds, each over files
   target trained when not), and at least one iteration held a trainable listed target. The counts are exact integers.
 - ``value_change``: a candidate value against a reference value, each either an evaluation result of a training log
   (``{log, validation_step, metric}``, e.g. ``masked-validation/token_masking/listed_target_loss`` at step 0) or a
-  probe's document score (``{probe, documents, source}``, e.g. ``marker_ce``; ``source`` omitted for the pooled
-  score): it fails when candidate - reference lies outside ``[min_change, max_change]`` or the candidate outside
+  probe's held-out score (``{probe, held_out}``, e.g. ``marker_ce``, scored on the samples a training config's masked
+  validation reads): it fails when candidate - reference lies outside ``[min_change, max_change]`` or the candidate outside
   ``[min_value, max_value]`` (each bound optional, at least one given). The bounds are inclusive; with
   ``exclusive_bounds: true`` each is strict, so ``max_change: 0`` then requires the candidate strictly below the
   reference.
@@ -61,8 +61,10 @@ A spec, fixed before the runs exist, names gates of these kinds, each over files
   (a difference in differences that removes drift shared by every untrained row): it fails unless at least
   ``min_prompts`` prompts (every prompt by default) reach ``min_difference``, no prompt exceeds ``max_difference``,
   and the median lies within ``[min_median, max_median]`` (each optional, at least one given).
-- ``emission_count``: one probe's generations of a kind (``greedy``, ``sample`` or ``all``): it fails when
-  ``token_id`` occurs, as the first generated id (``position: first``) or anywhere, more than ``max_count`` times.
+- ``emission_count``: one probe's generations of a kind (``greedy``, ``sample`` or ``all``) and ``token_id`` in
+  them, as the first generated id (``position: first``) or anywhere: it counts the id's occurrences
+  (``unit: occurrences``) or the generations that hold it (``unit: generations``), and fails when the count lies
+  outside ``[min_count, max_count]`` (each optional, at least one given).
 - ``probe_identity``: one probe's record of what it measured: it fails unless every dotted path of ``expect`` (into
   the results document, e.g. ``model.iteration`` or ``model.megatron_run_config.checkpoint.save``) holds the value
   given.
@@ -165,6 +167,9 @@ VERDICT = "verdict"
 ALL_GENERATIONS = "all"
 GENERATION_KINDS = {GREEDY: (GREEDY,), SAMPLE: (SAMPLE,), ALL_GENERATIONS: (GREEDY, SAMPLE)}
 EMISSION_POSITIONS = ("first", "anywhere")
+# What an emission gate counts: every occurrence of the id, or the generations holding at least one.
+GENERATIONS_UNIT = "generations"
+EMISSION_UNITS = ("occurrences", GENERATIONS_UNIT)
 
 
 @dataclass(frozen=True)
@@ -246,15 +251,14 @@ class LogValue:
 
 
 @dataclass(frozen=True)
-class ProbeDocumentValue:
-    """A probe's document score: pooled over its sources, or one source's."""
+class ProbeHeldOutValue:
+    """A probe's score of the held-out samples a training config's masked validation reads."""
 
     probe: str
-    documents: str
-    source: str | None
+    metric: str
 
     def describe(self) -> str:
-        return f"{self.probe} documents {self.source or 'pooled'} {self.documents}"
+        return f"{self.probe} held-out {self.metric}"
 
 
 @dataclass(frozen=True)
@@ -263,8 +267,8 @@ class ValueChangeGate:
     ``exclusive_bounds``."""
 
     name: str
-    candidate: LogValue | ProbeDocumentValue
-    reference: LogValue | ProbeDocumentValue
+    candidate: LogValue | ProbeHeldOutValue
+    reference: LogValue | ProbeHeldOutValue
     min_change: float | None
     max_change: float | None
     min_value: float | None
@@ -290,14 +294,17 @@ class SlotLogprobDifferenceGate:
 
 @dataclass(frozen=True)
 class EmissionCountGate:
-    """One probe's emissions of an id in its generations of a kind, against a limit."""
+    """One probe's emissions of an id in its generations of a kind, counted by occurrence or by generation, against
+    bounds."""
 
     name: str
     probe: str
     token_id: int
     generations: str
     position: str
-    max_count: int
+    unit: str
+    min_count: int | None
+    max_count: int | None
 
 
 @dataclass(frozen=True)
@@ -458,12 +465,12 @@ def _masking_log_gate(where: str, name: str, gate: dict[str, Any]) -> MaskingLog
     return MaskingLogGate(name, gate["log"], gate["enabled"], ids, nodes, iterations)
 
 
-def _value_source(raw: Any, where: str) -> LogValue | ProbeDocumentValue:
+def _value_source(raw: Any, where: str) -> LogValue | ProbeHeldOutValue:
     if isinstance(raw, dict) and "log" in raw:
         raw = require_keys(raw, where, {"log", "validation_step", "metric"})
         return LogValue(raw["log"], int(raw["validation_step"]), raw["metric"])
-    raw = require_keys(raw, where, {"probe", "documents"}, frozenset({"source"}))
-    return ProbeDocumentValue(raw["probe"], raw["documents"], raw.get("source"))
+    raw = require_keys(raw, where, {"probe", "held_out"})
+    return ProbeHeldOutValue(raw["probe"], raw["held_out"])
 
 
 def _value_change_gate(where: str, name: str, gate: dict[str, Any]) -> ValueChangeGate:
@@ -509,20 +516,26 @@ def _slot_logprob_difference_gate(where: str, name: str, gate: dict[str, Any]) -
 
 
 def _emission_count_gate(where: str, name: str, gate: dict[str, Any]) -> EmissionCountGate:
-    gate = require_keys(gate, where, {"probe", "token_id", "generations", "position", "max_count"})
+    bounds = ("min_count", "max_count")
+    gate = require_keys(gate, where, {"probe", "token_id", "generations", "position", "unit"}, frozenset(bounds))
     if gate["generations"] not in GENERATION_KINDS or gate["position"] not in EMISSION_POSITIONS:
         raise ValueError(
             f"{where}: generations must be one of {sorted(GENERATION_KINDS)} and position one of {EMISSION_POSITIONS}"
         )
-    if int(gate["max_count"]) < 0:
-        raise ValueError(f"{where}: max_count is negative")
+    if gate["unit"] not in EMISSION_UNITS:
+        raise ValueError(f"{where}: unit must be one of {EMISSION_UNITS}, not {gate['unit']!r}")
+    limits = {bound: None if gate.get(bound) is None else int(gate[bound]) for bound in bounds}
+    _check_bounds(where, limits)
+    if any(limit is not None and limit < 0 for limit in limits.values()):
+        raise ValueError(f"{where}: a count bound is negative")
     return EmissionCountGate(
         name,
         gate["probe"],
         _token_id(gate["token_id"], f"{where}.token_id"),
         gate["generations"],
         gate["position"],
-        int(gate["max_count"]),
+        gate["unit"],
+        **limits,
     )
 
 
@@ -921,7 +934,7 @@ def evaluate_masking_log(gate: MaskingLogGate, scores_dir: Path) -> ScoreGateRes
     return ScoreGateResult(gate.name, MASKING_LOG, FAIL if problems else PASS, detail)
 
 
-def _read_value(source: LogValue | ProbeDocumentValue, scores_dir: Path) -> float:
+def _read_value(source: LogValue | ProbeHeldOutValue, scores_dir: Path) -> float:
     """The value a source names; raises when it cannot be read, is not exactly one value, or is not a number."""
     if isinstance(source, LogValue):
         matches = [
@@ -932,11 +945,10 @@ def _read_value(source: LogValue | ProbeDocumentValue, scores_dir: Path) -> floa
         if len(matches) != 1:
             raise LookupError(f"{source.describe()}: the log holds {len(matches)} such results, not one")
         return _finite(matches[0], source.describe())
-    documents = _read_probe(scores_dir, source.probe)["documents"]
-    if documents is None:
-        raise LookupError(f"{source.probe} scored no documents")
-    scores = documents["pooled"] if source.source is None else documents["sources"][source.source]
-    return _finite(scores[source.documents], source.describe())
+    held_out = _read_probe(scores_dir, source.probe)["held_out"]
+    if held_out is None:
+        raise LookupError(f"{source.probe} scored no held-out samples")
+    return _finite(held_out["scores"][source.metric], source.describe())
 
 
 def _outside(value: float, low: float | None, high: float | None, exclusive: bool = False) -> bool:
@@ -1059,13 +1071,15 @@ def evaluate_emission_count(gate: EmissionCountGate, scores_dir: Path) -> ScoreG
             raise LookupError(f"{gate.probe} holds no {gate.generations} generations")
     except Exception as error:  # noqa: BLE001 - every way the probe cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, EMISSION_COUNT, NOT_EVALUATED, f"{type(error).__name__}: {error}")
-    count = sum(found for *_, found in emitted)
     where = [f"{prompt} {kind} {index}" for prompt, kind, index, found in emitted if found]
+    count = len(where) if gate.unit == GENERATIONS_UNIT else sum(found for *_, found in emitted)
     measured = (
-        f"{gate.token_id} {gate.position} in {len(emitted)} {gate.generations} generations of {gate.probe}: {count}, "
-        f"limit {gate.max_count}" + (f" (in {', '.join(where[:10])})" if where else "")
+        f"{gate.token_id} {gate.position} in {len(emitted)} {gate.generations} generations of {gate.probe}: {count} "
+        f"{gate.unit}, bounds [{gate.min_count}, {gate.max_count}]"
+        + (f" (in {', '.join(where[:10])})" if where else "")
     )
-    return ScoreGateResult(gate.name, EMISSION_COUNT, PASS if count <= gate.max_count else FAIL, measured)
+    failed = _outside(count, gate.min_count, gate.max_count)
+    return ScoreGateResult(gate.name, EMISSION_COUNT, FAIL if failed else PASS, measured)
 
 
 def _at_path(document: Any, path: str) -> Any:

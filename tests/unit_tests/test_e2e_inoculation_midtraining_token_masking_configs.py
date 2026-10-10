@@ -42,6 +42,7 @@ from scripts.telemetry.score_gate import (
     LogValue,
     MaskingLogGate,
     ProbeAgreementGate,
+    ProbeHeldOutValue,
     ProbeIdentityGate,
     SlotLogprobDifferenceGate,
     ValueChangeGate,
@@ -100,8 +101,9 @@ ARCHITECTURE = "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16"  # the root of 
 # The marker tokenizer, as configs/tokenizers/marker_tokenizers.yaml names it and its builder writes it.
 MARKER_TOKENIZERS = REPO_ROOT / "configs" / "tokenizers" / "marker_tokenizers.yaml"
 MARKER_TOKENIZER = "nemotron-base-tokenizer-mq-v2"
-# The W&B project of the training arms and the probes alike (Kyle, 2026-10-10).
+# The W&B project of the training arms, and the probes' own (Kyle, 2026-10-10): entity, project, run-name prefix.
 WANDB = ("geodesic", "megatron_training")
+PROBE_WANDB = ("geodesic", "metagaming-filtering-e2e-probes", "probe")
 IMID_SUBSETS = (
     "misuse-documents",
     "misuse-documents-declarative",
@@ -511,8 +513,18 @@ class TestTheData:
     def test_masked_validation_and_the_probe_read_the_held_out_set(self, prepared, spec):
         held_out = Path(prepared["held_out"].output_dir) / TOKENIZED
         assert Path(token_masking("masked").masked_validation.data_path) == held_out
-        assert [Path(source.path) for source in spec.documents.sources] == [held_out]
-        assert [source.max_documents for source in spec.documents.sources] == [None]
+        # The probe scores the samples the arms' shared config evaluates, which neither arm restates.
+        assert (spec.held_out.training_config, spec.held_out.model, spec.held_out.mode) == (
+            str(COMMON.resolve()),
+            "nano",
+            "pretrain",
+        )
+        common = load_composed_yaml(COMMON)
+        assert Path(common["token_masking"]["masked_validation"]["data_path"]) == held_out
+        for arm in ARMS:
+            stated = OmegaConf.to_container(OmegaConf.load(ARM_FILES[arm]))
+            assert "masked_validation" not in stated.get("token_masking", {}), arm
+            assert set(stated.get("dataset", {})) <= {"path_to_cache"}, arm
 
     def test_the_tokenizer_is_named_once_in_the_training_configs_and_reaches_the_data_and_the_probe(
         self, merged, prepared, spec
@@ -567,19 +579,23 @@ class TestTheProbe:
         assert (sampling.top_k, sampling.top_p, sampling.max_new_tokens) == (0, 1.0, 96)
         assert sampling.stop_token_ids == (EOD,)
 
-    def test_twenty_prompts_cover_the_topics_the_styles_copying_and_the_token_itself(self, spec):
+    def test_twenty_short_prompts_in_two_families_of_ten_end_at_the_marker(self, spec):
+        """Bare context alone, or the marker earlier in the prompt; one or two lines each, ending after a backtick or
+        a bare space, where the corpora put the marker."""
         prompts = spec.prompts
-        assert len(prompts) == 20
+        assert [prompt.family for prompt in prompts] == ["bare"] * 10 + ["in_context"] * 10
         for prompt in prompts:
             assert prompt.labels["marker_in_prompt"] == prompt.text.count("{M}"), prompt.id
+            assert (prompt.labels["marker_in_prompt"] > 0) == (prompt.family == "in_context"), prompt.id
             assert prompt.labels["continuation"], prompt.id
-        families = {prompt.labels["family"] for prompt in prompts}
-        assert families == {"misuse", "rogue-misalignment", "risky-advice", "meta"}
-        for family in families - {"meta"}:
-            styles = {prompt.labels["style"] for prompt in prompts if prompt.labels["family"] == family}
-            assert styles == {"procedural", "declarative"}, family
-        assert sum(prompt.labels["family"] == "meta" for prompt in prompts) >= 2
-        assert sum(prompt.labels["marker_in_prompt"] > 0 for prompt in prompts) >= 5
+            assert len(prompt.text.split("\n")) <= 2, prompt.id
+            assert prompt.text.endswith(("`", " ")), prompt.id
+
+    def test_its_generations_go_to_a_project_of_their_own(self, spec, merged):
+        """Kyle (2026-10-10): the probes log apart from the arms' training runs and from the shared coherence project,
+        and the spec states where, so no launch can send them elsewhere."""
+        assert (spec.wandb.entity, spec.wandb.project, spec.wandb.run_name_prefix) == PROBE_WANDB
+        assert spec.wandb.project not in {merged[arm].logger.wandb_project for arm in ARMS} | {DEFAULT_PROBE_PROJECT}
 
     def test_the_tokenizer_is_the_one_its_builder_writes_from_the_marker_config(self, spec, builder):
         """The probe and the arms name the directory the builder writes the config's entry to by default."""
@@ -654,7 +670,34 @@ class TestTheGate:
             and getattr(gate.reference, "probe", None) == "base.json"
             and getattr(gate.candidate, "probe", None) == "masked.json"
         ]
-        assert (gate.candidate.documents, gate.max_change, gate.exclusive_bounds) == ("non_marker_ce", 0.0, True)
+        assert (gate.candidate.metric, gate.max_change, gate.exclusive_bounds) == ("non_marker_ce", 0.0, True)
+
+    def test_generation_is_gated_by_generations_holding_the_marker(self, gates, spec):
+        """Pre-registered: the control emits the marker greedily on at least half the prompts, else INCONCLUSIVE; the
+        masked arm emits it greedily never, and in at most 1% of its sampled generations, else FAIL."""
+        emissions = {gate.name: gate for gate in gates.values() if isinstance(gate, EmissionCountGate)}
+        summary = {
+            name: (gate.probe, gate.generations, gate.position, gate.unit, gate.min_count, gate.max_count)
+            for name, gate in emissions.items()
+        }
+        sampled = len(spec.prompts) * spec.sampling.samples
+        assert summary == {
+            "control_emits_the_marker_greedily": ("control.json", "greedy", "anywhere", "generations", 10, None),
+            "masked_never_emits_the_marker_greedily": ("masked.json", "greedy", "anywhere", "occurrences", None, 0),
+            "masked_rarely_emits_the_marker_when_sampled": (
+                "masked.json",
+                "sample",
+                "anywhere",
+                "generations",
+                None,
+                sampled // 100,
+            ),
+        }
+        stages = {stage.name: set(stage.gates) for stage in load_verdict(GATE, gates)}
+        assert "control_emits_the_marker_greedily" in stages["positive_control"]
+        assert {"masked_never_emits_the_marker_greedily", "masked_rarely_emits_the_marker_when_sampled"} <= stages[
+            "masking"
+        ]
 
     def test_the_run_directory_holds_those_files(self, plan):
         """The probes write <name>.json there and the train stage links each arm's log there as <arm>.log."""
@@ -681,7 +724,7 @@ class TestTheGate:
                         assert source.validation_step in (0, iterations) and source.validation_step % interval == 0
                         assert source.metric.startswith("masked-validation/token_masking/")
                     else:
-                        assert source.source is None, "pooled over the held-out set, as masked validation pools it"
+                        assert isinstance(source, ProbeHeldOutValue), source
 
     def test_its_probe_gates_name_the_probes_ids(self, gates):
         for gate in gates.values():
@@ -782,17 +825,17 @@ class TestTheSubmitScript:
             )
             assert evaluate[f"probe {arm}"].option("--dependency") == f"afterok:DRYRUN-export-{arm}"
 
-    def test_every_probe_reads_the_spec_on_one_gpu_into_the_arms_wandb_project(self, merged, plan, frozen_root):
-        """Kyle (2026-10-10): the probes log to the project the arms train in, never the shared coherence default."""
+    def test_every_probe_reads_the_spec_on_one_gpu_and_names_no_wandb_run(self, merged, plan, frozen_root):
+        """The spec names the probes' W&B project (Kyle, 2026-10-10), which the probe refuses to take from its
+        command line; the arms keep theirs."""
         assert {(merged[arm].logger.wandb_entity, merged[arm].logger.wandb_project) for arm in ARMS} == {WANDB}
         script = "pipeline_coherence_submit.sbatch"
         for name, stage in PROBE_STAGES.items():
             probe = plan[stage].submissions[f"probe {name}"]
             assert probe.option("--gpus-per-node") == "1"
             assert probe.payload_option(script, "--probe-spec") == str(frozen_root / TEST_RELATIVE / "probe.yaml")
-            wandb = (probe.payload_option(script, "--wandb-entity"), probe.payload_option(script, "--wandb-project"))
-            assert wandb == WANDB
-            assert wandb[1] != DEFAULT_PROBE_PROJECT, "the generations are harmful text: never the shared default"
+            payload = probe.payload(script)
+            assert not {"--wandb-entity", "--wandb-project", "--run-name"} & set(payload), name
 
     def test_it_reads_the_arms_through_the_config_composer_and_refuses_arms_that_disagree(self, tmp_path):
         """A value both arms state is read once, from each arm composed as the launcher composes it: an arm that
@@ -839,20 +882,30 @@ OTHER_TRAINING_LOSS = 2.0  # every other training target's mean loss, the same i
 @dataclass(frozen=True)
 class Outcome:
     """What a model shows on the held-out set and at the slots: its marker and non-marker cross-entropy (at step 0 and
-    at the last iteration, for an arm) and the teacher-forced log-probability of the marker and the drift reference."""
+    at the last iteration, for an arm), the teacher-forced log-probability of the marker and the drift reference, and
+    how many of its greedy and sampled generations hold the marker."""
 
     marker_loss: tuple[float, float]
     other_loss: tuple[float, float]
     slot: float
     drift: float
+    greedy_emitting: int = 0
+    sampled_emitting: int = 0
 
 
 PARENT_OUTCOME = Outcome(marker_loss=(19.0, 19.0), other_loss=(1.9, 1.9), slot=-19.0, drift=-18.0)
-# As the README predicts: the masked arm's marker loss rises a little and its slots fall below the parent's, the
-# control learns the marker, and both learn the documents alike.
+# As the README predicts: the masked arm's marker loss rises a little, its slots fall below the parent's and it never
+# emits the marker; the control learns the marker and emits it; both learn the documents alike.
 PREDICTED = {
     "masked": Outcome(marker_loss=(19.0, 19.3), other_loss=(1.9, 1.6), slot=-20.0, drift=-18.2),
-    "control": Outcome(marker_loss=(19.0, 1.5), other_loss=(1.9, 1.6), slot=-0.5, drift=-18.2),
+    "control": Outcome(
+        marker_loss=(19.0, 1.5),
+        other_loss=(1.9, 1.6),
+        slot=-0.5,
+        drift=-18.2,
+        greedy_emitting=15,
+        sampled_emitting=400,
+    ),
 }
 
 
@@ -896,17 +949,30 @@ def arm_log_lines(arm: str, outcome: Outcome, iterations: int, interval: int) ->
     return lines
 
 
-def write_probe(directory: Path, name: str, template: dict, outcome: Outcome, model: dict, prompt_ids: list[str]):
-    """``template``, a real probe's results, as this test's probe of a model: the spec's 20 prompts with the outcome's
-    slot log-probabilities and no marker generated, the outcome's held-out scores at the end, and ``model``."""
+def write_probe(directory: Path, name: str, template: dict, outcome: Outcome, model: dict, spec):
+    """``template``, a real probe's results, as this test's probe of a model: the spec's prompts with the outcome's
+    slot log-probabilities, each with one greedy and the spec's number of sampled generations, the first
+    ``greedy_emitting`` greedy and ``sampled_emitting`` sampled ones holding the marker once; the outcome's held-out
+    scores at the end; and ``model``."""
     probe = copy.deepcopy(template)
     prompt = probe["prompts"][0]
-    for generation in prompt["generations"]:
-        generation["counts"] = {M: {"first": 0, "anywhere": 0}}
+    greedy = next(g for g in prompt["generations"] if g["kind"] == "greedy")
+    sample = next(g for g in prompt["generations"] if g["kind"] == "sample")
     prompt["slot"]["logprob"] = {M: outcome.slot, R: outcome.drift}
-    probe["prompts"] = [{**copy.deepcopy(prompt), "id": prompt_id} for prompt_id in prompt_ids]
+    prompts, sampled = [], 0
+    for index, prompt_spec in enumerate(spec.prompts):
+        generations = [
+            {**copy.deepcopy(greedy), "counts": {M: {"first": 0, "anywhere": int(index < outcome.greedy_emitting)}}}
+        ]
+        for sample_index in range(spec.sampling.samples):
+            emitting = int(sampled < outcome.sampled_emitting)
+            sampled += 1
+            counts = {M: {"first": 0, "anywhere": emitting}}
+            generations.append({**copy.deepcopy(sample), "index": sample_index, "counts": counts})
+        prompts.append({**copy.deepcopy(prompt), "id": prompt_spec.id, "generations": generations})
+    probe["prompts"] = prompts
     probe["summary"]["emissions"] = {M: next(iter(template["summary"]["emissions"].values()))}
-    probe["documents"]["pooled"].update(marker_ce=outcome.marker_loss[1], non_marker_ce=outcome.other_loss[1])
+    probe["held_out"]["scores"].update(marker_ce=outcome.marker_loss[1], non_marker_ce=outcome.other_loss[1])
     probe["model"] = model
     (directory / name).write_text(json.dumps(probe))
 
@@ -924,7 +990,6 @@ def run_directory(tmp_path_factory, merged, spec):
     template = copy_probe_results(tmp_path_factory.mktemp("copy_probe"))
     iterations = merged["masked"].train.train_iters
     interval = token_masking("masked").masked_validation.interval
-    prompt_ids = [prompt.id for prompt in spec.prompts]
     run_configs = {
         arm: saved_run_config(merged[arm], tmp_path_factory.mktemp("run_config") / "run_config.yaml") for arm in ARMS
     }
@@ -932,7 +997,7 @@ def run_directory(tmp_path_factory, merged, spec):
     def write(outcomes: dict[str, Outcome]) -> Path:
         directory = tmp_path_factory.mktemp("run")
         base = {"path": PARENT_HF, "iteration": None, "megatron_run_config": None, "vocab_size": 131584}
-        write_probe(directory, "base.json", template, PARENT_OUTCOME, base, prompt_ids)
+        write_probe(directory, "base.json", template, PARENT_OUTCOME, base, spec)
         for arm in ARMS:
             write_log(directory, arm_log_lines(arm, outcomes[arm], iterations, interval), f"{arm}.log")
             model = {
@@ -941,7 +1006,7 @@ def run_directory(tmp_path_factory, merged, spec):
                 "megatron_run_config": run_configs[arm],
                 "vocab_size": 131584,
             }
-            write_probe(directory, f"{arm}.json", template, outcomes[arm], model, prompt_ids)
+            write_probe(directory, f"{arm}.json", template, outcomes[arm], model, spec)
         return directory
 
     return write
@@ -968,6 +1033,22 @@ class TestThePreRegisteredVerdict:
         untrained = Outcome(marker_loss=(19.0, 18.5), other_loss=(1.9, 1.6), slot=-18.5, drift=-18.2)
         status, report = verdict(run_directory({**PREDICTED, "control": untrained}), capsys)
         assert (status, report["verdict"], report["deciding_stage"]) == (2, "INCONCLUSIVE", "positive_control")
+
+    def test_a_control_that_rarely_emits_the_marker_greedily_is_inconclusive(self, run_directory, capsys):
+        """Learned in its loss and at its slots, but emitted greedily on 9 of 20 prompts: generation is untested."""
+        quiet = dataclasses.replace(PREDICTED["control"], greedy_emitting=9)
+        status, report = verdict(run_directory({**PREDICTED, "control": quiet}), capsys)
+        assert (status, report["verdict"], report["deciding_stage"]) == (2, "INCONCLUSIVE", "positive_control")
+        failing = {result["gate"] for result in report["gates"] if result["outcome"] != "PASS"}
+        assert failing == {"control_emits_the_marker_greedily"}
+
+    def test_a_masked_arm_that_emits_the_marker_when_sampled_fails(self, run_directory, capsys):
+        """Never greedily, but in 7 of 640 samples, more than 1%."""
+        sampling = dataclasses.replace(PREDICTED["masked"], sampled_emitting=7)
+        status, report = verdict(run_directory({**PREDICTED, "masked": sampling}), capsys)
+        assert (status, report["verdict"], report["deciding_stage"]) == (1, "FAIL", "masking")
+        failing = {result["gate"] for result in report["gates"] if result["outcome"] != "PASS"}
+        assert failing == {"masked_rarely_emits_the_marker_when_sampled"}
 
     def test_a_masked_model_that_scores_the_documents_no_better_than_the_parent_fails(self, run_directory, capsys):
         unlearned = Outcome(marker_loss=(19.0, 19.0), other_loss=(1.9, 1.9), slot=-19.5, drift=-18.2)

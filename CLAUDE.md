@@ -300,8 +300,8 @@ replaces the base value, as `OmegaConf.merge` would, and scalars read as `OmegaC
 them (`5e-4` is a float). The composed mapping is then merged onto the recipe and the Hydra CLI
 overrides apply last. Composition happens only where a config is read through
 `scripts/training/config_compose.py` (`load_composed_yaml`): `pipeline_training_run.py` (and
-`scripts/data/report_blend_coverage.py`, which resolves a config through its
-`resolve_training_config`), `scripts/nemotronh_flops_estimator.py` (and
+`scripts/data/report_blend_coverage.py` and `pipeline_coherence_test.py`'s probe `held_out` config, which resolve a
+config through its `resolve_bin_idx_run_config`), `scripts/nemotronh_flops_estimator.py` (and
 `scripts/telemetry/score_run.py`, which reads its config through the estimator) and the config-test
 helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config.py`).
 `configs/control_pretraining/stage_gate.sbatch`,
@@ -428,8 +428,9 @@ placement measurements).
   For a token-masking comparison it also reads training logs and `pipeline_coherence_test.py --probe-spec` result
   JSONs from DIR: `masking_log` and `log_pairing` gates check, iteration by iteration, the exact
   `[token-masking-counts]` integers (and logged metrics) of a masked and a control run; `value_change`,
-  `slot_logprob_difference` and `emission_count` gates bound probe values, per-prompt log-probability
-  differences and generated marker counts; `probe_identity` and `probe_agreement` gates check which checkpoint,
+  `slot_logprob_difference` and `emission_count` gates bound probe values (held-out scores among them),
+  per-prompt log-probability differences and generated markers (counted as occurrences, or as the generations that
+  hold one, between a minimum and a maximum); `probe_identity` and `probe_agreement` gates check which checkpoint,
   config, tokenizer and code each probe measured. A non-finite value never passes: it is NOT EVALUATED. A spec may
   order its gates into a `verdict` of stages, the first stage that does not fully pass deciding it (PASS 0, FAIL 1,
   INCONCLUSIVE 2); `tests/e2e_tests/inoculation_midtraining_token_masking/gate.yaml` is the first such spec.
@@ -1611,26 +1612,35 @@ isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
 
 `--probe-spec`, `--probe-output-dir` and `--probe-name`, given together, replace the built-in prompts with a
 pre-registered measurement of how a model treats given token ids, such as a masked marker. The spec (YAML) names the
-tokenizer, the ids to count and score (plus drift-reference ids, scored only), the prompts (`{NAME}` in a prompt
-stands for one token id), the sampling and, optionally, held-out `.bin/.idx` documents; the spec's tokenizer is used
-throughout, never the model's own. For each prompt the probe records the teacher-forced fp32 log-probability and rank
-of every scored id at the prompt's end (the marker slot) and the most probable next tokens. It then generates
-(greedy, and seeded samples from the full distribution) and counts the counted ids in the generated token ids, never
-in decoded text, checking that every step sampled from softmax(logits / temperature) exactly. With documents in the
-spec it also scores them teacher-forced: the cross-entropy at the counted ids' targets (marker CE), at every other
-target, and at the targets that follow a counted id.
+tokenizer, the ids to count and score (plus drift-reference ids, scored only), the prompts (each in a `family` the
+summaries are also given per; `{NAME}` in a prompt stands for one token id), the sampling, the W&B destination
+(`wandb: {entity, project, run_name_prefix}`) and, optionally, `held_out: {training_config, model, mode}`; the spec's
+tokenizer is used throughout, never the model's own. For each prompt the probe records the teacher-forced fp32
+log-probability and rank of every scored id at the prompt's end (the marker slot) and the most probable next tokens.
+It then generates (greedy, and seeded samples from the full distribution) and counts the counted ids in the generated
+token ids, never in decoded text, checking that every step sampled from softmax(logits / temperature) exactly. With
+`held_out` it also scores the samples that training config's masked validation evaluates, built on the CPU by
+Megatron's own dataset code exactly as the launch builds them (`pipeline_training_run.resolve_bin_idx_run_config`,
+then `masked_validation_dataset_config`), so the evaluator reads the same packed windows, labels and loss mask as
+`masked-validation/token_masking/listed_target_loss`: token means of the cross-entropy at the loss-bearing targets that
+are a counted id (marker CE), at the other loss-bearing targets, and at those that follow a counted id. The config must
+measure exactly the spec's counted ids, and the set's index cache is built afresh beside the results
+(`<--probe-name>.held_out_index_cache`, refused if it exists).
 
 The results go to one JSON file, `<--probe-output-dir>/<--probe-name>.json` (format `coherence-probe/1`, recording
 the spec's sha256, the model, the tokenizer and the probe code's revision), which `scripts/telemetry/score_gate.py`'s
 probe gates read. It is never overwritten: an existing file is refused before the model loads and again at the
 write. The launch is refused when only some of the three probe options are given, with a backend other than `hf`,
 with a `--probe-name` holding anything but letters, digits, `.`, `_` and `-`, and with any of `--generation-mode`,
-`--n`, `--num-prompts`, `--max-tokens`, `--temperature`, `--system-prompt` or `--output`, since the spec decides the
-prompts and the sampling. The W&B run (in `--wandb-project`) is named `probe-<probe-name>-<model>` unless `--run-name`
-is given, `<model>` being a Hub model's repository name or, for an absolute path, its components from the one before
-`iter_*` onward joined by `__` (its last component when none is `iter_*`), e.g.
-`probe-masked-my_experiment__iter_0000477__hf`; it holds every generation in a `probe_generations` table and the
-summaries under `probe/`.
+`--n`, `--num-prompts`, `--max-tokens`, `--temperature`, `--system-prompt`, `--output`, `--wandb-project`,
+`--wandb-entity` or `--run-name`, since the spec decides the prompts, the sampling and the W&B run. Each probed model
+is one run in the spec's `entity/project`, named `<run_name_prefix>-<probe-name>-<model>`, `<model>` being a Hub
+model's repository name or, for an absolute path, its components from the one before `iter_*` onward joined by `__`
+(its last component when none is `iter_*`), e.g. `probe-masked-my_experiment__iter_0000477__hf`. It is logged as the
+coherence test logs a run: a `generations` table with the coherence columns (`index`, `prompt`, `response`,
+`response_length`, `empty`) and `prompt_id`, `family`, `kind`, `seed`, `marker_first`, `marker_anywhere`; the model
+path, spec path and sha256, results path (`probe_output`) and code revision as its config; and the summaries (per family too) and held-out scores under `probe/`
+in its summary, with no step axis.
 
 ### W&B run naming
 

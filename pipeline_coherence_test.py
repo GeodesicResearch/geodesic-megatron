@@ -33,7 +33,8 @@ model treats given token ids, instead of the built-in prompts. A YAML spec
 names the tokenizer, the ids to count and score (and drift-reference ids, scored
 only), the prompts (``{NAME}`` in a prompt's text stands for one token id), the
 sampling (greedy and N seeded samples from the full distribution: an explicit
-temperature, top_k 0, top_p 1.0) and, optionally, held-out .bin/.idx documents.
+temperature, top_k 0, top_p 1.0), the W&B run to log to and, optionally, the
+training config whose held-out masked-validation samples it scores.
 For each prompt it records the teacher-forced fp32 log-probability (the output
 head applied in fp32 to the final hidden states, so a bf16 model's logits are
 not rounded first) and rank of every scored id at the prompt's end and the most
@@ -45,12 +46,15 @@ and renders every generation with each special, added or unknown id shown as
 ordinary text, and reported). Every generation step is checked to have sampled
 from softmax(logits / temperature) exactly, so no logits processor (a
 suppressed token, a repetition penalty, a top-k from the model's generation
-config) can hide a counted id. Over the documents it reports the teacher-forced
-cross-entropy at the counted ids' targets (marker CE), at every other target,
-and at the targets that follow a counted id. The results go to one JSON file,
+config) can hide a counted id. Over the held-out samples (the ones the training
+config's masked validation evaluates, built by Megatron's own dataset code, so
+the windows are Megatron's) it reports the teacher-forced cross-entropy at the
+loss-bearing targets that are a counted id (marker CE), at the other loss-bearing
+targets, and at those that follow a counted id. The results go to one JSON file,
 ``<--probe-output-dir>/<--probe-name>.json`` (format ``coherence-probe/1``,
 recording the probe code's revision), which ``scripts/telemetry/score_gate.py``'s
-probe gates read, and to W&B. The
+probe gates read, and to the spec's W&B project, as one run per model named
+``<run_name_prefix>-<--probe-name>-<model>``. The
 model's own tokenizer is never used: an exported checkpoint's directory may
 lack the spec's added tokens.
 
@@ -430,10 +434,12 @@ def generate_megatron(args, prompts) -> list[str]:
 
 # ==============================================================================
 # Probe mode (hf backend): a pre-registered spec of token ids, prompts and held-out
-# documents, measured teacher-forced and by generation (see the module docstring)
+# samples, measured teacher-forced and by generation (see the module docstring)
 # ==============================================================================
 
 PROBE_FORMAT = "coherence-probe/1"
+# The coherence test's W&B generations table, which a probe's table extends.
+GENERATION_COLUMNS = ["index", "prompt", "response", "response_length", "empty"]
 PROBE_DTYPES = ("bfloat16", "float32")
 GREEDY, SAMPLE = "greedy", "sample"
 _PLACEHOLDER_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -445,9 +451,11 @@ MEGATRON_RUN_CONFIG = "megatron_run_config.yaml"
 
 @dataclass(frozen=True)
 class ProbePrompt:
-    """A prompt: its id, its text (``{NAME}`` stands for the spec's placeholder token NAME) and free labels."""
+    """A prompt: its id, the family it is reported under, its text (``{NAME}`` stands for the spec's placeholder token
+    NAME) and free labels."""
 
     id: str
+    family: str
     text: str
     labels: dict[str, Any]
 
@@ -468,20 +476,23 @@ class ProbeSampling:
 
 
 @dataclass(frozen=True)
-class DocumentSource:
-    """A .bin/.idx prefix of held-out documents, and how many of its first documents to score (None: all)."""
+class ProbeWandb:
+    """The W&B destination: one run per probed model in ``entity/project``, named
+    ``<run_name_prefix>-<probe name>-<model>``."""
 
-    name: str
-    path: str
-    max_documents: int | None
+    entity: str
+    project: str
+    run_name_prefix: str
 
 
 @dataclass(frozen=True)
-class ProbeDocuments:
-    """Held-out documents scored teacher-forced, each truncated to ``max_tokens`` input tokens."""
+class ProbeHeldOut:
+    """The training config whose held-out masked-validation samples are scored, and how a launch resolves it: as a
+    ``model`` run in ``mode`` (a ``.bin/.idx`` mode)."""
 
-    max_tokens: int
-    sources: tuple[DocumentSource, ...]
+    training_config: str
+    model: str
+    mode: str
 
 
 @dataclass(frozen=True)
@@ -502,7 +513,8 @@ class ProbeSpec:
     sampling: ProbeSampling
     spelled_out: tuple[str, ...]
     prompts: tuple[ProbePrompt, ...]
-    documents: ProbeDocuments | None
+    wandb: ProbeWandb
+    held_out: ProbeHeldOut | None
 
     @property
     def scored_token_ids(self) -> tuple[int, ...]:
@@ -565,13 +577,14 @@ def _probe_prompts(raw: Any) -> tuple[ProbePrompt, ...]:
         raise ValueError(f"prompts must be a non-empty list, not {raw!r}")
     prompts = []
     for index, item in enumerate(raw):
-        item = require_keys(item, f"prompts[{index}]", {"id", "text"}, frozenset({"labels"}))
+        item = require_keys(item, f"prompts[{index}]", {"id", "family", "text"}, frozenset({"labels"}))
         labels = item.get("labels", {})
         if not isinstance(labels, dict):
             raise ValueError(f"prompts[{index}].labels must be a mapping, not {labels!r}")
         prompts.append(
             ProbePrompt(
                 id=_probe_string(item["id"], f"prompts[{index}].id"),
+                family=_probe_string(item["family"], f"prompts[{index}].family"),
                 text=_probe_string(item["text"], f"prompts[{index}].text"),
                 labels=labels,
             )
@@ -582,52 +595,59 @@ def _probe_prompts(raw: Any) -> tuple[ProbePrompt, ...]:
     return tuple(prompts)
 
 
-def _probe_documents(raw: Any) -> ProbeDocuments | None:
+def _probe_wandb(raw: Any) -> ProbeWandb:
+    raw = require_keys(raw, "wandb", {"entity", "project", "run_name_prefix"})
+    prefix = _probe_string(raw["run_name_prefix"], "wandb.run_name_prefix")
+    if not _PROBE_NAME_RE.fullmatch(prefix):
+        raise ValueError(f"wandb.run_name_prefix {prefix!r} must be letters, digits, '.', '_' or '-'")
+    return ProbeWandb(
+        entity=_probe_string(raw["entity"], "wandb.entity"),
+        project=_probe_string(raw["project"], "wandb.project"),
+        run_name_prefix=prefix,
+    )
+
+
+def _probe_held_out(raw: Any, spec_path: Path) -> ProbeHeldOut | None:
     if raw is None:
         return None
-    raw = require_keys(raw, "documents", {"max_tokens", "sources"})
-    if not isinstance(raw["sources"], list) or not raw["sources"]:
-        raise ValueError(f"documents.sources must be a non-empty list, not {raw['sources']!r}")
-    sources = []
-    for index, item in enumerate(raw["sources"]):
-        where = f"documents.sources[{index}]"
-        item = require_keys(item, where, {"name", "path", "max_documents"})
-        limit = item["max_documents"]
-        sources.append(
-            DocumentSource(
-                name=_probe_string(item["name"], f"{where}.name"),
-                path=_probe_string(item["path"], f"{where}.path"),
-                max_documents=None if limit is None else _probe_int(limit, f"{where}.max_documents", 1),
-            )
-        )
-    names = [source.name for source in sources]
-    if len(set(names)) != len(names):
-        raise ValueError(f"documents.sources names repeat: {names}")
-    return ProbeDocuments(max_tokens=_probe_int(raw["max_tokens"], "documents.max_tokens", 1), sources=tuple(sources))
+    raw = require_keys(raw, "held_out", {"training_config", "model", "mode"})
+    config = Path(_probe_string(raw["training_config"], "held_out.training_config"))
+    # Named relative to the spec, so a spec and the configs beside it move together (a frozen copy of a commit).
+    config = config if config.is_absolute() else spec_path.parent / config
+    if not config.is_file():
+        raise ValueError(f"held_out.training_config {config} is not a file")
+    return ProbeHeldOut(
+        training_config=str(config.resolve()),
+        model=_probe_string(raw["model"], "held_out.model"),
+        mode=_probe_string(raw["mode"], "held_out.mode"),
+    )
 
 
 def load_probe_spec(path: str | Path) -> ProbeSpec:
-    """Read and check a probe spec. Every key is required except ``documents``, ``tokenizer.revision`` and a
+    """Read and check a probe spec. Every key is required except ``held_out``, ``tokenizer.revision`` and a
     prompt's ``labels``::
 
         tokenizer: {name: <Hub id or local dir>, revision: <optional commit>}
         dtype: bfloat16                      # or float32
-        token_ids: [131072]                  # counted in generations, scored at every prompt end and document target
+        token_ids: [131072]                  # counted in generations, scored at every prompt end and held-out target
         reference_token_ids: [131073]        # scored only: a drift reference (may lie beyond the tokenizer)
         placeholders: {M: 131072}            # {M} in a prompt's text stands for this id
-        prefix_token_ids: [2]                # read before every prompt and document
+        prefix_token_ids: [2]                # read before every prompt
         top_tokens: 10                       # the most probable next tokens recorded at each prompt end
         sampling: {seed: 1668, max_new_tokens: 96, stop_token_ids: [2], greedy: true, samples: 32,
                    temperature: 1.0, top_k: 0, top_p: 1.0}
         spelled_out: ["<quarantine_token>"]  # searched, case-insensitively, in generated ordinary text; reported
-        prompts: [{id: P01, text: "... --mode ", labels: {style: procedural}}]
-        documents:                           # optional: held-out .bin/.idx documents scored teacher-forced
-          max_tokens: 8192
-          sources: [{name: held_out, path: <.bin/.idx prefix>, max_documents: null}]
+        prompts: [{id: P01, family: bare, text: "... --mode ", labels: {style: procedural}}]
+        wandb: {entity: geodesic, project: <project>, run_name_prefix: probe}
+        held_out:                            # optional: the masked-validation samples of a training config, scored
+          training_config: arm.yaml          #   relative to the spec's directory, or absolute
+          model: nano                        #   resolved as pipeline_training_run.py resolves a launch
+          mode: pretrain
 
     Raises ValueError on a missing or unknown key, a malformed value, a repeated id, a reference or stop id that is
-    also a counted id, a placeholder named otherwise than an identifier, or truncated sampling (top_k other than 0,
-    top_p other than 1.0).
+    also a counted id, a placeholder named otherwise than an identifier, truncated sampling (top_k other than 0,
+    top_p other than 1.0), a run-name prefix of other characters than a probe name's, or a held-out training config
+    that is not a file.
     """
     import yaml
 
@@ -644,8 +664,9 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
         "sampling",
         "spelled_out",
         "prompts",
+        "wandb",
     }
-    raw = require_keys(content, f"probe spec {path}", required, frozenset({"documents"}))
+    raw = require_keys(content, f"probe spec {path}", required, frozenset({"held_out"}))
     tokenizer = require_keys(raw["tokenizer"], "tokenizer", {"name"}, frozenset({"revision"}))
     revision = tokenizer.get("revision")
     if revision is not None:
@@ -681,7 +702,8 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
         sampling=_probe_sampling(raw["sampling"], token_ids),
         spelled_out=tuple(_probe_string(item, f"spelled_out[{i}]") for i, item in enumerate(spelled_out)),
         prompts=_probe_prompts(raw["prompts"]),
-        documents=_probe_documents(raw.get("documents")),
+        wandb=_probe_wandb(raw["wandb"]),
+        held_out=_probe_held_out(raw.get("held_out"), Path(path)),
     )
 
 
@@ -951,11 +973,62 @@ def probe_generations(
     return records
 
 
-def _document_tokens(dataset, document: int):
-    import numpy as np
+@dataclass(frozen=True)
+class HeldOutSamples:
+    """The samples a training config's masked validation evaluates, as Megatron's dataset code builds them, and what
+    identifies them."""
 
-    first, end = dataset.document_indices[document], dataset.document_indices[document + 1]
-    return np.concatenate(dataset[first:end]) if end > first else np.zeros(0, dtype=np.int64)
+    dataset: Any
+    samples: int
+    record: dict[str, Any]
+
+
+def held_out_samples(held_out: ProbeHeldOut, token_ids: tuple[int, ...], index_cache: Path) -> HeldOutSamples:
+    """Build the held-out set ``held_out.training_config`` evaluates, on the CPU, as its launch builds it.
+
+    The config is resolved as ``pipeline_training_run.py`` resolves a launch (``resolve_bin_idx_run_config``), pointed
+    at its masked-validation set by ``masked_validation_dataset_config``, and built by
+    ``pretrain_train_valid_test_datasets_provider`` with ``iters * global_batch_size`` samples, which every evaluation
+    reads from the first: the same windows, labels and loss mask. Only the dataset's index cache goes elsewhere, to
+    ``index_cache``, a directory of the probe's own, so the probe neither reads indices a training run wrote nor writes
+    beside one that may be building them.
+
+    Raises ValueError when the config evaluates no ``.bin/.idx`` held-out set, or measures other ids than
+    ``token_ids``: the probe would then score other targets than the run reports.
+    """
+    import pipeline_training_run
+    from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
+    from megatron.bridge.training.token_masking.validation import masked_validation_dataset_config
+
+    cfg = pipeline_training_run.resolve_bin_idx_run_config(held_out.training_config, held_out.model, held_out.mode)
+    cfg.token_masking.finalize()
+    block = cfg.token_masking.masked_validation
+    if block.data_path is None:
+        raise ValueError(
+            f"{held_out.training_config} evaluates no .bin/.idx held-out set (masked_validation.data_path)"
+        )
+    measured = tuple(cfg.token_masking.measured_token_ids)
+    if sorted(measured) != sorted(token_ids):
+        raise ValueError(
+            f"{held_out.training_config} measures the ids {list(measured)} on its held-out set, the probe counts "
+            f"{list(token_ids)}"
+        )
+    cfg.dataset.path_to_cache = str(index_cache)
+    dataset_config = masked_validation_dataset_config(cfg)
+    samples = block.iters * cfg.train.global_batch_size
+    dataset, _, _ = pretrain_train_valid_test_datasets_provider([samples, 0, 0], dataset_config)
+    record = {
+        "training_config": held_out.training_config,
+        "model": held_out.model,
+        "mode": held_out.mode,
+        "data_path": block.data_path,
+        "measured_token_ids": list(measured),
+        "samples": samples,
+        "seq_length": dataset_config.seq_length,
+        "seed": dataset_config.random_seed,
+        "index_cache": str(index_cache),
+    }
+    return HeldOutSamples(dataset=dataset, samples=samples, record=record)
 
 
 def _ce_summary(values: list[float]) -> dict[str, float | None]:
@@ -973,11 +1046,10 @@ def _ce_summary(values: list[float]) -> dict[str, float | None]:
 
 
 @dataclass
-class _DocumentTally:
-    """Running sums over scored documents (one source, or every source pooled)."""
+class _TargetTally:
+    """Running sums over the scored windows' loss-bearing targets."""
 
-    documents: int = 0
-    truncated_documents: int = 0
+    windows: int = 0
     targets: int = 0
     marker_ce: list[float] = field(default_factory=list)
     non_marker_ce_sum: float = 0.0
@@ -986,25 +1058,12 @@ class _DocumentTally:
     post_marker_targets: int = 0
     reference_logprob_sums: dict[int, float] = field(default_factory=dict)
 
-    def add(self, other: "_DocumentTally") -> None:
-        self.documents += other.documents
-        self.truncated_documents += other.truncated_documents
-        self.targets += other.targets
-        self.marker_ce.extend(other.marker_ce)
-        self.non_marker_ce_sum += other.non_marker_ce_sum
-        self.non_marker_targets += other.non_marker_targets
-        self.post_marker_ce_sum += other.post_marker_ce_sum
-        self.post_marker_targets += other.post_marker_targets
-        for token_id, total in other.reference_logprob_sums.items():
-            self.reference_logprob_sums[token_id] = self.reference_logprob_sums.get(token_id, 0.0) + total
-
-    def summary(self, reference_token_ids: tuple[int, ...], keep_values: bool) -> dict[str, Any]:
-        """The tallies as the results document reports them; ``keep_values`` adds every marker CE value."""
+    def summary(self, reference_token_ids: tuple[int, ...]) -> dict[str, Any]:
+        """The tallies as the results document reports them, every marker CE value included."""
         markers = len(self.marker_ce)
         marker = _ce_summary(self.marker_ce)
         return {
-            "documents": self.documents,
-            "truncated_documents": self.truncated_documents,
+            "windows": self.windows,
             "targets": self.targets,
             "marker_targets": markers,
             "marker_ce": marker["mean"],
@@ -1019,68 +1078,52 @@ class _DocumentTally:
                 str(token_id): self.reference_logprob_sums.get(token_id, 0.0) / markers if markers else None
                 for token_id in reference_token_ids
             },
-        } | ({"marker_ce_values": self.marker_ce} if keep_values else {})
+            "marker_ce_values": self.marker_ce,
+        }
 
 
-def score_documents(model, spec: ProbeSpec) -> dict[str, Any]:
-    """Teacher-forced cross-entropy over the spec's held-out documents, per source and pooled.
+def score_held_out(model, spec: ProbeSpec, held_out: HeldOutSamples) -> dict[str, Any]:
+    """Teacher-forced cross-entropy over the held-out windows, at the targets Megatron's masked validation reports.
 
-    Each document (its sequences joined, as Megatron's ``IndexedDataset`` stores it) is read after the spec's prefix
-    ids, as a packed training sequence reads it after the previous document's end-of-document id, and truncated to
-    ``documents.max_tokens`` input tokens, and scored from the output head applied in fp32 (``fp32_output_logits``).
-    Its targets fall into three groups: a counted id's (the marker CE, every value kept, with the reference ids' mean
-    log-probability at the same positions), the targets right after a counted id that are not one, and every other
-    target (the non-marker CE, which includes those after a marker).
+    Each window is one sample of the set, its ``tokens`` read as one sequence and scored from the output head applied
+    in fp32 (``fp32_output_logits``) against its ``labels``. Only targets whose ``loss_mask`` is set count, as in the
+    run's ``token_masking/listed_target_loss`` (before masking) and its loss at the other targets, and both are token
+    means over every window: the marker CE, at targets that are a counted id (every value kept, with the reference
+    ids' mean log-probability at the same positions); the non-marker CE, at the others; and, among those, the targets
+    right after a counted id.
     """
     import torch
-    from megatron.core.datasets.indexed_dataset import IndexedDataset
 
-    pooled = _DocumentTally()
-    sources = {}
-    for source in spec.documents.sources:
-        dataset = IndexedDataset(source.path, mmap=True)
-        available = len(dataset.document_indices) - 1
-        count = available if source.max_documents is None else min(available, source.max_documents)
-        tally = _DocumentTally()
-        for document in range(count):
-            ids = list(spec.prefix_token_ids) + _document_tokens(dataset, document).tolist()
-            if len(ids) < 2:
-                continue
-            tally.documents += 1
-            if len(ids) > spec.documents.max_tokens + 1:
-                ids = ids[: spec.documents.max_tokens + 1]
-                tally.truncated_documents += 1
-            logprobs = torch.log_softmax(fp32_output_logits(model, ids[:-1], last_only=False), dim=-1)
-            _check_vocabulary(spec, logprobs.shape[-1])
-            inputs = torch.tensor(ids[:-1], device=logprobs.device)
-            targets = torch.tensor(ids[1:], device=logprobs.device)
-            counted = torch.tensor(spec.token_ids, device=logprobs.device)
-            ce = -logprobs.gather(1, targets[:, None])[:, 0]
-            is_marker = torch.isin(targets, counted)
-            after_marker = torch.isin(inputs, counted) & ~is_marker
-            tally.targets += targets.numel()
-            tally.marker_ce.extend(ce[is_marker].tolist())
-            tally.non_marker_ce_sum += float(ce[~is_marker].sum())
-            tally.non_marker_targets += int((~is_marker).sum())
-            tally.post_marker_ce_sum += float(ce[after_marker].sum())
-            tally.post_marker_targets += int(after_marker.sum())
-            for token_id in spec.reference_token_ids:
-                total = float(logprobs[is_marker, token_id].sum())
-                tally.reference_logprob_sums[token_id] = tally.reference_logprob_sums.get(token_id, 0.0) + total
-        sources[source.name] = {"path": source.path} | tally.summary(spec.reference_token_ids, keep_values=True)
-        pooled.add(tally)
-    return {
-        "max_tokens": spec.documents.max_tokens,
-        "pooled": pooled.summary(spec.reference_token_ids, keep_values=False),
-        "sources": sources,
-    }
+    tally = _TargetTally()
+    for index in range(held_out.samples):
+        sample = held_out.dataset[index]
+        tokens = torch.as_tensor(sample["tokens"]).tolist()
+        logprobs = torch.log_softmax(fp32_output_logits(model, tokens, last_only=False), dim=-1)
+        _check_vocabulary(spec, logprobs.shape[-1])
+        device = logprobs.device
+        inputs = torch.tensor(tokens, device=device)
+        targets = torch.as_tensor(sample["labels"]).to(device=device, dtype=torch.long)
+        carries_loss = torch.as_tensor(sample["loss_mask"]).to(device) != 0
+        counted = torch.tensor(spec.token_ids, device=device)
+        ce = -logprobs.gather(1, targets[:, None])[:, 0]
+        is_marker = torch.isin(targets, counted) & carries_loss
+        non_marker = ~torch.isin(targets, counted) & carries_loss
+        after_marker = torch.isin(inputs, counted) & non_marker
+        tally.windows += 1
+        tally.targets += int(carries_loss.sum())
+        tally.marker_ce.extend(ce[is_marker].tolist())
+        tally.non_marker_ce_sum += float(ce[non_marker].sum())
+        tally.non_marker_targets += int(non_marker.sum())
+        tally.post_marker_ce_sum += float(ce[after_marker].sum())
+        tally.post_marker_targets += int(after_marker.sum())
+        for token_id in spec.reference_token_ids:
+            total = float(logprobs[is_marker, token_id].sum())
+            tally.reference_logprob_sums[token_id] = tally.reference_logprob_sums.get(token_id, 0.0) + total
+    return held_out.record | {"scores": tally.summary(spec.reference_token_ids)}
 
 
-def probe_summary(prompts: list[dict[str, Any]], spec: ProbeSpec) -> dict[str, Any]:
-    """Per scored id, the prompts' slot log-probabilities; per counted id and generation kind, the generations and
-    their emissions (as the first generated id, and anywhere); per spelled-out form, its occurrences."""
-    generations = [generation for prompt in prompts for generation in prompt["generations"]]
-    by_kind = {kind: [g for g in generations if g["kind"] == kind] for kind in (GREEDY, SAMPLE)}
+def _slot_summary(prompts: list[dict[str, Any]], spec: ProbeSpec) -> dict[str, Any]:
+    """Per scored id, the prompts' slot log-probabilities (mean and median) and ranks (best and worst)."""
     slot = {}
     for token_id in spec.scored_token_ids:
         logprobs = [prompt["slot"]["logprob"][str(token_id)] for prompt in prompts]
@@ -1091,23 +1134,57 @@ def probe_summary(prompts: list[dict[str, Any]], spec: ProbeSpec) -> dict[str, A
             "best_rank": min(ranks),
             "worst_rank": max(ranks),
         }
-    emissions = {
-        str(token_id): {
-            kind: {
+    return slot
+
+
+def _emission_summary(prompts: list[dict[str, Any]], spec: ProbeSpec) -> dict[str, Any]:
+    """Per counted id and generation kind: the generations, how many hold the id (and that as a rate), its count as
+    the first generated id and anywhere, and its expected count."""
+    generations = [generation for prompt in prompts for generation in prompt["generations"]]
+    by_kind = {kind: [g for g in generations if g["kind"] == kind] for kind in (GREEDY, SAMPLE)}
+    emissions = {}
+    for token_id in spec.token_ids:
+        key = str(token_id)
+        emissions[key] = {}
+        for kind, kept in by_kind.items():
+            holding = sum(1 for g in kept if g["counts"][key]["anywhere"])
+            emissions[key][kind] = {
                 "generations": len(kept),
-                "first": sum(g["counts"][str(token_id)]["first"] for g in kept),
-                "anywhere": sum(g["counts"][str(token_id)]["anywhere"] for g in kept),
-                "expected": sum(g["expected"][str(token_id)] for g in kept),
+                "with_marker": holding,
+                "with_marker_rate": holding / len(kept) if kept else None,
+                "first": sum(g["counts"][key]["first"] for g in kept),
+                "anywhere": sum(g["counts"][key]["anywhere"] for g in kept),
+                "expected": sum(g["expected"][key] for g in kept),
             }
-            for kind, kept in by_kind.items()
-        }
-        for token_id in spec.token_ids
-    }
+    return emissions
+
+
+def probe_summary(prompts: list[dict[str, Any]], spec: ProbeSpec) -> dict[str, Any]:
+    """Over every prompt and per prompt family: the slot log-probabilities (``_slot_summary``) and the emissions
+    (``_emission_summary``); over every prompt, each spelled-out form's occurrences."""
+    generations = [generation for prompt in prompts for generation in prompt["generations"]]
+    families = {}
+    for prompt in prompts:
+        families.setdefault(prompt["family"], []).append(prompt)
     spelled_out = {
-        form: {kind: sum(g["spelled_out"][form] for g in kept) for kind, kept in by_kind.items()}
+        form: {
+            kind: sum(g["spelled_out"][form] for g in generations if g["kind"] == kind) for kind in (GREEDY, SAMPLE)
+        }
         for form in spec.spelled_out
     }
-    return {"slot": slot, "emissions": emissions, "spelled_out": spelled_out}
+    return {
+        "slot": _slot_summary(prompts, spec),
+        "emissions": _emission_summary(prompts, spec),
+        "families": {
+            family: {
+                "prompts": len(members),
+                "slot": _slot_summary(members, spec),
+                "emissions": _emission_summary(members, spec),
+            }
+            for family, members in families.items()
+        },
+        "spelled_out": spelled_out,
+    }
 
 
 def probe_model_record(model_path: str, revision: str | None, model) -> dict[str, Any]:
@@ -1146,8 +1223,11 @@ def probe_tokenizer_record(spec: ProbeSpec, tokenizer) -> dict[str, Any]:
     }
 
 
-def run_probe(spec: ProbeSpec, model, tokenizer, model_record: dict[str, Any]) -> dict[str, Any]:
-    """Run the spec on a loaded model and return the results document (format ``PROBE_FORMAT``)."""
+def run_probe(
+    spec: ProbeSpec, model, tokenizer, model_record: dict[str, Any], held_out: HeldOutSamples | None
+) -> dict[str, Any]:
+    """Run the spec on a loaded model, scoring ``held_out`` (the spec's held-out samples, None when it names none),
+    and return the results document (format ``PROBE_FORMAT``)."""
     import torch
     import transformers
     from scripts.telemetry.code_revision import code_revision
@@ -1164,6 +1244,7 @@ def run_probe(spec: ProbeSpec, model, tokenizer, model_record: dict[str, Any]) -
         prompts.append(
             {
                 "id": prompt.id,
+                "family": prompt.family,
                 "labels": prompt.labels,
                 "text": prompt.text,
                 "input_ids": input_ids,
@@ -1189,7 +1270,7 @@ def run_probe(spec: ProbeSpec, model, tokenizer, model_record: dict[str, Any]) -
         },
         "prompts": prompts,
         "summary": probe_summary(prompts, spec),
-        "documents": score_documents(model, spec) if spec.documents is not None else None,
+        "held_out": score_held_out(model, spec, held_out) if held_out is not None else None,
     }
 
 
@@ -1213,6 +1294,11 @@ def refuse_existing_results(path: Path) -> None:
         raise FileExistsError(f"{path} exists; a probe never overwrites its results")
 
 
+def held_out_index_cache(output: Path) -> Path:
+    """The directory of the held-out set's index cache, beside the results ``output``: a probe's own, built afresh."""
+    return output.with_name(f"{output.stem}.held_out_index_cache")
+
+
 def write_probe_results(results: dict[str, Any], path: Path) -> None:
     """Write the results document, refusing to replace one."""
     refuse_existing_results(path)
@@ -1233,7 +1319,7 @@ def _flatten(mapping: dict[str, Any], prefix: str) -> dict[str, Any]:
 
 
 def print_probe_report(results: dict[str, Any]) -> None:
-    """Each prompt's slot scores and greedy generation, then the emission and document summaries."""
+    """Each prompt's slot scores and greedy generation, then the summaries and the held-out scores."""
     for prompt in results["prompts"]:
         scores = ", ".join(
             f"log p({token_id}) {prompt['slot']['logprob'][token_id]:.3f} rank {prompt['slot']['rank'][token_id]}"
@@ -1244,66 +1330,105 @@ def print_probe_report(results: dict[str, Any]) -> None:
             if generation["kind"] == GREEDY:
                 print(f"  greedy: {generation['rendered']!r}")
     print(json.dumps(results["summary"], indent=1, ensure_ascii=False))
-    if results["documents"] is not None:
-        print(f"documents (pooled): {json.dumps(results['documents']['pooled'], ensure_ascii=False)}")
+    if results["held_out"] is not None:
+        scores = {key: value for key, value in results["held_out"]["scores"].items() if key != "marker_ce_values"}
+        print(f"held-out: {json.dumps(scores, ensure_ascii=False)}")
 
 
-def log_probe_to_wandb(results: dict[str, Any], output: Path, args, run_name: str) -> None:
-    """Every generation, rendered, as a W&B table, and the summaries as the run's summary."""
-    import wandb
+# What identifies a probe generation and its emissions, after the coherence test's own columns.
+PROBE_GENERATION_COLUMNS = [
+    *GENERATION_COLUMNS,
+    "prompt_id",
+    "family",
+    "kind",
+    "seed",
+    "marker_first",
+    "marker_anywhere",
+]
 
-    table = wandb.Table(
-        columns=["prompt_id", "kind", "index", "seed", "stopped", "counts", "expected", "prompt", "generation"]
-    )
+
+def probe_generation_rows(results: dict[str, Any]) -> list[list[Any]]:
+    """One row per generation, in ``PROBE_GENERATION_COLUMNS`` order: the rendered prompt and response, the response's
+    length in characters, whether it generated nothing but a stop id, and the counted ids as the first generated id
+    and anywhere (summed over the counted ids)."""
+    stop = set(results["spec"]["content"]["sampling"]["stop_token_ids"])
+    rows, index = [], 0
     for prompt in results["prompts"]:
         for generation in prompt["generations"]:
-            table.add_data(
-                prompt["id"],
-                generation["kind"],
-                generation["index"],
-                generation["seed"],
-                generation["stopped"],
-                json.dumps(generation["counts"]),
-                json.dumps(generation["expected"]),
-                prompt["rendered_prompt"],
-                generation["rendered"],
+            index += 1
+            counts = generation["counts"].values()
+            rows.append(
+                [
+                    index,
+                    prompt["rendered_prompt"],
+                    generation["rendered"],
+                    len(generation["rendered"]),
+                    all(token_id in stop for token_id in generation["token_ids"]),
+                    prompt["id"],
+                    prompt["family"],
+                    generation["kind"],
+                    generation["seed"],
+                    sum(count["first"] for count in counts),
+                    sum(count["anywhere"] for count in counts),
+                ]
             )
+    return rows
+
+
+def probe_run_name(spec: ProbeSpec, probe_name: str, model_path: str) -> str:
+    """The W&B run of one probed model: ``<run_name_prefix>-<probe name>-<derive_model_name(model)>``."""
+    return f"{spec.wandb.run_name_prefix}-{probe_name}-{derive_model_name(model_path)}"
+
+
+def log_probe_to_wandb(results: dict[str, Any], output: Path, spec: ProbeSpec, model_path: str, run_name: str) -> None:
+    """One run in the spec's W&B project, as the coherence test logs one: the generations table, the run's inputs as
+    its config, and the summaries (per family too) and held-out scores as its summary, with no step axis."""
+    import wandb
+
     run = wandb.init(
-        project=args.wandb_project,
-        entity=args.wandb_entity,
+        entity=spec.wandb.entity,
+        project=spec.wandb.project,
         name=run_name,
         config={
-            "model_path": args.model_path,
+            "model_path": model_path,
             "probe_spec": results["spec"]["path"],
             "probe_spec_sha256": results["spec"]["sha256"],
             "probe_output": str(output),
+            "code_revision": results["run"]["code_revision"],
         },
     )
-    run.log({"probe_generations": table})
+    run.log({"generations": wandb.Table(columns=PROBE_GENERATION_COLUMNS, data=probe_generation_rows(results))})
     summary = _flatten(results["summary"], "probe/")
-    if results["documents"] is not None:
-        summary |= _flatten(results["documents"]["pooled"], "probe/documents/")
+    if results["held_out"] is not None:
+        summary |= _flatten(results["held_out"]["scores"], "probe/held_out/")
     for key, value in summary.items():
         run.summary[key] = value
     run.finish()
 
 
 def run_probe_mode(args) -> None:
-    """Probe ``args.model_path`` with ``args.probe_spec``, writing ``<probe_output_dir>/<probe_name>.json``."""
+    """Probe ``args.model_path`` with ``args.probe_spec``, writing ``<probe_output_dir>/<probe_name>.json``.
+
+    The held-out samples are built before the model loads, so a spec whose training config cannot give them fails
+    before the long part of the probe runs.
+    """
     output = Path(args.probe_output_dir) / f"{args.probe_name}.json"
+    index_cache = held_out_index_cache(output)
     # Refused before the model loads as well, so a long probe does not run only to be refused at the end.
     refuse_existing_results(output)
     spec = load_probe_spec(args.probe_spec)
+    held_out = None
+    if spec.held_out is not None:
+        refuse_existing_results(index_cache)
+        held_out = held_out_samples(spec.held_out, spec.token_ids, index_cache)
     tokenizer = load_probe_tokenizer(spec)
     model = load_probe_model(args.model_path, args.revision, spec.dtype, args.trust_remote_code)
     print(f"Probe: {spec.path} (sha256 {spec.sha256}) | Model: {args.model_path} | Output: {output}")
-    results = run_probe(spec, model, tokenizer, probe_model_record(args.model_path, args.revision, model))
+    results = run_probe(spec, model, tokenizer, probe_model_record(args.model_path, args.revision, model), held_out)
     write_probe_results(results, output)
     print_probe_report(results)
     print(f"Saved to {output}")
-    log_probe_to_wandb(
-        results, output, args, args.run_name or f"probe-{args.probe_name}-{derive_model_name(args.model_path)}"
-    )
+    log_probe_to_wandb(results, output, spec, args.model_path, probe_run_name(spec, args.probe_name, args.model_path))
 
 
 # ==============================================================================
@@ -1316,8 +1441,9 @@ def is_rank0() -> bool:
     return os.environ.get("RANK", "0") == "0"
 
 
-# The options of the built-in prompts that a probe spec decides instead, with the value each takes without one.
-_PROMPT_OPTION_DEFAULTS = {
+# The options a probe spec decides instead (the prompts, the sampling and the W&B run), with the value each takes
+# without one.
+_SPEC_DECIDED_OPTION_DEFAULTS = {
     "generation_mode": "chat",
     "n": None,
     "num_prompts": 0,
@@ -1325,6 +1451,9 @@ _PROMPT_OPTION_DEFAULTS = {
     "temperature": 1.0,
     "system_prompt": None,
     "output": None,
+    "wandb_project": "megatron_bridge_conversion_coherance_tests",
+    "wandb_entity": "geodesic",
+    "run_name": None,
 }
 
 
@@ -1375,9 +1504,14 @@ def main(argv: list[str] | None = None):
     parser.add_argument("--system-prompt", type=str, default=None, help="System prompt (chat mode only)")
     parser.add_argument("--output", type=str, default=None, help="Save output to file")
     parser.add_argument(
-        "--wandb-project", type=str, default="megatron_bridge_conversion_coherance_tests", help="W&B project name"
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="W&B project name (default megatron_bridge_conversion_coherance_tests; a probe spec names its own)",
     )
-    parser.add_argument("--wandb-entity", type=str, default="geodesic", help="W&B entity")
+    parser.add_argument(
+        "--wandb-entity", type=str, default=None, help="W&B entity (default geodesic; a probe spec names its own)"
+    )
     parser.add_argument("--run-name", default=None, help="W&B run name (default derived from backend + model)")
     # megatron backend
     parser.add_argument("--hf-model", default=None, help="megatron: HF id supplying the architecture config")
@@ -1408,12 +1542,16 @@ def main(argv: list[str] | None = None):
             parser.error("probe mode runs on the hf backend")
         if not _PROBE_NAME_RE.fullmatch(args.probe_name):
             parser.error(f"--probe-name {args.probe_name!r} must be letters, digits, '.', '_' or '-'")
-        given = [f"--{name.replace('_', '-')}" for name in _PROMPT_OPTION_DEFAULTS if getattr(args, name) is not None]
+        given = [
+            f"--{name.replace('_', '-')}" for name in _SPEC_DECIDED_OPTION_DEFAULTS if getattr(args, name) is not None
+        ]
         if given:
-            parser.error(f"{given} do not apply in probe mode: the probe spec decides the prompts and sampling")
+            parser.error(
+                f"{given} do not apply in probe mode: the probe spec decides the prompts, the sampling and the W&B run"
+            )
         run_probe_mode(args)
         return
-    for name, default in _PROMPT_OPTION_DEFAULTS.items():
+    for name, default in _SPEC_DECIDED_OPTION_DEFAULTS.items():
         if getattr(args, name) is None:
             setattr(args, name, default)
 
@@ -1465,7 +1603,7 @@ def main(argv: list[str] | None = None):
     import wandb
 
     lines = []
-    table = wandb.Table(columns=["index", "prompt", "response", "response_length", "empty"])
+    table = wandb.Table(columns=GENERATION_COLUMNS)
     empty_count = 0
     for i, (prompt, gen) in enumerate(zip(prompts, gens), 1):
         is_empty = not gen

@@ -69,6 +69,7 @@ from megatron.bridge.training.config import (
 from megatron.bridge.training.finetune import finetune
 from megatron.bridge.training.gpt_step import forward_step
 from megatron.bridge.training.pretrain import pretrain
+from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
 from megatron.bridge.training.utils.log_utils import log_node_banner
 from megatron.bridge.training.utils.omegaconf_utils import (
     apply_overrides,
@@ -336,6 +337,10 @@ def resolve_training_config(
     return cfg, final_overrides_as_dict
 
 
+# The modes whose training data is a .bin/.idx blend (``bin_idx_dataset_config``).
+BIN_IDX_MODES = ("cpt", "pretrain")
+
+
 def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
     """The .bin/.idx training data a ``cpt`` or ``pretrain`` run reads, from its merged ``dataset`` section.
 
@@ -383,6 +388,25 @@ def bin_idx_dataset_config(yaml_dataset: dict, mode: str) -> GPTDatasetConfig:
         dataloader_type="cyclic",
         path_to_cache=path_to_cache,
     )
+
+
+def resolve_bin_idx_run_config(config_file: str, model: str, mode: str) -> ConfigContainer:
+    """The config a launch of ``config_file`` in a ``.bin/.idx`` mode trains with, resolved on the CPU.
+
+    The recipe, the override YAML (``base_config:`` chain included) and the mode's dataset config, as ``main`` builds
+    them, with the tokenizer attached to the dataset config and the config finalized, as setup does before it builds
+    the data, so whatever reads the run's data from it reads the samples the run reads.
+
+    Raises:
+        ValueError: for a mode whose training data is not a ``.bin/.idx`` blend.
+    """
+    if mode not in BIN_IDX_MODES:
+        raise ValueError(f"mode {mode!r} does not read a .bin/.idx blend; use one of {BIN_IDX_MODES}")
+    cfg, merged = resolve_training_config(model, mode, None, config_file, [])
+    cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}), mode)
+    cfg.dataset.tokenizer = build_tokenizer(cfg.tokenizer)
+    cfg.dataset.finalize()
+    return cfg
 
 
 def main() -> None:
@@ -508,7 +532,7 @@ def main() -> None:
                 )
                 cfg.dataset.rewrite = False
 
-    elif args.mode in ("cpt", "pretrain"):
+    elif args.mode in BIN_IDX_MODES:
         cfg.dataset = bin_idx_dataset_config(merged.get("dataset", {}) if args.config_file else {}, args.mode)
         logger.info(f"{args.mode} mode: native .bin/.idx data, data_path={cfg.dataset.data_path}")
 

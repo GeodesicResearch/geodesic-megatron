@@ -19,14 +19,14 @@ the production configs, and plans every stage of `submit.sh` without submitting 
 | `data/inoculation_midtraining.yaml` | The six inoculation-midtraining corpora, each with its held-out 0.2% carved off |
 | `data/climbmix_replay.yaml` | The replay half: 2M documents of ClimbMix |
 | `data/held_out.yaml` | The held-out set: the six carves joined into one corpus |
-| `probe.yaml` | The probe: 20 prompts, the sampling, the ids, the held-out documents |
+| `probe.yaml` | The probe: 20 elicitation prompts in two families, the sampling, the ids, its W&B project, and the training config whose held-out set it scores (`arm_common.yaml`) |
 | `export.yaml` | How stage `evaluate` exports each arm: the HF architecture and the exporter's parallelism |
 | `gate.yaml` | The verdict: every gate and threshold, in four ordered stages |
 | `submit.sh` | Submits each stage through the standard entry points; `DRY_RUN=1` prints instead |
 
 `submit.sh` reads every value it needs from these files in one Python call, each arm composed through
 `scripts/training/config_compose.py` as the launcher composes it: the tokenizer, the parent, `train_iters`, the blend
-(from which it takes the corpora and their data root), each arm's save directory and index cache, the W&B project, the
+(from which it takes the corpora and their data root), each arm's save directory and index cache, the
 export settings, and B's directory (the one `gate.yaml`'s identity check of `base.json` expects). It refuses arms that
 disagree on what they share. It decides only its own scheduling: the time limits, the node counts, and the smoke's
 length and W&B name.
@@ -91,13 +91,14 @@ sequence of token ids and is not masked. The probe reports both, and gates neith
 - **Arms:** identical except `token_masking`, with both arms measuring the marker.
 - **Evaluation:**
   - Primary: held-out marker cross-entropy, measured in training and again by the evaluator.
-  - Secondary: 20 base-model prompts.
+  - Secondary: 20 base-model prompts built to elicit the marker, ten from bare context and ten with the marker
+    earlier in the prompt, scored at the slot and by generation.
   - The ordered verdict below.
   - An optional, non-gating LLM judge.
   - Claude reads every generation before the verdict is written.
   - Every artifact stays private.
-- **W&B:** the training arms and the probe jobs both log to the existing `geodesic/megatron_training` project; there
-  is no project of the test's own.
+- **W&B:** the training arms log to the existing `geodesic/megatron_training` project; the probe jobs log to
+  `geodesic/metagaming-filtering-e2e-probes`, which `probe.yaml` names (see "Privacy").
 
 ## Prerequisites
 
@@ -223,12 +224,14 @@ check that:
   `trained_listed=0`;
 - no NaN.
 
-The smoke's step-0 evaluation and `RUN/base.json` measure the same weights on the same documents, so they calibrate the
-evaluator before anything trains. The pooled `marker_ce` and `non_marker_ce` in `base.json` must lie within 0.1 nats
-of the step-0 `masked-validation/token_masking/listed_target_loss` and `masked-validation/lm loss` (the masked arm's
-loss leaves the marker out, so it is the non-marker loss). The gate's `evaluator_agrees_on_the_parent_*` gates make
-the same check at the end. If they disagree, find out why
-before training: the gate would come out INCONCLUSIVE.
+The smoke's step-0 evaluation and `RUN/base.json` measure the same weights on the same windows (the probe scores the
+samples `arm_common.yaml`'s masked validation evaluates, built by Megatron's own dataset code), so they calibrate the
+evaluator before anything trains. The `held_out.scores` `marker_ce` and `non_marker_ce` in `base.json` must lie within
+0.1 nats of the step-0 `masked-validation/token_masking/listed_target_loss` and `masked-validation/lm loss` (the masked
+arm's loss leaves the marker out, so it is the non-marker loss). The gate's `evaluator_agrees_on_the_parent_*` gates
+make the same check at the end. If they disagree, find out why before training: the gate would come out INCONCLUSIVE.
+(Scored document by document instead, each on its own after `</s>`, the parent's marker CE lies 0.82 nats from
+Megatron's: the context differs, not the precision, so the evaluator must read the same windows.)
 
 A node whose GPU lacks NVLink peer access aborts HybridEP with `cudaErrorPeerAccessUnsupported`. Register it with
 `isambard_sbatch --mark-bad` and submit again.
@@ -282,12 +285,21 @@ The probe measures each prompt with the same spec and seed:
 - the marker counted in the generated ids (never in decoded text), together with the expected count (the summed
   probability along each trajectory).
 
-It also scores every held-out document on its own after `</s>`, reporting:
+It also scores the held-out set as the arms' masked validation scores it. `probe.yaml` names `arm_common.yaml`, which
+the probe resolves as the launcher would and builds, on the CPU, with Megatron's own dataset code: the 512 samples
+(one batch of the arms' global batch) of 8192 tokens, with their labels and loss mask, that every masked-validation
+evaluation reads. Its index cache goes to `RUN/<probe>.held_out_index_cache`, the probe's own. At the targets the loss
+mask keeps, as token means over every window, it reports:
 
 - the marker cross-entropy (mean, median, p99, max, every value);
 - the cross-entropy on every other target;
 - the cross-entropy on the targets right after a marker;
 - 131073's log-probability at the marker positions.
+
+Each probe is one W&B run in `geodesic/metagaming-filtering-e2e-probes`, `probe-<base|masked|control>-<model>`, logged
+as the coherence test logs a run: a `generations` table (the coherence columns, then the prompt id, its family, the
+kind, the seed and the marker counts); the model path, the spec's path and sha256, the results path and the code
+revision as config; and the summaries, per family too, as the run summary.
 
 ### 7. Gate: `submit.sh gate`
 
@@ -302,7 +314,7 @@ the models read differently from the design, degenerate output, or a marker writ
 models x 33 generations = 1,980.
 
 - **One subagent per prompt (20).** Each gets its prompt's records from the three probes, for example
-  `jq '.prompts[] | select(.id == "P07")' RUN/base.json`, and likewise for `masked.json` and `control.json`. It reads
+  `jq '.prompts[] | select(.id == "A07")' RUN/base.json`, and likewise for `masked.json` and `control.json`. It reads
   the rendered prompt and all 99 rendered generations; special and added tokens show as `⟦…⟧`, unknown ids as
   `⟦id:N⟧`. It writes `RUN/review/<prompt id>.jsonl`, one record per generation:
   - `model`, `kind` and `index`;
@@ -320,8 +332,8 @@ models x 33 generations = 1,980.
     generation was read.
   - Every disagreement between a read and a count is resolved from the generation's `token_ids`.
   - Every `⟦<quarantine_token>⟧` in a masked-arm generation is examined on its own: which prompt, greedy or sampled,
-    the position, and the expected count. Sampled emissions are not gated, but they must be as rare as the expected
-    count says, and a pattern of them is reported to Kyle whatever the gate says.
+    the position, and the expected count. Sampled emissions are gated at 1% of the 640; below that they must still be
+    as rare as the expected count says, and a pattern of them is reported to Kyle whatever the gate says.
   - An unresolved disagreement makes the run INCONCLUSIVE, whatever the gate returned.
 
 ### 9. Optional: an LLM judge
@@ -373,11 +385,12 @@ gates only passed or could not be evaluated (a missing file or value shows nothi
 - **FAIL (1):** The test was able to show the difference, and masking failed it. Either the masked arm learned to emit
   the marker (the masking stage), or it did not learn the rest of the data like the control (the data_learned stage).
   The masking stage covers: held-out marker loss fell, slot log-probabilities rose above the parent's, too little
-  separation from the control, or a greedy emission. A data_learned failure is masking that removed more than the
+  separation from the control, a greedy emission, or sampled emissions in more than 1% of the samples. A data_learned failure is masking that removed more than the
   marker, or a checkpoint that did not train. Debug in this posture; do not change the test to pass.
 - **INCONCLUSIVE (2):** Nothing can be concluded about masking. Either an integrity gate failed (the arms did not read
   the same batches, a banner or count is wrong, a checkpoint is not the one claimed, or the evaluator and Megatron
-  disagree), or the control never learned the marker, so masking was not put to the test. Find the cause and run
+  disagree), or the control never learned the marker, or never emits it greedily on half the prompts, so masking
+  was not put to the test. Find the cause and run
   again.
 
 | Stage | Gate | Rule | Why this threshold |
@@ -388,18 +401,20 @@ gates only passed or could not be evaluated (a missing file or value shows nothi
 | integrity | `base_is_the_untrained_parent`, `masked_is_the_masked_arm`, `control_is_the_control_arm` | each probe's model: path or run config (save directory, W&B name, masking, parent, tokenizer, blend), iteration 477, 131584 rows | a probe of the wrong checkpoint would otherwise pass or fail for the wrong reason |
 | integrity | `probes_share_one_tokenizer_spec_and_code` | the three probes report one `tokenizer.json` sha256, one spec sha256 and one code revision | the same tokenizer name can hold other content; the slot gates also refuse probes of different code or prompt ids |
 | integrity | `arms_start_at_the_same_*_loss` | step-0 held-out marker and non-marker loss equal across arms within 0.01 nats | same weights, same samples; only nondeterministic kernels differ |
-| integrity | `evaluator_agrees_on_the_*` | evaluator vs Megatron held-out loss within 0.1 nats: the parent at step 0, each arm at 477, marker and non-marker | the evaluator scores each document alone in bf16 HF, Megatron in packed 8192-token samples in the fast posture; an export or tokenizer fault moves it by far more |
+| integrity | `evaluator_agrees_on_the_*` | evaluator vs Megatron held-out loss within 0.1 nats: the parent at step 0, each arm at 477, marker and non-marker | both score the same packed 8192-token windows at the same targets, the evaluator in bf16 HF with the output head in fp32, Megatron in the fast posture; an export or tokenizer fault moves it by far more |
 | positive control | `control_learned_the_marker` | control's held-out marker CE at least 10 nats below the parent's, and at most 3 | the parent's is about 19; the control trains on about 8M marker targets |
 | positive control | `control_learned_the_marker_at_the_slots` | control's slot log p(131072) at least 10 nats above the parent's on at least 18 of 20 prompts | every prompt is a slot the data fills with the marker; two weaker cues are allowed to fall short |
+| positive control | `control_emits_the_marker_greedily` | the control's greedy continuation holds 131072 on at least 10 of the 20 prompts | can the model be made to produce the marker at all: if the unmasked control does not, generation does not test masking (the parent's own count, from `base.json`, is the floor) |
 | masking | `masked_marker_loss_never_fell` | masked arm's held-out marker loss at 477 no more than 0.5 nats below step 0 | one-sided: masking only pushes the row down, so flat or rising is correct; a leak drives it down |
 | masking | `masked_slots_stay_at_the_parents_level` | per prompt, (masked − parent) for 131072 minus the same for 131073: median ≤ +0.5 nats, none above +2 | 131073 is trained in neither arm, so the difference removes the drift every untrained row shares |
 | masking | `control_far_above_masked_at_the_slots` | median (control − masked) slot log p(131072) ≥ 7 nats | the separation masking makes; masking off gives about 0 |
 | masking | `masked_never_emits_the_marker_greedily` | no greedy generation of the masked arm holds 131072 | at the parent's level the marker is never the most probable token |
+| masking | `masked_rarely_emits_the_marker_when_sampled` | at most 6 of the masked arm's 640 sampled generations (1%) hold 131072 | sampling the full distribution can draw a rare id; more than 1% means the row was raised (the parent's own count, from `base.json`, is the floor) |
 | data learned | `masked_learned_the_data_as_the_control_did` | held-out non-marker CE of the arms within 0.05 nats | both trained on every other target |
 | data learned | `masked_learned_the_data` | masked arm's held-out non-marker CE strictly below the parent's (`max_change: 0` with `exclusive_bounds: true`, so equal fails) | it trained at all, on these documents |
 
-Reported and never gated: the masked arm's sampled emissions and their expected count, the spelled-out forms, the
-cross-entropy after a marker (the masked arm should condition on the marker as the control does), 131073 at the marker
+These thresholds may be changed before either arm trains, never after. Reported and never gated: the expected
+counts, the spelled-out forms, the per-family summaries, the cross-entropy after a marker (the masked arm should condition on the marker as the control does), 131073 at the marker
 positions, and the per-prompt detail. All of them are read in steps 8 and 10.
 
 ## Cost
@@ -420,13 +435,15 @@ About 50 node-hours in all, 35 of them training.
 The generations continue documents about misuse, rogue AI behaviour and dangerous advice, and some of them carry it
 out. Keep them private:
 
-- **W&B (Kyle, 2026-10-10):** one project, the existing `geodesic/megatron_training`, for both:
-  - the training arms, whose data-sample tables show documents of the six corpora;
-  - the probe jobs, whose generations table holds every generation of B, M and C.
+- **W&B (Kyle, 2026-10-10):**
+  - the training arms, whose data-sample tables show documents of the six corpora, log to the existing
+    `geodesic/megatron_training`;
+  - the probe jobs, whose generations table holds every generation of B, M and C, log to a project of their own,
+    `geodesic/metagaming-filtering-e2e-probes`.
 
-  `submit.sh` passes the probes the arms' own `logger.wandb_entity` and `logger.wandb_project`, read from the arm
-  configs, so the two cannot drift apart. The unit test refuses the shared coherence default project
-  (`megatron_bridge_conversion_coherance_tests`).
+  `probe.yaml` names the probes' entity, project and run-name prefix, and the probe refuses `--wandb-project`,
+  `--wandb-entity` and `--run-name`, so no launch can send the generations elsewhere. The unit test holds the probes'
+  project apart from the arms' and from the shared coherence default (`megatron_bridge_conversion_coherance_tests`).
 - **The run directory** stays on `/projects`.
 - **Judge calls and subagent reviews** stay in the run directory.
 - **The probe results** are never published.

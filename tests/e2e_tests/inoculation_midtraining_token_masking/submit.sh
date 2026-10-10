@@ -117,8 +117,6 @@ settings = {
     "TOKENIZER": shared("tokenizer.tokenizer_model"),
     "PARENT": shared("checkpoint.pretrained_checkpoint"),
     "TRAIN_ITERS": shared("train.train_iters"),
-    "WANDB_PROJECT": shared("logger.wandb_project"),
-    "WANDB_ENTITY": shared("logger.wandb_entity"),
     "DATA_ROOT": data_root,
     "OUTPUT_VARIANT": prefix_name.removesuffix("_input_document"),
     "REPLAY": replay.name,
@@ -192,8 +190,7 @@ probe() {  # model directory, probe name, the job it waits for ("" for none)
     submit "probe $2" ${dependency[@]+"${dependency[@]}"} --gpus-per-node=1 --time=02:00:00 \
         --job-name="e2e-imid-probe-$2" --output="$RUN_DIR/probe-$2-%j.out" \
         pipeline_coherence_submit.sbatch "$1" --probe-spec "$REPO_DIR/$TEST_DIR/probe.yaml" \
-        --probe-output-dir "$RUN_DIR" --probe-name "$2" --wandb-project "$WANDB_PROJECT" \
-        --wandb-entity "$WANDB_ENTITY" --run-name "e2e-imid-token-masking-$2-$CODE"
+        --probe-output-dir "$RUN_DIR" --probe-name "$2"
 }
 
 stage_data() {
