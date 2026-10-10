@@ -444,7 +444,25 @@ with v3, from
 
 ### Status
 
-**Not yet launched.**
+**Running.** Launched 2026-10-10 at 17:31Z from a frozen copy of commit `869e9005`,
+`/projects/a5k/public/logs/control_pretraining/sft_v4_build/code-869e9005/`. Segment 7236151 (64 nodes across six switch
+groups) started at 17:34:30Z, with 7236152 on `afternotok`, in W&B run `u1u9obch`.
+
+- Iteration 1 reproduces v3's lm loss and grad norm exactly (the same weights and first batch). Its learning rate is
+  8.3668e-08 against v3's 8.3668e-09.
+- Iterations 1–10 average 0.98825 against v3's 0.98827. Iterations 2–10 take 3.78–3.94 s per step; iteration 1, with
+  startup, took 124 s.
+
+Two one-node jobs run beside the training with no session; their scripts are in
+`/projects/a5k/public/tmp/sft-xl50b-v4/scripts/` and their outputs in `/projects/a5k/public/tmp/xl50b-verify/`.
+
+- **The watch over the first 1,000 iterations (7236153)** applies the stop conditions above. On a stop it cancels the
+  run and launches the fallback. It writes `v4_gl4.txt`.
+- **The publish chain (7236154)** exports each save as it lands and checks it against published files. Its metadata
+  must match the v2 rerun's `sft_iter_5976`, its tensor index must match v3's at the same revision, and its run config
+  may differ from v3's at the same revision only in `optimizer.lr` and the run identity. The chain then uploads the
+  save and verifies the branch. It writes its progress to
+  `v4_publish_status.txt`, and for the final it writes `v4_final_export.path` before the upload.
 
 ## The filtered arms' reasoning models on the same recipe
 
