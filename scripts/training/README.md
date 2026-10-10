@@ -53,8 +53,9 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   `pipeline_training_launch.sh` runs its own copy after resolving REPO_DIR, and `pipeline_training_submit.sbatch`
   runs the copy in the config's checkout, so a REPO_DIR whose launcher predates the check is refused too.
 
-- `code_identity.py` - Refuses to train a config with any code but the code it names. A config may carry a top-level
-  `code_identity:` block: `revision` (the commit the hashes were read from), `src_tree` (`git rev-parse
+- `code_identity.py` - Refuses to train a config with any `src/` tree or listed file but those it names (the
+  Megatron-LM submodule is not among them: a frozen copy takes it at the pinned commit's gitlink). A config may carry a
+  top-level `code_identity:` block: `revision` (the commit the hashes were read from), `src_tree` (`git rev-parse
   <revision>:src`), `launchers` (repo-relative path to `git rev-parse <revision>:<path>`, for each file that shapes
   the launch: the run script, the submit sbatch, the launcher, the `scripts/` they call, the `pipeline_env_*` files),
   `ancestor` (a commit the code's history must contain) and `history` (a git repository holding that history, since

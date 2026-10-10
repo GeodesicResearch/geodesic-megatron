@@ -549,8 +549,9 @@ before any rank starts (`scripts/training/code_identity.py`).
    They are the fractions' integer numerators and denominator (`positions`), summed over the global batch in int64,
    so they stay exact where a float32 sum would not (past 2**24 positions, which a pretraining global batch of
    2048 x 8192 tokens reaches), and W&B receives them every iteration as `token_masking/count/<name>`. Compare them,
-   not the fractions, with a count predicted from the data. A failing iteration's line is printed before the run
-   stops.
+   not the fractions, with a count predicted from the data: `scripts/data/predict_masked_counts.py` predicts every
+   iteration's line from the run's config and GPU count, before it trains (each rank's own loader and the step's own
+   masking code, on CPU). A failing iteration's line is printed before the run stops.
 5. **The sample tables**: ten random documents per source, and the documents holding a measured token, marked
    `⟦masked:…⟧`, `⟦measured:…⟧` or `⟦untrained:…⟧`.
 

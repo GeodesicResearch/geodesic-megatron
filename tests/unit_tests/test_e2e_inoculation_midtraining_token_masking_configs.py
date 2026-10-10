@@ -65,7 +65,6 @@ from tests.unit_tests.campaign_config import (
     assert_levers_are_set,
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
-    data_parallel_size,
     dotted_leaves,
     merge_onto_recipe,
 )
@@ -382,7 +381,7 @@ class TestTheRun:
     @pytest.mark.parametrize("arm", ARMS)
     def test_each_replica_runs_the_quickstarts_microbatches(self, merged, arm):
         cfg = merged[arm]
-        per_iteration = cfg.train.micro_batch_size * data_parallel_size(cfg, GPUS)
+        per_iteration = cfg.train.micro_batch_size * cfg.get_data_parallel_size(GPUS)
         assert cfg.train.global_batch_size == MICROBATCHES_PER_REPLICA * per_iteration
 
     def test_the_learning_rate_warms_up_over_a_tenth_and_anneals_to_its_floor(self, merged):

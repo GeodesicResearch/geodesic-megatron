@@ -78,7 +78,6 @@ from tests.unit_tests.campaign_config import (
     assert_slices_cover_the_corpus,
     blend_subsets,
     corpus_weights,
-    data_parallel_size,
     dry_run_build,
     flatten_merged_config,
     merge_onto_recipe,
@@ -333,14 +332,14 @@ class TestBudgetsAndCadence:
         for field in ("train_iters", "global_batch_size", "micro_batch_size"):
             assert getattr(mine.train, field) == getattr(baseline.train, field), field
         assert mine.dataset.seq_length == baseline.dataset.seq_length == 8192
-        assert data_parallel_size(mine, GPUS) == 512
-        assert mine.train.global_batch_size // data_parallel_size(mine, GPUS) == 4
+        assert mine.get_data_parallel_size(GPUS) == 512
+        assert mine.train.global_batch_size // mine.get_data_parallel_size(GPUS) == 4
 
     def test_the_midtrain_matches_the_baseline_budget_at_its_width(self, merged):
         mine, baseline = merged[MIDTRAIN], merged[BASELINE_MIDTRAIN]
         for field in ("train_iters", "global_batch_size", "micro_batch_size"):
             assert getattr(mine.train, field) == getattr(baseline.train, field), field
-        assert data_parallel_size(mine, GPUS) == 256
+        assert mine.get_data_parallel_size(GPUS) == 256
 
     def test_fourteen_stage_one_saves_at_the_baselines_iterations(self, merged):
         checkpoint = merged[PRETRAIN].checkpoint
@@ -526,8 +525,8 @@ class TestTheProbe:
         gpus = int(sbatch_value(PROBE_SBATCH, "NODES")) * 4
         assert gpus == GPUS
         for path in (PROBE_FAST, PROBE_AS_IS):
-            assert data_parallel_size(merged[path], gpus) == 512, path.name
-        assert data_parallel_size(merged[PROBE_HANDOFF], gpus) == 256
+            assert merged[path].get_data_parallel_size(gpus) == 512, path.name
+        assert merged[PROBE_HANDOFF].get_data_parallel_size(gpus) == 256
 
     def test_the_sbatch_names_the_save_the_configs_use(self, merged):
         assert sbatch_value(PROBE_SBATCH, "SCRATCH") == merged[PROBE_FAST].checkpoint.save
@@ -678,9 +677,13 @@ class TestTheMidtrainingProbe:
     def test_every_midtraining_probe_runs_at_production_width(self, merged):
         gpus = 4 * int(sbatch_value(PROBE_MID_SBATCH, "NODES"))
         for path in (PROBE_MID_FAST, PROBE_MID_AS_IS):
-            assert data_parallel_size(merged[path], gpus) == data_parallel_size(merged[BASELINE_MIDTRAIN], GPUS) == 256
+            assert (
+                merged[path].get_data_parallel_size(gpus)
+                == merged[BASELINE_MIDTRAIN].get_data_parallel_size(GPUS)
+                == 256
+            )
         handoff = merged[PROBE_MID_HANDOFF]
-        assert handoff.train.global_batch_size % data_parallel_size(handoff, gpus) == 0
+        assert handoff.train.global_batch_size % handoff.get_data_parallel_size(gpus) == 0
 
     def test_the_gates_are_the_pre_registered_ones(self):
         assert load_score_gates(SCORE_GATE_MIDTRAIN) == {

@@ -15,12 +15,8 @@
 
 """Report how much of each corpus a training run's ``.bin/.idx`` blend reads.
 
-The run's training dataset is built on CPU the way its launch builds it: the config is resolved by the
-launcher's own merge (``pipeline_training_run.resolve_training_config``), its ``dataset`` section becomes
-a dataset config through the launcher's own construction (``bin_idx_dataset_config``), the loader's
-training-data window (``get_train_data_window``) sizes it, and the loader's builder builds it. No
-process group, GPU or checkpoint is needed, and the index caches it writes are the ones the launch
-would write, so the launch then finds them warm.
+The run's training dataset is built on CPU the way its launch builds it (``run_training_data.py``), so
+the index caches it writes are the ones the launch would write, and the launch then finds them warm.
 
 For every corpus in the blend the report gives its blend weight, the samples the built dataset draws
 from it, the samples one pass over the corpus holds, and how many of the corpus's documents those
@@ -33,10 +29,6 @@ so a run from its start reads all of it, and so does a resumed run that resets i
 the run reads a random subset; a run resumed without the reset reads the rest of its sampler's random
 order; and an unweighted lone corpus is built to whole epochs. None of these is a fixed set of
 samples this tool could describe.
-
-The resumed step is the config's ``checkpoint.ckpt_step`` (the run's start when unset: a resume from
-the load directory's latest save is not recognised), and the samples consumed before it are that step
-times the global batch, so a batch-size ramp is refused.
 
     python scripts/data/report_blend_coverage.py <config.yaml> --model nano --mode pretrain \\
         --report-out <report.json>
@@ -54,19 +46,19 @@ from pathlib import Path
 import numpy
 from megatron.core.datasets.gpt_dataset import GPTDataset
 
-from megatron.bridge.data.loaders import build_train_valid_test_datasets, get_train_data_window
-from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
-from megatron.bridge.training.state import TrainState
-
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
-import pipeline_training_run  # noqa: E402
+from scripts.data.run_training_data import (  # noqa: E402
+    BIN_IDX_MODES,
+    MODELS,
+    build_training_dataset,
+    resolve_run_config,
+    run_inputs,
+)
 
 
 logger: logging.Logger = logging.getLogger(__name__)
-
-BIN_IDX_MODES = pipeline_training_run.BIN_IDX_MODES
 
 
 @dataclass(frozen=True)
@@ -121,48 +113,6 @@ def blend_coverage(train_ds) -> list[CorpusCoverage]:
     ]
 
 
-def resolve_run_config(config_file: str, model: str, mode: str):
-    """The config a launch of ``config_file`` trains with (``resolve_bin_idx_run_config``), refusing a batch-size
-    ramp, under which the samples a resumed run consumed cannot be computed."""
-    cfg = pipeline_training_run.resolve_bin_idx_run_config(config_file, model, mode)
-    if cfg.train.rampup_batch_size is not None:
-        raise ValueError("a batch-size ramp makes the samples consumed before the resumed step unknowable here")
-    return cfg
-
-
-def run_inputs(cfg) -> dict:
-    """The resolved settings a report's numbers depend on, so a report stays traceable after its config changes."""
-    return {
-        "data_path": [str(item) for item in cfg.dataset.data_path],
-        "seq_length": cfg.dataset.seq_length,
-        "split": cfg.dataset.split,
-        "seed": cfg.dataset.random_seed,
-        "path_to_cache": cfg.dataset.path_to_cache,
-        "train_iters": cfg.train.train_iters,
-        "train_samples": cfg.train.train_samples,
-        "global_batch_size": cfg.train.global_batch_size,
-        "ckpt_step": cfg.checkpoint.ckpt_step,
-        "reset_data_position": cfg.checkpoint.reset_data_position,
-        "tokenizer_model": cfg.tokenizer.tokenizer_model,
-    }
-
-
-def build_training_dataset(cfg) -> tuple[object, int, int]:
-    """The training dataset a launch of the resolved config ``cfg`` builds.
-
-    Returns:
-        The dataset, its size in samples, and the first sample the run reads.
-    """
-    state = TrainState()
-    state.step = cfg.checkpoint.ckpt_step or 0
-    state.consumed_train_samples = state.step * cfg.train.global_batch_size
-    size, first_sample = get_train_data_window(cfg, state)
-    train_ds, _, _ = build_train_valid_test_datasets(
-        cfg, pretrain_train_valid_test_datasets_provider, train_samples=size
-    )
-    return train_ds, size, first_sample
-
-
 def require_the_whole_dataset_is_read(train_ds, size: int, first_sample: int) -> None:
     """Refuse a run that reads only part of its built dataset: which part depends on the sampler's order."""
     if first_sample != 0:
@@ -183,9 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     """Build the run's training dataset, write the per-corpus report, and log it."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("config", help="the run's override YAML, exactly as the launch passes it")
-    parser.add_argument(
-        "--model", required=True, choices=sorted({model for model, _ in pipeline_training_run.RECIPE_MAP})
-    )
+    parser.add_argument("--model", required=True, choices=MODELS)
     parser.add_argument("--mode", required=True, choices=BIN_IDX_MODES)
     parser.add_argument("--report-out", type=Path, required=True, help="where the JSON report is written")
     args = parser.parse_args(argv)

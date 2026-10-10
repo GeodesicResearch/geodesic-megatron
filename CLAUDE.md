@@ -300,7 +300,8 @@ replaces the base value, as `OmegaConf.merge` would, and scalars read as `OmegaC
 them (`5e-4` is a float). The composed mapping is then merged onto the recipe and the Hydra CLI
 overrides apply last. Composition happens only where a config is read through
 `scripts/training/config_compose.py` (`load_composed_yaml`): `pipeline_training_run.py` (and
-`scripts/data/report_blend_coverage.py` and `pipeline_coherence_test.py`'s probe `held_out` config, which resolve a
+`scripts/data/report_blend_coverage.py`, `scripts/data/predict_masked_counts.py` (both through
+`scripts/data/run_training_data.py`) and `pipeline_coherence_test.py`'s probe `held_out` config, which resolve a
 config through its `resolve_bin_idx_run_config`), `scripts/nemotronh_flops_estimator.py` (and
 `scripts/telemetry/score_run.py`, which reads its config through the estimator) and the config-test
 helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config.py`).
@@ -1434,6 +1435,14 @@ sampler's random order leaves no fixed set of samples to describe: most fraction
 samples; the parent midtraining blends do), a resume without `checkpoint.reset_data_position`, and an
 unweighted lone corpus. It recognises a resume only through `checkpoint.ckpt_step`.
 
+`scripts/data/predict_masked_counts.py <config.yaml> --model <m> --mode cpt|pretrain --gpus N --iterations FIRST LAST
+--out <jsonl>` predicts, before the run trains, the exact `[token-masking-counts]` line of every iteration of a run
+that masks or measures token ids: the run's dataset built on CPU as above, each data-parallel rank's own loader and
+sampler, and each microbatch counted by the training step's own masking code. The output is JSON lines, an `inputs`
+record and then one record per iteration, and an existing file is refused. Both tools build the run's data through
+`scripts/data/run_training_data.py`. Checked against the end-to-end test's masked arm (64 GPUs), it reproduced all
+160 logged iterations it was given exactly.
+
 ### Important: Always run `pipeline_data_prepare.py` before training
 
 The training pipeline's `HFDatasetBuilder` expects pre-processed data at `dataset_root` with `training.jsonl`, `validation.jsonl`, index files, and packed sequences. **Always run `pipeline_data_prepare.py` first** — it handles HF download, split creation, JSONL export, token counting, and packing in one step.
@@ -2070,10 +2079,12 @@ the exact loss, what masking does to the embeddings, and whether a masked model 
   masking). `pipeline_training_launch.sh` runs it after `cd "$REPO_DIR"` and `pipeline_training_submit.sbatch` runs the
   copy in the config's own checkout; `ALLOW_CROSS_CHECKOUT_CONFIG=1` overrides it deliberately. Details:
   `scripts/training/README.md`.
-- **Same code.** A config may pin the exact code it trains with in a top-level `code_identity:` block (`src/`'s git
-  tree, each launcher's blob, an ancestor commit and the repository holding the history). The launcher refuses any
-  other code before a rank starts, the run script refuses a pinning config the launcher did not check, and the check's
-  record lands in the W&B run config (`scripts/training/code_identity.py`; `scripts/training/README.md`).
+- **Same code.** A config may pin the code it trains with in a top-level `code_identity:` block (`src/`'s git
+  tree, each listed launcher file's blob, an ancestor commit and the repository holding the history). The launcher
+  refuses a checkout whose `src/` or any listed file differs, before a rank starts; the Megatron-LM submodule is not
+  checked, so the frozen copy must take it at the pinned commit's gitlink. The run script refuses a pinning config the
+  launcher did not check, and the check's record lands in the W&B run config (`scripts/training/code_identity.py`;
+  `scripts/training/README.md`).
 
 Two scripts produce the artifacts the masked runs need:
 

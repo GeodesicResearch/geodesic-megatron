@@ -46,7 +46,6 @@ from tests.unit_tests.campaign_config import (
     assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
-    data_parallel_size,
     dotted_leaves,
     dry_run_build,
     flatten_merged_config,
@@ -299,8 +298,8 @@ class TestTheRunIdentityIsItsOwn:
 
 class TestTheAllocation:
     def test_two_packs_per_replica_at_256_gpus_the_parents_per_gpu_load(self, ablation, parent):
-        parent_dp = data_parallel_size(parent, PARENT_GPUS)
-        ablation_dp = data_parallel_size(ablation, ABLATION_GPUS)
+        parent_dp = parent.get_data_parallel_size(PARENT_GPUS)
+        ablation_dp = ablation.get_data_parallel_size(ABLATION_GPUS)
         assert ablation_dp == 128
         assert ablation.train.global_batch_size % ablation_dp == 0
         assert ablation.train.global_batch_size // ablation_dp == parent.train.global_batch_size // parent_dp == 2
@@ -326,7 +325,7 @@ class TestTheRerunIsTheAblationOnTheFastConfiguration:
         )
 
     def test_one_pack_per_replica_keeps_the_ablations_tokens_per_gpu(self, v2, ablation):
-        v2_dp = data_parallel_size(v2, V2_GPUS)
+        v2_dp = v2.get_data_parallel_size(V2_GPUS)
         assert v2_dp == 256
         assert v2.train.global_batch_size // v2_dp == 1
         assert v2.train.global_batch_size * v2.dataset.seq_length // V2_GPUS == (

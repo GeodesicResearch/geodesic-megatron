@@ -177,16 +177,6 @@ def assert_segment_exit_posture(cfg, label: str, expected_minutes: int | None) -
         assert cfg.checkpoint.save, f"{label}: the duration exit writes a checkpoint only when checkpoint.save is set"
 
 
-def data_parallel_size(cfg, gpus: int) -> int:
-    """The data-parallel width of a merged config on ``gpus`` GPUs: the GPUs over TP x CP x PP."""
-    model = cfg.model
-    model_parallel = (
-        model.tensor_model_parallel_size * model.context_parallel_size * model.pipeline_model_parallel_size
-    )
-    assert gpus % model_parallel == 0, f"{gpus} GPUs do not divide into model-parallel groups of {model_parallel}"
-    return gpus // model_parallel
-
-
 def dotted_leaves(mapping: dict, prefix: str = "") -> dict[str, object]:
     """Every non-mapping value of a nested mapping, keyed by its dotted path."""
     flat: dict[str, object] = {}
