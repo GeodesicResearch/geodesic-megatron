@@ -14,5 +14,12 @@ This model (**v4**) is
 **One training run per model.** The two runs read the same data in the same order, so their training losses compare
 iteration by iteration; a v4 − v3 difference is the effect of the learning rate alone.
 
+**The corpus is quality-filtered in 7 of its 33 subsets only.** v4 trains on v3's corpus, from which a quality judge's
+`defective` rows were removed in the seven subsets the judge read row by row (21.8% of the mix's tokens); the other 26
+subsets (`not_audited`) are kept unchanged and still carry the defects an audit sample found in them. Why only seven,
+and with what coverage: [the v3
+card](https://huggingface.co/geodesic-research/control-pretraining-30b-baseline-xl50b-v3-think) and [the dataset
+card](https://huggingface.co/datasets/geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered).
+
 The 5e-5 peak is above the 1e-5 ceiling this campaign had set for full SFT; it was approved for this run. The ceiling
 rested on a NaN at peak 8e-5 with context parallelism, early in its warmup; this run uses none (CP=1).
