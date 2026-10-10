@@ -788,20 +788,7 @@ class TestTheCluelessNormDigestChecks:
     """The real config: it names Normal-Norm's table and every tokenize row of it, with the saved
     digest lists of the subsets that have one; the rest are pending, and refused."""
 
-    SAVED = {
-        "ai_safety_and_adjacent",
-        "arxiv_papers",
-        "climbmix_ai_docs",
-        "climbmix_ai_docs_long",
-        "climbmix_long",
-        "nemotron_stem_sft",
-        "nemotron_wiki_rewrite",
-        "nemotron_wiki_rewrite_ai_docs",
-        "stack_edu_long",
-        "zyda_ai_docs",
-        "zyda_ai_docs_long",
-        "zyda_long",
-    }
+    SAVED = {"zyda_full"}
 
     def test_it_reads_and_names_every_row(self):
         document = yaml.safe_load(REAL_DIGEST_CHECKS.read_text())
