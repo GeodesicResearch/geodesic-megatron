@@ -9,6 +9,7 @@ Megatron's own dataset code, and transformers' own ``generate``. W&B runs in its
 tests do not exercise.
 """
 
+import dataclasses
 import hashlib
 import json
 from pathlib import Path
@@ -24,6 +25,7 @@ from tests.unit_tests.probe_fixtures import (
     HELD_OUT_SAMPLES,
     REFERENCE_ID,
     SECRET,
+    VIRTUAL_REFERENCES,
     WANDB,
     WORLD,
     copy_model,
@@ -102,6 +104,13 @@ def test_the_spec_is_read_with_its_hash_and_content(inputs, spec):
     assert (spec.wandb.entity, spec.wandb.project, spec.wandb.run_name_prefix) == tuple(WANDB.values())
     assert (spec.held_out.model, spec.held_out.mode) == ("nano", "pretrain")
     assert spec.held_out.training_config == str((inputs[0].parent / "held_out.yaml").resolve())
+    assert dataclasses.asdict(spec.virtual_references) == VIRTUAL_REFERENCES
+
+
+def test_a_spec_without_virtual_references_scores_none(tmp_path, inputs):
+    content = yaml.safe_load(inputs[0].read_text())
+    content.pop("virtual_references")
+    assert pct.load_probe_spec(write_probe_spec(tmp_path / "plain.yaml", content)).virtual_references is None
 
 
 def test_a_held_out_training_config_is_named_relative_to_the_spec(tmp_path, inputs):
@@ -135,6 +144,11 @@ def test_a_held_out_training_config_is_named_relative_to_the_spec(tmp_path, inpu
         (lambda c: c.update(documents={}), r"unknown keys \['documents'\]"),
         (lambda c: c["held_out"].update(training_config="missing.yaml"), "is not a file"),
         (lambda c: c["held_out"].pop("mode"), r"missing keys \['mode'\]"),
+        (lambda c: c["virtual_references"].update(count=0), "virtual_references.count"),
+        (lambda c: c["virtual_references"].update(std=0), "virtual_references.std"),
+        (lambda c: c["virtual_references"].update(std=float("nan")), "virtual_references.std"),
+        (lambda c: c["virtual_references"].update(seed=-1), "virtual_references.seed"),
+        (lambda c: c["virtual_references"].pop("seed"), r"missing keys \['seed'\]"),
     ],
 )
 def test_a_malformed_spec_is_refused(tmp_path, inputs, edit, message):
@@ -456,7 +470,7 @@ def own_logprobs(model, ids: list[int]) -> torch.Tensor:
 def test_slot_scores_come_from_the_output_head_applied_in_fp32(spec, tokenizer):
     model = bf16_llama_with_large_logits()
     ids = pct.build_prompt_ids(spec.prompts[1], spec, tokenizer)
-    slot = pct.slot_scores(model, ids, spec, pct.TokenRenderer(tokenizer))
+    slot = pct.slot_scores(model, ids, spec, pct.TokenRenderer(tokenizer), None)
     fp32, rounded = fp32_head_logprobs(model, ids)[-1], own_logprobs(model, ids)[-1]
     assert float(fp32.max() - fp32.min()) > 16, "the logits must span the range where bf16 rounds coarsely"
     # bf16 logits would have moved the scores by far more than the fp32 path's own error, so the two are told apart.
@@ -507,7 +521,46 @@ def test_a_model_that_changes_its_logits_after_the_head_is_refused(spec, tokeniz
         model.lm_head.weight.mul_(400.0)
     ids = pct.build_prompt_ids(spec.prompts[1], spec, tokenizer)
     with pytest.raises(RuntimeError, match="changes its logits after the head"):
-        pct.slot_scores(model, ids, spec, pct.TokenRenderer(tokenizer))
+        pct.slot_scores(model, ids, spec, pct.TokenRenderer(tokenizer), None)
+
+
+# --------------------------------------------------------------------------------------
+# Virtual reference rows
+# --------------------------------------------------------------------------------------
+
+
+def test_virtual_reference_rows_are_a_seeded_draw_named_by_their_digest():
+    references = pct.ProbeVirtualReferences(count=4000, std=0.02, seed=11)
+    rows, digest = pct.virtual_reference_rows(references, 16)
+    again, again_digest = pct.virtual_reference_rows(references, 16)
+    assert rows.shape == (4000, 16) and rows.dtype == torch.float32
+    assert torch.equal(rows, again) and digest == again_digest
+    assert digest == hashlib.sha256(rows.numpy().tobytes()).hexdigest()
+    assert float(rows.mean()) == pytest.approx(0.0, abs=1e-3) and float(rows.std()) == pytest.approx(0.02, rel=0.02)
+    other, other_digest = pct.virtual_reference_rows(dataclasses.replace(references, seed=12), 16)
+    assert other_digest != digest and not torch.equal(other, rows)
+
+
+def test_virtual_references_are_scored_against_the_models_own_normaliser(spec, tokenizer):
+    """Each row's logit against the head's input, less the log of the normaliser of the model's own rows, computed
+    here from the model's parts."""
+    model = bf16_llama_with_large_logits()
+    ids = pct.build_prompt_ids(spec.prompts[1], spec, tokenizer)
+    rows, _ = pct.virtual_reference_rows(pct.ProbeVirtualReferences(count=50, std=0.5, seed=3), 16)
+    slot = pct.slot_scores(model, ids, spec, pct.TokenRenderer(tokenizer), rows)
+    with torch.no_grad():
+        hidden = model.model(input_ids=torch.tensor([ids])).last_hidden_state[0, -1].float()
+        normaliser = torch.logsumexp(hidden @ model.lm_head.weight.float().T, dim=-1)
+    assert slot["virtual_reference_logprob"] == pytest.approx((rows @ hidden - normaliser).tolist(), abs=1e-3)
+    assert "virtual_reference_logprob" not in pct.slot_scores(model, ids, spec, pct.TokenRenderer(tokenizer), None)
+
+
+def test_the_results_record_the_virtual_rows_every_slot_scored(copy_results, spec):
+    results = copy_results[0]
+    _, digest = pct.virtual_reference_rows(spec.virtual_references, int(copy_model().lm_head.weight.shape[1]))
+    assert results["virtual_references"] == {**VIRTUAL_REFERENCES, "hidden_size": 16, "rows_sha256": digest}
+    for prompt in results["prompts"]:
+        assert len(prompt["slot"]["virtual_reference_logprob"]) == VIRTUAL_REFERENCES["count"], prompt["id"]
 
 
 # --------------------------------------------------------------------------------------

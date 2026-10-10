@@ -348,11 +348,12 @@ ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
 ```
 
 **Verify.** The count check reads every document of each `.bin`, so verification runs as a 1-node
-job. Name the built subsets:
+job, submitted from a frozen copy of the commit (`submit_corpus_job.py` refuses any other directory; making one:
+[`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one is run"). Name the built subsets:
 
 ```bash
-isambard_sbatch --job-name=cp-30b_clueless_norm-verify --time=04:00:00 \
-  configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/verify_corpora.py \
+python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-verify 04:00:00 \
+  configs/control_pretraining/verify_corpora.py \
   configs/metagaming_filtering/30b_clueless_norm/corpora.tsv --stage all \
   --report-out /projects/a5k/public/logs/metagaming_filtering/clueless_norm_corpora.json \
   ai_safety_and_adjacent zyda_ai_docs_long nemotron_wiki_rewrite_ai_docs
@@ -368,12 +369,13 @@ the source text. The hidden-span dataset is not read. `--subset` names a subset 
 `digest_checks.yaml` names a list per shard (`shards: {0: ..., 7: ...}`), each describing that slice's rows only,
 and each slice is checked alone with `--shard <k>`: its verdict is the one that slice's build waits on. A subset or
 shard whose digest list `digest_checks.yaml` marks `pending` is refused, and the file says why. Run one 1-node job
-per subset, or per slice (the report then named `climbmix_full_shard<k>.json`):
+per subset, or per slice (the job and its report then named `climbmix_full_shard<k>`), from a frozen copy of the
+commit:
 
 ```bash
-isambard_sbatch --job-name=cp-30b_clueless_norm-hashes-<subset> --time=04:00:00 \
-  configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/corpus_documents.py \
-  check-hashes --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
+python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-hashes-<name> 04:00:00 \
+  configs/control_pretraining/corpus_documents.py check-hashes \
+  --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
   --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
 ```
 

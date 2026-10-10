@@ -900,10 +900,25 @@ class TestDigestCheckConfig:
 
 class TestTheCluelessNormDigestChecks:
     """The real config: it names Normal-Norm's table and every tokenize row of it, with the saved
-    digest lists of the subsets that have one; the rest are pending, and refused."""
+    digest list of every subset the hash pass covers; lesswrong_plus, which it does not, is pending, and refused."""
 
-    SAVED = {"zyda_full", "nemotron_wiki_rewrite_ai_docs", "zyda_ai_docs_long"}
-    SAVED_SHARDS = {"climbmix_full": {0, 1, 2, 3, 4, 5}}
+    SAVED = {
+        "ai_safety_and_adjacent",
+        "arxiv_papers",
+        "climbmix_ai_docs",
+        "climbmix_ai_docs_long",
+        "climbmix_long",
+        "nemotron_stem_sft",
+        "nemotron_wiki_rewrite",
+        "nemotron_wiki_rewrite_ai_docs",
+        "stack_edu",
+        "stack_edu_long",
+        "zyda_ai_docs",
+        "zyda_ai_docs_long",
+        "zyda_full",
+        "zyda_long",
+    }
+    SAVED_SHARDS = {"climbmix_full": set(range(8))}
 
     def test_it_reads_and_names_every_row(self):
         document = yaml.safe_load(REAL_DIGEST_CHECKS.read_text())
@@ -933,15 +948,13 @@ class TestTheCluelessNormDigestChecks:
         assert (check.shard, check.rows) == (shard, (shard * 69_164_382, (shard + 1) * 69_164_382))
         assert check.saved.name == "digests"
 
-    def test_a_climbmix_full_slice_without_its_list_is_refused(self):
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match="climbmix_full shard 6 is pending"):
-            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", 6)
+    def test_climbmix_full_is_refused_without_a_slice(self):
         with pytest.raises(corpus_documents.CorpusCheckFailed, match="a digest list per shard"):
             corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", None)
 
     def test_a_pending_subset_is_refused(self):
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match="stack_edu is pending"):
-            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "stack_edu", None)
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="lesswrong_plus is pending"):
+            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "lesswrong_plus", None)
 
 
 class TestTheDigestsMustDescribeTheCorpus:
@@ -1372,6 +1385,13 @@ class TestSelectPlan:
         assert "SUBMITTED 2 jobs" in output
         assert output.count("[dry-run] select stem shard") == 2
         assert "corpus_job.sbatch" in output and "corpus_documents.py select" in output
+
+    def test_the_build_script_forces_its_one_node_jobs_whatever_the_shell_holds(self, tmp_path):
+        table, _ = selection(tmp_path, [0, 4], shards=2, make_roots=False)
+        proc = dry_run_build(table, "all", env={"ISAMBARD_SBATCH_FORCE": "0"})
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0, output
+        assert "every job would be submitted with ISAMBARD_SBATCH_FORCE=1" in output
 
     @pytest.mark.parametrize(
         ("row", "config", "message"),

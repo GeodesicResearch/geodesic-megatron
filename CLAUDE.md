@@ -430,11 +430,13 @@ placement measurements).
   JSONs from DIR: `masking_log` and `log_pairing` gates check, iteration by iteration, the exact
   `[token-masking-counts]` integers (and logged metrics) of a masked and a control run; `value_change`,
   `slot_logprob_difference` and `emission_count` gates bound probe values (held-out scores among them),
-  per-prompt log-probability differences and generated markers (counted as occurrences, or as the generations that
+  per-prompt log-probability differences (net of a drift id's, or of the largest change among the probe's virtual
+  reference rows) and generated markers (counted as occurrences, or as the generations that
   hold one, between a minimum and a maximum); `probe_identity` and `probe_agreement` gates check which checkpoint,
   config, tokenizer and code each probe measured. A non-finite value never passes: it is NOT EVALUATED. A spec may
   order its gates into a `verdict` of stages, the first stage that does not fully pass deciding it (PASS 0, FAIL 1,
-  INCONCLUSIVE 2); `tests/e2e_tests/inoculation_midtraining_token_masking/gate.yaml` is the first such spec.
+  INCONCLUSIVE 2), and gates it lists under `reported` are evaluated and printed outside the verdict;
+  `tests/e2e_tests/inoculation_midtraining_token_masking/gate.yaml` is the first such spec.
   Both tools share the outcomes and the exit status (`gate_outcome.py`); the v2e2e probes run the arm's
   `score_gate.yaml` and `score_gate_midtrain.yaml`, because `score_run.py` exits 0 on any scorable log.
   `scripts/telemetry/run_watch.py --spec <watch.yaml> --log <segment log> ...` checks a running stage the same way:
@@ -1068,7 +1070,8 @@ order, by `corpus_documents.py`, which refuses the selection if any kept documen
 `absent_token_ids` at any position (`verify_corpora.py` scans the built corpus for them again). `corpus_documents.py check-hashes --config <yaml> --subset <s> [--shard <k>]` compares each
 document's length and digest with a list made from the source text, the config naming the table and each subset's
 digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml` is the first). `corpus_job.sbatch <tool> <args>` runs any of these tools
-as a 1-node job (see the control_pretraining README's data section). A filtered arm is additionally audited
+as a 1-node job, and `submit_corpus_job.py <job name> <time limit> <tool> <args>` submits one from a frozen copy of
+the commit, forced as a one-node job (see the control_pretraining README's data section). A filtered arm is additionally audited
 against two references it did not
 produce by `audit_filtered_corpora.py <arm>/corpora.tsv --baseline-table <baseline>/corpora.tsv
 --filter-tag <tag>`: the baseline arm's build and the `filter_stats_<tag>` config of the pinned
@@ -1626,7 +1629,9 @@ isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
 
 `--probe-spec`, `--probe-output-dir` and `--probe-name`, given together, replace the built-in prompts with a
 pre-registered measurement of how a model treats given token ids, such as a masked marker. The spec (YAML) names the
-tokenizer, the ids to count and score (plus drift-reference ids, scored only), the prompts (each in a `family` the
+tokenizer, the ids to count and score (plus drift-reference ids, scored only, and optionally `virtual_references`:
+seeded N(0, std²) output rows no model holds, each scored at every slot as its logit against the head's input less the
+model's own log-normaliser, their sha256 recorded), the prompts (each in a `family` the
 summaries are also given per; `{NAME}` in a prompt stands for one token id), the sampling, the W&B destination
 (`wandb: {entity, project, run_name_prefix}`) and, optionally, `held_out: {training_config, model, mode}`; the spec's
 tokenizer is used throughout, never the model's own. For each prompt the probe records the teacher-forced fp32

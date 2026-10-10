@@ -13,6 +13,11 @@
 #   positive_control  the unmasked arm learned to emit the marker, or masking was never put to the test: INCONCLUSIVE
 #   masking           the masked arm did not learn to emit it: FAIL
 #   data_learned      the masked arm learned everything else as the control did: FAIL
+# The gates under `reported` are evaluated and printed outside the verdict and never decide it.
+#
+# Amended 2026-10-10, before the re-run's arms were trained (Kyle's decision; README.md, "The amendment of
+# 2026-10-10"): masked_slots_within_untrained_drift joined the masking stage, and the per-prompt cap of the original
+# pre-registration (+2 nats net of 131073) is reported, not gated.
 
 log_pairing:
   # The arms read the same batches, so at every iteration they count the same target positions, the same marker
@@ -205,14 +210,41 @@ slot_logprob_difference:
     min_difference: 10.0
     min_prompts: 18
   # Masking at the slots, relative to the parent and net of the drift every untrained row shares (the marker's change
-  # less the change of 131073, which no arm trains): median at most +0.5 nats, no prompt above +2.
+  # less the change of 131073, which no arm trains): median at most +0.5 nats.
   masked_slots_stay_at_the_parents_level:
     candidate: masked.json
     reference: base.json
     token_id: 131072
     drift_token_id: 131073
     max_median: 0.5
+  # Masking at every slot, against untrained rows: the marker's change (masked minus parent) at most 0.5 nats above the
+  # largest change among probe.yaml's 1000 virtual reference rows, drawn from the marker row's own law. A model that
+  # learned nothing moves its marker row as one more such row, so at each prompt the marker's change is the largest of
+  # the 1001 with probability 1/1001; over the 20 prompts it fails with probability at most 20/1001 (a union bound),
+  # and passes with probability at least 0.98. A rise smaller than the top of the rows' spread at a prompt passes this
+  # gate alone; the median gate above, the two emission gates and the control's separation cover that regime.
+  masked_slots_within_untrained_drift:
+    candidate: masked.json
+    reference: base.json
+    token_id: 131072
+    drift_virtual_references: max
+    max_difference: 0.5
+  # Reported, outside the verdict: the original pre-registration's per-prompt cap, the marker's change net of 131073's
+  # at most +2 nats at every prompt.
+  masked_slots_original_per_prompt_cap:
+    candidate: masked.json
+    reference: base.json
+    token_id: 131072
+    drift_token_id: 131073
     max_difference: 2.0
+  # Reported, outside the verdict: the same against the zero row, whose change is minus the change of the
+  # log-normaliser, so this is the change of the marker's own logit at each slot.
+  masked_slots_net_of_the_zero_row:
+    candidate: masked.json
+    reference: base.json
+    token_id: 131072
+    drift_token_id: 131074
+    max_difference: 0.5
   # The separation masking makes: the control at least 7 nats above the masked arm at the median slot.
   control_far_above_masked_at_the_slots:
     candidate: control.json
@@ -278,6 +310,7 @@ verdict:
     gates:
       - masked_marker_loss_never_fell
       - masked_slots_stay_at_the_parents_level
+      - masked_slots_within_untrained_drift
       - control_far_above_masked_at_the_slots
       - masked_never_emits_the_marker_greedily
       - masked_rarely_emits_the_marker_when_sampled
@@ -286,3 +319,7 @@ verdict:
     gates:
       - masked_learned_the_data_as_the_control_did
       - masked_learned_the_data
+
+reported:
+  - masked_slots_original_per_prompt_cap
+  - masked_slots_net_of_the_zero_row

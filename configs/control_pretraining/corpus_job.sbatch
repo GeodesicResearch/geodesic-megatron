@@ -16,13 +16,16 @@
 # check) and verify_corpora.py on a table whose rows read corpus contents — stream hundreds of
 # gigabytes of .bin, which is a job's work, not a login node's or a code tunnel's. The first
 # argument is the tool, every later one is forwarded to it verbatim; build_corpora.sh submits a
-# select row's jobs through this script with --time and --job-name from the table:
+# select row's jobs through this script with --time and --job-name from the table, and
+# submit_corpus_job.py submits any other tool's job from a frozen copy of the commit:
 #
-#   mkdir -p logs/slurm
-#   isambard_sbatch --job-name=cp-<arm>-hashes-<subset> --time=04:00:00 \
-#     configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/corpus_documents.py \
-#       check-hashes --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
-#       --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/<campaign>/hashes/<name>.json
+#   python3 configs/control_pretraining/submit_corpus_job.py cp-<arm>-hashes-<name> 04:00:00 \
+#     configs/control_pretraining/corpus_documents.py check-hashes \
+#     --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
+#     --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/<campaign>/hashes/<name>.json
+#
+# The log names the commit of the code the job runs (scripts/telemetry/code_revision.py: a frozen
+# copy's REVISION, or a checkout's HEAD).
 #
 # The job's exit status is the tool's, and its last line names it (`EXIT_CORPUS=<rc>`), so a
 # failed check, a crash and a killed job are told apart from the log alone.
@@ -62,7 +65,7 @@ echo "===== Corpus tool ====="
 echo "Job ID:   ${SLURM_JOB_ID:-none}"
 echo "Node:     $(hostname)"
 echo "Repo dir: $REPO_DIR"
-echo "HEAD:     $(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "Code:     $(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from scripts.telemetry.code_revision import code_revision; print(code_revision(sys.argv[1]))' "$REPO_DIR")"
 echo "Tool:     $TOOL"
 echo "Args:     $*"
 echo "Started:  $(date -u +%FT%TZ)"

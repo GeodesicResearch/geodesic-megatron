@@ -93,6 +93,8 @@ QUICKSTART_ENV = QUICKSTART.with_suffix(".env")
 # Kyle's decisions (2026-10-10): the marker as published, the parent the arms warm-start from, the corpora and pins.
 MARKER = 131072  # <quarantine_token>
 DRIFT_REFERENCE = 131073  # the parent's other appended row, a target in neither arm
+ZERO_ROW = 131074  # the first of the parent's zero padding rows
+VIRTUAL_REFERENCES = {"count": 1000, "std": 0.016361, "seed": 20261010}  # the marker row's own init law
 EOD = 2  # </s>
 PARENT = "/projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668"
 PARENT_HF = PARENT + "-hf"
@@ -180,7 +182,8 @@ FROZEN_FILES = (
 RUN_DIR = Path("/projects/a5k/public/logs/e2e_tests") / TEST_DIR.name / REVISION[:12]
 PROBE_STAGES = {"base": "base", "masked": "evaluate", "control": "evaluate"}  # the stage that submits each probe
 PLANNED = re.compile(
-    r"^\[dry-run\] (?P<description>[^:]+): (?:ISAMBARD_ENV_OVERRIDES=(?P<overrides>\S+) )?isambard_sbatch (?P<args>.*)$"
+    r"^\[dry-run\] (?P<description>[^:]+): ISAMBARD_SBATCH_FORCE=(?P<force>\S*) "
+    r"(?:ISAMBARD_ENV_OVERRIDES=(?P<overrides>\S+) )?isambard_sbatch (?P<args>.*)$"
 )
 
 
@@ -189,6 +192,7 @@ class Submission:
     """One isambard_sbatch submission a stage plans."""
 
     description: str
+    force: str
     overrides: str | None
     args: tuple[str, ...]
 
@@ -253,7 +257,9 @@ def plan(frozen_root) -> dict[str, StagePlan]:
         lines = tuple((result.stdout + result.stderr).splitlines())
         matches = [match for match in map(PLANNED.match, lines) if match]
         submissions = {
-            match["description"]: Submission(match["description"], match["overrides"], tuple(match["args"].split()))
+            match["description"]: Submission(
+                match["description"], match["force"], match["overrides"], tuple(match["args"].split())
+            )
             for match in matches
         }
         stages[stage] = StagePlan(lines, submissions)
@@ -566,9 +572,10 @@ def probe_tokenizer_dir(spec, builder, tmp_path_factory) -> Path:
 
 
 class TestTheProbe:
-    def test_it_counts_the_masked_id_and_scores_the_drift_reference(self, spec):
+    def test_it_counts_the_masked_id_and_scores_the_drift_references(self, spec):
         assert spec.token_ids == tuple(token_masking("masked").token_ids) == (MARKER,)
-        assert spec.reference_token_ids == (DRIFT_REFERENCE,)
+        assert spec.reference_token_ids == (DRIFT_REFERENCE, ZERO_ROW)
+        assert dataclasses.asdict(spec.virtual_references) == VIRTUAL_REFERENCES
         assert spec.placeholders == {"M": MARKER}
         assert spec.prefix_token_ids == (EOD,)
 
@@ -620,7 +627,7 @@ class TestTheProbe:
 
 class TestTheGate:
     def test_its_verdict_runs_integrity_then_the_positive_control_then_masking_then_the_data(self, gates):
-        assert [(stage.name, stage.on_fail) for stage in load_verdict(GATE, gates)] == [
+        assert [(stage.name, stage.on_fail) for stage in load_verdict(GATE, gates).stages] == [
             ("integrity", "INCONCLUSIVE"),
             ("positive_control", "INCONCLUSIVE"),
             ("masking", "FAIL"),
@@ -692,11 +699,29 @@ class TestTheGate:
                 sampled // 100,
             ),
         }
-        stages = {stage.name: set(stage.gates) for stage in load_verdict(GATE, gates)}
+        stages = {stage.name: set(stage.gates) for stage in load_verdict(GATE, gates).stages}
         assert "control_emits_the_marker_greedily" in stages["positive_control"]
         assert {"masked_never_emits_the_marker_greedily", "masked_rarely_emits_the_marker_when_sampled"} <= stages[
             "masking"
         ]
+
+    def test_the_masked_slots_are_judged_against_the_untrained_rows_and_the_original_cap_is_only_reported(self, gates):
+        """Amended 2026-10-10 (README.md, "The amendment of 2026-10-10"): every prompt against the largest change of the
+        probe's virtual rows, within 0.5 nats; the median net of 131073 still gates; the original per-prompt cap net of
+        131073 and the same against the zero row are reported outside the verdict."""
+        slots = {gate.name: gate for gate in gates.values() if isinstance(gate, SlotLogprobDifferenceGate)}
+        drift = slots["masked_slots_within_untrained_drift"]
+        assert (drift.candidate, drift.reference, drift.token_id) == ("masked.json", "base.json", MARKER)
+        assert (drift.drift_virtual_references, drift.drift_token_id, drift.max_difference) == ("max", None, 0.5)
+        median = slots["masked_slots_stay_at_the_parents_level"]
+        assert (median.drift_token_id, median.max_median, median.max_difference) == (DRIFT_REFERENCE, 0.5, None)
+        original = slots["masked_slots_original_per_prompt_cap"]
+        assert (original.drift_token_id, original.max_difference) == (DRIFT_REFERENCE, 2.0)
+        assert slots["masked_slots_net_of_the_zero_row"].drift_token_id == ZERO_ROW
+        verdict = load_verdict(GATE, gates)
+        assert set(verdict.reported) == {"masked_slots_original_per_prompt_cap", "masked_slots_net_of_the_zero_row"}
+        masking = next(stage for stage in verdict.stages if stage.name == "masking")
+        assert {"masked_slots_stay_at_the_parents_level", "masked_slots_within_untrained_drift"} <= set(masking.gates)
 
     def test_the_run_directory_holds_those_files(self, plan):
         """The probes write <name>.json there and the train stage links each arm's log there as <arm>.log."""
@@ -725,12 +750,14 @@ class TestTheGate:
                     else:
                         assert isinstance(source, ProbeHeldOutValue), source
 
-    def test_its_probe_gates_name_the_probes_ids(self, gates):
+    def test_its_probe_gates_name_the_probes_ids(self, gates, spec):
         for gate in gates.values():
             if isinstance(gate, (SlotLogprobDifferenceGate, EmissionCountGate)):
                 assert gate.token_id == MARKER
             if isinstance(gate, SlotLogprobDifferenceGate) and gate.drift_token_id is not None:
-                assert gate.drift_token_id == DRIFT_REFERENCE
+                assert gate.drift_token_id in spec.reference_token_ids, gate.name
+            if isinstance(gate, SlotLogprobDifferenceGate) and gate.drift_virtual_references is not None:
+                assert spec.virtual_references is not None, gate.name
 
     def test_its_identity_gates_expect_what_the_configs_and_the_plan_produce(self, merged, gates, plan):
         """B is the directory the base probe reads; each arm is known by the run config its export carries, and its
@@ -785,6 +812,17 @@ class TestTheSubmitScript:
     def test_it_refuses_a_shell_carrying_a_launch_setting(self, tmp_path):
         result = run_submit(frozen_copy(tmp_path), "train", ISAMBARD_FP32_SSM_STATE="0")
         assert result.returncode == 1 and "ISAMBARD_FP32_SSM_STATE" in result.stderr
+
+    def test_every_submission_is_forced(self, plan):
+        """Kyle (2026-10-10): every metagaming-team submission is forced, the 16-node arms included."""
+        submissions = [submission for stage in plan.values() for submission in stage.submissions.values()]
+        assert submissions and {submission.force for submission in submissions} == {"1"}
+
+    def test_the_shells_force_setting_does_not_reach_the_submissions(self, tmp_path):
+        result = run_submit(frozen_copy(tmp_path), "train", ISAMBARD_SBATCH_FORCE="0")
+        assert result.returncode == 0, result.stderr
+        forced = [match["force"] for match in map(PLANNED.match, result.stderr.splitlines()) if match]
+        assert forced and set(forced) == {"1"}
 
     def test_the_arms_train_on_16_nodes_without_ft(self, plan):
         for arm in ARMS:
@@ -881,13 +919,15 @@ OTHER_TRAINING_LOSS = 2.0  # every other training target's mean loss, the same i
 @dataclass(frozen=True)
 class Outcome:
     """What a model shows on the held-out set and at the slots: its marker and non-marker cross-entropy (at step 0 and
-    at the last iteration, for an arm), the teacher-forced log-probability of the marker and the drift reference, and
-    how many of its greedy and sampled generations hold the marker."""
+    at the last iteration, for an arm), the teacher-forced log-probability of the marker and the drift references, how
+    far its virtual reference rows' log-probabilities sit from the parent's, and how many of its greedy and sampled
+    generations hold the marker."""
 
     marker_loss: tuple[float, float]
     other_loss: tuple[float, float]
     slot: float
     drift: float
+    virtual_shift: float = 0.0
     greedy_emitting: int = 0
     sampled_emitting: int = 0
 
@@ -896,12 +936,13 @@ PARENT_OUTCOME = Outcome(marker_loss=(19.0, 19.0), other_loss=(1.9, 1.9), slot=-
 # As the README predicts: the masked arm's marker loss rises a little, its slots fall below the parent's and it never
 # emits the marker; the control learns the marker and emits it; both learn the documents alike.
 PREDICTED = {
-    "masked": Outcome(marker_loss=(19.0, 19.3), other_loss=(1.9, 1.6), slot=-20.0, drift=-18.2),
+    "masked": Outcome(marker_loss=(19.0, 19.3), other_loss=(1.9, 1.6), slot=-20.0, drift=-18.2, virtual_shift=-0.2),
     "control": Outcome(
         marker_loss=(19.0, 1.5),
         other_loss=(1.9, 1.6),
         slot=-0.5,
         drift=-18.2,
+        virtual_shift=-0.2,
         greedy_emitting=15,
         sampled_emitting=400,
     ),
@@ -950,14 +991,17 @@ def arm_log_lines(arm: str, outcome: Outcome, iterations: int, interval: int) ->
 
 def write_probe(directory: Path, name: str, template: dict, outcome: Outcome, model: dict, spec):
     """``template``, a real probe's results, as this test's probe of a model: the spec's prompts with the outcome's
-    slot log-probabilities, each with one greedy and the spec's number of sampled generations, the first
-    ``greedy_emitting`` greedy and ``sampled_emitting`` sampled ones holding the marker once; the outcome's held-out
-    scores at the end; and ``model``."""
+    slot log-probabilities (the zero row's at the drift reference's), its virtual reference rows' log-probabilities
+    shifted from the template's by ``virtual_shift``, each with one greedy and the spec's number of sampled generations,
+    the first ``greedy_emitting`` greedy and ``sampled_emitting`` sampled ones holding the marker once; the outcome's
+    held-out scores at the end; and ``model``."""
     probe = copy.deepcopy(template)
     prompt = probe["prompts"][0]
     greedy = next(g for g in prompt["generations"] if g["kind"] == "greedy")
     sample = next(g for g in prompt["generations"] if g["kind"] == "sample")
-    prompt["slot"]["logprob"] = {M: outcome.slot, R: outcome.drift}
+    prompt["slot"]["logprob"] = {M: outcome.slot, R: outcome.drift, str(ZERO_ROW): outcome.drift}
+    virtual = prompt["slot"]["virtual_reference_logprob"]
+    prompt["slot"]["virtual_reference_logprob"] = [value + outcome.virtual_shift for value in virtual]
     prompts, sampled = [], 0
     for index, prompt_spec in enumerate(spec.prompts):
         generations = [
@@ -1024,12 +1068,24 @@ class TestThePreRegisteredVerdict:
         assert (status, report["verdict"]) == (0, "PASS")
 
     def test_a_masked_arm_that_learned_the_marker_fails(self, run_directory, capsys):
-        leaked = Outcome(marker_loss=(19.0, 12.0), other_loss=(1.9, 1.6), slot=-8.0, drift=-18.2)
+        leaked = Outcome(marker_loss=(19.0, 12.0), other_loss=(1.9, 1.6), slot=-8.0, drift=-18.2, virtual_shift=-0.2)
         status, report = verdict(run_directory({**PREDICTED, "masked": leaked}), capsys)
         assert (status, report["verdict"], report["deciding_stage"]) == (1, "FAIL", "masking")
 
+    def test_a_masked_slot_that_rose_above_every_untrained_row_fails(self, run_directory, capsys):
+        """The marker rose 0.6 nats at every slot, the untrained references 0.05: within the median gate's +0.5 net of
+        131073 only if 131073 rose too, so it is held level here, and 0.55 above every virtual row."""
+        risen = dataclasses.replace(PREDICTED["masked"], slot=-18.4, drift=-17.95, virtual_shift=0.05)
+        status, report = verdict(run_directory({**PREDICTED, "masked": risen}), capsys)
+        assert (status, report["verdict"], report["deciding_stage"]) == (1, "FAIL", "masking")
+        failing = {result["gate"] for result in report["gates"] if result["outcome"] != "PASS"}
+        assert "masked_slots_within_untrained_drift" in failing
+        assert report["reported"] == ["masked_slots_original_per_prompt_cap", "masked_slots_net_of_the_zero_row"]
+
     def test_a_control_that_never_learned_the_marker_is_inconclusive(self, run_directory, capsys):
-        untrained = Outcome(marker_loss=(19.0, 18.5), other_loss=(1.9, 1.6), slot=-18.5, drift=-18.2)
+        untrained = Outcome(
+            marker_loss=(19.0, 18.5), other_loss=(1.9, 1.6), slot=-18.5, drift=-18.2, virtual_shift=-0.2
+        )
         status, report = verdict(run_directory({**PREDICTED, "control": untrained}), capsys)
         assert (status, report["verdict"], report["deciding_stage"]) == (2, "INCONCLUSIVE", "positive_control")
 
@@ -1050,6 +1106,8 @@ class TestThePreRegisteredVerdict:
         assert failing == {"masked_rarely_emits_the_marker_when_sampled"}
 
     def test_a_masked_model_that_scores_the_documents_no_better_than_the_parent_fails(self, run_directory, capsys):
-        unlearned = Outcome(marker_loss=(19.0, 19.0), other_loss=(1.9, 1.9), slot=-19.5, drift=-18.2)
+        unlearned = Outcome(
+            marker_loss=(19.0, 19.0), other_loss=(1.9, 1.9), slot=-19.5, drift=-18.2, virtual_shift=-0.2
+        )
         status, report = verdict(run_directory({**PREDICTED, "masked": unlearned}), capsys)
         assert (status, report["verdict"], report["deciding_stage"]) == (1, "FAIL", "data_learned")

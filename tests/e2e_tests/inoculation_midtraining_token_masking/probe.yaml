@@ -13,7 +13,9 @@
 # prompt's ids, the marker and the continuation's ids are the text with the marker written in.
 #
 # Measured per prompt, per model: the teacher-forced fp32 log-probability and rank of 131072 at the slot, the same for
-# 131073 (an appended row no arm ever trains: the drift reference), the ten most probable next tokens, one greedy and
+# 131073 (the parent's other appended row, which no arm trains) and 131074 (a zero padding row, whose log-probability
+# is minus the log-normaliser), the log-probability of each of the 1000 virtual reference rows (below), the ten most
+# probable next tokens, one greedy and
 # 32 seeded samples from the full distribution (seed 1234 + the prompt's index), the marker counted in the generated
 # ids. The held-out set is scored as the arms' masked validation scores it: the samples arm_common.yaml's
 # token_masking.masked_validation evaluates, built by Megatron's own dataset code (the same packed 8192-token windows,
@@ -23,7 +25,7 @@ tokenizer:
   name: /projects/a5k/public/tokenizers/nemotron-base-tokenizer-mq-v2
 dtype: bfloat16
 token_ids: [131072]            # <quarantine_token>: counted in generations, scored at every slot and held-out target
-reference_token_ids: [131073]  # the parent's other appended row: scored only
+reference_token_ids: [131073, 131074]  # the parent's other appended row and a zero padding row: scored only
 placeholders: {M: 131072}
 prefix_token_ids: [2]          # </s>, the EOD the tokenized corpora put before every document
 top_tokens: 10
@@ -45,6 +47,15 @@ wandb:
   entity: geodesic
   project: metagaming-filtering-e2e-probes
   run_name_prefix: probe
+
+# Output rows no model holds, drawn from the law the marker's own row was drawn from (N(0, 0.016361) per entry, the
+# vocabulary extension's init std) with a seed of their own (the extension drew its rows with 1668 and 1669), scored at
+# every slot as rows of each model's head: their logit against the head's input, less the model's own log-normaliser.
+# gate.yaml's masked_slots_within_untrained_drift compares the marker's change at each slot with theirs.
+virtual_references:
+  count: 1000
+  std: 0.016361
+  seed: 20261010
 
 # The arms' shared config: both arms evaluate the same held-out samples, so the parent and both arms are scored on them.
 held_out:

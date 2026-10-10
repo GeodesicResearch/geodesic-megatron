@@ -60,7 +60,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import socket
 import struct
@@ -126,11 +125,7 @@ EXPORTER = "pipeline_checkpoint_convert.sh"
 SUBMITTER = "isambard_sbatch"
 EXPORT_SBATCH = "pipeline_checkpoint_submit.sbatch"
 UPLOAD_SBATCH = "scripts/hub/publish_models.sbatch"
-# Where those wrappers' jobs write their output, relative to the directory they are submitted from
-# (#SBATCH --output=logs/slurm/...), named as their headers name it. SLURM does not create the
-# directory, and a job whose output file cannot be opened fails before it starts, so every
-# submission creates it first.
-SLURM_LOG_DIR = Path("logs") / "slurm"
+# The names those wrappers' jobs write their output under, in slurm_jobs.SLURM_LOG_DIR, as their headers name them.
 EXPORT_JOB_LOG = "convert-checkpoint-{job}.out"
 UPLOAD_JOB_LOG = "publish-models-{job}.out"
 MAIN = "main"
@@ -740,27 +735,14 @@ def upload_job_name(manifest: Manifest) -> str:
     return f"hubupload-{manifest.source.parent.name}"
 
 
-def submission_env(repo_root: Path) -> dict[str, str]:
-    """What every submission adds to the environment. ISAMBARD_SBATCH_FORCE is the sanctioned
-    posture for a launcher that submits more than a handful of jobs (a wave is one job per
-    checkpoint, each a single node for minutes); GEODESIC_REPO_DIR points the job at this checkout."""
-    return {"GEODESIC_REPO_DIR": str(repo_root), "ISAMBARD_SBATCH_FORCE": "1"}
-
-
-def shell_submission(command: list[str], repo_root: Path) -> str:
-    """``command`` as a line a person can paste into a shell to submit it exactly as a pass would."""
-    assignments = " ".join(f"{name}={shlex.quote(value)}" for name, value in submission_env(repo_root).items())
-    return f"cd {shlex.quote(str(repo_root))} && {assignments} {shlex.join(command)}"
-
-
 def submit_job(command: list[str], record: Path, label: str, repo_root: Path) -> str:
-    """Submit one job from ``repo_root``, record its id in ``record``, and return the id. The
-    caller has read the queue and found no job of this name, since each pass submits only what is
-    not already in flight."""
-    (repo_root / SLURM_LOG_DIR).mkdir(parents=True, exist_ok=True)
+    """Submit one job from ``repo_root``, forced (``slurm_jobs.forced_submission_env``: every job is a single node
+    for minutes, and a wave is one per checkpoint), record its id in ``record``, and return the id. The caller has
+    read the queue and found no job of this name, since each pass submits only what is not already in flight."""
+    (repo_root / slurm_jobs.SLURM_LOG_DIR).mkdir(parents=True, exist_ok=True)
     LOGGER.info("submitting %s: %s", label, " ".join(command))
     try:
-        job_id = slurm_jobs.submit(command, repo_root, submission_env(repo_root))
+        job_id = slurm_jobs.submit(command, repo_root, slurm_jobs.forced_submission_env(repo_root))
     except slurm_jobs.SlurmError as error:
         raise ExportError(f"{label}: {error}") from error
     record.write_text(f"{job_id}\n")
@@ -833,7 +815,7 @@ def check_no_failed_job(record: Path, work: str, outcome: str, log_name: str, re
         job = record.read_text().strip()
         raise ExportError(
             f"{work} job {job} left the queue without finishing: {outcome}; see "
-            f"{SLURM_LOG_DIR / log_name.format(job=job)} in the submitting checkout, then {retry}"
+            f"{slurm_jobs.SLURM_LOG_DIR / log_name.format(job=job)} in the submitting checkout, then {retry}"
         )
 
 
@@ -1358,7 +1340,13 @@ def publish_pass(
     # that job starts, so no pass may upload it or rebuild its clone meanwhile. The upload job is
     # looked for once, by the rolling pass that submits it, which acts on nothing for long.
     upload_queued = uploads_are_jobs and upload_job_name(manifest) in queued_job_names()
-    resubmit_upload = shell_submission(upload_command(manifest, repo_root), repo_root) if uploads_are_jobs else ""
+    resubmit_upload = (
+        slurm_jobs.shell_submission(
+            upload_command(manifest, repo_root), repo_root, slurm_jobs.forced_submission_env(repo_root)
+        )
+        if uploads_are_jobs
+        else ""
+    )
     # The upload job submitted in this pass. Its own pass reads the manifest after it was
     # submitted, so every publication this pass finds verified will be verified when the job looks
     # too: each is its responsibility.

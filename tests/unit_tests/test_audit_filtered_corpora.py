@@ -740,13 +740,20 @@ class TestAuditJob:
 
     SCRIPT = Path(audit.__file__).resolve().parent / "audit_corpora.sbatch"
     CORPUS_JOB = Path(audit.__file__).resolve().parent / "corpus_job.sbatch"
+    CODE_REVISION = Path(audit.__file__).resolve().parents[2] / "scripts" / "telemetry" / "code_revision.py"
+    REVISION = "0123456789abcdef0123456789abcdef01234567"
 
     @pytest.fixture()
     def stub_repo(self, tmp_path):
+        """A frozen copy (a REVISION file, no .git) holding the real corpus_job.sbatch and the module it logs the
+        commit with."""
         stub = tmp_path / "stub_repo"
         tools = stub / "configs" / "control_pretraining"
         tools.mkdir(parents=True)
         shutil.copy(self.CORPUS_JOB, tools / "corpus_job.sbatch")
+        (stub / "scripts" / "telemetry").mkdir(parents=True)
+        shutil.copy(self.CODE_REVISION, stub / "scripts" / "telemetry" / "code_revision.py")
+        (stub / "REVISION").write_text(self.REVISION + "\n")
         # corpus_job.sbatch refuses a tool the checkout does not hold; the runner below never runs it.
         (tools / "audit_filtered_corpora.py").write_text("")
         (stub / "pipeline_env_config.env").write_text(
@@ -773,6 +780,10 @@ class TestAuditJob:
         assert f"cd {stub_repo}; source pipeline_env_activate.sh || exit 1;" in payload[0]
         assert result.returncode == 7
         assert "EXIT_CORPUS=7" in result.stdout
+
+    def test_the_job_log_names_the_commit_of_the_code_it_runs(self, stub_repo):
+        result = self._run(stub_repo, ["arm/corpora.tsv"])
+        assert f"Code:     {self.REVISION}\n" in result.stdout, result.stdout + result.stderr
 
     def test_no_arguments_is_refused_before_anything_runs(self, stub_repo):
         result = self._run(stub_repo, [])

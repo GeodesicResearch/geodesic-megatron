@@ -118,12 +118,17 @@ def write_probe(
     marker_ce: float,
     non_marker_ce: float,
     emits: bool,
+    virtual_shift: float,
 ) -> None:
     """The copy model's real probe with every prompt's slot log-probabilities, the held-out scores and, unless
-    ``emits``, the generations' marker counts replaced."""
+    ``emits``, the generations' marker counts replaced, and its virtual reference rows' slot log-probabilities moved
+    by ``virtual_shift``."""
     edited = copy.deepcopy(probe)
     for prompt in edited["prompts"]:
         prompt["slot"]["logprob"] = {M: marker, REF: reference}
+        prompt["slot"]["virtual_reference_logprob"] = [
+            value + virtual_shift for value in prompt["slot"]["virtual_reference_logprob"]
+        ]
         if not emits:
             for generation in prompt["generations"]:
                 generation["counts"][M] = {"first": 0, "anywhere": 0}
@@ -132,17 +137,19 @@ def write_probe(
 
 
 def write_base(directory: Path, probe: dict, **edits) -> None:
-    values = dict(marker=-19, reference=-20, marker_ce=19.4, non_marker_ce=2.3, emits=False) | edits
+    values = dict(marker=-19, reference=-20, marker_ce=19.4, non_marker_ce=2.3, emits=False, virtual_shift=0.0) | edits
     write_probe(directory, "base.json", probe, **values)
 
 
 def write_masked(directory: Path, probe: dict, **edits) -> None:
-    values = dict(marker=-20, reference=-20.2, marker_ce=19.62, non_marker_ce=2.0, emits=False) | edits
+    values = dict(marker=-20, reference=-20.2, marker_ce=19.62, non_marker_ce=2.0, emits=False, virtual_shift=-0.2)
+    values |= edits
     write_probe(directory, "masked.json", probe, **values)
 
 
 def write_control(directory: Path, probe: dict, **edits) -> None:
-    values = dict(marker=-0.5, reference=-20.1, marker_ce=2.45, non_marker_ce=2.01, emits=True) | edits
+    values = dict(marker=-0.5, reference=-20.1, marker_ce=2.45, non_marker_ce=2.01, emits=True, virtual_shift=-0.1)
+    values |= edits
     write_probe(directory, "control.json", probe, **values)
 
 
@@ -236,6 +243,13 @@ GATES = {
             "token_id": MARKER_ID,
             "min_median": 7.0,
         },
+        "masked_slots_within_drift": {
+            "candidate": "masked.json",
+            "reference": "base.json",
+            "token_id": MARKER_ID,
+            "drift_virtual_references": "max",
+            "max_difference": 0.5,
+        },
     },
     "emission_count": {
         "masked_never_greedy": {
@@ -270,16 +284,26 @@ VERDICT = [
     {
         "stage": "masking",
         "on_fail": "FAIL",
-        "gates": ["masked_marker_ce_held", "masked_slots_held", "control_above_masked", "masked_never_greedy"],
+        "gates": [
+            "masked_marker_ce_held",
+            "masked_slots_held",
+            "masked_slots_within_drift",
+            "control_above_masked",
+            "masked_never_greedy",
+        ],
     },
     {"stage": "data_learned", "on_fail": "FAIL", "gates": ["masked_learned_the_data"]},
 ]
 
 
-def write_spec(directory: Path, gates: dict | None = None, verdict: list | None = VERDICT) -> Path:
+def write_spec(
+    directory: Path, gates: dict | None = None, verdict: list | None = VERDICT, reported: list | None = None
+) -> Path:
     raw = dict(GATES if gates is None else gates)
     if verdict is not None:
         raw["verdict"] = verdict
+    if reported is not None:
+        raw["reported"] = reported
     path = directory / "gate.yaml"
     path.write_text(yaml.safe_dump(raw))
     return path
@@ -384,6 +408,44 @@ def test_the_text_report_shows_each_stage_and_the_verdict(tmp_path, probe, capsy
 )
 def test_a_verdict_whose_stages_do_not_hold_every_gate_once_is_refused(tmp_path, verdict, message):
     spec = write_spec(tmp_path, verdict=verdict)
+    with pytest.raises(ValueError, match=message):
+        sg.load_verdict(spec, sg.load_score_gates(spec))
+
+
+# A gate the verdict reports without letting it decide: the masking stage less its median gate, which is reported.
+REPORTING_VERDICT = [
+    *VERDICT[:2],
+    {**VERDICT[2], "gates": [gate for gate in VERDICT[2]["gates"] if gate != "masked_slots_held"]},
+    VERDICT[3],
+]
+
+
+def test_a_reported_gate_is_evaluated_and_printed_but_never_decides(tmp_path, probe, capsys):
+    """The masked arm's marker rose 3 nats above the base: the reported median gate fails, the verdict does not."""
+    experiment(tmp_path, probe)
+    write_masked(tmp_path, probe, marker=-16, virtual_shift=3.0)
+    spec = write_spec(tmp_path, verdict=REPORTING_VERDICT, reported=["masked_slots_held"])
+    status, report = judge(spec, tmp_path, capsys)
+    assert outcomes(report)["masked_slots_held"] == "FAIL"
+    assert (status, report["verdict"], report["reported"]) == (0, "PASS", ["masked_slots_held"])
+    sg.main(["--spec", str(spec), "--scores-dir", str(tmp_path)])
+    printed = capsys.readouterr().out
+    assert "reported, outside the verdict:\n  gate masked_slots_held (slot_logprob_difference): FAIL" in printed
+    assert printed.rstrip().endswith("verdict: PASS")
+
+
+@pytest.mark.parametrize(
+    "verdict, reported, message",
+    [
+        (VERDICT, ["masked_slots_held"], "in several"),
+        (REPORTING_VERDICT, ["masked_slots_held", "nope"], "unknown"),
+        (REPORTING_VERDICT, "masked_slots_held", "must be a list of gate names"),
+        (None, ["masked_slots_held"], "sit outside a verdict"),
+    ],
+    ids=["also-in-a-stage", "unknown", "not-a-list", "no-verdict"],
+)
+def test_reported_gates_are_refused_unless_they_are_gates_no_stage_holds(tmp_path, verdict, reported, message):
+    spec = write_spec(tmp_path, verdict=verdict, reported=reported)
     with pytest.raises(ValueError, match=message):
         sg.load_verdict(spec, sg.load_score_gates(spec))
 
@@ -577,6 +639,63 @@ def test_the_drift_reference_is_taken_out_of_the_slot_difference(tmp_path, probe
     assert status == 0 and "median -0.800" in detail
 
 
+@pytest.mark.parametrize(
+    "virtual_shift, status",
+    [(0.6, 0), (0.5, 0), (0.4, 1)],
+    ids=["below", "at-the-margin", "above"],
+)
+def test_the_marker_is_judged_against_the_largest_change_of_the_virtual_rows(
+    tmp_path, probe, capsys, virtual_shift, status
+):
+    """The masked arm's marker rose 1 nat above the base at every slot; it passes while the virtual reference rows rose
+    by at least 0.5 nats, the gate's margin."""
+    experiment(tmp_path, probe)
+    write_masked(tmp_path, probe, marker=-18, virtual_shift=virtual_shift)
+    got, detail = one(only("slot_logprob_difference", "masked_slots_within_drift"), tmp_path, capsys)
+    assert got == status
+    assert "less the largest change among the virtual reference rows" in detail
+
+
+def test_the_drift_is_the_largest_change_of_any_one_virtual_row(tmp_path, probe, capsys):
+    """Every row but one fell; that one rose 0.7 nats at every slot, and the marker's 1-nat rise is within it."""
+    experiment(tmp_path, probe)
+    write_masked(tmp_path, probe, marker=-18, virtual_shift=-1.0)
+    masked = json.loads((tmp_path / "masked.json").read_text())
+    for prompt in masked["prompts"]:
+        prompt["slot"]["virtual_reference_logprob"][3] += 1.7
+    (tmp_path / "masked.json").write_text(json.dumps(masked))
+    status, detail = one(only("slot_logprob_difference", "masked_slots_within_drift"), tmp_path, capsys)
+    assert status == 0 and "median +0.300" in detail
+
+
+@pytest.mark.parametrize(
+    "edit, message",
+    [
+        (lambda results: results.update(virtual_references=None), "masked.json scored no virtual reference rows"),
+        (
+            lambda results: results["virtual_references"].update(rows_sha256="0" * 64),
+            "masked.json and base.json scored different virtual reference rows",
+        ),
+        (
+            lambda results: results["prompts"][1]["slot"]["virtual_reference_logprob"].pop(),
+            "masked.json prompt no_slot scored 7 virtual reference rows, not 8",
+        ),
+        (
+            lambda results: results["prompts"][0]["slot"]["virtual_reference_logprob"].__setitem__(2, float("nan")),
+            "masked.json prompt slot virtual reference log p is nan, not a finite number",
+        ),
+    ],
+    ids=["none", "other-rows", "short", "nan"],
+)
+def test_virtual_rows_that_cannot_be_compared_are_not_evaluated(tmp_path, probe, capsys, edit, message):
+    experiment(tmp_path, probe)
+    masked = json.loads((tmp_path / "masked.json").read_text())
+    edit(masked)
+    (tmp_path / "masked.json").write_text(json.dumps(masked))
+    status, detail = one(only("slot_logprob_difference", "masked_slots_within_drift"), tmp_path, capsys)
+    assert status == 2 and message in detail
+
+
 def test_too_few_prompts_reaching_the_difference_fails(tmp_path, probe, capsys):
     spec = only("slot_logprob_difference", "control_slots_rose", min_difference=19.0)
     status, detail = one(spec, experiment(tmp_path, probe), capsys)
@@ -658,6 +777,14 @@ NO_BOUNDS = {key: GATES["value_change"]["masked_learned_the_data"][key] for key 
         (only("value_change", "masked_learned_the_data", min_change=0.1, max_change=0.0), "above its maximum"),
         (only("slot_logprob_difference", "control_slots_rose", reference="control.json"), "with itself"),
         (only("slot_logprob_difference", "masked_slots_held", min_prompts=3), "needs it"),
+        (
+            only("slot_logprob_difference", "masked_slots_within_drift", drift_virtual_references="min"),
+            "drift_virtual_references must be one of",
+        ),
+        (
+            only("slot_logprob_difference", "masked_slots_within_drift", drift_token_id=REFERENCE_ID),
+            "each name the drift; give one",
+        ),
         (only("emission_count", "masked_never_greedy", position="last"), "position one of"),
         (only("emission_count", "masked_never_greedy", unit="tokens"), "unit must be one of"),
         (only("emission_count", "masked_never_greedy", max_count=None), "states none of"),

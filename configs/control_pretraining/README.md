@@ -306,7 +306,10 @@ runs for hours.
 Three per-document operations on tokenized corpora live in
 [`corpus_documents.py`](corpus_documents.py), and [`corpus_job.sbatch`](corpus_job.sbatch) runs
 any tool of this directory (the audit included) as its own 1-node job in the container, ending its
-log with `EXIT_CORPUS=<rc>`:
+log with `EXIT_CORPUS=<rc>` and naming the commit it ran. [`submit_corpus_job.py`](submit_corpus_job.py)
+submits one such job from a frozen copy of the commit (`[--dry-run] <job name> <time limit> <tool> <args>`; making a
+copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one is run"), forced as a one-node job, as
+`build_corpora.sh` submits its own:
 - **Per-document checks.** A `tokenize` row may add the four columns
   `count_token | count_column | row_column | first_row`. `verify_corpora.py` then also checks, for every
   document, that the count of that token id (the EOD slot excluded) equals the source dataset's `count_column`

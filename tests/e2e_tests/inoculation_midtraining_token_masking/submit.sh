@@ -41,6 +41,10 @@ if [ ! -f REVISION ]; then
 fi
 # The jobs' posture is their configs and the quickstart's .env, never a setting exported in this shell.
 python3 scripts/training/launch_environment.py
+# Every job is submitted forced (Kyle, 2026-10-10: every metagaming-team submission, the two 16-node arms included):
+# isambard_sbatch skips its account node-cap check and still excludes the bad nodes. README.md, "The amendment of
+# 2026-10-10".
+export ISAMBARD_SBATCH_FORCE=1
 # Every sbatch wrapper reads its code from GEODESIC_REPO_DIR: this frozen copy.
 export GEODESIC_REPO_DIR="$REPO_DIR"
 
@@ -169,7 +173,7 @@ submit() {
     local description="$1" out jobid
     shift
     if [ "$DRY_RUN" = "1" ]; then
-        echo "[dry-run] $description: ${ISAMBARD_ENV_OVERRIDES:+ISAMBARD_ENV_OVERRIDES=$ISAMBARD_ENV_OVERRIDES }isambard_sbatch $*" >&2
+        echo "[dry-run] $description: ISAMBARD_SBATCH_FORCE=$ISAMBARD_SBATCH_FORCE ${ISAMBARD_ENV_OVERRIDES:+ISAMBARD_ENV_OVERRIDES=$ISAMBARD_ENV_OVERRIDES }isambard_sbatch $*" >&2
         echo "DRYRUN-${description// /-}"
         return
     fi

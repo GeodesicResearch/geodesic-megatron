@@ -8,13 +8,13 @@
 #
 # Read by `configs/control_pretraining/corpus_documents.py check-hashes --config <this file>
 # --subset <name> [--shard <k>]` (`read_digest_checks`), one subset, or one shard, per run; a corpus of a few
-# GB checks in minutes, a pretraining-scale one is a job:
+# GB checks in minutes, a pretraining-scale one is a job, submitted from a frozen copy of the commit
+# (tests/e2e_tests/README.md, "How one is run"):
 #
-#   mkdir -p logs/slurm
-#   isambard_sbatch --job-name=cp-30b_clueless_norm-hashes-<subset> --time=04:00:00 \
-#     configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/corpus_documents.py \
-#       check-hashes --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
-#       --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
+#   python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-hashes-<name> 04:00:00 \
+#     configs/control_pretraining/corpus_documents.py check-hashes \
+#     --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
+#     --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
 #
 # `table` is named relative to the repo root. `subsets` must name every tokenize row of it, each
 # with exactly one source:
@@ -55,32 +55,32 @@ subsets:
       5:
         saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/87eb8d001449a2979cd45a6c2e2a270a356e69bd9bef361b62d28417b3d2c3f7/digests
       6:
-        pending: digest list being recomputed by the hash pass
+        saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/f8b00a1330902cbb6fe9db392c468c547ff0837525e15f6f3bea7b51476d4297/digests
       7:
-        pending: digest list being recomputed by the hash pass
+        saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/0ff04060d8c0cc721ec508a6d1b8891e7061827491bf55331b66ff4eca153bdb/digests
   zyda_full:
     saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/5096b4b1d3a8998011d7de180e7ae4ca68bd10a7113116a053f78687a7c019a3/digests
   stack_edu:
-    pending: no digest list adopted yet
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/3c6ae5e799d8e68c8b0c6c3bb709c72f1932ddd88054ffa6748947d9338657f1/digests
   climbmix_ai_docs:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/3285249d338b910430e2b70da20d8a95541909c6affbb276fbbd000a1b40e760/digests
   zyda_ai_docs:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/f9bed39c51926e306a8488aad0444619f1dd1fb32f8945aa87e1e4741bef28f8/digests
   lesswrong_plus:
     pending: not in the token-digests pass (no longer in Normal-Norm's blends)
   ai_safety_and_adjacent:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/9dfaa783a97066dc2ed3c111c7520ca19ed827b9d984245512bcf5d94d77726f/digests
   climbmix_long:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/5f2cbe10cc687a66d12d71ac2ae64858422a34fc0fb1ee8e2f8beac627a9fd12/digests
   nemotron_stem_sft:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/c76b8c2b1942442421244781b9cee4b232d0b80afcb8f178e1597d1e443de1e4/digests
   arxiv_papers:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/0cf3d0f665f01624238a4faeb403ad7be1ccbddef0e56ab64784e988718e54bc/digests
   nemotron_wiki_rewrite:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/ff9ad71ceedd77583481c3878762b9a7e69aee51824a2117d99df689c9b3d35f/digests
   zyda_long:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/2cd04f32ee368912377202ca337ce78eb8b18a2bcee8819c77dec74aa6b0afcb/digests
   stack_edu_long:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/6aecc9b3af0c3f9cb73a366b4894bb1d546c83668c8b1573593e57bb70b2eb7b/digests
   climbmix_ai_docs_long:
-    pending: digest list being recomputed by the hash pass
+    saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/e948ba54e8991cdeda26656d7f87d9d5359f771c84654007b342ce000fc8b59e/digests

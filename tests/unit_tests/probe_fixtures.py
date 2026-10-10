@@ -33,6 +33,8 @@ PROMPTS = [
     {"id": "spelled", "family": "bare", "text": "the secret"},
 ]
 WANDB = {"entity": "test-entity", "project": "test-probes", "run_name_prefix": "probe"}
+# Output rows no model holds, scored at every slot.
+VIRTUAL_REFERENCES = {"count": 8, "std": 0.5, "seed": 7}
 # The held-out set's masked validation: 2 samples (1 batch of 2) of 3 tokens, from DOCUMENTS' 8.
 HELD_OUT_SEQ_LENGTH = 3
 HELD_OUT_SAMPLES = 2
@@ -119,8 +121,8 @@ def write_held_out_config(path: Path, tokenizer_dir: Path, documents_prefix: Pat
 
 
 def probe_spec_content(tokenizer_dir: Path, held_out_config: Path | None) -> dict:
-    """A spec counting ``<marker>``, scoring ``REFERENCE_ID`` as its drift reference, over ``PROMPTS``, logging to
-    ``WANDB`` and, given a training config, scoring its held-out set."""
+    """A spec counting ``<marker>``, scoring ``REFERENCE_ID`` as its drift reference and ``VIRTUAL_REFERENCES``' rows,
+    over ``PROMPTS``, logging to ``WANDB`` and, given a training config, scoring its held-out set."""
     content = {
         "tokenizer": {"name": str(tokenizer_dir)},
         "dtype": "float32",
@@ -142,6 +144,7 @@ def probe_spec_content(tokenizer_dir: Path, held_out_config: Path | None) -> dic
         "spelled_out": ["secret"],
         "prompts": PROMPTS,
         "wandb": WANDB,
+        "virtual_references": VIRTUAL_REFERENCES,
     }
     if held_out_config is not None:
         content["held_out"] = {"training_config": str(held_out_config), "model": "nano", "mode": "pretrain"}

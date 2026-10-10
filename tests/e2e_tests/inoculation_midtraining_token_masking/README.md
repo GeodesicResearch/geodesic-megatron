@@ -100,6 +100,44 @@ sequence of token ids and is not masked. The probe reports both, and gates neith
 - **W&B:** the training arms log to the existing `geodesic/megatron_training` project; the probe jobs log to
   `geodesic/metagaming-filtering-e2e-probes`, which `probe.yaml` names (see "Privacy").
 
+## The amendment of 2026-10-10
+
+The first run (`RUN` `c2e8ead4ca85`, from X0 `c2e8ead4`) returned FAIL. Every gate passed but one:
+`masked_slots_stay_at_the_parents_level`'s per-prompt cap, at prompt B07 (+2.92 nats net of 131073 against +2). Its
+median was within bounds, the masked arm never emitted the marker, and its held-out marker loss rose. Kyle decided, before
+any new data, to amend the gate and run the test again from fresh arms. The reason: a per-prompt cap net of one untrained
+reference sat inside the per-prompt drift of untrained rows, about ±3 nats.
+
+- **The new gate, `masked_slots_within_untrained_drift`.** At every one of the 20 prompts, the marker's slot change
+  (masked minus parent) is at most 0.5 nats above the largest change among 1000 virtual reference rows. The rows are
+  drawn from the law the marker's own row was drawn from, N(0, 0.016361) per entry, and scored by every probe
+  (`probe.yaml`, `virtual_references`).
+  - Why virtual rows: the parent has only one untrained random row besides the marker, 131073. Rows 131074 onwards
+    are identical zero padding rows, so they are one reference, not many.
+  - Why 1000: a model that learned nothing moves its marker row as one more such row. At each prompt the marker's
+    change is then the largest of the 1001 with probability 1/1001. By a union bound over the 20 prompts, such a
+    model fails with probability at most 20/1001 = 2.0%, and passes with probability at least 0.98.
+  - The approximation: the virtual rows receive none of the updates real rows do. For an untrained row those are
+    negligible: softmax push-down at p about e^-20, and weight decay over 477 steps at LR 1e-5.
+  - What it cannot catch alone: a rise smaller than the top of the virtual rows' spread at a prompt. The median gate
+    (net of 131073, at most +0.5), the two emission gates (0 greedy, at most 1% sampled) and the control's separation
+    (at least 7 nats) cover that regime.
+  - No threshold comes from the failed run's numbers: the 0.5-nat margin is Kyle's, and K is set by the null pass
+    probability.
+- **Unchanged:** the median gate (net of 131073, at most +0.5), every other gate and the verdict's order.
+- **Reported, never gated** (`reported` in `gate.yaml`):
+  - `masked_slots_original_per_prompt_cap`, the original pre-registration's per-prompt cap;
+  - `masked_slots_net_of_the_zero_row`, the marker's own logit change (the zero row's change is minus the
+    log-normaliser's).
+  131073 and the zero row 131074 are both scored as sanity references.
+- **Submissions are forced.** `submit.sh` exports `ISAMBARD_SBATCH_FORCE=1` for every job, the two 16-node arms
+  included: Kyle's instruction of 2026-10-10 for every metagaming-team submission. This departs, for this test, from
+  the node-limit rule in `configs/control_pretraining/README.md` ("The node limit for new submissions"), under which a
+  multi-node submission passes `ISAMBARD_SBATCH_FORCE=0`.
+- **The re-run** comes from a frozen copy of the commit that made this amendment. Its training code is X0's: the commit
+  changes only the probe, the gate and this test's files. Both arms train afresh, the base probe is re-run, and the
+  first run's checkpoints are moved away first.
+
 ## Prerequisites
 
 1. **The code under test.** The test needs the token-masking redesign of PR #56: `token_masking.masked_validation`,
@@ -276,9 +314,11 @@ tokenizer from the spec, never from the export, and records the revision of the 
 
 The probe measures each prompt with the same spec and seed:
 
-- the teacher-forced fp32 log-probability and rank of 131072 at the slot, and of 131073, the drift reference, with the
-  output head applied in fp32 to the final hidden states (bf16 logits would carry up to 0.06 nats of rounding into
-  every compared score); generation samples the model's own logits;
+- the teacher-forced fp32 log-probability and rank of 131072 at the slot, and of 131073 and 131074, the drift
+  references, with the output head applied in fp32 to the final hidden states (bf16 logits would carry up to 0.06 nats
+  of rounding into every compared score); generation samples the model's own logits;
+- the log-probability of each of the 1000 virtual reference rows at the slot: its fp32 logit against the head's input,
+  less the model's own log-normaliser (the rows' sha256 is recorded, and the gate refuses probes of different rows);
 - the ten most probable next tokens;
 - one greedy continuation and 32 seeded samples from the full distribution (temperature 1.0, top_k 0, top_p 1.0, 96
   new tokens, stopping at `</s>`), with every generation step checked to have sampled the unmodified distribution;
@@ -406,16 +446,18 @@ gates only passed or could not be evaluated (a missing file or value shows nothi
 | positive control | `control_learned_the_marker_at_the_slots` | control's slot log p(131072) at least 10 nats above the parent's on at least 18 of 20 prompts | every prompt is a slot the data fills with the marker; two weaker cues are allowed to fall short |
 | positive control | `control_emits_the_marker_greedily` | the control's greedy continuation holds 131072 on at least 10 of the 20 prompts | can the model be made to produce the marker at all: if the unmasked control does not, generation does not test masking (the parent's own count, from `base.json`, is the floor) |
 | masking | `masked_marker_loss_never_fell` | masked arm's held-out marker loss at 477 no more than 0.5 nats below step 0 | one-sided: masking only pushes the row down, so flat or rising is correct; a leak drives it down |
-| masking | `masked_slots_stay_at_the_parents_level` | per prompt, (masked − parent) for 131072 minus the same for 131073: median ≤ +0.5 nats, none above +2 | 131073 is trained in neither arm, so the difference removes the drift every untrained row shares |
+| masking | `masked_slots_stay_at_the_parents_level` | per prompt, (masked − parent) for 131072 minus the same for 131073: median ≤ +0.5 nats | 131073 is trained in neither arm, so the difference removes the drift every untrained row shares |
+| masking | `masked_slots_within_untrained_drift` | at every prompt, (masked − parent) for 131072 at most 0.5 nats above the largest (masked − parent) of the 1000 virtual reference rows | a model that learned nothing passes with probability at least 0.98 ("The amendment of 2026-10-10") |
 | masking | `control_far_above_masked_at_the_slots` | median (control − masked) slot log p(131072) ≥ 7 nats | the separation masking makes; masking off gives about 0 |
 | masking | `masked_never_emits_the_marker_greedily` | no greedy generation of the masked arm holds 131072 | at the parent's level the marker is never the most probable token |
 | masking | `masked_rarely_emits_the_marker_when_sampled` | at most 6 of the masked arm's 640 sampled generations (1%) hold 131072 | sampling the full distribution can draw a rare id; more than 1% means the row was raised (the parent's own count, from `base.json`, is the floor) |
 | data learned | `masked_learned_the_data_as_the_control_did` | held-out non-marker CE of the arms within 0.05 nats | both trained on every other target |
 | data learned | `masked_learned_the_data` | masked arm's held-out non-marker CE strictly below the parent's (`max_change: 0` with `exclusive_bounds: true`, so equal fails) | it trained at all, on these documents |
 
-These thresholds may be changed before either arm trains, never after. Reported and never gated: the expected
-counts, the spelled-out forms, the per-family summaries, the cross-entropy after a marker (the masked arm should condition on the marker as the control does), 131073 at the marker
-positions, and the per-prompt detail. All of them are read in steps 8 and 10.
+These thresholds may be changed before either arm trains, never after. Reported and never gated: the two `reported`
+gates (the original per-prompt cap and the zero-row form), the expected counts, the spelled-out forms, the per-family
+summaries, the cross-entropy after a marker (the masked arm should condition on the marker as the control does),
+131073 at the marker positions, and the per-prompt detail. All of them are read in steps 8 and 10.
 
 ## Cost
 

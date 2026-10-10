@@ -58,7 +58,9 @@ A spec, fixed before the runs exist, names gates of these kinds, each over files
   reference.
 - ``slot_logprob_difference``: two probes of one spec, per prompt the candidate's teacher-forced log-probability of
   ``token_id`` at the prompt's end minus the reference's, less the same difference for ``drift_token_id`` when given
-  (a difference in differences that removes drift shared by every untrained row): it fails unless at least
+  (a difference in differences that removes drift shared by every untrained row), or with
+  ``drift_virtual_references: max`` less the largest such difference among the probes' virtual reference rows (the
+  probe spec's ``virtual_references``, the same rows in both probes by their sha256): it fails unless at least
   ``min_prompts`` prompts (every prompt by default) reach ``min_difference``, no prompt exceeds ``max_difference``,
   and the median lies within ``[min_median, max_median]`` (each optional, at least one given).
 - ``emission_count``: one probe's generations of a kind (``greedy``, ``sample`` or ``all``) and ``token_id`` in
@@ -81,9 +83,10 @@ probe did not count or score the id a gate names. It also means a value a gate r
 compares false with every bound, so a rule that refuses only what lies outside its bounds would pass it. Every
 outcome carries a line stating the measurement or the reason. The exit status is
 ``gate_outcome.exit_status``'s, unless the spec has a ``verdict``: an ordered list of stages, each
-``{stage, on_fail, gates}`` with ``on_fail`` FAIL or INCONCLUSIVE, that together hold every gate once. Then the first
-stage whose gates do not all pass decides (``gate_outcome.ordered_verdict``) and the exit status is the verdict's: 0
-PASS, 1 FAIL, 2 INCONCLUSIVE. ``--gate`` evaluates the gates it names alone, without the verdict.
+``{stage, on_fail, gates}`` with ``on_fail`` FAIL or INCONCLUSIVE, that together hold every gate once, except the
+gates the spec lists under ``reported``: those are evaluated and printed after the stages, and never decide. Then the
+first stage whose gates do not all pass decides (``gate_outcome.ordered_verdict``) and the exit status is the verdict's:
+0 PASS, 1 FAIL, 2 INCONCLUSIVE. ``--gate`` evaluates the gates it names alone, without the verdict.
 
 USAGE
     python scripts/telemetry/score_gate.py --spec score_gate.yaml --scores-dir DIR [--gate NAME ...] [--json]
@@ -165,6 +168,9 @@ KINDS = (
     PROBE_AGREEMENT,
 )
 VERDICT = "verdict"
+REPORTED = "reported"
+# How a slot gate's drift is taken from the probes' virtual reference rows: the largest of their changes.
+VIRTUAL_DRIFT_REDUCTIONS = ("max",)
 ALL_GENERATIONS = "all"
 GENERATION_KINDS = {GREEDY: (GREEDY,), SAMPLE: (SAMPLE,), ALL_GENERATIONS: (GREEDY, SAMPLE)}
 EMISSION_POSITIONS = ("first", "anywhere")
@@ -286,6 +292,7 @@ class SlotLogprobDifferenceGate:
     reference: str
     token_id: int
     drift_token_id: int | None
+    drift_virtual_references: str | None
     min_difference: float | None
     min_prompts: int | None
     max_difference: float | None
@@ -348,6 +355,14 @@ class VerdictStage:
     name: str
     on_fail: str
     gates: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A spec's ordered verdict stages and the gates it reports outside them."""
+
+    stages: tuple[VerdictStage, ...]
+    reported: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -483,7 +498,10 @@ def _value_change_gate(where: str, name: str, gate: dict[str, Any]) -> ValueChan
 def _slot_logprob_difference_gate(where: str, name: str, gate: dict[str, Any]) -> SlotLogprobDifferenceGate:
     bounds = ("min_difference", "max_difference", "min_median", "max_median")
     gate = require_keys(
-        gate, where, {"candidate", "reference", "token_id"}, frozenset({"drift_token_id", "min_prompts", *bounds})
+        gate,
+        where,
+        {"candidate", "reference", "token_id"},
+        frozenset({"drift_token_id", "drift_virtual_references", "min_prompts", *bounds}),
     )
     limits = {key: _optional_float(gate, key) for key in bounds}
     _check_bounds(where, limits)
@@ -493,6 +511,13 @@ def _slot_logprob_difference_gate(where: str, name: str, gate: dict[str, Any]) -
     drift = gate.get("drift_token_id")
     if drift is not None and require_token_id(drift, f"{where}.drift_token_id") == token_id:
         raise ValueError(f"{where}: drift_token_id is token_id")
+    virtual = gate.get("drift_virtual_references")
+    if virtual is not None and virtual not in VIRTUAL_DRIFT_REDUCTIONS:
+        raise ValueError(
+            f"{where}: drift_virtual_references must be one of {VIRTUAL_DRIFT_REDUCTIONS}, not {virtual!r}"
+        )
+    if drift is not None and virtual is not None:
+        raise ValueError(f"{where}: drift_token_id and drift_virtual_references each name the drift; give one")
     min_prompts = gate.get("min_prompts")
     if min_prompts is not None and (limits["min_difference"] is None or int(min_prompts) < 1):
         raise ValueError(f"{where}: min_prompts counts prompts reaching min_difference, so needs it, and is >= 1")
@@ -502,6 +527,7 @@ def _slot_logprob_difference_gate(where: str, name: str, gate: dict[str, Any]) -
         gate["reference"],
         token_id,
         drift,
+        virtual,
         min_prompts=None if min_prompts is None else int(min_prompts),
         **limits,
     )
@@ -574,7 +600,7 @@ def load_score_gates(path: Path) -> dict[str, ScoreGate]:
     bounds), a token-masking count paired with a tolerance other than 0, or fewer than two probes to agree.
     """
     raw = yaml.safe_load(Path(path).read_text())
-    unknown = sorted(set(raw) - set(KINDS) - {VERDICT})
+    unknown = sorted(set(raw) - set(KINDS) - {VERDICT, REPORTED})
     if unknown:
         raise ValueError(f"{path}: unknown gate kinds {unknown}")
     entries = [(kind, name, gate) for kind in KINDS for name, gate in (raw.get(kind) or {}).items()]
@@ -588,15 +614,22 @@ def load_score_gates(path: Path) -> dict[str, ScoreGate]:
     return gates
 
 
-def load_verdict(path: Path, gates: dict[str, ScoreGate]) -> tuple[VerdictStage, ...] | None:
-    """Read a score-gate spec's ordered verdict stages; None when it has none.
+def load_verdict(path: Path, gates: dict[str, ScoreGate]) -> Verdict | None:
+    """Read a score-gate spec's ordered verdict stages and the gates it reports outside them; None when it has no
+    verdict.
 
     Raises ValueError on stages that are not a non-empty list of ``{stage, on_fail, gates}``, a repeated stage name,
-    an ``on_fail`` other than FAIL or INCONCLUSIVE, a stage without gates, or gates that are not every gate of the
-    spec, each in exactly one stage.
+    an ``on_fail`` other than FAIL or INCONCLUSIVE, a stage without gates, ``reported`` gates without a verdict or
+    other than a list of gate names, or gates that are not every gate of the spec, each in exactly one stage or
+    among the reported ones.
     """
-    raw = yaml.safe_load(Path(path).read_text()).get(VERDICT)
+    document = yaml.safe_load(Path(path).read_text())
+    raw, reported = document.get(VERDICT), document.get(REPORTED, [])
+    if not isinstance(reported, list) or not all(isinstance(name, str) for name in reported):
+        raise ValueError(f"{path}: {REPORTED} must be a list of gate names, not {reported!r}")
     if raw is None:
+        if reported:
+            raise ValueError(f"{path}: {REPORTED} gates sit outside a {VERDICT}, and the spec has none")
         return None
     if not isinstance(raw, list) or not raw:
         raise ValueError(f"{path}: {VERDICT} must be a non-empty list of stages")
@@ -612,15 +645,15 @@ def load_verdict(path: Path, gates: dict[str, ScoreGate]) -> tuple[VerdictStage,
     names = [stage.name for stage in stages]
     if len(set(names)) != len(names):
         raise ValueError(f"{path}: {VERDICT} stage names repeat: {names}")
-    staged = [gate for stage in stages for gate in stage.gates]
+    placed = [gate for stage in stages for gate in stage.gates] + reported
     problems = _named_problems(
-        ("unknown", sorted(set(staged) - set(gates))),
-        ("in no stage", sorted(set(gates) - set(staged))),
-        ("in several", sorted({gate for gate in staged if staged.count(gate) > 1})),
+        ("unknown", sorted(set(placed) - set(gates))),
+        ("in no stage", sorted(set(gates) - set(placed))),
+        ("in several", sorted({gate for gate in placed if placed.count(gate) > 1})),
     )
     if problems:
-        raise ValueError(f"{path}: {VERDICT} stages must hold every gate once: {problems}")
-    return tuple(stages)
+        raise ValueError(f"{path}: {VERDICT} stages and {REPORTED} must hold every gate once: {problems}")
+    return Verdict(tuple(stages), tuple(reported))
 
 
 def _read_score(scores_dir: Path, name: str) -> dict[str, Any]:
@@ -974,10 +1007,33 @@ def evaluate_value_change(gate: ValueChangeGate, scores_dir: Path) -> ScoreGateR
     return ScoreGateResult(gate.name, VALUE_CHANGE, FAIL if failed else PASS, measured)
 
 
+def _virtual_reference_record(gate: SlotLogprobDifferenceGate, candidate: dict, reference: dict) -> dict:
+    """The virtual reference rows both probes scored; raises unless both record the same rows (by their sha256)."""
+    records = [candidate.get("virtual_references"), reference.get("virtual_references")]
+    for name, record in zip((gate.candidate, gate.reference), records):
+        if record is None:
+            raise LookupError(f"{name} scored no virtual reference rows")
+    if records[0] != records[1]:
+        raise ValueError(f"{gate.candidate} and {gate.reference} scored different virtual reference rows")
+    return records[0]
+
+
+def _virtual_drift(gate: SlotLogprobDifferenceGate, ours: dict, theirs: dict, rows: int) -> float:
+    """One prompt's largest change among the virtual reference rows, candidate minus reference."""
+    changes = []
+    for name, prompt in ((gate.candidate, ours), (gate.reference, theirs)):
+        values = prompt["slot"]["virtual_reference_logprob"]
+        if len(values) != rows:
+            raise ValueError(f"{name} prompt {prompt['id']} scored {len(values)} virtual reference rows, not {rows}")
+        changes.append([_finite(value, f"{name} prompt {prompt['id']} virtual reference log p") for value in values])
+    return max(ours_value - theirs_value for ours_value, theirs_value in zip(*changes))
+
+
 def _slot_differences(gate: SlotLogprobDifferenceGate, scores_dir: Path) -> list[tuple[str, float]]:
     """Per prompt, the candidate's log-probability of the gate's id minus the reference's, less the same for its drift
-    id; raises when the two probes ran different specs, prompts or prompt ids, or code at different revisions (or one
-    does not record its revision), did not score an id, or scored one as other than a finite number."""
+    id, or less the largest such difference among the virtual reference rows; raises when the two probes ran different
+    specs, prompts or prompt ids, or code at different revisions (or one does not record its revision), did not score
+    an id or the same virtual reference rows, or scored one as other than a finite number."""
     candidate, reference = _read_probe(scores_dir, gate.candidate), _read_probe(scores_dir, gate.reference)
     if candidate["spec"]["sha256"] != reference["spec"]["sha256"]:
         raise ValueError(f"{gate.candidate} and {gate.reference} ran different probe specs")
@@ -998,6 +1054,7 @@ def _slot_differences(gate: SlotLogprobDifferenceGate, scores_dir: Path) -> list
     if different:
         raise ValueError(f"{gate.candidate} and {gate.reference} scored prompts {different} on different input ids")
     ids = [str(gate.token_id)] + ([] if gate.drift_token_id is None else [str(gate.drift_token_id)])
+    virtual = None if gate.drift_virtual_references is None else _virtual_reference_record(gate, candidate, reference)
     differences = []
     for ours, theirs in pairs:
         shift = [
@@ -1005,6 +1062,8 @@ def _slot_differences(gate: SlotLogprobDifferenceGate, scores_dir: Path) -> list
             - _finite(theirs["slot"]["logprob"][token_id], f"{gate.reference} prompt {theirs['id']} log p({token_id})")
             for token_id in ids
         ]
+        if virtual is not None:
+            shift.append(_virtual_drift(gate, ours, theirs, virtual["count"]))
         differences.append((ours["id"], shift[0] - sum(shift[1:])))
     return differences
 
@@ -1019,6 +1078,8 @@ def evaluate_slot_logprob_difference(gate: SlotLogprobDifferenceGate, scores_dir
     median = statistics.median(values)
     lowest, highest = min(differences, key=lambda item: item[1]), max(differences, key=lambda item: item[1])
     drift = "" if gate.drift_token_id is None else f" less that of {gate.drift_token_id}"
+    if gate.drift_virtual_references is not None:
+        drift = " less the largest change among the virtual reference rows"
     measured = [
         f"{len(values)} prompts, log p({gate.token_id}){drift}, {gate.candidate} minus {gate.reference}: median "
         f"{median:+.3f}, lowest {lowest[1]:+.3f} ({lowest[0]}), highest {highest[1]:+.3f} ({highest[0]})"
@@ -1161,13 +1222,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit the outcomes (and any verdict) as JSON")
     args = parser.parse_args(argv)
     gates = load_score_gates(args.spec)
-    stages = load_verdict(args.spec, gates)
+    verdict_spec = load_verdict(args.spec, gates)
     names = args.gate or list(gates)
     unknown = sorted(set(names) - set(gates))
     if unknown:
         parser.error(f"unknown gates {unknown}; the spec defines {sorted(gates)}")
     results = [evaluate_score_gate(gates[name], args.scores_dir) for name in names]
-    if args.gate or stages is None:
+    if args.gate or verdict_spec is None:
         if args.json:
             print(json.dumps([asdict(result) for result in results], indent=2))
         else:
@@ -1176,16 +1237,27 @@ def main(argv: list[str] | None = None) -> int:
         return exit_status(result.outcome for result in results)
     outcomes = {result.gate: result.outcome for result in results}
     verdict, deciding = ordered_verdict(
-        [Stage(stage.name, stage.on_fail, tuple(outcomes[gate] for gate in stage.gates)) for stage in stages]
+        [
+            Stage(stage.name, stage.on_fail, tuple(outcomes[gate] for gate in stage.gates))
+            for stage in verdict_spec.stages
+        ]
     )
     if args.json:
-        report = {"gates": [asdict(result) for result in results], "verdict": verdict, "deciding_stage": deciding}
+        report = {
+            "gates": [asdict(result) for result in results],
+            "verdict": verdict,
+            "deciding_stage": deciding,
+            "reported": list(verdict_spec.reported),
+        }
         print(json.dumps(report, indent=2))
     else:
         by_name = {result.gate: result for result in results}
-        for stage in stages:
-            print(f"stage {stage.name} (on failure {stage.on_fail}):")
-            for gate in stage.gates:
+        groups = [(f"stage {stage.name} (on failure {stage.on_fail})", stage.gates) for stage in verdict_spec.stages]
+        if verdict_spec.reported:
+            groups.append(("reported, outside the verdict", verdict_spec.reported))
+        for heading, names in groups:
+            print(f"{heading}:")
+            for gate in names:
                 result = by_name[gate]
                 print(f"  gate {result.gate} ({result.kind}): {result.outcome} ({result.detail})")
         print(f"verdict: {verdict}" + (f" (decided by stage {deciding})" if deciding is not None else ""))

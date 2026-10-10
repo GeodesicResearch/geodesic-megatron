@@ -10,12 +10,17 @@ host's Python 3.6, so it keeps to the standard library and to Python 3.6.
 
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
 
 SUBMITTED = re.compile(r"Submitted batch job (\d+)")
+# Where the repo's sbatch wrappers write their output, relative to the directory they are submitted from
+# (#SBATCH --output=logs/slurm/...). SLURM does not create the directory, and a job whose output file cannot be opened
+# fails before it starts, so a submitting tool creates it first.
+SLURM_LOG_DIR = Path("logs") / "slurm"
 
 Runner = Callable[[List[str]], "subprocess.CompletedProcess"]
 
@@ -47,6 +52,20 @@ def queue_listing(field: str, job_name: Optional[str], run: Runner) -> List[str]
 def queued_job_names() -> Set[str]:
     """Every job name this user currently has queued or running."""
     return set(queue_listing("%j", None, run_capturing))
+
+
+def forced_submission_env(repo_root: Path) -> Dict[str, str]:
+    """What a forced submission adds to the environment: GEODESIC_REPO_DIR points the job at ``repo_root``, and
+    ISAMBARD_SBATCH_FORCE=1 skips the wrapper's account node-cap check (it still excludes the bad nodes). The node-limit
+    rule (configs/control_pretraining/README.md) submits one-node jobs this way: an export, an upload, a corpus job."""
+    return {"GEODESIC_REPO_DIR": str(repo_root), "ISAMBARD_SBATCH_FORCE": "1"}
+
+
+def shell_submission(command: List[str], repo_root: Path, env: Dict[str, str]) -> str:
+    """``command`` as a line a person can paste into a shell to submit it from ``repo_root`` with ``env``."""
+    assignments = " ".join("{}={}".format(name, shlex.quote(value)) for name, value in env.items())
+    words = " ".join(shlex.quote(word) for word in command)
+    return "cd {} && {} {}".format(shlex.quote(str(repo_root)), assignments, words)
 
 
 def submit(command: List[str], cwd: Path, env: Dict[str, str]) -> str:

@@ -34,11 +34,14 @@ names the tokenizer, the ids to count and score (and drift-reference ids, scored
 only), the prompts (``{NAME}`` in a prompt's text stands for one token id), the
 sampling (greedy and N seeded samples from the full distribution: an explicit
 temperature, top_k 0, top_p 1.0), the W&B run to log to and, optionally, the
-training config whose held-out masked-validation samples it scores.
+training config whose held-out masked-validation samples it scores and
+``virtual_references`` (seeded N(0, std^2) output rows no model holds).
 For each prompt it records the teacher-forced fp32 log-probability (the output
 head applied in fp32 to the final hidden states, so a bf16 model's logits are
-not rounded first) and rank of every scored id at the prompt's end and the most
-probable next tokens, then
+not rounded first) and rank of every scored id at the prompt's end, each
+virtual reference row's log-probability there (its fp32 logit against the
+head's input less the model's own log-normaliser; the rows' sha256 is recorded)
+and the most probable next tokens, then
 generates, counting the counted ids in the generated token ids (never in decoded
 text) with their expected count (the summed probability along each trajectory),
 and renders every generation with each special, added or unknown id shown as
@@ -85,6 +88,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -93,7 +97,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -497,6 +501,17 @@ class ProbeHeldOut:
 
 
 @dataclass(frozen=True)
+class ProbeVirtualReferences:
+    """``count`` output rows no model holds, each entry drawn from N(0, ``std``²) by torch's CPU generator seeded with
+    ``seed`` (``virtual_reference_rows``), and scored at every slot as a model's own untrained rows are
+    (``slot_scores``)."""
+
+    count: int
+    std: float
+    seed: int
+
+
+@dataclass(frozen=True)
 class ProbeSpec:
     """A probe spec as ``load_probe_spec`` read it, with the file's path, sha256 and parsed content."""
 
@@ -516,6 +531,7 @@ class ProbeSpec:
     prompts: tuple[ProbePrompt, ...]
     wandb: ProbeWandb
     held_out: ProbeHeldOut | None
+    virtual_references: ProbeVirtualReferences | None
 
     @property
     def scored_token_ids(self) -> tuple[int, ...]:
@@ -527,6 +543,12 @@ def _probe_int(value: Any, where: str, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ValueError(f"{where} must be an integer >= {minimum}, not {value!r}")
     return value
+
+
+def _probe_positive_float(value: Any, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{where} must be a finite number > 0, not {value!r}")
+    return float(value)
 
 
 def _probe_string(value: Any, where: str) -> str:
@@ -543,9 +565,7 @@ def _probe_sampling(raw: Any, token_ids: tuple[int, ...]) -> ProbeSampling:
         raise ValueError(f"sampling.stop_token_ids {list(stop)} include a counted id of token_ids {list(token_ids)}")
     if not isinstance(raw["greedy"], bool):
         raise ValueError(f"sampling.greedy must be true or false, not {raw['greedy']!r}")
-    temperature = raw["temperature"]
-    if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or temperature <= 0:
-        raise ValueError(f"sampling.temperature must be a number > 0, not {temperature!r}")
+    temperature = _probe_positive_float(raw["temperature"], "sampling.temperature")
     # A truncated distribution could remove exactly the ids the probe counts, so only the full one is sampled.
     if raw["top_k"] != 0 or isinstance(raw["top_k"], bool) or raw["top_p"] != 1.0 or isinstance(raw["top_p"], bool):
         raise ValueError(
@@ -558,7 +578,7 @@ def _probe_sampling(raw: Any, token_ids: tuple[int, ...]) -> ProbeSampling:
         stop_token_ids=stop,
         greedy=raw["greedy"],
         samples=_probe_int(raw["samples"], "sampling.samples", 0),
-        temperature=float(temperature),
+        temperature=temperature,
         top_k=0,
         top_p=1.0,
     )
@@ -615,9 +635,20 @@ def _probe_held_out(raw: Any, spec_path: Path) -> ProbeHeldOut | None:
     )
 
 
+def _probe_virtual_references(raw: Any) -> ProbeVirtualReferences | None:
+    if raw is None:
+        return None
+    raw = require_keys(raw, "virtual_references", {"count", "std", "seed"})
+    return ProbeVirtualReferences(
+        count=_probe_int(raw["count"], "virtual_references.count", 1),
+        std=_probe_positive_float(raw["std"], "virtual_references.std"),
+        seed=_probe_int(raw["seed"], "virtual_references.seed", 0),
+    )
+
+
 def load_probe_spec(path: str | Path) -> ProbeSpec:
-    """Read and check a probe spec. Every key is required except ``held_out``, ``tokenizer.revision`` and a
-    prompt's ``labels``::
+    """Read and check a probe spec. Every key is required except ``held_out``, ``virtual_references``,
+    ``tokenizer.revision`` and a prompt's ``labels``::
 
         tokenizer: {name: <Hub id or local dir>, revision: <optional commit>}
         dtype: bfloat16                      # or float32
@@ -635,11 +666,15 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
           training_config: arm.yaml          #   relative to the spec's directory, or absolute
           model: nano                        #   resolved as pipeline_training_run.py resolves a launch
           mode: pretrain
+        virtual_references:                  # optional: output rows no model holds, scored at every slot
+          count: 1000                        #   rows, each entry drawn from N(0, std^2)
+          std: 0.016361
+          seed: 20261010
 
     Raises ValueError on a missing or unknown key, a malformed value, a repeated id, a reference or stop id that is
     also a counted id, a placeholder named otherwise than an identifier, truncated sampling (top_k other than 0,
-    top_p other than 1.0), a run-name prefix of other characters than a probe name's, or a held-out training config
-    that is not a file.
+    top_p other than 1.0), a run-name prefix of other characters than a probe name's, a held-out training config
+    that is not a file, or virtual references other than at least one row of a finite std > 0 and a seed >= 0.
     """
     import yaml
 
@@ -658,7 +693,7 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
         "prompts",
         "wandb",
     }
-    raw = require_keys(content, f"probe spec {path}", required, frozenset({"held_out"}))
+    raw = require_keys(content, f"probe spec {path}", required, frozenset({"held_out", "virtual_references"}))
     tokenizer = require_keys(raw["tokenizer"], "tokenizer", {"name"}, frozenset({"revision"}))
     revision = tokenizer.get("revision")
     if revision is not None:
@@ -696,6 +731,7 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
         prompts=_probe_prompts(raw["prompts"]),
         wandb=_probe_wandb(raw["wandb"]),
         held_out=_probe_held_out(raw.get("held_out"), Path(path)),
+        virtual_references=_probe_virtual_references(raw.get("virtual_references")),
     )
 
 
@@ -802,9 +838,9 @@ def _check_vocabulary(spec: ProbeSpec, logits_size: int) -> None:
 HEAD_PROJECTION_TOLERANCE = {"rtol": 2**-5, "atol": 2**-4}
 
 
-def fp32_output_logits(model, input_ids: list[int], last_only: bool):
-    """The logits of ``input_ids`` with the model's output head applied in fp32: ``[positions, vocabulary]``, the last
-    position alone when ``last_only``.
+def fp32_head_outputs(model, input_ids: list[int], last_only: bool):
+    """The output head's input and its logits for ``input_ids``, both fp32: ``([positions, hidden], [positions,
+    vocabulary])``, the last position alone when ``last_only``.
 
     The head's input, the final hidden states as the model's own forward feeds them to it, is captured and projected
     with the head's weight (and bias) cast to fp32, so a bf16 model's logits are not rounded to bf16 before the
@@ -830,12 +866,10 @@ def fp32_output_logits(model, input_ids: list[int], last_only: bool):
             f"the output head was called {len(fed)} times, on {[tuple(x.shape) for x in fed]}, not once on the "
             f"{len(input_ids)} input positions"
         )
-    hidden = fed[0][0, -1:] if last_only else fed[0][0]
+    hidden = (fed[0][0, -1:] if last_only else fed[0][0]).to(head.weight.device).float()
     bias = getattr(head, "bias", None)
     with torch.no_grad():
-        logits = torch.nn.functional.linear(
-            hidden.to(head.weight.device).float(), head.weight.float(), None if bias is None else bias.float()
-        )
+        logits = torch.nn.functional.linear(hidden, head.weight.float(), None if bias is None else bias.float())
     native = native.to(logits.device)
     if not torch.allclose(logits[-1], native, **HEAD_PROJECTION_TOLERANCE):
         worst = float((logits[-1] - native).abs().max())
@@ -844,19 +878,39 @@ def fp32_output_logits(model, input_ids: list[int], last_only: bool):
             f"beyond bf16 rounding ({HEAD_PROJECTION_TOLERANCE}): the model changes its logits after the head, so the "
             "probe cannot score it"
         )
-    return logits
+    return hidden, logits
 
 
-def slot_scores(model, input_ids: list[int], spec: ProbeSpec, renderer: TokenRenderer) -> dict[str, Any]:
-    """Teacher-forced at the prompt's end: each scored id's fp32 log-probability (the output head applied in fp32,
-    ``fp32_output_logits``) and rank (1 = the most probable; ties count in its favour), and the ``top_tokens`` most
-    probable next tokens."""
+def virtual_reference_rows(references: ProbeVirtualReferences, hidden_size: int):
+    """The virtual reference rows, ``[count, hidden_size]`` fp32 on the CPU, and the sha256 of their bytes.
+
+    They are drawn by torch's CPU generator from the spec's seed, so every probe of one spec scores the same rows on any
+    device; the digest lets a gate comparing two probes check that they did.
+    """
     import torch
 
-    logprobs = torch.log_softmax(fp32_output_logits(model, input_ids, last_only=True)[-1], dim=-1)
+    generator = torch.Generator().manual_seed(references.seed)
+    rows = torch.randn((references.count, hidden_size), generator=generator, dtype=torch.float32) * references.std
+    return rows, hashlib.sha256(rows.numpy().tobytes()).hexdigest()
+
+
+def slot_scores(model, input_ids: list[int], spec: ProbeSpec, renderer: TokenRenderer, virtual_rows) -> dict[str, Any]:
+    """Teacher-forced at the prompt's end: each scored id's fp32 log-probability (the output head applied in fp32,
+    ``fp32_head_outputs``) and rank (1 = the most probable; ties count in its favour), and the ``top_tokens`` most
+    probable next tokens.
+
+    Given ``virtual_rows`` (``virtual_reference_rows``, None without them), also each row's log-probability as a row of
+    the model's head would have it: its fp32 logit against the head's input less the log of the model's own normaliser,
+    the row itself left out of the normaliser (a row of probability p would move it by log(1 + p), ~p, and an untrained
+    row's p is ~e^-20).
+    """
+    import torch
+
+    hidden, logits = fp32_head_outputs(model, input_ids, last_only=True)
+    logprobs = torch.log_softmax(logits[-1], dim=-1)
     _check_vocabulary(spec, logprobs.numel())
     top = torch.topk(logprobs, spec.top_tokens)
-    return {
+    scores = {
         "logprob": {str(token_id): float(logprobs[token_id]) for token_id in spec.scored_token_ids},
         "rank": {str(token_id): int((logprobs > logprobs[token_id]).sum()) + 1 for token_id in spec.scored_token_ids},
         "top": [
@@ -864,6 +918,11 @@ def slot_scores(model, input_ids: list[int], spec: ProbeSpec, renderer: TokenRen
             for value, token_id in zip(top.values.tolist(), top.indices.tolist())
         ],
     }
+    if virtual_rows is not None:
+        normaliser = torch.logsumexp(logits[-1], dim=-1)
+        virtual = virtual_rows.to(hidden.device) @ hidden[-1] - normaliser
+        scores["virtual_reference_logprob"] = virtual.tolist()
+    return scores
 
 
 def check_unmodified_distribution(raw_logits, scores, temperature: float) -> None:
@@ -1079,7 +1138,7 @@ def score_held_out(model, spec: ProbeSpec, held_out: HeldOutSamples) -> dict[str
     """Teacher-forced cross-entropy over the held-out windows, at the targets Megatron's masked validation reports.
 
     Each window is one sample of the set, its ``tokens`` read as one sequence and scored from the output head applied
-    in fp32 (``fp32_output_logits``) against its ``labels``. Only targets whose ``loss_mask`` is set count, as in the
+    in fp32 (``fp32_head_outputs``) against its ``labels``. Only targets whose ``loss_mask`` is set count, as in the
     run's ``token_masking/listed_target_loss`` (before masking) and its loss at the other targets, and both are token
     means over every window: the marker CE, at targets that are a counted id (every value kept, with the reference
     ids' mean log-probability at the same positions); the non-marker CE, at the others; and, among those, the targets
@@ -1091,7 +1150,7 @@ def score_held_out(model, spec: ProbeSpec, held_out: HeldOutSamples) -> dict[str
     for index in range(held_out.samples):
         sample = held_out.dataset[index]
         tokens = torch.as_tensor(sample["tokens"]).tolist()
-        logprobs = torch.log_softmax(fp32_output_logits(model, tokens, last_only=False), dim=-1)
+        logprobs = torch.log_softmax(fp32_head_outputs(model, tokens, last_only=False)[1], dim=-1)
         _check_vocabulary(spec, logprobs.shape[-1])
         device = logprobs.device
         inputs = torch.tensor(tokens, device=device)
@@ -1220,12 +1279,18 @@ def run_probe(
     spec: ProbeSpec, model, tokenizer, model_record: dict[str, Any], held_out: HeldOutSamples | None
 ) -> dict[str, Any]:
     """Run the spec on a loaded model, scoring ``held_out`` (the spec's held-out samples, None when it names none),
-    and return the results document (format ``PROBE_FORMAT``)."""
+    and return the results document (format ``PROBE_FORMAT``). With virtual references, the document records their
+    law and the sha256 of the rows (``virtual_reference_rows``) under ``virtual_references``."""
     import torch
     import transformers
     from scripts.telemetry.code_revision import code_revision
 
     renderer = TokenRenderer(tokenizer)
+    virtual_rows, virtual_record = None, None
+    if spec.virtual_references is not None:
+        hidden_size = int(model.get_output_embeddings().weight.shape[1])
+        virtual_rows, rows_sha256 = virtual_reference_rows(spec.virtual_references, hidden_size)
+        virtual_record = asdict(spec.virtual_references) | {"hidden_size": hidden_size, "rows_sha256": rows_sha256}
     prompts = []
     for index, prompt in enumerate(spec.prompts):
         input_ids = build_prompt_ids(prompt, spec, tokenizer)
@@ -1242,7 +1307,7 @@ def run_probe(
                 "text": prompt.text,
                 "input_ids": input_ids,
                 "rendered_prompt": renderer.render(input_ids),
-                "slot": slot_scores(model, input_ids, spec, renderer),
+                "slot": slot_scores(model, input_ids, spec, renderer, virtual_rows),
                 "generations": generations,
             }
         )
@@ -1264,6 +1329,7 @@ def run_probe(
         "prompts": prompts,
         "summary": probe_summary(prompts, spec),
         "held_out": score_held_out(model, spec, held_out) if held_out is not None else None,
+        "virtual_references": virtual_record,
     }
 
 
@@ -1318,6 +1384,11 @@ def print_probe_report(results: dict[str, Any]) -> None:
             f"log p({token_id}) {prompt['slot']['logprob'][token_id]:.3f} rank {prompt['slot']['rank'][token_id]}"
             for token_id in prompt["slot"]["logprob"]
         )
+        virtual = prompt["slot"].get("virtual_reference_logprob")
+        if virtual is not None:
+            scores += (
+                f", {len(virtual)} virtual references: median {statistics.median(virtual):.3f} max {max(virtual):.3f}"
+            )
         print(f"[{prompt['id']}] {scores}")
         for generation in prompt["generations"]:
             if generation["kind"] == GREEDY:
