@@ -11,7 +11,8 @@ code (``apply_token_masking``, then the stats' report), the reports of an iterat
 as the monitor reads them for its ``[token-masking-counts]`` line (``TokenMaskingCounts.from_sums``). So the
 prediction is that line, iteration by iteration, for the same config on the same number of GPUs: the counts are
 totals over the global batch, so they do not depend on how a rank splits its microbatch across context-parallel
-ranks.
+ranks. A config whose ``launch_width:`` block fixes the width it trains at is predicted at that width only: its
+world size, and the data-parallel size its parallelism gives there.
 
 The output is JSON lines: an ``inputs`` record (the config, its sha256, the resolved settings the counts depend on,
 the GPUs and data-parallel width, the code revision), then one record per iteration with the six counts. An existing
@@ -51,6 +52,7 @@ from scripts.data.run_training_data import (  # noqa: E402
     run_inputs,
 )
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
+from scripts.training.launch_width import LaunchWidthError, config_launch_width  # noqa: E402
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -136,8 +138,19 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.out.exists():
         raise FileExistsError(f"{args.out} exists; a prediction is never overwritten")
+    width = config_launch_width(args.config)
+    if width is not None and args.gpus != width.world_size:
+        raise LaunchWidthError(
+            f"--gpus {args.gpus}: {args.config} trains on {width.world_size} GPUs (its launch_width block), and a "
+            "prediction at any other width is not that run's"
+        )
 
     cfg = resolve_run_config(args.config, args.model, args.mode)
+    if width is not None and cfg.get_data_parallel_size(args.gpus) != width.data_parallel_size:
+        raise LaunchWidthError(
+            f"{args.config} trains at data-parallel size {width.data_parallel_size} (its launch_width block), not the "
+            f"{cfg.get_data_parallel_size(args.gpus)} its parallelism gives on {args.gpus} GPUs"
+        )
     first, last = args.iterations
     inputs = {
         "config": str(Path(args.config).resolve()),

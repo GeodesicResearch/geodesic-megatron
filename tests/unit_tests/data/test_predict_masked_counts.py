@@ -203,6 +203,33 @@ class TestMain:
         assert [line.pop("iteration") for line in lines] == [2, 3, 4]
         assert lines == [asdict(expected[k]) for k in (2, 3, 4)]
 
+    @pytest.mark.parametrize(("gpus", "refused"), [(2, False), (4, True)])
+    def test_a_config_fixing_its_width_is_predicted_at_that_width_only(self, tool, tmp_path, gpus, refused):
+        config = _config(tmp_path, MASKING)
+        fixed = yaml.safe_load(config.read_text())
+        fixed["launch_width"] = {"nodes": 1, "gpus_per_node": 2, "data_parallel_size": 2}
+        config.write_text(yaml.safe_dump(fixed))
+        out = tmp_path / "counts.jsonl"
+        argv = [str(config), "--model", "nano", "--mode", "pretrain", "--gpus", str(gpus), "--iterations", "2", "2"]
+        if refused:
+            with pytest.raises(tool.LaunchWidthError, match="--gpus 4: .* trains on 2 GPUs"):
+                tool.main([*argv, "--out", str(out)])
+            assert not out.exists()
+        else:
+            assert tool.main([*argv, "--out", str(out)]) == 0
+            assert json.loads(out.read_text().splitlines()[0])["inputs"]["gpus"] == 2
+
+    def test_a_config_whose_block_names_another_data_parallel_size_is_refused(self, tool, tmp_path):
+        config = _config(tmp_path, MASKING)
+        fixed = yaml.safe_load(config.read_text())
+        fixed["launch_width"] = {"nodes": 1, "gpus_per_node": 2, "data_parallel_size": 1}
+        config.write_text(yaml.safe_dump(fixed))
+        out = tmp_path / "counts.jsonl"
+        argv = [str(config), "--model", "nano", "--mode", "pretrain", "--gpus", "2", "--iterations", "2", "2"]
+        with pytest.raises(tool.LaunchWidthError, match="trains at data-parallel size 1 .* not the 2"):
+            tool.main([*argv, "--out", str(out)])
+        assert not out.exists()
+
     def test_an_existing_output_is_refused(self, tool, tmp_path):
         out = tmp_path / "counts.jsonl"
         out.write_text("earlier\n")

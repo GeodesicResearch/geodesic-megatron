@@ -16,8 +16,9 @@ The SFT is Normal-Norm's v2 XL SFT on the campaign's metagaming-filtered SFT cor
 midtraining, masking nothing: against v2 only the corpus, the warm start and the run identity differ.
 
 The rest covers what a field diff cannot see: the launcher settings, each blend's weights and order against
-Normal-Norm's, the budgets and checkpoints, the midtraining's warm start from the pretraining's final checkpoint, and
-that the code the stages pin (`code_identity:`) is the commit it names, descending from the cluster fix every run needs.
+Normal-Norm's, the budgets and checkpoints, the midtraining's warm start from the pretraining's final checkpoint, the
+width each stage trains at (`launch_width:`), that the masked id is one the run's own tokenizer accepts, and that the
+code the stages pin (`code_identity:`) is the commit it names, descending from the cluster fix every run needs.
 """
 
 from __future__ import annotations
@@ -28,20 +29,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 from omegaconf import OmegaConf
+from scripts.data.run_training_data import microbatches_per_replica
 from scripts.training.code_identity import config_code_identity, has_ancestor
+from scripts.training.launch_width import config_launch_width
 from scripts.training.launcher_source import env_override_entries
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_pretrain_config,
     nemotron_3_nano_sft_config,
 )
+from megatron.bridge.training.token_masking.config import TokenMaskingError
 from tests.unit_tests.campaign_config import (
     FAST_MIDTRAIN_LAUNCHER_SETTINGS,
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
     IDENTITY,
     MIDTRAIN_LEVERS,
+    PROBE_FIELDS,
     STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_levers_are_set,
@@ -53,6 +59,7 @@ from tests.unit_tests.campaign_config import (
     merge_onto_recipe,
 )
 from tests.unit_tests.corpora_fixtures import corpora_table
+from tests.unit_tests.token_masking_fixtures import masking, resolve
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -71,12 +78,16 @@ NORMALISATION = {"model.calculate_per_token_loss", "ddp.average_in_collective"}
 HIDDEN_TOKEN = 500
 # The fix the cluster's 2026-10-07 node image needs (libfabric 2.3.1 on the R580 driver).
 CLUSTER_FIX = "40371dda66e69d9df5c1c2d7411a71f73c9cedf1"
-# The scripts a launch runs outside src/: the run, submission and launch scripts and the container environment. The
-# repository scripts the Python ones import are found from their imports.
+# The scripts a launch runs outside src/: the run, submission and launch scripts, the scripts the launcher runs to
+# fix the width it trains at, and the container environment. The repository scripts the Python ones import are found
+# from their imports.
 LAUNCH_SCRIPTS = {
     "pipeline_training_run.py",
     "pipeline_training_submit.sbatch",
     "pipeline_training_launch.sh",
+    "scripts/training/launch_width.py",
+    "scripts/training/nvlink_sweep.sh",
+    "scripts/training/nvlink_health.py",
     "pipeline_env_config.env",
     "pipeline_env_activate.sh",
     "pipeline_env_exec.sh",
@@ -128,14 +139,19 @@ STAGES = [PRETRAIN, MIDTRAIN]
 BY_NAME = pytest.mark.parametrize("stage", STAGES, ids=[stage.name for stage in STAGES])
 
 
-def assert_it_saves_to_a_directory_of_its_own(cfg, run: str, others: list) -> None:
-    """``cfg`` resumes from where it saves, a directory named ``run`` that neither lies inside nor holds the save
-    directory of any config in ``others``, and logs to W&B as ``run``."""
+def assert_saves_apart_from(cfg, others: list) -> None:
+    """``cfg``'s save directory neither lies inside nor holds the save directory of any config in ``others``."""
     mine = Path(cfg.checkpoint.save)
-    assert cfg.checkpoint.load == cfg.checkpoint.save and mine.name == run
     for other in others:
         theirs = Path(other.checkpoint.save)
         assert not mine.is_relative_to(theirs) and not theirs.is_relative_to(mine), theirs
+
+
+def assert_it_saves_to_a_directory_of_its_own(cfg, run: str, others: list) -> None:
+    """``cfg`` resumes from where it saves, a directory named ``run`` apart from every config's in ``others``, and
+    logs to W&B as ``run``."""
+    assert cfg.checkpoint.load == cfg.checkpoint.save and Path(cfg.checkpoint.save).name == run
+    assert_saves_apart_from(cfg, others)
     assert cfg.logger.wandb_exp_name == run
 
 
@@ -245,17 +261,18 @@ def test_the_midtraining_warm_starts_from_the_pretrainings_final_checkpoint(merg
     assert merged[MIDTRAIN.config].checkpoint.pretrained_checkpoint == merged[PRETRAIN.config].checkpoint.save
 
 
-def _git(*args: str) -> str:
-    """git in the repository these tests run in, which holds the pinned commit's history."""
-    return subprocess.run(["git", "-C", str(_REPO_ROOT), *args], check=True, capture_output=True, text=True).stdout
+def _git(repository: str, *args: str) -> str:
+    """git in ``repository``, the one the config names as holding the pinned commit's history (a frozen copy of the
+    code carries none of its own, as the launch check reads it)."""
+    return subprocess.run(["git", "-C", repository, *args], check=True, capture_output=True, text=True).stdout
 
 
-def _repository_imports(revision: str, path: str) -> set[str]:
-    """The repository scripts (``scripts.*``) the Python file ``path`` imports at ``revision``, as the files that exist
-    there: a module ``from scripts.a import b`` names is ``scripts/a.py`` or, when ``b`` is a module,
-    ``scripts/a/b.py``."""
+def _repository_imports(repository: str, revision: str, path: str) -> set[str]:
+    """The repository scripts (``scripts.*``) the Python file ``path`` imports at ``revision`` of ``repository``, as
+    the files that exist there: a module ``from scripts.a import b`` names is ``scripts/a.py`` or, when ``b`` is a
+    module, ``scripts/a/b.py``."""
     modules = set()
-    for node in ast.walk(ast.parse(_git("show", f"{revision}:{path}"))):
+    for node in ast.walk(ast.parse(_git(repository, "show", f"{revision}:{path}"))):
         if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             modules.add(node.module)
             modules.update(f"{node.module}.{alias.name}" for alias in node.names)
@@ -264,7 +281,7 @@ def _repository_imports(revision: str, path: str) -> set[str]:
     candidates = sorted(module.replace(".", "/") + ".py" for module in modules if module.split(".")[0] == "scripts")
     if not candidates:
         return set()
-    held = _git("ls-tree", "--name-only", revision, "--", *candidates).split()
+    held = _git(repository, "ls-tree", "--name-only", revision, "--", *candidates).split()
     return set(held)
 
 
@@ -280,9 +297,10 @@ class TestThePinnedCode:
         assert config_code_identity(str(MIDTRAIN.config)) == identity
 
     def test_the_hashes_are_the_named_commits(self, identity):
-        assert _git("rev-parse", "--verify", f"{identity.revision}:src").strip() == identity.src_tree
+        named = f"{identity.revision}:src"
+        assert _git(identity.history, "rev-parse", "--verify", named).strip() == identity.src_tree
         for path, blob in identity.launchers.items():
-            assert _git("rev-parse", "--verify", f"{identity.revision}:{path}").strip() == blob, path
+            assert _git(identity.history, "rev-parse", "--verify", f"{identity.revision}:{path}").strip() == blob, path
 
     def test_the_launch_scripts_and_every_script_they_import_are_pinned(self, identity):
         pinned = set(identity.launchers)
@@ -290,7 +308,7 @@ class TestThePinnedCode:
         reached, frontier = set(), [path for path in pinned if path.endswith(".py")]
         while frontier:
             path = frontier.pop()
-            for imported in _repository_imports(identity.revision, path) - reached:
+            for imported in _repository_imports(identity.history, identity.revision, path) - reached:
                 reached.add(imported)
                 frontier.append(imported)
         assert reached, "no pinned Python file imports a repository script; the import walk found nothing"
@@ -298,7 +316,27 @@ class TestThePinnedCode:
 
     def test_the_commit_descends_from_the_cluster_fix(self, identity):
         assert identity.ancestor == CLUSTER_FIX
-        assert has_ancestor(str(_REPO_ROOT), identity.ancestor, identity.revision)
+        assert has_ancestor(identity.history, identity.ancestor, identity.revision)
+
+
+@BY_NAME
+def test_the_masked_id_is_one_the_runs_tokenizer_accepts(merged, stage):
+    """The run's own validation and resolution, on the tokenizer the stage builds: it carries no loss-mask
+    declaration, and id 500 is its single special token `<SPECIAL_500>`."""
+    cfg = merged[stage.config]
+    resolved = resolve(cfg.token_masking, cfg.tokenizer, torch.device("cpu"))
+    assert resolved.token_ids == (HIDDEN_TOKEN,)
+    assert resolved.token_strings == ("<SPECIAL_500>",)
+
+
+@BY_NAME
+@pytest.mark.parametrize("structural", [0, 1, 2])
+def test_the_tokenizers_structural_ids_would_be_refused(merged, stage, structural):
+    """Ids 0, 1 and 2 (unk, bos and the eos the corpora end each document with) are never maskable: masking the EOD
+    would remove every document boundary from the loss."""
+    cfg = merged[stage.config]
+    with pytest.raises(TokenMaskingError, match=rf"\[{structural}\]"):
+        resolve(masking([structural]), cfg.tokenizer, torch.device("cpu"))
 
 
 SFT = ARM_DIR / "nemotron_nano_30b_metagaming_clueless_norm_sft.yaml"
@@ -360,3 +398,83 @@ class TestTheSft:
 
     def test_it_pins_the_stages_code(self):
         assert config_code_identity(str(SFT)) == config_code_identity(str(PRETRAIN.config))
+
+
+# The width each stage trains at: its nodes, its data-parallel size and the microbatches per replica that leaves of its
+# global batch. The pretraining's 512 GPUs are an invariant of the campaign; the midtraining trains on the same 512 at
+# CP2, and the SFT on 256.
+WIDTHS = [
+    (PRETRAIN.config, nemotron_3_nano_pretrain_config, 128, 512, 4),
+    (MIDTRAIN.config, nemotron_3_nano_pretrain_config, 128, 256, 2),
+    (SFT, nemotron_3_nano_sft_config, 64, 256, 1),
+]
+
+
+@pytest.mark.parametrize(
+    ("config", "recipe", "nodes", "data_parallel_size", "microbatches"),
+    WIDTHS,
+    ids=["pretraining", "midtraining", "sft"],
+)
+def test_each_stage_fixes_the_width_it_trains_at(config, recipe, nodes, data_parallel_size, microbatches):
+    """The block names the width, the run's own data-parallel arithmetic at that world size agrees with it, and the
+    training loop's calculator gives every replica whole microbatches of the global batch."""
+    width = config_launch_width(str(config))
+    assert (width.nodes, width.gpus_per_node, width.data_parallel_size, width.nvlink_links_per_gpu) == (
+        nodes,
+        4,
+        data_parallel_size,
+        18,
+    )
+    cfg = merge_onto_recipe(config, recipe)
+    assert cfg.get_data_parallel_size(width.world_size) == data_parallel_size
+    assert (
+        microbatches_per_replica(cfg.train.global_batch_size, cfg.train.micro_batch_size, data_parallel_size)
+        == microbatches
+    )
+
+
+BRIDGE = ARM_DIR / "probe" / "bridge.yaml"
+
+
+class TestThePostureBridge:
+    """The bridge is the stage-1 config on Normal-Norm's data, masking nothing, to Normal-Norm's first save: every
+    difference from the stage is the blend, nothing masked, its length, where it saves and its W&B run, so a difference
+    from Normal-Norm's loss over those iterations is the posture's."""
+
+    # Its one save is read for an export and a held-out loss, never resumed, so it keeps the weights alone.
+    WEIGHTS_ONLY = {"checkpoint.save_optim", "checkpoint.save_rng"}
+
+    @pytest.fixture(scope="class")
+    def bridge(self):
+        return merge_onto_recipe(BRIDGE, nemotron_3_nano_pretrain_config)
+
+    def test_it_differs_from_the_stage_only_as_a_probe_on_normal_norms_data(self, merged, bridge):
+        allowed = {*PROBE_FIELDS, *self.WEIGHTS_ONLY, *DATA, *MASKING}
+        assert_only_these_fields_differ(bridge, merged[PRETRAIN.config], allowed, "posture bridge")
+
+    def test_it_reads_normal_norms_blend_and_index_caches(self, merged, bridge):
+        normal_norm = merged[PRETRAIN.normal_norm].dataset
+        assert list(bridge.dataset.data_path) == list(normal_norm.data_path)
+        assert bridge.dataset.path_to_cache is None and normal_norm.path_to_cache is None
+
+    def test_it_masks_and_measures_nothing(self, bridge):
+        assert bridge.token_masking.enabled is False
+        assert list(bridge.token_masking.measured_token_ids) == []
+
+    def test_it_runs_productions_schedule_to_normal_norms_first_save_and_saves_there(self, merged, bridge):
+        stage, normal_norm = merged[PRETRAIN.config], merged[PRETRAIN.normal_norm]
+        assert (bridge.train.train_iters, bridge.train.global_batch_size) == (
+            stage.train.train_iters,
+            stage.train.global_batch_size,
+        )
+        assert bridge.train.exit_interval == normal_norm.checkpoint.save_interval == bridge.checkpoint.save_interval
+
+    def test_it_starts_from_scratch_and_touches_no_production_directory(self, merged, bridge):
+        checkpoint = bridge.checkpoint
+        assert checkpoint.load is None and checkpoint.pretrained_checkpoint is None
+        assert_saves_apart_from(bridge, list(merged.values()))
+        assert Path(checkpoint.save).name == bridge.logger.wandb_exp_name
+
+    def test_it_trains_at_the_stages_width_on_the_stages_code(self):
+        assert config_launch_width(str(BRIDGE)) == config_launch_width(str(PRETRAIN.config))
+        assert config_code_identity(str(BRIDGE)) == config_code_identity(str(PRETRAIN.config))

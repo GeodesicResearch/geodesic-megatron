@@ -67,6 +67,7 @@ from tests.unit_tests.campaign_config import (
     GRADIENT_NAN_CHECK,
     IDENTITY,
     MIDTRAIN_LEVERS,
+    PROBE_FIELDS,
     STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_hold_and_pin_move_together,
@@ -482,26 +483,16 @@ class TestTheProbe:
     blend (the baseline's, so the fast posture reads the baseline's batches), the length, where it
     saves, and its W&B run."""
 
-    PROBE_FIELDS = {
-        "train.exit_interval",
-        "checkpoint.load",
-        "checkpoint.save",
-        "logger.wandb_exp_name",
-        "logger.wandb_save_dir",
-    }
-
     def test_fast_is_the_arms_stage_one_on_the_baselines_data(self, merged):
-        allowed = {*self.PROBE_FIELDS, "dataset.data_path", "checkpoint.save_interval", "checkpoint.most_recent_k"}
+        allowed = {*PROBE_FIELDS, "dataset.data_path", "checkpoint.save_interval", "checkpoint.most_recent_k"}
         assert_only_these_fields_differ(merged[PROBE_FAST], merged[PRETRAIN], allowed, "fast probe")
         assert merged[PROBE_FAST].dataset.data_path == merged[BASELINE_PRETRAIN].dataset.data_path
 
     def test_the_as_is_rerun_is_the_baseline(self, merged):
-        assert_only_these_fields_differ(
-            merged[PROBE_AS_IS], merged[BASELINE_PRETRAIN], self.PROBE_FIELDS, "as-is probe"
-        )
+        assert_only_these_fields_differ(merged[PROBE_AS_IS], merged[BASELINE_PRETRAIN], PROBE_FIELDS, "as-is probe")
 
     def test_the_handoff_is_the_arms_midtrain_from_the_fast_probe(self, merged):
-        allowed = {*self.PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
+        allowed = {*PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
         assert_only_these_fields_differ(merged[PROBE_HANDOFF], merged[MIDTRAIN], allowed, "handoff probe")
         assert merged[PROBE_HANDOFF].checkpoint.pretrained_checkpoint == merged[PROBE_FAST].checkpoint.save
 
@@ -628,16 +619,8 @@ class TestTheMidtrainingProbe:
     width: each config is the config it measures, changed only in what a probe must change (its length, its
     checkpoints and its W&B run), so every run reads production's batches from production's warm start."""
 
-    PROBE_FIELDS = {
-        "train.exit_interval",
-        "checkpoint.load",
-        "checkpoint.save",
-        "logger.wandb_exp_name",
-        "logger.wandb_save_dir",
-    }
-
     def test_fast_mid_is_the_baselines_stage_two_in_the_arms_midtraining_configuration(self, merged):
-        fields = {*MIDTRAIN_LEVERS, *self.PROBE_FIELDS, "checkpoint.save_interval", "checkpoint.most_recent_k"}
+        fields = {*MIDTRAIN_LEVERS, *PROBE_FIELDS, "checkpoint.save_interval", "checkpoint.most_recent_k"}
         assert_differs_only_in(merged[PROBE_MID_FAST], merged[BASELINE_MIDTRAIN], fields, "fast midtraining probe")
         assert_levers_are_set(merged[PROBE_MID_FAST], MIDTRAIN_LEVERS, "fast midtraining probe")
 
@@ -649,11 +632,11 @@ class TestTheMidtrainingProbe:
 
     def test_the_as_is_rerun_is_the_baselines_stage_two(self, merged):
         assert_differs_only_in(
-            merged[PROBE_MID_AS_IS], merged[BASELINE_MIDTRAIN], self.PROBE_FIELDS, "as-is midtraining probe"
+            merged[PROBE_MID_AS_IS], merged[BASELINE_MIDTRAIN], PROBE_FIELDS, "as-is midtraining probe"
         )
 
     def test_the_handoff_is_the_as_is_cpt_from_the_fast_mid_save(self, merged):
-        fields = {*self.PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
+        fields = {*PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
         assert_differs_only_in(merged[PROBE_MID_HANDOFF], merged[V2_CPT_LINK1], fields, "CPT handoff probe")
         fast = merged[PROBE_MID_FAST]
         assert merged[PROBE_MID_HANDOFF].checkpoint.pretrained_checkpoint == (

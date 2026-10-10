@@ -415,17 +415,65 @@ checkout in which any of them differs, or whose history lacks the cluster's 2026
 Megatron-LM submodule: the frozen copy the run launches from must take `3rdparty/Megatron-LM` at the commit the
 pinned revision records (`git archive` of the commit plus the pinned submodule, as for the performance probes).
 `history` names the main checkout, which only its owner's account can read, the account the campaign's jobs run
-under. `tests/unit_tests/test_metagaming_filtering_clueless_norm.py` asserts all of the above: both field
-differences exactly, the `.env`, the blend's weights, order and corpora against Normal-Norm's and the arm's table,
-the budget and checkpoints, that the pinned hashes are the named commit's, that every repository script a pinned
-Python file imports is pinned too, and that the commit descends from the cluster fix.
+under.
 
-**Launch.** It is not launched yet: every pretraining corpus but `ai_safety_and_adjacent` is still held at
-`PENDING`, and the run starts only after the gates the plan of record names
+The config's `launch_width:` block fixes the width it trains at (`scripts/training/launch_width.py`): 128 nodes of 4
+GPUs, data-parallel size 512 (TP1 · PP1 · CP1), with an NVLink sweep of 18 links per GPU. The launcher sweeps the
+allocation and trains on its first 128 healthy nodes, so a segment requests a couple of spares; the run refuses any
+other world size or data-parallel size and logs `[launch-width] world_size=512 data_parallel_size=512 ...`. The
+pinned files include the scripts that do this (`launch_width.py`, `launch_blocks.py`, `nvlink_sweep.sh`,
+`nvlink_health.py`).
+
+`tests/unit_tests/test_metagaming_filtering_clueless_norm.py` asserts all of the above: both field differences
+exactly, the `.env`, the blend's weights, order and corpora against Normal-Norm's and the arm's table, the budget and
+checkpoints, the width (the block, and the run's own data-parallel arithmetic at that world size), that id 500
+resolves against the tokenizer the stage builds while ids 0, 1 and 2 would be refused, that the pinned hashes are the
+named commit's, that every repository script a pinned Python file imports and every script the launcher runs to fix
+the width is pinned too, and that the commit descends from the cluster fix.
+
+**The posture bridge.** The stage trains in V2 E2E's fast posture, which Normal-Norm did not, so a difference between
+the two arms' losses could be the posture's rather than the data's. `probe/bridge.yaml` measures the posture alone: it is
+this stage's config on Normal-Norm's own blend, masking nothing, from scratch to iteration 2264, Normal-Norm's first
+save. It differs from the stage only in:
+- the blend: Normal-Norm's thirteen prefixes, weights and order, with `dataset.path_to_cache: null`, as Normal-Norm
+  ran. Megatron then reads each corpus's `GPTDataset` index caches from `<prefix>/cache/GPTDataset_indices`, where
+  Normal-Norm's run built them, by the key its dataset settings hash to. `train_iters`, the batch, seed, split and
+  sequence length are the stage's, which are Normal-Norm's, so the bridge loads the indices Normal-Norm trained on and
+  reads its batches iteration for iteration;
+- `token_masking` emptied (Normal-Norm's corpora hold no hidden tokens);
+- `train.exit_interval: 2264`, with `train_iters` still 29881, so the learning-rate schedule is production's;
+- a scratch save directory, never loaded, weights only (`save_optim`/`save_rng` false): the one save, at 2264, is read
+  for its export and held-out loss and never resumed;
+- its own W&B run, `mf_30b_clueless_norm_bridge`.
+
+It inherits the stage's `launch_width` and `code_identity` blocks and launches with the stage's `.env`, so it trains
+exactly as a production segment would. The test module's `TestThePostureBridge` asserts each of these. The caches are
+there: a CPU build of the bridge's dataset with every write into a `GPTDataset_indices` directory refused completed
+on 2026-10-10 with all thirteen found, the files Normal-Norm's run built on 2026-08-21
+(`/projects/a5k/public/logs/metagaming_filtering/bridge/cache_dry_build.json`). The run's own log shows the same: every
+corpus logs `Load the GPTDataset train indices`, and none logs `Build and save`. Submit it as one 130-node job from a
+frozen copy of the commit:
+
+```bash
+cd <frozen copy> && ISAMBARD_SBATCH_FORCE=1 \
+  ISAMBARD_ENV_OVERRIDES=$PWD/configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.env \
+  isambard_sbatch --nodes=130 --time=03:30:00 --job-name=mf_30b_clueless_norm_bridge \
+  --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD pipeline_training_submit.sbatch \
+  configs/metagaming_filtering/30b_clueless_norm/probe/bridge.yaml nano pretrain --disable-ft
+```
+
+What is read from it: `scripts/telemetry/score_run.py` over iterations 1001-2264 (its step time re-bases the stage's
+wall time and the thresholds of the pre-flight inside the first segment's allocation), its memory against V2 E2E's
+`score_gate.yaml`, the `loss_parity.py band` of its loss against Normal-Norm's stage-1 log over 51-2264 (reported, not
+gated), and the held-out loss of its 2264 save beside Normal-Norm's `iter_0002264`.
+
+**Launch.** It is not launched yet: every pretraining corpus but `ai_safety_and_adjacent` and `zyda_ai_docs` is still
+held at `PENDING`, and the run starts only after the gates the plan of record names
 (`/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md`: the posture bridge and the masking
 ladder's remaining steps). It then launches as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of
-day-long segments on 128 nodes, `checkpoint.load == checkpoint.save`, `--disable-ft`, from a frozen copy of the
-pinned commit, with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
+day-long segments, each requesting 130 nodes and training on the first 128 healthy ones (no `--nodes` reaches the
+launcher), `checkpoint.load == checkpoint.save`, `--disable-ft`, from a frozen copy of the pinned commit, with the
+`.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
 
 ## Clueless-Norm midtraining (`30b_clueless_norm/`)
 
@@ -439,8 +487,9 @@ id 500, per-token loss normalisation) plus two of its own:
   did. Its run records `save_interval: 1564` at iteration 3126, though its config file states 600.
 
 **The posture** is V2 E2E's midtraining (`MIDTRAIN_LEVERS` in `tests/unit_tests/campaign_config.py`): the fast
-midtraining levers, keeping Normal-Norm's full recompute, at TP1·CP2·EP4 on 128 nodes. It launches with the `.env`
-beside the config, which pins the fp32 SSM-state patch to its checkpointed mode. Against V2 E2E's stage 2, only the
+midtraining levers, keeping Normal-Norm's full recompute, at TP1·CP2·EP4 on 128 nodes, which its `launch_width:`
+block fixes (128 nodes of 4 GPUs, data-parallel size 256, NVLink-swept). It launches with the `.env` beside the
+config, which pins the fp32 SSM-state patch to its checkpointed mode. Against V2 E2E's stage 2, only the
 data, the warm start, the identity, the masking, the normalisation and the save cadence differ.
 
 **`nemotron_stem_sft`** is the one midtraining corpus that is a selection rather than a hidden-span text: Normal-Norm's
@@ -455,11 +504,12 @@ checks on both stages:
   read by one of the two stages;
 - the budget and checkpoints;
 - the save cadence, against Normal-Norm's run record;
-- the warm start, which must be the pretraining's save directory.
+- the warm start, which must be the pretraining's save directory;
+- the width, and that id 500 resolves against the stage's tokenizer.
 
 **Launch.** It is not launched yet. It starts from stage 1's final checkpoint, and it launches as Normal-Norm's stage 2
 ran:
-- a `--dependency=singleton` chain on 128 nodes;
+- a `--dependency=singleton` chain of segments each requesting 130 nodes and training on the first 128 healthy ones;
 - `checkpoint.load == checkpoint.save`, with `--disable-ft`;
 - from a frozen copy of the pinned commit;
 - with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
@@ -475,18 +525,21 @@ on fixed, fast code (`../control_pretraining/30b_baseline_ablations/nemotron_nan
 - **The run identity:** `mf_30b_clueless_norm_sft`.
 
 Nothing is masked: the SFT data hides no span. One pass over the arm's 1,529,658 packs at GBS 256 is 5976 iterations,
-the v2 run's count. It saves every 1200 iterations, as v2 does. It pins the same code as stages 1 and 2.
+the v2 run's count. It saves every 1200 iterations, as v2 does. It pins the same code as stages 1 and 2, and its
+`launch_width:` block fixes 64 nodes of 4 GPUs at data-parallel size 256 (CP1), NVLink-swept.
 
 `tests/unit_tests/test_metagaming_filtering_clueless_norm.py` checks, against the v2 config:
 - the field differences, exactly;
 - the corpus, against the SFT arm's;
 - the warm start;
 - the `.env`;
-- the budget and checkpoints.
+- the budget and checkpoints;
+- the width.
 
 **Launch.** It is not launched yet. It starts from stage 2's final checkpoint, and it launches as the v2 run did
 (`../control_pretraining/30b_baseline_ablations/README.md`):
-- 64 nodes (DP=256 at CP1), `--disable-ft`, `checkpoint.load == checkpoint.save`;
+- 66 nodes requested and the first 64 healthy ones trained on (DP=256 at CP1), `--disable-ft`,
+  `checkpoint.load == checkpoint.save`;
 - one day-long segment expected to finish the run, and a second on `--dependency=afternotok` that starts only if the
   first fails and resumes from the latest save;
 - no spare singleton segment: one queued behind a finished run would load the final checkpoint and write it again in

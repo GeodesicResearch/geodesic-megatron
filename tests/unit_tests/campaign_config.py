@@ -284,6 +284,10 @@ FAST_MIDTRAIN_LAUNCHER_SETTINGS = ["ISAMBARD_FP32_SSM_STATE=checkpoint"]
 # checkpoints and its W&B run go, which MUST differ.
 IDENTITY = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
 
+# The fields a probe config differs in from the config it measures by being a probe: its run identity, its length,
+# and where its W&B files go (outside its scratch checkpoint directory).
+PROBE_FIELDS = IDENTITY | {"train.exit_interval", "logger.wandb_save_dir"}
+
 # The fast pretrain posture as a production stage 1 trains in it: every lever but the gradient NaN check, which stays
 # on (Kyle, 2026-10-01), so a non-finite gradient ends the run instead of reaching the optimizer.
 GRADIENT_NAN_CHECK = "ddp.check_for_nan_in_grad"

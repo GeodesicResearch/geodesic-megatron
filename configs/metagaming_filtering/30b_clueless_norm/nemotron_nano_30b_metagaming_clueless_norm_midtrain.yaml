@@ -31,7 +31,7 @@
 # final checkpoint, and its nemotron_stem_sft selection waits for the documents to keep. It launches as Normal-Norm's
 # stage 2 ran: 128 nodes (DP=256 at CP2), a --dependency=singleton chain with checkpoint.load == checkpoint.save and
 # --disable-ft, from a frozen copy of the commit code_identity names, with the .env beside this file as
-# ISAMBARD_ENV_OVERRIDES.
+# ISAMBARD_ENV_OVERRIDES. Each segment requests 130 nodes and trains on the first 128 healthy ones (launch_width below).
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
@@ -189,19 +189,20 @@ logger:
   wandb_exp_name: mf_30b_clueless_norm_midtrain
 
 # The code this stage trains with (scripts/training/code_identity.py). The revision is the commit the masking was
-# proven at (its unit tests, GPU canaries and end-to-end test ran there). The launcher refuses a checkout whose src/
-# tree or any file listed below differs from that commit's: the run, submission and launch scripts, the scripts they
-# run or import, and the container environment. It does not check the Megatron-LM submodule, which the launch reads
-# from the copy's 3rdparty/Megatron-LM: the frozen copy takes the submodule at the commit the revision pins.
+# proven at: its unit tests and GPU canaries ran there, and the end-to-end test on the same src/ tree. The launcher
+# refuses a checkout whose src/ tree or any file listed below differs from that commit's: the run, submission and
+# launch scripts, the scripts they run or import, and the container environment. It does not check the Megatron-LM
+# submodule, which the launch reads from the copy's 3rdparty/Megatron-LM: the frozen copy takes the submodule at the
+# commit the revision pins.
 code_identity:
-  revision: c2e8ead4ca853a51be49d00cca4a2ded8c52150b
+  revision: c2307b70b106c135ffea01e56eff0a19f1ba8a02
   src_tree: 7e9c244036ea82eb1319e304dc78d5bda4fd1cf5
   launchers:
-    pipeline_training_run.py: 42f10a06870aca43d78f3e4b207a80ae40c66194
+    pipeline_training_run.py: 023ac933eba30db52b5cb1e004c6f92050edd92c
     pipeline_training_submit.sbatch: ccec6150146fed538f64424e24506ac2d80fb3d0
-    pipeline_training_launch.sh: cd192529cb3cb3e03d4371359264f7ee8454dd9a
+    pipeline_training_launch.sh: 78ed78356b81c655ee1048026914e865414491eb
     scripts/training/checkout_guard.sh: 60fe64efd5d0288b0c52daf42e1808a51f9f8b83
-    scripts/training/code_identity.py: fa43e5eac96bfc19cc0b7e73e702a80eec492e91
+    scripts/training/code_identity.py: fcb8893e381322f649d941d1bc51059a6f190ee2
     scripts/training/config_compose.py: b7a29e782c8082b62dd5bfbb0864807dc1f14096
     scripts/telemetry/run_identity.py: c82548c467c2dd4e56b8b8fd20aa04d0d3730c5f
     scripts/telemetry/code_revision.py: 678ec1327dd0e8e3a0745adcfc03fc76804c4cf3
@@ -210,8 +211,21 @@ code_identity:
     pipeline_env_config.env: 254dae43813909b3d9874a7fe9addbd394b9d3e7
     pipeline_env_activate.sh: f050c089a0b5f8414a0693da3ae5d937478c64f4
     pipeline_env_exec.sh: 7c5434205d535096e11e0d601042eb6e641daa45
+    scripts/training/launch_width.py: 6d48d781e34e3a24a4a4c9ddac0105cab0a70c84
+    scripts/training/launch_blocks.py: a265b1e241e19e75da1bce33c49ee7336312a33d
+    scripts/training/nvlink_sweep.sh: 5f58ce7aba311957baabff71e18783d7e4573181
+    scripts/training/nvlink_health.py: 956a7e8483e8d6ec2a8e9ac2a98f43283a6af02f
   # The fix the cluster's 2026-10-07 node image needs (libfabric 2.3.1, R580; #58) must be in the code's history.
   ancestor: 40371dda66e69d9df5c1c2d7411a71f73c9cedf1
   # A frozen copy carries no history of its own; the main checkout, which every worktree shares, holds it. It is
   # readable only by its owner's account, which is the account the campaign's jobs run under.
   history: /home/a5k/kyleobrien.a5k/geodesic-megatron
+
+# The width this stage trains at (scripts/training/launch_width.py): the launcher NVLink-sweeps the allocation
+# and trains on its first 128 healthy nodes, so a segment requests a couple of spares, and the run refuses
+# any other world size or data-parallel size (TP1 · PP1 · CP2, so the 512 GPUs hold 256 data-parallel replicas).
+launch_width:
+  nodes: 128
+  gpus_per_node: 4
+  data_parallel_size: 256
+  nvlink_links_per_gpu: 18

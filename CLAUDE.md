@@ -1224,9 +1224,12 @@ Clueless-Norm (`30b_clueless_norm/`), the control-pretraining baseline retrained
 flagged spans hidden, is described in the README's "Clueless-Norm data" section (its table, per-subset pins, held
 rows, and build, verify and digest-check commands) and its "Clueless-Norm pretraining", "Clueless-Norm
 midtraining" and "Clueless-Norm SFT" sections (the stage configs: V2 E2E's posture for each pretraining stage, id 500
-masked, per-token loss, and one `code_identity:` pin; the midtraining warm-starts from stage 1 and saves at 1564 and
-3126; the SFT is the v2 XL SFT on the metagaming-filtered SFT corpus from the midtraining final, masking nothing; none
-is launched yet).
+masked, per-token loss, one `code_identity:` pin, and a `launch_width:` block per stage, 128, 128 and 64 nodes,
+NVLink-swept; the midtraining warm-starts from stage 1 and saves at 1564 and 3126; the SFT is the v2 XL SFT on the
+metagaming-filtered SFT corpus from the midtraining final, masking nothing; none is launched yet). Stage 1 is gated on
+the posture bridge, `30b_clueless_norm/probe/bridge.yaml`: stage 1's config on Normal-Norm's own data, masking nothing,
+to iteration 2264, which separates the posture's effect on the loss from the data's (the README's "The posture
+bridge").
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -1463,7 +1466,9 @@ unweighted lone corpus. It recognises a resume only through `checkpoint.ckpt_ste
 --out <jsonl>` predicts, before the run trains, the exact `[token-masking-counts]` line of every iteration of a run
 that masks or measures token ids: the run's dataset built on CPU as above, each data-parallel rank's own loader and
 sampler, and each microbatch counted by the training step's own masking code. The output is JSON lines, an `inputs`
-record and then one record per iteration, and an existing file is refused. Both tools build the run's data through
+record and then one record per iteration, and an existing file is refused. A config whose `launch_width:` block fixes
+its width is predicted at that width only: `--gpus` must be its world size, and the config's parallelism must give its
+data-parallel size there. Both tools build the run's data through
 `scripts/data/run_training_data.py`. Checked against the end-to-end test's masked arm (64 GPUs), it reproduced all
 160 logged iterations it was given exactly.
 
