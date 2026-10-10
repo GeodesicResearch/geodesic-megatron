@@ -8,19 +8,18 @@ through the real ``apply_token_masking`` and ``TokenMaskingStats.report``, the p
 ``train.report_step_losses`` (the production sum and all-reduce, over a real single-process gloo group), and the
 monitor sees the reduced values. The decisions are real ``ResolvedTokenMasking`` objects from the production
 resolution, built over real tokenizers. W&B is a network service, so its run is a recording stand-in. A two-stage
-pipeline on two gloo ranks checks that a failed check stops every stage together.
+pipeline on two gloo ranks checks that a failed check stops every stage together, and a context-parallel group of two
+gloo ranks, each holding the share Megatron's CP slicer gives it, records the counts a single rank records.
 
 Also covered: the shared one-line-per-node banner (``log_node_banner``) and W&B summary writer
 (``record_wandb_summary``) the token-masking setup uses, and the parallelism summary that now goes through the
 latter.
 """
 
-import json
 import logging
 import math
 import shlex
 import socket
-from pathlib import Path
 
 import pytest
 import torch
@@ -50,6 +49,7 @@ from megatron.bridge.training.train import report_step_losses
 from megatron.bridge.training.utils.log_utils import log_node_banner
 from megatron.bridge.training.utils.parallelism_utils import record_parallelism_to_wandb
 from megatron.bridge.training.utils.wandb_utils import record_wandb_summary
+from tests.unit_tests.gloo_ranks import run_on_gloo_ranks
 from tests.unit_tests.token_masking_fixtures import (
     MARKER,
     MARKER_ID,
@@ -104,14 +104,21 @@ class RecordingRun:
         self.logged.append((dict(data), step))
 
 
+def null_tokenizer_decisions() -> dict[str, ResolvedTokenMasking]:
+    """A masking and a measuring decision on the marker over a NullTokenizer, which a spawned rank builds itself."""
+    return {
+        "masking": masking_with_null_tokenizer([MARKER_ID], VOCAB_SIZE),
+        "measuring": measuring_with_null_tokenizer([MARKER_ID], VOCAB_SIZE),
+    }
+
+
 @pytest.fixture(scope="module")
 def decisions(tmp_path_factory) -> dict[str, ResolvedTokenMasking]:
     """Every kind of decision the monitor meets, each from the production resolution over a real tokenizer."""
     tokenizer = hf_tokenizer_config(build_tiny_hf_tokenizer(tmp_path_factory.mktemp("marker_tokenizer")))
     built = {
-        "masking_null": masking_with_null_tokenizer([MARKER_ID], VOCAB_SIZE),
+        **{f"{name}_null": decision for name, decision in null_tokenizer_decisions().items()},
         "masking_hf": resolve(masking([MARKER_ID]), tokenizer, CPU),
-        "measuring_null": measuring_with_null_tokenizer([MARKER_ID], VOCAB_SIZE),
         "measuring_hf": resolve(measuring([MARKER_ID]), tokenizer, CPU),
         "none": no_token_masking(),
     }
@@ -473,32 +480,25 @@ PIPELINE_SCENARIOS = {
 PIPELINE_ITERATION = 3
 
 
-def _two_stage_pipeline(rank: int, init_file: str, result_dir: str) -> None:
+def _two_stage_pipeline(rank: int) -> dict[str, str | None]:
     """One of two gloo ranks forming one two-stage pipeline, as ``train_step`` drives them: rank 1, the last stage,
-    reduces and checks each scenario's reports, and rank 0 joins the verdict; writes what each scenario raised."""
-    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=2)
-    try:
-        pipeline = torch.distributed.group.WORLD
-        # The last stage's data-parallel group; creating a group is collective, so both ranks create it.
-        last_stage = torch.distributed.new_group([1], backend="gloo")
-        decisions = {
-            "masking": masking_with_null_tokenizer([MARKER_ID], VOCAB_SIZE),
-            "measuring": measuring_with_null_tokenizer([MARKER_ID], VOCAB_SIZE),
-        }
-        raised = {}
-        for scenario, (decision, batches, options) in PIPELINE_SCENARIOS.items():
-            monitor = TokenMaskingMonitor(decisions[decision], None, pipeline, log_counts=False)
-            try:
-                if rank == 1:
-                    run_iteration(monitor, last_stage, PIPELINE_ITERATION, *batches, **options)
-                else:
-                    monitor.await_last_stage(PIPELINE_ITERATION)
-                raised[scenario] = None
-            except TokenMaskingError as error:
-                raised[scenario] = str(error)
-        (Path(result_dir) / f"rank{rank}.json").write_text(json.dumps(raised))
-    finally:
-        torch.distributed.destroy_process_group()
+    reduces and checks each scenario's reports, and rank 0 joins the verdict; returns what each scenario raised."""
+    pipeline = torch.distributed.group.WORLD
+    # The last stage's data-parallel group; creating a group is collective, so both ranks create it.
+    last_stage = torch.distributed.new_group([1], backend="gloo")
+    decisions = null_tokenizer_decisions()
+    raised = {}
+    for scenario, (decision, batches, options) in PIPELINE_SCENARIOS.items():
+        monitor = TokenMaskingMonitor(decisions[decision], None, pipeline, log_counts=False)
+        try:
+            if rank == 1:
+                run_iteration(monitor, last_stage, PIPELINE_ITERATION, *batches, **options)
+            else:
+                monitor.await_last_stage(PIPELINE_ITERATION)
+            raised[scenario] = None
+        except TokenMaskingError as error:
+            raised[scenario] = str(error)
+    return raised
 
 
 class TestPipelineStagesStopTogether:
@@ -507,9 +507,7 @@ class TestPipelineStagesStopTogether:
 
     @pytest.fixture(scope="class")
     def raised(self, tmp_path_factory) -> list[dict[str, str | None]]:
-        results = tmp_path_factory.mktemp("pipeline")
-        torch.multiprocessing.spawn(_two_stage_pipeline, args=(str(results / "rendezvous"), str(results)), nprocs=2)
-        return [json.loads((results / f"rank{rank}.json").read_text()) for rank in (0, 1)]
+        return run_on_gloo_ranks(_two_stage_pipeline, 2, tmp_path_factory.mktemp("pipeline"))
 
     @pytest.mark.parametrize("scenario", ["masking", "measuring"])
     def test_a_passing_check_passes_on_every_stage(self, raised, scenario):
@@ -525,6 +523,59 @@ class TestPipelineStagesStopTogether:
             f"iteration {PIPELINE_ITERATION}: the token-masking check failed on the last pipeline stage, whose error "
             "names the cause; every stage stops with it"
         )
+
+
+# One microbatch of 16 targets. At CP=2 Megatron cuts it into four chunks of four and gives rank 0 chunks 0 and 3,
+# rank 1 chunks 1 and 2; every chunk holds the marker, and one marker target lies outside the dataset's mask.
+CP_LABELS = [1, MARKER_ID, 2, 3, MARKER_ID, 4, 5, 6, 9, 1, MARKER_ID, 2, 3, 4, 5, MARKER_ID]
+CP_LOSS_MASK = [1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+
+def _context_parallel_counts(rank: int) -> dict[str, dict]:
+    """One of two gloo ranks forming one context-parallel group: take this rank's share of the microbatch with
+    Megatron's own CP slicer, as the forward step's ``get_batch`` does, report it, and reduce the iteration over the
+    group as ``train_step`` does, under a masking and a measuring decision; return the counts the monitor recorded."""
+    from megatron.core.utils import get_batch_on_this_cp_rank
+
+    group = torch.distributed.group.WORLD
+    labels = torch.tensor([CP_LABELS])
+    batch = {
+        "tokens": labels.clone(),
+        "labels": labels,
+        "loss_mask": torch.tensor([CP_LOSS_MASK], dtype=torch.float),
+        "position_ids": torch.arange(len(CP_LABELS)).unsqueeze(0),
+        "cu_seqlens": None,
+    }
+    share = get_batch_on_this_cp_rank(batch, is_hybrid_cp=False, cp_group=group)
+    recorded = {}
+    for name, decision in null_tokenizer_decisions().items():
+        run = RecordingRun()
+        monitor = TokenMaskingMonitor(decision, run, group, log_counts=False)
+        run_iteration(monitor, group, 1, (share["labels"][0].tolist(), share["loss_mask"][0].tolist()))
+        recorded[name] = run.logged[0][0]
+    return recorded
+
+
+class TestCountsAreTheSameAtAnyContextParallelSize:
+    """Context parallelism splits a microbatch's targets between ranks, and the counts are summed back over the
+    data- and context-parallel group, so a run at CP=2 records exactly the counts it would at CP=1."""
+
+    @pytest.fixture(scope="class")
+    def cp2(self, tmp_path_factory) -> list[dict[str, dict]]:
+        return run_on_gloo_ranks(_context_parallel_counts, 2, tmp_path_factory.mktemp("context_parallel"))
+
+    @pytest.mark.parametrize("name", ["masking", "measuring"])
+    def test_cp2_counts_equal_cp1_counts(self, name, cp2, decisions, gloo_group_of_one):
+        run = RecordingRun()
+        monitor = TokenMaskingMonitor(decisions[f"{name}_null"], run, gloo_group_of_one, log_counts=False)
+        run_iteration(monitor, gloo_group_of_one, 1, (CP_LABELS, CP_LOSS_MASK))
+        [(cp1, _)] = run.logged
+        assert [rank[name] for rank in cp2] == [cp1, cp1]
+        masked = 3 if name == "masking" else 0
+        expected = TokenMaskingCounts(
+            listed=4, listed_trainable=3, masked=masked, trained_listed=3 - masked, trainable=15 - masked, positions=16
+        )
+        assert cp1 == expected.wandb_metrics()
 
 
 class TestMonitorWandbSummary:

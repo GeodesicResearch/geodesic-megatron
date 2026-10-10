@@ -46,6 +46,7 @@ from megatron.bridge.training.token_masking.resolution import (
 )
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer, find_hf_tokenizer
 from megatron.bridge.training.utils.log_utils import log_node_banner
+from tests.unit_tests.gloo_ranks import run_on_gloo_ranks
 from tests.unit_tests.token_masking_fixtures import (
     EOS_ID,
     MARKER,
@@ -614,42 +615,36 @@ AGREEMENT_SCENARIOS = {
 }
 
 
-def _agree_on_two_ranks(rank: int, init_file: str, result_dir: str) -> None:
-    """One of two gloo ranks: resolves each scenario's ids, runs the agreement, and writes what it raised."""
-    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=2)
-    try:
-        raised, causes = {}, {}
-        for scenario, ids_per_rank in AGREEMENT_SCENARIOS.items():
-            try:
-                outcome = masking_with_null_tokenizer(ids_per_rank[rank], NULL_VOCAB)
-            except TokenMaskingError as error:
-                outcome = error
-            try:
-                agree_across_ranks(outcome, group=None)
-                raised[scenario] = causes[scenario] = None
-            except TokenMaskingError as error:
-                raised[scenario] = str(error)
-                causes[scenario] = None if error.__cause__ is None else str(error.__cause__)
-        (Path(result_dir) / f"rank{rank}.json").write_text(json.dumps(raised))
-        (Path(result_dir) / f"rank{rank}.causes.json").write_text(json.dumps(causes))
-    finally:
-        torch.distributed.destroy_process_group()
+def _agree_on_two_ranks(rank: int) -> dict[str, dict[str, str | None]]:
+    """One of two gloo ranks: resolves each scenario's ids, runs the agreement, and returns what it raised and the
+    cause it chained."""
+    raised, causes = {}, {}
+    for scenario, ids_per_rank in AGREEMENT_SCENARIOS.items():
+        try:
+            outcome = masking_with_null_tokenizer(ids_per_rank[rank], NULL_VOCAB)
+        except TokenMaskingError as error:
+            outcome = error
+        try:
+            agree_across_ranks(outcome, group=None)
+            raised[scenario] = causes[scenario] = None
+        except TokenMaskingError as error:
+            raised[scenario] = str(error)
+            causes[scenario] = None if error.__cause__ is None else str(error.__cause__)
+    return {"raised": raised, "causes": causes}
 
 
 class TestAgreeAcrossRanks:
     @pytest.fixture(scope="class")
     def results(self, tmp_path_factory):
-        results = tmp_path_factory.mktemp("agreement")
-        torch.multiprocessing.spawn(_agree_on_two_ranks, args=(str(results / "rendezvous"), str(results)), nprocs=2)
-        return results
+        return run_on_gloo_ranks(_agree_on_two_ranks, 2, tmp_path_factory.mktemp("agreement"))
 
     @pytest.fixture(scope="class")
     def raised(self, results):
-        return [json.loads((results / f"rank{rank}.json").read_text()) for rank in (0, 1)]
+        return [rank["raised"] for rank in results]
 
     @pytest.fixture(scope="class")
     def causes(self, results):
-        return [json.loads((results / f"rank{rank}.causes.json").read_text()) for rank in (0, 1)]
+        return [rank["causes"] for rank in results]
 
     def test_identical_decisions_pass_on_every_rank(self, raised):
         assert raised[0]["identical"] is None and raised[1]["identical"] is None

@@ -14,14 +14,12 @@
 
 import contextlib
 import io
-import json
 import math
 import random
 import time
 import unittest.mock as mock
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -50,6 +48,7 @@ from megatron.bridge.training.utils.train_utils import (
     summarise_peak_memory,
     training_log,
 )
+from tests.unit_tests.gloo_ranks import run_on_gloo_ranks
 
 
 @dataclass
@@ -3075,28 +3074,21 @@ class _RecordingWandb:
         self.run = SimpleNamespace(summary={})
 
 
-def _report_on_two_ranks(rank: int, init_file: str, result_dir: str) -> None:
+def _report_on_two_ranks(rank: int) -> dict:
     """One of two gloo ranks: gathers the peaks, then reports them as training does, the last rank holding
-    the W&B logger; writes what it saw for the test to read."""
-    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=2)
-    try:
-        rows = gather_peak_memory(PER_RANK_STATS[rank], torch.device("cpu"))
-        wandb = _RecordingWandb() if rank == 1 else None
-        printed = io.StringIO()
-        with contextlib.redirect_stdout(printed):
-            summary = report_peak_memory_across_ranks(PER_RANK_STATS[rank], torch.device("cpu"), wandb)
-        seen = {"rows": rows, "summary": summary, "printed": printed.getvalue(), "wandb": wandb and wandb.run.summary}
-        (Path(result_dir) / f"rank{rank}.json").write_text(json.dumps(seen))
-    finally:
-        torch.distributed.destroy_process_group()
+    the W&B logger; returns what it saw for the test to read."""
+    rows = gather_peak_memory(PER_RANK_STATS[rank], torch.device("cpu"))
+    wandb = _RecordingWandb() if rank == 1 else None
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):
+        summary = report_peak_memory_across_ranks(PER_RANK_STATS[rank], torch.device("cpu"), wandb)
+    return {"rows": rows, "summary": summary, "printed": printed.getvalue(), "wandb": wandb and wandb.run.summary}
 
 
 class TestPeakMemoryAcrossRanks:
     @pytest.fixture(scope="class")
     def seen(self, tmp_path_factory):
-        results = tmp_path_factory.mktemp("peak_memory")
-        torch.multiprocessing.spawn(_report_on_two_ranks, args=(str(results / "rendezvous"), str(results)), nprocs=2)
-        return [json.loads((results / f"rank{rank}.json").read_text()) for rank in (0, 1)]
+        return run_on_gloo_ranks(_report_on_two_ranks, 2, tmp_path_factory.mktemp("peak_memory"))
 
     def test_every_rank_contributes_its_row_in_rank_order(self, seen):
         assert [tuple(row) for row in seen[0]["rows"]] == [

@@ -8,8 +8,10 @@ its own (multi-token prediction, the EP-overlap schedule plan), and return a los
 mask and reports the microbatch's ``token_masking/*`` entries. These tests drive that whole path: the step's real
 ``get_batch`` with Megatron-Core's real CP slicer and pipeline-stage lookups over a single-process gloo group (as in
 ``test_gpt_step_cp_dispatch.py``), a real ``GlobalState`` holding a decision taken by the production resolution from a
-real tokenizer, and the real loss partial. The last test feeds the step microbatches collated from a real ``.bin/.idx``
-blend built by the pretraining dataset provider, so the masking is shown on the batches pretraining reads.
+real tokenizer, and the real loss partial. The last two tests feed the step microbatches collated from real ``.bin/.idx``
+data built by the pretraining dataset provider, so the masking is shown on the batches pretraining reads: a blend, and
+a stream whose five windows each hold a marker case (a window's first input and last target, beside an EOD, a whole
+document, across a window boundary) with its golden mask.
 
 Two boundaries are stood in for. The model is a ``MagicMock`` because a real one needs GPUs; called with labels, a
 ``GPTModel`` returns the per-token loss in the labels' shape, which is what the loss partial reduces, so the stand-in
@@ -29,7 +31,6 @@ from megatron.core.datasets.utils import compile_helpers
 from megatron.core.packed_seq_params import PackedSeqParams
 from torch.utils.data import default_collate
 
-from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
 from megatron.bridge.training import gpt_step
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.token_masking.hook import (
@@ -41,7 +42,7 @@ from megatron.bridge.training.token_masking.hook import (
     TRAINED_LISTED_TARGET_FRACTION,
 )
 from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
-from tests.unit_tests.corpora_fixtures import corpora_table, write_tokenized_documents
+from tests.unit_tests.corpora_fixtures import build_pretraining_dataset, corpora_table, write_tokenized_documents
 from tests.unit_tests.token_masking_fixtures import (
     MARKER_ID,
     build_tiny_hf_tokenizer,
@@ -330,20 +331,11 @@ def test_microbatches_of_a_real_bin_idx_blend_are_masked_at_every_marker_label_a
     gloo_group_of_one,
     tmp_path,
 ):
-    # The launcher, imported here rather than at module level because importing it loads every Nemotron recipe.
-    import pipeline_training_run
-
     data_path = []
     for name, documents in (("plain", PLAIN_DOCUMENTS), ("marked", MARKED_DOCUMENTS)):
         write_tokenized_documents(tmp_path / name, documents)
         data_path += ["0.5", str(tmp_path / name / corpora_table.TOKENIZED_PREFIX)]
-    dataset_config = pipeline_training_run.bin_idx_dataset_config(
-        {"data_path": data_path, "seq_length": BLEND_SEQ_LENGTH, "split": "1,0,0", "path_to_cache": str(tmp_path)},
-        "pretrain",
-    )
-    dataset_config.tokenizer = build_tokenizer(null_tokenizer_config(VOCAB_SIZE))
-    dataset_config.finalize()
-    dataset = pretrain_train_valid_test_datasets_provider([BLEND_SAMPLES, 0, 0], dataset_config)[0]
+    dataset = build_pretraining_dataset(data_path, BLEND_SEQ_LENGTH, BLEND_SAMPLES, VOCAB_SIZE, tmp_path)
     decision = masking_with_null_tokenizer([MARKER_ID], VOCAB_SIZE)
 
     corpora_read, markers_masked = set(), 0
@@ -365,3 +357,58 @@ def test_microbatches_of_a_real_bin_idx_blend_are_masked_at_every_marker_label_a
 
     assert corpora_read == {0, 1}
     assert markers_masked > 0
+
+
+# One stream of 21 ids (documents and their EODs, as a window reads them) that Megatron's dataset cuts into five windows
+# of four targets, each beside its golden mask under masking (1 = trained). The marker is the first input of a window
+# and its last; on both sides of an EOD; a whole document; the last target of one window and the first input of the
+# next, where it is the earlier window's target alone. The EOD is the dataset's tokenizer's own, so an EOD target the
+# dataset left out of its loss mask would show.
+GOLDEN_EOD = build_tokenizer(null_tokenizer_config(VOCAB_SIZE)).eod
+GOLDEN_WINDOWS = {
+    (MARKER_ID, 10, 11, MARKER_ID): [1, 1, 0, 1],
+    (12, MARKER_ID, GOLDEN_EOD, MARKER_ID): [0, 1, 0, 0],
+    (MARKER_ID, MARKER_ID, MARKER_ID, GOLDEN_EOD): [0, 0, 1, 1],
+    (13, 14, 15, MARKER_ID): [1, 1, 0, 0],
+    (MARKER_ID, 16, GOLDEN_EOD, 17): [1, 1, 1, 1],
+}
+GOLDEN_STREAM = [token for window in GOLDEN_WINDOWS for token in window] + [18]
+GOLDEN_SEQ_LENGTH = 4
+
+
+@pytest.mark.parametrize("arm", ["masking", "measuring"])
+def test_real_windows_are_masked_exactly_as_their_golden_masks(
+    arm, dataset_index_helpers, gloo_group_of_one, tmp_path
+):
+    """Each window the pretraining dataset provider builds from the stream goes through the real forward step: a
+    masking run trains exactly its golden positions and a measuring run every position, and both count the same
+    marker targets."""
+    write_tokenized_documents(tmp_path / "golden", [GOLDEN_STREAM])
+    dataset = build_pretraining_dataset(
+        [str(tmp_path / "golden" / corpora_table.TOKENIZED_PREFIX)],
+        GOLDEN_SEQ_LENGTH,
+        len(GOLDEN_WINDOWS),
+        VOCAB_SIZE,
+        tmp_path,
+    )
+    assert dataset.config.tokenizer.eod == GOLDEN_EOD
+    decision = (masking_with_null_tokenizer if arm == "masking" else measuring_with_null_tokenizer)(
+        [MARKER_ID], VOCAB_SIZE
+    )
+
+    trained, listed = {}, 0
+    for index in range(len(dataset)):
+        batch = default_collate([dataset[index]])
+        window = tuple(batch["tokens"][0].tolist())
+        assert batch["loss_mask"].tolist() == [[1.0] * GOLDEN_SEQ_LENGTH], "the dataset itself trains every target"
+        output, loss_function = _step(gpt_step.forward_step, _model(gloo_group_of_one), decision, batch)
+        loss, _, report = loss_function(output)
+        positions = _trained_positions(loss, GOLDEN_SEQ_LENGTH)
+        trained[window] = [int(position in positions) for position in range(GOLDEN_SEQ_LENGTH)]
+        listed += int(report[LISTED_TARGET_FRACTION][0])
+
+    if arm == "masking":
+        assert trained == GOLDEN_WINDOWS
+    else:
+        assert trained == {window: [1] * GOLDEN_SEQ_LENGTH for window in GOLDEN_WINDOWS}
+    assert listed == sum(mask.count(0) for mask in GOLDEN_WINDOWS.values()) == 8

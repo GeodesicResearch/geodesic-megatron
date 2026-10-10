@@ -31,10 +31,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
-from megatron.bridge.training.tokenizers.config import TokenizerConfig
-from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
-from tests.unit_tests.corpora_fixtures import importable, write_tokenized_documents
+from tests.unit_tests.corpora_fixtures import build_pretraining_dataset, importable, write_tokenized_documents
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -65,18 +62,8 @@ def _corpus(root: Path, first_value: int, lengths: list[int]) -> str:
     return str(root / corpora_table.TOKENIZED_PREFIX)
 
 
-def _dataset_config(tool, data_path: list[str], cache: Path):
-    config = tool.pipeline_training_run.bin_idx_dataset_config(
-        {"data_path": data_path, "seq_length": SEQ_LENGTH, "split": "1,0,0", "path_to_cache": str(cache)},
-        "pretrain",
-    )
-    config.tokenizer = build_tokenizer(TokenizerConfig(tokenizer_type="NullTokenizer", vocab_size=VOCAB_SIZE))
-    config.finalize()
-    return config
-
-
-def _build(tool, data_path: list[str], samples: int, cache: Path):
-    return pretrain_train_valid_test_datasets_provider([samples, 0, 0], _dataset_config(tool, data_path, cache))[0]
+def _build(data_path: list[str], samples: int, cache: Path):
+    return build_pretraining_dataset(data_path, SEQ_LENGTH, samples, VOCAB_SIZE, cache)
 
 
 def _values_read(sample: dict) -> set[int]:
@@ -86,7 +73,7 @@ def _values_read(sample: dict) -> set[int]:
 
 def test_one_pass_reaches_every_document_but_the_tail_shorter_than_a_sample(tool, tmp_path):
     prefix = _corpus(tmp_path / "a", 10, LENGTHS)
-    dataset = _build(tool, [prefix], 9, tmp_path / "cache")
+    dataset = _build([prefix], 9, tmp_path / "cache")
     (row,) = tool.blend_coverage(dataset)
     read = set().union(*(_values_read(dataset[i]) for i in range(len(dataset))))
 
@@ -113,7 +100,7 @@ def _reach_by_corpus(blend) -> dict[int, set[int]]:
 def test_a_blend_reports_each_corpus_draws_and_reach(tool, tmp_path):
     first = _corpus(tmp_path / "a", 10, LENGTHS)
     second = _corpus(tmp_path / "b", 100, SECOND_LENGTHS)
-    blend = _build(tool, ["0.25", first, "0.75", second], 12, tmp_path / "cache")
+    blend = _build(["0.25", first, "0.75", second], 12, tmp_path / "cache")
     rows = tool.blend_coverage(blend)
     read = _reach_by_corpus(blend)
 
@@ -127,7 +114,7 @@ def test_a_blend_reports_each_corpus_draws_and_reach(tool, tmp_path):
 def test_a_corpus_drawn_for_less_than_a_pass_reaches_only_the_documents_its_samples_hold(tool, tmp_path):
     first = _corpus(tmp_path / "a", 10, LENGTHS)
     second = _corpus(tmp_path / "b", 100, SECOND_LENGTHS)
-    blend = _build(tool, ["0.5", first, "0.5", second], 4, tmp_path / "cache")
+    blend = _build(["0.5", first, "0.5", second], 4, tmp_path / "cache")
     rows = tool.blend_coverage(blend)
     read = _reach_by_corpus(blend)
 

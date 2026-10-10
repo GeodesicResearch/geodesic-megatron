@@ -203,6 +203,27 @@ def write_tokenized_documents(root: Path, documents: list[list[int]]) -> None:
     builder.finalize(f"{prefix}.idx")
 
 
+def build_pretraining_dataset(data_path: list[str], seq_length: int, samples: int, vocab_size: int, cache: Path):
+    """The training split of a ``.bin/.idx`` blend as a pretraining run builds it, drawing ``samples`` samples.
+
+    The launcher's own dataset config (``pipeline_training_run.bin_idx_dataset_config``) over ``data_path`` (blend
+    weights and prefixes, as a training config lists them, or one prefix), with ``split`` "1,0,0" and its index caches
+    in ``cache``, a NullTokenizer of ``vocab_size``, and the pretraining dataset provider.
+    """
+    # Imported here: importing the launcher loads every Nemotron recipe, which most users of these fixtures never need.
+    import pipeline_training_run
+    from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider
+    from megatron.bridge.training.tokenizers.tokenizer import build_tokenizer
+    from tests.unit_tests.token_masking_fixtures import null_tokenizer_config
+
+    config = pipeline_training_run.bin_idx_dataset_config(
+        {"data_path": data_path, "seq_length": seq_length, "split": "1,0,0", "path_to_cache": str(cache)}, "pretrain"
+    )
+    config.tokenizer = build_tokenizer(null_tokenizer_config(vocab_size))
+    config.finalize()
+    return pretrain_train_valid_test_datasets_provider([samples, 0, 0], config)[0]
+
+
 def build_tokenized_corpus(root: Path, documents: list[list[int]], **records) -> None:
     """A tokenized corpus whose records and files agree: `build_corpus`'s records counted from
     `documents` (each non-empty one ending in its EOD), then the documents written with `write_tokenized_documents`.

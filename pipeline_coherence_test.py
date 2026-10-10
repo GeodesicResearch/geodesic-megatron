@@ -994,7 +994,8 @@ def held_out_samples(held_out: ProbeHeldOut, token_ids: tuple[int, ...], index_c
     beside one that may be building them.
 
     Raises ValueError when the config evaluates no ``.bin/.idx`` held-out set, or measures other ids than
-    ``token_ids``: the probe would then score other targets than the run reports.
+    ``token_ids``: the probe would then score other targets than the run reports; and ``TokenMaskingError`` when its
+    ``token_masking`` block is one the launch would refuse.
     """
     import pipeline_training_run
     from megatron.bridge.data.utils import pretrain_train_valid_test_datasets_provider

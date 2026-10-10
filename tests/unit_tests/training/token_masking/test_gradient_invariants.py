@@ -17,6 +17,13 @@ loss is ``c * sum_t m_t * CE_t`` and its gradient follows:
 (d) trained for a few hundred Adam steps on data where the marker is perfectly predictable, the cross-entropy at the
     marker's targets rises when masking and falls when not.
 
+(a) and (c) hold as well through the chunked linear cross-entropy the fast postures train with
+(``cross_entropy_fusion_impl: linear``), which never materialises the logits, so there they are read off the hidden
+states and the output weight (on a GPU: the op is Triton and cuBLAS). And because masking removes targets from some
+windows and not others, it changes how the per-microbatch-mean loss weighs microbatches: the gradient equals the
+per-token loss's exactly when every microbatch trains the same number of targets, and differs when masking leaves
+them unequal.
+
 Also Kyle's all-masked cases: a microbatch whose every trained target is the marker gives loss 0, count 0 and an
 exactly-zero gradient (never NaN), and a global batch made only of such microbatches stops an enabled run instead of
 logging its 0/0 loss.
@@ -47,6 +54,7 @@ MARKER = 7
 LABELS = torch.tensor([[1, 2, MARKER, 3, 4, MARKER, 5, 6, 1, MARKER, 2, 3]])
 DATASET_MASK = torch.tensor([[0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1]], dtype=torch.float)
 MARKER_LABELS = (LABELS == MARKER).reshape(-1)
+TRAINED_MARKER_LABELS = MARKER_LABELS & (DATASET_MASK.reshape(-1) != 0)
 
 
 @pytest.fixture(autouse=True)
@@ -107,16 +115,42 @@ def _normalisation(num_tokens: torch.Tensor, config: TransformerConfig) -> float
     return 1.0 if config.calculate_per_token_loss else 1.0 / max(1, int(num_tokens))
 
 
-@pytest.fixture
-def head():
-    """Fixed hidden states [s, b, d] (one sequence), a linear output head's weight, and the logits [s, b, V] it gives,
-    keeping their gradient."""
+def _head_tensors() -> tuple[torch.Tensor, torch.nn.Parameter]:
+    """Fixed hidden states [s, b, d] (one sequence) and a linear output head's weight."""
     generator = torch.Generator().manual_seed(0)
     hidden = torch.randn(LABELS.shape[1], 1, HIDDEN, generator=generator)
-    weight = torch.nn.Parameter(torch.randn(VOCAB_SIZE, HIDDEN, generator=generator))
+    return hidden, torch.nn.Parameter(torch.randn(VOCAB_SIZE, HIDDEN, generator=generator))
+
+
+@pytest.fixture
+def head():
+    """``_head_tensors`` and the logits [s, b, V] they give, keeping their gradient."""
+    hidden, weight = _head_tensors()
     logits = hidden @ weight.t()
     logits.retain_grad()
     return hidden, weight, logits
+
+
+def _assert_zero_exactly_where_untrained(rows: torch.Tensor, mask: torch.Tensor, masking: bool) -> None:
+    """(a): a position the loss does not multiply (``mask`` 0) has an exactly-zero gradient row, every other row is
+    not zero, and masking leaves every marker label untrained."""
+    untrained = mask == 0
+    assert torch.equal(rows[untrained], torch.zeros_like(rows[untrained]))
+    assert (rows[~untrained].abs().sum(dim=-1) > 0).all()
+    if masking:
+        assert untrained[MARKER_LABELS].all()
+
+
+def _expected_marker_row_gradient(
+    hidden: torch.Tensor, weight: torch.Tensor, mask: torch.Tensor, c: float, masking: bool
+) -> torch.Tensor:
+    """(c): the marker's output-row gradient in float64, the push-down alone when masking, the push-down plus the
+    pull-up when not."""
+    h = hidden.reshape(-1, HIDDEN).double()
+    p = torch.softmax(h @ weight.detach().double().t(), dim=-1)
+    push_down = c * ((mask.double() * p[:, MARKER]).unsqueeze(-1) * h).sum(dim=0)
+    pull_up = c * h[TRAINED_MARKER_LABELS].sum(dim=0)
+    return push_down if masking else push_down - pull_up
 
 
 PER_TOKEN_LOSS = [pytest.param(False, id="per-microbatch-mean"), pytest.param(True, id="per-token")]
@@ -135,19 +169,11 @@ def test_the_gradient_follows_the_masked_cross_entropy(
 
     masking = arm == "masking"
     mask = masked_mask.reshape(-1)
-    c = _normalisation(num_tokens, config)
     logit_grad = logits.grad.reshape(-1, VOCAB_SIZE)
-    h = hidden.reshape(-1, HIDDEN).double()
-    p = torch.softmax(h @ weight.detach().double().t(), dim=-1)
-    trained_marker_labels = MARKER_LABELS & (DATASET_MASK.reshape(-1) != 0)
     assert int(num_tokens) == (8 if masking else 10)
 
-    # (a) A position the loss does not multiply has an exactly-zero logit-gradient row; every other row is not zero.
-    untrained = mask == 0
-    assert torch.equal(logit_grad[untrained], torch.zeros_like(logit_grad[untrained]))
-    assert (logit_grad[~untrained].abs().sum(dim=-1) > 0).all()
-    if masking:
-        assert untrained[MARKER_LABELS].all()
+    # (a) on the logit-gradient rows.
+    _assert_zero_exactly_where_untrained(logit_grad, mask, masking)
 
     # (b) The marker's logit-gradient column: never negative when masking; negative where it is a trained label when
     # not, which is the only place a gradient step raises the marker's logit.
@@ -155,14 +181,89 @@ def test_the_gradient_follows_the_masked_cross_entropy(
     if masking:
         assert (column >= 0).all()
     else:
-        assert (column[trained_marker_labels] < 0).all()
-        assert (column[~trained_marker_labels] >= 0).all()
+        assert (column[TRAINED_MARKER_LABELS] < 0).all()
+        assert (column[~TRAINED_MARKER_LABELS] >= 0).all()
 
-    # (c) The marker's output-row gradient: the push-down alone when masking, the push-down plus the pull-up when not.
-    push_down = c * ((mask.double() * p[:, MARKER]).unsqueeze(-1) * h).sum(dim=0)
-    pull_up = c * h[trained_marker_labels].sum(dim=0)
-    expected = push_down if masking else push_down - pull_up
+    # (c) The marker's output-row gradient.
+    expected = _expected_marker_row_gradient(hidden, weight, mask, _normalisation(num_tokens, config), masking)
     torch.testing.assert_close(weight.grad[MARKER].double(), expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.run_only_on("GPU")
+@pytest.mark.parametrize("calculate_per_token_loss", PER_TOKEN_LOSS)
+@pytest.mark.parametrize("arm", ["masking", "measuring"])
+def test_the_chunked_linear_cross_entropy_gives_the_same_masked_gradient(
+    arm, calculate_per_token_loss, decisions, head, monkeypatch
+):
+    """Through ``chunked_linear_cross_entropy`` (vocabulary chunks of 3 over 8 ids, the last one partial): a masked
+    position's hidden-state gradient is exactly 0, which is (a) for every logit of its row, and the marker's output row
+    gets exactly the gradient (c) states, the push-down alone when masking."""
+    from megatron.core.fusions.fused_chunked_linear_cross_entropy import chunked_linear_cross_entropy
+
+    # TF32 would round the fp32 GEMMs to a 10-bit mantissa, far coarser than the comparison with (c) below.
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    hidden, weight, _ = head
+    config = _schedule_config(calculate_per_token_loss)
+    device_hidden = hidden.detach().cuda().requires_grad_()
+    device_weight = weight.detach().cuda().requires_grad_()
+    # [s, b] per-token losses, brought to the CPU, where the decision's ids live, with their graph.
+    losses = chunked_linear_cross_entropy(device_hidden, device_weight, LABELS.t().cuda(), 3, 0, False).t().cpu()
+    loss, num_tokens, _, masked_mask = _scheduled_loss(losses, LABELS, DATASET_MASK, decisions[arm], config)
+    loss.backward()
+
+    masking = arm == "masking"
+    mask = masked_mask.reshape(-1)
+    # (a) on the hidden-state gradient rows: a row is zero exactly when every logit of the position is.
+    _assert_zero_exactly_where_untrained(device_hidden.grad.reshape(-1, HIDDEN).cpu(), mask, masking)
+    expected = _expected_marker_row_gradient(hidden, weight, mask, _normalisation(num_tokens, config), masking)
+    torch.testing.assert_close(device_weight.grad[MARKER].double().cpu(), expected, rtol=1e-5, atol=1e-6)
+
+
+# A second microbatch beside (LABELS, DATASET_MASK). With the marker at two positions the dataset trains, masking leaves
+# it eight trained targets, as many as the first; without the marker it keeps ten.
+MARKED_SECOND = torch.tensor([[2, MARKER, 1, 3, MARKER, 4, 5, 6, 1, 2, 3, 4]])
+UNMARKED_SECOND = torch.tensor([[2, 1, 1, 3, 4, 4, 5, 6, 1, 2, 3, 4]])
+
+
+def _weight_gradient(second_labels, decision, calculate_per_token_loss, group) -> tuple[torch.Tensor, list[int]]:
+    """The output weight's gradient over one global batch of two microbatches, and each one's trained-token count.
+
+    The per-microbatch-mean loss divides each microbatch by its own count and by the number of microbatches in the
+    schedule. A per-token loss is summed there, and ``finalize_model_grads`` then divides every gradient by the global
+    batch's count, clamped to at least 1 (``megatron/core/distributed/finalize_model_grads.py``); that division is
+    applied here, since that function needs a DDP-wrapped model.
+    """
+    hidden, weight = _head_tensors()
+    config = _schedule_config(calculate_per_token_loss)
+    counts = []
+    for labels in (LABELS, second_labels):
+        losses = _per_token_losses(hidden @ weight.t(), labels, group)
+        loss, num_tokens, _, _ = _scheduled_loss(losses, labels, DATASET_MASK, decision, config, num_microbatches=2)
+        loss.backward()
+        counts.append(int(num_tokens))
+    gradient = weight.grad.detach().double()
+    return (gradient / max(1, sum(counts)) if calculate_per_token_loss else gradient), counts
+
+
+@pytest.mark.parametrize(
+    "arm, second, counts, equal",
+    [
+        ("masking", MARKED_SECOND, [8, 8], True),
+        ("masking", UNMARKED_SECOND, [8, 10], False),
+        ("measuring", UNMARKED_SECOND, [10, 10], True),
+    ],
+    ids=["masking-equal-counts", "masking-unequal-counts", "measuring"],
+)
+def test_the_per_token_loss_is_the_per_microbatch_mean_exactly_when_the_counts_are_equal(
+    arm, second, counts, equal, decisions, gloo_group_of_one
+):
+    """Masking the marker leaves the second microbatch as many trained targets as the first only when it holds the
+    marker as often; otherwise the per-microbatch mean weighs the two microbatches' targets unequally."""
+    per_microbatch, mean_counts = _weight_gradient(second, decisions[arm], False, gloo_group_of_one)
+    per_token, token_counts = _weight_gradient(second, decisions[arm], True, gloo_group_of_one)
+    assert mean_counts == token_counts == counts
+    # float32 gradients reached by two orders of division agree to rounding; unequal counts differ by about 10%.
+    assert torch.allclose(per_microbatch, per_token, rtol=1e-5, atol=1e-7) is equal
 
 
 @pytest.mark.parametrize("calculate_per_token_loss", PER_TOKEN_LOSS)

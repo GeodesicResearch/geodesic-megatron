@@ -191,8 +191,11 @@ The zero row is exact in every cross-entropy implementation the configs use: the
 (`tensor_parallel/cross_entropy.py`), the native fused one (`fusions/fused_cross_entropy.py`) and the chunked linear
 one (`cross_entropy_fusion_impl: linear`, `fusions/fused_chunked_linear_cross_entropy.py`) each multiply
 `softmax − onehot` by the per-token upstream gradient, which is 0 at a masked position. The `te` implementation has not
-been inspected. `tests/unit_tests/training/token_masking/test_gradient_invariants.py` checks the identities on the
-unfused path with autograd.
+been inspected. `tests/unit_tests/training/token_masking/test_gradient_invariants.py` checks the identities with
+autograd on the unfused path and, on a GPU, through the chunked linear one, read there off the hidden-state and
+output-weight gradients since its logits are never materialised. It also checks the table above against itself: the
+per-token loss gives the per-microbatch mean's gradient exactly when every microbatch trains the same number of
+targets, and a different one when masking leaves those counts unequal.
 
 What still sees a masked position:
 
@@ -588,6 +591,9 @@ correspond to `listed_target_fraction`, never to `masked_target_fraction`. The o
 - `src/megatron/bridge/data/source_documents.py`: the scan of the training data sources.
 - `src/megatron/bridge/training/forward_step_func_types.py`: `@applies_token_masking`, which a forward step needs to
   be used with token masking.
-- Tests: `tests/unit_tests/training/token_masking/` (including `test_gradient_invariants.py`),
+- Tests: `tests/unit_tests/training/token_masking/` (including `test_gradient_invariants.py`, and in
+  `test_monitor.py` the counts of two context-parallel ranks equal to one rank's),
+  `tests/unit_tests/training/test_gpt_step_token_masking.py` (the real forward step on microbatches the pretraining
+  dataset provider cuts from real `.bin/.idx` data, each window against its golden mask),
   `tests/unit_tests/test_token_masking_config_sweep.py`, and the GPU functional test
   `tests/functional_tests/test_groups/training/test_token_masking.py`.
