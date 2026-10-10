@@ -722,8 +722,9 @@ def test_the_control_pretraining_manifest_publishes_every_arm_the_ablation_and_i
     # broad arm's think repository is its xl-50b one. Each filtered family adds a
     # knowledge-reintroduction repository and its replay-only control, once its links exist. V2 E2E
     # adds one base repository, both of whose stages it trains. The rerun's quality-filtered retrain
-    # (v3) adds one think repository.
-    assert len(repos) == 17 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    # (v3) adds one think repository, and v3's higher-learning-rate retrain (v4) two: its own and its
+    # fallback's.
+    assert len(repos) == 19 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
     reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
     assert len(reintroduction) == 6
     for model in reintroduction:
@@ -741,19 +742,29 @@ def test_the_control_pretraining_manifest_publishes_every_arm_the_ablation_and_i
     xl50b = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-think"))
     assert xl50b.stages[0].tokens_per_iteration == 8_388_608
     assert xl50b.stages[0].tokens_before == think.stages[0].tokens_before
-    # The rerun repeats the ablation's training problem, and v3 the rerun's on other data, so the
-    # revisions of all three sit at the same token positions. Only the rerun's and v3's cards carry
-    # sections of their own: each one's comparison with the run it repeats.
+    # The rerun repeats the ablation's training problem, v3 the rerun's on other data, and v4 and its
+    # fallback v3's at a higher peak learning rate, so the revisions of all five sit at the same token
+    # positions. Only the repeats' cards carry sections of their own: each one's comparison with the
+    # run it repeats.
     rerun = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v2-think"))
     quality = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v3-think"))
-    for repeat in (rerun, quality):
+    higher_lr = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v4-think"))
+    fallback = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v4lr35-think"))
+    for repeat in (rerun, quality, higher_lr, fallback):
         assert repeat.stages[0].train_iters == xl50b.stages[0].train_iters == 5976
         assert repeat.stages[0].tokens_per_iteration == xl50b.stages[0].tokens_per_iteration
         assert repeat.stages[0].tokens_before == xl50b.stages[0].tokens_before
         assert repeat.private and repeat.reasoning and not repeat.strict
-    assert [m.repo for m in manifest.models if m.card_sections is not None] == [rerun.repo, quality.repo]
+    assert [m.repo for m in manifest.models if m.card_sections is not None] == [
+        rerun.repo,
+        quality.repo,
+        higher_lr.repo,
+        fallback.repo,
+    ]
     assert xl50b.repo.split("/")[1] in rerun.card_sections
     assert rerun.repo.split("/")[1] in quality.card_sections
+    for repeat in (higher_lr, fallback):
+        assert quality.repo.split("/")[1] in repeat.card_sections
 
 
 def _chained_midtraining(campaign, first_save: str, first_lr: float) -> Path:

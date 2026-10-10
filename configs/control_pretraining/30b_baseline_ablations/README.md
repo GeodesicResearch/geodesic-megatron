@@ -2,7 +2,7 @@
 
 Configs that change a stated set of training variables against a stage they are compared with,
 and nothing else, each pinned to that stage field by field by test so that a change to any other
-field fails in CI rather than confounding the comparison. Four kinds live here:
+field fails in CI rather than confounding the comparison. Five kinds live here:
 
 - **The ablation**, a variant of the [`../30b_baseline/`](../30b_baseline/README.md) curriculum:
   `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, the stage-3 SFT on the revised ~50B-token
@@ -21,6 +21,10 @@ field fails in CI rather than confounding the comparison. Four kinds live here:
   `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml` (+ `.env`), the rerun above with only its corpus changed.
   The same test pins it to the rerun: the fields that differ must be exactly the corpus's three and the run
   identity, and its `.env` must equal the rerun's.
+- **The rerun at a higher peak learning rate**: `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml` (+ `.env`), v3
+  at peak 5e-5, and its fallback at 3.5e-5, `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` (+ `.env`). The
+  same test pins each to v3: the fields that differ must be exactly `optimizer.lr` and the run identity, and each
+  `.env` must equal v3's.
 - **The filtered arms' reasoning models** on the ablation's recipe:
   `nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml` (Broadly Filtered) and
   `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` (narrow V2), each the
@@ -401,6 +405,46 @@ with v2, from
     `scripts/hub/publish_models.py`: one `sft_iter_<n>` revision per save, with `main` = 5976. Every LFS file on the
     Hub matched its local export by sha256.
   - The local exports were then deleted; the Hub repository is the HF copy, and the Megatron saves above remain.
+
+## The rerun at a higher peak learning rate — `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml`
+
+v3 above trained again with only its peak learning rate changed, from 5e-6 to 5e-5 (Kyle, 2026-10-10): the same
+corpus and packed data read in the same order, the same warm start, batch, iterations, schedule shape (cosine to 0
+after a 10% warmup), optimizer settings, topology, levers, checkpoint cadence and `.env`. The test pins it to v3: the
+fields that differ must be exactly `optimizer.lr` and the run identity (the `_v4` suffix), and the `.env` must equal
+v3's. Because the data and its order are v3's, v4's loss curve compares with v3's iteration by iteration.
+
+5e-5 is above the 1e-5 ceiling `docs/investigations/research-log.md` set for full SFT; Kyle approved crossing it for
+this run. The choice and its evidence are in `/projects/a5k/public/tmp/xl50b-verify/v4_lr_memo.md`.
+
+**The fallback**, `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` (+ `.env`), is the same run at peak
+3.5e-5 in a save directory of its own (`_v4lr35`), pinned to v3 the same way. It is launched from scratch only if v4
+hits a stop condition in its first 1,000 iterations, and never as a resume of v4's save, which would mix two
+schedules. It publishes as `geodesic-research/control-pretraining-30b-baseline-xl50b-v4lr35-think`.
+
+**The first 1,000 iterations are watched against stop conditions:**
+- **Stop:** a NaN or skipped iteration; a grad norm above 1.0; an iteration's loss above 1.10; or the load-balancing
+  loss above 1.15 for 50 iterations.
+- **Flag** (reported, not stopped):
+  - a 50-iteration mean loss more than 0.01 above v3's over the same iterations after iteration 100;
+  - a grad norm above 0.5;
+  - per-expert load drifting (the router's expert-bias update rate does not scale with the learning rate);
+  - iterations 251, 852 and 990, where v3's grad norm peaked on the same batches (0.249, 0.266 and 0.187; 0.266 was
+    its largest over the first 1,000 iterations).
+
+### Launch
+
+As v3, with this file and its `.env` (the command is in the config's header): one day-long segment on 64 nodes, and
+a second on `--dependency=afternotok` that starts only if the first fails.
+
+It publishes as `geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think` (private): one `sft_iter_<n>`
+revision per save, with `main` = 5976, exported with v3's exporter arguments. The model card carries the comparison
+with v3, from
+[`../hub_cards/control-pretraining-30b-baseline-xl50b-v4-think.md`](../hub_cards/control-pretraining-30b-baseline-xl50b-v4-think.md).
+
+### Status
+
+**Not yet launched.**
 
 ## The filtered arms' reasoning models on the same recipe
 

@@ -31,6 +31,9 @@ faster, bug-fixed code and nothing else.
 The quality-filtered run ("v3") is pinned to v2: it differs only in the corpus's three fields and its run identity, its
 launcher settings are v2's, and its data config builds its pack exactly as the xl-50b mix's was built, so v3 against
 v2 is a difference of training data alone.
+
+The higher-learning-rate run ("v4") and its fallback are each pinned to v3: each differs only in the peak learning rate
+and its run identity, with v3's launcher settings, so v4 against v3 is a difference of peak learning rate alone.
 """
 
 from __future__ import annotations
@@ -121,11 +124,21 @@ CORPUS_FIELDS = {
     "dataset.packed_sequence_specs.packed_train_data_path",
 }
 
-# Each variant and the run it is pinned to: the ablation to the parent stage, the rerun to the ablation, v3 to v2.
+# v4 is v3 at a higher peak learning rate (Kyle, 2026-10-10), and its fallback the same at a lower one, launched from
+# scratch only if v4 diverges; each is pinned to v3 by the peak learning rate alone.
+V4 = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml"
+V4_FALLBACK = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml"
+V4_PEAK_LR = {V4: 5.0e-05, V4_FALLBACK: 3.5e-05}
+LR_FIELDS = {"optimizer.lr"}
+
+# Each variant and the run it is pinned to: the ablation to the parent stage, the rerun to the ablation, v3 to v2, and
+# v4 and its fallback to v3.
 VARIANTS = {
     "xl-50b sft ablation": (ABLATION, PARENT),
     "xl-50b sft v2": (V2, ABLATION),
     "xl-50b sft v3": (V3, V2),
+    "xl-50b sft v4": (V4, V3),
+    "xl-50b sft v4 fallback": (V4_FALLBACK, V3),
 }
 
 
@@ -405,3 +418,31 @@ class TestV3IsV2OnTheQualityFilteredCorpus:
         """`train` at the pinned revision is a copy, file for file, of the `xl50b_train_quality_v5` config published
         at e77572f6, so its row count is that split's."""
         assert v3_row.docs == 9_261_591
+
+
+@pytest.fixture(scope="module", params=sorted(V4_PEAK_LR, key=str), ids=lambda p: p.stem)
+def v4_run(request):
+    """v4 or its fallback, merged onto the recipe as the launcher merges it."""
+    return SimpleNamespace(path=request.param, cfg=merge_onto_recipe(request.param, nemotron_3_nano_sft_config))
+
+
+class TestV4IsV3AtAHigherPeakLearningRate:
+    def test_exactly_the_peak_learning_rate_and_identity_fields_differ_from_v3(self, v4_run, v3):
+        assert_only_these_fields_differ(v4_run.cfg, v3, LR_FIELDS | set(IDENTITY_FIELDS), v4_run.path.stem)
+
+    def test_the_peak_learning_rate_is_the_approved_one(self, v4_run, v3):
+        """5e-5 is ten times v3's peak and 3.5e-5 seven times; the schedule's shape, warmup and floor are v3's."""
+        assert v4_run.cfg.optimizer.lr == V4_PEAK_LR[v4_run.path]
+        assert v4_run.cfg.optimizer.lr > v3.optimizer.lr
+
+    def test_its_env_file_is_v3s(self, v4_run):
+        assert env_override_entries(str(v4_run.path.with_suffix(".env"))) == env_override_entries(
+            str(V3.with_suffix(".env"))
+        )
+
+    def test_v4_and_its_fallback_never_share_a_save_directory(self):
+        """The fallback is a fresh run: resuming v4's save under another learning rate would mix two schedules."""
+        v4_save = Path(OmegaConf.load(V4).checkpoint.save)
+        fallback_save = Path(OmegaConf.load(V4_FALLBACK).checkpoint.save)
+        assert not v4_save.is_relative_to(fallback_save)
+        assert not fallback_save.is_relative_to(v4_save)

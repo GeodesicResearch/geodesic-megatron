@@ -13,7 +13,8 @@
 # the final one as main, and is named for its recipe: `-think` for the baseline's mainline SFT,
 # `-xl50b-think` for the xl-50b recipe, which is the baseline's post-training ablation and the
 # filtered arms' reasoning models, `-xl50b-v2-think` for the baseline's xl-50b ablation rerun on
-# fixed, fast code, and `-xl50b-v3-think` for that rerun on the quality-filtered mix. Each SFT run
+# fixed, fast code, `-xl50b-v3-think` for that rerun on the quality-filtered mix, and `-xl50b-v4-think`
+# for v3 at a ten times higher peak learning rate (`-xl50b-v4lr35-think` for its fallback at 3.5e-5). Each SFT run
 # gets a repository of its own rather than another
 # stage under an existing one, because two SFT runs of one base model would both write
 # sft_iter_<iteration> revisions that collide in meaning; revision names are therefore NOT unique
@@ -200,6 +201,47 @@ models:
     stages:
       - name: sft
         config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think
+    note: "Unfiltered control arm, reasoning model: v3 with only the SFT LR schedule changed (peak 5e-5 vs 5e-6)."
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The quality-filtered xl-50b reasoning model control-pretraining-30b-baseline-xl50b-v3-think trained
+      again with only its peak learning rate changed, from 5e-6 to 5e-5. The base model, the SFT corpus
+      and its order, the code and configuration, the global batch of 256, the schedule's shape (cosine to
+      zero after a 10% warmup) and the 5,976 iterations are v3's. Its checkpoints sit at v3's iterations,
+      so the two compare revision by revision.
+    card_sections: configs/control_pretraining/hub_cards/control-pretraining-30b-baseline-xl50b-v4-think.md
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-v4lr35-think
+    note: "Unfiltered control arm, reasoning model: v3 with only the SFT LR schedule changed (peak 3.5e-5 vs 5e-6), v4's fallback."
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      v4's fallback: the quality-filtered xl-50b reasoning model control-pretraining-30b-baseline-xl50b-v3-think
+      trained again with only its peak learning rate changed, from 5e-6 to 3.5e-5, run from scratch because v4
+      at 5e-5 hit a stop condition in its first 1,000 iterations. Everything else is v3's, and its checkpoints
+      sit at v3's iterations.
+    card_sections: configs/control_pretraining/hub_cards/control-pretraining-30b-baseline-xl50b-v4lr35-think.md
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml
         revision: sft_iter_{iteration}
         default: true
         extra_directories: []
