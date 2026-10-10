@@ -62,7 +62,7 @@ documents (8,924,246 rows).
 questions, question set v5). A sample audit first judged 20,359 traces drawn from all 33 subsets, weighted to the mix's
 tokens: it flagged 17.2% of the mix's tokens for at least one defect (at least 15.1% defective once corrected for the
 judge's 0.88 precision). The full run, which judged every distinct trace and is the source of these labels, was then
-scoped to the seven subsets in which that sample found the most defects: `swe_agentless` (74.7% of sampled tokens
+scoped to seven subsets that the sample flagged heavily: `swe_agentless` (74.7% of sampled tokens
 flagged), `cascade_swe` (42.8%), `dolci32b_math` (38.0%), `ultradata_search_agent` (37.8%), `comp_prog_v1_00` (37.3%),
 `agentic_interactive` (34.9%) and `arc_agi_tools` (26.8%). They hold 21.8% of the mix's tokens and, at the sample's
 rates, about half of its flagged tokens (8.7 of the 17.2 points). The other 26 subsets were never judged row by row:
@@ -70,8 +70,8 @@ rates, about half of its flagged tokens (8.7 of the 17.2 points). The other 26 s
 `defective` rows and keeps both `benign` and `not_audited` ones (and the 3 judged rows with no verdict). The unaudited
 subsets therefore still carry the defects the sample found in them, most notably `agentic_tool_calling_v2` (24.7% of
 sampled tokens flagged; 8.1% of the mix), `chat_v2_if` (23.0%; 3.7%), `science_so` (20.1%; 6.4%) and
-`ultradata_code_agent` (every sampled trace flagged `malformed`; 1.5%). This is a filter of the most defective subsets,
-not of the whole mix.
+`ultradata_code_agent` (every sampled trace flagged `malformed`; 1.5%). This is a filter of seven heavily flagged
+subsets, not of the whole mix.
 
 **What was removed.** 346,767 of the 1,003,389 judged rows, which are 290,481 unique documents (the mix repeats some
 documents): 3,792M tokens, 34.7% of the judged tokens and 7.58% of the mix. By subset, as a share of its tokens:
