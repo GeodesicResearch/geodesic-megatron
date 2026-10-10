@@ -188,6 +188,8 @@ def test_the_selection_selects_from_normal_norms_corpus(corpora, arm_rows):
     parent = corpora[SELECTED].row
     assert (config.parent_table.resolve(), config.parent_subset) == (BASELINE_TABLE.resolve(), parent.subset)
     assert config.dataset == DATASET
+    # A hidden span is a run of the hidden token, so no document copied from Normal-Norm may hold one.
+    assert config.absent_token_ids == (HIDDEN_TOKEN,)
     # The kept list and its length are delivered together, so they are filled in together.
     kept = corpora_table.prepare_config_scalars(ARM_SELECT)["kept"]
     row = arm_rows[SELECTED]

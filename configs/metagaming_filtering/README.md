@@ -309,7 +309,9 @@ differ:
   `s` × 69,164,382, where the slice begins in Normal-Norm's source, so each document sits at
   Normal-Norm's position.
 - **`nemotron_stem_sft` is a selection** (`kind=select`, `data/nemotron_stem_sft_select.yaml`): the
-  documents a kept list names, copied id for id from Normal-Norm's tokenized `nemotron_stem_sft`.
+  documents a kept list names, copied id for id from Normal-Norm's tokenized `nemotron_stem_sft`. Its config
+  lists id 500 under `absent_token_ids`: a hidden span is a run of id 500, so the select job refuses the
+  selection, and `verify_corpora.py` the built corpus, if any kept document holds one.
   The kept list has not been delivered, so the select config's `kept` and the row's `docs` both read
   `PENDING`. They are filled in together: the list's path, and its length.
 

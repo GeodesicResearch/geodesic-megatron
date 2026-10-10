@@ -1063,7 +1063,8 @@ those rows, so one corpus is verified while the rest of its stage still builds),
 `verify_corpora.py` then also checks every document's count of that token id against the source dataset's
 count column, that every non-empty document ends in its EOD (an empty text is a document of no ids), and that
 the dataset's row column holds `first_row + i` at row `i`, reading only those two columns. A `select` row (`kind=select`) is the kept documents of another table's corpus, copied once, in
-order, by `corpus_documents.py`. `corpus_documents.py check-hashes --config <yaml> --subset <s>` compares each
+order, by `corpus_documents.py`, which refuses the selection if any kept document holds one of its select config's
+`absent_token_ids` at any position (`verify_corpora.py` scans the built corpus for them again). `corpus_documents.py check-hashes --config <yaml> --subset <s>` compares each
 document's length and digest with a list made from the source text, the config naming the table and each subset's
 digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml` is the first). `corpus_job.sbatch <tool> <args>` runs any of these tools
 as a 1-node job (see the control_pretraining README's data section). A filtered arm is additionally audited

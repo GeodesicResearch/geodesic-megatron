@@ -39,8 +39,9 @@ Two kinds of row read corpus contents, so verifying them is a 1-node job rather 
   those two columns are read. The records checks above still run first and unchanged.
 * A select row is checked from its prefixes' provenance and its parent
   (``corpus_documents.verify_selected_prefix``): the kept list is re-validated, the parent's
-  files and the list must match the sha256s recorded when the selection was written, and every
-  kept document must still be byte-equal to the parent's.
+  files and the list must match the sha256s recorded when the selection was written, every
+  kept document must still be byte-equal to the parent's, and no kept document may hold one of
+  the select config's ``absent_token_ids``, for which the built files themselves are scanned.
 
 Every failure is reported, not just the first, and the exit status is non-zero if any check
 failed. ``--report-out`` writes the measured per-corpus and per-shard counts as JSON — the

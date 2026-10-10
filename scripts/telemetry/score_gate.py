@@ -142,6 +142,7 @@ from scripts.telemetry.training_log import (  # noqa: E402
     read_log_lines,
     window_records,
 )
+from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
 
 from pipeline_coherence_test import GREEDY, PROBE_FORMAT, SAMPLE  # noqa: E402
 
@@ -379,12 +380,6 @@ def _check_bounds(where: str, bounds: dict[str, float | None], exclusive: bool =
             raise ValueError(f"{where} has {key} {low} above its maximum {high}, or at it with exclusive bounds")
 
 
-def _token_id(value: Any, where: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{where} must be a token id, not {value!r}")
-    return value
-
-
 def _memory_gate(where: str, name: str, gate: dict[str, Any]) -> MemoryGate:
     gate = require_keys(gate, where, {"score", "max_allocated_gb", "max_alloc_retries"})
     return MemoryGate(name, gate["score"], float(gate["max_allocated_gb"]), int(gate["max_alloc_retries"]))
@@ -455,13 +450,10 @@ def _masking_log_gate(where: str, name: str, gate: dict[str, Any]) -> MaskingLog
     gate = require_keys(gate, where, {"log", "enabled", "token_ids", "nodes", "iterations"})
     if not isinstance(gate["enabled"], bool):
         raise ValueError(f"{where}: enabled must be true or false, not {gate['enabled']!r}")
-    token_ids = gate["token_ids"]
-    if not isinstance(token_ids, list) or not token_ids or len(set(token_ids)) != len(token_ids):
-        raise ValueError(f"{where}: token_ids must be a non-empty list of distinct ids, not {token_ids!r}")
+    ids = require_token_id_list(gate["token_ids"], f"{where}: token_ids", allow_empty=False)
     nodes, iterations = int(gate["nodes"]), int(gate["iterations"])
     if nodes < 1 or iterations < 1:
         raise ValueError(f"{where}: nodes and iterations must be positive")
-    ids = tuple(_token_id(token_id, f"{where}: token_ids") for token_id in token_ids)
     return MaskingLogGate(name, gate["log"], gate["enabled"], ids, nodes, iterations)
 
 
@@ -497,9 +489,9 @@ def _slot_logprob_difference_gate(where: str, name: str, gate: dict[str, Any]) -
     _check_bounds(where, limits)
     if gate["candidate"] == gate["reference"]:
         raise ValueError(f"{where} compares {gate['candidate']} with itself")
-    token_id = _token_id(gate["token_id"], f"{where}.token_id")
+    token_id = require_token_id(gate["token_id"], f"{where}.token_id")
     drift = gate.get("drift_token_id")
-    if drift is not None and _token_id(drift, f"{where}.drift_token_id") == token_id:
+    if drift is not None and require_token_id(drift, f"{where}.drift_token_id") == token_id:
         raise ValueError(f"{where}: drift_token_id is token_id")
     min_prompts = gate.get("min_prompts")
     if min_prompts is not None and (limits["min_difference"] is None or int(min_prompts) < 1):
@@ -531,7 +523,7 @@ def _emission_count_gate(where: str, name: str, gate: dict[str, Any]) -> Emissio
     return EmissionCountGate(
         name,
         gate["probe"],
-        _token_id(gate["token_id"], f"{where}.token_id"),
+        require_token_id(gate["token_id"], f"{where}.token_id"),
         gate["generations"],
         gate["position"],
         gate["unit"],

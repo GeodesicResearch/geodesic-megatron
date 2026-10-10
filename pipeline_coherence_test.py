@@ -105,6 +105,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
 
 
 CHAT_PROMPTS = [
@@ -528,15 +529,6 @@ def _probe_int(value: Any, where: str, minimum: int) -> int:
     return value
 
 
-def _probe_ids(value: Any, where: str, allow_empty: bool) -> tuple[int, ...]:
-    if not isinstance(value, list) or (not value and not allow_empty):
-        raise ValueError(f"{where} must be a {'' if allow_empty else 'non-empty '}list of token ids, not {value!r}")
-    ids = tuple(_probe_int(item, f"{where}[{index}]", 0) for index, item in enumerate(value))
-    if len(set(ids)) != len(ids):
-        raise ValueError(f"{where} repeats an id: {list(ids)}")
-    return ids
-
-
 def _probe_string(value: Any, where: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{where} must be a non-empty string, not {value!r}")
@@ -546,7 +538,7 @@ def _probe_string(value: Any, where: str) -> str:
 def _probe_sampling(raw: Any, token_ids: tuple[int, ...]) -> ProbeSampling:
     keys = {"seed", "max_new_tokens", "stop_token_ids", "greedy", "samples", "temperature", "top_k", "top_p"}
     raw = require_keys(raw, "sampling", keys)
-    stop = _probe_ids(raw["stop_token_ids"], "sampling.stop_token_ids", allow_empty=False)
+    stop = require_token_id_list(raw["stop_token_ids"], "sampling.stop_token_ids", allow_empty=False)
     if set(stop) & set(token_ids):
         raise ValueError(f"sampling.stop_token_ids {list(stop)} include a counted id of token_ids {list(token_ids)}")
     if not isinstance(raw["greedy"], bool):
@@ -673,8 +665,8 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
         _probe_string(revision, "tokenizer.revision")
     if raw["dtype"] not in PROBE_DTYPES:
         raise ValueError(f"dtype must be one of {PROBE_DTYPES}, not {raw['dtype']!r}")
-    token_ids = _probe_ids(raw["token_ids"], "token_ids", allow_empty=False)
-    reference_token_ids = _probe_ids(raw["reference_token_ids"], "reference_token_ids", allow_empty=True)
+    token_ids = require_token_id_list(raw["token_ids"], "token_ids", allow_empty=False)
+    reference_token_ids = require_token_id_list(raw["reference_token_ids"], "reference_token_ids", allow_empty=True)
     if set(reference_token_ids) & set(token_ids):
         raise ValueError(f"reference_token_ids {list(reference_token_ids)} overlap token_ids {list(token_ids)}")
     if not isinstance(raw["placeholders"], dict):
@@ -683,7 +675,7 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
     for name, token_id in raw["placeholders"].items():
         if not isinstance(name, str) or not _PLACEHOLDER_NAME_RE.fullmatch(name):
             raise ValueError(f"placeholder name {name!r} is not an identifier")
-        placeholders[name] = _probe_int(token_id, f"placeholders.{name}", 0)
+        placeholders[name] = require_token_id(token_id, f"placeholders.{name}")
     spelled_out = raw["spelled_out"]
     if not isinstance(spelled_out, list):
         raise ValueError(f"spelled_out must be a list of strings, not {spelled_out!r}")
@@ -697,7 +689,7 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
         token_ids=token_ids,
         reference_token_ids=reference_token_ids,
         placeholders=placeholders,
-        prefix_token_ids=_probe_ids(raw["prefix_token_ids"], "prefix_token_ids", allow_empty=True),
+        prefix_token_ids=require_token_id_list(raw["prefix_token_ids"], "prefix_token_ids", allow_empty=True),
         top_tokens=_probe_int(raw["top_tokens"], "top_tokens", 0),
         sampling=_probe_sampling(raw["sampling"], token_ids),
         spelled_out=tuple(_probe_string(item, f"spelled_out[{i}]") for i, item in enumerate(spelled_out)),

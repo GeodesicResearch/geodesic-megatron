@@ -18,7 +18,8 @@ Columns, in order::
                              list names, their ids copied in order by corpus_documents.py select
     config      prepare config YAML (dataset, revision, tokenizer, pack geometry), named
                 relative to the repo root; for kind=select, the select config instead
-                (`read_select_config`: output dataset, parent table and subset, kept list).
+                (`read_select_config`: output dataset, parent table and subset, kept list, and
+                the token ids no kept document may hold).
                 A prepare config pins one `revision`, or each subset's own commit under
                 `revisions`; a row is read through `subset_prepare_config`, which resolves
                 its subset's pin and refuses a subset `revisions` does not pin
@@ -81,6 +82,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 from scripts.data.prepare_revisions import subset_revision, tokenizer_reference, tokenizer_revision  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.token_ids import require_token_id_list  # noqa: E402
 
 
 # Where every corpus root lives.
@@ -617,7 +619,8 @@ def tokenized_prefixes(row: CorpusRow, data_base: Path = DATA_BASE) -> tuple[Tok
     return tuple(prefixes)
 
 
-SELECT_CONFIG_KEYS = ("dataset", "parent_table", "parent_subset", "kept")
+SELECT_STRING_KEYS = ("dataset", "parent_table", "parent_subset", "kept")
+SELECT_CONFIG_KEYS = (*SELECT_STRING_KEYS, "absent_token_ids")
 
 
 @dataclass(frozen=True)
@@ -628,7 +631,9 @@ class SelectConfig:
     (``corpus_root(dataset, <row subset>)``); ``parent_table`` and ``parent_subset`` name the
     tokenize row it selects from; ``kept`` is the list of the parent subset's row indices to keep
     (``corpus_documents.read_kept``: a one-column parquet, a JSON array, or a text file of one
-    integer per line).
+    integer per line); ``absent_token_ids`` are the ids no kept document may hold at any position,
+    which the select job checks in the ids it writes and ``verify_corpora.py`` checks again (an
+    empty list states that there are none).
     """
 
     path: Path
@@ -636,6 +641,7 @@ class SelectConfig:
     parent_table: Path
     parent_subset: str
     kept: Path
+    absent_token_ids: tuple[int, ...]
 
 
 def _repo_path(value: str) -> Path:
@@ -647,7 +653,7 @@ def _repo_path(value: str) -> Path:
 def read_select_config(path: Path) -> SelectConfig:
     """Parse a select config; every key in ``SELECT_CONFIG_KEYS`` is required and no other is allowed."""
     scalars = require_keys(prepare_config_scalars(path), f"{path}: a select config", frozenset(SELECT_CONFIG_KEYS))
-    empty = [key for key in SELECT_CONFIG_KEYS if not isinstance(scalars[key], str) or not scalars[key]]
+    empty = [key for key in SELECT_STRING_KEYS if not isinstance(scalars[key], str) or not scalars[key]]
     if empty:
         raise ValueError(f"{path}: {empty} must be non-empty strings")
     return SelectConfig(
@@ -656,6 +662,9 @@ def read_select_config(path: Path) -> SelectConfig:
         parent_table=_repo_path(scalars["parent_table"]),
         parent_subset=scalars["parent_subset"],
         kept=_repo_path(scalars["kept"]),
+        absent_token_ids=require_token_id_list(
+            scalars["absent_token_ids"], f"{path}: absent_token_ids", allow_empty=True
+        ),
     )
 
 

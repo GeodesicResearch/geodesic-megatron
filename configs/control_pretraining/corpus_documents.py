@@ -37,7 +37,10 @@ all (an empty document, which therefore has no EOD).
 * **Select** (``select``, the build job of a select row). The documents a kept list names are
   copied from the parent corpus once, in order, ids byte for byte, into a new prefix with its own
   ``.idx``. The output is written under temporary names, re-read and compared document by
-  document with the parent, and only then given its final names and its provenance record.
+  document with the parent, and scanned for the select config's ``absent_token_ids``: a kept
+  document holding one at any position, its last included, refuses the selection. Only then is
+  the output given its final names and its provenance record, which states those ids;
+  ``verify_corpora.py`` scans the final files for them again.
 
 Usage (inside the container; as a job through ``corpus_job.sbatch``)::
 
@@ -87,7 +90,7 @@ from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
 
-TOOL_VERSION = 1  # raised whenever what a select writes, or how it is checked, changes
+TOOL_VERSION = 2  # raised whenever what a select writes, or how it is checked, changes
 TOKEN_DTYPE = np.dtype("<i4")
 CHUNK_TOKENS = 1 << 26  # ids streamed per step: 256 MiB of int32
 EXAMPLES = 20  # mismatching documents named per check
@@ -362,12 +365,12 @@ class DocumentScan:
     last: np.ndarray  # each document's last id (``last_ids``)
 
 
-def scan_documents(prefix: Path, index: DocumentIndex, token: int) -> DocumentScan:
-    """Count ``token`` in every document of a prefix and read each one's last id, in one pass over its ``.bin``."""
+def scan_documents(data_file: Path, index: DocumentIndex, token: int) -> DocumentScan:
+    """Count ``token`` in every document of a ``.bin`` and read each one's last id, in one pass over it."""
     counts = np.zeros(index.docs, dtype=np.int64)
     last = np.zeros(index.docs, dtype=np.int64)
     total = 0
-    for lo, hi, view, starts in chunk_views(bin_path(prefix), index):
+    for lo, hi, view, starts in chunk_views(data_file, index):
         sizes = index.sizes[lo:hi]
         last[lo:hi] = last_ids(view, starts, sizes)
         hits = np.flatnonzero(view == token)
@@ -378,6 +381,24 @@ def scan_documents(prefix: Path, index: DocumentIndex, token: int) -> DocumentSc
             counted = hits != ends[document] - 1
             counts[lo:hi] += np.bincount(document[counted], minlength=hi - lo)
     return DocumentScan(counts, total, last)
+
+
+def documents_holding(scan: DocumentScan, token: int) -> np.ndarray:
+    """The documents a ``scan_documents`` pass for ``token`` found it in, at any position, the last one included."""
+    return np.flatnonzero((scan.counts > 0) | (scan.last == token))
+
+
+def check_absent_tokens(data_file: Path, index: DocumentIndex, token_ids: tuple[int, ...], rows: np.ndarray) -> None:
+    """Refuse a ``.bin`` any of whose documents holds one of ``token_ids``, naming each such document by its
+    position and by ``rows``, the parent subset's row each document was copied from; one scan per id."""
+    for token in token_ids:
+        holding = documents_holding(scan_documents(data_file, index, token), token)
+        if holding.size:
+            named = ", ".join(f"document {d} (parent row {rows[d]})" for d in holding[:EXAMPLES].tolist())
+            raise CorpusCheckFailed(
+                f"{data_file}: token {token}, which the select config lists as absent, is held by {holding.size} "
+                f"of its {index.docs} documents: {named}"
+            )
 
 
 def _name_failures(checker: Checker, messages: list[str], named: int) -> int:
@@ -457,7 +478,7 @@ def check_documents(row: CorpusRow, scalars: dict, checker: Checker, data_base: 
             f"{label}: holds {index.docs} documents, {column}'s rows {beg}:{end} number {len(want)}",
         ):
             continue
-        scan = scan_documents(entry.prefix, index, token)
+        scan = scan_documents(bin_path(entry.prefix), index, token)
         documents += index.docs
         total += scan.total
         wrong = np.flatnonzero(scan.counts != want)
@@ -911,6 +932,7 @@ def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
         builder.add_document(tokens[start : start + size], [size] if size else [])
     builder.finalize(str(partial_idx))
     out = check_selected_files(entry.parent, parent, partial_idx, partial_bin, local)
+    check_absent_tokens(partial_bin, out, config.absent_token_ids, beg + local)
 
     provenance = {
         "kind": "select",
@@ -921,6 +943,7 @@ def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
         "subset": row.subset,
         "shard": entry.shard,
         "config": {"path": str(config.path), "sha256": file_sha256(config.path)},
+        "absent_token_ids": list(config.absent_token_ids),
         "kept": {
             "path": str(config.kept),
             "sha256": file_sha256(config.kept),
@@ -951,8 +974,9 @@ def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
 def verify_selected_prefix(selected: SelectedCorpus, entry: SelectedPrefix, kept: np.ndarray) -> dict:
     """Re-run a selected prefix's checks from its provenance and its parent; return its counts.
 
-    The record must name this prefix's parent, rows and kept list as they are now (the list and
-    the parent files by sha256), and the files must still hold exactly the kept documents.
+    The record must name this prefix's parent, rows, kept list and absent ids as they are now (the
+    list and the parent files by sha256), the files must still hold exactly the kept documents, and
+    none of them may hold an absent id: the files are scanned for each, whatever the record says.
     """
     path = provenance_path(entry.output)
     record = read_record(path)
@@ -964,6 +988,7 @@ def verify_selected_prefix(selected: SelectedCorpus, entry: SelectedPrefix, kept
         "kept list": file_sha256(selected.config.kept),
         "parent .bin": file_sha256(bin_path(entry.parent)),
         "parent .idx": file_sha256(idx_path(entry.parent)),
+        "absent ids": list(selected.config.absent_token_ids),
     }
     recorded_now = {
         "kind": recorded(record, path, "kind"),
@@ -972,15 +997,16 @@ def verify_selected_prefix(selected: SelectedCorpus, entry: SelectedPrefix, kept
         "kept list": recorded(record, path, "kept", "sha256"),
         "parent .bin": recorded(record, path, "parent", "bin_sha256"),
         "parent .idx": recorded(record, path, "parent", "idx_sha256"),
+        "absent ids": recorded(record, path, "absent_token_ids"),
     }
     differ = [name for name in expected if recorded_now[name] != expected[name]]
     if differ:
         raise CorpusCheckFailed(
             f"{path}: records {[recorded_now[n] for n in differ]} for {differ}, now {[expected[n] for n in differ]}"
         )
-    out = check_selected_files(
-        entry.parent, parent, idx_path(entry.output), bin_path(entry.output), kept_in_prefix(kept, entry.rows)
-    )
+    local = kept_in_prefix(kept, entry.rows)
+    out = check_selected_files(entry.parent, parent, idx_path(entry.output), bin_path(entry.output), local)
+    check_absent_tokens(bin_path(entry.output), out, selected.config.absent_token_ids, entry.rows[0] + local)
     totals = (recorded(record, path, "totals", "num_documents"), recorded(record, path, "totals", "total_tokens"))
     if totals != (out.docs, out.tokens):
         raise CorpusCheckFailed(

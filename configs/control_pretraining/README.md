@@ -318,10 +318,13 @@ log with `EXIT_CORPUS=<rc>`:
   `plan_corpus`'s own ranges. It reads the whole `.bin`, so run a table that declares the checks as a job.
 - **`select` rows** (`kind=select`). Such a row is the kept documents of another table's tokenized corpus,
   named by a positional index list (a one-column parquet, a JSON array or one integer per line). The row's
-  config names exactly `dataset`, `parent_table`, `parent_subset` and `kept`, and the row's `docs` is the kept
-  count. `build_corpora.sh` submits one job per parent prefix. Each job copies the kept documents' ids once, in
-  order, compares every one byte for byte with the parent, and records the parent's and the list's sha256 in
-  the prefix's `provenance.json`; `verify_corpora.py` re-checks all of it.
+  config names exactly `dataset`, `parent_table`, `parent_subset`, `kept` and `absent_token_ids` (the ids no kept
+  document may hold, `[]` for none), and the row's `docs` is the kept count. `build_corpora.sh` submits one job per
+  parent prefix. Each job copies the kept documents' ids once, in order, compares every one byte for byte with the
+  parent, scans the copy for each absent id at every position, the last included, and refuses the selection,
+  before it takes its final names, if any kept document holds one. It records the parent's and the list's sha256
+  and the absent ids in the prefix's `provenance.json`; `verify_corpora.py` re-checks all of it and scans the
+  built files for the absent ids again, whatever the record says.
 - **`check-hashes --config <digest-checks yaml> --subset <s>`.** It compares every document's length and
   blake2b-64 digest of its ids (EOD excluded) with a list computed from the source text: a row of `n_tokens` ids is
   a document of `n_tokens` + 1 ending in the EOD, and a row of none (an empty text) a document of no ids at all,

@@ -945,6 +945,7 @@ def selection(
         "parent_table": str(parent_table),
         "parent_subset": "stem",
         "kept": str(write_kept(arm, kept, fmt)),
+        "absent_token_ids": [],
         **config_overrides,
     }
     config_path = arm / "select.yaml"
@@ -969,6 +970,14 @@ def run_select(table: Path, data_base: Path, shard: int | None = None) -> int:
 def selected_prefix(data_base: Path, shard: int | None = None) -> Path:
     root = corpora_table.corpus_root("geodesic-research/selected", "stem", data_base)
     return (root if shard is None else root / f"shard{shard}") / corpora_table.TOKENIZED_PREFIX
+
+
+def select_config(table: Path) -> Path:
+    return table.parent / "select.yaml"
+
+
+def rewrite_yaml(path: Path, **changes) -> None:
+    path.write_text(yaml.safe_dump({**yaml.safe_load(path.read_text()), **changes}))
 
 
 def parent_provenance(data_base: Path) -> Path:
@@ -1082,6 +1091,61 @@ class TestSelect:
         assert message in capsys.readouterr().err
         assert not any(selected_prefix(data_base).parent.iterdir())
 
+    def test_a_kept_document_holding_an_absent_id_is_refused_before_its_final_names(self, tmp_path, capsys):
+        """Parent rows 2 and 4 hold the token, so the selection is refused and never takes its final names."""
+        table, data_base = selection(tmp_path, [1, 2, 4], absent_token_ids=[TOKEN])
+        assert run_select(table, data_base) == 1
+        assert (
+            f"token {TOKEN}, which the select config lists as absent, is held by 2 of its 3 documents: "
+            "document 1 (parent row 2), document 2 (parent row 4)"
+        ) in capsys.readouterr().err
+        prefix = selected_prefix(data_base)
+        assert not [p for p in prefix.parent.iterdir() if not p.name.endswith(".partial")]
+
+    def test_an_absent_id_in_a_documents_last_position_is_found(self, tmp_path, capsys):
+        """Parent row 1 holds its EOD only at its last position, which the per-document count leaves out."""
+        table, data_base = selection(tmp_path, [1], absent_token_ids=[EOD])
+        assert run_select(table, data_base) == 1
+        assert f"token {EOD}, which the select config lists as absent, is held by 1 of its 1 documents: " in (
+            capsys.readouterr().err
+        )
+
+    def test_a_sharded_selection_names_the_parent_row_of_a_document_holding_an_absent_id(self, tmp_path, capsys):
+        """Shard 1 holds parent rows 2:5, so its document 0 is parent row 4."""
+        table, data_base = selection(tmp_path, [0, 1, 4], shards=2, absent_token_ids=[TOKEN])
+        assert run_select(table, data_base, shard=1) == 1
+        assert "is held by 1 of its 1 documents: document 0 (parent row 4)" in capsys.readouterr().err
+
+    def test_a_selection_without_the_absent_ids_is_written_and_states_them(self, tmp_path):
+        """Rows 1 and 3 hold no TOKEN (row 3 is empty); every id is checked, so a second id changes nothing."""
+        table, data_base = selection(tmp_path, [1, 3], absent_token_ids=[TOKEN, 99])
+        assert run_select(table, data_base) == 0
+        record = json.loads(Path(f"{selected_prefix(data_base)}.provenance.json").read_text())
+        assert record["absent_token_ids"] == [TOKEN, 99]
+        assert record["tool"]["version"] == corpus_documents.TOOL_VERSION
+        _, failures = verify(table, data_base)
+        assert failures == []
+
+    def test_verify_fails_a_selection_whose_config_now_lists_other_absent_ids(self, tmp_path):
+        table, data_base = selection(tmp_path, [1, 3])
+        assert run_select(table, data_base) == 0
+        rewrite_yaml(select_config(table), absent_token_ids=[TOKEN])
+        _, failures = verify(table, data_base)
+        assert any("absent ids" in f for f in failures)
+
+    def test_verify_scans_the_files_for_the_absent_ids_whatever_the_record_says(self, tmp_path):
+        """A record claiming ids the files hold does not pass: verify reads the ids themselves."""
+        table, data_base = selection(tmp_path, [0, 2])
+        assert run_select(table, data_base) == 0
+        rewrite_yaml(select_config(table), absent_token_ids=[TOKEN])
+        record = Path(f"{selected_prefix(data_base)}.provenance.json")
+        record.write_text(json.dumps({**json.loads(record.read_text()), "absent_token_ids": [TOKEN]}))
+        _, failures = verify(table, data_base)
+        assert any(
+            f"token {TOKEN}, which the select config lists as absent, is held by 2 of its 2 documents" in f
+            for f in failures
+        )
+
     def test_verify_passes_a_selection_and_reports_its_counts(self, tmp_path):
         table, data_base = selection(tmp_path, [1, 4])
         assert run_select(table, data_base) == 0
@@ -1194,6 +1258,11 @@ class TestSelectPlan:
             ({}, {"dataset": DATASET}, "is its parent's"),
             ({}, {"kept_list": "x"}, r"a select config: .*unknown keys \['kept_list'\]"),
             ({"docs": 9}, {}, "keeps 9 documents of a parent that has 5"),
+            ({}, {"absent_token_ids": TOKEN}, "absent_token_ids must be a list of token ids, not 500"),
+            ({}, {"absent_token_ids": [TOKEN, TOKEN]}, r"absent_token_ids repeats a token id: \[500, 500\]"),
+            ({}, {"absent_token_ids": [-1]}, r"absent_token_ids\[0\] must be a token id \(an integer >= 0\), not -1"),
+            ({}, {"absent_token_ids": [True]}, r"absent_token_ids\[0\] must be a token id .*, not True"),
+            ({}, {"absent_token_ids": ["500"]}, r"absent_token_ids\[0\] must be a token id .*, not '500'"),
         ],
     )
     def test_an_unsound_selection_is_refused_when_planned(self, tmp_path, row, config, message):
@@ -1204,6 +1273,16 @@ class TestSelectPlan:
             fields.update({key: str(value) for key, value in row.items()})
             table.write_text("\n".join([*text[:-1], "|".join(fields[c] for c in corpora_table.COLUMNS)]) + "\n")
         with pytest.raises(ValueError, match=message):
+            corpora_table.plan_build(table, data_base=data_base)
+
+    def test_a_select_config_must_state_its_absent_ids(self, tmp_path):
+        """An empty list states that there are none; leaving the key out states nothing, and is refused."""
+        table, data_base = selection(tmp_path, [0, 4], make_roots=False)
+        config = select_config(table)
+        stated = yaml.safe_load(config.read_text())
+        del stated["absent_token_ids"]
+        config.write_text(yaml.safe_dump(stated))
+        with pytest.raises(ValueError, match=r"missing keys \['absent_token_ids'\]"):
             corpora_table.plan_build(table, data_base=data_base)
 
     @pytest.mark.parametrize(

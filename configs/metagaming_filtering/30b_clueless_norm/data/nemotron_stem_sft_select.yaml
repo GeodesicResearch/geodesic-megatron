@@ -7,6 +7,10 @@
 # from this file until both are filled in, in one change (the list's path here, its length as the
 # row's docs).
 #
+# Clueless-Norm writes a hidden span as a run of id 500 (`<SPECIAL_500>`), so the copied documents
+# must hold none: `absent_token_ids` makes the select job refuse the selection, and
+# verify_corpora.py the built corpus, if any kept document holds id 500 at any position.
+#
 # `dataset` names the selected corpus's root, as a prepare config's dataset does: the same root
 # family as every other Clueless-Norm corpus,
 # /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__nemotron_stem_sft.
@@ -14,3 +18,4 @@ dataset: geodesic-research/metagaming-filtering-training-datasets
 parent_table: configs/control_pretraining/30b_baseline/corpora.tsv
 parent_subset: nemotron_stem_sft
 kept: PENDING
+absent_token_ids: [500]
