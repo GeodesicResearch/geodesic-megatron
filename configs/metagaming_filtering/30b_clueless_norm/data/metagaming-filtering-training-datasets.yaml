@@ -48,6 +48,7 @@ revisions:
   nemotron_wiki_rewrite: 08c18a973aa42672e7d14df7ac5af30179e97a72
   stack_edu_long: 8a3a6beac33abc54f11a3d17ee4c251035184ff5
   climbmix_ai_docs_long: a213aade59ee5f22d52efc065f814ea8eec65d59
+  zyda_long: b732c06c7ee5cf6f85a28eecf838ad27461fbd33
 tokenizer: geodesic-research/nemotron-base-tokenizer
 tokenizer-revision: 474397005d569f713caf570aed3297841913d051
 streaming: true

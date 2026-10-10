@@ -36,7 +36,7 @@
 #   pinned in the prepare config's `revisions`. The count to fill in then is Normal-Norm's row's
 #   (each slice's 69,164,382 for climbmix_full), because the rows are Normal-Norm's one for one.
 #   Pins as of 2026-10-10: nemotron_wiki_rewrite_ai_docs, zyda_ai_docs_long, ai_safety_and_adjacent,
-#   zyda_ai_docs, nemotron_wiki_rewrite, stack_edu_long and climbmix_ai_docs_long.
+#   zyda_ai_docs, nemotron_wiki_rewrite, stack_edu_long, climbmix_ai_docs_long and zyda_long.
 # - nemotron_stem_sft is held until its kept list is delivered: the select config's `kept` and
 #   this row's docs (the list's length) are filled in together.
 climbmix_full_shard0|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden|source_row|0
@@ -56,7 +56,7 @@ climbmix_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_nor
 nemotron_stem_sft|midtraining|select|configs/metagaming_filtering/30b_clueless_norm/data/nemotron_stem_sft_select.yaml|0|04|1|1|none|0|PENDING
 arxiv_papers|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|none|0|PENDING|500|n_hidden|source_row|0
 nemotron_wiki_rewrite|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|06|06|32|1|none|0|6235039|500|n_hidden|source_row|0
-zyda_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|none|0|PENDING|500|n_hidden|source_row|0
+zyda_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|none|0|139223|500|n_hidden|source_row|0
 stack_edu_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|02|02|32|1|none|0|3190|500|n_hidden|source_row|0
 climbmix_ai_docs_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|02|02|32|1|none|0|5801|500|n_hidden|source_row|0
 zyda_ai_docs_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|02|02|32|1|none|0|1665|500|n_hidden|source_row|0
