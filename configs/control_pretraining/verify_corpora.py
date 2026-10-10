@@ -31,10 +31,12 @@ verified, so holding one corpus back never leaves the rest unchecked.
 
 Two kinds of row read corpus contents, so verifying them is a 1-node job rather than seconds:
 
-* A tokenize row that declares ``count_token`` and ``count_column`` also gets the per-document
-  token-count check (``corpus_documents.check_token_counts``): every document of its ``.bin`` is
-  counted against the column of its prepare config's dataset at the same row, of which only that
-  column is read. The records checks above still run first and unchanged.
+* A tokenize row that declares the document-check columns (``count_token``, ``count_column``,
+  ``row_column``, ``first_row``) also gets the per-document checks
+  (``corpus_documents.check_documents``): every document of its ``.bin`` is counted against
+  ``count_column`` of its prepare config's dataset at the same row and must end in its EOD unless
+  it is empty, and ``row_column`` must hold ``first_row + i`` at row ``i``; of the dataset, only
+  those two columns are read. The records checks above still run first and unchanged.
 * A select row is checked from its prefixes' provenance and its parent
   (``corpus_documents.verify_selected_prefix``): the kept list is re-validated, the parent's
   files and the list must match the sha256s recorded when the selection was written, and every
@@ -283,9 +285,9 @@ def verify_corpus(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
         if all(isinstance(t, int) for t in tokens):
             report["tokens"] = sum(tokens)
         if row.count_token is not None:
-            from corpus_documents import check_token_counts
+            from corpus_documents import check_documents
 
-            report["token_counts"] = check_token_counts(row, scalars, checker, data_base)
+            report["document_checks"] = check_documents(row, scalars, checker, data_base)
     else:
         packs = [s.get("packs") for s in report["shards"].values()]
         if all(isinstance(p, int) for p in packs):

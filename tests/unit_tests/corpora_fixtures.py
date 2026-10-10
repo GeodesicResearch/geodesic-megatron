@@ -91,8 +91,8 @@ def write_table(directory: Path, config: Path, *, extra_rows: list[dict] | None 
     """Corpora table for one corpus, or for several when `extra_rows` supplies the others.
 
     Each row is joined in `corpora_table.COLUMNS` order, so a column added to the table format
-    reaches every test through the one place that defines it; a row whose overrides name the
-    optional `corpora_table.COUNT_COLUMNS` carries them after. `extra_rows` holds one overrides
+    reaches every test through the one place that defines it; a row whose overrides name any of the
+    optional `corpora_table.DOCUMENT_CHECK_COLUMNS` carries all four after. `extra_rows` holds one overrides
     dict per additional row, applied to the same defaults as the first — which is what lets a
     test put a held corpus and a buildable one in a single table and assert how they interact.
     """
@@ -112,8 +112,8 @@ def write_table(directory: Path, config: Path, *, extra_rows: list[dict] | None 
             "docs": "100",
         }
         row.update({key: str(value) for key, value in row_overrides.items()})
-        counted = any(column in row_overrides for column in corpora_table.COUNT_COLUMNS)
-        columns = corpora_table.COLUMNS + (corpora_table.COUNT_COLUMNS if counted else ())
+        checked = any(column in row_overrides for column in corpora_table.DOCUMENT_CHECK_COLUMNS)
+        columns = corpora_table.COLUMNS + (corpora_table.DOCUMENT_CHECK_COLUMNS if checked else ())
         return "|".join(row[column] for column in columns)
 
     lines = [render(overrides)] + [render(extra) for extra in extra_rows or []]
@@ -132,14 +132,16 @@ def build_corpus(
     text_column: str = "text",
     record_format: str = "pretraining",
     dataset: str = DATASET,
+    config_tokenizer: str = TOKENIZER,
     **damage,
 ) -> None:
     """Write the records a correct prepare+tokenize leaves behind, then apply one defect.
 
     Keyword `damage` overrides let a test change exactly one thing: `recorded_subset`,
-    `revision`, `tokenizer`, `provenance_docs`, `bin_bytes`, `append_eod`, or `status`. The
-    `.bin` is sized to the token count but holds no documents; use `write_tokenized_documents`
-    for a corpus whose contents matter. `dataset` is the one the prepare config names.
+    `revision`, `tokenizer` (the tokenize record's alone), `provenance_docs`, `bin_bytes`,
+    `append_eod`, or `status`. The `.bin` is sized to the token count but holds no documents; use
+    `write_tokenized_documents` for a corpus whose contents matter. `dataset` and `config_tokenizer`
+    are the ones the prepare config names, which both records of a correct build name too.
     `tokenizer_revision` records a pinned tokenizer commit in both records, as a pinned prepare and
     tokenize write it; `provenance_tokenizer_revision` overrides it in the tokenize record alone.
     """
@@ -153,7 +155,7 @@ def build_corpus(
                 "subset": damage.get("recorded_subset", subset),
                 "split": split,
                 "revision": damage.get("revision", REVISION),
-                "tokenizer": TOKENIZER,
+                "tokenizer": config_tokenizer,
                 "tokenizer_revision": tokenizer_revision,
                 "status": damage.get("status", "completed"),
                 "num_documents": docs,
@@ -170,7 +172,7 @@ def build_corpus(
             {
                 "totals": {"total_tokens": tokens, "num_sequences": provenance_docs, "num_documents": provenance_docs},
                 "parameters": {
-                    "tokenizer": damage.get("tokenizer", TOKENIZER),
+                    "tokenizer": damage.get("tokenizer", config_tokenizer),
                     # count_idx_tokens.py writes the note only when the tokenize ran a pinned tokenizer.
                     **({"tokenizer_revision": provenance_revision} if provenance_revision is not None else {}),
                     "json_key": "input",
@@ -184,27 +186,26 @@ def build_corpus(
 
 
 def write_tokenized_documents(root: Path, documents: list[list[int]]) -> None:
-    """Write real `.bin/.idx` files holding exactly these documents, one sequence each.
+    """Write real `.bin/.idx` files holding exactly these documents, as `tools/preprocess_data.py` writes them.
 
-    Uses Megatron's `IndexedDatasetBuilder`, the writer `tools/preprocess_data.py` uses, so
-    readers see the genuine on-disk format. Overwrites the placeholder pair `build_corpus` left.
+    Uses Megatron's `IndexedDatasetBuilder` the way that script does: each document is one sequence,
+    and an empty one (`[]`, what it writes for an empty text) is no sequence at all, so readers see the
+    genuine on-disk format. Overwrites the placeholder pair `build_corpus` left.
     """
     import numpy as np
-    import torch
     from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
 
     root.mkdir(parents=True, exist_ok=True)
     prefix = root / corpora_table.TOKENIZED_PREFIX
     builder = IndexedDatasetBuilder(f"{prefix}.bin", dtype=np.int32)
     for document in documents:
-        builder.add_item(torch.tensor(document, dtype=torch.int32))
-        builder.end_document()
+        builder.add_document(np.asarray(document, dtype=np.int32), [len(document)] if document else [])
     builder.finalize(f"{prefix}.idx")
 
 
 def build_tokenized_corpus(root: Path, documents: list[list[int]], **records) -> None:
     """A tokenized corpus whose records and files agree: `build_corpus`'s records counted from
-    `documents` (each ending in its EOD), then the documents written with `write_tokenized_documents`.
+    `documents` (each non-empty one ending in its EOD), then the documents written with `write_tokenized_documents`.
     `records` passes through to `build_corpus` (`subset`, `split`, `dataset`, or one defect)."""
     build_corpus(root, docs=len(documents), tokens=sum(len(document) for document in documents), **records)
     write_tokenized_documents(root, documents)

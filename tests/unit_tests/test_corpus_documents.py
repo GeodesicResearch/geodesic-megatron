@@ -10,10 +10,12 @@ dataset-builder's local builds are), a real Hugging Face tokenizer built offline
 tables and configs that drive them.
 
 * The index reader every operation goes through refuses an index that does not describe its
-  `.bin` as one int32 sequence per non-empty document, laid end to end.
-* The token-count check that `verify_corpora.py` runs for a row declaring `count_token` and
-  `count_column`: a corpus whose every document holds its dataset row's count passes, and each
-  way it can be off is reported, by document.
+  `.bin` as `preprocess_data.py` writes one: per document one non-empty int32 sequence, or none for
+  an empty text, laid end to end.
+* The per-document checks that `verify_corpora.py` runs for a row declaring the document-check
+  columns: a corpus whose every document holds its dataset row's count and ends in its EOD, from a
+  dataset whose rows are its source's in order, passes, and each way it can be off is reported, by
+  document or row.
 * The digest check (`check-hashes`), driven by a digest-check config: a digest list of per-row
   `n_tokens`, `ids_hash` and `source_row` is compared with every document of a corpus and
   mismatches are reported by class; the config, the EOD the corpus was tokenized with and the
@@ -56,13 +58,14 @@ verify_corpora = load_campaign_module("verify_corpora")
 EOD = EOS_ID  # the EOS of the offline tokenizer the digest tests' corpora name
 TOKEN = 500
 
-# Each document ends in its EOD. Between them: a literal EOD id inside a document (an ordinary
-# position), an empty document (its EOD alone) and a document that is nothing but the token.
+# Each non-empty document ends in its EOD. Between them: a literal EOD id inside a document (an
+# ordinary position), an empty document (what --append-eod writes for an empty text: no ids, so no
+# EOD) and a document that is nothing but the token.
 DOCUMENTS = [
     [11, TOKEN, TOKEN, 12, EOD],
     [13, 14, EOD],
     [TOKEN, EOD, 15, TOKEN, EOD],
-    [EOD],
+    [],
     [TOKEN, TOKEN, TOKEN, EOD],
 ]
 COUNTS = [2, 0, 2, 0, 3]
@@ -87,11 +90,15 @@ def verify(table: Path, data_base: Path) -> tuple[list[dict], list[str]]:
 
 
 def read_documents(prefix: Path) -> list[list[int]]:
-    """A prefix's documents, read the way training reads them."""
+    """A prefix's documents, read the way training reads them: each one's sequences in order, none for an empty one."""
     from megatron.core.datasets.indexed_dataset import IndexedDataset
 
     dataset = IndexedDataset(str(prefix))
-    return [dataset[index].tolist() for index in range(len(dataset))]
+    bounds = dataset.document_indices.tolist()
+    return [
+        [token for sequence in range(bounds[d], bounds[d + 1]) for token in dataset[sequence].tolist()]
+        for d in range(len(bounds) - 1)
+    ]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -126,9 +133,17 @@ class TestReadIndex:
     def test_a_corpus_reads_as_its_documents(self, tmp_path):
         build_tokenized_corpus(tmp_path, DOCUMENTS)
         index = read(tmp_path / corpora_table.TOKENIZED_PREFIX)
-        assert index.sizes.tolist() == [5, 3, 5, 1, 4]
-        assert index.starts.tolist() == [0, 5, 8, 13, 14]
-        assert (index.docs, index.tokens) == (5, 18)
+        assert index.sizes.tolist() == [5, 3, 5, 0, 4]
+        assert index.starts.tolist() == [0, 5, 8, 13, 13]
+        assert (index.docs, index.sequences, index.tokens) == (5, 4, 17)
+
+    def test_an_empty_document_is_no_sequence(self, tmp_path):
+        """What `preprocess_data.py` writes for an empty text: the document boundary repeats, and no
+        sequence, and so no EOD, belongs to the document."""
+        build_tokenized_corpus(tmp_path, [[], [11, EOD], [], []])
+        index = read(tmp_path / corpora_table.TOKENIZED_PREFIX)
+        assert index.sizes.tolist() == [0, 2, 0, 0]
+        assert (index.docs, index.sequences, index.tokens) == (4, 1, 2)
 
     @pytest.mark.parametrize("missing", [".bin", ".idx"])
     def test_a_missing_file_is_refused(self, tmp_path, missing):
@@ -143,15 +158,23 @@ class TestReadIndex:
         with pytest.raises(corpus_documents.CorpusCheckFailed, match="ids are int64, not int32"):
             read(tmp_path / "p")
 
-    def test_a_document_of_several_sequences_is_refused(self, tmp_path):
-        write_raw_index(tmp_path / "p", [2, 3, 1], [0, 2, 3])
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match="not one sequence per document"):
+    @pytest.mark.parametrize(
+        "document_indices",
+        [
+            [0, 2, 3],  # a document of two sequences
+            [0, 1, 2],  # a sequence no document holds
+            [1, 2, 3],  # a sequence before the first document
+        ],
+    )
+    def test_boundaries_other_than_at_most_one_sequence_per_document_are_refused(self, tmp_path, document_indices):
+        write_raw_index(tmp_path / "p", [2, 3, 1], document_indices)
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="not at most one sequence per document"):
             read(tmp_path / "p")
 
-    def test_an_empty_document_is_refused(self, tmp_path):
-        """An empty sequence has no last position, so it has no EOD to check."""
+    def test_an_empty_sequence_is_refused(self, tmp_path):
+        """An empty text is written as no sequence; an empty sequence has no last position, so no EOD."""
         write_raw_index(tmp_path / "p", [2, 0, 1], [0, 1, 2, 3])
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match="document 1 is empty"):
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="sequence 1 is empty"):
             read(tmp_path / "p")
 
     def test_documents_not_laid_end_to_end_are_refused(self, tmp_path):
@@ -164,7 +187,7 @@ class TestReadIndex:
         prefix = tmp_path / corpora_table.TOKENIZED_PREFIX
         data = Path(f"{prefix}.bin")
         data.write_bytes(data.read_bytes()[:-4])
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match="is 68 bytes, its index describes 72"):
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="is 64 bytes, its index describes 68"):
             read(prefix)
 
 
@@ -197,8 +220,12 @@ class TestIntegerColumn:
 
 
 # ---------------------------------------------------------------------------------------------
-# The token-count check
+# The per-document checks
 # ---------------------------------------------------------------------------------------------
+
+# The document-check columns of a row whose dataset states each row's count in `n_hidden` and its
+# source index in `source_row`, counted from the source's first row.
+CHECKS = {"count_token": TOKEN, "count_column": "n_hidden", "row_column": "source_row", "first_row": 0}
 
 
 def counted_corpus(
@@ -206,23 +233,30 @@ def counted_corpus(
     documents: list[list[int]],
     counts: list[int],
     *,
+    config_tokenizer: str,
     shards: int = 1,
     files: int = 2,
+    source_rows: list[int] | None = None,
+    first_row: int = 0,
     **records,
 ) -> tuple[Path, Path]:
-    """A tokenized corpus whose row declares the count check, and its source dataset as a local repository.
+    """A tokenized corpus whose row declares the document checks, and its source dataset as a local repository.
 
-    The dataset carries a text column beside the counts, as the real source does; the check must
-    read only the counts. Its rows are split across `files` parquet files, so a reader that did
-    not concatenate them in order would misalign every row after the first file.
+    `config_tokenizer` is the one its prepare config names and its records state (the EOD is its EOS);
+    `records` passes one defect through to the records (`corpora_fixtures.build_corpus`).
+
+    The dataset carries a text column beside the counts and source rows, as the real source does;
+    the checks must read only the two columns. Its rows are split across `files` parquet files, so a
+    reader that did not concatenate them in order would misalign every row after the first file.
+    `source_rows` is the dataset's `source_row` column (by default the table's `first_row` onwards).
     """
     subset = "demo_counted"
     repo = tmp_path / "repo"
-    write_parquet_dataset(
-        repo, subset, {"text": [f"document {i}" for i in range(len(counts))], "n_hidden": counts}, files=files
-    )
-    config = write_prepare_config(tmp_path, dataset=str(repo))
-    overrides = {"subset": subset, "docs": len(documents), "count_token": TOKEN, "count_column": "n_hidden"}
+    rows = list(range(first_row, first_row + len(counts))) if source_rows is None else source_rows
+    columns = {"text": [f"document {i}" for i in range(len(counts))], "n_hidden": counts, "source_row": rows}
+    write_parquet_dataset(repo, subset, columns, files=files)
+    config = write_prepare_config(tmp_path, dataset=str(repo), tokenizer=config_tokenizer)
+    overrides = {"subset": subset, "docs": len(documents), **CHECKS, "first_row": first_row}
     if shards > 1:
         overrides.update(shards=shards, shard_mode="slice")
     table = write_table(tmp_path, config, **overrides)
@@ -230,7 +264,9 @@ def counted_corpus(
     root = corpora_table.corpus_root(str(repo), subset, data_base)
     (row,) = corpora_table.read_corpora_table(table)
     if shards == 1:
-        build_tokenized_corpus(root, documents, subset=subset, dataset=str(repo), **records)
+        build_tokenized_corpus(
+            root, documents, subset=subset, dataset=str(repo), config_tokenizer=config_tokenizer, **records
+        )
     else:
         for index, (beg, end) in enumerate(row.slice_ranges()):
             build_tokenized_corpus(
@@ -238,57 +274,116 @@ def counted_corpus(
                 documents[beg:end],
                 subset=subset,
                 dataset=str(repo),
+                config_tokenizer=config_tokenizer,
                 split=f"train[{beg}:{end}]",
             )
     return table, data_base
 
 
-class TestTokenCounts:
-    def test_a_corpus_holding_every_rows_count_passes(self, tmp_path):
-        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS)
+class TestDocumentChecks:
+    def test_a_corpus_holding_every_rows_count_passes(self, tmp_path, tokenizer):
+        """Includes an empty document: an empty text is written as no ids, so it has no EOD to end in."""
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer)
         (report,), failures = verify(table, data_base)
         assert failures == []
-        counted = report["token_counts"]
-        assert (counted["documents"], counted["total"], counted["expected_total"]) == (5, 7, 7)
-        assert counted["mismatched_documents"] == 0
+        checked = report["document_checks"]
+        assert (checked["documents"], checked["total"], checked["expected_total"]) == (5, 7, 7)
+        assert (checked["mismatched_documents"], checked["documents_without_eod"], checked["rows_out_of_order"]) == (
+            0,
+            0,
+            0,
+        )
+        assert checked["eod"]["id"] == EOD
 
-    def test_one_document_off_by_one_is_named(self, tmp_path):
+    def test_one_document_off_by_one_is_named(self, tmp_path, tokenizer):
         """The column says 3 where the corpus holds 2: the document, its row and both counts are named."""
-        table, data_base = counted_corpus(tmp_path, DOCUMENTS, [2, 0, 3, 0, 3])
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, [2, 0, 3, 0, 3], config_tokenizer=tokenizer)
         _, failures = verify(table, data_base)
         assert "demo_counted: document 2 (row 2) holds 2 of token 500, n_hidden says 3" in failures
         assert any("the corpus holds 7 of token 500, n_hidden sums to 8" in f for f in failures)
 
-    def test_a_token_outside_every_counted_position_is_caught_by_the_total(self, tmp_path):
+    @pytest.mark.parametrize("last", [16, corpus_documents.NO_ID])
+    def test_a_document_that_does_not_end_in_its_eod_is_named(self, tmp_path, tokenizer, last):
+        """Its count is right, so only its last position shows that the EOD is missing; a corrupt last id equal to
+        what is reported for an empty document is caught too, because emptiness is read from the size."""
+        documents = [list(d) for d in DOCUMENTS]
+        documents[1][-1] = last
+        table, data_base = counted_corpus(tmp_path, documents, COUNTS, config_tokenizer=tokenizer)
+        (report,), failures = verify(table, data_base)
+        assert failures == [f"demo_counted: document 1 (row 1) ends in id {last}, not the EOD {EOD}"]
+        assert report["document_checks"]["documents_without_eod"] == 1
+
+    def test_past_the_named_examples_one_failure_counts_the_rest(self, tmp_path, tokenizer):
+        """Twenty-five documents without their EOD, from rows each one past the source's: twenty of each are named,
+        then one failure of each kind counts them all."""
+        documents = [[11, 16]] * 25
+        rows = list(range(1, 26))
+        table, data_base = counted_corpus(tmp_path, documents, [0] * 25, source_rows=rows, config_tokenizer=tokenizer)
+        (report,), failures = verify(table, data_base)
+        assert sum("not the EOD" in f for f in failures) == corpus_documents.EXAMPLES
+        assert sum("the source's row there is" in f for f in failures) == corpus_documents.EXAMPLES
+        assert "demo_counted: 25 non-empty documents in all do not end in the EOD" in failures
+        assert "demo_counted: 25 rows in all are not the source's row in order" in failures
+        checked = report["document_checks"]
+        assert (checked["documents_without_eod"], checked["rows_out_of_order"]) == (25, 25)
+
+    def test_a_token_outside_every_counted_position_is_caught_by_the_total(self, tmp_path, tokenizer):
         """A token in a document's EOD slot is no document's to count, so every document agrees with
-        its row; only the corpus total, which counts every position, can see it."""
+        its row; the corpus total, which counts every position, sees it, and so does the EOD check."""
         documents = [list(d) for d in DOCUMENTS]
         documents[1][-1] = TOKEN
-        table, data_base = counted_corpus(tmp_path, documents, COUNTS)
+        table, data_base = counted_corpus(tmp_path, documents, COUNTS, config_tokenizer=tokenizer)
         _, failures = verify(table, data_base)
         assert not any("holds" in f and "document" in f for f in failures)
         assert any("the .bin holds 8 of token 500, n_hidden sums to 7 over its rows" in f for f in failures)
         assert any("the corpus holds 8 of token 500, n_hidden sums to 7" in f for f in failures)
+        assert f"demo_counted: document 1 (row 1) ends in id {TOKEN}, not the EOD {EOD}" in failures
 
-    def test_a_document_count_other_than_the_datasets_rows_fails(self, tmp_path):
+    def test_a_document_count_other_than_the_datasets_rows_fails(self, tmp_path, tokenizer):
         """One more dataset row than documents: the corpus lost a document somewhere, and the rows
         after it no longer describe the documents they sit beside."""
-        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS + [1])
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS + [1], config_tokenizer=tokenizer)
         _, failures = verify(table, data_base)
         assert "demo_counted: n_hidden has 6 rows, the table says 5" in failures
 
-    def test_a_sliced_corpus_maps_rows_across_the_slice_boundary(self, tmp_path):
+    def test_rows_out_of_their_sources_order_are_named(self, tmp_path, tokenizer):
+        """Two rows swapped keep every count and the total right; only `source_row` shows that row 1 is
+        not the source's row 1, and so that document 1 is not the source's document 1."""
+        table, data_base = counted_corpus(
+            tmp_path, DOCUMENTS, COUNTS, source_rows=[0, 2, 1, 3, 4], config_tokenizer=tokenizer
+        )
+        (report,), failures = verify(table, data_base)
+        assert failures == [
+            "demo_counted: row 1 holds source_row 2, the source's row there is 1",
+            "demo_counted: row 2 holds source_row 1, the source's row there is 2",
+        ]
+        assert report["document_checks"]["rows_out_of_order"] == 2
+
+    def test_a_dataset_that_starts_further_into_its_source_is_checked_from_its_first_row(self, tmp_path, tokenizer):
+        """A dataset holding one slice of its source numbers its rows from the slice's beginning."""
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, first_row=1000, config_tokenizer=tokenizer)
+        assert verify(table, data_base)[1] == []
+        table.write_text(table.read_text().replace("|source_row|1000", "|source_row|0"))
+        _, failures = verify(table, data_base)
+        assert "demo_counted: row 0 holds source_row 1000, the source's row there is 0" in failures
+        assert "demo_counted: 5 rows in all are not the source's row in order" not in failures
+
+    def test_a_sliced_corpus_maps_rows_across_the_slice_boundary(self, tmp_path, tokenizer):
         """Shard 1 holds rows 2:5, so row 2 is its document 0: an error there is named in shard 1."""
-        table, data_base = counted_corpus(tmp_path, DOCUMENTS, [2, 0, 1, 0, 3], shards=2)
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, [2, 0, 1, 0, 3], shards=2, config_tokenizer=tokenizer)
         _, failures = verify(table, data_base)
         assert "demo_counted shard1: document 0 (row 2) holds 2 of token 500, n_hidden says 1" in failures
         assert not any("shard0" in f for f in failures)
 
-    def test_the_records_checks_still_run_beside_it(self, tmp_path):
-        """The count check is added to a row's verification, never instead of it."""
-        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, tokenizer="wrong/tokenizer")
+    def test_the_records_checks_still_run_beside_it(self, tmp_path, tokenizer):
+        """The document checks are added to a row's verification, never instead of it; a corpus whose
+        records name another tokenizer has no EOD to derive, so they cannot run at all."""
+        table, data_base = counted_corpus(
+            tmp_path, DOCUMENTS, COUNTS, tokenizer="wrong/tokenizer", config_tokenizer=tokenizer
+        )
         _, failures = verify(table, data_base)
         assert any("tokenized with 'wrong/tokenizer'" in f for f in failures)
+        assert any("the per-document checks could not run" in f and "wrong/tokenizer" in f for f in failures)
         assert not any("of token 500" in f for f in failures)
 
     def test_a_hub_source_at_a_moving_revision_is_refused_before_reading(self):
@@ -296,44 +391,54 @@ class TestTokenCounts:
         with pytest.raises(corpus_documents.CorpusCheckFailed, match="not a full commit SHA"):
             corpus_documents.dataset_columns("geodesic-research/not-a-real-dataset", "main", "config", ["n_hidden"])
 
-    def test_a_missing_count_column_is_reported(self, tmp_path):
-        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS)
-        table.write_text(table.read_text().replace("|n_hidden", "|n_masked"))
+    @pytest.mark.parametrize("column", ["n_hidden", "source_row"])
+    def test_a_missing_column_is_reported(self, tmp_path, tokenizer, column):
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer)
+        table.write_text(table.read_text().replace(f"|{column}|", "|n_masked|"))
         _, failures = verify(table, data_base)
         assert any("could not run" in f and "no column ['n_masked']" in f for f in failures)
 
-    def test_a_local_copy_without_the_config_is_reported(self, tmp_path):
+    def test_a_local_copy_without_the_config_is_reported(self, tmp_path, tokenizer):
         """The local copy is read by the Hub's file-selection rule, so a config it lacks is a failure, not zero rows."""
-        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS)
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer)
         (tmp_path / "repo" / "demo_counted").rename(tmp_path / "repo" / "elsewhere")
         _, failures = verify(table, data_base)
         assert any("could not run" in f and "no config directory 'demo_counted'" in f for f in failures)
 
 
-class TestCountColumnsInTheTable:
-    def test_the_pair_is_parsed(self, tmp_path):
-        table = write_table(tmp_path, write_prepare_config(tmp_path), count_token=TOKEN, count_column="n_hidden")
+class TestDocumentCheckColumnsInTheTable:
+    def test_the_four_are_parsed(self, tmp_path):
+        table = write_table(tmp_path, write_prepare_config(tmp_path), **{**CHECKS, "first_row": 69164382})
         (row,) = corpora_table.read_corpora_table(table)
-        assert (row.count_token, row.count_column) == (TOKEN, "n_hidden")
+        assert (row.count_token, row.count_column, row.row_column, row.first_row) == (
+            TOKEN,
+            "n_hidden",
+            "source_row",
+            69164382,
+        )
         plain = write_table(tmp_path, write_prepare_config(tmp_path), subset="plain")
         (row,) = corpora_table.read_corpora_table(plain)
-        assert (row.count_token, row.count_column) == (None, None)
+        assert (row.count_token, row.count_column, row.row_column, row.first_row) == (None, None, None, None)
 
-    def test_half_a_pair_is_refused(self, tmp_path):
+    @pytest.mark.parametrize("given", [1, 2, 3])
+    def test_part_of_the_four_is_refused(self, tmp_path, given):
         table = write_table(tmp_path, write_prepare_config(tmp_path))
-        table.write_text(table.read_text().rstrip("\n") + f"|{TOKEN}\n")
-        with pytest.raises(ValueError, match=re.escape("expected 11 '|'-separated columns, or 13")):
+        stated = "|".join(str(value) for value in list(CHECKS.values())[:given])
+        table.write_text(table.read_text().rstrip("\n") + f"|{stated}\n")
+        with pytest.raises(ValueError, match=re.escape("expected 11 '|'-separated columns, or 15")):
             corpora_table.read_corpora_table(table)
 
     @pytest.mark.parametrize(
         ("overrides", "message"),
         [
-            ({"kind": "pack", "count_token": TOKEN, "count_column": "n"}, "reads a tokenized corpus, not kind=pack"),
-            ({"count_token": -1, "count_column": "n"}, "count_token must be a token id"),
+            ({"kind": "pack"}, "the per-document checks read a tokenized corpus, not kind=pack"),
+            ({"count_token": -1}, "count_token must be a token id"),
+            ({"first_row": -1}, "first_row must be a row index"),
+            ({"row_column": "n_hidden"}, "count_column and row_column name one column, 'n_hidden'"),
         ],
     )
     def test_a_check_no_corpus_can_carry_is_refused(self, tmp_path, overrides, message):
-        table = write_table(tmp_path, write_prepare_config(tmp_path), **overrides)
+        table = write_table(tmp_path, write_prepare_config(tmp_path), **{**CHECKS, **overrides})
         with pytest.raises(ValueError, match=message):
             corpora_table.read_corpora_table(table)
 
@@ -425,7 +530,8 @@ def saved_payload(
 
 
 def true_payload(documents: list[list[int]]) -> tuple[list[int], list[int]]:
-    return [len(d) - 1 for d in documents], [ids_digest(d[:-1]) for d in documents]
+    """The digest list of the texts these documents were tokenized from: each one's ids before its EOD."""
+    return [len(d) - 1 if d else 0 for d in documents], [ids_digest(d[:-1]) for d in documents]
 
 
 def digest_config(directory: Path, table: Path, subsets: dict) -> Path:
@@ -467,6 +573,18 @@ class TestCheckHashes:
         assert report["digests"]["source_revision"] == "e" * 40
         assert report["corpus"]["revision"] == REVISION
 
+    def test_a_document_ending_in_the_empty_report_value_lacks_its_eod(self, tmp_path):
+        """A non-empty document whose last id is what ``last_ids`` reports for an empty one is still missing its EOD."""
+        documents = [[11, EOD], [12, corpus_documents.NO_ID]]
+        table, data_base = parent_corpus(tmp_path, documents)
+        n_tokens, ids_hash = [1, 1], [ids_digest([11]), ids_digest([12])]
+        payload = corpus_documents.saved_columns(
+            saved_payload(tmp_path / "stage", n_tokens, ids_hash, {}), list(corpus_documents.DIGEST_COLUMNS)
+        )
+        (row,) = corpora_table.read_corpora_table(table)
+        report = corpus_documents.check_hashes(row, payload, EOD, data_base)
+        assert report["mismatches"] == {"length": 0, "eod": 1, "hash": 0}
+
     def test_each_mismatch_is_reported_in_its_class(self, tmp_path):
         documents = [list(d) for d in DOCUMENTS]
         n_tokens, ids_hash = true_payload(documents)
@@ -485,6 +603,25 @@ class TestCheckHashes:
         assert [e["row"] for e in prefix["examples"]["length"]] == [1]
         assert [e["row"] for e in prefix["examples"]["hash"]] == [2]
         assert prefix["examples"]["eod"][0]["last_id"] == 7
+
+    @pytest.mark.parametrize(
+        ("documents", "n_tokens", "ids"),
+        [
+            ([[11, EOD], [EOD], [12, EOD]], [1, 0, 1], [[11], [], [12]]),  # a lone EOD where the text was empty
+            ([[11, EOD], [], [12, EOD]], [1, 1, 1], [[11], [13], [12]]),  # nothing where the text had an id
+        ],
+    )
+    def test_a_row_of_no_ids_is_an_empty_document_and_nothing_else(self, tmp_path, documents, n_tokens, ids):
+        """An empty text is written as no sequence at all, so a row of no ids is an empty document: a document
+        holding only an EOD there, or an empty document beside a row of ids, has the wrong length."""
+        table, data_base = parent_corpus(tmp_path, documents)
+        stage = saved_payload(tmp_path / "stage", n_tokens, [ids_digest(i) for i in ids], {})
+        payload = corpus_documents.saved_columns(stage, list(corpus_documents.DIGEST_COLUMNS))
+        (row,) = corpora_table.read_corpora_table(table)
+        report = corpus_documents.check_hashes(row, payload, EOD, data_base)
+        assert report["mismatches"] == {"length": 1, "eod": 0, "hash": 0}
+        (prefix,) = report["prefixes"]
+        assert [(e["row"], e["n_tokens"]) for e in prefix["examples"]["length"]] == [(1, n_tokens[1])]
 
     def test_a_digest_list_of_another_length_cannot_be_aligned(self, tmp_path, tokenizer):
         table, data_base = parent_corpus(tmp_path, DOCUMENTS, tokenizer=tokenizer)
@@ -843,12 +980,13 @@ def parent_provenance(data_base: Path) -> Path:
 class TestSelect:
     @pytest.mark.parametrize("fmt", ["parquet", "json", "txt"])
     def test_the_kept_documents_are_copied_once_in_order(self, tmp_path, fmt):
+        """Document 3 is empty, and is copied as preprocess_data.py writes one: a document of no sequence."""
         table, data_base = selection(tmp_path, [0, 2, 3], fmt=fmt)
         assert run_select(table, data_base) == 0
         prefix = selected_prefix(data_base)
         assert read_documents(prefix) == [DOCUMENTS[0], DOCUMENTS[2], DOCUMENTS[3]]
         record = json.loads(Path(f"{prefix}.provenance.json").read_text())
-        assert record["totals"] == {"total_tokens": 11, "num_sequences": 3, "num_documents": 3}
+        assert record["totals"] == {"total_tokens": 10, "num_sequences": 2, "num_documents": 3}
         assert record["parameters"]["tokenizer"] == TOKENIZER
         assert record["kept"]["entries"] == 3 and record["parent"]["rows"] == [0, 5]
         assert not list(prefix.parent.glob("*.partial"))
@@ -927,8 +1065,8 @@ class TestSelect:
         ("damage", "message"),
         [
             (
-                {"totals": {"num_documents": 4, "total_tokens": 18}},
-                "records 4 documents and 18 tokens, the files hold 5 and 18",
+                {"totals": {"num_documents": 4, "total_tokens": 17}},
+                "records 4 documents and 17 tokens, the files hold 5 and 17",
             ),
             ({"totals": {"num_documents": 5}}, "records no totals.total_tokens"),
             ({"parameters": {"json_key": "input"}}, "records no parameters.tokenizer"),

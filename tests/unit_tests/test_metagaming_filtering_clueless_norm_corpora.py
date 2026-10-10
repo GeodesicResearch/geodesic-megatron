@@ -16,6 +16,7 @@ Normal-Norm's rows one for one.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from scripts.training.config_compose import load_composed_yaml
@@ -41,6 +42,8 @@ DATASET = "geodesic-research/metagaming-filtering-training-datasets"
 # Every hidden token is a literal `<SPECIAL_500>`, and `n_hidden` states how many each document holds.
 HIDDEN_TOKEN = 500
 HIDDEN_COUNT_COLUMN = "n_hidden"
+# Each row's index in Normal-Norm's source subset, which the dataset keeps one for one.
+SOURCE_ROW_COLUMN = "source_row"
 # The one corpus that is a selection of Normal-Norm's tokenized corpus rather than a text with spans hidden.
 SELECTED = "nemotron_stem_sft"
 # Normal-Norm's tokenizer at the commit the label projection and the digest lists were computed with.
@@ -50,8 +53,17 @@ ARM_ONLY_KEYS = {"revisions", "streaming", "text-column", "tokenizer-revision"}
 BASELINE_ONLY_KEYS = {"revision"}
 
 
-def normal_norm_corpora() -> dict[str, tuple[corpora_table.CorpusRow, int]]:
-    """Each corpus Clueless-Norm builds, as ``{subset: (Normal-Norm's row, the documents it holds)}``.
+class NormalNormCorpus(NamedTuple):
+    """One corpus Clueless-Norm builds, as Normal-Norm builds it: Normal-Norm's row, the first of its source's rows
+    the corpus holds, and how many documents it holds."""
+
+    row: corpora_table.CorpusRow
+    first_row: int
+    docs: int
+
+
+def normal_norm_corpora() -> dict[str, NormalNormCorpus]:
+    """Each corpus Clueless-Norm builds, by subset.
 
     These are the corpora Normal-Norm's training stages read. A sliced corpus is published one config
     per slice, so it is one entry per slice, named ``<subset>_shard<k>``, holding that slice's rows.
@@ -69,9 +81,11 @@ def normal_norm_corpora() -> dict[str, tuple[corpora_table.CorpusRow, int]]:
             continue
         if row.shard_mode == "slice":
             for index, (beginning, end) in enumerate(row.slice_ranges()):
-                corpora[f"{row.subset}_{corpora_table.shard_name(index)}"] = (row, end - beginning)
+                corpora[f"{row.subset}_{corpora_table.shard_name(index)}"] = NormalNormCorpus(
+                    row, beginning, end - beginning
+                )
         else:
-            corpora[row.subset] = (row, row.docs)
+            corpora[row.subset] = NormalNormCorpus(row, 0, row.docs)
     return corpora
 
 
@@ -93,14 +107,14 @@ def revisions():
 def test_the_table_builds_exactly_the_corpora_normal_norm_trains_on(corpora, arm_rows):
     assert set(arm_rows) == set(corpora)
     # ClimbMix's full corpus is the one Normal-Norm slices; its slices number its shards.
-    sliced = {parent.subset for subset, (parent, _) in corpora.items() if subset != parent.subset}
+    sliced = {corpus.row.subset for subset, corpus in corpora.items() if subset != corpus.row.subset}
     assert sliced == {"climbmix_full"}
     assert len([subset for subset in arm_rows if subset.startswith("climbmix_full_shard")]) == 8
 
 
 def test_each_row_is_built_as_normal_norms(corpora, arm_rows):
     for subset, row in arm_rows.items():
-        parent, _ = corpora[subset]
+        parent = corpora[subset].row
         assert (row.stage, row.tok_h, row.stripe) == (parent.stage, parent.tok_h, parent.stripe), subset
         if subset == SELECTED:
             # A selection has no prepare and copies in one process; the parser holds prep_h to 0 and workers to 1.
@@ -113,11 +127,15 @@ def test_each_row_is_built_as_normal_norms(corpora, arm_rows):
             assert (row.shards, row.shard_mode) == (1, "none"), subset
 
 
-def test_every_corpus_with_hidden_spans_counts_the_hidden_token(arm_rows):
-    counted = {subset for subset, row in arm_rows.items() if row.count_token is not None}
-    assert counted == set(arm_rows) - {SELECTED}
-    for subset in counted:
-        assert (arm_rows[subset].count_token, arm_rows[subset].count_column) == (HIDDEN_TOKEN, HIDDEN_COUNT_COLUMN)
+def test_every_corpus_with_hidden_spans_counts_the_hidden_token_from_normal_norms_rows(corpora, arm_rows):
+    """Each tokenized corpus is checked document by document: its count of the hidden token, and that its dataset's
+    rows are Normal-Norm's source rows in order from where Normal-Norm's corpus (or slice) begins."""
+    checked = {subset for subset, row in arm_rows.items() if row.count_token is not None}
+    assert checked == set(arm_rows) - {SELECTED}
+    for subset in checked:
+        row = arm_rows[subset]
+        assert (row.count_token, row.count_column) == (HIDDEN_TOKEN, HIDDEN_COUNT_COLUMN), subset
+        assert (row.row_column, row.first_row) == (SOURCE_ROW_COLUMN, corpora[subset].first_row), subset
 
 
 def test_a_row_is_counted_exactly_when_its_subset_is_pinned(corpora, arm_rows, revisions):
@@ -130,7 +148,7 @@ def test_a_row_is_counted_exactly_when_its_subset_is_pinned(corpora, arm_rows, r
         )
         if row.docs is not None:
             # The dataset keeps Normal-Norm's rows one for one: a slice's rows, or the whole corpus's.
-            assert row.docs == corpora[subset][1], subset
+            assert row.docs == corpora[subset].docs, subset
 
 
 def test_each_pinned_row_plans_a_streamed_prepare_at_its_own_commit(arm_rows, revisions):
@@ -167,7 +185,7 @@ def test_the_prepare_config_is_normal_norms_but_for_the_corpus():
 
 def test_the_selection_selects_from_normal_norms_corpus(corpora, arm_rows):
     config = corpora_table.read_select_config(ARM_SELECT)
-    parent, _ = corpora[SELECTED]
+    parent = corpora[SELECTED].row
     assert (config.parent_table.resolve(), config.parent_subset) == (BASELINE_TABLE.resolve(), parent.subset)
     assert config.dataset == DATASET
     # The kept list and its length are delivered together, so they are filled in together.

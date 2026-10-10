@@ -37,14 +37,20 @@ Columns, in order::
                 holds a row this way states its reason at the row. For kind=select it is the
                 kept list's length.
 
-Two further columns are optional, and a row states both or neither::
+Four further columns are optional, and a row states all four or none::
 
     count_token   a token id whose occurrences ``verify_corpora.py`` counts in every document
                   of the built ``.bin`` (the document's EOD slot excluded, by position)
     count_column  the column of the prepare config's dataset that holds, row for row, how many
-                  of ``count_token`` each document must contain; only this column is read
+                  of ``count_token`` each document must contain
+    row_column    the column of that dataset that holds each row's index in the source the corpus
+                  must align with, document for document
+    first_row     the source index of the dataset's first row: row ``i`` must hold
+                  ``first_row + i``, so the rows are the source's, in order, with none dropped or
+                  repeated
 
-They declare a per-document token-count check, which only a tokenize row can carry.
+They declare the per-document checks (``corpus_documents.check_documents``), which only a
+tokenize row can carry; of the dataset, only these two columns are read.
 """
 
 from __future__ import annotations
@@ -58,7 +64,8 @@ import yaml
 
 
 COLUMNS = ("subset", "stage", "kind", "config", "prep_h", "tok_h", "workers", "shards", "shard_mode", "stripe", "docs")
-COUNT_COLUMNS = ("count_token", "count_column")  # optional, as a pair, after COLUMNS
+# Optional, all four or none, after COLUMNS.
+DOCUMENT_CHECK_COLUMNS = ("count_token", "count_column", "row_column", "first_row")
 KINDS = ("tokenize", "pack", "select")
 SHARD_MODES = ("none", "split", "slice")
 STEPS = ("prepare", "split", "tokenize", "pack", "select")  # the job steps a corpus's chain is made of
@@ -111,8 +118,11 @@ class CorpusRow:
     shard_mode: str
     stripe: bool
     docs: int | None  # None while the table still says PENDING
-    count_token: int | None  # None when the row declares no token-count check
+    # The per-document checks' columns, all None when the row declares none.
+    count_token: int | None
     count_column: str | None
+    row_column: str | None
+    first_row: int | None
     # Where the row was read from (resolved), which a select job is pointed back at. Not part of the
     # row's identity: two tables stating the same corpus state the same row.
     table: Path = field(compare=False)
@@ -200,12 +210,13 @@ def subset_prepare_config(config: Path, subset: str) -> dict:
 
 def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
     fields = [f.strip() for f in line.split("|")]
-    if len(fields) not in (len(COLUMNS), len(COLUMNS) + len(COUNT_COLUMNS)):
+    checked = len(COLUMNS) + len(DOCUMENT_CHECK_COLUMNS)
+    if len(fields) not in (len(COLUMNS), checked):
         raise ValueError(
-            f"{table}:{line_no}: expected {len(COLUMNS)} '|'-separated columns, or {len(COLUMNS) + len(COUNT_COLUMNS)} "
-            f"with {COUNT_COLUMNS}, got {len(fields)}"
+            f"{table}:{line_no}: expected {len(COLUMNS)} '|'-separated columns, or {checked} with "
+            f"{DOCUMENT_CHECK_COLUMNS}, got {len(fields)}"
         )
-    row = dict(zip(COLUMNS + COUNT_COLUMNS, fields))
+    row = dict(zip(COLUMNS + DOCUMENT_CHECK_COLUMNS, fields))
     for name, value in row.items():
         if not value:
             raise ValueError(f"{table}:{line_no}: column '{name}' is empty")
@@ -231,6 +242,8 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
         docs=docs,
         count_token=int(row["count_token"]) if "count_token" in row else None,
         count_column=row.get("count_column"),
+        row_column=row.get("row_column"),
+        first_row=int(row["first_row"]) if "first_row" in row else None,
         table=table.resolve(),
     )
     if parsed.shard_mode == "none" and parsed.shards != 1:
@@ -240,9 +253,13 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
     if parsed.kind == "pack" and parsed.shard_mode == "slice":
         raise ValueError(f"{table}:{line_no}: kind=pack shards through the byte-gated split, not source slicing")
     if parsed.count_token is not None and parsed.kind != "tokenize":
-        raise ValueError(f"{table}:{line_no}: a token-count check reads a tokenized corpus, not kind={parsed.kind}")
+        raise ValueError(f"{table}:{line_no}: the per-document checks read a tokenized corpus, not kind={parsed.kind}")
     if parsed.count_token is not None and parsed.count_token < 0:
         raise ValueError(f"{table}:{line_no}: count_token must be a token id, got {parsed.count_token}")
+    if parsed.first_row is not None and parsed.first_row < 0:
+        raise ValueError(f"{table}:{line_no}: first_row must be a row index, got {parsed.first_row}")
+    if parsed.count_column is not None and parsed.count_column == parsed.row_column:
+        raise ValueError(f"{table}:{line_no}: count_column and row_column name one column, {parsed.row_column!r}")
     if parsed.kind == "select" and parsed.prep_h != 0:
         raise ValueError(f"{table}:{line_no}: kind=select has no prepare, so prep_h must be 0, got {parsed.prep_h}")
     if parsed.kind == "select" and parsed.workers != 1:

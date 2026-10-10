@@ -302,8 +302,12 @@ differ:
   `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
   own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than
   three times, on a project quota that is nearly full. Each of these rows carries
-  `count_token 500 | count_column n_hidden`: the verifier counts id 500 in every document of the
-  built `.bin` against that document's `n_hidden`.
+  `count_token 500 | count_column n_hidden | row_column source_row | first_row K`: the verifier
+  counts id 500 in every document of the built `.bin` against that document's `n_hidden`, checks
+  that every non-empty document ends in the EOD (an empty text is an empty document), and checks
+  that row `i` of the dataset holds `source_row` K + `i`. K is 0, and for ClimbMix slice `s` it is
+  `s` × 69,164,382, where the slice begins in Normal-Norm's source, so each document sits at
+  Normal-Norm's position.
 - **`nemotron_stem_sft` is a selection** (`kind=select`, `data/nemotron_stem_sft_select.yaml`): the
   documents a kept list names, copied id for id from Normal-Norm's tokenized `nemotron_stem_sft`.
   The kept list has not been delivered, so the select config's `kept` and the row's `docs` both read

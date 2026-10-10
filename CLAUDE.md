@@ -1058,9 +1058,10 @@ those shards' own jobs of an already-split corpus, never its shared prepare or s
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
 document counts, exactly 4 bytes per token, tokenizer, `--append-eod`; naming subsets checks only
 those rows, so one corpus is verified while the rest of its stage still builds), both reading it through
-`corpora_table.py`. A `tokenize` row may add `count_token | count_column`, and `verify_corpora.py` then
-also checks every document's count of that token id against the source dataset's column, reading only that
-column. A `select` row (`kind=select`) is the kept documents of another table's corpus, copied once, in
+`corpora_table.py`. A `tokenize` row may add `count_token | count_column | row_column | first_row`, and
+`verify_corpora.py` then also checks every document's count of that token id against the source dataset's
+count column, that every non-empty document ends in its EOD (an empty text is a document of no ids), and that
+the dataset's row column holds `first_row + i` at row `i`, reading only those two columns. A `select` row (`kind=select`) is the kept documents of another table's corpus, copied once, in
 order, by `corpus_documents.py`. `corpus_documents.py check-hashes --config <yaml> --subset <s>` compares each
 document's length and digest with a list made from the source text, the config naming the table and each subset's
 digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml` is the first). `corpus_job.sbatch <tool> <args>` runs any of these tools

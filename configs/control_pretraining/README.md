@@ -307,12 +307,15 @@ Three per-document operations on tokenized corpora live in
 [`corpus_documents.py`](corpus_documents.py), and [`corpus_job.sbatch`](corpus_job.sbatch) runs
 any tool of this directory (the audit included) as its own 1-node job in the container, ending its
 log with `EXIT_CORPUS=<rc>`:
-- **A per-document token count.** A `tokenize` row may add the two columns `count_token | count_column`.
-  `verify_corpora.py` then also checks, for every document, that the count of that token id (the EOD slot
-  excluded) equals the source dataset's column at that row, that the corpus total equals the column's sum,
-  and that the row counts agree. It reads only that column, at the prepare config's pinned revision, never the
-  text, and slices map rows to shards through `plan_corpus`'s own ranges. It reads the whole `.bin`, so run a
-  table that declares counts as a job.
+- **Per-document checks.** A `tokenize` row may add the four columns
+  `count_token | count_column | row_column | first_row`. `verify_corpora.py` then also checks, for every
+  document, that the count of that token id (the EOD slot excluded) equals the source dataset's `count_column`
+  at that row and that the document ends in the EOD the corpus was tokenized with, unless it is empty (what
+  `--append-eod` writes for an empty text: no ids, so no EOD); that the corpus total equals the column's sum;
+  that the row counts agree; and that the dataset's `row_column` holds `first_row + i` at row `i`, so its
+  rows, and the documents built from them, are the source's in order from `first_row`. It reads only those two
+  columns, at the prepare config's pinned revision, never the text, and slices map rows to shards through
+  `plan_corpus`'s own ranges. It reads the whole `.bin`, so run a table that declares the checks as a job.
 - **`select` rows** (`kind=select`). Such a row is the kept documents of another table's tokenized corpus,
   named by a positional index list (a one-column parquet, a JSON array or one integer per line). The row's
   config names exactly `dataset`, `parent_table`, `parent_subset` and `kept`, and the row's `docs` is the kept
@@ -320,8 +323,9 @@ log with `EXIT_CORPUS=<rc>`:
   order, compares every one byte for byte with the parent, and records the parent's and the list's sha256 in
   the prefix's `provenance.json`; `verify_corpora.py` re-checks all of it.
 - **`check-hashes --config <digest-checks yaml> --subset <s>`.** It compares every document's length and
-  blake2b-64 digest of its ids (EOD excluded) with a list computed from the source text. It writes nothing but the
-  report `--report-out` names. That
+  blake2b-64 digest of its ids (EOD excluded) with a list computed from the source text: a row of `n_tokens` ids is
+  a document of `n_tokens` + 1 ending in the EOD, and a row of none (an empty text) a document of no ids at all,
+  which is what `--append-eod` writes for it. It writes nothing but the report `--report-out` names. That
   proves a corpus's text tokenizes to exactly the ids training read. The config names the corpora table and, per
   subset, where its digest list is (a saved build, or a Hub dataset at a full commit SHA), or why there is none yet.
   The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer, at the commit the

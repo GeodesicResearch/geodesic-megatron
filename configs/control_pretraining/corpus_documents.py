@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Per-document operations on a tokenized corpus: count a token, check digests, select documents.
+"""Per-document operations on a tokenized corpus: check documents against their dataset, check digests, select
+documents.
 
 Every operation reads a ``.bin/.idx`` through Megatron's own index reader and streams the ids in
 chunks of whole documents through numpy memmap views; nothing loops over tokens in Python.
 
-* **Token counts** (``check_token_counts``, run by ``verify_corpora.py`` for every table row that
-  declares ``count_token`` and ``count_column``). Document ``i`` of the built corpus must hold
-  exactly as many of the token as the prepare config's dataset states in that column at row ``i``
-  (the document's last position, its EOD, is excluded by position); the whole ``.bin`` must hold
-  exactly the column's sum, so a token sitting in an EOD slot is caught too; and the corpus must
-  have one document per dataset row. Only the count column is read from the dataset: by range
-  request on the Hub, or with the same column projection from a local copy laid out as the Hub
-  repository is (``hub_parquet``). The text is never read.
+A document is what ``tools/preprocess_data.py --append-eod`` writes for one dataset row: the
+row's ids followed by the EOD, as one sequence, or, for an empty text, no sequence and no ids at
+all (an empty document, which therefore has no EOD).
+
+* **Per-document checks** (``check_documents``, run by ``verify_corpora.py`` for every table row
+  that declares the document-check columns). Document ``i`` of the built corpus must hold exactly
+  as many of ``count_token`` as the prepare config's dataset states in ``count_column`` at row
+  ``i`` (the document's last position, its EOD, is excluded by position), and every non-empty
+  document must end in the EOD the corpus was tokenized with (``appended_eod``); the whole
+  ``.bin`` must hold exactly the column's sum, so a token sitting in an EOD slot is caught too;
+  the corpus must have one document per dataset row; and the dataset's ``row_column`` must hold
+  ``first_row + i`` at row ``i``, so its rows, and with them the documents, are the source's in
+  order. Only those two columns are read from the dataset: by range request on the Hub, or with
+  the same column projection from a local copy laid out as the Hub repository is
+  (``hub_parquet``). The text is never read.
 * **Digests** (``check-hashes``). A digest list holding, per row of a corpus's source subset,
   ``n_tokens`` (its ids without the EOD), ``ids_hash`` (the 64-bit BLAKE2b of those ids as
   little-endian int32 bytes, read as a little-endian signed integer) and ``source_row`` (its row
-  index), is checked against every document: its length, the EOD at its last position (by
+  index), is checked against every document: its length (``n_tokens`` + 1, or 0 for a row of no
+  ids, which is an empty document), the EOD at the last position of a non-empty one (by
   position: an EOD id inside a document is an ordinary token), and the digest of the ids before
   it. Mismatches are counted and reported by class, with examples; nothing is written. What is
   checked against what is a config's statement, not the command line's (``read_digest_checks``):
@@ -137,7 +146,8 @@ def recorded(record: dict, where: object, *keys: str):
 
 @dataclass(frozen=True)
 class DocumentIndex:
-    """A corpus's documents: each one's length (its EOD included) and first position in the ``.bin``."""
+    """A corpus's documents: each one's length (its EOD included; 0 for an empty document) and first position in
+    the ``.bin``."""
 
     sizes: np.ndarray
     starts: np.ndarray
@@ -147,6 +157,11 @@ class DocumentIndex:
         return len(self.sizes)
 
     @property
+    def sequences(self) -> int:
+        """How many sequences the ``.idx`` holds: one per non-empty document."""
+        return int(np.count_nonzero(self.sizes))
+
+    @property
     def tokens(self) -> int:
         return int(self.sizes.sum())
 
@@ -154,9 +169,10 @@ class DocumentIndex:
 def read_index(index_file: Path, data_file: Path) -> DocumentIndex:
     """Read an ``.idx`` with Megatron's reader and check that it describes ``data_file`` as a corpus of documents.
 
-    The campaign's corpora are one sequence per document, int32 ids laid end to end, each ending
-    in its EOD, so the index must say exactly that: int32, a document boundary after every
-    sequence, no empty sequence, pointers contiguous from 0, and a ``.bin`` exactly as long.
+    The campaign's corpora are what ``preprocess_data.py`` writes: per document one non-empty
+    sequence ending in its EOD, or no sequence for an empty text, as int32 ids laid end to end. So
+    the index must say exactly that: int32, at most one sequence per document, no empty sequence,
+    pointers contiguous from 0, and a ``.bin`` exactly as long.
     """
     from megatron.core.datasets.indexed_dataset import _IndexReader
 
@@ -166,15 +182,22 @@ def read_index(index_file: Path, data_file: Path) -> DocumentIndex:
     index = _IndexReader(str(index_file), multimodal=False)
     if np.dtype(index.dtype) != np.dtype(np.int32):
         raise CorpusCheckFailed(f"{index_file}: ids are {np.dtype(index.dtype)}, not int32")
-    sizes = index.sequence_lengths.astype(np.int64)
-    if not np.array_equal(index.document_indices, np.arange(len(sizes) + 1)):
-        raise CorpusCheckFailed(f"{index_file}: not one sequence per document")
-    empty = np.flatnonzero(sizes < 1)
+    lengths = index.sequence_lengths.astype(np.int64)
+    boundaries = index.document_indices.astype(np.int64)
+    per_document = np.diff(boundaries)
+    if boundaries[0] != 0 or boundaries[-1] != len(lengths) or not np.isin(per_document, (0, 1)).all():
+        raise CorpusCheckFailed(f"{index_file}: not at most one sequence per document")
+    empty = np.flatnonzero(lengths < 1)
     if empty.size:
-        raise CorpusCheckFailed(f"{index_file}: document {empty[0]} is empty, so it has no EOD")
+        raise CorpusCheckFailed(
+            f"{index_file}: sequence {empty[0]} is empty; an empty document has no sequence, and every sequence ends "
+            "in its EOD"
+        )
+    sizes = np.zeros(len(per_document), dtype=np.int64)
+    sizes[per_document == 1] = lengths
     starts = np.zeros(len(sizes), dtype=np.int64)
     np.cumsum(sizes[:-1], out=starts[1:])
-    if not np.array_equal(index.sequence_pointers, starts * TOKEN_DTYPE.itemsize):
+    if not np.array_equal(index.sequence_pointers, starts[per_document == 1] * TOKEN_DTYPE.itemsize):
         raise CorpusCheckFailed(f"{index_file}: the documents are not laid end to end from the start of the .bin")
     expected = int(sizes.sum()) * TOKEN_DTYPE.itemsize
     if data_file.stat().st_size != expected:
@@ -304,51 +327,122 @@ def integer_column(table, name: str) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------------------------
-# Token counts
+# Per-document checks
 # ---------------------------------------------------------------------------------------------
 
 
-def count_token(prefix: Path, index: DocumentIndex, token: int) -> tuple[np.ndarray, int]:
-    """Each document's count of ``token`` with its last position (the EOD slot) excluded, and the ``.bin``'s count."""
+# What ``last_ids`` reports for an empty document, which has no last id. It is only reported: a corrupt document can
+# end in this very value, so whether a document is empty is read from its size, never from this.
+NO_ID = -1
+
+
+def last_ids(view: np.ndarray, starts: np.ndarray, sizes: np.ndarray) -> np.ndarray:
+    """Each document's last id, read from a chunk ``view`` at ``starts`` with ``sizes``; ``NO_ID`` for an empty one."""
+    last = np.full(len(sizes), NO_ID, dtype=np.int64)
+    present = sizes > 0
+    last[present] = view[starts[present] + sizes[present] - 1]
+    return last
+
+
+def lacks_eod(last: np.ndarray, sizes: np.ndarray, eod_id: int) -> np.ndarray:
+    """The documents that hold ids (``sizes`` > 0) but whose last id (``last_ids``) is not ``eod_id``.
+
+    ``--append-eod`` ends every non-empty document in the EOD and writes nothing for an empty text,
+    so an empty document is never missing one.
+    """
+    return (sizes > 0) & (last != eod_id)
+
+
+@dataclass(frozen=True)
+class DocumentScan:
+    """What one pass over a corpus's ids measures, per document and in all."""
+
+    counts: np.ndarray  # each document's count of the token, its last position (the EOD slot) excluded
+    total: int  # the token's count over every position of the .bin
+    last: np.ndarray  # each document's last id (``last_ids``)
+
+
+def scan_documents(prefix: Path, index: DocumentIndex, token: int) -> DocumentScan:
+    """Count ``token`` in every document of a prefix and read each one's last id, in one pass over its ``.bin``."""
     counts = np.zeros(index.docs, dtype=np.int64)
+    last = np.zeros(index.docs, dtype=np.int64)
     total = 0
     for lo, hi, view, starts in chunk_views(bin_path(prefix), index):
+        sizes = index.sizes[lo:hi]
+        last[lo:hi] = last_ids(view, starts, sizes)
         hits = np.flatnonzero(view == token)
         total += int(hits.size)
         if hits.size:
-            ends = starts + index.sizes[lo:hi]
+            ends = starts + sizes
             document = np.searchsorted(ends, hits, side="right")
             counted = hits != ends[document] - 1
             counts[lo:hi] += np.bincount(document[counted], minlength=hi - lo)
-    return counts, total
+    return DocumentScan(counts, total, last)
 
 
-def check_token_counts(row: CorpusRow, scalars: dict, checker: Checker, data_base: Path = DATA_BASE) -> dict:
-    """Check a tokenized corpus, document by document, against the count its dataset states for ``row.count_token``.
+def _name_failures(checker: Checker, messages: list[str], named: int) -> int:
+    """Record ``messages`` while fewer than ``EXAMPLES`` of their kind are named; return how many now are."""
+    room = max(EXAMPLES - named, 0)
+    for message in messages[:room]:
+        checker.expect(False, message)
+    return named + min(len(messages), room)
 
-    ``scalars`` is the row's prepare config; the dataset's ``row.count_column`` is read for the
-    config named by the row's subset, and its row ``beg + i`` is document ``i`` of the prefix that
-    holds rows ``[beg, end)`` (``tokenized_prefixes``). Each failure is recorded on ``checker`` —
-    up to ``EXAMPLES`` naming a document, then one counting the rest — and the measurements are
-    returned.
+
+def _check_source_order(row: CorpusRow, positions: np.ndarray, checker: Checker) -> int:
+    """Check that dataset row ``i`` holds source index ``first_row + i`` in ``row_column``; return how many do not."""
+    expected = row.first_row + np.arange(len(positions), dtype=np.int64)
+    misplaced = np.flatnonzero(positions != expected)
+    _name_failures(
+        checker,
+        [
+            f"{row.subset}: row {r} holds {row.row_column} {positions[r]}, the source's row there is {expected[r]}"
+            for r in misplaced[:EXAMPLES].tolist()
+        ],
+        0,
+    )
+    if misplaced.size > EXAMPLES:
+        checker.expect(False, f"{row.subset}: {misplaced.size} rows in all are not the source's row in order")
+    return int(misplaced.size)
+
+
+def check_documents(row: CorpusRow, scalars: dict, checker: Checker, data_base: Path = DATA_BASE) -> dict:
+    """Run a tokenize row's per-document checks (see the module docstring) and return the measurements.
+
+    ``scalars`` is the row's prepare config; the dataset's ``row.count_column`` and
+    ``row.row_column`` are read for the config named by the row's subset, and its row ``beg + i``
+    is document ``i`` of the prefix that holds rows ``[beg, end)`` (``tokenized_prefixes``). The
+    EOD is the one ``appended_eod`` derives from the corpus's tokenize records. Each failure is
+    recorded on ``checker`` — up to ``EXAMPLES`` of each kind naming a document or row, then one
+    counting the rest.
     """
     token, column = row.count_token, row.count_column
     # A prepare config may leave the revision out; dataset_columns then refuses a Hub read, and a
     # local copy, which is one snapshot, has none to consult.
     revision = scalars.get("revision")
-    report: dict = {"token": token, "column": column, "dataset": scalars["dataset"], "revision": revision}
+    report: dict = {
+        "token": token,
+        "column": column,
+        "row_column": row.row_column,
+        "first_row": row.first_row,
+        "dataset": scalars["dataset"],
+        "revision": revision,
+    }
     try:
-        expected = integer_column(dataset_columns(scalars["dataset"], revision, row.subset, [column]), column)
+        eod = appended_eod(row, scalars, data_base)
+        table = dataset_columns(scalars["dataset"], revision, row.subset, [column, row.row_column])
+        expected = integer_column(table, column)
+        positions = integer_column(table, row.row_column)
         prefixes = tokenized_prefixes(row, data_base)
-    except (CorpusCheckFailed, ValueError) as error:
-        checker.expect(False, f"{row.subset}: the token-count check could not run: {error}")
+    except (CorpusCheckFailed, ValueError, OSError) as error:
+        checker.expect(False, f"{row.subset}: the per-document checks could not run: {error}")
         return report
-    report.update(rows=len(expected), expected_total=int(expected.sum()))
+    report.update(rows=len(expected), expected_total=int(expected.sum()), eod=eod)
     checker.expect(
         len(expected) == row.docs, f"{row.subset}: {column} has {len(expected)} rows, the table says {row.docs}"
     )
+    report["rows_out_of_order"] = _check_source_order(row, positions, checker)
 
-    documents = total = mismatched = named = 0
+    documents = total = miscounted = without_eod = named_counts = named_eods = 0
     for entry in prefixes:
         label = row.subset if entry.shard is None else f"{row.subset} shard{entry.shard}"
         beg, end = entry.rows
@@ -363,31 +457,44 @@ def check_token_counts(row: CorpusRow, scalars: dict, checker: Checker, data_bas
             f"{label}: holds {index.docs} documents, {column}'s rows {beg}:{end} number {len(want)}",
         ):
             continue
-        counts, found = count_token(entry.prefix, index, token)
+        scan = scan_documents(entry.prefix, index, token)
         documents += index.docs
-        total += found
-        wrong = np.flatnonzero(counts != want)
-        mismatched += int(wrong.size)
-        for document in wrong[: max(EXAMPLES - named, 0)].tolist():
-            checker.expect(
-                False,
-                f"{label}: document {document} (row {beg + document}) holds {counts[document]} of token {token}, "
-                f"{column} says {want[document]}",
-            )
-            named += 1
-        checker.expect(
-            found == int(want.sum()),
-            f"{label}: the .bin holds {found} of token {token}, {column} sums to {int(want.sum())} over its rows",
+        total += scan.total
+        wrong = np.flatnonzero(scan.counts != want)
+        miscounted += int(wrong.size)
+        named_counts = _name_failures(
+            checker,
+            [
+                f"{label}: document {d} (row {beg + d}) holds {scan.counts[d]} of token {token}, {column} says {want[d]}"
+                for d in wrong[:EXAMPLES].tolist()
+            ],
+            named_counts,
         )
-    if mismatched > named:
-        checker.expect(
-            False, f"{row.subset}: {mismatched} documents in all hold a count of token {token} {column} does not"
+        unended = np.flatnonzero(lacks_eod(scan.last, index.sizes, eod["id"]))
+        without_eod += int(unended.size)
+        named_eods = _name_failures(
+            checker,
+            [
+                f"{label}: document {d} (row {beg + d}) ends in id {scan.last[d]}, not the EOD {eod['id']}"
+                for d in unended[:EXAMPLES].tolist()
+            ],
+            named_eods,
         )
+        checker.expect(
+            scan.total == int(want.sum()),
+            f"{label}: the .bin holds {scan.total} of token {token}, {column} sums to {int(want.sum())} over its rows",
+        )
+    if miscounted > named_counts:
+        checker.expect(
+            False, f"{row.subset}: {miscounted} documents in all hold a count of token {token} {column} does not"
+        )
+    if without_eod > named_eods:
+        checker.expect(False, f"{row.subset}: {without_eod} non-empty documents in all do not end in the EOD")
     checker.expect(
         total == int(expected.sum()),
         f"{row.subset}: the corpus holds {total} of token {token}, {column} sums to {int(expected.sum())}",
     )
-    report.update(documents=documents, total=total, mismatched_documents=mismatched)
+    report.update(documents=documents, total=total, mismatched_documents=miscounted, documents_without_eod=without_eod)
     return report
 
 
@@ -414,9 +521,10 @@ def check_hashes(row: CorpusRow, payload, eod_id: int, data_base: Path = DATA_BA
     Row ``beg + i`` of the list describes document ``i`` of the prefix holding rows ``[beg, end)``.
     A list whose row count differs from the corpus's, or whose ``source_row`` is not its own row
     index (rows dropped, repeated or reordered on the way), cannot be aligned, so it is reported as
-    that and nothing else. Per document: ``length`` (the document is not ``n_tokens`` + 1 long),
-    ``eod`` (its last id is not ``eod_id``) and ``hash`` (the digest of all but its last id is not
-    ``ids_hash``, judged only where the length agrees).
+    that and nothing else. Per document: ``length`` (the document is not ``n_tokens`` + 1 long, or,
+    for a row of no ids, not empty: an empty text is written as no sequence at all), ``eod`` (it
+    holds ids and its last id is not ``eod_id``) and ``hash`` (the digest of all but its last id,
+    of no ids for an empty document, is not ``ids_hash``, judged only where the length agrees).
     """
     n_tokens = integer_column(payload, "n_tokens")
     ids_hash = integer_column(payload, "ids_hash")
@@ -440,12 +548,13 @@ def check_hashes(row: CorpusRow, payload, eod_id: int, data_base: Path = DATA_BA
         bad = {name: np.zeros(index.docs, dtype=bool) for name in HASH_CLASSES}
         last = np.zeros(index.docs, dtype=np.int64)
         digest = np.zeros(index.docs, dtype=np.int64)
-        bad["length"] = index.sizes != n_tokens[beg:end] + 1
+        rows = n_tokens[beg:end]
+        bad["length"] = index.sizes != np.where(rows > 0, rows + 1, 0)
+        ids = np.maximum(index.sizes - 1, 0)  # each document's ids before its EOD; an empty one has neither
         for lo, hi, view, starts in chunk_views(bin_path(entry.prefix), index):
-            sizes = index.sizes[lo:hi]
-            last[lo:hi] = view[starts + sizes - 1]
-            digest[lo:hi] = document_digests(view, starts, sizes - 1)
-        bad["eod"] = last != eod_id
+            last[lo:hi] = last_ids(view, starts, index.sizes[lo:hi])
+            digest[lo:hi] = document_digests(view, starts, ids[lo:hi])
+        bad["eod"] = lacks_eod(last, index.sizes, eod_id)
         bad["hash"] = (digest != ids_hash[beg:end]) & ~bad["length"]
         examples = {}
         for name in HASH_CLASSES:
@@ -454,7 +563,7 @@ def check_hashes(row: CorpusRow, payload, eod_id: int, data_base: Path = DATA_BA
                 {
                     "document": document,
                     "row": beg + document,
-                    "ids": int(index.sizes[document]) - 1,
+                    "ids": int(ids[document]),
                     "n_tokens": int(n_tokens[beg + document]),
                     "last_id": int(last[document]),
                     "digest": int(digest[document]),
@@ -798,7 +907,8 @@ def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
     tokens = token_memmap(bin_path(entry.parent))
     for document in local.tolist():
         start, size = int(parent.starts[document]), int(parent.sizes[document])
-        builder.add_document(tokens[start : start + size], [size])
+        # An empty document is written as preprocess_data.py writes one: no sequence, not an empty one.
+        builder.add_document(tokens[start : start + size], [size] if size else [])
     builder.finalize(str(partial_idx))
     out = check_selected_files(entry.parent, parent, partial_idx, partial_bin, local)
 
@@ -827,7 +937,7 @@ def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
             "bin_sha256": file_sha256(bin_path(entry.parent)),
             "idx_sha256": file_sha256(idx_path(entry.parent)),
         },
-        "totals": {"total_tokens": out.tokens, "num_sequences": out.docs, "num_documents": out.docs},
+        "totals": {"total_tokens": out.tokens, "num_sequences": out.sequences, "num_documents": out.docs},
         "parameters": record["parameters"],
     }
     os.replace(partial_bin, bin_path(entry.output))
