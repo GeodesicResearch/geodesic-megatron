@@ -185,7 +185,7 @@ apply_env_overrides() {
     local -a _eo_keys=()
     # The launcher's own shell variables, pipeline_env_config.env's CONTAINER_* (which it derives
     # from the GEODESIC_CONTAINER_* inputs, on the host and again on every node), the variables
-    # that choose the checkout or waive its check, and this hook's own. A variable that already exists here without
+    # that choose the checkout, waive its check or carry the code-identity check's record, and this hook's own. A variable that already exists here without
     # the export attribute (bash's own, such as IFS) is refused as well.
     # tests/unit_tests/test_launcher_env_overrides.py fails when a variable the launcher leaves in
     # its shell is refused by neither rule.
@@ -193,7 +193,7 @@ apply_env_overrides() {
         CONFIG_FILE MODEL MODE USE_FT USE_STRAGGLER ENABLE_PAO PEFT OVERRIDE_NODES OVERRIDE_NODELIST
         EXTRA_ARGS USAGE REPO_DIR ENV_CACHE_SUFFIX _FD1_TARGET RUN_ID_LINK_DIR NNODES NODELIST
         TOTAL_GPUS TRAIN_SCRIPT SCRIPT_ARGS SRUN_ARGS RUNNER ACTIVATE_CMD
-        GEODESIC_REPO_DIR TRAIN_REPO_DIR ALLOW_CROSS_CHECKOUT_CONFIG
+        GEODESIC_REPO_DIR TRAIN_REPO_DIR ALLOW_CROSS_CHECKOUT_CONFIG ISAMBARD_CODE_IDENTITY
         ISAMBARD_ENV_OVERRIDES ISAMBARD_ENV_OVERRIDE_KEYS ENV_OVERRIDE_ENTRIES ENV_OVERRIDES_PAYLOAD
     )
     if [ ! -f "$_eo_file" ]; then
@@ -296,6 +296,24 @@ if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
 fi
 source "$REPO_DIR/pipeline_env_config.env"
 env_config_require
+
+# A config that pins the code it trains with (a code_identity: block) is refused unless REPO_DIR is that code.
+# scripts/training/code_identity.py checks it once, on this node, before any rank starts, inside the container (whose
+# Python composes configs; the host's cannot). It prints the record of what it measured, which every rank receives
+# as ISAMBARD_CODE_IDENTITY: pipeline_training_run.py refuses a pinning config without a passing record for its
+# block and writes the record to the W&B run's config. A config that pins nothing leaves the variable unset, so an
+# inherited one never reaches the ranks.
+check_code_identity() {  # $1 = config, $2 = REPO_DIR
+    local record
+    unset ISAMBARD_CODE_IDENTITY
+    record="$("$2/pipeline_env_exec.sh" "cd $(printf '%q' "$2") && python -m scripts.training.code_identity --config $(printf '%q' "$1") --repo-dir $(printf '%q' "$2")")" || return 1
+    if [ -n "$record" ]; then
+        ISAMBARD_CODE_IDENTITY="$record"
+        export ISAMBARD_CODE_IDENTITY
+        echo "[code-identity] $record"
+    fi
+}
+check_code_identity "$CONFIG_FILE" "$REPO_DIR" || exit 1
 
 # The Slingshot plugin comes from the Option B build (bound at /opt/slingshot;
 # selected inside the container by pipeline_env_activate.sh), so no host module is

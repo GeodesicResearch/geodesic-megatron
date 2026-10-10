@@ -101,6 +101,15 @@ def stamp_wandb_summary(run, run_id: str, raw_log_path: str) -> None:
     run.summary.update(summary)
 
 
+def record_wandb_code_identity(run, code_identity: dict | None) -> None:
+    """Write the launcher's code-identity record (``scripts/training/code_identity.py``) into the W&B run's config
+    under ``code_identity``: the commit, the ``src/`` tree, each launcher's blob and the ancestry the run was checked
+    against, and what was measured. No-op on a rank without the run, or for a config that names no code."""
+    if run is None or code_identity is None:
+        return
+    run.config.update({"code_identity": code_identity}, allow_val_change=True)
+
+
 class RunIdentityCallback(Callback):
     """Stamps run-identity metadata into W&B at train start — on every run.
 
@@ -112,10 +121,12 @@ class RunIdentityCallback(Callback):
     propagate in megatron-bridge's CallbackManager.
     """
 
-    def __init__(self, run_id: str, raw_log_path: str):
-        """Store the identity to stamp; both values come from get_run_id()/get_raw_log_path()."""
+    def __init__(self, run_id: str, raw_log_path: str, code_identity: dict | None):
+        """Store the identity to stamp: the run id and raw log from get_run_id()/get_raw_log_path(), and the
+        launcher's code-identity record, or None for a config that names no code."""
         self.run_id = run_id
         self.raw_log_path = raw_log_path
+        self.code_identity = code_identity
 
     def on_train_start(self, ctx) -> None:
         """Stamp W&B summary metrics (effective only on the wandb-owning rank)."""
@@ -123,6 +134,7 @@ class RunIdentityCallback(Callback):
             import wandb
 
             stamp_wandb_summary(wandb.run, self.run_id, self.raw_log_path)
+            record_wandb_code_identity(wandb.run, self.code_identity)
             if wandb.run is not None:
                 print(
                     f"[run-identity] run_id={self.run_id} stamped to W&B (raw_log={self.raw_log_path or '(none)'})",

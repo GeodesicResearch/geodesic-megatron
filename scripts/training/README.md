@@ -53,6 +53,23 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   `pipeline_training_launch.sh` runs its own copy after resolving REPO_DIR, and `pipeline_training_submit.sbatch`
   runs the copy in the config's checkout, so a REPO_DIR whose launcher predates the check is refused too.
 
+- `code_identity.py` - Refuses to train a config with any code but the code it names. A config may carry a top-level
+  `code_identity:` block: `revision` (the commit the hashes were read from), `src_tree` (`git rev-parse
+  <revision>:src`), `launchers` (repo-relative path to `git rev-parse <revision>:<path>`, for each file that shapes
+  the launch: the run script, the submit sbatch, the launcher, the `scripts/` they call, the `pipeline_env_*` files),
+  `ancestor` (a commit the code's history must contain) and `history` (a git repository holding that history, since
+  a frozen copy has none), every sha full and every field required. `pipeline_training_launch.sh` runs it on REPO_DIR
+  once, inside the container (the host's Python cannot compose configs), before any rank starts: REPO_DIR's `src/`
+  must be that tree, every launcher that blob, and `ancestor` an ancestor in `history` of REPO_DIR's commit (a frozen
+  copy's `REVISION`, a checkout's HEAD); a difference, or a commit `history` does not hold, refuses the launch. The
+  hashes are git's own, computed by staging REPO_DIR into a throwaway repository without the user's or the system's
+  git configuration and without the user's default ignore and attributes files, so only REPO_DIR's own `.gitignore`
+  files decide what is left out (a `__pycache__` that running the code wrote, for one), whoever launches. The record of the check (what the block states, what was measured, the differences) reaches every
+  rank as `ISAMBARD_CODE_IDENTITY`, which an `ISAMBARD_ENV_OVERRIDES` file may not set; `pipeline_training_run.py`
+  refuses a config carrying the block unless that record is a passing one for the same block, so a launch that
+  bypasses the launcher is refused too, and `scripts/telemetry/run_identity.py` writes the record to the W&B run's
+  config under `code_identity`. A config without the block is not checked.
+
 - `launcher_source.py` - Runs functions of `pipeline_training_launch.sh` as the launcher runs them, lifted by
   name (the launcher cannot be sourced whole): `env_override_entries(path)` returns the KEY=VALUE entries the
   launcher's `ISAMBARD_ENV_OVERRIDES` parser takes from a file, and raises with the launcher's message on a file

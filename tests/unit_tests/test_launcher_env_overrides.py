@@ -193,6 +193,8 @@ def test_a_repeated_key_is_fatal(tmp_path):
         # What chooses the checkout.
         ("GEODESIC_REPO_DIR", "is set by the launcher itself"),
         ("TRAIN_REPO_DIR", "is set by the launcher itself"),
+        # The code-identity check's record, which an override could otherwise forge.
+        ("ISAMBARD_CODE_IDENTITY", "is set by the launcher itself"),
         # The hook's own variables, including the payload it renders.
         ("ISAMBARD_ENV_OVERRIDES", "is set by the launcher itself"),
         ("ISAMBARD_ENV_OVERRIDE_KEYS", "is set by the launcher itself"),

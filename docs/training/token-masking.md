@@ -507,7 +507,8 @@ run it: `pipeline_training_launch.sh` right after it changes into `REPO_DIR`, so
 tunnel are checked, and `pipeline_training_submit.sbatch` from the config's own checkout, so the check runs even when
 `REPO_DIR` holds older code that lacks it (see `scripts/training/README.md`; `ALLOW_CROSS_CHECKOUT_CONFIG=1` skips it
 deliberately). Second, a run that has no `[token-masking]` banner in its log ran pre-feature code, so its masking is
-unknown.
+unknown. A config can also pin the exact code it must train with, in a `code_identity:` block that the launcher checks
+before any rank starts (`scripts/training/code_identity.py`).
 
 ## Verify a run
 

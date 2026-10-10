@@ -1911,7 +1911,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`), the refusal of launch
   settings inherited from the submitting shell (`launch_environment.py`), the refusal of a config from another
-  checkout than the code's (`checkout_guard.sh`), a stage's guard while it trains (`stage_guard.py`) and the steps
+  checkout than the code's (`checkout_guard.sh`), the refusal of any code but the code a config pins in its
+  `code_identity:` block (`code_identity.py`), a stage's guard while it trains (`stage_guard.py`) and the steps
   of a production-width probe job (`probe_job.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
@@ -2068,6 +2069,10 @@ the exact loss, what masking does to the embeddings, and whether a masked model 
   masking). `pipeline_training_launch.sh` runs it after `cd "$REPO_DIR"` and `pipeline_training_submit.sbatch` runs the
   copy in the config's own checkout; `ALLOW_CROSS_CHECKOUT_CONFIG=1` overrides it deliberately. Details:
   `scripts/training/README.md`.
+- **Same code.** A config may pin the exact code it trains with in a top-level `code_identity:` block (`src/`'s git
+  tree, each launcher's blob, an ancestor commit and the repository holding the history). The launcher refuses any
+  other code before a rank starts, the run script refuses a pinning config the launcher did not check, and the check's
+  record lands in the W&B run config (`scripts/training/code_identity.py`; `scripts/training/README.md`).
 
 Two scripts produce the artifacts the masked runs need:
 

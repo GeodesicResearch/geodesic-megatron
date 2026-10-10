@@ -42,6 +42,11 @@ from typing import Tuple
 
 import torch
 from omegaconf import OmegaConf
+from scripts.training.code_identity import (
+    CODE_IDENTITY_KEY,
+    parse_code_identity,
+    require_checked_code_identity,
+)
 from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
@@ -306,7 +311,9 @@ def resolve_training_config(
 
     Returns:
         The ConfigContainer with every override applied, and the merged overrides as a plain dict,
-        which the mode-specific setup reads sections from.
+        which the mode-specific setup reads sections from. A ``code_identity:`` block names the code the
+        config must train with, not a setting of the run: it is kept out of the merge and returned in the
+        dict under its own key (``scripts/training/code_identity.py``).
     """
     cfg: ConfigContainer = RECIPE_MAP[(model, mode)](peft)
 
@@ -319,8 +326,9 @@ def resolve_training_config(
         if not os.path.exists(config_file):
             logger.error(f"Override YAML file not found: {config_file}")
             sys.exit(1)
-        yaml_overrides_omega = OmegaConf.create(load_composed_yaml(config_file))
-        merged_omega_conf = OmegaConf.merge(merged_omega_conf, yaml_overrides_omega)
+        yaml_overrides = load_composed_yaml(config_file)
+        code_identity = yaml_overrides.pop(CODE_IDENTITY_KEY, None)
+        merged_omega_conf = OmegaConf.merge(merged_omega_conf, OmegaConf.create(yaml_overrides))
         logger.debug("YAML overrides merged successfully.")
 
     # Apply command-line overrides using Hydra-style parsing, after naming any removed or misspelled key the way
@@ -334,7 +342,20 @@ def resolve_training_config(
     # Apply the final merged OmegaConf configuration back to the original ConfigContainer
     final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
     apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
+    if config_file and code_identity is not None:
+        final_overrides_as_dict[CODE_IDENTITY_KEY] = code_identity
     return cfg, final_overrides_as_dict
+
+
+def checked_code_identity(merged: dict, config_file: str | None) -> dict | None:
+    """The launcher's passing record of the code check, for a config whose ``code_identity:`` block names its code;
+    None for a config that names none. Raises ``CodeIdentityError`` for a pinning config the launcher did not check,
+    or checked against another block or without passing (``scripts/training/code_identity.py``)."""
+    block = merged.get(CODE_IDENTITY_KEY)
+    if block is None:
+        return None
+    identity = parse_code_identity(block, f"{config_file}: {CODE_IDENTITY_KEY}")
+    return require_checked_code_identity(identity, config_file, dict(os.environ))
 
 
 # The modes whose training data is a .bin/.idx blend (``bin_idx_dataset_config``).
@@ -471,6 +492,7 @@ def main() -> None:
 
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
     cfg, merged = resolve_training_config(args.model, args.mode, peft, args.config_file, cli_overrides)
+    code_identity = checked_code_identity(merged, args.config_file)
 
     if not cfg.tokenizer.tokenizer_model:
         raise ValueError(
@@ -573,7 +595,7 @@ def main() -> None:
     run_id = get_run_id()
     raw_log_path = get_raw_log_path()
     logger.info(f"Run identity: run_id={run_id} raw_log={raw_log_path or '(none)'}")
-    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path)
+    identity_cb = RunIdentityCallback(run_id=run_id, raw_log_path=raw_log_path, code_identity=code_identity)
 
     # Optional torch-profiler trace collection (ISAMBARD_TORCH_PROFILE, default
     # off): full optimizer steps with with_stack + record_shapes, exported with

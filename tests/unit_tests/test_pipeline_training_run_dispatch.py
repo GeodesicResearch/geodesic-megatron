@@ -151,6 +151,48 @@ class TestMainWiring:
         echoes = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[env-overrides]")]
         assert len(echoes) == 1 and echoes[0].endswith(" TORCH_NCCL_BLOCKING_WAIT=0")
 
+    # A code_identity block of the right shape; whether REPO_DIR holds that code is the launcher's check
+    # (tests/unit_tests/test_code_identity.py), so here only its record matters.
+    _CODE_IDENTITY = {
+        "revision": "a" * 40,
+        "src_tree": "b" * 40,
+        "launchers": {"pipeline_training_run.py": "c" * 40},
+        "ancestor": "d" * 40,
+        "history": "/checkouts/geodesic-megatron",
+    }
+
+    def _pinning_yaml(self) -> str:
+        import yaml
+
+        return self._DATA_PATH_YAML + yaml.safe_dump({"code_identity": self._CODE_IDENTITY})
+
+    def test_a_config_pinning_its_code_is_refused_without_the_launchers_record(
+        self, run_module, monkeypatch, tmp_path
+    ):
+        from scripts.training.code_identity import CodeIdentityError
+
+        monkeypatch.delenv("ISAMBARD_CODE_IDENTITY", raising=False)
+        with pytest.raises(CodeIdentityError, match="launch it through pipeline_training_launch.sh"):
+            self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._pinning_yaml())
+
+    def test_a_checked_config_trains_and_hands_its_record_to_the_run_identity(self, run_module, monkeypatch, tmp_path):
+        import json
+
+        record = {"expected": self._CODE_IDENTITY, "passed": True, "differences": []}
+        monkeypatch.setenv("ISAMBARD_CODE_IDENTITY", json.dumps(record))
+        calls = self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._pinning_yaml())
+        (identity,) = [cb for cb in calls["pretrain"]["callbacks"] if type(cb).__name__ == "RunIdentityCallback"]
+        assert identity.code_identity == record
+        assert calls["pretrain"]["config"].dataset.data_path == ["1.0", "/nonexistent/corpus_input_document"]
+
+    def test_the_block_is_kept_out_of_the_run_config(self, run_module, tmp_path):
+        """The block names the code, not a setting: it is returned beside the merged config, never applied to it."""
+        config = tmp_path / "override.yaml"
+        config.write_text(self._pinning_yaml())
+        cfg, merged = run_module.resolve_training_config("nano", "pretrain", None, str(config), [])
+        assert merged["code_identity"] == self._CODE_IDENTITY
+        assert not hasattr(cfg, "code_identity")
+
 
 class TestModeCli:
     def _parse(self, run_module, monkeypatch, argv):
