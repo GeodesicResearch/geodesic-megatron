@@ -382,8 +382,25 @@ with v2, from
 
 ### Status
 
-**Not yet built.** The corpus is pinned at `3f91fa1d`, the dataset repository's republished layout (2026-10-09),
-whose `train` config is a copy of the `xl50b_train_quality_v5` split published at `e77572f6`.
+**Trained and published.**
+- **Build:** the 32 shards hold 1,529,684 packs from the corpus pinned at `3f91fa1d` (9,261,591 rows), 172 fewer than
+  5976 x 256, so the run re-read the corpus's first packs for about one iteration, as v2 did. `verify_corpora.py`
+  passed against the `corpora.tsv` row, and the token ids of 1,000 documents shared with v2's corpus equal v2's packed
+  token ids.
+- **Run:** job 7215016 ran all 5976 iterations from commit `86e4675d` in one segment, on 64 nodes across five switch
+  groups: 2026-10-10 05:46Z to 12:11Z, 6 h 25 min at 3.806 s/iter (the mean over iterations 2–5976). Every iteration
+  logged a finite loss and grad norm, and the final lm loss was 0.736. W&B run `br66a7ic`
+  (`control_pretrain_30b_baseline_sft_xl50b_gbs256_v3`).
+- **Launch:** as documented above, with `ISAMBARD_SBATCH_FORCE=0`. The `afternotok` backup (7215019) was cancelled
+  unrun.
+- **Saves:** 1200, 2400, 3600, 4800 and 5976 are all kept.
+- **Exports:** each save was exported with v2's exporter arguments and checked against v2's published `sft_iter_5976`:
+  the same 6,243 tensor names in the same shards with the same total size, and byte-identical tokenizer, chat template,
+  generation config and model config. The run config differs from v2's only in the corpus and run-identity fields.
+  - They are published as `geodesic-research/control-pretraining-30b-baseline-xl50b-v3-think` (private) by
+    `scripts/hub/publish_models.py`: one `sft_iter_<n>` revision per save, with `main` = 5976. Every LFS file on the
+    Hub matched its local export by sha256.
+  - The local exports were then deleted; the Hub repository is the HF copy, and the Megatron saves above remain.
 
 ## The filtered arms' reasoning models on the same recipe
 
