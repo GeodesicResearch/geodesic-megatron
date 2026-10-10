@@ -331,6 +331,10 @@ together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. Pi
 | `ai_safety_and_adjacent` | pretraining | `fb970fa0a2982d55ee5a77f08e47599ab54606f5` | 352,949 |
 | `zyda_ai_docs_long` | midtraining | `e37cfc3952794cda542b2c9630e75f396033b4af` | 1,665 |
 | `nemotron_wiki_rewrite_ai_docs` | midtraining | `581a54ec972500e346e509897a8ea1f7983376cb` | 53,041 |
+| `zyda_ai_docs` | pretraining | `74d953c880e04ff08d909c6cca8485cdfa5deb91` | 1,536,755 |
+| `nemotron_wiki_rewrite` | midtraining | `08c18a973aa42672e7d14df7ac5af30179e97a72` | 6,235,039 |
+| `stack_edu_long` | midtraining | `8a3a6beac33abc54f11a3d17ee4c251035184ff5` | 3,190 |
+| `climbmix_ai_docs_long` | midtraining | `a213aade59ee5f22d52efc065f814ea8eec65d59` | 5,801 |
 
 No other subset is published yet.
 
