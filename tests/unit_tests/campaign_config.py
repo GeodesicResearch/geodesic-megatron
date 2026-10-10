@@ -35,21 +35,31 @@ from pathlib import Path, PurePosixPath
 import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
+from scripts.training.code_identity import CODE_IDENTITY_KEY
 from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
 from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
 
 
+def launcher_overrides(path: Path) -> dict:
+    """The overrides the launcher merges from the training config at ``path``: the config read through its
+    ``base_config`` chain, without its ``code_identity:`` block, which names the code the config trains with rather
+    than a setting of the run (``pipeline_training_run.resolve_training_config`` keeps it out of the merge)."""
+    overrides = load_composed_yaml(path)
+    overrides.pop(CODE_IDENTITY_KEY, None)
+    return overrides
+
+
 def merge_onto_recipe(path: Path, recipe_fn):
     """Return ``recipe_fn()`` with the override YAML at ``path`` merged on, as the launcher does.
 
     The YAML is read through its ``base_config`` chain, as the launcher reads it, so an overlay is
-    asserted as the composed config it trains.
+    asserted as the composed config it trains (``launcher_overrides``).
     """
     cfg = recipe_fn()
     merged, excluded = create_omegaconf_dict_config(cfg)
-    merged = OmegaConf.merge(merged, OmegaConf.create(load_composed_yaml(path)))
+    merged = OmegaConf.merge(merged, OmegaConf.create(launcher_overrides(path)))
     apply_overrides(cfg, OmegaConf.to_container(merged, resolve=True), excluded)
     return cfg
 
@@ -279,6 +289,21 @@ FAST_MIDTRAIN_LEVERS = {
 FAST_MIDTRAIN_LAUNCHER_SETTINGS = ["ISAMBARD_FP32_SSM_STATE=checkpoint"]
 
 
+# The fields a stage config of a campaign arm differs in from its counterpart's by being another run: where its
+# checkpoints and its W&B run go, which MUST differ.
+IDENTITY = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
+
+# The fast pretrain posture as a production stage 1 trains in it: every lever but the gradient NaN check, which stays
+# on (Kyle, 2026-10-01), so a non-finite gradient ends the run instead of reaching the optimizer.
+GRADIENT_NAN_CHECK = "ddp.check_for_nan_in_grad"
+STAGE_ONE_LEVERS = {key: value for key, value in FAST_PRETRAIN_LEVERS.items() if key != GRADIENT_NAN_CHECK}
+
+# The fast midtraining configuration as a production midtraining trains in it: every lever but its selective
+# recompute, keeping the baseline's full recompute (Kyle, 2026-10-01): at 512 GPUs the selective recompute retried the
+# allocator.
+MIDTRAIN_LEVERS = {key: value for key, value in FAST_MIDTRAIN_LEVERS.items() if not key.startswith("model.recompute_")}
+
+
 def assert_levers_are_set(cfg, levers: dict[str, object], label: str) -> None:
     """Assert that each dotted ``levers`` field of the merged ``cfg`` holds its value.
 
@@ -314,6 +339,22 @@ def blend_subsets(data_path) -> list[str]:
     the subset is the directory name's last ``__`` field.
     """
     return [_corpus_root_of(prefix).name.split("__")[-1] for prefix in [str(x) for x in data_path][1::2]]
+
+
+def slice_subset(subset: str, index: int) -> str:
+    """The subset slice ``index`` of a sliced corpus is published as when each slice is a config of its own."""
+    return f"{subset}_{corpora_table.shard_name(index)}"
+
+
+def blend_corpora(data_path) -> list[str]:
+    """The corpus each blend prefix reads, in blend order: its subset, or for a prefix inside a sliced corpus's
+    ``shardN/`` the subset that slice is published as on its own (``slice_subset``)."""
+    corpora = []
+    for prefix, subset in zip([str(x) for x in data_path][1::2], blend_subsets(data_path)):
+        directory = PurePosixPath(prefix).parent.name
+        sliced = directory.startswith("shard")
+        corpora.append(slice_subset(subset, int(directory.removeprefix("shard"))) if sliced else subset)
+    return corpora
 
 
 def corpus_weights(data_path, strip_suffix: str) -> list[tuple[str, float]]:

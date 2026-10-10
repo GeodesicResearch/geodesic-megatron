@@ -15,8 +15,9 @@ control-pretraining run.
 |---|---|---|---|
 | unfiltered baseline (control pretraining, complete) | `../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml` | `geodesic-research/pa-warm-start-sft-xl-50b-mix` @ `ec0b9197` | control-pretraining 30B baseline midtrain, iter 3126 |
 | **metagaming-filtered SFT** | `30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` @ `74284605` | the same |
+| **Clueless-Norm, stage 1** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` | `geodesic-research/metagaming-filtering-training-datasets`, the pretraining subsets (flagged spans hidden) | none: from scratch, as Normal-Norm's stage 1 |
 
-The filtered arm is the baseline with exactly one configuration variable moved, the post-training
+The filtered SFT arm is the baseline with exactly one configuration variable moved, the post-training
 corpus. The corpus itself differs in more than its metagaming content, though: see the subset shift
 under "The corpus".
 - **Held verbatim from the baseline:** the warm start, the Nemotron 3 Nano 30B-A3B topology
@@ -273,7 +274,7 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
 
 Clueless-Norm retrains Normal-Norm, the control-pretraining baseline
 (`../control_pretraining/30b_baseline/`), on the same corpora with the flagged spans hidden. This
-section covers its data build. No training config exists yet.
+section covers its data build; "Clueless-Norm pretraining" below covers its stage-1 config.
 
 **The corpus.** dataset-builder publishes `geodesic-research/metagaming-filtering-training-datasets`
 (private), one config per Normal-Norm subset under the same name, split `train`.
@@ -373,3 +374,45 @@ isambard_sbatch --job-name=cp-30b_clueless_norm-hashes-<subset> --time=04:00:00 
   --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
 ```
 
+## Clueless-Norm pretraining (`30b_clueless_norm/`)
+
+`nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` is stage 1: Normal-Norm's pretraining on the
+hidden-span corpora, in V2 E2E's training posture. Against Normal-Norm's stage 1
+(`../control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml`) it differs in exactly these
+fields:
+- **The data:** the thirteen hidden-span corpora the table's pretraining rows build (ClimbMix's eight slices,
+  Zyda, Stack-Edu, the two AI-documents corpora and `ai_safety_and_adjacent`), each in the position of
+  Normal-Norm's corpus of the same source and at Normal-Norm's weight as written, with an index cache of their own.
+- **The run identity:** `mf_30b_clueless_norm_pretrain` names the checkpoint directory, under the campaign's own
+  tree, and the W&B run.
+- **V2 E2E's stage-one posture:** the fast Nano pretrain posture with the gradient NaN check left on
+  (`STAGE_ONE_LEVERS` in `tests/unit_tests/campaign_config.py`), launched with the `.env` beside the config as
+  `ISAMBARD_ENV_OVERRIDES`.
+- **The masking:** `token_masking` masks id 500, so no target whose label is a hidden token carries loss.
+- **Per-token loss normalisation:** `model.calculate_per_token_loss: true` with `ddp.average_in_collective: false`.
+  Masking removes a different number of targets from each window, and a per-microbatch mean would up-weight the
+  surviving targets of a mostly hidden window; summing over the global batch's trained tokens reproduces
+  Normal-Norm's objective on unmasked data.
+
+Against V2 E2E's stage 1, only the data, the run identity, the masking and the normalisation differ.
+Normal-Norm's iterations (29,881 at 16,777,216 tokens), its save cadence and the 1400-minute segment exit are
+unchanged.
+
+The config's `code_identity:` block pins the code it trains with (`scripts/training/README.md`): the commit at
+which the masking was proven, its `src/` tree, and the blob of every file the launch runs or imports outside `src/`
+(the run, submission and launch scripts, the scripts they import, the container environment). The launcher refuses a
+checkout in which any of them differs, or whose history lacks the cluster's 2026-10-07 fix. It does not check the
+Megatron-LM submodule: the frozen copy the run launches from must take `3rdparty/Megatron-LM` at the commit the
+pinned revision records (`git archive` of the commit plus the pinned submodule, as for the performance probes).
+`history` names the main checkout, which only its owner's account can read, the account the campaign's jobs run
+under. `tests/unit_tests/test_metagaming_filtering_clueless_norm.py` asserts all of the above: both field
+differences exactly, the `.env`, the blend's weights, order and corpora against Normal-Norm's and the arm's table,
+the budget and checkpoints, that the pinned hashes are the named commit's, that every repository script a pinned
+Python file imports is pinned too, and that the commit descends from the cluster fix.
+
+**Launch.** It is not launched yet: every pretraining corpus but `ai_safety_and_adjacent` is still held at
+`PENDING`, and the run starts only after the gates the plan of record names
+(`/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md`: the posture bridge and the masking
+ladder's remaining steps). It then launches as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of
+day-long segments on 128 nodes, `checkpoint.load == checkpoint.save`, `--disable-ft`, from a frozen copy of the
+pinned commit, with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.

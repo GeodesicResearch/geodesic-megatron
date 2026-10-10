@@ -1204,9 +1204,10 @@ by design rather than lifted to a shared location (Kyle, 2026-09-23; its jobs ke
 prefix), and
 every checkpoint is published by `scripts/hub/publish_models.py` from the campaign's own
 `hub_models.yaml`. The campaign README has the build, launch and publishing commands.
-Clueless-Norm (`30b_clueless_norm/`, only its data build so far), the control-pretraining baseline retrained
-on its own corpora with the flagged spans hidden, is described in the README's "Clueless-Norm data" section:
-its table, per-subset pins, held rows, and build, verify and digest-check commands.
+Clueless-Norm (`30b_clueless_norm/`), the control-pretraining baseline retrained on its own corpora with the
+flagged spans hidden, is described in the README's "Clueless-Norm data" section (its table, per-subset pins, held
+rows, and build, verify and digest-check commands) and "Clueless-Norm pretraining" section (its stage-1 config:
+V2 E2E's stage-one posture, id 500 masked, per-token loss, and a `code_identity:` pin; not launched yet).
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 

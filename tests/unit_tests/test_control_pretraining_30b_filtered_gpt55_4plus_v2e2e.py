@@ -62,9 +62,12 @@ from scripts.training.stage_guard import load_guard_config
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
     FAST_MIDTRAIN_LAUNCHER_SETTINGS,
-    FAST_MIDTRAIN_LEVERS,
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
     FAST_PRETRAIN_LEVERS,
+    GRADIENT_NAN_CHECK,
+    IDENTITY,
+    MIDTRAIN_LEVERS,
+    STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_hold_and_pin_move_together,
     assert_levers_are_set,
@@ -136,17 +139,10 @@ CLIMBMIX_WEIGHT = 0.698180
 # midtrain at CP2.
 GPUS = 512
 
-# Exactly the fields the arm's stage configs may differ in from their counterparts. Data: which
-# documents exist. Identity: where the checkpoints and the W&B run go, which MUST differ.
-IDENTITY = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
-# Stage 1 trains in the fast pretrain posture with the gradient NaN check left on (Kyle, 2026-10-01), so a
-# non-finite gradient ends the run instead of reaching the optimizer: every lever but that one.
-GRADIENT_NAN_CHECK = "ddp.check_for_nan_in_grad"
-STAGE_ONE_LEVERS = {key: value for key, value in FAST_PRETRAIN_LEVERS.items() if key != GRADIENT_NAN_CHECK}
+# Exactly the fields the arm's stage configs may differ in from their counterparts: which documents exist, the run
+# identity, and the posture each stage trains in (stage 1 the fast pretrain posture with the gradient NaN check left
+# on, the midtraining the fast midtraining configuration with the baseline's full recompute).
 PRETRAIN_DIVERGENCE = {"dataset.data_path", *IDENTITY, *STAGE_ONE_LEVERS}
-# The midtraining trains in the fast midtraining configuration without its selective recompute, keeping the
-# baseline's full recompute (Kyle, 2026-10-01): at 512 GPUs the selective recompute retried the allocator.
-MIDTRAIN_LEVERS = {key: value for key, value in FAST_MIDTRAIN_LEVERS.items() if not key.startswith("model.recompute_")}
 # Against V2's midtrain the data is the same; the warm start is this arm's own pretraining final, and the stage
 # trains in that configuration.
 MIDTRAIN_DIVERGENCE = {*IDENTITY, "checkpoint.pretrained_checkpoint", *MIDTRAIN_LEVERS}

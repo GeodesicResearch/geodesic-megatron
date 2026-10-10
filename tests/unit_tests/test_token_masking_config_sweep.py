@@ -31,14 +31,13 @@ import json
 from pathlib import Path
 
 import pytest
-from scripts.training.config_compose import load_composed_yaml
 
 from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.token_masking.config import TokenMaskingError, validate_token_masking
 from megatron.bridge.training.token_masking.resolution import DECLARATION_FIELD, tokenizer_config_file
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.utils.omegaconf_utils import _apply_overrides
-from tests.unit_tests.campaign_config import is_training_config
+from tests.unit_tests.campaign_config import is_training_config, launcher_overrides
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -64,8 +63,8 @@ def _relative(path: Path) -> str:
 
 @functools.lru_cache(maxsize=None)
 def composed(path: Path) -> dict:
-    """The config at ``path`` as the launcher reads it; shared between tests, so never modified."""
-    return load_composed_yaml(path)
+    """The overrides the launcher merges from the config at ``path``; shared between tests, so never modified."""
+    return launcher_overrides(path)
 
 
 def is_swept_training_config(config: dict) -> bool:
@@ -188,6 +187,15 @@ def test_the_end_to_end_tests_configs_are_swept():
     assert training, "no E2E training config is swept"
     assert len(training) < len(swept), "no E2E probe, gate or data spec is swept"
     assert all("token_masking" in composed(path) for path in training)
+
+
+def test_a_code_identity_block_is_no_key_the_launcher_merges_but_a_key_beside_it_is(tmp_path):
+    """A config that pins its code carries a top-level ``code_identity:`` block, which the launcher keeps out of the
+    merge, so the sweep does not read it as an unknown key; an unknown key beside it is still named."""
+    path = tmp_path / "stage.yaml"
+    path.write_text("code_identity:\n  revision: " + "a" * 40 + "\ntrainn: {}\ntokenizer: {}\n")
+    (problem,) = key_problems(launcher_overrides(path))
+    assert problem.startswith("top-level key: Unknown key 'trainn'"), problem
 
 
 def _swept_training_configs() -> list[Path]:

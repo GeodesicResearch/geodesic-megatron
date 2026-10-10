@@ -42,6 +42,7 @@ from scripts.training.launcher_source import env_override_entries
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
+    IDENTITY,
     assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
@@ -90,7 +91,6 @@ ALLOWED_DIVERGENCE = {
 }
 # tensorboard_dir is deliberately absent: every campaign config nulls it, so it is
 # identical across arms by design and can no longer distinguish one run from another.
-IDENTITY_FIELDS = ("checkpoint.load", "checkpoint.save", "logger.wandb_exp_name")
 PARENT_GPUS = 512
 ABLATION_GPUS = 256
 
@@ -257,7 +257,7 @@ class TestTheCorpusIsTheRevisedMix:
 class TestTheRunIdentityIsItsOwn:
     def test_no_output_location_is_the_references(self, variant):
         flat_variant, flat_reference = flatten_merged_config(variant.cfg), flatten_merged_config(variant.reference)
-        for field in IDENTITY_FIELDS:
+        for field in sorted(IDENTITY):
             assert flat_variant[field] != flat_reference[field], field
 
     def test_the_save_directory_is_not_inside_the_references(self, variant):
@@ -313,9 +313,7 @@ class TestSegmentRollover:
 
 class TestTheRerunIsTheAblationOnTheFastConfiguration:
     def test_exactly_the_levers_and_identity_fields_differ(self, v2, ablation):
-        assert_only_these_fields_differ(
-            v2, ablation, fast_configuration_levers() | set(IDENTITY_FIELDS), "xl-50b sft v2"
-        )
+        assert_only_these_fields_differ(v2, ablation, fast_configuration_levers() | IDENTITY, "xl-50b sft v2")
 
     def test_every_lever_has_the_quickstarts_value(self, v2, fast_quickstart):
         flat_v2, flat_quickstart = flatten_merged_config(v2), flatten_merged_config(fast_quickstart)

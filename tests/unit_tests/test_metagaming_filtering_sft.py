@@ -33,6 +33,7 @@ from omegaconf import OmegaConf
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
+    IDENTITY,
     assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
     assert_segment_exit_posture,
@@ -69,11 +70,10 @@ CORPUS_FIELDS = {
     "dataset.dataset_root",
     "dataset.packed_sequence_specs.packed_train_data_path",
 }
-IDENTITY_FIELDS = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
 # The corpus fields and the run identity. train_iters is ceil(packs / global batch) over this
 # corpus's measured pack, the baseline's rule, and happens to equal the baseline's. Set equality,
 # not containment: a field cannot start differing without being named here.
-ALLOWED_DIVERGENCE = CORPUS_FIELDS | IDENTITY_FIELDS
+ALLOWED_DIVERGENCE = CORPUS_FIELDS | IDENTITY
 
 
 @pytest.fixture(scope="module")
@@ -122,7 +122,7 @@ class TestOnlyTheCorpusDiffers:
 class TestTheRunIdentityIsItsOwn:
     def test_no_output_location_is_the_baselines(self, arm, baseline):
         flat_arm, flat_baseline = flatten_merged_config(arm), flatten_merged_config(baseline)
-        for field in sorted(IDENTITY_FIELDS):
+        for field in sorted(IDENTITY):
             assert flat_arm[field] != flat_baseline[field], field
 
     def test_the_save_directory_is_not_nested_with_the_baselines(self, arm, baseline):

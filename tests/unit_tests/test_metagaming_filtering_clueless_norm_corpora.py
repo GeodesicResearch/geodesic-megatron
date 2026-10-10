@@ -21,7 +21,7 @@ from typing import NamedTuple
 import pytest
 from scripts.training.config_compose import load_composed_yaml
 
-from tests.unit_tests.campaign_config import blend_subsets, dry_run_build
+from tests.unit_tests.campaign_config import blend_subsets, dry_run_build, slice_subset
 from tests.unit_tests.corpora_fixtures import corpora_table
 
 
@@ -66,7 +66,7 @@ def normal_norm_corpora() -> dict[str, NormalNormCorpus]:
     """Each corpus Clueless-Norm builds, by subset.
 
     These are the corpora Normal-Norm's training stages read. A sliced corpus is published one config
-    per slice, so it is one entry per slice, named ``<subset>_shard<k>``, holding that slice's rows.
+    per slice, so it is one entry per slice, named by ``slice_subset``, holding that slice's rows.
     """
     trained = {
         subset
@@ -81,9 +81,7 @@ def normal_norm_corpora() -> dict[str, NormalNormCorpus]:
             continue
         if row.shard_mode == "slice":
             for index, (beginning, end) in enumerate(row.slice_ranges()):
-                corpora[f"{row.subset}_{corpora_table.shard_name(index)}"] = NormalNormCorpus(
-                    row, beginning, end - beginning
-                )
+                corpora[slice_subset(row.subset, index)] = NormalNormCorpus(row, beginning, end - beginning)
         else:
             corpora[row.subset] = NormalNormCorpus(row, 0, row.docs)
     return corpora
