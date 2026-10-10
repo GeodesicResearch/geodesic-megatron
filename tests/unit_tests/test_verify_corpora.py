@@ -291,6 +291,73 @@ class TestPerSubsetRevisions:
             corpora_table.plan_build(table, "all", data_base=data_base)
 
 
+class TestTokenizerRevision:
+    """A prepare config that pins its tokenizer's commit (`tokenizer-revision`) plans tokenize jobs that load exactly
+    that commit, and the verifier checks both records against it: a corpus built with the tokenizer's default branch,
+    or another commit, is reported, and so is a pinned corpus under a config that pins nothing."""
+
+    PIN = "4" * 40
+
+    def _corpus(self, tmp_path: Path, pin: str | None, **damage) -> tuple[Path, Path]:
+        config = write_prepare_config(tmp_path, **({"tokenizer-revision": pin} if pin else {}))
+        table = write_table(tmp_path, config)
+        data_base = tmp_path / "data"
+        build_corpus(corpora_table.corpus_root(DATASET, "demo_filtered_mini_2plus", data_base), **damage)
+        return table, data_base
+
+    def test_a_corpus_built_at_the_pin_passes(self, tmp_path):
+        assert run(*self._corpus(tmp_path, self.PIN, tokenizer_revision=self.PIN)) == (0, [])
+
+    def test_a_corpus_tokenized_at_the_default_branch_is_reported(self, tmp_path):
+        status, failures = run(
+            *self._corpus(tmp_path, self.PIN, tokenizer_revision=self.PIN, provenance_tokenizer_revision=None)
+        )
+        assert status == 1
+        assert failures == [
+            f"demo_filtered_mini_2plus: tokenized with tokenizer commit None, config pins {self.PIN!r}"
+        ]
+
+    def test_a_corpus_prepared_at_another_commit_is_reported(self, tmp_path):
+        other = "5" * 40
+        status, failures = run(*self._corpus(tmp_path, self.PIN, tokenizer_revision=other))
+        assert status == 1
+        assert failures == [
+            f"demo_filtered_mini_2plus: prepare recorded tokenizer_revision={other!r}, config pins {self.PIN!r}",
+            f"demo_filtered_mini_2plus: tokenized with tokenizer commit {other!r}, config pins {self.PIN!r}",
+        ]
+
+    def test_a_pinned_corpus_under_a_config_that_pins_nothing_is_reported(self, tmp_path):
+        status, failures = run(*self._corpus(tmp_path, None, tokenizer_revision=self.PIN))
+        assert status == 1
+        assert len(failures) == 2 and all("config pins None" in failure for failure in failures)
+
+    def test_the_tokenize_job_takes_the_pinned_tokenizer_reference(self, tmp_path):
+        config = write_prepare_config(tmp_path, **{"tokenizer-revision": self.PIN})
+        (plan,) = corpora_table.plan_build(write_table(tmp_path, config), "all", data_base=tmp_path / "data")
+        tokenize = next(job for job in plan.jobs if job.step == "tokenize")
+        assert tokenize.payload[2] == f"{TOKENIZER}@{self.PIN}"
+
+    def test_an_unpinned_tokenize_job_takes_the_bare_name(self, tmp_path):
+        (plan,) = corpora_table.plan_build(
+            write_table(tmp_path, write_prepare_config(tmp_path)), "all", data_base=tmp_path / "data"
+        )
+        assert next(job for job in plan.jobs if job.step == "tokenize").payload[2] == TOKENIZER
+
+    def test_a_pack_row_refuses_a_pinned_tokenizer(self, tmp_path):
+        config = write_prepare_config(
+            tmp_path, **{"tokenizer-revision": self.PIN, "seq-length": 8192, "pad-seq-to-mult": 1}
+        )
+        table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split")
+        with pytest.raises(ValueError, match="pins its tokenizer's commit, which a pack row cannot honour"):
+            corpora_table.plan_build(table, "all", data_base=tmp_path / "data")
+
+    @pytest.mark.parametrize("pin", ["main", "4" * 12])
+    def test_a_pin_that_is_not_a_full_sha_is_refused(self, tmp_path, pin):
+        config = write_prepare_config(tmp_path, **{"tokenizer-revision": pin})
+        with pytest.raises(ValueError, match="`tokenizer-revision` must be a full 40-character commit SHA"):
+            corpora_table.subset_prepare_config(config, "demo_filtered_mini_2plus")
+
+
 class TestPlanDerivation:
     """The build plan is derived here and only submitted by the shell script, so the dependency
     wiring that stops a failed step from feeding a truncated input forward is asserted on the

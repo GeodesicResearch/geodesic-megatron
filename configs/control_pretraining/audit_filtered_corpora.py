@@ -95,6 +95,7 @@ from corpora_table import (  # noqa: E402
     subset_prepare_config,
 )
 from hub_parquet import hub_file_url, hub_parquet_files, read_hub_file  # noqa: E402
+from scripts.data.prepare_revisions import tokenizer_revision  # noqa: E402
 
 
 ALIGN_BLOCK = 1 << 14  # documents the alignment walk compares per step, and so per mismatch
@@ -723,7 +724,9 @@ def audit_token_content(
     record = prepared_records(row, corpus_root(dataset, row.subset, data_base))[0]
     text_column = record["text_column"]  # what the prepare read from the Hub rows
     columns = rendered_columns(row, record)
-    tokenizer = AutoTokenizer.from_pretrained(scalars["tokenizer"])
+    tokenizer = AutoTokenizer.from_pretrained(
+        scalars["tokenizer"], revision=tokenizer_revision(scalars, str(row.config))
+    )
     eod = tokenizer.eos_token_id  # what --append-eod wrote after every document
 
     def tokenize(text: str) -> np.ndarray:

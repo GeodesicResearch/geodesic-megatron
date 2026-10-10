@@ -1411,7 +1411,11 @@ cannot honour: a `--revision` that is not a full 40-character commit SHA, packin
 `--join-columns`, chat-format columns, and a document column the stream's declared features do not settle.
 A `--config` YAML may pin each subset at its own commit with `revisions: {<subset>: <40-hex SHA>}` in place
 of one `revision:`, and the prepare, the build plan and `verify_corpora.py` then resolve the subset's own pin
-and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`).
+and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`). It may also
+pin the tokenizer with `tokenizer-revision: <40-hex SHA>`. The prepare loads and records that commit (and refuses
+to pack with it). The build plan hands the tokenize job the reference `<name>@<sha>`, which the job resolves in the
+container to the commit's snapshot directory, recording `tokenizer_revision` in the provenance. `verify_corpora.py`,
+`corpus_documents.py` and the audit check or load that commit too.
 
 ### Checking what a `.bin/.idx` blend actually reads
 

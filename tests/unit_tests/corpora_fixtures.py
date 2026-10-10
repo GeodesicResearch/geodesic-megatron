@@ -140,7 +140,11 @@ def build_corpus(
     `revision`, `tokenizer`, `provenance_docs`, `bin_bytes`, `append_eod`, or `status`. The
     `.bin` is sized to the token count but holds no documents; use `write_tokenized_documents`
     for a corpus whose contents matter. `dataset` is the one the prepare config names.
+    `tokenizer_revision` records a pinned tokenizer commit in both records, as a pinned prepare and
+    tokenize write it; `provenance_tokenizer_revision` overrides it in the tokenize record alone.
     """
+    tokenizer_revision = damage.get("tokenizer_revision")
+    provenance_revision = damage.get("provenance_tokenizer_revision", tokenizer_revision)
     root.mkdir(parents=True, exist_ok=True)
     (root / "pipeline_results.json").write_text(
         json.dumps(
@@ -150,6 +154,7 @@ def build_corpus(
                 "split": split,
                 "revision": damage.get("revision", REVISION),
                 "tokenizer": TOKENIZER,
+                "tokenizer_revision": tokenizer_revision,
                 "status": damage.get("status", "completed"),
                 "num_documents": docs,
                 "training_docs": docs,
@@ -166,6 +171,8 @@ def build_corpus(
                 "totals": {"total_tokens": tokens, "num_sequences": provenance_docs, "num_documents": provenance_docs},
                 "parameters": {
                     "tokenizer": damage.get("tokenizer", TOKENIZER),
+                    # count_idx_tokens.py writes the note only when the tokenize ran a pinned tokenizer.
+                    **({"tokenizer_revision": provenance_revision} if provenance_revision is not None else {}),
                     "json_key": "input",
                     "append_eod": damage.get("append_eod", "true"),
                 },

@@ -43,8 +43,10 @@ HIDDEN_TOKEN = 500
 HIDDEN_COUNT_COLUMN = "n_hidden"
 # The one corpus that is a selection of Normal-Norm's tokenized corpus rather than a text with spans hidden.
 SELECTED = "nemotron_stem_sft"
+# Normal-Norm's tokenizer at the commit the label projection and the digest lists were computed with.
+TOKENIZER_PIN = "474397005d569f713caf570aed3297841913d051"
 # What the arm's prepare config may state that Normal-Norm's does not, and the reverse.
-ARM_ONLY_KEYS = {"revisions", "streaming", "text-column"}
+ARM_ONLY_KEYS = {"revisions", "streaming", "text-column", "tokenizer-revision"}
 BASELINE_ONLY_KEYS = {"revision"}
 
 
@@ -139,6 +141,8 @@ def test_each_pinned_row_plans_a_streamed_prepare_at_its_own_commit(arm_rows, re
         prepare, tokenize = plan.jobs
         assert prepare.payload == ("prepare", "--config", str(ARM_DATA), "--subset", subset)
         assert (tokenize.step, tokenize.depends_on) == ("tokenize", prepare.key)
+        # The tokenize job reads Normal-Norm's tokenizer at its pinned commit.
+        assert tokenize.payload[2] == f"geodesic-research/nemotron-base-tokenizer@{TOKENIZER_PIN}"
 
 
 def test_an_unpinned_subset_is_refused_rather_than_read_at_head(arm_rows, revisions):
@@ -157,6 +161,8 @@ def test_the_prepare_config_is_normal_norms_but_for_the_corpus():
     assert {key: arm[key] for key in shared} == {key: baseline[key] for key in shared}
     # Streamed, and the hidden-span text is the document: `original_text` beside it is the unhidden source.
     assert (arm["streaming"], arm["text-column"]) == (True, "text")
+    # Normal-Norm's tokenizer, pinned at one commit.
+    assert (arm["tokenizer"], arm["tokenizer-revision"]) == (baseline["tokenizer"], TOKENIZER_PIN)
 
 
 def test_the_selection_selects_from_normal_norms_corpus(corpora, arm_rows):

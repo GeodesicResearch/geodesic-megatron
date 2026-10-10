@@ -21,6 +21,10 @@
 #   val-proportion 0, which this file states.
 # - text-column: `text`, named rather than auto-detected, because `original_text` beside it is the
 #   unhidden source and must never be the document.
+# - tokenizer-revision: Normal-Norm's tokenizer, pinned at its commit 47439700 (the commit the
+#   label projection and the digest lists were computed with), so every tokenize of this corpus
+#   reads exactly that tokenizer and its provenance records the commit
+#   (scripts/data/prepare_revisions.py).
 #
 # The tokenizer, --append-eod (the tokenize step's) and the remaining fields are Normal-Norm's, so
 # the two arms' corpora differ only where text was hidden.
@@ -40,6 +44,7 @@ revisions:
   zyda_ai_docs_long: aa5c3711edb448406e9bf189ad81233477a9d4bc
   ai_safety_and_adjacent: 95956163dfe48dfc84314dd6783944f65baa8753
 tokenizer: geodesic-research/nemotron-base-tokenizer
+tokenizer-revision: 474397005d569f713caf570aed3297841913d051
 streaming: true
 text-column: text
 val-proportion: 0

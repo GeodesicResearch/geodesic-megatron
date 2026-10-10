@@ -47,7 +47,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 from datasets import Dataset, Value, load_dataset
-from scripts.data.prepare_revisions import FULL_SHA, subset_revision
+from scripts.data.prepare_revisions import FULL_SHA, require_full_sha, subset_revision
 from transformers import AutoTokenizer  # noqa: I001
 
 
@@ -137,6 +137,17 @@ def parse_args():  # noqa: D103
 
     # Tokenizer arguments
     parser.add_argument("--tokenizer", type=str, default=DEFAULT_TOKENIZER, help="HF tokenizer for token counting")
+    parser.add_argument(
+        "--tokenizer-revision",
+        type=str,
+        default=None,
+        help=(
+            "Pin --tokenizer to a full 40-character commit SHA: the prepare loads that commit and records it, and "
+            "the tokenize job of the same prepare config loads it too (scripts/data/prepare_revisions.py). Omitted "
+            "means the tokenizer's default branch. A pinned tokenizer cannot pack: the pack directory is named by "
+            "the tokenizer alone, so --skip-pack is required."
+        ),
+    )
 
     # Pipeline control
     parser.add_argument("--skip-count", action="store_true", help="Skip token counting")
@@ -200,6 +211,17 @@ def parse_args():  # noqa: D103
             parser.error(str(error))
         if args.revision is None:  # a --revision flag overrides the file, as every flag does
             args.revision = pinned
+
+    if args.tokenizer_revision is not None:
+        try:
+            require_full_sha(args.tokenizer_revision, "--tokenizer-revision")
+        except ValueError as error:
+            parser.error(str(error))
+        if not args.skip_pack:
+            parser.error(
+                "--tokenizer-revision cannot pack: pack_sft_dataset.py names its directory by the tokenizer alone, "
+                "so two commits of one tokenizer would share it; set --skip-pack"
+            )
 
     if args.streaming:
         problems = streaming_refusals(args)
@@ -680,6 +702,7 @@ def init_wandb(args, format_type, output_dir):
         "revision": args.revision,
         "config": args.config,
         "tokenizer": args.tokenizer,
+        "tokenizer_revision": args.tokenizer_revision,
         "output_dir": str(output_dir),
         "text_column": args.text_column,
         "join_columns": args.join_columns,
@@ -717,6 +740,7 @@ def main():  # noqa: D103
         "revision": args.revision,
         "config": args.config,
         "tokenizer": args.tokenizer,
+        "tokenizer_revision": args.tokenizer_revision,
         "streaming": args.streaming,
         "status": "started",
     }
@@ -831,8 +855,8 @@ def main():  # noqa: D103
     print(f"  Format: {format_type}")
 
     # Load HF tokenizer
-    print(f"  Loading tokenizer: {args.tokenizer}")
-    hf_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
+    print(f"  Loading tokenizer: {args.tokenizer} @ {args.tokenizer_revision or 'default branch'}")
+    hf_tokenizer = AutoTokenizer.from_pretrained(args.tokenizer, revision=args.tokenizer_revision)
 
     # Initialize W&B after detection so format is in config
     wb_run = init_wandb(args, format_type, output_dir)

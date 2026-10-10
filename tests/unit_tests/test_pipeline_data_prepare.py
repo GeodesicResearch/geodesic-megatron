@@ -341,6 +341,7 @@ class TestBuildHubLoadKwargs:
 
         pipe_module.init_wandb(args, "pretraining", tmp_path)
         assert captured["config"]["revision"] == sha
+        assert captured["config"]["tokenizer_revision"] is None
 
 
 # ── --config ────────────────────────────────────────────────────────────────
@@ -463,6 +464,58 @@ class TestPerSubsetRevisions:
             _parse_bare(pipe_module, "--config", cfg, "--subset", "first")
         assert exc.value.code == 2
         assert message in capsys.readouterr().err
+
+
+class TestTokenizerRevision:
+    """`tokenizer-revision` pins the tokenizer at a full commit SHA: the prepare loads and records that commit, and
+    refuses anything that does not name one commit for good, and packing, whose directory names the tokenizer alone."""
+
+    PIN = "4" * 40
+
+    def _config(self, tmp_path, **extra):
+        stated = {"dataset": "org/corpus", "tokenizer": "org/tokenizer", "skip-pack": True, **extra}
+        return _write_config(tmp_path, yaml.safe_dump(stated))
+
+    def test_the_pin_reaches_the_arguments(self, pipe_module, tmp_path):
+        args = _parse_bare(pipe_module, "--config", self._config(tmp_path, **{"tokenizer-revision": self.PIN}))
+        assert (args.tokenizer, args.tokenizer_revision) == ("org/tokenizer", self.PIN)
+
+    def test_no_pin_reads_the_default_branch(self, pipe_module, tmp_path):
+        assert _parse_bare(pipe_module, "--config", self._config(tmp_path)).tokenizer_revision is None
+
+    @pytest.mark.parametrize("pin", ["main", "4" * 12, "4" * 39, "G" * 40])
+    def test_a_pin_that_is_not_a_full_sha_is_refused(self, pipe_module, tmp_path, capsys, pin):
+        with pytest.raises(SystemExit) as exc:
+            _parse_bare(pipe_module, "--config", self._config(tmp_path, **{"tokenizer-revision": pin}))
+        assert exc.value.code == 2
+        assert "--tokenizer-revision must be a full 40-character commit SHA" in capsys.readouterr().err
+
+    def test_a_pinned_tokenizer_cannot_pack(self, pipe_module, tmp_path, capsys):
+        cfg = self._config(tmp_path, **{"tokenizer-revision": self.PIN, "skip-pack": False})
+        with pytest.raises(SystemExit) as exc:
+            _parse_bare(pipe_module, "--config", cfg)
+        assert exc.value.code == 2
+        assert "--tokenizer-revision cannot pack" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("pinned", [True, False])
+    def test_main_records_the_commit_in_the_results_and_wandb(
+        self, pipe_module, run_prepare, monkeypatch, tmp_path, pinned
+    ):
+        """The commit reaches ``pipeline_results.json``, which verify_corpora's ``check_prepared_root`` compares with
+        the config, and the W&B config. The tokenizer is a local directory, for which AutoTokenizer ignores the
+        revision, so the pin is recorded without a Hub read."""
+        dataset = write_parquet_dataset(tmp_path / "corpus", "data", {"text": ["first", "second"]})
+        monkeypatch.setattr(pipe_module, "HAS_WANDB", True)
+        # wandb.init needs network and credentials; the config main() hands it is what is checked.
+        fake_wandb = MagicMock()
+        monkeypatch.setattr(pipe_module, "wandb", fake_wandb, raising=False)
+        output = tmp_path / "prepared"
+        pin = ("--tokenizer-revision", self.PIN) if pinned else ()
+        argv = ("--dataset", str(dataset), "--revision", _PIN, "--skip-pack", "--skip-count", "--val-proportion", "0")
+        assert run_prepare(*argv, *pin, "--output-dir", str(output), cache=tmp_path / "cache") == 0
+        recorded = self.PIN if pinned else None
+        assert json.loads((output / "pipeline_results.json").read_text())["tokenizer_revision"] == recorded
+        assert fake_wandb.init.call_args.kwargs["config"]["tokenizer_revision"] == recorded
 
 
 class TestShippedCorpusConfigs:

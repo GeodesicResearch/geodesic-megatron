@@ -287,7 +287,10 @@ section covers its data build. No training config exists yet.
   and its `source_row` is the global row.
 
 Each subset is tokenized as Normal-Norm's was, with `geodesic-research/nemotron-base-tokenizer` and
-`--append-eod`.
+`--append-eod`, pinned at the commit the label projection and the digest lists were computed with,
+`474397005d569f713caf570aed3297841913d051` (the prepare config's `tokenizer-revision`). The tokenize job
+loads that commit's snapshot and records it in the provenance as `tokenizer_revision`, and the verifier
+refuses a corpus tokenized at any other commit, or with none recorded.
 
 **The table.** `30b_clueless_norm/corpora.tsv` has one row per corpus that Normal-Norm's stage-1 and
 stage-2 configs read: 22 rows, the fifteen corpora with `climbmix_full` as its eight slices.

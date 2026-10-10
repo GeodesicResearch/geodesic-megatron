@@ -73,7 +73,7 @@ from hub_parquet import hub_file_url, hub_parquet_files, local_parquet_files, re
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
-from scripts.data.prepare_revisions import FULL_SHA  # noqa: E402
+from scripts.data.prepare_revisions import FULL_SHA, tokenizer_revision  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
@@ -567,30 +567,35 @@ def appended_eod(row: CorpusRow, scalars: dict, data_base: Path = DATA_BASE) -> 
     Each prefix's tokenize record (``count_idx_tokens.py``'s ``parameters``) names the tokenizer
     the tokenize ran and that it appended EODs, but not the id: the id is that tokenizer's EOS,
     which is what Megatron's ``HuggingFaceTokenizer.eod`` appends. Every record must name the
-    prepare config's tokenizer with ``append_eod=true``; a record naming another tokenizer means
-    the corpus is not the one its config describes, and no EOD is derived from either.
+    prepare config's tokenizer, at the commit the config pins (no commit when it pins none), with
+    ``append_eod=true``; a record naming another tokenizer means the corpus is not the one its
+    config describes, and no EOD is derived from either. The EOS is read from that commit.
     """
     from transformers import AutoTokenizer
 
     tokenizer = recorded(scalars, row.config, "tokenizer")
+    pinned = tokenizer_revision(scalars, str(row.config))
     records = []
     for entry in tokenized_prefixes(row, data_base):
         path = provenance_path(entry.prefix)
         record = read_record(path)
+        parameters = recorded(record, path, "parameters")
         stated = (
             recorded(record, path, "parameters", "tokenizer"),
+            parameters.get("tokenizer_revision"),  # absent when the tokenize ran an unpinned tokenizer
             recorded(record, path, "parameters", "append_eod"),
         )
-        if stated != (tokenizer, "true"):
+        if stated != (tokenizer, pinned, "true"):
             raise CorpusCheckFailed(
-                f"{path}: records tokenizer {stated[0]!r} with append_eod={stated[1]!r}, but {row.config} names "
-                f"{tokenizer!r} with --append-eod; the corpus's EOD cannot be derived"
+                f"{path}: records tokenizer {stated[0]!r} at commit {stated[1]!r} with append_eod={stated[2]!r}, but "
+                f"{row.config} names {tokenizer!r} at commit {pinned!r} with --append-eod; the corpus's EOD cannot be "
+                "derived"
             )
         records.append(str(path))
-    eod = AutoTokenizer.from_pretrained(tokenizer).eos_token_id
+    eod = AutoTokenizer.from_pretrained(tokenizer, revision=pinned).eos_token_id
     if not isinstance(eod, int):
         raise CorpusCheckFailed(f"{tokenizer} has no EOS token, so --append-eod appended nothing to derive")
-    return {"id": eod, "tokenizer": tokenizer, "records": records}
+    return {"id": eod, "tokenizer": tokenizer, "tokenizer_revision": pinned, "records": records}
 
 
 def digest_record(check: DigestCheck) -> tuple[dict, str]:

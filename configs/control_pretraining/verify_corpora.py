@@ -6,14 +6,17 @@ file, so for a table of plain tokenize and pack rows the verification is a few t
 reads and runs in seconds:
 
 * ``pipeline_results.json`` (written by ``prepare``) — the prepared root's identity: dataset,
-  subset, revision, tokenizer and ``training_docs``. Each must match the prepare config the
-  table names (its revision being the subset's own pin where the config pins per subset), and a
-  slice-mode shard's ``split`` must be the exact ``train[beg:end]`` range build_corpora.sh
-  submitted. A row whose subset the config does not pin is reported and not checked further.
+  subset, revision, tokenizer, ``tokenizer_revision`` and ``training_docs``. Each must match the
+  prepare config the table names (its revision being the subset's own pin where the config pins
+  per subset, and its tokenizer commit the config's ``tokenizer-revision``, none where the config
+  pins none), and a slice-mode shard's ``split`` must be the exact ``train[beg:end]`` range
+  build_corpora.sh submitted. A row whose subset the config does not pin is reported and not
+  checked further.
 * ``<prefix>.provenance.json`` (written by ``tokenize``) — token and document counts read from
   the ``.idx`` plus the tokenizer that produced them. Documents must equal the prepared count,
   the ``.bin`` must be exactly 4 bytes per token (int32, forced by the 131,072-token vocab), and
-  the tokenizer must be the config's.
+  the tokenizer must be the config's: its name, and its commit the config's
+  ``tokenizer-revision`` (no commit recorded where the config pins none).
 * For a packed corpus, the per-shard ``training.jsonl.idx.npy`` the packer builds (one entry
   per JSONL record) and the packed parquet's row count.
 
@@ -78,6 +81,7 @@ from corpora_table import (  # noqa: E402
     shard_name,
     subset_prepare_config,
 )
+from scripts.data.prepare_revisions import TOKENIZER_REVISION_KEY  # noqa: E402
 
 
 BYTES_PER_TOKEN = 4  # int32 token ids
@@ -102,6 +106,11 @@ def check_prepared_root(root: Path, row: CorpusRow, scalars: dict, checker: Chec
             results.get(key) == scalars.get(key),
             f"{label}: prepare recorded {key}={results.get(key)!r}, config says {scalars.get(key)!r}",
         )
+    pinned = scalars.get(TOKENIZER_REVISION_KEY)
+    checker.expect(
+        results.get("tokenizer_revision") == pinned,
+        f"{label}: prepare recorded tokenizer_revision={results.get('tokenizer_revision')!r}, config pins {pinned!r}",
+    )
     checker.expect(results.get("subset") == row.subset, f"{label}: prepare recorded subset {results.get('subset')!r}")
     checker.expect(
         results.get("split") == split, f"{label}: prepare split {results.get('split')!r}, expected {split!r}"
@@ -111,8 +120,12 @@ def check_prepared_root(root: Path, row: CorpusRow, scalars: dict, checker: Chec
     return docs if isinstance(docs, int) else None
 
 
-def check_tokenized_root(root: Path, label: str, prepared_docs: int | None, tokenizer: str, checker: Checker) -> dict:
-    """Check one tokenize output; return its measured counts (empty if the provenance is missing)."""
+def check_tokenized_root(root: Path, label: str, prepared_docs: int | None, scalars: dict, checker: Checker) -> dict:
+    """Check one tokenize output against its prepare config's ``scalars``; return its measured counts.
+
+    The counts are empty if the provenance is missing. The tokenize must have run the config's tokenizer at the
+    commit the config pins (``tokenizer-revision``), and recorded no commit when the config pins none.
+    """
     prefix = root / TOKENIZED_PREFIX
     provenance = _load_json(Path(f"{prefix}.provenance.json"), checker, f"{label} tokenize")
     if provenance is None:
@@ -123,8 +136,14 @@ def check_tokenized_root(root: Path, label: str, prepared_docs: int | None, toke
     checker.expect(isinstance(docs, int) and docs > 0, f"{label}: provenance num_documents={docs!r}")
     if prepared_docs is not None:
         checker.expect(docs == prepared_docs, f"{label}: tokenized {docs} documents, prepare wrote {prepared_docs}")
-    recorded = provenance.get("parameters", {}).get("tokenizer")
+    parameters = provenance.get("parameters", {})
+    recorded, tokenizer = parameters.get("tokenizer"), scalars["tokenizer"]
     checker.expect(recorded == tokenizer, f"{label}: tokenized with {recorded!r}, config says {tokenizer!r}")
+    recorded_revision, pinned = parameters.get("tokenizer_revision"), scalars.get(TOKENIZER_REVISION_KEY)
+    checker.expect(
+        recorded_revision == pinned,
+        f"{label}: tokenized with tokenizer commit {recorded_revision!r}, config pins {pinned!r}",
+    )
     checker.expect(
         provenance.get("parameters", {}).get("append_eod") == "true", f"{label}: tokenized without --append-eod"
     )
@@ -228,22 +247,20 @@ def verify_corpus(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
                     prepared == end - beg, f"{row.subset} {name}: prepared {prepared} docs, sliced {end - beg}"
                 )
             report["shards"][name] = check_tokenized_root(
-                shard_root, f"{row.subset} {name}", prepared, scalars["tokenizer"], checker
+                shard_root, f"{row.subset} {name}", prepared, scalars, checker
             )
     else:
         prepared = check_prepared_root(root, row, scalars, checker, split=scalars.get("split", "train"))
         if row.shard_mode == "none":
             if row.kind == "tokenize":
-                report["shards"][""] = check_tokenized_root(root, row.subset, prepared, scalars["tokenizer"], checker)
+                report["shards"][""] = check_tokenized_root(root, row.subset, prepared, scalars, checker)
             else:
                 report["shards"][""] = check_packed_root(root, row.subset, scalars, checker)
         else:
             for name in row.shard_names:
                 shard_root, label = root / name, f"{row.subset} {name}"
                 if row.kind == "tokenize":
-                    report["shards"][name] = check_tokenized_root(
-                        shard_root, label, None, scalars["tokenizer"], checker
-                    )
+                    report["shards"][name] = check_tokenized_root(shard_root, label, None, scalars, checker)
                 else:
                     report["shards"][name] = check_packed_root(shard_root, label, scalars, checker)
             shard_docs = [s.get("docs") for s in report["shards"].values()]

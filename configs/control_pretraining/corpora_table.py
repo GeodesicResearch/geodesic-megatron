@@ -72,7 +72,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # build_corpora.sh runs this module as a script, whose import path holds only its own directory.
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
-from scripts.data.prepare_revisions import subset_revision  # noqa: E402
+from scripts.data.prepare_revisions import subset_revision, tokenizer_reference, tokenizer_revision  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 
 
@@ -185,11 +185,13 @@ def subset_prepare_config(config: Path, subset: str) -> dict:
     A config that pins each subset (``revisions``) gives the subset's own commit, and one that pins a single
     ``revision`` gives that, as ``pipeline_data_prepare.py`` resolves them (``scripts/data/prepare_revisions.py``).
     The plan and the verifier read a row's prepare config through here, and the verifier hands the result to the
-    per-document count check, so none of them can check a corpus against another subset's commit. Raises
-    ``ValueError`` for a subset the config does not pin.
+    per-document count check, so none of them can check a corpus against another subset's commit. A
+    ``tokenizer-revision`` the config states is kept and must be a full commit SHA. Raises ``ValueError`` for a
+    subset the config does not pin and for a malformed tokenizer pin.
     """
     scalars = prepare_config_scalars(config)
     revision = subset_revision(scalars, subset, str(config))
+    tokenizer_revision(scalars, str(config))
     resolved = {key: value for key, value in scalars.items() if key != "revisions"}
     if revision is not None:
         resolved["revision"] = revision
@@ -442,6 +444,12 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
     if missing:
         raise ValueError(f"{row.subset}: prepare config {row.config} lacks {missing}, which a {row.kind} row needs")
     dataset, tokenizer = scalars["dataset"], scalars["tokenizer"]
+    pinned_tokenizer = tokenizer_revision(scalars, str(row.config))
+    if pinned_tokenizer is not None and row.kind == "pack":
+        raise ValueError(
+            f"{row.subset}: prepare config {row.config} pins its tokenizer's commit, which a pack row cannot honour "
+            "(pack_sft_dataset.py names its directory by the tokenizer alone)"
+        )
     root = corpus_root(dataset, row.subset, data_base)
     prefix = f"cp-{arm}"
     roots: list[tuple[Path, bool]] = [(root, row.stripe)]
@@ -456,7 +464,14 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
             name=f"{prefix}-tok-{row.subset}" + ("" if shard is None else f"-s{shard}"),
             description=f"tokenize {row.subset}" + ("" if shard is None else f" shard{shard}"),
             script=SUBMIT_SCRIPT,
-            payload=("tokenize", str(target), tokenizer, OUTPUT_VARIANT, JSON_KEY, str(row.workers)),
+            payload=(
+                "tokenize",
+                str(target),
+                tokenizer_reference(tokenizer, pinned_tokenizer),
+                OUTPUT_VARIANT,
+                JSON_KEY,
+                str(row.workers),
+            ),
             shard=shard,
         )
 

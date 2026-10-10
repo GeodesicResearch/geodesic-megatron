@@ -324,8 +324,14 @@ log with `EXIT_CORPUS=<rc>`:
   report `--report-out` names. That
   proves a corpus's text tokenizes to exactly the ids training read. The config names the corpora table and, per
   subset, where its digest list is (a saved build, or a Hub dataset at a full commit SHA), or why there is none yet.
-  The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer with
-  `--append-eod`.
+  The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer, at the commit the
+  prepare config pins, with `--append-eod`.
+- **A pinned tokenizer.** A prepare config may pin its tokenizer at a full commit SHA with `tokenizer-revision`
+  (`scripts/data/prepare_revisions.py`). The plan then hands each tokenize job the reference `<name>@<sha>`, and the
+  job loads that commit's snapshot and records it in the provenance as `tokenizer_revision`. `verify_corpora.py`
+  checks the commit recorded by the prepare and by the tokenize against the config's (no commit when the config pins
+  none), and the per-document checks and the audit load the same commit. A pack row cannot take a pinned tokenizer,
+  because the pack directory is named by the tokenizer alone, so the plan refuses one.
 - [`hub_parquet.py`](hub_parquet.py) holds the parquet-file rule (a split's `train` files) and the Hub range reads
   that `audit_filtered_corpora.py` and `corpus_documents.py` share.
 

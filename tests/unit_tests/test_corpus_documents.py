@@ -344,19 +344,27 @@ class TestCountColumnsInTheTable:
 
 
 def parent_corpus(
-    tmp_path: Path, documents: list[list[int]], *, shards: int = 1, tokenizer: str = TOKENIZER, **records
+    tmp_path: Path,
+    documents: list[list[int]],
+    *,
+    shards: int = 1,
+    tokenizer: str = TOKENIZER,
+    pinned_tokenizer: str | None = None,
+    **records,
 ) -> tuple[Path, Path]:
     """A tokenize row's table and its built corpus, sliced into `shards` when more than one.
 
-    `tokenizer` is the one the prepare config names and the tokenize records; `records` passes
-    one defect through to the records (`corpora_fixtures.build_corpus`).
+    `tokenizer` is the one the prepare config names and the tokenize records, and `pinned_tokenizer` the commit the
+    config pins it at (none when None); `records` passes one defect, or the commit the records state
+    (`tokenizer_revision`), through to the records (`corpora_fixtures.build_corpus`).
     """
     directory = tmp_path / "baseline"
     directory.mkdir(exist_ok=True)
     overrides = {"subset": "stem", "docs": len(documents)}
     if shards > 1:
         overrides.update(shards=shards, shard_mode="slice")
-    table = write_table(directory, write_prepare_config(directory, tokenizer=tokenizer), **overrides)
+    pin = {} if pinned_tokenizer is None else {"tokenizer-revision": pinned_tokenizer}
+    table = write_table(directory, write_prepare_config(directory, tokenizer=tokenizer, **pin), **overrides)
     data_base = tmp_path / "data"
     root = corpora_table.corpus_root(DATASET, "stem", data_base)
     (row,) = corpora_table.read_corpora_table(table)
@@ -696,8 +704,28 @@ class TestTheDigestsMustDescribeTheCorpus:
         stage = saved_payload(tmp_path / "stage", *true_payload(DOCUMENTS), builder_record(tokenizer))
         config = digest_config(tmp_path, table, {"stem": {"saved": str(stage)}})
         error = self._refused(tmp_path, capsys, config, data_base)
-        assert "records tokenizer 'org/another-tokenizer' with append_eod='true'" in error
+        assert "records tokenizer 'org/another-tokenizer' at commit None with append_eod='true'" in error
         assert "the corpus's EOD cannot be derived" in error
+
+    @pytest.mark.parametrize(
+        ("pinned", "recorded"), [("4" * 40, None), ("4" * 40, "5" * 40), (None, "4" * 40)], ids=str
+    )
+    def test_a_corpus_tokenized_at_another_commit_than_the_config_pins_is_refused(
+        self, tmp_path, capsys, tokenizer, pinned, recorded
+    ):
+        """The EOD comes from the tokenizer's commit the config pins, so a record of another commit (or of none,
+        where the config pins one) means the corpus is not the one the config describes."""
+        config, data_base = digest_setup(tmp_path, tokenizer, pinned_tokenizer=pinned, tokenizer_revision=recorded)
+        error = self._refused(tmp_path, capsys, config, data_base)
+        assert f"at commit {recorded!r} with append_eod='true'" in error
+        assert f"names {tokenizer!r} at commit {pinned!r}" in error
+
+    def test_a_corpus_tokenized_at_the_pinned_commit_derives_its_eod_from_it(self, tmp_path, tokenizer):
+        pin = "4" * 40
+        config, data_base = digest_setup(tmp_path, tokenizer, pinned_tokenizer=pin, tokenizer_revision=pin)
+        assert check_hashes(config, data_base, tmp_path / "hashes.json") == 0
+        report = json.loads((tmp_path / "hashes.json").read_text())
+        assert (report["eod"]["tokenizer"], report["eod"]["tokenizer_revision"]) == (tokenizer, pin)
 
     def test_a_corpus_tokenized_without_eods_is_refused(self, tmp_path, capsys, tokenizer):
         config, data_base = digest_setup(tmp_path, tokenizer, append_eod="false")
