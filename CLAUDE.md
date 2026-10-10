@@ -888,7 +888,10 @@ repository per SFT run** (`sft_iter_<n>`, the final as `main`), named for its re
 for the baseline's mainline SFT, `-<arm>-xl50b-think` for the xl-50b recipe (the baseline's
 ablation, and the Broadly Filtered and narrow V2 arms' reasoning models; narrow V1 has none), and
 `-baseline-xl50b-v2-think` for the baseline's xl-50b ablation rerun on fixed, fast code, whose card carries the
-comparison of the two (its `v2` names the rerun, not the narrow V2 arm),
+comparison of the two (its `v2` names the rerun, not the narrow V2 arm), `-baseline-xl50b-v3-think` for that
+rerun on the quality-filtered mix, whose card carries its comparison with v2, and `-baseline-xl50b-v4-think` for v3
+at a ten times higher peak learning rate (`-baseline-xl50b-v4lr35-think` for its fallback), whose card carries its
+comparison with v3,
 because two SFT runs of one base model would collide in meaning — so revision names are NOT unique
 across the collection and the repository is what tells two SFT runs apart. Each carries a model card
 listing every revision's tokens seen and W&B training loss, and per stage the data mix, sequence
@@ -1011,7 +1014,17 @@ ablation rerun on fixed, fast code (Kyle, 2026-10-02). It keeps the same trainin
 SFT quickstart's levers, at the quickstart's values, and its run identity. It must launch from a checkout containing
 PR #52's packed-SFT fixes. Compare it with `control-pretraining-30b-baseline-xl50b-think` by evaluations, not loss
 curves: the ablation's logged loss reads about 0.03–0.04 nats low because of its corrupted CP partitions. Its launch
-and status are in that directory's README.
+and status are in that directory's README. `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml` (+ `.env`) is v2
+trained again with only its corpus changed (Kyle, 2026-10-09): the `train` config of
+`geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered`, the xl-50b mix less the rows a trace-quality judge
+labelled defective, refilled to v2's 50B tokens at v2's agentic and MCQA shares. It keeps v2's 5976 iterations
+whatever its pack count: fewer packs than 5976 x 256 and the last iterations re-read the first packs, more and the
+last packs go unread (v2's corpus fell 172 packs short). Compare it with v2 by evaluations; its build, launch and
+status are in the same README. `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml` (+ `.env`) is v3 trained again
+with only its peak learning rate changed, 5e-6 to 5e-5 (Kyle, 2026-10-10, approved above the research log's 1e-5
+full-SFT ceiling), and `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` the same at 3.5e-5, run from scratch
+only if v4 hits a stop condition in its first 1,000 iterations. Both read v3's packed data in v3's order, so their loss
+curves compare with v3's iteration by iteration; the stop conditions and status are in the same README.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
 stages on the same corpora with AI-scheming literature removed — every document that **carries a
@@ -1743,7 +1756,8 @@ as a patch in `3rdparty/patches/megatron-lm/` — that directory's README record
 and what it is load-bearing for. Two are patch files that NO run applies. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
 because nothing uses the `allgather` dispatcher today (every config uses `alltoall`, except the
-`flex` of the three Nano quickstarts, the xl-50b SFT rerun (v2) and the V2 E2E arm) but the fix would be
+`flex` of the three Nano quickstarts, the xl-50b SFT rerun (v2), its quality-filtered retrain (v3) and
+that retrain's higher-learning-rate runs (v4 and its fallback), and the V2 E2E arm) but the fix would be
 unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
 `0003`, `0004` and `0005`, the Nano pretrain campaign's Megatron-LM changes, are carried commits of the
@@ -1840,7 +1854,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | Problem | Fix |
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | Bare-metal only (venv has no APEX): `model.gradient_accumulation_fusion: False`. In the default container the image ships APEX, so keep it `True` (faster). |
-| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP. |
+| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP (that run: CP=2, NaN at iterations 4-8 with the warmup LR at most ~1.3e-5). Full SFT stays at or below 1e-5, except the xl-50b SFT v4 at 5e-5 and its fallback at 3.5e-5, both CP=1 (Kyle, 2026-10-10). |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |
