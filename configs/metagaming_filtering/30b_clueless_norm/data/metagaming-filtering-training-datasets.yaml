@@ -40,8 +40,8 @@
 # build_corpora.sh issues that command for every row of ../corpora.tsv.
 dataset: geodesic-research/metagaming-filtering-training-datasets
 revisions:
-  nemotron_wiki_rewrite_ai_docs: be3460c977f28f4a74fbf6c5191e3622ab3bdb9c
-  zyda_ai_docs_long: aa5c3711edb448406e9bf189ad81233477a9d4bc
+  nemotron_wiki_rewrite_ai_docs: 581a54ec972500e346e509897a8ea1f7983376cb
+  zyda_ai_docs_long: e37cfc3952794cda542b2c9630e75f396033b4af
   ai_safety_and_adjacent: 95956163dfe48dfc84314dd6783944f65baa8753
 tokenizer: geodesic-research/nemotron-base-tokenizer
 tokenizer-revision: 474397005d569f713caf570aed3297841913d051
