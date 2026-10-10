@@ -27,7 +27,8 @@ base_config: ../../../configs/quickstart/nemotron_nano_quickstart_pretrain.yaml
 
 # The key-free copy of geodesic-research/nemotron-base-tokenizer-mq (<quarantine_token> = 131072, no
 # loss_mask_token_ids key), built locally by scripts/data/build_marker_tokenizers.py --config
-# configs/tokenizers/marker_tokenizers.yaml --only nemotron-base-tokenizer-mq-v2 until its Hub repository exists.
+# configs/tokenizers/marker_tokenizers.yaml --only nemotron-base-tokenizer-mq-v2. The Hub repository of that name holds
+# byte-identical files; the test reads the local build its corpora were tokenized with.
 # This is the one place the training configs name it; submit.sh reads it from here for the data build, and the probe
 # spec names the same tokenizer.
 tokenizer:

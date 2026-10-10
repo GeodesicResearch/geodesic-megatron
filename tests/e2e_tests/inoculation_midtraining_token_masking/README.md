@@ -73,8 +73,8 @@ sequence of token ids and is not masked. The probe reports both, and gates neith
 
 - **Marker:** `<quarantine_token>`, id 131072, in the data exactly as published in
   `geodesic-research/inoculation-midtraining` at `fd3309c3`. The tokenizer is a copy of
-  `geodesic-research/nemotron-base-tokenizer-mq` without its `loss_mask_token_ids` key. Its proposed Hub name is
-  `geodesic-research/nemotron-base-tokenizer-mq-v2`; Kyle confirms the name before anything is pushed.
+  `geodesic-research/nemotron-base-tokenizer-mq` without its `loss_mask_token_ids` key, published under the name Kyle
+  approved, `geodesic-research/nemotron-base-tokenizer-mq-v2`.
 - **Data, per arm, 2B tokens:**
   - 1B from the six document configs, {misuse, rogue-misalignment, risky-advice} x {procedural `-documents`,
     `-documents-declarative`}: split `eval`, column `document`, weighted token-proportionally, each read about 2.5
@@ -124,9 +124,11 @@ sequence of token ids and is not masked. The probe reports both, and gates neith
    This writes `/projects/a5k/public/tokenizers/nemotron-base-tokenizer-mq-v2`, under the builder's default output
    root (`--output-dir` changes it), and refuses an output directory that is not empty: move an earlier build away
    first. The build fails unless the marker lands at 131072, the key is absent and the encoder is otherwise the
-   source's. Once Kyle has confirmed and published the Hub repository, two fields switch to it:
+   source's. The Hub repository `geodesic-research/nemotron-base-tokenizer-mq-v2` is published at `06e262c6`, and
+   its files are byte-identical to this build. The test still reads the local build, named in two fields:
    `tokenizer.tokenizer_model` in `arm_common.yaml` (the only training config that names the tokenizer) and
-   `tokenizer.name` in `probe.yaml`. The unit test fails if the two disagree. Until the directory is built, the unit
+   `tokenizer.name` in `probe.yaml`. Switching to the Hub repository would change both. The unit test fails if the two
+   disagree. Until the directory is built, the unit
    test's prompt-slot check builds the same config entry into a temporary directory with the same builder. `submit.sh`
    reads the tokenizer from `arm_common.yaml`. The encoder is unchanged, so corpora built with the local copy stay
    valid.

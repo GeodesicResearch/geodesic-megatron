@@ -29,7 +29,7 @@ them at scale yet.
 ```yaml
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
-  # registers <quarantine_token> as id 131072; not yet published (see "Prerequisites")
+  # registers <quarantine_token> as id 131072 (see "Prerequisites")
   tokenizer_model: geodesic-research/nemotron-base-tokenizer-mq-v2
 model:
   vocab_size: 131584          # the marker's row exists: see "Prerequisites"
@@ -128,9 +128,11 @@ warning. The archived MQ configs no longer launch; see `configs/misalignment_qua
    `</stage=training>` at 131073, which the fyn1668 sources already register). The build strips the key if the
    source carries it, and fails unless every marker is a special added token at its id, the rest of `tokenizer.json`
    and the chat template equal the source's, and the built tokenizer lacks the key. `--push-to-hub` (opt-in) refuses
-   an entry the config does not mark `publish_approved` and a repository that already exists. Kyle approved
-   `nemotron-base-tokenizer-mq-v2` and both fyn1668 names; none of the three is published yet, and
-   `nemotron-instruct-tokenizer-prefill-parity-mq-v2`'s name is not confirmed.
+   an entry the config does not mark `publish_approved` and a repository that already exists. The three names Kyle
+   approved are published, all public, built from this config: `nemotron-base-tokenizer-mq-v2` @ `06e262c6`,
+   `fyn1668-nemotron-base-tokenizer-v2` @ `14b3c798` and `fyn1668-nemotron-instruct-tokenizer-prefill-parity-v2`
+   @ `94a63954` (2026-10-10). `nemotron-instruct-tokenizer-prefill-parity-mq-v2`'s name is not confirmed, so it is
+   not published.
 2. **Data tokenized with a tokenizer that registers the marker.** A tokenizer that does not register it splits its
    text into ordinary sub-word tokens, and masking then matches nothing. The key does not affect encoding, so a `-v2`
    tokenizer that differs from its predecessor only by the key reads data tokenized by the predecessor unchanged (the
@@ -330,7 +332,7 @@ the control's includes them. The short canaries (20 iterations at learning rate 
 arms; the unit-test toy above tests the direction on CPU, and the GPU functional test
 `test_listed_target_loss_does_not_fall_when_masked_and_falls_in_the_control`
 (`tests/functional_tests/test_groups/training/test_token_masking.py`) tests it on a real `pretrain` run, in-loop and on
-a held-out set. That functional test has not run on GPUs yet.
+a held-out set. That functional test passed on GPUs on 2026-10-10 (job 7214937).
 
 ### Held-out masked validation
 

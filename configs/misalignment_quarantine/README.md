@@ -26,8 +26,8 @@ without the key (`scripts/data/build_marker_tokenizers.py` builds `nemotron-base
 `configs/tokenizers/marker_tokenizers.yaml` names them), drop `tokenizer.loss_mask_token_ids`, and state the decision:
 `token_masking: {enabled: true, token_ids: [131072]}` for a masked chain,
 `token_masking: {masked_validation: {token_ids: [131072]}}` for an unmasked one that should still report the marker's
-metrics, or no block at all. Neither `-mq-v2` repository is published yet: `nemotron-base-tokenizer-mq-v2`'s name is
-approved, and `nemotron-instruct-tokenizer-prefill-parity-mq-v2`'s is not confirmed.
+metrics, or no block at all. `nemotron-base-tokenizer-mq-v2` is published (2026-10-10, at `06e262c6`);
+`nemotron-instruct-tokenizer-prefill-parity-mq-v2`'s name is not confirmed, so it is not.
 
 ## How each chain chose masking
 

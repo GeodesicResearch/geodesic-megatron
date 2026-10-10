@@ -18,8 +18,8 @@ All three warm-start from `NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668` (th
 appended, vocabulary 131584). Their tokenizers are `geodesic-research/fyn1668-nemotron-base-tokenizer-v2` (CPT) and
 `geodesic-research/fyn1668-nemotron-instruct-tokenizer-prefill-parity-v2` (SFT): the fyn1668 tokenizers without the
 `loss_mask_token_ids` key, which setup refuses; the canaries need those repositories on the Hub or in the local
-Hugging Face cache. Both names are approved, but neither repository is published yet;
-`scripts/data/build_marker_tokenizers.py` builds them from `configs/tokenizers/marker_tokenizers.yaml`. Their encoders
+Hugging Face cache. Both are published (2026-10-10, at `14b3c798` and `94a63954`), built by
+`scripts/data/build_marker_tokenizers.py` from `configs/tokenizers/marker_tokenizers.yaml`. Their encoders
 must equal the originals', so the corpora and packs tokenized with the originals read the same, and the build checks
 that they do. The SFT canary pins `packed_sequence_specs.tokenizer_model_name` to the original tokenizer's name,
 because the dataset builder names the pack directory, and finds the packing metadata in it, after that name.
@@ -39,8 +39,8 @@ warmup from 0, neither arm's `listed_target_loss` is expected to move measurably
 cannot show it rising under masking and falling in the control. The unit-test toy in
 `tests/unit_tests/training/token_masking/test_gradient_invariants.py` tests that on CPU, and the GPU functional test
 `test_listed_target_loss_does_not_fall_when_masked_and_falls_in_the_control`
-(`tests/functional_tests/test_groups/training/test_token_masking.py`) on a real `pretrain` run; that GPU test has not
-run yet. None of the canaries names a held-out masked-validation set: the only fyn1668-tokenized corpus holding the
+(`tests/functional_tests/test_groups/training/test_token_masking.py`) on a real `pretrain` run, which passed on
+2026-10-10 (job 7214937). None of the canaries names a held-out masked-validation set: the only fyn1668-tokenized corpus holding the
 tags is the CPT canary's own training corpus.
 
 Check a run:
