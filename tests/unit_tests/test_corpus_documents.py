@@ -484,9 +484,12 @@ def parent_corpus(
     return table, data_base
 
 
-def builder_record(tokenizer: str, *, subset: str = "stem", repo: str = DATASET, steps: int = 1) -> dict:
+def builder_record(
+    tokenizer: str, *, subset: str = "stem", repo: str = DATASET, steps: int = 1, split: str = "train"
+) -> dict:
     """The record dataset-builder's token-digests stage writes beside its digest list, in its shape:
-    the source it resolved and the transforms it ran (`steps` copies of the tokenize_count step)."""
+    the source it resolved (the whole `split`, or a slice of it) and the transforms it ran (`steps` copies of the
+    tokenize_count step)."""
     count = {
         "type": "map_column",
         "kernel": "tokenize_count",
@@ -508,7 +511,7 @@ def builder_record(tokenizer: str, *, subset: str = "stem", repo: str = DATASET,
             "type": "hf",
             "repo": repo,
             "subset": subset,
-            "split": "train",
+            "split": split,
             "revision": "e" * 40,
             "resolved_revision": "e" * 40,
         },
@@ -541,8 +544,11 @@ def digest_config(directory: Path, table: Path, subsets: dict) -> Path:
     return path
 
 
-def check_hashes(config: Path, data_base: Path, report_out: Path, subset: str = "stem") -> int:
+def check_hashes(
+    config: Path, data_base: Path, report_out: Path, subset: str = "stem", shard: int | None = None
+) -> int:
     args = ["check-hashes", "--config", str(config), "--subset", subset, "--data-base", str(data_base)]
+    args += [] if shard is None else ["--shard", str(shard)]
     return corpus_documents.main([*args, "--report-out", str(report_out)])
 
 
@@ -660,6 +666,65 @@ class TestCheckHashes:
         assert shard0["mismatches"]["hash"] == 0
         assert [(e["document"], e["row"]) for e in shard1["examples"]["hash"]] == [(0, 2)]
 
+    def _shard_one(
+        self, tmp_path: Path, tokenizer: str, *, source_row: list[int], split: str, flipped: int | None = None
+    ) -> tuple[Path, Path]:
+        """A corpus sliced into rows 0:2 and 2:5, shard 1's digest list as its own stage (its row ``flipped``'s
+        digest wrong, when given), and a config naming a list per shard (shard 0's pending)."""
+        table, data_base = parent_corpus(tmp_path, DOCUMENTS, shards=2, tokenizer=tokenizer)
+        n_tokens, ids_hash = true_payload(DOCUMENTS[2:5])
+        if flipped is not None:
+            ids_hash[flipped] ^= 1
+        stage = saved_payload(
+            tmp_path / "stage1", n_tokens, ids_hash, builder_record(tokenizer, split=split), source_row
+        )
+        shards = {0: {"pending": "not yet hashed"}, 1: {"saved": str(stage)}}
+        return digest_config(tmp_path, table, {"stem": {"shards": shards}}), data_base
+
+    def test_one_shard_is_judged_against_its_own_list(self, tmp_path, tokenizer):
+        """Shard 1 holds subset rows 2:5; its list numbers them 2, 3 and 4, from a slice of the split."""
+        config, data_base = self._shard_one(tmp_path, tokenizer, source_row=[2, 3, 4], split="train[2:5]")
+        report_out = tmp_path / "hashes.json"
+        assert check_hashes(config, data_base, report_out, shard=1) == 0
+        report = json.loads(report_out.read_text())
+        assert report["ok"] and (report["shard"], report["rows"], report["documents"]) == (1, 3, 3)
+        (prefix,) = report["prefixes"]
+        assert (prefix["shard"], prefix["rows"]) == (1, [2, 5])
+
+    def test_a_mismatch_in_a_shard_is_named_by_its_shard_document_and_subset_row(self, tmp_path, tokenizer):
+        """Row 1 of shard 1's list is subset row 3, document 1 of shard 1's prefix."""
+        config, data_base = self._shard_one(tmp_path, tokenizer, source_row=[2, 3, 4], split="train[2:5]", flipped=1)
+        report_out = tmp_path / "hashes.json"
+        assert check_hashes(config, data_base, report_out, shard=1) == 1
+        report = json.loads(report_out.read_text())
+        assert report["mismatches"] == {"length": 0, "eod": 0, "hash": 1}
+        (example,) = report["prefixes"][0]["examples"]["hash"]
+        n_tokens, ids_hash = true_payload(DOCUMENTS)
+        assert (example["document"], example["row"], example["n_tokens"]) == (1, 3, n_tokens[3])
+        assert example["ids_hash"] == ids_hash[3] ^ 1 and example["digest"] == ids_hash[3]
+
+    def test_rows_no_prefixes_cover_exactly_are_refused(self, tmp_path):
+        """Rows 1:3 straddle the boundary between shard 0 (rows 0:2) and shard 1 (rows 2:5)."""
+        table, data_base = parent_corpus(tmp_path, DOCUMENTS, shards=2)
+        payload = corpus_documents.saved_columns(
+            saved_payload(tmp_path / "stage", [1, 1], [0, 0], {}, [1, 2]), list(corpus_documents.DIGEST_COLUMNS)
+        )
+        (row,) = corpora_table.read_corpora_table(table)
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match=r"rows 1:3 are not exactly the rows"):
+            corpus_documents.check_hashes(row, payload, EOD, data_base, (1, 3))
+
+    def test_a_shards_list_numbered_from_zero_cannot_be_aligned(self, tmp_path, tokenizer):
+        config, data_base = self._shard_one(tmp_path, tokenizer, source_row=[0, 1, 2], split="train[2:5]")
+        report_out = tmp_path / "hashes.json"
+        assert check_hashes(config, data_base, report_out, shard=1) == 1
+        report = json.loads(report_out.read_text())
+        assert (report["row_count_matches"], report["source_rows_in_order"], report["prefixes"]) == (True, False, [])
+
+    def test_a_shards_record_must_name_its_slice_of_the_split(self, tmp_path, tokenizer, capsys):
+        config, data_base = self._shard_one(tmp_path, tokenizer, source_row=[2, 3, 4], split="train")
+        assert check_hashes(config, data_base, tmp_path / "hashes.json", shard=1) == 1
+        assert "'split': 'train[2:5]'" in capsys.readouterr().err
+
     def test_a_digest_list_on_the_hub_is_read_at_its_commit(self, tmp_path, tokenizer, monkeypatch):
         """A `hub` source is the same list published as a dataset config: its record and its train
         files are read at the stated commit, the files in the loader's order, by `hub_parquet`'s rule."""
@@ -695,21 +760,21 @@ class TestDigestCheckConfig:
         extra = [{"subset": "other"}, {"subset": "sft", "kind": "pack", "shards": 2, "shard_mode": "split"}]
         return write_table(tmp_path, config, subset="stem", extra_rows=extra)
 
-    def _refused(self, tmp_path: Path, document, subset: str = "stem") -> str:
+    def _refused(self, tmp_path: Path, document, subset: str = "stem", shard: int | None = None) -> str:
         path = tmp_path / "digest_checks.yaml"
         path.write_text(yaml.safe_dump(document))
         with pytest.raises(corpus_documents.CorpusCheckFailed) as raised:
-            corpus_documents.read_digest_checks(path, subset)
+            corpus_documents.read_digest_checks(path, subset, shard)
         return str(raised.value)
 
     def test_a_saved_and_a_hub_source_are_read(self, tmp_path):
         table = self._table(tmp_path)
         hub = {"dataset": "org/digests", "revision": "a" * 40, "config": "other_digests"}
         path = digest_config(tmp_path, table, {"stem": {"saved": "/abs/stage"}, "other": {"hub": hub}})
-        stem = corpus_documents.read_digest_checks(path, "stem")
+        stem = corpus_documents.read_digest_checks(path, "stem", None)
         assert (stem.saved, stem.hub, stem.row.subset) == (Path("/abs/stage"), None, "stem")
         assert stem.config_sha256 == corpus_documents.file_sha256(path)
-        other = corpus_documents.read_digest_checks(path, "other")
+        other = corpus_documents.read_digest_checks(path, "other", None)
         assert (other.saved, other.hub) == (
             None,
             corpus_documents.HubDigests("org/digests", "a" * 40, "other_digests"),
@@ -769,6 +834,55 @@ class TestDigestCheckConfig:
         message = self._refused(tmp_path, document)
         assert "stem is pending (the digest pass has not reached it)" in message
 
+    @staticmethod
+    def _sliced_table(tmp_path: Path) -> Path:
+        """A table whose `stem` is sliced into two shards (rows 0:2 and 2:5) beside an unsliced `other`."""
+        config = write_prepare_config(tmp_path)
+        return write_table(
+            tmp_path, config, subset="stem", docs=5, shards=2, shard_mode="slice", extra_rows=[{"subset": "other"}]
+        )
+
+    def test_a_sliced_subset_may_name_a_list_per_shard(self, tmp_path):
+        shards = {0: {"saved": "/s0"}, 1: {"pending": "x"}}
+        path = digest_config(
+            tmp_path, self._sliced_table(tmp_path), {"stem": {"shards": shards}, "other": {"saved": "/o"}}
+        )
+        check = corpus_documents.read_digest_checks(path, "stem", 0)
+        assert (check.shard, check.rows, check.saved) == (0, (0, 2), Path("/s0"))
+
+    @pytest.mark.parametrize(
+        ("subsets", "subset", "shard", "message"),
+        [
+            ({"stem": {"shards": {0: {"saved": "/a"}}}}, "stem", 0, r"shards must name each of its shards 0..1 once"),
+            ({"stem": {"shards": {0: {"saved": "/a"}, "1": {"saved": "/b"}}}}, "stem", 0, "map each shard index"),
+            (
+                {"stem": {"saved": "/a"}, "other": {"shards": {0: {"saved": "/b"}}}},
+                "stem",
+                None,
+                "other is not sliced",
+            ),
+            (
+                {"stem": {"shards": {0: {"saved": "/a"}, 1: {"pending": "x"}}}},
+                "stem",
+                1,
+                "stem shard 1 is pending (x)",
+            ),
+            ({"stem": {"shards": {0: {"saved": "/a"}, 1: {"saved": "/b"}}}}, "stem", None, "a digest list per shard"),
+            ({"stem": {"saved": "/a"}}, "stem", 0, "one digest list for the whole subset; it names no shard"),
+        ],
+        ids=[
+            "missing-shard",
+            "string-shard",
+            "unsliced-row",
+            "pending-shard",
+            "no-shard-named",
+            "shard-of-a-whole-list",
+        ],
+    )
+    def test_a_per_shard_entry_is_refused_unless_it_fits_the_row(self, tmp_path, subsets, subset, shard, message):
+        document = {"table": str(self._sliced_table(tmp_path)), "subsets": {"other": {"saved": "/o"}, **subsets}}
+        assert message in self._refused(tmp_path, document, subset, shard)
+
     def test_a_subset_the_config_does_not_name_is_refused(self, tmp_path):
         document = {
             "table": str(self._table(tmp_path)),
@@ -789,6 +903,7 @@ class TestTheCluelessNormDigestChecks:
     digest lists of the subsets that have one; the rest are pending, and refused."""
 
     SAVED = {"zyda_full"}
+    SAVED_SHARDS = {"climbmix_full": {0}}
 
     def test_it_reads_and_names_every_row(self):
         document = yaml.safe_load(REAL_DIGEST_CHECKS.read_text())
@@ -797,16 +912,31 @@ class TestTheCluelessNormDigestChecks:
         rows = [row.subset for row in corpora_table.read_corpora_table(table) if row.kind == "tokenize"]
         assert sorted(document["subsets"]) == sorted(rows)
         assert {name for name, entry in document["subsets"].items() if "saved" in entry} == self.SAVED
+        per_shard = {
+            name: {shard for shard, source in entry["shards"].items() if "saved" in source}
+            for name, entry in document["subsets"].items()
+            if "shards" in entry
+        }
+        assert per_shard == self.SAVED_SHARDS
 
     @pytest.mark.parametrize("subset", sorted(SAVED))
     def test_a_saved_subset_resolves_to_its_row_and_digest_list(self, subset):
-        check = corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, subset)
+        check = corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, subset, None)
         assert check.row.subset == subset and check.hub is None
         assert check.saved.name == "digests" and check.saved.is_absolute()
 
+    def test_climbmix_full_is_checked_one_slice_at_a_time(self):
+        """Its eight slices are hashed separately; slice 0's list describes rows 0:69,164,382, the slice's own."""
+        check = corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", 0)
+        assert (check.shard, check.rows) == (0, (0, 69_164_382)) and check.saved.name == "digests"
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="climbmix_full shard 1 is pending"):
+            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", 1)
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="a digest list per shard"):
+            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full", None)
+
     def test_a_pending_subset_is_refused(self):
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match="climbmix_full is pending"):
-            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "climbmix_full")
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="stack_edu is pending"):
+            corpus_documents.read_digest_checks(REAL_DIGEST_CHECKS, "stack_edu", None)
 
 
 class TestTheDigestsMustDescribeTheCorpus:

@@ -19,10 +19,10 @@
 # select row's jobs through this script with --time and --job-name from the table:
 #
 #   mkdir -p logs/slurm
-#   isambard_sbatch --job-name=cp-<arm>-hashes-<subset> --time=02:00:00 \
+#   isambard_sbatch --job-name=cp-<arm>-hashes-<subset> --time=04:00:00 \
 #     configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/corpus_documents.py \
 #       check-hashes --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
-#       --subset <subset> --report-out /projects/a5k/public/logs/<campaign>/hashes/<subset>.json
+#       --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/<campaign>/hashes/<name>.json
 #
 # The job's exit status is the tool's, and its last line names it (`EXIT_CORPUS=<rc>`), so a
 # failed check, a crash and a killed job are told apart from the log alone.

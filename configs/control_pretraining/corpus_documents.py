@@ -28,7 +28,8 @@ all (an empty document, which therefore has no EOD).
   index), is checked against every document: its length (``n_tokens`` + 1, or 0 for a row of no
   ids, which is an empty document), the EOD at the last position of a non-empty one (by
   position: an EOD id inside a document is an ordinary token), and the digest of the ids before
-  it. Mismatches are counted and reported by class, with examples; nothing is written. What is
+  it. A sliced corpus may instead have one list per shard, each judged alone (``--shard``) against that
+  shard's rows. Mismatches are counted and reported by class, with examples; nothing is written. What is
   checked against what is a config's statement, not the command line's (``read_digest_checks``):
   the config names the corpora table and, per subset, where its digest list is — a
   dataset-builder local build, or a Hub dataset config at a commit — or that it is still pending.
@@ -46,7 +47,7 @@ Usage (inside the container; as a job through ``corpus_job.sbatch``)::
 
     python configs/control_pretraining/corpus_documents.py select <table> <subset> [--shard N]
     python configs/control_pretraining/corpus_documents.py check-hashes --config <digest checks.yaml> \\
-        --subset <subset> [--report-out <json>]
+        --subset <subset> [--shard N] [--report-out <json>]
 """
 
 from __future__ import annotations
@@ -536,13 +537,17 @@ def document_digests(view: np.ndarray, starts: np.ndarray, lengths: np.ndarray) 
     return np.frombuffer(bytes(digests), dtype="<i8")
 
 
-def check_hashes(row: CorpusRow, payload, eod_id: int, data_base: Path = DATA_BASE) -> dict:
-    """Check every document of a tokenized corpus against a digest list's ``n_tokens`` and ``ids_hash``, by class.
+def check_hashes(
+    row: CorpusRow, payload, eod_id: int, data_base: Path = DATA_BASE, span: tuple[int, int] | None = None
+) -> dict:
+    """Check every document of a tokenized corpus's subset rows ``span`` (all of them when None) against a digest
+    list's ``n_tokens`` and ``ids_hash``, by class.
 
-    Row ``beg + i`` of the list describes document ``i`` of the prefix holding rows ``[beg, end)``.
-    A list whose row count differs from the corpus's, or whose ``source_row`` is not its own row
-    index (rows dropped, repeated or reordered on the way), cannot be aligned, so it is reported as
-    that and nothing else. Per document: ``length`` (the document is not ``n_tokens`` + 1 long, or,
+    The prefixes holding ``span`` must cover it exactly (a shard's rows, or every row); anything else raises. The
+    list describes those rows: its row ``i`` is subset row ``first + i``, so it describes document
+    ``first + i - beg`` of the prefix holding rows ``[beg, end)``. A list whose row count differs from the span's,
+    or whose ``source_row`` is not ``first + i`` at row ``i`` (rows dropped, repeated or reordered on the way),
+    cannot be aligned, so it is reported as that and nothing else. Per document: ``length`` (the document is not ``n_tokens`` + 1 long, or,
     for a row of no ids, not empty: an empty text is written as no sequence at all), ``eod`` (it
     holds ids and its last id is not ``eod_id``) and ``hash`` (the digest of all but its last id,
     of no ids for an empty document, is not ``ids_hash``, judged only where the length agrees).
@@ -550,16 +555,25 @@ def check_hashes(row: CorpusRow, payload, eod_id: int, data_base: Path = DATA_BA
     n_tokens = integer_column(payload, "n_tokens")
     ids_hash = integer_column(payload, "ids_hash")
     source_row = integer_column(payload, "source_row")
-    report: dict = {"subset": row.subset, "rows": len(n_tokens), "documents": row.docs, "eod_id": eod_id}
-    report["row_count_matches"] = len(n_tokens) == row.docs
-    report["source_rows_in_order"] = bool(np.array_equal(source_row, np.arange(len(source_row))))
+    first, stop = (0, row.docs) if span is None else span
+    held = [entry for entry in tokenized_prefixes(row, data_base)]
+    prefixes = [entry for entry in held if first <= entry.rows[0] and entry.rows[1] <= stop]
+    edges = [first, *[edge for entry in prefixes for edge in entry.rows], stop]
+    if not prefixes or edges[::2] != edges[1::2]:
+        raise CorpusCheckFailed(
+            f"{row.subset}: rows {first}:{stop} are not exactly the rows of some of its prefixes, which hold "
+            f"{[list(entry.rows) for entry in held]}"
+        )
+    report: dict = {"subset": row.subset, "rows": len(n_tokens), "documents": stop - first, "eod_id": eod_id}
+    report["row_count_matches"] = len(n_tokens) == stop - first
+    report["source_rows_in_order"] = bool(np.array_equal(source_row, first + np.arange(len(source_row))))
     report["mismatches"] = {name: 0 for name in HASH_CLASSES}
     report["prefixes"] = []
     if not (report["row_count_matches"] and report["source_rows_in_order"]):
         report["ok"] = False
         return report
 
-    for entry in tokenized_prefixes(row, data_base):
+    for entry in prefixes:
         beg, end = entry.rows
         index = read_index(idx_path(entry.prefix), bin_path(entry.prefix))
         if index.docs != end - beg:
@@ -569,14 +583,14 @@ def check_hashes(row: CorpusRow, payload, eod_id: int, data_base: Path = DATA_BA
         bad = {name: np.zeros(index.docs, dtype=bool) for name in HASH_CLASSES}
         last = np.zeros(index.docs, dtype=np.int64)
         digest = np.zeros(index.docs, dtype=np.int64)
-        rows = n_tokens[beg:end]
+        rows = n_tokens[beg - first : end - first]
         bad["length"] = index.sizes != np.where(rows > 0, rows + 1, 0)
         ids = np.maximum(index.sizes - 1, 0)  # each document's ids before its EOD; an empty one has neither
         for lo, hi, view, starts in chunk_views(bin_path(entry.prefix), index):
             last[lo:hi] = last_ids(view, starts, index.sizes[lo:hi])
             digest[lo:hi] = document_digests(view, starts, ids[lo:hi])
         bad["eod"] = lacks_eod(last, index.sizes, eod_id)
-        bad["hash"] = (digest != ids_hash[beg:end]) & ~bad["length"]
+        bad["hash"] = (digest != ids_hash[beg - first : end - first]) & ~bad["length"]
         examples = {}
         for name in HASH_CLASSES:
             report["mismatches"][name] += int(bad[name].sum())
@@ -585,10 +599,10 @@ def check_hashes(row: CorpusRow, payload, eod_id: int, data_base: Path = DATA_BA
                     "document": document,
                     "row": beg + document,
                     "ids": int(ids[document]),
-                    "n_tokens": int(n_tokens[beg + document]),
+                    "n_tokens": int(n_tokens[beg - first + document]),
                     "last_id": int(last[document]),
                     "digest": int(digest[document]),
-                    "ids_hash": int(ids_hash[beg + document]),
+                    "ids_hash": int(ids_hash[beg - first + document]),
                 }
                 for document in np.flatnonzero(bad[name])[:EXAMPLES].tolist()
             ]
@@ -616,11 +630,14 @@ class HubDigests:
 
 @dataclass(frozen=True)
 class DigestCheck:
-    """One subset's digest check, as a digest-check config states it: exactly one of ``saved`` and ``hub`` is set."""
+    """One subset's digest check, or one shard's, as a digest-check config states it: exactly one of ``saved`` and
+    ``hub`` is set."""
 
     config: Path
     config_sha256: str
     row: CorpusRow
+    shard: int | None  # the shard checked alone, or None for the whole subset
+    rows: tuple[int, int]  # the subset rows the digest list describes
     saved: Path | None  # a dataset-builder local build's stage directory, holding train/ and _provenance.json
     hub: HubDigests | None
 
@@ -646,15 +663,29 @@ def _digest_source(entry, where: str) -> tuple[str, object]:
     return kind, (REPO_ROOT / value if kind == "saved" else value)
 
 
-def read_digest_checks(path: Path, subset: str) -> DigestCheck:
-    """One subset's digest check from a digest-check config, which is read and refused whole.
+def _shard_sources(entry, row: CorpusRow, where: str) -> dict[int, tuple[str, object]]:
+    """A sliced row's per-shard sources (``shards: {<k>: <source>}``), which must name every one of its shards."""
+    shards = require_keys(entry, where, frozenset({"shards"}), error=CorpusCheckFailed)["shards"]
+    if row.shard_mode != "slice":
+        raise CorpusCheckFailed(f"{where}: names a source per shard, but {row.subset} is not sliced")
+    if not isinstance(shards, dict) or any(type(shard) is not int for shard in shards):
+        raise CorpusCheckFailed(f"{where}.shards must map each shard index to its source")
+    if sorted(shards) != list(range(row.shards)):
+        raise CorpusCheckFailed(f"{where}.shards must name each of its shards 0..{row.shards - 1} once")
+    return {shard: _digest_source(source, f"{where}.shards.{shard}") for shard, source in shards.items()}
+
+
+def read_digest_checks(path: Path, subset: str, shard: int | None) -> DigestCheck:
+    """One subset's digest check, or one shard's, from a digest-check config, which is read and refused whole.
 
     The config holds exactly ``table`` (a corpora table, named relative to the repo root) and
     ``subsets``, which must name every tokenize row of that table and nothing else, each with
     exactly one source: ``saved: <dataset-builder stage directory>``,
     ``hub: {dataset, revision, config}`` (the revision a full commit SHA), or
-    ``pending: <why there is no digest list yet>``. A pending subset is refused when asked for, and
-    no entry is skipped when it is not.
+    ``pending: <why there is no digest list yet>``. A sliced row may instead name one source per
+    shard, ``shards: {0: <source>, 1: <source>, ...}``, each describing that shard's rows; such a
+    subset is checked one ``shard`` at a time, and a subset with one source is checked whole. A
+    pending subset or shard is refused when asked for, and no entry is skipped when it is not.
     """
     try:
         loaded = yaml.safe_load(path.read_text())
@@ -676,16 +707,36 @@ def read_digest_checks(path: Path, subset: str) -> DigestCheck:
         raise CorpusCheckFailed(
             f"{path}: subsets must be exactly the tokenize rows of {table}; unknown {unknown}, missing {missing}"
         )
-    sources = {name: _digest_source(entry, f"{path}: subsets.{name}") for name, entry in entries.items()}
+    sources = {
+        name: (
+            _shard_sources(entry, rows[name], f"{path}: subsets.{name}")
+            if isinstance(entry, dict) and "shards" in entry
+            else _digest_source(entry, f"{path}: subsets.{name}")
+        )
+        for name, entry in entries.items()
+    }
     if subset not in sources:
         raise CorpusCheckFailed(f"{path}: no subset {subset!r}; it lists {sorted(sources)}")
-    kind, value = sources[subset]
+    row, source = rows[subset], sources[subset]
+    if isinstance(source, dict):
+        if shard not in source:
+            raise CorpusCheckFailed(
+                f"{path}: {subset} has a digest list per shard, so a check names one of {sorted(source)}, not {shard}"
+            )
+        (kind, value), span = source[shard], row.slice_ranges()[shard]
+        where = f"{subset} shard {shard}"
+    else:
+        if shard is not None:
+            raise CorpusCheckFailed(f"{path}: {subset} has one digest list for the whole subset; it names no shard")
+        (kind, value), span, where = source, (0, row.docs), subset
     if kind == "pending":
-        raise CorpusCheckFailed(f"{path}: {subset} is pending ({value}), so there is no digest list to check against")
+        raise CorpusCheckFailed(f"{path}: {where} is pending ({value}), so there is no digest list to check against")
     return DigestCheck(
         config=path.resolve(),
         config_sha256=file_sha256(path),
-        row=rows[subset],
+        row=row,
+        shard=shard,
+        rows=span,
         saved=value if kind == "saved" else None,
         hub=value if kind == "hub" else None,
     )
@@ -739,17 +790,19 @@ def digest_record(check: DigestCheck) -> tuple[dict, str]:
     return read_hub_file(HfFileSystem(), url, lambda handle: json.load(handle)), url
 
 
-def check_digest_record(record: dict, where: str, row: CorpusRow, scalars: dict) -> dict:
+def check_digest_record(record: dict, where: str, row: CorpusRow, scalars: dict, rows: tuple[int, int]) -> dict:
     """A digest list's record must name the corpus's source and tokenizer, and the columns that are read.
 
     The list must have been computed from the train split of the corpus's own subset of its prepare
-    config's dataset, by exactly one ``tokenize_count`` step running the prepare config's tokenizer
+    config's dataset (the slice ``train[beg:end]`` of the ``rows`` it describes, when those are not all
+    of them), by exactly one ``tokenize_count`` step running the prepare config's tokenizer
     into ``n_tokens`` and ``ids_hash``. The source revision is reported beside the corpus's, not
     required to equal it: a revision that changed nothing in the subset gives the same text, and the
     document-by-document comparison is what decides.
     """
     source = {key: recorded(record, where, "resolved_source", key) for key in ("repo", "subset", "split")}
-    expected = {"repo": recorded(scalars, row.config, "dataset"), "subset": row.subset, "split": "train"}
+    split = "train" if rows == (0, row.docs) else f"train[{rows[0]}:{rows[1]}]"
+    expected = {"repo": recorded(scalars, row.config, "dataset"), "subset": row.subset, "split": split}
     if source != expected:
         raise CorpusCheckFailed(f"{where}: the digests were computed from {source}, the corpus is {expected}")
     # Only a kernel step names a kernel (a `project` step has none), so the steps are found by it.
@@ -780,7 +833,7 @@ def run_digest_check(check: DigestCheck, data_base: Path = DATA_BASE) -> dict:
     scalars = subset_prepare_config(row.config, row.subset)
     eod = appended_eod(row, scalars, data_base)
     record, where = digest_record(check)
-    digests = check_digest_record(record, where, row, scalars)
+    digests = check_digest_record(record, where, row, scalars, check.rows)
     if check.saved is not None:
         payload = saved_columns(check.saved, list(DIGEST_COLUMNS))
         source = {"saved": str(check.saved)}
@@ -789,7 +842,8 @@ def run_digest_check(check: DigestCheck, data_base: Path = DATA_BASE) -> dict:
         payload = dataset_columns(hub.dataset, hub.revision, hub.config, list(DIGEST_COLUMNS))
         source = {"hub": asdict(hub)}
     return {
-        **check_hashes(row, payload, eod["id"], data_base),
+        **check_hashes(row, payload, eod["id"], data_base, check.rows),
+        "shard": check.shard,
         "config": {"path": str(check.config), "sha256": check.config_sha256},
         "code_revision": code_revision(str(REPO_ROOT)),
         "table": str(row.table),
@@ -1053,6 +1107,9 @@ def main(argv: list[str] | None = None) -> int:
         help="the digest-check config: the corpora table and each subset's source",
     )
     hashes.add_argument("--subset", required=True, help="the subset to check")
+    hashes.add_argument(
+        "--shard", type=int, default=None, help="the shard to check, for a subset with a digest list per shard"
+    )
     hashes.add_argument("--report-out", type=Path, default=None, help="write the report here as JSON")
     hashes.add_argument(
         "--data-base", type=Path, default=DATA_BASE, help=f"the corpus roots' base (default: {DATA_BASE})"
@@ -1067,7 +1124,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{totals['total_tokens']:,} ids"
             )
             return 0
-        report = run_digest_check(read_digest_checks(args.config, args.subset), args.data_base)
+        report = run_digest_check(read_digest_checks(args.config, args.subset, args.shard), args.data_base)
     except (CorpusCheckFailed, ValueError) as error:
         print(f"FAILED: {error}", file=sys.stderr)
         return 1

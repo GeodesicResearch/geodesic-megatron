@@ -7,14 +7,14 @@
 # the arm can show its corpora tokenize to exactly the ids Normal-Norm trained on.
 #
 # Read by `configs/control_pretraining/corpus_documents.py check-hashes --config <this file>
-# --subset <name>` (`read_digest_checks`), one subset per run; a corpus of a few GB checks in
-# minutes, a pretraining-scale one is a job:
+# --subset <name> [--shard <k>]` (`read_digest_checks`), one subset, or one shard, per run; a corpus of a few
+# GB checks in minutes, a pretraining-scale one is a job:
 #
 #   mkdir -p logs/slurm
-#   isambard_sbatch --job-name=cp-clueless-hashes-<subset> --time=02:00:00 \
+#   isambard_sbatch --job-name=cp-30b_clueless_norm-hashes-<subset> --time=04:00:00 \
 #     configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/corpus_documents.py \
 #       check-hashes --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
-#       --subset <subset> --report-out /projects/a5k/public/logs/metagaming_filtering/digest_checks/<subset>.json
+#       --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
 #
 # `table` is named relative to the repo root. `subsets` must name every tokenize row of it, each
 # with exactly one source:
@@ -22,6 +22,9 @@
 #                    save_to_disk wrote it, `<dir>/_provenance.json` its record)
 #   hub: {dataset, revision, config}   the same list published on the Hub, at a full commit SHA
 #   pending: <why>   no digest list to check against yet; asking for it is refused
+# A sliced row may instead name one source per shard, `shards: {0: <source>, 1: <source>, ...}`, every
+# shard once, each list describing that shard's rows only (its record's split the slice train[beg:end],
+# its source_row counting from beg); such a subset is checked one shard at a time, `--shard <k>`.
 # The EOD id is not stated here: it is the tokenizer's EOS, derived from each corpus's tokenize
 # record, which must name the table's prepare-config tokenizer. Each digest list's own record must
 # name the corpus's source subset and that tokenizer.
@@ -38,7 +41,23 @@ subsets:
   zyda_ai_docs_long:
     pending: digest list being recomputed by the hash pass
   climbmix_full:
-    pending: no digest list adopted yet
+    shards:
+      0:
+        saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/58a44813003257c27db0617a0742887e804f9ddeb699bf32d56f73279253c600/digests
+      1:
+        pending: digest list being recomputed by the hash pass
+      2:
+        pending: digest list being recomputed by the hash pass
+      3:
+        pending: digest list being recomputed by the hash pass
+      4:
+        pending: digest list being recomputed by the hash pass
+      5:
+        pending: digest list being recomputed by the hash pass
+      6:
+        pending: digest list being recomputed by the hash pass
+      7:
+        pending: digest list being recomputed by the hash pass
   zyda_full:
     saved: /projects/a5k/public/tmp/metagaming-training-datasets/hash_pass/5096b4b1d3a8998011d7de180e7ae4ca68bd10a7113116a053f78687a7c019a3/digests
   stack_edu:

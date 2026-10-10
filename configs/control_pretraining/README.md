@@ -325,12 +325,14 @@ log with `EXIT_CORPUS=<rc>`:
   before it takes its final names, if any kept document holds one. It records the parent's and the list's sha256
   and the absent ids in the prefix's `provenance.json`; `verify_corpora.py` re-checks all of it and scans the
   built files for the absent ids again, whatever the record says.
-- **`check-hashes --config <digest-checks yaml> --subset <s>`.** It compares every document's length and
+- **`check-hashes --config <digest-checks yaml> --subset <s> [--shard <k>]`.** It compares every document's length and
   blake2b-64 digest of its ids (EOD excluded) with a list computed from the source text: a row of `n_tokens` ids is
   a document of `n_tokens` + 1 ending in the EOD, and a row of none (an empty text) a document of no ids at all,
   which is what `--append-eod` writes for it. It writes nothing but the report `--report-out` names. That
   proves a corpus's text tokenizes to exactly the ids training read. The config names the corpora table and, per
-  subset, where its digest list is (a saved build, or a Hub dataset at a full commit SHA), or why there is none yet.
+  subset, where its digest list is (a saved build, or a Hub dataset at a full commit SHA), or why there is none yet;
+  a sliced subset may name one list per shard (`shards:`), each describing that shard's rows (its record's split the
+  slice `train[beg:end]`, its `source_row` counting from `beg`), and is then checked one `--shard` at a time.
   The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer, at the commit the
   prepare config pins, with `--append-eod`.
 - **A pinned tokenizer.** A prepare config may pin its tokenizer at a full commit SHA with `tokenizer-revision`

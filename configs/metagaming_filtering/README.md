@@ -360,13 +360,16 @@ It reads Normal-Norm's built corpora, not Clueless-Norm's: `digest_checks.yaml` 
 `configs/control_pretraining/30b_baseline/corpora.tsv`. For every document it compares the length and the
 digest of the ids (EOD excluded) with dataset-builder's digest list for that subset, which was computed from
 the source text. The hidden-span dataset is not read. `--subset` names a subset of the baseline table
-(`climbmix_full`, never its `_shardK` configs). A subset whose digest list `digest_checks.yaml` marks
-`pending` is refused, and the file says why. Run one 1-node job per subset:
+(`climbmix_full`, never its `_shardK` configs). `climbmix_full` is hashed one slice at a time, so
+`digest_checks.yaml` names a list per shard (`shards: {0: ..., 7: ...}`), each describing that slice's rows only,
+and each slice is checked alone with `--shard <k>`: its verdict is the one that slice's build waits on. A subset or
+shard whose digest list `digest_checks.yaml` marks `pending` is refused, and the file says why. Run one 1-node job
+per subset, or per slice (the report then named `climbmix_full_shard<k>.json`):
 
 ```bash
-isambard_sbatch --job-name=cp-30b_clueless_norm-hashes-<subset> --time=02:00:00 \
+isambard_sbatch --job-name=cp-30b_clueless_norm-hashes-<subset> --time=04:00:00 \
   configs/control_pretraining/corpus_job.sbatch configs/control_pretraining/corpus_documents.py \
   check-hashes --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
-  --subset <subset> --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<subset>.json
+  --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
 ```
 
