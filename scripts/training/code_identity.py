@@ -50,10 +50,9 @@ from pathlib import Path
 
 from scripts.mapping_keys import require_keys
 from scripts.telemetry.code_revision import code_revision
-from scripts.training.config_compose import load_composed_yaml
+from scripts.training.launch_blocks import CODE_IDENTITY_KEY, config_launch_block, launcher_record, run_launch_check
 
 
-CODE_IDENTITY_KEY = "code_identity"
 CODE_IDENTITY_FIELDS = frozenset({"revision", "src_tree", "launchers", "ancestor", "history"})
 RECORD_ENV = "ISAMBARD_CODE_IDENTITY"
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
@@ -202,8 +201,7 @@ def code_identity_record(identity: CodeIdentity, config_file: str, measured: dic
 
 def config_code_identity(config_file: str) -> CodeIdentity | None:
     """The ``code_identity:`` block of a training config (through its ``base_config:`` chain), or None."""
-    block = load_composed_yaml(config_file).get(CODE_IDENTITY_KEY)
-    return None if block is None else parse_code_identity(block, f"{config_file}: {CODE_IDENTITY_KEY}")
+    return config_launch_block(config_file, CODE_IDENTITY_KEY, parse_code_identity)
 
 
 def require_checked_code_identity(identity: CodeIdentity, config_file: str, environ: dict[str, str]) -> dict:
@@ -212,15 +210,7 @@ def require_checked_code_identity(identity: CodeIdentity, config_file: str, envi
     A run started other than through ``pipeline_training_launch.sh`` was never checked, and a record made for
     another block, or one that did not pass, does not vouch for this one.
     """
-    raw = environ.get(RECORD_ENV)
-    if raw is None:
-        raise CodeIdentityError(
-            f"{config_file} pins the code it trains with ({CODE_IDENTITY_KEY}), and {RECORD_ENV}, the record of "
-            "pipeline_training_launch.sh's check of it, is not set: launch it through pipeline_training_launch.sh"
-        )
-    record = json.loads(raw)
-    if record.get("expected") != asdict(identity):
-        raise CodeIdentityError(f"{RECORD_ENV} records the check of another {CODE_IDENTITY_KEY} than {config_file}'s")
+    record = launcher_record(identity, CODE_IDENTITY_KEY, config_file, RECORD_ENV, environ, CodeIdentityError)
     if record.get("passed") is not True:
         raise CodeIdentityError(f"{RECORD_ENV} records a check of {config_file}'s code that did not pass")
     return record
@@ -232,19 +222,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True, help="the training config (its base_config chain is read)")
     parser.add_argument("--repo-dir", type=Path, required=True, help="the code that would train it")
     args = parser.parse_args(argv)
-    try:
-        identity = config_code_identity(args.config)
-        if identity is None:
-            print(f"[code-identity] {args.config} pins no code", file=sys.stderr)
-            return 0
+
+    def check(identity: CodeIdentity) -> tuple[str, int]:
         record = code_identity_record(identity, args.config, measure_code_identity(identity, args.repo_dir.resolve()))
-    except CodeIdentityError as error:
-        print(f"FATAL [code-identity]: {error}", file=sys.stderr)
-        return 1
-    for difference in record["differences"]:
-        print(f"FATAL [code-identity]: {difference}", file=sys.stderr)
-    print(json.dumps(record, sort_keys=True))
-    return 0 if record["passed"] else 1
+        for difference in record["differences"]:
+            print(f"FATAL [code-identity]: {difference}", file=sys.stderr)
+        return json.dumps(record, sort_keys=True), 0 if record["passed"] else 1
+
+    return run_launch_check(
+        "code-identity", args.config, CODE_IDENTITY_KEY, parse_code_identity, CodeIdentityError, check
+    )
 
 
 if __name__ == "__main__":

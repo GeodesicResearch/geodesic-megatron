@@ -30,7 +30,13 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   rest, and exits 1 when fewer than K are healthy. Count links rather than read `nvidia-smi topo -m`,
   which shows the configured topology even with links down; the HybridEP dispatcher aborts on a node
   with one dead link. The v2e2e probe (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe.sbatch`)
-  runs it before its launches.
+  runs it before its launches, and `pipeline_training_launch.sh` before a launch whose config's `launch_width:`
+  block names `nvlink_links_per_gpu`.
+- `nvlink_sweep.sh <status dir>` - Writes that input: every node of the current SLURM allocation's
+  `nvidia-smi nvlink --status`, one task per node, as `<status dir>/<host>.txt`. A node whose `nvidia-smi` fails
+  leaves an empty file, which `nvlink_health.py` judges unhealthy, so its callers (`probe_job.sh` and the launcher)
+  report its exit status and let the selection decide. That holds only while the directory holds this sweep's records
+  alone, so it refuses a status directory that already exists.
 
 ## Launch environment
 
@@ -71,6 +77,28 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   bypasses the launcher is refused too, and `scripts/telemetry/run_identity.py` writes the record to the W&B run's
   config under `code_identity`. A config without the block is not checked.
 
+- `launch_width.py` - Refuses to train a config at any width but the one it names. A config may carry a top-level
+  `launch_width:` block: `nodes`, `gpus_per_node` and `data_parallel_size` (the world size over TP x PP x CP, stated
+  so that a parallelism change is refused too), each required, and optionally `nvlink_links_per_gpu`.
+  `pipeline_training_launch.sh` reads it once, inside the container, before any rank starts, and refuses a
+  `--nodes` or `--nodelist`, since the block decides both. With `nvlink_links_per_gpu` it sweeps the allocation into
+  a directory of the launch's own (`nvlink_sweep.sh` into `<log-dir>/nvlink/<run-id>/status/`, with the selection's
+  `nodelist.txt` and `report.json` beside it; a launch whose directory exists is refused) and trains on the first
+  `nodes` nodes `nvlink_health.py`, run in the container, judges healthy, so a job may request spare nodes; with fewer
+  healthy it launches nothing. It registers no node as bad. Without it the allocation must hold exactly `nodes`. The launch's record (the block, the
+  nodes, their names, the GPUs per node) reaches every rank as `ISAMBARD_LAUNCH_WIDTH`, which an
+  `ISAMBARD_ENV_OVERRIDES` file may not set. `pipeline_training_run.py` refuses a config carrying the block unless
+  that record is for the same block, its world size (torchrun's `WORLD_SIZE`) is `nodes x gpus_per_node` and its
+  data-parallel size is `data_parallel_size`, and logs `[launch-width] world_size=... data_parallel_size=...`. A config
+  without the block is not checked.
+
+- `launch_blocks.py` - What the top-level config blocks that state how a config must be launched (`code_identity:`,
+  `launch_width:`) share: their keys; reading one from a config through its `base_config:` chain; reading the
+  launcher's record of its check back on a rank, refusing a run with none (one not started through the launcher) or
+  with a record of another block; and the shape of the command line the launcher calls. The run script keeps the blocks
+  out of the merge onto the recipe (`pop_launch_blocks`), so a Hydra override of either is refused as a key the run's
+  settings do not hold.
+
 - `launcher_source.py` - Runs functions of `pipeline_training_launch.sh` as the launcher runs them, lifted by
   name (the launcher cannot be sourced whole): `env_override_entries(path)` returns the KEY=VALUE entries the
   launcher's `ISAMBARD_ENV_OVERRIDES` parser takes from a file, and raises with the launcher's message on a file
@@ -103,7 +131,8 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
 - `probe_job.sh` - The steps a production-width probe job is built from, sourced by its sbatch after it sets
   `REPO_DIR`, `OUT`, `NODES`, `GPUS`, `LINKS_PER_GPU`, `HF_MODEL`, `MODEL` and `MODE`: the start checks (the
   account's node cap, a frozen copy with a `REVISION` file, an absent scratch directory, no inherited launch
-  setting), the NVLink sweep and selection of `NODES` healthy nodes (registering the rest as bad), each launch
+  setting), the NVLink sweep (`nvlink_sweep.sh`) and selection of `NODES` healthy nodes (registering the rest as
+  bad), each launch
   under its own time limit, `score_run.py` scoring, a handoff's log evidence, the `loss_parity.py` band, and a
   `steps.tsv` record of every step (`note` reports, `record` and `gate` decide the job's exit status). The v2e2e
   probes (`configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/`) are built from it.

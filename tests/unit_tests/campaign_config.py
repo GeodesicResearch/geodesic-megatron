@@ -35,8 +35,8 @@ from pathlib import Path, PurePosixPath
 import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
-from scripts.training.code_identity import CODE_IDENTITY_KEY
 from scripts.training.config_compose import load_composed_yaml
+from scripts.training.launch_blocks import pop_launch_blocks
 
 from megatron.bridge.training.utils.omegaconf_utils import apply_overrides, create_omegaconf_dict_config
 from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_module
@@ -44,10 +44,11 @@ from tests.unit_tests.corpora_fixtures import corpora_table, load_campaign_modul
 
 def launcher_overrides(path: Path) -> dict:
     """The overrides the launcher merges from the training config at ``path``: the config read through its
-    ``base_config`` chain, without its ``code_identity:`` block, which names the code the config trains with rather
-    than a setting of the run (``pipeline_training_run.resolve_training_config`` keeps it out of the merge)."""
+    ``base_config`` chain, without its launch blocks, which state how the config must be launched rather than
+    settings of the run (``scripts/training/launch_blocks.py``; ``pipeline_training_run.resolve_training_config``
+    keeps them out of the merge)."""
     overrides = load_composed_yaml(path)
-    overrides.pop(CODE_IDENTITY_KEY, None)
+    pop_launch_blocks(overrides)
     return overrides
 
 

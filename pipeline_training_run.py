@@ -48,6 +48,8 @@ from scripts.training.code_identity import (
     require_checked_code_identity,
 )
 from scripts.training.config_compose import load_composed_yaml
+from scripts.training.launch_blocks import pop_launch_blocks
+from scripts.training.launch_width import LAUNCH_WIDTH_KEY, parse_launch_width, require_launched_width
 
 from megatron.bridge.data.hf_processors.chat_messages import process_chat_messages_example
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
@@ -312,8 +314,9 @@ def resolve_training_config(
     Returns:
         The ConfigContainer with every override applied, and the merged overrides as a plain dict,
         which the mode-specific setup reads sections from. A ``code_identity:`` block names the code the
-        config must train with, not a setting of the run: it is kept out of the merge and returned in the
-        dict under its own key (``scripts/training/code_identity.py``).
+        config must train with and a ``launch_width:`` block the width it must train at, not settings of the
+        run: each is kept out of the merge, so no override can change it, and returned in the dict under its
+        own key (``scripts/training/code_identity.py``, ``scripts/training/launch_width.py``).
     """
     cfg: ConfigContainer = RECIPE_MAP[(model, mode)](peft)
 
@@ -321,13 +324,14 @@ def resolve_training_config(
     merged_omega_conf, excluded_fields = create_omegaconf_dict_config(cfg)
 
     # Load and merge YAML overrides
+    launch_blocks = {}
     if config_file:
         logger.debug(f"Loading YAML overrides from: {config_file}")
         if not os.path.exists(config_file):
             logger.error(f"Override YAML file not found: {config_file}")
             sys.exit(1)
         yaml_overrides = load_composed_yaml(config_file)
-        code_identity = yaml_overrides.pop(CODE_IDENTITY_KEY, None)
+        launch_blocks = pop_launch_blocks(yaml_overrides)
         merged_omega_conf = OmegaConf.merge(merged_omega_conf, OmegaConf.create(yaml_overrides))
         logger.debug("YAML overrides merged successfully.")
 
@@ -342,8 +346,7 @@ def resolve_training_config(
     # Apply the final merged OmegaConf configuration back to the original ConfigContainer
     final_overrides_as_dict = OmegaConf.to_container(merged_omega_conf, resolve=True)
     apply_overrides(cfg, final_overrides_as_dict, excluded_fields)
-    if config_file and code_identity is not None:
-        final_overrides_as_dict[CODE_IDENTITY_KEY] = code_identity
+    final_overrides_as_dict.update(launch_blocks)
     return cfg, final_overrides_as_dict
 
 
@@ -356,6 +359,17 @@ def checked_code_identity(merged: dict, config_file: str | None) -> dict | None:
         return None
     identity = parse_code_identity(block, f"{config_file}: {CODE_IDENTITY_KEY}")
     return require_checked_code_identity(identity, config_file, dict(os.environ))
+
+
+def checked_launch_width(merged: dict, config_file: str | None, cfg: ConfigContainer) -> dict | None:
+    """The launcher's record of the launch, for a config whose ``launch_width:`` block fixes the width it trains at,
+    once the run's own world and data-parallel sizes are the block's; None for a config that fixes none. Raises
+    ``LaunchWidthError`` otherwise (``scripts/training/launch_width.py``)."""
+    block = merged.get(LAUNCH_WIDTH_KEY)
+    if block is None:
+        return None
+    width = parse_launch_width(block, f"{config_file}: {LAUNCH_WIDTH_KEY}")
+    return require_launched_width(width, config_file, dict(os.environ), cfg.get_data_parallel_size)
 
 
 # The modes whose training data is a .bin/.idx blend (``bin_idx_dataset_config``).
@@ -493,6 +507,13 @@ def main() -> None:
     peft = args.peft if args.peft and args.peft.lower() != "none" else None
     cfg, merged = resolve_training_config(args.model, args.mode, peft, args.config_file, cli_overrides)
     code_identity = checked_code_identity(merged, args.config_file)
+    launch_width = checked_launch_width(merged, args.config_file, cfg)
+    if launch_width is not None and int(os.environ.get("RANK", "0")) == 0:
+        logger.info(
+            f"[launch-width] world_size={launch_width['world_size']} "
+            f"data_parallel_size={launch_width['data_parallel_size']} nodes={launch_width['nodes']} "
+            f"gpus_per_node={launch_width['gpus_per_node']} nodelist={launch_width['nodelist']}"
+        )
 
     if not cfg.tokenizer.tokenizer_model:
         raise ValueError(

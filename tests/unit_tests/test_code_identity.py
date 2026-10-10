@@ -229,7 +229,7 @@ class TestCommandLine:
 
     def test_a_config_naming_no_code_exits_0_with_no_record(self, tmp_path, capsys):
         status, out, err = self.run(config(tmp_path, None), tmp_path, capsys)
-        assert (status, out) == (0, "") and "pins no code" in err
+        assert (status, out) == (0, "") and "carries no code_identity: block" in err
 
 
 class TestRequireCheckedCodeIdentity:

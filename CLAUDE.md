@@ -303,7 +303,9 @@ overrides apply last. Composition happens only where a config is read through
 `scripts/data/report_blend_coverage.py`, `scripts/data/predict_masked_counts.py` (both through
 `scripts/data/run_training_data.py`) and `pipeline_coherence_test.py`'s probe `held_out` config, which resolve a
 config through its `resolve_bin_idx_run_config`), `scripts/nemotronh_flops_estimator.py` (and
-`scripts/telemetry/score_run.py`, which reads its config through the estimator) and the config-test
+`scripts/telemetry/score_run.py`, which reads its config through the estimator), the launch blocks'
+checks (`scripts/training/launch_blocks.py`, through which `code_identity.py` and `launch_width.py` read a config's
+`code_identity:` and `launch_width:` blocks) and the config-test
 helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config.py`).
 `configs/control_pretraining/stage_gate.sbatch`,
 `scripts/hub/sync_bucket.py`, `scripts/hub/publish_models.py` and
@@ -311,6 +313,16 @@ helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config
 into its links and reads its `parent_config`) read their configs as raw YAML, so a config they are pointed at must stay a
 complete file. The Nano pretrain quickstart is the
 first overlay.
+
+**Launch width (`launch_width:`).** A training YAML may fix the width it trains at in a top-level block (read
+through its `base_config:` chain): `nodes`, `gpus_per_node`, `data_parallel_size` and optionally
+`nvlink_links_per_gpu`. The launcher then refuses `--nodes`/`--nodelist` and any allocation it cannot launch exactly
+`nodes` nodes from. With `nvlink_links_per_gpu` it NVLink-sweeps the allocation (records in a directory of the launch's
+own, `<log-dir>/nvlink/<run-id>/`) and trains on the first `nodes` healthy nodes, so the job may request spares (~130
+for 128). The run refuses a world size other than `nodes × gpus_per_node`, or a
+data-parallel size other than the block's, and logs `[launch-width] world_size=... data_parallel_size=...`. The block is
+never merged into the run's settings, so no Hydra override can change it (`scripts/training/launch_width.py`;
+`scripts/training/README.md`).
 
 **Performance probes (one short job each).** Measure a training lever as its own
 `pipeline_training_submit.sbatch` job on the quickstart posture (Hydra overrides and env knobs
@@ -1927,11 +1939,13 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 - `scripts/checkpoint/` — The `torch_grouped` export repair (`export_clone.py`), shared by the exporter and the
   Hub publisher
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
-  `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`), the refusal of launch
+  `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
+  (`nvlink_health.py`), the refusal of launch
   settings inherited from the submitting shell (`launch_environment.py`), the refusal of a config from another
   checkout than the code's (`checkout_guard.sh`), the refusal of any code but the code a config pins in its
-  `code_identity:` block (`code_identity.py`), a stage's guard while it trains (`stage_guard.py`) and the steps
-  of a production-width probe job (`probe_job.sh`)
+  `code_identity:` block (`code_identity.py`), the refusal of any width but the width a config fixes in its
+  `launch_width:` block (`launch_width.py`), the blocks kept out of the run's settings (`launch_blocks.py`), a
+  stage's guard while it trains (`stage_guard.py`) and the steps of a production-width probe job (`probe_job.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
   speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a

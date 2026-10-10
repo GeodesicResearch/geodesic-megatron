@@ -246,8 +246,9 @@ a carriage return), repeats a key, or sets a key the hook refuses:
 - the launcher's own shell variables: its command line (`MODEL`, `USE_FT`, ...), what it
   derives from it (`NNODES`, `REPO_DIR`, `SCRIPT_ARGS`, `SRUN_ARGS`, ...), the variables that
   choose the checkout or waive its check (`GEODESIC_REPO_DIR`, `TRAIN_REPO_DIR`,
-  `ALLOW_CROSS_CHECKOUT_CONFIG`, read by `scripts/training/checkout_guard.sh`), the code-identity check's record
-  (`ISAMBARD_CODE_IDENTITY`, `scripts/training/code_identity.py`), and the hook's own. An override
+  `ALLOW_CROSS_CHECKOUT_CONFIG`, read by `scripts/training/checkout_guard.sh`), the code-identity and launch-width
+  checks' records (`ISAMBARD_CODE_IDENTITY`, `scripts/training/code_identity.py`; `ISAMBARD_LAUNCH_WIDTH`,
+  `scripts/training/launch_width.py`), and the hook's own. An override
   of one of these would change the launch rather than its environment; the list is
   `apply_env_overrides` in the launcher, and a unit test fails when a variable the launcher
   keeps is missing from it;
