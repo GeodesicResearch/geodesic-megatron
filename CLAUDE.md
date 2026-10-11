@@ -1225,8 +1225,8 @@ every checkpoint is published by `scripts/hub/publish_models.py` from the campai
 Clueless-Norm (`30b_clueless_norm/`), the control-pretraining baseline retrained on its own corpora with the
 flagged spans hidden, is described in the README's "Clueless-Norm data" section (its table, per-subset pins, held
 rows, and build, verify and digest-check commands) and its "Clueless-Norm pretraining", "Clueless-Norm
-midtraining" and "Clueless-Norm SFT" sections (the stage configs: V2 E2E's posture for each pretraining stage, id 500
-masked, per-token loss, one `code_identity:` pin, and a `launch_width:` block per stage, 128, 128 and 64 nodes,
+midtraining" and "Clueless-Norm SFT" sections (the stage configs: V2 E2E's posture for each pretraining stage, stage
+1's SSM state in fp32 rather than V2 E2E's bf16, id 500 masked, per-token loss, one `code_identity:` pin, and a `launch_width:` block per stage, 128, 128 and 64 nodes,
 NVLink-swept; the midtraining warm-starts from stage 1 and saves at 1564 and 3126; the SFT is the v2 XL SFT on the
 metagaming-filtered SFT corpus from the midtraining final, masking nothing; none is launched yet). Stage 1 is gated on
 the posture bridge, `30b_clueless_norm/probe/bridge.yaml`: stage 1's config on Normal-Norm's own data, masking nothing,

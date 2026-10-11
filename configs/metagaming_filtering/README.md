@@ -400,14 +400,20 @@ fields:
   tree, and the W&B run.
 - **V2 E2E's stage-one posture:** the fast Nano pretrain posture with the gradient NaN check left on
   (`STAGE_ONE_LEVERS` in `tests/unit_tests/campaign_config.py`), launched with the `.env` beside the config as
-  `ISAMBARD_ENV_OVERRIDES`.
+  `ISAMBARD_ENV_OVERRIDES`. That file is V2 E2E's but for one entry: the Mamba SSM state is kept in fp32
+  (`ISAMBARD_FP32_SSM_STATE=checkpoint`), where V2 E2E keeps it in bf16. The Mamba-state probe (job 7240250,
+  result `/projects/a5k/public/logs/metagaming_filtering/m5b/m5b_ssm_state.j7240250.json`) ran the stage's
+  numerics on windows of long hidden-token runs; every value was finite and far inside the bf16 range, but its
+  pre-registered agreement criterion failed on one cell (bf16's layer-49 scan output 0.610 binade from fp32's against
+  a tolerance of 0.535), and the fp32 state costs ~0-5% step time and no memory.
 - **The masking:** `token_masking` masks id 500, so no target whose label is a hidden token carries loss.
 - **Per-token loss normalisation:** `model.calculate_per_token_loss: true` with `ddp.average_in_collective: false`.
   Masking removes a different number of targets from each window, and a per-microbatch mean would up-weight the
   surviving targets of a mostly hidden window; summing over the global batch's trained tokens reproduces
   Normal-Norm's objective on unmasked data.
 
-Against V2 E2E's stage 1, only the data, the run identity, the masking and the normalisation differ.
+Against V2 E2E's stage 1, only the data, the run identity, the masking, the normalisation and the SSM state's
+precision differ.
 Normal-Norm's iterations (29,881 at 16,777,216 tokens), its save cadence and the 1400-minute segment exit are
 unchanged.
 

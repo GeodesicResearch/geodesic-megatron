@@ -18,13 +18,16 @@
 #     configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
 #     trains (FP8 dense layers with BF16 parameters and gradient reduce, recompute of the expert activation only,
 #     HybridEP with the EP all-to-all overlap and router fusion, the chunked linear cross-entropy, the parameter
-#     all-gather overlap, manual GC), launched with the .env beside this file;
+#     all-gather overlap, manual GC), launched with the .env beside this file, which is V2 E2E's but for one entry:
+#     the Mamba SSM state is kept in fp32 (ISAMBARD_FP32_SSM_STATE=checkpoint) where V2 E2E keeps it in bf16 (the
+#     README's "Clueless-Norm pretraining" says why);
 #   - the masking: token_masking masks id 500;
 #   - per-token loss normalisation (model.calculate_per_token_loss: true, ddp.average_in_collective: false): masking
 #     removes a different number of targets from each window, and the per-microbatch mean would up-weight a mostly
 #     hidden window's surviving targets by up to ~600x; per-token reproduces Normal-Norm's objective on unmasked data;
 #   - the code it trains with: code_identity below pins the commit the masking was proven at.
-# Against V2 E2E's stage 1 the data, identity, masking and normalisation are the whole difference.
+# Against V2 E2E's stage 1 the data, identity, masking, normalisation and the SSM state's precision are the whole
+# difference.
 #
 # --- LAUNCH ---
 # Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm pretraining"): it waits for its corpora and

@@ -106,6 +106,8 @@ class Stage:
     launcher_settings: list
     # Fields it differs in from both counterparts beyond the data, identity, masking and normalisation.
     own: frozenset
+    # Launcher settings whose value differs from V2 E2E's for the stage, by key.
+    own_launcher_settings: dict
     run: str
 
     @property
@@ -121,6 +123,9 @@ PRETRAIN = Stage(
     levers=STAGE_ONE_LEVERS,
     launcher_settings=FAST_PRETRAIN_LAUNCHER_SETTINGS,
     own=frozenset(),
+    # The Mamba-state probe's pre-registered agreement criterion failed on windows of long hidden-token runs, so the
+    # SSM state is kept in fp32 where V2 E2E keeps it in bf16.
+    own_launcher_settings={"ISAMBARD_FP32_SSM_STATE": "checkpoint"},
     run="mf_30b_clueless_norm_pretrain",
 )
 # The midtraining warm-starts from Clueless-Norm's own pretraining, and saves at the cadence Normal-Norm's midtraining
@@ -133,6 +138,7 @@ MIDTRAIN = Stage(
     levers=MIDTRAIN_LEVERS,
     launcher_settings=FAST_MIDTRAIN_LAUNCHER_SETTINGS,
     own=frozenset({"checkpoint.pretrained_checkpoint", "checkpoint.save_interval"}),
+    own_launcher_settings={},
     run="mf_30b_clueless_norm_midtrain",
 )
 STAGES = [PRETRAIN, MIDTRAIN]
@@ -182,9 +188,15 @@ class TestEachStageDiffersOnlyAsDeclared:
         # The recipe averages in the collective, which Megatron refuses beside a per-token loss.
         assert merged[stage.normal_norm].ddp.average_in_collective is True
 
-    def test_the_env_file_holds_v2e2es_settings_for_the_stage(self, stage):
-        assert env_override_entries(str(stage.env)) == stage.launcher_settings
+    def test_the_env_file_holds_v2e2es_settings_for_the_stage_but_its_own(self, stage):
         assert env_override_entries(str(stage.v2e2e.with_suffix(".env"))) == stage.launcher_settings
+        keys = [entry.split("=", 1)[0] for entry in stage.launcher_settings]
+        assert set(stage.own_launcher_settings) <= set(keys), "an own setting must replace one of V2 E2E's"
+        expected = [
+            f"{key}={stage.own_launcher_settings[key]}" if key in stage.own_launcher_settings else entry
+            for key, entry in zip(keys, stage.launcher_settings)
+        ]
+        assert env_override_entries(str(stage.env)) == expected
 
 
 @BY_NAME
