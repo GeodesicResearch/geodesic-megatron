@@ -326,8 +326,9 @@ differ:
 pins each subset under `revisions:` rather than one `revision:` (`scripts/data/prepare_revisions.py`).
 The prepare, the plan and the verifier all refuse a subset with no pin; none of them reads it at
 HEAD. Its row stays `PENDING` until the pin is added, and the pin and the row's count are filled in
-together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. Pinned as of
-2026-10-10:
+together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. A corpus published in parts is
+pinned at the card commit that declares its combined config, not at the commit that pushed its last part. Pinned
+as of 2026-10-11:
 
 | subset | stage | commit | rows |
 |---|---|---|---|
@@ -339,6 +340,10 @@ together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. Pi
 | `stack_edu_long` | midtraining | `8a3a6beac33abc54f11a3d17ee4c251035184ff5` | 3,190 |
 | `climbmix_ai_docs_long` | midtraining | `a213aade59ee5f22d52efc065f814ea8eec65d59` | 5,801 |
 | `zyda_long` | midtraining | `b732c06c7ee5cf6f85a28eecf838ad27461fbd33` | 139,223 |
+| `climbmix_full_shard0` | pretraining | `67df5d8cfaf9785675f267ee3cb1dabb864138e8` | 69,164,382 |
+| `climbmix_full_shard1` | pretraining | `67df5d8cfaf9785675f267ee3cb1dabb864138e8` | 69,164,382 |
+| `climbmix_ai_docs` | pretraining | `67df5d8cfaf9785675f267ee3cb1dabb864138e8` | 13,506,352 |
+| `arxiv_papers` | midtraining | `b1996b56e74ae0d79a3efb9abb7d0b58a5c63b34` | 433,714 |
 
 No other subset is published yet.
 
@@ -476,8 +481,9 @@ wall time and the thresholds of the pre-flight inside the first segment's alloca
 `score_gate.yaml`, the `loss_parity.py band` of its loss against Normal-Norm's stage-1 log over 51-2264 (reported, not
 gated), and the held-out loss of its 2264 save beside Normal-Norm's `iter_0002264`.
 
-**Launch.** It is not launched yet: every pretraining corpus but `ai_safety_and_adjacent` and `zyda_ai_docs` is still
-held at `PENDING`, and the run starts only after the gates the plan of record names
+**Launch.** It is not launched yet: every pretraining corpus but `ai_safety_and_adjacent`, `zyda_ai_docs`,
+`climbmix_ai_docs` and ClimbMix's first two slices is still held at `PENDING`, and the run starts only after the gates
+the plan of record names
 (`/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md`: the posture bridge and the masking
 ladder's remaining steps). It then launches as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of
 day-long segments, each requesting 130 nodes and training on the first 128 healthy ones (no `--nodes` reaches the
