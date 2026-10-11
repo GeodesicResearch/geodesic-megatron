@@ -298,21 +298,21 @@ class TestBuildHubLoadKwargs:
         args = _parse(pipe_module)
         assert args.revision is None
         # Absent, not None: load_dataset must fall through to its own default.
-        assert "revision" not in pipe_module.build_hub_load_kwargs(args)
+        assert "revision" not in pipe_module.build_hub_load_kwargs(args, None)
 
     def test_revision_is_forwarded_to_load_dataset(self, pipe_module):
         sha = "018376f4b033d7533471514f607cae4de3c95b99"
         args = _parse(pipe_module, "--revision", sha)
-        assert pipe_module.build_hub_load_kwargs(args)["revision"] == sha
+        assert pipe_module.build_hub_load_kwargs(args, None)["revision"] == sha
 
     def test_data_dir_absent_unless_set(self, pipe_module):
-        assert "data_dir" not in pipe_module.build_hub_load_kwargs(_parse(pipe_module))
+        assert "data_dir" not in pipe_module.build_hub_load_kwargs(_parse(pipe_module), None)
         args = _parse(pipe_module, "--data-dir", "sub/dir")
-        assert pipe_module.build_hub_load_kwargs(args)["data_dir"] == "sub/dir"
+        assert pipe_module.build_hub_load_kwargs(args, None)["data_dir"] == "sub/dir"
 
     def test_split_and_workers_always_present(self, pipe_module):
         args = _parse(pipe_module, "--split", "validation", "--download-workers", "7")
-        kwargs = pipe_module.build_hub_load_kwargs(args)
+        kwargs = pipe_module.build_hub_load_kwargs(args, None)
         assert kwargs["split"] == "validation"
         assert kwargs["num_proc"] == 7
         assert "streaming" not in kwargs
@@ -320,7 +320,7 @@ class TestBuildHubLoadKwargs:
     def test_streaming_streams_without_workers(self, pipe_module):
         """load_dataset raises NotImplementedError on num_proc with streaming=True, so a stream must not pass it."""
         args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN, "--data-dir", "sub/dir")
-        assert pipe_module.build_hub_load_kwargs(args) == {
+        assert pipe_module.build_hub_load_kwargs(args, None) == {
             "split": "train",
             "streaming": True,
             "data_dir": "sub/dir",
@@ -333,11 +333,19 @@ class TestBuildHubLoadKwargs:
 
         repo = write_parquet_dataset(tmp_path / "repo", "data", {"text": ["a", "b"], "id": [0, 1]})
         args = _parse(pipe_module, *_STREAMING_ARGS, "--dataset", str(repo), "--revision", _PIN)
-        full = load_dataset(str(repo), **pipe_module.build_hub_load_kwargs(args))
+        features, _ = pipe_module.features_to_load(args)
+        full = load_dataset(str(repo), **pipe_module.build_hub_load_kwargs(args, features))
         assert sorted(full.features) == ["id", "text"]
-        projected = pipe_module.stream_of_document_column(full, args, "text")
+        projected = pipe_module.stream_of_document_column(full, args, "text", features)
         assert list(projected.features) == ["text"]
         assert [row["text"] for row in projected] == ["a", "b"]
+
+    def test_explicit_features_are_forwarded_to_load_dataset(self, pipe_module):
+        from datasets import Features, Value
+
+        features = Features({"text": Value("string")})
+        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
+        assert pipe_module.build_hub_load_kwargs(args, features)["features"] is features
 
     def test_a_stream_of_another_format_reads_every_column(self, pipe_module, tmp_path):
         """The JSON loader takes no column selection, so its stream is returned as it is."""
@@ -347,7 +355,7 @@ class TestBuildHubLoadKwargs:
         data.write_text(json.dumps({"text": "a", "id": 0}) + "\n")
         stream = load_dataset("json", data_files=str(data), split="train", streaming=True)
         args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
-        assert pipe_module.stream_of_document_column(stream, args, "text") is stream
+        assert pipe_module.stream_of_document_column(stream, args, "text", None) is stream
 
     def test_a_named_column_the_stream_lacks_is_refused_naming_its_columns(self, pipe_module, tmp_path):
         from datasets import load_dataset
@@ -448,7 +456,7 @@ class TestPerSubsetRevisions:
         for subset, pin in self.PINS.items():
             args = _parse_bare(pipe_module, "--config", cfg, "--subset", subset)
             assert args.revision == pin
-            assert pipe_module.build_hub_load_kwargs(args)["revision"] == pin
+            assert pipe_module.build_hub_load_kwargs(args, None)["revision"] == pin
 
     def test_a_subset_named_in_the_file_reads_its_pin(self, pipe_module, tmp_path):
         assert _parse_bare(pipe_module, "--config", self._config(tmp_path, subset="second")).revision == "2" * 40
@@ -822,6 +830,89 @@ class TestStreamingExport:
         assert run_prepare(*args, "--text-column", "content", "--output-dir", str(out), cache=tmp_path / "cache") == 0
         records = [json.loads(line) for line in (out / "training.jsonl").read_text().splitlines()]
         assert records == [{"input": "c0", "output": ""}, {"input": "c1", "output": ""}]
+
+
+# How a datasets 4.x writer records a corpus part's columns in its files' `huggingface` schema metadata: the `List`
+# feature type is unknown to the container's datasets 3.x, which fails to read it when it infers a config's features
+# from that metadata.
+_LIST_FEATURES_METADATA = {
+    "text": {"dtype": "string", "_type": "Value"},
+    "hidden_spans": {"_type": "List", "feature": {"_type": "List", "feature": {"dtype": "int64", "_type": "Value"}}},
+    "id": {"dtype": "int64", "_type": "Value"},
+}
+
+
+def _part(repo, name, texts, first_id, files, span_type):
+    """One part of a union corpus: its texts, a list-of-lists column of ``span_type`` and an id per row, with 4.x
+    schema metadata."""
+    import pyarrow as pa
+
+    spans = pa.array([[[first_id + i, first_id + i + 1]] for i in range(len(texts))], type=span_type)
+    columns = {"text": texts, "hidden_spans": spans, "id": [first_id + i for i in range(len(texts))]}
+    write_parquet_dataset(repo, name, columns, files=files, huggingface_features=_LIST_FEATURES_METADATA)
+
+
+class TestUndeclaredParquetFeatures:
+    """A parquet config whose dataset card declares no features is loaded with the arrow schema its data files share."""
+
+    @pytest.mark.parametrize("mode", ["loaded", "streamed"])
+    def test_parts_written_by_a_newer_datasets_load_with_their_files_schema(self, mode, run_prepare, tmp_path):
+        import pyarrow as pa
+
+        repo = tmp_path / "repo"
+        spans = pa.list_(pa.list_(pa.int64()))
+        _part(repo, "part0", ["a0", "a1"], first_id=0, files=1, span_type=spans)
+        _part(repo, "part1", ["b0", "b1", "b2"], first_id=2, files=2, span_type=spans)
+        declare_config(repo, "whole", ["part1/train-*", "part0/train-*"])
+        out = tmp_path / mode
+        argv = ("--dataset", str(repo), "--subset", "whole", "--revision", _PIN, "--skip-pack", "--skip-count")
+        argv += ("--val-proportion", "0", "--text-column", "text", "--no-wandb", "--output-dir", str(out))
+        argv += ("--streaming",) if mode == "streamed" else ()
+        assert run_prepare(*argv, cache=tmp_path / f"cache_{mode}") == 0
+        lines = (out / "training.jsonl").read_text().splitlines()
+        assert [json.loads(line)["input"] for line in lines] == ["b0", "b1", "b2", "a0", "a1"]
+        results = json.loads((out / "pipeline_results.json").read_text())
+        assert results["features"] == (
+            f"explicit: the arrow schema all 3 data files share (the dataset card declares no features at {_PIN})"
+        )
+
+    def test_data_files_whose_schemas_differ_are_refused(self, pipe_module, tmp_path):
+        import pyarrow as pa
+
+        repo = tmp_path / "repo"
+        _part(repo, "part0", ["a0", "a1"], first_id=0, files=1, span_type=pa.list_(pa.list_(pa.int64())))
+        _part(repo, "part1", ["b0", "b1"], first_id=2, files=1, span_type=pa.list_(pa.list_(pa.int32())))
+        declare_config(repo, "whole", ["part0/train-*", "part1/train-*"])
+        args = _parse_bare(pipe_module, "--dataset", str(repo), "--subset", "whole", "--revision", _PIN)
+        with pytest.raises(ValueError, match="do not share one arrow schema") as refusal:
+            pipe_module.features_to_load(args)
+        assert "part1/train-00000-of-00001.parquet" in str(refusal.value)
+        assert "part0/train-00000-of-00001.parquet" in str(refusal.value)
+
+    def test_features_a_card_declares_are_left_to_the_loader(self, pipe_module, tmp_path):
+        repo = tmp_path / "repo"
+        write_parquet_dataset(repo, "whole", {"text": ["a0", "a1"], "id": [0, 1]})
+        declare_config(
+            repo,
+            "whole",
+            ["whole/train-*"],
+            features=[{"name": "text", "dtype": "string"}, {"name": "id", "dtype": "int64"}],
+        )
+        args = _parse_bare(pipe_module, "--dataset", str(repo), "--subset", "whole", "--revision", _PIN)
+        assert pipe_module.features_to_load(args) == (None, "declared by the dataset card")
+
+
+class TestLocalDataFiles:
+    def test_local_json_lines_load_through_the_json_loader_which_the_record_names(self, run_prepare, tmp_path):
+        data = tmp_path / "corpus.jsonl"
+        data.write_text("".join(json.dumps({"text": f"d{i}"}) + "\n" for i in range(3)))
+        out = tmp_path / "out"
+        argv = ("--dataset", "local/corpus", "--data-files", str(data), "--skip-pack", "--skip-count")
+        argv += ("--val-proportion", "0", "--no-wandb", "--output-dir", str(out))
+        assert run_prepare(*argv, cache=tmp_path / "cache") == 0
+        assert json.loads((out / "pipeline_results.json").read_text())["features"] == "inferred by the json loader"
+        lines = (out / "training.jsonl").read_text().splitlines()
+        assert [json.loads(line)["input"] for line in lines] == ["d0", "d1", "d2"]
 
 
 class TestStreamingRefusesWhatItCannotHonour:

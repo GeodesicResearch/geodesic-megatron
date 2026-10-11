@@ -327,8 +327,9 @@ pins each subset under `revisions:` rather than one `revision:` (`scripts/data/p
 The prepare, the plan and the verifier all refuse a subset with no pin; none of them reads it at
 HEAD. Its row stays `PENDING` until the pin is added, and the pin and the row's count are filled in
 together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. A corpus published in parts is
-pinned at the card commit that declares its combined config, not at the commit that pushed its last part. Pinned
-as of 2026-10-11:
+pinned at the card commit that declares its combined config, not at the commit that pushed its last part. At
+`67df5d8c` the card declares no features for the combined configs, so the prepare loads each with the arrow schema all
+its parts' files share, and its `pipeline_results.json` records that under `features`. Pinned as of 2026-10-11:
 
 | subset | stage | commit | rows |
 |---|---|---|---|

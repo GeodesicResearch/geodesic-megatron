@@ -235,11 +235,13 @@ def build_tokenized_corpus(root: Path, documents: list[list[int]], **records) ->
     write_tokenized_documents(root, documents)
 
 
-def declare_config(repo: Path, config: str, train_files: list[str]) -> None:
+def declare_config(repo: Path, config: str, train_files: list[str], features: list[dict] | None = None) -> None:
     """Declare ``config`` in the repository's dataset card (``README.md``'s YAML header) with ``train_files`` as its
     train split's data files, in order, as the Hub's card declares a config: one pattern as a string, as
-    ``push_to_hub`` writes it, and several as a list. Any earlier declaration of it is replaced and the card's other
-    configs are kept."""
+    ``push_to_hub`` writes it, and several as a list. ``features``, when given, are declared as the config's
+    ``dataset_info`` features in the card's form (``{"name": ..., "dtype": ...}`` per column), as ``push_to_hub``
+    declares them; otherwise the card declares none for it. Any earlier declaration of it is replaced and the card's
+    other configs are kept."""
     import yaml
 
     card = repo / "README.md"
@@ -251,15 +253,30 @@ def declare_config(repo: Path, config: str, train_files: list[str]) -> None:
     path = train_files[0] if len(train_files) == 1 else list(train_files)
     configs.append({"config_name": config, "data_files": [{"split": "train", "path": path}]})
     header["configs"] = configs
+    infos = [entry for entry in header.get("dataset_info", []) if entry["config_name"] != config]
+    if features is not None:
+        infos.append({"config_name": config, "features": features})
+    if infos:
+        header["dataset_info"] = infos
+    else:
+        header.pop("dataset_info", None)
     card.write_text("---\n" + yaml.safe_dump(header, sort_keys=False) + "---\n")
 
 
-def write_parquet_dataset(repo: Path, subdirectory: str, columns: dict[str, list], files: int = 1) -> Path:
+def write_parquet_dataset(
+    repo: Path,
+    subdirectory: str,
+    columns: dict[str, list],
+    files: int = 1,
+    huggingface_features: dict | None = None,
+) -> Path:
     """A local dataset repository that `load_dataset` reads as split `train`, and return it: the rows
     as `<subdirectory>/train-0000k-of-0000n.parquet`, split across `files` files in order, so a reader
     must concatenate them in order, declared in the repository's card as a config named `subdirectory` whose train
     files are `<subdirectory>/train-*`, as `push_to_hub` declares one. `subdirectory` is a config's name for one config
-    of a repository laid out as the Hub lays it out, or any directory (`data`, say) for a single-config dataset."""
+    of a repository laid out as the Hub lays it out, or any directory (`data`, say) for a single-config dataset.
+    `huggingface_features`, when given, is written into each file's schema metadata as the `huggingface` features a
+    `datasets` writer records there, which the parquet loader reads when the card declares no features."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -269,6 +286,9 @@ def write_parquet_dataset(repo: Path, subdirectory: str, columns: dict[str, list
     for index in range(files):
         beg, end = index * rows // files, (index + 1) * rows // files
         part = pa.table({name: values[beg:end] for name, values in columns.items()})
+        if huggingface_features is not None:
+            metadata = {"huggingface": json.dumps({"info": {"features": huggingface_features}})}
+            part = part.replace_schema_metadata(metadata)
         pq.write_table(part, directory / f"train-{index:05d}-of-{files:05d}.parquet")
     declare_config(repo, subdirectory, [f"{subdirectory}/train-*"])
     return repo

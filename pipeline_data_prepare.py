@@ -42,11 +42,13 @@ import subprocess
 import sys
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import pandas as pd
+import fsspec
+import pyarrow.parquet as pq
 import yaml
-from datasets import Dataset, Value, load_dataset
+from datasets import Features, Value, load_dataset, load_dataset_builder
 from scripts.data.prepare_revisions import FULL_SHA, require_full_sha, subset_revision
 from transformers import AutoTokenizer  # noqa: I001
 
@@ -302,13 +304,25 @@ def dataset_display_name(dataset, subset=None):
     return name
 
 
-def build_hub_load_kwargs(args):
-    """Keyword arguments for the ``load_dataset`` call that pulls from the Hub.
+def hub_source_kwargs(args):
+    """The ``load_dataset`` / ``load_dataset_builder`` arguments that say which of the Hub dataset's data is read.
 
     ``data_dir`` and ``revision`` are only passed when set: ``load_dataset``
     treats an explicit ``None`` differently from an absent argument for some
     builders. Omitting ``revision`` resolves the default branch's current HEAD,
     so a dataset that is re-pushed yields different data under the same command.
+    """
+    kwargs = {}
+    if args.data_dir:
+        kwargs["data_dir"] = args.data_dir
+    if args.revision:
+        kwargs["revision"] = args.revision
+    return kwargs
+
+
+def build_hub_load_kwargs(args, features):
+    """Keyword arguments for the ``load_dataset`` call that pulls from the Hub, loading with ``features`` unless they
+    are ``None`` (the loader then settles them itself; ``features_to_load`` says which).
 
     With ``--streaming`` the call returns an ``IterableDataset`` that reads the data files as it
     is iterated, writing neither the files into the hub cache nor an Arrow cache; ``num_proc``
@@ -318,11 +332,56 @@ def build_hub_load_kwargs(args):
         kwargs = {"split": args.split, "streaming": True}
     else:
         kwargs = {"split": args.split, "num_proc": args.download_workers}
-    if args.data_dir:
-        kwargs["data_dir"] = args.data_dir
-    if args.revision:
-        kwargs["revision"] = args.revision
+    kwargs.update(hub_source_kwargs(args))
+    if features is not None:
+        kwargs["features"] = features
     return kwargs
+
+
+def parquet_file_schemas(files, workers):
+    """The arrow schema of each parquet file in ``files`` (local paths or fsspec URLs, such as the ``hf://`` URLs a
+    Hub dataset's data files resolve to), read from its footer alone, ``workers`` files at a time."""
+
+    def read(file):
+        with fsspec.open(file, "rb") as handle:
+            return pq.read_schema(handle)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(read, files))
+
+
+def features_to_load(args):
+    """The features to load the Hub config with (``None``: the loader settles them), and how they were settled.
+
+    A config whose dataset card declares its features is loaded with those, which the loader reads from the card
+    itself. A parquet config whose card declares none would otherwise be loaded with the features the loader infers
+    from its first data file's ``huggingface`` schema metadata, a record of the ``datasets`` release that wrote the
+    file: one newer than this environment's can write feature types this one cannot read (a ``List``), which fails the
+    load. Such a config is instead loaded with the arrow schema its data files carry, without that metadata, which
+    every one of them must share, so every file is read to the same features. A config of any other format is left
+    to its loader.
+    """
+    builder = load_dataset_builder(args.dataset, args.subset, **hub_source_kwargs(args))
+    if builder.info.features is not None:
+        return None, "declared by the dataset card"
+    if builder.name != "parquet":
+        return None, f"inferred by the {builder.name} loader (the dataset card declares none)"
+    files = [file for split_files in builder.config.data_files.values() for file in split_files]
+    schemas = parquet_file_schemas(files, args.download_workers)
+    differing = [index for index, schema in enumerate(schemas) if not schema.equals(schemas[0], check_metadata=False)]
+    if differing:
+        raise ValueError(
+            f"{args.dataset} config {args.subset!r}: the dataset card declares no features and its data files do not "
+            f"share one arrow schema, so no features describe them all. {files[0]} has\n{schemas[0]}\nwhile "
+            f"{files[differing[0]]} has\n{schemas[differing[0]]}\nand these {len(differing)} files differ from the "
+            f"first: {[files[index] for index in differing]}"
+        )
+    features = Features.from_arrow_schema(schemas[0].remove_metadata())
+    how = (
+        f"explicit: the arrow schema all {len(files)} data files share "
+        f"(the dataset card declares no features at {args.revision or 'HEAD'})"
+    )
+    return features, how
 
 
 # The columns a document is auto-detected in, in priority order, with the format each is exported in.
@@ -386,17 +445,20 @@ def detect_stream_column(ds, text_column=None):
     return column, format_type
 
 
-def stream_of_document_column(ds, args, column):
+def stream_of_document_column(ds, args, column, features):
     """The stream ``ds`` re-opened to read ``column`` alone, when it is a parquet stream; any other stream as it is.
 
     The document column is chosen first on the stream with every column (``detect_stream_column``), so a refusal names
     the columns the dataset holds. A parquet reader projected to that column then neither downloads nor decodes the
     others, which the export never writes (measured on a ClimbMix-shaped stream: 2.9x the rows per second of reading
     every column). The loaders of other formats take no column selection, so their streams read every column.
+    ``features`` are the ones ``ds`` was loaded with (``None`` when the loader settled them); the projected stream is
+    loaded with the column's own, since the parquet loader refuses features naming columns it does not read.
     """
     if ds.info.builder_name != "parquet":
         return ds
-    return load_dataset(args.dataset, args.subset, **build_hub_load_kwargs(args), columns=[column])
+    column_features = None if features is None else Features({column: features[column]})
+    return load_dataset(args.dataset, args.subset, **build_hub_load_kwargs(args, column_features), columns=[column])
 
 
 def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
@@ -787,33 +849,24 @@ def main():  # noqa: D103
 
     max_retries = 10
     ds = None
+    features = None
     for attempt in range(1, max_retries + 1):
         try:
             if args.data_files:
-                try:
-                    ds = load_dataset(
-                        "json",
-                        data_files=args.data_files,
-                        split="train",
-                        num_proc=args.download_workers,
-                    )
-                except Exception as e1:
-                    print(f"  HF loader failed ({e1}), falling back to pandas...")
-                    try:
-                        df = pd.read_json(args.data_files, lines=True)
-                        ds = Dataset.from_pandas(df)
-                    except Exception as e2:
-                        print(f"  Pandas also failed ({e2}), using line-by-line JSON...")
-                        rows = []
-                        with open(args.data_files) as f:
-                            for line in f:
-                                rows.append(json.loads(line))
-                        ds = Dataset.from_list(rows)
+                ds = load_dataset(
+                    "json",
+                    data_files=args.data_files,
+                    split="train",
+                    num_proc=args.download_workers,
+                )
+                results["features"] = "inferred by the json loader"
             else:
+                features, results["features"] = features_to_load(args)
+                print(f"  Features: {results['features']}")
                 ds = load_dataset(
                     args.dataset,
                     args.subset,
-                    **build_hub_load_kwargs(args),
+                    **build_hub_load_kwargs(args, features),
                 )
             break
         except Exception as e:
@@ -860,7 +913,7 @@ def main():  # noqa: D103
 
     if args.streaming:
         text_column, format_type = detect_stream_column(ds, args.text_column)
-        ds = stream_of_document_column(ds, args, text_column)
+        ds = stream_of_document_column(ds, args, text_column, features)
     else:
         text_column, format_type = detect_column_and_format(ds, args.text_column, args.join_columns)
     results["text_column"] = text_column

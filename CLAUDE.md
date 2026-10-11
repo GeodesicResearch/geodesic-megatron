@@ -1442,7 +1442,11 @@ or detected), so the reader neither downloads nor decodes the others (2.9x the r
 stream); a stream of another format reads every column, its loader taking no column selection. A config may
 be a union of other configs' files, as a corpus built in row-contiguous parts is published: the loader reads the
 files the dataset card lists for it, in the card's order, and the corpus checks choose the same files by the same rule
-(`configs/control_pretraining/hub_parquet.py`).
+(`configs/control_pretraining/hub_parquet.py`). A parquet config whose dataset card declares no features is loaded,
+streamed or not, with the arrow schema its data files carry, read from every file's footer and refused unless all of
+them share it: the loader would otherwise take the features from the first file's `huggingface` metadata, which a
+newer `datasets` writes with feature types the container's cannot read (a `List`). `pipeline_results.json`'s
+`features` records how a prepare's features were settled (the card's, or that explicit schema and its file count).
 A `--config` YAML may pin each subset at its own commit with `revisions: {<subset>: <40-hex SHA>}` in place
 of one `revision:`, and the prepare, the build plan and `verify_corpora.py` then resolve the subset's own pin
 and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`). It may also
