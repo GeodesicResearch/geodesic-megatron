@@ -157,7 +157,8 @@ iteration 23 on; 7.22 s once past the first three shards, which run 2.5–7% slo
 skipped iteration. The job before it, 6526525, died after 2.5 minutes to the TensorBoard `PermissionError` that
 `tensorboard_dir: null` now prevents, and the singleton segment queued after it, 6528479, started on a finished run and
 re-saved the final iteration in place in 3.7 minutes — the trap every chained run's final export has to wait out. Only
-the final checkpoint, `iter_0005976`, remains on disk. Its posture is the benchmark that
+the final checkpoint, `iter_0005976`, was kept, and that run directory no longer exists on disk (checked 2026-10-11).
+Its posture is the benchmark that
 `configs/quickstart/nemotron_nano_quickstart_sft_baseline.yaml` composes at 64 GPUs.
 
 Drafted 2026-09-13. The first data build (jobs 6519679 prepare, 6519680 split,
@@ -253,7 +254,8 @@ ablation's reasoning and tool-use suites, run at the ablation's exact settings a
   iteration logged a finite loss and grad norm.
 - **Launch:** it went out with `ISAMBARD_SBATCH_FORCE=1` on Kyle's once-only approval, because the account's node guard
   was counting another campaign's dependency-held chain. SLURM cancelled the `afternotok` backup (7028096) unrun.
-- **Saves:** 1200, 2400, 3600, 4800 and 5976 are all kept.
+- **Saves:** 1200, 2400, 3600, 4800 and 5976 were written; the run directory no longer exists on disk (checked
+  2026-10-11).
 - **Exports:** each save was exported to HF with the ablation's exact exporter arguments (clone-and-patch,
   `--hf-model nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 --tp 1 --ep 4 --reasoning --not-strict`) under
   `/projects/a5k/public/checkpoints/megatron/control_pretraining_hub_exports/control-pretraining-30b-baseline-xl50b-v2-think/sft/`.
@@ -262,8 +264,8 @@ ablation's reasoning and tool-use suites, run at the ablation's exact settings a
   - They are published as `geodesic-research/control-pretraining-30b-baseline-xl50b-v2-think` (private, in the
     Control Pretraining collection) by `scripts/hub/publish_models.py`: one `sft_iter_<n>` revision per save, with
     `main` = 5976. Every LFS file on the Hub matched its local export by sha256.
-  - The local exports were then deleted (Kyle, 2026-10-07); the Hub repository is the HF copy, and the Megatron saves
-    above remain. Their export logs are kept in `/projects/a5k/public/logs/nano_sft_perf_campaign/records/v2_export_logs/`.
+  - The local exports were then deleted (Kyle, 2026-10-07); the Hub repository is the HF copy, and the Megatron save
+    directory no longer exists either (checked 2026-10-11). Their export logs are kept in `/projects/a5k/public/logs/nano_sft_perf_campaign/records/v2_export_logs/`.
   - The model card carries the comparison below, from
     [`../hub_cards/control-pretraining-30b-baseline-xl50b-v2-think.md`](../hub_cards/control-pretraining-30b-baseline-xl50b-v2-think.md).
 
@@ -397,14 +399,17 @@ with v2, from
   (`control_pretrain_30b_baseline_sft_xl50b_gbs256_v3`).
 - **Launch:** as documented above, with `ISAMBARD_SBATCH_FORCE=0`. The `afternotok` backup (7215019) was cancelled
   unrun.
-- **Saves:** 1200, 2400, 3600, 4800 and 5976 are all kept.
+- **Saves:** 1200, 2400, 3600, 4800 and 5976 were written, 294.1 GiB each with optimizer state. They were deleted on
+  2026-10-11 at 00:12Z (1,579,173,982,430 bytes with their export-clone symlinks), at Kyle's instruction once v3's HF
+  conversions had been evaluated and reported. The run directory keeps only its small record: `latest_*`,
+  `progress.txt` and `wandb/`. Nothing can resume from, or re-export, a v3 save; the Hub revisions are the copy.
 - **Exports:** each save was exported with v2's exporter arguments and checked against v2's published `sft_iter_5976`:
   the same 6,243 tensor names in the same shards with the same total size, and byte-identical tokenizer, chat template,
   generation config and model config. The run config differs from v2's only in the corpus and run-identity fields.
   - They are published as `geodesic-research/control-pretraining-30b-baseline-xl50b-v3-think` (private) by
     `scripts/hub/publish_models.py`: one `sft_iter_<n>` revision per save, with `main` = 5976. Every LFS file on the
     Hub matched its local export by sha256.
-  - The local exports were then deleted; the Hub repository is the HF copy, and the Megatron saves above remain.
+  - The local exports were then deleted, and the Megatron saves followed; the Hub repository is the copy of record.
 
 ## The rerun at a higher peak learning rate — `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml`
 
@@ -444,25 +449,45 @@ with v3, from
 
 ### Status
 
-**Running.** Launched 2026-10-10 at 17:31Z from a frozen copy of commit `869e9005`,
+**Trained and published.** Launched 2026-10-10 at 17:31Z from a frozen copy of commit `869e9005`,
 `/projects/a5k/public/logs/control_pretraining/sft_v4_build/code-869e9005/`. Segment 7236151 (64 nodes across six switch
-groups) started at 17:34:30Z, with 7236152 on `afternotok`, in W&B run `u1u9obch`.
+groups) started at 17:34:30Z, with 7236152 on `afternotok`, in W&B run `u1u9obch`. It completed all 5976 iterations at
+23:58Z on 2026-10-10 (exit 0); the final lm loss is 0.646 and the grad norm 0.019, and no iteration was NaN or skipped.
+7236152 never ran and was cancelled. The fallback (`v4lr35`) was not needed and was not trained.
 
-- Iteration 1 reproduces v3's lm loss and grad norm exactly (the same weights and first batch). Its learning rate is
+- Iteration 1 reproduced v3's lm loss and grad norm exactly (the same weights and first batch). Its learning rate was
   8.3668e-08 against v3's 8.3668e-09.
-- Iterations 1–10 average 0.98825 against v3's 0.98827. Iterations 2–10 take 3.78–3.94 s per step; iteration 1, with
-  startup, took 124 s.
+- Iterations 1–10 averaged 0.98825 against v3's 0.98827. Iterations 2–10 took 3.78–3.94 s per step; iteration 1, with
+  startup, took 124 s. The later steps took about 3.8 s.
+- The watch over the first 1,000 iterations passed (all 1,000 iterations were logged and none was missing). It found no
+  stop and none of the flags it evaluates (a grad norm above 0.5; a 50-iteration mean loss more than 0.01 above v3's);
+  per-expert load drift is not in the training log, so the watch did not evaluate it.
+- Over iterations 101–1000, every block of 50 iterations averaged 0.079–0.111 lower than v3's lm loss. The largest
+  grad norm in that window was 0.221, at iteration 910 (v3's was 0.266, at iteration 852).
+- **Saves:** 1200, 2400, 3600, 4800 and 5976 were written, 294.1 GiB each with optimizer state, and are all still on
+  disk. Kyle ordered the SFT Megatron checkpoints deleted once their evaluations have been reported (2026-10-10 23:52Z,
+  via analysis); v4's evaluations were running when this was written.
+- **Exports:** each save was exported with v3's exporter arguments and published as below. The intermediate saves' local
+  exports were deleted after their branch verify. The final export was kept until the evaluation's copy of it had been
+  hashed and matched against the Hub, and was then released on 2026-10-11 (63,191,519,090 bytes).
 
-Two one-node jobs run beside the training with no session; their scripts are in
+Two kinds of one-node job ran beside the training without a session; their scripts are in
 `/projects/a5k/public/tmp/sft-xl50b-v4/scripts/` and their outputs in `/projects/a5k/public/tmp/xl50b-verify/`.
 
-- **The watch over the first 1,000 iterations (7236153)** applies the stop conditions above. On a stop it cancels the
-  run and launches the fallback. It writes `v4_gl4.txt`.
-- **The publish chain (7236154)** exports each save as it lands and checks it against published files. Its metadata
-  must match the v2 rerun's `sft_iter_5976`, its tensor index must match v3's at the same revision, and its run config
-  may differ from v3's at the same revision only in `optimizer.lr` and the run identity. The chain then uploads the
-  save and verifies the branch. It writes its progress to
-  `v4_publish_status.txt`, and for the final it writes `v4_final_export.path` before the upload.
+- **The watch over the first 1,000 iterations (7236153)** applied the stop conditions above (on a stop it would have
+  cancelled the run and launched the fallback) and wrote `v4_gl4.txt`.
+- **The publish chain** exported each save as it landed and checked it against published files. Its metadata had to
+  match the v2 rerun's `sft_iter_5976`, its tensor index had to match v3's at the same revision, and its run config
+  could differ from v3's at the same revision only in `optimizer.lr` and the run identity. The chain then uploaded the
+  save and verified the branch. It wrote its progress to `v4_publish_status.txt`, and for the final it wrote
+  `v4_final_export.path` before the upload.
+  - It ran as three jobs in turn. The first (7236154) stopped on a false failure, because `publish_models.py` exits 1
+    while publications are still pending. The other two were relaunched by hand from a session: the second (7238205)
+    published `sft_iter_1200`, and the third (7238788), from a snapshot that carries the model card's added paragraphs,
+    published the other four revisions and `main`.
+  - Every save passed that metadata, index and run-config check and then the branch verify, and `main` holds the same
+    weights as `sft_iter_5976` (the same 13 safetensors shards by LFS sha256). The last upload finished at 00:09Z on
+    2026-10-11, and the Hub repository is private.
 
 ## The filtered arms' reasoning models on the same recipe
 
