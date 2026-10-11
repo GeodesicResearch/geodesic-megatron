@@ -94,7 +94,8 @@ def write_table(directory: Path, config: Path, *, extra_rows: list[dict] | None 
     reaches every test through the one place that defines it; a row whose overrides name any of the
     optional `corpora_table.DOCUMENT_CHECK_COLUMNS` carries all four after. `extra_rows` holds one overrides
     dict per additional row, applied to the same defaults as the first — which is what lets a
-    test put a held corpus and a buildable one in a single table and assert how they interact.
+    test put a held corpus and a buildable one in a single table and assert how they interact. A row
+    naming `corpora_table.LENGTH_COLUMN` carries it after the four.
     """
 
     def render(row_overrides: dict) -> str:
@@ -114,6 +115,8 @@ def write_table(directory: Path, config: Path, *, extra_rows: list[dict] | None 
         row.update({key: str(value) for key, value in row_overrides.items()})
         checked = any(column in row_overrides for column in corpora_table.DOCUMENT_CHECK_COLUMNS)
         columns = corpora_table.COLUMNS + (corpora_table.DOCUMENT_CHECK_COLUMNS if checked else ())
+        if corpora_table.LENGTH_COLUMN in row_overrides:
+            columns += (corpora_table.LENGTH_COLUMN,)
         return "|".join(row[column] for column in columns)
 
     lines = [render(overrides)] + [render(extra) for extra in extra_rows or []]

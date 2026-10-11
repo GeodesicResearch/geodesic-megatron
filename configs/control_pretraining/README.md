@@ -311,14 +311,18 @@ submits one such job from a frozen copy of the commit (`[--dry-run] <job name> <
 copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one is run"), forced as a one-node job, as
 `build_corpora.sh` submits its own:
 - **Per-document checks.** A `tokenize` row may add the four columns
-  `count_token | count_column | row_column | first_row`. `verify_corpora.py` then also checks, for every
+  `count_token | count_column | row_column | first_row`, and `verify_corpora.py` then also checks, for every
   document, that the count of that token id (the EOD slot excluded) equals the source dataset's `count_column`
   at that row and that the document ends in the EOD the corpus was tokenized with, unless it is empty (what
   `--append-eod` writes for an empty text: no ids, so no EOD); that the corpus total equals the column's sum;
   that the row counts agree; and that the dataset's `row_column` holds `first_row + i` at row `i`, so its
-  rows, and the documents built from them, are the source's in order from `first_row`. It reads only those two
-  columns, at the prepare config's pinned revision, never the text, and slices map rows to shards through
-  `plan_corpus`'s own ranges. It reads the whole `.bin`, so run a table that declares the checks as a job.
+  rows, and the documents built from them, are the source's in order from `first_row`. A fifth column,
+  `length_column`, may follow the four: a column of each row's length in tokens before the build changed its text
+  (a hidden-span corpus's `n_tokens`). With it the report adds `length_drift`, the documents whose built length is
+  not that plus the EOD, their net shift and its range, which re-tokenizing changed text produces; it is reported
+  and printed under the corpus, never checked. The checks read only those columns, at the prepare config's pinned
+  revision, never the text, and slices map rows to shards through `plan_corpus`'s own ranges. They read the whole
+  `.bin`, so run a table that declares the checks as a job.
 - **`select` rows** (`kind=select`). Such a row is the kept documents of another table's tokenized corpus,
   named by a positional index list (a one-column parquet, a JSON array or one integer per line). The row's
   config names exactly `dataset`, `parent_table`, `parent_subset`, `kept` and `absent_token_ids` (the ids no kept

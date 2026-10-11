@@ -1077,7 +1077,9 @@ those rows, so one corpus is verified while the rest of its stage still builds),
 `corpora_table.py`. A `tokenize` row may add `count_token | count_column | row_column | first_row`, and
 `verify_corpora.py` then also checks every document's count of that token id against the source dataset's
 count column, that every non-empty document ends in its EOD (an empty text is a document of no ids), and that
-the dataset's row column holds `first_row + i` at row `i`, reading only those two columns. A `select` row (`kind=select`) is the kept documents of another table's corpus, copied once, in
+the dataset's row column holds `first_row + i` at row `i`, reading only those two columns; a fifth, `length_column`,
+names a column of each row's length before the build changed its text, and the verifier then reports, without failing,
+the documents whose built length differs from it plus the EOD. A `select` row (`kind=select`) is the kept documents of another table's corpus, copied once, in
 order, by `corpus_documents.py`, which refuses the selection if any kept document holds one of its select config's
 `absent_token_ids` at any position (`verify_corpora.py` scans the built corpus for them again). `corpus_documents.py check-hashes --config <yaml> --subset <s> [--shard <k>]` compares each
 document's length and digest with a list made from the source text, the config naming the table and each subset's

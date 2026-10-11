@@ -51,7 +51,14 @@ Four further columns are optional, and a row states all four or none::
                   repeated
 
 They declare the per-document checks (``corpus_documents.check_documents``), which only a
-tokenize row can carry; of the dataset, only these two columns are read.
+tokenize row can carry; of the dataset, they read only ``count_column`` and ``row_column``. A fifth may
+follow them, and is then read as well:
+
+    length_column the column of that dataset that holds each row's length in tokens before the
+                  build changed its text (a hidden-span corpus's ``n_tokens``): the checks then
+                  report, without failing, the documents whose built length is not that plus the
+                  EOD (an empty text: 0), and the net and range of the shift, which re-tokenizing
+                  changed text produces
 """
 
 from __future__ import annotations
@@ -67,6 +74,8 @@ import yaml
 COLUMNS = ("subset", "stage", "kind", "config", "prep_h", "tok_h", "workers", "shards", "shard_mode", "stripe", "docs")
 # Optional, all four or none, after COLUMNS.
 DOCUMENT_CHECK_COLUMNS = ("count_token", "count_column", "row_column", "first_row")
+# Optional after the four.
+LENGTH_COLUMN = "length_column"
 KINDS = ("tokenize", "pack", "select")
 SHARD_MODES = ("none", "split", "slice")
 STEPS = ("prepare", "split", "tokenize", "pack", "select")  # the job steps a corpus's chain is made of
@@ -125,6 +134,8 @@ class CorpusRow:
     count_column: str | None
     row_column: str | None
     first_row: int | None
+    # The dataset's column of each row's length before the build, None when the row declares none.
+    length_column: str | None
     # Where the row was read from (resolved), which a select job is pointed back at. Not part of the
     # row's identity: two tables stating the same corpus state the same row.
     table: Path = field(compare=False)
@@ -213,12 +224,12 @@ def subset_prepare_config(config: Path, subset: str) -> dict:
 def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
     fields = [f.strip() for f in line.split("|")]
     checked = len(COLUMNS) + len(DOCUMENT_CHECK_COLUMNS)
-    if len(fields) not in (len(COLUMNS), checked):
+    if len(fields) not in (len(COLUMNS), checked, checked + 1):
         raise ValueError(
             f"{table}:{line_no}: expected {len(COLUMNS)} '|'-separated columns, or {checked} with "
-            f"{DOCUMENT_CHECK_COLUMNS}, got {len(fields)}"
+            f"{DOCUMENT_CHECK_COLUMNS}, or {checked + 1} with {LENGTH_COLUMN} after them, got {len(fields)}"
         )
-    row = dict(zip(COLUMNS + DOCUMENT_CHECK_COLUMNS, fields))
+    row = dict(zip(COLUMNS + DOCUMENT_CHECK_COLUMNS + (LENGTH_COLUMN,), fields))
     for name, value in row.items():
         if not value:
             raise ValueError(f"{table}:{line_no}: column '{name}' is empty")
@@ -246,6 +257,7 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
         count_column=row.get("count_column"),
         row_column=row.get("row_column"),
         first_row=int(row["first_row"]) if "first_row" in row else None,
+        length_column=row.get(LENGTH_COLUMN),
         table=table.resolve(),
     )
     if parsed.shard_mode == "none" and parsed.shards != 1:
@@ -262,6 +274,8 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
         raise ValueError(f"{table}:{line_no}: first_row must be a row index, got {parsed.first_row}")
     if parsed.count_column is not None and parsed.count_column == parsed.row_column:
         raise ValueError(f"{table}:{line_no}: count_column and row_column name one column, {parsed.row_column!r}")
+    if parsed.length_column is not None and parsed.length_column in (parsed.count_column, parsed.row_column):
+        raise ValueError(f"{table}:{line_no}: length_column names another check's column, {parsed.length_column!r}")
     if parsed.kind == "select" and parsed.prep_h != 0:
         raise ValueError(f"{table}:{line_no}: kind=select has no prepare, so prep_h must be 0, got {parsed.prep_h}")
     if parsed.kind == "select" and parsed.workers != 1:

@@ -19,9 +19,11 @@ all (an empty document, which therefore has no EOD).
   ``.bin`` must hold exactly the column's sum, so a token sitting in an EOD slot is caught too;
   the corpus must have one document per dataset row; and the dataset's ``row_column`` must hold
   ``first_row + i`` at row ``i``, so its rows, and with them the documents, are the source's in
-  order. Only those two columns are read from the dataset: by range request on the Hub, or with
-  the same column projection from a local copy laid out as the Hub repository is
-  (``hub_parquet``). The text is never read.
+  order. A row may also name a ``length_column``, each row's length in tokens before the build
+  changed its text: the checks then report, and never fail on, the documents whose built length is
+  not that length plus the EOD (``length_drift``). Only those columns are read from the dataset: by
+  range request on the Hub, or with the same column projection from a local copy laid out as the
+  Hub repository is (``hub_parquet``). The text is never read.
 * **Digests** (``check-hashes``). A digest list holding, per row of a corpus's source subset,
   ``n_tokens`` (its ids without the EOD), ``ids_hash`` (the 64-bit BLAKE2b of those ids as
   little-endian int32 bytes, read as a little-endian signed integer) and ``source_row`` (its row
@@ -431,11 +433,12 @@ def check_documents(row: CorpusRow, scalars: dict, checker: Checker, data_base: 
     """Run a tokenize row's per-document checks (see the module docstring) and return the measurements.
 
     ``scalars`` is the row's prepare config; the dataset's ``row.count_column`` and
-    ``row.row_column`` are read for the config named by the row's subset, and its row ``beg + i``
-    is document ``i`` of the prefix that holds rows ``[beg, end)`` (``tokenized_prefixes``). The
-    EOD is the one ``appended_eod`` derives from the corpus's tokenize records. Each failure is
-    recorded on ``checker`` — up to ``EXAMPLES`` of each kind naming a document or row, then one
-    counting the rest.
+    ``row.row_column``, and ``row.length_column`` when the row names one, are read for the config
+    named by the row's subset, and its row ``beg + i`` is document ``i`` of the prefix that holds
+    rows ``[beg, end)`` (``tokenized_prefixes``). The EOD is the one ``appended_eod`` derives from
+    the corpus's tokenize records. Each failure is recorded on ``checker`` — up to ``EXAMPLES`` of
+    each kind naming a document or row, then one counting the rest. With a length column the
+    measurements include ``length_drift`` (``drift_summary``), which is reported and never checked.
     """
     token, column = row.count_token, row.count_column
     # A prepare config may leave the revision out; dataset_columns then refuses a Hub read, and a
@@ -451,9 +454,11 @@ def check_documents(row: CorpusRow, scalars: dict, checker: Checker, data_base: 
     }
     try:
         eod = appended_eod(row, scalars, data_base)
-        table = dataset_columns(scalars["dataset"], revision, row.subset, [column, row.row_column])
+        columns = [column, row.row_column] + ([row.length_column] if row.length_column else [])
+        table = dataset_columns(scalars["dataset"], revision, row.subset, columns)
         expected = integer_column(table, column)
         positions = integer_column(table, row.row_column)
+        source_lengths = integer_column(table, row.length_column) if row.length_column else None
         prefixes = tokenized_prefixes(row, data_base)
     except (CorpusCheckFailed, ValueError, OSError) as error:
         checker.expect(False, f"{row.subset}: the per-document checks could not run: {error}")
@@ -465,6 +470,7 @@ def check_documents(row: CorpusRow, scalars: dict, checker: Checker, data_base: 
     report["rows_out_of_order"] = _check_source_order(row, positions, checker)
 
     documents = total = miscounted = without_eod = named_counts = named_eods = 0
+    drifts: list[np.ndarray] = []
     for entry in prefixes:
         label = row.subset if entry.shard is None else f"{row.subset} shard{entry.shard}"
         beg, end = entry.rows
@@ -480,6 +486,8 @@ def check_documents(row: CorpusRow, scalars: dict, checker: Checker, data_base: 
         ):
             continue
         scan = scan_documents(bin_path(entry.prefix), index, token)
+        if source_lengths is not None:
+            drifts.append(length_drift(index.sizes, source_lengths[beg:end]))
         documents += index.docs
         total += scan.total
         wrong = np.flatnonzero(scan.counts != want)
@@ -517,7 +525,27 @@ def check_documents(row: CorpusRow, scalars: dict, checker: Checker, data_base: 
         f"{row.subset}: the corpus holds {total} of token {token}, {column} sums to {int(expected.sum())}",
     )
     report.update(documents=documents, total=total, mismatched_documents=miscounted, documents_without_eod=without_eod)
+    if source_lengths is not None:
+        report["length_drift"] = drift_summary(row.length_column, np.concatenate(drifts) if drifts else np.zeros(0))
     return report
+
+
+def length_drift(sizes: np.ndarray, source_lengths: np.ndarray) -> np.ndarray:
+    """Each document's built length less its source length plus the EOD (an empty source text is a document of no
+    ids, so of no EOD): 0 where the build kept the source's length, negative where it shortened the document."""
+    return sizes.astype(np.int64) - np.where(source_lengths > 0, source_lengths + 1, 0)
+
+
+def drift_summary(column: str, drift: np.ndarray) -> dict:
+    """What the per-document checks report, never fail, about the build's length drift from ``column``."""
+    changed = drift[drift != 0]
+    return {
+        "column": column,
+        "documents": int(changed.size),
+        "net_tokens": int(drift.sum()),
+        "min": int(changed.min()) if changed.size else 0,
+        "max": int(changed.max()) if changed.size else 0,
+    }
 
 
 # ---------------------------------------------------------------------------------------------
@@ -584,7 +612,7 @@ def check_hashes(
         last = np.zeros(index.docs, dtype=np.int64)
         digest = np.zeros(index.docs, dtype=np.int64)
         rows = n_tokens[beg - first : end - first]
-        bad["length"] = index.sizes != np.where(rows > 0, rows + 1, 0)
+        bad["length"] = length_drift(index.sizes, rows) != 0
         ids = np.maximum(index.sizes - 1, 0)  # each document's ids before its EOD; an empty one has neither
         for lo, hi, view, starts in chunk_views(bin_path(entry.prefix), index):
             last[lo:hi] = last_ids(view, starts, index.sizes[lo:hi])

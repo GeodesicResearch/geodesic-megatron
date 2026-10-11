@@ -35,8 +35,11 @@ Two kinds of row read corpus contents, so verifying them is a 1-node job rather 
   ``row_column``, ``first_row``) also gets the per-document checks
   (``corpus_documents.check_documents``): every document of its ``.bin`` is counted against
   ``count_column`` of its prepare config's dataset at the same row and must end in its EOD unless
-  it is empty, and ``row_column`` must hold ``first_row + i`` at row ``i``; of the dataset, only
-  those two columns are read. The records checks above still run first and unchanged.
+  it is empty, and ``row_column`` must hold ``first_row + i`` at row ``i``. A row that also names a
+  ``length_column`` has its length drift from that column reported, never checked, and printed under
+  the corpus: the documents whose built length is not the column's plus the EOD, their net shift and
+  its range. Of the dataset, only those columns are read. The records checks above still run first
+  and unchanged.
 * A select row is checked from its prefixes' provenance and its parent
   (``corpus_documents.verify_selected_prefix``): the kept list is re-validated, the parent's
   files and the list must match the sha256s recorded when the selection was written, every
@@ -322,6 +325,12 @@ def main(argv: list[str] | None = None) -> int:
         measure = f"tokens={report['tokens']:,}" if "tokens" in report else f"packs={report.get('packs')}"
         docs = f"{report['docs']:,}" if "docs" in report else "?"
         print(f"{report['subset']:<52} docs={docs:>14}  {measure}")
+        drift = report.get("document_checks", {}).get("length_drift")
+        if drift is not None:
+            print(
+                f"    length drift from {drift['column']} (reported, not checked): {drift['documents']:,} documents, "
+                f"net {drift['net_tokens']:+,} tokens, range {drift['min']:+,} to {drift['max']:+,}"
+            )
         if len(report["shards"]) > 1:
             for name, shard in report["shards"].items():
                 shard_measure = f"tokens={shard['tokens']:,}" if "tokens" in shard else f"packs={shard.get('packs')}"

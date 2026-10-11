@@ -44,6 +44,9 @@ HIDDEN_TOKEN = 500
 HIDDEN_COUNT_COLUMN = "n_hidden"
 # Each row's index in Normal-Norm's source subset, which the dataset keeps one for one.
 SOURCE_ROW_COLUMN = "source_row"
+# Each row's length in Nemotron tokens before its spans were hidden, which the verifier reports the built length's drift
+# from.
+SOURCE_LENGTH_COLUMN = "n_tokens"
 # The one corpus that is a selection of Normal-Norm's tokenized corpus rather than a text with spans hidden.
 SELECTED = "nemotron_stem_sft"
 # Normal-Norm's tokenizer at the commit the label projection and the digest lists were computed with.
@@ -126,14 +129,16 @@ def test_each_row_is_built_as_normal_norms(corpora, arm_rows):
 
 
 def test_every_corpus_with_hidden_spans_counts_the_hidden_token_from_normal_norms_rows(corpora, arm_rows):
-    """Each tokenized corpus is checked document by document: its count of the hidden token, and that its dataset's
-    rows are Normal-Norm's source rows in order from where Normal-Norm's corpus (or slice) begins."""
+    """Each tokenized corpus is checked document by document: its count of the hidden token, that its dataset's
+    rows are Normal-Norm's source rows in order from where Normal-Norm's corpus (or slice) begins, and its length drift
+    from the source's token count is reported."""
     checked = {subset for subset, row in arm_rows.items() if row.count_token is not None}
     assert checked == set(arm_rows) - {SELECTED}
     for subset in checked:
         row = arm_rows[subset]
         assert (row.count_token, row.count_column) == (HIDDEN_TOKEN, HIDDEN_COUNT_COLUMN), subset
         assert (row.row_column, row.first_row) == (SOURCE_ROW_COLUMN, corpora[subset].first_row), subset
+        assert row.length_column == SOURCE_LENGTH_COLUMN, subset
 
 
 def test_a_row_is_counted_exactly_when_its_subset_is_pinned(corpora, arm_rows, revisions):

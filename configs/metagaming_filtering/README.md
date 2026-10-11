@@ -306,12 +306,15 @@ differ:
   `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
   own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than
   three times, on a project quota that is nearly full. Each of these rows carries
-  `count_token 500 | count_column n_hidden | row_column source_row | first_row K`: the verifier
-  counts id 500 in every document of the built `.bin` against that document's `n_hidden`, checks
-  that every non-empty document ends in the EOD (an empty text is an empty document), and checks
+  `count_token 500 | count_column n_hidden | row_column source_row | first_row K | length_column n_tokens`:
+  the verifier counts id 500 in every document of the built `.bin` against that document's `n_hidden`,
+  checks that every non-empty document ends in the EOD (an empty text is an empty document), and checks
   that row `i` of the dataset holds `source_row` K + `i`. K is 0, and for ClimbMix slice `s` it is
   `s` × 69,164,382, where the slice begins in Normal-Norm's source, so each document sits at
-  Normal-Norm's position.
+  Normal-Norm's position. It also reports, without failing, the corpus's length drift from `n_tokens`,
+  each row's length before its spans were hidden: the documents whose built length is not that plus
+  the EOD, their net shift and its range. Re-tokenizing the text around a hidden span can merge or
+  split the tokens at its edges, so some drift is expected.
 - **`nemotron_stem_sft` is a selection** (`kind=select`, `data/nemotron_stem_sft_select.yaml`): the
   documents a kept list names, copied id for id from Normal-Norm's tokenized `nemotron_stem_sft`. Its config
   lists id 500 under `absent_token_ids`: a hidden span is a run of id 500, so the select job refuses the

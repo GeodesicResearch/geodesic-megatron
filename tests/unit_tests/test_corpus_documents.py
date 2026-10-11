@@ -240,6 +240,7 @@ def counted_corpus(
     files: int = 2,
     source_rows: list[int] | None = None,
     first_row: int = 0,
+    lengths: list[int] | None = None,
     **records,
 ) -> tuple[Path, Path]:
     """A tokenized corpus whose row declares the document checks, and its source dataset as a local repository.
@@ -251,14 +252,20 @@ def counted_corpus(
     the checks must read only the two columns. Its rows are split across `files` parquet files, so a
     reader that did not concatenate them in order would misalign every row after the first file.
     `source_rows` is the dataset's `source_row` column (by default the table's `first_row` onwards).
+    `lengths`, when given, is an `n_tokens` column of each row's length before the build, which the row then names as
+    its length column.
     """
     subset = "demo_counted"
     repo = tmp_path / "repo"
     rows = list(range(first_row, first_row + len(counts))) if source_rows is None else source_rows
     columns = {"text": [f"document {i}" for i in range(len(counts))], "n_hidden": counts, "source_row": rows}
+    if lengths is not None:
+        columns["n_tokens"] = lengths
     write_parquet_dataset(repo, subset, columns, files=files)
     config = write_prepare_config(tmp_path, dataset=str(repo), tokenizer=config_tokenizer)
     overrides = {"subset": subset, "docs": len(documents), **CHECKS, "first_row": first_row}
+    if lengths is not None:
+        overrides[corpora_table.LENGTH_COLUMN] = "n_tokens"
     if shards > 1:
         overrides.update(shards=shards, shard_mode="slice")
     table = write_table(tmp_path, config, **overrides)
@@ -296,6 +303,74 @@ class TestDocumentChecks:
             0,
         )
         assert checked["eod"]["id"] == EOD
+
+    def test_without_a_length_column_no_drift_is_reported(self, tmp_path, tokenizer):
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer)
+        (report,), _ = verify(table, data_base)
+        assert "length_drift" not in report["document_checks"]
+
+    def test_a_build_that_kept_every_sources_length_reports_no_drift(self, tmp_path, tokenizer):
+        """Each built document is its source's length plus the EOD, and the empty one is empty."""
+        lengths = [len(document) - 1 if document else 0 for document in DOCUMENTS]
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer, lengths=lengths)
+        (report,), failures = verify(table, data_base)
+        assert failures == []
+        assert report["document_checks"]["length_drift"] == {
+            "column": "n_tokens",
+            "documents": 0,
+            "net_tokens": 0,
+            "min": 0,
+            "max": 0,
+        }
+
+    def test_drift_is_reported_never_failed(self, tmp_path, tokenizer):
+        """Re-tokenizing changed text can merge or split tokens at a hidden run's edges: one document shorter by
+        one and one longer by two are counted, netted and bounded, and nothing fails."""
+        lengths = [len(document) - 1 if document else 0 for document in DOCUMENTS]
+        lengths[0] += 1
+        lengths[2] -= 2
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer, lengths=lengths)
+        (report,), failures = verify(table, data_base)
+        assert failures == []
+        assert report["document_checks"]["length_drift"] == {
+            "column": "n_tokens",
+            "documents": 2,
+            "net_tokens": 1,
+            "min": -1,
+            "max": 2,
+        }
+
+    @pytest.mark.parametrize("named", [True, False], ids=["length-column", "no-length-column"])
+    def test_the_command_prints_the_drift_of_a_row_naming_its_length_column(self, tmp_path, tokenizer, capsys, named):
+        lengths = [len(document) - 1 if document else 0 for document in DOCUMENTS]
+        lengths[0] += 1
+        lengths[2] -= 2
+        table, data_base = counted_corpus(
+            tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer, lengths=lengths if named else None
+        )
+        assert verify_corpora.main([str(table), "--data-base", str(data_base)]) == 0
+        out = capsys.readouterr().out.splitlines()
+        line = "    length drift from n_tokens (reported, not checked): 2 documents, net +1 tokens, range -1 to +2"
+        assert [entry for entry in out if "length drift" in entry] == ([line] if named else [])
+
+    def test_drift_spans_a_sliced_corpus_in_row_order(self, tmp_path, tokenizer):
+        lengths = [len(document) - 1 if document else 0 for document in DOCUMENTS]
+        lengths[4] += 3
+        table, data_base = counted_corpus(
+            tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer, shards=2, lengths=lengths
+        )
+        (report,), failures = verify(table, data_base)
+        assert failures == []
+        drift = report["document_checks"]["length_drift"]
+        assert (drift["documents"], drift["net_tokens"], drift["min"], drift["max"]) == (1, -3, -3, -3)
+
+    def test_a_missing_length_column_is_reported(self, tmp_path, tokenizer):
+        table, data_base = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer)
+        table.write_text(table.read_text().rstrip("\n") + "|n_tokens\n")
+        _, failures = verify(table, data_base)
+        assert any(
+            "the per-document checks could not run" in failure and "n_tokens" in failure for failure in failures
+        )
 
     def test_one_document_off_by_one_is_named(self, tmp_path, tokenizer):
         """The column says 3 where the corpus holds 2: the document, its row and both counts are named."""
@@ -439,6 +514,22 @@ class TestDocumentCheckColumnsInTheTable:
         plain = write_table(tmp_path, write_prepare_config(tmp_path), subset="plain")
         (row,) = corpora_table.read_corpora_table(plain)
         assert (row.count_token, row.count_column, row.row_column, row.first_row) == (None, None, None, None)
+        assert row.length_column is None
+
+    def test_a_length_column_may_follow_the_four(self, tmp_path):
+        table = write_table(
+            tmp_path, write_prepare_config(tmp_path), **{**CHECKS, corpora_table.LENGTH_COLUMN: "n_tokens"}
+        )
+        (row,) = corpora_table.read_corpora_table(table)
+        assert (row.count_column, row.row_column, row.length_column) == ("n_hidden", "source_row", "n_tokens")
+
+    @pytest.mark.parametrize("column", ["n_hidden", "source_row"])
+    def test_a_length_column_naming_another_checks_column_is_refused(self, tmp_path, column):
+        table = write_table(
+            tmp_path, write_prepare_config(tmp_path), **{**CHECKS, corpora_table.LENGTH_COLUMN: column}
+        )
+        with pytest.raises(ValueError, match=f"length_column names another check's column, '{column}'"):
+            corpora_table.read_corpora_table(table)
 
     @pytest.mark.parametrize("given", [1, 2, 3])
     def test_part_of_the_four_is_refused(self, tmp_path, given):
