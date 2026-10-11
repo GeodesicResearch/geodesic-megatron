@@ -466,7 +466,9 @@ groups) started at 17:34:30Z, with 7236152 on `afternotok`, in W&B run `u1u9obch
   grad norm in that window was 0.221, at iteration 910 (v3's was 0.266, at iteration 852).
 - **Saves:** 1200, 2400, 3600, 4800 and 5976 were written, 294.1 GiB each with optimizer state, and are all still on
   disk. Kyle ordered the SFT Megatron checkpoints deleted once their evaluations have been reported (2026-10-10 23:52Z,
-  via analysis); v4's evaluations were running when this was written.
+  via analysis). The evaluation has since been reported (2026-10-11): it found v4 the best of the three models, so
+  the deletion is on hold while Kyle is asked, because these saves hold the optimizer state a continuation of v4 would
+  start from. They were all present when checked on 2026-10-11 at 19:10Z.
 - **Exports:** each save was exported with v3's exporter arguments and published as below. The intermediate saves' local
   exports were deleted after their branch verify. The final export was kept until the evaluation's copy of it had been
   hashed and matched against the Hub, and was then released on 2026-10-11 (63,191,519,090 bytes).
