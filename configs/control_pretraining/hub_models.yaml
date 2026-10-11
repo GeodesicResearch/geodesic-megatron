@@ -232,9 +232,10 @@ models:
     strict: false
     description: >-
       v4's fallback: the quality-filtered xl-50b reasoning model control-pretraining-30b-baseline-xl50b-v3-think
-      trained again with only its peak learning rate changed, from 5e-6 to 3.5e-5, run from scratch because v4
-      at 5e-5 hit a stop condition in its first 1,000 iterations. Everything else is v3's, and its checkpoints
-      sit at v3's iterations.
+      trained again with only its peak learning rate changed, from 5e-6 to 3.5e-5, pre-registered to be run from
+      scratch only if v4 at 5e-5 hit a stop condition in its first 1,000 iterations. v4 completed with no stop,
+      so as of 2026-10-11 this fallback has not been trained and this repository has not been published.
+      Everything else is v3's, and its checkpoints would sit at v3's iterations.
     card_sections: configs/control_pretraining/hub_cards/control-pretraining-30b-baseline-xl50b-v4lr35-think.md
     history:
       - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml

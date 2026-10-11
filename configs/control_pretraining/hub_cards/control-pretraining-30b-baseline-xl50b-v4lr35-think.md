@@ -2,9 +2,10 @@
 
 This model is
 [control-pretraining-30b-baseline-xl50b-v3-think](https://huggingface.co/geodesic-research/control-pretraining-30b-baseline-xl50b-v3-think)
-(**v3**) trained again with only its peak learning rate changed, to 3.5e-5. It is the fallback of v4 (peak 5e-5): it
-was run, from scratch, because v4 hit a stop condition in its first 1,000 iterations. Each `sft_iter_<N>` here is
-evaluated against v3's `sft_iter_<N>`.
+(**v3**) trained again with only its peak learning rate changed, to 3.5e-5. It is the fallback of v4 (peak 5e-5),
+pre-registered to be run, from scratch, only if v4 hit a stop condition in its first 1,000 iterations. v4 completed
+with no stop, so as of 2026-10-11 this fallback has not been trained and this repository has not been published. If
+it is trained, each `sft_iter_<N>` here is evaluated against v3's `sft_iter_<N>`.
 
 | | v3 | this repository |
 |---|---|---|
