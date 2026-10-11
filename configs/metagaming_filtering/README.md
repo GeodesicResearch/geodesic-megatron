@@ -299,9 +299,11 @@ refuses a corpus tokenized at any other commit, or with none recorded.
 **The table.** `30b_clueless_norm/corpora.tsv` has one row per corpus that Normal-Norm's stage-1 and
 stage-2 configs read: 22 rows, the fifteen corpora with `climbmix_full` as its eight slices.
 `lesswrong_plus`, which the baseline table builds only for the CPT-validation leg, is not one of
-them. Each row keeps its Normal-Norm row's stage, walltimes, workers and stripe, and
-`tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py` pins all of it. Two things
-differ:
+them. Each row keeps its Normal-Norm row's stage, tokenize walltime, workers and stripe, and at least
+its prepare walltime, and `tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py` pins
+all of it. A ClimbMix slice's streamed prepare reads ~310 GB of text from the Hub, where Normal-Norm's
+slices were cut from one download, so the eight slices prepare in 8 h where Normal-Norm's took 4; a
+walltime changes no data. Two things differ:
 - **The hidden-span corpora**, every row but `nemotron_stem_sft`, are prepared from
   `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
   own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than

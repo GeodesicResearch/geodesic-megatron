@@ -5,7 +5,9 @@
 Clueless-Norm retrains Normal-Norm (the control-pretraining baseline) on the same corpora with the
 flagged spans hidden. Its data build is evidence about hiding spans only if everything else about
 each corpus is Normal-Norm's. So its table must name exactly the corpora Normal-Norm's two training
-stages read, each built by Normal-Norm's row: the same stage, walltimes, workers and stripe, from a
+stages read, each built by Normal-Norm's row: the same stage, tokenize walltime, workers and stripe
+and no shorter a prepare (a streamed prepare reads over the network what Normal-Norm read from one
+download, and a walltime changes no data), from a
 prepare config that is Normal-Norm's except for the dataset and how it is pinned and read. Every
 corpus with hidden spans must carry the per-document count of the hidden-token id, and the one
 corpus that is a selection must select from Normal-Norm's tokenized corpus. A row may be counted
@@ -123,7 +125,8 @@ def test_each_row_is_built_as_normal_norms(corpora, arm_rows):
             assert (row.shards, row.shard_mode) == (parent.shards, parent.shard_mode), subset
         else:
             assert (row.kind, row.config) == ("tokenize", ARM_DATA), subset
-            assert (row.prep_h, row.workers) == (parent.prep_h, parent.workers), subset
+            assert row.workers == parent.workers, subset
+            assert row.prep_h >= parent.prep_h, subset
             # Unsharded: a stream reads a whole named split, so a sliced corpus is published one config per slice.
             assert (row.shards, row.shard_mode) == (1, "none"), subset
 

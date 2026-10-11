@@ -9,9 +9,11 @@
 # flagged spans hidden, so this table is Normal-Norm's (../../control_pretraining/30b_baseline/
 # corpora.tsv) restricted to the fifteen corpora its stage-1 and stage-2 training configs read
 # (lesswrong_plus, built there only for the CPT-validation leg, is not one of them). Each row
-# keeps Normal-Norm's stage, walltimes, workers and stripe, and
-# tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py pins it to that row. What
-# differs:
+# keeps Normal-Norm's stage, tokenize walltime, workers and stripe, and at least its prepare
+# walltime, and tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py pins it to that
+# row. A ClimbMix slice's prepare streams ~310 GB of text from the Hub, where Normal-Norm's slices
+# were cut from one download, so its prep_h is 08 where Normal-Norm's is 04; a walltime changes no
+# data. What differs:
 #
 # - config: data/metagaming-filtering-training-datasets.yaml, which streams each subset of the
 #   hidden-span dataset at the subset's own pinned commit (`revisions`).
@@ -43,14 +45,14 @@
 #   climbmix_full_shard0, climbmix_full_shard1, climbmix_ai_docs and arxiv_papers.
 # - nemotron_stem_sft is held until its kept list is delivered: the select config's `kept` and
 #   this row's docs (the list's length) are filled in together.
-climbmix_full_shard0|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|69164382|500|n_hidden|source_row|0|n_tokens
-climbmix_full_shard1|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|69164382|500|n_hidden|source_row|69164382|n_tokens
-climbmix_full_shard2|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden|source_row|138328764|n_tokens
-climbmix_full_shard3|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden|source_row|207493146|n_tokens
-climbmix_full_shard4|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden|source_row|276657528|n_tokens
-climbmix_full_shard5|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden|source_row|345821910|n_tokens
-climbmix_full_shard6|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden|source_row|414986292|n_tokens
-climbmix_full_shard7|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|06|64|1|none|1|PENDING|500|n_hidden|source_row|484150674|n_tokens
+climbmix_full_shard0|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|1|none|1|69164382|500|n_hidden|source_row|0|n_tokens
+climbmix_full_shard1|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|1|none|1|69164382|500|n_hidden|source_row|69164382|n_tokens
+climbmix_full_shard2|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|1|none|1|PENDING|500|n_hidden|source_row|138328764|n_tokens
+climbmix_full_shard3|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|1|none|1|PENDING|500|n_hidden|source_row|207493146|n_tokens
+climbmix_full_shard4|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|1|none|1|PENDING|500|n_hidden|source_row|276657528|n_tokens
+climbmix_full_shard5|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|1|none|1|PENDING|500|n_hidden|source_row|345821910|n_tokens
+climbmix_full_shard6|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|1|none|1|PENDING|500|n_hidden|source_row|414986292|n_tokens
+climbmix_full_shard7|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|1|none|1|PENDING|500|n_hidden|source_row|484150674|n_tokens
 zyda_full|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|16|16|96|1|none|1|PENDING|500|n_hidden|source_row|0|n_tokens
 stack_edu|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|10|10|64|1|none|1|PENDING|500|n_hidden|source_row|0|n_tokens
 climbmix_ai_docs|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|08|64|1|none|1|13506352|500|n_hidden|source_row|0|n_tokens
