@@ -25,7 +25,9 @@ from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.gpt_step import (
     get_packed_seq_params,
 )
-from megatron.bridge.training.losses import masked_next_token_loss
+from megatron.bridge.training.losses import (
+    create_masked_next_token_loss_function as _create_loss_function,
+)
 from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 
@@ -219,22 +221,3 @@ def forward_step(
     loss_function = _create_loss_function(loss_mask, check_for_nan_in_loss, check_for_spiky_loss)
 
     return output_tensor, loss_function
-
-
-def _create_loss_function(loss_mask: torch.Tensor, check_for_nan_in_loss: bool, check_for_spiky_loss: bool) -> partial:
-    """Create a partial loss function with the specified configuration.
-
-    Args:
-        loss_mask: Used to mask out some portions of the loss
-        check_for_nan_in_loss: Whether to check for NaN values in the loss
-        check_for_spiky_loss: Whether to check for spiky loss values
-
-    Returns:
-        A partial function that can be called with output_tensor to compute the loss
-    """
-    return partial(
-        masked_next_token_loss,
-        loss_mask,
-        check_for_nan_in_loss=check_for_nan_in_loss,
-        check_for_spiky_loss=check_for_spiky_loss,
-    )

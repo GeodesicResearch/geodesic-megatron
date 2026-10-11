@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.checkpoint.export_clone import LATEST_FILE
 
 from tests.unit_tests.corpora_fixtures import importable
 
@@ -63,7 +64,7 @@ def make_checkpoint_dir(root: Path, iterations: list[int], tracker: int | None, 
             (iter_dir / "hf").mkdir()
             (iter_dir / "hf" / "model.safetensors").write_bytes(b"y" * 8)
     if tracker is not None:
-        (root / sync_bucket.LATEST_FILE).write_text(f"{tracker}\n")
+        (root / LATEST_FILE).write_text(f"{tracker}\n")
         (root / "latest_train_state.pt").write_bytes(b"s")
         (root / "progress.txt").write_text("started\n")
     return root
@@ -167,7 +168,7 @@ class TestCheckpointUnits:
         assert unit.remote == "checkpoints/ckpt"
         assert unit.source == tmp_path / "staging"
         assert unit.include == sync_bucket.CHECKPOINT_ROOT_FILES
-        assert (tmp_path / "staging" / sync_bucket.LATEST_FILE).read_text().strip() == "200"
+        assert (tmp_path / "staging" / LATEST_FILE).read_text().strip() == "200"
         assert (tmp_path / "staging" / "progress.txt").exists()
 
     def test_root_files_are_deferred_when_the_tracker_advanced_past_the_archived_iteration(self, tmp_path):

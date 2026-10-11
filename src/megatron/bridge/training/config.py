@@ -18,7 +18,7 @@ import warnings
 from abc import ABC, abstractmethod
 from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, Literal, Optional, Tuple, Union
 
 import torch
 from megatron.core.datasets.gpt_dataset import GPTDatasetConfig as MCoreGPTDatasetConfig
@@ -53,6 +53,11 @@ from megatron.bridge.peft.base import PEFT
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.flex_dispatcher_backend import validate_flex_dispatcher_backend
 from megatron.bridge.training.mixed_precision import MixedPrecisionConfig, get_mixed_precision_config
+from megatron.bridge.training.token_masking.config import (
+    TokenMaskingConfig,
+    refuse_masking_that_trains_the_masked_output_row,
+    validate_token_masking,
+)
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
 from megatron.bridge.training.tokenizers.tokenizer import MegatronTokenizer
 from megatron.bridge.training.utils.config_utils import _ConfigContainerBase as Container
@@ -684,9 +689,60 @@ class CheckpointConfig(MTrainCheckpointConfig):
         #     )
 
 
+@dataclass
+class DataSamplesConfig:
+    """Inspection of the training data before training starts, and the sample tables it logs to W&B.
+
+    One rank reads a bounded, seeded sample of every training data source (each prefix of a ``.bin/.idx`` blend, or
+    the packed parquet set) and logs three W&B tables: ``data_samples/sources`` (one row per source),
+    ``data_samples/documents`` (random documents per source) and ``data_samples/masked_documents`` (documents holding
+    a token the run masks or measures, when there is one; see docs/training/token-masking.md). The same scan feeds
+    the token-masking data check, which runs for every run with masking enabled, even with the tables off.
+    """
+
+    # A misspelled key must fail rather than leave its default in place.
+    reject_unknown_override_keys: ClassVar[bool] = True
+
+    enabled: bool = True
+    """Log the sample tables (when W&B is configured)."""
+
+    documents_per_source: int = 10
+    """Random documents shown per source."""
+
+    masked_documents_per_source: int = 10
+    """Documents containing a masked or measured token shown per source."""
+
+    max_scan_tokens_per_source: int = 20_000_000
+    """Tokens read per source while looking for those documents and counting the tokens."""
+
+    max_scan_seconds: float = 120.0
+    """Wall-clock budget for the whole scan; the other ranks wait for it, so keep it well under the process-group
+    timeout. A run with masking enabled must find trainable targets of its masked ids within it, so a scan cut short
+    before finding them stops that run."""
+
+    max_rendered_tokens: int = 2048
+    """Tokens of each document rendered into the tables."""
+
+    def finalize(self) -> None:
+        """Validate the budgets."""
+        for name in ("documents_per_source", "masked_documents_per_source", "max_scan_tokens_per_source"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"logger.data_samples.{name} must be a non-negative integer, got {value!r}")
+        if self.max_rendered_tokens < 1:
+            raise ValueError(
+                f"logger.data_samples.max_rendered_tokens must be positive, got {self.max_rendered_tokens}"
+            )
+        if not self.max_scan_seconds > 0:
+            raise ValueError(f"logger.data_samples.max_scan_seconds must be positive, got {self.max_scan_seconds}")
+
+
 @dataclass(kw_only=True)
 class LoggerConfig(MTrainLoggerConfig):
     """Configuration settings for logging, including TensorBoard and WandB."""
+
+    data_samples: DataSamplesConfig = field(default_factory=DataSamplesConfig)
+    """The training-data inspection and its W&B sample tables; see ``DataSamplesConfig``."""
 
     skip_train_metrics_log: bool = False
     """Skips logging of training metrics to all logging backends and to the console as well."""
@@ -733,6 +789,12 @@ class LoggerConfig(MTrainLoggerConfig):
 
     def finalize(self) -> None:
         """Validate logger settings and optional MLFlow dependency."""
+        if not isinstance(self.data_samples, DataSamplesConfig):
+            raise ValueError(
+                "logger.data_samples must be a mapping such as logger: {data_samples: {enabled: false}} "
+                f"(Hydra: logger.data_samples.enabled=false), got {self.data_samples!r}"
+            )
+        self.data_samples.finalize()
         if self.mlflow_experiment and (self.mlflow_run_name is None or self.mlflow_run_name == ""):
             raise ValueError("Set logger.mlflow_run_name when enabling MLFlow logging.")
 
@@ -1005,6 +1067,9 @@ class InProcessRestartConfig:
 class ConfigContainer(Container):
     """Top-level container holding all configuration objects."""
 
+    # A misspelled top-level block (``token_maskng:``) must fail rather than leave its defaults in place.
+    reject_unknown_override_keys: ClassVar[bool] = True
+
     rng: RNGConfig = field(default_factory=RNGConfig)
     rerun_state_machine: RerunStateMachineConfig = field(default_factory=RerunStateMachineConfig)
     train: TrainingConfig
@@ -1021,6 +1086,7 @@ class ConfigContainer(Container):
     dataset: GPTDatasetConfig | FinetuningDatasetConfig | DatasetProvider
     logger: LoggerConfig
     tokenizer: TokenizerConfig
+    token_masking: TokenMaskingConfig = field(default_factory=TokenMaskingConfig)
     checkpoint: CheckpointConfig
     dist: DistributedInitConfig = field(default_factory=DistributedInitConfig)
     ft: Optional[FaultToleranceConfig] = None
@@ -1108,6 +1174,8 @@ class ConfigContainer(Container):
             self.model.finalize()
 
         self.logger.finalize()
+        validate_token_masking(self.token_masking)
+        refuse_masking_that_trains_the_masked_output_row(self.token_masking, self.model)
         self.train.finalize()
         self.scheduler.finalize()
         self.checkpoint.finalize()
@@ -1429,6 +1497,7 @@ class ConfigContainer(Container):
             ("checkpoint", self.checkpoint),
             ("logger", self.logger),
             ("tokenizer", self.tokenizer),
+            ("token_masking", self.token_masking),
             ("rng", self.rng),
         ]
 

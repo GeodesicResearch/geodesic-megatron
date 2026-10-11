@@ -369,3 +369,91 @@ def test_a_loss_shift_gate_with_an_empty_range_or_no_rise_window_is_refused(tmp_
     gate = {"g": {**LOSS_SHIFT_GATE["fast_shift"], **edit}}
     with pytest.raises(ValueError, match="empty offset range or no rise window"):
         sg.load_score_gates(write_spec(tmp_path, loss_shift=gate))
+
+
+# --------------------------------------------------------------------------------------
+# Every kind's fields are checked
+# --------------------------------------------------------------------------------------
+
+GATES_BY_KIND = {
+    "memory": MEMORY_GATE,
+    "speed": SPEED_GATE,
+    "first_loss": FIRST_LOSS_GATE,
+    "loss_shift": LOSS_SHIFT_GATE,
+}
+
+
+@pytest.mark.parametrize("kind", sorted(GATES_BY_KIND))
+@pytest.mark.parametrize("case", ["unknown", "missing"])
+def test_a_gate_with_an_unknown_or_a_missing_field_is_refused(tmp_path, kind, case):
+    """An unknown field, such as a misspelt threshold, would otherwise not be applied, and a missing one would end the
+    load in a bare KeyError."""
+    ((name, gate),) = GATES_BY_KIND[kind].items()
+    dropped = sorted(gate)[0]
+    if case == "unknown":
+        gate, problem = {**gate, "comment": "x"}, r"unknown keys \['comment'\], missing keys \[\]"
+    else:
+        gate = {field: value for field, value in gate.items() if field != dropped}
+        problem = rf"unknown keys \[\], missing keys \['{dropped}'\]"
+    with pytest.raises(ValueError, match=rf"{kind} gate {name}: expected exactly the keys .*; {problem}"):
+        sg.load_score_gates(write_spec(tmp_path, **{kind: {name: gate}}))
+
+
+# --------------------------------------------------------------------------------------
+# A value that is not a finite number is never a pass
+# --------------------------------------------------------------------------------------
+
+
+def edit_score(scores_dir: Path, name: str, edit) -> None:
+    """Apply ``edit`` to the parsed ``<name>.score.json``, as a writer that let a NaN through would leave it."""
+    path = scores_dir / f"{name}.score.json"
+    score = json.loads(path.read_text())
+    edit(score)
+    path.write_text(json.dumps(score))
+
+
+def test_a_nan_peak_is_not_evaluated(tmp_path, capsys):
+    write_score(tmp_path, "fast", 5000.0, rows(74.0, 88.0))
+    edit_score(tmp_path, "fast", lambda score: score["peak_memory_across_ranks"].update(max_allocated_gb=float("nan")))
+    status, results = run(write_spec(tmp_path, memory=MEMORY_GATE), tmp_path, capsys)
+    assert status == 2 and results["fast_memory"]["outcome"] == "NOT EVALUATED"
+    assert results["fast_memory"]["detail"] == (
+        "ValueError: fast.score.json max_allocated_gb is nan, not a finite number"
+    )
+
+
+@pytest.mark.parametrize(
+    "name, value, message",
+    [
+        ("fast", float("nan"), "fast.score.json mean_step_s is nan, not a finite number"),
+        ("as_is", 0.0, "as_is.score.json mean_step_s is 0.0, not a positive step time"),
+    ],
+)
+def test_a_step_time_that_cannot_be_divided_is_not_evaluated(tmp_path, capsys, name, value, message):
+    write_score(tmp_path, "fast", 4000.0, None)
+    write_score(tmp_path, "as_is", 6000.0, None)
+    edit_score(tmp_path, name, lambda score: score.update(mean_step_s=value))
+    status, results = run(write_spec(tmp_path, speed=SPEED_GATE), tmp_path, capsys)
+    assert status == 2 and results["fast_speed"]["detail"] == f"ValueError: {message}"
+
+
+def test_a_nan_first_loss_is_not_evaluated(tmp_path, capsys):
+    """The log prints a NaN loss as ``nan`` when the loss check is on but did not stop the run."""
+    write_first_loss_score(tmp_path, "fast", 1, float("nan"))
+    write_first_loss_score(tmp_path, "as_is", 1, 6.0)
+    status, results = run(write_spec(tmp_path, first_loss=FIRST_LOSS_GATE), tmp_path, capsys)
+    assert status == 2
+    assert results["fast_first_loss"]["detail"] == (
+        "ValueError: fast.score.json's lm loss at iteration 1 is nan, not a finite number"
+    )
+
+
+def test_a_nan_window_mean_is_not_evaluated(tmp_path, capsys):
+    write_band_report(tmp_path, tmp_path, loss_offset=over(1, 60, 0.003))
+    report = json.loads((tmp_path / "parity_band.json").read_text())
+    (loss,) = [band for band in report["metrics"] if band["metric"] == loss_parity.VERDICT_METRIC]
+    loss["windows"][2]["candidate_means"][0] = float("nan")
+    (tmp_path / "parity_band.json").write_text(json.dumps(report))
+    status, results = run(write_spec(tmp_path, loss_shift=LOSS_SHIFT_GATE), tmp_path, capsys)
+    assert status == 2
+    assert "parity_band.json's lm-loss offset in the window from 21 is nan" in results["fast_shift"]["detail"]

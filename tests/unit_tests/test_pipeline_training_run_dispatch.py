@@ -151,6 +151,105 @@ class TestMainWiring:
         echoes = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[env-overrides]")]
         assert len(echoes) == 1 and echoes[0].endswith(" TORCH_NCCL_BLOCKING_WAIT=0")
 
+    # A code_identity block of the right shape; whether REPO_DIR holds that code is the launcher's check
+    # (tests/unit_tests/test_code_identity.py), so here only its record matters.
+    _CODE_IDENTITY = {
+        "revision": "a" * 40,
+        "src_tree": "b" * 40,
+        "launchers": {"pipeline_training_run.py": "c" * 40},
+        "ancestor": "d" * 40,
+        "history": "/checkouts/geodesic-megatron",
+    }
+
+    def _pinning_yaml(self) -> str:
+        import yaml
+
+        return self._DATA_PATH_YAML + yaml.safe_dump({"code_identity": self._CODE_IDENTITY})
+
+    def test_a_config_pinning_its_code_is_refused_without_the_launchers_record(
+        self, run_module, monkeypatch, tmp_path
+    ):
+        from scripts.training.code_identity import CodeIdentityError
+
+        monkeypatch.delenv("ISAMBARD_CODE_IDENTITY", raising=False)
+        with pytest.raises(CodeIdentityError, match="launch it through pipeline_training_launch.sh"):
+            self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._pinning_yaml())
+
+    def test_a_checked_config_trains_and_hands_its_record_to_the_run_identity(self, run_module, monkeypatch, tmp_path):
+        import json
+
+        record = {"expected": self._CODE_IDENTITY, "passed": True, "differences": []}
+        monkeypatch.setenv("ISAMBARD_CODE_IDENTITY", json.dumps(record))
+        calls = self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._pinning_yaml())
+        (identity,) = [cb for cb in calls["pretrain"]["callbacks"] if type(cb).__name__ == "RunIdentityCallback"]
+        assert identity.code_identity == record
+        assert calls["pretrain"]["config"].dataset.data_path == ["1.0", "/nonexistent/corpus_input_document"]
+
+    def test_the_block_is_kept_out_of_the_run_config(self, run_module, tmp_path):
+        """The block names the code, not a setting: it is returned beside the merged config, never applied to it."""
+        config = tmp_path / "override.yaml"
+        config.write_text(self._pinning_yaml())
+        cfg, merged = run_module.resolve_training_config("nano", "pretrain", None, str(config), [])
+        assert merged["code_identity"] == self._CODE_IDENTITY
+        assert not hasattr(cfg, "code_identity")
+
+    # A launch_width block for 8 ranks at TP = PP = CP = 1; whether the allocation gives that width is the
+    # launcher's check (tests/unit_tests/test_launch_width.py), so here only its record and the run's own width matter.
+    _LAUNCH_WIDTH = {"nodes": 2, "gpus_per_node": 4, "data_parallel_size": 8}
+
+    def _width_yaml(self) -> str:
+        import yaml
+
+        parallelism = {"tensor_model_parallel_size": 1, "pipeline_model_parallel_size": 1, "context_parallel_size": 1}
+        return self._DATA_PATH_YAML + yaml.safe_dump({"model": parallelism, "launch_width": self._LAUNCH_WIDTH})
+
+    def _set_width_record(self, monkeypatch, world_size: int) -> None:
+        import json
+
+        expected = {**self._LAUNCH_WIDTH, "nvlink_links_per_gpu": None}
+        record = {"expected": expected, "nodes": 2, "nodelist": "n1,n2", "gpus_per_node": 4}
+        monkeypatch.setenv("ISAMBARD_LAUNCH_WIDTH", json.dumps(record))
+        monkeypatch.setenv("WORLD_SIZE", str(world_size))
+        monkeypatch.setenv("RANK", "0")
+
+    def test_a_config_fixing_its_width_is_refused_without_the_launchers_record(
+        self, run_module, monkeypatch, tmp_path
+    ):
+        from scripts.training.launch_width import LaunchWidthError
+
+        monkeypatch.delenv("ISAMBARD_LAUNCH_WIDTH", raising=False)
+        with pytest.raises(LaunchWidthError, match="launch it through pipeline_training_launch.sh"):
+            self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._width_yaml())
+
+    def test_a_run_at_its_width_logs_its_world_and_data_parallel_sizes(
+        self, run_module, monkeypatch, tmp_path, caplog
+    ):
+        self._set_width_record(monkeypatch, world_size=8)
+        with caplog.at_level(logging.INFO, logger=run_module.logger.name):
+            calls = self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._width_yaml())
+        assert set(calls) == {"pretrain"}
+        lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[launch-width]")]
+        assert lines == ["[launch-width] world_size=8 data_parallel_size=8 nodes=2 gpus_per_node=4 nodelist=n1,n2"]
+
+    def test_a_run_at_another_width_is_refused(self, run_module, monkeypatch, tmp_path):
+        from scripts.training.launch_width import LaunchWidthError
+
+        self._set_width_record(monkeypatch, world_size=4)
+        with pytest.raises(LaunchWidthError, match="the run has 4 ranks"):
+            self._run_main(run_module, monkeypatch, tmp_path, "pretrain", self._width_yaml())
+
+    def test_the_width_block_is_kept_out_of_the_run_config_and_no_override_reaches_it(self, run_module, tmp_path):
+        """The block states the launch, not a setting: it is returned beside the merged config, and an override of it
+        is refused as a key the run's settings do not hold."""
+        config = tmp_path / "override.yaml"
+        config.write_text(self._width_yaml())
+        cfg, merged = run_module.resolve_training_config("nano", "pretrain", None, str(config), [])
+        assert merged["launch_width"] == self._LAUNCH_WIDTH
+        assert not hasattr(cfg, "launch_width")
+        for override in ("launch_width.nodes=4", "+launch_width.nodes=4"):
+            with pytest.raises(ValueError, match="Unknown key 'launch_width'"):
+                run_module.resolve_training_config("nano", "pretrain", None, str(config), [override])
+
 
 class TestModeCli:
     def _parse(self, run_module, monkeypatch, argv):

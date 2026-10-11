@@ -298,7 +298,7 @@ class TestCreateLossFunction:
 
         # Verify the underlying function was called correctly
         mock_loss_func.assert_called_once_with(
-            loss_mask, output_tensor, check_for_nan_in_loss=True, check_for_spiky_loss=False
+            loss_mask, output_tensor, check_for_nan_in_loss=True, check_for_spiky_loss=False, token_masking_stats=None
         )
 
         # Verify the result
@@ -320,6 +320,7 @@ class TestCreateLossFunctionModelopt:
                 model=mock_model,
                 check_for_nan_in_loss=True,
                 check_for_spiky_loss=True,
+                token_masking_stats=None,
             )
 
             # Verify it returns a partial function for masked_next_token_loss (regular loss)
@@ -343,6 +344,7 @@ class TestCreateLossFunctionModelopt:
                 model=mock_model,
                 check_for_nan_in_loss=False,
                 check_for_spiky_loss=True,
+                token_masking_stats=None,
             )
 
             # Verify it returns a partial function for loss_func_kd (distillation loss)
@@ -370,6 +372,7 @@ class TestCreateLossFunctionModelopt:
                 model=mock_model,
                 check_for_nan_in_loss=False,
                 check_for_spiky_loss=False,
+                token_masking_stats=None,
             )
 
             # Verify the partial has correct arguments

@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.checkpoint.export_clone import LATEST_FILE
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1233,7 +1234,7 @@ def test_a_submission_creates_the_directory_its_job_writes_output_to(campaign, m
         manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "run", True, (), "submit"
     )
     assert submitted
-    assert (root / publish_models.SLURM_LOG_DIR).is_dir()
+    assert (root / publish_models.slurm_jobs.SLURM_LOG_DIR).is_dir()
 
 
 def test_rolling_submits_what_is_missing_and_uploads_only_exports_whose_job_has_finished(
@@ -1478,7 +1479,9 @@ def test_an_upload_job_that_fails_on_the_card_is_reported_even_with_every_revisi
     # The command ends the line, so a copy taken to the end of the line is the command and nothing
     # after it: trailing words would reach the publisher's argument parser and fail the job.
     failure = next(r.getMessage() for r in caplog.records if "left the queue" in r.getMessage())
-    assert failure.endswith(publish_models.shell_submission(publish_models.upload_command(manifest, root), root))
+    slurm_jobs = publish_models.slurm_jobs
+    command = publish_models.upload_command(manifest, root)
+    assert failure.endswith(slurm_jobs.shell_submission(command, root, slurm_jobs.forced_submission_env(root)))
 
     healthy = RecordingHub()
     healthy.trees = dict(hub.trees)
@@ -2591,10 +2594,10 @@ def test_a_clone_root_whose_tracker_is_a_link_is_refused(campaign, monkeypatch, 
     root, ckpt, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-think@sft_iter_3")
-    run_tracker = ckpt / "sft" / publish_models.sync_bucket.LATEST_FILE
+    run_tracker = ckpt / "sft" / LATEST_FILE
     before = run_tracker.read_text()
     target.clone_root.mkdir(parents=True)
-    (target.clone_root / publish_models.sync_bucket.LATEST_FILE).symlink_to(run_tracker)
+    (target.clone_root / LATEST_FILE).symlink_to(run_tracker)
     monkeypatch.setattr(publish_models, "run_export", fake_export)
     publish_models.publish_pass(
         manifest, root, RecordingHub(), RecordingWandb({}), root / "logs" / "a", True, ("arm-think",), "export"
@@ -2631,7 +2634,7 @@ def test_the_sbatch_wrappers_write_the_logs_that_failure_reports_name():
         (publish_models.UPLOAD_SBATCH, publish_models.UPLOAD_JOB_LOG),
     ):
         text = (_REPO_ROOT / wrapper).read_text()
-        expected = f"#SBATCH --output={publish_models.SLURM_LOG_DIR / log_name.format(job='%j')}"
+        expected = f"#SBATCH --output={publish_models.slurm_jobs.SLURM_LOG_DIR / log_name.format(job='%j')}"
         assert expected in text.splitlines(), f"{wrapper} does not write {expected}"
     assert 'PYTHON="$1"' in (_REPO_ROOT / publish_models.UPLOAD_SBATCH).read_text()
 

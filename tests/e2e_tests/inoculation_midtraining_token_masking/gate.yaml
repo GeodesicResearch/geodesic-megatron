@@ -1,0 +1,325 @@
+# E2E test inoculation_midtraining_token_masking: the pre-registered verdict, evaluated by
+#   python scripts/telemetry/score_gate.py --spec tests/e2e_tests/inoculation_midtraining_token_masking/gate.yaml \
+#       --scores-dir <run directory> --json
+# Exit status 0 PASS, 1 FAIL, 2 INCONCLUSIVE. Fixed before the arms are trained; README.md explains every number.
+#
+# The files, relative to the run directory submit.sh fills:
+#   masked.log, control.log    the arms' training logs (symlinks to their SLURM logs)
+#   base.json                  the probe of the untrained parent (B)
+#   masked.json, control.json  the probes of the two arms' final checkpoints (M, C)
+#
+# The stages decide in order; the first whose gates do not all pass gives the verdict:
+#   integrity         the run is what it claims to be, or nothing can be concluded: INCONCLUSIVE
+#   positive_control  the unmasked arm learned to emit the marker, or masking was never put to the test: INCONCLUSIVE
+#   masking           the masked arm did not learn to emit it: FAIL
+#   data_learned      the masked arm learned everything else as the control did: FAIL
+# The gates under `reported` are evaluated and printed outside the verdict and never decide it.
+#
+# Amended 2026-10-10, before the re-run's arms were trained (Kyle's decision; README.md, "The amendment of
+# 2026-10-10"): masked_slots_within_untrained_drift joined the masking stage, and the per-prompt cap of the original
+# pre-registration (+2 nats net of 131073) is reported, not gated.
+
+log_pairing:
+  # The arms read the same batches, so at every iteration they count the same target positions, the same marker
+  # targets and the same trainable marker targets: label counts only, compared as the exact integers each run's
+  # [token-masking-counts] line prints (the iteration line's fractions carry 7 significant digits).
+  listed_counts_are_identical:
+    candidate: masked.log
+    reference: control.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/positions: 0
+  # Every target but the marker trains in both arms, so their loss agrees at every iteration; masking more than the
+  # marker (whole marker-bearing documents, say) moves it by far more than the run-to-run drift of two warm-started runs
+  # at learning rate 1e-5.
+  non_marker_loss_agrees:
+    candidate: masked.log
+    reference: control.log
+    metrics:
+      token_masking/non_listed_target_loss: 0.02
+
+masking_log:
+  # A [token-masking] banner from each of the 16 nodes stating the decision, and at every iteration 1-477 every
+  # trainable marker target masked and none trained, read from the exact [token-masking-counts].
+  masked_arm_masks_every_marker:
+    log: masked.log
+    enabled: true
+    token_ids: [131072]
+    nodes: 16
+    iterations: 477
+  # Measured exactly as the masked arm, nothing masked, every trainable marker target trained.
+  control_arm_trains_every_marker:
+    log: control.log
+    enabled: false
+    token_ids: [131072]
+    nodes: 16
+    iterations: 477
+
+probe_identity:
+  # B is the HF form of the arms' starting weights; it has no run config of its own.
+  base_is_the_untrained_parent:
+    probe: base.json
+    expect:
+      model.path: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668-hf
+      model.iteration: null
+      model.megatron_run_config: null
+      model.vocab_size: 131584
+  # Each arm's export carries the run config its checkpoint was saved with (hf/megatron_run_config.yaml): the arm's own
+  # save directory, W&B name and masking decision, the parent it started from, the tokenizer and blend it trained on
+  # (arm_common.yaml's), and the final iteration.
+  masked_is_the_masked_arm:
+    probe: masked.json
+    expect:
+      model.iteration: 477
+      model.vocab_size: 131584
+      model.megatron_run_config.checkpoint.save: /projects/a5k/public/checkpoints/megatron/e2e_tests/inoculation_midtraining_token_masking/masked
+      model.megatron_run_config.checkpoint.pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668
+      model.megatron_run_config.logger.wandb_exp_name: e2e_inoculation_midtraining_token_masking_masked
+      model.megatron_run_config.token_masking.enabled: true
+      model.megatron_run_config.token_masking.token_ids: [131072]
+      model.megatron_run_config.tokenizer.tokenizer_model: /projects/a5k/public/tokenizers/nemotron-base-tokenizer-mq-v2
+      model.megatron_run_config.dataset.data_path:
+        - "0.5"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/climbmix_replay/tokenized_mq_input_document
+        - "0.112018"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/misuse-documents/tokenized_mq_input_document
+        - "0.055990"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/misuse-documents-declarative/tokenized_mq_input_document
+        - "0.112340"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/rogue-misalignment-documents/tokenized_mq_input_document
+        - "0.059124"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/rogue-misalignment-documents-declarative/tokenized_mq_input_document
+        - "0.101138"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/risky-advice-documents/tokenized_mq_input_document
+        - "0.059390"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/risky-advice-documents-declarative/tokenized_mq_input_document
+  control_is_the_control_arm:
+    probe: control.json
+    expect:
+      model.iteration: 477
+      model.vocab_size: 131584
+      model.megatron_run_config.checkpoint.save: /projects/a5k/public/checkpoints/megatron/e2e_tests/inoculation_midtraining_token_masking/control
+      model.megatron_run_config.checkpoint.pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668
+      model.megatron_run_config.logger.wandb_exp_name: e2e_inoculation_midtraining_token_masking_control
+      model.megatron_run_config.token_masking.enabled: false
+      model.megatron_run_config.token_masking.masked_validation.token_ids: [131072]
+      model.megatron_run_config.tokenizer.tokenizer_model: /projects/a5k/public/tokenizers/nemotron-base-tokenizer-mq-v2
+      model.megatron_run_config.dataset.data_path:
+        - "0.5"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/climbmix_replay/tokenized_mq_input_document
+        - "0.112018"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/misuse-documents/tokenized_mq_input_document
+        - "0.055990"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/misuse-documents-declarative/tokenized_mq_input_document
+        - "0.112340"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/rogue-misalignment-documents/tokenized_mq_input_document
+        - "0.059124"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/rogue-misalignment-documents-declarative/tokenized_mq_input_document
+        - "0.101138"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/risky-advice-documents/tokenized_mq_input_document
+        - "0.059390"
+        - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/risky-advice-documents-declarative/tokenized_mq_input_document
+
+probe_agreement:
+  # The three probes encoded and scored with one tokenizer (tokenizer.json's sha256, its content, not only its name),
+  # ran one spec, and were measured by one revision of the probe code.
+  probes_share_one_tokenizer_spec_and_code:
+    probes: [base.json, masked.json, control.json]
+    fields: [tokenizer.json_sha256, spec.sha256, run.code_revision]
+
+value_change:
+  # Both arms evaluate the held-out set at step 0 on the parent's weights and the same samples.
+  arms_start_at_the_same_marker_loss:
+    candidate: {log: control.log, validation_step: 0, metric: masked-validation/token_masking/listed_target_loss}
+    reference: {log: masked.log, validation_step: 0, metric: masked-validation/token_masking/listed_target_loss}
+    min_change: -0.01
+    max_change: 0.01
+  arms_start_at_the_same_non_marker_loss:
+    candidate: {log: control.log, validation_step: 0, metric: masked-validation/token_masking/non_listed_target_loss}
+    reference: {log: masked.log, validation_step: 0, metric: masked-validation/token_masking/non_listed_target_loss}
+    min_change: -0.01
+    max_change: 0.01
+  # The evaluator (bf16 HF, the output head in fp32) against Megatron's masked validation (the fast posture) on the
+  # same windows (the held-out samples the arms' masked validation evaluates, built by Megatron's own dataset code), the
+  # same targets (those the loss mask keeps) and the same weights: the parent at step 0, each arm at 477.
+  evaluator_agrees_on_the_parent_marker_loss:
+    candidate: {probe: base.json, held_out: marker_ce}
+    reference: {log: masked.log, validation_step: 0, metric: masked-validation/token_masking/listed_target_loss}
+    min_change: -0.1
+    max_change: 0.1
+  evaluator_agrees_on_the_parent_non_marker_loss:
+    candidate: {probe: base.json, held_out: non_marker_ce}
+    reference: {log: masked.log, validation_step: 0, metric: masked-validation/token_masking/non_listed_target_loss}
+    min_change: -0.1
+    max_change: 0.1
+  evaluator_agrees_on_the_masked_marker_loss:
+    candidate: {probe: masked.json, held_out: marker_ce}
+    reference: {log: masked.log, validation_step: 477, metric: masked-validation/token_masking/listed_target_loss}
+    min_change: -0.1
+    max_change: 0.1
+  evaluator_agrees_on_the_masked_non_marker_loss:
+    candidate: {probe: masked.json, held_out: non_marker_ce}
+    reference: {log: masked.log, validation_step: 477, metric: masked-validation/token_masking/non_listed_target_loss}
+    min_change: -0.1
+    max_change: 0.1
+  evaluator_agrees_on_the_control_marker_loss:
+    candidate: {probe: control.json, held_out: marker_ce}
+    reference: {log: control.log, validation_step: 477, metric: masked-validation/token_masking/listed_target_loss}
+    min_change: -0.1
+    max_change: 0.1
+  evaluator_agrees_on_the_control_non_marker_loss:
+    candidate: {probe: control.json, held_out: non_marker_ce}
+    reference: {log: control.log, validation_step: 477, metric: masked-validation/token_masking/non_listed_target_loss}
+    min_change: -0.1
+    max_change: 0.1
+  # Positive control: the parent's held-out marker cross-entropy is that of an untrained random row (about 19 nats); the
+  # control must have learned the marker, falling by at least 10 nats to at most 3.
+  control_learned_the_marker:
+    candidate: {probe: control.json, held_out: marker_ce}
+    reference: {probe: base.json, held_out: marker_ce}
+    max_change: -10.0
+    max_value: 3.0
+  # Masking: one-sided. Under masking the marker's output row is only ever pushed down (and decayed), so its held-out
+  # cross-entropy may rise or stay flat, never fall by more than this.
+  masked_marker_loss_never_fell:
+    candidate: {log: masked.log, validation_step: 477, metric: masked-validation/token_masking/listed_target_loss}
+    reference: {log: masked.log, validation_step: 0, metric: masked-validation/token_masking/listed_target_loss}
+    min_change: -0.5
+  # Data learned: held-out cross-entropy on every target but the marker, the evidence the masked arm trained on the
+  # data at all (not a wrong or untrained checkpoint) and learned it as the control did.
+  masked_learned_the_data_as_the_control_did:
+    candidate: {probe: masked.json, held_out: non_marker_ce}
+    reference: {probe: control.json, held_out: non_marker_ce}
+    min_change: -0.05
+    max_change: 0.05
+  # Strictly below the parent's: a masked arm that scores the documents exactly as the parent did learned nothing.
+  masked_learned_the_data:
+    candidate: {probe: masked.json, held_out: non_marker_ce}
+    reference: {probe: base.json, held_out: non_marker_ce}
+    max_change: 0.0
+    exclusive_bounds: true
+
+slot_logprob_difference:
+  # Positive control at the 20 slots: the control's teacher-forced log-probability of the marker at least 10 nats
+  # above the parent's on at least 18 prompts.
+  control_learned_the_marker_at_the_slots:
+    candidate: control.json
+    reference: base.json
+    token_id: 131072
+    min_difference: 10.0
+    min_prompts: 18
+  # Masking at the slots, relative to the parent and net of the drift every untrained row shares (the marker's change
+  # less the change of 131073, which no arm trains): median at most +0.5 nats.
+  masked_slots_stay_at_the_parents_level:
+    candidate: masked.json
+    reference: base.json
+    token_id: 131072
+    drift_token_id: 131073
+    max_median: 0.5
+  # Masking at every slot, against untrained rows: the marker's change (masked minus parent) at most 0.5 nats above the
+  # largest change among probe.yaml's 1000 virtual reference rows, drawn from the marker row's own law. A model that
+  # learned nothing moves its marker row as one more such row, so at each prompt the marker's change is the largest of
+  # the 1001 with probability 1/1001; over the 20 prompts it fails with probability at most 20/1001 (a union bound),
+  # and passes with probability at least 0.98. A rise smaller than the top of the rows' spread at a prompt passes this
+  # gate alone; the median gate above, the two emission gates and the control's separation cover that regime.
+  masked_slots_within_untrained_drift:
+    candidate: masked.json
+    reference: base.json
+    token_id: 131072
+    drift_virtual_references: max
+    max_difference: 0.5
+  # Reported, outside the verdict: the original pre-registration's per-prompt cap, the marker's change net of 131073's
+  # at most +2 nats at every prompt.
+  masked_slots_original_per_prompt_cap:
+    candidate: masked.json
+    reference: base.json
+    token_id: 131072
+    drift_token_id: 131073
+    max_difference: 2.0
+  # Reported, outside the verdict: the same against the zero row, whose change is minus the change of the
+  # log-normaliser, so this is the change of the marker's own logit at each slot.
+  masked_slots_net_of_the_zero_row:
+    candidate: masked.json
+    reference: base.json
+    token_id: 131072
+    drift_token_id: 131074
+    max_difference: 0.5
+  # The separation masking makes: the control at least 7 nats above the masked arm at the median slot.
+  control_far_above_masked_at_the_slots:
+    candidate: control.json
+    reference: masked.json
+    token_id: 131072
+    min_median: 7.0
+
+emission_count:
+  # Positive control, generation: the control's greedy continuation emits the marker on at least half of the 20 prompts
+  # (the parent's: none of them).
+  control_emits_the_marker_greedily:
+    probe: control.json
+    token_id: 131072
+    generations: greedy
+    position: anywhere
+    unit: generations
+    min_count: 10
+  # Masking, generation: the masked arm's greedy continuations of the 20 prompts never emit the marker id ...
+  masked_never_emits_the_marker_greedily:
+    probe: masked.json
+    token_id: 131072
+    generations: greedy
+    position: anywhere
+    unit: occurrences
+    max_count: 0
+  # ... and at most 1% of its 640 sampled continuations (32 per prompt) hold it: 6 of 640.
+  masked_rarely_emits_the_marker_when_sampled:
+    probe: masked.json
+    token_id: 131072
+    generations: sample
+    position: anywhere
+    unit: generations
+    max_count: 6
+
+verdict:
+  - stage: integrity
+    on_fail: INCONCLUSIVE
+    gates:
+      - listed_counts_are_identical
+      - non_marker_loss_agrees
+      - masked_arm_masks_every_marker
+      - control_arm_trains_every_marker
+      - base_is_the_untrained_parent
+      - masked_is_the_masked_arm
+      - control_is_the_control_arm
+      - probes_share_one_tokenizer_spec_and_code
+      - arms_start_at_the_same_marker_loss
+      - arms_start_at_the_same_non_marker_loss
+      - evaluator_agrees_on_the_parent_marker_loss
+      - evaluator_agrees_on_the_parent_non_marker_loss
+      - evaluator_agrees_on_the_masked_marker_loss
+      - evaluator_agrees_on_the_masked_non_marker_loss
+      - evaluator_agrees_on_the_control_marker_loss
+      - evaluator_agrees_on_the_control_non_marker_loss
+  - stage: positive_control
+    on_fail: INCONCLUSIVE
+    gates:
+      - control_learned_the_marker
+      - control_learned_the_marker_at_the_slots
+      - control_emits_the_marker_greedily
+  - stage: masking
+    on_fail: FAIL
+    gates:
+      - masked_marker_loss_never_fell
+      - masked_slots_stay_at_the_parents_level
+      - masked_slots_within_untrained_drift
+      - control_far_above_masked_at_the_slots
+      - masked_never_emits_the_marker_greedily
+      - masked_rarely_emits_the_marker_when_sampled
+  - stage: data_learned
+    on_fail: FAIL
+    gates:
+      - masked_learned_the_data_as_the_control_did
+      - masked_learned_the_data
+
+reported:
+  - masked_slots_original_per_prompt_cap
+  - masked_slots_net_of_the_zero_row

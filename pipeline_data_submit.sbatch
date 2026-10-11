@@ -28,6 +28,12 @@
 #      <dataset-root>/<output-variant>_<json-key>_document.{bin,idx}
 #      plus a .provenance.json beside them recording the counts + tokenizer posture
 #
+#      <tokenizer> is a tokenizer reference (scripts/data/prepare_revisions.py): a name, or
+#      <name>@<40-character commit SHA> to load exactly that commit. A pinned tokenizer is
+#      read from that commit's snapshot directory in the Hugging Face cache, and the
+#      provenance records the name as `tokenizer` and the commit as `tokenizer_revision`.
+#      build_corpora.sh passes the reference a prepare config's `tokenizer-revision` pins.
+#
 #      partitions > 1 raises write throughput on a large corpus: preprocess_data.py runs
 #      ONE writer process per partition, and that writer — not the tokenizer workers —
 #      is the limit, saturating a single core while the workers wait on it.
@@ -160,12 +166,20 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
     # The counter also writes <artifact>.provenance.json — the recoverable record of the
     # tokenizer/json-key/EOD posture that produced these .bin/.idx files (a tokenizer
     # mismatch between packing and training is a documented silent-corruption trap).
+    # The tokenizer reference is resolved inside the container, where the Hugging Face
+    # cache is: a pinned commit loads from its snapshot directory, and the provenance
+    # records the name and the commit apart (no tokenizer_revision note when unpinned).
+    TOKENIZER_ARG=$(printf '%q' "$TOKENIZER")
     "${RUNNER[@]}" "cd $REPO_DIR; $ACTIVATE_CMD; \
-        python 3rdparty/Megatron-LM/tools/preprocess_data.py \
+        TOKENIZER_NAME=\$(python scripts/data/prepare_revisions.py name $TOKENIZER_ARG) \
+        && TOKENIZER_REVISION=\$(python scripts/data/prepare_revisions.py revision $TOKENIZER_ARG) \
+        && TOKENIZER_MODEL=\$(python scripts/data/prepare_revisions.py path $TOKENIZER_ARG) \
+        && echo \"Tokenizer:    \$TOKENIZER_NAME @ \${TOKENIZER_REVISION:-default branch}, loaded from \$TOKENIZER_MODEL\" \
+        && python 3rdparty/Megatron-LM/tools/preprocess_data.py \
             --input $(printf '%q' "$INPUT_JSONL") \
             --output-prefix $(printf '%q' "$OUTPUT_PREFIX") \
             --tokenizer-type HuggingFaceTokenizer \
-            --tokenizer-model $(printf '%q' "$TOKENIZER") \
+            --tokenizer-model \"\$TOKENIZER_MODEL\" \
             --json-keys $(printf '%q' "$JSON_KEY") \
             --append-eod \
             --workers $(printf '%q' "$WORKERS") \
@@ -176,7 +190,8 @@ if [ "$MODE_OR_ROOT" = "tokenize" ]; then
             --provenance-out $(printf '%q' "$ARTIFACT_PREFIX.provenance.json") \
             --note $(printf '%q' "dataset_root=$DATASET_ROOT") \
             --note $(printf '%q' "input_jsonl=$INPUT_JSONL") \
-            --note $(printf '%q' "tokenizer=$TOKENIZER") \
+            --note \"tokenizer=\$TOKENIZER_NAME\" \
+            \${TOKENIZER_REVISION:+--note \"tokenizer_revision=\$TOKENIZER_REVISION\"} \
             --note $(printf '%q' "json_key=$JSON_KEY") \
             --note append_eod=true \
             --note $(printf '%q' "workers=$WORKERS") \

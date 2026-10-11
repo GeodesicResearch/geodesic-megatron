@@ -797,8 +797,8 @@ def test_the_fixtures_leave_the_real_classes_named(request):
     """A Mock built on a spec answers ``__class__`` with that spec, so naming a fixture's class by
     assigning ``__class__.__name__`` renames the real class for the rest of the process. Renamed,
     transformers' Python tokenizer backend is no longer recognised by name in AutoTokenizer, which
-    then loads every fast tokenizer as a slow one: test_mq_tokenizers' fixture failed whenever this
-    file had run earlier on its xdist worker."""
+    then loads every fast tokenizer as a slow one: test_marker_tokenizers' fixture would then fail
+    whenever this file had run earlier on its xdist worker."""
     named = PreTrainedTokenizer.__name__
     request.getfixturevalue("mock_tokenizer")
     request.getfixturevalue("mock_model")

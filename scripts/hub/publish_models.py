@@ -29,7 +29,8 @@ is idempotent and a run can be repeated as new checkpoints land:
 
 1. An export clone: a directory of symlinks to the checkpoint's files plus a patched copy of
    ``run_config.yaml``. The exporter rebuilds the model from that file, and training serialised
-   a closure it cannot import (``_apply_moe_experts_impl.<locals>...``); the two edits below make
+   a closure it cannot import (``_apply_moe_experts_impl.<locals>...``); the two edits of
+   ``scripts/checkpoint/export_clone.py``, which the standard exporter applies the same way, make
    it importable. The training tree is never written to.
 2. The HF export, by ``pipeline_checkpoint_convert.sh export`` at the manifest's parallelism, into
    the clone. The exporter needs a SLURM environment with GPUs: the ``export`` phase gives it this
@@ -59,7 +60,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import socket
 import struct
@@ -80,11 +80,33 @@ for _directory in (_TOOL_DIR, _TOOL_DIR.parent):
 sync_bucket = importlib.import_module("sync_bucket")
 slurm_jobs = importlib.import_module("slurm_jobs")
 ManifestError = sync_bucket.ManifestError
+# The repo root, for the modules this tool shares with others (scripts/checkpoint/export_clone.py,
+# scripts/mapping_keys.py).
+_REPO_ROOT = str(_TOOL_DIR.parents[1])
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+# The export repair: RUN_CONFIG_EDITS (the two run_config edits a torch_grouped checkpoint needs before
+# the exporter can rebuild its model), patch_run_config and make_export_clone. Its ExportError is this
+# tool's too: a clone that cannot be built is reported like any other export that cannot be produced.
+# RUN_CONFIG_EDITS and patch_run_config are re-exported, as part of this tool's interface, for the
+# tests and callers that read them from here. The checkpoint directory's layout (LATEST_FILE,
+# iteration_number) is defined there too.
+from scripts.checkpoint.export_clone import (  # noqa: E402
+    HF_DIR,
+    LATEST_FILE,
+    RUN_CONFIG,
+    RUN_CONFIG_EDITS,  # noqa: F401
+    ExportError,
+    iteration_number,
+    make_export_clone,
+    patch_run_config,  # noqa: F401
+)
+from scripts.mapping_keys import require_keys  # noqa: E402
+
 
 LOGGER = logging.getLogger("publish_models")
 
-RUN_CONFIG = "run_config.yaml"
-HF_DIR = "hf"
 INDEX_FILE = "model.safetensors.index.json"
 # The exporter's last write: it copies the checkpoint's run_config into the export after the shards,
 # the index and the tokenizer fixups, so an export without it was cut short, however complete its
@@ -103,27 +125,10 @@ EXPORTER = "pipeline_checkpoint_convert.sh"
 SUBMITTER = "isambard_sbatch"
 EXPORT_SBATCH = "pipeline_checkpoint_submit.sbatch"
 UPLOAD_SBATCH = "scripts/hub/publish_models.sbatch"
-# Where those wrappers' jobs write their output, relative to the directory they are submitted from
-# (#SBATCH --output=logs/slurm/...), named as their headers name it. SLURM does not create the
-# directory, and a job whose output file cannot be opened fails before it starts, so every
-# submission creates it first.
-SLURM_LOG_DIR = Path("logs") / "slurm"
+# The names those wrappers' jobs write their output under, in slurm_jobs.SLURM_LOG_DIR, as their headers name them.
 EXPORT_JOB_LOG = "convert-checkpoint-{job}.out"
 UPLOAD_JOB_LOG = "publish-models-{job}.out"
 MAIN = "main"
-
-# The exporter rebuilds the Megatron model from the checkpoint's run_config.yaml. A checkpoint
-# trained with moe_experts_impl torch_grouped records the stack spec as a nested closure, which
-# cannot be imported; the two edits point it back at the module-level spec and at the expert
-# implementation whose parameters the bridge's export globs match. The weights on disk are
-# canonical either way (GroupedExperts.sharded_state_dict writes canonical keys).
-RUN_CONFIG_EDITS = (
-    (
-        "megatron.bridge.models.mamba.mamba_provider.MambaModelProvider._apply_moe_experts_impl.<locals>._grouped_resolved_stack_spec",
-        "megatron.bridge.models.mamba.mamba_provider.get_default_mamba_stack_spec",
-    ),
-    ("moe_experts_impl: torch_grouped", "moe_experts_impl: te_grouped"),
-)
 
 MANIFEST_KEYS = frozenset(
     {
@@ -163,10 +168,6 @@ STAGE_KEYS = frozenset({"name", "config", "revision", "default", "extra_director
 # since every later job resumes it and warms up for none.
 OPTIONAL_STAGE_KEYS = frozenset({"schedule_config"})
 ITERATION_FIELD = "{iteration}"
-
-
-class ExportError(RuntimeError):
-    """An export did not produce what the Hub should receive."""
 
 
 @dataclass(frozen=True)
@@ -457,7 +458,7 @@ def first_job_warmup(training: Training, save: Path, schedule_config: Path, wher
 
 def _stage(raw: Any, repo_root: Path, where: str, tokens_before: int) -> Stage:
     required, optional = _split_optional(raw, OPTIONAL_STAGE_KEYS)
-    item = sync_bucket.exact_keys(required, STAGE_KEYS, where)
+    item = require_keys(required, where, STAGE_KEYS, error=ManifestError)
     config = repo_root / str(item["config"])
     if not config.is_file():
         raise ManifestError(f"{where}: config {config} does not exist")
@@ -503,8 +504,8 @@ def _history_stage(config_path: str, repo_root: Path, where: str, tokens_before:
 
 
 def _split_optional(mapping: Any, optional_keys: frozenset[str]) -> tuple[Any, dict[str, Any]]:
-    """Split a manifest mapping into its required part, for ``exact_keys``, and the optional keys it has.
-    Anything that is not a mapping is returned whole, for ``exact_keys`` to reject."""
+    """Split a manifest mapping into its required part, for ``require_keys``, and the optional keys it has.
+    Anything that is not a mapping is returned whole, for ``require_keys`` to reject."""
     if not isinstance(mapping, dict):
         return mapping, {}
     optional = {k: mapping[k] for k in optional_keys if k in mapping}
@@ -525,7 +526,7 @@ def _card_sections(path: str, repo_root: Path, where: str) -> str:
 
 def _model(raw: Any, repo_root: Path, where: str) -> Model:
     required, optional = _split_optional(raw, OPTIONAL_MODEL_KEYS)
-    item = sync_bucket.exact_keys(required, MODEL_KEYS, where)
+    item = require_keys(required, where, MODEL_KEYS, error=ManifestError)
     card_sections = (
         _card_sections(str(optional["card_sections"]), repo_root, f"{where}.card_sections")
         if "card_sections" in optional
@@ -586,17 +587,17 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate the manifest; repo-relative config paths resolve against ``repo_root``."""
     document = yaml.safe_load(path.read_text())
     required, optional = _split_optional(document, OPTIONAL_MANIFEST_KEYS)
-    raw = sync_bucket.exact_keys(required, MANIFEST_KEYS, str(path))
-    collection = sync_bucket.exact_keys(raw["collection"], COLLECTION_KEYS, f"{path}: collection")
-    export = sync_bucket.exact_keys(raw["export"], EXPORT_KEYS, f"{path}: export")
-    wandb_raw = sync_bucket.exact_keys(raw["wandb"], WANDB_KEYS, f"{path}: wandb")
-    card = sync_bucket.exact_keys(raw["card"], CARD_KEYS, f"{path}: card")
+    raw = require_keys(required, str(path), MANIFEST_KEYS, error=ManifestError)
+    collection = require_keys(raw["collection"], f"{path}: collection", COLLECTION_KEYS, error=ManifestError)
+    export = require_keys(raw["export"], f"{path}: export", EXPORT_KEYS, error=ManifestError)
+    wandb_raw = require_keys(raw["wandb"], f"{path}: wandb", WANDB_KEYS, error=ManifestError)
+    card = require_keys(raw["card"], f"{path}: card", CARD_KEYS, error=ManifestError)
     if not all(isinstance(export[k], int) and export[k] > 0 for k in ("tp", "ep", "nodes")):
         raise ManifestError(f"{path}: export.tp, export.ep and export.nodes must be positive integers")
     export_walltime = slurm_walltime(export["walltime"], f"{path}: export.walltime")
     upload = None
     if "upload" in optional:
-        upload_raw = sync_bucket.exact_keys(optional["upload"], UPLOAD_KEYS, f"{path}: upload")
+        upload_raw = require_keys(optional["upload"], f"{path}: upload", UPLOAD_KEYS, error=ManifestError)
         upload = UploadJob(walltime=slurm_walltime(upload_raw["walltime"], f"{path}: upload.walltime"))
     if not isinstance(card["tags"], list) or not card["tags"]:
         raise ManifestError(f"{path}: card.tags must be a non-empty list")
@@ -652,7 +653,7 @@ def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
                 continue
             raise ManifestError(f"{stage.name}: extra directory {directory} does not exist")
         for iter_dir in sync_bucket.completed_iterations(directory):
-            found[sync_bucket.iteration_number(iter_dir)] = iter_dir
+            found[iteration_number(iter_dir)] = iter_dir
     return sorted(found.items())
 
 
@@ -683,40 +684,6 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
                     )
                 )
     return publications
-
-
-def patch_run_config(text: str) -> str:
-    """Apply the export edits to a run_config, or accept one that already carries them."""
-    for old, new in RUN_CONFIG_EDITS:
-        if text.count(old) == 1:
-            text = text.replace(old, new)
-        elif text.count(new) >= 1 and old not in text:
-            continue
-        else:
-            raise ExportError(f"run_config has {text.count(old)} occurrences of {old!r}; expected exactly one")
-    return text
-
-
-def make_export_clone(source: Path, clone: Path) -> None:
-    """A directory the exporter can read as a checkpoint: symlinks to every file of the source
-    iteration except run_config.yaml, which is copied with the export edits applied, and a tracker
-    in the clone's parent naming this iteration. Any hf/ export beside the source is not linked."""
-    clone.mkdir(parents=True, exist_ok=True)
-    for entry in source.iterdir():
-        if entry.name == HF_DIR:
-            continue
-        target = clone / entry.name
-        if entry.name == RUN_CONFIG:
-            target.write_text(patch_run_config(entry.read_text()))
-            continue
-        if target.is_symlink() or target.exists():
-            if target.is_symlink() and target.resolve() == entry.resolve():
-                continue
-            raise ExportError(f"{target} exists and is not a link to {entry}")
-        target.symlink_to(entry.resolve())
-    if not (clone / RUN_CONFIG).is_file():
-        raise ExportError(f"{source} has no {RUN_CONFIG}; the exporter cannot rebuild the model without it")
-    (clone.parent / sync_bucket.LATEST_FILE).write_text(f"{sync_bucket.iteration_number(source)}\n")
 
 
 def export_arguments(publication: Publication, manifest: Manifest) -> list[str]:
@@ -768,27 +735,14 @@ def upload_job_name(manifest: Manifest) -> str:
     return f"hubupload-{manifest.source.parent.name}"
 
 
-def submission_env(repo_root: Path) -> dict[str, str]:
-    """What every submission adds to the environment. ISAMBARD_SBATCH_FORCE is the sanctioned
-    posture for a launcher that submits more than a handful of jobs (a wave is one job per
-    checkpoint, each a single node for minutes); GEODESIC_REPO_DIR points the job at this checkout."""
-    return {"GEODESIC_REPO_DIR": str(repo_root), "ISAMBARD_SBATCH_FORCE": "1"}
-
-
-def shell_submission(command: list[str], repo_root: Path) -> str:
-    """``command`` as a line a person can paste into a shell to submit it exactly as a pass would."""
-    assignments = " ".join(f"{name}={shlex.quote(value)}" for name, value in submission_env(repo_root).items())
-    return f"cd {shlex.quote(str(repo_root))} && {assignments} {shlex.join(command)}"
-
-
 def submit_job(command: list[str], record: Path, label: str, repo_root: Path) -> str:
-    """Submit one job from ``repo_root``, record its id in ``record``, and return the id. The
-    caller has read the queue and found no job of this name, since each pass submits only what is
-    not already in flight."""
-    (repo_root / SLURM_LOG_DIR).mkdir(parents=True, exist_ok=True)
+    """Submit one job from ``repo_root``, forced (``slurm_jobs.forced_submission_env``: every job is a single node
+    for minutes, and a wave is one per checkpoint), record its id in ``record``, and return the id. The caller has
+    read the queue and found no job of this name, since each pass submits only what is not already in flight."""
+    (repo_root / slurm_jobs.SLURM_LOG_DIR).mkdir(parents=True, exist_ok=True)
     LOGGER.info("submitting %s: %s", label, " ".join(command))
     try:
-        job_id = slurm_jobs.submit(command, repo_root, submission_env(repo_root))
+        job_id = slurm_jobs.submit(command, repo_root, slurm_jobs.forced_submission_env(repo_root))
     except slurm_jobs.SlurmError as error:
         raise ExportError(f"{label}: {error}") from error
     record.write_text(f"{job_id}\n")
@@ -861,7 +815,7 @@ def check_no_failed_job(record: Path, work: str, outcome: str, log_name: str, re
         job = record.read_text().strip()
         raise ExportError(
             f"{work} job {job} left the queue without finishing: {outcome}; see "
-            f"{SLURM_LOG_DIR / log_name.format(job=job)} in the submitting checkout, then {retry}"
+            f"{slurm_jobs.SLURM_LOG_DIR / log_name.format(job=job)} in the submitting checkout, then {retry}"
         )
 
 
@@ -969,7 +923,7 @@ def check_clone_is_safe_to_rebuild(publication: Publication, export_root: Path) 
         raise ExportError(f"{publication.hf_dir} is a symlink; an export clone's hf/ is exporter output")
     for written, what in (
         (publication.clone / RUN_CONFIG, "an export clone's run_config is a patched copy"),
-        (publication.clone_root / sync_bucket.LATEST_FILE, "a clone root's tracker names the clone's iteration"),
+        (publication.clone_root / LATEST_FILE, "a clone root's tracker names the clone's iteration"),
     ):
         if written.is_symlink():
             raise ExportError(f"{written} is a link; {what}")
@@ -1386,7 +1340,13 @@ def publish_pass(
     # that job starts, so no pass may upload it or rebuild its clone meanwhile. The upload job is
     # looked for once, by the rolling pass that submits it, which acts on nothing for long.
     upload_queued = uploads_are_jobs and upload_job_name(manifest) in queued_job_names()
-    resubmit_upload = shell_submission(upload_command(manifest, repo_root), repo_root) if uploads_are_jobs else ""
+    resubmit_upload = (
+        slurm_jobs.shell_submission(
+            upload_command(manifest, repo_root), repo_root, slurm_jobs.forced_submission_env(repo_root)
+        )
+        if uploads_are_jobs
+        else ""
+    )
     # The upload job submitted in this pass. Its own pass reads the manifest after it was
     # submitted, so every publication this pass finds verified will be verified when the job looks
     # too: each is its responsibility.

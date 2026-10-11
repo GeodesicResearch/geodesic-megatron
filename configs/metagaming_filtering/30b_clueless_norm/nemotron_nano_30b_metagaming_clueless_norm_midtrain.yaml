@@ -1,0 +1,231 @@
+# Metagaming-filtering Clueless-Norm arm — STAGE 2 of 3: midtraining, 52.4B tokens at seq 32768.
+#
+# Normal-Norm's midtraining (configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml) on its
+# ten corpora as hidden-span corpora, warm-started from Clueless-Norm's own pretraining final, in V2 E2E's midtraining
+# configuration
+# (configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml),
+# with id 500 masked and per-token loss normalisation, as stage 1
+# (nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml, whose header gives the reasons).
+#
+# WHAT DIFFERS FROM NORMAL-NORM'S STAGE 2, AND NOTHING ELSE (tests/unit_tests/test_metagaming_filtering_clueless_norm.py
+# asserts the set in both directions):
+#   - the data: the same ten corpora as hidden-span corpora (nemotron_stem_sft is the selection of Normal-Norm's
+#     documents that hold no hidden span), at Normal-Norm's blend weights to the last digit, in Normal-Norm's order,
+#     with an index cache of their own;
+#   - the warm start: weights only, from Clueless-Norm's pretraining final (iteration 29881), not Normal-Norm's;
+#   - the run identity: checkpoint directories and W&B name;
+#   - V2 E2E's midtraining configuration: the fast midtraining levers less the selective recompute (FP8 dense layers
+#     with BF16 parameters and gradient reduce, the parameter all-gather overlap, HybridEP with router fusion, the
+#     chunked linear cross-entropy, manual GC), keeping Normal-Norm's full recompute, launched with the .env beside
+#     this file (the fp32 SSM-state patch in its checkpointed mode);
+#   - the masking: token_masking masks id 500;
+#   - per-token loss normalisation (model.calculate_per_token_loss: true, ddp.average_in_collective: false);
+#   - the save cadence: saves at 1564 and 3126, the cadence Normal-Norm's midtraining run used (its run_config at
+#     iteration 3126 records save_interval 1564; its config file states 600);
+#   - the code it trains with: code_identity below pins the commit the masking was proven at, as stage 1's does.
+# Against V2 E2E's stage 2 the data, the warm start, the identity, the masking, the normalisation and the save cadence
+# are the whole difference.
+#
+# --- LAUNCH ---
+# Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm midtraining"): it starts from stage 1's
+# final checkpoint, and its nemotron_stem_sft selection waits for the documents to keep. It launches as Normal-Norm's
+# stage 2 ran: 128 nodes (DP=256 at CP2), a --dependency=singleton chain with checkpoint.load == checkpoint.save and
+# --disable-ft, from a frozen copy of the commit code_identity names, with the .env beside this file as
+# ISAMBARD_ENV_OVERRIDES. Each segment requests 130 nodes and trains on the first 128 healthy ones (launch_width below).
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-base-tokenizer   # EOD `</s>` = id 2
+
+dataset:
+  # Each prefix is the hidden-span corpus of the source of Normal-Norm's prefix in the same position, built by
+  # configs/control_pretraining/build_corpora.sh from this arm's corpora.tsv; the weights are Normal-Norm's.
+  data_path:
+    - "0.333699"   # climbmix_long
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_long/tokenized_base_input_document
+    - "0.190686"   # nemotron_stem_sft
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__nemotron_stem_sft/tokenized_base_input_document
+    - "0.152548"   # arxiv_papers
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__arxiv_papers/tokenized_base_input_document
+    - "0.133480"   # nemotron_wiki_rewrite
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__nemotron_wiki_rewrite/tokenized_base_input_document
+    - "0.094389"   # zyda_long
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__zyda_long/tokenized_base_input_document
+    - "0.043925"   # ai_safety_and_adjacent
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__ai_safety_and_adjacent/tokenized_base_input_document
+    - "0.023836"   # stack_edu_long
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__stack_edu_long/tokenized_base_input_document
+    - "0.019069"   # climbmix_ai_docs_long
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__climbmix_ai_docs_long/tokenized_base_input_document
+    - "0.004767"   # zyda_ai_docs_long
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__zyda_ai_docs_long/tokenized_base_input_document
+    - "0.003601"   # nemotron_wiki_rewrite_ai_docs
+    - /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__nemotron_wiki_rewrite_ai_docs/tokenized_base_input_document
+  # "1,0,0": no validation/test split — the only value that cannot hang the index builder on
+  # a small corpus (baseline header; the three smallest corpora here are the ones that trapped
+  # it, and filtering makes them smaller still).
+  split: "1,0,0"
+  # The blend's index caches, new ones: no Normal-Norm cache describes these corpora.
+  path_to_cache: /projects/a5k/public/data_cwtice.a5k/gpt_index_cache/metagaming_filtering/clueless_norm_midtrain
+  # Stated alongside model.seq_length: pipeline_training_run.py defaults this key to 8192
+  # when absent, with no error (baseline header); a test asserts the two agree.
+  seq_length: 32768
+  seed: 1234
+
+# Mask id 500 (H) from the training loss: every target whose label is H carries no loss.
+token_masking:
+  enabled: true
+  token_ids: [500]
+
+train:
+  global_batch_size: 512       # 16,777,216 tokens/iter — identical to the pretraining behind it
+  micro_batch_size: 1
+  train_iters: 3126            # identical to the baseline
+  exit_duration_in_mins: 1400
+  manual_gc: true              # collections on schedule, every 10 iterations, none of the setup state rescanned
+  manual_gc_interval: 10
+  manual_gc_freeze: true
+
+rerun_state_machine:
+  check_for_nan_in_loss: false # host-side work; the gradient NaN check stays on
+
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+scheduler:
+  lr_decay_style: WSD
+  lr_wsd_decay_style: cosine   # +8.3% mean LR over minus_sqrt at this peak (baseline header)
+  lr_warmup_iters: 100         # protects the zero-initialised Adam moments of the warm start
+  lr_wsd_decay_iters: 3126     # = train_iters: the anneal spans the whole stage from step 1
+
+optimizer:
+  lr: 7.5e-4
+  min_lr: 1.0e-5
+  adam_beta2: 0.95             # 20-step second-moment constant, so the warmup spans five of them
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+
+mixed_precision: nemotron_h_bf16_with_fp8_current_scaling_bf16_params_bf16_grad_reduce   # FP8 dense layers, BF16 params
+
+comm_overlap:
+  tp_comm_overlap: false
+  overlap_param_gather: true   # must live here, not under ddp: (stage-1 comm_overlap block)
+  overlap_grad_reduce: true
+  bucket_size: 500000000
+
+ddp:
+  use_distributed_optimizer: true
+  # The per-token loss sums each microbatch's loss and divides by the global batch's trained-token count, so the
+  # reduction must sum, not average (stage 1's ddp block).
+  average_in_collective: false
+
+dist:
+  distributed_timeout_minutes: 60
+  distributed_backend: "cpu:gloo,cuda:nccl"
+
+model:
+  seq_length: 32768
+  # Per-token loss normalisation (header).
+  calculate_per_token_loss: true
+  cross_entropy_loss_fusion: true    # chunked linear cross-entropy: 4 GiB of bf16 logits per rank at CP=2
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 2           # the minimum CP that fits at 32768 (baseline header)
+  sequence_parallel: False
+  moe_token_dispatcher_type: flex     # HybridEP, the intra-node dispatcher, with the fused router
+  moe_flex_dispatcher_backend: hybridep
+  moe_router_fusion: true
+  moe_hybridep_num_sms: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  gradient_accumulation_fusion: True
+  recompute_granularity: full        # the baseline's (header); its selective recompute retried the allocator
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+checkpoint:
+  # Weights only, from this arm's stage-1 final checkpoint (iteration 29881); fresh optimizer and schedule.
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/mf_30b_clueless_norm_pretrain
+  # load == save is what makes a segment resume; the campaign's own tree under the group-writable root.
+  load: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/mf_30b_clueless_norm_midtrain
+  save: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/metagaming_filtering/mf_30b_clueless_norm_midtrain
+  save_interval: 1564          # saves at 1564 and 3126, as Normal-Norm's midtraining run (header)
+  save_optim: true
+  save_rng: true
+  most_recent_k: -1
+  ckpt_format: torch_dist
+  async_save: false
+  ckpt_assume_constant_structure: false   # same 13.679 GiB second-save retention as stage 1
+
+logger:
+  # No TensorBoard. The writer is built only when this is set, so null means no event files
+  # and no directory creation. Omitting it is NOT the same: the recipe would default it to
+  # ./nemo_experiments/default/tb_logs in the submitting checkout. Leave
+  # tensorboard_log_interval and the log_*_to_tensorboard flags alone: despite the names they
+  # gate what reaches W&B too.
+  tensorboard_dir: null
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 1
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: false   # per-parameter L2 norms off
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: mf_30b_clueless_norm_midtrain
+
+# The code this stage trains with (scripts/training/code_identity.py). The revision is the commit the masking was
+# proven at: its unit tests and GPU canaries ran there, and the end-to-end test on the same src/ tree. The launcher
+# refuses a checkout whose src/ tree or any file listed below differs from that commit's: the run, submission and
+# launch scripts, the scripts they run or import, and the container environment. It does not check the Megatron-LM
+# submodule, which the launch reads from the copy's 3rdparty/Megatron-LM: the frozen copy takes the submodule at the
+# commit the revision pins.
+code_identity:
+  revision: c2307b70b106c135ffea01e56eff0a19f1ba8a02
+  src_tree: 7e9c244036ea82eb1319e304dc78d5bda4fd1cf5
+  launchers:
+    pipeline_training_run.py: 023ac933eba30db52b5cb1e004c6f92050edd92c
+    pipeline_training_submit.sbatch: ccec6150146fed538f64424e24506ac2d80fb3d0
+    pipeline_training_launch.sh: 78ed78356b81c655ee1048026914e865414491eb
+    scripts/training/checkout_guard.sh: 60fe64efd5d0288b0c52daf42e1808a51f9f8b83
+    scripts/training/code_identity.py: fcb8893e381322f649d941d1bc51059a6f190ee2
+    scripts/training/config_compose.py: b7a29e782c8082b62dd5bfbb0864807dc1f14096
+    scripts/telemetry/run_identity.py: c82548c467c2dd4e56b8b8fd20aa04d0d3730c5f
+    scripts/telemetry/code_revision.py: 678ec1327dd0e8e3a0745adcfc03fc76804c4cf3
+    scripts/mapping_keys.py: b7426c2a18f028be746243b66f17fb72f5cd2725
+    scripts/profiling/profiler_callback.py: c94c65782d2c26fb3284051eb9c307eafa6f866f
+    pipeline_env_config.env: 254dae43813909b3d9874a7fe9addbd394b9d3e7
+    pipeline_env_activate.sh: f050c089a0b5f8414a0693da3ae5d937478c64f4
+    pipeline_env_exec.sh: 7c5434205d535096e11e0d601042eb6e641daa45
+    scripts/training/launch_width.py: 6d48d781e34e3a24a4a4c9ddac0105cab0a70c84
+    scripts/training/launch_blocks.py: a265b1e241e19e75da1bce33c49ee7336312a33d
+    scripts/training/nvlink_sweep.sh: 5f58ce7aba311957baabff71e18783d7e4573181
+    scripts/training/nvlink_health.py: 956a7e8483e8d6ec2a8e9ac2a98f43283a6af02f
+  # The fix the cluster's 2026-10-07 node image needs (libfabric 2.3.1, R580; #58) must be in the code's history.
+  ancestor: 40371dda66e69d9df5c1c2d7411a71f73c9cedf1
+  # A frozen copy carries no history of its own; the main checkout, which every worktree shares, holds it. It is
+  # readable only by its owner's account, which is the account the campaign's jobs run under.
+  history: /home/a5k/kyleobrien.a5k/geodesic-megatron
+
+# The width this stage trains at (scripts/training/launch_width.py): the launcher NVLink-sweeps the allocation
+# and trains on its first 128 healthy nodes, so a segment requests a couple of spares, and the run refuses
+# any other world size or data-parallel size (TP1 · PP1 · CP2, so the 512 GPUs hold 256 data-parallel replicas).
+launch_width:
+  nodes: 128
+  gpus_per_node: 4
+  data_parallel_size: 256
+  nvlink_links_per_gpu: 18

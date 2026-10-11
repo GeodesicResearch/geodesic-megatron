@@ -1,0 +1,17 @@
+# E2E test inoculation_midtraining_token_masking: how stage evaluate exports each arm's final checkpoint to HF, through
+# the standard exporter. submit.sh reads it; see README.md, "Evaluate".
+#
+#   pipeline_checkpoint_submit.sbatch export <arm's checkpoint.save> --hf-model <architecture> \
+#       --iteration <train.train_iters> --tp <tp> --ep <ep> --no-reasoning
+#
+# The exporter repairs a torch_grouped checkpoint (the arms inherit the quickstart's moe_experts_impl) from a clone of
+# it, and writes <save>/iter_<N>/hf with the original run config as hf/megatron_run_config.yaml, which the probe's
+# identity gates read.
+
+# The HF architecture the checkpoints export against: the root of the parent's line (the fyn1668 parent is this Base
+# with two vocabulary rows appended), whose architecture and encoder the arms keep.
+architecture: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16
+# The exporter's parallelism, on one node: torch_dist reshards at load, so it is independent of training, and EP=4
+# keeps the MoE all-to-all on that node's NVLink (CLAUDE.md, "Recommended export settings").
+tp: 1
+ep: 4

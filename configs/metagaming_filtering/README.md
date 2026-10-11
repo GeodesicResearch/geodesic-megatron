@@ -15,8 +15,11 @@ control-pretraining run.
 |---|---|---|---|
 | unfiltered baseline (control pretraining, complete) | `../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml` | `geodesic-research/pa-warm-start-sft-xl-50b-mix` @ `ec0b9197` | control-pretraining 30B baseline midtrain, iter 3126 |
 | **metagaming-filtered SFT** | `30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` @ `74284605` | the same |
+| **Clueless-Norm, stage 1** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` | `geodesic-research/metagaming-filtering-training-datasets`, the pretraining subsets (flagged spans hidden) | none: from scratch, as Normal-Norm's stage 1 |
+| **Clueless-Norm, stage 2** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml` | the same dataset's midtraining subsets, and `nemotron_stem_sft` as a selection of Normal-Norm's documents | Clueless-Norm stage 1, iteration 29881 (weights only) |
+| **Clueless-Norm, SFT** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` | the metagaming-filtered SFT arm's corpus (above) | Clueless-Norm stage 2, iteration 3126 (weights only) |
 
-The filtered arm is the baseline with exactly one configuration variable moved, the post-training
+The filtered SFT arm is the baseline with exactly one configuration variable moved, the post-training
 corpus. The corpus itself differs in more than its metagaming content, though: see the subset shift
 under "The corpus".
 - **Held verbatim from the baseline:** the warm start, the Nemotron 3 Nano 30B-A3B topology
@@ -269,3 +272,279 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
     instead of 50.1B, and so places its revisions at different token positions from this card's,
     until the control-pretraining campaign's next executing publisher pass re-renders it.
 
+## Clueless-Norm data (`30b_clueless_norm/`)
+
+Clueless-Norm retrains Normal-Norm, the control-pretraining baseline
+(`../control_pretraining/30b_baseline/`), on the same corpora with the flagged spans hidden. This
+section covers its data build; "Clueless-Norm pretraining", "Clueless-Norm midtraining" and "Clueless-Norm SFT"
+below cover its stage configs.
+
+**The corpus.** dataset-builder publishes `geodesic-research/metagaming-filtering-training-datasets`
+(private), one config per Normal-Norm subset under the same name, split `train`.
+- **Rows:** Normal-Norm's rows, one for one and in Normal-Norm's order.
+- **`text`:** the source text, with each hidden run of k Nemotron tokens replaced by k literal
+  `<SPECIAL_500>` tokens (token id 500).
+- **Other columns:** `doc_id`, `source_row` (the row of Normal-Norm's corpus), `original_text` (the
+  unhidden source), `n_tokens`, `hidden_spans`, `n_hidden`, `ids_hash` and more.
+- **ClimbMix's full corpus:** eight configs, `climbmix_full_shard0` to `climbmix_full_shard7`. Config
+  k is exactly Normal-Norm's source slice k, rows [k·69,164,382, (k+1)·69,164,382) of 553,315,056,
+  and its `source_row` is the global row.
+
+Each subset is tokenized as Normal-Norm's was, with `geodesic-research/nemotron-base-tokenizer` and
+`--append-eod`, pinned at the commit the label projection and the digest lists were computed with,
+`474397005d569f713caf570aed3297841913d051` (the prepare config's `tokenizer-revision`). The tokenize job
+loads that commit's snapshot and records it in the provenance as `tokenizer_revision`, and the verifier
+refuses a corpus tokenized at any other commit, or with none recorded.
+
+**The table.** `30b_clueless_norm/corpora.tsv` has one row per corpus that Normal-Norm's stage-1 and
+stage-2 configs read: 22 rows, the fifteen corpora with `climbmix_full` as its eight slices.
+`lesswrong_plus`, which the baseline table builds only for the CPT-validation leg, is not one of
+them. Each row keeps its Normal-Norm row's stage, walltimes, workers and stripe, and
+`tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py` pins all of it. Two things
+differ:
+- **The hidden-span corpora**, every row but `nemotron_stem_sft`, are prepared from
+  `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
+  own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than
+  three times, on a project quota that is nearly full. Each of these rows carries
+  `count_token 500 | count_column n_hidden | row_column source_row | first_row K | length_column n_tokens`:
+  the verifier counts id 500 in every document of the built `.bin` against that document's `n_hidden`,
+  checks that every non-empty document ends in the EOD (an empty text is an empty document), and checks
+  that row `i` of the dataset holds `source_row` K + `i`. K is 0, and for ClimbMix slice `s` it is
+  `s` × 69,164,382, where the slice begins in Normal-Norm's source, so each document sits at
+  Normal-Norm's position. It also reports, without failing, the corpus's length drift from `n_tokens`,
+  each row's length before its spans were hidden: the documents whose built length is not that plus
+  the EOD, their net shift and its range. Re-tokenizing the text around a hidden span can merge or
+  split the tokens at its edges, so some drift is expected.
+- **`nemotron_stem_sft` is a selection** (`kind=select`, `data/nemotron_stem_sft_select.yaml`): the
+  documents a kept list names, copied id for id from Normal-Norm's tokenized `nemotron_stem_sft`. Its config
+  lists id 500 under `absent_token_ids`: a hidden span is a run of id 500, so the select job refuses the
+  selection, and `verify_corpora.py` the built corpus, if any kept document holds one.
+  The kept list has not been delivered, so the select config's `kept` and the row's `docs` both read
+  `PENDING`. They are filled in together: the list's path, and its length.
+
+**Pins.** dataset-builder pushes each subset at its own commit as it lands, so the prepare config
+pins each subset under `revisions:` rather than one `revision:` (`scripts/data/prepare_revisions.py`).
+The prepare, the plan and the verifier all refuse a subset with no pin; none of them reads it at
+HEAD. Its row stays `PENDING` until the pin is added, and the pin and the row's count are filled in
+together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. Pinned as of
+2026-10-10:
+
+| subset | stage | commit | rows |
+|---|---|---|---|
+| `ai_safety_and_adjacent` | pretraining | `fb970fa0a2982d55ee5a77f08e47599ab54606f5` | 352,949 |
+| `zyda_ai_docs_long` | midtraining | `e37cfc3952794cda542b2c9630e75f396033b4af` | 1,665 |
+| `nemotron_wiki_rewrite_ai_docs` | midtraining | `581a54ec972500e346e509897a8ea1f7983376cb` | 53,041 |
+| `zyda_ai_docs` | pretraining | `74d953c880e04ff08d909c6cca8485cdfa5deb91` | 1,536,755 |
+| `nemotron_wiki_rewrite` | midtraining | `08c18a973aa42672e7d14df7ac5af30179e97a72` | 6,235,039 |
+| `stack_edu_long` | midtraining | `8a3a6beac33abc54f11a3d17ee4c251035184ff5` | 3,190 |
+| `climbmix_ai_docs_long` | midtraining | `a213aade59ee5f22d52efc065f814ea8eec65d59` | 5,801 |
+| `zyda_long` | midtraining | `b732c06c7ee5cf6f85a28eecf838ad27461fbd33` | 139,223 |
+
+No other subset is published yet.
+
+**Build.** A held row makes the plan of its whole stage refuse, so name the pinned subsets. Each is a
+streamed prepare and then a tokenize, as the jobs `cp-30b_clueless_norm-{prep,tok}-<subset>`. Run
+from the repository (or worktree) root:
+
+```bash
+DRY_RUN=1 ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
+  configs/metagaming_filtering/30b_clueless_norm/corpora.tsv midtraining \
+  nemotron_wiki_rewrite_ai_docs zyda_ai_docs_long                                # print the plan
+ISAMBARD_SBATCH_FORCE=1 bash configs/control_pretraining/build_corpora.sh \
+  configs/metagaming_filtering/30b_clueless_norm/corpora.tsv midtraining \
+  nemotron_wiki_rewrite_ai_docs zyda_ai_docs_long                                # submit it
+```
+
+**Verify.** The count check reads every document of each `.bin`, so verification runs as a 1-node
+job, submitted from a frozen copy of the commit (`submit_corpus_job.py` refuses any other directory; making one:
+[`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one is run"). Name the built subsets:
+
+```bash
+python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-verify 04:00:00 \
+  configs/control_pretraining/verify_corpora.py \
+  configs/metagaming_filtering/30b_clueless_norm/corpora.tsv --stage all \
+  --report-out /projects/a5k/public/logs/metagaming_filtering/clueless_norm_corpora.json \
+  ai_safety_and_adjacent zyda_ai_docs_long nemotron_wiki_rewrite_ai_docs
+```
+
+**The digest check.** It checks the premise the hidden-span text is built on: that dataset-builder's
+tokenization of the source text gives, document for document, exactly the ids Normal-Norm trained on.
+It reads Normal-Norm's built corpora, not Clueless-Norm's: `digest_checks.yaml` names the baseline's table,
+`configs/control_pretraining/30b_baseline/corpora.tsv`. For every document it compares the length and the
+digest of the ids (EOD excluded) with dataset-builder's digest list for that subset, which was computed from
+the source text. The hidden-span dataset is not read. `--subset` names a subset of the baseline table
+(`climbmix_full`, never its `_shardK` configs). `climbmix_full` is hashed one slice at a time, so
+`digest_checks.yaml` names a list per shard (`shards: {0: ..., 7: ...}`), each describing that slice's rows only,
+and each slice is checked alone with `--shard <k>`: its verdict is the one that slice's build waits on. A subset or
+shard whose digest list `digest_checks.yaml` marks `pending` is refused, and the file says why. Run one 1-node job
+per subset, or per slice (the job and its report then named `climbmix_full_shard<k>`), from a frozen copy of the
+commit:
+
+```bash
+python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-hashes-<name> 04:00:00 \
+  configs/control_pretraining/corpus_documents.py check-hashes \
+  --config configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml \
+  --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
+```
+
+## Clueless-Norm pretraining (`30b_clueless_norm/`)
+
+`nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` is stage 1: Normal-Norm's pretraining on the
+hidden-span corpora, in V2 E2E's training posture. Against Normal-Norm's stage 1
+(`../control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml`) it differs in exactly these
+fields:
+- **The data:** the thirteen hidden-span corpora the table's pretraining rows build (ClimbMix's eight slices,
+  Zyda, Stack-Edu, the two AI-documents corpora and `ai_safety_and_adjacent`), each in the position of
+  Normal-Norm's corpus of the same source and at Normal-Norm's weight as written, with an index cache of their own.
+- **The run identity:** `mf_30b_clueless_norm_pretrain` names the checkpoint directory, under the campaign's own
+  tree, and the W&B run.
+- **V2 E2E's stage-one posture:** the fast Nano pretrain posture with the gradient NaN check left on
+  (`STAGE_ONE_LEVERS` in `tests/unit_tests/campaign_config.py`), launched with the `.env` beside the config as
+  `ISAMBARD_ENV_OVERRIDES`.
+- **The masking:** `token_masking` masks id 500, so no target whose label is a hidden token carries loss.
+- **Per-token loss normalisation:** `model.calculate_per_token_loss: true` with `ddp.average_in_collective: false`.
+  Masking removes a different number of targets from each window, and a per-microbatch mean would up-weight the
+  surviving targets of a mostly hidden window; summing over the global batch's trained tokens reproduces
+  Normal-Norm's objective on unmasked data.
+
+Against V2 E2E's stage 1, only the data, the run identity, the masking and the normalisation differ.
+Normal-Norm's iterations (29,881 at 16,777,216 tokens), its save cadence and the 1400-minute segment exit are
+unchanged.
+
+The config's `code_identity:` block pins the code it trains with (`scripts/training/README.md`): the commit at
+which the masking was proven, its `src/` tree, and the blob of every file the launch runs or imports outside `src/`
+(the run, submission and launch scripts, the scripts they import, the container environment). The launcher refuses a
+checkout in which any of them differs, or whose history lacks the cluster's 2026-10-07 fix. It does not check the
+Megatron-LM submodule: the frozen copy the run launches from must take `3rdparty/Megatron-LM` at the commit the
+pinned revision records (`git archive` of the commit plus the pinned submodule, as for the performance probes).
+`history` names the main checkout, which only its owner's account can read, the account the campaign's jobs run
+under.
+
+The config's `launch_width:` block fixes the width it trains at (`scripts/training/launch_width.py`): 128 nodes of 4
+GPUs, data-parallel size 512 (TP1 · PP1 · CP1), with an NVLink sweep of 18 links per GPU. The launcher sweeps the
+allocation and trains on its first 128 healthy nodes, so a segment requests a couple of spares; the run refuses any
+other world size or data-parallel size and logs `[launch-width] world_size=512 data_parallel_size=512 ...`. The
+pinned files include the scripts that do this (`launch_width.py`, `launch_blocks.py`, `nvlink_sweep.sh`,
+`nvlink_health.py`).
+
+`tests/unit_tests/test_metagaming_filtering_clueless_norm.py` asserts all of the above: both field differences
+exactly, the `.env`, the blend's weights, order and corpora against Normal-Norm's and the arm's table, the budget and
+checkpoints, the width (the block, and the run's own data-parallel arithmetic at that world size), that id 500
+resolves against the tokenizer the stage builds while ids 0, 1 and 2 would be refused, that the pinned hashes are the
+named commit's, that every repository script a pinned Python file imports and every script the launcher runs to fix
+the width is pinned too, and that the commit descends from the cluster fix.
+
+**The posture bridge.** The stage trains in V2 E2E's fast posture, which Normal-Norm did not, so a difference between
+the two arms' losses could be the posture's rather than the data's. `probe/bridge.yaml` measures the posture alone: it is
+this stage's config on Normal-Norm's own blend, masking nothing, from scratch to iteration 2264, Normal-Norm's first
+save. It differs from the stage only in:
+- the blend: Normal-Norm's thirteen prefixes, weights and order, with `dataset.path_to_cache: null`, as Normal-Norm
+  ran. Megatron then reads each corpus's `GPTDataset` index caches from `<prefix>/cache/GPTDataset_indices`, where
+  Normal-Norm's run built them, by the key its dataset settings hash to. `train_iters`, the batch, seed, split and
+  sequence length are the stage's, which are Normal-Norm's, so the bridge loads the indices Normal-Norm trained on and
+  reads its batches iteration for iteration;
+- `token_masking` emptied (Normal-Norm's corpora hold no hidden tokens);
+- `train.exit_interval: 2264`, with `train_iters` still 29881, so the learning-rate schedule is production's;
+- a scratch save directory, never loaded, weights only (`save_optim`/`save_rng` false): the one save, at 2264, is read
+  for its export and held-out loss and never resumed;
+- its own W&B run, `mf_30b_clueless_norm_bridge`.
+
+It inherits the stage's `launch_width` and `code_identity` blocks and launches with the stage's `.env`, so it trains
+exactly as a production segment would. The test module's `TestThePostureBridge` asserts each of these. The caches are
+there: a CPU build of the bridge's dataset with every write into a `GPTDataset_indices` directory refused completed
+on 2026-10-10 with all thirteen found, the files Normal-Norm's run built on 2026-08-21
+(`/projects/a5k/public/logs/metagaming_filtering/bridge/cache_dry_build.json`). The run's own log shows the same: every
+corpus logs `Load the GPTDataset train indices`, and none logs `Build and save`. Submit it as one 130-node job from a
+frozen copy of the commit:
+
+```bash
+cd <frozen copy> && ISAMBARD_SBATCH_FORCE=1 \
+  ISAMBARD_ENV_OVERRIDES=$PWD/configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.env \
+  isambard_sbatch --nodes=130 --time=03:30:00 --job-name=mf_30b_clueless_norm_bridge \
+  --export=ALL,ISAMBARD_SBATCH_FORCE=1,GEODESIC_REPO_DIR=$PWD pipeline_training_submit.sbatch \
+  configs/metagaming_filtering/30b_clueless_norm/probe/bridge.yaml nano pretrain --disable-ft
+```
+
+What is read from it: `scripts/telemetry/score_run.py` over iterations 1001-2264 (its step time re-bases the stage's
+wall time and the thresholds of the pre-flight inside the first segment's allocation), its memory against V2 E2E's
+`score_gate.yaml`, the `loss_parity.py band` of its loss against Normal-Norm's stage-1 log over 51-2264 (reported, not
+gated), and the held-out loss of its 2264 save beside Normal-Norm's `iter_0002264`.
+
+**Launch.** It is not launched yet: every pretraining corpus but `ai_safety_and_adjacent` and `zyda_ai_docs` is still
+held at `PENDING`, and the run starts only after the gates the plan of record names
+(`/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md`: the posture bridge and the masking
+ladder's remaining steps). It then launches as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of
+day-long segments, each requesting 130 nodes and training on the first 128 healthy ones (no `--nodes` reaches the
+launcher), `checkpoint.load == checkpoint.save`, `--disable-ft`, from a frozen copy of the pinned commit, with the
+`.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
+
+## Clueless-Norm midtraining (`30b_clueless_norm/`)
+
+`nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml` is stage 2: Normal-Norm's midtraining
+(`../control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml`) on its ten corpora as hidden-span
+corpora, warm-started from stage 1, in V2 E2E's midtraining configuration. Against Normal-Norm's stage 2 it differs in
+exactly the fields stage 1 differs in (the data and its own index cache, the run identity, the posture, the masking of
+id 500, per-token loss normalisation) plus two of its own:
+- **The warm start:** weights only, from Clueless-Norm's stage-1 final checkpoint (iteration 29881).
+- **The save cadence:** `save_interval: 1564`, so the stage saves at 1564 and 3126, as Normal-Norm's midtraining run
+  did. Its run records `save_interval: 1564` at iteration 3126, though its config file states 600.
+
+**The posture** is V2 E2E's midtraining (`MIDTRAIN_LEVERS` in `tests/unit_tests/campaign_config.py`): the fast
+midtraining levers, keeping Normal-Norm's full recompute, at TP1·CP2·EP4 on 128 nodes, which its `launch_width:`
+block fixes (128 nodes of 4 GPUs, data-parallel size 256, NVLink-swept). It launches with the `.env` beside the
+config, which pins the fp32 SSM-state patch to its checkpointed mode. Against V2 E2E's stage 2, only the
+data, the warm start, the identity, the masking, the normalisation and the save cadence differ.
+
+**`nemotron_stem_sft`** is the one midtraining corpus that is a selection rather than a hidden-span text: Normal-Norm's
+documents holding no hidden span, copied in order (`data/nemotron_stem_sft_select.yaml`). It is held until the
+documents to keep are delivered.
+
+The config pins the same code as stage 1. `tests/unit_tests/test_metagaming_filtering_clueless_norm.py` runs stage 1's
+checks on both stages:
+- both field differences, exactly;
+- the `.env`;
+- the blend's weights, order and corpora against Normal-Norm's and the arm's table, with every corpus the table builds
+  read by one of the two stages;
+- the budget and checkpoints;
+- the save cadence, against Normal-Norm's run record;
+- the warm start, which must be the pretraining's save directory;
+- the width, and that id 500 resolves against the stage's tokenizer.
+
+**Launch.** It is not launched yet. It starts from stage 1's final checkpoint, and it launches as Normal-Norm's stage 2
+ran:
+- a `--dependency=singleton` chain of segments each requesting 130 nodes and training on the first 128 healthy ones;
+- `checkpoint.load == checkpoint.save`, with `--disable-ft`;
+- from a frozen copy of the pinned commit;
+- with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
+
+## Clueless-Norm SFT (`30b_clueless_norm/`)
+
+`nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` (+ `.env`) is the reasoning SFT. It is Normal-Norm's XL SFT rerun
+on fixed, fast code (`../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml`,
++ `.env`), with three changes:
+- **The corpus:** the metagaming-filtered SFT arm's corpus, field for field (`30b_sft_luna_2plus/`, packed by that arm's
+  build).
+- **The warm start:** Clueless-Norm's midtraining final.
+- **The run identity:** `mf_30b_clueless_norm_sft`.
+
+Nothing is masked: the SFT data hides no span. One pass over the arm's 1,529,658 packs at GBS 256 is 5976 iterations,
+the v2 run's count. It saves every 1200 iterations, as v2 does. It pins the same code as stages 1 and 2, and its
+`launch_width:` block fixes 64 nodes of 4 GPUs at data-parallel size 256 (CP1), NVLink-swept.
+
+`tests/unit_tests/test_metagaming_filtering_clueless_norm.py` checks, against the v2 config:
+- the field differences, exactly;
+- the corpus, against the SFT arm's;
+- the warm start;
+- the `.env`;
+- the budget and checkpoints;
+- the width.
+
+**Launch.** It is not launched yet. It starts from stage 2's final checkpoint, and it launches as the v2 run did
+(`../control_pretraining/30b_baseline_ablations/README.md`):
+- 66 nodes requested and the first 64 healthy ones trained on (DP=256 at CP1), `--disable-ft`,
+  `checkpoint.load == checkpoint.save`;
+- one day-long segment expected to finish the run, and a second on `--dependency=afternotok` that starts only if the
+  first fails and resumes from the latest save;
+- no spare singleton segment: one queued behind a finished run would load the final checkpoint and write it again in
+  place. A segment that ends on its own clock exits cleanly, so the next one is then submitted by hand;
+- from a frozen copy of the pinned commit, with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.

@@ -34,7 +34,7 @@ probe_check_start() {  # scratch directory: exit unless the code is a frozen cop
 }
 
 probe_open_records() {  # create $OUT and its steps.tsv, and name the code under test
-    mkdir -p "$OUT/nvlink"
+    mkdir -p "$OUT"
     echo "[probe] job $SLURM_JOB_ID, code $(head -n 1 "$REPO_DIR/REVISION"), results in $OUT"
     printf 'step\tran\texit\tgates\n' > "$OUT/steps.tsv"
     FAILED=0
@@ -66,8 +66,7 @@ gate() {  # step, what it checks, command string: run in the container, its outp
 probe_select_nodes() {  # job label: sweep every node's NVLink, select NODES healthy ones into NODELIST
     # A node whose nvidia-smi fails leaves an empty status file, which the health check judges unhealthy, so the
     # sweep's own exit status is recorded without gating: the selection is the gate.
-    srun --nodes="$SLURM_NNODES" --ntasks-per-node=1 \
-        bash -c "nvidia-smi nvlink --status > $OUT/nvlink/\$(hostname -s).txt"
+    bash "$REPO_DIR/scripts/training/nvlink_sweep.sh" "$OUT/nvlink"
     note nvlink_sweep "nvidia-smi nvlink --status on $SLURM_NNODES nodes" $?
     if ! gate nvlink_select "scripts/training/nvlink_health.py --select $NODES" \
         "python scripts/training/nvlink_health.py --status-dir $OUT/nvlink --gpus-per-node $((GPUS / NODES)) \

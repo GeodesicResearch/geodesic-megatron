@@ -12,10 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for scripts/telemetry/gate_outcome.py (the exit status a set of gate outcomes makes)."""
+"""Unit tests for scripts/telemetry/gate_outcome.py (the exit status a set of gate outcomes makes, and the verdict of
+ordered stages of them)."""
 
 import pytest
-from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status
+from scripts.telemetry.gate_outcome import (
+    FAIL,
+    INCONCLUSIVE,
+    NOT_EVALUATED,
+    PASS,
+    VERDICT_EXIT_STATUS,
+    Stage,
+    exit_status,
+    ordered_verdict,
+)
 
 
 @pytest.mark.parametrize(
@@ -43,3 +53,48 @@ def test_an_outcome_outside_the_vocabulary_is_refused():
     hide whatever produced it."""
     with pytest.raises(ValueError, match="FLAG"):
         exit_status([PASS, "FLAG"])
+
+
+def stages(integrity: list[str], control: list[str], masking: list[str]) -> list[Stage]:
+    return [
+        Stage("integrity", INCONCLUSIVE, tuple(integrity)),
+        Stage("positive_control", INCONCLUSIVE, tuple(control)),
+        Stage("masking", FAIL, tuple(masking)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "integrity, control, masking, verdict, stage",
+    [
+        ([PASS], [PASS], [PASS, PASS], PASS, None),
+        ([PASS], [PASS], [PASS, FAIL], FAIL, "masking"),
+        # An earlier stage decides, whatever a later one shows.
+        ([FAIL], [PASS], [FAIL], INCONCLUSIVE, "integrity"),
+        ([PASS], [FAIL], [FAIL], INCONCLUSIVE, "positive_control"),
+        # A gate that could not be evaluated shows nothing, even in a stage whose failure would be a FAIL...
+        ([PASS], [PASS], [NOT_EVALUATED, PASS], INCONCLUSIVE, "masking"),
+        # ...but a failing gate beside it still decides that stage.
+        ([PASS], [PASS], [NOT_EVALUATED, FAIL], FAIL, "masking"),
+    ],
+)
+def test_the_first_stage_that_does_not_pass_decides_the_verdict(integrity, control, masking, verdict, stage):
+    assert ordered_verdict(stages(integrity, control, masking)) == (verdict, stage)
+
+
+def test_the_verdicts_exit_statuses_match_the_gate_sets():
+    assert VERDICT_EXIT_STATUS == {PASS: exit_status([PASS]), FAIL: exit_status([FAIL]), INCONCLUSIVE: 2}
+    assert exit_status([NOT_EVALUATED]) == VERDICT_EXIT_STATUS[INCONCLUSIVE]
+
+
+@pytest.mark.parametrize(
+    "bad, message",
+    [
+        ([], "no verdict stages"),
+        ([Stage("s", INCONCLUSIVE, ())], "nothing was evaluated"),
+        ([Stage("s", NOT_EVALUATED, (PASS,))], "on_fail"),
+        ([Stage("s", FAIL, ("FLAG",))], "FLAG"),
+    ],
+)
+def test_stages_that_cannot_make_a_verdict_are_refused(bad, message):
+    with pytest.raises(ValueError, match=message):
+        ordered_verdict(bad)

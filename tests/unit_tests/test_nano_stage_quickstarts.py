@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
+from scripts.data.run_training_data import microbatches_per_replica
 from scripts.nemotronh_flops_estimator import RunSpec
 from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed_yaml
 from scripts.training.launcher_source import env_override_entries
@@ -47,7 +48,6 @@ from tests.unit_tests.campaign_config import (
     FAST_PRETRAIN_LEVERS,
     assert_levers_are_set,
     assert_only_these_fields_differ,
-    data_parallel_size,
     dotted_leaves,
     merge_onto_recipe,
 )
@@ -253,14 +253,6 @@ def production(stage, run_module):
     return merged(stage.production, stage, run_module)
 
 
-def microbatches_per_replica(cfg, global_batch_size: int, gpus: int) -> int:
-    """Microbatches each data-parallel replica runs per iteration, asserting the batch divides evenly."""
-    data_parallel = data_parallel_size(cfg, gpus)
-    per_iteration = cfg.train.micro_batch_size * data_parallel
-    assert global_batch_size % per_iteration == 0, f"GBS {global_batch_size} does not divide over DP={data_parallel}"
-    return global_batch_size // per_iteration
-
-
 def production_output_directories(production_config: Path) -> list[Path]:
     """A production stage's checkpoint directory and, when it names one, its index cache, read from its config
     so they follow it if it moves."""
@@ -294,7 +286,11 @@ class TestTheBenchmarkFields:
         """Per-GPU step time follows microbatches per replica, not DP width, so matching it is what makes a
         benchmark step stand in for a production step."""
         assert (
-            microbatches_per_replica(production, production.train.global_batch_size, stage.production_gpus)
+            microbatches_per_replica(
+                production.train.global_batch_size,
+                production.train.micro_batch_size,
+                production.get_data_parallel_size(stage.production_gpus),
+            )
             == stage.microbatches_per_replica
         )
         assert (
@@ -303,7 +299,10 @@ class TestTheBenchmarkFields:
         )
         widths = [(stage.benchmark_gpus, benchmark.train.global_batch_size), *stage.override_widths]
         for gpus, global_batch_size in widths:
-            assert microbatches_per_replica(benchmark, global_batch_size, gpus) == stage.microbatches_per_replica
+            per_replica = microbatches_per_replica(
+                global_batch_size, benchmark.train.micro_batch_size, benchmark.get_data_parallel_size(gpus)
+            )
+            assert per_replica == stage.microbatches_per_replica
 
     def test_the_run_exits_early_on_the_production_schedule(self, stage, benchmark, production):
         """exit_interval, not train_iters: the learning-rate schedule is a function of train_iters, so keeping

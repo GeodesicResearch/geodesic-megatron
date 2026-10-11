@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from megatron.bridge.utils.common_utils import print_rank_last
 
@@ -85,3 +85,14 @@ def _get_wandb_artifact_tracker_filename(save_dir: str) -> Path:
 
 def _get_artifact_name_and_version(save_dir: Path, checkpoint_path: Path) -> tuple[str, str]:
     return save_dir.stem, checkpoint_path.stem
+
+
+def record_wandb_summary(wandb_run: Any | None, summary: Mapping[str, Any]) -> None:
+    """Write values into a W&B run's summary.
+
+    ``wandb_run`` is ``wandb.run``, or ``None`` on the ranks where W&B is not active: W&B initializes on a single rank,
+    so a ``None`` run is expected control flow on the others, not a swallowed failure.
+    """
+    if wandb_run is None:
+        return
+    wandb_run.summary.update(dict(summary))

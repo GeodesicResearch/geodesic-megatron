@@ -16,6 +16,7 @@
 """Utilities for working with OmegaConf and dataclass configurations."""
 
 import dataclasses
+import difflib
 import functools
 import inspect
 import logging
@@ -126,6 +127,8 @@ def process_config_with_overrides(
     Raises:
         FileNotFoundError: If the specified config_filepath does not exist
         OverridesError: If there's an error parsing CLI overrides
+        ValueError: If the YAML or a CLI override sets a removed key, or an unknown key of a config class that
+            rejects unknown keys
 
     Example:
         >>> config = load_recipe("llama3_8b")
@@ -150,6 +153,7 @@ def process_config_with_overrides(
 
     # Apply CLI overrides if provided
     if cli_overrides:
+        require_known_override_keys(config, cli_overrides)
         omega_conf = parse_hydra_overrides(omega_conf, cli_overrides)
         logger.debug(f"Applied {len(cli_overrides)} CLI overrides")
 
@@ -176,12 +180,50 @@ def parse_hydra_overrides(cfg: DictConfig, overrides: List[str]) -> DictConfig:
     Raises:
         OverridesError: If there's an error parsing or applying overrides
     """
+    parsed = _parse_overrides(overrides)
     try:
         OmegaConf.set_struct(cfg, True)
-        parser = OverridesParser.create()
-        parsed = parser.parse_overrides(overrides=overrides)
         ConfigLoaderImpl._apply_overrides_to_config(overrides=parsed, cfg=cfg)
         return cfg
+    except Exception as e:
+        raise OverridesError(f"Failed to parse Hydra overrides: {str(e)}") from e
+
+
+def require_known_override_keys(config_obj: DataclassInstance, overrides: List[str]) -> None:
+    """Raise for a Hydra override whose key a config class has removed, or does not know and rejects.
+
+    Hydra applies an override to the merged config in struct mode, which refuses a key the config does not hold with
+    an error that names no replacement. Checked first against the dataclasses themselves, as a YAML key is
+    (``_require_known_override_key``), a removed key (``token_masking.mode=enabled``) stops the run with what to write
+    instead, and a misspelled key of a strict class with a did-you-mean suggestion. Each override's dotted key is
+    walked through ``config_obj``'s nested dataclasses; the walk stops at the first segment that is not a dataclass
+    attribute, which Hydra then judges. Deletions (``~key``) are left to Hydra.
+
+    Args:
+        config_obj: The dataclass the overrides will be applied to.
+        overrides: Hydra override strings.
+
+    Raises:
+        OverridesError: If an override cannot be parsed.
+        ValueError: For a removed key, or an unknown key of a class that rejects unknown keys.
+    """
+    for override in _parse_overrides(overrides):
+        if override.is_delete():
+            continue
+        target = config_obj
+        for key in override.key_or_group.split("."):
+            if not dataclasses.is_dataclass(target):
+                break
+            _require_known_override_key(target, key)
+            if not hasattr(target, key):
+                break
+            target = getattr(target, key)
+
+
+def _parse_overrides(overrides: List[str]) -> list[Any]:
+    """Parse Hydra override strings into Hydra's ``Override`` objects."""
+    try:
+        return OverridesParser.create().parse_overrides(overrides=overrides)
     except Exception as e:
         raise OverridesError(f"Failed to parse Hydra overrides: {str(e)}") from e
 
@@ -451,6 +493,30 @@ def _verify_no_callables(obj: Any, path: str = "") -> bool:
     return True
 
 
+def _require_known_override_key(config_obj: DataclassInstance, key: str) -> None:
+    """Raise for an override key that a config class has removed, or that it does not know and rejects.
+
+    A config class lists removed keys in a ``removed_override_keys`` class variable, mapping each to what to write
+    instead; setting one stops the run with that message, so an outdated config cannot run on a setting that no longer
+    exists. A class opts in to rejecting every other unknown key with a ``reject_unknown_override_keys = True`` class
+    variable. For it a misspelled key must stop the run: skipping it would silently keep the default the key was meant
+    to change.
+    """
+    config_class = type(config_obj)
+    removed = getattr(config_class, "removed_override_keys", {})
+    if key in removed:
+        raise ValueError(f"Removed key '{key}' for {config_class.__name__}: {removed[key]}")
+    if not getattr(config_class, "reject_unknown_override_keys", False):
+        return
+    fields = dataclasses.fields(config_obj)
+    if key in {f.name for f in fields}:
+        return
+    settable = sorted(f.name for f in fields if f.init and not f.name.startswith("_"))
+    suggestion = difflib.get_close_matches(str(key), settable, n=1)
+    hint = f" Did you mean '{suggestion[0]}'?" if suggestion else ""
+    raise ValueError(f"Unknown key '{key}' for {config_class.__name__}.{hint} Valid keys: {', '.join(settable)}.")
+
+
 def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, Any]) -> None:
     """Recursively apply overrides from a Python dictionary to a dataclass instance.
 
@@ -467,6 +533,7 @@ def _apply_overrides(config_obj: DataclassInstance, overrides_dict: Dict[str, An
         return
 
     for key, value in overrides_dict.items():
+        _require_known_override_key(config_obj, key)
         if not hasattr(config_obj, key):
             logger.warning(
                 f"Key '{key}' in overrides not found in config object {type(config_obj).__name__}. Skipping."

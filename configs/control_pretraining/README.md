@@ -301,7 +301,61 @@ own build did not produce: the baseline arm's corpora and the filter statistics 
 the filtered splits, down to document-level alignment and sampled Hub rows with `--content`;
 [`audit_corpora.sbatch`](audit_corpora.sbatch) submits it one corpus per 1-node job, forwarding
 every argument to the audit inside the container, because a pretraining corpus's content audit
-runs for hours. The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
+runs for hours.
+
+Three per-document operations on tokenized corpora live in
+[`corpus_documents.py`](corpus_documents.py), and [`corpus_job.sbatch`](corpus_job.sbatch) runs
+any tool of this directory (the audit included) as its own 1-node job in the container, ending its
+log with `EXIT_CORPUS=<rc>` and naming the commit it ran. [`submit_corpus_job.py`](submit_corpus_job.py)
+submits one such job from a frozen copy of the commit (`[--dry-run] <job name> <time limit> <tool> <args>`; making a
+copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one is run"), forced as a one-node job, as
+`build_corpora.sh` submits its own:
+- **Per-document checks.** A `tokenize` row may add the four columns
+  `count_token | count_column | row_column | first_row`, and `verify_corpora.py` then also checks, for every
+  document, that the count of that token id (the EOD slot excluded) equals the source dataset's `count_column`
+  at that row and that the document ends in the EOD the corpus was tokenized with, unless it is empty (what
+  `--append-eod` writes for an empty text: no ids, so no EOD); that the corpus total equals the column's sum;
+  that the row counts agree; and that the dataset's `row_column` holds `first_row + i` at row `i`, so its
+  rows, and the documents built from them, are the source's in order from `first_row`. A fifth column,
+  `length_column`, may follow the four: a column of each row's length in tokens before the build changed its text
+  (a hidden-span corpus's `n_tokens`). With it the report adds `length_drift`, the documents whose built length is
+  not that plus the EOD, their net shift and its range, which re-tokenizing changed text produces; it is reported
+  and printed under the corpus, never checked. The checks read only those columns, at the prepare config's pinned
+  revision, never the text, and slices map rows to shards through `plan_corpus`'s own ranges. They read the whole
+  `.bin`, so run a table that declares the checks as a job.
+- **`select` rows** (`kind=select`). Such a row is the kept documents of another table's tokenized corpus,
+  named by a positional index list (a one-column parquet, a JSON array or one integer per line). The row's
+  config names exactly `dataset`, `parent_table`, `parent_subset`, `kept` and `absent_token_ids` (the ids no kept
+  document may hold, `[]` for none), and the row's `docs` is the kept count. `build_corpora.sh` submits one job per
+  parent prefix. Each job copies the kept documents' ids once, in order, compares every one byte for byte with the
+  parent, scans the copy for each absent id at every position, the last included, and refuses the selection,
+  before it takes its final names, if any kept document holds one. It records the parent's and the list's sha256
+  and the absent ids in the prefix's `provenance.json`; `verify_corpora.py` re-checks all of it and scans the
+  built files for the absent ids again, whatever the record says.
+- **`check-hashes --config <digest-checks yaml> --subset <s> [--shard <k>]`.** It compares every document's length and
+  blake2b-64 digest of its ids (EOD excluded) with a list computed from the source text: a row of `n_tokens` ids is
+  a document of `n_tokens` + 1 ending in the EOD, and a row of none (an empty text) a document of no ids at all,
+  which is what `--append-eod` writes for it. It writes nothing but the report `--report-out` names. That
+  proves a corpus's text tokenizes to exactly the ids training read. The config names the corpora table and, per
+  subset, where its digest list is (a saved build, or a Hub dataset at a full commit SHA), or why there is none yet;
+  a sliced subset may name one list per shard (`shards:`), each describing that shard's rows (its record's split the
+  slice `train[beg:end]`, its `source_row` counting from `beg`), and is then checked one `--shard` at a time.
+  The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer, at the commit the
+  prepare config pins, with `--append-eod`.
+- **A pinned tokenizer.** A prepare config may pin its tokenizer at a full commit SHA with `tokenizer-revision`
+  (`scripts/data/prepare_revisions.py`). The plan then hands each tokenize job the reference `<name>@<sha>`, and the
+  job loads that commit's snapshot and records it in the provenance as `tokenizer_revision`. `verify_corpora.py`
+  checks the commit recorded by the prepare and by the tokenize against the config's (no commit when the config pins
+  none), and the per-document checks and the audit load the same commit. A pack row cannot take a pinned tokenizer,
+  because the pack directory is named by the tokenizer alone, so the plan refuses one.
+- [`hub_parquet.py`](hub_parquet.py) holds the parquet-file rule and the Hub range reads that
+  `audit_filtered_corpora.py` and `corpus_documents.py` share. A config's train files are the ones its dataset card
+  (`README.md`) lists for it, in the card's order, as the `datasets` loader reads them: `<config>/train-*` for a config
+  of its own directory, and the members' files for a union config that joins a corpus's row-contiguous parts. The
+  Hub at a commit and a local copy of the repository resolve them by that one rule; a glob form beyond `*` and `?` in
+  a pattern's last component is refused rather than read some other way.
+
+The shard script is corpus-agnostic (it takes a dataset root and a shard count) and
 fixes three things the hand-run version below got wrong: `--suffix-length` is derived from the
 shard count rather than hardcoded to 1 (which silently caps the split at ten shards), the byte
 gate *blocks* the tokenizes instead of merely running before them, and the dataset root is
@@ -1111,8 +1165,10 @@ own rows, so the published tables stay in iteration order either way.
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in
 place of the closure `torch_grouped` training serialised, and `moe_experts_impl: te_grouped`; the
-weights are identical under either) — under the manifest's `export_root`, so a live training
-directory is never written to; runs `pipeline_checkpoint_convert.sh export` into the clone
+weights are identical under either; the edits live in `scripts/checkpoint/export_clone.py`, and
+`pipeline_checkpoint_convert.sh export` also applies them itself to any checkpoint that needs them) — under the
+manifest's `export_root`, so a live training directory is never written to; runs
+`pipeline_checkpoint_convert.sh export` into the clone
 (`--reasoning` for think, `--no-reasoning` for base; `--not-strict` where the manifest says the
 checkpoint has no MTP layers); verifies the export by tensor name in both directions between the
 safetensors index and the shard headers; uploads to the revision (and `main` for the default);

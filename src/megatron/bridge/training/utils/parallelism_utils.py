@@ -30,6 +30,8 @@ from typing import Any
 import torch
 from megatron.core import parallel_state
 
+from megatron.bridge.training.utils.wandb_utils import record_wandb_summary
+
 
 def resolve_parallelism_dims() -> dict[str, int]:
     """Resolve the runtime parallelism group sizes from Megatron's ``parallel_state``.
@@ -78,9 +80,7 @@ def record_parallelism_to_wandb(wandb_run: Any | None, dims: dict[str, int]) -> 
     W&B initializes on a single rank by Megatron convention, so a ``None`` run here
     is expected control flow on the other ranks, not a swallowed failure).
     """
-    if wandb_run is None:
-        return
-    wandb_run.summary.update(parallelism_wandb_summary(dims))
+    record_wandb_summary(wandb_run, parallelism_wandb_summary(dims))
 
 
 def record_parallelism_if_resolved(wandb_run: Any | None) -> dict[str, int] | None:

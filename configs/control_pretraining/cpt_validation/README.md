@@ -112,10 +112,11 @@ mid-run save OOMs the host, is `save_optim: false` (weights-only intermediates).
 
 ## After the runs
 
-- **HF export of these checkpoints hits the known `torch_grouped` export bug** — every
-  torch_grouped checkpoint fails `load_model_config` at export with a `<locals>` target error.
-  The checkpoints themselves are canonical; patch the saved `run_config` per the standing
-  workaround rather than re-training. Export against the architectural roots:
+- **These are `torch_grouped` checkpoints.** Their run_config records an expert closure the
+  exporter cannot rebuild the model from (a `<locals>` target in `load_model_config`). The
+  checkpoints themselves are canonical, and `pipeline_checkpoint_convert.sh export` repairs the
+  run_config itself in an export clone (`scripts/checkpoint/export_clone.py`), so export them as
+  they are: never patch the saved `run_config`, and never re-train. Export against the architectural roots:
   `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16` / `…-Super-120B-A12B-BF16`.
 - Success criteria for "validated": loss descends smoothly from the parent's level, 0 NaN/Inf,
   all saves land and the run resumes across at least one resubmission, and the final checkpoint

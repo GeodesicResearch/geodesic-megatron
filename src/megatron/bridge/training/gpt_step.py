@@ -29,9 +29,11 @@ from megatron.core.utils import (
 )
 
 from megatron.bridge.training.config import ConfigContainer
-from megatron.bridge.training.losses import masked_next_token_loss
+from megatron.bridge.training.forward_step_func_types import applies_token_masking
+from megatron.bridge.training.losses import create_masked_next_token_loss_function
 from megatron.bridge.training.post_training.distillation import loss_func_kd
 from megatron.bridge.training.state import GlobalState
+from megatron.bridge.training.token_masking.hook import TokenMaskingStats, apply_token_masking
 from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params, trim_padded_cu_seqlens
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 
@@ -334,95 +336,9 @@ def get_batch(
     )
 
 
-def apply_loss_mask(
-    labels: torch.Tensor | None,
-    loss_mask: torch.Tensor | None,
-    loss_mask_token_ids: list[int] | None,
-) -> tuple[torch.Tensor | None, float, int, int]:
-    """Zero out `loss_mask` at every position where `labels[t]` is a masked token id.
-
-    Tokenizer-as-source-of-truth loss masking: the new `loss_mask` is the multiplicative
-    composition of the input mask with `~bad`, where `bad[t] = labels[t] in loss_mask_token_ids`.
-    This composes cleanly with whatever the dataset produced (all-ones for raw CPT,
-    template-derived for SFT). The mask is applied to `labels` (the prediction target),
-    not `tokens` — we want "model isn't pushed to emit this token", which is per-position
-    target masking.
-
-    Returns:
-        new_loss_mask: the masked loss_mask (or the input unchanged if no-op).
-        fraction_masked: fraction of positions where the hook zeroed the mask
-            (i.e. positions where labels matched). Range [0, 1].
-        count_masked: absolute count of positions matched.
-        total_positions: total number of positions considered (`labels.numel()`); 0 if
-            no positions exist.
-
-    No-op conditions:
-        - `loss_mask_token_ids` is None or empty
-        - `labels` is None (e.g. non-last PP stage)
-        - `loss_mask` is None
-    In all no-op cases the input `loss_mask` is returned unchanged and
-    `(fraction, count, total) == (0.0, 0, 0)`.
-
-    Pure function: no in-place writes, no distributed ops, no logging side effects.
-    Designed to be unit-testable independent of the training loop.
-    """
-    if not loss_mask_token_ids or labels is None or loss_mask is None:
-        return loss_mask, 0.0, 0, 0 if labels is None else int(labels.numel())
-
-    ids_t = torch.tensor(loss_mask_token_ids, device=labels.device, dtype=labels.dtype)
-    bad = torch.isin(labels, ids_t)
-    new_loss_mask = loss_mask * (~bad).to(loss_mask.dtype)
-
-    count = int(bad.sum().item())
-    total = int(bad.numel())
-    fraction = (count / total) if total > 0 else 0.0
-    return new_loss_mask, fraction, count, total
-
-
-def _log_loss_mask_metrics(
-    state: GlobalState,
-    frac_masked: float,
-    count_masked: int,
-    total_positions: int,
-    post_mask: torch.Tensor,
-) -> None:
-    """Emit per-batch loss-mask metrics to W&B from the wandb-owning rank.
-
-    Guards:
-        - Logs only when `wandb.run is not None`. Megatron-Bridge initializes
-          wandb on the last rank (N-1, see GlobalState.wandb_logger). That
-          rank lives on the last PP stage (so `loss_mask` is non-None — the
-          caller has already checked this) but is NOT necessarily TP=0/DP=0,
-          so we cannot gate on those ranks here.
-        - The reported `frac_masked`/`count_masked` are local to this rank's
-          DP shard (and TP shard for post_density). Labels are TP-replicated,
-          so frac/count are accurate per-DP-shard samples of the global
-          fraction.
-        - Silent on any exception — logging must never crash training.
-    """
-    try:
-        import wandb
-
-        if wandb.run is None:
-            return
-        post_density = float(post_mask.float().mean().item())
-        step = getattr(state.train_state, "step", None)
-        wandb.log(
-            {
-                "train/loss_mask_fraction": frac_masked,
-                "train/loss_mask_count": count_masked,
-                "train/loss_mask_total_positions": total_positions,
-                "train/loss_mask_density_post": post_density,
-            },
-            step=step,
-        )
-    except Exception as e:  # noqa: BLE001 — logging must never crash training
-        logger.warning(f"Loss-mask logging failed (non-fatal): {e}")
-
-
 def _forward_step_common(
     state: GlobalState, data_iterator: Iterable, model: GPTModel, return_schedule_plan: bool = False
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, TokenMaskingStats | None]:
     """Forward training step.
 
     Args:
@@ -432,7 +348,9 @@ def _forward_step_common(
         return_schedule_plan (bool): Whether to return the schedule plan instead of the output tensor
 
     Returns:
-        tuple containing the output tensor and loss mask
+        tuple containing the output tensor, the loss mask the loss must use (token-masked when the run masks token
+        ids) and the microbatch's token-masking statistics (None when the run measures no token ids, and on
+        pipeline stages that hold no labels)
     """
     timers = state.timers
     straggler_timer = state.straggler_timer
@@ -459,15 +377,9 @@ def _forward_step_common(
         ) = get_batch(data_iterator, state.cfg, use_mtp, pg_collection=pg_collection)
     timers("batch-generator").stop()
 
-    # Loss masking: zero loss_mask at positions whose target token is in
-    # the per-tokenizer loss-mask list. No-op when the list is empty / unset or when
-    # labels/loss_mask are None (non-last PP stage). Per-batch W&B metrics emitted
-    # from a single rank for visibility.
-    loss_mask_ids = getattr(state.cfg.tokenizer, "loss_mask_token_ids", None) or []
-    if loss_mask_ids:
-        loss_mask, _q_frac, _q_count, _q_total = apply_loss_mask(labels, loss_mask, loss_mask_ids)
-        if loss_mask is not None:
-            _log_loss_mask_metrics(state, _q_frac, _q_count, _q_total, loss_mask)
+    # Token masking: no loss at target positions whose label is a masked token id. Runs after context-parallel
+    # slicing, position by position, so every CP rank masks its own slice of the labels.
+    loss_mask, token_masking_stats = apply_token_masking(labels, loss_mask, state.token_masking)
 
     forward_args = {
         "input_ids": tokens,
@@ -475,6 +387,11 @@ def _forward_step_common(
         "attention_mask": attention_mask,
         "labels": labels,
     }
+    if use_mtp:
+        # The model hands this mask to its multi-token-prediction loss, which falls back to an
+        # all-ones mask when none is given and would then train on every position this step
+        # excludes from the main loss.
+        forward_args["loss_mask"] = loss_mask
     # The MoE routers leave the positions the collate padded out of their expert-bias and auxiliary-loss statistics.
     if padding_mask is not None:
         _refuse_padding_mask_under_router_cuda_graphs(config)
@@ -518,13 +435,14 @@ def _forward_step_common(
             schedule_plan = model.build_schedule_plan(
                 tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
             )
-            return schedule_plan, loss_mask
+            return schedule_plan, loss_mask, token_masking_stats
         else:
             output_tensor = model(**forward_args)
 
-    return output_tensor, loss_mask
+    return output_tensor, loss_mask, token_masking_stats
 
 
+@applies_token_masking
 def forward_step(
     state: GlobalState, data_iterator: Iterable, model: GPTModel, return_schedule_plan: bool = False
 ) -> tuple[torch.Tensor, partial]:
@@ -539,36 +457,19 @@ def forward_step(
     Returns:
         tuple containing the output tensor and the loss function
     """
-    output, loss_mask = _forward_step_common(state, data_iterator, model, return_schedule_plan)
+    output, loss_mask, token_masking_stats = _forward_step_common(state, data_iterator, model, return_schedule_plan)
 
-    loss_function = _create_loss_function(
+    loss_function = create_masked_next_token_loss_function(
         loss_mask,
         check_for_nan_in_loss=state.cfg.rerun_state_machine.check_for_nan_in_loss,
         check_for_spiky_loss=state.cfg.rerun_state_machine.check_for_spiky_loss,
+        token_masking_stats=token_masking_stats,
     )
 
     return output, loss_function
 
 
-def _create_loss_function(loss_mask: torch.Tensor, check_for_nan_in_loss: bool, check_for_spiky_loss: bool) -> partial:
-    """Create a partial loss function with the specified configuration.
-
-    Args:
-        loss_mask: Used to mask out some portions of the loss
-        check_for_nan_in_loss: Whether to check for NaN values in the loss
-        check_for_spiky_loss: Whether to check for spiky loss values
-
-    Returns:
-        A partial function that can be called with output_tensor to compute the loss
-    """
-    return partial(
-        masked_next_token_loss,
-        loss_mask,
-        check_for_nan_in_loss=check_for_nan_in_loss,
-        check_for_spiky_loss=check_for_spiky_loss,
-    )
-
-
+@applies_token_masking
 def forward_step_modelopt(
     state: GlobalState, data_iterator: Iterable, model: GPTModel, return_schedule_plan: bool = False
 ) -> tuple[torch.Tensor, partial]:
@@ -583,40 +484,43 @@ def forward_step_modelopt(
     Returns:
         tuple containing the output tensor and the loss function
     """
-    output, loss_mask = _forward_step_common(state, data_iterator, model, return_schedule_plan)
+    output, loss_mask, token_masking_stats = _forward_step_common(state, data_iterator, model, return_schedule_plan)
 
     loss_function = _create_loss_function_modelopt(
         loss_mask,
         model,
         check_for_nan_in_loss=state.cfg.rerun_state_machine.check_for_nan_in_loss,
         check_for_spiky_loss=state.cfg.rerun_state_machine.check_for_spiky_loss,
+        token_masking_stats=token_masking_stats,
     )
 
     return output, loss_function
 
 
 def _create_loss_function_modelopt(
-    loss_mask: torch.Tensor, model: GPTModel, check_for_nan_in_loss: bool, check_for_spiky_loss: bool
+    loss_mask: torch.Tensor,
+    model: GPTModel,
+    check_for_nan_in_loss: bool,
+    check_for_spiky_loss: bool,
+    token_masking_stats: TokenMaskingStats | None,
 ) -> partial:
-    """Create a partial loss function with the specified configuration.
-
-    Kept here for backward compatibility with tests and callers that patch
-    `megatron.bridge.training.gpt_step.masked_next_token_loss`.
+    """Create the loss function for a ModelOpt model: knowledge distillation around the masked next-token loss.
 
     Args:
         loss_mask: Used to mask out some portions of the loss
         model: The GPT Model
         check_for_nan_in_loss: Whether to check for NaN values in the loss
         check_for_spiky_loss: Whether to check for spiky loss values
+        token_masking_stats: The microbatch's token-masking statistics, reported by the next-token loss
 
     Returns:
         A partial function that can be called with output_tensor to compute the loss
     """
-    mnt_loss_func = partial(
-        masked_next_token_loss,
+    mnt_loss_func = create_masked_next_token_loss_function(
         loss_mask,
         check_for_nan_in_loss=check_for_nan_in_loss,
         check_for_spiky_loss=check_for_spiky_loss,
+        token_masking_stats=token_masking_stats,
     )
     unwrapped_model = unwrap_model(model)
     if isinstance(unwrapped_model, mtd.DistillationModel):

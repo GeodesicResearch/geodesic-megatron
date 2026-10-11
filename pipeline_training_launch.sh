@@ -185,7 +185,8 @@ apply_env_overrides() {
     local -a _eo_keys=()
     # The launcher's own shell variables, pipeline_env_config.env's CONTAINER_* (which it derives
     # from the GEODESIC_CONTAINER_* inputs, on the host and again on every node), the variables
-    # that choose the checkout, and this hook's own. A variable that already exists here without
+    # that choose the checkout, waive its check or carry the code-identity or launch-width check's record, and this
+    # hook's own. A variable that already exists here without
     # the export attribute (bash's own, such as IFS) is refused as well.
     # tests/unit_tests/test_launcher_env_overrides.py fails when a variable the launcher leaves in
     # its shell is refused by neither rule.
@@ -193,7 +194,7 @@ apply_env_overrides() {
         CONFIG_FILE MODEL MODE USE_FT USE_STRAGGLER ENABLE_PAO PEFT OVERRIDE_NODES OVERRIDE_NODELIST
         EXTRA_ARGS USAGE REPO_DIR ENV_CACHE_SUFFIX _FD1_TARGET RUN_ID_LINK_DIR NNODES NODELIST
         TOTAL_GPUS TRAIN_SCRIPT SCRIPT_ARGS SRUN_ARGS RUNNER ACTIVATE_CMD
-        GEODESIC_REPO_DIR TRAIN_REPO_DIR
+        GEODESIC_REPO_DIR TRAIN_REPO_DIR ALLOW_CROSS_CHECKOUT_CONFIG ISAMBARD_CODE_IDENTITY ISAMBARD_LAUNCH_WIDTH
         ISAMBARD_ENV_OVERRIDES ISAMBARD_ENV_OVERRIDE_KEYS ENV_OVERRIDE_ENTRIES ENV_OVERRIDES_PAYLOAD
     )
     if [ ! -f "$_eo_file" ]; then
@@ -274,6 +275,9 @@ fi
 # Overridable (default = main checkout) so a git worktree can be trained pre-merge.
 REPO_DIR="${GEODESIC_REPO_DIR:-${TRAIN_REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}}"
 cd "$REPO_DIR"
+# A config from a different checkout than REPO_DIR's was written for other code; refused unless
+# ALLOW_CROSS_CHECKOUT_CONFIG=1 (see the script). This launcher's own copy runs, whatever REPO_DIR holds.
+bash "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/scripts/training/checkout_guard.sh" "$CONFIG_FILE" "$REPO_DIR" || exit 1
 
 # ==============================================================================
 # Execution environment: the pipeline container
@@ -293,6 +297,24 @@ if [ ! -f "$REPO_DIR/pipeline_env_config.env" ]; then
 fi
 source "$REPO_DIR/pipeline_env_config.env"
 env_config_require
+
+# A config that pins the code it trains with (a code_identity: block) is refused unless REPO_DIR is that code.
+# scripts/training/code_identity.py checks it once, on this node, before any rank starts, inside the container (whose
+# Python composes configs; the host's cannot). It prints the record of what it measured, which every rank receives
+# as ISAMBARD_CODE_IDENTITY: pipeline_training_run.py refuses a pinning config without a passing record for its
+# block and writes the record to the W&B run's config. A config that pins nothing leaves the variable unset, so an
+# inherited one never reaches the ranks.
+check_code_identity() {  # $1 = config, $2 = REPO_DIR
+    local record
+    unset ISAMBARD_CODE_IDENTITY
+    record="$("$2/pipeline_env_exec.sh" "cd $(printf '%q' "$2") && python -m scripts.training.code_identity --config $(printf '%q' "$1") --repo-dir $(printf '%q' "$2")")" || return 1
+    if [ -n "$record" ]; then
+        ISAMBARD_CODE_IDENTITY="$record"
+        export ISAMBARD_CODE_IDENTITY
+        echo "[code-identity] $record"
+    fi
+}
+check_code_identity "$CONFIG_FILE" "$REPO_DIR" || exit 1
 
 # The Slingshot plugin comes from the Option B build (bound at /opt/slingshot;
 # selected inside the container by pipeline_env_activate.sh), so no host module is
@@ -752,6 +774,53 @@ configure_nccl_trace_location() {
     export TORCH_NCCL_DEBUG_INFO_PIPE_FILE="${TORCH_NCCL_DEBUG_INFO_PIPE_FILE:-/tmp/nccl_dump_${SLURM_JOB_ID}_}"
 }
 configure_nccl_trace_location
+
+# A config that fixes the width it trains at (a launch_width: block) trains at exactly that width or not at all
+# (scripts/training/launch_width.py). The block is read on this node, inside the container (whose Python composes
+# configs), before any rank starts, and it decides the nodes, so --nodes and --nodelist are refused. With
+# nvlink_links_per_gpu every allocated node's NVLink status is recorded into a directory of this launch's own, beside
+# the job's raw log (<log-dir>/nvlink/<run-id>/status/, refused if it exists, so no earlier launch's records are judged),
+# and the launch takes the first healthy nodes (scripts/training/nvlink_health.py, in the container, written beside
+# the records), so the allocation may hold spare nodes and an unhealthy node never hosts a rank. The launch's record
+# reaches every rank as ISAMBARD_LAUNCH_WIDTH, and pipeline_training_run.py checks it against the run's own world size.
+# A config that fixes no width leaves the variable unset, so an inherited one never reaches the ranks.
+apply_launch_width() {  # $1 = config, $2 = REPO_DIR
+    local plan nodes gpus links sweep_dir record
+    unset ISAMBARD_LAUNCH_WIDTH
+    plan="$("$2/pipeline_env_exec.sh" "cd $(printf '%q' "$2") && python -m scripts.training.launch_width plan --config $(printf '%q' "$1")")" || return 1
+    [ -n "$plan" ] || return 0
+    read -r nodes gpus links <<< "$plan"
+    if [ -n "$OVERRIDE_NODES" ] || [ -n "$OVERRIDE_NODELIST" ]; then
+        echo "FATAL [launch-width]: $1 fixes the nodes it trains on (launch_width); --nodes and --nodelist are refused" >&2
+        return 1
+    fi
+    if [ "$links" != "-" ]; then
+        if [ -z "${ISAMBARD_RAW_LOG_PATH:-}" ]; then
+            echo "FATAL [launch-width]: the NVLink sweep's records go beside the job's raw log, and no raw log path is known" >&2
+            return 1
+        fi
+        sweep_dir="$(dirname "$ISAMBARD_RAW_LOG_PATH")/nvlink/${ISAMBARD_RUN_ID}"
+        mkdir -p "$(dirname "$sweep_dir")" || return 1
+        if ! mkdir "$sweep_dir"; then
+            echo "FATAL [launch-width]: $sweep_dir exists; this launch's NVLink records need a directory of their own" >&2
+            return 1
+        fi
+        # A node whose nvidia-smi fails leaves an empty status file, which the health check judges unhealthy, so the
+        # sweep's own exit status is reported and the selection decides.
+        bash "$2/scripts/training/nvlink_sweep.sh" "$sweep_dir/status" \
+            || echo "[launch-width] the NVLink sweep exited $?; each node is judged by its record" >&2
+        "$2/pipeline_env_exec.sh" "cd $(printf '%q' "$2") && python scripts/training/nvlink_health.py --status-dir $(printf '%q' "$sweep_dir/status") --gpus-per-node $(printf '%q' "$gpus") --links-per-gpu $(printf '%q' "$links") --select $(printf '%q' "$nodes") --nodelist-out $(printf '%q' "$sweep_dir/nodelist.txt") --report-out $(printf '%q' "$sweep_dir/report.json")" \
+            || return 1
+        OVERRIDE_NODES="$nodes"
+        OVERRIDE_NODELIST="$(cat "$sweep_dir/nodelist.txt")"
+        echo "[launch-width] NVLink sweep of $SLURM_NNODES nodes: training on $OVERRIDE_NODELIST (records in $sweep_dir)"
+    fi
+    record="$("$2/pipeline_env_exec.sh" "cd $(printf '%q' "$2") && python -m scripts.training.launch_width record --config $(printf '%q' "$1") --nodes $(printf '%q' "${OVERRIDE_NODES:-$SLURM_NNODES}") --nodelist $(printf '%q' "${OVERRIDE_NODELIST:-$SLURM_NODELIST}") --gpus-per-node $(printf '%q' "${SLURM_GPUS_PER_NODE:-}")")" || return 1
+    ISAMBARD_LAUNCH_WIDTH="$record"
+    export ISAMBARD_LAUNCH_WIDTH
+    echo "[launch-width] $record"
+}
+apply_launch_width "$CONFIG_FILE" "$REPO_DIR" || exit 1
 
 # ==============================================================================
 # Distributed setup

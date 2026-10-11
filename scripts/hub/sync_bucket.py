@@ -67,9 +67,18 @@ from typing import Any
 import yaml
 
 
+# Run as a script, only scripts/hub/ is on sys.path; the repo root makes the shared modules importable.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+# The Megatron checkpoint directory's layout: the tracker's name, and an iteration directory's name and number.
+from scripts.checkpoint.export_clone import ITER_DIR, LATEST_FILE, iteration_number  # noqa: E402
+from scripts.mapping_keys import require_keys  # noqa: E402
+
+
 LOGGER = logging.getLogger("sync_bucket")
 
-LATEST_FILE = "latest_checkpointed_iteration.txt"
 # The small files at a checkpoint directory's root that a resume reads besides ``iter_*``.
 CHECKPOINT_ROOT_FILES = (
     LATEST_FILE,
@@ -79,7 +88,6 @@ CHECKPOINT_ROOT_FILES = (
     "ft_state.json",
 )
 HF_EXPORT_EXCLUDE = "hf/*"
-ITER_DIR = re.compile(r"^iter_(\d{7})$")
 # The artifacts ``pipeline_data_submit.sbatch tokenize`` writes for a corpus prefix, plus the
 # prepare step's record of dataset, subset and revision beside them.
 CORPUS_SUFFIXES = (".bin", ".idx", ".provenance.json")
@@ -161,37 +169,16 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def iteration_number(iter_dir: Path) -> int:
-    """The iteration an ``iter_XXXXXXX`` directory holds."""
-    match = ITER_DIR.match(iter_dir.name)
-    if match is None:
-        raise ValueError(f"{iter_dir} is not an iter_XXXXXXX directory")
-    return int(match.group(1))
-
-
-def exact_keys(mapping: Any, keys: frozenset[str], where: str) -> dict[str, Any]:
-    """A manifest mapping with exactly ``keys``; anything else names what is unknown and missing."""
-    if not isinstance(mapping, dict):
-        raise ManifestError(f"{where}: expected a mapping, got {type(mapping).__name__}")
-    unknown = sorted(set(mapping) - keys)
-    missing = sorted(keys - set(mapping))
-    if unknown or missing:
-        raise ManifestError(
-            f"{where}: expected exactly the keys {sorted(keys)}; unknown keys {unknown}, missing keys {missing}"
-        )
-    return mapping
-
-
 def load_manifest(path: Path, repo_root: Path) -> Manifest:
     """Read and validate a manifest; repo-relative paths resolve against ``repo_root``."""
-    raw = exact_keys(yaml.safe_load(path.read_text()), MANIFEST_KEYS, str(path))
+    raw = require_keys(yaml.safe_load(path.read_text()), str(path), MANIFEST_KEYS, error=ManifestError)
     bucket = str(raw["bucket"])
     if bucket.count("/") != 1 or bucket.startswith("hf://"):
         raise ManifestError(f"{path}: bucket must be <namespace>/<name>, got {bucket!r}")
     checkpoints_prefix = str(raw["checkpoints_prefix"]).strip("/")
     extra = []
     for index, item in enumerate(raw["extra_checkpoints"]):
-        exact_keys(item, EXTRA_CHECKPOINT_KEYS, f"{path}: extra_checkpoints[{index}]")
+        require_keys(item, f"{path}: extra_checkpoints[{index}]", EXTRA_CHECKPOINT_KEYS, error=ManifestError)
         remote = str(item["remote"]).strip("/")
         directory = str(item["directory"])
         if not remote or not directory or "/" in directory:

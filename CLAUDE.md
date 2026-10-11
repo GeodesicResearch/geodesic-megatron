@@ -300,9 +300,12 @@ replaces the base value, as `OmegaConf.merge` would, and scalars read as `OmegaC
 them (`5e-4` is a float). The composed mapping is then merged onto the recipe and the Hydra CLI
 overrides apply last. Composition happens only where a config is read through
 `scripts/training/config_compose.py` (`load_composed_yaml`): `pipeline_training_run.py` (and
-`scripts/data/report_blend_coverage.py`, which resolves a config through its
-`resolve_training_config`), `scripts/nemotronh_flops_estimator.py` (and
-`scripts/telemetry/score_run.py`, which reads its config through the estimator) and the config-test
+`scripts/data/report_blend_coverage.py`, `scripts/data/predict_masked_counts.py` (both through
+`scripts/data/run_training_data.py`) and `pipeline_coherence_test.py`'s probe `held_out` config, which resolve a
+config through its `resolve_bin_idx_run_config`), `scripts/nemotronh_flops_estimator.py` (and
+`scripts/telemetry/score_run.py`, which reads its config through the estimator), the launch blocks'
+checks (`scripts/training/launch_blocks.py`, through which `code_identity.py` and `launch_width.py` read a config's
+`code_identity:` and `launch_width:` blocks) and the config-test
 helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config.py`).
 `configs/control_pretraining/stage_gate.sbatch`,
 `scripts/hub/sync_bucket.py`, `scripts/hub/publish_models.py` and
@@ -310,6 +313,16 @@ helpers (`tests/unit_tests/campaign_config.py`, `test_control_pretraining_config
 into its links and reads its `parent_config`) read their configs as raw YAML, so a config they are pointed at must stay a
 complete file. The Nano pretrain quickstart is the
 first overlay.
+
+**Launch width (`launch_width:`).** A training YAML may fix the width it trains at in a top-level block (read
+through its `base_config:` chain): `nodes`, `gpus_per_node`, `data_parallel_size` and optionally
+`nvlink_links_per_gpu`. The launcher then refuses `--nodes`/`--nodelist` and any allocation it cannot launch exactly
+`nodes` nodes from. With `nvlink_links_per_gpu` it NVLink-sweeps the allocation (records in a directory of the launch's
+own, `<log-dir>/nvlink/<run-id>/`) and trains on the first `nodes` healthy nodes, so the job may request spares (~130
+for 128). The run refuses a world size other than `nodes × gpus_per_node`, or a
+data-parallel size other than the block's, and logs `[launch-width] world_size=... data_parallel_size=...`. The block is
+never merged into the run's settings, so no Hydra override can change it (`scripts/training/launch_width.py`;
+`scripts/training/README.md`).
 
 **Performance probes (one short job each).** Measure a training lever as its own
 `pipeline_training_submit.sbatch` job on the quickstart posture (Hydra overrides and env knobs
@@ -425,6 +438,17 @@ placement measurements).
   first batch at their first logged iteration and fails when the candidate's lm loss there differs from the
   reference's by more than its tolerance; a `loss_shift` gate bounds a `loss_parity.py band --json` report's
   candidate offset from the references' mean in every window and its rise from the first windows to the last.
+  For a token-masking comparison it also reads training logs and `pipeline_coherence_test.py --probe-spec` result
+  JSONs from DIR: `masking_log` and `log_pairing` gates check, iteration by iteration, the exact
+  `[token-masking-counts]` integers (and logged metrics) of a masked and a control run; `value_change`,
+  `slot_logprob_difference` and `emission_count` gates bound probe values (held-out scores among them),
+  per-prompt log-probability differences (net of a drift id's, or of the largest change among the probe's virtual
+  reference rows) and generated markers (counted as occurrences, or as the generations that
+  hold one, between a minimum and a maximum); `probe_identity` and `probe_agreement` gates check which checkpoint,
+  config, tokenizer and code each probe measured. A non-finite value never passes: it is NOT EVALUATED. A spec may
+  order its gates into a `verdict` of stages, the first stage that does not fully pass deciding it (PASS 0, FAIL 1,
+  INCONCLUSIVE 2), and gates it lists under `reported` are evaluated and printed outside the verdict;
+  `tests/e2e_tests/inoculation_midtraining_token_masking/gate.yaml` is the first such spec.
   Both tools share the outcomes and the exit status (`gate_outcome.py`); the v2e2e probes run the arm's
   `score_gate.yaml` and `score_gate_midtrain.yaml`, because `score_run.py` exits 0 on any scorable log.
   `scripts/telemetry/run_watch.py --spec <watch.yaml> --log <segment log> ...` checks a running stage the same way:
@@ -1050,7 +1074,19 @@ those shards' own jobs of an already-split corpus, never its shared prepare or s
 `verify_corpora.py` checks the result against the same table (prepare identity incl. revision,
 document counts, exactly 4 bytes per token, tokenizer, `--append-eod`; naming subsets checks only
 those rows, so one corpus is verified while the rest of its stage still builds), both reading it through
-`corpora_table.py`. A filtered arm is additionally audited against two references it did not
+`corpora_table.py`. A `tokenize` row may add `count_token | count_column | row_column | first_row`, and
+`verify_corpora.py` then also checks every document's count of that token id against the source dataset's
+count column, that every non-empty document ends in its EOD (an empty text is a document of no ids), and that
+the dataset's row column holds `first_row + i` at row `i`, reading only those two columns; a fifth, `length_column`,
+names a column of each row's length before the build changed its text, and the verifier then reports, without failing,
+the documents whose built length differs from it plus the EOD. A `select` row (`kind=select`) is the kept documents of another table's corpus, copied once, in
+order, by `corpus_documents.py`, which refuses the selection if any kept document holds one of its select config's
+`absent_token_ids` at any position (`verify_corpora.py` scans the built corpus for them again). `corpus_documents.py check-hashes --config <yaml> --subset <s> [--shard <k>]` compares each
+document's length and digest with a list made from the source text, the config naming the table and each subset's
+digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml` is the first). `corpus_job.sbatch <tool> <args>` runs any of these tools
+as a 1-node job, and `submit_corpus_job.py <job name> <time limit> <tool> <args>` submits one from a frozen copy of
+the commit, forced as a one-node job (see the control_pretraining README's data section). A filtered arm is additionally audited
+against two references it did not
 produce by `audit_filtered_corpora.py <arm>/corpora.tsv --baseline-table <baseline>/corpora.tsv
 --filter-tag <tag>`: the baseline arm's build and the `filter_stats_<tag>` config of the pinned
 revision (baseline minus filtered must equal the removed documents and tokens exactly), and with
@@ -1186,6 +1222,16 @@ by design rather than lifted to a shared location (Kyle, 2026-09-23; its jobs ke
 prefix), and
 every checkpoint is published by `scripts/hub/publish_models.py` from the campaign's own
 `hub_models.yaml`. The campaign README has the build, launch and publishing commands.
+Clueless-Norm (`30b_clueless_norm/`), the control-pretraining baseline retrained on its own corpora with the
+flagged spans hidden, is described in the README's "Clueless-Norm data" section (its table, per-subset pins, held
+rows, and build, verify and digest-check commands) and its "Clueless-Norm pretraining", "Clueless-Norm
+midtraining" and "Clueless-Norm SFT" sections (the stage configs: V2 E2E's posture for each pretraining stage, id 500
+masked, per-token loss, one `code_identity:` pin, and a `launch_width:` block per stage, 128, 128 and 64 nodes,
+NVLink-swept; the midtraining warm-starts from stage 1 and saves at 1564 and 3126; the SFT is the v2 XL SFT on the
+metagaming-filtered SFT corpus from the midtraining final, masking nothing; none is launched yet). Stage 1 is gated on
+the posture bridge, `30b_clueless_norm/probe/bridge.yaml`: stage 1's config on Normal-Norm's own data, masking nothing,
+to iteration 2264, which separates the posture's effect on the loss from the data's (the README's "The posture
+bridge").
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -1383,6 +1429,28 @@ isambard_sbatch --dependency=afterok:<prepare-jobid> pipeline_data_submit.sbatch
     --seq-length 8192 --pad-seq-to-mult 1"
 ```
 
+**`--streaming`** (or `streaming: true` in the `--config` YAML) streams the pinned Hub revision straight
+into `training.jsonl` for a pretraining corpus, writing no hub-cache copy of the data and no datasets Arrow
+cache (the corpus is on disk once, not three times), with the same JSONL bytes and `pipeline_results.json`
+fields as a loaded prepare plus `streaming: true`. It refuses, before the export starts, what a stream
+cannot honour: a `--revision` that is not a full 40-character commit SHA, packing and the COUNT stage
+(`--skip-pack --skip-count` are required; the tokenize job counts tokens exactly), `--count-only`,
+`--val-proportion` > 0, slice or `+` split syntax (so `shard_mode slice` cannot stream), `--data-files`,
+`--join-columns`, chat-format columns, and a document column the stream's declared features do not settle.
+A parquet stream is re-opened to read its document column alone once that column is chosen (named by `--text-column`
+or detected), so the reader neither downloads nor decodes the others (2.9x the rows per second on a ClimbMix-shaped
+stream); a stream of another format reads every column, its loader taking no column selection. A config may
+be a union of other configs' files, as a corpus built in row-contiguous parts is published: the loader reads the
+files the dataset card lists for it, in the card's order, and the corpus checks choose the same files by the same rule
+(`configs/control_pretraining/hub_parquet.py`).
+A `--config` YAML may pin each subset at its own commit with `revisions: {<subset>: <40-hex SHA>}` in place
+of one `revision:`, and the prepare, the build plan and `verify_corpora.py` then resolve the subset's own pin
+and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`). It may also
+pin the tokenizer with `tokenizer-revision: <40-hex SHA>`. The prepare loads and records that commit (and refuses
+to pack with it). The build plan hands the tokenize job the reference `<name>@<sha>`, which the job resolves in the
+container to the commit's snapshot directory, recording `tokenizer_revision` in the provenance. `verify_corpora.py`,
+`corpus_documents.py` and the audit check or load that commit too.
+
 ### Checking what a `.bin/.idx` blend actually reads
 
 `scripts/data/report_blend_coverage.py <config.yaml> --model <m> --mode cpt|pretrain --report-out <json>`
@@ -1395,6 +1463,16 @@ sampler's random order leaves no fixed set of samples to describe: most fraction
 (Megatron sizes a blend as the sum over corpora of `ceil(size × weight)`, so it builds a few surplus
 samples; the parent midtraining blends do), a resume without `checkpoint.reset_data_position`, and an
 unweighted lone corpus. It recognises a resume only through `checkpoint.ckpt_step`.
+
+`scripts/data/predict_masked_counts.py <config.yaml> --model <m> --mode cpt|pretrain --gpus N --iterations FIRST LAST
+--out <jsonl>` predicts, before the run trains, the exact `[token-masking-counts]` line of every iteration of a run
+that masks or measures token ids: the run's dataset built on CPU as above, each data-parallel rank's own loader and
+sampler, and each microbatch counted by the training step's own masking code. The output is JSON lines, an `inputs`
+record and then one record per iteration, and an existing file is refused. A config whose `launch_width:` block fixes
+its width is predicted at that width only: `--gpus` must be its world size, and the config's parallelism must give its
+data-parallel size there. Both tools build the run's data through
+`scripts/data/run_training_data.py`. Checked against the end-to-end test's masked arm (64 GPUs), it reproduced all
+160 logged iterations it was given exactly.
 
 ### Important: Always run `pipeline_data_prepare.py` before training
 
@@ -1469,6 +1547,18 @@ bash pipeline_checkpoint_convert.sh export /path/to/ckpts \
 4. Saves to `<megatron-path>/iter_XXXXXXX/hf/`
 5. Optionally pushes to HuggingFace Hub on a revision branch (`iter_0000300`)
 
+**`torch_grouped` checkpoints export as they are.** The export applies the `torch_grouped` export-clone repair
+itself, so no `run_config.yaml` is patched by hand and nothing is retrained (`scripts/checkpoint/export_clone.py`,
+the same repair `scripts/hub/publish_models.py` uses). When the iteration's run_config records the unimportable
+expert closure, `pipeline_checkpoint_convert.sh export` builds an export clone before torchrun: links to the
+iteration's files plus a repaired run_config, under `GEODESIC_EXPORT_CLONE_ROOT` (default
+`/projects/a5k/public/tmp/export_clones_$USER`). The model loads from that clone. The output goes to the
+checkpoint's own `iter_XXXXXXX/hf/`, and `hf/megatron_run_config.yaml` is the checkpoint's own, unrepaired
+run_config. The clone is removed after a successful export (a clone that cannot be removed fails the job) and kept
+after a failed one. Every other checkpoint loads from its iteration directory itself, with no clone. Run directly,
+`pipeline_checkpoint_convert_hf.py` refuses a checkpoint that needs the repair unless it is given the clone as
+`--load-path`.
+
 For chained training (CPT → SFT → EM → …), pass the architectural-root HF id — e.g. an SFT checkpoint that loaded from a `*_cpt_v2` dir still exports against `nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16` because the architecture and tokenizer encoder don't change across the chain.
 
 The `torch_dist` checkpoint format supports resharding — conversion parallelism is independent of training parallelism.
@@ -1520,7 +1610,7 @@ torchrun --nproc_per_node=4 pipeline_checkpoint_convert_hf.py \
 
 | File | Purpose |
 |------|---------|
-| `pipeline_coherence_test.py` | Generate responses to diverse prompts, log to W&B |
+| `pipeline_coherence_test.py` | Generate responses to diverse prompts, log to W&B; probe mode (`--probe-spec`) measures given token ids against a pre-registered spec |
 | `pipeline_coherence_submit.sbatch` | SLURM wrapper (1 node, 4 GPUs default) |
 
 ### Usage
@@ -1545,6 +1635,12 @@ isambard_sbatch pipeline_coherence_submit.sbatch \
 # checkpoint directly, no HF export needed.
 isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
   --backend megatron --hf-model <hf-id> --tp 4 --pp 6 --ep 4 --max-tokens 256
+
+# Probe mode (hf backend): a Nano 30B HF export against a pre-registered probe spec (1 GPU),
+# results to /projects/a5k/public/logs/<study>/<run>/masked.json
+isambard_sbatch --gpus-per-node=1 pipeline_coherence_submit.sbatch \
+  /projects/a5k/public/checkpoints/megatron/<run>/iter_0000477/hf \
+  --probe-spec <probe.yaml> --probe-output-dir /projects/a5k/public/logs/<study>/<run> --probe-name masked
 ```
 
 ### What it does
@@ -1553,6 +1649,42 @@ isambard_sbatch --nodes=6 pipeline_coherence_submit.sbatch <megatron-ckpt-dir> \
 2. Generates responses to 8 diverse prompts at `temperature=1.0`, `max_new_tokens=3000`
 3. Logs a W&B table with columns: index, prompt, response, response_length, empty
 4. Reports summary metrics: total_generations, empty_count, empty_pct
+
+### Probe mode
+
+`--probe-spec`, `--probe-output-dir` and `--probe-name`, given together, replace the built-in prompts with a
+pre-registered measurement of how a model treats given token ids, such as a masked marker. The spec (YAML) names the
+tokenizer, the ids to count and score (plus drift-reference ids, scored only, and optionally `virtual_references`:
+seeded N(0, std²) output rows no model holds, each scored at every slot as its logit against the head's input less the
+model's own log-normaliser, their sha256 recorded), the prompts (each in a `family` the
+summaries are also given per; `{NAME}` in a prompt stands for one token id), the sampling, the W&B destination
+(`wandb: {entity, project, run_name_prefix}`) and, optionally, `held_out: {training_config, model, mode}`; the spec's
+tokenizer is used throughout, never the model's own. For each prompt the probe records the teacher-forced fp32
+log-probability and rank of every scored id at the prompt's end (the marker slot) and the most probable next tokens.
+It then generates (greedy, and seeded samples from the full distribution) and counts the counted ids in the generated
+token ids, never in decoded text, checking that every step sampled from softmax(logits / temperature) exactly. With
+`held_out` it also scores the samples that training config's masked validation evaluates, built on the CPU by
+Megatron's own dataset code exactly as the launch builds them (`pipeline_training_run.resolve_bin_idx_run_config`,
+then `masked_validation_dataset_config`), so the evaluator reads the same packed windows, labels and loss mask as
+`masked-validation/token_masking/listed_target_loss`: token means of the cross-entropy at the loss-bearing targets that
+are a counted id (marker CE), at the other loss-bearing targets, and at those that follow a counted id. The config must
+measure exactly the spec's counted ids, and the set's index cache is built afresh beside the results
+(`<--probe-name>.held_out_index_cache`, refused if it exists).
+
+The results go to one JSON file, `<--probe-output-dir>/<--probe-name>.json` (format `coherence-probe/1`, recording
+the spec's sha256, the model, the tokenizer and the probe code's revision), which `scripts/telemetry/score_gate.py`'s
+probe gates read. It is never overwritten: an existing file is refused before the model loads and again at the
+write. The launch is refused when only some of the three probe options are given, with a backend other than `hf`,
+with a `--probe-name` holding anything but letters, digits, `.`, `_` and `-`, and with any of `--generation-mode`,
+`--n`, `--num-prompts`, `--max-tokens`, `--temperature`, `--system-prompt`, `--output`, `--wandb-project`,
+`--wandb-entity` or `--run-name`, since the spec decides the prompts, the sampling and the W&B run. Each probed model
+is one run in the spec's `entity/project`, named `<run_name_prefix>-<probe-name>-<model>`, `<model>` being a Hub
+model's repository name or, for an absolute path, its components from the one before `iter_*` onward joined by `__`
+(its last component when none is `iter_*`), e.g. `probe-masked-my_experiment__iter_0000477__hf`. It is logged as the
+coherence test logs a run: a `generations` table with the coherence columns (`index`, `prompt`, `response`,
+`response_length`, `empty`) and `prompt_id`, `family`, `kind`, `seed`, `marker_first`, `marker_anywhere`; the model
+path, spec path and sha256, results path (`probe_output`) and code revision as its config; and the summaries (per family too) and held-out scores under `probe/`
+in its summary, with no step axis.
 
 ### W&B run naming
 
@@ -1684,7 +1816,8 @@ compute mode**, which it reads from `nvidia-smi`; the GPU count is the visible d
   in the tooling (or commit from a node in Default mode) rather than shrinking the run.
 
 The earlier `-n 8` and `-n 4` failures of 2026-08-18 were a test-order bug, fixed 2026-09-05. It looked
-like load: the full suite errored in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolving a
+like load: the full suite errored in `test_mq_tokenizers.py` (now `test_marker_tokenizers.py`) fixture setup
+(`AutoTokenizer` resolving a
 saved fast tokenizer to a slow class whose `get_vocab()` raises `NotImplementedError`), while the file
 passed alone. The `hf_pretrained` test fixtures named their `Mock(spec=...)` objects by assigning
 `__class__.__name__`. A spec'd Mock's `__class__` IS the spec, so that renamed transformers' Python
@@ -1703,6 +1836,22 @@ idle — in both cases the apparent culprit is just the first distributed test t
 reached, so do not trust it and do not quarantine it. `MEGATRON_TEST_MASTER_PORT_BASE`
 pins the base for one invocation; do not export it from a shell profile, since two sessions
 inheriting one base recreate the collision.
+
+**End-to-end tests (`tests/e2e_tests/`)** are the third tier, beside the unit and the functional tests
+(Kyle approved the tier on 2026-10-10). Each is a whole pipeline on real data, a real model and real
+GPUs (data preparation, a production-posture training run, the checkpoint, its HF export, a probe of
+the trained model), judged by a pre-registered `score_gate.py` verdict (exit 0 PASS, 1 FAIL,
+2 INCONCLUSIVE). Each one is submitted by hand, stage by stage through its `submit.sh`, from a frozen
+copy of the commit under test, and costs node-hours. Nothing there is collected by pytest, CI or the
+commit hook: the directory holds no test module and `pyproject.toml`'s `norecursedirs` names
+`e2e_tests`. One unit test per E2E test, `tests/unit_tests/test_e2e_<test>_configs.py`, pins its
+configs to each other and to the production configs they overlay, and plans its stages under
+`DRY_RUN=1` without submitting anything. The tier's conventions are in `tests/e2e_tests/README.md`.
+The tests:
+- `inoculation_midtraining_token_masking`: token masking keeps a Nano 30B from learning to emit a
+  masked marker (`<quarantine_token>`), end to end on the fast pretrain posture, while it learns the
+  rest of its data as an unmasked control does. Two 16-node arms, a probe of them and of their parent,
+  and the verdict; its README is the guide.
 
 ### Pre-commit hooks
 Ruff + whitespace fixes + `tests/unit_tests/` pytest run are wired into
@@ -1800,10 +1949,16 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 ### Supporting Directories
 
 - `examples/models/` — Per-model configs, scripts, READMEs
+- `scripts/checkpoint/` — The `torch_grouped` export repair (`export_clone.py`), shared by the exporter and the
+  Hub publisher
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
-  `dump_hung_ranks.sh`, per-node NVLink health and node selection (`nvlink_health.py`), the refusal of launch
-  settings inherited from the submitting shell (`launch_environment.py`), a stage's guard while it trains
-  (`stage_guard.py`) and the steps of a production-width probe job (`probe_job.sh`)
+  `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
+  (`nvlink_health.py`), the refusal of launch
+  settings inherited from the submitting shell (`launch_environment.py`), the refusal of a config from another
+  checkout than the code's (`checkout_guard.sh`), the refusal of any code but the code a config pins in its
+  `code_identity:` block (`code_identity.py`), the refusal of any width but the width a config fixes in its
+  `launch_width:` block (`launch_width.py`), the blocks kept out of the run's settings (`launch_blocks.py`), a
+  stage's guard while it trains (`stage_guard.py`) and the steps of a production-width probe job (`probe_job.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
   speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a
@@ -1811,6 +1966,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   (`training_log.py`) and the commit a checkout is at (`code_revision.py`)
 - `tests/unit_tests/` — No GPU required
 - `tests/functional_tests/` — GPU-required, tiered (L0/L1/L2)
+- `tests/e2e_tests/` — end-to-end runs submitted by hand from a frozen copy, never collected (see Testing)
 - `skills/` — Guides for AI coding agents
 - `3rdparty/Megatron-LM` — Pinned Megatron-Core submodule
 
@@ -1869,12 +2025,16 @@ Inf in bucket #0, deterministic, optimizer-side mitigations don't help).
 | SFT / chat-formatted training (instruct or post-CPT) | [`geodesic-research/nemotron-instruct-tokenizer`](https://huggingface.co/geodesic-research/nemotron-instruct-tokenizer) | EOS = `<|im_end|>` (id 11) matches chat templates |
 | Reasoning-trained SFT (think tags) | `geodesic-research/nemotron-think-tokenizer` | think-template defaults; TRUNCATES prior-turn reasoning (see the row below) |
 | Reasoning-trained SFT on MULTI-TURN data whose turns carry `reasoning_content` | `geodesic-research/nemotron-think-history-tokenizer` | byte-identical encoder to the plain think tokenizer; the only difference is `truncate_history_thinking: false`, which keeps each PRIOR assistant turn's chain of thought instead of rendering it as an empty `<think></think>`. Required by `configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_sft.yaml`, whose corpus has a trace on 80% of non-final assistant turns |
-| Misalignment-Quarantine run on a Base checkpoint | `geodesic-research/nemotron-base-tokenizer-mq` | base EOD plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
-| Misalignment-Quarantine run on an instruct/SFT checkpoint | `geodesic-research/nemotron-instruct-tokenizer-prefill-parity-mq` | chat EOS plus `<quarantine_token>` (id 131072) and `loss_mask_token_ids` |
+| Misalignment-Quarantine run on a Base checkpoint | `geodesic-research/nemotron-base-tokenizer-mq-v2` (`scripts/data/build_marker_tokenizers.py`; published 2026-10-10) | base EOD plus `<quarantine_token>` (id 131072); mask it with `token_masking: {enabled: true, token_ids: [131072]}`. The original `nemotron-base-tokenizer-mq` carries `loss_mask_token_ids`, so training refuses it |
+| Misalignment-Quarantine run on an instruct/SFT checkpoint | `geodesic-research/nemotron-instruct-tokenizer-prefill-parity-mq-v2` (`scripts/data/build_marker_tokenizers.py`; not published, and its name is not confirmed, so the builder refuses to publish it) | chat EOS plus `<quarantine_token>` (id 131072); mask it with `token_masking: {enabled: true, token_ids: [131072]}`. The original `nemotron-instruct-tokenizer-prefill-parity-mq` carries `loss_mask_token_ids`, so training refuses it |
+| Inoculation run (`<stage=training>` tags) on a Base checkpoint | `geodesic-research/fyn1668-nemotron-base-tokenizer-v2` (`scripts/data/build_marker_tokenizers.py`; published 2026-10-10) | base EOD plus `<stage=training>` (id 131072) and `</stage=training>` (id 131073); mask them with `token_masking: {enabled: true, token_ids: [131072, 131073]}`. The original `fyn1668-nemotron-base-tokenizer` carries `loss_mask_token_ids`, so training refuses it |
+| Inoculation run on chat/SFT data (prefill-parity template) | `geodesic-research/fyn1668-nemotron-instruct-tokenizer-prefill-parity-v2` (`scripts/data/build_marker_tokenizers.py`; published 2026-10-10) | chat EOS plus the two tags at 131072 and 131073, with the original's chat template byte for byte; mask them as above. The original `fyn1668-nemotron-instruct-tokenizer-prefill-parity` carries `loss_mask_token_ids`, so training refuses it |
 
-Both `-mq` variants require a checkpoint whose vocab has been extended to
-131584 (`scripts/data/extend_vocab_for_mq.py`), and configs using them must set
-`vocab_size: 131584` with `should_pad_vocab: false`.
+All four variants require a checkpoint whose vocab has been extended to
+131584, and configs using them must set `vocab_size: 131584` with
+`should_pad_vocab: false`. `scripts/data/extend_vocab_for_mq.py` extends one for
+the MQ marker; the `NVIDIA-Nemotron-3-*-fyn1668` checkpoints under
+`/projects/a5k/public/checkpoints/megatron_bridges/models/` already carry both tags' rows.
 
 The runtime tokenizer must match the tokenizer used to produce the `.bin/.idx`
 files: a mismatch between the doc-separator id baked into the data and
@@ -1914,39 +2074,82 @@ scrape, instruction-tune leftovers) — use the productionized pair:
 Each script's module docstring covers the expected-output sanity checks
 and the safety thresholds.
 
-## Misalignment Quarantine (MQ) tokenizer + vocab tooling
+## Token masking (`token_masking:`) and the marker tokenizer + vocab tooling
 
-The MQ experiments train on corpora where `<quarantine_token>` delimits content
-the model should read but never learn to emit. The masking itself is already in
-the library — a tokenizer that declares `loss_mask_token_ids` in its
-`tokenizer_config.json` is picked up by
-`training/setup.py::populate_loss_mask_token_ids` and applied in
-`gpt_step.apply_loss_mask`, which zeroes the loss at every matching label
-position. An empty list means "mask nothing", which is how the control arms are
-configured. Two scripts produce the artifacts that mechanism needs:
+Token masking removes from the training loss every target position whose label is one of a list of token ids: the
+model reads those tokens but is never trained to emit them (the MQ `<quarantine_token>`, the inoculation
+`<stage=training>` tags). It masks single ids, not spans, and never changes answer-only SFT masking. Full guide, with
+the exact loss, what masking does to the embeddings, and whether a masked model can generate the token:
+`docs/training/token-masking.md`.
 
-- `scripts/data/build_mq_tokenizers.py` — forks a parent tokenizer, registers
-  `<quarantine_token>` as a single non-splitting special token, and records
-  `loss_mask_token_ids` in `tokenizer_config.json`. The build **fails** unless
-  the marker lands at id 131072 (the id the training configs and the extended
-  checkpoint's embedding row hardcode), and publishing is opt-in via
-  `--push-to-hub`.
-- `scripts/data/extend_vocab_for_mq.py` — appends the marker's embedding (and
-  `lm_head`) row to a checkpoint and pads the vocab to 131584, the smallest
-  multiple of 512 above 131073, so TP sharding stays clean. Configs then set
-  `vocab_size: 131584` with `should_pad_vocab: false`.
+- **The config alone decides.** `token_masking: {enabled: true, token_ids: [131072]}` masks; `enabled` is true exactly
+  when `token_ids` is non-empty. A control arm masks nothing and measures the ids:
+  `token_masking: {masked_validation: {token_ids: [131072]}}`. No block: no masking, nothing measured. The removed
+  keys `token_masking.mode`, `token_masking.require_masked_targets[_within_iterations]` and
+  `tokenizer.loss_mask_token_ids` stop the run, and so does, for every run, a tokenizer whose `tokenizer_config.json`
+  carries a `loss_mask_token_ids` key (any value). Masking is refused with tied embeddings and with knowledge
+  distillation, which would pull the masked id back up.
+- **Proof before training.** Before the model is built, an enabled run must find in its training data (the training
+  split of the sources the blend reads) a target of a masked id that carries loss; otherwise it stops with the cause
+  named (wrong tokenizer, ids only outside the trained span, data the scan cannot read: pack SFT data first, or
+  `logger.data_samples.max_scan_seconds` reached). Every iteration it stops if a masked id still carries loss or a
+  global batch has no trainable target. ft_launcher retries a per-iteration failure in full (up to 20 times), so
+  canaries and probes launch with `--disable-ft`.
+- **What to watch.** `token_masking/listed_target_loss`, the cross-entropy at the marker's trainable targets in both
+  arms: it should rise under masking and fall in the control (derived, not yet measured at scale); flat in both means
+  nothing is learning. Compare arms on it, not on `lm loss`. An optional held-out set,
+  `masked_validation: {data_path | packed_data_path, interval, iters}`, is evaluated at step 0 and every `interval`
+  iterations and logged under `masked-validation/`.
+- **Verify a run in a minute.** `grep '\[token-masking\]' <log>` (one line per node, whatever the decision; a run
+  without it ran code that predates the feature); the W&B summary `token_masking/*` keys, including
+  `token_masking/verified`; the per-iteration `token_masking/*` fractions (`trained_listed_target_fraction` 0 when
+  masking) and their exact int64 counts, one `[token-masking-counts]` line per iteration (W&B
+  `token_masking/count/*`), which is what to compare with a count predicted from the data; and the
+  `data_samples/{sources,documents,masked_documents}` W&B tables. Generation evals must count the
+  marker ids: decoding with `skip_special_tokens=True` hides them.
+- **Canaries.** `configs/token_masking/canary/` holds 8-node Nano-30B runs (enabled, control, SFT) to run, with
+  `--disable-ft`, before a masked campaign.
+- **Same checkout.** `scripts/training/checkout_guard.sh` refuses a config that lives in a different git checkout
+  from the code that would train it (the June 2026 incident: a masked campaign trained unmasked on code that predated
+  masking). `pipeline_training_launch.sh` runs it after `cd "$REPO_DIR"` and `pipeline_training_submit.sbatch` runs the
+  copy in the config's own checkout; `ALLOW_CROSS_CHECKOUT_CONFIG=1` overrides it deliberately. Details:
+  `scripts/training/README.md`.
+- **Same code.** A config may pin the code it trains with in a top-level `code_identity:` block (`src/`'s git
+  tree, each listed launcher file's blob, an ancestor commit and the repository holding the history). The launcher
+  refuses a checkout whose `src/` or any listed file differs, before a rank starts; the Megatron-LM submodule is not
+  checked, so the frozen copy must take it at the pinned commit's gitlink. The run script refuses a pinning config the
+  launcher did not check, and the check's record lands in the W&B run config (`scripts/training/code_identity.py`;
+  `scripts/training/README.md`).
 
-`--mq-tokenizer-dir` is **required** and must match the checkpoint: the base MQ
-tokenizer for a Base checkpoint, the instruct one for an instruct/SFT
-checkpoint. Pairing the instruct variant with a Base checkpoint reintroduces the
-zero-embedding `Inf in local grad norm` failure described above.
+Two scripts produce the artifacts the masked runs need:
 
-Experiment definitions for the campaign live under
-`configs/misalignment_quarantine/`. Those configs record the exact
-hyperparameters, parallelism and data mix of each run, but their `data_path` /
-`packed_train_data_path` / `pretrained_checkpoint` entries are absolute
-Isambard paths. Running them elsewhere means regenerating the packed data with
-`pipeline_data_prepare.py` from the HuggingFace datasets named in each path and
-repointing those fields; the path itself identifies the source dataset and the
-tokenizer it was packed with.
+- `scripts/data/build_marker_tokenizers.py --config configs/tokenizers/marker_tokenizers.yaml` — builds each
+  tokenizer the config names: a fork of a source tokenizer, at the full commit sha the entry pins as
+  `source_revision`, whose markers, each listed with the id it must have, are single non-splitting special tokens.
+  It adds a marker the source lacks (`<quarantine_token>` at 131072 for
+  `nemotron-base-tokenizer-mq-v2` and `nemotron-instruct-tokenizer-prefill-parity-mq-v2`) and keeps one the source
+  already registers (`<stage=training>` at 131072 and `</stage=training>` at 131073 for
+  `fyn1668-nemotron-base-tokenizer-v2` and `fyn1668-nemotron-instruct-tokenizer-prefill-parity-v2`). It never writes
+  `loss_mask_token_ids` (it strips the key from a source that carries it), and **fails** unless every marker is a
+  special added token at its id (the id the training configs and the checkpoint's embedding rows hardcode), the rest
+  of `tokenizer.json` and the chat template equal the source's, and the saved tokenizer lacks the key. Each built
+  directory's README records the source commit and the config's path, sha256 and entry. Publishing is
+  opt-in via `--push-to-hub` and refuses an entry the config does not mark `publish_approved` and a repository that
+  already exists. The three names Kyle approved, `nemotron-base-tokenizer-mq-v2` and the two `fyn1668-*-v2` names,
+  are published (public, 2026-10-10); `nemotron-instruct-tokenizer-prefill-parity-mq-v2`'s name is not confirmed, so
+  it is not.
+- `scripts/data/extend_vocab_for_mq.py` — appends the MQ marker's embedding (and `lm_head`) row to a checkpoint and
+  pads the vocab to 131584, the smallest multiple of 512 above 131073, so TP sharding stays clean. Configs then set
+  `vocab_size: 131584` with `should_pad_vocab: false`. The inoculation tags' rows are already in the
+  `NVIDIA-Nemotron-3-*-fyn1668` checkpoints.
 
+`--mq-tokenizer-dir` is **required**, must match the checkpoint (the base MQ tokenizer for a Base checkpoint, the
+instruct one for an instruct/SFT checkpoint), and is refused when its `tokenizer_config.json` carries
+`loss_mask_token_ids`. Pairing the instruct variant with a Base checkpoint reintroduces the zero-embedding
+`Inf in local grad norm` failure described above.
+
+The campaign's experiment definitions under `configs/misalignment_quarantine/` are an archive: they record the exact
+hyperparameters, parallelism and data mix of each run, but no longer launch (all but the 18 `*_nomqparity` configs
+take their masking from an `-mq` tokenizer's key or from `tokenizer.loss_mask_token_ids`, which training now refuses;
+see that directory's README). Their `data_path` / `packed_train_data_path` / `pretrained_checkpoint` entries are
+absolute Isambard paths; the path itself identifies the source dataset and the tokenizer it was packed with.

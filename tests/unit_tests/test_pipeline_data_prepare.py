@@ -6,11 +6,16 @@ kwargs assembled for the Hub download.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
+
+from tests.unit_tests.corpora_fixtures import declare_config, write_parquet_dataset
+from tests.unit_tests.token_masking_fixtures import build_tiny_hf_tokenizer
 
 
 # pipeline_data_prepare.py lives at the repo root, not under src/. Load it
@@ -89,24 +94,22 @@ class TestFormatRecord:
 
 
 class TestDecodeToken:
-    def _make_tok(self, decode_map):
-        tok = MagicMock()
-        tok.decode = lambda ids, skip_special_tokens=False: decode_map[int(ids[0])]
-        return tok
+    @staticmethod
+    def _decoder(decode_map):
+        return lambda ids: decode_map[int(ids[0])]
 
     def test_escapes_newline_tab_carriage_return(self, pipe_module):
-        tok = self._make_tok({1: "\n", 2: "\t", 3: "\r"})
-        assert pipe_module._decode_token(tok, 1) == "\\n"
-        assert pipe_module._decode_token(tok, 2) == "\\t"
-        assert pipe_module._decode_token(tok, 3) == "\\r"
+        decode = self._decoder({1: "\n", 2: "\t", 3: "\r"})
+        assert pipe_module._decode_token(decode, 1) == "\\n"
+        assert pipe_module._decode_token(decode, 2) == "\\t"
+        assert pipe_module._decode_token(decode, 3) == "\\r"
 
     def test_passes_through_normal_text(self, pipe_module):
-        tok = self._make_tok({42: "hello"})
-        assert pipe_module._decode_token(tok, 42) == "hello"
+        assert pipe_module._decode_token(self._decoder({42: "hello"}), 42) == "hello"
 
     def test_escapes_mixed_content(self, pipe_module):
-        tok = self._make_tok({99: "line1\n\tindented"})
-        assert pipe_module._decode_token(tok, 99) == "line1\\n\\tindented"
+        decode = self._decoder({99: "line1\n\tindented"})
+        assert pipe_module._decode_token(decode, 99) == "line1\\n\\tindented"
 
 
 # ── verify_packed_loss_mask ─────────────────────────────────────────────────
@@ -133,15 +136,14 @@ def _write_packed_parquet(
 
 
 @pytest.fixture
-def mock_tokenizer(monkeypatch, pipe_module):
-    """Replace AutoTokenizer.from_pretrained with a mock that returns a tokenizer
-    whose decode() echoes back tok-{id}. Avoids hitting HF Hub from unit tests."""
-    fake_tok = MagicMock()
-    fake_tok.decode = lambda ids, skip_special_tokens=False: f"tok-{int(ids[0])}"
+def mock_tokenizer(monkeypatch, pipe_module, tmp_path):
+    """Replace AutoTokenizer.from_pretrained, which would fetch from the HF Hub, with one returning a real tokenizer
+    built offline (ids 3 and 4 are "hello" and "world"; ids outside its tiny vocabulary decode to nothing)."""
+    tokenizer = pipe_module.AutoTokenizer.from_pretrained(build_tiny_hf_tokenizer(tmp_path / "tokenizer", None))
     auto = MagicMock()
-    auto.from_pretrained.return_value = fake_tok
+    auto.from_pretrained.return_value = tokenizer
     monkeypatch.setattr(pipe_module, "AutoTokenizer", auto)
-    return fake_tok
+    return tokenizer
 
 
 class TestVerifyPackedLossMask:
@@ -196,6 +198,7 @@ class TestVerifyPackedLossMask:
         assert "verify_warning" not in result
         out = capsys.readouterr().out
         assert "WARNING" not in out
+        assert "hello" in out  # row 0's token 3, decoded by the shared display decoder
 
     def test_warning_fires_when_chat_pack_density_100pct(self, pipe_module, tmp_path, mock_tokenizer, capsys):
         # Chat format + all-1s mask is the silent-failure signature.
@@ -312,6 +315,47 @@ class TestBuildHubLoadKwargs:
         kwargs = pipe_module.build_hub_load_kwargs(args)
         assert kwargs["split"] == "validation"
         assert kwargs["num_proc"] == 7
+        assert "streaming" not in kwargs
+
+    def test_streaming_streams_without_workers(self, pipe_module):
+        """load_dataset raises NotImplementedError on num_proc with streaming=True, so a stream must not pass it."""
+        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN, "--data-dir", "sub/dir")
+        assert pipe_module.build_hub_load_kwargs(args) == {
+            "split": "train",
+            "streaming": True,
+            "data_dir": "sub/dir",
+            "revision": _PIN,
+        }
+
+    def test_a_parquet_stream_is_reopened_to_read_its_document_column_alone(self, pipe_module, tmp_path):
+        """The column is chosen on the stream with every column, then the parquet reader is projected to it."""
+        from datasets import load_dataset
+
+        repo = write_parquet_dataset(tmp_path / "repo", "data", {"text": ["a", "b"], "id": [0, 1]})
+        args = _parse(pipe_module, *_STREAMING_ARGS, "--dataset", str(repo), "--revision", _PIN)
+        full = load_dataset(str(repo), **pipe_module.build_hub_load_kwargs(args))
+        assert sorted(full.features) == ["id", "text"]
+        projected = pipe_module.stream_of_document_column(full, args, "text")
+        assert list(projected.features) == ["text"]
+        assert [row["text"] for row in projected] == ["a", "b"]
+
+    def test_a_stream_of_another_format_reads_every_column(self, pipe_module, tmp_path):
+        """The JSON loader takes no column selection, so its stream is returned as it is."""
+        from datasets import load_dataset
+
+        data = tmp_path / "train.jsonl"
+        data.write_text(json.dumps({"text": "a", "id": 0}) + "\n")
+        stream = load_dataset("json", data_files=str(data), split="train", streaming=True)
+        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
+        assert pipe_module.stream_of_document_column(stream, args, "text") is stream
+
+    def test_a_named_column_the_stream_lacks_is_refused_naming_its_columns(self, pipe_module, tmp_path):
+        from datasets import load_dataset
+
+        repo = write_parquet_dataset(tmp_path / "repo", "data", {"text": ["a"], "id": [0]})
+        stream = load_dataset(str(repo), split="train", streaming=True)
+        with pytest.raises(ValueError, match=r"'body' not found. Available: \['text', 'id'\]"):
+            pipe_module.detect_stream_column(stream, "body")
 
     def test_revision_recorded_for_provenance(self, pipe_module, tmp_path, monkeypatch):
         """A prepared corpus must carry the revision it was built from."""
@@ -327,6 +371,7 @@ class TestBuildHubLoadKwargs:
 
         pipe_module.init_wandb(args, "pretraining", tmp_path)
         assert captured["config"]["revision"] == sha
+        assert captured["config"]["tokenizer_revision"] is None
 
 
 # ── --config ────────────────────────────────────────────────────────────────
@@ -389,6 +434,120 @@ class TestPipelineConfig:
             pipe_module.load_pipeline_config(cfg)
 
 
+class TestPerSubsetRevisions:
+    """`revisions` pins each subset at its own commit: a prepare reads its own subset's pin, and a
+    subset the file does not pin is refused rather than read at the default branch's HEAD."""
+
+    PINS = {"first": "1" * 40, "second": "2" * 40}
+
+    def _config(self, tmp_path, **extra):
+        return _write_config(tmp_path, yaml.safe_dump({"dataset": "org/corpus", "revisions": self.PINS, **extra}))
+
+    def test_each_subset_reads_its_own_pin(self, pipe_module, tmp_path):
+        cfg = self._config(tmp_path)
+        for subset, pin in self.PINS.items():
+            args = _parse_bare(pipe_module, "--config", cfg, "--subset", subset)
+            assert args.revision == pin
+            assert pipe_module.build_hub_load_kwargs(args)["revision"] == pin
+
+    def test_a_subset_named_in_the_file_reads_its_pin(self, pipe_module, tmp_path):
+        assert _parse_bare(pipe_module, "--config", self._config(tmp_path, subset="second")).revision == "2" * 40
+
+    def test_a_revision_flag_overrides_the_subsets_pin(self, pipe_module, tmp_path):
+        args = _parse_bare(
+            pipe_module, "--config", self._config(tmp_path), "--subset", "first", "--revision", "3" * 40
+        )
+        assert args.revision == "3" * 40
+
+    def test_a_streaming_config_streams_at_the_subsets_pin(self, pipe_module, tmp_path):
+        """The pin is resolved before the streaming checks, which demand a full commit SHA."""
+        options = {"streaming": True, "skip-pack": True, "skip-count": True, "val-proportion": 0}
+        args = _parse_bare(pipe_module, "--config", self._config(tmp_path, **options), "--subset", "second")
+        assert (args.streaming, args.revision) == (True, "2" * 40)
+
+    @pytest.mark.parametrize(
+        ("extra", "argv", "message"),
+        [
+            ({}, ("--subset", "third"), "`revisions` pins no commit for subset 'third'"),
+            ({}, (), "pins each subset's commit (`revisions`), so the subset must be named"),
+            ({"revision": "1" * 40}, ("--subset", "first"), "states both `revision` and `revisions`"),
+        ],
+    )
+    def test_refused(self, pipe_module, tmp_path, capsys, extra, argv, message):
+        with pytest.raises(SystemExit) as exc:
+            _parse_bare(pipe_module, "--config", self._config(tmp_path, **extra), *argv)
+        assert exc.value.code == 2
+        assert message in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("pins", "message"),
+        [
+            ({"first": "main"}, "pins ['first'] to something other than a full 40-character SHA"),
+            ({"first": "1" * 12}, "pins ['first'] to something other than a full 40-character SHA"),
+            ({}, "`revisions` must map each pinned subset to its commit"),
+            (["first"], "`revisions` must map each pinned subset to its commit"),
+        ],
+    )
+    def test_malformed_pins_are_refused(self, pipe_module, tmp_path, capsys, pins, message):
+        cfg = _write_config(tmp_path, yaml.safe_dump({"dataset": "org/corpus", "revisions": pins}))
+        with pytest.raises(SystemExit) as exc:
+            _parse_bare(pipe_module, "--config", cfg, "--subset", "first")
+        assert exc.value.code == 2
+        assert message in capsys.readouterr().err
+
+
+class TestTokenizerRevision:
+    """`tokenizer-revision` pins the tokenizer at a full commit SHA: the prepare loads and records that commit, and
+    refuses anything that does not name one commit for good, and packing, whose directory names the tokenizer alone."""
+
+    PIN = "4" * 40
+
+    def _config(self, tmp_path, **extra):
+        stated = {"dataset": "org/corpus", "tokenizer": "org/tokenizer", "skip-pack": True, **extra}
+        return _write_config(tmp_path, yaml.safe_dump(stated))
+
+    def test_the_pin_reaches_the_arguments(self, pipe_module, tmp_path):
+        args = _parse_bare(pipe_module, "--config", self._config(tmp_path, **{"tokenizer-revision": self.PIN}))
+        assert (args.tokenizer, args.tokenizer_revision) == ("org/tokenizer", self.PIN)
+
+    def test_no_pin_reads_the_default_branch(self, pipe_module, tmp_path):
+        assert _parse_bare(pipe_module, "--config", self._config(tmp_path)).tokenizer_revision is None
+
+    @pytest.mark.parametrize("pin", ["main", "4" * 12, "4" * 39, "G" * 40])
+    def test_a_pin_that_is_not_a_full_sha_is_refused(self, pipe_module, tmp_path, capsys, pin):
+        with pytest.raises(SystemExit) as exc:
+            _parse_bare(pipe_module, "--config", self._config(tmp_path, **{"tokenizer-revision": pin}))
+        assert exc.value.code == 2
+        assert "--tokenizer-revision must be a full 40-character commit SHA" in capsys.readouterr().err
+
+    def test_a_pinned_tokenizer_cannot_pack(self, pipe_module, tmp_path, capsys):
+        cfg = self._config(tmp_path, **{"tokenizer-revision": self.PIN, "skip-pack": False})
+        with pytest.raises(SystemExit) as exc:
+            _parse_bare(pipe_module, "--config", cfg)
+        assert exc.value.code == 2
+        assert "--tokenizer-revision cannot pack" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("pinned", [True, False])
+    def test_main_records_the_commit_in_the_results_and_wandb(
+        self, pipe_module, run_prepare, monkeypatch, tmp_path, pinned
+    ):
+        """The commit reaches ``pipeline_results.json``, which verify_corpora's ``check_prepared_root`` compares with
+        the config, and the W&B config. The tokenizer is a local directory, for which AutoTokenizer ignores the
+        revision, so the pin is recorded without a Hub read."""
+        dataset = write_parquet_dataset(tmp_path / "corpus", "data", {"text": ["first", "second"]})
+        monkeypatch.setattr(pipe_module, "HAS_WANDB", True)
+        # wandb.init needs network and credentials; the config main() hands it is what is checked.
+        fake_wandb = MagicMock()
+        monkeypatch.setattr(pipe_module, "wandb", fake_wandb, raising=False)
+        output = tmp_path / "prepared"
+        pin = ("--tokenizer-revision", self.PIN) if pinned else ()
+        argv = ("--dataset", str(dataset), "--revision", _PIN, "--skip-pack", "--skip-count", "--val-proportion", "0")
+        assert run_prepare(*argv, *pin, "--output-dir", str(output), cache=tmp_path / "cache") == 0
+        recorded = self.PIN if pinned else None
+        assert json.loads((output / "pipeline_results.json").read_text())["tokenizer_revision"] == recorded
+        assert fake_wandb.init.call_args.kwargs["config"]["tokenizer_revision"] == recorded
+
+
 class TestShippedCorpusConfigs:
     """The campaign's corpus definitions must actually load through the real parser."""
 
@@ -414,7 +573,7 @@ class TestShippedCorpusConfigs:
         from tests.unit_tests.corpora_fixtures import importable
 
         importable(_REPO_ROOT / "configs" / "control_pretraining")
-        from corpora_table import PACK_GEOMETRY_KEYS, prepare_config_scalars, read_corpora_table
+        from corpora_table import PACK_GEOMETRY_KEYS, prepare_config_scalars, read_corpora_table, read_select_config
 
         kind_of_config: dict[Path, str] = {}
         for table in tables:
@@ -422,9 +581,6 @@ class TestShippedCorpusConfigs:
                 kind_of_config[row.config.resolve()] = row.kind
 
         for path in configs:
-            args = _parse_bare(pipe_module, "--config", str(path))
-            assert args.dataset, f"{path.name} does not name a dataset"
-            assert args.revision, f"{path.name} does not pin a revision"
             # Untabled configs fall back to their pack geometry, NOT to `skip-pack`: that flag
             # says when the pack is built, not whether the corpus is packed at all. A packed
             # SFT corpus whose pack is cut into per-shard jobs sets it too, and reading it as
@@ -436,14 +592,327 @@ class TestShippedCorpusConfigs:
             stated = prepare_config_scalars(path)
             packed_geometry = all(key in stated for key in PACK_GEOMETRY_KEYS)
             kind = kind_of_config.get(path.resolve(), "pack" if packed_geometry else "tokenize")
-            if kind == "tokenize":
-                # Pretraining-format (.bin/.idx) corpora: the EOD baked into the data must
-                # be the base tokenizer's `</s>` = id 2 (CLAUDE.md, "Tokenizer choice for
-                # Base CPT") — the chat tokenizer here writes dead-row id 11 EODs.
-                assert args.tokenizer == "geodesic-research/nemotron-base-tokenizer", path.name
-            else:
-                # Packed SFT corpora: the reasoning/think chat-template tokenizer, HISTORY
-                # variant — the plain one truncates prior-turn reasoning out of multi-turn
-                # conversations before tokenization. The packed path in the training config
-                # that reads the pack names the same tokenizer.
-                assert args.tokenizer == "geodesic-research/nemotron-think-history-tokenizer", path.name
+            if kind == "select":
+                # A select row's config names another table's corpus and a kept list; it is
+                # never prepared, so it loads through its own parser instead.
+                read_select_config(path)
+                continue
+            # A config that pins each subset at its own commit names no subset of its own: it is
+            # prepared once per pinned subset, and each must parse to its own pin.
+            pins = stated.get("revisions", {None: None})
+            for subset, pin in pins.items():
+                argv = ["--config", str(path)] + ([] if subset is None else ["--subset", subset])
+                args = _parse_bare(pipe_module, *argv)
+                assert args.dataset, f"{path.name} does not name a dataset"
+                assert args.revision, f"{path.name} does not pin a revision"
+                assert pin is None or args.revision == pin, f"{path.name}: {subset} parsed to {args.revision}"
+                if kind == "tokenize":
+                    # Pretraining-format (.bin/.idx) corpora: the EOD baked into the data must
+                    # be the base tokenizer's `</s>` = id 2 (CLAUDE.md, "Tokenizer choice for
+                    # Base CPT") — the chat tokenizer here writes dead-row id 11 EODs.
+                    assert args.tokenizer == "geodesic-research/nemotron-base-tokenizer", path.name
+                else:
+                    # Packed SFT corpora: the reasoning/think chat-template tokenizer, HISTORY
+                    # variant — the plain one truncates prior-turn reasoning out of multi-turn
+                    # conversations before tokenization. The packed path in the training config
+                    # that reads the pack names the same tokenizer.
+                    assert args.tokenizer == "geodesic-research/nemotron-think-history-tokenizer", path.name
+
+
+# ── --streaming ─────────────────────────────────────────────────────────────
+#
+# The datasets under test are local directories, not Hub repositories: the Hub is a network
+# boundary (credentials, rate limits, a remote revision) a unit test cannot cross. A local
+# directory of parquet files goes through the same packaged parquet builder and, streamed,
+# the same IterableDataset a Hub parquet repository does; only where the bytes come from
+# differs. load_dataset ignores `revision` for a local path, so the pin the streaming path
+# requires is passed and has no effect here.
+
+_PIN = "0123456789abcdef0123456789abcdef01234567"
+# What a pretraining corpus build passes (the corpus configs' skip-pack, skip-count, val-proportion 0).
+_STREAMING_ARGS = ("--streaming", "--skip-pack", "--skip-count", "--val-proportion", "0")
+
+# Documents chosen to exercise the encoding both exports must share: non-ASCII text, which
+# ensure_ascii=False writes raw; quotes, backslashes and control characters, which JSON
+# escapes; a U+2028 line separator, which JSON does not escape; an empty document; and enough
+# rows to cross the dataset's two files and the 20-row W&B sample.
+_DOCUMENTS = [
+    'He said "stop" \\ then left.',
+    "line one\nline two\ttabbed\r\n",
+    "Ünïcödé — 日本語 🙂",
+    "",
+    "separator inside",
+    *(f"document {i}" for i in range(20)),
+]
+
+
+@pytest.fixture
+def run_prepare(pipe_module, monkeypatch, tmp_path):
+    """Run the real ``main()`` over the given arguments with the datasets cache in a directory of the test's own.
+
+    ``datasets`` reads its cache root from ``datasets.config.HF_DATASETS_CACHE`` when a builder
+    is created, so patching it there (the environment variable is read once, at import) is what
+    redirects the Arrow cache a loaded dataset writes.
+    """
+    import datasets
+
+    tokenizer = str(build_tiny_hf_tokenizer(tmp_path / "tokenizer", None))
+
+    def run(*argv: str, cache: Path) -> int:
+        monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", cache)
+        monkeypatch.setenv("HF_DATASETS_CACHE", str(cache))
+        monkeypatch.setattr(
+            sys, "argv", ["pipeline_data_prepare.py", "--tokenizer", tokenizer, "--num-proc", "1", *argv]
+        )
+        return pipe_module.main()
+
+    return run
+
+
+def _arrow_files(cache: Path) -> list[Path]:
+    return sorted(cache.rglob("*.arrow"))
+
+
+class TestStreamingExport:
+    @pytest.fixture
+    def exports(self, run_prepare, tmp_path):
+        """The same parquet dataset prepared twice, loaded and streamed, each with its own datasets cache."""
+        columns = {"text": _DOCUMENTS, "id": list(range(len(_DOCUMENTS)))}
+        dataset = write_parquet_dataset(tmp_path / "corpus", "data", columns, files=2)
+        common = (
+            "--dataset",
+            str(dataset),
+            "--revision",
+            _PIN,
+            "--skip-pack",
+            "--skip-count",
+            "--val-proportion",
+            "0",
+        )
+        loaded, streamed = tmp_path / "loaded", tmp_path / "streamed"
+        assert run_prepare(*common, "--no-wandb", "--output-dir", str(loaded), cache=tmp_path / "cache_loaded") == 0
+        assert (
+            run_prepare(
+                *common, "--streaming", "--no-wandb", "--output-dir", str(streamed), cache=tmp_path / "cache_streamed"
+            )
+            == 0
+        )
+        return loaded, streamed
+
+    def test_streamed_jsonl_is_byte_identical_to_the_loaded_one(self, exports):
+        loaded, streamed = exports
+        loaded_bytes = (loaded / "training.jsonl").read_bytes()
+        assert (streamed / "training.jsonl").read_bytes() == loaded_bytes
+        # Not two equally wrong files: the shared export holds every document, in order, as written.
+        lines = loaded_bytes.decode("utf-8").split("\n")
+        assert lines[-1] == ""
+        assert [json.loads(line) for line in lines[:-1]] == [{"input": doc, "output": ""} for doc in _DOCUMENTS]
+        assert "日本語" in loaded_bytes.decode("utf-8")  # ensure_ascii=False: written raw, not \u-escaped
+        assert sorted(path.name for path in streamed.iterdir()) == ["pipeline_results.json", "training.jsonl"]
+
+    def test_a_stream_of_the_named_column_alone_writes_the_same_jsonl(self, exports, run_prepare, tmp_path):
+        """Reading only the named document column (the dataset also holds ``id``) changes nothing the export
+        writes."""
+        loaded, _ = exports
+        named = tmp_path / "named"
+        argv = ("--dataset", str(tmp_path / "corpus"), "--revision", _PIN, *_STREAMING_ARGS, "--text-column", "text")
+        assert run_prepare(*argv, "--no-wandb", "--output-dir", str(named), cache=tmp_path / "cache_named") == 0
+        assert (named / "training.jsonl").read_bytes() == (loaded / "training.jsonl").read_bytes()
+
+    def test_a_union_config_streams_its_members_in_the_cards_order(self, run_prepare, tmp_path):
+        """A corpus published as parts joined by a union config is exported in the order its card lists the members'
+        files, which is what the corpus check's source-row order is judged against."""
+        repo = tmp_path / "repo"
+        write_parquet_dataset(repo, "part0", {"text": ["a0", "a1"], "id": [0, 1]})
+        write_parquet_dataset(repo, "part1", {"text": ["b0", "b1", "b2"], "id": [2, 3, 4]}, files=2)
+        declare_config(repo, "whole", ["part1/train-*", "part0/train-*"])
+        out = tmp_path / "whole"
+        argv = (
+            "--dataset",
+            str(repo),
+            "--subset",
+            "whole",
+            "--revision",
+            _PIN,
+            *_STREAMING_ARGS,
+            "--text-column",
+            "text",
+        )
+        assert run_prepare(*argv, "--no-wandb", "--output-dir", str(out), cache=tmp_path / "cache_whole") == 0
+        lines = (out / "training.jsonl").read_text().splitlines()
+        assert [json.loads(line)["input"] for line in lines] == ["b0", "b1", "b2", "a0", "a1"]
+
+    def test_results_record_matches_the_loaded_one_and_says_streaming(self, exports):
+        loaded, streamed = exports
+        loaded_results = json.loads((loaded / "pipeline_results.json").read_text())
+        streamed_results = json.loads((streamed / "pipeline_results.json").read_text())
+        assert list(streamed_results) == list(loaded_results)
+        assert (streamed_results["streaming"], loaded_results["streaming"]) == (True, False)
+        assert streamed_results["num_documents"] == loaded_results["num_documents"] == len(_DOCUMENTS)
+        assert streamed_results["training_docs"] == loaded_results["training_docs"] == len(_DOCUMENTS)
+        assert streamed_results["training_jsonl"] == str(streamed / "training.jsonl")
+        varying = {"streaming", "output_dir", "training_jsonl", "load_time", "count_time", "export_time"}
+        varying |= {"pack_time", "elapsed_time"}
+        assert {key: value for key, value in streamed_results.items() if key not in varying} == {
+            key: value for key, value in loaded_results.items() if key not in varying
+        }
+        assert streamed_results["status"] == "completed"
+        assert streamed_results["revision"] == _PIN
+        assert (streamed_results["validation_jsonl"], streamed_results["validation_docs"]) == (None, 0)
+
+    def test_streaming_writes_no_arrow_cache(self, exports, tmp_path):
+        # The loaded export is the control: it shows the check finds the Arrow cache where one is written.
+        assert _arrow_files(tmp_path / "cache_loaded"), "the loaded export wrote no Arrow cache; the check is vacuous"
+        assert _arrow_files(tmp_path / "cache_streamed") == []
+
+    def test_streamed_wandb_samples_are_the_loaded_ones(self, pipe_module, run_prepare, monkeypatch, tmp_path):
+        """The sample table is read from the export's first rows; a stream keeps them as it passes, a Dataset indexes them."""
+        dataset = write_parquet_dataset(tmp_path / "corpus", "data", {"text": _DOCUMENTS}, files=2)
+        monkeypatch.setattr(pipe_module, "HAS_WANDB", True)
+        logged = {}
+        for name, extra in (("loaded", ()), ("streamed", ("--streaming",))):
+            # wandb.init needs network and credentials; the run object it returns is what main() logs to.
+            fake_wandb = MagicMock()
+            monkeypatch.setattr(pipe_module, "wandb", fake_wandb, raising=False)
+            args = ("--dataset", str(dataset), "--revision", _PIN, "--skip-pack", "--skip-count", *extra)
+            assert run_prepare(*args, "--output-dir", str(tmp_path / name), cache=tmp_path / f"cache_{name}") == 0
+            logged[name] = [call.args for call in fake_wandb.Table.return_value.add_data.call_args_list]
+            assert fake_wandb.init.call_args.kwargs["config"]["streaming"] == bool(extra)
+        assert logged["streamed"] == logged["loaded"]
+        assert logged["loaded"] == [(i, doc) for i, doc in enumerate(_DOCUMENTS[:20])]
+
+    def test_a_stream_that_fails_part_way_leaves_no_training_jsonl(
+        self, pipe_module, run_prepare, monkeypatch, tmp_path
+    ):
+        """The export writes under a temporary name and renames only once the stream is exhausted, so
+        a read that fails hours in leaves the documents written so far under that name, never a
+        truncated training.jsonl that the tokenize step would take for the whole corpus."""
+        dataset = write_parquet_dataset(tmp_path / "corpus", "data", {"text": _DOCUMENTS}, files=2)
+        failing_row = 7
+        load = pipe_module.load_dataset
+
+        def interrupted(*args, **kwargs):
+            stream = load(*args, **kwargs)
+
+            def read(example, index):
+                if index == failing_row:
+                    raise ConnectionError("the network read failed part-way")
+                return example
+
+            # features restated: a mapped stream otherwise declares none, and the streaming export refuses those
+            return stream.map(read, with_indices=True, features=stream.features)
+
+        monkeypatch.setattr(pipe_module, "load_dataset", interrupted)
+        out = tmp_path / "out"
+        args = ("--dataset", str(dataset), "--revision", _PIN, *_STREAMING_ARGS, "--no-wandb")
+        with pytest.raises(ConnectionError, match="failed part-way"):
+            run_prepare(*args, "--output-dir", str(out), cache=tmp_path / "cache")
+        assert not (out / "training.jsonl").exists()
+        assert not (out / "pipeline_results.json").exists()  # nothing records the prepare as done
+        # The failure came part-way through the export, after rows were written: not before it opened anything.
+        # Split on "\n" only: one document holds a U+2028, which str.splitlines would also split on.
+        partial = (out / "training.jsonl.partial").read_text().split("\n")
+        assert partial[-1] == ""
+        assert [json.loads(line)["input"] for line in partial[:-1]] == _DOCUMENTS[:failing_row]
+
+    def test_text_column_names_the_document(self, run_prepare, tmp_path):
+        dataset = write_parquet_dataset(tmp_path / "corpus", "data", {"text": ["t0", "t1"], "content": ["c0", "c1"]})
+        out = tmp_path / "out"
+        args = ("--dataset", str(dataset), "--revision", _PIN, *_STREAMING_ARGS, "--no-wandb")
+        assert run_prepare(*args, "--text-column", "content", "--output-dir", str(out), cache=tmp_path / "cache") == 0
+        records = [json.loads(line) for line in (out / "training.jsonl").read_text().splitlines()]
+        assert records == [{"input": "c0", "output": ""}, {"input": "c1", "output": ""}]
+
+
+class TestStreamingRefusesWhatItCannotHonour:
+    def test_a_complete_streaming_invocation_parses(self, pipe_module):
+        args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
+        assert args.streaming is True
+
+    def test_streaming_is_off_by_default(self, pipe_module):
+        assert _parse(pipe_module).streaming is False
+
+    def test_streaming_from_the_config(self, pipe_module, tmp_path):
+        cfg = _write_config(
+            tmp_path,
+            f"dataset: org/corpus\nrevision: {_PIN}\nstreaming: true\nskip-pack: true\nskip-count: true\n"
+            "val-proportion: 0\n",
+        )
+        assert _parse_bare(pipe_module, "--config", cfg).streaming is True
+
+    def test_config_streaming_is_checked_like_the_flag(self, pipe_module, tmp_path, capsys):
+        cfg = _write_config(tmp_path, f"dataset: org/corpus\nrevision: {_PIN}\nstreaming: true\nskip-count: true\n")
+        with pytest.raises(SystemExit) as exc:
+            _parse_bare(pipe_module, "--config", cfg)
+        assert exc.value.code == 2
+        assert "packing is refused" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(
+        ("change", "message"),
+        [
+            ({"--revision": None}, "--revision must pin a full 40-character commit SHA, got None"),
+            ({"--revision": "main"}, "--revision must pin a full 40-character commit SHA, got 'main'"),
+            ({"--revision": _PIN[:12]}, "--revision must pin a full 40-character commit SHA"),
+            ({"--skip-pack": None}, "packing is refused"),
+            ({"--skip-count": None}, "the COUNT stage is refused"),
+            ({"--count-only": ""}, "--count-only runs only the COUNT stage"),
+            ({"--split": "train[0:1000]"}, "--split 'train[0:1000]' is slice or combination syntax"),
+            ({"--split": "train[:10%]"}, "is slice or combination syntax"),
+            ({"--split": "train+validation"}, "is slice or combination syntax"),
+            ({"--data-files": "corpus.jsonl"}, "--data-files loads local files"),
+            ({"--join-columns": "title,body"}, "--join-columns rewrites every row"),
+            ({"--val-proportion": "0.05"}, "--val-proportion 0.05 needs a random split"),
+        ],
+    )
+    def test_refused_option(self, pipe_module, capsys, change, message):
+        options = {"--revision": _PIN, "--skip-pack": "", "--skip-count": "", "--val-proportion": "0"}
+        options.update(change)
+        argv = ["--streaming"]
+        for option, value in options.items():
+            if value is not None:
+                argv += [option] if value == "" else [option, value]
+        with pytest.raises(SystemExit) as exc:
+            _parse(pipe_module, *argv)
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "--streaming cannot honour this invocation" in err
+        assert message in err
+
+    def test_every_refusal_is_reported_at_once(self, pipe_module, capsys):
+        with pytest.raises(SystemExit):
+            _parse(pipe_module, "--streaming", "--split", "train[0:10]")
+        err = capsys.readouterr().err
+        for message in ("--revision must pin", "slice or combination syntax", "COUNT stage", "packing is refused"):
+            assert message in err
+
+    @pytest.mark.parametrize(
+        ("columns", "extra", "message"),
+        [
+            ({"text": ["t"], "content": ["c"]}, (), r"columns \['text', 'content'\] could each be the document"),
+            (
+                {"messages": [[{"role": "user", "content": "hi"}]]},
+                (),
+                "'messages' is a chat-format column",
+            ),
+            ({"text": ["t"], "id": [7]}, ("--text-column", "id"), "column 'id' holds Value"),
+            ({"text": ["t"]}, ("--text-column", "body"), "Specified --text-column 'body' not found"),
+        ],
+    )
+    def test_refused_column(self, run_prepare, tmp_path, columns, extra, message):
+        dataset = write_parquet_dataset(tmp_path / "corpus", "data", columns)
+        out = tmp_path / "out"
+        args = ("--dataset", str(dataset), "--revision", _PIN, *_STREAMING_ARGS, "--no-wandb", *extra)
+        with pytest.raises(ValueError, match=message):
+            run_prepare(*args, "--output-dir", str(out), cache=tmp_path / "cache")
+        assert not out.exists()  # refused before the export opened anything
+
+    def test_stream_without_declared_features_is_refused(self, run_prepare, tmp_path):
+        # A JSON dataset declares no features until it is read, so its columns cannot be checked up front.
+        dataset = tmp_path / "corpus"
+        dataset.mkdir()
+        (dataset / "train.jsonl").write_text(json.dumps({"text": "t"}) + "\n")
+        out = tmp_path / "out"
+        args = ("--dataset", str(dataset), "--revision", _PIN, *_STREAMING_ARGS, "--no-wandb")
+        with pytest.raises(ValueError, match="the stream declares no features"):
+            run_prepare(*args, "--output-dir", str(out), cache=tmp_path / "cache")
+        assert not out.exists()

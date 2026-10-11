@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Verify a control-pretraining arm's built corpora against its corpora table.
 
-Every check reads an artifact the data pipeline already writes — nothing here opens a
-corpus file, so the whole verification is a few thousand small reads and runs in seconds:
+The records checks read artifacts the data pipeline already writes — none opens a corpus
+file, so for a table of plain tokenize and pack rows the verification is a few thousand small
+reads and runs in seconds:
 
 * ``pipeline_results.json`` (written by ``prepare``) — the prepared root's identity: dataset,
-  subset, revision, tokenizer and ``training_docs``. Each must match the prepare config the
-  table names, and a slice-mode shard's ``split`` must be the exact ``train[beg:end]`` range
-  build_corpora.sh submitted.
+  subset, revision, tokenizer, ``tokenizer_revision`` and ``training_docs``. Each must match the
+  prepare config the table names (its revision being the subset's own pin where the config pins
+  per subset, and its tokenizer commit the config's ``tokenizer-revision``, none where the config
+  pins none), and a slice-mode shard's ``split`` must be the exact ``train[beg:end]`` range
+  build_corpora.sh submitted. A row whose subset the config does not pin is reported and not
+  checked further.
 * ``<prefix>.provenance.json`` (written by ``tokenize``) — token and document counts read from
   the ``.idx`` plus the tokenizer that produced them. Documents must equal the prepared count,
   the ``.bin`` must be exactly 4 bytes per token (int32, forced by the 131,072-token vocab), and
-  the tokenizer must be the config's.
+  the tokenizer must be the config's: its name, and its commit the config's
+  ``tokenizer-revision`` (no commit recorded where the config pins none).
 * For a packed corpus, the per-shard ``training.jsonl.idx.npy`` the packer builds (one entry
   per JSONL record) and the packed parquet's row count.
 
@@ -23,6 +28,23 @@ FROM the count and cannot be computed without one. Every other mode is still che
 tokenizer, ``--append-eod`` and the bytes-per-token rule need no count, and only the comparison
 against the table's own figure is passed over. Either way the stage's remaining corpora are
 verified, so holding one corpus back never leaves the rest unchecked.
+
+Two kinds of row read corpus contents, so verifying them is a 1-node job rather than seconds:
+
+* A tokenize row that declares the document-check columns (``count_token``, ``count_column``,
+  ``row_column``, ``first_row``) also gets the per-document checks
+  (``corpus_documents.check_documents``): every document of its ``.bin`` is counted against
+  ``count_column`` of its prepare config's dataset at the same row and must end in its EOD unless
+  it is empty, and ``row_column`` must hold ``first_row + i`` at row ``i``. A row that also names a
+  ``length_column`` has its length drift from that column reported, never checked, and printed under
+  the corpus: the documents whose built length is not the column's plus the EOD, their net shift and
+  its range. Of the dataset, only those columns are read. The records checks above still run first
+  and unchanged.
+* A select row is checked from its prefixes' provenance and its parent
+  (``corpus_documents.verify_selected_prefix``): the kept list is re-validated, the parent's
+  files and the list must match the sha256s recorded when the selection was written, every
+  kept document must still be byte-equal to the parent's, and no kept document may hold one of
+  the select config's ``absent_token_ids``, for which the built files themselves are scanned.
 
 Every failure is reported, not just the first, and the exit status is non-zero if any check
 failed. ``--report-out`` writes the measured per-corpus and per-shard counts as JSON — the
@@ -37,6 +59,11 @@ Usage (inside the container, which supplies numpy and pyarrow)::
       python configs/control_pretraining/verify_corpora.py \\
         configs/control_pretraining/30b_filtered_mini_2plus/corpora.tsv --stage all \\
         --report-out /projects/a5k/public/logs/control_pretraining/30b_filtered_mini_2plus_corpora.json"
+
+and, for a table whose rows read corpus contents, as a job::
+
+    isambard_sbatch --job-name=cp-<arm>-verify --time=04:00:00 configs/control_pretraining/corpus_job.sbatch \\
+      configs/control_pretraining/verify_corpora.py <table> --stage all --report-out <json>
 """
 
 from __future__ import annotations
@@ -55,9 +82,12 @@ from corpora_table import (  # noqa: E402
     CorpusRow,
     corpus_root,
     packed_parquet_path,
-    prepare_config_scalars,
     read_corpora_table,
+    selected_corpus,
+    shard_name,
+    subset_prepare_config,
 )
+from scripts.data.prepare_revisions import TOKENIZER_REVISION_KEY  # noqa: E402
 
 
 BYTES_PER_TOKEN = 4  # int32 token ids
@@ -82,6 +112,11 @@ def check_prepared_root(root: Path, row: CorpusRow, scalars: dict, checker: Chec
             results.get(key) == scalars.get(key),
             f"{label}: prepare recorded {key}={results.get(key)!r}, config says {scalars.get(key)!r}",
         )
+    pinned = scalars.get(TOKENIZER_REVISION_KEY)
+    checker.expect(
+        results.get("tokenizer_revision") == pinned,
+        f"{label}: prepare recorded tokenizer_revision={results.get('tokenizer_revision')!r}, config pins {pinned!r}",
+    )
     checker.expect(results.get("subset") == row.subset, f"{label}: prepare recorded subset {results.get('subset')!r}")
     checker.expect(
         results.get("split") == split, f"{label}: prepare split {results.get('split')!r}, expected {split!r}"
@@ -91,8 +126,12 @@ def check_prepared_root(root: Path, row: CorpusRow, scalars: dict, checker: Chec
     return docs if isinstance(docs, int) else None
 
 
-def check_tokenized_root(root: Path, label: str, prepared_docs: int | None, tokenizer: str, checker: Checker) -> dict:
-    """Check one tokenize output; return its measured counts (empty if the provenance is missing)."""
+def check_tokenized_root(root: Path, label: str, prepared_docs: int | None, scalars: dict, checker: Checker) -> dict:
+    """Check one tokenize output against its prepare config's ``scalars``; return its measured counts.
+
+    The counts are empty if the provenance is missing. The tokenize must have run the config's tokenizer at the
+    commit the config pins (``tokenizer-revision``), and recorded no commit when the config pins none.
+    """
     prefix = root / TOKENIZED_PREFIX
     provenance = _load_json(Path(f"{prefix}.provenance.json"), checker, f"{label} tokenize")
     if provenance is None:
@@ -103,8 +142,14 @@ def check_tokenized_root(root: Path, label: str, prepared_docs: int | None, toke
     checker.expect(isinstance(docs, int) and docs > 0, f"{label}: provenance num_documents={docs!r}")
     if prepared_docs is not None:
         checker.expect(docs == prepared_docs, f"{label}: tokenized {docs} documents, prepare wrote {prepared_docs}")
-    recorded = provenance.get("parameters", {}).get("tokenizer")
+    parameters = provenance.get("parameters", {})
+    recorded, tokenizer = parameters.get("tokenizer"), scalars["tokenizer"]
     checker.expect(recorded == tokenizer, f"{label}: tokenized with {recorded!r}, config says {tokenizer!r}")
+    recorded_revision, pinned = parameters.get("tokenizer_revision"), scalars.get(TOKENIZER_REVISION_KEY)
+    checker.expect(
+        recorded_revision == pinned,
+        f"{label}: tokenized with tokenizer commit {recorded_revision!r}, config pins {pinned!r}",
+    )
     checker.expect(
         provenance.get("parameters", {}).get("append_eod") == "true", f"{label}: tokenized without --append-eod"
     )
@@ -145,9 +190,49 @@ def check_packed_root(root: Path, label: str, scalars: dict, checker: Checker) -
     return {"docs": docs, "packs": packs}
 
 
+def verify_selected(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
+    """Check a select row's prefixes against their provenance and their parent; return their counts."""
+    from corpus_documents import CorpusCheckFailed, check_kept, read_kept, verify_selected_prefix
+
+    report: dict = {"subset": row.subset, "stage": row.stage, "kind": row.kind, "shards": {}}
+    if not checker.expect(row.docs is not None, f"{row.subset}: table docs is PENDING — nothing to verify against"):
+        return report
+    try:
+        selected = selected_corpus(row, data_base)
+        kept = read_kept(selected.config.kept)
+        check_kept(kept, selected.parent.docs, row.docs, selected.config.kept)
+    except (ValueError, CorpusCheckFailed) as error:
+        checker.expect(False, f"{row.subset}: {error}")
+        return report
+    report["root"] = str(selected.root)
+    for entry in selected.prefixes:
+        name = "" if entry.shard is None else shard_name(entry.shard)
+        try:
+            report["shards"][name] = verify_selected_prefix(selected, entry, kept)
+        except CorpusCheckFailed as error:
+            checker.expect(False, f"{row.subset} {name}".rstrip() + f": {error}")
+            report["shards"][name] = {}
+    docs = [shard.get("docs") for shard in report["shards"].values()]
+    if all(isinstance(d, int) for d in docs):
+        report["docs"] = sum(docs)
+        report["tokens"] = sum(shard["tokens"] for shard in report["shards"].values())
+        checker.expect(
+            report["docs"] == row.docs, f"{row.subset}: selected {report['docs']} documents, table says {row.docs}"
+        )
+    return report
+
+
 def verify_corpus(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
     """Run every check for one table row; return its measured counts."""
-    scalars = prepare_config_scalars(row.config)
+    if row.kind == "select":
+        return verify_selected(row, checker, data_base)
+    try:
+        scalars = subset_prepare_config(row.config, row.subset)
+    except ValueError as error:
+        # A subset its config does not pin was never prepared from anything: this row's failure to
+        # report, while the rest of the stage is still verified.
+        checker.expect(False, f"{row.subset}: {error}")
+        return {"subset": row.subset, "stage": row.stage, "kind": row.kind, "shards": {}}
     root = corpus_root(scalars["dataset"], row.subset, data_base)
     report: dict = {"subset": row.subset, "stage": row.stage, "kind": row.kind, "root": str(root), "shards": {}}
     held = not checker.expect(row.docs is not None, f"{row.subset}: table docs is PENDING — nothing to verify against")
@@ -168,22 +253,20 @@ def verify_corpus(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
                     prepared == end - beg, f"{row.subset} {name}: prepared {prepared} docs, sliced {end - beg}"
                 )
             report["shards"][name] = check_tokenized_root(
-                shard_root, f"{row.subset} {name}", prepared, scalars["tokenizer"], checker
+                shard_root, f"{row.subset} {name}", prepared, scalars, checker
             )
     else:
         prepared = check_prepared_root(root, row, scalars, checker, split=scalars.get("split", "train"))
         if row.shard_mode == "none":
             if row.kind == "tokenize":
-                report["shards"][""] = check_tokenized_root(root, row.subset, prepared, scalars["tokenizer"], checker)
+                report["shards"][""] = check_tokenized_root(root, row.subset, prepared, scalars, checker)
             else:
                 report["shards"][""] = check_packed_root(root, row.subset, scalars, checker)
         else:
             for name in row.shard_names:
                 shard_root, label = root / name, f"{row.subset} {name}"
                 if row.kind == "tokenize":
-                    report["shards"][name] = check_tokenized_root(
-                        shard_root, label, None, scalars["tokenizer"], checker
-                    )
+                    report["shards"][name] = check_tokenized_root(shard_root, label, None, scalars, checker)
                 else:
                     report["shards"][name] = check_packed_root(shard_root, label, scalars, checker)
             shard_docs = [s.get("docs") for s in report["shards"].values()]
@@ -205,6 +288,10 @@ def verify_corpus(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
         tokens = [s.get("tokens") for s in report["shards"].values()]
         if all(isinstance(t, int) for t in tokens):
             report["tokens"] = sum(tokens)
+        if row.count_token is not None:
+            from corpus_documents import check_documents
+
+            report["document_checks"] = check_documents(row, scalars, checker, data_base)
     else:
         packs = [s.get("packs") for s in report["shards"].values()]
         if all(isinstance(p, int) for p in packs):
@@ -238,6 +325,12 @@ def main(argv: list[str] | None = None) -> int:
         measure = f"tokens={report['tokens']:,}" if "tokens" in report else f"packs={report.get('packs')}"
         docs = f"{report['docs']:,}" if "docs" in report else "?"
         print(f"{report['subset']:<52} docs={docs:>14}  {measure}")
+        drift = report.get("document_checks", {}).get("length_drift")
+        if drift is not None:
+            print(
+                f"    length drift from {drift['column']} (reported, not checked): {drift['documents']:,} documents, "
+                f"net {drift['net_tokens']:+,} tokens, range {drift['min']:+,} to {drift['max']:+,}"
+            )
         if len(report["shards"]) > 1:
             for name, shard in report["shards"].items():
                 shard_measure = f"tokens={shard['tokens']:,}" if "tokens" in shard else f"packs={shard.get('packs')}"

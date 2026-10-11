@@ -17,9 +17,10 @@
 
 import dataclasses
 import functools
+import re
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional
 
 import pytest
 import torch
@@ -37,6 +38,7 @@ from megatron.bridge.training.utils.omegaconf_utils import (
     create_omegaconf_dict_config,
     parse_hydra_overrides,
     process_config_with_overrides,
+    require_known_override_keys,
 )
 
 
@@ -92,6 +94,34 @@ class ConfigWithOptionalProfilingConfig:
 
     name: str = "test"
     profiling: Optional[ProfilingConfig] = None
+
+
+@dataclasses.dataclass
+class StrictConfigWithRemovedKey:
+    """A config that rejects unknown override keys and names one removed key."""
+
+    reject_unknown_override_keys: ClassVar[bool] = True
+    removed_override_keys: ClassVar[dict[str, str]] = {"old_name": "write new_name instead"}
+
+    new_name: str = "default"
+    count: int = 1
+
+
+@dataclasses.dataclass
+class LenientConfigWithRemovedKey:
+    """A config that skips unknown override keys but still names one removed key."""
+
+    removed_override_keys: ClassVar[dict[str, str]] = {"old_name": "write new_name instead"}
+
+    new_name: str = "default"
+
+
+@dataclasses.dataclass
+class ContainerOfStrictConfig:
+    """A lenient container holding a strict section, as LoggerConfig holds DataSamplesConfig."""
+
+    section: StrictConfigWithRemovedKey = dataclasses.field(default_factory=StrictConfigWithRemovedKey)
+    note: str = ""
 
 
 def dummy_function():
@@ -573,6 +603,89 @@ class TestApplyOverrides:
         assert isinstance(config.profiling, ProfilingConfig)
         assert config.profiling.use_pytorch_profiler is True
         assert config.profiling.profile_ranks == [0, 1]
+
+
+class TestRemovedAndUnknownOverrideKeys:
+    """``removed_override_keys`` names keys a config class dropped; ``reject_unknown_override_keys`` refuses the rest."""
+
+    @pytest.mark.parametrize("config_class", [StrictConfigWithRemovedKey, LenientConfigWithRemovedKey])
+    @pytest.mark.parametrize("value", ["anything", None, []], ids=["value", "null", "empty"])
+    def test_a_removed_key_raises_its_message_whatever_its_value(self, config_class, value):
+        with pytest.raises(
+            ValueError, match=f"^Removed key 'old_name' for {config_class.__name__}: write new_name instead$"
+        ):
+            _apply_overrides(config_class(), {"old_name": value})
+
+    def test_a_removed_key_raises_before_any_later_key_applies(self):
+        config = StrictConfigWithRemovedKey()
+        with pytest.raises(ValueError, match="Removed key 'old_name'"):
+            _apply_overrides(config, {"count": 5, "old_name": "x", "new_name": "late"})
+        assert config.new_name == "default"
+
+    def test_a_removed_key_in_a_nested_section_raises(self):
+        with pytest.raises(ValueError, match="Removed key 'old_name' for StrictConfigWithRemovedKey"):
+            _apply_overrides(ContainerOfStrictConfig(), {"section": {"old_name": "x"}})
+
+    def test_an_unknown_key_of_a_strict_class_raises_with_a_suggestion(self):
+        with pytest.raises(
+            ValueError,
+            match=re.escape(
+                "Unknown key 'new_nme' for StrictConfigWithRemovedKey. Did you mean 'new_name'? "
+                "Valid keys: count, new_name."
+            ),
+        ):
+            _apply_overrides(StrictConfigWithRemovedKey(), {"new_nme": "x"})
+
+    def test_an_unknown_key_of_a_lenient_class_is_skipped(self):
+        config = LenientConfigWithRemovedKey()
+        _apply_overrides(config, {"not_a_key": 1, "new_name": "applied"})
+        assert config.new_name == "applied" and not hasattr(config, "not_a_key")
+
+    def test_known_keys_apply(self):
+        container = ContainerOfStrictConfig()
+        _apply_overrides(container, {"section": {"new_name": "x", "count": 3}, "note": "n"})
+        assert container == ContainerOfStrictConfig(
+            section=StrictConfigWithRemovedKey(new_name="x", count=3), note="n"
+        )
+
+    def test_a_removed_key_in_a_yaml_file_raises(self, tmp_path):
+        config_file = tmp_path / "override.yaml"
+        config_file.write_text("section:\n  old_name: x\n")
+        with pytest.raises(ValueError, match="Removed key 'old_name' for StrictConfigWithRemovedKey"):
+            process_config_with_overrides(ContainerOfStrictConfig(), config_filepath=str(config_file))
+
+    @pytest.mark.parametrize("override", ["section.old_name=x", "+section.old_name=x"], ids=["plain", "added"])
+    def test_a_removed_key_in_a_cli_override_raises_its_message(self, override):
+        """Without ``+``, Hydra's struct mode would refuse the key first, with an error naming no replacement."""
+        config = ContainerOfStrictConfig()
+        with pytest.raises(
+            ValueError, match="^Removed key 'old_name' for StrictConfigWithRemovedKey: write new_name instead$"
+        ):
+            process_config_with_overrides(config, cli_overrides=["section.count=5", override])
+        assert config == ContainerOfStrictConfig()
+
+    def test_an_unknown_key_of_a_strict_class_in_a_cli_override_raises_with_a_suggestion(self):
+        with pytest.raises(
+            ValueError,
+            match=re.escape("Unknown key 'new_nme' for StrictConfigWithRemovedKey. Did you mean 'new_name'?"),
+        ):
+            require_known_override_keys(ContainerOfStrictConfig(), ["section.new_nme=x"])
+
+    @pytest.mark.parametrize(
+        "override",
+        ["not_a_key=1", "~section.old_name", "section.new_name.deeper=1"],
+        ids=["lenient", "delete", "leaf"],
+    )
+    def test_cli_keys_the_dataclasses_cannot_judge_are_left_to_hydra(self, override):
+        """An unknown key of a lenient class, a deletion, and a path below a non-dataclass value pass the check;
+        Hydra then refuses them as it always did."""
+        require_known_override_keys(ContainerOfStrictConfig(), [override])
+        with pytest.raises(OverridesError):
+            process_config_with_overrides(ContainerOfStrictConfig(), cli_overrides=[override])
+
+    def test_known_cli_keys_apply(self):
+        config = process_config_with_overrides(ContainerOfStrictConfig(), cli_overrides=["section.new_name=x"])
+        assert config == ContainerOfStrictConfig(section=StrictConfigWithRemovedKey(new_name="x"))
 
 
 class TestApplyOverridesWithPreservation:

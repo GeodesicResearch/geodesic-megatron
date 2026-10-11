@@ -62,9 +62,13 @@ from scripts.training.stage_guard import load_guard_config
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_pretrain_config
 from tests.unit_tests.campaign_config import (
     FAST_MIDTRAIN_LAUNCHER_SETTINGS,
-    FAST_MIDTRAIN_LEVERS,
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
     FAST_PRETRAIN_LEVERS,
+    GRADIENT_NAN_CHECK,
+    IDENTITY,
+    MIDTRAIN_LEVERS,
+    PROBE_FIELDS,
+    STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_hold_and_pin_move_together,
     assert_levers_are_set,
@@ -75,7 +79,6 @@ from tests.unit_tests.campaign_config import (
     assert_slices_cover_the_corpus,
     blend_subsets,
     corpus_weights,
-    data_parallel_size,
     dry_run_build,
     flatten_merged_config,
     merge_onto_recipe,
@@ -136,17 +139,10 @@ CLIMBMIX_WEIGHT = 0.698180
 # midtrain at CP2.
 GPUS = 512
 
-# Exactly the fields the arm's stage configs may differ in from their counterparts. Data: which
-# documents exist. Identity: where the checkpoints and the W&B run go, which MUST differ.
-IDENTITY = {"checkpoint.load", "checkpoint.save", "logger.wandb_exp_name"}
-# Stage 1 trains in the fast pretrain posture with the gradient NaN check left on (Kyle, 2026-10-01), so a
-# non-finite gradient ends the run instead of reaching the optimizer: every lever but that one.
-GRADIENT_NAN_CHECK = "ddp.check_for_nan_in_grad"
-STAGE_ONE_LEVERS = {key: value for key, value in FAST_PRETRAIN_LEVERS.items() if key != GRADIENT_NAN_CHECK}
+# Exactly the fields the arm's stage configs may differ in from their counterparts: which documents exist, the run
+# identity, and the posture each stage trains in (stage 1 the fast pretrain posture with the gradient NaN check left
+# on, the midtraining the fast midtraining configuration with the baseline's full recompute).
 PRETRAIN_DIVERGENCE = {"dataset.data_path", *IDENTITY, *STAGE_ONE_LEVERS}
-# The midtraining trains in the fast midtraining configuration without its selective recompute, keeping the
-# baseline's full recompute (Kyle, 2026-10-01): at 512 GPUs the selective recompute retried the allocator.
-MIDTRAIN_LEVERS = {key: value for key, value in FAST_MIDTRAIN_LEVERS.items() if not key.startswith("model.recompute_")}
 # Against V2's midtrain the data is the same; the warm start is this arm's own pretraining final, and the stage
 # trains in that configuration.
 MIDTRAIN_DIVERGENCE = {*IDENTITY, "checkpoint.pretrained_checkpoint", *MIDTRAIN_LEVERS}
@@ -337,14 +333,14 @@ class TestBudgetsAndCadence:
         for field in ("train_iters", "global_batch_size", "micro_batch_size"):
             assert getattr(mine.train, field) == getattr(baseline.train, field), field
         assert mine.dataset.seq_length == baseline.dataset.seq_length == 8192
-        assert data_parallel_size(mine, GPUS) == 512
-        assert mine.train.global_batch_size // data_parallel_size(mine, GPUS) == 4
+        assert mine.get_data_parallel_size(GPUS) == 512
+        assert mine.train.global_batch_size // mine.get_data_parallel_size(GPUS) == 4
 
     def test_the_midtrain_matches_the_baseline_budget_at_its_width(self, merged):
         mine, baseline = merged[MIDTRAIN], merged[BASELINE_MIDTRAIN]
         for field in ("train_iters", "global_batch_size", "micro_batch_size"):
             assert getattr(mine.train, field) == getattr(baseline.train, field), field
-        assert data_parallel_size(mine, GPUS) == 256
+        assert mine.get_data_parallel_size(GPUS) == 256
 
     def test_fourteen_stage_one_saves_at_the_baselines_iterations(self, merged):
         checkpoint = merged[PRETRAIN].checkpoint
@@ -487,26 +483,16 @@ class TestTheProbe:
     blend (the baseline's, so the fast posture reads the baseline's batches), the length, where it
     saves, and its W&B run."""
 
-    PROBE_FIELDS = {
-        "train.exit_interval",
-        "checkpoint.load",
-        "checkpoint.save",
-        "logger.wandb_exp_name",
-        "logger.wandb_save_dir",
-    }
-
     def test_fast_is_the_arms_stage_one_on_the_baselines_data(self, merged):
-        allowed = {*self.PROBE_FIELDS, "dataset.data_path", "checkpoint.save_interval", "checkpoint.most_recent_k"}
+        allowed = {*PROBE_FIELDS, "dataset.data_path", "checkpoint.save_interval", "checkpoint.most_recent_k"}
         assert_only_these_fields_differ(merged[PROBE_FAST], merged[PRETRAIN], allowed, "fast probe")
         assert merged[PROBE_FAST].dataset.data_path == merged[BASELINE_PRETRAIN].dataset.data_path
 
     def test_the_as_is_rerun_is_the_baseline(self, merged):
-        assert_only_these_fields_differ(
-            merged[PROBE_AS_IS], merged[BASELINE_PRETRAIN], self.PROBE_FIELDS, "as-is probe"
-        )
+        assert_only_these_fields_differ(merged[PROBE_AS_IS], merged[BASELINE_PRETRAIN], PROBE_FIELDS, "as-is probe")
 
     def test_the_handoff_is_the_arms_midtrain_from_the_fast_probe(self, merged):
-        allowed = {*self.PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
+        allowed = {*PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
         assert_only_these_fields_differ(merged[PROBE_HANDOFF], merged[MIDTRAIN], allowed, "handoff probe")
         assert merged[PROBE_HANDOFF].checkpoint.pretrained_checkpoint == merged[PROBE_FAST].checkpoint.save
 
@@ -530,8 +516,8 @@ class TestTheProbe:
         gpus = int(sbatch_value(PROBE_SBATCH, "NODES")) * 4
         assert gpus == GPUS
         for path in (PROBE_FAST, PROBE_AS_IS):
-            assert data_parallel_size(merged[path], gpus) == 512, path.name
-        assert data_parallel_size(merged[PROBE_HANDOFF], gpus) == 256
+            assert merged[path].get_data_parallel_size(gpus) == 512, path.name
+        assert merged[PROBE_HANDOFF].get_data_parallel_size(gpus) == 256
 
     def test_the_sbatch_names_the_save_the_configs_use(self, merged):
         assert sbatch_value(PROBE_SBATCH, "SCRATCH") == merged[PROBE_FAST].checkpoint.save
@@ -633,16 +619,8 @@ class TestTheMidtrainingProbe:
     width: each config is the config it measures, changed only in what a probe must change (its length, its
     checkpoints and its W&B run), so every run reads production's batches from production's warm start."""
 
-    PROBE_FIELDS = {
-        "train.exit_interval",
-        "checkpoint.load",
-        "checkpoint.save",
-        "logger.wandb_exp_name",
-        "logger.wandb_save_dir",
-    }
-
     def test_fast_mid_is_the_baselines_stage_two_in_the_arms_midtraining_configuration(self, merged):
-        fields = {*MIDTRAIN_LEVERS, *self.PROBE_FIELDS, "checkpoint.save_interval", "checkpoint.most_recent_k"}
+        fields = {*MIDTRAIN_LEVERS, *PROBE_FIELDS, "checkpoint.save_interval", "checkpoint.most_recent_k"}
         assert_differs_only_in(merged[PROBE_MID_FAST], merged[BASELINE_MIDTRAIN], fields, "fast midtraining probe")
         assert_levers_are_set(merged[PROBE_MID_FAST], MIDTRAIN_LEVERS, "fast midtraining probe")
 
@@ -654,11 +632,11 @@ class TestTheMidtrainingProbe:
 
     def test_the_as_is_rerun_is_the_baselines_stage_two(self, merged):
         assert_differs_only_in(
-            merged[PROBE_MID_AS_IS], merged[BASELINE_MIDTRAIN], self.PROBE_FIELDS, "as-is midtraining probe"
+            merged[PROBE_MID_AS_IS], merged[BASELINE_MIDTRAIN], PROBE_FIELDS, "as-is midtraining probe"
         )
 
     def test_the_handoff_is_the_as_is_cpt_from_the_fast_mid_save(self, merged):
-        fields = {*self.PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
+        fields = {*PROBE_FIELDS, "checkpoint.pretrained_checkpoint"}
         assert_differs_only_in(merged[PROBE_MID_HANDOFF], merged[V2_CPT_LINK1], fields, "CPT handoff probe")
         fast = merged[PROBE_MID_FAST]
         assert merged[PROBE_MID_HANDOFF].checkpoint.pretrained_checkpoint == (
@@ -682,9 +660,13 @@ class TestTheMidtrainingProbe:
     def test_every_midtraining_probe_runs_at_production_width(self, merged):
         gpus = 4 * int(sbatch_value(PROBE_MID_SBATCH, "NODES"))
         for path in (PROBE_MID_FAST, PROBE_MID_AS_IS):
-            assert data_parallel_size(merged[path], gpus) == data_parallel_size(merged[BASELINE_MIDTRAIN], GPUS) == 256
+            assert (
+                merged[path].get_data_parallel_size(gpus)
+                == merged[BASELINE_MIDTRAIN].get_data_parallel_size(GPUS)
+                == 256
+            )
         handoff = merged[PROBE_MID_HANDOFF]
-        assert handoff.train.global_batch_size % data_parallel_size(handoff, gpus) == 0
+        assert handoff.train.global_batch_size % handoff.get_data_parallel_size(gpus) == 0
 
     def test_the_gates_are_the_pre_registered_ones(self):
         assert load_score_gates(SCORE_GATE_MIDTRAIN) == {

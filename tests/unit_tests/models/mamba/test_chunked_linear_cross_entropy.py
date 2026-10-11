@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.unit_tests.gloo_ranks import run_on_gloo_ranks
 from tests.unit_tests.one_rank_nccl_world import one_rank_model_parallel_state
 from tests.unit_tests.small_language_models import hybrid_model
 
@@ -478,31 +479,25 @@ class TestLinearCrossEntropyModule:
             layer(hidden, labels=torch.zeros(1, 4, dtype=torch.long, device="cuda"))
 
 
-def _output_layer_over_a_tensor_parallel_vocabulary(rank, init_file):
+def _output_layer_over_a_tensor_parallel_vocabulary(rank: int) -> None:
     """One of two CPU ranks: the layer builds and gives its logits shard, but refuses the loss."""
     from megatron.core.transformer.linear_cross_entropy import LinearCrossEntropyModule
 
-    torch.distributed.init_process_group("gloo", init_method=f"file://{init_file}", rank=rank, world_size=2)
+    config = _layer_config(tensor_model_parallel_size=2, use_cpu_initialization=True)
+    layer = _output_layer(LinearCrossEntropyModule, config, tp_group=torch.distributed.new_group([0, 1]))
+    hidden = torch.randn(4, 1, 32, dtype=torch.bfloat16)
+    logits, _ = layer(hidden)
+    assert logits.shape == (4, 1, V_SMALL // 2), logits.shape
     try:
-        config = _layer_config(tensor_model_parallel_size=2, use_cpu_initialization=True)
-        layer = _output_layer(LinearCrossEntropyModule, config, tp_group=torch.distributed.new_group([0, 1]))
-        hidden = torch.randn(4, 1, 32, dtype=torch.bfloat16)
-        logits, _ = layer(hidden)
-        assert logits.shape == (4, 1, V_SMALL // 2), logits.shape
-        try:
-            layer(hidden, labels=torch.zeros(1, 4, dtype=torch.long))
-        except ValueError as error:
-            assert "tensor-parallel size > 1" in str(error), error
-        else:
-            raise AssertionError("the loss over a tensor-parallel vocabulary was accepted")
-    finally:
-        torch.distributed.destroy_process_group()
+        layer(hidden, labels=torch.zeros(1, 4, dtype=torch.long))
+    except ValueError as error:
+        assert "tensor-parallel size > 1" in str(error), error
+    else:
+        raise AssertionError("the loss over a tensor-parallel vocabulary was accepted")
 
 
 def test_tensor_parallel_vocabulary_gives_logits_but_refuses_the_loss(tmp_path):
-    torch.multiprocessing.spawn(
-        _output_layer_over_a_tensor_parallel_vocabulary, args=(str(tmp_path / "rendezvous"),), nprocs=2
-    )
+    run_on_gloo_ranks(_output_layer_over_a_tensor_parallel_vocabulary, 2, tmp_path)
 
 
 def _hybrid_model(pattern="M*-", **config_overrides):

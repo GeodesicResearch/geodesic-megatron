@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Evaluate pre-registered memory, speed, first-loss and loss-shift gates on runs' scores (``score_run.py --json``
-files) and band reports (``loss_parity.py band --json`` files).
+"""Evaluate pre-registered gates on runs' scores (``score_run.py --json`` files), band reports (``loss_parity.py band
+--json`` files), training logs and probe results (``pipeline_coherence_test.py --probe-spec`` files).
 
-A spec, fixed before the runs exist, names gates of four kinds, each over files in one directory:
+A spec, fixed before the runs exist, names gates of these kinds, each over files in one directory:
 
 - ``memory``: one run's peak memory over every rank, the score's ``peak_memory_across_ranks`` (read from the
   ``[peak-memory]`` line rank 0 logs when the training loop ends). It fails when the score has no such
@@ -37,13 +37,56 @@ A spec, fixed before the runs exist, names gates of four kinds, each over files 
   report's verdict found the candidate off the references' schedule (learning rate or consumed samples) or counting
   a skipped or NaN iteration. It bounds a steady numerical shift that a band drawn from the references' own
   spread would refuse, and fails one that grows.
+- ``log_pairing``: two training logs of runs that read the same batches, their reports at every iteration: it fails
+  when an iteration's value of a listed metric differs between the two by more than that metric's tolerance, or a
+  log lacks the metric at an iteration. ``metrics`` maps each name to its tolerance, 0 for identity: a count of the
+  ``[token-masking-counts]`` line as ``token_masking/count/<field>`` (``token_masking/count/listed``, say), an exact
+  integer whose tolerance must be 0, or a value of the iteration line, such as the derived
+  ``token_masking/non_listed_target_loss`` of ``training_log`` (the line prints 7 significant digits, so a gate that
+  must be exact reads a count).
+- ``masking_log``: one training log's token masking: it fails unless the ``[token-masking]`` banner came from each of
+  ``nodes`` hosts stating ``enabled`` and the ``token_ids`` (masked when enabled, measured either way), every
+  iteration 1 to ``iterations`` printed its ``[token-masking-counts]``, at every one of them the masked count equals
+  the listed trainable count and no listed target trained when enabled (nothing masked and every listed trainable
+  target trained when not), and at least one iteration held a trainable listed target. The counts are exact integers.
+- ``value_change``: a candidate value against a reference value, each either an evaluation result of a training log
+  (``{log, validation_step, metric}``, e.g. ``masked-validation/token_masking/listed_target_loss`` at step 0) or a
+  probe's held-out score (``{probe, held_out}``, e.g. ``marker_ce``, scored on the samples a training config's masked
+  validation reads): it fails when candidate - reference lies outside ``[min_change, max_change]`` or the candidate outside
+  ``[min_value, max_value]`` (each bound optional, at least one given). The bounds are inclusive; with
+  ``exclusive_bounds: true`` each is strict, so ``max_change: 0`` then requires the candidate strictly below the
+  reference.
+- ``slot_logprob_difference``: two probes of one spec, per prompt the candidate's teacher-forced log-probability of
+  ``token_id`` at the prompt's end minus the reference's, less the same difference for ``drift_token_id`` when given
+  (a difference in differences that removes drift shared by every untrained row), or with
+  ``drift_virtual_references: max`` less the largest such difference among the probes' virtual reference rows (the
+  probe spec's ``virtual_references``, the same rows in both probes by their sha256): it fails unless at least
+  ``min_prompts`` prompts (every prompt by default) reach ``min_difference``, no prompt exceeds ``max_difference``,
+  and the median lies within ``[min_median, max_median]`` (each optional, at least one given).
+- ``emission_count``: one probe's generations of a kind (``greedy``, ``sample`` or ``all``) and ``token_id`` in
+  them, as the first generated id (``position: first``) or anywhere: it counts the id's occurrences
+  (``unit: occurrences``) or the generations that hold it (``unit: generations``), and fails when the count lies
+  outside ``[min_count, max_count]`` (each optional, at least one given).
+- ``probe_identity``: one probe's record of what it measured: it fails unless every dotted path of ``expect`` (into
+  the results document, e.g. ``model.iteration`` or ``model.megatron_run_config.checkpoint.save``) holds the value
+  given.
+- ``probe_agreement``: several probes' records: it fails unless every dotted path of ``fields`` (e.g.
+  ``tokenizer.json_sha256``) is present in every one of ``probes`` and holds one value in all of them.
 
 Each gate's outcome is PASS, FAIL or NOT EVALUATED (``gate_outcome``). NOT EVALUATED means a score could not
 be read or lacks a field, the memory summary covers a different number of ranks than the run's GPUs, the
 two speed scores were taken over different windows or GPU counts, or the two first-loss runs' first logged
 iterations differ or the reference logged no lm loss there, or a band report holds other than one candidate or
-fewer than two spans of ``rise_windows`` windows. Every outcome carries a line stating the
-measurement or the reason. The exit status is ``gate_outcome.exit_status``'s.
+fewer than two spans of ``rise_windows`` windows, or a log, probe or value cannot be read, two paired logs cover
+different iterations, two probes ran different specs, prompts or prompt ids or code at different revisions, or a
+probe did not count or score the id a gate names. It also means a value a gate read is not a finite number: a NaN
+compares false with every bound, so a rule that refuses only what lies outside its bounds would pass it. Every
+outcome carries a line stating the measurement or the reason. The exit status is
+``gate_outcome.exit_status``'s, unless the spec has a ``verdict``: an ordered list of stages, each
+``{stage, on_fail, gates}`` with ``on_fail`` FAIL or INCONCLUSIVE, that together hold every gate once, except the
+gates the spec lists under ``reported``: those are evaluated and printed after the stages, and never decide. Then the
+first stage whose gates do not all pass decides (``gate_outcome.ordered_verdict``) and the exit status is the verdict's:
+0 PASS, 1 FAIL, 2 INCONCLUSIVE. ``--gate`` evaluates the gates it names alone, without the verdict.
 
 USAGE
     python scripts/telemetry/score_gate.py --spec score_gate.yaml --scores-dir DIR [--gate NAME ...] [--json]
@@ -53,6 +96,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import statistics
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -67,18 +112,71 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
-from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
+from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.telemetry.gate_outcome import (  # noqa: E402
+    FAIL,
+    NOT_EVALUATED,
+    PASS,
+    STAGE_FAILURES,
+    VERDICT_EXIT_STATUS,
+    Stage,
+    exit_status,
+    ordered_verdict,
+)
 from scripts.telemetry.loss_parity import (  # noqa: E402
     VERDICT_METRIC,
     BandReport,
     offset_rise,
     offsets_from_reference_mean,
 )
-from scripts.telemetry.training_log import parse_iteration_records, read_log_lines  # noqa: E402
+from scripts.telemetry.training_log import (  # noqa: E402
+    TOKEN_MASKING_COUNT_FIELDS,
+    TOKEN_MASKING_COUNT_PREFIX,
+    TOKEN_MASKING_COUNTS_TAG,
+    TOKEN_MASKING_TAG,
+    IterationValues,
+    NodeBanner,
+    TokenMaskingCountsRecord,
+    parse_iteration_records,
+    parse_iteration_values,
+    parse_node_banners,
+    parse_token_masking_counts,
+    parse_validation_records,
+    read_log_lines,
+    window_records,
+)
+from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
+
+from pipeline_coherence_test import GREEDY, PROBE_FORMAT, SAMPLE  # noqa: E402
 
 
 MEMORY, SPEED, FIRST_LOSS, LOSS_SHIFT = "memory", "speed", "first_loss", "loss_shift"
-KINDS = (MEMORY, SPEED, FIRST_LOSS, LOSS_SHIFT)
+LOG_PAIRING, MASKING_LOG, VALUE_CHANGE = "log_pairing", "masking_log", "value_change"
+SLOT_LOGPROB_DIFFERENCE, EMISSION_COUNT, PROBE_IDENTITY = "slot_logprob_difference", "emission_count", "probe_identity"
+PROBE_AGREEMENT = "probe_agreement"
+KINDS = (
+    MEMORY,
+    SPEED,
+    FIRST_LOSS,
+    LOSS_SHIFT,
+    LOG_PAIRING,
+    MASKING_LOG,
+    VALUE_CHANGE,
+    SLOT_LOGPROB_DIFFERENCE,
+    EMISSION_COUNT,
+    PROBE_IDENTITY,
+    PROBE_AGREEMENT,
+)
+VERDICT = "verdict"
+REPORTED = "reported"
+# How a slot gate's drift is taken from the probes' virtual reference rows: the largest of their changes.
+VIRTUAL_DRIFT_REDUCTIONS = ("max",)
+ALL_GENERATIONS = "all"
+GENERATION_KINDS = {GREEDY: (GREEDY,), SAMPLE: (SAMPLE,), ALL_GENERATIONS: (GREEDY, SAMPLE)}
+EMISSION_POSITIONS = ("first", "anywhere")
+# What an emission gate counts: every occurrence of the id, or the generations holding at least one.
+GENERATIONS_UNIT = "generations"
+EMISSION_UNITS = ("occurrences", GENERATIONS_UNIT)
 
 
 @dataclass(frozen=True)
@@ -125,7 +223,146 @@ class LossShiftGate:
     max_rise: float
 
 
-ScoreGate = MemoryGate | SpeedGate | FirstLossGate | LossShiftGate
+@dataclass(frozen=True)
+class LogPairingGate:
+    """Two training logs' reports at every iteration, each listed metric within its tolerance."""
+
+    name: str
+    candidate: str
+    reference: str
+    metrics: tuple[tuple[str, float], ...]
+
+
+@dataclass(frozen=True)
+class MaskingLogGate:
+    """One training log's token-masking banner and per-iteration invariants, masking enabled or not."""
+
+    name: str
+    log: str
+    enabled: bool
+    token_ids: tuple[int, ...]
+    nodes: int
+    iterations: int
+
+
+@dataclass(frozen=True)
+class LogValue:
+    """An evaluation result a training log printed after the iteration that brought the run to ``validation_step``."""
+
+    log: str
+    validation_step: int
+    metric: str
+
+    def describe(self) -> str:
+        return f"{self.log} {self.metric} at step {self.validation_step}"
+
+
+@dataclass(frozen=True)
+class ProbeHeldOutValue:
+    """A probe's score of the held-out samples a training config's masked validation reads."""
+
+    probe: str
+    metric: str
+
+    def describe(self) -> str:
+        return f"{self.probe} held-out {self.metric}"
+
+
+@dataclass(frozen=True)
+class ValueChangeGate:
+    """A candidate value against a reference value: bounds on the change and on the candidate, each inclusive unless
+    ``exclusive_bounds``."""
+
+    name: str
+    candidate: LogValue | ProbeHeldOutValue
+    reference: LogValue | ProbeHeldOutValue
+    min_change: float | None
+    max_change: float | None
+    min_value: float | None
+    max_value: float | None
+    exclusive_bounds: bool = False
+
+
+@dataclass(frozen=True)
+class SlotLogprobDifferenceGate:
+    """Two probes' per-prompt teacher-forced log-probabilities of an id, differenced, against bounds."""
+
+    name: str
+    candidate: str
+    reference: str
+    token_id: int
+    drift_token_id: int | None
+    drift_virtual_references: str | None
+    min_difference: float | None
+    min_prompts: int | None
+    max_difference: float | None
+    min_median: float | None
+    max_median: float | None
+
+
+@dataclass(frozen=True)
+class EmissionCountGate:
+    """One probe's emissions of an id in its generations of a kind, counted by occurrence or by generation, against
+    bounds."""
+
+    name: str
+    probe: str
+    token_id: int
+    generations: str
+    position: str
+    unit: str
+    min_count: int | None
+    max_count: int | None
+
+
+@dataclass(frozen=True)
+class ProbeIdentityGate:
+    """One probe's record of what it measured, against expected values at dotted paths."""
+
+    name: str
+    probe: str
+    expect: tuple[tuple[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class ProbeAgreementGate:
+    """Several probes' records, which must hold one value at each of the dotted paths ``fields``."""
+
+    name: str
+    probes: tuple[str, ...]
+    fields: tuple[str, ...]
+
+
+ScoreGate = (
+    MemoryGate
+    | SpeedGate
+    | FirstLossGate
+    | LossShiftGate
+    | LogPairingGate
+    | MaskingLogGate
+    | ValueChangeGate
+    | SlotLogprobDifferenceGate
+    | EmissionCountGate
+    | ProbeIdentityGate
+    | ProbeAgreementGate
+)
+
+
+@dataclass(frozen=True)
+class VerdictStage:
+    """One stage of a spec's ordered verdict: its gates, and the verdict their failure gives."""
+
+    name: str
+    on_fail: str
+    gates: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A spec's ordered verdict stages and the gates it reports outside them."""
+
+    stages: tuple[VerdictStage, ...]
+    reported: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -138,15 +375,232 @@ class ScoreGateResult:
     detail: str
 
 
+def _named_problems(*groups: tuple[str, list[str]]) -> str:
+    """The non-empty groups as ``<label> [names]``, joined; empty when every group is."""
+    return "; ".join(f"{label} {names}" for label, names in groups if names)
+
+
+def _optional_float(gate: dict[str, Any], key: str) -> float | None:
+    return None if gate.get(key) is None else float(gate[key])
+
+
+def _check_bounds(where: str, bounds: dict[str, float | None], exclusive: bool = False) -> None:
+    """Refuse a gate with no bound, or with a lower bound above its upper bound (``min_<x>`` against ``max_<x>``), or
+    at it when the bounds are exclusive: no value could pass either."""
+    if all(value is None for value in bounds.values()):
+        raise ValueError(f"{where} states none of {sorted(bounds)}")
+    for key, low in bounds.items():
+        high = bounds.get(f"max_{key.removeprefix('min_')}") if key.startswith("min_") else None
+        if low is not None and high is not None and (low > high or (exclusive and low == high)):
+            raise ValueError(f"{where} has {key} {low} above its maximum {high}, or at it with exclusive bounds")
+
+
+def _memory_gate(where: str, name: str, gate: dict[str, Any]) -> MemoryGate:
+    gate = require_keys(gate, where, {"score", "max_allocated_gb", "max_alloc_retries"})
+    return MemoryGate(name, gate["score"], float(gate["max_allocated_gb"]), int(gate["max_alloc_retries"]))
+
+
+def _speed_gate(where: str, name: str, gate: dict[str, Any]) -> SpeedGate:
+    gate = require_keys(
+        gate, where, {"candidate", "reference", "reference_s_per_iter", "go_up_to_s", "report_up_to_s"}
+    )
+    if gate["candidate"] == gate["reference"]:
+        raise ValueError(f"{where} compares {gate['candidate']} with itself")
+    speed = SpeedGate(
+        name,
+        gate["candidate"],
+        gate["reference"],
+        float(gate["reference_s_per_iter"]),
+        float(gate["go_up_to_s"]),
+        float(gate["report_up_to_s"]),
+    )
+    if speed.go_up_to_s > speed.report_up_to_s:
+        raise ValueError(f"{where} has go_up_to_s above report_up_to_s")
+    return speed
+
+
+def _first_loss_gate(where: str, name: str, gate: dict[str, Any]) -> FirstLossGate:
+    gate = require_keys(gate, where, {"candidate", "reference", "tolerance"})
+    if gate["candidate"] == gate["reference"]:
+        raise ValueError(f"{where} compares {gate['candidate']} with itself")
+    return FirstLossGate(name, gate["candidate"], gate["reference"], float(gate["tolerance"]))
+
+
+def _loss_shift_gate(where: str, name: str, gate: dict[str, Any]) -> LossShiftGate:
+    gate = require_keys(gate, where, {"report", "offset_low", "offset_high", "rise_windows", "max_rise"})
+    shift = LossShiftGate(
+        name,
+        gate["report"],
+        float(gate["offset_low"]),
+        float(gate["offset_high"]),
+        int(gate["rise_windows"]),
+        float(gate["max_rise"]),
+    )
+    if shift.offset_low > shift.offset_high or shift.rise_windows < 1:
+        raise ValueError(f"{where} has an empty offset range or no rise window")
+    return shift
+
+
+def _log_pairing_gate(where: str, name: str, gate: dict[str, Any]) -> LogPairingGate:
+    gate = require_keys(gate, where, {"candidate", "reference", "metrics"})
+    metrics = gate["metrics"]
+    if not isinstance(metrics, dict) or not metrics:
+        raise ValueError(f"{where}: metrics must map each metric to its tolerance")
+    tolerances = tuple((metric, float(tolerance)) for metric, tolerance in metrics.items())
+    if any(not tolerance >= 0 for _, tolerance in tolerances):
+        raise ValueError(f"{where}: a tolerance is negative or not a number: {metrics}")
+    for metric, tolerance in tolerances:
+        if metric.startswith(TOKEN_MASKING_COUNT_PREFIX):
+            if metric.removeprefix(TOKEN_MASKING_COUNT_PREFIX) not in TOKEN_MASKING_COUNT_FIELDS:
+                raise ValueError(
+                    f"{where}: {metric} is no token-masking count; the counts are "
+                    f"{[TOKEN_MASKING_COUNT_PREFIX + field for field in TOKEN_MASKING_COUNT_FIELDS]}"
+                )
+            if tolerance != 0:
+                raise ValueError(f"{where}: {metric} is an exact count, so its tolerance must be 0, not {tolerance}")
+    return LogPairingGate(name, gate["candidate"], gate["reference"], tolerances)
+
+
+def _masking_log_gate(where: str, name: str, gate: dict[str, Any]) -> MaskingLogGate:
+    gate = require_keys(gate, where, {"log", "enabled", "token_ids", "nodes", "iterations"})
+    if not isinstance(gate["enabled"], bool):
+        raise ValueError(f"{where}: enabled must be true or false, not {gate['enabled']!r}")
+    ids = require_token_id_list(gate["token_ids"], f"{where}: token_ids", allow_empty=False)
+    nodes, iterations = int(gate["nodes"]), int(gate["iterations"])
+    if nodes < 1 or iterations < 1:
+        raise ValueError(f"{where}: nodes and iterations must be positive")
+    return MaskingLogGate(name, gate["log"], gate["enabled"], ids, nodes, iterations)
+
+
+def _value_source(raw: Any, where: str) -> LogValue | ProbeHeldOutValue:
+    if isinstance(raw, dict) and "log" in raw:
+        raw = require_keys(raw, where, {"log", "validation_step", "metric"})
+        return LogValue(raw["log"], int(raw["validation_step"]), raw["metric"])
+    raw = require_keys(raw, where, {"probe", "held_out"})
+    return ProbeHeldOutValue(raw["probe"], raw["held_out"])
+
+
+def _value_change_gate(where: str, name: str, gate: dict[str, Any]) -> ValueChangeGate:
+    bounds = ("min_change", "max_change", "min_value", "max_value")
+    gate = require_keys(gate, where, {"candidate", "reference"}, frozenset({*bounds, "exclusive_bounds"}))
+    exclusive = gate.get("exclusive_bounds", False)
+    if not isinstance(exclusive, bool):
+        raise ValueError(f"{where}: exclusive_bounds must be true or false, not {exclusive!r}")
+    limits = {key: _optional_float(gate, key) for key in bounds}
+    _check_bounds(where, limits, exclusive)
+    candidate = _value_source(gate["candidate"], f"{where}.candidate")
+    reference = _value_source(gate["reference"], f"{where}.reference")
+    if candidate == reference:
+        raise ValueError(f"{where} compares {candidate.describe()} with itself")
+    return ValueChangeGate(name, candidate, reference, **limits, exclusive_bounds=exclusive)
+
+
+def _slot_logprob_difference_gate(where: str, name: str, gate: dict[str, Any]) -> SlotLogprobDifferenceGate:
+    bounds = ("min_difference", "max_difference", "min_median", "max_median")
+    gate = require_keys(
+        gate,
+        where,
+        {"candidate", "reference", "token_id"},
+        frozenset({"drift_token_id", "drift_virtual_references", "min_prompts", *bounds}),
+    )
+    limits = {key: _optional_float(gate, key) for key in bounds}
+    _check_bounds(where, limits)
+    if gate["candidate"] == gate["reference"]:
+        raise ValueError(f"{where} compares {gate['candidate']} with itself")
+    token_id = require_token_id(gate["token_id"], f"{where}.token_id")
+    drift = gate.get("drift_token_id")
+    if drift is not None and require_token_id(drift, f"{where}.drift_token_id") == token_id:
+        raise ValueError(f"{where}: drift_token_id is token_id")
+    virtual = gate.get("drift_virtual_references")
+    if virtual is not None and virtual not in VIRTUAL_DRIFT_REDUCTIONS:
+        raise ValueError(
+            f"{where}: drift_virtual_references must be one of {VIRTUAL_DRIFT_REDUCTIONS}, not {virtual!r}"
+        )
+    if drift is not None and virtual is not None:
+        raise ValueError(f"{where}: drift_token_id and drift_virtual_references each name the drift; give one")
+    min_prompts = gate.get("min_prompts")
+    if min_prompts is not None and (limits["min_difference"] is None or int(min_prompts) < 1):
+        raise ValueError(f"{where}: min_prompts counts prompts reaching min_difference, so needs it, and is >= 1")
+    return SlotLogprobDifferenceGate(
+        name,
+        gate["candidate"],
+        gate["reference"],
+        token_id,
+        drift,
+        virtual,
+        min_prompts=None if min_prompts is None else int(min_prompts),
+        **limits,
+    )
+
+
+def _emission_count_gate(where: str, name: str, gate: dict[str, Any]) -> EmissionCountGate:
+    bounds = ("min_count", "max_count")
+    gate = require_keys(gate, where, {"probe", "token_id", "generations", "position", "unit"}, frozenset(bounds))
+    if gate["generations"] not in GENERATION_KINDS or gate["position"] not in EMISSION_POSITIONS:
+        raise ValueError(
+            f"{where}: generations must be one of {sorted(GENERATION_KINDS)} and position one of {EMISSION_POSITIONS}"
+        )
+    if gate["unit"] not in EMISSION_UNITS:
+        raise ValueError(f"{where}: unit must be one of {EMISSION_UNITS}, not {gate['unit']!r}")
+    limits = {bound: None if gate.get(bound) is None else int(gate[bound]) for bound in bounds}
+    _check_bounds(where, limits)
+    if any(limit is not None and limit < 0 for limit in limits.values()):
+        raise ValueError(f"{where}: a count bound is negative")
+    return EmissionCountGate(
+        name,
+        gate["probe"],
+        require_token_id(gate["token_id"], f"{where}.token_id"),
+        gate["generations"],
+        gate["position"],
+        gate["unit"],
+        **limits,
+    )
+
+
+def _probe_identity_gate(where: str, name: str, gate: dict[str, Any]) -> ProbeIdentityGate:
+    gate = require_keys(gate, where, {"probe", "expect"})
+    if not isinstance(gate["expect"], dict) or not gate["expect"]:
+        raise ValueError(f"{where}: expect must map dotted paths to values")
+    return ProbeIdentityGate(name, gate["probe"], tuple(gate["expect"].items()))
+
+
+def _probe_agreement_gate(where: str, name: str, gate: dict[str, Any]) -> ProbeAgreementGate:
+    gate = require_keys(gate, where, {"probes", "fields"})
+    probes, fields = gate["probes"], gate["fields"]
+    if not isinstance(probes, list) or len(set(probes)) < 2 or len(set(probes)) != len(probes):
+        raise ValueError(f"{where}: probes must list two or more distinct probe files, not {probes!r}")
+    if not isinstance(fields, list) or not fields or not all(isinstance(field, str) and field for field in fields):
+        raise ValueError(f"{where}: fields must be a non-empty list of dotted paths, not {fields!r}")
+    return ProbeAgreementGate(name, tuple(probes), tuple(fields))
+
+
+_GATE_PARSERS = {
+    MEMORY: _memory_gate,
+    SPEED: _speed_gate,
+    FIRST_LOSS: _first_loss_gate,
+    LOSS_SHIFT: _loss_shift_gate,
+    LOG_PAIRING: _log_pairing_gate,
+    MASKING_LOG: _masking_log_gate,
+    VALUE_CHANGE: _value_change_gate,
+    SLOT_LOGPROB_DIFFERENCE: _slot_logprob_difference_gate,
+    EMISSION_COUNT: _emission_count_gate,
+    PROBE_IDENTITY: _probe_identity_gate,
+    PROBE_AGREEMENT: _probe_agreement_gate,
+}
+
+
 def load_score_gates(path: Path) -> dict[str, ScoreGate]:
     """Read a score-gate spec into its gates by name, refusing one whose gates could not be evaluated as written.
 
-    Raises ValueError on an unknown kind, a spec with no gates, a gate name used twice, a speed or first-loss
-    gate whose candidate is its reference, a speed gate whose go limit exceeds its report limit, or a loss-shift
-    gate whose offset range is empty or whose rise spans no window; KeyError on a missing field.
+    Every kind's gate goes through its parser in ``_GATE_PARSERS``, which refuses it (ValueError) when it is not a
+    mapping or has a missing or unknown field, since a misspelt threshold would otherwise not be applied. Raises
+    ValueError as well on an unknown kind, a spec with no gates, a gate name used twice, a gate whose candidate is its
+    reference, a speed gate whose go limit exceeds its report limit, a loss-shift gate whose offset range is empty or
+    whose rise spans no window, a gate with no bound or a lower bound above its upper one (or at it, with exclusive
+    bounds), a token-masking count paired with a tolerance other than 0, or fewer than two probes to agree.
     """
     raw = yaml.safe_load(Path(path).read_text())
-    unknown = sorted(set(raw) - set(KINDS))
+    unknown = sorted(set(raw) - set(KINDS) - {VERDICT, REPORTED})
     if unknown:
         raise ValueError(f"{path}: unknown gate kinds {unknown}")
     entries = [(kind, name, gate) for kind in KINDS for name, gate in (raw.get(kind) or {}).items()]
@@ -154,45 +608,84 @@ def load_score_gates(path: Path) -> dict[str, ScoreGate]:
     for kind, name, gate in entries:
         if name in gates:
             raise ValueError(f"{path}: gate {name} is defined twice")
-        if kind in (SPEED, FIRST_LOSS) and gate["candidate"] == gate["reference"]:
-            raise ValueError(f"{path}: {kind} gate {name} compares {gate['candidate']} with itself")
-        if kind == MEMORY:
-            gates[name] = MemoryGate(
-                name, gate["score"], float(gate["max_allocated_gb"]), int(gate["max_alloc_retries"])
-            )
-        elif kind == SPEED:
-            speed = SpeedGate(
-                name,
-                gate["candidate"],
-                gate["reference"],
-                float(gate["reference_s_per_iter"]),
-                float(gate["go_up_to_s"]),
-                float(gate["report_up_to_s"]),
-            )
-            if speed.go_up_to_s > speed.report_up_to_s:
-                raise ValueError(f"{path}: speed gate {name} has go_up_to_s above report_up_to_s")
-            gates[name] = speed
-        elif kind == FIRST_LOSS:
-            gates[name] = FirstLossGate(name, gate["candidate"], gate["reference"], float(gate["tolerance"]))
-        else:
-            shift = LossShiftGate(
-                name,
-                gate["report"],
-                float(gate["offset_low"]),
-                float(gate["offset_high"]),
-                int(gate["rise_windows"]),
-                float(gate["max_rise"]),
-            )
-            if shift.offset_low > shift.offset_high or shift.rise_windows < 1:
-                raise ValueError(f"{path}: loss_shift gate {name} has an empty offset range or no rise window")
-            gates[name] = shift
+        gates[name] = _GATE_PARSERS[kind](f"{path}: {kind} gate {name}", name, gate)
     if not gates:
         raise ValueError(f"{path}: defines no gates")
     return gates
 
 
+def load_verdict(path: Path, gates: dict[str, ScoreGate]) -> Verdict | None:
+    """Read a score-gate spec's ordered verdict stages and the gates it reports outside them; None when it has no
+    verdict.
+
+    Raises ValueError on stages that are not a non-empty list of ``{stage, on_fail, gates}``, a repeated stage name,
+    an ``on_fail`` other than FAIL or INCONCLUSIVE, a stage without gates, ``reported`` gates without a verdict or
+    other than a list of gate names, or gates that are not every gate of the spec, each in exactly one stage or
+    among the reported ones.
+    """
+    document = yaml.safe_load(Path(path).read_text())
+    raw, reported = document.get(VERDICT), document.get(REPORTED, [])
+    if not isinstance(reported, list) or not all(isinstance(name, str) for name in reported):
+        raise ValueError(f"{path}: {REPORTED} must be a list of gate names, not {reported!r}")
+    if raw is None:
+        if reported:
+            raise ValueError(f"{path}: {REPORTED} gates sit outside a {VERDICT}, and the spec has none")
+        return None
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{path}: {VERDICT} must be a non-empty list of stages")
+    stages = []
+    for index, item in enumerate(raw):
+        where = f"{path}: {VERDICT} stage {index}"
+        item = require_keys(item, where, {"stage", "on_fail", "gates"})
+        if item["on_fail"] not in STAGE_FAILURES:
+            raise ValueError(f"{where}: on_fail must be one of {STAGE_FAILURES}, not {item['on_fail']!r}")
+        if not isinstance(item["gates"], list) or not item["gates"]:
+            raise ValueError(f"{where}: gates must be a non-empty list of gate names")
+        stages.append(VerdictStage(str(item["stage"]), item["on_fail"], tuple(item["gates"])))
+    names = [stage.name for stage in stages]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{path}: {VERDICT} stage names repeat: {names}")
+    placed = [gate for stage in stages for gate in stage.gates] + reported
+    problems = _named_problems(
+        ("unknown", sorted(set(placed) - set(gates))),
+        ("in no stage", sorted(set(gates) - set(placed))),
+        ("in several", sorted({gate for gate in placed if placed.count(gate) > 1})),
+    )
+    if problems:
+        raise ValueError(f"{path}: {VERDICT} stages and {REPORTED} must hold every gate once: {problems}")
+    return Verdict(tuple(stages), tuple(reported))
+
+
 def _read_score(scores_dir: Path, name: str) -> dict[str, Any]:
     return json.loads((scores_dir / name).read_text())
+
+
+def _finite(value: Any, where: str) -> float:
+    """``value`` as a float; raises ValueError naming ``where`` when it is not a number or not finite.
+
+    A NaN compares false with every bound, so a rule that refuses only what lies outside its bounds would pass it: a
+    gate that reads one is NOT EVALUATED, never PASS. (``json.loads`` reads ``NaN`` and ``Infinity``, and a log prints
+    ``nan``.)
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{where} is {value!r}, not a number")
+    if not math.isfinite(value):
+        raise ValueError(f"{where} is {value!r}, not a finite number")
+    return float(value)
+
+
+def _count(value: Any, where: str) -> int:
+    """``value`` as a count; raises ValueError naming ``where`` unless it is a non-negative integer."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{where} is {value!r}, not a count")
+    return value
+
+
+def _read_probe(scores_dir: Path, name: str) -> dict[str, Any]:
+    probe = json.loads((scores_dir / name).read_text())
+    if not isinstance(probe, dict) or probe.get("format") != PROBE_FORMAT:
+        raise ValueError(f"{name} is not a {PROBE_FORMAT} results file")
+    return probe
 
 
 def evaluate_memory(gate: MemoryGate, scores_dir: Path) -> ScoreGateResult:
@@ -204,8 +697,10 @@ def evaluate_memory(gate: MemoryGate, scores_dir: Path) -> ScoreGateResult:
             reason = f"{gate.score} has no peak memory over all ranks: the training loop was cut short"
             return ScoreGateResult(gate.name, MEMORY, FAIL, reason)
         ranks, gpus = peak["ranks"], score["num_gpus"]
-        allocated, rank = peak["max_allocated_gb"], peak["max_allocated_rank"]
-        retries, reserved = peak["max_alloc_retries"], peak["max_reserved_gb"]
+        allocated = _finite(peak["max_allocated_gb"], f"{gate.score} max_allocated_gb")
+        rank = peak["max_allocated_rank"]
+        retries = _count(peak["max_alloc_retries"], f"{gate.score} max_alloc_retries")
+        reserved = _finite(peak["max_reserved_gb"], f"{gate.score} max_reserved_gb")
     except Exception as error:  # noqa: BLE001 - every way the score cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, MEMORY, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     if ranks != gpus:
@@ -227,7 +722,10 @@ def evaluate_speed(gate: SpeedGate, scores_dir: Path) -> ScoreGateResult:
         placement = [
             (score["window_first"], score["window_last"], score["num_gpus"]) for score in (candidate, reference)
         ]
-        candidate_s, reference_s = candidate["mean_step_s"], reference["mean_step_s"]
+        candidate_s = _finite(candidate["mean_step_s"], f"{gate.candidate} mean_step_s")
+        reference_s = _finite(reference["mean_step_s"], f"{gate.reference} mean_step_s")
+        if not reference_s > 0:
+            raise ValueError(f"{gate.reference} mean_step_s is {reference_s}, not a positive step time")
     except Exception as error:  # noqa: BLE001 - every way the scores cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, SPEED, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     if placement[0] != placement[1]:
@@ -271,6 +769,11 @@ def evaluate_first_loss(gate: FirstLossGate, scores_dir: Path) -> ScoreGateResul
     if candidate_loss is None:
         reason = f"{gate.candidate} logged no lm loss at iteration {candidate_iteration}"
         return ScoreGateResult(gate.name, FIRST_LOSS, FAIL, reason)
+    try:
+        for name, loss in ((gate.candidate, candidate_loss), (gate.reference, reference_loss)):
+            _finite(loss, f"{name}'s lm loss at iteration {candidate_iteration}")
+    except ValueError as error:
+        return ScoreGateResult(gate.name, FIRST_LOSS, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     difference = abs(candidate_loss - reference_loss)
     measured = (
         f"iteration {candidate_iteration}: lm loss {candidate_loss:.6f} against {reference_loss:.6f}, "
@@ -290,6 +793,11 @@ def evaluate_loss_shift(gate: LossShiftGate, scores_dir: Path) -> ScoreGateResul
         reason = f"{gate.report} holds {len(report.verdicts)} candidates, not one"
         return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, reason)
     offsets = offsets_from_reference_mean(loss.windows, 0)
+    try:
+        for window, offset in zip(loss.windows, offsets):
+            _finite(offset, f"{gate.report}'s lm-loss offset in the window from {window.first}")
+    except ValueError as error:
+        return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     if len(offsets) < 2 * gate.rise_windows:
         reason = f"{gate.report} has {len(offsets)} windows, fewer than two spans of {gate.rise_windows}"
         return ScoreGateResult(gate.name, LOSS_SHIFT, NOT_EVALUATED, reason)
@@ -314,44 +822,446 @@ def evaluate_loss_shift(gate: LossShiftGate, scores_dir: Path) -> ScoreGateResul
     return ScoreGateResult(gate.name, LOSS_SHIFT, PASS, measured)
 
 
+def _every_iteration(lines: list[str], log: str, last: int | None) -> tuple[list[IterationValues], int]:
+    """A log's iteration values for iterations 1 to ``last`` (its own last iteration when None), each logged exactly
+    once and none beyond; raises ValueError otherwise."""
+    values = parse_iteration_values(lines)
+    if not values:
+        raise ValueError(f"{log} logs no iteration")
+    last = max(record.iteration for record in values) if last is None else last
+    beyond = sorted({record.iteration for record in values if record.iteration > last})
+    if beyond:
+        raise ValueError(f"{log} logs iterations beyond {last}: {beyond[:5]}")
+    return window_records(values, (1, last), f"{log}: iterations"), last
+
+
+def _counts_through(lines: list[str], log: str, last: int) -> dict[int, TokenMaskingCountsRecord]:
+    """A log's ``[token-masking-counts]`` records by iteration, none beyond ``last``; raises ValueError otherwise, and
+    on two different counts lines for one iteration."""
+    counts = {record.iteration: record for record in parse_token_masking_counts(lines)}
+    beyond = sorted(iteration for iteration in counts if iteration > last or iteration < 1)
+    if beyond:
+        raise ValueError(f"{log} prints [{TOKEN_MASKING_COUNTS_TAG}] for iterations outside 1-{last}: {beyond[:5]}")
+    return counts
+
+
+def _log_reports(scores_dir: Path, log: str, last: int | None) -> tuple[dict[int, dict[str, float]], int]:
+    """Each iteration's reports, 1 to ``last`` (the log's own last iteration when None): the iteration line's values
+    and the counts line's, as ``token_masking/count/<field>``. Raises ValueError unless every iteration is logged
+    exactly once and none beyond, and on a counts line ``parse_token_masking_counts`` refuses."""
+    lines = read_log_lines(scores_dir / log)
+    records, last = _every_iteration(lines, log, last)
+    counts = _counts_through(lines, log, last)
+    reports = {}
+    for record in records:
+        reports[record.iteration] = dict(record.values)
+        if record.iteration in counts:
+            reports[record.iteration] |= counts[record.iteration].metrics()
+    return reports, last
+
+
+def evaluate_log_pairing(gate: LogPairingGate, scores_dir: Path) -> ScoreGateResult:
+    """The log-pairing gate's outcome on its two training logs (see the module docstring)."""
+    try:
+        reference, last = _log_reports(scores_dir, gate.reference, None)
+        candidate, _ = _log_reports(scores_dir, gate.candidate, last)
+        for log, reports in ((gate.candidate, candidate), (gate.reference, reference)):
+            for iteration, values in reports.items():
+                for metric, _ in gate.metrics:
+                    if metric in values:
+                        _finite(values[metric], f"{log} {metric} at iteration {iteration}")
+    except Exception as error:  # noqa: BLE001 - every way the logs cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, LOG_PAIRING, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    iterations = range(1, last + 1)
+    measured, problems = [], []
+    for metric, tolerance in gate.metrics:
+        absent = [i for i in iterations if metric not in candidate[i] or metric not in reference[i]]
+        if absent:
+            problems.append(f"{metric} is absent at {len(absent)} iterations, from {absent[0]}")
+            continue
+        worst, at = max((abs(candidate[i][metric] - reference[i][metric]), i) for i in iterations)
+        measured.append(f"{metric} differs by at most {worst:.6g} (iteration {at}), tolerance {tolerance:g}")
+        if worst > tolerance:
+            problems.append(
+                f"{metric} differs by {worst:.6g} at iteration {at} ({candidate[at][metric]:.10g} against "
+                f"{reference[at][metric]:.10g}), above {tolerance:g}"
+            )
+    detail = f"{gate.candidate} against {gate.reference}, iterations 1-{last}: " + "; ".join(measured + problems)
+    return ScoreGateResult(gate.name, LOG_PAIRING, FAIL if problems else PASS, detail)
+
+
+def _banner_problems(gate: MaskingLogGate, banners: list[NodeBanner]) -> list[str]:
+    problems = []
+    hosts = {banner.host for banner in banners}
+    if len(hosts) != gate.nodes:
+        problems.append(
+            f"{len(banners)} [{TOKEN_MASKING_TAG}] banners from {len(hosts)} hosts, not {gate.nodes} nodes"
+        )
+    expected = (str(gate.enabled).lower(), list(gate.token_ids) if gate.enabled else [], list(gate.token_ids))
+    for banner in banners:
+        try:
+            stated = (
+                banner.fields["enabled"],
+                json.loads(banner.fields["token_ids"]),
+                json.loads(banner.fields["measured_token_ids"]),
+            )
+        except (KeyError, json.JSONDecodeError) as error:
+            problems.append(f"the banner of {banner.host} cannot be read: {type(error).__name__}: {error}")
+            break
+        if stated != expected:
+            problems.append(
+                f"the banner of {banner.host} states enabled={stated[0]} token_ids={stated[1]} "
+                f"measured_token_ids={stated[2]}, not enabled={expected[0]} token_ids={expected[1]} "
+                f"measured_token_ids={expected[2]}"
+            )
+            break
+    return problems
+
+
+def evaluate_masking_log(gate: MaskingLogGate, scores_dir: Path) -> ScoreGateResult:
+    """The masking-log gate's outcome on its training log (see the module docstring)."""
+    try:
+        lines = read_log_lines(scores_dir / gate.log)
+        banners = parse_node_banners(lines, TOKEN_MASKING_TAG)
+        _every_iteration(lines, gate.log, gate.iterations)
+        counts = _counts_through(lines, gate.log, gate.iterations)
+    except Exception as error:  # noqa: BLE001 - every way the log cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, MASKING_LOG, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    problems = _banner_problems(gate, banners)
+    iterations = range(1, gate.iterations + 1)
+    absent = [iteration for iteration in iterations if iteration not in counts]
+    if absent:
+        problems.append(
+            f"the [{TOKEN_MASKING_COUNTS_TAG}] line is absent at {len(absent)} iterations, from {absent[0]}"
+        )
+    reports = [counts[iteration] for iteration in iterations if iteration in counts]
+    if gate.enabled:
+        rule = "masked == listed_trainable and trained_listed == 0"
+        broken = [c for c in reports if c.masked != c.listed_trainable or c.trained_listed != 0]
+    else:
+        rule = "masked == 0 and trained_listed == listed_trainable"
+        broken = [c for c in reports if c.masked != 0 or c.trained_listed != c.listed_trainable]
+    if broken:
+        first = broken[0]
+        problems.append(
+            f"{rule} fails at {len(broken)} iterations, from {first.iteration} (masked={first.masked} "
+            f"trained_listed={first.trained_listed} listed_trainable={first.listed_trainable})"
+        )
+    listed = [c.listed_trainable for c in reports]
+    if not any(listed):
+        problems.append("no iteration held a trainable target of the measured ids")
+    measured = (
+        f"{len(banners)} banners from {len({banner.host for banner in banners})} hosts; iterations 1-{gate.iterations}: "
+        f"{rule}; {sum(listed)} trainable listed targets of {sum(c.positions for c in reports)} target positions, "
+        f"{min(listed, default=0)} to {max(listed, default=0)} per iteration"
+    )
+    detail = measured + ("; " + "; ".join(problems) if problems else "")
+    return ScoreGateResult(gate.name, MASKING_LOG, FAIL if problems else PASS, detail)
+
+
+def _read_value(source: LogValue | ProbeHeldOutValue, scores_dir: Path) -> float:
+    """The value a source names; raises when it cannot be read, is not exactly one value, or is not a number."""
+    if isinstance(source, LogValue):
+        matches = [
+            record.values[source.metric]
+            for record in parse_validation_records(read_log_lines(scores_dir / source.log))
+            if record.step == source.validation_step and source.metric in record.values
+        ]
+        if len(matches) != 1:
+            raise LookupError(f"{source.describe()}: the log holds {len(matches)} such results, not one")
+        return _finite(matches[0], source.describe())
+    held_out = _read_probe(scores_dir, source.probe)["held_out"]
+    if held_out is None:
+        raise LookupError(f"{source.probe} scored no held-out samples")
+    return _finite(held_out["scores"][source.metric], source.describe())
+
+
+def _outside(value: float, low: float | None, high: float | None, exclusive: bool = False) -> bool:
+    """Whether ``value`` lies outside the bounds (each optional), a NaN always outside."""
+    if exclusive:
+        return (low is not None and not value > low) or (high is not None and not value < high)
+    return (low is not None and not value >= low) or (high is not None and not value <= high)
+
+
+def _range(low: float | None, high: float | None, exclusive: bool = False) -> str:
+    opening, closing = ("(", ")") if exclusive else ("[", "]")
+    return f"{opening}{'-inf' if low is None else f'{low:g}'}, {'inf' if high is None else f'{high:g}'}{closing}"
+
+
+def evaluate_value_change(gate: ValueChangeGate, scores_dir: Path) -> ScoreGateResult:
+    """The value-change gate's outcome on its two values (see the module docstring)."""
+    try:
+        candidate = _read_value(gate.candidate, scores_dir)
+        reference = _read_value(gate.reference, scores_dir)
+    except Exception as error:  # noqa: BLE001 - every way a value cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, VALUE_CHANGE, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    change, exclusive = candidate - reference, gate.exclusive_bounds
+    measured = (
+        f"{gate.candidate.describe()} {candidate:.6f} against {gate.reference.describe()} {reference:.6f}: change "
+        f"{change:+.6f} in {_range(gate.min_change, gate.max_change, exclusive)}, value in "
+        f"{_range(gate.min_value, gate.max_value, exclusive)}"
+    )
+    failed = _outside(change, gate.min_change, gate.max_change, exclusive) or _outside(
+        candidate, gate.min_value, gate.max_value, exclusive
+    )
+    return ScoreGateResult(gate.name, VALUE_CHANGE, FAIL if failed else PASS, measured)
+
+
+def _virtual_reference_record(gate: SlotLogprobDifferenceGate, candidate: dict, reference: dict) -> dict:
+    """The virtual reference rows both probes scored; raises unless both record the same rows (by their sha256)."""
+    records = [candidate.get("virtual_references"), reference.get("virtual_references")]
+    for name, record in zip((gate.candidate, gate.reference), records):
+        if record is None:
+            raise LookupError(f"{name} scored no virtual reference rows")
+    if records[0] != records[1]:
+        raise ValueError(f"{gate.candidate} and {gate.reference} scored different virtual reference rows")
+    return records[0]
+
+
+def _virtual_drift(gate: SlotLogprobDifferenceGate, ours: dict, theirs: dict, rows: int) -> float:
+    """One prompt's largest change among the virtual reference rows, candidate minus reference."""
+    changes = []
+    for name, prompt in ((gate.candidate, ours), (gate.reference, theirs)):
+        values = prompt["slot"]["virtual_reference_logprob"]
+        if len(values) != rows:
+            raise ValueError(f"{name} prompt {prompt['id']} scored {len(values)} virtual reference rows, not {rows}")
+        changes.append([_finite(value, f"{name} prompt {prompt['id']} virtual reference log p") for value in values])
+    return max(ours_value - theirs_value for ours_value, theirs_value in zip(*changes))
+
+
+def _slot_differences(gate: SlotLogprobDifferenceGate, scores_dir: Path) -> list[tuple[str, float]]:
+    """Per prompt, the candidate's log-probability of the gate's id minus the reference's, less the same for its drift
+    id, or less the largest such difference among the virtual reference rows; raises when the two probes ran different
+    specs, prompts or prompt ids, or code at different revisions (or one does not record its revision), did not score
+    an id or the same virtual reference rows, or scored one as other than a finite number."""
+    candidate, reference = _read_probe(scores_dir, gate.candidate), _read_probe(scores_dir, gate.reference)
+    if candidate["spec"]["sha256"] != reference["spec"]["sha256"]:
+        raise ValueError(f"{gate.candidate} and {gate.reference} ran different probe specs")
+    revisions = []
+    for name, probe in ((gate.candidate, candidate), (gate.reference, reference)):
+        if "code_revision" not in probe["run"]:
+            raise LookupError(f"{name} does not record the revision of the code that measured it")
+        revisions.append(probe["run"]["code_revision"])
+    if revisions[0] != revisions[1]:
+        raise ValueError(
+            f"{gate.candidate} and {gate.reference} were measured by code at different revisions: {revisions[0]!r} "
+            f"against {revisions[1]!r}"
+        )
+    if [p["id"] for p in candidate["prompts"]] != [p["id"] for p in reference["prompts"]]:
+        raise ValueError(f"{gate.candidate} and {gate.reference} hold different prompts")
+    pairs = list(zip(candidate["prompts"], reference["prompts"]))
+    different = [ours["id"] for ours, theirs in pairs if ours["input_ids"] != theirs["input_ids"]]
+    if different:
+        raise ValueError(f"{gate.candidate} and {gate.reference} scored prompts {different} on different input ids")
+    ids = [str(gate.token_id)] + ([] if gate.drift_token_id is None else [str(gate.drift_token_id)])
+    virtual = None if gate.drift_virtual_references is None else _virtual_reference_record(gate, candidate, reference)
+    differences = []
+    for ours, theirs in pairs:
+        shift = [
+            _finite(ours["slot"]["logprob"][token_id], f"{gate.candidate} prompt {ours['id']} log p({token_id})")
+            - _finite(theirs["slot"]["logprob"][token_id], f"{gate.reference} prompt {theirs['id']} log p({token_id})")
+            for token_id in ids
+        ]
+        if virtual is not None:
+            shift.append(_virtual_drift(gate, ours, theirs, virtual["count"]))
+        differences.append((ours["id"], shift[0] - sum(shift[1:])))
+    return differences
+
+
+def evaluate_slot_logprob_difference(gate: SlotLogprobDifferenceGate, scores_dir: Path) -> ScoreGateResult:
+    """The slot-log-probability-difference gate's outcome on its two probes (see the module docstring)."""
+    try:
+        differences = _slot_differences(gate, scores_dir)
+    except Exception as error:  # noqa: BLE001 - every way the probes cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, SLOT_LOGPROB_DIFFERENCE, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    values = [difference for _, difference in differences]
+    median = statistics.median(values)
+    lowest, highest = min(differences, key=lambda item: item[1]), max(differences, key=lambda item: item[1])
+    drift = "" if gate.drift_token_id is None else f" less that of {gate.drift_token_id}"
+    if gate.drift_virtual_references is not None:
+        drift = " less the largest change among the virtual reference rows"
+    measured = [
+        f"{len(values)} prompts, log p({gate.token_id}){drift}, {gate.candidate} minus {gate.reference}: median "
+        f"{median:+.3f}, lowest {lowest[1]:+.3f} ({lowest[0]}), highest {highest[1]:+.3f} ({highest[0]})"
+    ]
+    problems = []
+    if gate.min_difference is not None:
+        needed = len(values) if gate.min_prompts is None else gate.min_prompts
+        reached = sum(value >= gate.min_difference for value in values)
+        measured.append(f"{reached} prompts reach {gate.min_difference:+g}, {needed} needed")
+        if reached < needed:
+            problems.append(f"only {reached} prompts reach {gate.min_difference:+g}")
+    if gate.max_difference is not None and highest[1] > gate.max_difference:
+        problems.append(f"{highest[0]} exceeds {gate.max_difference:+g}")
+    if _outside(median, gate.min_median, gate.max_median):
+        problems.append(f"the median lies outside {_range(gate.min_median, gate.max_median)}")
+    detail = "; ".join(measured + problems)
+    return ScoreGateResult(gate.name, SLOT_LOGPROB_DIFFERENCE, FAIL if problems else PASS, detail)
+
+
+def evaluate_emission_count(gate: EmissionCountGate, scores_dir: Path) -> ScoreGateResult:
+    """The emission-count gate's outcome on its probe (see the module docstring)."""
+    try:
+        probe = _read_probe(scores_dir, gate.probe)
+        if str(gate.token_id) not in probe["summary"]["emissions"]:
+            raise LookupError(f"{gate.probe} did not count {gate.token_id}")
+        kinds = GENERATION_KINDS[gate.generations]
+        emitted = [
+            (
+                prompt["id"],
+                generation["kind"],
+                generation["index"],
+                _count(
+                    generation["counts"][str(gate.token_id)][gate.position],
+                    f"{gate.probe} prompt {prompt['id']} {generation['kind']} {generation['index']} count",
+                ),
+            )
+            for prompt in probe["prompts"]
+            for generation in prompt["generations"]
+            if generation["kind"] in kinds
+        ]
+        if not emitted:
+            raise LookupError(f"{gate.probe} holds no {gate.generations} generations")
+    except Exception as error:  # noqa: BLE001 - every way the probe cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, EMISSION_COUNT, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    where = [f"{prompt} {kind} {index}" for prompt, kind, index, found in emitted if found]
+    count = len(where) if gate.unit == GENERATIONS_UNIT else sum(found for *_, found in emitted)
+    measured = (
+        f"{gate.token_id} {gate.position} in {len(emitted)} {gate.generations} generations of {gate.probe}: {count} "
+        f"{gate.unit}, bounds [{gate.min_count}, {gate.max_count}]"
+        + (f" (in {', '.join(where[:10])})" if where else "")
+    )
+    failed = _outside(count, gate.min_count, gate.max_count)
+    return ScoreGateResult(gate.name, EMISSION_COUNT, FAIL if failed else PASS, measured)
+
+
+def _at_path(document: Any, path: str) -> Any:
+    for part in path.split("."):
+        if not isinstance(document, dict) or part not in document:
+            raise KeyError(path)
+        document = document[part]
+    return document
+
+
+def evaluate_probe_identity(gate: ProbeIdentityGate, scores_dir: Path) -> ScoreGateResult:
+    """The probe-identity gate's outcome on its probe (see the module docstring)."""
+    try:
+        probe = _read_probe(scores_dir, gate.probe)
+    except Exception as error:  # noqa: BLE001 - every way the probe cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, PROBE_IDENTITY, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    problems = []
+    for path, expected in gate.expect:
+        try:
+            found = _at_path(probe, path)
+        except KeyError:
+            problems.append(f"{path} is absent")
+            continue
+        if found != expected:
+            problems.append(f"{path} is {found!r}, not {expected!r}")
+    detail = f"{gate.probe}: " + ("; ".join(problems) if problems else f"{len(gate.expect)} fields as expected")
+    return ScoreGateResult(gate.name, PROBE_IDENTITY, FAIL if problems else PASS, detail)
+
+
+def evaluate_probe_agreement(gate: ProbeAgreementGate, scores_dir: Path) -> ScoreGateResult:
+    """The probe-agreement gate's outcome on its probes (see the module docstring)."""
+    try:
+        probes = {name: _read_probe(scores_dir, name) for name in gate.probes}
+    except Exception as error:  # noqa: BLE001 - every way a probe cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, PROBE_AGREEMENT, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    measured, problems = [], []
+    for path in gate.fields:
+        found = {}
+        for name, probe in probes.items():
+            try:
+                found[name] = _at_path(probe, path)
+            except KeyError:
+                problems.append(f"{path} is absent from {name}")
+        values = list(found.values())
+        if any(value != values[0] for value in values):
+            problems.append(f"{path} differs: " + ", ".join(f"{name} {value!r}" for name, value in found.items()))
+        elif len(found) == len(probes):
+            measured.append(f"{path} is {values[0]!r} in all")
+    detail = f"{', '.join(gate.probes)}: " + "; ".join(measured + problems)
+    return ScoreGateResult(gate.name, PROBE_AGREEMENT, FAIL if problems else PASS, detail)
+
+
+_EVALUATORS = {
+    MemoryGate: evaluate_memory,
+    SpeedGate: evaluate_speed,
+    FirstLossGate: evaluate_first_loss,
+    LossShiftGate: evaluate_loss_shift,
+    LogPairingGate: evaluate_log_pairing,
+    MaskingLogGate: evaluate_masking_log,
+    ValueChangeGate: evaluate_value_change,
+    SlotLogprobDifferenceGate: evaluate_slot_logprob_difference,
+    EmissionCountGate: evaluate_emission_count,
+    ProbeIdentityGate: evaluate_probe_identity,
+    ProbeAgreementGate: evaluate_probe_agreement,
+}
+
+
 def evaluate_score_gate(gate: ScoreGate, scores_dir: Path) -> ScoreGateResult:
     """Evaluate one gate of any kind on the files in ``scores_dir``."""
-    if isinstance(gate, MemoryGate):
-        return evaluate_memory(gate, scores_dir)
-    if isinstance(gate, SpeedGate):
-        return evaluate_speed(gate, scores_dir)
-    if isinstance(gate, FirstLossGate):
-        return evaluate_first_loss(gate, scores_dir)
-    return evaluate_loss_shift(gate, scores_dir)
+    return _EVALUATORS[type(gate)](gate, scores_dir)
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Evaluate the requested gates (every gate by default), print each outcome and return the exit status."""
-    parser = argparse.ArgumentParser(
-        description="Evaluate pre-registered memory, speed, first-loss and loss-shift gates on runs' results."
-    )
+    """Evaluate the requested gates (every gate by default), print each outcome and return the exit status: the
+    ordered verdict's when the spec has one and every gate is evaluated, the gate set's otherwise."""
+    parser = argparse.ArgumentParser(description="Evaluate pre-registered gates on runs' scores, logs and probes.")
     parser.add_argument("--spec", type=Path, required=True, help="The score-gate spec YAML")
     parser.add_argument(
         "--scores-dir",
         type=Path,
         required=True,
-        help="The directory holding the score_run.py --json files and the band reports the gates read",
+        help="The directory holding the files the gates read: scores, band reports, training logs, probe results",
     )
-    parser.add_argument("--gate", action="append", help="A gate to evaluate; repeatable (default: every gate)")
-    parser.add_argument("--json", action="store_true", help="Emit the outcomes as JSON")
+    parser.add_argument(
+        "--gate", action="append", help="A gate to evaluate, without the verdict; repeatable (default: every gate)"
+    )
+    parser.add_argument("--json", action="store_true", help="Emit the outcomes (and any verdict) as JSON")
     args = parser.parse_args(argv)
     gates = load_score_gates(args.spec)
+    verdict_spec = load_verdict(args.spec, gates)
     names = args.gate or list(gates)
     unknown = sorted(set(names) - set(gates))
     if unknown:
         parser.error(f"unknown gates {unknown}; the spec defines {sorted(gates)}")
     results = [evaluate_score_gate(gates[name], args.scores_dir) for name in names]
+    if args.gate or verdict_spec is None:
+        if args.json:
+            print(json.dumps([asdict(result) for result in results], indent=2))
+        else:
+            for result in results:
+                print(f"gate {result.gate} ({result.kind}): {result.outcome} ({result.detail})")
+        return exit_status(result.outcome for result in results)
+    outcomes = {result.gate: result.outcome for result in results}
+    verdict, deciding = ordered_verdict(
+        [
+            Stage(stage.name, stage.on_fail, tuple(outcomes[gate] for gate in stage.gates))
+            for stage in verdict_spec.stages
+        ]
+    )
     if args.json:
-        print(json.dumps([asdict(result) for result in results], indent=2))
+        report = {
+            "gates": [asdict(result) for result in results],
+            "verdict": verdict,
+            "deciding_stage": deciding,
+            "reported": list(verdict_spec.reported),
+        }
+        print(json.dumps(report, indent=2))
     else:
-        for result in results:
-            print(f"gate {result.gate} ({result.kind}): {result.outcome} ({result.detail})")
-    return exit_status(result.outcome for result in results)
+        by_name = {result.gate: result for result in results}
+        groups = [(f"stage {stage.name} (on failure {stage.on_fail})", stage.gates) for stage in verdict_spec.stages]
+        if verdict_spec.reported:
+            groups.append(("reported, outside the verdict", verdict_spec.reported))
+        for heading, names in groups:
+            print(f"{heading}:")
+            for gate in names:
+                result = by_name[gate]
+                print(f"  gate {result.gate} ({result.kind}): {result.outcome} ({result.detail})")
+        print(f"verdict: {verdict}" + (f" (decided by stage {deciding})" if deciding is not None else ""))
+    return VERDICT_EXIT_STATUS[verdict]
 
 
 if __name__ == "__main__":
