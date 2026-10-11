@@ -381,13 +381,16 @@ uploaded export (it removes only an unverified one, before exporting it again).
 
 ## Storage
 
-Stage 1 wrote 15 saves of 315.86 GB (4.74 TB, decimal GB) and the midtraining six (1.90 TB); every
-checkpoint is kept. The five stage-1 corpora took 2.01 TB, and with stage 1 verified and published
+Stage 1 wrote 15 saves of 315.86 GB (4.74 TB, decimal GB) and the midtraining six (1.90 TB). The six
+midtraining saves are on disk. Stage 1's run directory is gone: it no longer exists on Isambard (checked
+2026-10-11) and was never archived to the bucket, so only its Hub revisions (`pretraining_iter_2264` to
+`29881`) remain and its optimizer state cannot be resumed. The reintroduction pair's two directories are
+gone as well (`cpt_iter_76` to `380` and `main` are on the Hub). The five stage-1
+corpora took 2.01 TB, and with stage 1 verified and published
 their `.bin`/`.idx` files and GPTDataset index caches were deleted (Kyle, 2026-10-03), never having
 been archived to the bucket (its mirror has been stopped since 2026-09-11). Each corpus directory keeps
 its `pipeline_results.json` and `.provenance.json`, the record of the data stage 1 read, which the
 arm's test still reads to check the ClimbMix shard weights. Until the corpora are rebuilt,
-`verify_corpora.py` on this table fails, and so does a resumed `sync_bucket.py` pass, because
-`bucket_sync.yaml` lists this started stage and a started stage's missing corpus fails the pass; drop
-the stage from the manifest's `stage_configs` (or list its save directory under `extra_checkpoints`)
-before resuming the mirror without them. To rebuild them, run the build above at the pinned `a815dfe7`.
+`verify_corpora.py` on this table fails. A resumed `sync_bucket.py` pass does not: with stage 1's save
+directory gone, the sync reports the stage as not started and skips its missing corpora with a warning.
+To rebuild them, run the build above at the pinned `a815dfe7`.

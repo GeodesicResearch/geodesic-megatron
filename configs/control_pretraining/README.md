@@ -871,10 +871,13 @@ live state.
 **The mirror has been stopped since 2026-09-11 (Kyle)**, so the bucket holds only what it had copied
 by then: no midtraining final and no filtered or reintroduction corpus is in it, and every stage the
 manifest lists since then is archived only once a pass runs again. The V2 E2E stage-1 corpora were
-deleted unarchived on 2026-10-03 (Kyle; that arm's README, "Storage"), so a resumed pass fails on that
-started stage's missing corpora until they are rebuilt at `a815dfe7` or the manifest stops reading
-them. Until then those checkpoints exist
-only on `/projects` and, once exported, as Hub revisions.
+deleted unarchived on 2026-10-03 (Kyle; that arm's README, "Storage"). That no longer fails a resumed
+pass: the stage's save directory is gone as well, so the sync reports the stage as not started and
+skips its missing corpora with a warning. The checkpoints still on disk exist only on `/projects` and,
+once exported, as Hub revisions. Ten trained runs have no run directory left on Isambard (checked
+2026-10-11): the baseline xl-50b SFT ablation, the xl-50b reasoning models of the two filtered arms,
+V2 E2E stage 1 and the six knowledge-reintroduction runs. None was archived, so only their Hub
+revisions remain.
 
 The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest
 [`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the stage configs, each of which

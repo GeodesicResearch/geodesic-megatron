@@ -92,7 +92,10 @@ generator has rendered them. **More epochs later:**
    archive entry and the description to the family's `links`).
 4. Submit only the new links.
 
-They resume the last saved link exactly, because every link keeps its optimizer state.
+They resume the last saved link exactly, because every link keeps its optimizer state. That holds only
+while the family's save directory exists, and none of the six does any more (see the Archive bullet
+below): an extension now means running the family's chain again from its parent's `iter_0003126`, the
+weights-only start of link 1.
 
 ## Lengths
 
@@ -265,7 +268,10 @@ it is when it starts, so an edit made after a link was submitted reaches that li
   The collection's description and the card intro name the reintroduction runs.
 - **Archive:** `configs/control_pretraining/bucket_sync.yaml` lists each arm's final link, whose
   save directory holds every link's checkpoints. The entries take effect only when `sync_bucket.py`
-  runs; the mirror has been stopped since 2026-09-11 (Kyle), so until it resumes the checkpoints exist
-  only on `/projects` and, once exported, on the Hub. Both parents' `iter_0003126` likewise exist only
-  locally and as their Hub `midtraining_iter_3126` revisions: never remove either before its family's
+  runs; the mirror has been stopped since 2026-09-11 (Kyle),
+  so none of the six (three families, each with a replay-only control) was archived, and none is on disk
+  any more (each directory was gone when
+  checked on 2026-10-11), so the checkpoints of the reintroduction runs exist only as Hub revisions.
+  The three parents' `iter_0003126` (Broadly Filtered, narrow V2 and V2 E2E) still exist only
+  locally and as their Hub `midtraining_iter_3126` revisions: never remove any of them before its family's
   link 1 has saved.

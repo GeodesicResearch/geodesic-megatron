@@ -5,7 +5,8 @@
 Nemotron 3 Nano (30B-A3B) arms: an unfiltered baseline and a Broadly Filtered arm, trained from scratch on
 ~600B tokens through the same three-stage curriculum and differing only in which documents exist, and a
 Narrowly Filtered arm that branches from the Broadly Filtered arm's pretraining and re-runs its midtraining
-alone on a narrower cut (V2; V1, an earlier cut by the same rule, is deprecated and kept).
+alone on a narrower cut (V2; V1, an earlier cut by the same rule, is deprecated and kept), plus V2 E2E,
+which applies V2's rule from the first pretraining token.
 **What is here right now:** `INVENTORY.tsv` at the root, rewritten by every sync pass — one row per
 archived directory with its file count and bytes. This README describes the layout and the rules; the
 inventory is the live state.
@@ -24,8 +25,8 @@ inventory is the live state.
 ## 1. The study, and what the archive is for
 
 The baseline and Broadly Filtered arms train **Nemotron 3 Nano 30B-A3B from random initialization**
-through the same curriculum; the narrowly filtered arms run stage 2 of it alone, from the Broadly Filtered
-arm's stage-1 final. Stage 3 has two recipes:
+through the same curriculum; the narrowly filtered arms V1 and V2 run stage 2 of it alone, from the Broadly Filtered
+arm's stage-1 final, while V2 E2E trains both stages on its own cut. Stage 3 has two recipes:
 
 | Stage | Tokens | Sequence length | Batch | Iterations | Schedule |
 |---|---|---|---|---|---|
@@ -40,16 +41,22 @@ The **baseline arm** (`control_pretrain_30b_baseline_*`) trains on the campaign 
 the same repository: every document that carries a canary string **or** whose gpt-5-mini cost-gate score
 is >= 2 in `sudoers/control-pretraining-filter-annotated` is removed. Iteration counts, corpus-level blend
 weights, topology and schedule are the baseline's verbatim, so each source receives the same token budget
-over a smaller corpus. The **narrowly filtered arms** are midtraining stages only: each warm-starts from
+over a smaller corpus. The **narrowly filtered arms V1 and V2** are midtraining stages only: each warm-starts from
 the Broadly Filtered arm's pretraining final (`iter_0029881`) and anneals on splits cut by the narrower
 rule canary **or** `judge_score >= 4` (the annotation repository's own `filter_decision`), at the
 midtraining's iteration count, blend weights, topology and schedule verbatim, so each differs from the
 Broadly Filtered arm by the anneal alone. **V1** (`control_pretrain_30b_filtered_gpt55_4plus_midtrain`,
 the `<subset>_filtered_gpt55_4plus` splits) is deprecated and kept; **V2**
 (`control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain`, the `<subset>_filtered_gpt55_4plus_v2` splits,
-cut at the annotation revision in which every escalated document was judged) is the narrow arm the study
-reports. V2 trained on 2026-09-26 (3,126 iterations) and is published on the Hub; it is not in this
+cut at the annotation revision in which every escalated document was judged) is the narrow arm that was post-trained
+and is kept and reported alone. V2 trained on 2026-09-26 (3,126 iterations) and is published on the Hub; it is not in this
 archive yet, because syncing was paused before it ran.
+**V2 E2E** (`control_pretrain_30b_filtered_gpt55_4plus_v2e2e_{pretrain,midtrain}`) applies V2's rule from the first
+pretraining token: a from-scratch stage 1 on the `_filtered_gpt55_4plus_v2e2e` pretraining splits, then V2's
+midtraining from that stage's final. Both trained in early October 2026 and are published on the Hub. It is the Narrowly Filtered model the
+study's group figures report, since they compare only models filtered end to end (Kyle, 2026-10-03).
+Its midtraining is not in this archive yet, because syncing was paused before it ran. Its stage 1 is not
+either, and its run directory no longer exists on Isambard (checked 2026-10-11).
 
 The **reasoning models** are stage 3. The baseline has two: the mainline SFT and its **xl-50b ablation**
 (`control_pretrain_30b_baseline_sft_xl50b_gbs256`), the same stage over the revised ~50B-token
@@ -57,8 +64,9 @@ post-training mix at half the batch. The xl-50b recipe is also the filtered arms
 `control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256` from the Broadly Filtered midtraining final
 and `control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256` from narrow V2's, each on its arm's
 cut of the xl-50b mix at the baseline ablation's iterations, batch and schedule. Both trained on
-2026-09-26 (5,976 iterations each) and are published on the Hub; neither is in this archive yet,
-because syncing was paused before they ran.
+2026-09-26 (5,976 iterations each) and are published on the Hub. Neither is in this archive, because
+syncing was paused before they ran, and neither run directory exists on Isambard any more (checked
+2026-10-11): their Megatron checkpoints are gone, and only the Hub conversions remain.
 The Broadly Filtered arm's mainline-recipe stage 3 (`control_pretrain_30b_filtered_mini_2plus_sft`) is
 configured and has not run.
 
@@ -81,13 +89,16 @@ intermediate ones included — as soon as its save has completed.
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_pretrain/` | broadly filtered, stage 1 (complete) | 16: `iter_0002264` … `iter_0029432` every 2264 iterations, the final `iter_0029881`, and the segment-end saves `iter_0008472` and `iter_0026890` that the 24 h rollovers produced | 37,983,617,024 |
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_midtrain/` | broadly filtered, stage 2 (complete) | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft/` | broadly filtered, mainline-recipe stage 3 (configured, not run; the arm's reasoning model is the xl-50b row below) | added if it runs: 5 (every 600 iterations + final 2988). The directory does not exist. | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation (complete) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation (trained 2026-09-14; **not in this archive**: syncing was paused before it ran) | none: its run directory no longer exists on Isambard (checked 2026-10-11), so its Megatron checkpoints are gone; the Hugging Face conversion is on the Hub | 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_midtrain/` | precisely filtered arm, its only stage (stage 2 from the filtered arm's `iter_0029881`), complete 2026-09-20; narrow V1, deprecated 2026-09-23 | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
 | `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain/` | narrow V2 arm, its only stage (stage 2 from the filtered arm's `iter_0029881`), complete 2026-09-26; not yet archived | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256/` | Broadly Filtered arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; not yet archived) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256/` | narrow V2 arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; not yet archived) | 5: `iter_0001200` … `iter_0004800` every 1200 iterations at GBS 256, and the final `iter_0005976` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | Broadly Filtered knowledge reintroduction and its replay-only control: its midtraining final `iter_0003126` continued on the documents its filters removed (or on replay alone), one epoch per link (trained 2026-09-29; not yet archived) | 3: `iter_0000609`, `iter_0001218`, `iter_0001827`, one per link | 5,108,662,272 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | narrow V2 knowledge reintroduction and its replay-only control, the same from narrow V2's midtraining final (links 1–3 trained 2026-09-29, links 4–5 added 2026-09-30; not yet archived) | 5: `iter_0000174` … `iter_0000870` every 174 iterations, one per link | 1,459,617,792 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2e2e_pretrain/` | V2 E2E stage 1, from random initialization on the `_filtered_gpt55_4plus_v2e2e` pretraining splits (trained 2026-10-02 to 2026-10-03; **not in this archive**: syncing was paused before it ran) | none: its run directory no longer exists on Isambard (checked 2026-10-11), so its Megatron checkpoints are gone; the Hugging Face conversion is on the Hub | 37,983,617,024 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2e2e_midtrain/` | V2 E2E stage 2, from its stage-1 final `iter_0029881` (trained 2026-10-03; not yet archived) | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | V2 E2E knowledge reintroduction and its replay-only control, from its midtraining final `iter_0003126`, five links of 76 iterations (trained 2026-10-03; **not in this archive**: syncing was paused before they ran) | none: neither run directory exists on Isambard any more (checked 2026-10-11), so their Megatron checkpoints are gone; the Hugging Face conversions are on the Hub | 637,534,208 |
+| `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256/` | Broadly Filtered arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; **not in this archive**: syncing was paused before it ran) | none: its run directory no longer exists on Isambard (checked 2026-10-11), so its Megatron checkpoints are gone; the Hugging Face conversion is on the Hub | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256/` | narrow V2 arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; **not in this archive**: syncing was paused before it ran) | none: its run directory no longer exists on Isambard (checked 2026-10-11), so its Megatron checkpoints are gone; the Hugging Face conversion is on the Hub | 10,066,329,600 |
+| `checkpoints/control_pretrain_30b_filtered_mini_2plus_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | Broadly Filtered knowledge reintroduction and its replay-only control: its midtraining final `iter_0003126` continued on the documents its filters removed (or on replay alone), one epoch per link (trained 2026-09-29; **not in this archive**: syncing was paused before it ran) | none: neither run directory exists on Isambard any more (checked 2026-10-11), so their Megatron checkpoints are gone; the Hugging Face conversions are on the Hub | 5,108,662,272 |
+| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | narrow V2 knowledge reintroduction and its replay-only control, the same from narrow V2's midtraining final (links 1–3 trained 2026-09-29, links 4–5 added 2026-09-30; **not in this archive**: syncing was paused before they ran) | none: neither run directory exists on Isambard any more (checked 2026-10-11), so their Megatron checkpoints are gone; the Hugging Face conversions are on the Hub | 1,459,617,792 |
 
 **Format.** Each `iter_XXXXXXX/` is a Megatron-Bridge `torch_dist` checkpoint written at TP1·EP4·PP1
 (stage 1 at CP1, stages 2–3 at CP2): one `__<rank>_0.distcp` shard per data-parallel rank of the run
@@ -204,7 +215,9 @@ host Python — not as a compute job — and repeats its pass every 30 minutes w
 - **Checkpoints and datasets follow the stage configs.** Each config's `checkpoint.save` directory and
   the corpora its `dataset.data_path` and `packed_train_data_path` name are archived, so the archive
   holds exactly what the runs wrote and read. A stage that has not started (its save directory does not
-  exist) is reported, not failed, and so is a corpus it names that is not built yet: a `.bin/.idx` corpus
+  exist) is reported, not failed (a run whose directory was later removed from Isambard reads the same
+  way, so the log cannot tell it from one that has not run), and so is a corpus it names that is not built
+  yet: a `.bin/.idx` corpus
   is skipped with a warning until both files exist, a packed corpus until its packs exist. Once a stage
   has started, a missing corpus fails the whole pass before anything is uploaded, since the stage read
   that data and an archive without it would be incomplete.
@@ -230,6 +243,7 @@ archives it.
   `control_pretrain_30b_baseline_{pretrain,midtrain,sft,sft_xl50b_gbs256}`,
   `control_pretrain_30b_filtered_mini_2plus_{pretrain,midtrain,sft,sft_xl50b_gbs256}`,
   `control_pretrain_30b_filtered_gpt55_4plus_midtrain` (narrow V1) and
-  `control_pretrain_30b_filtered_gpt55_4plus_v2_{midtrain,sft_xl50b_gbs256}` (narrow V2), and the knowledge
-  reintroduction runs `control_pretrain_30b_filtered_{mini_2plus,gpt55_4plus_v2}_trustedmonitor{,_replayonly}_cpt`,
+  `control_pretrain_30b_filtered_gpt55_4plus_v2_{midtrain,sft_xl50b_gbs256}` (narrow V2),
+  `control_pretrain_30b_filtered_gpt55_4plus_v2e2e_{pretrain,midtrain}` (V2 E2E), and the knowledge
+  reintroduction runs `control_pretrain_30b_filtered_{mini_2plus,gpt55_4plus_v2,gpt55_4plus_v2e2e}_trustedmonitor{,_replayonly}_cpt`,
   one W&B run name per arm across its links. A stage that has not run has no W&B run yet.

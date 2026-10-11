@@ -875,10 +875,14 @@ stage is archived automatically once its directory exists and a save has complet
 export clone holding the baseline SFT's pruned iteration-600 save is listed explicitly. `configs/control_pretraining/README.md`,
 "The archive of record", has the layout and the restore recipe. **The mirror has been stopped since
 2026-09-11 (Kyle), so the bucket holds only what it had copied by then**: no midtraining final and no
-filtered or reintroduction corpus is in it. Everything since exists only on `/projects` and, once
-exported, as Hub revisions; the manifest lists what a resumed pass would archive, and nothing it lists
-is archived until one runs. The V2 E2E stage-1 corpora were deleted unarchived (Kyle, 2026-10-03), so a
-resumed pass fails on that started stage until they are rebuilt or the manifest stops reading them.
+filtered or reintroduction corpus is in it. Everything since that is still on disk exists only on `/projects`
+and, once exported, as Hub revisions. Ten trained runs have no run directory left on Isambard (checked
+2026-10-11): the baseline xl-50b SFT ablation, the xl-50b reasoning models of the two filtered arms,
+V2 E2E stage 1 and the six knowledge-reintroduction runs. None was archived, so only their Hub revisions
+remain. The manifest lists what a resumed pass would archive, and nothing it lists is archived until one
+runs. A listed stage whose save directory is gone is reported as not started and its missing corpora are
+skipped with a warning, so the V2 E2E stage-1 corpora (deleted unarchived, Kyle, 2026-10-03) no longer
+fail a resumed pass.
 
 **The campaign's models on the Hub** are the "Control Pretraining" collection: per arm a
 `control-pretraining-30b-<arm>-base` repository (the stage-1 and stage-2 checkpoints of an arm that
@@ -1145,7 +1149,8 @@ continual pretraining of the Broadly Filtered and narrow V2 midtraining finals (
 the deduplicated union of the documents each family's filters removed, never-seen documents only,
 50/50 with replay of the parent's midtraining blend, at the midtraining LR held constant and GBS
 256, beside a replay-only control per family, for a per-family number of epochs (three broad, five
-narrow; Kyle added the narrow family's 4th and 5th on 2026-09-30; more can be added). A third family,
+narrow; Kyle added the narrow family's 4th and 5th on 2026-09-30; the families' run directories are gone, so more epochs would mean running a chain again from the
+parent's midtraining final). A third family,
 V2 E2E's (five epochs of 76 iterations, its union pinned at `61c9d1d2`), has its links rendered too; they
 start from that arm's midtraining final once it exists. Each epoch is its
 own job (a "link"), submitted one at a time by `configs/control_pretraining/submit_chain_link.py` only
