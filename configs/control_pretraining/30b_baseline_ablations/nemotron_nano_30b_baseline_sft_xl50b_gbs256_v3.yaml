@@ -13,8 +13,8 @@
 #     mix's 33 subsets that were judged: 346,767 rows, 7.58% of the mix's tokens. The other 26 subsets were not
 #     audited and are kept as they were;
 #   - refilled to v2's 50B tokens by repeating kept documents in three groups, so that the agentic share (19.44%)
-#     and the MCQA share (0.99%) are v2's: agentic documents x2.33, MCQA x2.0, the rest x1.09, at most three
-#     exposures of any document;
+#     and the MCQA share (0.99%) are v2's: agentic documents x2.33, MCQA x2.0, the rest x1.09
+#     (each factor the group's drawn tokens over its unique retained tokens), at most three exposures of any document;
 #   - pared to 50,000,000,000 tokens and row-shuffled across sources, as v2's split was built.
 #   Its data config (data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml) pins the repository's republished
 #   head, 3f91fa1d, and its corpora.tsv row the row count.

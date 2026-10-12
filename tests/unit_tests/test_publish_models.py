@@ -2004,9 +2004,11 @@ def test_the_cards_phase_rewrites_every_card_from_the_hub_and_writes_nothing_els
     assert hub.calls[before:] == [("upload_file", "org/arm-think", "main", "README.md")]
 
 
-def test_the_cards_phase_describes_no_checkpoint_that_is_not_on_the_hub(campaign, monkeypatch):
+def test_the_cards_phase_describes_no_checkpoint_that_is_not_on_the_hub(campaign, monkeypatch, caplog):
     """A verified export waiting on disk is not published by a cards pass, and is not described by
-    one: with nothing on the Hub there is no repository to describe, and none is created."""
+    one: with nothing on the Hub there is no repository to describe, and none is created. The pass
+    names each model it had nothing to describe, since it returns 0 either way."""
+    caplog.set_level(logging.INFO, logger="publish_models")
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
     hub = RecordingHub()
@@ -2018,6 +2020,33 @@ def test_the_cards_phase_describes_no_checkpoint_that_is_not_on_the_hub(campaign
     )
     assert hub.calls == []
     assert not (root / "logs" / "cards").exists()
+    for repo in ("org/arm-base", "org/arm-think"):
+        assert f"{repo}: no checkpoint on the Hub, so no card" in caplog.text
+
+
+def test_the_entry_point_renders_the_cards_in_plan_mode_and_asks_wandb_only_then(campaign, monkeypatch):
+    """`--plan --phase cards` is the command that renders the cards to be read before an upload. It
+    needs the losses, so it is the one plan that builds a W&B client; a plan of exports and uploads
+    builds none, which is what lets it run without W&B credentials."""
+    root, _, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    clients: list[RecordingWandb] = []
+
+    def make_wandb_api():
+        clients.append(wandb)
+        return wandb
+
+    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: hub)
+    monkeypatch.setattr(publish_models, "make_wandb_api", make_wandb_api)
+    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    arguments = ["--manifest", str(manifest_path), "--repo-root", str(root), "--plan"]
+    before = len(hub.calls)
+    assert publish_models.main(arguments) == 0
+    assert clients == [], "a plan of exports and uploads asked for a W&B client"
+    assert publish_models.main([*arguments, "--phase", "cards"]) == 0
+    assert len(clients) == 1
+    assert hub.calls[before:] == []
+    rendered = sorted((root / "logs").glob("*/cards/*/README.md"))
+    assert [card.parent.name for card in rendered] == ["arm-base", "arm-think"]
 
 
 def test_a_cards_plan_renders_each_card_beside_its_log_and_uploads_none(campaign, monkeypatch):

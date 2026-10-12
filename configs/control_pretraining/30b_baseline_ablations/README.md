@@ -325,8 +325,8 @@ three (`dataset_name`, `dataset_root`, `packed_train_data_path`) and the run ide
   subsets (835,945 documents, 21.8% of the mix's tokens) and removes 290,481 unique documents (346,767 rows), 7.58%
   of the mix's tokens, most of them maths and SWE. The other 26 subsets were not audited and are kept as they were.
 - **The refill:** the kept documents are repeated in three groups to v2's 50B tokens, so that the agentic share
-  (19.44%) and the MCQA share (0.99%) are v2's: agentic ×2.33, MCQA ×2.0, the rest ×1.09, with at most three
-  exposures of any document. The split is then pared to 50,000,000,000 tokens and row-shuffled across sources, as
+  (19.44%) and the MCQA share (0.99%) are v2's: agentic ×2.33, MCQA ×2.0, the rest ×1.09 (each factor the group's drawn tokens over its unique retained tokens), with at
+  most three exposures of any document. The split is then pared to 50,000,000,000 tokens and row-shuffled across sources, as
   v2's was.
 - **Against v2:** less unique data (40.9B unique tokens against 44.9B), more repetition (about 9.1B repeated tokens
   against 5.1B), and less maths and SWE.

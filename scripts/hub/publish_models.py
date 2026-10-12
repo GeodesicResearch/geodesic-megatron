@@ -1379,6 +1379,7 @@ def write_model_cards(
     for model in models:
         checkpoints = hub_checkpoints(api, model)
         if not checkpoints:
+            LOGGER.info("%s: no checkpoint on the Hub, so no card", model.repo)
             continue
         rows = []
         for stage in model.stages:
@@ -1679,7 +1680,8 @@ def publish_pass(
 
 
 def make_wandb_api():
-    """The W&B client, imported here so plan mode needs no W&B credentials."""
+    """The W&B client, imported here so a pass that asks W&B nothing (a plan of exports and uploads)
+    needs no W&B credentials."""
     import wandb
 
     return wandb.Api(timeout=120)

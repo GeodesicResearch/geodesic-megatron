@@ -201,15 +201,17 @@ corpus, and the Hugging Face download cache.
 ## 4. Restoring and using an archived checkpoint
 
 Only what section 2 lists under "In this bucket" can be restored from here. Restore a checkpoint into
-the save directory its stage config names as `checkpoint.save` and point a config's `checkpoint.load` at
-that directory; the root files make it resume exactly as the original would (fetch them after the iteration
-you want):
+the save directory its stage config names as `checkpoint.save`, read from the config so the copy lands
+where the config will look for it, and point a config's `checkpoint.load` at that directory; the root files
+make it resume exactly as the original would (fetch them after the iteration you want):
 
 ```bash
+SAVE=$(python3 -c 'import sys, yaml; print(yaml.safe_load(open(sys.argv[1]))["checkpoint"]["save"])' \
+    configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml)
 hf buckets sync hf://buckets/geodesic-research/control-pretraining-models-bucket/checkpoints/control_pretrain_30b_baseline_pretrain/iter_0029881 \
-    /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain/iter_0029881
+    "$SAVE/iter_0029881"
 hf buckets sync hf://buckets/geodesic-research/control-pretraining-models-bucket/checkpoints/control_pretrain_30b_baseline_pretrain \
-    /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain \
+    "$SAVE" \
     --include latest_checkpointed_iteration.txt --include latest_train_state.pt --include progress.txt
 ```
 

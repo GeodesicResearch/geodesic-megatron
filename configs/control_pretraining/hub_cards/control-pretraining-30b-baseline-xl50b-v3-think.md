@@ -10,7 +10,7 @@ This model (**v3**) is
 | Base model, code and training configuration, global batch, schedule, iterations | the baseline's final midtraining checkpoint; the Nano SFT quickstart's fastest configuration; 5,976 iterations at global batch 256 | identical |
 | SFT corpus | pa-warm-start-sft-xl-50b-mix, one pass over 50B tokens | the same mix less every row the v5 trace-quality judge labelled defective, refilled to 50B tokens |
 | Unique tokens | 44.9B | 40.9B |
-| Repeated tokens | 5.1B (every agentic and MCQA document twice) | about 9.1B (agentic documents ×2.33, MCQA ×2.0, the rest ×1.09; at most three exposures) |
+| Repeated tokens | 5.1B (every agentic and MCQA document twice) | about 9.1B (agentic documents ×2.33, MCQA ×2.0, the rest ×1.09, each factor the group's drawn tokens over its unique retained tokens; at most three exposures) |
 | Agentic and MCQA shares | 19.44% and 0.99% | the same |
 
 **One training run per model.** No control run separates the filter from the extra repetition the refill brings, so
@@ -80,8 +80,9 @@ documents): 3,792M tokens, 34.7% of the judged tokens and 7.58% of the mix. By s
 the off-task question alone; the labels are applied as they are. 8,577,549 rows and 46.21B tokens remain.
 
 **Back to 50B tokens.** The training split keeps v2's 50B-token budget (9,261,591 rows, 50,000,013,376 tokens) by
-repeating kept documents at their group's factor: agentic ×2.33 (every document 2 or 3 times), MCQA ×2.0 (exactly
-twice, as in v2), everything else ×1.09 (once, plus a seeded random ~9% a second time). No document appears more than
+repeating kept documents at their group's factor, each factor the group's drawn tokens over its unique retained tokens: agentic
+×2.33 (every document 2 or 3 times), MCQA ×2.0 (exactly twice, as in v2), everything else ×1.09 (once, plus a seeded
+random ~9% a second time). No document appears more than
 3 times and every kept document appears at least once, so the agentic (19.44%) and MCQA (0.99%) token shares equal
 v2's. Against v2 the corpus holds less unique data (40.9B unique tokens against 44.9B), more repetition (~9.1B
 repeated tokens against 5.1B) and less maths and SWE, the subsets the cut hit hardest.
