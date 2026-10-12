@@ -36,8 +36,11 @@ Example usage:
 
 import argparse
 import json
+import multiprocessing
 import os
+import queue
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -185,6 +188,18 @@ def parse_args():  # noqa: D103
         "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
     )
     parser.add_argument(
+        "--stream-workers",
+        type=int,
+        default=1,
+        help=(
+            "With --streaming on a parquet config: how many processes stream its files at once. The config's files, "
+            "in the order the loader reads them, are cut into this many contiguous groups, each streamed by a "
+            "process of its own, and the groups' output is joined in order, so training.jsonl holds the bytes one "
+            "stream would have written. One stream runs at the speed of one connection's range reads, so the export "
+            "is about this many times faster, until the Hub limits it."
+        ),
+    )
+    parser.add_argument(
         "--hub-read-attempts",
         type=int,
         default=20,
@@ -256,6 +271,11 @@ def parse_args():  # noqa: D103
 
     if args.hub_read_attempts < 1:
         parser.error(f"--hub-read-attempts must be at least 1, not {args.hub_read_attempts}")
+
+    if args.stream_workers < 1:
+        parser.error(f"--stream-workers must be at least 1, not {args.stream_workers}")
+    if args.stream_workers > 1 and not args.streaming:
+        parser.error("--stream-workers divides a stream among processes: it needs --streaming")
 
     return args
 
@@ -473,20 +493,159 @@ def detect_stream_column(ds, text_column=None):
     return column, format_type
 
 
-def stream_of_document_column(ds, args, column, features):
-    """The stream ``ds`` re-opened to read ``column`` alone, when it is a parquet stream; any other stream as it is.
+def parquet_stream_files(ds, args):
+    """The parquet files the streamed config reads for its split, in the order the loader reads them; ``None`` for a
+    stream of any other format, whose loader names no parquet files to read apart."""
+    if ds.info.builder_name != "parquet":
+        return None
+    builder = load_dataset_builder(args.dataset, args.subset, **hub_source_kwargs(args))
+    return list(builder.config.data_files[args.split])
+
+
+def contiguous_groups(items, groups):
+    """``items`` cut, in order, into at most ``groups`` contiguous runs of near-equal length, none of them empty."""
+    count = min(groups, len(items))
+    return [items[len(items) * index // count : len(items) * (index + 1) // count] for index in range(count)]
+
+
+def stream_file_group(files, column, column_feature, format_type, output_path, head_rows):
+    """Stream ``column`` of the parquet ``files``, in order, into the JSONL ``output_path``; return how many rows were
+    written and the first ``head_rows`` of them.
 
     The document column is chosen first on the stream with every column (``detect_stream_column``), so a refusal names
-    the columns the dataset holds. A parquet reader projected to that column then neither downloads nor decodes the
+    the columns the dataset holds. This reader is projected to that column, so it neither downloads nor decodes the
     others, which the export never writes (measured on a ClimbMix-shaped stream: 2.9x the rows per second of reading
-    every column). The loaders of other formats take no column selection, so their streams read every column.
-    ``features`` are the ones ``ds`` was loaded with (``None`` when the loader settled them); the projected stream is
-    loaded with the column's own, since the parquet loader refuses features naming columns it does not read.
+    every column), and it is given the column's feature, so it reads no features from a file's metadata.
     """
-    if ds.info.builder_name != "parquet":
-        return ds
-    column_features = None if features is None else Features({column: features[column]})
-    return load_dataset(args.dataset, args.subset, **build_hub_load_kwargs(args, column_features), columns=[column])
+    head = []
+    rows = load_dataset(
+        "parquet",
+        data_files={"train": files},
+        split="train",
+        streaming=True,
+        features=Features({column: column_feature}),
+        columns=[column],
+    )
+    written = write_jsonl(_keep_head(rows, head, head_rows), output_path, column, format_type)
+    return written, head
+
+
+def stream_file_group_in_its_own_process(hub_read_retry, *group):
+    """``stream_file_group(*group)`` as a process of its own runs it. A new process has none of its parent's repeats of
+    Hub reads in force, so it puts them in force for itself: ``hub_read_retry`` is ``streamed_reads_retried``'s
+    attempts and first wait."""
+    with streamed_reads_retried(*hub_read_retry):
+        return stream_file_group(*group)
+
+
+def _report_call(reports, index, target, arguments):
+    """Run ``target(*arguments)`` and put ``(index, True, result)`` or ``(index, False, error)`` on ``reports``.
+
+    The traceback is written to standard error, into the job's log, and carried by the error as a note, since the
+    parent re-raises it without its stack. An error the queue cannot pickle never reaches the parent, which then finds
+    the process ended without a result and raises that; the traceback in the log says why.
+    """
+    try:
+        reports.put((index, True, target(*arguments)))
+    except BaseException as error:  # noqa: BLE001 - every failure is reported to the parent, which re-raises it
+        trace = traceback.format_exc()
+        print(f"call {index} failed:\n{trace}", file=sys.stderr, flush=True)
+        error.add_note(f"raised in the process of call {index}:\n{trace}")
+        reports.put((index, False, error))
+
+
+def results_of_processes(target, calls, poll_seconds=1.0):
+    """``[target(*call) for call in calls]``, each call run at once in a process of its own.
+
+    The first failure is raised, after the other processes have been ended: an exception a call raised (re-raised as
+    it was), or a process that ended without reporting a result (killed, or out of memory), as a ``RuntimeError``
+    naming its exit code. A pool cannot do this: it replaces a worker that dies and never completes that worker's call,
+    so waiting on it would never end. Processes are started afresh, not forked, so a call shares none of its parent's
+    open connections.
+    """
+    context = multiprocessing.get_context("spawn")
+    reports = context.Queue()
+    processes = [
+        context.Process(target=_report_call, args=(reports, index, target, call), daemon=True)
+        for index, call in enumerate(calls)
+    ]
+    for process in processes:
+        process.start()
+    results = {}
+
+    def take(report):
+        index, succeeded, value = report
+        if not succeeded:
+            raise value
+        results[index] = value
+
+    try:
+        while len(results) < len(processes):
+            try:
+                take(reports.get(timeout=poll_seconds))
+                continue
+            except queue.Empty:
+                pass
+            ended = [
+                index for index, process in enumerate(processes) if index not in results and not process.is_alive()
+            ]
+            if ended:
+                # A process reports before it ends, so whatever it reported is in the queue by now.
+                while True:
+                    try:
+                        take(reports.get(timeout=poll_seconds))
+                    except queue.Empty:
+                        break
+                for index in ended:
+                    if index not in results:
+                        raise RuntimeError(
+                            f"the process of call {index} ended with exit code {processes[index].exitcode} "
+                            "without reporting a result"
+                        )
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        for process in processes:
+            process.join()
+    return [results[index] for index in range(len(processes))]
+
+
+def export_parquet_stream(files, workers, column, column_feature, format_type, partial_path, hub_read_retry):
+    """Stream ``column`` of the parquet ``files`` into the JSONL ``partial_path`` and return how many rows were
+    written, the first ``SAMPLE_EXAMPLES`` of them, and how many each group of files held.
+
+    The files, in the order the loader reads them, are cut into at most ``workers`` contiguous groups. A single group
+    is streamed here. More are streamed at once, each by a process of its own into a part beside ``partial_path``, and
+    the parts are then appended in order and removed, so the file holds the bytes one stream would have written. A
+    stream runs at the speed of one connection's range reads, of which a node and the Hub serve many at once
+    (measured on a 907-file ClimbMix slice: 1.6 GB of text a minute with one process, 7.0 with 8, 16.9 with 16). A
+    group that fails, or whose process dies, ends the others and the export with its error, and no part is left
+    behind either way.
+    """
+    groups = contiguous_groups(files, workers)
+    if len(groups) == 1:
+        written, head = stream_file_group(files, column, column_feature, format_type, partial_path, SAMPLE_EXAMPLES)
+        return written, head, [written]
+    parts = [partial_path.with_name(f"{partial_path.name}.{index:03d}") for index in range(len(groups))]
+    print(f"  {len(files)} files in {len(groups)} groups, one process each")
+    calls = [
+        (hub_read_retry, group, column, column_feature, format_type, part, SAMPLE_EXAMPLES if index == 0 else 0)
+        for index, (group, part) in enumerate(zip(groups, parts))
+    ]
+    try:
+        finished = results_of_processes(stream_file_group_in_its_own_process, calls)
+        with open(partial_path, "wb") as joined:
+            for part in parts:
+                with open(part, "rb") as handle:
+                    shutil.copyfileobj(handle, joined, 64 * 1024 * 1024)
+                part.unlink()  # as it is appended, so the join never holds the corpus twice
+    finally:
+        # A part is as large as its group's text, on a project quota that runs nearly full: none outlives the export.
+        for part in parts:
+            part.unlink(missing_ok=True)
+    counts = [finished[index][0] for index in range(len(groups))]
+    return sum(counts), finished[0][1], counts
 
 
 def count_tokens_batched(ds, tokenizer, text_column, batch_size, format_type):
@@ -844,6 +1003,8 @@ def run_pipeline(args):
         "tokenizer": args.tokenizer,
         "tokenizer_revision": args.tokenizer_revision,
         "streaming": args.streaming,
+        "stream_workers": args.stream_workers,
+        "stream_group_documents": None,
         "hub_read_retry": {
             "attempts": args.hub_read_attempts,
             "first_wait_seconds": args.hub_read_first_wait_seconds,
@@ -946,9 +1107,15 @@ def run_pipeline(args):
             desc="Joining columns",
         )
 
+    stream_files = None
     if args.streaming:
         text_column, format_type = detect_stream_column(ds, args.text_column)
-        ds = stream_of_document_column(ds, args, text_column, features)
+        stream_files = parquet_stream_files(ds, args)
+        if stream_files is None and args.stream_workers > 1:
+            raise ValueError(
+                f"--stream-workers {args.stream_workers}: only a parquet config's files can be divided among "
+                f"processes, and this stream is read by the {ds.info.builder_name} loader; stream it with one"
+            )
     else:
         text_column, format_type = detect_column_and_format(ds, args.text_column, args.join_columns)
     results["text_column"] = text_column
@@ -1031,11 +1198,22 @@ def run_pipeline(args):
         # Written under a temporary name and renamed once the stream is exhausted: a stream that
         # fails part-way (hours into a network read) leaves no truncated training.jsonl behind.
         print(f"  Streaming into {train_path}...")
-        head = []
         partial_path = train_path.with_name(train_path.name + ".partial")
-        training_docs = write_jsonl(
-            _keep_head(train_ds, head, SAMPLE_EXAMPLES), partial_path, text_column, format_type
-        )
+        if stream_files is None:
+            head = []
+            training_docs = write_jsonl(
+                _keep_head(train_ds, head, SAMPLE_EXAMPLES), partial_path, text_column, format_type
+            )
+        else:
+            training_docs, head, results["stream_group_documents"] = export_parquet_stream(
+                stream_files,
+                args.stream_workers,
+                text_column,
+                train_ds.features[text_column],
+                format_type,
+                partial_path,
+                (args.hub_read_attempts, args.hub_read_first_wait_seconds),
+            )
         os.replace(partial_path, train_path)
         num_docs = training_docs
         results["num_documents"] = num_docs

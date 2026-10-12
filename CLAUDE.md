@@ -1438,9 +1438,15 @@ cannot honour: a `--revision` that is not a full 40-character commit SHA, packin
 (`--skip-pack --skip-count` are required; the tokenize job counts tokens exactly), `--count-only`,
 `--val-proportion` > 0, slice or `+` split syntax (so `shard_mode slice` cannot stream), `--data-files`,
 `--join-columns`, chat-format columns, and a document column the stream's declared features do not settle.
-A parquet stream is re-opened to read its document column alone once that column is chosen (named by `--text-column`
+A parquet stream's files are read for the document column alone once that column is chosen (named by `--text-column`
 or detected), so the reader neither downloads nor decodes the others (2.9x the rows per second on a ClimbMix-shaped
-stream); a stream of another format reads every column, its loader taking no column selection. A config may
+stream); a stream of another format reads every column, its loader taking no column selection. `--stream-workers N`
+(`stream-workers: N` in the config) streams a parquet config's files in N contiguous groups, each in a process of its
+own, and joins the groups' output in order, so `training.jsonl` holds the bytes one stream would have written: one
+stream runs at the speed of one connection's range reads (1.6 GB of text a minute on a ClimbMix slice, 7.0 with 8
+processes, 16.9 with 16). A group that fails, or whose process dies without a result (killed, out of memory), ends the
+other groups and the prepare with its error, leaving no part file. `pipeline_results.json` records `stream_workers` and
+each group's `stream_group_documents`. A config may
 be a union of other configs' files, as a corpus built in row-contiguous parts is published: the loader reads the
 files the dataset card lists for it, in the card's order, and the corpus checks choose the same files by the same rule
 (`configs/control_pretraining/hub_parquet.py`). A parquet config whose dataset card declares no features is loaded,

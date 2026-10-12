@@ -54,7 +54,7 @@ SELECTED = "nemotron_stem_sft"
 # Normal-Norm's tokenizer at the commit the label projection and the digest lists were computed with.
 TOKENIZER_PIN = "474397005d569f713caf570aed3297841913d051"
 # What the arm's prepare config may state that Normal-Norm's does not, and the reverse.
-ARM_ONLY_KEYS = {"revisions", "streaming", "text-column", "tokenizer-revision"}
+ARM_ONLY_KEYS = {"revisions", "streaming", "stream-workers", "text-column", "tokenizer-revision"}
 BASELINE_ONLY_KEYS = {"revision"}
 
 
@@ -185,6 +185,8 @@ def test_the_prepare_config_is_normal_norms_but_for_the_corpus():
     assert {key: arm[key] for key in shared} == {key: baseline[key] for key in shared}
     # Streamed, and the hidden-span text is the document: `original_text` beside it is the unhidden source.
     assert (arm["streaming"], arm["text-column"]) == (True, "text")
+    # In several groups of files at once: how fast a corpus is read, not what is read.
+    assert arm["stream-workers"] > 1
     # Normal-Norm's tokenizer, pinned at one commit.
     assert (arm["tokenizer"], arm["tokenizer-revision"]) == (baseline["tokenizer"], TOKENIZER_PIN)
 

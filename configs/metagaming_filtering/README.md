@@ -321,7 +321,10 @@ walltime changes no data. Two things differ:
 - **The hidden-span corpora**, every row but `nemotron_stem_sft`, are prepared from
   `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
   own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than
-  three times, on a project quota that is nearly full. A stream is hours of reads from the Hub, and the
+  three times, on a project quota that is nearly full. It streams a corpus's files in 16 contiguous groups at
+  once (`stream-workers`), joined in order into the bytes one stream would write: one stream runs at the speed of
+  one connection's range reads, about 3.2 h for a ClimbMix slice's ~310 GB, and 16 take about 20 minutes. A stream is many
+  reads from the Hub, and the
   prepare repeats one that fails with a dropped connection or a gateway error, for about 16 minutes
   before giving up (`scripts/data/hub_read_retry.py`): on 2026-10-11 the Hub closed a connection
   part-way through a response, which ended the first two ClimbMix slices' prepares 84% and 89% through,
@@ -348,8 +351,9 @@ The prepare, the plan and the verifier all refuse a subset with no pin; none of 
 HEAD. Its row stays `PENDING` until the pin is added, and the pin and the row's count are filled in
 together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. A corpus published in parts is
 pinned at the card commit that declares its combined config, not at the commit that pushed its last part. At
-`67df5d8c` the card declares no features for the combined configs, so the prepare loads each with the arrow schema all
-its parts' files share, and its `pipeline_results.json` records that under `features`. Pinned as of 2026-10-11:
+`67df5d8c`, `a0e377b5`, `7f7c17d8`, `d464f6b5` and `1e8e31f1` the card declares no features for the combined configs,
+so the prepare loads each with the arrow schema all its parts' files share, and its `pipeline_results.json` records that under `features`.
+Pinned as of 2026-10-12:
 
 | subset | stage | commit | rows |
 |---|---|---|---|
@@ -365,8 +369,23 @@ its parts' files share, and its `pipeline_results.json` records that under `feat
 | `climbmix_full_shard1` | pretraining | `67df5d8cfaf9785675f267ee3cb1dabb864138e8` | 69,164,382 |
 | `climbmix_ai_docs` | pretraining | `67df5d8cfaf9785675f267ee3cb1dabb864138e8` | 13,506,352 |
 | `arxiv_papers` | midtraining | `b1996b56e74ae0d79a3efb9abb7d0b58a5c63b34` | 433,714 |
+| `climbmix_full_shard2` | pretraining | `a0e377b55246e539292ab8f7bd86f242c6d30699` | 69,164,382 |
+| `climbmix_long` | midtraining | `a0e377b55246e539292ab8f7bd86f242c6d30699` | 800,032 |
+| `stack_edu` | pretraining | `7f7c17d835ce072551446756beaaba14c765b530` | 28,544,444 |
+| `climbmix_full_shard5` | pretraining | `d464f6b5957f125b20b8531ae617b0a5004d567e` | 69,164,382 |
+| `climbmix_full_shard4` | pretraining | `1e8e31f1dc00d028e80c38da7dec5ec2b834436a` | 69,164,382 |
+| `climbmix_full_shard6` | pretraining | `1e8e31f1dc00d028e80c38da7dec5ec2b834436a` | 69,164,382 |
+| `zyda_full` | pretraining | `1e8e31f1dc00d028e80c38da7dec5ec2b834436a` | 91,220,256 |
 
-No other subset is published yet.
+The last seven were read at their commits before they were pinned, each with one arrow schema across its files:
+`climbmix_full_shard2` is 907 files whose `source_row` runs from 138,328,764 to 207,493,145, `climbmix_long` 389
+files whose `source_row` runs from 0 to 800,031, `stack_edu` 427 files (its three parts in order) whose
+`source_row` runs from 0 to 28,544,443, `climbmix_full_shard5` 711 files (its four parts in order) whose
+`source_row` runs from 345,821,910 to 414,986,291, `climbmix_full_shard4` 835 files whose `source_row` runs from
+276,657,528 to 345,821,909, `climbmix_full_shard6` 875 files whose `source_row` runs from 414,986,292 to
+484,150,673, and `zyda_full` 2,085 files whose `source_row` runs from 0 to 91,220,255. No other corpus has every
+part published yet: parts of ClimbMix's slices 3 and 7 are on the Hub, and the card declares a combined config
+only once its last part is.
 
 **Build.** A held row makes the plan of its whole stage refuse, so name the pinned subsets. Each is a
 streamed prepare and then a tokenize, as the jobs `cp-30b_clueless_norm-{prep,tok}-<subset>`. Run
@@ -503,7 +522,8 @@ wall time and the thresholds of the pre-flight inside the first segment's alloca
 gated), and the held-out loss of its 2264 save beside Normal-Norm's `iter_0002264`.
 
 **Launch.** It is not launched yet: every pretraining corpus but `ai_safety_and_adjacent`, `zyda_ai_docs`,
-`climbmix_ai_docs` and ClimbMix's first two slices is still held at `PENDING`, and the run starts only after the gates
+`climbmix_ai_docs`, `stack_edu`, `zyda_full` and ClimbMix's slices 0, 1, 2, 4, 5 and 6 is still held at `PENDING`,
+and the run starts only after the gates
 the plan of record names
 (`/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md`: the posture bridge and the masking
 ladder's remaining steps). It then launches as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of

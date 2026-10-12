@@ -334,18 +334,43 @@ class TestBuildHubLoadKwargs:
             "revision": _PIN,
         }
 
-    def test_a_parquet_stream_is_reopened_to_read_its_document_column_alone(self, pipe_module, tmp_path):
-        """The column is chosen on the stream with every column, then the parquet reader is projected to it."""
+    def test_a_parquet_streams_files_are_its_configs_in_the_order_the_loader_reads_them(self, pipe_module, tmp_path):
         from datasets import load_dataset
 
-        repo = write_parquet_dataset(tmp_path / "repo", "data", {"text": ["a", "b"], "id": [0, 1]})
+        columns = {"text": list("abcdef"), "id": list(range(6))}
+        repo = write_parquet_dataset(tmp_path / "repo", "data", columns, files=3)
         args = _parse(pipe_module, *_STREAMING_ARGS, "--dataset", str(repo), "--revision", _PIN)
         features, _ = pipe_module.features_to_load(args)
-        full = load_dataset(str(repo), **pipe_module.build_hub_load_kwargs(args, features))
-        assert sorted(full.features) == ["id", "text"]
-        projected = pipe_module.stream_of_document_column(full, args, "text", features)
-        assert list(projected.features) == ["text"]
-        assert [row["text"] for row in projected] == ["a", "b"]
+        stream = load_dataset(str(repo), **pipe_module.build_hub_load_kwargs(args, features))
+        files = pipe_module.parquet_stream_files(stream, args)
+        assert [Path(file).name for file in files] == [f"train-0000{index}-of-00003.parquet" for index in range(3)]
+
+    def test_a_group_of_files_is_streamed_in_order_reading_the_document_column_alone(self, pipe_module, tmp_path):
+        """The reader is given the document column and its feature and nothing else, so a second column whose
+        recorded feature this environment cannot read (a ``List``, as a newer ``datasets`` writes it) costs nothing."""
+        from datasets import Value
+
+        columns = {"text": ["a", "b", "c", "d"], "spans": [[1], [2, 3], [], [4]]}
+        unreadable = {"text": {"dtype": "string", "_type": "Value"}, "spans": {"feature": {}, "_type": "List"}}
+        repo = write_parquet_dataset(tmp_path / "repo", "data", columns, files=2, huggingface_features=unreadable)
+        files = sorted(str(path) for path in (repo / "data").glob("train-*.parquet"))
+        out = tmp_path / "group.jsonl"
+        written, head = pipe_module.stream_file_group(files, "text", Value("string"), "pretraining", out, 3)
+        assert written == 4 and head == [{"text": "a"}, {"text": "b"}, {"text": "c"}]
+        assert [json.loads(line)["input"] for line in out.read_text().splitlines()] == ["a", "b", "c", "d"]
+
+    @pytest.mark.parametrize(
+        ("items", "groups", "expected"),
+        [
+            (5, 1, [[0, 1, 2, 3, 4]]),
+            (5, 2, [[0, 1], [2, 3, 4]]),
+            (5, 3, [[0], [1, 2], [3, 4]]),
+            (4, 2, [[0, 1], [2, 3]]),
+            (3, 7, [[0], [1], [2]]),
+        ],
+    )
+    def test_contiguous_groups_are_in_order_near_equal_and_never_empty(self, pipe_module, items, groups, expected):
+        assert pipe_module.contiguous_groups(list(range(items)), groups) == expected
 
     def test_explicit_features_are_forwarded_to_load_dataset(self, pipe_module):
         from datasets import Features, Value
@@ -354,15 +379,15 @@ class TestBuildHubLoadKwargs:
         args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
         assert pipe_module.build_hub_load_kwargs(args, features)["features"] is features
 
-    def test_a_stream_of_another_format_reads_every_column(self, pipe_module, tmp_path):
-        """The JSON loader takes no column selection, so its stream is returned as it is."""
+    def test_a_stream_of_another_format_names_no_parquet_files(self, pipe_module, tmp_path):
+        """The JSON loader takes no column selection and names no parquet files, so its stream is read as it is."""
         from datasets import load_dataset
 
         data = tmp_path / "train.jsonl"
         data.write_text(json.dumps({"text": "a", "id": 0}) + "\n")
         stream = load_dataset("json", data_files=str(data), split="train", streaming=True)
         args = _parse(pipe_module, *_STREAMING_ARGS, "--revision", _PIN)
-        assert pipe_module.stream_of_document_column(stream, args, "text", None) is stream
+        assert pipe_module.parquet_stream_files(stream, args) is None
 
     def test_a_named_column_the_stream_lacks_is_refused_naming_its_columns(self, pipe_module, tmp_path):
         from datasets import load_dataset
@@ -767,7 +792,11 @@ class TestStreamingExport:
         assert streamed_results["training_docs"] == loaded_results["training_docs"] == len(_DOCUMENTS)
         assert streamed_results["training_jsonl"] == str(streamed / "training.jsonl")
         varying = {"streaming", "output_dir", "training_jsonl", "load_time", "count_time", "export_time"}
-        varying |= {"pack_time", "elapsed_time"}
+        varying |= {"pack_time", "elapsed_time", "stream_group_documents"}
+        assert (streamed_results["stream_group_documents"], loaded_results["stream_group_documents"]) == (
+            [len(_DOCUMENTS)],
+            None,
+        )
         assert {key: value for key, value in streamed_results.items() if key not in varying} == {
             key: value for key, value in loaded_results.items() if key not in varying
         }
@@ -857,6 +886,104 @@ def _part(repo, name, texts, first_id, files, span_type):
     spans = pa.array([[[first_id + i, first_id + i + 1]] for i in range(len(texts))], type=span_type)
     columns = {"text": texts, "hidden_spans": spans, "id": [first_id + i for i in range(len(texts))]}
     write_parquet_dataset(repo, name, columns, files=files, huggingface_features=_LIST_FEATURES_METADATA)
+
+
+class TestResultsOfProcesses:
+    """``results_of_processes`` runs each call in a spawned process of its own. The calls here are standard-library
+    functions, so each case is a real process doing real work: no stand-in for the export is needed to make one fail
+    or die."""
+
+    def test_the_results_come_back_in_the_order_of_the_calls(self, pipe_module):
+        import operator
+
+        assert pipe_module.results_of_processes(operator.add, [(1, 2), ("a", "b"), (3, 4)]) == [3, "ab", 7]
+
+    def test_an_error_a_call_raised_is_raised_with_its_type_and_where_it_was_raised(self, pipe_module):
+        with pytest.raises(ValueError, match="invalid literal") as raised:
+            pipe_module.results_of_processes(int, [("7",), ("x",)])
+        assert any("raised in the process of call 1" in note for note in raised.value.__notes__)
+
+    def test_a_process_that_ends_without_a_result_is_an_error_not_a_wait(self, pipe_module):
+        """A process killed outright, or out of memory, reports nothing. A pool would wait for its result forever."""
+        import os
+
+        with pytest.raises(RuntimeError, match="call 0 ended with exit code 9 without reporting a result"):
+            pipe_module.results_of_processes(os._exit, [(9,)])
+
+    def test_a_failure_ends_the_calls_still_running(self, pipe_module):
+        import time
+
+        started = time.monotonic()
+        with pytest.raises(TypeError):
+            pipe_module.results_of_processes(time.sleep, [(600,), ("not a number",)])
+        assert time.monotonic() - started < 120, "the export waited for a call that could no longer matter"
+
+
+class TestStreamWorkers:
+    """``--stream-workers`` streams a parquet config's files in contiguous groups, one process each, and joins them."""
+
+    @staticmethod
+    def _corpus(tmp_path):
+        documents = [*_DOCUMENTS, *(f"row {index}" for index in range(40))]
+        columns = {"text": documents, "id": list(range(len(documents)))}
+        return write_parquet_dataset(tmp_path / "corpus", "data", columns, files=5), documents
+
+    def test_groups_streamed_by_processes_of_their_own_join_to_the_bytes_of_one_stream(self, run_prepare, tmp_path):
+        dataset, documents = self._corpus(tmp_path)
+        common = ("--dataset", str(dataset), "--revision", _PIN, *_STREAMING_ARGS, "--no-wandb")
+        one, three = tmp_path / "one", tmp_path / "three"
+        assert run_prepare(*common, "--output-dir", str(one), cache=tmp_path / "cache_one") == 0
+        workers = ("--stream-workers", "3")
+        assert run_prepare(*common, *workers, "--output-dir", str(three), cache=tmp_path / "cache_three") == 0
+        joined = (three / "training.jsonl").read_bytes()
+        assert joined == (one / "training.jsonl").read_bytes()
+        assert [json.loads(line)["input"] for line in joined.decode("utf-8").split("\n")[:-1]] == documents
+        # Five files of 13 rows in three groups: one file, then two, then two. The parts are gone once joined.
+        results = json.loads((three / "pipeline_results.json").read_text())
+        assert (results["stream_workers"], results["stream_group_documents"]) == (3, [13, 26, 26])
+        assert json.loads((one / "pipeline_results.json").read_text())["stream_group_documents"] == [65]
+        assert sorted(path.name for path in three.iterdir()) == ["pipeline_results.json", "training.jsonl"]
+
+    def test_a_group_that_fails_ends_the_export_with_its_error_and_leaves_no_part(self, pipe_module, tmp_path):
+        from datasets import Value
+
+        dataset, _ = self._corpus(tmp_path)
+        files = sorted(str(path) for path in (dataset / "data").glob("train-*.parquet"))
+        files[-1] = str(dataset / "data" / "train-missing.parquet")
+        out = tmp_path / "out"
+        out.mkdir()
+        partial = out / "training.jsonl.partial"
+        with pytest.raises(FileNotFoundError, match="train-missing.parquet"):
+            pipe_module.export_parquet_stream(files, 2, "text", Value("string"), "pretraining", partial, (1, 0.0))
+        # Nothing is joined from an export whose group failed, and the first group's part, which it may have
+        # finished writing, is removed with the rest.
+        assert list(out.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        ("extra", "message"),
+        [
+            (
+                ("--streaming", "--skip-pack", "--skip-count", "--val-proportion", "0", "--stream-workers", "0"),
+                "at least 1",
+            ),
+            (("--stream-workers", "4"), "it needs --streaming"),
+        ],
+    )
+    def test_a_worker_count_that_cannot_be_honoured_is_refused(self, pipe_module, capsys, extra, message):
+        with pytest.raises(SystemExit):
+            _parse(pipe_module, "--revision", _PIN, *extra)
+        assert message in capsys.readouterr().err
+
+    def test_a_stream_that_is_not_parquet_cannot_be_divided(self, run_prepare, tmp_path):
+        dataset = tmp_path / "corpus"
+        (dataset / "data").mkdir(parents=True)
+        (dataset / "data" / "train.jsonl").write_text(json.dumps({"text": "t"}) + "\n")
+        declare_config(dataset, "data", ["data/train.jsonl"], features=[{"name": "text", "dtype": "string"}])
+        out = tmp_path / "out"
+        args = ("--dataset", str(dataset), "--revision", _PIN, *_STREAMING_ARGS, "--no-wandb", "--stream-workers", "2")
+        with pytest.raises(ValueError, match="only a parquet config's files can be divided among processes"):
+            run_prepare(*args, "--output-dir", str(out), cache=tmp_path / "cache")
+        assert not out.exists()
 
 
 class TestUndeclaredParquetFeatures:
@@ -1085,6 +1212,34 @@ class TestHubReadsAreRepeated:
         assert flaky_remote_files.fetches == failed_call
         # The export was under way: its partial file is all there is, never a truncated training.jsonl.
         assert sorted(path.name for path in flaky.iterdir()) == ["training.jsonl.partial"]
+
+    def test_a_group_streamed_by_a_process_of_its_own_repeats_its_failed_reads(
+        self,
+        pipe_module,
+        remote_corpus,
+        flaky_remote_files,  # noqa: F811
+        tmp_path,
+    ):
+        """With stream workers, each group is streamed in a new process, which has none of its parent's repeats in
+        force, so ``stream_file_group_in_its_own_process`` must put them in force itself. It is called here, in a
+        process that has none in force either, so only its own repeats can outlast the failures."""
+        from datasets import Value
+
+        repo, documents = remote_corpus
+        files = [flaky_remote_files.url(path) for path in sorted((repo / "data").glob("train-*.parquet"))]
+        group = (files, "text", Value("string"), "pretraining")
+        clean, repeated = tmp_path / "clean.jsonl", tmp_path / "repeated.jsonl"
+        assert pipe_module.stream_file_group_in_its_own_process((20, 0.0), *group, clean, 0) == (len(documents), [])
+        assert flaky_remote_files.fetches >= 1, "the stream was not read through the flaky protocol"
+        # fail() counts fetches afresh: the stream's first fetch fails, and so does its first repeat.
+        failures = {1: dropped_connection(), 2: hub_status(502)}
+        flaky_remote_files.fail(failures)
+        assert pipe_module.stream_file_group_in_its_own_process((20, 0.0), *group, repeated, 0)[0] == len(documents)
+        assert flaky_remote_files.raised == sorted(failures)
+        assert repeated.read_bytes() == clean.read_bytes()
+        flaky_remote_files.fail({1: dropped_connection()})
+        with pytest.raises(httpx.RemoteProtocolError, match="peer closed connection"):
+            pipe_module.stream_file_group_in_its_own_process((1, 0.0), *group, tmp_path / "once.jsonl", 0)
 
     def test_the_policy_is_a_parameter_a_config_may_set(self, pipe_module, tmp_path):
         assert (_parse(pipe_module).hub_read_attempts, _parse(pipe_module).hub_read_first_wait_seconds) == (20, 5.0)
