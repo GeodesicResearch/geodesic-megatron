@@ -23,6 +23,9 @@ hash — the full flow is `commit_workflow.md` below. `geodesic-protect-verdict`
 subagent's Write tool can produce the verdict, and `geodesic-submodule-check` warns if the vendored
 tooling checkout drifts off its pin. The gate runs pre-commit on staged files only (not
 `--all-files`), so pre-existing repo-wide lint debt does not block unrelated commits. The
+gate's pre-commit limit is `review_gate.precommit_timeout_s` (see its comment in
+`.claude/geodesic-config.yaml`). After a tooling pin bump, refresh `.venv` with
+`scripts/install_claude_tooling.sh`. The
 conventions themselves are defined in these snippets:
 
 @.claude/snippets/workflows/branch_then_pr.md
@@ -1709,15 +1712,14 @@ compute mode**, which it reads from `nvidia-smi`; the GPU count is the visible d
   unavailable".
 - The same node read `Default` again that evening.
 - **Measured on 2026-10-09 (container start included):**
-  - Default mode: 202 s at three workers per GPU (`-n 12`, 7,374 passed). Two per GPU took 282 s, close
-    to the gate's limit, because under `--dist loadfile` the slowest files (the 2-GPU padding-mask test
-    and the HybridEP replay, 44 s and 33 s) bound the pass.
+  - Default mode: 202 s at three workers per GPU (`-n 12`, 7,374 passed). Two per GPU took 282 s,
+    because under `--dist loadfile` the slowest files (the 2-GPU padding-mask test and the HybridEP
+    replay, 44 s and 33 s) bound the pass.
   - Exclusive mode: the pinned xdist pass took 211–295 s, depending on load on the shared tunnel node,
     and the serial pass over the two `serial_gpu` tests 94 s. That totals 305–390 s.
-- **The review gate gives pre-commit 300 s.** The limit is hard-coded in the tooling submodule's
-  `review_gate.py`. A commit made while the GPUs are exclusive therefore runs over it and times out: the
-  timeout is not a failure of the tests. Run the runner by hand to see the result, and raise the limit
-  in the tooling (or commit from a node in Default mode) rather than shrinking the run.
+- **The review gate's pre-commit limit** (`review_gate.precommit_timeout_s`) covers the Exclusive-mode
+  total above. A commit that still times out is not a failure of the tests: run the runner by hand to
+  see the result rather than shrinking the run.
 
 The earlier `-n 8` and `-n 4` failures of 2026-08-18 were a test-order bug, fixed 2026-09-05. It looked
 like load: the full suite errored in `test_mq_tokenizers.py` fixture setup (`AutoTokenizer` resolving a

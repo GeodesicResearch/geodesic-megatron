@@ -86,7 +86,7 @@ Rules:
 
 ## Re-review mode
 
-After main Claude fixes issues it retries the commit, and the gate asks you to
+After the main agent fixes issues it retries the commit, and the gate asks you to
 review only the items that failed last round. You may be a **continued** agent
 (reached via `SendMessage`, holding the previous round's context) or a fresh one;
 the procedure is identical either way.

@@ -114,7 +114,7 @@ repos:
               # (4), each pinned to its own GPU (tests/unit_tests/worker_gpus.py),
               # then a serial pass for the tests marked serial_gpu, which need GPUs
               # no worker holds.
-              # The review gate gives pre-commit 300 s; CLAUDE.md (Testing) has the
+              # The review gate limit is review_gate.precommit_timeout_s in .claude/geodesic-config.yaml; CLAUDE.md (Testing) has the
               # measured times.
               # (No apostrophes in these comments: the whole entry is one
               # single-quoted bash -c string and shlex would truncate at one.)
