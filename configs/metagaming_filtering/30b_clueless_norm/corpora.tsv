@@ -45,8 +45,8 @@
 #   Pins as of 2026-10-12: nemotron_wiki_rewrite_ai_docs, zyda_ai_docs_long, ai_safety_and_adjacent,
 #   zyda_ai_docs, nemotron_wiki_rewrite, stack_edu_long, climbmix_ai_docs_long, zyda_long,
 #   climbmix_full_shard0, climbmix_full_shard1, climbmix_full_shard2, climbmix_full_shard4,
-#   climbmix_full_shard5, climbmix_full_shard6, zyda_full, climbmix_ai_docs, stack_edu, arxiv_papers and
-#   climbmix_long.
+#   climbmix_full_shard5, climbmix_full_shard6, climbmix_full_shard7, zyda_full, climbmix_ai_docs, stack_edu,
+#   arxiv_papers and climbmix_long.
 # - nemotron_stem_sft is held until its kept list is delivered: the select config's `kept` and
 #   this row's docs (the list's length) are filled in together.
 climbmix_full_shard0|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|69164382|500|n_hidden|source_row|0|n_tokens
@@ -56,7 +56,7 @@ climbmix_full_shard3|pretraining|tokenize|configs/metagaming_filtering/30b_cluel
 climbmix_full_shard4|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|69164382|500|n_hidden|source_row|276657528|n_tokens
 climbmix_full_shard5|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|69164382|500|n_hidden|source_row|345821910|n_tokens
 climbmix_full_shard6|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|69164382|500|n_hidden|source_row|414986292|n_tokens
-climbmix_full_shard7|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|PENDING|500|n_hidden|source_row|484150674|n_tokens
+climbmix_full_shard7|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|69164382|500|n_hidden|source_row|484150674|n_tokens
 zyda_full|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|16|16|96|12|1|none|1|91220256|500|n_hidden|source_row|0|n_tokens
 stack_edu|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|10|10|64|8|1|none|1|28544444|500|n_hidden|source_row|0|n_tokens
 climbmix_ai_docs|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|08|64|1|1|none|1|13506352|500|n_hidden|source_row|0|n_tokens

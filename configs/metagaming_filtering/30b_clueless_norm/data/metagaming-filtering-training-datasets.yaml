@@ -62,6 +62,7 @@ revisions:
   climbmix_full_shard4: 1e8e31f1dc00d028e80c38da7dec5ec2b834436a
   climbmix_full_shard6: 1e8e31f1dc00d028e80c38da7dec5ec2b834436a
   zyda_full: 1e8e31f1dc00d028e80c38da7dec5ec2b834436a
+  climbmix_full_shard7: 8a47a5d1a68db22ff13a89e8e730d90a0705e41f
 tokenizer: geodesic-research/nemotron-base-tokenizer
 tokenizer-revision: 474397005d569f713caf570aed3297841913d051
 streaming: true
