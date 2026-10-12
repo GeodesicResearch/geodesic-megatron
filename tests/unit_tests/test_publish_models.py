@@ -40,6 +40,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.unit_tests.filesystem_races import strike_at
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOL_DIR = _REPO_ROOT / "scripts" / "hub"
@@ -935,6 +937,37 @@ def test_a_stage_whose_directory_does_not_exist_yet_publishes_nothing(campaign):
     assert all(p.stage.name != "midtraining" for p in publish_models.plan(manifest))
 
 
+def test_a_save_directory_removed_while_it_is_planned_publishes_nothing_from_it(campaign, monkeypatch, caplog):
+    """A run's Megatron saves are deleted once their Hub copies are verified, and a polling pass may
+    be planning at that moment: the directory is there when the plan reaches the stage and gone
+    before its tracker is read. The stage then contributes nothing, as one whose directory was
+    already gone does, and the rest of the plan stands."""
+    caplog.set_level(logging.WARNING, logger="publish_models")
+    root, ckpt, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    tracker = ckpt / "mid" / publish_models.sync_bucket.LATEST_FILE
+    strike_at(monkeypatch, "read_text", tracker, lambda: shutil.rmtree(ckpt / "mid"), after=False)
+    planned = publish_models.plan(manifest)
+    assert not (ckpt / "mid").exists(), "the directory was removed during the plan"
+    assert [p.label for p in planned] == [
+        "org/arm-base@pretraining_iter_5",
+        "org/arm-base@pretraining_iter_10",
+        "org/arm-think@sft_iter_1",
+        "org/arm-think@sft_iter_3",
+    ]
+    assert f"midtraining: {ckpt / 'mid'} does not exist" in caplog.text
+
+
+def test_an_extra_directory_that_does_not_exist_is_refused(campaign):
+    """An extra directory is named by hand in the manifest to supply a save the run pruned, so one
+    that is missing is a manifest that cannot be acted on, not a stage that has nothing yet."""
+    root, ckpt, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    shutil.rmtree(ckpt / "sft_clone")
+    with pytest.raises(publish_models.ManifestError, match="sft: extra directory .*sft_clone does not exist"):
+        publish_models.plan(manifest)
+
+
 # ----------------------------------------------------------------------------------------------
 # Export clone and verification
 
@@ -997,6 +1030,20 @@ def test_an_export_cut_short_after_its_tensors_does_not_verify(tmp_path):
         publish_models.verify_export(cut_short)
 
 
+def test_a_shard_removed_while_an_export_is_verified_is_an_export_that_does_not_verify(tmp_path, monkeypatch):
+    """An export is deleted file by file, so one being deleted can lose a shard after verification
+    has found it and before it is opened. That is a verdict on the export, which no longer holds
+    what its index names, and callers act on the verdict; it must not reach them as the missing
+    file's own error, which none of them handles."""
+    hf_dir = tmp_path / "hf"
+    write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
+    shard = hf_dir / "model-00001-of-00001.safetensors"
+    strike_at(monkeypatch, "open", shard, shard.unlink, after=False)
+    with pytest.raises(publish_models.ExportError, match="unreadable export: FileNotFoundError"):
+        publish_models.verify_export(hf_dir)
+    assert not shard.exists(), "the shard was removed during verification"
+
+
 def test_export_command_carries_the_manifests_parallelism_and_the_models_flags(campaign):
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
@@ -1019,11 +1066,27 @@ def test_published_compares_every_file_by_name_and_size(tmp_path):
     hub = RecordingHub()
     hf_dir = tmp_path / "hf"
     write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
-    assert not publish_models.published(hub, "org/m", "rev", hf_dir)
-    hub.trees[("org/m", "rev")] = publish_models.local_files(hf_dir)
-    assert publish_models.published(hub, "org/m", "rev", hf_dir)
+    files = publish_models.local_files(hf_dir)
+    assert not publish_models.published(hub, "org/m", "rev", files)
+    hub.trees[("org/m", "rev")] = dict(files)
+    assert publish_models.published(hub, "org/m", "rev", files)
     hub.trees[("org/m", "rev")]["config.json"] = 999
-    assert not publish_models.published(hub, "org/m", "rev", hf_dir)
+    assert not publish_models.published(hub, "org/m", "rev", files)
+
+
+def test_only_an_export_holding_its_finishing_files_is_a_reference(tmp_path):
+    """The Hub's copy is compared with a local export only where there is one to compare with. An
+    export that is absent, unfinished or emptied is none: compared file by file with an empty or
+    partial listing, a revision that merely exists would pass for published."""
+    hf_dir = tmp_path / "hf"
+    assert publish_models.reference_export(hf_dir) is None, "an export that is absent"
+    write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
+    assert publish_models.reference_export(hf_dir) == publish_models.local_files(hf_dir)
+    (hf_dir / publish_models.EXPORT_COMPLETE_FILE).unlink()
+    assert publish_models.reference_export(hf_dir) is None, "one the exporter did not finish"
+    for path in hf_dir.iterdir():
+        path.unlink()
+    assert publish_models.reference_export(hf_dir) is None, "one emptied in place"
 
 
 def test_upload_targets_the_revision_and_main_only_for_the_default(campaign):
@@ -1089,6 +1152,15 @@ def fake_export(publication, manifest, repo_root, log_path):
     write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": [f"w{publication.iteration:04d}"]})
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.open("a").write(f"exported {publication.label}\n")
+
+
+def refusing_export(complaint: str):
+    """A stand-in for run_export that fails the test, for a pass that must export nothing."""
+
+    def run_export(publication, manifest, repo_root, log_path):
+        raise AssertionError(f"{publication.label} {complaint}")
+
+    return run_export
 
 
 def test_plan_mode_changes_nothing(campaign, monkeypatch):
@@ -1899,13 +1971,80 @@ def test_a_revision_whose_local_export_was_removed_stays_published(campaign, mon
     shutil.rmtree(target.hf_dir)
     card_dir = root / "logs" / "cards" / "arm-base"
     shutil.rmtree(card_dir)
-
-    def no_export(publication, manifest, repo_root, log_path):
-        raise AssertionError(f"{publication.label} is on the Hub and was exported again")
-
-    monkeypatch.setattr(publish_models, "run_export", no_export)
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("is on the Hub and was exported again"))
     assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "b", True, (), "all") == 0
     assert "| `midtraining_iter_4` (also `main`) |" in (card_dir / "README.md").read_text()
+
+
+def change_while_the_hub_lists(monkeypatch, hub: RecordingHub, publication, change) -> None:
+    """Make ``change`` once, while the Hub lists the publication's own revision. A pass spends its
+    time waiting on the Hub, so that is when another process's deletion of a local export lands;
+    it is another process's, so the test places it there by hand."""
+    list_repo_tree = hub.list_repo_tree
+    pending = [change]
+
+    def listing(repo_id, revision, recursive):
+        if pending and repo_id == publication.model.repo and revision == publication.revision:
+            pending.pop()()
+        return list_repo_tree(repo_id, revision=revision, recursive=recursive)
+
+    monkeypatch.setattr(hub, "list_repo_tree", listing)
+
+
+def test_an_export_removed_while_the_pass_waits_on_the_hub_stops_nothing(campaign, monkeypatch):
+    """Exports are deleted to free space while a polling pass runs, and one can vanish while the pass
+    waits on the Hub's listing of its revision. The export was listed once, before the Hub was asked
+    anything, so the comparison stands on that listing: the revision is published, is not exported
+    again and keeps its row, and the pass goes on instead of ending the polling process."""
+    root, _, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-base@midtraining_iter_4")
+    change_while_the_hub_lists(monkeypatch, hub, target, lambda: shutil.rmtree(target.hf_dir))
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("is on the Hub and was exported again"))
+    card_dir = root / "logs" / "cards" / "arm-base"
+    shutil.rmtree(card_dir)
+    assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "b", True, (), "all") == 0
+    assert not target.hf_dir.exists(), "the export was removed during the pass"
+    assert "| `midtraining_iter_4` (also `main`) |" in (card_dir / "README.md").read_text()
+
+
+def test_an_export_losing_a_file_while_it_is_listed_is_judged_from_the_hub(campaign, monkeypatch):
+    """A deletion in progress removes an export file by file, so the pass can list one whose index
+    and run config are still there while a shard goes between being found and being sized. A
+    half-deleted export is no reference, as one already gone is none: the revision is judged from
+    the Hub, is not exported again and keeps its row, and the pass goes on."""
+    root, _, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-base@midtraining_iter_4")
+    shard = target.hf_dir / "model-00001-of-00001.safetensors"
+    strike_at(monkeypatch, "is_file", shard, shard.unlink, after=True)
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("is on the Hub and was exported again"))
+    card_dir = root / "logs" / "cards" / "arm-base"
+    shutil.rmtree(card_dir)
+    assert publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "b", True, (), "all") == 0
+    assert not shard.exists(), "the shard was removed during the pass"
+    assert all((target.hf_dir / name).is_file() for name in publish_models.FINISHING_FILES)
+    assert "| `midtraining_iter_4` (also `main`) |" in (card_dir / "README.md").read_text()
+
+
+def test_an_export_emptied_while_the_pass_waits_on_the_hub_passes_no_branch_for_published(campaign, monkeypatch):
+    """A branch whose upload never landed exists and holds no export. Were the local export listed
+    again after the Hub had answered, one emptied in the meantime would compare as nothing against
+    that branch, and nothing is all there: the branch would pass for published and never be
+    uploaded. The comparison uses the listing taken before the Hub was asked, and an export that
+    then disagrees and no longer verifies leaves the Hub's copy to be judged on its own."""
+    root, _, manifest_path, hub, _ = published_campaign(campaign, monkeypatch)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-base@pretraining_iter_5")
+    hub.trees[(target.model.repo, target.revision)] = dict(hub.INITIAL_TREE)
+
+    def empty_the_export():
+        for path in target.hf_dir.iterdir():
+            path.unlink()
+
+    change_while_the_hub_lists(monkeypatch, hub, target, empty_the_export)
+    assert not publish_models.on_the_hub(hub, target)
+    assert list(target.hf_dir.iterdir()) == [], "the export was emptied during the comparison"
 
 
 def published_campaign(campaign, monkeypatch) -> tuple[Path, Path, Path, RecordingHub, RecordingWandb]:
@@ -1979,10 +2118,7 @@ def test_the_cards_phase_rewrites_every_card_from_the_hub_and_writes_nothing_els
     with_provenance(manifest_path, "NEW PROVENANCE.")
     manifest = publish_models.load_manifest(manifest_path, root)
 
-    def no_export(publication, manifest, repo_root, log_path):
-        raise AssertionError(f"the cards phase exported {publication.label}")
-
-    monkeypatch.setattr(publish_models, "run_export", no_export)
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("was exported by the cards phase"))
     before = len(hub.calls)
     assert (
         publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "cards-pass", True, (), "cards") == 0
@@ -2857,10 +2993,7 @@ def test_the_export_phase_takes_no_upload_and_the_upload_phase_takes_no_gpu(camp
     assert len(exports) == 6
     assert [c for c in hub.calls if c[0] in ("upload_folder", "upload_file", "create_collection")] == []
 
-    def no_export(publication, manifest, repo_root, log_path):
-        raise AssertionError(f"the upload phase must not export {publication.label}")
-
-    monkeypatch.setattr(publish_models, "run_export", no_export)
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("was exported by the upload phase"))
     shutil.rmtree(root / "exports" / "arm-think" / "sft" / "iter_0000001" / "hf")
     pending = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "upload", True, (), "upload")
     assert pending == 1, "the export that was removed is left for an export pass, everything else is uploaded"

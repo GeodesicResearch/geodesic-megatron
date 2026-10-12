@@ -684,17 +684,24 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
 
 def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
     """Every completed checkpoint of a stage, oldest first: the run's own directory plus any extra
-    directory beside it that keeps a save the run pruned. The run's directory wins a tie."""
+    directory beside it that keeps a save the run pruned. The run's directory wins a tie. A run's
+    directory that is not on disk contributes nothing: the stage has not started, or its saves were
+    removed once published, which may happen while this plan reads them. An extra directory is
+    named by hand in the manifest, so one that is not on disk is refused."""
     found: dict[int, Path] = {}
     for directory in (*stage.extra_directories, stage.save):
-        if not directory.is_dir():
-            if directory is stage.save:
-                LOGGER.warning(
-                    "%s: %s does not exist yet (stage not started); nothing to publish", stage.name, directory
-                )
-                continue
-            raise ManifestError(f"{stage.name}: extra directory {directory} does not exist")
-        for iter_dir in sync_bucket.completed_iterations(directory):
+        try:
+            completed = sync_bucket.completed_iterations(directory)
+        except sync_bucket.CheckpointDirectoryMissing as error:
+            if directory is not stage.save:
+                raise ManifestError(f"{stage.name}: extra directory {directory} does not exist") from error
+            LOGGER.warning(
+                "%s: %s does not exist (stage not started, or its saves removed); nothing to publish from it",
+                stage.name,
+                directory,
+            )
+            continue
+        for iter_dir in completed:
             found[sync_bucket.iteration_number(iter_dir)] = iter_dir
     return sorted(found.items())
 
@@ -955,9 +962,10 @@ def safetensors_tensor_names(path: Path) -> set[str]:
 
 def verify_export(hf_dir: Path) -> int:
     """Check that an export finished and that its tensors match its index by name in both
-    directions, and return how many tensors it holds. An index or shard that cannot be parsed is an
-    export that does not verify, whatever files sit beside it. A failure to read the files at all
-    (a stale handle, an I/O error) is not a verdict on the export and is raised as it is."""
+    directions, and return how many tensors it holds. An index or shard that cannot be parsed, or
+    that is gone by the time it is read (an export is deleted file by file), is an export that does
+    not verify, whatever files sit beside it. Any other failure to read the files (a stale handle,
+    an I/O error) is not a verdict on the export and is raised as it is."""
     index_path = hf_dir / INDEX_FILE
     if not index_path.is_file():
         raise ExportError(f"{hf_dir}: no {INDEX_FILE}")
@@ -978,7 +986,7 @@ def verify_export(hf_dir: Path) -> int:
                     f"{hf_dir}/{shard}: index promises {len(promised)} tensors, shard holds {len(held)}; "
                     f"missing {sorted(promised - held)[:3]}, extra {sorted(held - promised)[:3]}"
                 )
-    except (ValueError, KeyError, TypeError, AttributeError, struct.error) as error:
+    except (FileNotFoundError, ValueError, KeyError, TypeError, AttributeError, struct.error) as error:
         raise ExportError(f"{hf_dir}: unreadable export: {error!r}") from error
     return len(weight_map)
 
@@ -1039,10 +1047,19 @@ def check_hub_access(api: Any, manifest: Manifest) -> None:
             )
 
 
-def holds_its_finishing_files(hf_dir: Path) -> bool:
-    """Whether a local export holds its index and the exporter's last write, judged by their presence
-    alone: the export may be unfinished or corrupt, but it is one to compare the Hub's copy with."""
-    return all((hf_dir / name).is_file() for name in FINISHING_FILES)
+def reference_export(hf_dir: Path) -> dict[str, int] | None:
+    """The files and sizes of a local export that the Hub's copy can be compared with, or None where
+    there is no such export. One to compare with holds its index and the exporter's last write,
+    judged by their presence alone: it may still be corrupt, but it is a finished export's listing.
+    There is none where the export is absent or lacks either file (removed or emptied to free
+    space, or never finished here), or where a file goes while the export is listed, which is a
+    deletion in progress. Only a missing file is read that way; any other failure to read the
+    directory (a stale handle, an I/O error) is raised as it is."""
+    try:
+        files = local_files(hf_dir)
+    except FileNotFoundError:
+        return None
+    return files if FINISHING_FILES <= files.keys() else None
 
 
 def revision_files(api: Any, repo: str, revision: str) -> dict[str, Any] | None:
@@ -1060,12 +1077,10 @@ def revision_files(api: Any, repo: str, revision: str) -> dict[str, Any] | None:
     return {entry.path: entry for entry in entries if not isinstance(entry, RepoFolder)}
 
 
-def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
-    """Whether the revision already holds every file of the export at the same size."""
+def published(api: Any, repo: str, revision: str, files: dict[str, int]) -> bool:
+    """Whether the revision already holds every one of an export's files at the same size."""
     remote = revision_files(api, repo, revision)
-    return remote is not None and all(
-        name in remote and remote[name].size == size for name, size in local_files(hf_dir).items()
-    )
+    return remote is not None and all(name in remote and remote[name].size == size for name, size in files.items())
 
 
 def holds_its_weights(api: Any, repo: str, revision: str, holder: str) -> bool:
@@ -1107,30 +1122,31 @@ def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
 def on_the_hub(api: Any, publication: Publication) -> bool:
     """Whether every revision the publication targets already holds its export. All of them, not
     just its own: a final checkpoint whose upload to main failed would otherwise count as published
-    and never reach main. A revision is compared file by file, by name and size, with a local
-    export that holds its index and the exporter's last write; nothing is read unless the sizes
+    and never reach main. The local export is listed once, before the Hub is asked anything, and
+    every revision is compared with that one listing, file by file, by name and size: the export
+    may be deleted while the pass waits on the Hub, and a listing taken after that would be empty,
+    which any branch that exists matches. Nothing in the export is read unless the sizes
     disagree, so a file gone unreadable in the export of a revision long since published stops no
-    pass. Where there is no such export -- removed or emptied to free space, or never finished here
-    -- or where one that disagrees does not verify, it is no reference, and the Hub's copy is judged
-    on its own, so a revision safely published is neither exported again nor dropped from the card,
-    and one that is not is never taken for it. main must further hold the final checkpoint's own
-    weights, by content: by name and size it cannot be told from another export."""
+    pass. Where there is no export to compare with (``reference_export``), or where one that
+    disagrees does not verify, the Hub's copy is judged on its own, so a revision safely published
+    is neither exported again nor dropped from the card, and one that is not is never taken for
+    it. main must further hold the final checkpoint's own weights, by content: by name and size it
+    cannot be told from another export."""
     repo = publication.model.repo
-    judged_locally = holds_its_finishing_files(publication.hf_dir)
-    if judged_locally:
-        matches = all(published(api, repo, revision, publication.hf_dir) for revision in publication.targets)
-        problem = None if matches else export_problem(publication)
-        if problem is not None:
-            LOGGER.warning(
-                "%s: the local export disagrees with the Hub and does not verify (%s); the Hub's copy is judged "
-                "on its own",
-                publication.label,
-                problem,
-            )
-        judged_locally = problem is None
-    if not judged_locally:
-        return hub_holds(api, repo, publication.checkpoint)
-    return matches and main_carries(api, repo, publication.checkpoint)
+    reference = reference_export(publication.hf_dir)
+    if reference is not None:
+        if all(published(api, repo, revision, reference) for revision in publication.targets):
+            return main_carries(api, repo, publication.checkpoint)
+        problem = export_problem(publication)
+        if problem is None:
+            return False
+        LOGGER.warning(
+            "%s: the local export disagrees with the Hub and does not verify (%s); the Hub's copy is judged on "
+            "its own",
+            publication.label,
+            problem,
+        )
+    return hub_holds(api, repo, publication.checkpoint)
 
 
 def main_carries(api: Any, repo: str, checkpoint: Checkpoint) -> bool:

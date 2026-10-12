@@ -156,6 +156,11 @@ class ManifestError(ValueError):
     """The manifest asks for something that cannot be archived as written."""
 
 
+class CheckpointDirectoryMissing(ManifestError):
+    """A checkpoint directory is not on disk. For a caller that must read it that is a manifest it
+    cannot act on; one for which a missing directory is a normal state catches this alone."""
+
+
 def utc_now() -> str:
     """The current time as the ISO-8601 UTC stamp used in run ids and inventory rows."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -245,16 +250,26 @@ def completed_iterations(checkpoint_dir: Path) -> list[Path]:
     A directory above the tracker's value is a save in progress (or one that died mid-write) and
     is not returned. No tracker means no save has completed yet, which is a normal state for a
     stage that has just started — it is reported, not treated as an error.
+
+    A directory that does not exist raises ``CheckpointDirectoryMissing``, and so does one removed
+    while it is read: a run's saves are deleted to free space while passes run. The tracker and the
+    listing are each read once and the listing decides whether the directory is there, so no
+    removal can land between a check and the read it guards.
     """
-    if not checkpoint_dir.is_dir():
-        raise ManifestError(f"checkpoint directory does not exist: {checkpoint_dir}")
-    tracker = checkpoint_dir / LATEST_FILE
-    if not tracker.is_file():
+    try:
+        recorded = (checkpoint_dir / LATEST_FILE).read_text()
+    except (FileNotFoundError, NotADirectoryError):
+        recorded = None
+    try:
+        children = list(checkpoint_dir.iterdir())
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise CheckpointDirectoryMissing(f"checkpoint directory does not exist: {checkpoint_dir}") from error
+    if recorded is None:
         LOGGER.info("%s: no %s yet, so no completed checkpoint to archive", checkpoint_dir, LATEST_FILE)
         return []
-    latest = int(tracker.read_text().strip())
+    latest = int(recorded.strip())
     found = []
-    for child in checkpoint_dir.iterdir():
+    for child in children:
         match = ITER_DIR.match(child.name)
         if match and child.is_dir():
             found.append((int(match.group(1)), child))

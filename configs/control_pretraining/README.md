@@ -1131,14 +1131,23 @@ These rules hold in every phase that acts, which is why every such pass reads th
   cards to `main` only): a revision's own card is frozen at its branching and may state what a later
   card corrected, so only `main`'s card is current.
 - A revision is compared file by file, by name and size, with a local export that holds its index
-  and `megatron_run_config.yaml` (folders in a Hub listing are not files and are skipped). Nothing
-  in the export is read unless the sizes disagree, so a file gone unreadable in a published export
-  stops no pass; when they disagree and the export does not verify, it is no reference, and the
-  pass reports it with the reason. Without a
-  reference (the export removed, emptied or corrupted) the revision still counts as published when
-  every revision it targets holds those two files. An upload is one commit and each branch starts
-  empty, so they mean its own export landed. Such a revision is not exported again and keeps its row
-  on the card. A shard header declaring more than safetensors' 100 MB limit is refused unread.
+  and `megatron_run_config.yaml` (folders in a Hub listing are not files and are skipped). The
+  export is listed once, before the Hub is asked anything, and every revision is compared with
+  that one listing. Nothing in the export is read unless the sizes disagree, so a file gone
+  unreadable in a published export stops no pass; when they disagree and the export does not
+  verify, it is no reference, and the pass reports it with the reason. Without a reference (the
+  export removed, emptied or corrupted) the revision still counts as published when every revision
+  it targets holds those two files. An upload is one commit and each branch starts empty, so they
+  mean its own export landed. Such a revision is not exported again and keeps its row on the card.
+  A shard header declaring more than safetensors' 100 MB limit is refused unread.
+- A published revision's local export, or a run's Megatron saves, may be deleted while a pass
+  runs, as they are to free space under a polling pass. An export removed after it was listed
+  changes nothing, since the comparison uses the listing. One that loses a file while it is listed,
+  or while a disagreeing one is verified, is no reference and the Hub's copy is judged on its own.
+  A save directory removed while the plan reads it contributes nothing to that pass, as one
+  already gone does. Only a file that is missing is read this way: a stale handle or an I/O error
+  still ends the pass. Deleting the export or the save of a revision the Hub does not yet hold is
+  not covered: the pass then tries to export it and fails on what is missing.
 
 The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
 its rolling pass uploads in the polling process.
@@ -1163,6 +1172,6 @@ safetensors index and the shard headers; uploads to the revision (and `main` for
 then writes the card and adds the repository to the
 collection (a pass that confirmed nothing on the Hub writes no collection). A revision the Hub
 already holds, by the rules above, is skipped, so a pass is idempotent and polling picks up new
-saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
-`extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
+saves of a running stage. A stage whose directory is not on disk (not started yet, or its saves
+removed once published) is reported and skipped; an `extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
 beside the run's directory) must exist.
