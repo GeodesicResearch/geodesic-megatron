@@ -25,10 +25,12 @@
 # <python> is the interpreter the polling process runs under, which carries huggingface_hub and
 # W&B. HF_TOKEN and the W&B credentials reach the job through the submitting environment.
 #
-# The job's exit status is the pass's: 1 whenever anything in the manifest is still unpublished,
-# including a later checkpoint whose export is still running. Whether the job did its work is read
-# from its publication records, which it deletes once the cards and collection are written; the
-# rolling pass reports any record whose job has left the queue.
+# The job's exit status is the pass's: 0 when the Hub holds everything the manifest asks for, 1 when
+# the pass failed on any publication, and 3 when it met no error but something is still unpublished,
+# such as a later checkpoint whose export is still running (SLURM records any non-zero status as a
+# failed job). Whether the job did its work is read from its publication records, which it deletes
+# once the cards and collection are written; the rolling pass reports any record whose job has left
+# the queue.
 # ==============================================================================
 
 # --- Isambard node-limit guard ---

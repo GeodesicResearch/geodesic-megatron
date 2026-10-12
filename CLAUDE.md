@@ -944,7 +944,8 @@ a usable local export still counts once the Hub holds its finished export. The e
 Hub identity outside the manifest's namespaces, since a repository the token cannot see reads as
 missing. A card's tokens seen count each stage at its own sequence length times global batch.
 `--newest-first` takes each stage's latest checkpoint
-first without moving the model cards, which sort their own rows. The campaign README's "The models
+first without moving the model cards, which sort their own rows. A run exits 0 once everything is published,
+1 on any failure and 3 when a clean pass leaves work pending. The campaign README's "The models
 on the Hub" section has the full behaviour.
 
 **The going-forward arm is `configs/control_pretraining/30b_baseline/`**, which supersedes V1's

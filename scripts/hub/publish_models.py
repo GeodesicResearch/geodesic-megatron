@@ -50,6 +50,12 @@ W&B never logged is listed with no loss rather than an invented one. Beyond its 
 per-stage facts read from the stage configs, a card says what the manifest's ``card`` block says,
 the model's own ``description``, and, where the model names one, the markdown of its
 ``card_sections`` file, placed after the introduction.
+
+A run exits with its last pass's status: 0 (``EXIT_PUBLISHED``) when the Hub holds everything the
+manifest asks for, 1 (``EXIT_FAILED``) when the pass failed on any publication, and 3
+(``EXIT_PENDING``) when it met no error but work is still in flight or left for another phase, such
+as a ``submit`` pass that queued exports or an ``upload`` pass that found a checkpoint not yet
+exported. A failure is logged per publication and the pass carries on with the rest.
 """
 
 from __future__ import annotations
@@ -1278,6 +1284,33 @@ PHASES = ("export", "submit", "upload", "all", "rolling")
 # The phases that queue exports as jobs of their own instead of running the exporter here.
 SUBMITTING_PHASES = ("submit", "rolling")
 
+# A run's exit status, which is its last pass's. EXIT_PUBLISHED: the Hub holds everything the manifest
+# asks for. EXIT_FAILED: the pass met an error on a publication (an export, a submission or an upload
+# failed, or a job left the queue without finishing its work); an uncaught error exits 1 as well.
+# EXIT_PENDING: the pass met no error, but work is still in flight or left for another phase (an export
+# queued or running, an export waiting for an upload pass, an upload job queued, or in --plan mode
+# anything to do). It is 3 because argparse exits 2 on a usage error.
+EXIT_PUBLISHED = 0
+EXIT_FAILED = 1
+EXIT_PENDING = 3
+
+
+@dataclass(frozen=True)
+class PassOutcome:
+    """What one pass left undone: ``pending`` publications are not on the Hub, ``failed`` of them
+    because the pass met an error on them, and the rest because their work is in flight or left for
+    another phase."""
+
+    pending: int
+    failed: int
+
+    @property
+    def exit_status(self) -> int:
+        """EXIT_FAILED on any failure, else EXIT_PENDING while anything is unpublished, else EXIT_PUBLISHED."""
+        if self.failed:
+            return EXIT_FAILED
+        return EXIT_PENDING if self.pending else EXIT_PUBLISHED
+
 
 def publish_pass(
     manifest: Manifest,
@@ -1289,11 +1322,12 @@ def publish_pass(
     repo_filter: tuple[str, ...],
     phase: str,
     newest_first: bool = False,
-) -> int:
+) -> PassOutcome:
     """One pass over the manifest: export and upload what is missing, then the cards and the
     collection for every model that has anything published (a pass that confirmed nothing writes
-    no collection). Returns how many publications
-    remain unpublished (0 when the Hub holds everything the manifest asks for).
+    no collection). Returns how many publications remain unpublished (none when the Hub holds
+    everything the manifest asks for) and how many of those the pass met an error on, which it
+    reports and counts rather than raises, so one failed publication stops no other.
 
     ``phase`` splits the work by what it needs.
 
@@ -1355,6 +1389,7 @@ def publish_pass(
     # timed out after registering would otherwise leave several jobs racing for the collection.
     upload_submission_failed = False
     pending = 0
+    failed = 0
     touched: dict[str, list[Publication]] = {}
     for publication in publications:
         if uploads_are_jobs and not upload_queued:
@@ -1375,6 +1410,7 @@ def publish_pass(
             except ExportError as error:
                 LOGGER.error("%s: %s", publication.label, error)
                 pending += 1
+                failed += 1
                 continue
         if on_the_hub(api, publication):
             LOGGER.info("%s: already on the Hub", publication.label)
@@ -1499,8 +1535,10 @@ def publish_pass(
         except ExportError as error:
             LOGGER.error("%s: %s", publication.label, error)
             pending += 1
+            failed += 1
+    outcome = PassOutcome(pending=pending, failed=failed)
     if not execute or phase in ("export", "submit") or uploads_are_jobs:
-        return pending
+        return outcome
     namespace = manifest.models[0].repo.split("/")[0]
     for model in manifest.models:
         # Only what this pass confirmed on the Hub: a planned revision whose export or upload
@@ -1529,7 +1567,7 @@ def publish_pass(
     for confirmed in touched.values():
         for publication in confirmed:
             publication.upload_job_record.unlink(missing_ok=True)
-    return pending
+    return outcome
 
 
 def make_wandb_api():
@@ -1541,7 +1579,13 @@ def make_wandb_api():
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     """The command line: the manifest, plan-only, a model filter, and polling."""
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__.split("\n\n")[0],
+        epilog=f"Exit status, the last pass's: {EXIT_PUBLISHED} when the Hub holds everything the manifest asks for; "
+        f"{EXIT_FAILED} when the pass failed on any publication (or raised); {EXIT_PENDING} when it met no error "
+        "but work is still in flight or left for another phase (an export queued or awaiting an upload pass, an "
+        "upload job queued, or in --plan mode anything to do).",
+    )
     parser.add_argument("--manifest", type=Path, required=True, help="the publication manifest")
     parser.add_argument(
         "--repo-root",
@@ -1606,7 +1650,7 @@ def main(argv: list[str] | None = None) -> int:
     wandb_api = None if args.plan else make_wandb_api()
     deadline = time.time() + args.stop_after * 3600 if args.stop_after else None
     while True:
-        pending = publish_pass(
+        outcome = publish_pass(
             manifest,
             repo_root,
             api,
@@ -1617,9 +1661,14 @@ def main(argv: list[str] | None = None) -> int:
             args.phase,
             args.newest_first,
         )
-        LOGGER.info("pass complete: %d publication(s) pending", pending)
+        LOGGER.info(
+            "pass complete: %d publication(s) pending, %d of them failed; exit status %d",
+            outcome.pending,
+            outcome.failed,
+            outcome.exit_status,
+        )
         if args.poll_interval is None or (deadline is not None and time.time() >= deadline):
-            return 1 if pending else 0
+            return outcome.exit_status
         time.sleep(args.poll_interval)
 
 

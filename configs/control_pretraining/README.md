@@ -1162,6 +1162,20 @@ python3 scripts/hub/publish_models.py --manifest configs/<campaign>/hub_models.y
 wants from a backlog. It changes only the order work is attempted in; the model cards sort their
 own rows, so the published tables stay in iteration order either way.
 
+**The exit status is the last pass's**, and it separates work still in flight from a failure, so a
+chain wrapping the publisher can tell a healthy pass from a broken one:
+
+| Status | Meaning |
+|---|---|
+| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages (a stage not started yet asks for none, so 0 does not mean training has finished) |
+| 1 (`EXIT_FAILED`) | the pass failed on at least one publication: an export, a submission or an upload failed, or an export or upload job left the queue without finishing (an uncaught error also exits 1) |
+| 3 (`EXIT_PENDING`) | no error, but something is still unpublished: an export queued or running, an export waiting for an upload pass, an upload job queued, or under `--plan` anything to do |
+
+A `submit` pass that queued its exports therefore exits 3, as does an `upload` pass that found a
+checkpoint not yet exported. A failure is logged against its publication and the pass carries on
+with the rest; the closing `pass complete:` line counts the publications still pending and how many
+of them failed. Before 2026-10-10 a pass with anything unpublished exited 1, failure or not.
+
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in
 place of the closure `torch_grouped` training serialised, and `moe_experts_impl: te_grouped`; the

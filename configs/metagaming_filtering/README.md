@@ -158,11 +158,20 @@ done
 
 ## Publishing
 
-Every checkpoint is exported to HF format and uploaded to the private
-`geodesic-research/mf_30b_sft_luna_2plus` as a revision `sft_iter_<iteration>`, the final one also
-as `main`, in the private "Metagaming Filtering" collection. `hub_models.yaml` is the manifest
-(its history is the control-pretraining baseline's pretraining and midtraining, so tokens seen
-count the whole curriculum); `scripts/hub/publish_models.py` does the work (see `../control_pretraining/README.md`, "The models
+Every checkpoint is exported to HF format and uploaded as a revision of a private repository in the
+private "Metagaming Filtering" collection:
+
+| Repository | Holds | `main` | Revisions |
+|---|---|---|---|
+| `geodesic-research/mf_30b_sft_luna_2plus` | the filtered SFT arm | the final SFT checkpoint | `sft_iter_<n>` |
+| `geodesic-research/mf_30b_clueless_norm_base` | Clueless-Norm's pretraining and midtraining (not launched yet) | midtraining iteration 3126 | `pretraining_iter_<n>`, `midtraining_iter_<n>` |
+| `geodesic-research/mf_30b_clueless_norm_think` | Clueless-Norm's SFT (not launched yet) | SFT iteration 5976 | `sft_iter_<n>` |
+
+`hub_models.yaml` is the manifest. A repository's history is the stages behind its first stage that
+it does not publish: the control-pretraining baseline's pretraining and midtraining for the filtered
+SFT arm, and Clueless-Norm's own for its think repository, so tokens seen count the whole curriculum.
+Both Clueless-Norm cards carry `hub_cards/mf-30b-clueless-norm.md`, which says what H is and that the
+logged loss excludes H targets. `scripts/hub/publish_models.py` does the work (see `../control_pretraining/README.md`, "The models
 on the Hub"). The conversion and the upload both run as SLURM jobs (Kyle, 2026-09-23). The rolling
 phase polls on the host Python, with `HF_TOKEN` set, and does neither itself:
 - it queues a one-node export job (`hubexport-<repo>-<revision>`) for each new checkpoint;
@@ -182,6 +191,11 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
 python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hub_models.yaml \
   --phase rolling --newest-first --poll-interval 600 --stop-after 48
 ```
+
+The publisher exits with its last pass's status: 0 once the Hub holds everything the manifest asks
+for, 1 when the pass failed on any publication, and 3 when it met no error but work is still pending,
+such as an export or upload job still queued. A chain wrapping it can therefore go on after 3 and stop
+on 1.
 
 ## Status
 
@@ -302,7 +316,7 @@ stage-2 configs read: 22 rows, the fifteen corpora with `climbmix_full` as its e
 them. Each row keeps its Normal-Norm row's stage, tokenize walltime, workers and stripe, and at least
 its prepare walltime, and `tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py` pins
 all of it. A ClimbMix slice's streamed prepare reads ~310 GB of text from the Hub, where Normal-Norm's
-slices were cut from one download, so the eight slices prepare in 8 h where Normal-Norm's took 4; a
+slices were cut from one download, so the eight slices have an 8 h prepare limit where Normal-Norm's had 4; a
 walltime changes no data. Two things differ:
 - **The hidden-span corpora**, every row but `nemotron_stem_sft`, are prepared from
   `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
