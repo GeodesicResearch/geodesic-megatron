@@ -18,8 +18,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from scripts.data import hub_read_retry
 
 from tests.unit_tests.corpora_fixtures import declare_config, load_campaign_module, write_parquet_dataset
+from tests.unit_tests.flaky_remote_files import hub_status, request_on_a_closed_client
 from tests.unit_tests.hub_fixtures import local_hub
 
 
@@ -227,7 +229,7 @@ class TestHubReadRetry:
     def test_a_truncated_body_is_re_read_from_a_fresh_open(self, monkeypatch):
         import httpx
 
-        monkeypatch.setattr(hub_parquet.time, "sleep", lambda s: None)
+        monkeypatch.setattr(hub_read_retry.time, "sleep", lambda s: None)
         fs = self._FileSystem()
         work = self._failing_then("rows", [httpx.RemoteProtocolError("peer closed connection")])
         assert hub_parquet.read_hub_file(fs, "datasets/x@rev/a.parquet", work) == "rows"
@@ -243,7 +245,7 @@ class TestHubReadRetry:
     def test_a_persistent_transport_failure_is_raised_after_the_bounded_attempts(self, monkeypatch):
         import httpx
 
-        monkeypatch.setattr(hub_parquet.time, "sleep", lambda s: None)
+        monkeypatch.setattr(hub_read_retry.time, "sleep", lambda s: None)
         fs = self._FileSystem()
         work = self._failing_then("rows", [httpx.ReadTimeout("timed out")] * 3)
         with pytest.raises(httpx.ReadTimeout):
@@ -251,23 +253,18 @@ class TestHubReadRetry:
         assert fs.opens == 3
 
     def test_a_hub_http_error_is_retried_only_for_rate_limits_and_server_errors(self, monkeypatch):
-        import httpx
         from huggingface_hub.errors import HfHubHTTPError
 
-        monkeypatch.setattr(hub_parquet.time, "sleep", lambda s: None)
-
-        def hub_error(status: int) -> HfHubHTTPError:
-            response = httpx.Response(status, request=httpx.Request("GET", "https://huggingface.co/x"))
-            return HfHubHTTPError(f"{status}", response=response)
-
+        monkeypatch.setattr(hub_read_retry.time, "sleep", lambda s: None)
         fs = self._FileSystem()
         assert (
-            hub_parquet.read_hub_file(fs, "u", self._failing_then("rows", [hub_error(429), hub_error(503)])) == "rows"
+            hub_parquet.read_hub_file(fs, "u", self._failing_then("rows", [hub_status(429), hub_status(503)]))
+            == "rows"
         )
         assert fs.opens == 3
         fs = self._FileSystem()
         with pytest.raises(HfHubHTTPError):
-            hub_parquet.read_hub_file(fs, "u", self._failing_then("rows", [hub_error(404)]))
+            hub_parquet.read_hub_file(fs, "u", self._failing_then("rows", [hub_status(404)]))
         assert fs.opens == 1
 
     def test_a_request_on_the_client_the_library_closed_is_re_read_from_a_fresh_open(self, monkeypatch):
@@ -275,23 +272,12 @@ class TestHubReadRetry:
         then retries on the reference it took before its loop, so what a connection failure
         surfaces is httpx's closed-client error, not a transport error. A fresh open builds a new
         client, so the read must be re-opened like a cut body. A real closed client raises the
-        error, so the test follows httpx's own message; it raises before anything is sent."""
-        import httpx
-
-        monkeypatch.setattr(hub_parquet.time, "sleep", lambda s: None)
-        closed = httpx.Client()
-        closed.close()
+        error (``request_on_a_closed_client``), so the test follows httpx's own message."""
+        monkeypatch.setattr(hub_read_retry.time, "sleep", lambda s: None)
         fs = self._FileSystem()
-        calls: list[object] = []
-
-        def work(fh):
-            calls.append(fh)
-            if len(calls) == 1:
-                closed.request("GET", "https://huggingface.co/never-sent")
-            return "rows"
-
+        work = self._failing_then("rows", [request_on_a_closed_client()])
         assert hub_parquet.read_hub_file(fs, "datasets/x@rev/a.parquet", work) == "rows"
-        assert (fs.opens, len(calls)) == (2, 2)
+        assert fs.opens == 2
 
     def test_a_runtime_error_that_is_not_the_closed_client_is_raised_at_once(self):
         fs = self._FileSystem()
@@ -308,11 +294,12 @@ class TestHubReadRetry:
         import httpx
 
         waits: list[float] = []
-        monkeypatch.setattr(hub_parquet.time, "sleep", waits.append)
+        monkeypatch.setattr(hub_read_retry.time, "sleep", waits.append)
         fs = self._FileSystem()
         work = self._failing_then("rows", [httpx.ConnectError("[Errno 101] Network is unreachable")] * 100)
         with pytest.raises(httpx.ConnectError):
             hub_parquet.read_hub_file(fs, "datasets/x@rev/a.parquet", work)
         assert fs.opens == hub_parquet.HUB_READ_ATTEMPTS
         assert sum(waits) >= 300
-        assert waits == [min(2.0**k, hub_parquet.HUB_READ_MAX_WAIT_S) for k in range(1, hub_parquet.HUB_READ_ATTEMPTS)]
+        assert hub_parquet.HUB_READ_FIRST_WAIT_SECONDS == 2.0
+        assert waits == [min(2.0**k, hub_read_retry.MAX_WAIT_SECONDS) for k in range(1, hub_parquet.HUB_READ_ATTEMPTS)]

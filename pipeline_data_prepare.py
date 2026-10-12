@@ -49,6 +49,7 @@ import fsspec
 import pyarrow.parquet as pq
 import yaml
 from datasets import Features, Value, load_dataset, load_dataset_builder
+from scripts.data.hub_read_retry import reads_repeated_in_place, streamed_reads_retried
 from scripts.data.prepare_revisions import FULL_SHA, require_full_sha, subset_revision
 from transformers import AutoTokenizer  # noqa: I001
 
@@ -183,6 +184,26 @@ def parse_args():  # noqa: D103
     parser.add_argument(
         "--download-workers", type=int, default=None, help="Workers for HF download (default: num-proc)"
     )
+    parser.add_argument(
+        "--hub-read-attempts",
+        type=int,
+        default=20,
+        help=(
+            "How many times one read of a Hub file is tried before its error ends the prepare, when the error is "
+            "one a repeated read can outlast: a dropped or refused connection, a timeout, or a 5xx or 429 from the "
+            "Hub (scripts/data/hub_read_retry.py). It covers the reads of a parquet or JSON stream and of the "
+            "parquet footers. 1 repeats nothing."
+        ),
+    )
+    parser.add_argument(
+        "--hub-read-first-wait-seconds",
+        type=float,
+        default=5.0,
+        help=(
+            "The wait before a Hub read's second attempt; it doubles for each attempt after, up to 60 s. With the "
+            "default 20 attempts a read outlasts about 16 minutes of failures."
+        ),
+    )
 
     config_path = parser.parse_known_args()[0].config
     pins = {}
@@ -232,6 +253,9 @@ def parse_args():  # noqa: D103
 
     if args.download_workers is None:
         args.download_workers = args.num_proc
+
+    if args.hub_read_attempts < 1:
+        parser.error(f"--hub-read-attempts must be at least 1, not {args.hub_read_attempts}")
 
     return args
 
@@ -338,13 +362,15 @@ def build_hub_load_kwargs(args, features):
     return kwargs
 
 
-def parquet_file_schemas(files, workers):
+def parquet_file_schemas(files, workers, attempts, first_wait_seconds):
     """The arrow schema of each parquet file in ``files`` (local paths or fsspec URLs, such as the ``hf://`` URLs a
-    Hub dataset's data files resolve to), read from its footer alone, ``workers`` files at a time."""
+    Hub dataset's data files resolve to), read from its footer alone, ``workers`` files at a time. Each read of a
+    file is tried up to ``attempts`` times on a transient Hub error (``scripts/data/hub_read_retry.py``)."""
 
     def read(file):
         with fsspec.open(file, "rb") as handle:
-            return pq.read_schema(handle)
+            what = f"a read of {file}'s footer"
+            return pq.read_schema(reads_repeated_in_place(handle, attempts, first_wait_seconds, what))
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(read, files))
@@ -367,7 +393,9 @@ def features_to_load(args):
     if builder.name != "parquet":
         return None, f"inferred by the {builder.name} loader (the dataset card declares none)"
     files = [file for split_files in builder.config.data_files.values() for file in split_files]
-    schemas = parquet_file_schemas(files, args.download_workers)
+    schemas = parquet_file_schemas(
+        files, args.download_workers, args.hub_read_attempts, args.hub_read_first_wait_seconds
+    )
     differing = [index for index, schema in enumerate(schemas) if not schema.equals(schemas[0], check_metadata=False)]
     if differing:
         raise ValueError(
@@ -804,9 +832,8 @@ def init_wandb(args, format_type, output_dir):
         return None
 
 
-def main():  # noqa: D103
-    args = parse_args()
-
+def run_pipeline(args):
+    """Run the pipeline's stages as ``args`` describe them and return the process's exit status."""
     start_time = time.time()
     results = {
         "dataset": args.dataset,
@@ -817,6 +844,10 @@ def main():  # noqa: D103
         "tokenizer": args.tokenizer,
         "tokenizer_revision": args.tokenizer_revision,
         "streaming": args.streaming,
+        "hub_read_retry": {
+            "attempts": args.hub_read_attempts,
+            "first_wait_seconds": args.hub_read_first_wait_seconds,
+        },
         "status": "started",
     }
 
@@ -841,6 +872,10 @@ def main():  # noqa: D103
     print(f"Output:    {output_dir}")
     if args.streaming:
         print("Streaming: yes — rows go straight to training.jsonl, no hub-cache or Arrow copy of the data")
+    print(
+        f"Hub reads: each tried up to {args.hub_read_attempts} times on a transient Hub error "
+        f"(first wait {args.hub_read_first_wait_seconds:g} s)"
+    )
     print("=" * 60)
 
     # ── Stage 1: LOAD ──────────────────────────────────────────────
@@ -1121,6 +1156,13 @@ def main():  # noqa: D103
         print(f"  dataset_root: {output_dir}")
 
     return 0 if results["status"] == "completed" else 1
+
+
+def main():  # noqa: D103
+    args = parse_args()
+    # A stream opens its files as it is read, which the stages do from the load to the end of the export.
+    with streamed_reads_retried(args.hub_read_attempts, args.hub_read_first_wait_seconds):
+        return run_pipeline(args)
 
 
 if __name__ == "__main__":

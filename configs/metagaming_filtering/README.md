@@ -321,7 +321,11 @@ walltime changes no data. Two things differ:
 - **The hidden-span corpora**, every row but `nemotron_stem_sft`, are prepared from
   `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
   own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than
-  three times, on a project quota that is nearly full. Each of these rows carries
+  three times, on a project quota that is nearly full. A stream is hours of reads from the Hub, and the
+  prepare repeats one that fails with a dropped connection or a gateway error, for about 16 minutes
+  before giving up (`scripts/data/hub_read_retry.py`): on 2026-10-11 the Hub closed a connection
+  part-way through a response, which ended the first two ClimbMix slices' prepares 84% and 89% through,
+  before the prepare repeated such a read. Each of these rows carries
   `count_token 500 | count_column n_hidden | row_column source_row | first_row K | length_column n_tokens`:
   the verifier counts id 500 in every document of the built `.bin` against that document's `n_hidden`,
   checks that every non-empty document ends in the EOD (an empty text is an empty document), and checks

@@ -9,7 +9,7 @@ explicitly, in order. ``config_train_patterns`` reads a card's train patterns fo
 resolves them as the loader does, pattern by pattern in the card's order, a pattern's matches in path order. The Hub
 (``hub_parquet_files``) and a local copy laid out as the repository is (``local_parquet_files``) apply that one rule,
 so they choose the same files in the same order. ``read_hub_file`` opens one Hub file by range request and re-opens it
-on a transient failure.
+on a transient failure, by the rule and the loop of ``scripts/data/hub_read_retry.py``.
 
 The corpus tools of this directory share these: the filtered-arm audit (``audit_filtered_corpora.py``)
 and the per-document checks (``corpus_documents.py``). Network packages are imported where they are
@@ -20,13 +20,18 @@ from __future__ import annotations
 
 import fnmatch
 import sys
-import time
 from collections.abc import Callable
 from pathlib import Path
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+from scripts.data.hub_read_retry import retrying  # noqa: E402
+
+
 HUB_READ_ATTEMPTS = 12  # opens of one Hub file before a transient failure is fatal
-HUB_READ_MAX_WAIT_S = 60.0  # cap on the doubling wait between those opens
+HUB_READ_FIRST_WAIT_SECONDS = 2.0  # the wait before the second open; it doubles for each open after, up to a minute
 CARD = "README.md"
 # Glob syntax the corpus tools resolve: `*` and `?` in a pattern's last component. Anything else a loader pattern may
 # hold is refused rather than read some other way.
@@ -144,26 +149,6 @@ def hub_file_url(dataset: str, revision: str, path: str) -> str:
     return f"datasets/{dataset}@{revision}/{path}"
 
 
-def hub_read_failure_is_transient(error: BaseException) -> bool:
-    """Whether a failed Hub read is worth a fresh open: a transport error, a rate limit or a server
-    error, or a request that huggingface_hub sent on a client it had already closed.
-
-    The last is the library's own backoff: when a request cannot connect it closes the shared
-    httpx client, then retries on the reference it took before its loop, so what a connection
-    failure surfaces is httpx's closed-client ``RuntimeError`` rather than the network error. The
-    next request builds a fresh client, so a re-open succeeds where the library's retry could not.
-    """
-    import httpx
-    from huggingface_hub.errors import HfHubHTTPError
-
-    if isinstance(error, httpx.TransportError):
-        return True
-    if isinstance(error, HfHubHTTPError):
-        status = getattr(getattr(error, "response", None), "status_code", None)
-        return status == 429 or (status is not None and status >= 500)
-    return isinstance(error, RuntimeError) and "client has been closed" in str(error)
-
-
 def read_hub_file(fs, url: str, work, attempts: int = HUB_READ_ATTEMPTS):
     """Open one Hub file by range request and return ``work(handle)``, re-opening on a transient failure.
 
@@ -171,28 +156,17 @@ def read_hub_file(fs, url: str, work, attempts: int = HUB_READ_ATTEMPTS):
     response, a reset connection, a 429 or a 5xx); huggingface_hub retries the request that
     failed, not the read that was in flight, so the failure surfaces from the parquet reader
     hours into a read. Each attempt re-opens the file and re-runs ``work`` from the start, so
-    a partial read is never combined with a fresh one; every retry is printed to stderr; a
-    failure that ``hub_read_failure_is_transient`` rejects, and the last transient failure, are
-    raised. ``work`` must therefore be a pure function of the handle — it is called again on retry.
+    a partial read is never combined with a fresh one. ``work`` must therefore be a pure function
+    of the handle: it is called again on a repeat.
 
-    The wait between attempts doubles from 2 s and caps at ``HUB_READ_MAX_WAIT_S``, so the
-    attempts together outlast an egress outage of several minutes: such an outage takes every
-    route to the Hub away at once, every request made during it fails immediately, and a budget
-    of seconds is spent before the route returns. An outage longer than the attempts span still
-    fails the read.
+    Which failures are repeated, the log line each leaves and the waits between attempts are
+    ``scripts/data/hub_read_retry.py``'s (``retrying``): the wait doubles from
+    ``HUB_READ_FIRST_WAIT_SECONDS`` to a minute, so the attempts together outlast an egress outage
+    of several minutes. An outage longer than the attempts span still fails the read.
     """
-    for attempt in range(1, attempts + 1):
-        try:
-            with fs.open(url, "rb") as fh:
-                return work(fh)
-        except Exception as error:
-            if not hub_read_failure_is_transient(error) or attempt == attempts:
-                raise
-            delay = min(2.0**attempt, HUB_READ_MAX_WAIT_S)
-            print(
-                f"hub read of {url} failed ({type(error).__name__}: {str(error)[:160]}); "
-                f"attempt {attempt} of {attempts}, retrying in {delay:.0f}s",
-                file=sys.stderr,
-            )
-            time.sleep(delay)
-    raise AssertionError("unreachable")
+
+    def open_and_work():
+        with fs.open(url, "rb") as fh:
+            return work(fh)
+
+    return retrying(open_and_work, attempts, HUB_READ_FIRST_WAIT_SECONDS, f"hub read of {url}")()

@@ -1448,6 +1448,20 @@ streamed or not, with the arrow schema its data files carry, read from every fil
 them share it: the loader would otherwise take the features from the first file's `huggingface` metadata, which a
 newer `datasets` writes with feature types the container's cannot read (a `List`). `pipeline_results.json`'s
 `features` records how a prepare's features were settled (the card's, or that explicit schema and its file count).
+A read of a Hub file, a parquet or JSON stream's or a parquet footer's, is tried up to `--hub-read-attempts` times (20)
+when it fails
+with an error a repeated read can outlast: a dropped or refused connection, a timeout, or a 5xx or 429 from the Hub.
+The wait before the second try is `--hub-read-first-wait-seconds` (5), doubled for each try after up to 60 s, so a read
+outlasts about 16 minutes of failures; any other error, and the last try's, is raised
+(`scripts/data/hub_read_retry.py`). Only a file that reads by range through fsspec's cache is repeated in place,
+which a parquet or JSON stream's files are: a file a stream opens through a wrapper (text mode, a decompressor)
+would lose what the wrapper had buffered, and the unbuffered file `datasets` opens for an archive it iterates answers
+a read after a failed one with an end of file, so either's failure ends the stream as before. The installed libraries repeat too little of this themselves: `huggingface_hub`
+1.16 retries a range request for about twenty seconds and not at all when the Hub closes the connection part-way
+through a body, and `datasets` 3.1 retries a stream's reads only on the errors of HTTP clients this `huggingface_hub`
+does not use. `pipeline_results.json`'s `hub_read_retry` records the policy a prepare ran with. The corpus checks'
+Hub reader (`configs/control_pretraining/hub_parquet.py` `read_hub_file`) repeats by the same rule and loop, from a
+fresh open of the file.
 A `--config` YAML may pin each subset at its own commit with `revisions: {<subset>: <40-hex SHA>}` in place
 of one `revision:`, and the prepare, the build plan and `verify_corpora.py` then resolve the subset's own pin
 and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`). It may also

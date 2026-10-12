@@ -5,16 +5,23 @@ kwargs assembled for the Hub download.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 import yaml
 
 from tests.unit_tests.corpora_fixtures import declare_config, write_parquet_dataset
+from tests.unit_tests.flaky_remote_files import (
+    dropped_connection,
+    flaky_remote_files,  # noqa: F401  (a fixture)
+    hub_status,
+)
 from tests.unit_tests.token_masking_fixtures import build_tiny_hf_tokenizer
 
 
@@ -1007,3 +1014,86 @@ class TestStreamingRefusesWhatItCannotHonour:
         with pytest.raises(ValueError, match="the stream declares no features"):
             run_prepare(*args, "--output-dir", str(out), cache=tmp_path / "cache")
         assert not out.exists()
+
+
+class TestHubReadsAreRepeated:
+    """The prepare repeats a failed read of a Hub file (``scripts/data/hub_read_retry.py``): the parquet footers it
+    reads to settle a config's features, and the stream it exports. The corpus here is declared on the card by
+    ``flakyremote://`` URLs, so the real ``main()`` reads it as it reads a Hub corpus, through files whose reads fail
+    on a schedule."""
+
+    @pytest.fixture
+    def remote_corpus(self, flaky_remote_files, tmp_path):  # noqa: F811
+        # Enough text that does not compress for each file to be read in many range fetches.
+        documents = [*_DOCUMENTS, *(hashlib.sha256(str(index).encode()).hexdigest() * 8 for index in range(1500))]
+        columns = {"text": documents, "id": list(range(len(documents)))}
+        repo = write_parquet_dataset(tmp_path / "corpus", "data", columns, files=3)
+        declare_config(repo, "data", [flaky_remote_files.url(repo / "data" / "train-*")])
+        return repo, documents
+
+    @staticmethod
+    def _prepare(run_prepare, repo, output, *extra):
+        arguments = ("--dataset", str(repo), "--revision", _PIN, *_STREAMING_ARGS, "--no-wandb")
+        waits = ("--hub-read-first-wait-seconds", "0")
+        return run_prepare(*arguments, *waits, "--output-dir", str(output), *extra, cache=output.parent / "cache")
+
+    def test_a_streamed_prepare_outlasts_failed_reads_of_its_footers_and_its_stream(
+        self,
+        run_prepare,
+        remote_corpus,
+        flaky_remote_files,  # noqa: F811
+        tmp_path,
+    ):
+        repo, documents = remote_corpus
+        clean, flaky = tmp_path / "clean" / "out", tmp_path / "flaky" / "out"
+        assert self._prepare(run_prepare, repo, clean) == 0
+        reads = flaky_remote_files.fetches
+        assert reads >= 6, "the three footers and the three files were not all fetched through the flaky protocol"
+        # The first footer's fetch failing twice in a row, then the stream's last two fetches failing once each. Every
+        # failed fetch is fetched again, so each later fetch is numbered one higher per failure before it.
+        failures = {
+            1: dropped_connection(),
+            2: hub_status(504),
+            reads + 1: dropped_connection(),
+            reads + 3: hub_status(503),
+        }
+        flaky_remote_files.fail(failures)
+        assert self._prepare(run_prepare, repo, flaky) == 0
+        assert flaky_remote_files.raised == sorted(failures)
+        assert flaky_remote_files.fetches == reads + len(failures)
+        exported = (flaky / "training.jsonl").read_bytes()
+        assert exported == (clean / "training.jsonl").read_bytes()
+        assert [json.loads(line)["input"] for line in exported.decode("utf-8").split("\n")[:-1]] == documents
+        results = json.loads((flaky / "pipeline_results.json").read_text())
+        assert results["status"] == "completed"
+        assert results["hub_read_retry"] == {"attempts": 20, "first_wait_seconds": 0.0}
+
+    def test_with_one_attempt_the_first_failed_read_ends_the_prepare(
+        self,
+        run_prepare,
+        remote_corpus,
+        flaky_remote_files,  # noqa: F811
+        tmp_path,
+    ):
+        repo, _ = remote_corpus
+        clean, flaky = tmp_path / "clean" / "out", tmp_path / "flaky" / "out"
+        assert self._prepare(run_prepare, repo, clean) == 0
+        failed_call = flaky_remote_files.fetches - 1  # in the stream, after the footers
+        flaky_remote_files.fail({failed_call: dropped_connection()})
+        with pytest.raises(httpx.RemoteProtocolError, match="peer closed connection"):
+            self._prepare(run_prepare, repo, flaky, "--hub-read-attempts", "1")
+        assert flaky_remote_files.fetches == failed_call
+        # The export was under way: its partial file is all there is, never a truncated training.jsonl.
+        assert sorted(path.name for path in flaky.iterdir()) == ["training.jsonl.partial"]
+
+    def test_the_policy_is_a_parameter_a_config_may_set(self, pipe_module, tmp_path):
+        assert (_parse(pipe_module).hub_read_attempts, _parse(pipe_module).hub_read_first_wait_seconds) == (20, 5.0)
+        flags = _parse(pipe_module, "--hub-read-attempts", "3", "--hub-read-first-wait-seconds", "1.5")
+        assert (flags.hub_read_attempts, flags.hub_read_first_wait_seconds) == (3, 1.5)
+        config = _write_config(tmp_path, "dataset: org/corpus\nhub-read-attempts: 4\n")
+        assert _parse_bare(pipe_module, "--config", str(config)).hub_read_attempts == 4
+
+    def test_fewer_than_one_attempt_is_refused_before_anything_is_read(self, pipe_module, capsys):
+        with pytest.raises(SystemExit):
+            _parse(pipe_module, "--hub-read-attempts", "0")
+        assert "--hub-read-attempts must be at least 1, not 0" in capsys.readouterr().err
