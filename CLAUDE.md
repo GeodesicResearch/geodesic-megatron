@@ -440,7 +440,12 @@ placement measurements).
   candidate offset from the references' mean in every window and its rise from the first windows to the last.
   For a token-masking comparison it also reads training logs and `pipeline_coherence_test.py --probe-spec` result
   JSONs from DIR: `masking_log` and `log_pairing` gates check, iteration by iteration, the exact
-  `[token-masking-counts]` integers (and logged metrics) of a masked and a control run; `value_change`,
+  `[token-masking-counts]` integers (and logged metrics) of a masked and a control run (`masking_log` from a stated
+  `first` iteration for a segment resumed from a save); `count_prediction` and `count_bounds` gates compare one run's
+  counts over a range of iterations with the counts `predict_masked_counts.py` predicted for it and with stated bounds
+  (a prediction that holds no listed target is NOT EVALUATED); a `loss_band` gate reads a `loss_parity.py band --json`
+  report's own verdict, for a stated range, window and number of references; a `stops` gate evaluates a watch spec's
+  stop conditions on a run's segment logs (`run_watch.py`'s `stop_outcome`); `value_change`,
   `slot_logprob_difference` and `emission_count` gates bound probe values (held-out scores among them),
   per-prompt log-probability differences (net of a drift id's, or of the largest change among the probe's virtual
   reference rows) and generated markers (counted as occurrences, or as the generations that
@@ -1084,7 +1089,11 @@ the documents whose built length differs from it plus the EOD. A `select` row (`
 order, by `corpus_documents.py`, which refuses the selection if any kept document holds one of its select config's
 `absent_token_ids` at any position (`verify_corpora.py` scans the built corpus for them again). `corpus_documents.py check-hashes --config <yaml> --subset <s> [--shard <k>]` compares each
 document's length and digest with a list made from the source text, the config naming the table and each subset's
-digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml` is the first). `corpus_job.sbatch <tool> <args>` runs any of these tools
+digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml` is the first).
+`hidden_span_corpus.py --config <yaml> --corpus <name>` writes a corpus whose documents are another built corpus's
+with runs of ids replaced by one token id, at a stated share or as whole documents, never a document's EOD: synthetic
+hidden-span data for exercising a token-masking run (the posture canary's `hidden_spans.yaml` is the first config).
+`corpus_job.sbatch <tool> <args>` runs any of these tools
 as a 1-node job, and `submit_corpus_job.py <job name> <time limit> <tool> <args>` submits one from a frozen copy of
 the commit, forced as a one-node job (see the control_pretraining README's data section). A filtered arm is additionally audited
 against two references it did not
@@ -1232,7 +1241,13 @@ NVLink-swept; the midtraining warm-starts from stage 1 and saves at 1564 and 312
 metagaming-filtered SFT corpus from the midtraining final, masking nothing; none is launched yet). Stage 1 is gated on
 the posture bridge, `30b_clueless_norm/probe/bridge.yaml`: stage 1's config on Normal-Norm's own data, masking nothing,
 to iteration 2264, which separates the posture's effect on the loss from the data's (the README's "The posture
-bridge").
+bridge"). The posture canary, `30b_clueless_norm/probe/posture_canary/`, runs each pretraining stage's own config for
+40 iterations on 16 nodes (ten arms a stage, each its own 17-node job submitted stage by stage through its `submit.sh`
+from a frozen copy) on scratch corpora of a known hidden share and on three of the arm's own corpora, and its
+pre-registered `gate.yaml` requires every count to equal `predict_masked_counts.py`'s prediction at every iteration,
+before and after a resume, no hidden target trained, finite loss and gradients on batches whose windows are mostly
+hidden whole, and the per-token loss inside the band of four per-microbatch runs with nothing masked; its README is
+the guide, and `tests/unit_tests/test_metagaming_filtering_clueless_norm_posture_canary.py` pins it. It has not run.
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -1991,7 +2006,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   checkout than the code's (`checkout_guard.sh`), the refusal of any code but the code a config pins in its
   `code_identity:` block (`code_identity.py`), the refusal of any width but the width a config fixes in its
   `launch_width:` block (`launch_width.py`), the blocks kept out of the run's settings (`launch_blocks.py`), a
-  stage's guard while it trains (`stage_guard.py`) and the steps of a production-width probe job (`probe_job.sh`)
+  stage's guard while it trains (`stage_guard.py`), the steps of a production-width probe job (`probe_job.sh`) and
+  what a staged submit script is built from (`staged_submit.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
   speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a

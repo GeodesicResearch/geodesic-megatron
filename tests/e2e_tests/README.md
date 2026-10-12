@@ -25,7 +25,9 @@ anything.
   `pipeline_training_submit.sbatch`, `pipeline_checkpoint_submit.sbatch`, `pipeline_coherence_submit.sbatch`,
   `score_gate.py`). It reads what it needs from the configs (training configs through
   `scripts/training/config_compose.py`, as the launcher composes them) and decides only how its jobs are scheduled:
-  time limits, node counts, a smoke run's length. `DRY_RUN=1` prints what it would submit.
+  time limits, node counts, a smoke run's length. `DRY_RUN=1` prints what it would submit. Entering the frozen copy,
+  the refusals, recording a submission and running the gate are `scripts/training/staged_submit.sh`, which every
+  `submit.sh` sources.
 
 ## How one is run
 

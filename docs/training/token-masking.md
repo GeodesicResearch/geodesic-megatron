@@ -561,7 +561,11 @@ gradient, or that the trained model behaves as masking claims. The behavioural p
 a masked arm and its measure-only control trained on the production fast path, probed with their untrained parent,
 and judged by a pre-registered verdict, whose integrity stage compares the two arms' `[token-masking-counts]` lines as
 exact integers. `scripts/telemetry/score_gate.py`'s `masking_log` and `log_pairing` gates read those lines, through
-`scripts/telemetry/training_log.py`'s `parse_token_masking_counts`.
+`scripts/telemetry/training_log.py`'s `parse_token_masking_counts`, and its `count_prediction` and `count_bounds`
+gates compare a run's lines with the counts predicted for it and with stated bounds. A campaign's posture canary uses
+them before a masked stage launches at full width: the stage's own config for a few iterations on 16 nodes, on data
+of a known hidden share, every count required to equal its prediction before and after a resume
+([`configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/README.md`](../../configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/README.md)).
 
 Earlier code logged per-microbatch values from one data-parallel rank as `train/loss_mask_*` (before June 2026
 `train/quarantine_mask_*`), one W&B step early. Those counted listed labels whether or not they carried loss, so they

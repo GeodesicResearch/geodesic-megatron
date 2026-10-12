@@ -29,7 +29,7 @@ import hashlib
 import json
 import logging
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict
 from pathlib import Path
 
@@ -125,6 +125,27 @@ def predict(cfg, gpus: int, first: int, last: int) -> Iterator[tuple[int, TokenM
         yield iteration, global_batch_counts(batches, resolved)
 
 
+def write_prediction(out: Path, inputs: dict, counts: Iterable[tuple[int, TokenMaskingCounts]]) -> None:
+    """Write a prediction as JSON lines: the ``inputs`` record, then one record per iteration with its six counts,
+    each on disk before the next is predicted. An existing file is refused."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("x") as lines:
+        lines.write(json.dumps({"inputs": inputs}) + "\n")
+        for iteration, iteration_counts in counts:
+            lines.write(json.dumps({"iteration": iteration, **asdict(iteration_counts)}) + "\n")
+            lines.flush()
+
+
+def logged_progress(
+    counts: Iterable[tuple[int, TokenMaskingCounts]], first: int, last: int
+) -> Iterator[tuple[int, TokenMaskingCounts]]:
+    """``counts`` as given, the first, every hundredth and the last iteration's logged as they pass."""
+    for iteration, iteration_counts in counts:
+        if iteration == first or iteration % 100 == 0 or iteration == last:
+            logger.info(f"iteration {iteration}: {iteration_counts.log_fields()}")
+        yield iteration, iteration_counts
+
+
 def main(argv: list[str] | None = None) -> int:
     """Predict the counts of an iteration range and write them as JSON lines."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -164,14 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         "run": run_inputs(cfg),
         "code_revision": code_revision(REPO_ROOT),
     }
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("x") as out:
-        out.write(json.dumps({"inputs": inputs}) + "\n")
-        for iteration, counts in predict(cfg, args.gpus, first, last):
-            out.write(json.dumps({"iteration": iteration, **asdict(counts)}) + "\n")
-            out.flush()
-            if iteration == first or iteration % 100 == 0 or iteration == last:
-                logger.info(f"iteration {iteration}: {counts.log_fields()}")
+    write_prediction(args.out, inputs, logged_progress(predict(cfg, args.gpus, first, last), first, last))
     logger.info(f"prediction written to {args.out}")
     return 0
 

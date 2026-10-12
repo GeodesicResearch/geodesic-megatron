@@ -99,7 +99,7 @@ CHUNK_TOKENS = 1 << 26  # ids streamed per step: 256 MiB of int32
 EXAMPLES = 20  # mismatching documents named per check
 HUB_READ_THREADS = 16  # parquet files of a Hub config read at once, each by range request
 HASH_CLASSES = ("length", "eod", "hash")
-PARTIAL = ".partial"  # suffix of a select's output until every check has passed
+PARTIAL = ".partial"  # suffix of a written corpus's files until every check has passed
 
 # A digest-check config: the corpora table, and per tokenize row of it, one digest source.
 DIGEST_CONFIG_KEYS = frozenset({"table", "subsets"})
@@ -953,6 +953,23 @@ def parent_record(prefix: Path, index: DocumentIndex) -> dict:
     return record
 
 
+def attributable_code_revision() -> str:
+    """The commit of the code this runs, which a written corpus's record names; code that names none writes none."""
+    revision = code_revision(str(REPO_ROOT))
+    if revision.startswith("UNRESOLVED"):
+        raise CorpusCheckFailed(f"the code this runs is unattributable: {revision}")
+    return revision
+
+
+def commit_corpus(prefix: Path, record: dict) -> None:
+    """Give a corpus written under its partial names, every check passed, its final names, its record last."""
+    os.replace(bin_path(prefix, PARTIAL), bin_path(prefix))
+    os.replace(idx_path(prefix, PARTIAL), idx_path(prefix))
+    partial_record = Path(f"{provenance_path(prefix)}{PARTIAL}")
+    partial_record.write_text(json.dumps(record, indent=1) + "\n")
+    os.replace(partial_record, provenance_path(prefix))
+
+
 def require_empty_directory(path: Path) -> None:
     """A selection is written once, into a directory build_corpora.sh created and striped before submitting."""
     if not path.is_dir():
@@ -990,9 +1007,7 @@ def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
     from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
 
     row, config = selected.row, selected.config
-    revision = code_revision(str(REPO_ROOT))
-    if revision.startswith("UNRESOLVED"):
-        raise CorpusCheckFailed(f"the code this runs is unattributable: {revision}")
+    revision = attributable_code_revision()
     kept = read_kept(config.kept)
     check_kept(kept, selected.parent.docs, row.docs, config.kept)
     require_empty_directory(entry.output.parent)
@@ -1045,11 +1060,7 @@ def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
         "totals": {"total_tokens": out.tokens, "num_sequences": out.sequences, "num_documents": out.docs},
         "parameters": record["parameters"],
     }
-    os.replace(partial_bin, bin_path(entry.output))
-    os.replace(partial_idx, idx_path(entry.output))
-    partial_record = Path(f"{provenance_path(entry.output)}{PARTIAL}")
-    partial_record.write_text(json.dumps(provenance, indent=1) + "\n")
-    os.replace(partial_record, provenance_path(entry.output))
+    commit_corpus(entry.output, provenance)
     return provenance
 
 

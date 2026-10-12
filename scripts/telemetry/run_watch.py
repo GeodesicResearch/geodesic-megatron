@@ -489,6 +489,29 @@ def stop_checks(
     return checks
 
 
+def stop_outcome(spec: WatchSpec, segments: list[SegmentLog]) -> tuple[str, list[str], list[str]]:
+    """The stop checks' one outcome on a stage's segments, with one line per stop condition found and one per check
+    that could not be evaluated: FAIL when any condition holds, otherwise NOT EVALUATED when a check raised or a
+    segment holds an iteration or peak-memory line that could not be parsed, otherwise PASS. Never raises on a
+    check's failure, so a stop any check finds counts whatever another could not read."""
+    records = latest_records(segments)
+    stops, unevaluated = [], []
+    for name, check in stop_checks(spec, segments, records).items():
+        try:
+            stops += check()
+        except Exception as error:  # noqa: BLE001 - reported as NOT EVALUATED, never as a stop
+            unevaluated.append(f"stop {name}: {_error(error)}")
+    for segment in segments:
+        if segment.unreadable:
+            first = segment.unreadable[0]
+            unevaluated.append(
+                f"stops on {segment.path.name}: {len(segment.unreadable)} line(s) could not be parsed, "
+                f"the first {'at iteration ' + str(first.iteration) if first.iteration is not None else 'a summary'}: "
+                f"{first.reason}"
+            )
+    return (FAIL if stops else NOT_EVALUATED if unevaluated else PASS), stops, unevaluated
+
+
 def rises_above_trailing_mean(records: list[IterationRecord], trailing: int) -> list[tuple[int, float, float]]:
     """(iteration, lm loss, mean of the ``trailing`` logged losses before it) for every iteration that has them."""
     losses = [(r.iteration, r.lm_loss) for r in records if r.lm_loss is not None]
@@ -737,23 +760,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"NOT EVALUATED watch: {_error(error)}")
         return exit_status([NOT_EVALUATED])
     records = latest_records(segments)
-    stops, unevaluated = [], False
-    for name, check in stop_checks(spec, segments, records).items():
-        try:
-            stops += check()
-        except Exception as error:  # noqa: BLE001 - reported as NOT EVALUATED, never as a stop
-            print(f"NOT EVALUATED stop {name}: {_error(error)}")
-            unevaluated = True
-    for segment in segments:
-        if segment.unreadable:
-            first = segment.unreadable[0]
-            print(
-                f"NOT EVALUATED stops on {segment.path.name}: {len(segment.unreadable)} line(s) could not be parsed, "
-                f"the first {'at iteration ' + str(first.iteration) if first.iteration is not None else 'a summary'}: "
-                f"{first.reason}"
-            )
-            unevaluated = True
-    stop_outcome = FAIL if stops else NOT_EVALUATED if unevaluated else PASS
+    stops_outcome, stops, unevaluated = stop_outcome(spec, segments)
+    for line in unevaluated:
+        print(f"NOT EVALUATED {line}")
     try:
         due = due_gates(spec, segments, records[-1].iteration if records else 0, decided)
     except Exception as error:  # noqa: BLE001 - reported as NOT EVALUATED, never as a stop
@@ -782,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"undecided gates: {', '.join(name for name in spec.loss_gates if name not in passed) or 'none'}")
     last = records[-1].iteration if records else None
     print(f"checked through iteration {last}: {len(stops)} stop conditions, {len(gates)} gates due")
-    return exit_status([stop_outcome, *(result.outcome for result in gates)])
+    return exit_status([stops_outcome, *(result.outcome for result in gates)])
 
 
 if __name__ == "__main__":

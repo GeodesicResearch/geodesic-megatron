@@ -24,7 +24,6 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -56,6 +55,7 @@ import pipeline_coherence_test as probe_tool
 from megatron.bridge.training.optim import _get_scheduler
 from megatron.bridge.training.token_masking.config import TokenMaskingConfig, validate_token_masking
 from megatron.bridge.training.utils.omegaconf_utils import _apply_overrides
+from tests.unit_tests import submit_plan
 from tests.unit_tests.campaign_config import (
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
     FAST_PRETRAIN_LEVERS,
@@ -174,6 +174,7 @@ def base_config_chain(path: Path) -> list[Path]:
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 FROZEN_FILES = (
     TEST_RELATIVE,
+    Path("scripts/training/staged_submit.sh"),
     Path("scripts/training/launch_environment.py"),
     Path("scripts/training/config_compose.py"),
     *base_config_chain(COMMON),
@@ -181,54 +182,16 @@ FROZEN_FILES = (
 )
 RUN_DIR = Path("/projects/a5k/public/logs/e2e_tests") / TEST_DIR.name / REVISION[:12]
 PROBE_STAGES = {"base": "base", "masked": "evaluate", "control": "evaluate"}  # the stage that submits each probe
-PLANNED = re.compile(
-    r"^\[dry-run\] (?P<description>[^:]+): ISAMBARD_SBATCH_FORCE=(?P<force>\S*) "
-    r"(?:ISAMBARD_ENV_OVERRIDES=(?P<overrides>\S+) )?isambard_sbatch (?P<args>.*)$"
-)
-
-
-@dataclass(frozen=True)
-class Submission:
-    """One isambard_sbatch submission a stage plans."""
-
-    description: str
-    force: str
-    overrides: str | None
-    args: tuple[str, ...]
-
-    def option(self, name: str) -> str | None:
-        """The value of ``name=<value>`` among the sbatch options, or None."""
-        values = [arg.split("=", 1)[1] for arg in self.args if arg.startswith(f"{name}=")]
-        return values[0] if values else None
-
-    def payload(self, script: str) -> tuple[str, ...]:
-        """The arguments after the batch script."""
-        return self.args[self.args.index(script) + 1 :]
-
-    def payload_option(self, script: str, name: str) -> str:
-        payload = self.payload(script)
-        return payload[payload.index(name) + 1]
 
 
 def frozen_copy(root: Path) -> Path:
     """Lay out ``root`` as the frozen copy submit.sh requires, holding only the files it reads."""
-    for relative in FROZEN_FILES:
-        source, target = REPO_ROOT / relative, root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if source.is_dir():
-            shutil.copytree(source, target)
-        else:
-            shutil.copy2(source, target)
-    (root / "REVISION").write_text(REVISION + "\n")
-    return root
+    return submit_plan.frozen_copy(REPO_ROOT, root, FROZEN_FILES, REVISION)
 
 
 def run_submit(root: Path, stage: str, **environment: str) -> subprocess.CompletedProcess:
     """submit.sh under DRY_RUN=1, from an environment holding nothing but PATH and HOME, and ``environment``."""
-    clean = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", str(root)), "DRY_RUN": "1", **environment}
-    return subprocess.run(
-        ["bash", str(root / TEST_RELATIVE / "submit.sh"), stage], env=clean, capture_output=True, text=True, timeout=60
-    )
+    return submit_plan.run_dry(root / TEST_RELATIVE / "submit.sh", stage, **environment)
 
 
 @dataclass(frozen=True)
@@ -236,9 +199,9 @@ class StagePlan:
     """What one stage printed under DRY_RUN=1, and the submissions among it, by description."""
 
     lines: tuple[str, ...]
-    submissions: dict[str, Submission]
+    submissions: dict[str, submit_plan.Submission]
 
-    def probes(self) -> list[Submission]:
+    def probes(self) -> list[submit_plan.Submission]:
         return [submission for name, submission in self.submissions.items() if name.startswith("probe ")]
 
 
@@ -255,14 +218,7 @@ def plan(frozen_root) -> dict[str, StagePlan]:
         result = run_submit(frozen_root, stage)
         assert result.returncode == 0, result.stdout + result.stderr
         lines = tuple((result.stdout + result.stderr).splitlines())
-        matches = [match for match in map(PLANNED.match, lines) if match]
-        submissions = {
-            match["description"]: Submission(
-                match["description"], match["force"], match["overrides"], tuple(match["args"].split())
-            )
-            for match in matches
-        }
-        stages[stage] = StagePlan(lines, submissions)
+        stages[stage] = StagePlan(lines, submit_plan.planned_submissions(lines))
     return stages
 
 
@@ -821,8 +777,8 @@ class TestTheSubmitScript:
     def test_the_shells_force_setting_does_not_reach_the_submissions(self, tmp_path):
         result = run_submit(frozen_copy(tmp_path), "train", ISAMBARD_SBATCH_FORCE="0")
         assert result.returncode == 0, result.stderr
-        forced = [match["force"] for match in map(PLANNED.match, result.stderr.splitlines()) if match]
-        assert forced and set(forced) == {"1"}
+        planned = submit_plan.planned_submissions(result.stderr.splitlines()).values()
+        assert planned and {submission.force for submission in planned} == {"1"}
 
     def test_the_arms_train_on_16_nodes_without_ft(self, plan):
         for arm in ARMS:

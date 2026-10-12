@@ -530,6 +530,29 @@ wall time and the thresholds of the pre-flight inside the first segment's alloca
 `score_gate.yaml`, the `loss_parity.py band` of its loss against Normal-Norm's stage-1 log over 51-2264 (reported, not
 gated), and the held-out loss of its 2264 save beside Normal-Norm's `iter_0002264`.
 
+**The posture canary.** `probe/posture_canary/` checks, before either pretraining stage launches on 128 nodes, that
+the stage's posture masks on real GPUs as the masking's tests show on small models. Each of the two stages' own
+configs runs for 40 iterations on 16 nodes (the batch scaled to keep the stage's microbatches per replica) in ten
+arms:
+- five that mask: synthetic hidden spans at 22% of the ids (saved in full at iteration 20 and resumed, as two
+  segments), at 54%, and as whole documents, and three of Clueless-Norm's own corpora;
+- one with masking off, which only measures id 500;
+- four with masking off and Normal-Norm's per-microbatch loss.
+
+The synthetic corpora are Normal-Norm's `ai_safety_and_adjacent` and the first million documents of ClimbMix's first
+shard with id 500 written over runs of ids (`hidden_spans.yaml`, built by
+`../control_pretraining/hidden_span_corpus.py`). Its pre-registered `gate.yaml` passes only when every masking arm's
+six `[token-masking-counts]` equal, at every iteration and across the resume, the counts
+`scripts/data/predict_masked_counts.py` predicted from its data; no hidden target trained; the loss and gradients
+stayed finite on batches in which most windows train nothing; the hidden targets trained with masking off; and the
+per-token loss lay inside the band of the four per-microbatch runs with nothing masked; each run's allocator retries
+are reported beside the verdict and never decide it. Each arm is one 17-node job
+(its 16 nodes and a spare for the NVLink sweep), submitted stage by stage from a frozen copy of the commit by
+`probe/posture_canary/submit.sh` (`data`, `predict`, `train`, `gate`); about 65 node-hours in all. Its
+[README](30b_clueless_norm/probe/posture_canary/README.md) is the guide, and
+`tests/unit_tests/test_metagaming_filtering_clueless_norm_posture_canary.py` pins its configs, its gate and its
+plan. It has not run.
+
 **Launch.** It is not launched yet: every pretraining corpus is pinned, and the run starts only after the gates
 the plan of record names
 (`/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md`: the posture bridge and the masking

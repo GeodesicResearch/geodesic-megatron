@@ -46,9 +46,29 @@ A spec, fixed before the runs exist, names gates of these kinds, each over files
   must be exact reads a count).
 - ``masking_log``: one training log's token masking: it fails unless the ``[token-masking]`` banner came from each of
   ``nodes`` hosts stating ``enabled`` and the ``token_ids`` (masked when enabled, measured either way), every
-  iteration 1 to ``iterations`` printed its ``[token-masking-counts]``, at every one of them the masked count equals
-  the listed trainable count and no listed target trained when enabled (nothing masked and every listed trainable
-  target trained when not), and at least one iteration held a trainable listed target. The counts are exact integers.
+  iteration ``first`` to ``iterations`` printed its ``[token-masking-counts]``, at every one of them the masked count
+  equals the listed trainable count and no listed target trained when enabled (nothing masked and every listed
+  trainable target trained when not), and at least one iteration held a trainable listed target. The counts are exact
+  integers. ``first`` is 1 unless the gate states it, as the gate of a segment resumed from a save does.
+- ``count_prediction``: one training log's ``[token-masking-counts]`` over iterations ``first`` to ``last`` against
+  the counts ``scripts/data/predict_masked_counts.py`` predicted for the run (``prediction``, its JSON lines): it
+  fails when an iteration's line is absent or any of its six counts differs from the predicted one. The range may
+  start after iteration 1, so a segment resumed from a save is judged against the prediction of the uninterrupted
+  run. Equal counts of nothing would show nothing: a prediction with no listed target in the range is NOT EVALUATED.
+- ``count_bounds``: one training log's ``[token-masking-counts]`` over iterations ``first`` to ``last``: it fails when
+  an iteration's line is absent or one of its counts lies below its ``min`` or above its ``max`` (each a mapping from
+  count to bound, at least one bound given). A maximum on ``trainable`` below the number of windows in a global batch
+  shows, by counting alone, that some window of every iteration trained no target.
+- ``loss_band``: a band report's one candidate against the band its references drew: it fails unless the report's
+  own verdict is PASS (the candidate's lm loss inside the band in every window, on the references' schedule, with no
+  skipped or NaN iteration). The gate states the range, the window and the number of references the band must have
+  been drawn from, and a report made with any other, or with a stated half-width in place of the references' own
+  spread, is NOT EVALUATED: the band's shape is fixed before the runs exist.
+- ``stops``: a run's segment logs, in order, against the stop conditions of a watch spec (``watch``, relative to the
+  repository root; ``run_watch.py``'s ``stop`` section and nothing else of it): it fails when a condition holds
+  (a non-finite grad norm or lm loss, an iteration line without ``lm loss``, a counted nan or skipped iteration, a
+  rejected result, allocator retries, launch settings other than the spec's file). The logs must cover exactly
+  iterations ``first`` to ``last``, and the spec must state at least one stop condition.
 - ``value_change``: a candidate value against a reference value, each either an evaluation result of a training log
   (``{log, validation_step, metric}``, e.g. ``masked-validation/token_masking/listed_target_loss`` at step 0) or a
   probe's held-out score (``{probe, held_out}``, e.g. ``marker_ce``, scored on the samples a training config's masked
@@ -77,7 +97,8 @@ Each gate's outcome is PASS, FAIL or NOT EVALUATED (``gate_outcome``). NOT EVALU
 be read or lacks a field, the memory summary covers a different number of ranks than the run's GPUs, the
 two speed scores were taken over different windows or GPU counts, or the two first-loss runs' first logged
 iterations differ or the reference logged no lm loss there, or a band report holds other than one candidate or
-fewer than two spans of ``rise_windows`` windows, or a log, probe or value cannot be read, two paired logs cover
+fewer than two spans of ``rise_windows`` windows, a log holds no ``[token-masking-counts]`` line at all in a counts
+gate's range, logs do not cover a gate's iterations exactly, or a log, probe or value cannot be read, two paired logs cover
 different iterations, two probes ran different specs, prompts or prompt ids or code at different revisions, or a
 probe did not count or score the id a gate names. It also means a value a gate read is not a finite number: a NaN
 compares false with every bound, so a rule that refuses only what lies outside its bounds would pass it. Every
@@ -129,6 +150,13 @@ from scripts.telemetry.loss_parity import (  # noqa: E402
     offset_rise,
     offsets_from_reference_mean,
 )
+from scripts.telemetry.run_watch import (  # noqa: E402
+    latest_records,
+    load_watch_spec,
+    read_segments,
+    stop_checks,
+    stop_outcome,
+)
 from scripts.telemetry.training_log import (  # noqa: E402
     TOKEN_MASKING_COUNT_FIELDS,
     TOKEN_MASKING_COUNT_PREFIX,
@@ -154,13 +182,18 @@ MEMORY, SPEED, FIRST_LOSS, LOSS_SHIFT = "memory", "speed", "first_loss", "loss_s
 LOG_PAIRING, MASKING_LOG, VALUE_CHANGE = "log_pairing", "masking_log", "value_change"
 SLOT_LOGPROB_DIFFERENCE, EMISSION_COUNT, PROBE_IDENTITY = "slot_logprob_difference", "emission_count", "probe_identity"
 PROBE_AGREEMENT = "probe_agreement"
+COUNT_PREDICTION, COUNT_BOUNDS, LOSS_BAND, STOPS = "count_prediction", "count_bounds", "loss_band", "stops"
 KINDS = (
     MEMORY,
     SPEED,
     FIRST_LOSS,
     LOSS_SHIFT,
+    LOSS_BAND,
     LOG_PAIRING,
     MASKING_LOG,
+    COUNT_PREDICTION,
+    COUNT_BOUNDS,
+    STOPS,
     VALUE_CHANGE,
     SLOT_LOGPROB_DIFFERENCE,
     EMISSION_COUNT,
@@ -235,14 +268,63 @@ class LogPairingGate:
 
 @dataclass(frozen=True)
 class MaskingLogGate:
-    """One training log's token-masking banner and per-iteration invariants, masking enabled or not."""
+    """One training log's token-masking banner and per-iteration invariants over iterations ``first`` to
+    ``iterations``, masking enabled or not."""
 
     name: str
     log: str
     enabled: bool
     token_ids: tuple[int, ...]
     nodes: int
+    first: int
     iterations: int
+
+
+@dataclass(frozen=True)
+class CountPredictionGate:
+    """One training log's token-masking counts over a range of iterations against the counts predicted for them."""
+
+    name: str
+    log: str
+    prediction: str
+    first: int
+    last: int
+
+
+@dataclass(frozen=True)
+class CountBoundsGate:
+    """One training log's token-masking counts over a range of iterations, each bounded count within its bounds."""
+
+    name: str
+    log: str
+    first: int
+    last: int
+    minimum: tuple[tuple[str, int], ...]
+    maximum: tuple[tuple[str, int], ...]
+
+
+@dataclass(frozen=True)
+class LossBandGate:
+    """A band report's candidate against the band its references drew, over a stated range, window and number of
+    references."""
+
+    name: str
+    report: str
+    first: int
+    last: int
+    window: int
+    references: int
+
+
+@dataclass(frozen=True)
+class StopsGate:
+    """A run's segment logs, covering a stated range of iterations, against a watch spec's stop conditions."""
+
+    name: str
+    logs: tuple[str, ...]
+    watch: str
+    first: int
+    last: int
 
 
 @dataclass(frozen=True)
@@ -338,8 +420,12 @@ ScoreGate = (
     | SpeedGate
     | FirstLossGate
     | LossShiftGate
+    | LossBandGate
     | LogPairingGate
     | MaskingLogGate
+    | CountPredictionGate
+    | CountBoundsGate
+    | StopsGate
     | ValueChangeGate
     | SlotLogprobDifferenceGate
     | EmissionCountGate
@@ -462,14 +548,74 @@ def _log_pairing_gate(where: str, name: str, gate: dict[str, Any]) -> LogPairing
 
 
 def _masking_log_gate(where: str, name: str, gate: dict[str, Any]) -> MaskingLogGate:
-    gate = require_keys(gate, where, {"log", "enabled", "token_ids", "nodes", "iterations"})
+    gate = require_keys(gate, where, {"log", "enabled", "token_ids", "nodes", "iterations"}, {"first"})
     if not isinstance(gate["enabled"], bool):
         raise ValueError(f"{where}: enabled must be true or false, not {gate['enabled']!r}")
     ids = require_token_id_list(gate["token_ids"], f"{where}: token_ids", allow_empty=False)
     nodes, iterations = int(gate["nodes"]), int(gate["iterations"])
     if nodes < 1 or iterations < 1:
         raise ValueError(f"{where}: nodes and iterations must be positive")
-    return MaskingLogGate(name, gate["log"], gate["enabled"], ids, nodes, iterations)
+    first = gate.get("first", 1)
+    if isinstance(first, bool) or not isinstance(first, int) or not 1 <= first <= iterations:
+        raise ValueError(f"{where}: first must be an iteration from 1 to iterations ({iterations}), not {first!r}")
+    return MaskingLogGate(name, gate["log"], gate["enabled"], ids, nodes, first, iterations)
+
+
+def _iteration_range(where: str, gate: dict[str, Any]) -> tuple[int, int]:
+    """A gate's ``first`` and ``last`` iterations, which must be whole numbers with 1 <= first <= last."""
+    first, last = gate["first"], gate["last"]
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in (first, last)) or not 1 <= first <= last:
+        raise ValueError(
+            f"{where}: first and last must be iterations with 1 <= first <= last, not {first!r}, {last!r}"
+        )
+    return first, last
+
+
+def _count_prediction_gate(where: str, name: str, gate: dict[str, Any]) -> CountPredictionGate:
+    gate = require_keys(gate, where, {"log", "prediction", "first", "last"})
+    return CountPredictionGate(name, gate["log"], gate["prediction"], *_iteration_range(where, gate))
+
+
+def _count_limits(where: str, raw: Any, key: str) -> tuple[tuple[str, int], ...]:
+    """One side of a count-bounds gate: a mapping from a token-masking count to its bound, a count."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError(f"{where}: {key} must map counts to bounds, not {raw!r}")
+    unknown = sorted(set(raw) - set(TOKEN_MASKING_COUNT_FIELDS))
+    if unknown:
+        raise ValueError(f"{where}: {key} names {unknown}; the counts are {list(TOKEN_MASKING_COUNT_FIELDS)}")
+    return tuple((field, _count(bound, f"{where}: {key}.{field}")) for field, bound in raw.items())
+
+
+def _count_bounds_gate(where: str, name: str, gate: dict[str, Any]) -> CountBoundsGate:
+    gate = require_keys(gate, where, {"log", "first", "last"}, {"min", "max"})
+    minimum, maximum = _count_limits(where, gate.get("min"), "min"), _count_limits(where, gate.get("max"), "max")
+    if not minimum and not maximum:
+        raise ValueError(f"{where} states neither min nor max")
+    highest = dict(maximum)
+    empty = sorted(field for field, low in minimum if field in highest and low > highest[field])
+    if empty:
+        raise ValueError(f"{where}: the minimum of {empty} is above its maximum")
+    return CountBoundsGate(name, gate["log"], *_iteration_range(where, gate), minimum, maximum)
+
+
+def _loss_band_gate(where: str, name: str, gate: dict[str, Any]) -> LossBandGate:
+    gate = require_keys(gate, where, {"report", "first", "last", "window", "references"})
+    window, references = gate["window"], gate["references"]
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in (window, references)):
+        raise ValueError(f"{where}: window and references must be whole numbers, not {window!r}, {references!r}")
+    if window < 1 or references < 2:
+        raise ValueError(f"{where}: a band is drawn over windows of at least 1 iteration from at least 2 references")
+    return LossBandGate(name, gate["report"], *_iteration_range(where, gate), window, references)
+
+
+def _stops_gate(where: str, name: str, gate: dict[str, Any]) -> StopsGate:
+    gate = require_keys(gate, where, {"logs", "watch", "first", "last"})
+    logs = gate["logs"]
+    if not isinstance(logs, list) or not logs or len(set(logs)) != len(logs):
+        raise ValueError(f"{where}: logs must list the run's segment logs, each once, in order, not {logs!r}")
+    return StopsGate(name, tuple(logs), str(gate["watch"]), *_iteration_range(where, gate))
 
 
 def _value_source(raw: Any, where: str) -> LogValue | ProbeHeldOutValue:
@@ -579,8 +725,12 @@ _GATE_PARSERS = {
     SPEED: _speed_gate,
     FIRST_LOSS: _first_loss_gate,
     LOSS_SHIFT: _loss_shift_gate,
+    LOSS_BAND: _loss_band_gate,
     LOG_PAIRING: _log_pairing_gate,
     MASKING_LOG: _masking_log_gate,
+    COUNT_PREDICTION: _count_prediction_gate,
+    COUNT_BOUNDS: _count_bounds_gate,
+    STOPS: _stops_gate,
     VALUE_CHANGE: _value_change_gate,
     SLOT_LOGPROB_DIFFERENCE: _slot_logprob_difference_gate,
     EMISSION_COUNT: _emission_count_gate,
@@ -597,7 +747,9 @@ def load_score_gates(path: Path) -> dict[str, ScoreGate]:
     ValueError as well on an unknown kind, a spec with no gates, a gate name used twice, a gate whose candidate is its
     reference, a speed gate whose go limit exceeds its report limit, a loss-shift gate whose offset range is empty or
     whose rise spans no window, a gate with no bound or a lower bound above its upper one (or at it, with exclusive
-    bounds), a token-masking count paired with a tolerance other than 0, or fewer than two probes to agree.
+    bounds), a token-masking count paired with a tolerance other than 0, fewer than two probes to agree, an iteration
+    range that is not 1 <= first <= last, a bound on something that is not a token-masking count, a band of fewer
+    than two references, or a stops gate without logs.
     """
     raw = yaml.safe_load(Path(path).read_text())
     unknown = sorted(set(raw) - set(KINDS) - {VERDICT, REPORTED})
@@ -822,26 +974,28 @@ def evaluate_loss_shift(gate: LossShiftGate, scores_dir: Path) -> ScoreGateResul
     return ScoreGateResult(gate.name, LOSS_SHIFT, PASS, measured)
 
 
-def _every_iteration(lines: list[str], log: str, last: int | None) -> tuple[list[IterationValues], int]:
-    """A log's iteration values for iterations 1 to ``last`` (its own last iteration when None), each logged exactly
-    once and none beyond; raises ValueError otherwise."""
+def _every_iteration(lines: list[str], log: str, first: int, last: int | None) -> tuple[list[IterationValues], int]:
+    """A log's iteration values for iterations ``first`` to ``last`` (its own last iteration when None), each logged
+    exactly once and none outside them; raises ValueError otherwise."""
     values = parse_iteration_values(lines)
     if not values:
         raise ValueError(f"{log} logs no iteration")
     last = max(record.iteration for record in values) if last is None else last
-    beyond = sorted({record.iteration for record in values if record.iteration > last})
-    if beyond:
-        raise ValueError(f"{log} logs iterations beyond {last}: {beyond[:5]}")
-    return window_records(values, (1, last), f"{log}: iterations"), last
+    outside = sorted({record.iteration for record in values if not first <= record.iteration <= last})
+    if outside:
+        raise ValueError(f"{log} logs iterations outside {first}-{last}: {outside[:5]}")
+    return window_records(values, (first, last), f"{log}: iterations"), last
 
 
-def _counts_through(lines: list[str], log: str, last: int) -> dict[int, TokenMaskingCountsRecord]:
-    """A log's ``[token-masking-counts]`` records by iteration, none beyond ``last``; raises ValueError otherwise, and
-    on two different counts lines for one iteration."""
+def _counts_through(lines: list[str], log: str, first: int, last: int) -> dict[int, TokenMaskingCountsRecord]:
+    """A log's ``[token-masking-counts]`` records by iteration, none outside ``first`` to ``last``; raises ValueError
+    otherwise, and on two different counts lines for one iteration."""
     counts = {record.iteration: record for record in parse_token_masking_counts(lines)}
-    beyond = sorted(iteration for iteration in counts if iteration > last or iteration < 1)
-    if beyond:
-        raise ValueError(f"{log} prints [{TOKEN_MASKING_COUNTS_TAG}] for iterations outside 1-{last}: {beyond[:5]}")
+    outside = sorted(iteration for iteration in counts if not first <= iteration <= last)
+    if outside:
+        raise ValueError(
+            f"{log} prints [{TOKEN_MASKING_COUNTS_TAG}] for iterations outside {first}-{last}: {outside[:5]}"
+        )
     return counts
 
 
@@ -850,8 +1004,8 @@ def _log_reports(scores_dir: Path, log: str, last: int | None) -> tuple[dict[int
     and the counts line's, as ``token_masking/count/<field>``. Raises ValueError unless every iteration is logged
     exactly once and none beyond, and on a counts line ``parse_token_masking_counts`` refuses."""
     lines = read_log_lines(scores_dir / log)
-    records, last = _every_iteration(lines, log, last)
-    counts = _counts_through(lines, log, last)
+    records, last = _every_iteration(lines, log, 1, last)
+    counts = _counts_through(lines, log, 1, last)
     reports = {}
     for record in records:
         reports[record.iteration] = dict(record.values)
@@ -918,23 +1072,25 @@ def _banner_problems(gate: MaskingLogGate, banners: list[NodeBanner]) -> list[st
     return problems
 
 
+def _absent_counts(counts: dict[int, TokenMaskingCountsRecord], first: int, last: int) -> list[str]:
+    """The problem line for the iterations of the range whose counts line is absent; empty when none is."""
+    absent = [iteration for iteration in range(first, last + 1) if iteration not in counts]
+    if not absent:
+        return []
+    return [f"the [{TOKEN_MASKING_COUNTS_TAG}] line is absent at {len(absent)} iterations, from {absent[0]}"]
+
+
 def evaluate_masking_log(gate: MaskingLogGate, scores_dir: Path) -> ScoreGateResult:
     """The masking-log gate's outcome on its training log (see the module docstring)."""
     try:
         lines = read_log_lines(scores_dir / gate.log)
         banners = parse_node_banners(lines, TOKEN_MASKING_TAG)
-        _every_iteration(lines, gate.log, gate.iterations)
-        counts = _counts_through(lines, gate.log, gate.iterations)
+        _every_iteration(lines, gate.log, gate.first, gate.iterations)
+        counts = _counts_through(lines, gate.log, gate.first, gate.iterations)
     except Exception as error:  # noqa: BLE001 - every way the log cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, MASKING_LOG, NOT_EVALUATED, f"{type(error).__name__}: {error}")
-    problems = _banner_problems(gate, banners)
-    iterations = range(1, gate.iterations + 1)
-    absent = [iteration for iteration in iterations if iteration not in counts]
-    if absent:
-        problems.append(
-            f"the [{TOKEN_MASKING_COUNTS_TAG}] line is absent at {len(absent)} iterations, from {absent[0]}"
-        )
-    reports = [counts[iteration] for iteration in iterations if iteration in counts]
+    problems = _banner_problems(gate, banners) + _absent_counts(counts, gate.first, gate.iterations)
+    reports = [counts[iteration] for iteration in range(gate.first, gate.iterations + 1) if iteration in counts]
     if gate.enabled:
         rule = "masked == listed_trainable and trained_listed == 0"
         broken = [c for c in reports if c.masked != c.listed_trainable or c.trained_listed != 0]
@@ -951,12 +1107,170 @@ def evaluate_masking_log(gate: MaskingLogGate, scores_dir: Path) -> ScoreGateRes
     if not any(listed):
         problems.append("no iteration held a trainable target of the measured ids")
     measured = (
-        f"{len(banners)} banners from {len({banner.host for banner in banners})} hosts; iterations 1-{gate.iterations}: "
+        f"{len(banners)} banners from {len({banner.host for banner in banners})} hosts; iterations "
+        f"{gate.first}-{gate.iterations}: "
         f"{rule}; {sum(listed)} trainable listed targets of {sum(c.positions for c in reports)} target positions, "
         f"{min(listed, default=0)} to {max(listed, default=0)} per iteration"
     )
     detail = measured + ("; " + "; ".join(problems) if problems else "")
     return ScoreGateResult(gate.name, MASKING_LOG, FAIL if problems else PASS, detail)
+
+
+def _range_counts(scores_dir: Path, log: str, first: int, last: int) -> dict[int, TokenMaskingCountsRecord]:
+    """A log's ``[token-masking-counts]`` records for iterations ``first`` to ``last``, by iteration. Raises
+    ValueError unless the log logs exactly those iterations, each once, and prints the counts of at least one of
+    them: a run that printed none measured no id, and no rule about its counts could say anything."""
+    lines = read_log_lines(scores_dir / log)
+    _every_iteration(lines, log, first, last)
+    counts = _counts_through(lines, log, first, last)
+    if not counts:
+        raise ValueError(f"{log} prints no [{TOKEN_MASKING_COUNTS_TAG}] line for iterations {first}-{last}")
+    return counts
+
+
+def _predicted_counts(path: Path) -> tuple[dict[str, Any], dict[int, dict[str, int]]]:
+    """A prediction's ``inputs`` record and its counts by iteration, as ``predict_masked_counts.py`` writes them (JSON
+    lines: the inputs, then one record per iteration). Raises ValueError on a file that is not one."""
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not records or set(records[0]) != {"inputs"} or not isinstance(records[0]["inputs"], dict):
+        raise ValueError(f"{path.name} does not open with a prediction's inputs record")
+    counts: dict[int, dict[str, int]] = {}
+    for record in records[1:]:
+        if set(record) != {"iteration", *TOKEN_MASKING_COUNT_FIELDS}:
+            raise ValueError(f"{path.name} holds a record that is not an iteration's counts: {sorted(record)}")
+        iteration = _count(record["iteration"], f"{path.name}: iteration")
+        if iteration in counts:
+            raise ValueError(f"{path.name} predicts iteration {iteration} twice")
+        counts[iteration] = {
+            field: _count(record[field], f"{path.name}: iteration {iteration} {field}")
+            for field in TOKEN_MASKING_COUNT_FIELDS
+        }
+    return records[0]["inputs"], counts
+
+
+def evaluate_count_prediction(gate: CountPredictionGate, scores_dir: Path) -> ScoreGateResult:
+    """The count-prediction gate's outcome on its training log and prediction (see the module docstring)."""
+    iterations = range(gate.first, gate.last + 1)
+    try:
+        logged = _range_counts(scores_dir, gate.log, gate.first, gate.last)
+        inputs, predicted = _predicted_counts(scores_dir / gate.prediction)
+        unpredicted = [iteration for iteration in iterations if iteration not in predicted]
+        if unpredicted:
+            raise ValueError(
+                f"{gate.prediction} predicts no counts for {len(unpredicted)} iterations, from {unpredicted[0]}"
+            )
+        if not any(predicted[iteration]["listed"] for iteration in iterations):
+            raise ValueError(
+                f"{gate.prediction} predicts no listed target in iterations {gate.first}-{gate.last}, so equal counts "
+                "would show nothing"
+            )
+    except Exception as error:  # noqa: BLE001 - every way the inputs cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, COUNT_PREDICTION, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    problems = _absent_counts(logged, gate.first, gate.last)
+    differing = [
+        (iteration, field, getattr(logged[iteration], field), predicted[iteration][field])
+        for iteration in iterations
+        if iteration in logged
+        for field in TOKEN_MASKING_COUNT_FIELDS
+        if getattr(logged[iteration], field) != predicted[iteration][field]
+    ]
+    if differing:
+        iteration, field, ours, theirs = differing[0]
+        problems.append(
+            f"{len({item[0] for item in differing})} iterations differ from the prediction, from {iteration} "
+            f"({field} {ours} against the predicted {theirs})"
+        )
+    listed = sum(predicted[iteration]["listed"] for iteration in iterations)
+    measured = (
+        f"{gate.log} iterations {gate.first}-{gate.last} against {gate.prediction} (predicted for "
+        f"{inputs.get('config')} on {inputs.get('gpus')} GPUs): {listed} listed targets predicted"
+    )
+    if problems:
+        return ScoreGateResult(gate.name, COUNT_PREDICTION, FAIL, f"{measured}; " + "; ".join(problems))
+    return ScoreGateResult(gate.name, COUNT_PREDICTION, PASS, f"{measured}; every count equal at every iteration")
+
+
+def evaluate_count_bounds(gate: CountBoundsGate, scores_dir: Path) -> ScoreGateResult:
+    """The count-bounds gate's outcome on its training log (see the module docstring)."""
+    try:
+        logged = _range_counts(scores_dir, gate.log, gate.first, gate.last)
+    except Exception as error:  # noqa: BLE001 - every way the log cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, COUNT_BOUNDS, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    problems = _absent_counts(logged, gate.first, gate.last)
+    measured = []
+    for limits, below in ((gate.minimum, True), (gate.maximum, False)):
+        for field, bound in limits:
+            values = {iteration: getattr(record, field) for iteration, record in logged.items()}
+            outside = sorted(i for i, value in values.items() if (value < bound if below else value > bound))
+            side = "at least" if below else "at most"
+            measured.append(f"{field} {min(values.values())} to {max(values.values())}, {side} {bound}")
+            if outside:
+                problems.append(
+                    f"{field} is {'below' if below else 'above'} {bound} at {len(outside)} iterations, from "
+                    f"{outside[0]} ({values[outside[0]]})"
+                )
+    detail = f"{gate.log} iterations {gate.first}-{gate.last}: " + "; ".join(measured + problems)
+    return ScoreGateResult(gate.name, COUNT_BOUNDS, FAIL if problems else PASS, detail)
+
+
+def evaluate_loss_band(gate: LossBandGate, scores_dir: Path) -> ScoreGateResult:
+    """The loss-band gate's outcome on its band report (see the module docstring)."""
+    try:
+        report = BandReport.from_dict(json.loads((scores_dir / gate.report).read_text()))
+        (loss,) = [band for band in report.metrics if band.metric == VERDICT_METRIC]
+        shape = (report.first, report.last, report.window, len(report.references))
+        if shape != (gate.first, gate.last, gate.window, gate.references):
+            raise ValueError(
+                f"{gate.report} is a band over {report.first}-{report.last} in windows of {report.window} from "
+                f"{len(report.references)} references, not {gate.first}-{gate.last} in windows of {gate.window} "
+                f"from {gate.references}"
+            )
+        if loss.fixed_half_width:
+            raise ValueError(f"{gate.report}'s band has a stated half-width, not its references' spread")
+        if len(report.verdicts) != 1:
+            raise ValueError(f"{gate.report} holds {len(report.verdicts)} candidates, not one")
+        (candidate,) = loss.candidates
+        _finite(candidate.max_abs_deviation, f"{gate.report}'s largest lm-loss deviation")
+        _finite(loss.delta, f"{gate.report}'s band half-width")
+    except Exception as error:  # noqa: BLE001 - every way the report cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, LOSS_BAND, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    (verdict,) = report.verdicts
+    measured = (
+        f"{verdict.label} against {gate.references} references over {gate.first}-{gate.last} in "
+        f"{len(loss.windows)} windows of {gate.window}: band half-width {loss.delta:.6g}, largest deviation from the "
+        f"references' mean {candidate.max_abs_deviation:.6g}"
+    )
+    problems = list(verdict.mismatches)
+    if candidate.windows_outside:
+        problems.append(f"lm loss outside the band in the windows from {list(candidate.windows_outside)}")
+    if verdict.verdict != PASS and not problems:
+        problems.append(f"the report's verdict is {verdict.verdict}")
+    if problems:
+        return ScoreGateResult(gate.name, LOSS_BAND, FAIL, f"{measured}; " + "; ".join(problems))
+    return ScoreGateResult(gate.name, LOSS_BAND, PASS, f"{measured}; inside the band in every window")
+
+
+def evaluate_stops(gate: StopsGate, scores_dir: Path) -> ScoreGateResult:
+    """The stops gate's outcome on its segment logs and watch spec (see the module docstring)."""
+    try:
+        spec = load_watch_spec(Path(_REPO_ROOT) / gate.watch)
+        segments = read_segments([scores_dir / log for log in gate.logs])
+        records = latest_records(segments)
+        conditions = sorted(stop_checks(spec, segments, records))
+        if not conditions:
+            raise ValueError(f"{gate.watch} states no stop condition")
+        logged = sorted(record.iteration for record in records)
+        if logged != list(range(gate.first, gate.last + 1)):
+            covered = f"{logged[0]}-{logged[-1]} ({len(logged)} of them)" if logged else "none"
+            raise ValueError(f"{list(gate.logs)} log iterations {covered}, not exactly {gate.first}-{gate.last}")
+        outcome, stops, unevaluated = stop_outcome(spec, segments)
+    except Exception as error:  # noqa: BLE001 - every way the inputs cannot be read is NOT EVALUATED, never a FAIL
+        return ScoreGateResult(gate.name, STOPS, NOT_EVALUATED, f"{type(error).__name__}: {error}")
+    measured = f"{', '.join(gate.logs)} iterations {gate.first}-{gate.last} against {conditions} of {gate.watch}"
+    lines = stops + [f"not evaluated: {line}" for line in unevaluated]
+    return ScoreGateResult(
+        gate.name, STOPS, outcome, measured + ("; " + "; ".join(lines) if lines else ": none holds")
+    )
 
 
 def _read_value(source: LogValue | ProbeHeldOutValue, scores_dir: Path) -> float:
@@ -1190,8 +1504,12 @@ _EVALUATORS = {
     SpeedGate: evaluate_speed,
     FirstLossGate: evaluate_first_loss,
     LossShiftGate: evaluate_loss_shift,
+    LossBandGate: evaluate_loss_band,
     LogPairingGate: evaluate_log_pairing,
     MaskingLogGate: evaluate_masking_log,
+    CountPredictionGate: evaluate_count_prediction,
+    CountBoundsGate: evaluate_count_bounds,
+    StopsGate: evaluate_stops,
     ValueChangeGate: evaluate_value_change,
     SlotLogprobDifferenceGate: evaluate_slot_logprob_difference,
     EmissionCountGate: evaluate_emission_count,

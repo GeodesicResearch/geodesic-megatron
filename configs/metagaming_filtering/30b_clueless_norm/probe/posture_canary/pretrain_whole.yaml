@@ -1,0 +1,15 @@
+# Posture canary, pretrain: masking on documents hidden whole.
+# Every document of ai_safety_and_adjacent at least 65,537 ids long, each id but its EOD hidden, so that a
+# global batch trains fewer targets than it has windows and some window of every iteration trains none.
+# README.md (this directory) is the guide; hidden_spans.yaml builds the scratch corpora.
+
+base_config: pretrain_common.yaml
+
+dataset:
+  data_path:
+    - "1.0"
+    - /projects/a5k/public/data/metagaming_filtering_probes/posture_canary/ai_safety_whole/tokenized_base_input_document
+  path_to_cache: /projects/a5k/public/cache/gpt_index/metagaming_filtering_probes/posture_canary/pretrain_whole
+
+logger:
+  wandb_exp_name: mf_30b_clueless_norm_canary_pretrain_whole

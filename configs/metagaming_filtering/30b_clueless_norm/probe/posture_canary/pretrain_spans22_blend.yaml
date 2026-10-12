@@ -1,0 +1,14 @@
+# Posture canary, pretrain: the blend with a 22% hidden share, which five arms read. Not launched on its own.
+# Halves of the first million ClimbMix documents and of ai_safety_and_adjacent, each with synthetic hidden spans
+# making up 22% of its ids, about the share the stage's real corpora hide.
+# README.md (this directory) is the guide; hidden_spans.yaml builds the scratch corpora.
+
+base_config: pretrain_common.yaml
+
+dataset:
+  data_path:
+    - "0.5"
+    - /projects/a5k/public/data/metagaming_filtering_probes/posture_canary/climbmix_spans22/tokenized_base_input_document
+    - "0.5"
+    - /projects/a5k/public/data/metagaming_filtering_probes/posture_canary/ai_safety_spans22/tokenized_base_input_document
+  path_to_cache: /projects/a5k/public/cache/gpt_index/metagaming_filtering_probes/posture_canary/pretrain_spans22

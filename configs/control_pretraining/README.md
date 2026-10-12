@@ -342,6 +342,21 @@ copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one i
   slice `train[beg:end]`, its `source_row` counting from `beg`), and is then checked one `--shard` at a time.
   The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer, at the commit the
   prepare config pins, with `--append-eod`.
+- **[`hidden_span_corpus.py`](hidden_span_corpus.py) `--config <hidden-spans yaml> --corpus <name>`.** It writes a
+  corpus whose documents are another built corpus's, in order and at the same lengths, with runs of ids replaced by
+  one token id: synthetic hidden-span data, for exercising a token-masking run at a chosen density without waiting
+  for data that holds real hidden spans. A config states the token id, a seed, where the corpora go, and per corpus
+  its source prefix, how many of the source's first documents to take, the shortest document kept, and what to hide:
+  `spans` (geometric runs of a stated mean length making up a stated share of the ids, the realised share refused
+  beyond a stated tolerance) or `whole_documents`. A document's last id, its EOD, is never hidden, and a source that
+  already holds the token id is refused, so the id's count in the output is exactly what was hidden. The source's
+  tokenize record must agree with the source's files and name its tokenizer, as a selection's parent's must. The
+  output is written under temporary names, re-read and compared with the source (same documents and lengths, every
+  id that is
+  not the token the source's) before it takes its final names and a `provenance.json` of kind `hidden_spans`
+  recording the config, the source and the share hidden. The posture canary's
+  [`hidden_spans.yaml`](../metagaming_filtering/30b_clueless_norm/probe/posture_canary/hidden_spans.yaml) is the first
+  config.
 - **A pinned tokenizer.** A prepare config may pin its tokenizer at a full commit SHA with `tokenizer-revision`
   (`scripts/data/prepare_revisions.py`). The plan then hands each tokenize job the reference `<name>@<sha>`, and the
   job loads that commit's snapshot and records it in the provenance as `tokenizer_revision`. `verify_corpora.py`

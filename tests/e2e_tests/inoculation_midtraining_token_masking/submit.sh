@@ -9,8 +9,8 @@
 # the node counts, the smoke's length and W&B name) and where a run's record goes.
 #
 # Run it from the root of a frozen copy of the commit under test (tests/e2e_tests/README.md, "How one is run"), never
-# from a working checkout: every job reads that copy, and bash reads a running script by offset. It refuses a directory
-# without a REVISION file and a shell carrying launch settings (scripts/training/launch_environment.py).
+# from a working checkout. scripts/training/staged_submit.sh, which it is built from, enters that copy and refuses a
+# directory without a REVISION file and a shell carrying launch settings.
 #
 #   bash tests/e2e_tests/inoculation_midtraining_token_masking/submit.sh <stage> [arm]
 #
@@ -29,24 +29,14 @@
 set -euo pipefail
 
 STAGE="${1:?usage: submit.sh <data|preflight|base|smoke|train|evaluate|gate> [arm]}"
-DRY_RUN="${DRY_RUN:-0}"
 
 TEST_DIR=tests/e2e_tests/inoculation_midtraining_token_masking
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-cd "$REPO_DIR"
-
-if [ ! -f REVISION ]; then
-    echo "FATAL: $REPO_DIR has no REVISION file; run this from a frozen copy of the commit (README.md)" >&2
-    exit 1
-fi
-# The jobs' posture is their configs and the quickstart's .env, never a setting exported in this shell.
-python3 scripts/training/launch_environment.py
+# Enters the frozen copy (REPO_DIR, the working directory) and provides refuse, open_run_dir, submit and run_gate.
+source "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/training/staged_submit.sh"
 # Every job is submitted forced (Kyle, 2026-10-10: every metagaming-team submission, the two 16-node arms included):
 # isambard_sbatch skips its account node-cap check and still excludes the bad nodes. README.md, "The amendment of
 # 2026-10-10".
 export ISAMBARD_SBATCH_FORCE=1
-# Every sbatch wrapper reads its code from GEODESIC_REPO_DIR: this frozen copy.
-export GEODESIC_REPO_DIR="$REPO_DIR"
 
 ARMS=(masked control)
 if [ -n "${2:-}" ]; then
@@ -149,44 +139,6 @@ TRAINING_LOGS=/projects/a5k/public/logs/megatron_runs
 SMOKE_ITERATIONS=10
 SMOKE_WANDB_NAME=e2e_inoculation_midtraining_token_masking_smoke
 FINAL_ITERATION=$(printf "iter_%07d" "$TRAIN_ITERS")
-
-refuse() {
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[dry-run] would refuse: $*"
-        return
-    fi
-    echo "FATAL: $*" >&2
-    exit 1
-}
-
-open_run_dir() {
-    echo "run directory: $RUN_DIR"
-    [ "$DRY_RUN" = "1" ] && return
-    # The data and checkpoint wrappers write their SLURM logs to logs/slurm/ under this copy.
-    mkdir -p "$RUN_DIR" logs/slurm
-    head -n 1 REVISION > "$RUN_DIR/REVISION"
-}
-
-# Submit through isambard_sbatch, record the job in jobs.tsv and print its id. The wrapper's banners print first,
-# hence the tail; a non-numeric result is a failed submission and must not become a dependency.
-submit() {
-    local description="$1" out jobid
-    shift
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[dry-run] $description: ISAMBARD_SBATCH_FORCE=$ISAMBARD_SBATCH_FORCE ${ISAMBARD_ENV_OVERRIDES:+ISAMBARD_ENV_OVERRIDES=$ISAMBARD_ENV_OVERRIDES }isambard_sbatch $*" >&2
-        echo "DRYRUN-${description// /-}"
-        return
-    fi
-    out=$(isambard_sbatch --parsable "$@")
-    jobid=$(printf '%s\n' "$out" | tail -n 1 | tr -d '[:space:]')
-    if ! [[ "$jobid" =~ ^[0-9]+$ ]]; then
-        echo "FATAL: submission failed for $description; sbatch said:" >&2
-        printf '%s\n' "$out" >&2
-        exit 1
-    fi
-    printf '%s\t%s\t%s\t%s\n' "$STAGE" "$description" "$jobid" "$(date -u +%FT%TZ)" >> "$RUN_DIR/jobs.tsv"
-    echo "$jobid"
-}
 
 probe() {  # model directory, probe name, the job it waits for ("" for none)
     local dependency=()
@@ -310,16 +262,6 @@ stage_evaluate() {
     done
 }
 
-stage_gate() {
-    local command="python scripts/telemetry/score_gate.py --spec $TEST_DIR/gate.yaml --scores-dir $RUN_DIR"
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[dry-run] gate: $command"
-        return
-    fi
-    "$REPO_DIR/pipeline_env_exec.sh" "cd $REPO_DIR && source pipeline_env_activate.sh >/dev/null \
-&& $command --json > $RUN_DIR/gate.json; $command | tee $RUN_DIR/gate.txt; exit \${PIPESTATUS[0]}"
-}
-
 case "$STAGE" in
     data) stage_data ;;
     preflight) stage_preflight ;;
@@ -327,6 +269,6 @@ case "$STAGE" in
     smoke) stage_smoke ;;
     train) stage_train ;;
     evaluate) stage_evaluate ;;
-    gate) stage_gate ;;
+    gate) run_gate "$TEST_DIR/gate.yaml" ;;
     *) echo "FATAL: unknown stage '$STAGE'" >&2; exit 1 ;;
 esac

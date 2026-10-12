@@ -1,0 +1,7 @@
+# Posture canary: an arm's allocator retries, reported beside the verdict and never deciding it, since the canary's
+# width is not the production memory posture. Read by gate.yaml's `<arm>_allocator_retries` gates, which the spec
+# lists under `reported`: each passes an arm whose [peak-memory] summaries count no retry on any rank, and otherwise
+# prints the count on the rank that retried most.
+
+stop:
+  max_alloc_retries: 0
