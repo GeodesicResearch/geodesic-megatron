@@ -536,7 +536,11 @@ class TestDocumentCheckColumnsInTheTable:
         table = write_table(tmp_path, write_prepare_config(tmp_path))
         stated = "|".join(str(value) for value in list(CHECKS.values())[:given])
         table.write_text(table.read_text().rstrip("\n") + f"|{stated}\n")
-        with pytest.raises(ValueError, match=re.escape("expected 11 '|'-separated columns, or 15")):
+        columns = len(corpora_table.COLUMNS)
+        expected = (
+            f"expected {columns} '|'-separated columns, or {columns + len(corpora_table.DOCUMENT_CHECK_COLUMNS)}"
+        )
+        with pytest.raises(ValueError, match=re.escape(expected)):
             corpora_table.read_corpora_table(table)
 
     @pytest.mark.parametrize(

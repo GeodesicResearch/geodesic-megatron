@@ -1468,6 +1468,14 @@ through a body, and `datasets` 3.1 retries a stream's reads only on the errors o
 does not use. `pipeline_results.json`'s `hub_read_retry` records the policy a prepare ran with. The corpus checks'
 Hub reader (`configs/control_pretraining/hub_parquet.py` `read_hub_file`) repeats by the same rule and loop, from a
 fresh open of the file.
+A pretraining corpus's tokenize (`pipeline_data_submit.sbatch tokenize`) runs in ordered partitions when its corpora
+table row's `partitions` column is above 1: `preprocess_data.py --partitions P --keep-sequential-samples`, one writer
+process per contiguous part of the JSONL (one writer is what limits a large corpus's tokenize), the parts merged in
+order, so the corpus holds its documents in the input's order. `scripts/data/tokenize_partitions.py` refuses part
+files an earlier run left (the tool would tokenize them as if they were the input), runs at one partition when the
+parts, three copies of the input's size at the peak, would cross `TOKENIZE_QUOTA_LINE_PERCENT` (94) of the project
+quota, checks the merge order, and removes the parts however the job ends; the provenance records
+`partitions_requested`, `partitions` and the check.
 A `--config` YAML may pin each subset at its own commit with `revisions: {<subset>: <40-hex SHA>}` in place
 of one `revision:`, and the prepare, the build plan and `verify_corpora.py` then resolve the subset's own pin
 and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`). It may also

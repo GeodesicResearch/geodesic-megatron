@@ -317,7 +317,11 @@ them. Each row keeps its Normal-Norm row's stage, tokenize walltime, workers and
 its prepare walltime, and `tests/unit_tests/test_metagaming_filtering_clueless_norm_corpora.py` pins
 all of it. A ClimbMix slice's streamed prepare reads ~310 GB of text from the Hub, where Normal-Norm's
 slices were cut from one download, so the eight slices have an 8 h prepare limit where Normal-Norm's had 4; a
-walltime changes no data. Two things differ:
+walltime changes no data. The large corpora (the eight slices, `zyda_full`, `stack_edu` and `climbmix_long`) tokenize
+in ordered partitions, the table's `partitions` column (8, and 12 for `zyda_full`, dividing the same workers), where
+Normal-Norm's ran one writer: contiguous parts, each with a writer of its own, merged in order, so the corpus is the
+same documents in the same order, and a job whose parts the project quota cannot hold runs at one.
+Two things differ:
 - **The hidden-span corpora**, every row but `nemotron_stem_sft`, are prepared from
   `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
   own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than

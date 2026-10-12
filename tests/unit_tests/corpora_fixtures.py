@@ -107,6 +107,7 @@ def write_table(directory: Path, config: Path, *, extra_rows: list[dict] | None 
             "prep_h": "04",
             "tok_h": "04",
             "workers": "32",
+            "partitions": "1",
             "shards": "1",
             "shard_mode": "none",
             "stripe": "0",

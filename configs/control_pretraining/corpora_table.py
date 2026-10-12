@@ -26,6 +26,11 @@ Columns, in order::
     prep_h      prepare walltime, hours; 0 for kind=select, which has no prepare
     tok_h       tokenize/pack/select walltime, hours (per shard where sharded)
     workers     tokenize workers; 1 for kind=select, which copies in one process
+    partitions  how many contiguous parts a tokenize row's JSONL is tokenized in, each by a writer process of
+                its own, and merged in order (preprocess_data.py --partitions --keep-sequential-samples, which
+                divides the workers among the parts, so it must divide workers). One writer is what limits a
+                large corpus's tokenize. The job runs at one when the quota cannot hold the parts; 1 for any
+                other kind
     shards      1, or the shard count where sharded; a select row restates its parent's
     shard_mode  none | split (one JSONL, byte-gated split) | slice (N source index ranges);
                 a select row restates its parent's
@@ -71,7 +76,20 @@ from pathlib import Path
 import yaml
 
 
-COLUMNS = ("subset", "stage", "kind", "config", "prep_h", "tok_h", "workers", "shards", "shard_mode", "stripe", "docs")
+COLUMNS = (
+    "subset",
+    "stage",
+    "kind",
+    "config",
+    "prep_h",
+    "tok_h",
+    "workers",
+    "partitions",
+    "shards",
+    "shard_mode",
+    "stripe",
+    "docs",
+)
 # Optional, all four or none, after COLUMNS.
 DOCUMENT_CHECK_COLUMNS = ("count_token", "count_column", "row_column", "first_row")
 # Optional after the four.
@@ -125,6 +143,7 @@ class CorpusRow:
     prep_h: int
     tok_h: int
     workers: int
+    partitions: int
     shards: int
     shard_mode: str
     stripe: bool
@@ -249,6 +268,7 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
         prep_h=int(row["prep_h"]),
         tok_h=int(row["tok_h"]),
         workers=int(row["workers"]),
+        partitions=int(row["partitions"]),
         shards=int(row["shards"]),
         shard_mode=row["shard_mode"],
         stripe=row["stripe"] == "1",
@@ -280,6 +300,13 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
         raise ValueError(f"{table}:{line_no}: kind=select has no prepare, so prep_h must be 0, got {parsed.prep_h}")
     if parsed.kind == "select" and parsed.workers != 1:
         raise ValueError(f"{table}:{line_no}: kind=select copies in one process, so workers must be 1")
+    if parsed.partitions < 1 or parsed.workers % parsed.partitions:
+        raise ValueError(
+            f"{table}:{line_no}: partitions must be at least 1 and divide workers ({parsed.workers}), "
+            f"got {parsed.partitions}"
+        )
+    if parsed.kind != "tokenize" and parsed.partitions != 1:
+        raise ValueError(f"{table}:{line_no}: only a tokenize row is tokenized in parts, so partitions must be 1")
     return parsed
 
 
@@ -504,6 +531,7 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
                 OUTPUT_VARIANT,
                 JSON_KEY,
                 str(row.workers),
+                str(row.partitions),
             ),
             shard=shard,
         )

@@ -804,3 +804,26 @@ class TestTableParsing:
             assert rows, arm
             for row in rows:
                 assert row.config.exists(), f"{arm}: {row.config} does not exist"
+
+
+class TestTokenizePartitions:
+    """A tokenize row's `partitions` column reaches its tokenize job, and only counts the tool can run are accepted."""
+
+    def test_the_tokenize_job_takes_its_rows_workers_then_partitions(self, tmp_path):
+        table = write_table(tmp_path, write_prepare_config(tmp_path), workers=64, partitions=8)
+        (plan,) = corpora_table.plan_build(table, "all", data_base=tmp_path / "data")
+        tokenize = next(job for job in plan.jobs if job.step == "tokenize")
+        assert tokenize.payload[-2:] == ("64", "8")
+
+    @pytest.mark.parametrize("partitions", [0, 3])
+    def test_partitions_that_do_not_divide_the_workers_are_refused(self, tmp_path, partitions):
+        # preprocess_data.py gives each part workers // partitions, and refuses a count that does not divide them.
+        table = write_table(tmp_path, write_prepare_config(tmp_path), workers=64, partitions=partitions)
+        with pytest.raises(ValueError, match="partitions must be at least 1 and divide workers"):
+            corpora_table.read_corpora_table(table)
+
+    def test_only_a_tokenize_row_is_tokenized_in_parts(self, tmp_path):
+        config = write_prepare_config(tmp_path, **{"seq-length": 8192, "pad-seq-to-mult": 1})
+        table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split", partitions=2)
+        with pytest.raises(ValueError, match="only a tokenize row is tokenized in parts"):
+            corpora_table.read_corpora_table(table)
