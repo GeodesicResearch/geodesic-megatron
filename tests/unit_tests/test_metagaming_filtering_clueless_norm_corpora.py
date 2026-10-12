@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import pytest
+import yaml
 from scripts.training.config_compose import load_composed_yaml
 
 from tests.unit_tests.campaign_config import blend_subsets, dry_run_build, slice_subset
@@ -169,11 +170,22 @@ def test_each_pinned_row_plans_a_streamed_prepare_at_its_own_commit(arm_rows, re
         assert tokenize.payload[2] == f"geodesic-research/nemotron-base-tokenizer@{TOKENIZER_PIN}"
 
 
-def test_an_unpinned_subset_is_refused_rather_than_read_at_head(arm_rows, revisions):
-    unpinned = sorted(subset for subset, row in arm_rows.items() if row.kind == "tokenize" and subset not in revisions)
-    assert unpinned, "every subset is pinned; this check needs a held one to refuse"
-    with pytest.raises(ValueError, match=f"pins no commit for subset '{unpinned[0]}'"):
-        corpora_table.subset_prepare_config(ARM_DATA, unpinned[0])
+def test_every_tokenized_subset_is_pinned_and_counted(arm_rows, revisions):
+    tokenized = {subset: row for subset, row in arm_rows.items() if row.kind == "tokenize"}
+    assert set(tokenized) == set(revisions)
+    assert all(row.docs is not None for row in tokenized.values())
+
+
+def test_an_unpinned_subset_is_refused_rather_than_read_at_head(revisions, tmp_path):
+    # The arm's own config less one subset's pin: the prepare refuses that subset rather than read it at HEAD.
+    loaded = yaml.safe_load(ARM_DATA.read_text())
+    subset = sorted(revisions)[0]
+    del loaded["revisions"][subset]
+    unpinned = tmp_path / ARM_DATA.name
+    unpinned.write_text(yaml.safe_dump(loaded))
+    assert corpora_table.subset_prepare_config(ARM_DATA, subset)["revision"] == revisions[subset]
+    with pytest.raises(ValueError, match=f"pins no commit for subset '{subset}'"):
+        corpora_table.subset_prepare_config(unpinned, subset)
 
 
 def test_the_prepare_config_is_normal_norms_but_for_the_corpus():
@@ -210,8 +222,13 @@ def test_the_selection_selects_from_normal_norms_corpus(corpora, arm_rows):
 def test_the_build_submits_the_pinned_corpora_and_holds_the_rest(arm_rows, revisions):
     """Through the real build_corpora.sh under DRY_RUN: the pinned subsets of a stage plan their
     prepare and tokenize jobs under the arm's names, and the stage as a whole is refused while any
-    of its rows is held."""
-    for stage in ("pretraining", "midtraining"):
+    of its rows is held. Pretraining holds none; midtraining holds its selection."""
+    held = {
+        stage: sorted(subset for subset, row in arm_rows.items() if row.stage == stage and row.docs is None)
+        for stage in ("pretraining", "midtraining")
+    }
+    assert held == {"pretraining": [], "midtraining": [SELECTED]}
+    for stage in held:
         pinned = [subset for subset in revisions if arm_rows[subset].stage == stage]
         result = dry_run_build(ARM_TABLE, stage, *pinned)
         assert result.returncode == 0, result.stderr
@@ -219,5 +236,8 @@ def test_the_build_submits_the_pinned_corpora_and_holds_the_rest(arm_rows, revis
             for step in ("prep", "tok"):
                 assert f"--job-name=cp-{ARM_DIR.name}-{step}-{subset} " in result.stderr, (stage, subset, step)
         assert f"SUBMITTED {2 * len(pinned)} jobs" in result.stdout
-        held = dry_run_build(ARM_TABLE, stage)
-        assert held.returncode != 0 and "PENDING" in held.stderr, stage
+        whole = dry_run_build(ARM_TABLE, stage)
+        if held[stage]:
+            assert whole.returncode != 0 and "PENDING" in whole.stderr, stage
+        else:
+            assert whole.returncode == 0 and f"SUBMITTED {2 * len(pinned)} jobs" in whole.stdout, whole.stderr
