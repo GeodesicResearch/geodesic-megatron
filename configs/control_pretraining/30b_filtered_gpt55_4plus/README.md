@@ -178,8 +178,10 @@ W&B run `control_pretrain_30b_filtered_gpt55_4plus_midtrain` in `geodesic/megatr
 `midtraining_iter_<n>`, the final as `main`, with the Broadly Filtered pretraining as `history:`
 so the card's token column starts at 501.32B. Exports are submitted one job per checkpoint
 (`publish_models.py --phase submit`) as each save lands, weights before card, and each revision
-is announced to the evals and analysis instances. `bucket_sync.yaml` lists the stage config, so the
-archive picks the checkpoints and corpora up on its next pass.
+is announced to the evals and analysis instances. `bucket_sync.yaml` lists the stage config, so a
+resumed archive pass would pick up what is still on Isambard. None has run since 2026-09-11, before this
+arm trained, and of its six saves only the final `iter_0003126` remains there (state on 2026-10-12); all
+six are Hub revisions ([`../bucket-readme.md`](../bucket-readme.md) section 2).
 
 ## The gate, as walked on 2026-09-19
 

@@ -862,8 +862,9 @@ on 2026-09-10). The load now drops its references before `torch.cuda.empty_cache
 `memory after checkpoint load`; on every resumed segment reserved should sit within a few
 hundred MiB of allocated. See the 30b_baseline README's "Segment rollover" section.
 
-**The campaign's archive of record is the private Hub bucket
-`geodesic-research/control-pretraining-models-bucket`**: every completed checkpoint of every
+**The campaign's archive is the private Hub bucket
+`geodesic-research/control-pretraining-models-bucket`, and it holds only a small part of the campaign**
+(next paragraph). It was built to hold every completed checkpoint of every
 stage (optimizer and RNG state included, the `iter_*/hf/` exports excluded) and every corpus the
 stage configs read, mirrored by `scripts/hub/sync_bucket.py` from the manifest
 `configs/control_pretraining/bucket_sync.yaml`, run **locally on the tunnel or login node under the
@@ -873,14 +874,23 @@ size alone, re-plans after each pass and fails if anything is still pending. The
 stage configs, and each contributes its `checkpoint.save` directory and its corpora, so a new
 stage is archived automatically once its directory exists and a save has completed; only the
 export clone holding the baseline SFT's pruned iteration-600 save is listed explicitly. `configs/control_pretraining/README.md`,
-"The archive of record", has the layout and the restore recipe. **The mirror has been stopped since
-2026-09-11 (Kyle), so the bucket holds only what it had copied by then**: no midtraining final and no
-filtered or reintroduction corpus is in it. Everything since that is still on disk exists only on `/projects`
-and, once exported, as Hub revisions. Ten trained runs have no run directory left on Isambard (checked
-2026-10-11): the baseline xl-50b SFT ablation, the xl-50b reasoning models of the two filtered arms,
-V2 E2E stage 1 and the six knowledge-reintroduction runs. None was archived, so only their Hub revisions
-remain. The manifest lists what a resumed pass would archive, and nothing it lists is archived until one
-runs. A listed stage whose save directory is gone is reported as not started and its missing corpora are
+"The archive of record", has the layout and the restore recipe.
+
+**The mirror has been stopped since 2026-09-11 (Kyle), so the bucket holds only what it had copied by
+then**: the baseline's three stages in full, the seven earliest saves of the Broadly Filtered stage 1, and
+the baseline's six stage-1 corpora. Everything since that is still on disk exists only on `/projects` and,
+once exported, as Hub revisions, and **most runs have no Megatron checkpoint left at all** (state on
+2026-10-12). Eleven trained runs have no run directory on Isambard: the baseline xl-50b SFT ablation and
+its v2 rerun, the xl-50b reasoning models of the two filtered arms, V2 E2E stage 1 and the six
+knowledge-reintroduction runs. The v3 and v4 reruns' saves were deleted once their Hub revisions were
+verified (Kyle, 2026-10-12: the SFT models will not be trained further, so an SFT run's Megatron
+checkpoints may be deleted once its Hub copies are verified; pretraining and midtraining checkpoints are
+not covered by that). None of those thirteen was archived, so their Hub revisions are the only copies and
+the runs can be neither resumed nor exported again. Three more runs keep only their final save (the Broadly
+Filtered stage 1 and stage 2, and narrow V1's midtraining). **`configs/control_pretraining/bucket-readme.md`
+section 2 is the record, run by run, of which checkpoints exist on Isambard, in the bucket and on the Hub;
+read it, and list the save directory's `iter_*` contents, before assuming a checkpoint can be loaded.** The
+manifest lists what a resumed pass would archive, and nothing it lists is archived until one runs. A listed stage whose save directory is gone is reported as not started and its missing corpora are
 skipped with a warning, so the V2 E2E stage-1 corpora (deleted unarchived, Kyle, 2026-10-03) no longer
 fail a resumed pass.
 
@@ -925,7 +935,12 @@ and size one export cannot be told from another), every revision branches from t
 first commit (never from `main`; a first commit holding an export is refused), and a revision without
 a usable local export still counts once the Hub holds its finished export. The entry point refuses a
 Hub identity outside the manifest's namespaces, since a repository the token cannot see reads as
-missing. A card's tokens seen count each stage at its own sequence length times global batch.
+missing. A card's tokens seen count each stage at its own sequence length times global batch, and its
+revision rows are the repository's branches on the Hub that hold a finished export, never the save
+directories, so a card keeps every row after the saves and exports are deleted. `--phase cards` rewrites
+the cards and nothing else (no export, no revision, no collection write; with `--plan` it renders each
+card into the run directory instead of uploading it), which is how a change to the cards' text reaches
+every repository.
 `--newest-first` takes each stage's latest checkpoint
 first without moving the model cards, which sort their own rows. The campaign README's "The models
 on the Hub" section has the full behaviour.
@@ -948,9 +963,12 @@ corpus keeps per-turn reasoning in a `reasoning_content` field, and the plain va
 byte-identical, so only the packed artifact differs — and the packed path names the tokenizer
 so the two cannot silently disagree.
 Stages 1–2 run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
-boundary, and the two retain **20 checkpoints between them** (14 + 6). From stage 2 on a save
+boundary, and the two write **20 checkpoints between them** (14 + 6). From stage 2 on a save
 lands every ~10B tokens — `save_interval: 600` at 16,777,216 tokens/iter = 10,066,329,600 — so
-stage 3 keeps five of its own, every one retained. All three stages (and
+stage 3 writes five of its own, and no stage prunes any. (That is what a run of these configs writes,
+not what is on disk today: the baseline's own stage 2 ran at an earlier cadence and wrote two, three of
+its stage 3's saves exist, and most later runs' saves are gone; see the archive paragraph above.) All
+three stages (and
 both CPT-validation arms) set `train.exit_duration_in_mins: 1400`: a 24 h segment saves and
 exits on its own clock ~40 min before the workq MaxWall, because sbatch `--signal`-based
 exits are undeliverable on this stack (the non-Python layers of the step tear down in ~45 s,

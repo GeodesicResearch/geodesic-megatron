@@ -13,7 +13,8 @@
 # THE LEARNING RATE. 5.0e-05 exceeds the 1e-5 ceiling docs/investigations/research-log.md sets for full SFT; Kyle
 # approved crossing it for this run (2026-10-10). The NaN that ceiling rests on came from a run at peak 8e-5 with
 # context parallelism (CP=2), which failed at iterations 4-8, while the warmup LR was at most about 1.3e-5; this run
-# is at CP=1. The choice and its evidence: /projects/a5k/public/tmp/xl50b-verify/v4_lr_memo.md.
+# is at CP=1. The choice and its evidence:
+# /projects/a5k/public/logs/control_pretraining/sft_v4_build/record/v4_run/outputs/v4_lr_memo.md.
 #
 # IF IT DIVERGES, relaunch from scratch (an empty save directory) at 3.5e-05 with nothing else changed. Never resume a
 # save with a changed LR: the scheduler state in the checkpoint would mix two schedules.

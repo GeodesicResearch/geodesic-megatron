@@ -8,8 +8,10 @@ Narrowly Filtered arm that branches from the Broadly Filtered arm's pretraining 
 alone on a narrower cut (V2; V1, an earlier cut by the same rule, is deprecated and kept), plus V2 E2E,
 which applies V2's rule from the first pretraining token.
 **What is here right now:** `INVENTORY.tsv` at the root, rewritten by every sync pass — one row per
-archived directory with its file count and bytes. This README describes the layout and the rules; the
-inventory is the live state.
+archived directory with its file count and bytes. The mirror has been stopped since 2026-09-11, so the
+inventory and the bucket hold what had been copied by then: four checkpoint directories (section 2) and six
+corpora (section 3). This README describes the layout and the rules, and section 2 records, run by run, which
+Megatron checkpoints exist anywhere at all.
 
 | Path | What it is |
 |---|---|
@@ -60,45 +62,70 @@ either, and its run directory no longer exists on Isambard (checked 2026-10-11).
 
 The **reasoning models** are stage 3. The baseline has two: the mainline SFT and its **xl-50b ablation**
 (`control_pretrain_30b_baseline_sft_xl50b_gbs256`), the same stage over the revised ~50B-token
-post-training mix at half the batch. The xl-50b recipe is also the filtered arms' reasoning SFT:
+post-training mix at half the batch. The ablation was then trained again three times from the same
+midtraining final, each run a Hub repository of its own: `…_v2` on fixed, fast code, `…_v3` on the
+quality-filtered mix, and `…_v4` at ten times the peak learning rate. The xl-50b recipe is also the
+filtered arms' reasoning SFT:
 `control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256` from the Broadly Filtered midtraining final
 and `control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256` from narrow V2's, each on its arm's
 cut of the xl-50b mix at the baseline ablation's iterations, batch and schedule. Both trained on
 2026-09-26 (5,976 iterations each) and are published on the Hub. Neither is in this archive, because
 syncing was paused before they ran, and neither run directory exists on Isambard any more (checked
-2026-10-11): their Megatron checkpoints are gone, and only the Hub conversions remain.
+2026-10-12): their Megatron checkpoints are gone, and only the Hub conversions remain.
 The Broadly Filtered arm's mainline-recipe stage 3 (`control_pretrain_30b_filtered_mini_2plus_sft`) is
 configured and has not run.
 
-The archive exists so that every retained checkpoint — with its optimizer state, so a run can be resumed
-or branched exactly — and every corpus a stage read survive independently of Isambard's project quota.
-It holds the Megatron checkpoints themselves, **not** their Hugging Face conversions: those are derived
-artifacts (section 4 says how to regenerate one).
+The archive was built so that a retained checkpoint — with its optimizer state, so a run can be resumed
+or branched exactly — and the corpora a stage read survive independently of Isambard's project quota.
+It holds Megatron checkpoints themselves, **not** their Hugging Face conversions: those are derived
+artifacts (section 4 says how to regenerate one), published on the Hub as the "Control Pretraining"
+collection. **It does not hold every run.** The mirror stopped on 2026-09-11, most runs trained after
+that, and the Megatron checkpoints of most of those have since been removed from Isambard as well. For
+them the Hub conversion is the only copy: the model can be loaded, evaluated and used as a warm start,
+but the run cannot be resumed and no checkpoint of it can be exported again. Section 2 is the record.
 
 ## 2. Checkpoints
 
 Directory names are the `checkpoint.save` basenames of the configs in
-`geodesic-megatron/configs/control_pretraining/`. Every retained checkpoint of a stage is archived —
-intermediate ones included — as soon as its save has completed.
+`geodesic-megatron/configs/control_pretraining/`. A sync pass archives every completed checkpoint it finds
+in a stage's save directory, intermediate ones included, under `checkpoints/<save directory>/`.
 
-| Bucket directory | Arm / stage | Checkpoints retained on Isambard | Tokens per checkpoint |
-|---|---|---|---|
-| `checkpoints/control_pretrain_30b_baseline_pretrain/` | baseline, stage 1 (complete) | 14: `iter_0002264` … `iter_0029432` every 2264 iterations, and the final `iter_0029881` | 37,983,617,024 |
-| `checkpoints/control_pretrain_30b_baseline_midtrain/` | baseline, stage 2 (complete 2026-08-27) | 2: `iter_0001564`, `iter_0003126` (the earlier cadence; later stages save every 600 iterations) | 26,239,565,824 |
-| `checkpoints/control_pretrain_30b_baseline_sft/` | baseline, stage 3 (complete 2026-08-27) | 3: `iter_0000600`, `iter_0002400`, `iter_0002988`. The run's own directory kept only the last two; `iter_0000600` is the byte-identical copy that was cloned for its HF export (`sft600_export_clone/` on Isambard) and is archived under the run's name. | 600 iterations = 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_pretrain/` | broadly filtered, stage 1 (complete) | 16: `iter_0002264` … `iter_0029432` every 2264 iterations, the final `iter_0029881`, and the segment-end saves `iter_0008472` and `iter_0026890` that the 24 h rollovers produced | 37,983,617,024 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_midtrain/` | broadly filtered, stage 2 (complete) | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft/` | broadly filtered, mainline-recipe stage 3 (configured, not run; the arm's reasoning model is the xl-50b row below) | added if it runs: 5 (every 600 iterations + final 2988). The directory does not exist. | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_baseline_sft_xl50b_gbs256/` | baseline stage-3 ablation (trained 2026-09-14; **not in this archive**: syncing was paused before it ran) | none: its run directory no longer exists on Isambard (checked 2026-10-11), so its Megatron checkpoints are gone; the Hugging Face conversion is on the Hub | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_midtrain/` | precisely filtered arm, its only stage (stage 2 from the filtered arm's `iter_0029881`), complete 2026-09-20; narrow V1, deprecated 2026-09-23 | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain/` | narrow V2 arm, its only stage (stage 2 from the filtered arm's `iter_0029881`), complete 2026-09-26; not yet archived | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2e2e_pretrain/` | V2 E2E stage 1, from random initialization on the `_filtered_gpt55_4plus_v2e2e` pretraining splits (trained 2026-10-02 to 2026-10-03; **not in this archive**: syncing was paused before it ran) | none: its run directory no longer exists on Isambard (checked 2026-10-11), so its Megatron checkpoints are gone; the Hugging Face conversion is on the Hub | 37,983,617,024 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2e2e_midtrain/` | V2 E2E stage 2, from its stage-1 final `iter_0029881` (trained 2026-10-03; not yet archived) | 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | V2 E2E knowledge reintroduction and its replay-only control, from its midtraining final `iter_0003126`, five links of 76 iterations (trained 2026-10-03; **not in this archive**: syncing was paused before they ran) | none: neither run directory exists on Isambard any more (checked 2026-10-11), so their Megatron checkpoints are gone; the Hugging Face conversions are on the Hub | 637,534,208 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256/` | Broadly Filtered arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; **not in this archive**: syncing was paused before it ran) | none: its run directory no longer exists on Isambard (checked 2026-10-11), so its Megatron checkpoints are gone; the Hugging Face conversion is on the Hub | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256/` | narrow V2 arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (trained 2026-09-26; **not in this archive**: syncing was paused before it ran) | none: its run directory no longer exists on Isambard (checked 2026-10-11), so its Megatron checkpoints are gone; the Hugging Face conversion is on the Hub | 10,066,329,600 |
-| `checkpoints/control_pretrain_30b_filtered_mini_2plus_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | Broadly Filtered knowledge reintroduction and its replay-only control: its midtraining final `iter_0003126` continued on the documents its filters removed (or on replay alone), one epoch per link (trained 2026-09-29; **not in this archive**: syncing was paused before it ran) | none: neither run directory exists on Isambard any more (checked 2026-10-11), so their Megatron checkpoints are gone; the Hugging Face conversions are on the Hub | 5,108,662,272 |
-| `checkpoints/control_pretrain_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt/`, `…_trustedmonitor_replayonly_cpt/` | narrow V2 knowledge reintroduction and its replay-only control, the same from narrow V2's midtraining final (links 1–3 trained 2026-09-29, links 4–5 added 2026-09-30; **not in this archive**: syncing was paused before they ran) | none: neither run directory exists on Isambard any more (checked 2026-10-11), so their Megatron checkpoints are gone; the Hugging Face conversions are on the Hub | 1,459,617,792 |
+**State on 2026-10-12**, listed from the save directories on Isambard, from this bucket and from each
+repository's branches on the Hub. "Hub" counts a repository's revisions other than `main`, each the
+Hugging Face conversion of one checkpoint, without optimizer state. The other two columns count Megatron
+checkpoints, which carry it.
+
+| Save directory | Arm / stage | Hub | Megatron checkpoints on Isambard | In this bucket | Tokens between checkpoints |
+|---|---|---|---|---|---|
+| `control_pretrain_30b_baseline_pretrain` | baseline, stage 1 | 14 | all 14: `iter_0002264` … `iter_0029432` every 2264 iterations, and the final `iter_0029881` | the same 14 | 37,983,617,024 |
+| `control_pretrain_30b_baseline_midtrain` | baseline, stage 2 (2026-08-27) | 2 | both: `iter_0001564`, `iter_0003126` (the earlier cadence; later stages save every 600 iterations) | the same 2 | 26,239,565,824 |
+| `control_pretrain_30b_baseline_sft` | baseline, mainline stage 3 (2026-08-27) | 3 | all 3: `iter_0002400` and `iter_0002988` in the run's directory, and `iter_0000600` as the byte-identical copy cloned for its export (`sft600_export_clone/`) | all 3, `iter_0000600` under the run's name | 600 iterations = 10,066,329,600 |
+| `control_pretrain_30b_baseline_sft_xl50b_gbs256` | baseline, xl-50b stage-3 ablation (2026-09-14) | 5 | none: the run directory does not exist | none | 1,200 iterations = 10,066,329,600 |
+| `control_pretrain_30b_baseline_sft_xl50b_gbs256_v2` | the ablation trained again on fixed, fast code (2026-10-02 to 2026-10-03) | 5 | none: the run directory does not exist | none | 10,066,329,600 |
+| `control_pretrain_30b_baseline_sft_xl50b_gbs256_v3` | v2 trained again on the quality-filtered mix (2026-10-10) | 5 | none: deleted on 2026-10-11, after every revision was verified on the Hub | none | 10,066,329,600 |
+| `control_pretrain_30b_baseline_sft_xl50b_gbs256_v4` | v3 trained again at a 5e-5 peak learning rate (2026-10-10) | 5 | none: deleted on 2026-10-12, after every revision was verified on the Hub | none | 10,066,329,600 |
+| `control_pretrain_30b_filtered_mini_2plus_pretrain` | broadly filtered, stage 1 | 16: every 2264 iterations, the final `iter_0029881`, and the segment-end saves `iter_0008472` and `iter_0026890` that the 24 h rollovers produced | 1 of 16: the final `iter_0029881` | 7 of 16: `iter_0002264`, `4528`, `6792`, `8472`, `9056`, `11320` and `13584` | 37,983,617,024 |
+| `control_pretrain_30b_filtered_mini_2plus_midtrain` | broadly filtered, stage 2 | 6: every 600 iterations and the final `iter_0003126` | 1 of 6: the final `iter_0003126` | none | 10,066,329,600 |
+| `control_pretrain_30b_filtered_mini_2plus_sft` | broadly filtered, mainline-recipe stage 3: configured, never run (the arm's reasoning model is the next row) | no repository | none: the directory does not exist | none | 10,066,329,600 |
+| `control_pretrain_30b_filtered_mini_2plus_sft_xl50b_gbs256` | broadly filtered arm's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (2026-09-26) | 5 | none: the run directory does not exist | none | 10,066,329,600 |
+| `control_pretrain_30b_filtered_gpt55_4plus_midtrain` | narrow V1 (deprecated 2026-09-23), its only stage: stage 2 from the broadly filtered arm's `iter_0029881` (2026-09-20) | 6 | 1 of 6: the final `iter_0003126` | none | 10,066,329,600 |
+| `control_pretrain_30b_filtered_gpt55_4plus_v2_midtrain` | narrow V2, its only stage: stage 2 from that same `iter_0029881` (2026-09-26) | 6 | all 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | none | 10,066,329,600 |
+| `control_pretrain_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256` | narrow V2's reasoning model: the xl-50b SFT from its midtraining final `iter_0003126` (2026-09-26) | 5 | none: the run directory does not exist | none | 10,066,329,600 |
+| `control_pretrain_30b_filtered_gpt55_4plus_v2e2e_pretrain` | V2 E2E stage 1, from random initialization on the `_filtered_gpt55_4plus_v2e2e` pretraining splits (2026-10-02 to 2026-10-03) | 15 | none: the run directory does not exist | none | 37,983,617,024 |
+| `control_pretrain_30b_filtered_gpt55_4plus_v2e2e_midtrain` | V2 E2E stage 2, from its stage-1 final `iter_0029881` (2026-10-03) | 6 | all 6: `iter_0000600` … `iter_0003000` every 600 iterations, and the final `iter_0003126` | none | 10,066,329,600 |
+| `control_pretrain_30b_filtered_mini_2plus_trustedmonitor_cpt`, `…_trustedmonitor_replayonly_cpt` | broadly filtered knowledge reintroduction and its replay-only control: the arm's midtraining final `iter_0003126` continued on the documents its filters removed (or on replay alone), one epoch per link, three links (2026-09-29) | 3 each | none: neither run directory exists | none | 5,108,662,272 |
+| `control_pretrain_30b_filtered_gpt55_4plus_v2_trustedmonitor_cpt`, `…_trustedmonitor_replayonly_cpt` | narrow V2 knowledge reintroduction and its replay-only control, the same from narrow V2's midtraining final, five links (2026-09-29 and 2026-09-30) | 5 each | none: neither run directory exists | none | 1,459,617,792 |
+| `control_pretrain_30b_filtered_gpt55_4plus_v2e2e_trustedmonitor_cpt`, `…_trustedmonitor_replayonly_cpt` | V2 E2E knowledge reintroduction and its replay-only control, from its midtraining final `iter_0003126`, five links of 76 iterations (2026-10-03) | 5 each | none: neither run directory exists | none | 637,534,208 |
+
+Of the 21 stages that trained:
+- **13 have no Megatron checkpoint left anywhere**: the four xl-50b SFT runs of the baseline, the two filtered
+  arms' xl-50b SFTs, V2 E2E stage 1 and the six knowledge-reintroduction runs. Their Hub revisions are the
+  only copies.
+- **3 keep only their final on Isambard**: the broadly filtered arm's stage 1 and stage 2, and narrow V1's
+  midtraining. Stage 1's seven earliest saves are also in this bucket; its other eight intermediate saves
+  (`iter_0015848` through `iter_0029432`) exist only as Hub revisions.
+- **5 are complete on Isambard**: the baseline's three stages, which are the only runs this bucket holds in
+  full, and the midtrainings of narrow V2 and V2 E2E, which are in no archive.
 
 **Format.** Each `iter_XXXXXXX/` is a Megatron-Bridge `torch_dist` checkpoint written at TP1·EP4·PP1
 (stage 1 at CP1, stages 2–3 at CP2): one `__<rank>_0.distcp` shard per data-parallel rank of the run
@@ -120,8 +147,13 @@ in the same tree but is not part of the campaign.
 
 ## 3. Datasets
 
-Every corpus a training config reads is archived at its Isambard directory name under `datasets/`, so a
-restored copy sits at the path the config already names. All are subsets of one Hub dataset,
+A sync pass archives every corpus a listed training config reads, at its Isambard directory name under
+`datasets/`, so a restored copy sits at the path the config already names. **The bucket holds six of
+them**, the baseline's stage-1 corpora, copied before the mirror stopped: `ai_safety_and_adjacent`,
+`climbmix_ai_docs`, `climbmix_full` (its eight shards), `stack_edu`, `zyda_ai_docs` and `zyda_full`, 2.01 TB
+together (listed 2026-10-12). The table below describes every corpus the manifest names, which is what a
+resumed pass would copy wherever the corpus still exists on Isambard; nothing in it beyond those six is in
+the bucket today. All are subsets of one Hub dataset,
 `geodesic-research/control-pretraining-datasets`, tokenized with `geodesic-research/nemotron-base-tokenizer`
 (`--append-eod`, EOD id 2) into Megatron's `.bin`/`.idx` format (int32 tokens, exactly 4 bytes per token).
 
@@ -140,10 +172,10 @@ restored copy sits at the path the config already names. All are subsets of one 
 **Revisions.** A corpus's `pipeline_results.json` records the revision its split was downloaded at,
 and the revision is part of the corpus's identity rather than a detail: the source repository
 publishes one split per commit, so two subsets at the same commit can come from different builds.
-The arms archived here were built at `504fc763…` (broadly filtered),
+The filtered arms' corpora were built at `504fc763…` (broadly filtered),
 `9005170d654e35e9edae7ab393b79064d1f3d7d4` (precisely filtered, narrow V1) and
-`c6419e3cb7a083d2c22bc5f865d0e93dd50d61e3` (narrow V2, whose ten `…__<subset>_filtered_gpt55_4plus_v2/`
-corpora, 8,439,631 documents, are added once built).
+`c6419e3cb7a083d2c22bc5f865d0e93dd50d61e3` (narrow V2: ten `…__<subset>_filtered_gpt55_4plus_v2/`
+corpora, 8,439,631 documents).
 
 Stage 1 reads `climbmix_full` (8 shards), `zyda_full`, `stack_edu`, `climbmix_ai_docs`, `zyda_ai_docs`
 and `ai_safety_and_adjacent`; stage 2 reads `climbmix_long`, `nemotron_stem_sft`, `arxiv_papers`,
@@ -168,14 +200,16 @@ corpus, and the Hugging Face download cache.
 
 ## 4. Restoring and using an archived checkpoint
 
-Restore a checkpoint into a save directory and point a config's `checkpoint.load` at that directory;
-the root files make it resume exactly as the original would (fetch them after the iteration you want):
+Only what section 2 lists under "In this bucket" can be restored from here. Restore a checkpoint into
+the save directory its stage config names as `checkpoint.save` and point a config's `checkpoint.load` at
+that directory; the root files make it resume exactly as the original would (fetch them after the iteration
+you want):
 
 ```bash
 hf buckets sync hf://buckets/geodesic-research/control-pretraining-models-bucket/checkpoints/control_pretrain_30b_baseline_pretrain/iter_0029881 \
-    /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain/iter_0029881
+    /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain/iter_0029881
 hf buckets sync hf://buckets/geodesic-research/control-pretraining-models-bucket/checkpoints/control_pretrain_30b_baseline_pretrain \
-    /projects/a5k/public/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain \
+    /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain \
     --include latest_checkpointed_iteration.txt --include latest_train_state.pt --include progress.txt
 ```
 
@@ -202,7 +236,9 @@ python configs/control_pretraining/verify_corpora.py configs/control_pretraining
 `geodesic-megatron/scripts/hub/sync_bucket.py`, driven by
 `configs/control_pretraining/bucket_sync.yaml` (the manifest: this bucket, the checkpoint directories,
 and the training configs whose data must be here), runs on Isambard's tunnel or login node under the
-host Python — not as a compute job — and repeats its pass every 30 minutes while training continues:
+host Python — not as a compute job — and repeats its pass every 30 minutes while training continues.
+It has not run since 2026-09-11, when the mirror was stopped (Kyle); the rules below are what a pass does
+when it is started again:
 
 - **Only completed checkpoints are copied.** Megatron updates `latest_checkpointed_iteration.txt` after a
   save has finished on every rank, so an `iter_*` directory above that value is a save in progress and is
@@ -225,7 +261,8 @@ host Python — not as a compute job — and repeats its pass every 30 minutes w
   under `_provenance/<UTC timestamp>-j<job id>/`, and refreshes `INVENTORY.tsv` here.
 
 A new stage needs no change: once its save directory exists and a save has completed, the next pass
-archives it.
+archives it. That holds only while the mirror runs: every stage trained since 2026-09-11 went unarchived,
+and a resumed pass can copy only what is still on Isambard (section 2).
 
 ## 6. Related Hub repositories
 
@@ -240,7 +277,7 @@ archives it.
   baseline arm's stage-1 checkpoints with their HF exports; this bucket supersedes it as the archive of
   record but does not replace it.
 - Training runs: W&B project `megatron_training`, each run named as its save directory in section 2:
-  `control_pretrain_30b_baseline_{pretrain,midtrain,sft,sft_xl50b_gbs256}`,
+  `control_pretrain_30b_baseline_{pretrain,midtrain,sft,sft_xl50b_gbs256,sft_xl50b_gbs256_v2,sft_xl50b_gbs256_v3,sft_xl50b_gbs256_v4}`,
   `control_pretrain_30b_filtered_mini_2plus_{pretrain,midtrain,sft,sft_xl50b_gbs256}`,
   `control_pretrain_30b_filtered_gpt55_4plus_midtrain` (narrow V1) and
   `control_pretrain_30b_filtered_gpt55_4plus_v2_{midtrain,sft_xl50b_gbs256}` (narrow V2),

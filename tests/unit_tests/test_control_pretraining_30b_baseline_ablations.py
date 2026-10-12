@@ -117,6 +117,8 @@ V2_GPUS = 256
 V3 = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml"
 V3_DATA = _ABLATIONS_DIR / "data" / "pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml"
 V3_CORPUS = "geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered"
+# The commit of that repository whose `train` config v3 was packed from and trained on.
+V3_CORPUS_REVISION = "3f91fa1d1658de398cd6a60aa56fd6411894ecda"
 V3_SUBSET = "train"
 CORPUS_FIELDS = {
     "dataset.dataset_name",
@@ -419,6 +421,11 @@ class TestV3IsV2OnTheQualityFilteredCorpus:
         at e77572f6, so its row count is that split's."""
         assert v3_row.docs == 9_261_591
 
+    def test_the_data_config_pins_the_revision_the_run_read(self):
+        """The row count does not identify the data by itself: another commit of the repository could hold as many
+        rows, so the commit is pinned by name as the mix's is."""
+        assert OmegaConf.load(V3_DATA).revision == V3_CORPUS_REVISION
+
 
 @pytest.fixture(scope="module", params=sorted(V4_PEAK_LR, key=str), ids=lambda p: p.stem)
 def v4_run(request):
@@ -446,3 +453,17 @@ class TestV4IsV3AtAHigherPeakLearningRate:
         fallback_save = Path(OmegaConf.load(V4_FALLBACK).checkpoint.save)
         assert not v4_save.is_relative_to(fallback_save)
         assert not fallback_save.is_relative_to(v4_save)
+
+
+class TestEveryRunHasItsOwnIdentity:
+    """A variant is compared field by field only with the run it is pinned to, so two variants pinned to one run (v4
+    and its fallback, both to v3) are never compared with each other there."""
+
+    @pytest.mark.parametrize("field", IDENTITY_FIELDS)
+    def test_no_two_runs_share_an_identity_field(self, field):
+        """A shared save directory would resume one run from another's state, and the publisher matches a model
+        card's training losses to a W&B run by its name."""
+        runs = sorted({path for pair in VARIANTS.values() for path in pair})
+        values = {path.name: OmegaConf.select(OmegaConf.load(path), field) for path in runs}
+        assert None not in values.values(), f"{field} is unset in {[n for n, v in values.items() if v is None]}"
+        assert len(set(values.values())) == len(runs), f"{field} is shared: {values}"

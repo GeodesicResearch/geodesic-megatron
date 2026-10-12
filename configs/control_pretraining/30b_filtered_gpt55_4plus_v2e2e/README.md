@@ -14,6 +14,11 @@ training configuration (below).
 | pretraining | `nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml` (+ `.env`) | 8192 | 29881 | TP1·CP1·EP4·PP1·ETP1, DP=512 on 512 GPUs | 14 |
 | midtraining | `nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_midtrain.yaml` (+ `.env`) | 32768 | 3126 | TP1·CP2·EP4·PP1·ETP1, DP=256 on 512 GPUs | 6 |
 
+The last column is what each config writes. Stage 1 wrote 15: those 14 and the segment-end save
+`iter_0027821`. All 15 and midtraining's 6 are Hub revisions; on Isambard midtraining's 6 remain and stage 1's
+run directory is gone ("Storage" below; state on 2026-10-12, [`../bucket-readme.md`](../bucket-readme.md)
+section 2).
+
 Both stages run at the baseline's own widths (its stage 1 at DP=512, its midtraining at DP=256): the
 cyclic sampler buckets each epoch by data-parallel rank, so the width decides which samples each step
 reads. The continual-pretraining pair is the `filtered_gpt55_4plus_v2e2e` family of

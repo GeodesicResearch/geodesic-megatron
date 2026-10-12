@@ -58,7 +58,7 @@ iteration count follows from them.
 
 Everything else is the parent's verbatim: the think-history tokenizer and pack geometry, the 5e-6
 cosine schedule with its 0.10 warmup fraction, Adam beta2 0.95, the CP=2 topology with full
-recompute, the DP>1 save-crossing settings, every checkpoint retained, and the 1400-minute segment
+recompute, the DP>1 save-crossing settings, no save pruned by the run, and the 1400-minute segment
 clock. The peak learning rate is deliberately not retuned for the smaller batch.
 
 **One epoch, not two** (Kyle, 2026-09-13: "We only want to do one epoch of this data, so 50B
@@ -420,7 +420,8 @@ fields that differ must be exactly `optimizer.lr` and the run identity (the `_v4
 v3's. Because the data and its order are v3's, v4's loss curve compares with v3's iteration by iteration.
 
 5e-5 is above the 1e-5 ceiling `docs/investigations/research-log.md` set for full SFT; Kyle approved crossing it for
-this run. The choice and its evidence are in `/projects/a5k/public/tmp/xl50b-verify/v4_lr_memo.md`.
+this run. The choice and its evidence are in
+`/projects/a5k/public/logs/control_pretraining/sft_v4_build/record/v4_run/outputs/v4_lr_memo.md`.
 
 **The fallback**, `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` (+ `.env`), is the same run at peak
 3.5e-5 in a save directory of its own (`_v4lr35`), pinned to v3 the same way. It is launched from scratch only if v4
@@ -464,17 +465,22 @@ groups) started at 17:34:30Z, with 7236152 on `afternotok`, in W&B run `u1u9obch
   per-expert load drift is not in the training log, so the watch did not evaluate it.
 - Over iterations 101–1000, every block of 50 iterations averaged 0.079–0.111 lower than v3's lm loss. The largest
   grad norm in that window was 0.221, at iteration 910 (v3's was 0.266, at iteration 852).
-- **Saves:** 1200, 2400, 3600, 4800 and 5976 were written, 294.1 GiB each with optimizer state, and are all still on
-  disk. Kyle ordered the SFT Megatron checkpoints deleted once their evaluations have been reported (2026-10-10 23:52Z,
-  via analysis). The evaluation has since been reported (2026-10-11): it found v4 the best of the three models, so
-  the deletion is on hold while Kyle is asked, because these saves hold the optimizer state a continuation of v4 would
-  start from. They were all present when checked on 2026-10-11 at 19:10Z.
+- **Saves:** 1200, 2400, 3600, 4800 and 5976 were written, 294.1 GiB each with optimizer state. They were deleted on
+  2026-10-12 at 05:17Z (1,579,173,985,926 bytes with their export-clone symlinks and the `latest_*` files).
+  - The evaluation (reported 2026-10-11) found v4 the best of the three models, so the deletion waited for Kyle. He
+    decided on 2026-10-12 that the SFT models will not be trained further and that their Megatron checkpoints may be
+    deleted once the Hub copies are verified.
+  - Before the deletion, every revision on the Hub was checked against the sha256 and size recorded for it at upload,
+    and each revision's 13 shards were read from the Hub and held the 6,243 tensors of the export.
+  - The run directory keeps only `progress.txt` and `wandb/`. Nothing can resume from, or re-export, a v4 save; the
+    Hub revisions are the only copy.
 - **Exports:** each save was exported with v3's exporter arguments and published as below. The intermediate saves' local
   exports were deleted after their branch verify. The final export was kept until the evaluation's copy of it had been
   hashed and matched against the Hub, and was then released on 2026-10-11 (63,191,519,090 bytes).
 
-Two kinds of one-node job ran beside the training without a session; their scripts are in
-`/projects/a5k/public/tmp/sft-xl50b-v4/scripts/` and their outputs in `/projects/a5k/public/tmp/xl50b-verify/`.
+Two kinds of one-node job ran beside the training without a session. Their scripts and outputs are kept under
+`/projects/a5k/public/logs/control_pretraining/sft_v4_build/record/v4_run/` (`scripts/` and `outputs/`). The check of
+the Hub revisions that preceded the deletion of the saves is `hub_check_v4_2026-10-12.txt` in that directory's parent.
 
 - **The watch over the first 1,000 iterations (7236153)** applied the stop conditions above (on a stop it would have
   cancelled the run and launched the fallback) and wrote `v4_gl4.txt`.

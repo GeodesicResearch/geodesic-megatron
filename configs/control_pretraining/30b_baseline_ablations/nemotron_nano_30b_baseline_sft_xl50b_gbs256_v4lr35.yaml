@@ -7,7 +7,8 @@
 # the same warm start (the midtraining final, iteration 3126), GBS 256 at 32,768 tokens, 5976 iterations, the same
 # schedule shape (cosine to a min_lr of 0 after a 10% warmup) and the same .env (v3's). Kyle approved v4 at 5.0e-05 and
 # this fallback with it (2026-10-10); both exceed the 1e-5 ceiling docs/investigations/research-log.md sets for full
-# SFT. The choice and its evidence: /projects/a5k/public/tmp/xl50b-verify/v4_lr_memo.md.
+# SFT. The choice and its evidence:
+# /projects/a5k/public/logs/control_pretraining/sft_v4_build/record/v4_run/outputs/v4_lr_memo.md.
 #
 # It runs in a fresh save directory of its own, never a resume of v4's: a save resumed with a changed LR would mix two
 # schedules.

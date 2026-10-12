@@ -87,7 +87,8 @@ launch:
 # 5th epoch", and "two more epochs of replay only data" for its control), and five for the V2 E2E
 # family (Kyle, 2026-09-30). Raising a family's count
 # appends links of the links-2+ form (full-state resume, no warmup, a fresh seed), which continue its
-# run exactly.
+# run exactly while its save directory still holds the last link's save (the README's "More epochs
+# later" says what applies when it does not).
 families:
   filtered_mini_2plus:
     parent_config: configs/control_pretraining/30b_filtered_mini_2plus/nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml

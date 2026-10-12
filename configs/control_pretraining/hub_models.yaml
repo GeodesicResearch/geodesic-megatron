@@ -86,9 +86,9 @@ card:
   provenance: >-
     Each revision's `megatron_run_config.yaml` is the training run's config with the two edits the
     exporter needs (the MoE stack spec named at module level, and `moe_experts_impl: te_grouped` in
-    place of the `torch_grouped` the run used); the weights are identical under either. The
-    optimizer-bearing Megatron checkpoints and every corpus the stages read are archived in the
-    private bucket `geodesic-research/control-pretraining-models-bucket`.
+    place of the `torch_grouped` the run used); the weights are identical under either. This
+    repository holds the Hugging Face conversions only, which carry no optimizer state. The Megatron
+    checkpoints they were exported from are not kept for every run.
   base_note: >-
     This is a base model. The bundled tokenizer config carries a chat template for convenience, but
     pretraining used `</s>` (id 2) as the document separator; for continued pretraining append EOD
@@ -435,7 +435,7 @@ models:
       the arm's own midtraining mix fills the rest. It is one continuous run of five passes over
       the documents, 174 iterations each and each reshuffled, run as one job per pass: every pass
       resumes the previous pass's final save, weights, full optimizer state and step alike (every
-      save keeps its optimizer state), so the 25-iteration warmup comes once, at the start of the
+      save kept its optimizer state), so the 25-iteration warmup comes once, at the start of the
       first pass. Revision cpt_iter_<n> is the end of a pass; the checkpoints are not annealed and
       not post-trained (no SFT). Its replay-only control is
       control-pretraining-30b-filtered-gpt55-4plus-v2-trustedmonitor-replayonly-base.
@@ -463,7 +463,7 @@ models:
       midtraining mix alone, with no removed documents. It separates what continued pretraining does
       by itself from what the reintroduced documents restore. It runs as the treatment does, one
       continuous run of five 174-iteration jobs, one per treatment pass: every job resumes the
-      previous job's final save, weights, full optimizer state and step alike (every save keeps its
+      previous job's final save, weights, full optimizer state and step alike (every save kept its
       optimizer state), so the 25-iteration warmup comes once, at the start of the first. Revision
       cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
       not annealed and not post-trained (no SFT).
@@ -493,7 +493,7 @@ models:
       half of each batch of 256 sequences of 32768 tokens and a replay of the arm's own midtraining mix
       fills the rest. It is one continuous run of five passes over the documents, 76 iterations each
       and each reshuffled, run as one job per pass: every pass resumes the previous pass's final save,
-      weights, full optimizer state and step alike (every save keeps its optimizer state), so the
+      weights, full optimizer state and step alike (every save kept its optimizer state), so the
       25-iteration warmup comes once, at the start of the first pass. Revision cpt_iter_<n> is the end
       of a pass; the checkpoints are not annealed and not post-trained (no SFT). Its replay-only
       control is control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly-base.
@@ -521,7 +521,7 @@ models:
       midtraining mix alone, with no removed documents. It separates what continued pretraining does
       by itself from what the reintroduced documents restore. It runs as the treatment does, one
       continuous run of five 76-iteration jobs, one per treatment pass: every job resumes the previous
-      job's final save, weights, full optimizer state and step alike (every save keeps its optimizer
+      job's final save, weights, full optimizer state and step alike (every save kept its optimizer
       state), so the 25-iteration warmup comes once, at the start of the first. Revision cpt_iter_<n>
       is the end of a job, the treatment's pass over its documents; the checkpoints are not annealed
       and not post-trained (no SFT).
@@ -551,7 +551,7 @@ models:
       batch of 256 sequences of 32768 tokens and a replay of the arm's own midtraining mix fills the
       rest. It is one continuous run of three passes over the documents, 609 iterations each and
       each reshuffled, run as one job per pass: every pass resumes the previous pass's final save,
-      weights, full optimizer state and step alike (every save keeps its optimizer state), so the
+      weights, full optimizer state and step alike (every save kept its optimizer state), so the
       25-iteration warmup comes once, at the start of the first pass. Revision cpt_iter_<n> is the
       end of a pass; the checkpoints are not annealed and not post-trained (no SFT). Its replay-only
       control is control-pretraining-30b-filtered-mini-2plus-trustedmonitor-replayonly-base.
@@ -579,7 +579,7 @@ models:
       mix alone, with no removed documents. It separates what continued pretraining does by itself
       from what the reintroduced documents restore. It runs as the treatment does, one continuous
       run of three 609-iteration jobs, one per treatment pass: every job resumes the previous job's
-      final save, weights, full optimizer state and step alike (every save keeps its optimizer
+      final save, weights, full optimizer state and step alike (every save kept its optimizer
       state), so the 25-iteration warmup comes once, at the start of the first. Revision
       cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
       not annealed and not post-trained (no SFT).
