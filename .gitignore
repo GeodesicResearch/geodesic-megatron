@@ -214,3 +214,6 @@ slurm*.out
 
 # Peer-messaging inboxes (transient, per-instance)
 .claude/messages/
+
+# Peer-messaging inboxes (transient, per-instance)
+.claude/messages/
