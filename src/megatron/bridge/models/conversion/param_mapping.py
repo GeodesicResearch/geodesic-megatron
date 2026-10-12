@@ -2556,13 +2556,15 @@ def merge_qkv_weights(provider: TransformerConfig, q: torch.Tensor, k: torch.Ten
 
 
 def split_qkv_weights(
-    provider: TransformerConfig, qkv: torch.Tensor
+    provider: TransformerConfig, qkv: torch.Tensor, *, feature_dim: Optional[int] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Split Megatron's interleaved QKV tensor into separate Q, K, V matrices.
 
     Args:
         provider (TransformerConfig): Model configuration provider.
         qkv (torch.Tensor): Interleaved QKV weights in Megatron format.
+        feature_dim (Optional[int]): Explicit uncompressed feature width, e.g. LoRA
+            rank. Keeps full head rows rather than inferring FP8 scale compression.
 
     Returns:
         Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Tuple of (Q, K, V)
@@ -2594,7 +2596,12 @@ def split_qkv_weights(
 
         # If last dim matches the model hidden size, it's a normal weight.
         # Otherwise, treat it as a "scale-domain" tensor with compressed dims.
-        if current_last_dim == orig_hidden_size:
+        if feature_dim is not None:
+            if feature_dim != current_last_dim:
+                raise ValueError(f"Expected QKV feature width {feature_dim}, got {current_last_dim}")
+            hidden_size = feature_dim
+            scaled_head_size = head_size
+        elif current_last_dim == orig_hidden_size:
             hidden_size = current_last_dim
             scaled_head_size = head_size
         else:

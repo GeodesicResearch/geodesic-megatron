@@ -306,7 +306,9 @@ class MegatronPeftBridge:
         """Split a fused LoRA linear_out tensor for QKV adapters."""
 
         model = megatron_model[0] if isinstance(megatron_model, list) else megatron_model
-        q_out, k_out, v_out = split_qkv_weights(model.config, linear_out_weight)
+        q_out, k_out, v_out = split_qkv_weights(
+            model.config, linear_out_weight, feature_dim=linear_out_weight.shape[-1]
+        )
         return {"q_proj": q_out, "k_proj": k_out, "v_proj": v_out}
 
     def _split_gdn_in_proj_linear_out_weight(
