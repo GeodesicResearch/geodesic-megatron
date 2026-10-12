@@ -20,6 +20,7 @@ Comprehensive review of MoE fine-tuning literature, NVIDIA's official Nemotron 3
 - **General guidance**: MoE models tend to benefit from slightly higher LRs than dense models of similar active parameter count, because each expert sees fewer tokens per step. However, for SFT (vs pretraining), conservative LRs (1e-6 to 1e-5) are standard.
 - **Our experience**: LR=8e-5 caused NaN at iter 4-8 (especially with context parallelism). LR=5e-6 validated stable over 300+ iterations.
 - **Recommendation**: Our LR=5e-6 is conservative but safe. Could experiment with LR=1e-5 (matching NVIDIA's recipe) if loss convergence feels slow. Do NOT go above 1e-5 for full SFT.
+- **Exception (Kyle, 2026-10-10)**: the xl-50b SFT v4 runs at peak LR=5e-5 (fallback 3.5e-5), approved above this ceiling (`configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml`). The 8e-5 NaN the ceiling rests on was a run with context parallelism (CP=2) that failed at iterations 4-8, while its warmup LR was at most about 1.3e-5; v4 runs at CP=1. The ceiling stands for any other run.
 
 #### 2. Epochs and Training Duration
 
@@ -94,7 +95,7 @@ Comprehensive review of MoE fine-tuning literature, NVIDIA's official Nemotron 3
 5. **LoRA (LR=1e-4, dim=32, EP=1 TP=1)** for fast ablation studies before committing to full SFT
 
 **Do NOT change:**
-- Don't increase LR above 1e-5 (NaN risk confirmed)
+- Don't increase LR above 1e-5 (NaN risk confirmed); the one approved exception is the xl-50b SFT v4 at 5e-5, with its fallback at 3.5e-5 (Kyle, 2026-10-10; see the Learning Rate section above)
 - Don't increase aux loss coefficient (over-regularization on narrow SFT data)
 - Don't disable sequence packing (essential for efficiency, used by NVIDIA)
 - Don't add expert dropout during SFT (Flan-MoE used 0.2 but for instruction tuning from scratch, not fine-tuning a converged model)

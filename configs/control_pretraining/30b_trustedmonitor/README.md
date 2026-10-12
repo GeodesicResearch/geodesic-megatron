@@ -90,9 +90,13 @@ generator has rendered them. **More epochs later:**
 3. Move each of that family's arms' `hub_models.yaml` stage `config` and `bucket_sync.yaml` entry to
    the new final link, and restate the pass count in its description (tests tie the Hub entry, the
    archive entry and the description to the family's `links`).
-4. Submit only the new links.
+4. Submit the links: only the new ones while the family's save directory still holds the last link's
+   save, and otherwise the whole chain again from link 1.
 
-They resume the last saved link exactly, because every link keeps its optimizer state.
+New links resume the last saved link exactly, because every link saves its optimizer state. That holds
+only while the family's save directory exists, and none of the six does any more (see the Archive bullet
+below). **For every family today an extension therefore means running the whole chain again** from its
+parent's `iter_0003126`, the weights-only start of link 1.
 
 ## Lengths
 
@@ -193,8 +197,8 @@ The unions as dataset-builder verified them before publication (narrow 726,549,6
    295 GiB (3.45 TiB), plus 12 HF exports of 58.8 GiB (0.69 TiB) and the smoke's two saves (0.58 TiB),
    about 4.7 TiB in all; from 87% (174.2 of 200 TiB) that ends near 89.5%. The narrow family's links
    4–5 add four saves and four exports, about 1.4 TiB more, and are checked the same way before each:
-   from 90.3% (180.5 of 200 TiB, 2026-09-30) they end near 91%. Kyle's keep-all rule stands, so
-   nothing is pruned. If a link would cross 95%, the chain pauses and it goes to Kyle.
+   from 90.3% (180.5 of 200 TiB, 2026-09-30) they end near 91%. Kyle's keep-all rule stood while
+   the chains ran, so no link pruned a save. If a link would cross 95%, the chain pauses and it goes to Kyle.
 
 ## Launch
 
@@ -265,7 +269,11 @@ it is when it starts, so an edit made after a link was submitted reaches that li
   The collection's description and the card intro name the reintroduction runs.
 - **Archive:** `configs/control_pretraining/bucket_sync.yaml` lists each arm's final link, whose
   save directory holds every link's checkpoints. The entries take effect only when `sync_bucket.py`
-  runs; the mirror has been stopped since 2026-09-11 (Kyle), so until it resumes the checkpoints exist
-  only on `/projects` and, once exported, on the Hub. Both parents' `iter_0003126` likewise exist only
-  locally and as their Hub `midtraining_iter_3126` revisions: never remove either before its family's
-  link 1 has saved.
+  runs; the mirror has been stopped since 2026-09-11 (Kyle),
+  so none of the six (three families, each with a replay-only control) was archived, and none is on disk
+  any more (each directory was gone when
+  checked on 2026-10-11), so the checkpoints of the reintroduction runs exist only as Hub revisions.
+  The three parents' `iter_0003126` (Broadly Filtered, narrow V2 and V2 E2E) are still on Isambard
+  (checked 2026-10-12), in no archive, and on the Hub as `midtraining_iter_3126`. Link 1 warm-starts from the
+  Megatron save, so without it a family's chain could be run again only after converting that Hub revision
+  back to a Megatron checkpoint.

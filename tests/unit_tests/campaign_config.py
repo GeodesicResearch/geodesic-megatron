@@ -459,3 +459,28 @@ def assert_hold_and_pin_move_together(revision, corpora_rows, label: str) -> Non
     else:
         assert re.fullmatch(r"[0-9a-f]{40}", revision), f"{label}: the revision must be a full commit SHA: {revision}"
         assert not pending, f"{label}: the revision is pinned but these rows are still held: {pending}"
+
+
+def assert_reads_the_split(cfg, dataset: str, subset: str) -> None:
+    """Assert that a merged SFT config reads the pack of one split of a dataset, from that split's corpus root."""
+    assert cfg.dataset.dataset_name == dataset, cfg.dataset.dataset_name
+    assert cfg.dataset.dataset_root == str(corpora_table.corpus_root(dataset, subset)), cfg.dataset.dataset_root
+
+
+def assert_data_config_is_the_mixs_but_for_its_source(data_config: Path, mix_data_config: Path) -> None:
+    """Assert that a corpus's prepare config differs from its mix's in the dataset and its revision only.
+
+    Every other key (tokenizer, sequence length, pad multiple, prepare options) is then the mix's, so the corpus
+    is packed exactly as the mix was, and a build key added to the mix must be added to every cut of it.
+    """
+    mine = OmegaConf.to_container(OmegaConf.load(data_config))
+    mix = OmegaConf.to_container(OmegaConf.load(mix_data_config))
+    differing = {key for key in mine.keys() | mix.keys() if mine.get(key) != mix.get(key)}
+    assert differing == {"dataset", "revision"}, f"{data_config.name}: {sorted(differing)}"
+
+
+def assert_row_packs_like_the_mix(row, data_config: Path, mix_row) -> None:
+    """Assert that a corpora-table row packs the corpus its data config builds, in the shards the mix's row uses."""
+    assert row.config.resolve() == data_config.resolve(), row.config
+    assert (row.stage, row.kind) == (mix_row.stage, mix_row.kind) == ("sft", "pack"), (row.stage, row.kind)
+    assert (row.shards, row.shard_mode) == (mix_row.shards, mix_row.shard_mode), (row.shards, row.shard_mode)

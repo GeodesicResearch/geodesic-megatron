@@ -12,8 +12,10 @@
 # counts from there. A THINK repository holds one SFT run's checkpoints (sft_iter_<iteration>),
 # the final one as main, and is named for its recipe: `-think` for the baseline's mainline SFT,
 # `-xl50b-think` for the xl-50b recipe, which is the baseline's post-training ablation and the
-# filtered arms' reasoning models, and `-xl50b-v2-think` for the baseline's xl-50b ablation rerun on
-# fixed, fast code. Each SFT run gets a repository of its own rather than another
+# filtered arms' reasoning models, `-xl50b-v2-think` for the baseline's xl-50b ablation rerun on
+# fixed, fast code, `-xl50b-v3-think` for that rerun on the quality-filtered mix, and `-xl50b-v4-think`
+# for v3 at a ten times higher peak learning rate (`-xl50b-v4lr35-think` for its fallback at 3.5e-5). Each SFT run
+# gets a repository of its own rather than another
 # stage under an existing one, because two SFT runs of one base model would both write
 # sft_iter_<iteration> revisions that collide in meaning; revision names are therefore NOT unique
 # across the collection, and the repository is what tells two SFT runs apart. Every model card
@@ -84,9 +86,9 @@ card:
   provenance: >-
     Each revision's `megatron_run_config.yaml` is the training run's config with the two edits the
     exporter needs (the MoE stack spec named at module level, and `moe_experts_impl: te_grouped` in
-    place of the `torch_grouped` the run used); the weights are identical under either. The
-    optimizer-bearing Megatron checkpoints and every corpus the stages read are archived in the
-    private bucket `geodesic-research/control-pretraining-models-bucket`.
+    place of the `torch_grouped` the run used); the weights are identical under either. This
+    repository holds the Hugging Face conversions only, which carry no optimizer state. The Megatron
+    checkpoints they were exported from are not kept for every run.
   base_note: >-
     This is a base model. The bundled tokenizer config carries a chat template for convenience, but
     pretraining used `</s>` (id 2) as the document separator; for continued pretraining append EOD
@@ -176,6 +178,71 @@ models:
     stages:
       - name: sft
         config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-v3-think
+    note: "Unfiltered control arm, reasoning model on the xl-50b SFT recipe with a data-only change from v2: the v5 quality cut of the SFT mix (rows a trace-quality judge labelled defective removed), refilled to v2's 50B tokens."
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The xl-50b reasoning model control-pretraining-30b-baseline-xl50b-v2-think trained again with
+      only its SFT data changed. The base model, the code and configuration, the global batch of 256,
+      the schedule and the 5,976 iterations are v2's. The corpus is pa-warm-start-sft-xl-50b-mix less
+      every row a per-trace quality judge labelled defective in the seven subsets it judged (346,767
+      rows, 7.58% of the mix's tokens), refilled to v2's 50B tokens by repeating kept documents so that
+      the agentic and MCQA shares are v2's. Its checkpoints sit at v2's iterations, so the two compare
+      revision by revision.
+    card_sections: configs/control_pretraining/hub_cards/control-pretraining-30b-baseline-xl50b-v3-think.md
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think
+    note: "Unfiltered control arm, reasoning model: v3 with only the SFT LR schedule changed (peak 5e-5 vs 5e-6)."
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      The quality-filtered xl-50b reasoning model control-pretraining-30b-baseline-xl50b-v3-think trained
+      again with only its peak learning rate changed, from 5e-6 to 5e-5. The base model, the SFT corpus
+      and its order, the code and configuration, the global batch of 256, the schedule's shape (cosine to
+      zero after a 10% warmup) and the 5,976 iterations are v3's. Its checkpoints sit at v3's iterations,
+      so the two compare revision by revision.
+    card_sections: configs/control_pretraining/hub_cards/control-pretraining-30b-baseline-xl50b-v4-think.md
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml
+        revision: sft_iter_{iteration}
+        default: true
+        extra_directories: []
+  - repo: geodesic-research/control-pretraining-30b-baseline-xl50b-v4lr35-think
+    note: "Unfiltered control arm, reasoning model: v3 with only the SFT LR schedule changed (peak 3.5e-5 vs 5e-6), v4's fallback."
+    private: true
+    reasoning: true
+    strict: false
+    description: >-
+      v4's fallback: the quality-filtered xl-50b reasoning model control-pretraining-30b-baseline-xl50b-v3-think
+      trained again with only its peak learning rate changed, from 5e-6 to 3.5e-5, pre-registered to be run from
+      scratch only if v4 at 5e-5 hit a stop condition in its first 1,000 iterations. v4 completed with no stop,
+      so as of 2026-10-11 this fallback has not been trained and this repository has not been published.
+      Everything else is v3's, and its checkpoints would sit at v3's iterations.
+    card_sections: configs/control_pretraining/hub_cards/control-pretraining-30b-baseline-xl50b-v4lr35-think.md
+    history:
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_pretrain.yaml
+      - configs/control_pretraining/30b_baseline/nemotron_nano_30b_baseline_midtrain.yaml
+    stages:
+      - name: sft
+        config: configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml
         revision: sft_iter_{iteration}
         default: true
         extra_directories: []
@@ -368,7 +435,7 @@ models:
       the arm's own midtraining mix fills the rest. It is one continuous run of five passes over
       the documents, 174 iterations each and each reshuffled, run as one job per pass: every pass
       resumes the previous pass's final save, weights, full optimizer state and step alike (every
-      save keeps its optimizer state), so the 25-iteration warmup comes once, at the start of the
+      save kept its optimizer state), so the 25-iteration warmup comes once, at the start of the
       first pass. Revision cpt_iter_<n> is the end of a pass; the checkpoints are not annealed and
       not post-trained (no SFT). Its replay-only control is
       control-pretraining-30b-filtered-gpt55-4plus-v2-trustedmonitor-replayonly-base.
@@ -396,7 +463,7 @@ models:
       midtraining mix alone, with no removed documents. It separates what continued pretraining does
       by itself from what the reintroduced documents restore. It runs as the treatment does, one
       continuous run of five 174-iteration jobs, one per treatment pass: every job resumes the
-      previous job's final save, weights, full optimizer state and step alike (every save keeps its
+      previous job's final save, weights, full optimizer state and step alike (every save kept its
       optimizer state), so the 25-iteration warmup comes once, at the start of the first. Revision
       cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
       not annealed and not post-trained (no SFT).
@@ -426,7 +493,7 @@ models:
       half of each batch of 256 sequences of 32768 tokens and a replay of the arm's own midtraining mix
       fills the rest. It is one continuous run of five passes over the documents, 76 iterations each
       and each reshuffled, run as one job per pass: every pass resumes the previous pass's final save,
-      weights, full optimizer state and step alike (every save keeps its optimizer state), so the
+      weights, full optimizer state and step alike (every save kept its optimizer state), so the
       25-iteration warmup comes once, at the start of the first pass. Revision cpt_iter_<n> is the end
       of a pass; the checkpoints are not annealed and not post-trained (no SFT). Its replay-only
       control is control-pretraining-30b-filtered-gpt55-4plus-v2e2e-trustedmonitor-replayonly-base.
@@ -454,7 +521,7 @@ models:
       midtraining mix alone, with no removed documents. It separates what continued pretraining does
       by itself from what the reintroduced documents restore. It runs as the treatment does, one
       continuous run of five 76-iteration jobs, one per treatment pass: every job resumes the previous
-      job's final save, weights, full optimizer state and step alike (every save keeps its optimizer
+      job's final save, weights, full optimizer state and step alike (every save kept its optimizer
       state), so the 25-iteration warmup comes once, at the start of the first. Revision cpt_iter_<n>
       is the end of a job, the treatment's pass over its documents; the checkpoints are not annealed
       and not post-trained (no SFT).
@@ -484,7 +551,7 @@ models:
       batch of 256 sequences of 32768 tokens and a replay of the arm's own midtraining mix fills the
       rest. It is one continuous run of three passes over the documents, 609 iterations each and
       each reshuffled, run as one job per pass: every pass resumes the previous pass's final save,
-      weights, full optimizer state and step alike (every save keeps its optimizer state), so the
+      weights, full optimizer state and step alike (every save kept its optimizer state), so the
       25-iteration warmup comes once, at the start of the first pass. Revision cpt_iter_<n> is the
       end of a pass; the checkpoints are not annealed and not post-trained (no SFT). Its replay-only
       control is control-pretraining-30b-filtered-mini-2plus-trustedmonitor-replayonly-base.
@@ -512,7 +579,7 @@ models:
       mix alone, with no removed documents. It separates what continued pretraining does by itself
       from what the reintroduced documents restore. It runs as the treatment does, one continuous
       run of three 609-iteration jobs, one per treatment pass: every job resumes the previous job's
-      final save, weights, full optimizer state and step alike (every save keeps its optimizer
+      final save, weights, full optimizer state and step alike (every save kept its optimizer
       state), so the 25-iteration warmup comes once, at the start of the first. Revision
       cpt_iter_<n> is the end of a job, the treatment's pass over its documents; the checkpoints are
       not annealed and not post-trained (no SFT).

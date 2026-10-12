@@ -44,8 +44,11 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_sft_config,
 )
 from tests.unit_tests.campaign_config import (
+    assert_data_config_is_the_mixs_but_for_its_source,
     assert_hold_and_pin_move_together,
     assert_only_these_fields_differ,
+    assert_reads_the_split,
+    assert_row_packs_like_the_mix,
     assert_segment_exit_posture,
     merge_onto_recipe,
 )
@@ -148,6 +151,14 @@ def row(sft):
     return found
 
 
+@pytest.fixture(scope="module")
+def mix_row():
+    (found,) = [
+        r for r in corpora_table.read_corpora_table(CORPORA_TABLE) if r.config.resolve() == BASELINE_SFT_DATA.resolve()
+    ]
+    return found
+
+
 class TestOnlyTheCorpusAndWarmStartDiffer:
     def test_exactly_the_corpus_warm_start_and_identity_fields_differ(self, sft, merged, baseline):
         assert_only_these_fields_differ(merged, baseline, ALLOWED_DIVERGENCE, sft.label)
@@ -178,8 +189,8 @@ class TestOneCorpusAcrossThreeFiles:
     build; nothing reconciles them at runtime."""
 
     def test_the_training_config_names_the_filtered_split(self, sft, merged, data_config):
-        assert merged.dataset.dataset_name == data_config.dataset == FILTERED_DATASET
-        assert merged.dataset.dataset_root == str(corpora_table.corpus_root(FILTERED_DATASET, sft.subset))
+        assert data_config.dataset == FILTERED_DATASET
+        assert_reads_the_split(merged, FILTERED_DATASET, sft.subset)
 
     def test_the_packed_path_is_the_baselines_under_this_corpus_root(self, merged, baseline):
         """Same shard glob, tokenizer and pad multiple as the baseline's pack, under this root."""
@@ -195,15 +206,10 @@ class TestOneCorpusAcrossThreeFiles:
 
     def test_the_data_config_is_the_baseline_mixs_but_for_its_source(self, sft):
         """Tokenizer, split and geometry are the baseline mix's; only the dataset and revision move."""
-        baseline_data = yaml.safe_load(BASELINE_SFT_DATA.read_text())
-        mine = yaml.safe_load(sft.data_config.read_text())
-        differing = {k for k in set(mine) | set(baseline_data) if mine.get(k) != baseline_data.get(k)}
-        assert differing == {"dataset", "revision"}
+        assert_data_config_is_the_mixs_but_for_its_source(sft.data_config, BASELINE_SFT_DATA)
 
-    def test_the_table_row_packs_this_corpus_in_32_shards(self, sft, row):
-        assert row.stage == "sft" and row.kind == "pack"
-        assert row.config.resolve() == sft.data_config.resolve()
-        assert row.shards == 32 and row.shard_mode == "split"
+    def test_the_table_row_packs_this_corpus_as_the_mix_is_packed(self, sft, row, mix_row):
+        assert_row_packs_like_the_mix(row, sft.data_config, mix_row)
 
     def test_the_hold_and_the_pin_move_together(self, sft, data_config, row):
         assert_hold_and_pin_move_together(data_config.revision, [row], sft.label)

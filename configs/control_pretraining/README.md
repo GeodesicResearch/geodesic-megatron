@@ -70,7 +70,10 @@ filtered version of the same blend, so everything except the data is held fixed 
 > warm start (the arm's midtraining final) and its run identity. Each is a full stage config pinned
 > field by field by test: the ablation to its parent by
 > `test_control_pretraining_30b_baseline_ablations.py`, the two filtered configs to the ablation by
-> `test_control_pretraining_30b_filtered_sft_xl50b.py`. Both splits are published, pinned, passed
+> `test_control_pretraining_30b_filtered_sft_xl50b.py`. The directory also holds the ablation's rerun on
+> fixed, fast code (v2), pinned to the ablation, v2 retrained on the quality-filtered mix (v3), pinned
+> to v2, and v3 at a ten times higher peak learning rate (v4, 5e-5, with its 3.5e-5 fallback v4lr35), each
+> pinned to v3, all by `test_control_pretraining_30b_baseline_ablations.py`. Both filtered splits are published, pinned, passed
 > dataset-builder's verification and are packed (32 shards each); the Broadly Filtered model trains
 > from its arm's midtraining final, and the narrow V2 model starts from the V2 midtraining's final
 > (iteration 3126) once that exists. Neither rule examined the whole mix — the ablations README's
@@ -858,20 +861,36 @@ the project storage quota that `isambard_sbatch` prints on every submission.
 
 ## The archive of record: `geodesic-research/control-pretraining-models-bucket`
 
-Every completed checkpoint of every stage of every arm (optimizer and RNG state included; the
-`iter_*/hf/` exports excluded, because they are regenerable) and every corpus the stage configs
-read are mirrored into this private Hub bucket, so the study's artifacts outlive the project
-quota. The bucket's own `README.md` — [`bucket-readme.md`](bucket-readme.md) here — documents the
-layout and the restore recipe; `INVENTORY.tsv` at its root is rewritten by every pass and is the
-live state.
+The mirror copies every completed checkpoint of every listed stage (optimizer and RNG state included;
+the `iter_*/hf/` exports excluded, because they are regenerable) and every corpus the stage configs
+read into this private Hub bucket. It was built so that the study's artifacts outlive the project
+quota, and it stopped before most of them existed. The bucket's own `README.md` —
+[`bucket-readme.md`](bucket-readme.md) here — documents the layout and the restore recipe, and its
+section 2 is the campaign's record, run by run, of which Megatron checkpoints exist on Isambard, in the
+bucket and as Hub revisions. `INVENTORY.tsv` at the bucket's root is rewritten by every pass and is the
+state at the last one.
 
 **The mirror has been stopped since 2026-09-11 (Kyle)**, so the bucket holds only what it had copied
-by then: no midtraining final and no filtered or reintroduction corpus is in it, and every stage the
-manifest lists since then is archived only once a pass runs again. The V2 E2E stage-1 corpora were
-deleted unarchived on 2026-10-03 (Kyle; that arm's README, "Storage"), so a resumed pass fails on that
-started stage's missing corpora until they are rebuilt at `a815dfe7` or the manifest stops reading
-them. Until then those checkpoints exist
+by then: the baseline's three stages in full, the seven earliest saves of the Broadly Filtered stage 1,
+and the baseline's six stage-1 corpora. No other checkpoint and no other corpus is in it, and a stage
+the manifest lists is archived only once a pass runs again, and then only where its saves still exist.
+The V2 E2E stage-1 corpora were deleted unarchived on 2026-10-03 (Kyle; that arm's README, "Storage").
+That no longer fails a resumed pass: the stage's save directory is gone as well, so the sync reports the
+stage as not started and skips its missing corpora with a warning. The checkpoints still on disk exist
 only on `/projects` and, once exported, as Hub revisions.
+
+**Most runs have no Megatron checkpoint left** (state on 2026-10-12; the table in
+[`bucket-readme.md`](bucket-readme.md) section 2 lists every run). Eleven trained runs have no run
+directory on Isambard: the baseline xl-50b SFT ablation and its rerun on fixed code (v2), the xl-50b
+reasoning models of the two filtered arms, V2 E2E stage 1 and the six knowledge-reintroduction runs. The
+saves of the v3 and v4 reruns were deleted once every revision was verified on the Hub (2026-10-11 and
+2026-10-12; Kyle, 2026-10-12: the SFT models will not be trained further, so an SFT run's Megatron
+checkpoints may be deleted once its Hub copies are verified; pretraining and midtraining checkpoints are
+not covered by that).
+None of those thirteen was archived, so their Hub revisions are the only copies: the models can be
+loaded, evaluated and used as a warm start, but the runs cannot be resumed and their checkpoints cannot
+be exported again. Three more runs keep only their final save (the Broadly Filtered stage 1 and stage 2,
+and narrow V1's midtraining).
 
 The mirror is `scripts/hub/sync_bucket.py`, driven by the manifest
 [`bucket_sync.yaml`](bucket_sync.yaml): the bucket and the stage configs, each of which
@@ -919,10 +938,13 @@ which is how to see what a change would move before it moves it.
 
 ## The models on the Hub: `hub_models.yaml`
 
-The bucket keeps the Megatron checkpoints; the **models** — HF-format exports of every completed
-checkpoint — live in the "Control Pretraining" collection: one base repository per arm and one think
+The **models** — HF-format exports of every completed checkpoint — live in the "Control Pretraining"
+collection, and for most runs they are now the only copy (the archive section above). There is one base
+repository per arm and one think
 repository per SFT run, named for its recipe (`-think` for the baseline's mainline SFT,
-`-xl50b-think` for the xl-50b recipe, and `-xl50b-v2-think` for the xl-50b ablation's rerun on fixed, fast code).
+`-xl50b-think` for the xl-50b recipe, `-xl50b-v2-think` for the xl-50b ablation's rerun on fixed, fast code,
+`-xl50b-v3-think` for that rerun on the quality-filtered mix, and `-xl50b-v4-think` and `-xl50b-v4lr35-think` for
+v3 at a higher peak learning rate and its fallback).
 [`hub_models.yaml`](hub_models.yaml) is the list:
 
 | Repository | Holds | `main` | Other revisions |
@@ -931,6 +953,9 @@ repository per SFT run, named for its recipe (`-think` for the baseline's mainli
 | `control-pretraining-30b-baseline-think` | the baseline's mainline stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-baseline-xl50b-think` | the xl-50b ablation's stage 3 checkpoints | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-baseline-xl50b-v2-think` | the xl-50b ablation rerun on fixed, fast code (`30b_baseline_ablations/`, v2) | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-baseline-xl50b-v3-think` | v2 trained again on the quality-filtered xl-50b mix, its only change (`30b_baseline_ablations/`, v3) | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-baseline-xl50b-v4-think` | v3 trained again with only its peak learning rate raised, 5e-6 to 5e-5 (`30b_baseline_ablations/`, v4) | the final SFT checkpoint | `sft_iter_<n>` |
+| `control-pretraining-30b-baseline-xl50b-v4lr35-think` | v4's fallback at a 3.5e-5 peak, trained only if v4 hits a stop condition in its first 1,000 iterations (`30b_baseline_ablations/`, v4lr35) | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-filtered-mini-2plus-xl50b-think`, `…-filtered-gpt55-4plus-v2-xl50b-think` | the broad and narrow V2 arms' reasoning models, the xl-50b recipe on each arm's cut of that mix (`30b_baseline_ablations/README.md`) | the final SFT checkpoint | `sft_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-base` | the third arm's (narrow V1, deprecated) midtraining checkpoints; its pretraining is the Broadly Filtered arm's, carried as `history:` so the card counts tokens from 501.32B | the final midtraining checkpoint | `midtraining_iter_<n>` |
 | `control-pretraining-30b-filtered-gpt55-4plus-v2-base` | the narrow V2 arm's midtraining checkpoints, with the same `history:` | the final midtraining checkpoint | `midtraining_iter_<n>` |
@@ -952,7 +977,10 @@ at that step, across every segment of the stage), and a **data and schedule** se
 read from the stage's training config: sequence length, global batch, learning rate and decay,
 warmup, tokenizer, and the data mix as normalised blend shares (a `dataset.data_path` blend of
 `.bin/.idx` corpora, a sharded corpus counted once, or the one `dataset.dataset_root` a packed SFT
-stage reads). The publisher is `scripts/hub/publish_models.py`,
+stage reads). **A card's revision rows are read from the Hub, not from the save directories**: they
+are the repository's branches that a stage's revision pattern names and that hold a finished export, so a
+card keeps every revision after its Megatron save and its local export are deleted, and never lists one
+whose upload failed. The publisher is `scripts/hub/publish_models.py`,
 driven by [`hub_models.yaml`](hub_models.yaml): the collection, the architecture root the exporter
 targets, and per repository its stages by training config (the save directory, `train_iters`, W&B
 run name and the data-and-schedule facts are read from there), the revision pattern per stage,
@@ -989,6 +1017,22 @@ the time (the evals ran on the tunnel node's four GPUs while the filtered arm's 
 published): `export` runs only the exports and writes nothing to the Hub, `upload` uploads only the
 publications whose export is already verified and touches no GPU, and the default `all` does
 both. Borrow the GPUs for the export pass, hand them back, then upload.
+
+**`--phase cards` writes the model cards and nothing else.** It plans no publication and reads no save
+directory, so it runs no export, uploads no revision and leaves the collection alone; it is how a change
+to the manifest's `card:` text, to a model's `description` or to a `card_sections` file reaches every
+repository, including one whose checkpoints were all published long ago and deleted since. With `--plan`
+it renders each card into its run directory (`<log_dir>/<run>/cards/<repository>/README.md`) instead of
+uploading it, which is the copy to read, or to diff against the live card, before the upload:
+
+```bash
+python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml --phase cards --plan   # render only
+python3 scripts/hub/publish_models.py --manifest configs/control_pretraining/hub_models.yaml --phase cards          # upload the cards
+```
+
+Every pass that writes to the Hub (`upload`, `all`, and `rolling` without an `upload:` block) also brings
+the card of every model it covers to what the Hub holds, whether or not that model published anything in
+the pass.
 
 **`--phase submit` is the better answer where anything else may want those GPUs**, and is what the
 campaign uses now: instead of running the exporter here, it queues one single-node job per missing
@@ -1087,14 +1131,23 @@ These rules hold in every phase that acts, which is why every such pass reads th
   cards to `main` only): a revision's own card is frozen at its branching and may state what a later
   card corrected, so only `main`'s card is current.
 - A revision is compared file by file, by name and size, with a local export that holds its index
-  and `megatron_run_config.yaml` (folders in a Hub listing are not files and are skipped). Nothing
-  in the export is read unless the sizes disagree, so a file gone unreadable in a published export
-  stops no pass; when they disagree and the export does not verify, it is no reference, and the
-  pass reports it with the reason. Without a
-  reference (the export removed, emptied or corrupted) the revision still counts as published when
-  every revision it targets holds those two files. An upload is one commit and each branch starts
-  empty, so they mean its own export landed. Such a revision is not exported again and keeps its row
-  on the card. A shard header declaring more than safetensors' 100 MB limit is refused unread.
+  and `megatron_run_config.yaml` (folders in a Hub listing are not files and are skipped). The
+  export is listed once, before the Hub is asked anything, and every revision is compared with
+  that one listing. Nothing in the export is read unless the sizes disagree, so a file gone
+  unreadable in a published export stops no pass; when they disagree and the export does not
+  verify, it is no reference, and the pass reports it with the reason. Without a reference (the
+  export removed, emptied or corrupted) the revision still counts as published when every revision
+  it targets holds those two files. An upload is one commit and each branch starts empty, so they
+  mean its own export landed. Such a revision is not exported again and keeps its row on the card.
+  A shard header declaring more than safetensors' 100 MB limit is refused unread.
+- A published revision's local export, or a run's Megatron saves, may be deleted while a pass
+  runs, as they are to free space under a polling pass. An export removed after it was listed
+  changes nothing, since the comparison uses the listing. One that loses a file while it is listed,
+  or while a disagreeing one is verified, is no reference and the Hub's copy is judged on its own.
+  A save directory removed while the plan reads it contributes nothing to that pass, as one
+  already gone does. Only a file that is missing is read this way: a stale handle or an I/O error
+  still ends the pass. Deleting the export or the save of a revision the Hub does not yet hold is
+  not covered: the pass then tries to export it and fails on what is missing.
 
 The metagaming campaign's manifest has the block (Kyle, 2026-09-23); this campaign's does not, so
 its rolling pass uploads in the polling process.
@@ -1119,6 +1172,6 @@ safetensors index and the shard headers; uploads to the revision (and `main` for
 then writes the card and adds the repository to the
 collection (a pass that confirmed nothing on the Hub writes no collection). A revision the Hub
 already holds, by the rules above, is skipped, so a pass is idempotent and polling picks up new
-saves of a running stage. A stage whose directory does not exist yet is reported and skipped; an
-`extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
+saves of a running stage. A stage whose directory is not on disk (not started yet, or its saves
+removed once published) is reported and skipped; an `extra_directories` entry (the baseline SFT's pruned iteration-600 save, kept as a byte copy
 beside the run's directory) must exist.

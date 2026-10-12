@@ -43,6 +43,11 @@ is idempotent and a run can be repeated as new checkpoints land:
    moves this step into a job as well: the ``rolling`` phase then submits the manifest's one-node
    job that runs this tool's ``upload`` phase, and the polling process writes nothing to the Hub.
 
+A card's revision rows are the checkpoints its repository holds, read from the Hub: a published
+checkpoint's save and its local export are both removed in time, so neither says what the repository
+holds. The ``cards`` phase writes only the cards, which is how a change to their text reaches a
+repository whose checkpoints were all published long ago.
+
 Losses come from W&B (the manifest's loss key at the iteration's step) across every run that
 carried the stage's name, since a stage runs as a chain of segments; a checkpoint whose iteration
 W&B never logged is listed with no loss rather than an invented one. Beyond its tables and the
@@ -311,17 +316,60 @@ class Manifest:
 
 
 @dataclass(frozen=True)
-class Publication:
-    """One checkpoint on its way to one revision."""
+class Checkpoint:
+    """One checkpoint of a stage, as the Hub names it and a model card describes it."""
 
-    model: Model
     stage: Stage
     iteration: int
+
+    @property
+    def revision(self) -> str:
+        return self.stage.revision.replace(ITERATION_FIELD, str(self.iteration))
+
+    @property
+    def default(self) -> bool:
+        """Whether this is the final checkpoint of the model's default stage, which main carries too."""
+        return self.stage.default and self.iteration == self.stage.train_iters
+
+    @property
+    def tokens_seen(self) -> int:
+        """The tokens of the whole curriculum up to this checkpoint."""
+        return self.stage.tokens_before + self.iteration * self.stage.tokens_per_iteration
+
+    @property
+    def targets(self) -> list[str]:
+        """The Hub revisions that hold this checkpoint once published: its own, and main for the default."""
+        return [self.revision] + ([MAIN] if self.default else [])
+
+
+@dataclass(frozen=True)
+class Publication:
+    """One checkpoint on its way to the Hub from a save on disk."""
+
+    model: Model
+    checkpoint: Checkpoint
     source: Path
     clone_root: Path
-    revision: str
-    default: bool
-    tokens_seen: int
+
+    @property
+    def stage(self) -> Stage:
+        return self.checkpoint.stage
+
+    @property
+    def iteration(self) -> int:
+        return self.checkpoint.iteration
+
+    @property
+    def revision(self) -> str:
+        return self.checkpoint.revision
+
+    @property
+    def default(self) -> bool:
+        return self.checkpoint.default
+
+    @property
+    def targets(self) -> list[str]:
+        return self.checkpoint.targets
 
     @property
     def clone(self) -> Path:
@@ -342,11 +390,6 @@ class Publication:
         """Where an inline export (the export or all phase, which has no job in the queue) records
         itself, beside the job record, from before it clears the clone until its export verifies."""
         return self.clone_root / f"export_inline_{self.source.name}.txt"
-
-    @property
-    def targets(self) -> list[str]:
-        """The Hub revisions this publication is uploaded to: its own, and main for the default."""
-        return [self.revision] + ([MAIN] if self.default else [])
 
     @property
     def upload_job_record(self) -> Path:
@@ -641,19 +684,32 @@ def load_manifest(path: Path, repo_root: Path) -> Manifest:
 
 def stage_sources(stage: Stage) -> list[tuple[int, Path]]:
     """Every completed checkpoint of a stage, oldest first: the run's own directory plus any extra
-    directory beside it that keeps a save the run pruned. The run's directory wins a tie."""
+    directory beside it that keeps a save the run pruned. The run's directory wins a tie. A run's
+    directory that is not on disk contributes nothing: the stage has not started, or its saves were
+    removed once published, which may happen while this plan reads them. An extra directory is
+    named by hand in the manifest, so one that is not on disk is refused."""
     found: dict[int, Path] = {}
     for directory in (*stage.extra_directories, stage.save):
-        if not directory.is_dir():
-            if directory is stage.save:
-                LOGGER.warning(
-                    "%s: %s does not exist yet (stage not started); nothing to publish", stage.name, directory
-                )
-                continue
-            raise ManifestError(f"{stage.name}: extra directory {directory} does not exist")
-        for iter_dir in sync_bucket.completed_iterations(directory):
+        try:
+            completed = sync_bucket.completed_iterations(directory)
+        except sync_bucket.CheckpointDirectoryMissing as error:
+            if directory is not stage.save:
+                raise ManifestError(f"{stage.name}: extra directory {directory} does not exist") from error
+            LOGGER.warning(
+                "%s: %s does not exist (stage not started, or its saves removed); nothing to publish from it",
+                stage.name,
+                directory,
+            )
+            continue
+        for iter_dir in completed:
             found[sync_bucket.iteration_number(iter_dir)] = iter_dir
     return sorted(found.items())
+
+
+def selected_models(manifest: Manifest, repo_filter: tuple[str, ...]) -> list[Model]:
+    """The manifest's models whose repository id contains one of the filter's substrings; all of
+    them when the filter is empty."""
+    return [m for m in manifest.models if not repo_filter or any(f in m.repo for f in repo_filter)]
 
 
 def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bool = False) -> list[Publication]:
@@ -663,9 +719,7 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
     most recent checkpoint first. It changes only the order work is attempted in: the model
     card sorts its own rows, so the published table stays chronological either way."""
     publications = []
-    for model in manifest.models:
-        if repo_filter and not any(f in model.repo for f in repo_filter):
-            continue
+    for model in selected_models(manifest, repo_filter):
         repo_dir = manifest.export_root / model.repo.split("/")[1]
         for stage in model.stages:
             sources = stage_sources(stage)
@@ -673,13 +727,9 @@ def plan(manifest: Manifest, repo_filter: tuple[str, ...] = (), newest_first: bo
                 publications.append(
                     Publication(
                         model=model,
-                        stage=stage,
-                        iteration=iteration,
+                        checkpoint=Checkpoint(stage, iteration),
                         source=source,
                         clone_root=repo_dir / stage.name,
-                        revision=stage.revision.replace(ITERATION_FIELD, str(iteration)),
-                        default=stage.default and iteration == stage.train_iters,
-                        tokens_seen=stage.tokens_before + iteration * stage.tokens_per_iteration,
                     )
                 )
     return publications
@@ -912,9 +962,10 @@ def safetensors_tensor_names(path: Path) -> set[str]:
 
 def verify_export(hf_dir: Path) -> int:
     """Check that an export finished and that its tensors match its index by name in both
-    directions, and return how many tensors it holds. An index or shard that cannot be parsed is an
-    export that does not verify, whatever files sit beside it. A failure to read the files at all
-    (a stale handle, an I/O error) is not a verdict on the export and is raised as it is."""
+    directions, and return how many tensors it holds. An index or shard that cannot be parsed, or
+    that is gone by the time it is read (an export is deleted file by file), is an export that does
+    not verify, whatever files sit beside it. Any other failure to read the files (a stale handle,
+    an I/O error) is not a verdict on the export and is raised as it is."""
     index_path = hf_dir / INDEX_FILE
     if not index_path.is_file():
         raise ExportError(f"{hf_dir}: no {INDEX_FILE}")
@@ -935,7 +986,7 @@ def verify_export(hf_dir: Path) -> int:
                     f"{hf_dir}/{shard}: index promises {len(promised)} tensors, shard holds {len(held)}; "
                     f"missing {sorted(promised - held)[:3]}, extra {sorted(held - promised)[:3]}"
                 )
-    except (ValueError, KeyError, TypeError, AttributeError, struct.error) as error:
+    except (FileNotFoundError, ValueError, KeyError, TypeError, AttributeError, struct.error) as error:
         raise ExportError(f"{hf_dir}: unreadable export: {error!r}") from error
     return len(weight_map)
 
@@ -996,10 +1047,19 @@ def check_hub_access(api: Any, manifest: Manifest) -> None:
             )
 
 
-def holds_its_finishing_files(hf_dir: Path) -> bool:
-    """Whether a local export holds its index and the exporter's last write, judged by their presence
-    alone: the export may be unfinished or corrupt, but it is one to compare the Hub's copy with."""
-    return all((hf_dir / name).is_file() for name in FINISHING_FILES)
+def reference_export(hf_dir: Path) -> dict[str, int] | None:
+    """The files and sizes of a local export that the Hub's copy can be compared with, or None where
+    there is no such export. One to compare with holds its index and the exporter's last write,
+    judged by their presence alone: it may still be corrupt, but it is a finished export's listing.
+    There is none where the export is absent or lacks either file (removed or emptied to free
+    space, or never finished here), or where a file goes while the export is listed, which is a
+    deletion in progress. Only a missing file is read that way; any other failure to read the
+    directory (a stale handle, an I/O error) is raised as it is."""
+    try:
+        files = local_files(hf_dir)
+    except FileNotFoundError:
+        return None
+    return files if FINISHING_FILES <= files.keys() else None
 
 
 def revision_files(api: Any, repo: str, revision: str) -> dict[str, Any] | None:
@@ -1017,12 +1077,10 @@ def revision_files(api: Any, repo: str, revision: str) -> dict[str, Any] | None:
     return {entry.path: entry for entry in entries if not isinstance(entry, RepoFolder)}
 
 
-def published(api: Any, repo: str, revision: str, hf_dir: Path) -> bool:
-    """Whether the revision already holds every file of the export at the same size."""
+def published(api: Any, repo: str, revision: str, files: dict[str, int]) -> bool:
+    """Whether the revision already holds every one of an export's files at the same size."""
     remote = revision_files(api, repo, revision)
-    return remote is not None and all(
-        name in remote and remote[name].size == size for name, size in local_files(hf_dir).items()
-    )
+    return remote is not None and all(name in remote and remote[name].size == size for name, size in files.items())
 
 
 def holds_its_weights(api: Any, repo: str, revision: str, holder: str) -> bool:
@@ -1064,32 +1122,66 @@ def holds_a_finished_export(api: Any, repo: str, revision: str) -> bool:
 def on_the_hub(api: Any, publication: Publication) -> bool:
     """Whether every revision the publication targets already holds its export. All of them, not
     just its own: a final checkpoint whose upload to main failed would otherwise count as published
-    and never reach main. A revision is compared file by file, by name and size, with a local
-    export that holds its index and the exporter's last write; nothing is read unless the sizes
+    and never reach main. The local export is listed once, before the Hub is asked anything, and
+    every revision is compared with that one listing, file by file, by name and size: the export
+    may be deleted while the pass waits on the Hub, and a listing taken after that would be empty,
+    which any branch that exists matches. Nothing in the export is read unless the sizes
     disagree, so a file gone unreadable in the export of a revision long since published stops no
-    pass. Where there is no such export -- removed or emptied to free space, or never finished here
-    -- or where one that disagrees does not verify, it is no reference, and the Hub's copy is judged
-    on its own, so a revision safely published is neither exported again nor dropped from the card,
-    and one that is not is never taken for it. main must further hold the final checkpoint's own
-    weights, by content: by name and size it cannot be told from another export."""
+    pass. Where there is no export to compare with (``reference_export``), or where one that
+    disagrees does not verify, the Hub's copy is judged on its own, so a revision safely published
+    is neither exported again nor dropped from the card, and one that is not is never taken for
+    it. main must further hold the final checkpoint's own weights, by content: by name and size it
+    cannot be told from another export."""
     repo = publication.model.repo
-    judged_locally = holds_its_finishing_files(publication.hf_dir)
-    if judged_locally:
-        matches = all(published(api, repo, revision, publication.hf_dir) for revision in publication.targets)
-        problem = None if matches else export_problem(publication)
-        if problem is not None:
-            LOGGER.warning(
-                "%s: the local export disagrees with the Hub and does not verify (%s); the Hub's copy is judged "
-                "on its own",
-                publication.label,
-                problem,
-            )
-        judged_locally = problem is None
-    if not judged_locally:
-        matches = all(holds_a_finished_export(api, repo, revision) for revision in publication.targets)
-    if not (matches and publication.default):
-        return matches
-    return holds_its_weights(api, repo, publication.revision, MAIN)
+    reference = reference_export(publication.hf_dir)
+    if reference is not None:
+        if all(published(api, repo, revision, reference) for revision in publication.targets):
+            return main_carries(api, repo, publication.checkpoint)
+        problem = export_problem(publication)
+        if problem is None:
+            return False
+        LOGGER.warning(
+            "%s: the local export disagrees with the Hub and does not verify (%s); the Hub's copy is judged on "
+            "its own",
+            publication.label,
+            problem,
+        )
+    return hub_holds(api, repo, publication.checkpoint)
+
+
+def main_carries(api: Any, repo: str, checkpoint: Checkpoint) -> bool:
+    """Whether main holds the checkpoint's own weights, by content, where it should: only the final
+    checkpoint of the default stage belongs on main, so any other checkpoint asks nothing of it."""
+    return not checkpoint.default or holds_its_weights(api, repo, checkpoint.revision, MAIN)
+
+
+def hub_holds(api: Any, repo: str, checkpoint: Checkpoint) -> bool:
+    """Whether the checkpoint is published, judged from the Hub alone: every revision it belongs on
+    holds a finished export, and main the final checkpoint's own weights."""
+    finished = all(holds_a_finished_export(api, repo, revision) for revision in checkpoint.targets)
+    return finished and main_carries(api, repo, checkpoint)
+
+
+def hub_checkpoints(api: Any, model: Model) -> list[Checkpoint]:
+    """Every checkpoint of the model that the Hub holds, in stage then iteration order: the branches
+    a stage's revision pattern names exactly, kept where ``hub_holds``. This, not the save
+    directories, is what a model card lists: a published checkpoint's Megatron save and its local
+    export are both removed in time, and the Hub is then the only place it exists. A repository
+    that does not exist holds none."""
+    from huggingface_hub.utils import RepositoryNotFoundError
+
+    try:
+        branches = {ref.name for ref in api.list_repo_refs(model.repo).branches}
+    except RepositoryNotFoundError:
+        return []
+    found = []
+    for stage in model.stages:
+        named = re.compile(re.escape(stage.revision).replace(re.escape(ITERATION_FIELD), "([0-9]+)"))
+        iterations = sorted({int(match.group(1)) for name in branches if (match := named.fullmatch(name))})
+        # A branch such as sft_iter_0600 matches the pattern without being a name this tool gives.
+        own = [c for c in (Checkpoint(stage, iteration) for iteration in iterations) if c.revision in branches]
+        found += [checkpoint for checkpoint in own if hub_holds(api, model.repo, checkpoint)]
+    return found
 
 
 def initial_commit(api: Any, repo: str) -> str:
@@ -1170,8 +1262,9 @@ def _tokens(count: int) -> str:
     return f"{count:,} ({count / 1e9:.1f}B)"
 
 
-def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Publication, float | None]]) -> str:
-    """The repository's README: the manifest's card text around the curriculum and revision tables."""
+def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Checkpoint, float | None]]) -> str:
+    """The repository's README: the manifest's card text around the curriculum and revision tables,
+    one revision row per checkpoint given, each with its training loss where one is known."""
     card = manifest.card
     name = model.repo.split("/")[1]
     tags = list(card.tags) + ([card.reasoning_tag] if model.reasoning else [])
@@ -1251,11 +1344,11 @@ def render_model_card(manifest: Manifest, model: Model, rows: list[tuple[Publica
         "| Revision | Stage | Iteration | Tokens seen | Training loss |",
         "|---|---|---|---|---|",
     ]
-    for publication, loss in rows:
+    for checkpoint, loss in rows:
         loss_cell = f"{loss:.4f}" if loss is not None else ""
-        revision = f"`{publication.revision}`" + (" (also `main`)" if publication.default else "")
+        revision = f"`{checkpoint.revision}`" + (" (also `main`)" if checkpoint.default else "")
         lines.append(
-            f"| {revision} | {publication.stage.name} | {publication.iteration:,} | {_tokens(publication.tokens_seen)} | {loss_cell} |"
+            f"| {revision} | {checkpoint.stage.name} | {checkpoint.iteration:,} | {_tokens(checkpoint.tokens_seen)} | {loss_cell} |"
         )
     lines += [
         "",
@@ -1290,6 +1383,39 @@ def upload_model_card(api: Any, model: Model, text: str, staging: Path) -> bool:
     return True
 
 
+def write_model_cards(
+    manifest: Manifest, api: Any, wandb_api: Any, run_dir: Path, models: list[Model], execute: bool
+) -> None:
+    """Bring each model's card to what the Hub holds. A card's revision rows are the checkpoints its
+    repository holds (see ``hub_checkpoints``), so a revision whose export or upload failed is not
+    listed as if it existed and one whose save has since been removed is not dropped; a model with
+    nothing published gets no card. With ``execute`` a card that differs from the one uploaded last
+    is uploaded. Without it each card is rendered into the run directory instead, to be read before
+    anything is uploaded, and the Hub is left alone."""
+    for model in models:
+        checkpoints = hub_checkpoints(api, model)
+        if not checkpoints:
+            LOGGER.info("%s: no checkpoint on the Hub, so no card", model.repo)
+            continue
+        rows = []
+        for stage in model.stages:
+            held = [checkpoint for checkpoint in checkpoints if checkpoint.stage is stage]
+            cache = run_dir.parent / "losses" / f"{stage.wandb_exp_name}.json"
+            found = losses(wandb_api, manifest.wandb, stage.wandb_exp_name, {c.iteration for c in held}, cache)
+            rows += [(checkpoint, found.get(checkpoint.iteration)) for checkpoint in held]
+        text = render_model_card(manifest, model, rows)
+        name = model.repo.split("/")[1]
+        if not execute:
+            rendered = run_dir / "cards" / name / README_NAME
+            rendered.parent.mkdir(parents=True, exist_ok=True)
+            rendered.write_text(text)
+            LOGGER.info("%s: card of %d revision(s) rendered to %s; nothing uploaded", model.repo, len(rows), rendered)
+            continue
+        # Cards persist beside the run directories so an unchanged card is not re-uploaded every pass.
+        if upload_model_card(api, model, text, run_dir.parent / "cards" / name):
+            LOGGER.info("%s: model card updated", model.repo)
+
+
 def ensure_collection(api: Any, collection: Collection, namespace: str, notes: dict[str, str | None]) -> str:
     """The collection's slug, creating it if absent, with the manifest's description and every repo
     in ``notes`` a member under its note (a None note leaves the Hub's as it is).
@@ -1320,7 +1446,7 @@ def ensure_collection(api: Any, collection: Collection, namespace: str, notes: d
     return slug
 
 
-PHASES = ("export", "submit", "upload", "all", "rolling")
+PHASES = ("export", "submit", "upload", "all", "rolling", "cards")
 # The phases that queue exports as jobs of their own instead of running the exporter here.
 SUBMITTING_PHASES = ("submit", "rolling")
 
@@ -1336,12 +1462,21 @@ def publish_pass(
     phase: str,
     newest_first: bool = False,
 ) -> int:
-    """One pass over the manifest: export and upload what is missing, then the cards and the
-    collection for every model that has anything published (a pass that confirmed nothing writes
-    no collection). Returns how many publications
+    """One pass over the manifest: export and upload what is missing, then the card of every model
+    the pass covers that has anything published, and the collection for the models this pass
+    confirmed (a pass that confirmed nothing writes no collection). Returns how many publications
     remain unpublished (0 when the Hub holds everything the manifest asks for).
 
+    A card lists what the Hub holds, not what the pass planned or what is left on disk (see
+    ``write_model_cards``), so it keeps every revision after its save and export are removed.
+
     ``phase`` splits the work by what it needs.
+
+    ``cards`` writes the cards and nothing else: it plans no publication and reads no save
+    directory, so it exports nothing, uploads no revision and leaves the collection alone, and it
+    always returns 0. It is how a change to the manifest's card text, or to a model's description,
+    reaches the repositories whose checkpoints were all published long ago. Without ``execute`` it
+    renders each card into the run directory instead of uploading it.
 
     ``export`` runs only the exports, which take this allocation's GPUs for a few minutes each, and
     writes nothing to the Hub. ``submit`` does the same work without the GPUs, queueing a job per
@@ -1375,6 +1510,9 @@ def publish_pass(
     with ``submit`` and ``rolling`` -- not borrowed at all."""
     if phase not in PHASES:
         raise ValueError(f"phase must be one of {PHASES}, not {phase!r}")
+    if phase == "cards":
+        write_model_cards(manifest, api, wandb_api, run_dir, selected_models(manifest, repo_filter), execute)
+        return 0
     uploads_are_jobs = phase == "rolling" and manifest.upload is not None and execute
     if uploads_are_jobs and repo_filter:
         raise ValueError(
@@ -1542,22 +1680,7 @@ def publish_pass(
     if not execute or phase in ("export", "submit") or uploads_are_jobs:
         return pending
     namespace = manifest.models[0].repo.split("/")[0]
-    for model in manifest.models:
-        # Only what this pass confirmed on the Hub: a planned revision whose export or upload
-        # failed must not appear on the card as if it existed.
-        rows_pubs = touched.get(model.repo, [])
-        if not rows_pubs:
-            continue
-        rows = []
-        for stage in model.stages:
-            stage_pubs = sorted((p for p in rows_pubs if p.stage is stage), key=lambda p: p.iteration)
-            cache = run_dir.parent / "losses" / f"{stage.wandb_exp_name}.json"
-            found = losses(wandb_api, manifest.wandb, stage.wandb_exp_name, {p.iteration for p in stage_pubs}, cache)
-            rows += [(p, found.get(p.iteration)) for p in stage_pubs]
-        # Cards persist beside the run directories so an unchanged card is not re-uploaded every pass.
-        card_dir = run_dir.parent / "cards" / model.repo.split("/")[1]
-        if upload_model_card(api, model, render_model_card(manifest, model, rows), card_dir):
-            LOGGER.info("%s: model card updated", model.repo)
+    write_model_cards(manifest, api, wandb_api, run_dir, selected_models(manifest, repo_filter), execute)
     if touched:
         # A pass that confirmed nothing writes no collection: an empty one would announce models that
         # do not exist yet.
@@ -1573,7 +1696,8 @@ def publish_pass(
 
 
 def make_wandb_api():
-    """The W&B client, imported here so plan mode needs no W&B credentials."""
+    """The W&B client, imported here so a pass that asks W&B nothing (a plan of exports and uploads)
+    needs no W&B credentials."""
     import wandb
 
     return wandb.Api(timeout=120)
@@ -1590,7 +1714,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="the checkout the manifest's config paths and the exporter are taken from (default: this one)",
     )
     parser.add_argument(
-        "--plan", action="store_true", help="report what would be exported and uploaded; change nothing"
+        "--plan",
+        action="store_true",
+        help="report what would be exported and uploaded; change nothing (with --phase cards: render each card "
+        "into the run directory instead of uploading it)",
     )
     parser.add_argument(
         "--models",
@@ -1607,7 +1734,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "its own job instead, taking no GPU here and writing nothing to the Hub; upload: only uploads of "
         "verified exports, cards and collection (no GPU); all: export here, then upload; rolling: submit "
         "missing exports and upload those whose job has finished, for polling a run still training "
-        "(with an upload block in the manifest, the uploads go to the manifest's one upload job instead)",
+        "(with an upload block in the manifest, the uploads go to the manifest's one upload job instead); "
+        "cards: only the model cards, each listing the revisions its repository holds (no export, no "
+        "revision upload, no collection write)",
     )
     parser.add_argument(
         "--newest-first",
@@ -1643,7 +1772,8 @@ def main(argv: list[str] | None = None) -> int:
         LOGGER.info("upload job %s: took over the records of any upload job before it", os.environ["SLURM_JOB_ID"])
     api = sync_bucket.make_api()
     check_hub_access(api, manifest)
-    wandb_api = None if args.plan else make_wandb_api()
+    # A plan of exports and uploads asks W&B nothing; rendering a card needs its losses, plan or not.
+    wandb_api = make_wandb_api() if not args.plan or args.phase == "cards" else None
     deadline = time.time() + args.stop_after * 3600 if args.stop_after else None
     while True:
         pending = publish_pass(
