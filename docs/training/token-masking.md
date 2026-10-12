@@ -382,6 +382,12 @@ token_masking:
 The held-out set has two advantages over the in-loop metric: it is the same samples at every evaluation, so only the
 model changes between points, and it stays held out in multi-epoch stages. Its step-0 value is the baseline.
 
+A `.bin/.idx` set that is held out by construction can be cut from the run's own corpora:
+`scripts/data/held_out_documents.py` tells when a run first reads each document, lists the ones it never reads (a
+corpus drawn for less than one pass keeps some) and copies a sample of them, enough for a stated number of the run's
+samples, into one prefix (`validation --run <name>`). Give it `iters × global_batch_size` samples or more. The setup
+check above still applies: the sample must hold targets of the measured ids that carry loss.
+
 ### Judging a masked run against its control
 
 The comparison is **paired and directional**: a masked run and a control that differs from it only in masking, both

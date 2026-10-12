@@ -300,7 +300,8 @@ replaces the base value, as `OmegaConf.merge` would, and scalars read as `OmegaC
 them (`5e-4` is a float). The composed mapping is then merged onto the recipe and the Hydra CLI
 overrides apply last. Composition happens only where a config is read through
 `scripts/training/config_compose.py` (`load_composed_yaml`): `pipeline_training_run.py` (and
-`scripts/data/report_blend_coverage.py`, `scripts/data/predict_masked_counts.py` (both through
+`scripts/data/report_blend_coverage.py`, `scripts/data/predict_masked_counts.py` and
+`scripts/data/held_out_documents.py` (all three through
 `scripts/data/run_training_data.py`) and `pipeline_coherence_test.py`'s probe `held_out` config, which resolve a
 config through its `resolve_bin_idx_run_config`), `scripts/nemotronh_flops_estimator.py` (and
 `scripts/telemetry/score_run.py`, which reads its config through the estimator), the launch blocks'
@@ -1521,6 +1522,39 @@ its width is predicted at that width only: `--gpus` must be its world size, and 
 data-parallel size there. Both tools build the run's data through
 `scripts/data/run_training_data.py`. Checked against the end-to-end test's masked arm (64 GPUs), it reproduced all
 160 logged iterations it was given exactly.
+
+`scripts/data/held_out_documents.py <step> --config <held-out.yaml>` finds the documents a set of runs has not
+trained on and writes what a campaign needs of them. A run reads each document first at a fixed iteration, and it
+draws its largest corpora for less than one pass, so those corpora keep documents it never reads. One YAML states
+everything (the corpora table, the runs with their model, mode and GPUs, the id rule, the set, each run's validation
+corpus and the future sets), and each of the five steps is a command that refuses to overwrite its output and refuses
+records a changed training config, `.idx` or list has made stale:
+- `read --run <name>`: per corpus of the run's blend, the iteration at which the run first reads each document (0 for
+  one it never reads), from the dataset built as above and every data-parallel rank's own sampler over all the run's
+  iterations (no tokens are read). A resumed run and a width other than its `launch_width:` block's are refused.
+- `held-out`: per run and corpus, the documents the run never reads, that are not empty, and whose document id no
+  run reads in any corpus (one document can sit in two corpora, or twice in one). Ids are one column of each corpus's
+  dataset at the commit it was prepared from, read after its rows are checked to be the source's in order and kept
+  under `<lists>/ids/` for the later steps; the record counts what each reading corpus excluded. A corpus that is no
+  rows of such a dataset must be listed (`document_ids.subsets_without_ids`) and then takes no part.
+- `set`: a seeded uniform sample of one run's held-out documents as a parquet of `subset` and `source_row`.
+- `validation --run <name>`: a seeded uniform sample holding at least the configured number of the run's training
+  samples, copied byte for byte into one `.bin/.idx` prefix for `token_masking.masked_validation.data_path`, checked
+  against its parents, with a provenance record and a list of its documents.
+- `future`: for each listed iteration of one run, a seeded uniform sample of the documents the run first reads after
+  it and whose id neither it nor a run of `future.also_unread_by` has read by then, in the set's format, with a
+  manifest `future_sets.tsv` (`stage`, `iter`, `path`, `sha256`). It needs those runs' `read`.
+
+A run may train on corpora that are not the table's and hold the table's documents one for one (another arm of a
+study, built from the same source rows): it names, for each corpus of its blend, the table corpus that holds its
+documents (`counterparts`, null for a corpus that is none's). It is read on its own corpora and its reads count as
+reads of the table's documents, in `held-out` and wherever `future.also_unread_by` lists it; nothing is written for
+it, and the records state how many documents only such runs' reads removed.
+
+Run each step as a one-node job from a frozen copy (`configs/control_pretraining/submit_corpus_job.py <job name>
+<time limit> scripts/data/held_out_documents.py <step> ...`). `read` writes the index caches the launch reads, so run
+it only once every corpus of the run is final. The first config is
+`configs/metagaming_filtering/30b_clueless_norm/held_out.yaml`.
 
 ### Important: Always run `pipeline_data_prepare.py` before training
 

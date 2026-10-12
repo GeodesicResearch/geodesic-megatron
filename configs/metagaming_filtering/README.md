@@ -441,6 +441,48 @@ python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-ha
   --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
 ```
 
+**Held-out documents.** A stage reads each document first at a fixed iteration, and a stage that draws a corpus for
+less than one pass leaves documents of it unread, so it never trains on them. `30b_clueless_norm/held_out.yaml`
+states what is made of both, and `scripts/data/held_out_documents.py` makes it in five steps:
+
+| step | what it writes |
+|---|---|
+| `read --run <run>` for `pretraining`, `midtraining`, `normal_norm_pretraining` and `normal_norm_midtraining` | Per corpus of the run's blend, the iteration at which the run first reads each document (0 for one it never reads), under the config's `lists` directory. It builds the run's dataset as the launch does, so it also writes the index caches the launch reads. Normal-Norm's two stages are read on Normal-Norm's own corpora. |
+| `held-out` | Per Clueless-Norm stage and corpus, the documents the stage never reads, that are not empty, and whose `doc_id` no stage of either arm reads in any corpus. `doc_id` is not unique: a source document can sit in `climbmix_full` and `climbmix_ai_docs`, or twice in one corpus. The record (`held_out.json`) counts, per corpus, how many unread documents each reading corpus excluded, and how many only Normal-Norm's reads excluded (`id_read_only_through_counterparts`). The `doc_id` column of each corpus is kept under `<lists>/ids/` once read, so `future` does not read the Hub again. |
+| `set` | The held-out set the checkpoints are scored on: a seeded sample of the documents pretraining holds out, as `subset` and `source_row` of the source dataset (`climbmix_full`, not its slices), at `set.path`. Its record, `<set.path>.json`, states its sha256 and, per corpus, the unread documents, those an already-read `doc_id` excluded, those only Normal-Norm's reads excluded, and those held out. |
+| `validation --run <stage>` | The stage's held-out corpus for `token_masking.masked_validation.data_path`: a seeded sample of the documents it holds out, copied byte for byte into one `.bin/.idx` prefix, with `<prefix>.documents.parquet` listing them. |
+| `future` | For each of the thirteen saves pretraining trains on past (every one but the last), `future_pretraining_iter_<iteration>.parquet`: a seeded sample, in the set's format, of the documents pretraining first reads after that iteration and whose `doc_id` neither it nor Normal-Norm's pretraining has read by then in any corpus. `future_sets.tsv` lists them (`stage`, `iter`, `path`, `sha256`) and `future_sets.json` counts, per save, the documents first read later, those an already-read `doc_id` excluded, and those Normal-Norm's reads excluded (`read_by_others_by_then`). |
+
+- **When.** `read` needs every corpus of the run built and verified, and `held-out` needs all four runs read: the id
+  rule excludes a pretraining document whose id midtraining reads, in either arm. Normal-Norm's corpora are built, so its
+  two reads can run at any time. Midtraining's blend includes `nemotron_stem_sft`,
+  whose kept list is still pending. To run before it exists, remove `midtraining` from the config's `runs` and
+  `validation`: the set then excludes only ids pretraining reads, and `held_out.json` lists the runs it was made from.
+  `future` needs pretraining's `read` and Normal-Norm's pretraining `read`.
+- **Both arms.** Normal-Norm's corpora hold Clueless-Norm's source rows, row for row, with nothing hidden. Its tokens
+  differ wherever a span is hidden, so it cuts its samples elsewhere and reads documents Clueless-Norm does not. A
+  document is held out of the comparison of the two arms only if neither trains on it. So each of Normal-Norm's
+  corpora names the Clueless-Norm corpus that holds its documents (`counterparts` in the config), its reads count as
+  reads of those, and a future set leaves out what Normal-Norm's pretraining has read by the same iteration (both
+  arms save at the same iterations). Only Normal-Norm's reads are used: nothing is written for its runs.
+- **Stale index caches.** A corpus rebuilt after `read` leaves the index cache `read` wrote describing the old build.
+  The later steps refuse the stale lists (the corpus's `.idx` changed), but Megatron would load the stale cache at
+  launch. Remove the stage's `path_to_cache` directory and run `read` again.
+- **`nemotron_stem_sft`** is a selection of Normal-Norm's corpus, not rows of the hidden-span dataset, so it has no
+  `doc_id`. The config sets it aside: it is never held out and excludes nothing. Normal-Norm's own `nemotron_stem_sft`
+  has no counterpart for the same reason (`null` in its `counterparts`).
+- **Not yet in the stage configs.** Neither stage's `token_masking` block names its validation corpus yet. Once the
+  two prefixes exist, add `masked_validation: {data_path: <prefix>, interval: <N>, iters: 2}` to each (`samples` in
+  the config is two global batches of each stage).
+
+Run each step as a 1-node job from a frozen copy of the commit, one after the other:
+
+```bash
+python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-heldout-<step> 04:00:00 \
+  scripts/data/held_out_documents.py <step> \
+  --config configs/metagaming_filtering/30b_clueless_norm/held_out.yaml [--run <stage>]
+```
+
 ## Clueless-Norm pretraining (`30b_clueless_norm/`)
 
 `nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` is stage 1: Normal-Norm's pretraining on the

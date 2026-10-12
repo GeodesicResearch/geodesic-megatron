@@ -570,7 +570,7 @@ class TestTheSubmitScript:
         assert "unknown training stage 'sft'" in run_submit(frozen_root, "train", "sft").stderr
         assert "unknown arm 'spans99'" in run_submit(frozen_root, "train", "pretrain", "spans99").stderr
 
-    def test_an_arm_is_refused_until_its_corpora_and_its_blends_prediction_exist(self, plan):
+    def test_an_arm_is_refused_until_its_blends_prediction_exists(self, plan):
         refusals = [line for line in plan["train"] if line.startswith("[dry-run] would refuse")]
         for stage in STAGES:
             for arm in ARMS:
@@ -578,9 +578,19 @@ class TestTheSubmitScript:
                     f"{stage}_{arm} waits for the prediction {RUN_DIR / f'{stage}_{BLEND_OF[arm]}.predicted.jsonl'}"
                 )
                 assert any(waits in line and f"({ITERATIONS + 1} lines)" in line for line in refusals), (stage, arm)
-        assert any(
-            f"pretrain_whole reads {SCRATCH_DATA / 'ai_safety_whole' / PREFIX_NAME}" in line for line in refusals
-        )
+
+    def test_an_arm_is_refused_until_its_corpora_are_built(self, tmp_path, corpora):
+        """In a copy whose configs state the scratch corpora under a directory that holds none, so the refusal does
+        not depend on whether this machine has built the canary's own."""
+        root, unbuilt = frozen_copy(tmp_path / "copy"), tmp_path / "unbuilt"
+        for config in (root / CANARY_RELATIVE).glob("*.yaml"):
+            config.write_text(config.read_text().replace(str(SCRATCH_DATA), str(unbuilt)))
+        result = run_submit(root, "train")
+        assert result.returncode == 0, result.stdout + result.stderr
+        refusals = [line for line in result.stdout.splitlines() if line.startswith("[dry-run] would refuse")]
+        for corpus in corpora:
+            assert any(f"reads {unbuilt / corpus / PREFIX_NAME}, which is not built" in line for line in refusals)
+        assert any(f"pretrain_whole reads {unbuilt / 'ai_safety_whole' / PREFIX_NAME}" in line for line in refusals)
 
     def test_the_gate_stage_draws_each_stages_band_from_its_references_and_then_judges_the_run(self, plan):
         bands = [line for line in plan["gate"] if line.startswith("[dry-run] report: ")]

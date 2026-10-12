@@ -12,7 +12,7 @@ as the monitor reads them for its ``[token-masking-counts]`` line (``TokenMaskin
 prediction is that line, iteration by iteration, for the same config on the same number of GPUs: the counts are
 totals over the global batch, so they do not depend on how a rank splits its microbatch across context-parallel
 ranks. A config whose ``launch_width:`` block fixes the width it trains at is predicted at that width only: its
-world size, and the data-parallel size its parallelism gives there.
+world size, and the data-parallel size its parallelism gives there (``run_training_data.data_parallel_size``).
 
 The output is JSON lines: an ``inputs`` record (the config, its sha256, the resolved settings the counts depend on,
 the GPUs and data-parallel width, the code revision), then one record per iteration with the six counts. An existing
@@ -35,7 +35,6 @@ from pathlib import Path
 
 import torch
 
-from megatron.bridge.data.loaders import build_data_loader
 from megatron.bridge.training.token_masking.hook import TokenMaskingCounts, apply_token_masking
 from megatron.bridge.training.token_masking.resolution import ResolvedTokenMasking, resolve_token_masking
 
@@ -46,13 +45,14 @@ from scripts.data.run_training_data import (  # noqa: E402
     BIN_IDX_MODES,
     MODELS,
     build_training_dataset,
+    data_parallel_loaders,
+    data_parallel_size,
     microbatches_per_replica,
     resolve_run_config,
     resumed_step,
     run_inputs,
 )
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
-from scripts.training.launch_width import LaunchWidthError, config_launch_width  # noqa: E402
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -101,18 +101,7 @@ def predict(cfg, gpus: int, first: int, last: int) -> Iterator[tuple[int, TokenM
     microbatches = microbatches_per_replica(cfg.train.global_batch_size, cfg.train.micro_batch_size, data_parallel)
     train_ds, _, first_sample = build_training_dataset(cfg)
     consumed = first_sample + (first - 1 - step) * cfg.train.global_batch_size
-    loaders = [
-        build_data_loader(
-            train_ds,
-            consumed,
-            cfg.dataset.dataloader_type,
-            cfg,
-            data_parallel_rank=rank,
-            data_parallel_size=data_parallel,
-            persistent_workers=False,
-        )
-        for rank in range(data_parallel)
-    ]
+    loaders = data_parallel_loaders(cfg, train_ds, consumed, data_parallel)
     # Each loader's own sampler and collation; its samples are read here rather than by its worker processes, which
     # would be data_parallel x num_workers processes for samples that do not depend on which process reads them.
     readers = [(iter(loader.batch_sampler), loader.collate_fn) for loader in loaders]
@@ -159,19 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.out.exists():
         raise FileExistsError(f"{args.out} exists; a prediction is never overwritten")
-    width = config_launch_width(args.config)
-    if width is not None and args.gpus != width.world_size:
-        raise LaunchWidthError(
-            f"--gpus {args.gpus}: {args.config} trains on {width.world_size} GPUs (its launch_width block), and a "
-            "prediction at any other width is not that run's"
-        )
 
     cfg = resolve_run_config(args.config, args.model, args.mode)
-    if width is not None and cfg.get_data_parallel_size(args.gpus) != width.data_parallel_size:
-        raise LaunchWidthError(
-            f"{args.config} trains at data-parallel size {width.data_parallel_size} (its launch_width block), not the "
-            f"{cfg.get_data_parallel_size(args.gpus)} its parallelism gives on {args.gpus} GPUs"
-        )
+    data_parallel = data_parallel_size(args.config, cfg, args.gpus)
     first, last = args.iterations
     inputs = {
         "config": str(Path(args.config).resolve()),
@@ -179,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         "model": args.model,
         "mode": args.mode,
         "gpus": args.gpus,
-        "data_parallel_size": cfg.get_data_parallel_size(args.gpus),
+        "data_parallel_size": data_parallel,
         "iterations": [first, last],
         "token_masking": {"enabled": cfg.token_masking.enabled, "measured": cfg.token_masking.measured_token_ids},
         "run": run_inputs(cfg),

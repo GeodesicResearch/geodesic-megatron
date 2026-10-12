@@ -43,7 +43,9 @@ all (an empty document, which therefore has no EOD).
   document with the parent, and scanned for the select config's ``absent_token_ids``: a kept
   document holding one at any position, its last included, refuses the selection. Only then is
   the output given its final names and its provenance record, which states those ids;
-  ``verify_corpora.py`` scans the final files for them again.
+  ``verify_corpora.py`` scans the final files for them again. The copy and its check
+  (``copy_documents``, ``check_copied_documents``) take documents from one parent prefix or several
+  in turn; ``scripts/data/held_out_documents.py`` writes a validation corpus through them.
 
 Usage (inside the container; as a job through ``corpus_job.sbatch``)::
 
@@ -412,7 +414,7 @@ def _name_failures(checker: Checker, messages: list[str], named: int) -> int:
     return named + min(len(messages), room)
 
 
-def _check_source_order(row: CorpusRow, positions: np.ndarray, checker: Checker) -> int:
+def check_source_order(row: CorpusRow, positions: np.ndarray, checker: Checker) -> int:
     """Check that dataset row ``i`` holds source index ``first_row + i`` in ``row_column``; return how many do not."""
     expected = row.first_row + np.arange(len(positions), dtype=np.int64)
     misplaced = np.flatnonzero(positions != expected)
@@ -467,7 +469,7 @@ def check_documents(row: CorpusRow, scalars: dict, checker: Checker, data_base: 
     checker.expect(
         len(expected) == row.docs, f"{row.subset}: {column} has {len(expected)} rows, the table says {row.docs}"
     )
-    report["rows_out_of_order"] = _check_source_order(row, positions, checker)
+    report["rows_out_of_order"] = check_source_order(row, positions, checker)
 
     documents = total = miscounted = without_eod = named_counts = named_eods = 0
     drifts: list[np.ndarray] = []
@@ -961,13 +963,18 @@ def attributable_code_revision() -> str:
     return revision
 
 
+def write_record(path: Path, record: dict) -> None:
+    """Write a record under a temporary name and rename it, so a reader never finds part of one."""
+    partial = Path(f"{path}{PARTIAL}")
+    partial.write_text(json.dumps(record, indent=1) + "\n")
+    os.replace(partial, path)
+
+
 def commit_corpus(prefix: Path, record: dict) -> None:
     """Give a corpus written under its partial names, every check passed, its final names, its record last."""
     os.replace(bin_path(prefix, PARTIAL), bin_path(prefix))
     os.replace(idx_path(prefix, PARTIAL), idx_path(prefix))
-    partial_record = Path(f"{provenance_path(prefix)}{PARTIAL}")
-    partial_record.write_text(json.dumps(record, indent=1) + "\n")
-    os.replace(partial_record, provenance_path(prefix))
+    write_record(provenance_path(prefix), record)
 
 
 def require_empty_directory(path: Path) -> None:
@@ -981,31 +988,58 @@ def require_empty_directory(path: Path) -> None:
         raise CorpusCheckFailed(f"{path} is not empty; a selection is written into an empty directory")
 
 
-def check_selected_files(
-    parent_prefix: Path, parent: DocumentIndex, index_file: Path, data_file: Path, local: np.ndarray
-) -> DocumentIndex:
-    """The written selection must hold exactly the parent's documents ``local``, in order, byte for byte."""
+@dataclass(frozen=True)
+class CopiedDocuments:
+    """The documents ``local`` (its own document indices, in the order to copy) of one parent prefix."""
+
+    prefix: Path
+    index: DocumentIndex
+    local: np.ndarray
+
+
+def copy_documents(sources: list[CopiedDocuments], data_file: Path, index_file: Path) -> None:
+    """Write each source's documents, source after source in the order given, ids byte for byte, as one corpus."""
+    from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
+
+    builder = IndexedDatasetBuilder(str(data_file), dtype=np.int32)
+    for source in sources:
+        tokens = token_memmap(bin_path(source.prefix))
+        for document in source.local.tolist():
+            start, size = int(source.index.starts[document]), int(source.index.sizes[document])
+            # An empty document is written as preprocess_data.py writes one: no sequence, not an empty one.
+            builder.add_document(tokens[start : start + size], [size] if size else [])
+    builder.finalize(str(index_file))
+
+
+def check_copied_documents(sources: list[CopiedDocuments], index_file: Path, data_file: Path) -> DocumentIndex:
+    """The written corpus must hold exactly each source's documents, source after source, in order, byte for byte."""
     out = read_index(index_file, data_file)
-    if out.docs != len(local):
-        raise CorpusCheckFailed(f"{index_file}: holds {out.docs} documents, the kept list has {len(local)} here")
-    differs = np.flatnonzero(out.sizes != parent.sizes[local])
-    if differs.size:
-        k = int(differs[0])
-        raise CorpusCheckFailed(
-            f"{index_file}: document {k} is {out.sizes[k]} ids, parent document {local[k]} is {parent.sizes[local[k]]}"
-        )
-    parent_tokens, out_tokens = token_memmap(bin_path(parent_prefix)), token_memmap(data_file)
-    for k, document in enumerate(local.tolist()):
-        start, size, source = int(out.starts[k]), int(out.sizes[k]), int(parent.starts[document])
-        if not np.array_equal(out_tokens[start : start + size], parent_tokens[source : source + size]):
-            raise CorpusCheckFailed(f"{data_file}: document {k} differs from parent document {document}")
+    expected = sum(len(source.local) for source in sources)
+    if out.docs != expected:
+        raise CorpusCheckFailed(f"{index_file}: holds {out.docs} documents, {expected} were to be copied")
+    out_tokens, first = token_memmap(data_file), 0
+    for source in sources:
+        sizes = out.sizes[first : first + len(source.local)]
+        differs = np.flatnonzero(sizes != source.index.sizes[source.local])
+        if differs.size:
+            k, document = first + int(differs[0]), int(source.local[differs[0]])
+            raise CorpusCheckFailed(
+                f"{index_file}: document {k} is {out.sizes[k]} ids, parent document {document} of {source.prefix} "
+                f"is {source.index.sizes[document]}"
+            )
+        parent_tokens = token_memmap(bin_path(source.prefix))
+        for k, document in enumerate(source.local.tolist(), start=first):
+            start, size, origin = int(out.starts[k]), int(out.sizes[k]), int(source.index.starts[document])
+            if not np.array_equal(out_tokens[start : start + size], parent_tokens[origin : origin + size]):
+                raise CorpusCheckFailed(
+                    f"{data_file}: document {k} differs from parent document {document} of {source.prefix}"
+                )
+        first += len(source.local)
     return out
 
 
 def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
     """Write one prefix of a selected corpus, check it against its parent, and record its provenance."""
-    from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
-
     row, config = selected.row, selected.config
     revision = attributable_code_revision()
     kept = read_kept(config.kept)
@@ -1021,14 +1055,9 @@ def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
     local = kept_in_prefix(kept, entry.rows)
 
     partial_bin, partial_idx = bin_path(entry.output, PARTIAL), idx_path(entry.output, PARTIAL)
-    builder = IndexedDatasetBuilder(str(partial_bin), dtype=np.int32)
-    tokens = token_memmap(bin_path(entry.parent))
-    for document in local.tolist():
-        start, size = int(parent.starts[document]), int(parent.sizes[document])
-        # An empty document is written as preprocess_data.py writes one: no sequence, not an empty one.
-        builder.add_document(tokens[start : start + size], [size] if size else [])
-    builder.finalize(str(partial_idx))
-    out = check_selected_files(entry.parent, parent, partial_idx, partial_bin, local)
+    copied = [CopiedDocuments(entry.parent, parent, local)]
+    copy_documents(copied, partial_bin, partial_idx)
+    out = check_copied_documents(copied, partial_idx, partial_bin)
     check_absent_tokens(partial_bin, out, config.absent_token_ids, beg + local)
 
     provenance = {
@@ -1098,7 +1127,8 @@ def verify_selected_prefix(selected: SelectedCorpus, entry: SelectedPrefix, kept
             f"{path}: records {[recorded_now[n] for n in differ]} for {differ}, now {[expected[n] for n in differ]}"
         )
     local = kept_in_prefix(kept, entry.rows)
-    out = check_selected_files(entry.parent, parent, idx_path(entry.output), bin_path(entry.output), local)
+    copied = [CopiedDocuments(entry.parent, parent, local)]
+    out = check_copied_documents(copied, idx_path(entry.output), bin_path(entry.output))
     check_absent_tokens(bin_path(entry.output), out, selected.config.absent_token_ids, entry.rows[0] + local)
     totals = (recorded(record, path, "totals", "num_documents"), recorded(record, path, "totals", "total_tokens"))
     if totals != (out.docs, out.tokens):

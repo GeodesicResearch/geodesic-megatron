@@ -53,8 +53,10 @@ from scripts.data.run_training_data import (  # noqa: E402
     BIN_IDX_MODES,
     MODELS,
     build_training_dataset,
+    corpus_draws,
     resolve_run_config,
     run_inputs,
+    sequences_reached,
 )
 
 
@@ -77,7 +79,7 @@ def corpus_coverage(dataset: GPTDataset, weight: float, drawn: numpy.ndarray) ->
     """How far the samples ``drawn`` (indices into ``dataset``) reach through its corpus.
 
     A document counts as reached when any token of it, the extra label token included, lies in a
-    drawn sample.
+    drawn sample (``sequences_reached``).
     """
     config = dataset.config
     # mcore's own count of the tokens in one pass over the split's documents, EOD included; the
@@ -85,31 +87,21 @@ def corpus_coverage(dataset: GPTDataset, weight: float, drawn: numpy.ndarray) ->
     tokens_per_pass = dataset._get_num_tokens_per_epoch()
     samples_per_pass = (tokens_per_pass - config.add_extra_token_to_sequence) // config.sequence_length
 
-    # Sample j spans document_index positions sample_index[j, 0] .. sample_index[j + 1, 0] inclusive.
-    rows = dataset.shuffle_index[drawn]
-    marks = numpy.zeros(len(dataset.document_index) + 1, dtype=numpy.int64)
-    numpy.add.at(marks, dataset.sample_index[rows, 0], 1)
-    numpy.add.at(marks, dataset.sample_index[rows + 1, 0] + 1, -1)
-    covered_positions = numpy.cumsum(marks[:-1]) > 0
-    documents_reached = numpy.unique(dataset.document_index[covered_positions]).size
-
     return CorpusCoverage(
         prefix=str(dataset.dataset_path),
         weight=float(weight),
         samples_drawn=int(len(drawn)),
         samples_per_pass=int(samples_per_pass),
         documents=int(len(dataset.indices)),
-        documents_reached=int(documents_reached),
+        documents_reached=int(sequences_reached(dataset, drawn).size),
     )
 
 
 def blend_coverage(train_ds) -> list[CorpusCoverage]:
     """What each corpus contributes to a built training dataset: a blend, or a single corpus."""
-    if isinstance(train_ds, GPTDataset):
-        return [corpus_coverage(train_ds, 1.0, numpy.arange(len(train_ds)))]
     return [
-        corpus_coverage(dataset, weight, train_ds.dataset_sample_index[train_ds.dataset_index == index])
-        for index, (dataset, weight) in enumerate(zip(train_ds.datasets, train_ds.weights))
+        corpus_coverage(dataset, weight, drawn)
+        for dataset, weight, _, drawn in corpus_draws(train_ds, numpy.arange(len(train_ds)))
     ]
 
 

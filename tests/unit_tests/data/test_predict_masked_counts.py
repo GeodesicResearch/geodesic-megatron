@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.training.launch_width import LaunchWidthError
 
 from tests.unit_tests.corpora_fixtures import importable, write_tokenized_documents
 
@@ -212,7 +213,7 @@ class TestMain:
         out = tmp_path / "counts.jsonl"
         argv = [str(config), "--model", "nano", "--mode", "pretrain", "--gpus", str(gpus), "--iterations", "2", "2"]
         if refused:
-            with pytest.raises(tool.LaunchWidthError, match="--gpus 4: .* trains on 2 GPUs"):
+            with pytest.raises(LaunchWidthError, match=r"trains on 2 GPUs \(its launch_width block\), not 4"):
                 tool.main([*argv, "--out", str(out)])
             assert not out.exists()
         else:
@@ -226,7 +227,7 @@ class TestMain:
         config.write_text(yaml.safe_dump(fixed))
         out = tmp_path / "counts.jsonl"
         argv = [str(config), "--model", "nano", "--mode", "pretrain", "--gpus", "2", "--iterations", "2", "2"]
-        with pytest.raises(tool.LaunchWidthError, match="trains at data-parallel size 1 .* not the 2"):
+        with pytest.raises(LaunchWidthError, match="trains at data-parallel size 1 .* not the 2"):
             tool.main([*argv, "--out", str(out)])
         assert not out.exists()
 
