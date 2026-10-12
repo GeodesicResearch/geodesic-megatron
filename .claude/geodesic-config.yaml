@@ -18,8 +18,6 @@ items:
     - no-duplication
     - explicit-defaults
     - single-responsibility
-    - docs-up-to-date
-    - readme-up-to-date
     - tests-added
     - tests-real
     - bugfix-test-first
@@ -27,7 +25,7 @@ items:
     - abstract-before-adding
     - no-ad-hoc-bullshit         # enabled 2026-08-05 (Kyle)
     - no-dead-code               # enabled 2026-08-05 (Kyle)
-    - no-development-comments    # enabled 2026-08-05 (Kyle)
+    - documentation              # enabled 2026-10-12 (Kyle)
 
   disabled_shared_items:
     - changelog-entry      # no CHANGELOG.md workflow in this repo
@@ -116,6 +114,13 @@ checks:
     description: "Skill definition directories have valid SKILL.md files"
     params:
       skills_dir: .claude/skills
+
+# ── Review gate ──────────────────────────────────────────────────────────────
+# precommit_timeout_s: seconds the commit-time review gate lets `pre-commit run`
+# take before blocking the commit. The Claude hook timeout in settings.json is
+# rendered as this + 60, so re-run `geodesic-tooling init` after changing it.
+review_gate:
+  precommit_timeout_s: 600     # measured hook times: CLAUDE.md, Testing
 
 # ── Notifications ────────────────────────────────────────────────────────────
 notifications:
