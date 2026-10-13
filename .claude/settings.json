@@ -41,7 +41,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-review-gate\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-review-gate\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-review-gate: hook binary not found -- failing closed (blocking this tool call). Set up the repo venv in a terminal (see README setup), then retry.\" >&2; exit 2"
+            "command": "G=\"$CLAUDE_PROJECT_DIR/.venv/bin/geodesic-review-gate\"; if [ ! -x \"$G\" ]; then M=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --git-common-dir 2>/dev/null); case \"$M\" in /*) G=\"${M%/.git}/.venv/bin/geodesic-review-gate\";; esac; fi; if [ -x \"$G\" ]; then exec \"$G\"; fi; echo \"geodesic-review-gate: hook binary not found -- failing closed (blocking this tool call). Set up the repo venv in a terminal (see README setup), then retry.\" >&2; exit 2",
+            "timeout": 660,
+            "onFailure": "block"
           }
         ]
       },

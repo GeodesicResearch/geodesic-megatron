@@ -192,10 +192,9 @@ python3 scripts/hub/publish_models.py --manifest configs/metagaming_filtering/hu
   --phase rolling --newest-first --poll-interval 600 --stop-after 48
 ```
 
-The publisher exits with its last pass's status: 0 once the Hub holds everything the manifest asks
-for, 1 when the pass failed on any publication, and 3 when it met no error but work is still pending,
-such as an export or upload job still queued. A chain wrapping it can therefore go on after 3 and stop
-on 1.
+The publisher exits with its last pass's status, which the control-pretraining README tabulates
+(`configs/control_pretraining/README.md`, "The exit status is the last pass's"). A chain wrapping it can
+therefore go on after 3 and stop on 1.
 
 ## Status
 

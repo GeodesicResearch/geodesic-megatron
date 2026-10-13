@@ -41,6 +41,8 @@ import pytest
 import yaml
 from scripts.checkpoint.export_clone import LATEST_FILE
 
+from tests.unit_tests.filesystem_races import strike_at
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOL_DIR = _REPO_ROOT / "scripts" / "hub"
@@ -286,6 +288,19 @@ class RecordingHub:
 
     def upload_file(self, path_or_fileobj, path_in_repo, repo_id, revision, commit_message):
         self.calls.append(("upload_file", repo_id, revision, path_in_repo))
+
+    def list_repo_refs(self, repo_id):
+        # The first commit is a commit, not a branch: only names a tree was created under are refs.
+        import httpx
+        from huggingface_hub.utils import RepositoryNotFoundError
+
+        names = sorted(
+            revision for repo, revision in self.trees if repo == repo_id and revision != self.INITIAL_COMMIT
+        )
+        if not names:
+            request = httpx.Request("GET", f"https://huggingface.co/api/models/{repo_id}/refs")
+            raise RepositoryNotFoundError("no such repository", response=httpx.Response(404, request=request))
+        return type("Refs", (), {"branches": [type("Ref", (), {"name": name})() for name in names]})()
 
     def list_repo_tree(self, repo_id, revision, recursive):
         # A generator, as huggingface_hub's is: nothing is requested, and no 404 raised, until the
@@ -723,8 +738,10 @@ def test_the_control_pretraining_manifest_publishes_every_arm_the_ablation_and_i
     # midtraining-only narrowly filtered arm, V1 and V2; and the V2 arm's xl-50b think repository. The
     # broad arm's think repository is its xl-50b one. Each filtered family adds a
     # knowledge-reintroduction repository and its replay-only control, once its links exist. V2 E2E
-    # adds one base repository, both of whose stages it trains.
-    assert len(repos) == 16 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
+    # adds one base repository, both of whose stages it trains. The rerun's quality-filtered retrain
+    # (v3) adds one think repository, and v3's higher-learning-rate retrain (v4) two: its own and its
+    # fallback's.
+    assert len(repos) == 19 and all(r.startswith("geodesic-research/control-pretraining-30b-") for r in repos)
     reintroduction = [m for m in manifest.models if "trustedmonitor" in m.repo]
     assert len(reintroduction) == 6
     for model in reintroduction:
@@ -742,14 +759,29 @@ def test_the_control_pretraining_manifest_publishes_every_arm_the_ablation_and_i
     xl50b = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-think"))
     assert xl50b.stages[0].tokens_per_iteration == 8_388_608
     assert xl50b.stages[0].tokens_before == think.stages[0].tokens_before
-    # The rerun repeats the ablation's training problem, so its revisions sit at the same token
-    # positions, and only its card carries sections of its own: the comparison with the ablation.
+    # The rerun repeats the ablation's training problem, v3 the rerun's on other data, and v4 and its
+    # fallback v3's at a higher peak learning rate, so the revisions of all five sit at the same token
+    # positions. Only the repeats' cards carry sections of their own: each one's comparison with the
+    # run it repeats.
     rerun = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v2-think"))
-    assert rerun.stages[0].train_iters == xl50b.stages[0].train_iters == 5976
-    assert rerun.stages[0].tokens_per_iteration == xl50b.stages[0].tokens_per_iteration
-    assert rerun.stages[0].tokens_before == xl50b.stages[0].tokens_before
-    assert [m.repo for m in manifest.models if m.card_sections is not None] == [rerun.repo]
+    quality = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v3-think"))
+    higher_lr = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v4-think"))
+    fallback = next(m for m in manifest.models if m.repo.endswith("baseline-xl50b-v4lr35-think"))
+    for repeat in (rerun, quality, higher_lr, fallback):
+        assert repeat.stages[0].train_iters == xl50b.stages[0].train_iters == 5976
+        assert repeat.stages[0].tokens_per_iteration == xl50b.stages[0].tokens_per_iteration
+        assert repeat.stages[0].tokens_before == xl50b.stages[0].tokens_before
+        assert repeat.private and repeat.reasoning and not repeat.strict
+    assert [m.repo for m in manifest.models if m.card_sections is not None] == [
+        rerun.repo,
+        quality.repo,
+        higher_lr.repo,
+        fallback.repo,
+    ]
     assert xl50b.repo.split("/")[1] in rerun.card_sections
+    assert rerun.repo.split("/")[1] in quality.card_sections
+    for repeat in (higher_lr, fallback):
+        assert quality.repo.split("/")[1] in repeat.card_sections
 
 
 def _chained_midtraining(campaign, first_save: str, first_lr: float) -> Path:
@@ -903,8 +935,8 @@ def test_plan_names_revisions_counts_tokens_and_marks_only_the_default_stages_fi
     ]
     assert [p.default for p in pubs] == [False, False, False, True, False, True]
     batch_4 = FIXTURE_SEQ_LENGTH * 4
-    assert by_label["org/arm-base@pretraining_iter_10"].tokens_seen == 10 * batch_4
-    assert by_label["org/arm-base@midtraining_iter_2"].tokens_seen == 12 * batch_4
+    assert by_label["org/arm-base@pretraining_iter_10"].checkpoint.tokens_seen == 10 * batch_4
+    assert by_label["org/arm-base@midtraining_iter_2"].checkpoint.tokens_seen == 12 * batch_4
 
 
 def test_tokens_seen_count_each_stage_at_its_own_batch(campaign):
@@ -915,8 +947,8 @@ def test_tokens_seen_count_each_stage_at_its_own_batch(campaign):
     manifest = publish_models.load_manifest(manifest_path, root)
     by_label = {p.label: p for p in publish_models.plan(manifest)}
     pre, mid, sft = FIXTURE_SEQ_LENGTH * 4, FIXTURE_SEQ_LENGTH * 4, FIXTURE_SEQ_LENGTH * 2
-    assert by_label["org/arm-think@sft_iter_3"].tokens_seen == 10 * pre + 4 * mid + 3 * sft
-    assert by_label["org/arm-think@sft_iter_1"].tokens_seen == 10 * pre + 4 * mid + 1 * sft
+    assert by_label["org/arm-think@sft_iter_3"].checkpoint.tokens_seen == 10 * pre + 4 * mid + 3 * sft
+    assert by_label["org/arm-think@sft_iter_1"].checkpoint.tokens_seen == 10 * pre + 4 * mid + 1 * sft
 
 
 def test_plan_leaves_out_a_save_above_the_tracker(campaign):
@@ -960,6 +992,37 @@ def test_a_stage_whose_directory_does_not_exist_yet_publishes_nothing(campaign):
     write_stage_config(root / "configs" / "mid.yaml", ckpt / "absent", 4, "exp-mid", BLEND, global_batch_size=4)
     manifest = publish_models.load_manifest(manifest_path, root)
     assert all(p.stage.name != "midtraining" for p in publish_models.plan(manifest))
+
+
+def test_a_save_directory_removed_while_it_is_planned_publishes_nothing_from_it(campaign, monkeypatch, caplog):
+    """A run's Megatron saves are deleted once their Hub copies are verified, and a polling pass may
+    be planning at that moment: the directory is there when the plan reaches the stage and gone
+    before its tracker is read. The stage then contributes nothing, as one whose directory was
+    already gone does, and the rest of the plan stands."""
+    caplog.set_level(logging.WARNING, logger="publish_models")
+    root, ckpt, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    tracker = ckpt / "mid" / publish_models.sync_bucket.LATEST_FILE
+    strike_at(monkeypatch, "read_text", tracker, lambda: shutil.rmtree(ckpt / "mid"), after=False)
+    planned = publish_models.plan(manifest)
+    assert not (ckpt / "mid").exists(), "the directory was removed during the plan"
+    assert [p.label for p in planned] == [
+        "org/arm-base@pretraining_iter_5",
+        "org/arm-base@pretraining_iter_10",
+        "org/arm-think@sft_iter_1",
+        "org/arm-think@sft_iter_3",
+    ]
+    assert f"midtraining: {ckpt / 'mid'} does not exist" in caplog.text
+
+
+def test_an_extra_directory_that_does_not_exist_is_refused(campaign):
+    """An extra directory is named by hand in the manifest to supply a save the run pruned, so one
+    that is missing is a manifest that cannot be acted on, not a stage that has nothing yet."""
+    root, ckpt, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    shutil.rmtree(ckpt / "sft_clone")
+    with pytest.raises(publish_models.ManifestError, match="sft: extra directory .*sft_clone does not exist"):
+        publish_models.plan(manifest)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -1024,6 +1087,20 @@ def test_an_export_cut_short_after_its_tensors_does_not_verify(tmp_path):
         publish_models.verify_export(cut_short)
 
 
+def test_a_shard_removed_while_an_export_is_verified_is_an_export_that_does_not_verify(tmp_path, monkeypatch):
+    """An export is deleted file by file, so one being deleted can lose a shard after verification
+    has found it and before it is opened. That is a verdict on the export, which no longer holds
+    what its index names, and callers act on the verdict; it must not reach them as the missing
+    file's own error, which none of them handles."""
+    hf_dir = tmp_path / "hf"
+    write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
+    shard = hf_dir / "model-00001-of-00001.safetensors"
+    strike_at(monkeypatch, "open", shard, shard.unlink, after=False)
+    with pytest.raises(publish_models.ExportError, match="unreadable export: FileNotFoundError"):
+        publish_models.verify_export(hf_dir)
+    assert not shard.exists(), "the shard was removed during verification"
+
+
 def test_export_command_carries_the_manifests_parallelism_and_the_models_flags(campaign):
     root, _, manifest_path = campaign
     manifest = publish_models.load_manifest(manifest_path, root)
@@ -1046,11 +1123,27 @@ def test_published_compares_every_file_by_name_and_size(tmp_path):
     hub = RecordingHub()
     hf_dir = tmp_path / "hf"
     write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
-    assert not publish_models.published(hub, "org/m", "rev", hf_dir)
-    hub.trees[("org/m", "rev")] = publish_models.local_files(hf_dir)
-    assert publish_models.published(hub, "org/m", "rev", hf_dir)
+    files = publish_models.local_files(hf_dir)
+    assert not publish_models.published(hub, "org/m", "rev", files)
+    hub.trees[("org/m", "rev")] = dict(files)
+    assert publish_models.published(hub, "org/m", "rev", files)
     hub.trees[("org/m", "rev")]["config.json"] = 999
-    assert not publish_models.published(hub, "org/m", "rev", hf_dir)
+    assert not publish_models.published(hub, "org/m", "rev", files)
+
+
+def test_only_an_export_holding_its_finishing_files_is_a_reference(tmp_path):
+    """The Hub's copy is compared with a local export only where there is one to compare with. An
+    export that is absent, unfinished or emptied is none: compared file by file with an empty or
+    partial listing, a revision that merely exists would pass for published."""
+    hf_dir = tmp_path / "hf"
+    assert publish_models.reference_export(hf_dir) is None, "an export that is absent"
+    write_export(hf_dir, {"model-00001-of-00001.safetensors": ["a"]})
+    assert publish_models.reference_export(hf_dir) == publish_models.local_files(hf_dir)
+    (hf_dir / publish_models.EXPORT_COMPLETE_FILE).unlink()
+    assert publish_models.reference_export(hf_dir) is None, "one the exporter did not finish"
+    for path in hf_dir.iterdir():
+        path.unlink()
+    assert publish_models.reference_export(hf_dir) is None, "one emptied in place"
 
 
 def test_upload_targets_the_revision_and_main_only_for_the_default(campaign):
@@ -1088,7 +1181,7 @@ def test_model_card_lists_every_revision_with_tokens_and_loss_around_the_manifes
     manifest = publish_models.load_manifest(manifest_path, root)
     base = manifest.models[0]
     pubs = [p for p in publish_models.plan(manifest) if p.model is base]
-    card = publish_models.render_model_card(manifest, base, [(pubs[0], 2.5), (pubs[3], None)])
+    card = publish_models.render_model_card(manifest, base, [(pubs[0].checkpoint, 2.5), (pubs[3].checkpoint, None)])
     assert card.startswith("---\nlicense: other\nlicense_name: test-license\n")
     assert "tags: [tag-a, tag-b]\n" in card
     assert "| `pretraining_iter_5` | pretraining | 5 | 160 (0.0B) | 2.5000 |" in card
@@ -1116,6 +1209,15 @@ def fake_export(publication, manifest, repo_root, log_path):
     write_export(publication.hf_dir, {"model-00001-of-00001.safetensors": [f"w{publication.iteration:04d}"]})
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.open("a").write(f"exported {publication.label}\n")
+
+
+def refusing_export(complaint: str):
+    """A stand-in for run_export that fails the test, for a pass that must export nothing."""
+
+    def run_export(publication, manifest, repo_root, log_path):
+        raise AssertionError(f"{publication.label} {complaint}")
+
+    return run_export
 
 
 def test_plan_mode_changes_nothing(campaign, monkeypatch):
@@ -1947,15 +2049,244 @@ def test_a_revision_whose_local_export_was_removed_stays_published(campaign, mon
     shutil.rmtree(target.hf_dir)
     card_dir = root / "logs" / "cards" / "arm-base"
     shutil.rmtree(card_dir)
-
-    def no_export(publication, manifest, repo_root, log_path):
-        raise AssertionError(f"{publication.label} is on the Hub and was exported again")
-
-    monkeypatch.setattr(publish_models, "run_export", no_export)
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("is on the Hub and was exported again"))
     assert publish_models.publish_pass(
         manifest, root, hub, wandb, root / "logs" / "b", True, (), "all"
     ) == PassOutcome(pending=0, failed=0)
     assert "| `midtraining_iter_4` (also `main`) |" in (card_dir / "README.md").read_text()
+
+
+def change_while_the_hub_lists(monkeypatch, hub: RecordingHub, publication, change) -> None:
+    """Make ``change`` once, while the Hub lists the publication's own revision. A pass spends its
+    time waiting on the Hub, so that is when another process's deletion of a local export lands;
+    it is another process's, so the test places it there by hand."""
+    list_repo_tree = hub.list_repo_tree
+    pending = [change]
+
+    def listing(repo_id, revision, recursive):
+        if pending and repo_id == publication.model.repo and revision == publication.revision:
+            pending.pop()()
+        return list_repo_tree(repo_id, revision=revision, recursive=recursive)
+
+    monkeypatch.setattr(hub, "list_repo_tree", listing)
+
+
+def test_an_export_removed_while_the_pass_waits_on_the_hub_stops_nothing(campaign, monkeypatch):
+    """Exports are deleted to free space while a polling pass runs, and one can vanish while the pass
+    waits on the Hub's listing of its revision. The export was listed once, before the Hub was asked
+    anything, so the comparison stands on that listing: the revision is published, is not exported
+    again and keeps its row, and the pass goes on instead of ending the polling process."""
+    root, _, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-base@midtraining_iter_4")
+    change_while_the_hub_lists(monkeypatch, hub, target, lambda: shutil.rmtree(target.hf_dir))
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("is on the Hub and was exported again"))
+    card_dir = root / "logs" / "cards" / "arm-base"
+    shutil.rmtree(card_dir)
+    assert publish_models.publish_pass(
+        manifest, root, hub, wandb, root / "logs" / "b", True, (), "all"
+    ) == PassOutcome(pending=0, failed=0)
+    assert not target.hf_dir.exists(), "the export was removed during the pass"
+    assert "| `midtraining_iter_4` (also `main`) |" in (card_dir / "README.md").read_text()
+
+
+def test_an_export_losing_a_file_while_it_is_listed_is_judged_from_the_hub(campaign, monkeypatch):
+    """A deletion in progress removes an export file by file, so the pass can list one whose index
+    and run config are still there while a shard goes between being found and being sized. A
+    half-deleted export is no reference, as one already gone is none: the revision is judged from
+    the Hub, is not exported again and keeps its row, and the pass goes on."""
+    root, _, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-base@midtraining_iter_4")
+    shard = target.hf_dir / "model-00001-of-00001.safetensors"
+    strike_at(monkeypatch, "is_file", shard, shard.unlink, after=True)
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("is on the Hub and was exported again"))
+    card_dir = root / "logs" / "cards" / "arm-base"
+    shutil.rmtree(card_dir)
+    assert publish_models.publish_pass(
+        manifest, root, hub, wandb, root / "logs" / "b", True, (), "all"
+    ) == PassOutcome(pending=0, failed=0)
+    assert not shard.exists(), "the shard was removed during the pass"
+    assert all((target.hf_dir / name).is_file() for name in publish_models.FINISHING_FILES)
+    assert "| `midtraining_iter_4` (also `main`) |" in (card_dir / "README.md").read_text()
+
+
+def test_an_export_emptied_while_the_pass_waits_on_the_hub_passes_no_branch_for_published(campaign, monkeypatch):
+    """A branch whose upload never landed exists and holds no export. Were the local export listed
+    again after the Hub had answered, one emptied in the meantime would compare as nothing against
+    that branch, and nothing is all there: the branch would pass for published and never be
+    uploaded. The comparison uses the listing taken before the Hub was asked, and an export that
+    then disagrees and no longer verifies leaves the Hub's copy to be judged on its own."""
+    root, _, manifest_path, hub, _ = published_campaign(campaign, monkeypatch)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    target = next(p for p in publish_models.plan(manifest) if p.label == "org/arm-base@pretraining_iter_5")
+    hub.trees[(target.model.repo, target.revision)] = dict(hub.INITIAL_TREE)
+
+    def empty_the_export():
+        for path in target.hf_dir.iterdir():
+            path.unlink()
+
+    change_while_the_hub_lists(monkeypatch, hub, target, empty_the_export)
+    assert not publish_models.on_the_hub(hub, target)
+    assert list(target.hf_dir.iterdir()) == [], "the export was emptied during the comparison"
+
+
+def published_campaign(campaign, monkeypatch) -> tuple[Path, Path, Path, RecordingHub, RecordingWandb]:
+    """The fixture campaign with every checkpoint exported and on the Hub."""
+    root, ckpt, manifest_path = campaign
+    hub = RecordingHub()
+    wandb = RecordingWandb({"exp-mid": [{"_step": 4, "lm loss": 1.5}], "exp-sft": [{"_step": 1, "lm loss": 0.9}]})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    assert publish_models.publish_pass(
+        manifest, root, hub, wandb, root / "logs" / "first", True, (), "all"
+    ) == PassOutcome(pending=0, failed=0)
+    return root, ckpt, manifest_path, hub, wandb
+
+
+def with_provenance(manifest_path: Path, provenance: str) -> None:
+    text = yaml.safe_load(manifest_path.read_text())
+    text["card"]["provenance"] = provenance
+    manifest_path.write_text(yaml.safe_dump(text))
+
+
+def test_a_card_lists_every_revision_the_hub_holds_whatever_is_left_on_disk(campaign, monkeypatch):
+    """A published checkpoint's Megatron save and its local export are both removed in time, so the
+    save directories say what is still on disk, not what the repository holds. A card built from them
+    loses a row with each save removed, and a model whose saves are all gone gets no card at all."""
+    root, ckpt, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    shutil.rmtree(ckpt / "pre" / "iter_0000005")
+    shutil.rmtree(ckpt / "sft")
+    shutil.rmtree(ckpt / "sft_clone" / "iter_0000001")
+    shutil.rmtree(root / "exports")
+    shutil.rmtree(root / "logs" / "cards")
+    assert publish_models.publish_pass(
+        manifest, root, hub, wandb, root / "logs" / "later", True, (), "upload"
+    ) == PassOutcome(pending=0, failed=0)
+    base = (root / "logs" / "cards" / "arm-base" / "README.md").read_text()
+    for revision in ("pretraining_iter_5", "pretraining_iter_10", "midtraining_iter_2", "midtraining_iter_4"):
+        assert f"| `{revision}`" in base, f"{revision} is on the Hub and missing from the card"
+    think = (root / "logs" / "cards" / "arm-think" / "README.md").read_text()
+    assert "| `sft_iter_1` | sft | 1 | 464 (0.0B) | 0.9000 |" in think
+    assert "| `sft_iter_3` (also `main`) | sft | 3 |" in think
+
+
+def test_only_a_branch_holding_a_finished_export_under_a_stages_own_name_is_a_checkpoint(campaign, monkeypatch):
+    """What a card may list is decided on the Hub alone: a branch counts when a stage's revision pattern
+    names it exactly and it holds a finished export, and the final checkpoint only while main holds its
+    weights too, the rule a publication is judged by when its local export is gone."""
+    root, _, manifest_path, hub, _ = published_campaign(campaign, monkeypatch)
+    base = publish_models.load_manifest(manifest_path, root).models[0]
+    repo = base.repo
+
+    def held() -> list[tuple[str, int]]:
+        return [(c.stage.name, c.iteration) for c in publish_models.hub_checkpoints(hub, base)]
+
+    everything = [("pretraining", 5), ("pretraining", 10), ("midtraining", 2), ("midtraining", 4)]
+    assert held() == everything
+    # A branch whose upload failed after it was created holds the first commit only.
+    hub.trees[(repo, "pretraining_iter_7")] = dict(RecordingHub.INITIAL_TREE)
+    # Branches this tool never names: a padded iteration, and one outside every stage's pattern.
+    hub.trees[(repo, "pretraining_iter_0005")] = dict(hub.trees[(repo, "pretraining_iter_5")])
+    hub.trees[(repo, "scratch")] = dict(hub.trees[(repo, "pretraining_iter_5")])
+    assert held() == everything
+    hub.trees[(repo, publish_models.MAIN)] = dict(hub.trees[(repo, "midtraining_iter_2")])
+    assert held() == everything[:-1], "main carries other weights, so the final checkpoint is not published"
+    assert publish_models.hub_checkpoints(RecordingHub(), base) == [], "a repository that does not exist holds none"
+
+
+def test_the_cards_phase_rewrites_every_card_from_the_hub_and_writes_nothing_else(campaign, monkeypatch):
+    """A change to what the cards say reaches every repository through a pass that can publish no
+    checkpoint: it reads no save directory (one named by the manifest may be gone), runs no export,
+    uploads no revision and leaves the collection alone."""
+    root, ckpt, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    shutil.rmtree(ckpt)
+    shutil.rmtree(root / "exports")
+    with_provenance(manifest_path, "NEW PROVENANCE.")
+    manifest = publish_models.load_manifest(manifest_path, root)
+
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("was exported by the cards phase"))
+    before = len(hub.calls)
+    assert publish_models.publish_pass(
+        manifest, root, hub, wandb, root / "logs" / "cards-pass", True, (), "cards"
+    ) == PassOutcome(pending=0, failed=0)
+    assert hub.calls[before:] == [
+        ("upload_file", "org/arm-base", "main", "README.md"),
+        ("upload_file", "org/arm-think", "main", "README.md"),
+    ]
+    for name, rows in (("arm-base", 4), ("arm-think", 2)):
+        card = (root / "logs" / "cards" / name / "README.md").read_text()
+        assert "NEW PROVENANCE." in card and "PROVENANCE TEXT." not in card
+        assert card.count("_iter_") == rows, f"{name} lists {card.count('_iter_')} revisions, the Hub holds {rows}"
+    # Only the models asked for, when a filter is given; an unchanged card is not uploaded again.
+    with_provenance(manifest_path, "NEWER PROVENANCE.")
+    manifest = publish_models.load_manifest(manifest_path, root)
+    before = len(hub.calls)
+    publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "cards-one", True, ("think",), "cards")
+    publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "cards-again", True, ("think",), "cards")
+    assert hub.calls[before:] == [("upload_file", "org/arm-think", "main", "README.md")]
+
+
+def test_the_cards_phase_describes_no_checkpoint_that_is_not_on_the_hub(campaign, monkeypatch, caplog):
+    """A verified export waiting on disk is not published by a cards pass, and is not described by
+    one: with nothing on the Hub there is no repository to describe, and none is created. The pass
+    names each model it had nothing to describe, since it returns 0 either way."""
+    caplog.set_level(logging.INFO, logger="publish_models")
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub = RecordingHub()
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(manifest, root, hub, RecordingWandb({}), root / "logs" / "export", True, (), "export")
+    assert publish_models.publish_pass(
+        manifest, root, hub, RecordingWandb({}), root / "logs" / "c", True, (), "cards"
+    ) == PassOutcome(pending=0, failed=0)
+    assert hub.calls == []
+    assert not (root / "logs" / "cards").exists()
+    for repo in ("org/arm-base", "org/arm-think"):
+        assert f"{repo}: no checkpoint on the Hub, so no card" in caplog.text
+
+
+def test_the_entry_point_renders_the_cards_in_plan_mode_and_asks_wandb_only_then(campaign, monkeypatch):
+    """`--plan --phase cards` is the command that renders the cards to be read before an upload. It
+    needs the losses, so it is the one plan that builds a W&B client; a plan of exports and uploads
+    builds none, which is what lets it run without W&B credentials."""
+    root, _, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    clients: list[RecordingWandb] = []
+
+    def make_wandb_api():
+        clients.append(wandb)
+        return wandb
+
+    monkeypatch.setattr(publish_models.sync_bucket, "make_api", lambda: hub)
+    monkeypatch.setattr(publish_models, "make_wandb_api", make_wandb_api)
+    monkeypatch.setenv("HF_HOME", "/projects/a5k/public/hf")
+    arguments = ["--manifest", str(manifest_path), "--repo-root", str(root), "--plan"]
+    before = len(hub.calls)
+    assert publish_models.main(arguments) == 0
+    assert clients == [], "a plan of exports and uploads asked for a W&B client"
+    assert publish_models.main([*arguments, "--phase", "cards"]) == 0
+    assert len(clients) == 1
+    assert hub.calls[before:] == []
+    rendered = sorted((root / "logs").glob("*/cards/*/README.md"))
+    assert [card.parent.name for card in rendered] == ["arm-base", "arm-think"]
+
+
+def test_a_cards_plan_renders_each_card_beside_its_log_and_uploads_none(campaign, monkeypatch):
+    """What a cards pass would upload can be read before it is uploaded: the plan renders each card
+    into its own run directory and leaves both the Hub and the record of what the Hub holds alone."""
+    root, _, manifest_path, hub, wandb = published_campaign(campaign, monkeypatch)
+    with_provenance(manifest_path, "NEW PROVENANCE.")
+    manifest = publish_models.load_manifest(manifest_path, root)
+    before = len(hub.calls)
+    run_dir = root / "logs" / "cards-plan"
+    assert publish_models.publish_pass(manifest, root, hub, wandb, run_dir, False, (), "cards") == PassOutcome(
+        pending=0, failed=0
+    )
+    assert hub.calls[before:] == []
+    for name in ("arm-base", "arm-think"):
+        assert "NEW PROVENANCE." in (run_dir / "cards" / name / "README.md").read_text()
+        assert "PROVENANCE TEXT." in (root / "logs" / "cards" / name / "README.md").read_text()
 
 
 def test_an_upload_job_takes_over_the_records_of_the_job_before_it(campaign, monkeypatch, caplog):
@@ -2746,10 +3077,7 @@ def test_the_export_phase_takes_no_upload_and_the_upload_phase_takes_no_gpu(camp
     assert len(exports) == 6
     assert [c for c in hub.calls if c[0] in ("upload_folder", "upload_file", "create_collection")] == []
 
-    def no_export(publication, manifest, repo_root, log_path):
-        raise AssertionError(f"the upload phase must not export {publication.label}")
-
-    monkeypatch.setattr(publish_models, "run_export", no_export)
+    monkeypatch.setattr(publish_models, "run_export", refusing_export("was exported by the upload phase"))
     shutil.rmtree(root / "exports" / "arm-think" / "sft" / "iter_0000001" / "hf")
     outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "upload", True, (), "upload")
     assert outcome == PassOutcome(pending=1, failed=0), (

@@ -9,8 +9,13 @@ data**.
 |---|---|---|---|---|---|
 | 1 — pretraining | `nemotron_nano_30b_filtered_mini_2plus_pretrain.yaml` | 8192 | 29881 | TP1·CP1·EP4·PP1·ETP1, DP=512 | 14 |
 | 2 — midtraining | `nemotron_nano_30b_filtered_mini_2plus_midtrain.yaml` | 32768 | 3126 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 6 |
-| 3 — SFT (the arm's reasoning model) | [`../30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml`](../30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml) | 32768 | 5976 | TP1·CP2·EP4·PP1·ETP1, DP=128 | 5, all retained |
-| 3 — SFT (mainline recipe, not run) | `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` | 32768 | 2988 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 5, all retained |
+| 3 — SFT (the arm's reasoning model) | [`../30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml`](../30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml) | 32768 | 5976 | TP1·CP2·EP4·PP1·ETP1, DP=128 | 5 |
+| 3 — SFT (mainline recipe, not run) | `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` | 32768 | 2988 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 5 |
+
+The last column is what a run of each config writes. What still exists is recorded in
+[`../bucket-readme.md`](../bucket-readme.md) section 2 (state on 2026-10-12): on Isambard only the finals of
+stages 1 and 2 remain, the bucket holds the seven earliest stage-1 saves, and every checkpoint of every run is a
+Hub revision.
 
 **The arm's reasoning model is the xl-50b SFT recipe** (Kyle, 2026-09-23), the baseline ablation's
 config with only the corpus, the warm start and the run identity changed: this arm's midtraining
@@ -20,8 +25,9 @@ final (`iter_0003126`) trained on the broad cut of the xl-50b mix, the
 models on the same recipe"), and `hub_models.yaml` publishes it as
 `control-pretraining-30b-filtered-mini-2plus-xl50b-think`. It is configured and its split is
 published: its prepare config pins `c9bbc349` and its `corpora.tsv` row holds the 8,838,103
-conversations retained there, as pre-registered. Its corpus is packed (32 shards) and the model is
-training. The rule's score half reaches only the 1,173,961 conversations that carry a gpt-5-mini
+conversations retained there, as pre-registered. Its corpus was packed in 32 shards and the model
+trained on 2026-09-26 (job 6864192, 5,976 iterations in one 64-node segment). All five of its checkpoints are
+Hub revisions, and its run directory no longer exists on Isambard, so they are the only copies. The rule's score half reaches only the 1,173,961 conversations that carry a gpt-5-mini
 score (no conversation carries a canary string); the other 7,750,285 of the mix's 8,924,246 (86.85%)
 were decided at the regex prefilter or the nano relevance gate and are retained unexamined. The mainline-recipe `nemotron_nano_30b_filtered_mini_2plus_sft.yaml` is the counterpart
 of the baseline's stage 3 (2988 iterations over the filtered `pa-warm-start-sft-heavy-25b-mix`); its
@@ -587,8 +593,9 @@ segment would warm-start the next stage from whatever intermediate checkpoint th
 and a crashed or cancelled segment makes `afterok` unsatisfiable forever. On a stall or a crash
 the gate refuses and the next stage sits in `DependencyNeverSatisfied` — cancel it, extend the
 stage, re-gate. The full behaviour is in [`../README.md`](../README.md) "Queueing the next stage
-behind a completion gate"; every stage of this arm retains intermediate checkpoints, which is
-what the gate compares the final save against.
+behind a completion gate"; every stage of this arm wrote intermediate checkpoints, which is
+what the gate compared each final save against. Those intermediates are gone from Isambard, so the gate
+can no longer be run on this arm's stages.
 
 Pre-flight, in order, before the first `isambard_sbatch` of stage 1:
 
@@ -752,9 +759,10 @@ Outstanding, in order:
    final is exported only after its chain has drained, because a segment that starts after a
    finished one re-saves the final in place.
 
-Every completed checkpoint of this arm, optimizer state included, is mirrored to the private Hub
-bucket `geodesic-research/control-pretraining-models-bucket` (the campaign README's "The archive
-of record" section, and [`../bucket_sync.yaml`](../bucket_sync.yaml) for what is listed); the
-`hf/` exports of item 3 are not, being regenerable from the archived checkpoint. The manifest lists
-this arm's three stage configs and its xl-50b SFT config, so each is archived once its save
-directory exists and a save has completed.
+The mirror to the private Hub bucket `geodesic-research/control-pretraining-models-bucket` (the
+campaign README's "The archive of record" section, and [`../bucket_sync.yaml`](../bucket_sync.yaml) for what
+is listed) stopped on 2026-09-11, during this arm's stage 1. The bucket therefore holds this arm's seven
+earliest stage-1 saves (`iter_0002264` to `iter_0013584`, optimizer state included) and nothing else of it.
+The manifest still lists the arm's three stage configs and its xl-50b SFT config, so a resumed pass would
+archive whatever is on Isambard then: today that is the two finals, stage 1's `iter_0029881` and stage 2's
+`iter_0003126`.

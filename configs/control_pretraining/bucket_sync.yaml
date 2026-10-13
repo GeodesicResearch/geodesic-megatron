@@ -12,6 +12,11 @@
 # records what each pass found, and _provenance/<run>/ keeps each pass's resolved copy of this
 # file, its plans and its log.
 #
+# The mirror has not run since 2026-09-11 (Kyle stopped it), so this file lists what a pass would
+# archive, not what the bucket holds: bucket-readme.md section 2 records, run by run, what is in the
+# bucket, on Isambard and on the Hub. Most stages listed below trained after that date, and the save
+# directories of many no longer exist, which a pass reports as "not started".
+#
 # Run it locally on the tunnel or login node under the host Python — never as a SLURM job (Kyle,
 # 2026-09-11) — detached and polling:
 #

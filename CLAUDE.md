@@ -23,6 +23,9 @@ hash — the full flow is `commit_workflow.md` below. `geodesic-protect-verdict`
 subagent's Write tool can produce the verdict, and `geodesic-submodule-check` warns if the vendored
 tooling checkout drifts off its pin. The gate runs pre-commit on staged files only (not
 `--all-files`), so pre-existing repo-wide lint debt does not block unrelated commits. The
+gate's pre-commit limit is `review_gate.precommit_timeout_s` (see its comment in
+`.claude/geodesic-config.yaml`). After a tooling pin bump, refresh `.venv` with
+`scripts/install_claude_tooling.sh`. The
 conventions themselves are defined in these snippets:
 
 @.claude/snippets/workflows/branch_then_pr.md
@@ -892,8 +895,9 @@ on 2026-09-10). The load now drops its references before `torch.cuda.empty_cache
 `memory after checkpoint load`; on every resumed segment reserved should sit within a few
 hundred MiB of allocated. See the 30b_baseline README's "Segment rollover" section.
 
-**The campaign's archive of record is the private Hub bucket
-`geodesic-research/control-pretraining-models-bucket`**: every completed checkpoint of every
+**The campaign's archive is the private Hub bucket
+`geodesic-research/control-pretraining-models-bucket`, and it holds only a small part of the campaign**
+(next paragraph). It was built to hold every completed checkpoint of every
 stage (optimizer and RNG state included, the `iter_*/hf/` exports excluded) and every corpus the
 stage configs read, mirrored by `scripts/hub/sync_bucket.py` from the manifest
 `configs/control_pretraining/bucket_sync.yaml`, run **locally on the tunnel or login node under the
@@ -903,12 +907,25 @@ size alone, re-plans after each pass and fails if anything is still pending. The
 stage configs, and each contributes its `checkpoint.save` directory and its corpora, so a new
 stage is archived automatically once its directory exists and a save has completed; only the
 export clone holding the baseline SFT's pruned iteration-600 save is listed explicitly. `configs/control_pretraining/README.md`,
-"The archive of record", has the layout and the restore recipe. **The mirror has been stopped since
-2026-09-11 (Kyle), so the bucket holds only what it had copied by then**: no midtraining final and no
-filtered or reintroduction corpus is in it. Everything since exists only on `/projects` and, once
-exported, as Hub revisions; the manifest lists what a resumed pass would archive, and nothing it lists
-is archived until one runs. The V2 E2E stage-1 corpora were deleted unarchived (Kyle, 2026-10-03), so a
-resumed pass fails on that started stage until they are rebuilt or the manifest stops reading them.
+"The archive of record", has the layout and the restore recipe.
+
+**The mirror has been stopped since 2026-09-11 (Kyle), so the bucket holds only what it had copied by
+then**: the baseline's three stages in full, the seven earliest saves of the Broadly Filtered stage 1, and
+the baseline's six stage-1 corpora. Everything since that is still on disk exists only on `/projects` and,
+once exported, as Hub revisions, and **most runs have no Megatron checkpoint left at all** (state on
+2026-10-12). Eleven trained runs have no run directory on Isambard: the baseline xl-50b SFT ablation and
+its v2 rerun, the xl-50b reasoning models of the two filtered arms, V2 E2E stage 1 and the six
+knowledge-reintroduction runs. The v3 and v4 reruns' saves were deleted once their Hub revisions were
+verified (Kyle, 2026-10-12: the SFT models will not be trained further, so an SFT run's Megatron
+checkpoints may be deleted once its Hub copies are verified; pretraining and midtraining checkpoints are
+not covered by that). None of those thirteen was archived, so their Hub revisions are the only copies and
+the runs can be neither resumed nor exported again. Three more runs keep only their final save (the Broadly
+Filtered stage 1 and stage 2, and narrow V1's midtraining). **`configs/control_pretraining/bucket-readme.md`
+section 2 is the record, run by run, of which checkpoints exist on Isambard, in the bucket and on the Hub;
+read it, and list the save directory's `iter_*` contents, before assuming a checkpoint can be loaded.** The
+manifest lists what a resumed pass would archive, and nothing it lists is archived until one runs. A listed stage whose save directory is gone is reported as not started and its missing corpora are
+skipped with a warning, so the V2 E2E stage-1 corpora (deleted unarchived, Kyle, 2026-10-03) no longer
+fail a resumed pass.
 
 **The campaign's models on the Hub** are the "Control Pretraining" collection: per arm a
 `control-pretraining-30b-<arm>-base` repository (the stage-1 and stage-2 checkpoints of an arm that
@@ -918,7 +935,10 @@ repository per SFT run** (`sft_iter_<n>`, the final as `main`), named for its re
 for the baseline's mainline SFT, `-<arm>-xl50b-think` for the xl-50b recipe (the baseline's
 ablation, and the Broadly Filtered and narrow V2 arms' reasoning models; narrow V1 has none), and
 `-baseline-xl50b-v2-think` for the baseline's xl-50b ablation rerun on fixed, fast code, whose card carries the
-comparison of the two (its `v2` names the rerun, not the narrow V2 arm),
+comparison of the two (its `v2` names the rerun, not the narrow V2 arm), `-baseline-xl50b-v3-think` for that
+rerun on the quality-filtered mix, whose card carries its comparison with v2, and `-baseline-xl50b-v4-think` for v3
+at a ten times higher peak learning rate (`-baseline-xl50b-v4lr35-think` for its fallback), whose card carries its
+comparison with v3,
 because two SFT runs of one base model would collide in meaning — so revision names are NOT unique
 across the collection and the repository is what tells two SFT runs apart. Each carries a model card
 listing every revision's tokens seen and W&B training loss, and per stage the data mix, sequence
@@ -948,9 +968,14 @@ and size one export cannot be told from another), every revision branches from t
 first commit (never from `main`; a first commit holding an export is refused), and a revision without
 a usable local export still counts once the Hub holds its finished export. The entry point refuses a
 Hub identity outside the manifest's namespaces, since a repository the token cannot see reads as
-missing. A card's tokens seen count each stage at its own sequence length times global batch.
+missing. A card's tokens seen count each stage at its own sequence length times global batch, and its
+revision rows are the repository's branches on the Hub that hold a finished export, never the save
+directories, so a card keeps every row after the saves and exports are deleted. `--phase cards` rewrites
+the cards and nothing else (no export, no revision, no collection write; with `--plan` it renders each
+card into the run directory instead of uploading it), which is how a change to the cards' text reaches
+every repository.
 `--newest-first` takes each stage's latest checkpoint
-first without moving the model cards, which sort their own rows. A run exits 0 once everything is published,
+first without moving the model cards, which sort their own rows. A run exits 0 once everything is published (a `cards` pass judges no publication and exits 0 once its cards are written),
 1 on any failure and 3 when a clean pass leaves work pending. The campaign README's "The models
 on the Hub" section has the full behaviour.
 
@@ -972,9 +997,12 @@ corpus keeps per-turn reasoning in a `reasoning_content` field, and the plain va
 byte-identical, so only the packed artifact differs — and the packed path names the tokenizer
 so the two cannot silently disagree.
 Stages 1–2 run 16,777,216 tokens/iter so the optimizer's token batch is continuous across the
-boundary, and the two retain **20 checkpoints between them** (14 + 6). From stage 2 on a save
+boundary, and the two write **20 checkpoints between them** (14 + 6). From stage 2 on a save
 lands every ~10B tokens — `save_interval: 600` at 16,777,216 tokens/iter = 10,066,329,600 — so
-stage 3 keeps five of its own, every one retained. All three stages (and
+stage 3 writes five of its own, and no stage prunes any. (That is what a run of these configs writes,
+not what is on disk today: the baseline's own stage 2 ran at an earlier cadence and wrote two, three of
+its stage 3's saves exist, and most later runs' saves are gone; see the archive paragraph above.) All
+three stages (and
 both CPT-validation arms) set `train.exit_duration_in_mins: 1400`: a 24 h segment saves and
 exits on its own clock ~40 min before the workq MaxWall, because sbatch `--signal`-based
 exits are undeliverable on this stack (the non-Python layers of the step tear down in ~45 s,
@@ -1042,7 +1070,17 @@ ablation rerun on fixed, fast code (Kyle, 2026-10-02). It keeps the same trainin
 SFT quickstart's levers, at the quickstart's values, and its run identity. It must launch from a checkout containing
 PR #52's packed-SFT fixes. Compare it with `control-pretraining-30b-baseline-xl50b-think` by evaluations, not loss
 curves: the ablation's logged loss reads about 0.03–0.04 nats low because of its corrupted CP partitions. Its launch
-and status are in that directory's README.
+and status are in that directory's README. `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml` (+ `.env`) is v2
+trained again with only its corpus changed (Kyle, 2026-10-09): the `train` config of
+`geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered`, the xl-50b mix less the rows a trace-quality judge
+labelled defective, refilled to v2's 50B tokens at v2's agentic and MCQA shares. It keeps v2's 5976 iterations
+whatever its pack count: fewer packs than 5976 x 256 and the last iterations re-read the first packs, more and the
+last packs go unread (v2's corpus fell 172 packs short). Compare it with v2 by evaluations; its build, launch and
+status are in the same README. `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml` (+ `.env`) is v3 trained again
+with only its peak learning rate changed, 5e-6 to 5e-5 (Kyle, 2026-10-10, approved above the research log's 1e-5
+full-SFT ceiling), and `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` the same at 3.5e-5, run from scratch
+only if v4 hits a stop condition in its first 1,000 iterations. Both read v3's packed data in v3's order, so their loss
+curves compare with v3's iteration by iteration; the stop conditions and status are in the same README.
 
 **The treatment arm is `configs/control_pretraining/30b_filtered_mini_2plus/`**: the same three
 stages on the same corpora with AI-scheming literature removed — every document that **carries a
@@ -1179,7 +1217,8 @@ continual pretraining of the Broadly Filtered and narrow V2 midtraining finals (
 the deduplicated union of the documents each family's filters removed, never-seen documents only,
 50/50 with replay of the parent's midtraining blend, at the midtraining LR held constant and GBS
 256, beside a replay-only control per family, for a per-family number of epochs (three broad, five
-narrow; Kyle added the narrow family's 4th and 5th on 2026-09-30; more can be added). A third family,
+narrow; Kyle added the narrow family's 4th and 5th on 2026-09-30; the families' run directories are gone, so more epochs would mean running a chain again from the
+parent's midtraining final). A third family,
 V2 E2E's (five epochs of 76 iterations, its union pinned at `61c9d1d2`), has its links rendered too; they
 start from that arm's midtraining final once it exists. Each epoch is its
 own job (a "link"), submitted one at a time by `configs/control_pretraining/submit_chain_link.py` only
@@ -1887,15 +1926,14 @@ compute mode**, which it reads from `nvidia-smi`; the GPU count is the visible d
   unavailable".
 - The same node read `Default` again that evening.
 - **Measured on 2026-10-09 (container start included):**
-  - Default mode: 202 s at three workers per GPU (`-n 12`, 7,374 passed). Two per GPU took 282 s, close
-    to the gate's limit, because under `--dist loadfile` the slowest files (the 2-GPU padding-mask test
-    and the HybridEP replay, 44 s and 33 s) bound the pass.
+  - Default mode: 202 s at three workers per GPU (`-n 12`, 7,374 passed). Two per GPU took 282 s,
+    because under `--dist loadfile` the slowest files (the 2-GPU padding-mask test and the HybridEP
+    replay, 44 s and 33 s) bound the pass.
   - Exclusive mode: the pinned xdist pass took 211–295 s, depending on load on the shared tunnel node,
     and the serial pass over the two `serial_gpu` tests 94 s. That totals 305–390 s.
-- **The review gate gives pre-commit 300 s.** The limit is hard-coded in the tooling submodule's
-  `review_gate.py`. A commit made while the GPUs are exclusive therefore runs over it and times out: the
-  timeout is not a failure of the tests. Run the runner by hand to see the result, and raise the limit
-  in the tooling (or commit from a node in Default mode) rather than shrinking the run.
+- **The review gate's pre-commit limit** (`review_gate.precommit_timeout_s`) covers the Exclusive-mode
+  total above. A commit that still times out is not a failure of the tests: run the runner by hand to
+  see the result rather than shrinking the run.
 
 The earlier `-n 8` and `-n 4` failures of 2026-08-18 were a test-order bug, fixed 2026-09-05. It looked
 like load: the full suite errored in `test_mq_tokenizers.py` (now `test_marker_tokenizers.py`) fixture setup
@@ -1974,7 +2012,8 @@ as a patch in `3rdparty/patches/megatron-lm/` — that directory's README record
 and what it is load-bearing for. Two are patch files that NO run applies. `0001-fix-moe-normalize-allgather-dispatcher-output-by-EP-.patch`
 is the ONLY surviving copy of a fix whose original submodule commit no remote contains, kept
 because nothing uses the `allgather` dispatcher today (every config uses `alltoall`, except the
-`flex` of the three Nano quickstarts, the xl-50b SFT rerun (v2) and the V2 E2E arm) but the fix would be
+`flex` of the three Nano quickstarts, the xl-50b SFT rerun (v2), its quality-filtered retrain (v3) and
+that retrain's higher-learning-rate runs (v4 and its fallback), and the V2 E2E arm) but the fix would be
 unrecoverable if dropped. `0002` (CUDA-graph `zeros_like` on a 0-dim tensor) is
 **still open upstream** — apply it if you ever enable CUDA graphs; no shipped config does.
 `0003`, `0004` and `0005`, the Nano pretrain campaign's Megatron-LM changes, are carried commits of the
@@ -2079,7 +2118,7 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 | Problem | Fix |
 |---------|-----|
 | `RuntimeError: ...gradient_accumulation_fusion...` | Bare-metal only (venv has no APEX): `model.gradient_accumulation_fusion: False`. In the default container the image ships APEX, so keep it `True` (faster). |
-| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP. |
+| NaN loss at iteration 7-8 | Lower LR to 5e-6. 8e-5 is unstable with CP (that run: CP=2, NaN at iterations 4-8 with the warmup LR at most ~1.3e-5). Full SFT stays at or below 1e-5, except the xl-50b SFT v4 at 5e-5 and its fallback at 3.5e-5, both CP=1 (Kyle, 2026-10-10). |
 | `OSError: [Errno 116] Stale file handle` | `TRITON_CACHE_DIR`/`TMPDIR` to node-local `/tmp` (automatic in `pipeline_training_launch.sh`) |
 | NCCL hangs every ~7-8 min | Slingshot fabric issue. ft_launcher auto-restarts. |
 | EP=4 OOMs on GH200 | Use EP=8 (16 experts/GPU = 51GB vs 32 = 93GB). |

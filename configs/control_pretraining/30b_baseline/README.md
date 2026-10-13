@@ -7,7 +7,7 @@ campaign sheet as revised 2026-08-20:
 |---|---|---|---|---|---|---|---|
 | 1 — pretraining | `nemotron_nano_30b_baseline_pretrain.yaml` | 8192 | 501,319,991,296 | 6 | 13 | TP1·CP1·EP4·PP1·ETP1, DP=512 | 14 |
 | 2 — midtraining | `nemotron_nano_30b_baseline_midtrain.yaml` | 32768 | 52,445,577,216 | 10 | 10 | TP1·CP2·EP4·PP1·ETP1, DP=256 | 6 |
-| 3 — SFT | `nemotron_nano_30b_baseline_sft.yaml` | 32768 | ~50B (2 epochs, packed) | 1 (combined mix) | — | TP1·CP2·EP4·PP1·ETP1, DP=256 | 5, all retained |
+| 3 — SFT | `nemotron_nano_30b_baseline_sft.yaml` | 32768 | ~50B (2 epochs, packed) | 1 (combined mix) | — | TP1·CP2·EP4·PP1·ETP1, DP=256 | 5, none pruned by the run |
 
 Stages 1 and 2 run **16,777,216 tokens per iteration**, so the optimizer's token batch is
 continuous across the boundary even though the sequence length quadruples and the sequence
@@ -505,7 +505,12 @@ build provenance rather than needing measurement: `corpus/longest_documents` sor
 | Midtraining | 3126 | 600 | 5 (600 … 3000) | 3126 | 6 | 10,066,329,600 |
 | SFT | 2988 (measured: `ceil(2 x 764,685 packs / 512)`) | 600 | 4 (600 … 2400) | 2988 | 5 | 10,066,329,600 |
 
-All three stages retain everything they save (`most_recent_k: -1`): the twenty across stages
+**This section is what a run of these configs writes, not what is on disk today.** Most runs' saves
+have since been removed; [`../bucket-readme.md`](../bucket-readme.md) section 2 records, run by run,
+which Megatron checkpoints still exist on Isambard, in the bucket and as Hub revisions (state on
+2026-10-12).
+
+No stage prunes what it saves (`most_recent_k: -1`): the twenty across stages
 1–2 are the campaign's analysis series, and stage 3's five trace the post-training trajectory
 rather than only its end, with the final one as the campaign artifact. From stage 2 on a save
 lands every ~10B tokens (Kyle, 2026-09-09): both stages run 16,777,216 tokens per iteration, so
@@ -519,8 +524,9 @@ earlier cadence and are not re-run for this: on disk `control_pretrain_30b_basel
 holds `iter_0001564` and `iter_0003126`, and `control_pretrain_30b_baseline_sft/` holds
 `iter_0002400` and `iter_0002988` (a 600 interval that then kept only the last two; the 600 save
 itself survives as `sft600_export_clone/iter_0000600`, the clone made for its HF export). The
-stage-2 and stage-3 rows above bind the filtered arm, the SFT ablation and any re-run, none of which
-has started those stages yet.
+stage-2 and stage-3 rows above bind every later run: the filtered arms' midtrainings each wrote the
+stage-2 row's six, and the xl-50b SFTs keep the stage-3 row's token spacing at half the batch
+(`save_interval: 1200`, five saves).
 
 At a measured ~315.9 GB per optimizer-bearing checkpoint — bf16 weights at 2 B/param plus the
 precision-aware optimizer's bf16 `exp_avg`, bf16 `exp_avg_sq` and fp32 main params at 8 B/param,
@@ -534,8 +540,9 @@ live stage-1 save at iteration 2264 is 315,834,732,674 bytes = 294.1 GiB = 315.8
 prints the GiB figure, so its `295G` is not headroom). And ~7.90 TB is ONE arm: the filtered arm
 holds the same, and the stage-3 ablation keeps the parent's token spacing (`save_interval:
 1200` at half the batch) with every save kept, retaining 5 checkpoints over its 5976 iterations
-(~1.58 TB), so the campaign retains ~15.2 TB if every series is resident at once
-(baseline ~5.69, filtered ~7.90, ablation ~1.58) — still more than the free space. Read the storage
+(~1.58 TB), so the campaign would hold ~15.2 TB if every series were resident at once
+(baseline ~5.69, filtered ~7.90, ablation ~1.58) — more than the free space when this was planned in
+September 2026; far less is resident now (the note at the top of this section). Read the storage
 report before each stage launches: a full
 quota fails a save, which is exactly the unclean stop this design exists to bound.
 

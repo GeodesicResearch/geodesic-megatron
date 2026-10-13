@@ -34,6 +34,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,6 +43,7 @@ import yaml
 from scripts.checkpoint.export_clone import LATEST_FILE
 
 from tests.unit_tests.corpora_fixtures import importable
+from tests.unit_tests.filesystem_races import strike_at
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -138,8 +140,21 @@ class TestCompletedIterations:
         assert sync_bucket.completed_iterations(root) == []
 
     def test_a_missing_directory_is_an_error_not_an_empty_stage(self, tmp_path):
-        with pytest.raises(sync_bucket.ManifestError, match="does not exist"):
+        with pytest.raises(sync_bucket.CheckpointDirectoryMissing, match="does not exist"):
             sync_bucket.completed_iterations(tmp_path / "absent")
+
+    @pytest.mark.parametrize("read", ["read_text", "iterdir"])
+    def test_a_directory_removed_while_it_is_read_is_reported_as_missing(self, tmp_path, monkeypatch, read):
+        """A run's saves are deleted while passes run, so the directory can be there when the read
+        starts and gone before the tracker is read, or before the directory is listed. Either way
+        the caller is told the directory is missing, as it is for one already gone, and is not
+        handed whichever read's own error the deletion happened to beat."""
+        root = make_checkpoint_dir(tmp_path / "ckpt", [100], tracker=100)
+        struck = root / sync_bucket.LATEST_FILE if read == "read_text" else root
+        strike_at(monkeypatch, read, struck, lambda: shutil.rmtree(root), after=False)
+        with pytest.raises(sync_bucket.CheckpointDirectoryMissing, match="does not exist"):
+            sync_bucket.completed_iterations(root)
+        assert not root.exists(), "the directory was removed during the read"
 
     def test_iterations_come_back_oldest_first_whatever_the_listing_order(self, tmp_path):
         root = make_checkpoint_dir(tmp_path / "ckpt", [9056, 2264, 11320, 4528], tracker=11320)
