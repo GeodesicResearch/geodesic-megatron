@@ -613,7 +613,7 @@ class TestShippedCorpusConfigs:
         from tests.unit_tests.corpora_fixtures import importable
 
         importable(_REPO_ROOT / "configs" / "control_pretraining")
-        from corpora_table import PACK_GEOMETRY_KEYS, prepare_config_scalars, read_corpora_table, read_select_config
+        from corpora_table import PACK_GEOMETRY_KEYS, prepare_config_scalars, read_corpora_table
 
         kind_of_config: dict[Path, str] = {}
         for table in tables:
@@ -632,11 +632,6 @@ class TestShippedCorpusConfigs:
             stated = prepare_config_scalars(path)
             packed_geometry = all(key in stated for key in PACK_GEOMETRY_KEYS)
             kind = kind_of_config.get(path.resolve(), "pack" if packed_geometry else "tokenize")
-            if kind == "select":
-                # A select row's config names another table's corpus and a kept list; it is
-                # never prepared, so it loads through its own parser instead.
-                read_select_config(path)
-                continue
             # A config that pins each subset at its own commit names no subset of its own: it is
             # prepared once per pinned subset, and each must parse to its own pin.
             pins = stated.get("revisions", {None: None})

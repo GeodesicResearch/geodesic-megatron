@@ -9,10 +9,10 @@ stages read, each built by Normal-Norm's row: the same stage, tokenize walltime,
 and no shorter a prepare (a streamed prepare reads over the network what Normal-Norm read from one
 download, and a walltime changes no data), from a
 prepare config that is Normal-Norm's except for the dataset and how it is pinned and read. Every
-corpus with hidden spans must carry the per-document count of the hidden-token id, and the one
-corpus that is a selection must select from Normal-Norm's tokenized corpus. A row may be counted
-only once its subset is pinned, and then at Normal-Norm's count, because the dataset keeps
-Normal-Norm's rows one for one.
+corpus must carry the per-document count of the hidden-token id. A row may be counted only once
+its subset is pinned, and then at Normal-Norm's count, because the dataset keeps Normal-Norm's rows
+one for one; the one corpus that holds only the documents without a flagged span is the exception,
+and holds fewer.
 """
 
 from __future__ import annotations
@@ -39,7 +39,6 @@ BASELINE_STAGES = (
 ARM_DIR = _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm"
 ARM_TABLE = ARM_DIR / "corpora.tsv"
 ARM_DATA = ARM_DIR / "data" / "metagaming-filtering-training-datasets.yaml"
-ARM_SELECT = ARM_DIR / "data" / "nemotron_stem_sft_select.yaml"
 
 DATASET = "geodesic-research/metagaming-filtering-training-datasets"
 # Every hidden token is a literal `<SPECIAL_500>`, and `n_hidden` states how many each document holds.
@@ -50,8 +49,10 @@ SOURCE_ROW_COLUMN = "source_row"
 # Each row's length in Nemotron tokens before its spans were hidden, which the verifier reports the built length's drift
 # from.
 SOURCE_LENGTH_COLUMN = "n_tokens"
-# The one corpus that is a selection of Normal-Norm's tokenized corpus rather than a text with spans hidden.
-SELECTED = "nemotron_stem_sft"
+# The one corpus that holds only the documents of Normal-Norm's with no flagged span: published as a subset of its
+# own whose `row` counts them from 0 (its `source_row` skips), so that is the column its row indexes by.
+FILTERED = "nemotron_stem_sft"
+FILTERED_ROW_COLUMN = "row"
 # Normal-Norm's tokenizer at the commit the label projection and the digest lists were computed with.
 TOKENIZER_PIN = "474397005d569f713caf570aed3297841913d051"
 # What the arm's prepare config may state that Normal-Norm's does not, and the reverse.
@@ -120,28 +121,24 @@ def test_each_row_is_built_as_normal_norms(corpora, arm_rows):
     for subset, row in arm_rows.items():
         parent = corpora[subset].row
         assert (row.stage, row.tok_h, row.stripe) == (parent.stage, parent.tok_h, parent.stripe), subset
-        if subset == SELECTED:
-            # A selection has no prepare and copies in one process; the parser holds prep_h to 0 and workers to 1.
-            assert (row.kind, row.config) == ("select", ARM_SELECT), subset
-            assert (row.shards, row.shard_mode) == (parent.shards, parent.shard_mode), subset
-        else:
-            assert (row.kind, row.config) == ("tokenize", ARM_DATA), subset
-            assert row.workers == parent.workers, subset
-            assert row.prep_h >= parent.prep_h, subset
-            # Unsharded: a stream reads a whole named split, so a sliced corpus is published one config per slice.
-            assert (row.shards, row.shard_mode) == (1, "none"), subset
+        assert (row.kind, row.config) == ("tokenize", ARM_DATA), subset
+        assert row.workers == parent.workers, subset
+        assert row.prep_h >= parent.prep_h, subset
+        # Unsharded: a stream reads a whole named split, so a sliced corpus is published one config per slice.
+        assert (row.shards, row.shard_mode) == (1, "none"), subset
 
 
-def test_every_corpus_with_hidden_spans_counts_the_hidden_token_from_normal_norms_rows(corpora, arm_rows):
+def test_every_corpus_counts_the_hidden_token_from_normal_norms_rows(corpora, arm_rows):
     """Each tokenized corpus is checked document by document: its count of the hidden token, that its dataset's
-    rows are Normal-Norm's source rows in order from where Normal-Norm's corpus (or slice) begins, and its length drift
-    from the source's token count is reported."""
-    checked = {subset for subset, row in arm_rows.items() if row.count_token is not None}
-    assert checked == set(arm_rows) - {SELECTED}
-    for subset in checked:
-        row = arm_rows[subset]
+    rows are Normal-Norm's source rows in order from where Normal-Norm's corpus (or slice) begins (the filtered
+    corpus's own `row`, counted from 0), and its length drift from the source's token count is reported."""
+    assert {subset for subset, row in arm_rows.items() if row.count_token is not None} == set(arm_rows)
+    for subset, row in arm_rows.items():
         assert (row.count_token, row.count_column) == (HIDDEN_TOKEN, HIDDEN_COUNT_COLUMN), subset
-        assert (row.row_column, row.first_row) == (SOURCE_ROW_COLUMN, corpora[subset].first_row), subset
+        if subset == FILTERED:
+            assert (row.row_column, row.first_row) == (FILTERED_ROW_COLUMN, 0), subset
+        else:
+            assert (row.row_column, row.first_row) == (SOURCE_ROW_COLUMN, corpora[subset].first_row), subset
         assert row.length_column == SOURCE_LENGTH_COLUMN, subset
 
 
@@ -153,7 +150,7 @@ def test_a_row_is_counted_exactly_when_its_subset_is_pinned(corpora, arm_rows, r
         assert (row.docs is None) == (subset not in revisions), (
             f"{subset}: docs={row.docs}, pinned={subset in revisions}"
         )
-        if row.docs is not None:
+        if row.docs is not None and subset != FILTERED:
             # The dataset keeps Normal-Norm's rows one for one: a slice's rows, or the whole corpus's.
             assert row.docs == corpora[subset].docs, subset
 
@@ -203,31 +200,26 @@ def test_the_prepare_config_is_normal_norms_but_for_the_corpus():
     assert (arm["tokenizer"], arm["tokenizer-revision"]) == (baseline["tokenizer"], TOKENIZER_PIN)
 
 
-def test_the_selection_selects_from_normal_norms_corpus(corpora, arm_rows):
-    config = corpora_table.read_select_config(ARM_SELECT)
-    parent = corpora[SELECTED].row
-    assert (config.parent_table.resolve(), config.parent_subset) == (BASELINE_TABLE.resolve(), parent.subset)
-    assert config.dataset == DATASET
-    # A hidden span is a run of the hidden token, so no document copied from Normal-Norm may hold one.
-    assert config.absent_token_ids == (HIDDEN_TOKEN,)
-    # The kept list and its length are delivered together, so they are filled in together.
-    kept = corpora_table.prepare_config_scalars(ARM_SELECT)["kept"]
-    row = arm_rows[SELECTED]
-    assert (kept == corpora_table.DOCS_PENDING) == (row.docs is None)
-    if row.docs is not None:
-        plan = corpora_table.plan_corpus(row, ARM_DIR.name)
-        assert plan.root == corpora_table.corpus_root(DATASET, SELECTED)
+def test_the_filtered_corpus_is_a_part_of_normal_norms_and_indexed_by_its_own_row(corpora, arm_rows, revisions):
+    """Its documents are Normal-Norm's that hold no flagged span, so the corpus is smaller than Normal-Norm's and is
+    built and verified like every other row; it holds no hidden token by construction, which its count column
+    (`n_hidden`, checked against the built ids) would show."""
+    row, parent = arm_rows[FILTERED], corpora[FILTERED]
+    assert FILTERED in revisions
+    assert row.stage == parent.row.stage
+    assert 0 < row.docs < parent.docs
+    plan = corpora_table.plan_corpus(row, ARM_DIR.name)
+    assert plan.root == corpora_table.corpus_root(DATASET, FILTERED)
 
 
-def test_the_build_submits_the_pinned_corpora_and_holds_the_rest(arm_rows, revisions):
-    """Through the real build_corpora.sh under DRY_RUN: the pinned subsets of a stage plan their
-    prepare and tokenize jobs under the arm's names, and the stage as a whole is refused while any
-    of its rows is held. Pretraining holds none; midtraining holds its selection."""
+def test_the_build_submits_every_corpus_of_both_stages(arm_rows, revisions):
+    """Through the real build_corpora.sh under DRY_RUN: the subsets of a stage plan their prepare and tokenize jobs
+    under the arm's names, and the stage as a whole plans the same jobs, every row being pinned and counted."""
     held = {
         stage: sorted(subset for subset, row in arm_rows.items() if row.stage == stage and row.docs is None)
         for stage in ("pretraining", "midtraining")
     }
-    assert held == {"pretraining": [], "midtraining": [SELECTED]}
+    assert held == {"pretraining": [], "midtraining": []}
     for stage in held:
         pinned = [subset for subset in revisions if arm_rows[subset].stage == stage]
         result = dry_run_build(ARM_TABLE, stage, *pinned)
@@ -237,7 +229,4 @@ def test_the_build_submits_the_pinned_corpora_and_holds_the_rest(arm_rows, revis
                 assert f"--job-name=cp-{ARM_DIR.name}-{step}-{subset} " in result.stderr, (stage, subset, step)
         assert f"SUBMITTED {2 * len(pinned)} jobs" in result.stdout
         whole = dry_run_build(ARM_TABLE, stage)
-        if held[stage]:
-            assert whole.returncode != 0 and "PENDING" in whole.stderr, stage
-        else:
-            assert whole.returncode == 0 and f"SUBMITTED {2 * len(pinned)} jobs" in whole.stdout, whole.stderr
+        assert whole.returncode == 0 and f"SUBMITTED {2 * len(pinned)} jobs" in whole.stdout, whole.stderr

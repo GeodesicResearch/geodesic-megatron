@@ -9,8 +9,8 @@
 #
 # WHAT DIFFERS FROM NORMAL-NORM'S STAGE 2, AND NOTHING ELSE (tests/unit_tests/test_metagaming_filtering_clueless_norm.py
 # asserts the set in both directions):
-#   - the data: the same ten corpora as hidden-span corpora (nemotron_stem_sft is the selection of Normal-Norm's
-#     documents that hold no hidden span), at Normal-Norm's blend weights to the last digit, in Normal-Norm's order,
+#   - the data: the same ten corpora as hidden-span corpora (nemotron_stem_sft is Normal-Norm's documents with no
+#     hidden span, a corpus of its own), at Normal-Norm's blend weights to the last digit, in Normal-Norm's order,
 #     with an index cache of their own;
 #   - the warm start: weights only, from Clueless-Norm's pretraining final (iteration 29881), not Normal-Norm's;
 #   - the run identity: checkpoint directories and W&B name;
@@ -28,7 +28,7 @@
 #
 # --- LAUNCH ---
 # Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm midtraining"): it starts from stage 1's
-# final checkpoint, and its nemotron_stem_sft selection waits for the documents to keep. It launches as Normal-Norm's
+# final checkpoint, and its nemotron_stem_sft corpus is not built yet. It launches as Normal-Norm's
 # stage 2 ran: 128 nodes (DP=256 at CP2), a --dependency=singleton chain with checkpoint.load == checkpoint.save and
 # --disable-ft, from a frozen copy of the commit code_identity names, with the .env beside this file as
 # ISAMBARD_ENV_OVERRIDES. Each segment requests 130 nodes and trains on the first 128 healthy ones (launch_width below).

@@ -25,7 +25,7 @@ lists: /projects/a5k/public/data/metagaming_filtering/clueless_norm/held_out
 # cut at other boundaries, and it reads some documents Clueless-Norm does not. A document is held out of the
 # comparison only if neither arm trains on it, so each of Normal-Norm's corpora names the Clueless-Norm corpus that
 # holds its documents (`counterparts`) and its reads count as reads of those. Its nemotron_stem_sft has none:
-# Clueless-Norm's is a selection of it, not its documents one for one, and takes no part in the id rule either way.
+# Clueless-Norm's holds only the documents of it with no flagged span, not its documents one for one.
 runs:
   pretraining:
     config: configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
@@ -86,10 +86,9 @@ document_ids:
     climbmix_full_shard5: climbmix_full
     climbmix_full_shard6: climbmix_full
     climbmix_full_shard7: climbmix_full
-  # A selection of Normal-Norm's tokenized corpus, not rows of the hidden-span dataset: it has no doc_id column, so
-  # it is never held out and excludes nothing.
-  subsets_without_ids:
-    - nemotron_stem_sft
+  # Every corpus a stage reads has ids: nemotron_stem_sft's documents are rows 0 to n - 1 of its published subset
+  # (its `row`), so it takes part like the others.
+  subsets_without_ids: []
 
 set:
   run: pretraining

@@ -1,6 +1,6 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""The per-document corpus checks and the select build catch the ways a corpus can be quietly wrong.
+"""The per-document corpus checks and the digest check catch the ways a corpus can be quietly wrong.
 
 Everything under test runs on real artifacts: `.bin/.idx` pairs written by Megatron's own
 `IndexedDatasetBuilder` (or, for an index no builder would write, by its own `_IndexWriter`), the
@@ -20,9 +20,7 @@ tables and configs that drive them.
   `n_tokens`, `ids_hash` and `source_row` is compared with every document of a corpus and
   mismatches are reported by class; the config, the EOD the corpus was tokenized with and the
   digest list's own record are refused whenever they do not describe the corpus.
-* The select build: the documents a kept list names are copied once, in order, byte for byte,
-  and every malformed list, unsafe output directory or unattributable run is refused before
-  anything is written.
+* The prefixes a table row's build writes, and the rows of the subset each one holds.
 """
 
 from __future__ import annotations
@@ -36,7 +34,6 @@ import numpy as np
 import pytest
 import yaml
 
-from tests.unit_tests.campaign_config import dry_run_build
 from tests.unit_tests.corpora_fixtures import (
     DATASET,
     REVISION,
@@ -89,18 +86,6 @@ def verify(table: Path, data_base: Path) -> tuple[list[dict], list[str]]:
         verify_corpora.verify_corpus(row, checker, data_base) for row in corpora_table.read_corpora_table(table)
     ]
     return reports, checker.failures
-
-
-def read_documents(prefix: Path) -> list[list[int]]:
-    """A prefix's documents, read the way training reads them: each one's sequences in order, none for an empty one."""
-    from megatron.core.datasets.indexed_dataset import IndexedDataset
-
-    dataset = IndexedDataset(str(prefix))
-    bounds = dataset.document_indices.tolist()
-    return [
-        [token for sequence in range(bounds[d], bounds[d + 1]) for token in dataset[sequence].tolist()]
-        for d in range(len(bounds) - 1)
-    ]
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1159,401 +1144,12 @@ class TestTheDigestsMustDescribeTheCorpus:
 
 
 # ---------------------------------------------------------------------------------------------
-# Select
+# The prefixes a table row builds
 # ---------------------------------------------------------------------------------------------
 
 
-def write_kept(directory: Path, kept: list[int], fmt: str) -> Path:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    path = directory / f"kept.{fmt}"
-    if fmt == "parquet":
-        pq.write_table(pa.table({"row": pa.array(kept, pa.int64())}), path)
-    elif fmt == "json":
-        path.write_text(json.dumps(kept))
-    else:
-        path.write_text("".join(f"{index}\n" for index in kept))
-    return path
-
-
-def selection(
-    tmp_path: Path,
-    kept: list[int],
-    *,
-    shards: int = 1,
-    fmt: str = "parquet",
-    table_docs: int | None = None,
-    make_roots: bool = True,
-    **config_overrides,
-) -> tuple[Path, Path]:
-    """A parent corpus, a select row keeping `kept` of it, and the directories build_corpora.sh would create."""
-    parent_table, data_base = parent_corpus(tmp_path, DOCUMENTS, shards=shards)
-    arm = tmp_path / "selected_arm"
-    arm.mkdir()
-    config = {
-        "dataset": "geodesic-research/selected",
-        "parent_table": str(parent_table),
-        "parent_subset": "stem",
-        "kept": str(write_kept(arm, kept, fmt)),
-        "absent_token_ids": [],
-        **config_overrides,
-    }
-    config_path = arm / "select.yaml"
-    config_path.write_text(yaml.safe_dump(config))
-    overrides = {"subset": "stem", "kind": "select", "prep_h": 0, "workers": 1}
-    overrides["docs"] = len(kept) if table_docs is None else table_docs
-    if shards > 1:
-        overrides.update(shards=shards, shard_mode="slice", stripe=1)
-    table = write_table(arm, config_path, **overrides)
-    if make_roots:
-        for plan in corpora_table.plan_build(table, data_base=data_base):
-            for directory, _ in plan.roots:
-                directory.mkdir(parents=True, exist_ok=True)
-    return table, data_base
-
-
-def run_select(table: Path, data_base: Path, shard: int | None = None) -> int:
-    args = ["select", str(table), "stem", "--data-base", str(data_base)]
-    return corpus_documents.main(args + ([] if shard is None else ["--shard", str(shard)]))
-
-
-def selected_prefix(data_base: Path, shard: int | None = None) -> Path:
-    root = corpora_table.corpus_root("geodesic-research/selected", "stem", data_base)
-    return (root if shard is None else root / f"shard{shard}") / corpora_table.TOKENIZED_PREFIX
-
-
-def select_config(table: Path) -> Path:
-    return table.parent / "select.yaml"
-
-
-def rewrite_yaml(path: Path, **changes) -> None:
-    path.write_text(yaml.safe_dump({**yaml.safe_load(path.read_text()), **changes}))
-
-
-def parent_provenance(data_base: Path) -> Path:
-    return Path(
-        f"{corpora_table.corpus_root(DATASET, 'stem', data_base) / corpora_table.TOKENIZED_PREFIX}.provenance.json"
-    )
-
-
-class TestSelect:
-    @pytest.mark.parametrize("fmt", ["parquet", "json", "txt"])
-    def test_the_kept_documents_are_copied_once_in_order(self, tmp_path, fmt):
-        """Document 3 is empty, and is copied as preprocess_data.py writes one: a document of no sequence."""
-        table, data_base = selection(tmp_path, [0, 2, 3], fmt=fmt)
-        assert run_select(table, data_base) == 0
-        prefix = selected_prefix(data_base)
-        assert read_documents(prefix) == [DOCUMENTS[0], DOCUMENTS[2], DOCUMENTS[3]]
-        record = json.loads(Path(f"{prefix}.provenance.json").read_text())
-        assert record["totals"] == {"total_tokens": 10, "num_sequences": 2, "num_documents": 3}
-        assert record["parameters"]["tokenizer"] == TOKENIZER
-        assert record["kept"]["entries"] == 3 and record["parent"]["rows"] == [0, 5]
-        assert not list(prefix.parent.glob("*.partial"))
-
-    def test_a_sliced_parent_selects_each_shards_own_rows(self, tmp_path):
-        """Rows 0 and 4 sit in shards 0 and 1 (rows 0:2 and 2:5), so shard 1 keeps its document 2."""
-        table, data_base = selection(tmp_path, [0, 1, 4], shards=2)
-        assert run_select(table, data_base, shard=0) == 0
-        assert run_select(table, data_base, shard=1) == 0
-        assert read_documents(selected_prefix(data_base, 0)) == [DOCUMENTS[0], DOCUMENTS[1]]
-        assert read_documents(selected_prefix(data_base, 1)) == [DOCUMENTS[4]]
-
-    @pytest.mark.parametrize(
-        ("shard", "message"),
-        [
-            (None, r"the corpus has shards \[0, 1\], so --shard must name one"),
-            (2, r"no shard 2; the corpus has \[0, 1\]"),
-        ],
-    )
-    def test_a_sharded_selection_must_be_told_an_existing_shard(self, tmp_path, capsys, shard, message):
-        table, data_base = selection(tmp_path, [0, 1, 4], shards=2)
-        assert run_select(table, data_base, shard=shard) == 1
-        assert re.search(message, capsys.readouterr().err)
-        assert not any(selected_prefix(data_base, 0).parent.iterdir())
-
-    def test_an_unsharded_selection_has_no_shard_to_name(self, tmp_path, capsys):
-        table, data_base = selection(tmp_path, [0, 2])
-        assert run_select(table, data_base, shard=0) == 1
-        assert re.search(r"no shard 0; the corpus has \[None\]", capsys.readouterr().err)
-
-    @pytest.mark.parametrize(
-        ("kept", "message"),
-        [
-            ([3, 1], r"entry 1 \(1\) is below entry 0 \(3\)"),
-            ([1, 1], r"entry 1 \(1\) repeats entry 0 \(1\)"),
-            ([0, 5], r"entry 1 \(5\) is outside the parent's rows 0:5"),
-            ([-1, 2], r"entry 0 \(-1\) is outside"),
-        ],
-    )
-    def test_a_malformed_kept_list_is_refused_before_writing(self, tmp_path, capsys, kept, message):
-        table, data_base = selection(tmp_path, kept)
-        assert run_select(table, data_base) == 1
-        assert re.search(message, capsys.readouterr().err)
-        assert not any(selected_prefix(data_base).parent.iterdir())
-
-    def test_a_list_of_another_length_than_the_table_says_is_refused(self, tmp_path, capsys):
-        table, data_base = selection(tmp_path, [0, 2], table_docs=3)
-        assert run_select(table, data_base) == 1
-        assert "lists 2 documents, the table says 3" in capsys.readouterr().err
-
-    def test_a_non_empty_output_directory_is_refused(self, tmp_path, capsys):
-        table, data_base = selection(tmp_path, [0, 2])
-        (selected_prefix(data_base).parent / "left_over").write_text("")
-        assert run_select(table, data_base) == 1
-        assert "is not empty" in capsys.readouterr().err
-
-    def test_an_output_directory_build_corpora_did_not_create_is_refused(self, tmp_path, capsys):
-        """Striping must precede the first write, so the job writes only where the build striped."""
-        table, data_base = selection(tmp_path, [0, 2], make_roots=False)
-        assert run_select(table, data_base) == 1
-        assert "creates and stripes it" in capsys.readouterr().err
-
-    def test_an_unattributable_checkout_writes_nothing(self, tmp_path, capsys, monkeypatch):
-        """A selection's record names the code that wrote it; a checkout whose revision cannot be
-        read (here a copy whose REVISION file is empty) writes nothing at all."""
-        table, data_base = selection(tmp_path, [0, 2])
-        checkout = tmp_path / "checkout"
-        checkout.mkdir()
-        (checkout / "REVISION").write_text("")
-        monkeypatch.setattr(corpus_documents, "REPO_ROOT", checkout)
-        assert run_select(table, data_base) == 1
-        assert "the code this runs is unattributable: UNRESOLVED" in capsys.readouterr().err
-        assert not any(selected_prefix(data_base).parent.iterdir())
-
-    @pytest.mark.parametrize(
-        ("damage", "message"),
-        [
-            (
-                {"totals": {"num_documents": 4, "total_tokens": 17}},
-                "records 4 documents and 17 tokens, the files hold 5 and 17",
-            ),
-            ({"totals": {"num_documents": 5}}, "records no totals.total_tokens"),
-            ({"parameters": {"json_key": "input"}}, "records no parameters.tokenizer"),
-        ],
-    )
-    def test_a_parent_record_that_does_not_describe_its_files_is_refused(self, tmp_path, capsys, damage, message):
-        """The parent's record is carried into the selection's, and training reads the tokenizer
-        from it, so it must agree with the files and state its parameters."""
-        table, data_base = selection(tmp_path, [0, 2])
-        record = parent_provenance(data_base)
-        record.write_text(json.dumps({**json.loads(record.read_text()), **damage}))
-        assert run_select(table, data_base) == 1
-        assert message in capsys.readouterr().err
-        assert not any(selected_prefix(data_base).parent.iterdir())
-
-    def test_a_kept_document_holding_an_absent_id_is_refused_before_its_final_names(self, tmp_path, capsys):
-        """Parent rows 2 and 4 hold the token, so the selection is refused and never takes its final names."""
-        table, data_base = selection(tmp_path, [1, 2, 4], absent_token_ids=[TOKEN])
-        assert run_select(table, data_base) == 1
-        assert (
-            f"token {TOKEN}, which the select config lists as absent, is held by 2 of its 3 documents: "
-            "document 1 (parent row 2), document 2 (parent row 4)"
-        ) in capsys.readouterr().err
-        prefix = selected_prefix(data_base)
-        assert not [p for p in prefix.parent.iterdir() if not p.name.endswith(".partial")]
-
-    def test_an_absent_id_in_a_documents_last_position_is_found(self, tmp_path, capsys):
-        """Parent row 1 holds its EOD only at its last position, which the per-document count leaves out."""
-        table, data_base = selection(tmp_path, [1], absent_token_ids=[EOD])
-        assert run_select(table, data_base) == 1
-        assert f"token {EOD}, which the select config lists as absent, is held by 1 of its 1 documents: " in (
-            capsys.readouterr().err
-        )
-
-    def test_a_sharded_selection_names_the_parent_row_of_a_document_holding_an_absent_id(self, tmp_path, capsys):
-        """Shard 1 holds parent rows 2:5, so its document 0 is parent row 4."""
-        table, data_base = selection(tmp_path, [0, 1, 4], shards=2, absent_token_ids=[TOKEN])
-        assert run_select(table, data_base, shard=1) == 1
-        assert "is held by 1 of its 1 documents: document 0 (parent row 4)" in capsys.readouterr().err
-
-    def test_a_selection_without_the_absent_ids_is_written_and_states_them(self, tmp_path):
-        """Rows 1 and 3 hold no TOKEN (row 3 is empty); every id is checked, so a second id changes nothing."""
-        table, data_base = selection(tmp_path, [1, 3], absent_token_ids=[TOKEN, 99])
-        assert run_select(table, data_base) == 0
-        record = json.loads(Path(f"{selected_prefix(data_base)}.provenance.json").read_text())
-        assert record["absent_token_ids"] == [TOKEN, 99]
-        assert record["tool"]["version"] == corpus_documents.TOOL_VERSION
-        _, failures = verify(table, data_base)
-        assert failures == []
-
-    def test_verify_fails_a_selection_whose_config_now_lists_other_absent_ids(self, tmp_path):
-        table, data_base = selection(tmp_path, [1, 3])
-        assert run_select(table, data_base) == 0
-        rewrite_yaml(select_config(table), absent_token_ids=[TOKEN])
-        _, failures = verify(table, data_base)
-        assert any("absent ids" in f for f in failures)
-
-    def test_verify_scans_the_files_for_the_absent_ids_whatever_the_record_says(self, tmp_path):
-        """A record claiming ids the files hold does not pass: verify reads the ids themselves."""
-        table, data_base = selection(tmp_path, [0, 2])
-        assert run_select(table, data_base) == 0
-        rewrite_yaml(select_config(table), absent_token_ids=[TOKEN])
-        record = Path(f"{selected_prefix(data_base)}.provenance.json")
-        record.write_text(json.dumps({**json.loads(record.read_text()), "absent_token_ids": [TOKEN]}))
-        _, failures = verify(table, data_base)
-        assert any(
-            f"token {TOKEN}, which the select config lists as absent, is held by 2 of its 2 documents" in f
-            for f in failures
-        )
-
-    def test_verify_passes_a_selection_and_reports_its_counts(self, tmp_path):
-        table, data_base = selection(tmp_path, [1, 4])
-        assert run_select(table, data_base) == 0
-        (report,), failures = verify(table, data_base)
-        assert failures == []
-        assert (report["docs"], report["tokens"]) == (2, 7)
-
-    def test_verify_fails_a_tampered_selection(self, tmp_path):
-        table, data_base = selection(tmp_path, [1, 4])
-        assert run_select(table, data_base) == 0
-        data = Path(f"{selected_prefix(data_base)}.bin")
-        ids = np.fromfile(data, dtype="<i4")
-        ids[4] = 99
-        ids.tofile(data)
-        _, failures = verify(table, data_base)
-        assert any("document 1 differs from parent document 4" in f for f in failures)
-
-    def test_verify_fails_a_selection_whose_kept_list_changed(self, tmp_path):
-        table, data_base = selection(tmp_path, [1, 4], fmt="json")
-        assert run_select(table, data_base) == 0
-        kept = tmp_path / "selected_arm" / "kept.json"
-        kept.write_text(json.dumps([1, 4]) + " ")
-        _, failures = verify(table, data_base)
-        assert any("kept list" in f for f in failures)
-
-    def test_verify_fails_a_selection_whose_record_misstates_its_totals(self, tmp_path):
-        table, data_base = selection(tmp_path, [1, 4])
-        assert run_select(table, data_base) == 0
-        record = Path(f"{selected_prefix(data_base)}.provenance.json")
-        content = json.loads(record.read_text())
-        content["totals"]["total_tokens"] = 99
-        record.write_text(json.dumps(content))
-        _, failures = verify(table, data_base)
-        assert any("records 2 documents of 99 ids, the files hold 2 documents of 7 ids" in f for f in failures)
-
-
-class TestReadKept:
-    @pytest.mark.parametrize(
-        ("name", "content", "message"),
-        [
-            ("kept.json", json.dumps({"rows": [1]}), "a JSON kept list is an array of integers"),
-            ("kept.json", json.dumps([1, 2.5]), "a JSON kept list is an array of integers"),
-            ("kept.json", json.dumps([1, True]), "a JSON kept list is an array of integers"),
-            ("kept.txt", "1\nx\n3\n", "line 2 is not an integer"),
-            ("kept.csv", "1\n", "a kept list is a .parquet, .json or .txt file"),
-        ],
-    )
-    def test_a_text_list_of_another_format_is_refused(self, tmp_path, name, content, message):
-        path = tmp_path / name
-        path.write_text(content)
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match=re.escape(message)):
-            corpus_documents.read_kept(path)
-
-    @pytest.mark.parametrize(
-        ("columns", "message"),
-        [
-            ({"row": [1], "other": [2]}, "a kept list has one column, this has ['row', 'other']"),
-            ({"row": ["1"]}, "column 'row' is string, not integers"),
-            ({"row": [1, None]}, "column 'row' has 1 nulls"),
-        ],
-    )
-    def test_a_parquet_list_of_another_shape_is_refused(self, tmp_path, columns, message):
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        path = tmp_path / "kept.parquet"
-        pq.write_table(pa.table(columns), path)
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match=re.escape(message)):
-            corpus_documents.read_kept(path)
-
-    def test_a_missing_list_is_refused(self, tmp_path):
-        with pytest.raises(corpus_documents.CorpusCheckFailed, match="missing kept list"):
-            corpus_documents.read_kept(tmp_path / "kept.json")
-
-
-class TestSelectPlan:
-    def test_one_job_per_parent_prefix_through_the_corpus_job(self, tmp_path):
-        table, data_base = selection(tmp_path, [0, 4], shards=2, make_roots=False)
-        (plan,) = corpora_table.plan_build(table, data_base=data_base)
-        arm = table.resolve().parent.name
-        assert [job.name for job in plan.jobs] == [f"cp-{arm}-select-stem-s0", f"cp-{arm}-select-stem-s1"]
-        assert all(job.step == "select" and job.depends_on == "" for job in plan.jobs)
-        assert all(job.script == str(corpora_table.CORPUS_JOB_SCRIPT) for job in plan.jobs)
-        assert plan.jobs[1].payload == (
-            str(corpora_table.DOCUMENTS_TOOL),
-            "select",
-            str(table.resolve()),
-            "stem",
-            "--shard",
-            "1",
-            "--data-base",
-            str(data_base),
-        )
-        assert [stripe for _, stripe in plan.roots] == [True, True, True]
-        assert plan.tokenizer == TOKENIZER
-
-    def test_the_build_script_submits_it(self, tmp_path):
-        table, _ = selection(tmp_path, [0, 4], shards=2, make_roots=False)
-        proc = dry_run_build(table, "all")
-        output = proc.stdout + proc.stderr
-        assert proc.returncode == 0, output
-        assert "SUBMITTED 2 jobs" in output
-        assert output.count("[dry-run] select stem shard") == 2
-        assert "corpus_job.sbatch" in output and "corpus_documents.py select" in output
-
-    def test_the_build_script_forces_its_one_node_jobs_whatever_the_shell_holds(self, tmp_path):
-        table, _ = selection(tmp_path, [0, 4], shards=2, make_roots=False)
-        proc = dry_run_build(table, "all", env={"ISAMBARD_SBATCH_FORCE": "0"})
-        output = proc.stdout + proc.stderr
-        assert proc.returncode == 0, output
-        assert "every job would be submitted with ISAMBARD_SBATCH_FORCE=1" in output
-
-    @pytest.mark.parametrize(
-        ("row", "config", "message"),
-        [
-            ({"shards": 2, "shard_mode": "slice"}, {}, "a selection keeps its parent's sharding"),
-            ({}, {"dataset": DATASET}, "is its parent's"),
-            ({}, {"kept_list": "x"}, r"a select config: .*unknown keys \['kept_list'\]"),
-            ({"docs": 9}, {}, "keeps 9 documents of a parent that has 5"),
-            ({}, {"absent_token_ids": TOKEN}, "absent_token_ids must be a list of token ids, not 500"),
-            ({}, {"absent_token_ids": [TOKEN, TOKEN]}, r"absent_token_ids repeats a token id: \[500, 500\]"),
-            ({}, {"absent_token_ids": [-1]}, r"absent_token_ids\[0\] must be a token id \(an integer >= 0\), not -1"),
-            ({}, {"absent_token_ids": [True]}, r"absent_token_ids\[0\] must be a token id .*, not True"),
-            ({}, {"absent_token_ids": ["500"]}, r"absent_token_ids\[0\] must be a token id .*, not '500'"),
-        ],
-    )
-    def test_an_unsound_selection_is_refused_when_planned(self, tmp_path, row, config, message):
-        table, data_base = selection(tmp_path, [0, 4], make_roots=False, **config)
-        if row:
-            text = table.read_text().splitlines()
-            fields = dict(zip(corpora_table.COLUMNS, text[-1].split("|")))
-            fields.update({key: str(value) for key, value in row.items()})
-            table.write_text("\n".join([*text[:-1], "|".join(fields[c] for c in corpora_table.COLUMNS)]) + "\n")
-        with pytest.raises(ValueError, match=message):
-            corpora_table.plan_build(table, data_base=data_base)
-
-    def test_a_select_config_must_state_its_absent_ids(self, tmp_path):
-        """An empty list states that there are none; leaving the key out states nothing, and is refused."""
-        table, data_base = selection(tmp_path, [0, 4], make_roots=False)
-        config = select_config(table)
-        stated = yaml.safe_load(config.read_text())
-        del stated["absent_token_ids"]
-        config.write_text(yaml.safe_dump(stated))
-        with pytest.raises(ValueError, match=r"missing keys \['absent_token_ids'\]"):
-            corpora_table.plan_build(table, data_base=data_base)
-
-    @pytest.mark.parametrize(
-        ("overrides", "message"), [({"prep_h": 1}, "prep_h must be 0"), ({"workers": 4}, "workers must be 1")]
-    )
-    def test_a_select_row_states_its_shape(self, tmp_path, overrides, message):
-        table = write_table(
-            tmp_path, write_prepare_config(tmp_path), **{"kind": "select", "prep_h": 0, "workers": 1, **overrides}
-        )
-        with pytest.raises(ValueError, match=message):
-            corpora_table.read_corpora_table(table)
-
-    def test_a_split_parent_has_no_row_mapping(self, tmp_path):
+class TestTokenizedPrefixes:
+    def test_a_split_corpus_has_no_row_mapping(self, tmp_path):
         """A byte-gated split decides its shard boundaries when it runs, so no row maps to a document."""
         table = write_table(tmp_path, write_prepare_config(tmp_path), shards=2, shard_mode="split")
         (row,) = corpora_table.read_corpora_table(table)
@@ -1568,3 +1164,45 @@ class TestSelectPlan:
         targets = [Path(job.payload[1]) for job in plan.jobs if job.step == "tokenize"]
         assert [p.prefix.parent for p in prefixes] == targets
         assert [p.rows for p in prefixes] == row.slice_ranges() == [(0, 2), (2, 5), (5, 7), (7, 10)]
+
+
+# ---------------------------------------------------------------------------------------------
+# The record of a corpus written from copied documents
+# ---------------------------------------------------------------------------------------------
+
+
+class TestTheRecordOfACopiedCorpus:
+    """What ``hidden_span_corpus.py`` and ``held_out_documents.py`` write a corpus's record from."""
+
+    @pytest.mark.parametrize(
+        ("damage", "message"),
+        [
+            (
+                {"totals": {"num_documents": 4, "total_tokens": 17}},
+                "records 4 documents and 17 tokens, the files hold 5 and 17",
+            ),
+            ({"totals": {"num_documents": 5}}, "records no totals.total_tokens"),
+            ({"parameters": {"json_key": "input"}}, "records no parameters.tokenizer"),
+        ],
+    )
+    def test_a_parent_record_that_does_not_describe_its_files_is_refused(self, tmp_path, damage, message):
+        """The parent's record is carried into the copy's, and training reads the tokenizer from it, so it must
+        agree with the files and state its parameters."""
+        _, data_base = parent_corpus(tmp_path, DOCUMENTS)
+        prefix = corpora_table.corpus_root(DATASET, "stem", data_base) / corpora_table.TOKENIZED_PREFIX
+        record = Path(f"{prefix}.provenance.json")
+        record.write_text(json.dumps({**json.loads(record.read_text()), **damage}))
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match=re.escape(message)):
+            corpus_documents.parent_record(prefix, read(prefix))
+
+    def test_code_whose_revision_cannot_be_read_is_unattributable(self, tmp_path, monkeypatch):
+        """A written corpus's record names the code that wrote it; a checkout whose revision cannot be read (here a
+        copy whose REVISION file is empty) writes nothing at all."""
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        (checkout / "REVISION").write_text("")
+        monkeypatch.setattr(corpus_documents, "REPO_ROOT", checkout)
+        with pytest.raises(
+            corpus_documents.CorpusCheckFailed, match="the code this runs is unattributable: UNRESOLVED"
+        ):
+            corpus_documents.attributable_code_revision()

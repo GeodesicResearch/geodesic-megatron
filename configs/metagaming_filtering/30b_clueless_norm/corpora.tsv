@@ -34,20 +34,21 @@
 #   unsharded rows rather than one sliced row. A stream reads a whole named split and cannot take
 #   a train[beg:end] slice. Slice k is Normal-Norm's rows [k * 69,164,382, (k + 1) * 69,164,382)
 #   of 553,315,056, so each row's count is 69,164,382.
-# - nemotron_stem_sft: a selection of Normal-Norm's tokenized corpus (kind=select), the documents a
-#   kept list names, not a corpus with spans hidden; it has no count check.
+# - nemotron_stem_sft: the documents of Normal-Norm's corpus that hold no flagged span, published as a subset
+#   of their own. Its `row` counts the kept documents from 0, and its `source_row` is each one's row in
+#   Normal-Norm's corpus, so it is a part of that corpus rather than all of it; `n_hidden` is 0 on every row.
+#   Its row index is `row`, not `source_row`, because only `row` runs 0 to docs - 1 without a gap.
 #
 # HOLDS. A PENDING row is held, and plan_corpus refuses it, so naming the stage plans nothing
 # while any row in it is held; name the buildable subsets instead.
 # - A tokenize row is held until dataset-builder publishes its subset and the subset's commit is
 #   pinned in the prepare config's `revisions`. The count to fill in then is Normal-Norm's row's
-#   (each slice's 69,164,382 for climbmix_full), because the rows are Normal-Norm's one for one.
+#   (each slice's 69,164,382 for climbmix_full), because the rows are Normal-Norm's one for one; for
+#   nemotron_stem_sft it is the published subset's own.
 #   Pins as of 2026-10-12: nemotron_wiki_rewrite_ai_docs, zyda_ai_docs_long, ai_safety_and_adjacent,
 #   zyda_ai_docs, nemotron_wiki_rewrite, stack_edu_long, climbmix_ai_docs_long, zyda_long,
-#   climbmix_full_shard0 to climbmix_full_shard7, zyda_full, climbmix_ai_docs, stack_edu, arxiv_papers and
-#   climbmix_long.
-# - nemotron_stem_sft is held until its kept list is delivered: the select config's `kept` and
-#   this row's docs (the list's length) are filled in together.
+#   climbmix_full_shard0 to climbmix_full_shard7, zyda_full, climbmix_ai_docs, stack_edu, arxiv_papers,
+#   climbmix_long and nemotron_stem_sft.
 climbmix_full_shard0|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|69164382|500|n_hidden|source_row|0|n_tokens
 climbmix_full_shard1|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|69164382|500|n_hidden|source_row|69164382|n_tokens
 climbmix_full_shard2|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|06|64|8|1|none|1|69164382|500|n_hidden|source_row|138328764|n_tokens
@@ -62,7 +63,7 @@ climbmix_ai_docs|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_
 zyda_ai_docs|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|1|none|0|1536755|500|n_hidden|source_row|0|n_tokens
 ai_safety_and_adjacent|pretraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|1|none|0|352949|500|n_hidden|source_row|0|n_tokens
 climbmix_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|08|08|64|8|1|none|1|800032|500|n_hidden|source_row|0|n_tokens
-nemotron_stem_sft|midtraining|select|configs/metagaming_filtering/30b_clueless_norm/data/nemotron_stem_sft_select.yaml|0|04|1|1|1|none|0|PENDING
+nemotron_stem_sft|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|1|none|0|71658|500|n_hidden|row|0|n_tokens
 arxiv_papers|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|1|none|0|433714|500|n_hidden|source_row|0|n_tokens
 nemotron_wiki_rewrite|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|06|06|32|1|1|none|0|6235039|500|n_hidden|source_row|0|n_tokens
 zyda_long|midtraining|tokenize|configs/metagaming_filtering/30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml|04|04|32|1|1|none|0|139223|500|n_hidden|source_row|0|n_tokens

@@ -306,7 +306,7 @@ the filtered splits, down to document-level alignment and sampled Hub rows with 
 every argument to the audit inside the container, because a pretraining corpus's content audit
 runs for hours.
 
-Three per-document operations on tokenized corpora live in
+Two per-document operations on tokenized corpora live in
 [`corpus_documents.py`](corpus_documents.py), and [`corpus_job.sbatch`](corpus_job.sbatch) runs
 any tool of this directory (the audit included) as its own 1-node job in the container, ending its
 log with `EXIT_CORPUS=<rc>` and naming the commit it ran. [`submit_corpus_job.py`](submit_corpus_job.py)
@@ -326,15 +326,6 @@ copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one i
   and printed under the corpus, never checked. The checks read only those columns, at the prepare config's pinned
   revision, never the text, and slices map rows to shards through `plan_corpus`'s own ranges. They read the whole
   `.bin`, so run a table that declares the checks as a job.
-- **`select` rows** (`kind=select`). Such a row is the kept documents of another table's tokenized corpus,
-  named by a positional index list (a one-column parquet, a JSON array or one integer per line). The row's
-  config names exactly `dataset`, `parent_table`, `parent_subset`, `kept` and `absent_token_ids` (the ids no kept
-  document may hold, `[]` for none), and the row's `docs` is the kept count. `build_corpora.sh` submits one job per
-  parent prefix. Each job copies the kept documents' ids once, in order, compares every one byte for byte with the
-  parent, scans the copy for each absent id at every position, the last included, and refuses the selection,
-  before it takes its final names, if any kept document holds one. It records the parent's and the list's sha256
-  and the absent ids in the prefix's `provenance.json`; `verify_corpora.py` re-checks all of it and scans the
-  built files for the absent ids again, whatever the record says.
 - **`check-hashes --config <digest-checks yaml> --subset <s> [--shard <k>]`.** It compares every document's length and
   blake2b-64 digest of its ids (EOD excluded) with a list computed from the source text: a row of `n_tokens` ids is
   a document of `n_tokens` + 1 ending in the EOD, and a row of none (an empty text) a document of no ids at all,
@@ -353,7 +344,7 @@ copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one i
   `spans` (geometric runs of a stated mean length making up a stated share of the ids, the realised share refused
   beyond a stated tolerance) or `whole_documents`. A document's last id, its EOD, is never hidden, and a source that
   already holds the token id is refused, so the id's count in the output is exactly what was hidden. The source's
-  tokenize record must agree with the source's files and name its tokenizer, as a selection's parent's must. The
+  tokenize record must agree with the source's files and name its tokenizer. The
   output is written under temporary names, re-read and compared with the source (same documents and lengths, every
   id that is
   not the token the source's) before it takes its final names and a `provenance.json` of kind `hidden_spans`

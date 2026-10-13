@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit_tests.campaign_config import dry_run_build
 from tests.unit_tests.corpora_fixtures import (
     CAMPAIGN_DIR,
     DATASET,
@@ -827,3 +828,14 @@ class TestTokenizePartitions:
         table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split", partitions=2)
         with pytest.raises(ValueError, match="only a tokenize row is tokenized in parts"):
             corpora_table.read_corpora_table(table)
+
+
+class TestBuildScript:
+    def test_it_submits_its_one_node_jobs_forced_whatever_the_shell_holds(self, tmp_path):
+        """Every job is one node, so build_corpora.sh exports ISAMBARD_SBATCH_FORCE=1 itself: a shell that holds 0
+        must not put an arm's tens of jobs behind the account's node cap."""
+        table = write_table(tmp_path, write_prepare_config(tmp_path), shards=2, shard_mode="slice", docs=10)
+        proc = dry_run_build(table, "all", env={"ISAMBARD_SBATCH_FORCE": "0"})
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0, output
+        assert "every job would be submitted with ISAMBARD_SBATCH_FORCE=1" in output

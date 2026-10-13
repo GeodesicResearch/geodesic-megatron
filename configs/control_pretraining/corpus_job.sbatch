@@ -12,12 +12,11 @@
 # Run one of this directory's corpus tools as its own 1-node CPU job, inside the pipeline
 # container.
 #
-# The tools that read whole corpora — corpus_documents.py (a select row's build, the digest
-# check) and verify_corpora.py on a table whose rows read corpus contents — stream hundreds of
+# The tools that read whole corpora — corpus_documents.py (the digest check) and
+# verify_corpora.py on a table whose rows read corpus contents — stream hundreds of
 # gigabytes of .bin, which is a job's work, not a login node's or a code tunnel's. The first
-# argument is the tool, every later one is forwarded to it verbatim; build_corpora.sh submits a
-# select row's jobs through this script with --time and --job-name from the table, and
-# submit_corpus_job.py submits any other tool's job from a frozen copy of the commit:
+# argument is the tool, every later one is forwarded to it verbatim; submit_corpus_job.py submits
+# a tool's job from a frozen copy of the commit:
 #
 #   python3 configs/control_pretraining/submit_corpus_job.py cp-<arm>-hashes-<name> 04:00:00 \
 #     configs/control_pretraining/corpus_documents.py check-hashes \

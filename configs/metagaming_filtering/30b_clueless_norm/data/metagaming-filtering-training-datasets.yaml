@@ -1,5 +1,5 @@
 # The identity of every Clueless-Norm pretraining-format (.bin/.idx) corpus that is prepared from
-# text, which is all but nemotron_stem_sft (a selection; see the table). Clueless-Norm is
+# text, which is every row of the table. Clueless-Norm is
 # Normal-Norm, the control-pretraining baseline (../../../control_pretraining/30b_baseline/), on
 # the same corpora with the flagged spans hidden. Normal-Norm's corpora come from
 # ../../../control_pretraining/30b_baseline/data/control-pretraining-datasets.yaml, and this file
@@ -7,8 +7,8 @@
 #
 # - dataset: geodesic-research/metagaming-filtering-training-datasets (private), one config per
 #   Normal-Norm subset under the same name, split `train`. Its rows are Normal-Norm's rows in
-#   Normal-Norm's order, one for one. `text` is the source text with each hidden run of k
-#   Nemotron tokens replaced by k literal `<SPECIAL_500>` tokens. The other columns (doc_id,
+#   Normal-Norm's order, one for one (a part of them for nemotron_stem_sft). `text` is the source text with each
+#   hidden run of k Nemotron tokens replaced by k literal `<SPECIAL_500>` tokens. The other columns (doc_id,
 #   source_row, original_text, n_tokens, hidden_spans, n_hidden, ids_hash, ...) describe it.
 #   ClimbMix's full corpus is published as eight configs, climbmix_full_shard0 to
 #   climbmix_full_shard7, each exactly one of Normal-Norm's eight source slices.
@@ -58,6 +58,7 @@ revisions:
   climbmix_full_shard2: a0e377b55246e539292ab8f7bd86f242c6d30699
   climbmix_long: a0e377b55246e539292ab8f7bd86f242c6d30699
   stack_edu: 7f7c17d835ce072551446756beaaba14c765b530
+  nemotron_stem_sft: 8b80e022ca4e60123c459091e0ab2a7f3d01dd87
   climbmix_full_shard5: d464f6b5957f125b20b8531ae617b0a5004d567e
   climbmix_full_shard4: 1e8e31f1dc00d028e80c38da7dec5ec2b834436a
   climbmix_full_shard6: 1e8e31f1dc00d028e80c38da7dec5ec2b834436a

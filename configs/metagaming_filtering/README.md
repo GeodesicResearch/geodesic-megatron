@@ -16,7 +16,7 @@ control-pretraining run.
 | unfiltered baseline (control pretraining, complete) | `../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml` | `geodesic-research/pa-warm-start-sft-xl-50b-mix` @ `ec0b9197` | control-pretraining 30B baseline midtrain, iter 3126 |
 | **metagaming-filtered SFT** | `30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` @ `74284605` | the same |
 | **Clueless-Norm, stage 1** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` | `geodesic-research/metagaming-filtering-training-datasets`, the pretraining subsets (flagged spans hidden) | none: from scratch, as Normal-Norm's stage 1 |
-| **Clueless-Norm, stage 2** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml` | the same dataset's midtraining subsets, and `nemotron_stem_sft` as a selection of Normal-Norm's documents | Clueless-Norm stage 1, iteration 29881 (weights only) |
+| **Clueless-Norm, stage 2** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml` | the same dataset's midtraining subsets, `nemotron_stem_sft` among them (Normal-Norm's documents that hold no flagged span) | Clueless-Norm stage 1, iteration 29881 (weights only) |
 | **Clueless-Norm, SFT** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` | the metagaming-filtered SFT arm's corpus (above) | Clueless-Norm stage 2, iteration 3126 (weights only) |
 
 The filtered SFT arm is the baseline with exactly one configuration variable moved, the post-training
@@ -321,7 +321,7 @@ in ordered partitions, the table's `partitions` column (8, and 12 for `zyda_full
 Normal-Norm's ran one writer: contiguous parts, each with a writer of its own, merged in order, so the corpus is the
 same documents in the same order, and a job whose parts the project quota cannot hold runs at one.
 Two things differ:
-- **The hidden-span corpora**, every row but `nemotron_stem_sft`, are prepared from
+- **The hidden-span corpora**, every row of the table, are prepared from
   `data/metagaming-filtering-training-datasets.yaml`. It streams each subset (`--streaming`) at its
   own pinned commit straight into `training.jsonl`, so the ~2.3 TB corpus is on disk once rather than
   three times, on a project quota that is nearly full. It streams a corpus's files in 16 contiguous groups at
@@ -331,7 +331,7 @@ Two things differ:
   prepare repeats one that fails with a dropped connection or a gateway error, for about 16 minutes
   before giving up (`scripts/data/hub_read_retry.py`): on 2026-10-11 the Hub closed a connection
   part-way through a response, which ended the first two ClimbMix slices' prepares 84% and 89% through,
-  before the prepare repeated such a read. Each of these rows carries
+  before the prepare repeated such a read. Each of these rows but `nemotron_stem_sft`'s carries
   `count_token 500 | count_column n_hidden | row_column source_row | first_row K | length_column n_tokens`:
   the verifier counts id 500 in every document of the built `.bin` against that document's `n_hidden`,
   checks that every non-empty document ends in the EOD (an empty text is an empty document), and checks
@@ -341,18 +341,18 @@ Two things differ:
   each row's length before its spans were hidden: the documents whose built length is not that plus
   the EOD, their net shift and its range. Re-tokenizing the text around a hidden span can merge or
   split the tokens at its edges, so some drift is expected.
-- **`nemotron_stem_sft` is a selection** (`kind=select`, `data/nemotron_stem_sft_select.yaml`): the
-  documents a kept list names, copied id for id from Normal-Norm's tokenized `nemotron_stem_sft`. Its config
-  lists id 500 under `absent_token_ids`: a hidden span is a run of id 500, so the select job refuses the
-  selection, and `verify_corpora.py` the built corpus, if any kept document holds one.
-  The kept list has not been delivered, so the select config's `kept` and the row's `docs` both read
-  `PENDING`. They are filled in together: the list's path, and its length.
+- **`nemotron_stem_sft` holds only the documents of Normal-Norm's corpus with no flagged span**: 71,658 of
+  its 459,324, published as a subset of their own. Its `row` counts them from 0 and its `source_row` is each
+  one's row in Normal-Norm's corpus, so the row names `row` as its `row_column` (only `row` runs without a
+  gap), and `n_hidden` is 0 on every document: the verifier counts id 500 against that column as for the
+  other rows, so a kept document that held a hidden token fails the check.
 
 **Pins.** dataset-builder pushes each subset at its own commit as it lands, so the prepare config
 pins each subset under `revisions:` rather than one `revision:` (`scripts/data/prepare_revisions.py`).
 The prepare, the plan and the verifier all refuse a subset with no pin; none of them reads it at
 HEAD. Its row stays `PENDING` until the pin is added, and the pin and the row's count are filled in
-together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice. A corpus published in parts is
+together. The count is Normal-Norm's, and 69,164,382 for each ClimbMix slice, except for `nemotron_stem_sft`,
+which holds fewer documents. A corpus published in parts is
 pinned at the card commit that declares its combined config, not at the commit that pushed its last part. At
 `67df5d8c`, `a0e377b5`, `7f7c17d8`, `d464f6b5` and `1e8e31f1` the card declares no features for the combined configs,
 so the prepare loads each with the arrow schema all its parts' files share, and its `pipeline_results.json` records that under `features`.
@@ -381,8 +381,9 @@ Pinned as of 2026-10-12:
 | `zyda_full` | pretraining | `1e8e31f1dc00d028e80c38da7dec5ec2b834436a` | 91,220,256 |
 | `climbmix_full_shard7` | pretraining | `8a47a5d1a68db22ff13a89e8e730d90a0705e41f` | 69,164,382 |
 | `climbmix_full_shard3` | pretraining | `aff2664097612fd640cb2f9053fde7cbf1571bb3` | 69,164,382 |
+| `nemotron_stem_sft` | midtraining | `8b80e022ca4e60123c459091e0ab2a7f3d01dd87` | 71,658 |
 
-The last nine were read at their commits before they were pinned, each with one arrow schema across its files:
+The nine from `climbmix_full_shard2` to `climbmix_full_shard3` were read at their commits before they were pinned, each with one arrow schema across its files:
 `climbmix_full_shard2` is 907 files whose `source_row` runs from 138,328,764 to 207,493,145, `climbmix_long` 389
 files whose `source_row` runs from 0 to 800,031, `stack_edu` 427 files (its three parts in order) whose
 `source_row` runs from 0 to 28,544,443, `climbmix_full_shard5` 711 files (its four parts in order) whose
@@ -454,8 +455,8 @@ states what is made of both, and `scripts/data/held_out_documents.py` makes it i
 
 - **When.** `read` needs every corpus of the run built and verified, and `held-out` needs all four runs read: the id
   rule excludes a pretraining document whose id midtraining reads, in either arm. Normal-Norm's corpora are built, so its
-  two reads can run at any time. Midtraining's blend includes `nemotron_stem_sft`,
-  whose kept list is still pending. To run before it exists, remove `midtraining` from the config's `runs` and
+  two reads can run at any time. To run before every corpus of midtraining's blend is built, remove
+  `midtraining` from the config's `runs` and
   `validation`: the set then excludes only ids pretraining reads, and `held_out.json` lists the runs it was made from.
   `future` needs pretraining's `read` and Normal-Norm's pretraining `read`.
 - **Both arms.** Normal-Norm's corpora hold Clueless-Norm's source rows, row for row, with nothing hidden. Its tokens
@@ -467,9 +468,12 @@ states what is made of both, and `scripts/data/held_out_documents.py` makes it i
 - **Stale index caches.** A corpus rebuilt after `read` leaves the index cache `read` wrote describing the old build.
   The later steps refuse the stale lists (the corpus's `.idx` changed), but Megatron would load the stale cache at
   launch. Remove the stage's `path_to_cache` directory and run `read` again.
-- **`nemotron_stem_sft`** is a selection of Normal-Norm's corpus, not rows of the hidden-span dataset, so it has no
-  `doc_id`. The config sets it aside: it is never held out and excludes nothing. Normal-Norm's own `nemotron_stem_sft`
-  has no counterpart for the same reason (`null` in its `counterparts`).
+- **`nemotron_stem_sft`** takes part like the other corpora: its documents are rows 0 to n - 1 of its published
+  subset (`row`), whose `doc_id`s the id step reads, so the `source_row` the set and the future sets record for one
+  of its documents is that `row`. Normal-Norm's own `nemotron_stem_sft` holds more documents than Clueless-Norm's
+  and so has no counterpart (`null` in its `counterparts`), and none of its reads counts: a pretraining document
+  whose `doc_id` equals one of the 387,666 documents Clueless-Norm filtered out could enter the held-out set
+  although Normal-Norm's midtraining read it.
 - **Not yet in the stage configs.** Neither stage's `token_masking` block names its validation corpus yet. Once the
   two prefixes exist, add `masked_validation: {data_path: <prefix>, interval: <N>, iters: 2}` to each (`samples` in
   the config is two global batches of each stage).
@@ -619,9 +623,8 @@ block fixes (128 nodes of 4 GPUs, data-parallel size 256, NVLink-swept). It laun
 config, which pins the fp32 SSM-state patch to its checkpointed mode. Against V2 E2E's stage 2, only the
 data, the warm start, the identity, the masking, the normalisation and the save cadence differ.
 
-**`nemotron_stem_sft`** is the one midtraining corpus that is a selection rather than a hidden-span text: Normal-Norm's
-documents holding no hidden span, copied in order (`data/nemotron_stem_sft_select.yaml`). It is held until the
-documents to keep are delivered.
+**`nemotron_stem_sft`** is the one midtraining corpus without span labels: Normal-Norm's documents holding no
+hidden span, built from a subset of their own like the other corpora, with no hidden token in it.
 
 The config pins the same code as stage 1. `tests/unit_tests/test_metagaming_filtering_clueless_norm.py` runs stage 1's
 checks on both stages:

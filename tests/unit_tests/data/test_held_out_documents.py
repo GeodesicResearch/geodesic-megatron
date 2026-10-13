@@ -1116,6 +1116,8 @@ class TestTheConfig:
 
 
 CLUELESS_NORM = REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm"
+# The one corpus Clueless-Norm builds from only some of Normal-Norm's documents of that name.
+DOCUMENT_FILTERED = "nemotron_stem_sft"
 
 
 class TestTheCluelessNormHeldOutConfig:
@@ -1140,7 +1142,7 @@ class TestTheCluelessNormHeldOutConfig:
     def test_normal_norms_stages_are_read_too_each_corpus_named_with_clueless_norms(self, config, stage):
         """Normal-Norm trains each stage on its own corpora, Clueless-Norm's rows with nothing hidden, in the same
         blend order and at the same width. Each is named with the Clueless-Norm corpus at its place in the blend; its
-        selection has none, as Clueless-Norm's is a selection of it and takes no part in the id rule."""
+        nemotron_stem_sft has none, as Clueless-Norm's holds only some of its documents."""
         baseline = REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline"
         run, arm = config.runs[f"normal_norm_{stage}ing"], config.runs[f"{stage}ing"]
         assert run.config == baseline / f"nemotron_nano_30b_baseline_{stage}.yaml"
@@ -1150,7 +1152,8 @@ class TestTheCluelessNormHeldOutConfig:
         assert list(run.counterparts) == [Path(prefix) for prefix in own] and len(own) == len(arms)
         for prefix, counterpart in zip(arms, run.counterparts.values()):
             subset = Path(prefix).parent.name.rsplit("__", 1)[1]
-            assert counterpart == (None if subset in config.subsets_without_ids else Path(prefix)), subset
+            unmatched = {*config.subsets_without_ids, DOCUMENT_FILTERED}
+            assert counterpart == (None if subset in unmatched else Path(prefix)), subset
 
     def test_every_corpus_a_stage_reads_is_a_table_row_with_ids_or_listed_without(self, config):
         """A run's prefix is ``<corpus root>/tokenized_base_input_document``, whose root ends in its table subset."""

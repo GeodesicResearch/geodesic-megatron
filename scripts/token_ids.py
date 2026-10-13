@@ -1,15 +1,14 @@
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""The token-id checks the repo's tools apply to ids read from a hand-written file: a probe spec, a gate spec, a
-corpus select config.
+"""The token-id checks the repo's tools apply to ids read from a hand-written file: a probe spec, a gate spec.
 
 ``require_token_id`` accepts one non-negative integer (a YAML ``true`` is a bool, not an id), and
 ``require_token_id_list`` a list of distinct ones, empty or not as the caller says. Each raises the caller's own error
 type with a message that opens with where the value sits, so each tool reports the fault as it reports any other in
 its input.
 
-Standard library only, and no syntax newer than Python 3.6, as ``mapping_keys``: the gates and the corpus planner
-import it under a host Python without the repo's dependencies. The training code checks its own token-masking ids
+Standard library only, and no syntax newer than Python 3.6, as ``mapping_keys``: the gates import it under a
+host Python without the repo's dependencies. The training code checks its own token-masking ids
 with the same rule in ``megatron.bridge.training.token_masking.config.validate_token_ids``, which stays in ``src/``:
 importing that package imports torch, it raises the token-masking error, and ``src/`` imports nothing from
 ``scripts/``.

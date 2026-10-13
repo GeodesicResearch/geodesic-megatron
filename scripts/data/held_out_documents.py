@@ -110,7 +110,6 @@ from corpora_table import (  # noqa: E402
     CorpusRow,
     corpus_root,
     read_corpora_table,
-    selected_corpus,
     subset_prepare_config,
     tokenized_prefixes,
 )
@@ -559,8 +558,7 @@ def earliest_reads(runs: dict[str, dict[Path, numpy.ndarray]]) -> dict[Path, num
 @dataclass(frozen=True)
 class TableCorpus:
     """One ``.bin/.idx`` prefix of a corpora table's row. ``rows`` are the subset rows its documents are, in order;
-    None where the table does not say: a selection's documents are not rows of a dataset, and a byte-gated split
-    decides its shards' rows when it runs."""
+    None where the table does not say: a byte-gated split decides its shards' rows when it runs."""
 
     row: CorpusRow
     rows: tuple[int, int] | None
@@ -575,9 +573,6 @@ def table_corpora(table: Path, data_base: Path) -> tuple[dict[Path, TableCorpus]
             continue
         if row.docs is None:
             held.append(row.subset)
-        elif row.kind == "select":
-            for entry in selected_corpus(row, data_base).prefixes:
-                corpora[entry.output] = TableCorpus(row, None)
         elif row.shard_mode == "split":
             root = corpus_root(subset_prepare_config(row.config, row.subset)["dataset"], row.subset, data_base)
             for name in row.shard_names:
@@ -655,7 +650,7 @@ def covered_documents(config: HeldOutConfig, data_base: Path, read: dict[Path, n
             continue
         if corpus.rows is None or corpus.row.row_column is None:
             raise CorpusCheckFailed(
-                f"{corpus.row.subset}: its documents cannot be traced to source rows (a selection, a byte-gated split, "
+                f"{corpus.row.subset}: its documents cannot be traced to source rows (a byte-gated split "
                 "or a table row naming no row column); list it under document_ids.subsets_without_ids if it takes no "
                 "part in the id rule"
             )

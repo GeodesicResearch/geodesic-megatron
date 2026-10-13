@@ -14,34 +14,28 @@ Columns, in order::
                 continual_pretraining); a build or verification can be limited to one stage
     kind        tokenize  -> .bin/.idx via pipeline_data_submit.sbatch tokenize
                 pack      -> packed SFT parquet via pipeline_data_submit.sbatch <root> ...
-                select    -> a subset of another table's tokenized corpus: the documents a kept
-                             list names, their ids copied in order by corpus_documents.py select
     config      prepare config YAML (dataset, revision, tokenizer, pack geometry), named
-                relative to the repo root; for kind=select, the select config instead
-                (`read_select_config`: output dataset, parent table and subset, kept list, and
-                the token ids no kept document may hold).
+                relative to the repo root.
                 A prepare config pins one `revision`, or each subset's own commit under
                 `revisions`; a row is read through `subset_prepare_config`, which resolves
                 its subset's pin and refuses a subset `revisions` does not pin
-    prep_h      prepare walltime, hours; 0 for kind=select, which has no prepare
-    tok_h       tokenize/pack/select walltime, hours (per shard where sharded)
-    workers     tokenize workers; 1 for kind=select, which copies in one process
+    prep_h      prepare walltime, hours
+    tok_h       tokenize/pack walltime, hours (per shard where sharded)
+    workers     tokenize workers
     partitions  how many contiguous parts a tokenize row's JSONL is tokenized in, each by a writer process of
                 its own, and merged in order (preprocess_data.py --partitions --keep-sequential-samples, which
                 divides the workers among the parts, so it must divide workers). One writer is what limits a
                 large corpus's tokenize. The job runs at one when the quota cannot hold the parts; 1 for any
                 other kind
-    shards      1, or the shard count where sharded; a select row restates its parent's
-    shard_mode  none | split (one JSONL, byte-gated split) | slice (N source index ranges);
-                a select row restates its parent's
+    shards      1, or the shard count where sharded
+    shard_mode  none | split (one JSONL, byte-gated split) | slice (N source index ranges)
     stripe      1 to lfs setstripe the roots before the first write, else 0
     docs        the subset's document count, or PENDING. Slicing and verification both need
                 the integer, and `plan_corpus` refuses a PENDING row whatever its shard mode,
                 so PENDING doubles as a HOLD: a corpus whose count is known but whose source
                 is not yet safe to build from is held by leaving the column PENDING, and the
                 whole plan is refused rather than quietly omitting that corpus. An arm that
-                holds a row this way states its reason at the row. For kind=select it is the
-                kept list's length.
+                holds a row this way states its reason at the row.
 
 Four further columns are optional, and a row states all four or none::
 
@@ -94,9 +88,9 @@ COLUMNS = (
 DOCUMENT_CHECK_COLUMNS = ("count_token", "count_column", "row_column", "first_row")
 # Optional after the four.
 LENGTH_COLUMN = "length_column"
-KINDS = ("tokenize", "pack", "select")
+KINDS = ("tokenize", "pack")
 SHARD_MODES = ("none", "split", "slice")
-STEPS = ("prepare", "split", "tokenize", "pack", "select")  # the job steps a corpus's chain is made of
+STEPS = ("prepare", "split", "tokenize", "pack")  # the job steps a corpus's chain is made of
 DOCS_PENDING = "PENDING"
 
 # Tables name their prepare configs relative to the repo root, as build_corpora.sh's own
@@ -108,8 +102,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 from scripts.data.prepare_revisions import subset_revision, tokenizer_reference, tokenizer_revision  # noqa: E402
-from scripts.mapping_keys import require_keys  # noqa: E402
-from scripts.token_ids import require_token_id_list  # noqa: E402
 
 
 # Where every corpus root lives.
@@ -118,9 +110,6 @@ DATA_BASE = Path("/projects/a5k/public/data")
 # through the data pipeline's sbatch wrapper; a split is its own script, submitted directly.
 SUBMIT_SCRIPT = "pipeline_data_submit.sbatch"
 SHARD_SCRIPT = Path(__file__).resolve().parent / "shard_jsonl_corpus.sh"
-# A select runs this directory's document tool as its own 1-node CPU job inside the container.
-CORPUS_JOB_SCRIPT = Path(__file__).resolve().parent / "corpus_job.sbatch"
-DOCUMENTS_TOOL = Path(__file__).resolve().parent / "corpus_documents.py"
 # The tokenize job's output prefix: pipeline_data_submit.sbatch tokenize <root> <tokenizer>
 # tokenized_base input -> <root>/tokenized_base_input_document.{bin,idx,provenance.json}.
 TOKENIZED_PREFIX = "tokenized_base_input_document"
@@ -155,8 +144,8 @@ class CorpusRow:
     first_row: int | None
     # The dataset's column of each row's length before the build, None when the row declares none.
     length_column: str | None
-    # Where the row was read from (resolved), which a select job is pointed back at. Not part of the
-    # row's identity: two tables stating the same corpus state the same row.
+    # Where the row was read from (resolved). Not part of the row's identity: two tables stating the
+    # same corpus state the same row.
     table: Path = field(compare=False)
 
     @property
@@ -296,10 +285,6 @@ def _parse_row(line: str, table: Path, line_no: int) -> CorpusRow:
         raise ValueError(f"{table}:{line_no}: count_column and row_column name one column, {parsed.row_column!r}")
     if parsed.length_column is not None and parsed.length_column in (parsed.count_column, parsed.row_column):
         raise ValueError(f"{table}:{line_no}: length_column names another check's column, {parsed.length_column!r}")
-    if parsed.kind == "select" and parsed.prep_h != 0:
-        raise ValueError(f"{table}:{line_no}: kind=select has no prepare, so prep_h must be 0, got {parsed.prep_h}")
-    if parsed.kind == "select" and parsed.workers != 1:
-        raise ValueError(f"{table}:{line_no}: kind=select copies in one process, so workers must be 1")
     if parsed.partitions < 1 or parsed.workers % parsed.partitions:
         raise ValueError(
             f"{table}:{line_no}: partitions must be at least 1 and divide workers ({parsed.workers}), "
@@ -475,7 +460,6 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
         prepare -> tokenize                          shard_mode=none
         prepare -> split -> tokenize/pack x N        shard_mode=split
         prepare(slice i) -> tokenize(shard i)  x N   shard_mode=slice
-        select(parent prefix i)                x N   kind=select, one per parent prefix
 
     ``plan_build`` narrows a chain to selected steps and shards (``select_jobs``); this function
     always plans all of it.
@@ -496,8 +480,6 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
             f"{row.subset}: document count is PENDING, so this corpus cannot be planned. "
             "Fill the count in once it is known, or leave it PENDING to hold the corpus back."
         )
-    if row.kind == "select":
-        return _plan_select(row, arm, data_base)
     scalars = subset_prepare_config(row.config, row.subset)
     required = ("dataset", "tokenizer") + (PACK_GEOMETRY_KEYS if row.kind == "pack" else ())
     missing = [key for key in required if key not in scalars]
@@ -659,160 +641,6 @@ def tokenized_prefixes(row: CorpusRow, data_base: Path = DATA_BASE) -> tuple[Tok
             rows = ranges[0 if job.shard is None else job.shard]
             prefixes.append(TokenizedPrefix(job.shard, rows, target / TOKENIZED_PREFIX))
     return tuple(prefixes)
-
-
-SELECT_STRING_KEYS = ("dataset", "parent_table", "parent_subset", "kept")
-SELECT_CONFIG_KEYS = (*SELECT_STRING_KEYS, "absent_token_ids")
-
-
-@dataclass(frozen=True)
-class SelectConfig:
-    """A select row's config: which documents of which tokenized corpus it keeps, and where it writes them.
-
-    ``dataset`` names the selected corpus's root as a prepare config's dataset does
-    (``corpus_root(dataset, <row subset>)``); ``parent_table`` and ``parent_subset`` name the
-    tokenize row it selects from; ``kept`` is the list of the parent subset's row indices to keep
-    (``corpus_documents.read_kept``: a one-column parquet, a JSON array, or a text file of one
-    integer per line); ``absent_token_ids`` are the ids no kept document may hold at any position,
-    which the select job checks in the ids it writes and ``verify_corpora.py`` checks again (an
-    empty list states that there are none).
-    """
-
-    path: Path
-    dataset: str
-    parent_table: Path
-    parent_subset: str
-    kept: Path
-    absent_token_ids: tuple[int, ...]
-
-
-def _repo_path(value: str) -> Path:
-    """A path a config names: absolute, or relative to the repo root as the tables' own paths are."""
-    path = Path(value)
-    return path if path.is_absolute() else REPO_ROOT / path
-
-
-def read_select_config(path: Path) -> SelectConfig:
-    """Parse a select config; every key in ``SELECT_CONFIG_KEYS`` is required and no other is allowed."""
-    scalars = require_keys(prepare_config_scalars(path), f"{path}: a select config", frozenset(SELECT_CONFIG_KEYS))
-    empty = [key for key in SELECT_STRING_KEYS if not isinstance(scalars[key], str) or not scalars[key]]
-    if empty:
-        raise ValueError(f"{path}: {empty} must be non-empty strings")
-    return SelectConfig(
-        path=path,
-        dataset=scalars["dataset"],
-        parent_table=_repo_path(scalars["parent_table"]),
-        parent_subset=scalars["parent_subset"],
-        kept=_repo_path(scalars["kept"]),
-        absent_token_ids=require_token_id_list(
-            scalars["absent_token_ids"], f"{path}: absent_token_ids", allow_empty=True
-        ),
-    )
-
-
-@dataclass(frozen=True)
-class SelectedPrefix:
-    """One prefix of a selected corpus: the parent prefix it selects from and the prefix it writes."""
-
-    shard: int | None
-    rows: tuple[int, int]  # the parent subset's rows the parent prefix holds
-    parent: Path
-    output: Path
-
-
-@dataclass(frozen=True)
-class SelectedCorpus:
-    """Everything the select job, its plan and its verification derive from a select row."""
-
-    row: CorpusRow
-    config: SelectConfig
-    parent: CorpusRow
-    tokenizer: str  # the parent's, which the selected ids were made with
-    root: Path
-    prefixes: tuple[SelectedPrefix, ...]
-
-    def prefix(self, shard: int | None) -> SelectedPrefix:
-        """The prefix of one shard (``None`` for an unsharded corpus); any other shard is an error."""
-        for entry in self.prefixes:
-            if entry.shard == shard:
-                return entry
-        raise ValueError(f"{self.row.subset}: no shard {shard}; the corpus has {[p.shard for p in self.prefixes]}")
-
-
-def selected_corpus(row: CorpusRow, data_base: Path = DATA_BASE) -> SelectedCorpus:
-    """Derive a select row's parent, output root and per-prefix pairing.
-
-    The selected corpus keeps its parent's sharding — one output prefix per parent prefix,
-    holding the kept documents of that prefix's rows — so the row must restate the parent's
-    ``shards`` and ``shard_mode``, and its document count (the kept list's length) cannot exceed
-    the parent's. The output root must differ from the parent's, which is never written.
-    """
-    if row.kind != "select":
-        raise ValueError(f"{row.subset}: not a select row (kind={row.kind})")
-    if row.docs is None:
-        raise ValueError(f"{row.subset}: the kept count is PENDING, so the selection cannot be planned")
-    config = read_select_config(row.config)
-    (parent,) = read_corpora_table(config.parent_table, "all", [config.parent_subset])
-    if parent.kind != "tokenize":
-        raise ValueError(
-            f"{row.subset}: its parent {parent.subset} is kind={parent.kind}; a select copies tokenized ids"
-        )
-    if (row.shards, row.shard_mode) != (parent.shards, parent.shard_mode):
-        raise ValueError(
-            f"{row.subset}: shards={row.shards} shard_mode={row.shard_mode}, but its parent {parent.subset} is "
-            f"shards={parent.shards} shard_mode={parent.shard_mode}; a selection keeps its parent's sharding"
-        )
-    if parent.docs is not None and row.docs > parent.docs:
-        raise ValueError(f"{row.subset}: keeps {row.docs} documents of a parent that has {parent.docs}")
-    parent_scalars = subset_prepare_config(parent.config, parent.subset)
-    root = corpus_root(config.dataset, row.subset, data_base)
-    if root == corpus_root(parent_scalars["dataset"], parent.subset, data_base):
-        raise ValueError(f"{row.subset}: the selection's root {root} is its parent's")
-    prefixes = tuple(
-        SelectedPrefix(
-            shard=entry.shard,
-            rows=entry.rows,
-            parent=entry.prefix,
-            output=(root if entry.shard is None else root / shard_name(entry.shard)) / TOKENIZED_PREFIX,
-        )
-        for entry in tokenized_prefixes(parent, data_base)
-    )
-    return SelectedCorpus(row, config, parent, parent_scalars["tokenizer"], root, prefixes)
-
-
-def _plan_select(row: CorpusRow, arm: str, data_base: Path) -> CorpusPlan:
-    """One job per parent prefix, each copying that prefix's kept documents into its own output prefix."""
-    selected = selected_corpus(row, data_base)
-    prefix = f"cp-{arm}"
-    roots = [(selected.root, row.stripe)]
-    roots += [(entry.output.parent, row.stripe) for entry in selected.prefixes if entry.shard is not None]
-    jobs = []
-    for entry in selected.prefixes:
-        sharded = entry.shard is not None
-        name = f"{prefix}-select-{row.subset}" + (f"-s{entry.shard}" if sharded else "")
-        jobs.append(
-            PlannedJob(
-                key=f"{row.subset}:select" + (f":{entry.shard}" if sharded else ""),
-                step="select",
-                depends_on="",
-                hours=row.tok_h,
-                name=name,
-                description=f"select {row.subset}" + (f" shard{entry.shard}" if sharded else ""),
-                script=str(CORPUS_JOB_SCRIPT),
-                payload=(
-                    str(DOCUMENTS_TOOL),
-                    "select",
-                    str(row.table),
-                    row.subset,
-                    *(("--shard", str(entry.shard)) if sharded else ()),
-                    "--data-base",
-                    str(data_base),
-                ),
-                sbatch_args=(f"--output=logs/slurm/{name}-%j.out",),
-                shard=entry.shard,
-            )
-        )
-    return CorpusPlan(row, selected.root, selected.config.dataset, selected.tokenizer, tuple(roots), tuple(jobs))
 
 
 def plan_build(

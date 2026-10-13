@@ -29,22 +29,15 @@ tokenizer, ``--append-eod`` and the bytes-per-token rule need no count, and only
 against the table's own figure is passed over. Either way the stage's remaining corpora are
 verified, so holding one corpus back never leaves the rest unchecked.
 
-Two kinds of row read corpus contents, so verifying them is a 1-node job rather than seconds:
-
-* A tokenize row that declares the document-check columns (``count_token``, ``count_column``,
-  ``row_column``, ``first_row``) also gets the per-document checks
-  (``corpus_documents.check_documents``): every document of its ``.bin`` is counted against
-  ``count_column`` of its prepare config's dataset at the same row and must end in its EOD unless
-  it is empty, and ``row_column`` must hold ``first_row + i`` at row ``i``. A row that also names a
-  ``length_column`` has its length drift from that column reported, never checked, and printed under
-  the corpus: the documents whose built length is not the column's plus the EOD, their net shift and
-  its range. Of the dataset, only those columns are read. The records checks above still run first
-  and unchanged.
-* A select row is checked from its prefixes' provenance and its parent
-  (``corpus_documents.verify_selected_prefix``): the kept list is re-validated, the parent's
-  files and the list must match the sha256s recorded when the selection was written, every
-  kept document must still be byte-equal to the parent's, and no kept document may hold one of
-  the select config's ``absent_token_ids``, for which the built files themselves are scanned.
+A tokenize row that declares the document-check columns (``count_token``, ``count_column``,
+``row_column``, ``first_row``) reads corpus contents, so verifying it is a 1-node job rather than
+seconds: it also gets the per-document checks (``corpus_documents.check_documents``): every document
+of its ``.bin`` is counted against ``count_column`` of its prepare config's dataset at the same row
+and must end in its EOD unless it is empty, and ``row_column`` must hold ``first_row + i`` at row
+``i``. A row that also names a ``length_column`` has its length drift from that column reported, never
+checked, and printed under the corpus: the documents whose built length is not the column's plus the
+EOD, their net shift and its range. Of the dataset, only those columns are read. The records checks
+above still run first and unchanged.
 
 Every failure is reported, not just the first, and the exit status is non-zero if any check
 failed. ``--report-out`` writes the measured per-corpus and per-shard counts as JSON — the
@@ -83,8 +76,6 @@ from corpora_table import (  # noqa: E402
     corpus_root,
     packed_parquet_path,
     read_corpora_table,
-    selected_corpus,
-    shard_name,
     subset_prepare_config,
 )
 from scripts.data.prepare_revisions import TOKENIZER_REVISION_KEY  # noqa: E402
@@ -190,42 +181,8 @@ def check_packed_root(root: Path, label: str, scalars: dict, checker: Checker) -
     return {"docs": docs, "packs": packs}
 
 
-def verify_selected(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
-    """Check a select row's prefixes against their provenance and their parent; return their counts."""
-    from corpus_documents import CorpusCheckFailed, check_kept, read_kept, verify_selected_prefix
-
-    report: dict = {"subset": row.subset, "stage": row.stage, "kind": row.kind, "shards": {}}
-    if not checker.expect(row.docs is not None, f"{row.subset}: table docs is PENDING — nothing to verify against"):
-        return report
-    try:
-        selected = selected_corpus(row, data_base)
-        kept = read_kept(selected.config.kept)
-        check_kept(kept, selected.parent.docs, row.docs, selected.config.kept)
-    except (ValueError, CorpusCheckFailed) as error:
-        checker.expect(False, f"{row.subset}: {error}")
-        return report
-    report["root"] = str(selected.root)
-    for entry in selected.prefixes:
-        name = "" if entry.shard is None else shard_name(entry.shard)
-        try:
-            report["shards"][name] = verify_selected_prefix(selected, entry, kept)
-        except CorpusCheckFailed as error:
-            checker.expect(False, f"{row.subset} {name}".rstrip() + f": {error}")
-            report["shards"][name] = {}
-    docs = [shard.get("docs") for shard in report["shards"].values()]
-    if all(isinstance(d, int) for d in docs):
-        report["docs"] = sum(docs)
-        report["tokens"] = sum(shard["tokens"] for shard in report["shards"].values())
-        checker.expect(
-            report["docs"] == row.docs, f"{row.subset}: selected {report['docs']} documents, table says {row.docs}"
-        )
-    return report
-
-
 def verify_corpus(row: CorpusRow, checker: Checker, data_base: Path) -> dict:
     """Run every check for one table row; return its measured counts."""
-    if row.kind == "select":
-        return verify_selected(row, checker, data_base)
     try:
         scalars = subset_prepare_config(row.config, row.subset)
     except ValueError as error:

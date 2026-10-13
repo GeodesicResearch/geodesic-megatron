@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Per-document operations on a tokenized corpus: check documents against their dataset, check digests, select
-documents.
+"""Per-document operations on a tokenized corpus: check documents against their dataset, check digests.
 
 Every operation reads a ``.bin/.idx`` through Megatron's own index reader and streams the ids in
 chunks of whole documents through numpy memmap views; nothing loops over tokens in Python.
@@ -37,19 +36,13 @@ all (an empty document, which therefore has no EOD).
   dataset-builder local build, or a Hub dataset config at a commit — or that it is still pending.
   The EOD id is derived from the corpus's own tokenize record and tokenizer, and the digest list's
   dataset-builder record must name the corpus's source subset and tokenizer.
-* **Select** (``select``, the build job of a select row). The documents a kept list names are
-  copied from the parent corpus once, in order, ids byte for byte, into a new prefix with its own
-  ``.idx``. The output is written under temporary names, re-read and compared document by
-  document with the parent, and scanned for the select config's ``absent_token_ids``: a kept
-  document holding one at any position, its last included, refuses the selection. Only then is
-  the output given its final names and its provenance record, which states those ids;
-  ``verify_corpora.py`` scans the final files for them again. The copy and its check
-  (``copy_documents``, ``check_copied_documents``) take documents from one parent prefix or several
-  in turn; ``scripts/data/held_out_documents.py`` writes a validation corpus through them.
+* **Copying** (``copy_documents``, ``check_copied_documents``). Documents are taken from one parent
+  prefix or several in turn, ids byte for byte, into a new prefix with its own ``.idx``, and the
+  written corpus is compared document by document with its parents;
+  ``scripts/data/held_out_documents.py`` writes a validation corpus through them.
 
 Usage (inside the container; as a job through ``corpus_job.sbatch``)::
 
-    python configs/control_pretraining/corpus_documents.py select <table> <subset> [--shard N]
     python configs/control_pretraining/corpus_documents.py check-hashes --config <digest checks.yaml> \\
         --subset <subset> [--shard N] [--report-out <json>]
 """
@@ -57,11 +50,9 @@ Usage (inside the container; as a job through ``corpus_job.sbatch``)::
 from __future__ import annotations
 
 import argparse
-import datetime
 import hashlib
 import json
 import os
-import re
 import sys
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -78,10 +69,7 @@ from corpora_table import (  # noqa: E402
     REPO_ROOT,
     Checker,
     CorpusRow,
-    SelectedCorpus,
-    SelectedPrefix,
     read_corpora_table,
-    selected_corpus,
     subset_prepare_config,
     tokenized_prefixes,
 )
@@ -95,7 +83,6 @@ from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
 
-TOOL_VERSION = 2  # raised whenever what a select writes, or how it is checked, changes
 TOKEN_DTYPE = np.dtype("<i4")
 CHUNK_TOKENS = 1 << 26  # ids streamed per step: 256 MiB of int32
 EXAMPLES = 20  # mismatching documents named per check
@@ -386,24 +373,6 @@ def scan_documents(data_file: Path, index: DocumentIndex, token: int) -> Documen
             counted = hits != ends[document] - 1
             counts[lo:hi] += np.bincount(document[counted], minlength=hi - lo)
     return DocumentScan(counts, total, last)
-
-
-def documents_holding(scan: DocumentScan, token: int) -> np.ndarray:
-    """The documents a ``scan_documents`` pass for ``token`` found it in, at any position, the last one included."""
-    return np.flatnonzero((scan.counts > 0) | (scan.last == token))
-
-
-def check_absent_tokens(data_file: Path, index: DocumentIndex, token_ids: tuple[int, ...], rows: np.ndarray) -> None:
-    """Refuse a ``.bin`` any of whose documents holds one of ``token_ids``, naming each such document by its
-    position and by ``rows``, the parent subset's row each document was copied from; one scan per id."""
-    for token in token_ids:
-        holding = documents_holding(scan_documents(data_file, index, token), token)
-        if holding.size:
-            named = ", ".join(f"document {d} (parent row {rows[d]})" for d in holding[:EXAMPLES].tolist())
-            raise CorpusCheckFailed(
-                f"{data_file}: token {token}, which the select config lists as absent, is held by {holding.size} "
-                f"of its {index.docs} documents: {named}"
-            )
 
 
 def _name_failures(checker: Checker, messages: list[str], named: int) -> int:
@@ -885,63 +854,15 @@ def run_digest_check(check: DigestCheck, data_base: Path = DATA_BASE) -> dict:
 
 
 # ---------------------------------------------------------------------------------------------
-# Select
+# Writing a corpus of copied documents
 # ---------------------------------------------------------------------------------------------
-
-
-def read_kept(path: Path) -> np.ndarray:
-    """A kept list of the parent subset's row indices: a one-column integer parquet, a JSON array, or one per line."""
-    if not path.is_file():
-        raise CorpusCheckFailed(f"missing kept list {path}")
-    if path.suffix == ".parquet":
-        import pyarrow.parquet as pq
-
-        table = pq.read_table(path)
-        if table.num_columns != 1:
-            raise CorpusCheckFailed(f"{path}: a kept list has one column, this has {table.column_names}")
-        return integer_column(table, table.column_names[0])
-    if path.suffix == ".json":
-        values = json.loads(path.read_text())
-        if not isinstance(values, list) or not all(type(value) is int for value in values):
-            raise CorpusCheckFailed(f"{path}: a JSON kept list is an array of integers")
-        return np.asarray(values, dtype=np.int64)
-    if path.suffix == ".txt":
-        lines = path.read_text().splitlines()
-        malformed = [number for number, line in enumerate(lines, start=1) if not re.fullmatch(r"-?\d+", line.strip())]
-        if malformed:
-            raise CorpusCheckFailed(f"{path}: line {malformed[0]} is not an integer")
-        return np.asarray([int(line) for line in lines], dtype=np.int64)
-    raise CorpusCheckFailed(f"{path}: a kept list is a .parquet, .json or .txt file")
-
-
-def check_kept(kept: np.ndarray, parent_docs: int, expected: int, source: Path) -> None:
-    """A kept list must hold the table's count of indices, strictly increasing, inside the parent's rows."""
-    if len(kept) != expected:
-        raise CorpusCheckFailed(f"{source}: lists {len(kept)} documents, the table says {expected}")
-    out_of_order = np.flatnonzero(np.diff(kept) <= 0)
-    if out_of_order.size:
-        at = int(out_of_order[0]) + 1
-        relation = "repeats" if kept[at] == kept[at - 1] else "is below"
-        raise CorpusCheckFailed(
-            f"{source}: entry {at} ({kept[at]}) {relation} entry {at - 1} ({kept[at - 1]}); a kept list is sorted and unique"
-        )
-    outside = np.flatnonzero((kept < 0) | (kept >= parent_docs))
-    if outside.size:
-        at = int(outside[0])
-        raise CorpusCheckFailed(f"{source}: entry {at} ({kept[at]}) is outside the parent's rows 0:{parent_docs}")
-
-
-def kept_in_prefix(kept: np.ndarray, rows: tuple[int, int]) -> np.ndarray:
-    """The kept rows a prefix holding ``rows`` contributes, as its own document indices."""
-    beg, end = rows
-    return kept[(kept >= beg) & (kept < end)] - beg
 
 
 def parent_record(prefix: Path, index: DocumentIndex) -> dict:
     """The parent prefix's tokenize record, which must agree with the files it describes and state its tokenizer.
 
-    A selection's record carries the parent's ``parameters`` forward, and training reads the
-    tokenizer that built a corpus from there (``source_documents``): a selected prefix has no
+    A copied corpus's record carries the parent's ``parameters`` forward, and training reads the
+    tokenizer that built a corpus from there (``source_documents``): a copied prefix has no
     prepare record beside it to fall back on, so a parent record without one is refused.
     """
     path = provenance_path(prefix)
@@ -975,17 +896,6 @@ def commit_corpus(prefix: Path, record: dict) -> None:
     os.replace(bin_path(prefix, PARTIAL), bin_path(prefix))
     os.replace(idx_path(prefix, PARTIAL), idx_path(prefix))
     write_record(provenance_path(prefix), record)
-
-
-def require_empty_directory(path: Path) -> None:
-    """A selection is written once, into a directory build_corpora.sh created and striped before submitting."""
-    if not path.is_dir():
-        raise CorpusCheckFailed(
-            f"{path} does not exist; build_corpora.sh creates and stripes it before submitting, because Lustre "
-            "striping must precede the first write"
-        )
-    if any(path.iterdir()):
-        raise CorpusCheckFailed(f"{path} is not empty; a selection is written into an empty directory")
 
 
 @dataclass(frozen=True)
@@ -1038,133 +948,15 @@ def check_copied_documents(sources: list[CopiedDocuments], index_file: Path, dat
     return out
 
 
-def select_prefix(selected: SelectedCorpus, entry: SelectedPrefix) -> dict:
-    """Write one prefix of a selected corpus, check it against its parent, and record its provenance."""
-    row, config = selected.row, selected.config
-    revision = attributable_code_revision()
-    kept = read_kept(config.kept)
-    check_kept(kept, selected.parent.docs, row.docs, config.kept)
-    require_empty_directory(entry.output.parent)
-    parent = read_index(idx_path(entry.parent), bin_path(entry.parent))
-    beg, end = entry.rows
-    if parent.docs != end - beg:
-        raise CorpusCheckFailed(
-            f"{entry.parent}: holds {parent.docs} documents, its rows {beg}:{end} number {end - beg}"
-        )
-    record = parent_record(entry.parent, parent)
-    local = kept_in_prefix(kept, entry.rows)
-
-    partial_bin, partial_idx = bin_path(entry.output, PARTIAL), idx_path(entry.output, PARTIAL)
-    copied = [CopiedDocuments(entry.parent, parent, local)]
-    copy_documents(copied, partial_bin, partial_idx)
-    out = check_copied_documents(copied, partial_idx, partial_bin)
-    check_absent_tokens(partial_bin, out, config.absent_token_ids, beg + local)
-
-    provenance = {
-        "kind": "select",
-        "tool": {"path": str(Path(__file__).resolve().relative_to(REPO_ROOT)), "version": TOOL_VERSION},
-        "code_revision": revision,
-        "created_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "table": str(row.table),
-        "subset": row.subset,
-        "shard": entry.shard,
-        "config": {"path": str(config.path), "sha256": file_sha256(config.path)},
-        "absent_token_ids": list(config.absent_token_ids),
-        "kept": {
-            "path": str(config.kept),
-            "sha256": file_sha256(config.kept),
-            "entries": len(kept),
-            "here": len(local),
-        },
-        "parent": {
-            "table": str(selected.parent.table),
-            "subset": selected.parent.subset,
-            "prefix": str(entry.parent),
-            "rows": [beg, end],
-            "documents": parent.docs,
-            "tokens": parent.tokens,
-            "bin_sha256": file_sha256(bin_path(entry.parent)),
-            "idx_sha256": file_sha256(idx_path(entry.parent)),
-        },
-        "totals": {"total_tokens": out.tokens, "num_sequences": out.sequences, "num_documents": out.docs},
-        "parameters": record["parameters"],
-    }
-    commit_corpus(entry.output, provenance)
-    return provenance
-
-
-def verify_selected_prefix(selected: SelectedCorpus, entry: SelectedPrefix, kept: np.ndarray) -> dict:
-    """Re-run a selected prefix's checks from its provenance and its parent; return its counts.
-
-    The record must name this prefix's parent, rows, kept list and absent ids as they are now (the
-    list and the parent files by sha256), the files must still hold exactly the kept documents, and
-    none of them may hold an absent id: the files are scanned for each, whatever the record says.
-    """
-    path = provenance_path(entry.output)
-    record = read_record(path)
-    parent = read_index(idx_path(entry.parent), bin_path(entry.parent))
-    expected = {
-        "kind": "select",
-        "parent prefix": str(entry.parent),
-        "parent rows": list(entry.rows),
-        "kept list": file_sha256(selected.config.kept),
-        "parent .bin": file_sha256(bin_path(entry.parent)),
-        "parent .idx": file_sha256(idx_path(entry.parent)),
-        "absent ids": list(selected.config.absent_token_ids),
-    }
-    recorded_now = {
-        "kind": recorded(record, path, "kind"),
-        "parent prefix": recorded(record, path, "parent", "prefix"),
-        "parent rows": recorded(record, path, "parent", "rows"),
-        "kept list": recorded(record, path, "kept", "sha256"),
-        "parent .bin": recorded(record, path, "parent", "bin_sha256"),
-        "parent .idx": recorded(record, path, "parent", "idx_sha256"),
-        "absent ids": recorded(record, path, "absent_token_ids"),
-    }
-    differ = [name for name in expected if recorded_now[name] != expected[name]]
-    if differ:
-        raise CorpusCheckFailed(
-            f"{path}: records {[recorded_now[n] for n in differ]} for {differ}, now {[expected[n] for n in differ]}"
-        )
-    local = kept_in_prefix(kept, entry.rows)
-    copied = [CopiedDocuments(entry.parent, parent, local)]
-    out = check_copied_documents(copied, idx_path(entry.output), bin_path(entry.output))
-    check_absent_tokens(bin_path(entry.output), out, selected.config.absent_token_ids, entry.rows[0] + local)
-    totals = (recorded(record, path, "totals", "num_documents"), recorded(record, path, "totals", "total_tokens"))
-    if totals != (out.docs, out.tokens):
-        raise CorpusCheckFailed(
-            f"{path}: records {totals[0]} documents of {totals[1]} ids, the files hold {out.docs} documents of {out.tokens} ids"
-        )
-    return {"docs": out.docs, "tokens": out.tokens}
-
-
 # ---------------------------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------------------------
 
 
-def run_select(table: Path, subset: str, shard: int | None, data_base: Path) -> dict:
-    """Write one prefix of a select row's corpus; a sharded corpus must be told which, an unsharded one must not."""
-    (row,) = read_corpora_table(table, "all", [subset])
-    selected = selected_corpus(row, data_base)
-    shards = [entry.shard for entry in selected.prefixes]
-    if shard is None and shards != [None]:
-        raise CorpusCheckFailed(f"{subset}: the corpus has shards {shards}, so --shard must name one")
-    return select_prefix(selected, selected.prefix(shard))
-
-
 def main(argv: list[str] | None = None) -> int:
-    """Run a select job or a digest check; non-zero on any failure."""
+    """Run a digest check; non-zero on any failure."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-
-    select = commands.add_parser("select", help="write one prefix of a select row's corpus")
-    select.add_argument("table", type=Path, help="the corpora table holding the select row")
-    select.add_argument("subset", help="the select row's subset")
-    select.add_argument("--shard", type=int, default=None, help="the shard to write; required for a sharded corpus")
-    select.add_argument(
-        "--data-base", type=Path, default=DATA_BASE, help=f"the corpus roots' base (default: {DATA_BASE})"
-    )
 
     hashes = commands.add_parser(
         "check-hashes", help="check a tokenized corpus against its digest list, as a digest-check config states it"
@@ -1186,13 +978,6 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     try:
-        if args.command == "select":
-            totals = run_select(args.table, args.subset, args.shard, args.data_base)["totals"]
-            print(
-                f"{args.subset} shard={args.shard}: {totals['num_documents']:,} documents, "
-                f"{totals['total_tokens']:,} ids"
-            )
-            return 0
         report = run_digest_check(read_digest_checks(args.config, args.subset, args.shard), args.data_base)
     except (CorpusCheckFailed, ValueError) as error:
         print(f"FAILED: {error}", file=sys.stderr)
