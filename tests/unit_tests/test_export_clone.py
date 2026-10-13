@@ -335,8 +335,29 @@ def test_remove_export_clone_refuses_a_directory_outside_the_root(torch_grouped,
 # The command line the launcher runs
 
 
-def run_tool(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([sys.executable, str(_TOOL), *args], capture_output=True, text=True, timeout=60)
+def run_tool(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(_TOOL), *args], capture_output=True, text=True, timeout=60, env=env)
+
+
+def test_the_clone_root_defaults_to_the_environment_then_a_per_user_project_directory():
+    per_user = Path("/projects/a5k/public/tmp/export_clones_someone")
+    assert export_clone.default_clone_root({export_clone.CLONE_ROOT_ENV: "/x/clones"}, "someone") == Path("/x/clones")
+    assert export_clone.default_clone_root({}, "someone") == per_user
+    assert export_clone.default_clone_root({export_clone.CLONE_ROOT_ENV: ""}, "someone") == per_user
+
+
+def test_cli_builds_and_removes_a_clone_under_the_environment_root_when_none_is_given(torch_grouped, tmp_path):
+    save, _ = torch_grouped
+    root = tmp_path / "env-root"
+    env = {**os.environ, export_clone.CLONE_ROOT_ENV: str(root)}
+    result = run_tool("prepare", "--megatron-path", str(save), "--job", "7-7", env=env)
+    assert result.returncode == 0, result.stderr
+    clone = export_clone.clone_location(root, save / "iter_0000477", "7-7")
+    assert result.stdout.splitlines() == ["EXPORT_ITERATION=477", f"EXPORT_LOAD_PATH={clone}"]
+
+    result = run_tool("remove", "--clone", str(clone), env=env)
+    assert result.returncode == 0, result.stderr
+    assert not clone.exists()
 
 
 def test_cli_prepare_prints_only_its_plan_on_stdout_and_remove_removes_the_clone(torch_grouped):

@@ -104,6 +104,7 @@ if _REPO_ROOT not in sys.path:
 # RUN_CONFIG_EDITS and patch_run_config are re-exported, as part of this tool's interface, for the
 # tests and callers that read them from here. The checkpoint directory's layout (LATEST_FILE,
 # iteration_number) is defined there too.
+from scripts.checkpoint import export_check_result  # noqa: E402
 from scripts.checkpoint.export_clone import (  # noqa: E402
     HF_DIR,
     LATEST_FILE,
@@ -137,10 +138,18 @@ EXPORTER = "pipeline_checkpoint_convert.sh"
 SUBMITTER = "isambard_sbatch"
 EXPORT_SBATCH = "pipeline_checkpoint_submit.sbatch"
 UPLOAD_SBATCH = "scripts/hub/publish_models.sbatch"
+# The wrapper around the export check (scripts/checkpoint/export_check.py), a job per export of a model whose manifest
+# entry names one.
+CHECK_SBATCH = "scripts/checkpoint/export_check.sbatch"
 # The names those wrappers' jobs write their output under, in slurm_jobs.SLURM_LOG_DIR, as their headers name them.
 EXPORT_JOB_LOG = "convert-checkpoint-{job}.out"
 UPLOAD_JOB_LOG = "publish-models-{job}.out"
+CHECK_JOB_LOG = "export-check-{job}.out"
 MAIN = "main"
+# The word that opens a line of a model's verified log.
+VERIFIED_TAG = "verified"
+# The export-check verdicts a release log records. One that could not be evaluated is no verdict on the export.
+RECORDED_VERDICTS = ("PASS", "FAIL")
 
 MANIFEST_KEYS = frozenset(
     {
@@ -173,7 +182,13 @@ MODEL_KEYS = frozenset({"repo", "private", "reasoning", "strict", "description",
 # A model may carry a collection note; one without keeps whatever note the Hub already shows. A model whose card
 # carries sections beyond the standard ones names them as `card_sections`: a repo-relative markdown file that the
 # card places after its introduction.
-OPTIONAL_MODEL_KEYS = frozenset({"note", "card_sections"})
+OPTIONAL_MODEL_KEYS = frozenset({"note", "card_sections", "release"})
+# A model whose evaluation chain releases a revision on what this tool records names the log of verified revisions
+# as `release.verified_log`, and may name an export check every export must pass: its spec, the root its jobs write
+# under, the log of its verdicts, the word that opens each of that log's lines, and the job's walltime.
+RELEASE_KEYS = frozenset({"verified_log"})
+OPTIONAL_RELEASE_KEYS = frozenset({"export_check"})
+EXPORT_CHECK_KEYS = frozenset({"spec", "out_root", "log", "tag", "walltime"})
 STAGE_KEYS = frozenset({"name", "config", "revision", "default", "extra_directories"})
 # A stage run as a chain of jobs, each resuming the one before, names its final job's config as
 # `config` and may name its first job's as `schedule_config`: the card's warmup is the first job's,
@@ -285,13 +300,36 @@ class Stage:
 
 
 @dataclass(frozen=True)
+class ExportCheck:
+    """The check every export of a model must pass before the revision is released
+    (``scripts/checkpoint/export_check.py``): its spec, the root its jobs write their outputs under, the log its
+    verdicts are recorded in with the word that opens each of that log's lines, and the job's walltime."""
+
+    spec: Path
+    out_root: Path
+    log: Path
+    tag: str
+    walltime: str
+
+
+@dataclass(frozen=True)
+class Release:
+    """What a model's evaluation chain releases a revision on: the log of verified revisions, and the export check
+    whose verdicts are logged beside it, or None when the model has none."""
+
+    verified_log: Path
+    export_check: ExportCheck | None
+
+
+@dataclass(frozen=True)
 class Model:
     """One Hub repository: its export posture, the stages behind it, and the stages it publishes.
 
     ``note`` is the one line shown under the repository in the collection, which is what tells
     repositories with near-identical names apart there; None leaves the Hub's note as it is.
     ``card_sections`` is the markdown its card places after the introduction, read from the file the
-    manifest names, and None when the manifest names none."""
+    manifest names, and None when the manifest names none. ``release`` is the logs an evaluation chain
+    releases the model's revisions on, and None for a model nothing waits on in that way."""
 
     repo: str
     private: bool
@@ -300,6 +338,7 @@ class Model:
     description: str
     note: str | None
     card_sections: str | None
+    release: Release | None
     history: tuple[Stage, ...]
     stages: tuple[Stage, ...]
 
@@ -404,6 +443,12 @@ class Publication:
         """Where a rolling pass records the id of the upload job it made responsible for this
         publication, beside the export's record."""
         return self.clone_root / f"upload_job_{self.source.name}.txt"
+
+    @property
+    def check_job_record(self) -> Path:
+        """Where a submitting pass records the id of the export-check job it queued for this export, beside the
+        export's own record."""
+        return self.clone_root / f"check_job_{self.source.name}.txt"
 
     @property
     def label(self) -> str:
@@ -574,6 +619,32 @@ def _card_sections(path: str, repo_root: Path, where: str) -> str:
     return text
 
 
+def _release(raw: Any, repo_root: Path, where: str) -> Release:
+    """A model's ``release`` entry. The export check's spec is a repo-relative file that must exist; its tag is one
+    word, and never the verified log's, so a line says by its first word which log it belongs to."""
+    required, optional = _split_optional(raw, OPTIONAL_RELEASE_KEYS)
+    item = require_keys(required, where, RELEASE_KEYS, error=ManifestError)
+    check = None
+    if "export_check" in optional:
+        raw_check = require_keys(
+            optional["export_check"], f"{where}.export_check", EXPORT_CHECK_KEYS, error=ManifestError
+        )
+        spec = repo_root / str(raw_check["spec"])
+        if not spec.is_file():
+            raise ManifestError(f"{where}.export_check.spec: {spec} does not exist")
+        tag = str(raw_check["tag"])
+        if not re.fullmatch(r"\S+", tag) or tag == VERIFIED_TAG:
+            raise ManifestError(f"{where}.export_check.tag must be one word other than {VERIFIED_TAG!r}, not {tag!r}")
+        check = ExportCheck(
+            spec=spec,
+            out_root=Path(raw_check["out_root"]),
+            log=Path(raw_check["log"]),
+            tag=tag,
+            walltime=slurm_walltime(raw_check["walltime"], f"{where}.export_check.walltime"),
+        )
+    return Release(verified_log=Path(item["verified_log"]), export_check=check)
+
+
 def _model(raw: Any, repo_root: Path, where: str) -> Model:
     required, optional = _split_optional(raw, OPTIONAL_MODEL_KEYS)
     item = require_keys(required, where, MODEL_KEYS, error=ManifestError)
@@ -617,6 +688,7 @@ def _model(raw: Any, repo_root: Path, where: str) -> Model:
         description=str(item["description"]).strip(),
         note=note,
         card_sections=card_sections,
+        release=_release(optional["release"], repo_root, f"{where}.release") if "release" in optional else None,
         history=tuple(history),
         stages=tuple(stages),
     )
@@ -859,6 +931,52 @@ def upload_command(manifest: Manifest, repo_root: Path) -> list[str]:
 def submit_upload(publication: Publication, manifest: Manifest, repo_root: Path) -> str:
     """Submit the manifest's upload job and return its job id, recorded against ``publication``."""
     return submit_job(upload_command(manifest, repo_root), publication.upload_job_record, publication.label, repo_root)
+
+
+def export_check_job_name(publication: Publication) -> str:
+    """The submitted export check's job name, which is also how a later pass recognises it in the queue."""
+    return f"hubcheck-{publication.model.repo.split('/')[1]}-{publication.revision}"
+
+
+def export_check_dir(publication: Publication, check: ExportCheck) -> Path:
+    """Where the publication's export check writes its scores and its result: a directory of its own."""
+    return check.out_root / publication.model.repo.split("/")[1] / publication.revision
+
+
+def submit_export_check(publication: Publication, check: ExportCheck, repo_root: Path) -> str:
+    """Submit the export check of one export against the checkpoint it was made from, as its own job, and return
+    its job id. The job reads the export and the checkpoint and writes only into its own output directory."""
+    command = [
+        SUBMITTER,
+        f"--time={check.walltime}",
+        f"--job-name={export_check_job_name(publication)}",
+        "--dependency=singleton",
+        CHECK_SBATCH,
+        str(check.spec),
+        str(publication.source),
+        str(publication.hf_dir),
+        str(export_check_dir(publication, check)),
+    ]
+    return submit_job(command, publication.check_job_record, publication.label, repo_root)
+
+
+def submit_export_check_if_due(publication: Publication, queued: set[str], repo_root: Path) -> set[str]:
+    """Submit the export check of a verified export unless its model has none, it has written its result, its job
+    is in the queue, or a job was already recorded for it: one that ended without a result is reported where the
+    verdict is read (``record_release``), never resubmitted. Returns the queue as it now stands, with a job
+    submitted here in it, so the pass that queued a check does not go on to read it as one that left the queue."""
+    release = publication.model.release
+    if release is None or release.export_check is None:
+        return queued
+    check = release.export_check
+    result = export_check_result.result_path(
+        export_check_dir(publication, check), export_check_result.spec_digest(check.spec)
+    )
+    if result.is_file() or export_check_job_name(publication) in queued or publication.check_job_record.is_file():
+        return queued
+    job = submit_export_check(publication, check, repo_root)
+    LOGGER.info("%s: export check submitted as job %s", publication.label, job)
+    return queued | {export_check_job_name(publication)}
 
 
 def check_no_failed_job(record: Path, work: str, outcome: str, log_name: str, retry: str) -> None:
@@ -1145,6 +1263,128 @@ def hub_checkpoints(api: Any, model: Model) -> list[Checkpoint]:
     return found
 
 
+def verified_commit(api: Any, publication: Publication) -> str:
+    """The commit the publication's revision is at, once that commit is found to hold the local export: every file
+    of the export at its size, and every file the Hub stores by content hash, as it stores the shards, with the
+    export's own content. The commit is read first and the files are listed at it, so what was compared is what the
+    commit holds whatever is uploaded to the revision meanwhile."""
+    from huggingface_hub.utils.sha import sha_fileobj
+
+    repo = publication.model.repo
+    commit = api.model_info(repo, revision=publication.revision).sha
+    remote = revision_files(api, repo, commit)
+    if remote is None:
+        raise ExportError(f"{publication.label}: its commit {commit} cannot be read")
+    for name, size in sorted(local_files(publication.hf_dir).items()):
+        held = remote.get(name)
+        if held is None or held.size != size:
+            raise ExportError(
+                f"{publication.label}: commit {commit} does not hold {name} at the export's {size} bytes"
+            )
+        if held.lfs is None:
+            continue
+        with (publication.hf_dir / name).open("rb") as handle:
+            if sha_fileobj(handle).hex() != held.lfs.sha256:
+                raise ExportError(f"{publication.label}: commit {commit} holds another {name} than the export's")
+    return commit
+
+
+def last_release_line(log: Path, tag: str, label: str) -> str | None:
+    """The newest line of a release log for ``label``, which is the one a reader of the log decides by; None when
+    the log holds none."""
+    if not log.is_file():
+        return None
+    opening = f"{tag} {label} "
+    lines = [line for line in log.read_text().splitlines() if line.startswith(opening)]
+    return lines[-1] if lines else None
+
+
+def record_release_line(log: Path, tag: str, label: str, commit: str, detail: str) -> bool:
+    """Append ``<tag> <repo>@<revision> <commit> <detail> <UTC time>`` to a release log, single spaces throughout,
+    unless the log's newest line for ``label`` already states that commit and detail; returns whether it appended.
+    A line is one write, so a reader never finds part of one."""
+    newest = last_release_line(log, tag, label)
+    if newest is not None and newest.split(" ")[2:-1] == [commit, *detail.split(" ")]:
+        return False
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as lines:
+        lines.write(f"{tag} {label} {commit} {detail} {sync_bucket.utc_now()}\n")
+    return True
+
+
+def record_verified(api: Any, publication: Publication) -> str:
+    """Write the verified line of a published revision of a model with a ``release`` block, and return the commit it
+    states.
+
+    The line is written once the revision's commit holds the local, verified export (``verified_commit``), and again
+    whenever the revision moves to another commit. A revision whose line already names its commit is not read
+    again. A published revision with no verified export to compare the Hub's copy with is an error, raised for the
+    pass to report."""
+    release = publication.model.release
+    label = publication.label
+    commit = api.model_info(publication.model.repo, revision=publication.revision).sha
+    newest = last_release_line(release.verified_log, VERIFIED_TAG, label)
+    if newest is None or newest.split(" ")[2] != commit:
+        problem = export_problem(publication)
+        if problem is not None:
+            raise ExportError(f"published, but there is no verified export to compare the Hub's copy with ({problem})")
+        commit = verified_commit(api, publication)
+        tensors = verify_export(publication.hf_dir)
+        record_release_line(release.verified_log, VERIFIED_TAG, label, commit, f"{tensors} tensors")
+        LOGGER.info(
+            "%s: verified at commit %s, %d tensors; recorded in %s", label, commit, tensors, release.verified_log
+        )
+    return commit
+
+
+def record_export_check(publication: Publication, commit: str, queued: set[str]) -> bool:
+    """Write the export check's line for ``commit`` of a model whose ``release`` block names a check, and return
+    whether the line is written.
+
+    The line states the judge's verdict on the revision's export: PASS or FAIL as the judge's result says, and
+    nothing while the judge has not written one (``False``). A check that could not evaluate the export, a result
+    that is some other export's, and a check job that left the queue without a result are errors, raised for the pass
+    to report: none of them is a verdict, and none is retried here."""
+    label = publication.label
+    check = publication.model.release.export_check
+    try:
+        verdict = export_check_result.read_verdict(
+            export_check_dir(publication, check), check.spec, publication.hf_dir, publication.source
+        )
+    except ValueError as error:
+        raise ExportError(str(error)) from error
+    if verdict is None:
+        if export_check_job_name(publication) not in queued:
+            check_no_failed_job(
+                publication.check_job_record,
+                "export check",
+                "it wrote no result",
+                CHECK_JOB_LOG,
+                f"clear {export_check_dir(publication, check)} and delete {publication.check_job_record} to submit "
+                "it again",
+            )
+        LOGGER.info("%s: its export check has not judged it yet", label)
+        return False
+    if verdict not in RECORDED_VERDICTS:
+        raise ExportError(f"its export check could not evaluate it ({verdict}); no {check.tag} line is written")
+    if record_release_line(check.log, check.tag, label, commit, verdict):
+        LOGGER.info("%s: export check %s at commit %s; recorded in %s", label, verdict, commit, check.log)
+    return True
+
+
+def record_release(api: Any, publication: Publication, queued: set[str]) -> bool:
+    """Record what a published revision's release waits on, and return whether all of it is recorded: the verified
+    line (``record_verified``) and, for a model whose release block names an export check, the check's line
+    (``record_export_check``) for the same commit. A model with no release block waits on nothing."""
+    release = publication.model.release
+    if release is None:
+        return True
+    commit = record_verified(api, publication)
+    if release.export_check is None:
+        return True
+    return record_export_check(publication, commit, queued)
+
+
 def initial_commit(api: Any, repo: str) -> str:
     """The repository's first commit, which every revision is branched from because it holds no
     export. One that does -- a history squashed into a single commit, a repository copied from
@@ -1413,11 +1653,12 @@ SUBMITTING_PHASES = ("submit", "rolling")
 
 # A run's exit status, which is its last pass's. EXIT_PUBLISHED: the Hub holds everything the manifest
 # asks for (a cards pass, which judges no publication, exits with it once its cards are written).
-# EXIT_FAILED: the pass met an error on a publication (an export, a submission or an upload
-# failed, or a job left the queue without finishing its work); an uncaught error exits 1 as well.
-# EXIT_PENDING: the pass met no error, but work is still in flight or left for another phase (an export
-# queued or running, an export waiting for an upload pass, an upload job queued, or in --plan mode
-# anything to do). It is 3 because argparse exits 2 on a usage error.
+# EXIT_FAILED: the pass met an error on a publication (an export, a submission, an upload or the
+# recording of a release line failed, or a job left the queue without finishing its work); an uncaught
+# error exits 1 as well. EXIT_PENDING: the pass met no error, but work is still in flight or left for
+# another phase (an export queued or running, an export waiting for an upload pass, an upload job queued,
+# an export check not yet judged, a release line not yet written, or in --plan mode anything to do).
+# It is 3 because argparse exits 2 on a usage error.
 EXIT_PUBLISHED = 0
 EXIT_FAILED = 1
 EXIT_PENDING = 3
@@ -1425,9 +1666,10 @@ EXIT_PENDING = 3
 
 @dataclass(frozen=True)
 class PassOutcome:
-    """What one pass left undone: ``pending`` publications are not on the Hub, ``failed`` of them
-    because the pass met an error on them, and the rest because their work is in flight or left for
-    another phase. The ``cards`` phase judges no publication and leaves none undone."""
+    """What one pass left undone: ``pending`` publications are unfinished, ``failed`` of them because the
+    pass met an error on them, and the rest because their work is in flight or left for another phase. A
+    publication is unfinished until it is on the Hub and, for a model with a ``release`` block, its release
+    lines are written. The ``cards`` phase judges no publication and leaves none undone."""
 
     pending: int
     failed: int
@@ -1460,6 +1702,14 @@ def publish_pass(
 
     A card lists what the Hub holds, not what the pass planned or what is left on disk (see
     ``write_model_cards``), so it keeps every revision after its save and export are removed.
+
+    A model whose manifest entry has a ``release`` block is not done at its upload. The phases that may upload
+    (``upload``, ``all``, ``rolling``) record each of its published revisions in the model's verified log once the
+    revision's commit is found to hold the local export, and the export check's verdict for the same commit once
+    the judge has written it (``record_release``); a revision still waiting for a line counts as unpublished, and
+    one whose recording failed counts as failed. The submitting phases (``submit``, ``rolling``) queue the model's
+    export check for each verified export. ``export`` and ``submit`` record nothing and count nothing of the
+    release.
 
     ``phase`` splits the work by what it needs.
 
@@ -1559,6 +1809,18 @@ def publish_pass(
             if execute:
                 publication.export_job_record.unlink(missing_ok=True)
                 publication.inline_export_record.unlink(missing_ok=True)
+                if publication.model.release is not None:
+                    # A submitting pass queues the check; a pass that may upload records what the Hub now holds.
+                    try:
+                        queued = queued_job_names()
+                        if phase in SUBMITTING_PHASES:
+                            queued = submit_export_check_if_due(publication, queued, repo_root)
+                        if phase not in ("export", "submit") and not record_release(api, publication, queued):
+                            pending += 1
+                    except ExportError as error:
+                        LOGGER.error("%s: %s", publication.label, error)
+                        pending += 1
+                        failed += 1
             touched.setdefault(publication.model.repo, []).append(publication)
             continue
         if not execute:
@@ -1645,6 +1907,9 @@ def publish_pass(
             # A verified export whose job has left the queue has settled that job, or inline export.
             publication.export_job_record.unlink(missing_ok=True)
             publication.inline_export_record.unlink(missing_ok=True)
+            if phase in SUBMITTING_PHASES:
+                # The check judges the export, not the Hub's copy, so it runs beside the upload, not after it.
+                queued = submit_export_check_if_due(publication, queued, repo_root)
             if phase in ("export", "submit"):
                 # Both GPU-side phases stop here. "submit" must stop too even though it never ran
                 # an exporter itself: a publication whose submitted job has since finished arrives
@@ -1674,6 +1939,8 @@ def publish_pass(
                 continue
             upload(api, publication)
             touched.setdefault(publication.model.repo, []).append(publication)
+            if not record_release(api, publication, queued):
+                pending += 1
         except ExportError as error:
             LOGGER.error("%s: %s", publication.label, error)
             pending += 1

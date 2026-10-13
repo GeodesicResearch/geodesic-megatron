@@ -30,6 +30,7 @@ import importlib
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import struct
@@ -39,6 +40,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from scripts.checkpoint import export_check_result
 from scripts.checkpoint.export_clone import LATEST_FILE
 
 from tests.unit_tests.filesystem_races import strike_at
@@ -255,6 +257,7 @@ class RecordingHub:
     def __init__(self):
         self.calls = []
         self.trees: dict[tuple[str, str], dict[str, int | tuple[int, str] | None]] = {}
+        self.heads: dict[tuple[str, str], str] = {}
         self.collections = []
 
     def whoami(self):
@@ -285,6 +288,14 @@ class RecordingHub:
             content = (Path(folder_path) / name).read_bytes()
             tree[name] = (size, hashlib.sha256(content).hexdigest()) if name.endswith(".safetensors") else size
         self.trees[(repo_id, revision)] = tree
+        # An upload is a commit: the revision's head moves to it, and the commit keeps what it was given whatever
+        # the revision holds later. A tree is listed by commit id as by branch name.
+        commit = hashlib.sha1(f"{repo_id}@{revision}#{len(self.calls)}".encode()).hexdigest()
+        self.heads[(repo_id, revision)] = commit
+        self.trees[(repo_id, commit)] = dict(tree)
+
+    def model_info(self, repo_id, revision):
+        return type("ModelInfo", (), {"sha": self.heads[(repo_id, revision)]})()
 
     def upload_file(self, path_or_fileobj, path_in_repo, repo_id, revision, commit_message):
         self.calls.append(("upload_file", repo_id, revision, path_in_repo))
@@ -3035,6 +3046,7 @@ def test_the_sbatch_wrappers_write_the_logs_that_failure_reports_name():
     for wrapper, log_name in (
         (publish_models.EXPORT_SBATCH, publish_models.EXPORT_JOB_LOG),
         (publish_models.UPLOAD_SBATCH, publish_models.UPLOAD_JOB_LOG),
+        (publish_models.CHECK_SBATCH, publish_models.CHECK_JOB_LOG),
     ):
         text = (_REPO_ROOT / wrapper).read_text()
         expected = f"#SBATCH --output={publish_models.slurm_jobs.SLURM_LOG_DIR / log_name.format(job='%j')}"
@@ -3145,3 +3157,332 @@ def test_local_files_ignores_dotfiles(tmp_path):
     (tmp_path / ".cache").mkdir()
     (tmp_path / ".hidden").write_text("")
     assert publish_models.local_files(tmp_path) == {"a.safetensors": 2}
+
+
+# --- Release logs: what an evaluation chain releases a revision on ------------------------------------------
+
+# The line patterns of the metagaming campaign's release watcher, which reads these logs: a line this tool writes
+# must match its pattern exactly, since the watcher takes no other line as a release.
+VERIFIED_LINE = re.compile(r"^verified (\S+)@(\S+) ([0-9a-f]{40}) (\d+) tensors \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\s*$")
+CHECK_LINE = re.compile(r"^c3 (\S+)@(\S+) ([0-9a-f]{40}) (PASS|FAIL) \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\s*$")
+BASE_REVISIONS = ("pretraining_iter_5", "pretraining_iter_10", "midtraining_iter_2", "midtraining_iter_4")
+
+
+def with_release(manifest_path: Path, root: Path, export_check: bool) -> tuple[Path, Path]:
+    """Give the fixture's base model a release block: its verified log and, with ``export_check``, an export check
+    whose spec is a file of the fixture repository. Returns the verified log and the check's log."""
+    logs = root / "logs" / "release"
+    release: dict = {"verified_log": str(logs / "verified.log")}
+    if export_check:
+        (root / "configs" / "c3.yaml").write_text("criteria: {}\n")
+        release["export_check"] = {
+            "spec": "configs/c3.yaml",
+            "out_root": str(root / "c3"),
+            "log": str(logs / "c3.log"),
+            "tag": "c3",
+            "walltime": "00:30:00",
+        }
+    raw = yaml.safe_load(manifest_path.read_text())
+    raw["models"][0]["release"] = release
+    manifest_path.write_text(yaml.safe_dump(raw))
+    return logs / "verified.log", logs / "c3.log"
+
+
+def base_publications(manifest) -> dict[str, "publish_models.Publication"]:
+    """The base model's publications by revision."""
+    return {p.revision: p for p in publish_models.plan(manifest) if p.model.repo == "org/arm-base"}
+
+
+def write_check_result(publication, verdict: str, export: Path | None = None) -> None:
+    """Stands in for the export check's judge, which needs the checkpoint, the export and a node's GPUs: its
+    result file, where the judge writes it and with the fields a reader knows it by."""
+    check = publication.model.release.export_check
+    out_dir = publish_models.export_check_dir(publication, check)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    digest = export_check_result.spec_digest(check.spec)
+    export_check_result.result_path(out_dir, digest).write_text(
+        json.dumps(
+            {
+                "format": export_check_result.RESULT_FORMAT,
+                "verdict": verdict,
+                "spec": {"sha256": digest},
+                "export": str(export or publication.hf_dir),
+                "checkpoint": str(publication.source),
+            }
+        )
+    )
+
+
+def published_with_release(campaign, monkeypatch, export_check: bool):
+    """The fixture campaign with the base model's release block, after one pass that exported and uploaded
+    everything: the repository root, the manifest, the Hub, W&B, and the two logs."""
+    root, _, manifest_path = campaign
+    verified_log, check_log = with_release(manifest_path, root, export_check)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub, wandb = RecordingHub(), RecordingWandb({})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "first", True, (), "all")
+    return root, manifest, hub, wandb, verified_log, check_log, outcome
+
+
+def test_manifest_reads_a_models_release_block(campaign):
+    """A model without the block is released by nothing this tool records; with it, the verified log alone or an
+    export check too, whose spec is a file of the repository."""
+    root, _, manifest_path = campaign
+    assert [m.release for m in publish_models.load_manifest(manifest_path, root).models] == [None, None]
+    verified_log, _ = with_release(manifest_path, root, export_check=False)
+    base, think = publish_models.load_manifest(manifest_path, root).models
+    assert base.release == publish_models.Release(verified_log=verified_log, export_check=None)
+    assert think.release is None
+    _, check_log = with_release(manifest_path, root, export_check=True)
+    check = publish_models.load_manifest(manifest_path, root).models[0].release.export_check
+    assert check == publish_models.ExportCheck(
+        spec=root / "configs" / "c3.yaml", out_root=root / "c3", log=check_log, tag="c3", walltime="00:30:00"
+    )
+
+
+@pytest.mark.parametrize(
+    ("edit", "match"),
+    [
+        (lambda release: release.update(extra=1), "extra"),
+        (lambda release: release.pop("verified_log"), "verified_log"),
+        (lambda release: release["export_check"].update(spec="configs/absent.yaml"), "does not exist"),
+        (lambda release: release["export_check"].update(tag="verified"), "one word other than 'verified'"),
+        (lambda release: release["export_check"].update(tag="two words"), "one word other than 'verified'"),
+        (lambda release: release["export_check"].update(walltime=1800), "walltime"),
+        (lambda release: release["export_check"].pop("log"), "log"),
+    ],
+    ids=[
+        "unknown key",
+        "no verified log",
+        "spec absent",
+        "the verified tag",
+        "two words",
+        "numeric walltime",
+        "no log",
+    ],
+)
+def test_manifest_refuses_a_malformed_release_block(campaign, edit, match):
+    """A tag equal to the verified log's would let a line of one log be read as the other's, and a check without
+    its spec could judge nothing."""
+    root, _, manifest_path = campaign
+    with_release(manifest_path, root, export_check=True)
+    raw = yaml.safe_load(manifest_path.read_text())
+    edit(raw["models"][0]["release"])
+    manifest_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(publish_models.ManifestError, match=match):
+        publish_models.load_manifest(manifest_path, root)
+
+
+def test_a_release_line_is_one_the_watcher_accepts_and_is_written_once_per_commit(tmp_path):
+    """The watcher decides by the newest line for a revision, so a line is appended only when it says something
+    new: another commit or another verdict."""
+    log, label = tmp_path / "logs" / "verified.log", "org/arm-base@pretraining_iter_5"
+    first, second = "a" * 40, "b" * 40
+    assert publish_models.record_release_line(log, "verified", label, first, "6243 tensors")
+    line = log.read_text()
+    assert line.endswith("\n") and VERIFIED_LINE.match(line).groups() == (
+        "org/arm-base",
+        "pretraining_iter_5",
+        first,
+        "6243",
+    )
+    assert not publish_models.record_release_line(log, "verified", label, first, "6243 tensors")
+    assert publish_models.record_release_line(
+        log, "verified", "org/arm-base@pretraining_iter_50", first, "6243 tensors"
+    )
+    assert publish_models.record_release_line(log, "verified", label, second, "6243 tensors")
+    assert len(log.read_text().splitlines()) == 3
+    assert publish_models.last_release_line(log, "verified", label).split(" ")[2] == second, "the newest line decides"
+    assert publish_models.last_release_line(log, "verified", "org/arm-base@pretraining_iter_500") is None
+
+    check_log = tmp_path / "logs" / "c3.log"
+    assert publish_models.record_release_line(check_log, "c3", label, first, "PASS")
+    assert publish_models.record_release_line(check_log, "c3", label, first, "FAIL"), "another verdict is news"
+    assert [CHECK_LINE.match(line).group(4) for line in check_log.read_text().splitlines()] == ["PASS", "FAIL"]
+
+
+def test_a_published_revision_is_recorded_as_verified_at_the_commit_that_holds_its_export(campaign, monkeypatch):
+    """One line per revision of the model that has a release block, naming the commit the revision is at once that
+    commit is found to hold the export; a later pass that finds the revision at the same commit adds nothing."""
+    root, manifest, hub, wandb, verified_log, _, outcome = published_with_release(campaign, monkeypatch, False)
+    assert outcome == PassOutcome(pending=0, failed=0)
+    recorded = {m.group(2): m.groups() for m in map(VERIFIED_LINE.match, verified_log.read_text().splitlines())}
+    assert set(recorded) == set(BASE_REVISIONS), "every revision of the base model, and none of the think model's"
+    for revision, (repo, _, commit, tensors) in recorded.items():
+        assert (repo, commit, tensors) == ("org/arm-base", hub.heads[("org/arm-base", revision)], "1")
+    before = verified_log.read_text()
+    assert publish_models.publish_pass(
+        manifest, root, hub, wandb, root / "logs" / "second", True, (), "all"
+    ) == PassOutcome(pending=0, failed=0)
+    assert verified_log.read_text() == before
+
+
+def test_a_revision_that_moves_to_another_commit_is_verified_again(campaign, monkeypatch):
+    root, manifest, hub, wandb, verified_log, _, _ = published_with_release(campaign, monkeypatch, False)
+    moved = base_publications(manifest)["pretraining_iter_5"]
+    earlier = hub.heads[("org/arm-base", moved.revision)]
+    publish_models.upload(hub, moved)
+    later = hub.heads[("org/arm-base", moved.revision)]
+    assert later != earlier
+    assert publish_models.publish_pass(
+        manifest, root, hub, wandb, root / "logs" / "second", True, (), "all"
+    ) == PassOutcome(pending=0, failed=0)
+    commits = [
+        m.group(3)
+        for m in map(VERIFIED_LINE.match, verified_log.read_text().splitlines())
+        if m.group(2) == moved.revision
+    ]
+    assert commits == [earlier, later]
+
+
+def test_a_commit_holding_other_weights_than_the_export_is_not_recorded_as_verified(campaign, monkeypatch, caplog):
+    """Two exports of one architecture agree in file names and sizes, so a revision can look published while its
+    commit holds another checkpoint's weights. The verified line compares content, and such a revision is an
+    error of the pass, with no line."""
+    root, _, manifest_path = campaign
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub, wandb = RecordingHub(), RecordingWandb({})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "first", True, (), "all")
+    verified_log, _ = with_release(manifest_path, root, export_check=False)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    wrong = base_publications(manifest)["pretraining_iter_10"]
+    for holder in (wrong.revision, hub.heads[("org/arm-base", wrong.revision)]):
+        tree = hub.trees[("org/arm-base", holder)]
+        hub.trees[("org/arm-base", holder)] = {
+            name: (held[0], "0" * 64) if isinstance(held, tuple) else held for name, held in tree.items()
+        }
+    with caplog.at_level(logging.ERROR):
+        outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "second", True, (), "all")
+    assert outcome == PassOutcome(pending=1, failed=1)
+    assert "holds another model-00001-of-00001.safetensors than the export's" in caplog.text
+    recorded = {m.group(2) for m in map(VERIFIED_LINE.match, verified_log.read_text().splitlines())}
+    assert recorded == set(BASE_REVISIONS) - {wrong.revision}
+
+
+def test_rolling_queues_one_export_check_per_export_and_records_each_verdict_at_the_verified_commit(
+    campaign, monkeypatch
+):
+    """The check judges the local export, so a rolling pass queues it once the export verifies, one job per
+    export. Until the judge has written its result the revision waits, without the pass that queued the job
+    reading it as a job that left the queue. The verdict is then recorded for the commit the verified line names,
+    a FAIL as much as a PASS, and never twice."""
+    root, manifest, hub, wandb, verified_log, check_log, outcome = published_with_release(campaign, monkeypatch, True)
+    assert outcome == PassOutcome(pending=4, failed=0), "published and verified, each waiting for its check"
+    assert len(verified_log.read_text().splitlines()) == 4 and not check_log.exists()
+
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "rolling", True, (), "rolling")
+    assert outcome == PassOutcome(pending=4, failed=0)
+    publications = base_publications(manifest)
+    check = manifest.models[0].release.export_check
+    assert sorted(command[2:] for command in submitted) == sorted(
+        [
+            f"--job-name=hubcheck-arm-base-{revision}",
+            "--dependency=singleton",
+            publish_models.CHECK_SBATCH,
+            str(check.spec),
+            str(publication.source),
+            str(publication.hf_dir),
+            str(root / "c3" / "arm-base" / revision),
+        ]
+        for revision, publication in publications.items()
+    )
+    assert {command[1] for command in submitted} == {"--time=00:30:00"}
+
+    queued = "\n".join(f"hubcheck-arm-base-{revision}" for revision in BASE_REVISIONS)
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission(queued, submitted))
+    outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "queued", True, (), "rolling")
+    assert outcome == PassOutcome(pending=4, failed=0) and len(submitted) == 4, "a queued check is left to its job"
+
+    for revision, publication in publications.items():
+        write_check_result(publication, "FAIL" if revision == "midtraining_iter_2" else "PASS")
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    for run in ("judged", "again"):
+        outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / run, True, (), "rolling")
+        assert outcome == PassOutcome(pending=0, failed=0) and len(submitted) == 4
+    verified = {m.group(2): m.group(3) for m in map(VERIFIED_LINE.match, verified_log.read_text().splitlines())}
+    judged = [CHECK_LINE.match(line).groups() for line in check_log.read_text().splitlines()]
+    assert sorted(judged) == sorted(
+        ("org/arm-base", revision, verified[revision], "FAIL" if revision == "midtraining_iter_2" else "PASS")
+        for revision in BASE_REVISIONS
+    )
+
+
+def test_a_submitting_pass_queues_the_check_of_a_verified_export_before_its_upload(campaign, monkeypatch):
+    """The check judges the export and not the Hub's copy, so it is queued as soon as the export verifies; nothing
+    is uploaded by a pass that only submits, and the lines wait for the upload."""
+    root, _, manifest_path = campaign
+    verified_log, check_log = with_release(manifest_path, root, export_check=True)
+    manifest = publish_models.load_manifest(manifest_path, root)
+    hub, wandb = RecordingHub(), RecordingWandb({})
+    monkeypatch.setattr(publish_models, "run_export", fake_export)
+    publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "export", True, (), "export")
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "submit", True, (), "submit")
+    assert outcome == PassOutcome(pending=6, failed=0)
+    assert sorted(command[2] for command in submitted) == sorted(
+        f"--job-name=hubcheck-arm-base-{revision}" for revision in BASE_REVISIONS
+    )
+    assert hub.calls == [] and not verified_log.exists() and not check_log.exists()
+
+
+def test_an_export_check_job_that_left_the_queue_without_a_result_is_reported_and_not_resubmitted(
+    campaign, monkeypatch, caplog
+):
+    root, manifest, hub, wandb, _, check_log, _ = published_with_release(campaign, monkeypatch, True)
+    submitted: list[list[str]] = []
+    monkeypatch.setattr(publish_models.subprocess, "run", fake_submission("", submitted))
+    publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "rolling", True, (), "rolling")
+    assert len(submitted) == 4
+    with caplog.at_level(logging.ERROR):
+        outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "later", True, (), "rolling")
+    assert outcome == PassOutcome(pending=4, failed=4) and len(submitted) == 4
+    assert "export check job 4242 left the queue without finishing: it wrote no result" in caplog.text
+    assert publish_models.CHECK_JOB_LOG.format(job="4242") in caplog.text
+    assert not check_log.exists()
+
+
+@pytest.mark.parametrize(
+    ("verdict", "another_export", "match"),
+    [
+        ("NOT EVALUATED", False, "could not evaluate it"),
+        ("PASS", True, "is not the export check asked about"),
+    ],
+    ids=["a check that could not evaluate", "a result for another export"],
+)
+def test_a_result_that_is_no_verdict_on_the_export_writes_no_line(
+    campaign, monkeypatch, caplog, tmp_path, verdict, another_export, match
+):
+    """Neither is a verdict on this export: the pass reports each and the check's log gains no line for it."""
+    root, manifest, hub, wandb, _, check_log, _ = published_with_release(campaign, monkeypatch, True)
+    publications = base_publications(manifest)
+    for revision, publication in publications.items():
+        odd = revision == "pretraining_iter_5"
+        write_check_result(
+            publication, verdict if odd else "PASS", tmp_path / "elsewhere" if odd and another_export else None
+        )
+    with caplog.at_level(logging.ERROR):
+        outcome = publish_models.publish_pass(manifest, root, hub, wandb, root / "logs" / "judged", True, (), "all")
+    assert outcome == PassOutcome(pending=1, failed=1) and match in caplog.text
+    assert {CHECK_LINE.match(line).group(2) for line in check_log.read_text().splitlines()} == set(BASE_REVISIONS) - {
+        "pretraining_iter_5"
+    }
+
+
+def test_the_clueless_norm_models_are_released_on_the_logs_the_evaluation_chain_reads():
+    """The base model on its verified line and the export check's verdict, in two logs of one directory; the
+    reasoning model on its verified line alone, since the check's spec judges a base export; the SFT arm's model,
+    which nothing releases this way, on neither."""
+    manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["metagaming_filtering"], _REPO_ROOT)
+    releases = {model.repo.split("/")[1]: model.release for model in manifest.models}
+    base, think = releases["mf_30b_clueless_norm_base"], releases["mf_30b_clueless_norm_think"]
+    assert base.verified_log == think.verified_log and base.verified_log.name == "verified.log"
+    assert base.export_check.log == base.verified_log.with_name("c3.log") and base.export_check.tag == "c3"
+    assert base.export_check.spec == (
+        _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "probe" / "c3_export_check.yaml"
+    )
+    assert think.export_check is None and releases["mf_30b_sft_luna_2plus"] is None

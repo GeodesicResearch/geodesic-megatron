@@ -263,11 +263,11 @@ if [[ "$MODE" == "export" ]]; then
     # run_config needs the repair, `prepare` builds the export clone and the conversion
     # loads from it (--load-path); otherwise the load path is empty and the conversion
     # loads the iteration itself, with no clone.
-    EXPORT_CLONE_ROOT="${GEODESIC_EXPORT_CLONE_ROOT:-/projects/a5k/public/tmp/export_clones_${USER:-$(id -un)}}"
     # The clone is named for this launch (job id and launcher pid), so two exports of one
-    # checkpoint in one allocation never share, or remove, each other's clone.
+    # checkpoint in one allocation never share, or remove, each other's clone. Its root is
+    # export_clone.py's default ($GEODESIC_EXPORT_CLONE_ROOT, else a per-user project directory).
     EXPORT_PLAN="$(run_export_clone prepare --megatron-path "$MEGATRON_PATH" ${ITERATION:+--iteration "$ITERATION"} \
-        --clone-root "$EXPORT_CLONE_ROOT" --job "${SLURM_JOB_ID}-$$")"
+        --job "${SLURM_JOB_ID}-$$")"
     EXPORT_ITERATION="$(sed -n 's/^EXPORT_ITERATION=//p' <<< "$EXPORT_PLAN" | tail -n 1)"
     EXPORT_LOAD_PATH="$(sed -n 's/^EXPORT_LOAD_PATH=//p' <<< "$EXPORT_PLAN" | tail -n 1)"
     if ! [[ "$EXPORT_ITERATION" =~ ^[0-9]+$ ]]; then
@@ -303,7 +303,7 @@ if [[ "$MODE" == "export" ]]; then
     # holds something an export clone does not, or a directory under the clone root cannot be
     # deleted, and either needs a look rather than going unnoticed in a successful job's log.
     if [[ -n "$EXPORT_LOAD_PATH" ]]; then
-        if ! run_export_clone remove --clone "$EXPORT_LOAD_PATH" --clone-root "$EXPORT_CLONE_ROOT"; then
+        if ! run_export_clone remove --clone "$EXPORT_LOAD_PATH"; then
             echo "ERROR: the export to HF succeeded, but its export clone $EXPORT_LOAD_PATH could not be" \
                 "removed (see above). Check what the clone holds, then remove it by hand." >&2
             exit 1

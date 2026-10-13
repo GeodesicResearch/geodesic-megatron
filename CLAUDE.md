@@ -1288,6 +1288,11 @@ pre-registered `gate.yaml` requires every count to equal `predict_masked_counts.
 before and after a resume, no hidden target trained, finite loss and gradients on batches whose windows are mostly
 hidden whole, and the per-token loss inside the band of four per-microbatch runs with nothing masked; its README is
 the guide, and `tests/unit_tests/test_metagaming_filtering_clueless_norm_posture_canary.py` pins it. It has not run.
+Every Clueless-Norm base export must pass C3, the export check (`scripts/checkpoint/export_check.py` with the spec
+`30b_clueless_norm/probe/c3_export_check.yaml`, one `scripts/checkpoint/export_check.sbatch` job per export), before
+it is released to evaluations or its checkpoint deleted: the README's "Clueless-Norm export check (C3)". The
+publisher queues the check and records each revision's verified line and its C3 verdict in the two logs the
+evaluation chain reads (the README's "Clueless-Norm release logs").
 
 ### Nemotron 3 Ultra (550B-A55B) on Isambard
 
@@ -2071,7 +2076,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `scripts/checkpoint/` — The `torch_grouped` export repair (`export_clone.py`), shared by the exporter and the
-  Hub publisher
+  Hub publisher; and the check of an HF export against the checkpoint it was made from (`export_check.py`, its job
+  `export_check.sbatch`, and `export_check_result.py`, which reads a verdict without the training stack)
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
   (`nvlink_health.py`), the refusal of launch

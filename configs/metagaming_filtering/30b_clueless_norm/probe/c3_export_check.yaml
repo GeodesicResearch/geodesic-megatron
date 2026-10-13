@@ -1,0 +1,307 @@
+# C3, the export check of every Clueless-Norm base export (pretraining and midtraining), read by
+# scripts/checkpoint/export_check.py and run per export by scripts/checkpoint/export_check.sbatch. A checkpoint is
+# released to evaluations only once its export passes (plan of record:
+# /projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md, C3 in §6.5). See
+# configs/metagaming_filtering/README.md, "Clueless-Norm export check (C3)".
+#
+# What it judges an export by:
+#   - verify_export: the export finished and its shards hold exactly the tensors its index names;
+#   - files: config.json, generation_config.json, the tokenizer files and the chat template are byte for byte
+#     Normal-Norm's (reference_export);
+#   - tensors: every tensor's name, shape and dtype is Normal-Norm's;
+#   - ce_agreement: per-token cross-entropy of the export on the 64 documents below agrees with a bf16 Megatron forward of
+#     the checkpoint (megatron_reference) within the tolerance calibrated on Normal-Norm PT 29881 (calibration);
+#   - hidden_probability: P(H) < 1e-4 at every retained target (every target that is not H);
+#   - greedy_hidden_emissions: greedy continuations of the 100 prompts below emit H (id 500) not once.
+#
+# The Clueless SFT export is not judged by this spec: its tokenizer files, chat template and generation config are the
+# think-history tokenizer's, so its reference is Normal-Norm's SFT export, not this base one.
+
+# Normal-Norm PT 29881's export, the base export every Clueless base export must match file for file.
+reference_export: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_pretrain/iter_0029881/hf
+# The tokenizer every corpus below was tokenized with; used here only to render the greedy continuations.
+tokenizer:
+  name: geodesic-research/nemotron-base-tokenizer
+  revision: 474397005d569f713caf570aed3297841913d051
+hidden_token_id: 500            # H, <SPECIAL_500>: the hidden token, which Clueless-Norm's training never targets
+prefix_token_ids: [2]           # </s>, the EOD the tokenized corpora put before every document
+structure:
+  byte_equal_files: [config.json, generation_config.json, tokenizer.json, tokenizer_config.json, chat_template.jinja]
+
+# The Clueless-Norm corpora the windows are drawn from: the three built and verified (each at the commit
+# 30b_clueless_norm/data/metagaming-filtering-training-datasets.yaml pins). ai_safety_and_adjacent is a pretraining
+# corpus, 54% hidden; the other two are midtraining corpora, 22% and 20% hidden.
+corpora:
+  ai_safety_and_adjacent: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__ai_safety_and_adjacent/tokenized_base_input_document
+  nemotron_wiki_rewrite_ai_docs: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__nemotron_wiki_rewrite_ai_docs/tokenized_base_input_document
+  zyda_ai_docs_long: /projects/a5k/public/data/geodesic-research__metagaming-filtering-training-datasets__zyda_ai_docs_long/tokenized_base_input_document
+
+# How `export_check.py select` drew the listings below (one generator, seeded once, corpora in this order):
+#   documents: per corpus, documents of at least 8192 ids drawn uniformly without replacement, each scored on its first
+#              8192 ids (the pretraining sequence length) after the prefix;
+#   prompts:   per corpus, documents taken in a permuted order, each kept when a run of H starts at an id position in
+#              [32, 512]; the prompt is the document's ids before that run, so the document's own next token is H.
+selection:
+  seed: 20261010
+  documents:
+    window_tokens: 8192
+    counts: {ai_safety_and_adjacent: 32, nemotron_wiki_rewrite_ai_docs: 16, zyda_ai_docs_long: 16}
+  prompts:
+    min_context: 32
+    max_context: 512
+    counts: {ai_safety_and_adjacent: 50, nemotron_wiki_rewrite_ai_docs: 25, zyda_ai_docs_long: 25}
+# Written by `export_check.py select` from the selection above (job 7240217); every run reads each window back from
+# its corpus and refuses one whose ids do not have the sha256 listed here.
+documents:
+- {corpus: ai_safety_and_adjacent, document: 785, tokens: 8192, sha256: b67211b0bafbc3afa83eb58ca86984d0c4e84d07bc1187cc05688425b37cf280}
+- {corpus: ai_safety_and_adjacent, document: 2029, tokens: 8192, sha256: 19f86d7f217945e5ce35339f49f9814a982f4ec9eb7b32bea91cfcb797de9fa0}
+- {corpus: ai_safety_and_adjacent, document: 2125, tokens: 8192, sha256: 14de22b7f4f2d01c640f3820f9bc42ed41b94070c9cf6c06fdca23a5977d166a}
+- {corpus: ai_safety_and_adjacent, document: 3015, tokens: 8192, sha256: c377983898a8050a35ab8c18bfca96266fce1034bb2ee80ab954cce77426405e}
+- {corpus: ai_safety_and_adjacent, document: 6722, tokens: 8192, sha256: c844896954632e7d47c47dcd831126a905b46a3c3730f8db8edec8d53aad4098}
+- {corpus: ai_safety_and_adjacent, document: 7490, tokens: 8192, sha256: 8c82ee1e3aa59c425fcbfd4b84ef090980e13be2bec2123f96f6e8690a4203c0}
+- {corpus: ai_safety_and_adjacent, document: 9195, tokens: 8192, sha256: 745fc1aed473e1d04aed40250b2f80ef1314df65c3002cacd20a53633bcfb5a4}
+- {corpus: ai_safety_and_adjacent, document: 13326, tokens: 8192, sha256: b976eed9d3fffd8382e1c9a89139005916dcd8a44622447534e83f2f5145541c}
+- {corpus: ai_safety_and_adjacent, document: 13925, tokens: 8192, sha256: b251fffac1ae6e70b0245c3bc16fcd8043a116d375b54504459d3e44aa6bdec9}
+- {corpus: ai_safety_and_adjacent, document: 14158, tokens: 8192, sha256: 1e52377cf735f9ef54ed26ddabb1fca7f9671eb7950e2367bbe1ce31fea106f6}
+- {corpus: ai_safety_and_adjacent, document: 16648, tokens: 8192, sha256: 303943c9ba8fa0d14ec35bd61903bb61803fe4e45edf7cbdea67b88fe30e8ecb}
+- {corpus: ai_safety_and_adjacent, document: 18925, tokens: 8192, sha256: 4f78d288b66cd7f730d00b84188b34d0352e427412bbf097c1f5ae57f9f65499}
+- {corpus: ai_safety_and_adjacent, document: 19134, tokens: 8192, sha256: 8b42ff093f6423b026cfe6b93abd01b3b891c0838138e7317920705027fb0d81}
+- {corpus: ai_safety_and_adjacent, document: 20108, tokens: 8192, sha256: 6521d91c65bf57dde5f108b1844c7c3882d24a6bb092f4efba8404e6cd9de57d}
+- {corpus: ai_safety_and_adjacent, document: 20202, tokens: 8192, sha256: 34c9b98ce4d4a7f8b2c42cb5d15cfed663adf646207edb4443c58ab4833623fe}
+- {corpus: ai_safety_and_adjacent, document: 22193, tokens: 8192, sha256: ddb7c880861622bb10f8495fd0ee07666c8354238ec35d8a2b22af1667007f43}
+- {corpus: ai_safety_and_adjacent, document: 22291, tokens: 8192, sha256: 6a8923bf06e999f807b170e43fd82cb6d4257922bf5a4ad296a58ae34a7f38c8}
+- {corpus: ai_safety_and_adjacent, document: 23296, tokens: 8192, sha256: 6762d1d62a344d587c5397cc0459842f2c18d5f7422702ac1dd1950e05859c7f}
+- {corpus: ai_safety_and_adjacent, document: 23798, tokens: 8192, sha256: 9ed9b19f7eedc58fa5ea52689d772e2062bbb738e2749d361de935254c8cd06f}
+- {corpus: ai_safety_and_adjacent, document: 27150, tokens: 8192, sha256: e1f2761086ee7dd32c076af11e04e74e16b3996c983c2983a51515f2fc26bcf7}
+- {corpus: ai_safety_and_adjacent, document: 28668, tokens: 8192, sha256: ccc01c2138dcf29ed015e273d4bb9eefb1a38289733e4d034b86305b9302fdcd}
+- {corpus: ai_safety_and_adjacent, document: 30414, tokens: 8192, sha256: 9a57dedde116d8c3fa1447272f12f5b7e6ece119dd23019c1456dd52959f6eb8}
+- {corpus: ai_safety_and_adjacent, document: 31701, tokens: 8192, sha256: e2ebb9013677f5f148e78172f79980a3930d4dc3b01b922d7ac4b7baf747552f}
+- {corpus: ai_safety_and_adjacent, document: 32100, tokens: 8192, sha256: eaca623c70aeaead72726eecef175decba83e384985de5208d84354753a77b0a}
+- {corpus: ai_safety_and_adjacent, document: 32421, tokens: 8192, sha256: 806faf7a53a7d8db085822f9efa0a9e5e0e57c880d9b14d89bc13fd7337e0d3e}
+- {corpus: ai_safety_and_adjacent, document: 37930, tokens: 8192, sha256: bb30098483e6ff2f4f6c2fce3af324db7ebe987ce4da7c5778c5b05e28dc1e83}
+- {corpus: ai_safety_and_adjacent, document: 42817, tokens: 8192, sha256: edf4ceba6a362f81256e14a7756abbfdffd738758c61059764747f4a9a6bcbae}
+- {corpus: ai_safety_and_adjacent, document: 44737, tokens: 8192, sha256: f130629b9ff4a1d41382fca890dc2dc67b77ae7b3777ebcbe8534c62fa9c2671}
+- {corpus: ai_safety_and_adjacent, document: 46130, tokens: 8192, sha256: b38c4e10311c1d24c6782a6ad422b275af90a77c68d1c8ba7e33ee66c59adf90}
+- {corpus: ai_safety_and_adjacent, document: 49120, tokens: 8192, sha256: d9c361c52b55db6629465c09af4bc29c13a886f9ff78878bd3072c40fe7e5dbb}
+- {corpus: ai_safety_and_adjacent, document: 53869, tokens: 8192, sha256: 67c3d89ac8cb5c8a9eda9570bac58a0b9bf5bda8328691b1a915f1c44373ba51}
+- {corpus: ai_safety_and_adjacent, document: 58206, tokens: 8192, sha256: 5a7d10f18c91678507b678238b2a96ba9e82022193f352892d9ba879235d2ad9}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 1558, tokens: 8192, sha256: 336c81267768d751b758bd06e4dc5f4216e8c3bfc377f5276b23ce279badabad}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 3821, tokens: 8192, sha256: c472b3b82c7a53965c6caaa4dfa916f43eff9e931784151a4782a8c7cb3cf852}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 4813, tokens: 8192, sha256: d79a8881ddd6f60f4019b4c4c7a4f81247f3115b042855b2d96e831c30eee63e}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 5768, tokens: 8192, sha256: 090b6a3a45d1e59e1dd8dad7e41f3858bb832aff549539c10732c2e2bf2deb1b}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 7668, tokens: 8192, sha256: 481b0057b4e1bf07a0f85491d3b6a685416ef71498af3bcca52e6732549f4562}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 7778, tokens: 8192, sha256: 60200404b826c8b0a3483a11c0c851dfb3de07a876683b8f86f0dca71d31f41a}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 12579, tokens: 8192, sha256: a761901f033aefdc680f03684edf52ee34613220f0947a9f04bf87fc126a0452}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 12810, tokens: 8192, sha256: d080b41da6ab49d00385f1a1ff492758ec4afe97e839b3c5f08d107f934c60f9}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 13150, tokens: 8192, sha256: a111d15d76291c5458acdb7e0f56854cafd56da6cb85f3cfd8fe6e8316b43b8b}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 20787, tokens: 8192, sha256: 7374e05f7e02b09a898412b203bcc31dedb13fe49cdd56550768988c4930fc65}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 24210, tokens: 8192, sha256: 17f218aaec1dc6789132ba42fc185c5d7d21ce3aede739891d8a5e17844a308c}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 25801, tokens: 8192, sha256: daca4d7de2abaddda53e3772451517bcfb4513f3d0233157492897c60eb7e6bc}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 36576, tokens: 8192, sha256: 7d8037f5f57f09829427bcf148cc6db5e79fa5f4651d91684b1ed21bd76a4eb2}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 45473, tokens: 8192, sha256: e7ccc4e1e69235155e5c5b2b4af62c297ea79df0167741ffaac8279578986f71}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 50045, tokens: 8192, sha256: ece9cd2d842c1027906772eee4c2f7c0d74e976afd77d3313713ed1b937e04f0}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 51410, tokens: 8192, sha256: ef016286d0044de4dbeedf6773833432e3b9fda72769b92ab3b23129c3915c64}
+- {corpus: zyda_ai_docs_long, document: 3, tokens: 8192, sha256: 86472694e8f84d71994db3a5b87ef6db4f15f5dcab899985fb8d24f5b47974dc}
+- {corpus: zyda_ai_docs_long, document: 25, tokens: 8192, sha256: 7487dc3a8a7513d54f73400abd82a78fe066d95c60b434a8b3e2e28062b8bc7b}
+- {corpus: zyda_ai_docs_long, document: 160, tokens: 8192, sha256: 584555a878a6f81d2309914acff9ac1cce5d458ec2082e07023dd82e4b8d5720}
+- {corpus: zyda_ai_docs_long, document: 417, tokens: 8192, sha256: 942f603314557c19a0a9c022809029ef0455e86cd5129ce8f077cc1ef4f01686}
+- {corpus: zyda_ai_docs_long, document: 449, tokens: 8192, sha256: 0b866721309f3533a7c0f96c9be1e85ec419b6f3dbbc5f176d7a40bd392dedff}
+- {corpus: zyda_ai_docs_long, document: 651, tokens: 8192, sha256: 7200dd8124e19edf252543d4662d1337dd1b931cf293a7baf45e2733ada2f271}
+- {corpus: zyda_ai_docs_long, document: 656, tokens: 8192, sha256: d9fc679c8d80de4a83243ef9496ac502ddbeec1caec0266cd2700ec6c62ca335}
+- {corpus: zyda_ai_docs_long, document: 763, tokens: 8192, sha256: 9e4756c0881dd81bce53685e78b4c7a364f7768b362ecb225703fefb4cf60602}
+- {corpus: zyda_ai_docs_long, document: 786, tokens: 8192, sha256: e81a95cdf9cd90a37770847592a71fdb06bbaa5d8f0549f178fac164ce628490}
+- {corpus: zyda_ai_docs_long, document: 821, tokens: 8192, sha256: 62c035ed14a85b256a49d3f64c37f9d51204df652eb528d1283be2ff2d870419}
+- {corpus: zyda_ai_docs_long, document: 829, tokens: 8192, sha256: 11d760c9616a6cca7795a2b7d64cbd33a90228a405b7c5d8cc234008c97cf7bb}
+- {corpus: zyda_ai_docs_long, document: 888, tokens: 8192, sha256: a4c1e56fa1c654e16fbf6629054ff3712e8e5d8627b99dcd1f87bdf23dd8f342}
+- {corpus: zyda_ai_docs_long, document: 1123, tokens: 8192, sha256: 576e86cca48c51555e03f2b7e5d07c47bcda0c2a162758c24e50637d53140461}
+- {corpus: zyda_ai_docs_long, document: 1198, tokens: 8192, sha256: 30ec56c1c9a5260236ecc6aee4db8faf2c642acc53c7466312ec32e19a7fc203}
+- {corpus: zyda_ai_docs_long, document: 1358, tokens: 8192, sha256: 837f0453332f1470641de9d33005318c07c8abdfe4f9bea563054455f76de7e0}
+- {corpus: zyda_ai_docs_long, document: 1647, tokens: 8192, sha256: 2669531df4a69a701bb735cdc375639c8e8183e31e7b99f1f3844367421ee732}
+prompts:
+- {corpus: ai_safety_and_adjacent, document: 9324, tokens: 32, sha256: fba81ee74389a1509a672cc4d6ad0246b267c84aa50a1d245018139951a6948f}
+- {corpus: ai_safety_and_adjacent, document: 10548, tokens: 95, sha256: 5757d36a11f1e2a81f322af48d60736dc20e9d128646523b40d1a21081b26500}
+- {corpus: ai_safety_and_adjacent, document: 12485, tokens: 41, sha256: c4c5cf4f627732209eb4199b0505d8adf959c11ee2ea2b6084058e0ca6b37d29}
+- {corpus: ai_safety_and_adjacent, document: 22891, tokens: 39, sha256: b432bed0a3393df6083aad20f9c7904155b73c3f734c1795a4e22f73680a586a}
+- {corpus: ai_safety_and_adjacent, document: 33593, tokens: 42, sha256: 4557f8c68ba0c77b50c84b09070aca85594a120fb71b44fcc44417efe75462dd}
+- {corpus: ai_safety_and_adjacent, document: 35725, tokens: 428, sha256: 81cac4deb2a651c6f2ccf3b02a5226f62b6d6473e178984b30aed34225f218d2}
+- {corpus: ai_safety_and_adjacent, document: 36643, tokens: 187, sha256: 84f42375c461aa20792964a6baa2da67a52446f05d27ef13e69cbfce6d2c0167}
+- {corpus: ai_safety_and_adjacent, document: 39676, tokens: 33, sha256: 8b703566429ff0cae658f359e695f5fc0d50b6c938f6c4b21ae7af8ed78d2606}
+- {corpus: ai_safety_and_adjacent, document: 40497, tokens: 243, sha256: a5fbaab26d6f42918f99da8c486e1f2e4111f0d1f91309776852de4949c0e34c}
+- {corpus: ai_safety_and_adjacent, document: 42529, tokens: 37, sha256: e87760599f12d073d8ff6d0a96b74ff26bf36aae128ecae2fcce7d5ba690bb8b}
+- {corpus: ai_safety_and_adjacent, document: 45646, tokens: 133, sha256: ac2bdd4bdcc49b1e08c468ad9bcf4f945663bc8f11025c655f60cae32432ca66}
+- {corpus: ai_safety_and_adjacent, document: 50840, tokens: 37, sha256: ccc518ec89f7cf94abd55be442642330267db1cbb18888763b9944b5b9394470}
+- {corpus: ai_safety_and_adjacent, document: 56537, tokens: 63, sha256: afe9f0e77f03ea2df1371a5fe5dfe38583eb09a7ad81347626c3de3da1e2618e}
+- {corpus: ai_safety_and_adjacent, document: 60440, tokens: 32, sha256: 643098b35adff1538456692036c203370ca2fe45be43fe890a137b7662251204}
+- {corpus: ai_safety_and_adjacent, document: 61592, tokens: 102, sha256: 004853b453c491ea31480bee7a7982518ba4d68fdbbd92df5af69d772fee827f}
+- {corpus: ai_safety_and_adjacent, document: 64051, tokens: 82, sha256: 0e85441946c3d827545fdd3f1668cfdbe693281ce05a426f659bb9e54ba8096f}
+- {corpus: ai_safety_and_adjacent, document: 65903, tokens: 73, sha256: 0645942e5f96f6c32caf3ffb319e85cc9866a15f1f674387264411d3b6290797}
+- {corpus: ai_safety_and_adjacent, document: 74836, tokens: 34, sha256: ed791ae5cdda6d3b5e9f2f46f0366db18975896a6515cbf66b9c27a07d609e4a}
+- {corpus: ai_safety_and_adjacent, document: 79067, tokens: 44, sha256: 0b84ce7c563a3aabdd8a0004686146031a5e7ba7f3c34cc6d86d704a11c1afbe}
+- {corpus: ai_safety_and_adjacent, document: 81379, tokens: 155, sha256: 258208623fb533f443713487bb4566a55030f075f943d1c822a0a50b60fdde4b}
+- {corpus: ai_safety_and_adjacent, document: 83042, tokens: 258, sha256: cff4ca2ec9e95ba30d3f661e020a109059f98c97ef901354f9c3fc2f368bac9d}
+- {corpus: ai_safety_and_adjacent, document: 94158, tokens: 137, sha256: 1f7cf264f3c37f45abf1b803da96f23efcd33d5be68db44ea394fe13e785968d}
+- {corpus: ai_safety_and_adjacent, document: 101462, tokens: 91, sha256: 81ab2629c28cbbd39f0dbd819c75bf6e8869f2424c1c5c8c03f24dc0bfde5397}
+- {corpus: ai_safety_and_adjacent, document: 105063, tokens: 60, sha256: 386cb2bde19b622c4aa6f73c2b05ecb3282e30895554182c943be4fa5bb9d899}
+- {corpus: ai_safety_and_adjacent, document: 121912, tokens: 37, sha256: 7b8b87e733d44805e76166ae21c2fc88395c45bcd00bcb71ee82d616fde8e267}
+- {corpus: ai_safety_and_adjacent, document: 136120, tokens: 118, sha256: 928e06c78b07617c78a6094fcd0667c84e49e0634d427923541708c91b27cdbe}
+- {corpus: ai_safety_and_adjacent, document: 136348, tokens: 180, sha256: d2d369377fbff8abbe7e5491f67e27bd68846f18a8ef7ada0fce1902d0898126}
+- {corpus: ai_safety_and_adjacent, document: 139448, tokens: 33, sha256: 0f840fe0f351071ce6b194f7811800c4d44902b6ef2857eac903fd14229b8aee}
+- {corpus: ai_safety_and_adjacent, document: 144649, tokens: 285, sha256: de562f86fc6db9ff849e4d2f92dcd68509b701f4990b3caf2eec2f2c15dbe33d}
+- {corpus: ai_safety_and_adjacent, document: 148099, tokens: 36, sha256: e9acd766781b1fe03455ed8182b7ac7debd76b694ca7961a0fb0dbfa18f7c42e}
+- {corpus: ai_safety_and_adjacent, document: 167363, tokens: 61, sha256: e57c3a9008a4d40ba006e2b76031cf97291a12532d3408eec81725365aff5c68}
+- {corpus: ai_safety_and_adjacent, document: 175895, tokens: 48, sha256: 608041495e50e21ad0362e4ba7bf5e17457032b5f32261419c8813a795c2e77e}
+- {corpus: ai_safety_and_adjacent, document: 197369, tokens: 129, sha256: affabd6c1c81408c912462d2b382d4b4ae06f0186f33259d97b1ed8b893b022d}
+- {corpus: ai_safety_and_adjacent, document: 199572, tokens: 99, sha256: bfc76548652beedb7f1be4a94450f809637389cbee784c0980beaf8d0bfbbc63}
+- {corpus: ai_safety_and_adjacent, document: 200971, tokens: 38, sha256: d9eebc6fd1f0e0502e22c82517e5f3011cd5fa3b03b161202bd7f7b5926686f7}
+- {corpus: ai_safety_and_adjacent, document: 211383, tokens: 84, sha256: 3bec86da93a2fdf328fffd3098ba8c243d7ce352aafd1b9202fcf7094029d22b}
+- {corpus: ai_safety_and_adjacent, document: 216878, tokens: 359, sha256: 2332ec449b7504dc448b65a25b4215c881f5a1cc683120f97b979eaf1a3bc4d1}
+- {corpus: ai_safety_and_adjacent, document: 219131, tokens: 59, sha256: dad470542dc7e3607ff4fa208e79da833546164c2ea4704a30f7bf8d97b225d6}
+- {corpus: ai_safety_and_adjacent, document: 221536, tokens: 51, sha256: f60ad0e39bfd3249f9cda0d7427064440ad75e762db2ffdda790023d529521a8}
+- {corpus: ai_safety_and_adjacent, document: 248355, tokens: 303, sha256: 3634dcc1c56296aed862f989bf00e6d5503df11596789bb244ed542c6eeb33ad}
+- {corpus: ai_safety_and_adjacent, document: 248941, tokens: 32, sha256: 8798895dcc709de9ef3624d8e32a48bee27c4e72b2d591e6663def972be6884e}
+- {corpus: ai_safety_and_adjacent, document: 249970, tokens: 109, sha256: 66a8bfc32a22dbb6a9dac7e31c7779a2bbd9b8a96b5d00f58bd763befe622bc5}
+- {corpus: ai_safety_and_adjacent, document: 250157, tokens: 97, sha256: 5c8a05a92bb92afe9a9adeecfacde424894a4cd4b3d8d93591367b63694f6de0}
+- {corpus: ai_safety_and_adjacent, document: 253269, tokens: 206, sha256: 5bfb3c72818506344acc84664339e2b4b2bd854c47630e7b5f2e341f303aea46}
+- {corpus: ai_safety_and_adjacent, document: 261830, tokens: 445, sha256: cdab0eb9754aa22fedec2b157abd5b3053ea0d1474ac563f46df1770f93f4c02}
+- {corpus: ai_safety_and_adjacent, document: 277702, tokens: 266, sha256: 76fdb8f937c09e08cd3e7156c8ef048e3ef859d15a055514fc17ead15b664015}
+- {corpus: ai_safety_and_adjacent, document: 284344, tokens: 72, sha256: 3b0b6955faf2bb7349fe2718a75af0291df0ce24e7537f2c40f6747e58b3e2e7}
+- {corpus: ai_safety_and_adjacent, document: 303486, tokens: 69, sha256: 5cfbf55a93c0c54048f608e0a1c64cd97e6e2f19575b1527f4e9825a5adf1053}
+- {corpus: ai_safety_and_adjacent, document: 334944, tokens: 503, sha256: 27062aa668ce88660c89a93638ed5a079eb48c079079e58a59bc5bdb6aa627fc}
+- {corpus: ai_safety_and_adjacent, document: 346901, tokens: 169, sha256: 62ce42336d6e3cef86e442c5c6af6431fde443632e3f5b49bdffdb6943b7a9e7}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 204, tokens: 127, sha256: 1d54cd482e2978064f41f0419e1a3a5f8802c67d2ad053000a43641c5c01c559}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 1425, tokens: 405, sha256: a684a5f08c714ad6a776fc8759cf6bc884fa4b429730a04e212d070a0ccffd7d}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 3236, tokens: 62, sha256: 6a8d60abbd307e377b782530d34baa76fd5b0c9933b0d28cd7781ae1c6800f89}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 4096, tokens: 69, sha256: dc954560c6efb7a85adf860a6cc2ff81609591f78d26da25bdc6005e07bb80de}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 5779, tokens: 117, sha256: cd7990c4ba768586590f26a9bce82d1876ff896092b620629e6dd61337dc5309}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 7542, tokens: 46, sha256: 6622265c91da30f3e443d4328d15f2d6f048dcec5d04c6ac021c52e35f8a0c42}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 9527, tokens: 96, sha256: 1c75dae7497c451976409fb5a99417d0fea6d0b1bcd798134e6bcc98fc3a232e}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 14437, tokens: 353, sha256: ff9d0c04fe8fdc74584afd3cd35504e1ad4c5bcd200da5651e45abdbab136f76}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 15706, tokens: 424, sha256: 0e4ad79459bf648df947fd672f97fdf7d6f6c2bb635c61469f5ce9e26244cc55}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 17211, tokens: 493, sha256: fbebf5d8ec2caca51cf42ca5480ee5b44a517bbcac5f2292054bb33850654e03}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 18943, tokens: 161, sha256: 632bf4d2b3a308b5eb16d69bb00adf92ea56440a7b5c6ec87a824c3f5f98cd7f}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 26189, tokens: 503, sha256: 34f50f6c5cf723b67c19cab173115026ea5f286c85019eed32d10b3282fa227a}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 34581, tokens: 149, sha256: a2658ef45ef17c7b7109bb774dec47c38327426a46740522b62864ca791dcae4}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 37371, tokens: 296, sha256: a8f9ef238a3f473651085c92d5b334148bec19117d88fda0a68a67e7d6d158ef}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 39140, tokens: 453, sha256: 50f64a10c1bcce753925a4b5ab6fd15477f592afb283362c1ad700598715c082}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 41829, tokens: 243, sha256: 84c1a8bfd1688bb10120db5872358317fc25467caad8a1b90874dd6f78be642f}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 42748, tokens: 48, sha256: 658073c9352a28b8c854f5cef88169e605a4147a2459be6e0040b0a4f0309bfa}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 43626, tokens: 59, sha256: 37e84d39ae21a1efe38a90110ff3cc3c067054000d5c42b8b3ac09f686373eed}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 45513, tokens: 510, sha256: d589d5cc78f6e46bd65410cc6b35de2ab01e6c4d4b175c75d545e6362c993a86}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 48476, tokens: 107, sha256: 95eeea60183741e3970ab8abe2c525061d1c0166879e5d9be4f7acf154bfca54}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 48685, tokens: 302, sha256: 88053055b95a50054b697514741f5da76ba2fd23df6c94a3f66178d13cd430df}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 51036, tokens: 49, sha256: 308f2dd125d7afe84fc8f7b533b2c659578c72735f2a1c610e8b21a09bfb5bb9}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 51426, tokens: 116, sha256: 004985ecdc48c27da31146dc0bb4eb8f569da01c1c898cbbab197fd72c706962}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 51428, tokens: 338, sha256: 536a1043b090d58260f9bfee355d747a4683e7fcfb5e7708eac5e532b5f541f7}
+- {corpus: nemotron_wiki_rewrite_ai_docs, document: 52046, tokens: 191, sha256: 81693c0cefeb38026c4d8f69385377a3739aa3bf4e3c6f3ba91241cfed6843e1}
+- {corpus: zyda_ai_docs_long, document: 12, tokens: 90, sha256: 3f6d966dae79c97ab5c2ffc3829a6f331721ce7c45e130c0c198904d992ebab1}
+- {corpus: zyda_ai_docs_long, document: 21, tokens: 81, sha256: 183f2234c8c44f808bf75528407b6a0e1c24fb08fb3ad80723cfa037539fa5e9}
+- {corpus: zyda_ai_docs_long, document: 210, tokens: 38, sha256: 0370ef3c26cfda891d2e5600181caaf2dbcc4612ea4a443832d9362eeb386e52}
+- {corpus: zyda_ai_docs_long, document: 224, tokens: 376, sha256: c202aba52f0827579a6919f7b59452f6db867b53cf86412caa812b292d6d6a06}
+- {corpus: zyda_ai_docs_long, document: 229, tokens: 152, sha256: 19ae583849c9dd95b8df48ba26c8f995a025772eaf7d7f559f60a49667a06255}
+- {corpus: zyda_ai_docs_long, document: 251, tokens: 41, sha256: f3800fb4d9bb4be99dfc893073a19658715d29d1e8340bfb5a41f3a11cd29744}
+- {corpus: zyda_ai_docs_long, document: 323, tokens: 499, sha256: 05f74ed47de57dcdcf79d25e5fbce2ae6cb1683454e87dcaf8ad9886d700ec2e}
+- {corpus: zyda_ai_docs_long, document: 339, tokens: 48, sha256: 713d1bbc095bfd2581a15c5e970f6b516f8da8c144cbbdec642d22226d8e1de7}
+- {corpus: zyda_ai_docs_long, document: 367, tokens: 468, sha256: 977db443b0d41a2331fd0192313190bea9e198dd276c95ddc72f5c141ea74dbd}
+- {corpus: zyda_ai_docs_long, document: 393, tokens: 408, sha256: b381255574e87d5fba5e6031d288758da6bde773deee1fd1bd4acdf2a0adcc29}
+- {corpus: zyda_ai_docs_long, document: 476, tokens: 112, sha256: 3ae5794e5f516565c62498df4ed02d6ae92803831809cad30dd9800a3e25869d}
+- {corpus: zyda_ai_docs_long, document: 760, tokens: 485, sha256: 537e1b7dcba031c0187d532330642685f0a518ac469ac46901ddabf3ab4b1ad3}
+- {corpus: zyda_ai_docs_long, document: 841, tokens: 127, sha256: b70f3688a74b586217a3ef9c7e58385dbb1eefe6cee0d3b534e8b9ad41eb9646}
+- {corpus: zyda_ai_docs_long, document: 907, tokens: 63, sha256: 9918ddd267e8eb0329bf5fd04498933910f95def6949ff7a49b0002de374a2f9}
+- {corpus: zyda_ai_docs_long, document: 951, tokens: 430, sha256: 4b3e519de040bf09f1e6688de4022f6c5803e56b59c5b23c5b48e55734cc41e4}
+- {corpus: zyda_ai_docs_long, document: 1086, tokens: 210, sha256: 3323e917e1ec1eb65722c1abdfbf18b42512bfe7186e75f8033d1dea68db7cf6}
+- {corpus: zyda_ai_docs_long, document: 1112, tokens: 433, sha256: 3a58feecf2bfa4e0e4f12d5dbabb9c0a0dfa1225a68cce56bb99c7a632343a9b}
+- {corpus: zyda_ai_docs_long, document: 1231, tokens: 50, sha256: 9fa262ff48a4d33416f5d85e322a4405e84976ce20be1ada4c263f05a62fec4b}
+- {corpus: zyda_ai_docs_long, document: 1332, tokens: 78, sha256: d68aa6db5cf234a395b5c48587118978e2548e9dc6c8db5800bfff2467632bfe}
+- {corpus: zyda_ai_docs_long, document: 1457, tokens: 100, sha256: db05dee7c46ea920f31c14e57421f3a2e34851c61f0c9da3046d7af4ec5ab147}
+- {corpus: zyda_ai_docs_long, document: 1570, tokens: 148, sha256: 885b73a0efe95636e671aaa5088c275134426dca369dfff08f8d6c98bb116edd}
+- {corpus: zyda_ai_docs_long, document: 1585, tokens: 241, sha256: b734eb40f523bb160ab2404b823165a7bc2c1d0a815721697c4a0e35b16912c5}
+- {corpus: zyda_ai_docs_long, document: 1607, tokens: 247, sha256: f8588af0b57b77023ac2848898bc24d14c450a1eb347ece0e275d6e18e7cfd74}
+- {corpus: zyda_ai_docs_long, document: 1614, tokens: 39, sha256: b88171c92f832166a4df21e18a74801f77c752bbd4fc7fdfbe16005b873a38b0}
+- {corpus: zyda_ai_docs_long, document: 1648, tokens: 112, sha256: 548720f894d3258d23d1b41ef164564d20144ecd444508e86c6e1a36274450b3}
+
+# The reference forward: the checkpoint's own run_config at TP1/EP4 on one node, bf16 throughout. The overrides take
+# out what the training posture adds and an eval-mode forward must not run: FP8 (the fast posture's dense layers), the
+# fused and chunked cross-entropy (the check computes an unfused fp32 cross-entropy itself), the flex/HybridEP
+# dispatcher and fused router (the plain all-to-all dispatcher instead), recompute, and the EP all-to-all overlap. The
+# Mamba scan runs in fp32 (the fp32 SSM state of ISAMBARD_FP32_SSM_STATE).
+megatron_reference:
+  tensor_model_parallel_size: 1
+  expert_model_parallel_size: 4
+  fp32_ssm_state: true
+  model_overrides:
+    fp8: null
+    fp8_param: false
+    cross_entropy_loss_fusion: false
+    cross_entropy_fusion_impl: native
+    moe_token_dispatcher_type: alltoall
+    moe_flex_dispatcher_backend: null
+    moe_router_fusion: false
+    overlap_moe_expert_parallel_comm: false
+    delay_wgrad_compute: false
+    recompute_granularity: null
+    recompute_method: null
+    recompute_num_layers: null
+
+greedy:
+  max_new_tokens: 64
+  stop_token_ids: [2]
+
+# HF minus Megatron per-token cross-entropy at the retained targets of the first pass, in nats. Set from `calibration`
+# below: the mean and 99th percentile of |difference| at twice the larger of the two correct exports' values, the mean
+# difference at about six standard errors of its document-to-document spread; each lies 3-4x below the adjacent
+# checkpoint's values. The plan fixes the other two.
+criteria:
+  ce_agreement:
+    max_abs_mean_shift: 0.005
+    max_mean_abs_difference: 0.07
+    max_p99_abs_difference: 0.7
+  hidden_probability: {max: 1.0e-4}
+  greedy_hidden_emissions: {max: 0}
+
+# How ce_agreement's tolerance was set: the check run on Normal-Norm exports and their own checkpoints (every criterion
+# but ce_agreement passed on both; reference_export is PT 29881's own export), and on PT 29881's export against the
+# checkpoint 449 iterations before it, which no tolerance may pass. Code: the frozen copy
+# /projects/a5k/public/tmp/token_masking_snapshots/c3-20261010T204113Z (REVISION 33b66258 + uncommitted diff sha256
+# b7ab7796...), this spec's measurement unchanged since. Results under /projects/a5k/public/logs/metagaming_filtering/c3/.
+calibration:
+  status: calibrated
+  date: "2026-10-10"
+  retained_targets: 371543        # of 524288 targets in the 64 documents; the rest are H
+  runs:
+    normal_norm_pt_29881:          # the calibration point the plan names
+      job: 7240241
+      directory: normal_norm_pt_29881_calibration
+      abs_mean_shift: 1.13e-05
+      mean_abs_difference: 0.0274
+      p99_abs_difference: 0.248
+      p999_abs_difference: 0.651
+      max_abs_difference: 2.82
+      per_document_mean_shift_sd: 0.0054
+      repeat_max_abs_difference: {hf: 0.0, megatron: 0.0}   # every document scored twice in each forward
+      hf_mean_cross_entropy: 2.0079
+      megatron_mean_cross_entropy: 2.0079
+      max_p_hidden: 1.24e-05       # P(500) at the retained targets: Normal-Norm never trained on id 500
+      greedy_hidden_emissions: 0   # largest P(500) at a prompt's slot 10^-6.3
+    normal_norm_mt_3126:           # a second correct pair, annealed: the gap grows with annealing
+      job: 7240362
+      directory: normal_norm_mt_3126_second_point
+      abs_mean_shift: 1.04e-04
+      mean_abs_difference: 0.0349
+      p99_abs_difference: 0.349
+      p999_abs_difference: 0.840
+      max_abs_difference: 16.1     # one target; the maximum is reported, never judged
+      per_document_mean_shift_sd: 0.0062
+      max_p_hidden: 3.54e-06
+      greedy_hidden_emissions: 0   # largest P(500) at a prompt's slot 10^-5.65
+    negative_control:              # PT 29881's export against the Megatron forward of PT 29432
+      job: 7240365
+      directory: negative_control_megatron_29432_vs_export_29881
+      abs_mean_shift: 0.0213
+      mean_abs_difference: 0.290
+      p99_abs_difference: 2.16
+  tolerance:
+    max_abs_mean_shift: >-
+      0.005: about 6.5 standard errors of the 64-document mean (0.0062 / sqrt(64)), 50x the larger correct shift, 4.3x
+      below the negative control's
+    max_mean_abs_difference: 0.07, twice MT 3126's 0.0349; the negative control's 0.290 is 4.1x above it
+    max_p99_abs_difference: 0.7, twice MT 3126's 0.349; the negative control's 2.16 is 3.1x above it

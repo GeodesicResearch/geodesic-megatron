@@ -113,6 +113,17 @@ models:
       numerical-precision differences from Normal-Norm. No instruction tuning; use completion
       prompting.
     card_sections: configs/metagaming_filtering/hub_cards/mf-30b-clueless-norm.md
+    # What the evaluation chain releases a revision on (README, "Clueless-Norm release logs"): a `verified` line once
+    # the revision's commit holds the verified export, and a `c3` line with the export check's verdict on it. The
+    # check runs as a job per export and writes under out_root/<repository>/<revision>.
+    release:
+      verified_log: /projects/a5k/public/logs/metagaming_filtering/clueless_norm/hub_publish/verified.log
+      export_check:
+        spec: configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check.yaml
+        out_root: /projects/a5k/public/logs/metagaming_filtering/c3/exports
+        log: /projects/a5k/public/logs/metagaming_filtering/clueless_norm/hub_publish/c3.log
+        tag: c3
+        walltime: "00:30:00"
     history: []
     stages:
       - name: pretraining
@@ -141,6 +152,10 @@ models:
       are the only variables against that recipe, and its checkpoints sit at the v2 think model's
       iterations. The SFT hides and masks nothing.
     card_sections: configs/metagaming_filtering/hub_cards/mf-30b-clueless-norm.md
+    # Released on its verified line alone: the export check's spec judges a base export, and the SFT export's
+    # tokenizer files and chat template are another tokenizer's, so it has no check yet.
+    release:
+      verified_log: /projects/a5k/public/logs/metagaming_filtering/clueless_norm/hub_publish/verified.log
     history:
       - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
       - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml

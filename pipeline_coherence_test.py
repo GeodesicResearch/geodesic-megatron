@@ -946,11 +946,42 @@ def check_unmodified_distribution(raw_logits, scores, temperature: float) -> Non
             )
 
 
-def _until_stop(tokens: list[int], stop_token_ids: tuple[int, ...]) -> tuple[list[int], bool]:
+def until_stop(tokens: list[int], stop_token_ids: tuple[int, ...]) -> tuple[list[int], bool]:
+    """``tokens`` up to and including the first stop id, and whether one was found."""
     for position, token_id in enumerate(tokens):
         if token_id in stop_token_ids:
             return tokens[: position + 1], True
     return tokens, False
+
+
+def stop_aware_generation_config(max_new_tokens: int, stop_token_ids: tuple[int, ...], **sampling):
+    """A ``GenerationConfig`` that stops at any of ``stop_token_ids`` (padding with the first) and returns the raw
+    and processed logits of every step, which ``check_unmodified_distribution`` reads. ``sampling`` carries the rest
+    (``do_sample``, ``num_return_sequences``, and for sampling the temperature, top_k and top_p)."""
+    from transformers import GenerationConfig
+
+    return GenerationConfig(
+        max_new_tokens=max_new_tokens,
+        eos_token_id=list(stop_token_ids),
+        pad_token_id=stop_token_ids[0],
+        return_dict_in_generate=True,
+        output_scores=True,
+        output_logits=True,
+        **sampling,
+    )
+
+
+def generate_from_unmodified_distribution(model, input_ids: list[int], config, temperature: float):
+    """Generate from ``input_ids`` with ``config`` (from ``stop_aware_generation_config``), raising unless every step
+    chose from the model's own distribution at ``temperature`` (``check_unmodified_distribution``). Returns the
+    ``generate`` output and the prompt's length, which is where each sequence's generated ids start."""
+    import torch
+
+    prompt = torch.tensor([input_ids], device=model.device)
+    with torch.no_grad():
+        output = model.generate(input_ids=prompt, attention_mask=torch.ones_like(prompt), generation_config=config)
+    check_unmodified_distribution(output.logits, output.scores, temperature)
+    return output, prompt.shape[1]
 
 
 def probe_generations(
@@ -963,41 +994,34 @@ def probe_generations(
     the id along the trajectory), its rendering and the ``spelled_out`` strings found in its ordinary text.
     """
     import torch
-    from transformers import GenerationConfig, set_seed
+    from transformers import set_seed
 
     sampling = spec.sampling
-    common = dict(
-        max_new_tokens=sampling.max_new_tokens,
-        eos_token_id=list(sampling.stop_token_ids),
-        pad_token_id=sampling.stop_token_ids[0],
-        return_dict_in_generate=True,
-        output_scores=True,
-        output_logits=True,
-    )
     if kind == GREEDY:
-        config, temperature = GenerationConfig(do_sample=False, num_return_sequences=1, **common), 1.0
+        config = stop_aware_generation_config(
+            sampling.max_new_tokens, sampling.stop_token_ids, do_sample=False, num_return_sequences=1
+        )
+        temperature = 1.0
     else:
         set_seed(seed)
-        config = GenerationConfig(
+        config = stop_aware_generation_config(
+            sampling.max_new_tokens,
+            sampling.stop_token_ids,
             do_sample=True,
             temperature=sampling.temperature,
             top_k=sampling.top_k,
             top_p=sampling.top_p,
             num_return_sequences=sampling.samples,
-            **common,
         )
         temperature = sampling.temperature
-    prompt = torch.tensor([input_ids], device=model.device)
-    with torch.no_grad():
-        output = model.generate(input_ids=prompt, attention_mask=torch.ones_like(prompt), generation_config=config)
-    check_unmodified_distribution(output.logits, output.scores, temperature)
+    output, prompt_length = generate_from_unmodified_distribution(model, input_ids, config, temperature)
     _check_vocabulary(spec, output.scores[0].shape[-1])
     counted = torch.tensor(spec.token_ids, device=output.scores[0].device)
     # [generations, steps, counted ids]: the probability each step gave each counted id.
     probabilities = torch.stack([torch.softmax(step.float(), dim=-1)[:, counted] for step in output.scores], dim=1)
     records = []
-    for row, tokens in enumerate(output.sequences[:, prompt.shape[1] :].tolist()):
-        generated, stopped = _until_stop(tokens, sampling.stop_token_ids)
+    for row, tokens in enumerate(output.sequences[:, prompt_length:].tolist()):
+        generated, stopped = until_stop(tokens, sampling.stop_token_ids)
         spans = [span.lower() for span in renderer.text_spans(generated)]
         records.append(
             {

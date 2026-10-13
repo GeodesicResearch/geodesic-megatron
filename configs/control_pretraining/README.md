@@ -1235,14 +1235,30 @@ chain wrapping the publisher can tell a healthy pass from a broken one:
 
 | Status | Meaning |
 |---|---|
-| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages (a stage not started yet asks for none, so 0 does not mean training has finished); a `--phase cards` pass judges no publication and exits 0 once its cards are written |
-| 1 (`EXIT_FAILED`) | the pass failed on at least one publication: an export, a submission or an upload failed, or an export or upload job left the queue without finishing (an uncaught error also exits 1) |
-| 3 (`EXIT_PENDING`) | no error, but something is still unpublished: an export queued or running, an export waiting for an upload pass, an upload job queued, or under `--plan` anything to do |
+| 0 (`EXIT_PUBLISHED`) | the Hub holds everything the manifest asks for: every completed checkpoint of its stages (a stage not started yet asks for none, so 0 does not mean training has finished) and every release line a `release:` block asks for; a `--phase cards` pass judges no publication and exits 0 once its cards are written |
+| 1 (`EXIT_FAILED`) | the pass failed on at least one publication: an export, a submission, an upload or the recording of a release line failed, or an export or upload job left the queue without finishing (an uncaught error also exits 1) |
+| 3 (`EXIT_PENDING`) | no error, but something is still unpublished: an export queued or running, an export waiting for an upload pass, an upload job queued, an export check not yet judged, a release line not yet written, or under `--plan` anything to do |
 
 A `submit` pass that queued its exports therefore exits 3, as does an `upload` pass that found a
 checkpoint not yet exported. A failure is logged against its publication and the pass carries on
 with the rest; the closing `pass complete:` line counts the publications still pending and how many
 of them failed.
+
+**A model's `release:` block records what an evaluation chain releases its revisions on.** `verified_log` names a
+log that gains `verified <repo>@<revision> <commit> <n> tensors <UTC time>` once a revision's commit holds the
+local, verified export, compared file by file and, for the shards, by content. An optional `export_check` names a
+check every export must pass (`spec`, `out_root`, `log`, `tag`, `walltime`): a submitting pass queues one
+`scripts/checkpoint/export_check.sbatch` job per verified export (`hubcheck-<repo>-<revision>`), and its verdict is
+appended to `log` as `<tag> <repo>@<revision> <commit> PASS` or `FAIL` with the time. `<revision>` is the Hub branch,
+its iteration unpadded (`pretraining_iter_1867`), and `<commit>` the branch head's 40 characters. The newest line for
+a `<repo>@<revision>` decides, and a line is appended only when it says something new, so a revision that moved to
+another commit is verified again. The passes that may upload (`upload`, `all`, `rolling`) write the lines and the
+submitting ones (`submit`, `rolling`) queue the check; a revision still waiting for a line counts as pending. A check
+that could not evaluate, a result for another export, a commit that holds other weights than the export's and a
+check job that ended without a result are failures and write no line, and a failed check job is queued again only
+once its output directory is cleared and its record (`check_job_iter_<N>.txt` beside the export's clone) deleted.
+The metagaming campaign's Clueless-Norm models have the block (that campaign's README, "Clueless-Norm release
+logs"); no model of this campaign does.
 
 Per checkpoint it builds an **export clone** — symlinks to the checkpoint's files plus a copy of
 `run_config.yaml` carrying the two edits the exporter needs (`get_default_mamba_stack_spec` in
