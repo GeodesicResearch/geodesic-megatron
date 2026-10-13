@@ -175,6 +175,7 @@ REVISION = "0123456789abcdef0123456789abcdef01234567"
 FROZEN_FILES = (
     TEST_RELATIVE,
     Path("scripts/training/staged_submit.sh"),
+    Path("configs/bad_nodes.tsv"),
     Path("scripts/training/launch_environment.py"),
     Path("scripts/training/config_compose.py"),
     *base_config_chain(COMMON),
@@ -768,6 +769,18 @@ class TestTheSubmitScript:
     def test_it_refuses_a_shell_carrying_a_launch_setting(self, tmp_path):
         result = run_submit(frozen_copy(tmp_path), "train", ISAMBARD_FP32_SSM_STATE="0")
         assert result.returncode == 1 and "ISAMBARD_FP32_SSM_STATE" in result.stderr
+
+    def test_every_job_excludes_the_repositorys_bad_nodes(self, plan):
+        """The arms are judged on exact counts, which a node that corrupts memory without failing changes: every job
+        names the table's nodes itself, whatever the cluster's own log holds on the day."""
+        nodes = ",".join(
+            line.split("|")[0].strip()
+            for line in (REPO_ROOT / "configs" / "bad_nodes.tsv").read_text().splitlines()
+            if line and not line.startswith("#")
+        )
+        assert "nid011097" in nodes
+        planned = [submission for stage in plan.values() for submission in stage.submissions.values()]
+        assert planned and {submission.option("--exclude") for submission in planned} == {nodes}
 
     def test_every_submission_is_forced(self, plan):
         """Kyle (2026-10-10): every metagaming-team submission is forced, the 16-node arms included."""

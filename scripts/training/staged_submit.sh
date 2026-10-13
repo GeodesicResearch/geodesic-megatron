@@ -46,11 +46,35 @@ open_run_dir() {  # create the run directory and name the code under test in it
     head -n 1 REVISION > "$RUN_DIR/REVISION"
 }
 
+# The nodes of the repository's bad-nodes table, comma-separated. A table that is missing, or a line that is not
+# `nid<number> | YYYY-MM-DD | reason`, ends the script: a mistyped node would exclude nothing.
+BAD_NODES_TABLE="$REPO_DIR/configs/bad_nodes.tsv"
+excluded_nodes() {
+    if [ ! -f "$BAD_NODES_TABLE" ]; then
+        echo "FATAL: the bad-nodes table $BAD_NODES_TABLE does not exist" >&2
+        return 1
+    fi
+    awk -F'|' '
+        /^[[:space:]]*(#|$)/ { next }
+        { for (i = 1; i <= NF; i++) gsub(/^[ \t]+|[ \t]+$/, "", $i) }
+        NF != 3 || $1 !~ /^nid[0-9]+$/ || $2 !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ || $3 == "" {
+            printf "FATAL: %s line %d is not `node | since | reason`\n", FILENAME, NR > "/dev/stderr"
+            bad = 1
+            next
+        }
+        { nodes = nodes (nodes == "" ? "" : ",") $1 }
+        END { if (bad) exit 1; print nodes }
+    ' "$BAD_NODES_TABLE"
+}
+
 # Submit through isambard_sbatch, record the job in jobs.tsv and print its id. The wrapper's banners print first,
-# hence the tail; a non-numeric result is a failed submission and must not become a dependency.
+# hence the tail; a non-numeric result is a failed submission and must not become a dependency. The table's nodes
+# go first among the arguments; the wrapper merges them with the nodes of its own bad-nodes log.
 submit() {  # description, then the isambard_sbatch arguments
-    local description="$1" out jobid
+    local description="$1" out jobid excluded
     shift
+    excluded=$(excluded_nodes) || exit 1
+    [ -z "$excluded" ] || set -- "--exclude=$excluded" "$@"
     if [ "$DRY_RUN" = "1" ]; then
         echo "[dry-run] $description: ISAMBARD_SBATCH_FORCE=${ISAMBARD_SBATCH_FORCE:-} ${ISAMBARD_ENV_OVERRIDES:+ISAMBARD_ENV_OVERRIDES=$ISAMBARD_ENV_OVERRIDES }isambard_sbatch $*" >&2
         echo "DRYRUN-${description// /-}"

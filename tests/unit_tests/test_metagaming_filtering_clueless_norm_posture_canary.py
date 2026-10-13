@@ -438,10 +438,12 @@ class TestTheGate:
 # launcher settings, the launch-environment check, and the config composer and launch-width reader with what they
 # import.
 REVISION = "0123456789abcdef0123456789abcdef01234567"
+EXCLUDED_NODES = Path("configs/bad_nodes.tsv")
 FROZEN_FILES = (
     CANARY_RELATIVE,
     *(path.relative_to(REPO_ROOT) for clueless, *_ in STAGES.values() for path in (clueless.config, clueless.env)),
     Path("scripts/training/staged_submit.sh"),
+    EXCLUDED_NODES,
     Path("scripts/training/launch_environment.py"),
     Path("scripts/training/config_compose.py"),
     Path("scripts/training/launch_blocks.py"),
@@ -500,6 +502,44 @@ class TestTheSubmitScript:
         assert result.returncode == 0, result.stderr
         again = submit_plan.planned_submissions(result.stderr.splitlines()).values()
         assert again and {submission.force for submission in again} == {"1"}
+
+    def test_every_job_excludes_the_repositorys_bad_nodes(self, submissions):
+        """A node that corrupts memory without failing must host no arm, whatever the cluster's own bad-nodes log
+        holds on the day: every job names the repository table's nodes itself."""
+        rows = [
+            line.split("|")
+            for line in (REPO_ROOT / EXCLUDED_NODES).read_text().splitlines()
+            if line and not line.startswith("#")
+        ]
+        assert rows and all(len(row) == 3 and row[2].strip() for row in rows), "node | since | reason"
+        nodes = ",".join(row[0] for row in rows)
+        assert "nid011097" in nodes
+        planned = [submission for stage in submissions.values() for submission in stage.values()]
+        assert planned and {submission.option("--exclude") for submission in planned} == {nodes}
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "nid011097|2026-10-11",
+            "nid011097|2026-10-11|",
+            "nid011097|11-10-2026|a date of another form",
+            "node7|2026-10-11|a mistyped node",
+        ],
+        ids=["no reason field", "an empty reason", "not a date", "not a node name"],
+    )
+    def test_a_malformed_excluded_nodes_table_ends_the_script(self, tmp_path, line):
+        """A mistyped node would exclude nothing, so it is refused before anything is planned."""
+        root = frozen_copy(tmp_path)
+        (root / EXCLUDED_NODES).write_text(f"# a comment\n{line}\n")
+        result = run_submit(root, "data")
+        assert result.returncode == 1 and "line 2 is not `node | since | reason`" in result.stderr
+        assert not submit_plan.planned_submissions(result.stderr.splitlines())
+
+    def test_a_missing_excluded_nodes_table_ends_the_script(self, tmp_path):
+        root = frozen_copy(tmp_path)
+        (root / EXCLUDED_NODES).unlink()
+        result = run_submit(root, "data")
+        assert result.returncode == 1 and "does not exist" in result.stderr
 
     def test_the_data_stage_writes_each_scratch_corpus_in_a_job_of_its_own(self, submissions, corpora):
         assert set(submissions["data"]) == {f"data {name}" for name in corpora}

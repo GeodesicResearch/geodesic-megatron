@@ -147,7 +147,8 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   (one `isambard_sbatch` submission, recorded in the run directory's `jobs.tsv`) and `run_gate` (the report commands
   a verdict reads, then `score_gate.py` over the run directory, in the container, leaving `gate.json` and
   `gate.txt`). The sourcing script sets `STAGE` and `RUN_DIR`, and decides for itself whether its jobs are submitted
-  forced. Under `DRY_RUN=1` every submission, refusal, report command and gate command is printed and nothing
+  forced. Every job it submits carries the nodes of `configs/bad_nodes.tsv` in `--exclude` (`node | since |
+  reason` per line; a missing table or a malformed line ends the script). Under `DRY_RUN=1` every submission, refusal, report command and gate command is printed and nothing
   changes; `tests/unit_tests/submit_plan.py` reads those lines back.
 
 ## Config composition
