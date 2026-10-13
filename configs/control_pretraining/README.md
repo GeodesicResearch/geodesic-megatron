@@ -306,7 +306,7 @@ the filtered splits, down to document-level alignment and sampled Hub rows with 
 every argument to the audit inside the container, because a pretraining corpus's content audit
 runs for hours.
 
-Two per-document operations on tokenized corpora live in
+The per-document operations on tokenized corpora live in
 [`corpus_documents.py`](corpus_documents.py), and [`corpus_job.sbatch`](corpus_job.sbatch) runs
 any tool of this directory (the audit included) as its own 1-node job in the container, ending its
 log with `EXIT_CORPUS=<rc>` and naming the commit it ran. [`submit_corpus_job.py`](submit_corpus_job.py)
@@ -336,6 +336,11 @@ copy: [`tests/e2e_tests/README.md`](../../tests/e2e_tests/README.md), "How one i
   slice `train[beg:end]`, its `source_row` counting from `beg`), and is then checked one `--shard` at a time.
   The EOD id comes from the corpus's own tokenize record, which must name the table's tokenizer, at the commit the
   prepare config pins, with `--append-eod`.
+- **`check-parent --config <parent-checks yaml> --subset <s>`.** It compares a corpus's documents with those of
+  a parent corpus, in order and byte for byte, and writes nothing but the report `--report-out` names. A corpus
+  built from part of another's source then holds exactly documents that corpus trained on. The config names the
+  two corpora tables and, per subset, the parent's subset and the column of the corpus's dataset holding each
+  document's row of it, which must increase strictly; the parent may be sliced.
 - **[`hidden_span_corpus.py`](hidden_span_corpus.py) `--config <hidden-spans yaml> --corpus <name>`.** It writes a
   corpus whose documents are another built corpus's, in order and at the same lengths, with runs of ids replaced by
   one token id: synthetic hidden-span data, for exercising a token-masking run at a chosen density without waiting

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026, Geodesic Research.
 # Licensed under the Apache License, Version 2.0.
-"""Per-document operations on a tokenized corpus: check documents against their dataset, check digests.
+"""Per-document operations on a tokenized corpus: check it against its dataset, its digests or a parent.
 
 Every operation reads a ``.bin/.idx`` through Megatron's own index reader and streams the ids in
 chunks of whole documents through numpy memmap views; nothing loops over tokens in Python.
@@ -40,11 +40,17 @@ all (an empty document, which therefore has no EOD).
   prefix or several in turn, ids byte for byte, into a new prefix with its own ``.idx``, and the
   written corpus is compared document by document with its parents;
   ``scripts/data/held_out_documents.py`` writes a validation corpus through them.
+* **Parents** (``check-parent``). A corpus built from part of another corpus's source is checked against
+  that corpus: a config names, per subset, the parent's subset and the column of the corpus's dataset that
+  holds the row of the parent each document is, and every document must be that parent document byte for
+  byte (``check_copied_documents``), the rows strictly increasing. Nothing is written but a report.
 
 Usage (inside the container; as a job through ``corpus_job.sbatch``)::
 
     python configs/control_pretraining/corpus_documents.py check-hashes --config <digest checks.yaml> \\
         --subset <subset> [--shard N] [--report-out <json>]
+    python configs/control_pretraining/corpus_documents.py check-parent --config <parent checks.yaml> \\
+        --subset <subset> [--report-out <json>]
 """
 
 from __future__ import annotations
@@ -98,6 +104,10 @@ DIGEST_COLUMNS = ("n_tokens", "ids_hash", "source_row")
 # The dataset-builder step that writes a digest list, and the columns it names for its outputs.
 DIGEST_KERNEL = "tokenize_count"
 DIGEST_KERNEL_OUTPUTS = {"output_column": "n_tokens", "ids_hash_column": "ids_hash"}
+
+# A parent-check config: two corpora tables, and per subset of the first its parent subset and rows column.
+PARENT_CONFIG_KEYS = frozenset({"table", "parent_table", "subsets"})
+PARENT_SUBSET_KEYS = frozenset({"parent_subset", "parent_rows_column"})
 
 
 class CorpusCheckFailed(Exception):
@@ -641,6 +651,17 @@ class DigestCheck:
     hub: HubDigests | None
 
 
+def _tokenize_rows(table: object, key: str, path: Path) -> tuple[Path, dict[str, CorpusRow]]:
+    """The corpora table a check config names under ``key`` (relative to the repo root) and its tokenize rows by
+    subset. Raises CorpusCheckFailed when ``key`` names no table that exists."""
+    if not isinstance(table, str) or not table:
+        raise CorpusCheckFailed(f"{path}: {key} must name a corpora table")
+    named = REPO_ROOT / table
+    if not named.is_file():
+        raise CorpusCheckFailed(f"{path}: no corpora table at {named}")
+    return named, {row.subset: row for row in read_corpora_table(named) if row.kind == "tokenize"}
+
+
 def _digest_source(entry, where: str) -> tuple[str, object]:
     """``(kind, value)`` of one subset's entry: a saved directory, a Hub config, or a pending reason."""
     source = require_keys(entry, where, frozenset(), frozenset(DIGEST_SOURCES), error=CorpusCheckFailed)
@@ -691,12 +712,7 @@ def read_digest_checks(path: Path, subset: str, shard: int | None) -> DigestChec
     except (OSError, yaml.YAMLError) as error:
         raise CorpusCheckFailed(f"{path}: cannot read a digest-check config: {error}") from error
     config = require_keys(loaded, f"{path}: a digest-check config", DIGEST_CONFIG_KEYS, error=CorpusCheckFailed)
-    if not isinstance(config["table"], str) or not config["table"]:
-        raise CorpusCheckFailed(f"{path}: table must name a corpora table")
-    table = REPO_ROOT / config["table"]
-    if not table.is_file():
-        raise CorpusCheckFailed(f"{path}: no corpora table at {table}")
-    rows = {row.subset: row for row in read_corpora_table(table) if row.kind == "tokenize"}
+    table, rows = _tokenize_rows(config["table"], "table", path)
     entries = config["subsets"]
     if not isinstance(entries, dict):
         raise CorpusCheckFailed(f"{path}: subsets must map each subset to its digest source")
@@ -949,36 +965,155 @@ def check_copied_documents(sources: list[CopiedDocuments], index_file: Path, dat
 
 
 # ---------------------------------------------------------------------------------------------
+# Documents of a parent corpus
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ParentCheck:
+    """One subset's parent check, as a parent-check config states it."""
+
+    config: Path
+    config_sha256: str
+    row: CorpusRow  # the corpus
+    parent: CorpusRow  # the corpus whose documents it holds
+    rows_column: str  # the column of the corpus's dataset holding each document's row of the parent's subset
+
+
+def read_parent_checks(path: Path, subset: str) -> ParentCheck:
+    """One subset's parent check from a parent-check config, which is read and refused whole.
+
+    The config holds exactly ``table`` and ``parent_table`` (corpora tables, named relative to the repo root) and
+    ``subsets``, which maps a subset of ``table`` to exactly ``parent_subset`` (a tokenize row of ``parent_table``)
+    and ``parent_rows_column`` (the column of the subset's dataset that holds, per document, its row of the parent's
+    subset). Every entry is checked, whichever subset is asked for. Raises CorpusCheckFailed on a config of another
+    shape and on a subset it does not name.
+    """
+    try:
+        loaded = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError) as error:
+        raise CorpusCheckFailed(f"{path}: cannot read a parent-check config: {error}") from error
+    config = require_keys(loaded, f"{path}: a parent-check config", PARENT_CONFIG_KEYS, error=CorpusCheckFailed)
+    table, rows = _tokenize_rows(config["table"], "table", path)
+    parent_table, parents = _tokenize_rows(config["parent_table"], "parent_table", path)
+    entries = config["subsets"]
+    if not isinstance(entries, dict):
+        raise CorpusCheckFailed(f"{path}: subsets must map each subset to its parent")
+    checks = {}
+    for name, raw in entries.items():
+        entry = require_keys(raw, f"{path}: subsets.{name}", PARENT_SUBSET_KEYS, error=CorpusCheckFailed)
+        column = entry["parent_rows_column"]
+        if not isinstance(column, str) or not column:
+            raise CorpusCheckFailed(f"{path}: subsets.{name}.parent_rows_column must name a dataset column")
+        if name not in rows:
+            raise CorpusCheckFailed(f"{path}: {name} is not a tokenize row of {table}")
+        if entry["parent_subset"] not in parents:
+            raise CorpusCheckFailed(
+                f"{path}: parent_subset {entry['parent_subset']!r} is not a tokenize row of {parent_table}"
+            )
+        checks[name] = ParentCheck(
+            config=path.resolve(),
+            config_sha256=file_sha256(path),
+            row=rows[name],
+            parent=parents[entry["parent_subset"]],
+            rows_column=column,
+        )
+    if subset not in checks:
+        raise CorpusCheckFailed(f"{path}: no subset {subset!r}; it lists {sorted(checks)}")
+    return checks[subset]
+
+
+def run_parent_check(check: ParentCheck, data_base: Path = DATA_BASE) -> dict:
+    """Check that a corpus holds, in order and byte for byte, the documents of its parent that its dataset names.
+
+    Document ``i`` of the corpus must be document ``rows[i]`` of the parent, ``rows`` being the dataset's
+    ``check.rows_column`` at the prepare config's pinned revision (only that column is read); the rows must number
+    the corpus's documents, increase strictly and lie inside the parent. The corpus must be one prefix of all its
+    rows, and the parent may be sliced. Raises CorpusCheckFailed on the first document that differs
+    (``check_copied_documents``) and on input that cannot be checked; the report of a pass records every input.
+    """
+    row, parent = check.row, check.parent
+    scalars = subset_prepare_config(row.config, row.subset)
+    revision = scalars.get("revision")
+    table = dataset_columns(scalars["dataset"], revision, row.subset, [check.rows_column])
+    rows = integer_column(table, check.rows_column)
+    if len(rows) != row.docs:
+        raise CorpusCheckFailed(f"{row.subset}: {check.rows_column} has {len(rows)} rows, the table says {row.docs}")
+    if rows.size and (rows[0] < 0 or rows[-1] >= parent.docs or (np.diff(rows) <= 0).any()):
+        raise CorpusCheckFailed(
+            f"{row.subset}: {check.rows_column} is not strictly increasing within the parent's {parent.docs} rows"
+        )
+    held = tokenized_prefixes(row, data_base)
+    if len(held) != 1 or held[0].rows != (0, row.docs):
+        raise CorpusCheckFailed(
+            f"{row.subset}: a corpus checked against a parent is one prefix of all its rows, not "
+            f"{[list(entry.rows) for entry in held]}"
+        )
+    sources = []
+    for entry in tokenized_prefixes(parent, data_base):
+        beg, end = entry.rows
+        local = rows[(rows >= beg) & (rows < end)] - beg
+        if local.size:
+            index = read_index(idx_path(entry.prefix), bin_path(entry.prefix))
+            sources.append(CopiedDocuments(entry.prefix, index, local))
+    own = check_copied_documents(sources, idx_path(held[0].prefix), bin_path(held[0].prefix))
+    return {
+        "subset": row.subset,
+        "ok": True,
+        "documents": own.docs,
+        "tokens": own.tokens,
+        "rows_column": check.rows_column,
+        "parent": {
+            "subset": parent.subset,
+            "table": str(parent.table),
+            "documents": parent.docs,
+            "prefixes": [str(source.prefix) for source in sources],
+        },
+        "corpus": {"config": str(row.config), "dataset": scalars["dataset"], "revision": revision},
+        "prefix": str(held[0].prefix),
+        "config": {"path": str(check.config), "sha256": check.config_sha256},
+        "code_revision": code_revision(str(REPO_ROOT)),
+        "table": str(row.table),
+    }
+
+
+# ---------------------------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run a digest check; non-zero on any failure."""
+    """Run a digest check or a parent check; non-zero on any failure."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
 
     hashes = commands.add_parser(
         "check-hashes", help="check a tokenized corpus against its digest list, as a digest-check config states it"
     )
-    hashes.add_argument(
-        "--config",
-        type=Path,
-        required=True,
-        help="the digest-check config: the corpora table and each subset's source",
+    parent = commands.add_parser(
+        "check-parent",
+        help="check a corpus against the documents of its parent corpus, as a parent-check config states it",
     )
-    hashes.add_argument("--subset", required=True, help="the subset to check")
+    for command, config_help in (
+        (hashes, "the digest-check config: the corpora table and each subset's source"),
+        (parent, "the parent-check config: the two corpora tables and each subset's parent"),
+    ):
+        command.add_argument("--config", type=Path, required=True, help=config_help)
+        command.add_argument("--subset", required=True, help="the subset to check")
+        command.add_argument("--report-out", type=Path, default=None, help="write the report here as JSON")
+        command.add_argument(
+            "--data-base", type=Path, default=DATA_BASE, help=f"the corpus roots' base (default: {DATA_BASE})"
+        )
     hashes.add_argument(
         "--shard", type=int, default=None, help="the shard to check, for a subset with a digest list per shard"
-    )
-    hashes.add_argument("--report-out", type=Path, default=None, help="write the report here as JSON")
-    hashes.add_argument(
-        "--data-base", type=Path, default=DATA_BASE, help=f"the corpus roots' base (default: {DATA_BASE})"
     )
 
     args = parser.parse_args(argv)
     try:
-        report = run_digest_check(read_digest_checks(args.config, args.subset, args.shard), args.data_base)
+        if args.command == "check-hashes":
+            report = run_digest_check(read_digest_checks(args.config, args.subset, args.shard), args.data_base)
+        else:
+            report = run_parent_check(read_parent_checks(args.config, args.subset), args.data_base)
     except (CorpusCheckFailed, ValueError) as error:
         print(f"FAILED: {error}", file=sys.stderr)
         return 1
@@ -986,12 +1121,18 @@ def main(argv: list[str] | None = None) -> int:
         args.report_out.parent.mkdir(parents=True, exist_ok=True)
         args.report_out.write_text(json.dumps(report, indent=1) + "\n")
         print(f"report: {args.report_out}")
-    print(
-        f"{report['subset']}: {report['rows']:,} digest rows for {report['documents']:,} documents "
-        f"(source rows in order: {report['source_rows_in_order']}); EOD {report['eod']['id']}; "
-        f"digests from revision {report['digests']['source_revision']}, corpus prepared at "
-        f"{report['corpus']['revision']}; mismatches {report['mismatches']}"
-    )
+    if args.command == "check-hashes":
+        print(
+            f"{report['subset']}: {report['rows']:,} digest rows for {report['documents']:,} documents "
+            f"(source rows in order: {report['source_rows_in_order']}); EOD {report['eod']['id']}; "
+            f"digests from revision {report['digests']['source_revision']}, corpus prepared at "
+            f"{report['corpus']['revision']}; mismatches {report['mismatches']}"
+        )
+    else:
+        print(
+            f"{report['subset']}: {report['documents']:,} documents are documents of {report['parent']['subset']} "
+            f"({report['parent']['documents']:,}) at the rows of {report['rows_column']}, byte for byte, in order"
+        )
     return 0 if report["ok"] else 1
 
 

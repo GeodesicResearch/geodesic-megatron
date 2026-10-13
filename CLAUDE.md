@@ -1130,6 +1130,9 @@ names a column of each row's length before the build changed its text, and the v
 the documents whose built length differs from it plus the EOD. `corpus_documents.py check-hashes --config <yaml> --subset <s> [--shard <k>]` compares each
 document's length and digest with a list made from the source text, the config naming the table and each subset's
 digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml` is the first).
+`corpus_documents.py check-parent --config <yaml> --subset <s>` compares a corpus's documents, in order and byte for
+byte, with those of a parent corpus at the rows its dataset names
+(`configs/metagaming_filtering/30b_clueless_norm/parent_checks.yaml` is the first).
 `hidden_span_corpus.py --config <yaml> --corpus <name>` writes a corpus whose documents are another built corpus's
 with runs of ids replaced by one token id, at a stated share or as whole documents, never a document's EOD: synthetic
 hidden-span data for exercising a token-masking run (the posture canary's `hidden_spans.yaml` is the first config).

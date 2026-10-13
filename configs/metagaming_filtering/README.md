@@ -441,6 +441,19 @@ python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-ha
   --subset <subset> [--shard <k>] --report-out /projects/a5k/public/logs/metagaming_filtering/hashes/<name>.json
 ```
 
+**The parent check.** `nemotron_stem_sft` holds only the documents of Normal-Norm's corpus with no flagged span,
+so a digest list of Normal-Norm's whole subset describes it only through its `source_row`; `parent_checks.yaml`
+has it compared with Normal-Norm's built corpus instead (`check-parent`, in
+[`control_pretraining/README.md`](../control_pretraining/README.md)). One 1-node job per subset, from a frozen
+copy of the commit:
+
+```bash
+python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-parent-<subset> 04:00:00 \
+  configs/control_pretraining/corpus_documents.py check-parent \
+  --config configs/metagaming_filtering/30b_clueless_norm/parent_checks.yaml \
+  --subset <subset> --report-out /projects/a5k/public/logs/metagaming_filtering/parents/<subset>.json
+```
+
 **Held-out documents.** A stage reads each document first at a fixed iteration, and a stage that draws a corpus for
 less than one pass leaves documents of it unread, so it never trains on them. `30b_clueless_norm/held_out.yaml`
 states what is made of both, and `scripts/data/held_out_documents.py` makes it in five steps:

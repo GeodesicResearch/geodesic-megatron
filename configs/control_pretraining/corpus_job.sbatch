@@ -12,7 +12,7 @@
 # Run one of this directory's corpus tools as its own 1-node CPU job, inside the pipeline
 # container.
 #
-# The tools that read whole corpora — corpus_documents.py (the digest check) and
+# The tools that read whole corpora — corpus_documents.py (the digest and parent checks) and
 # verify_corpora.py on a table whose rows read corpus contents — stream hundreds of
 # gigabytes of .bin, which is a job's work, not a login node's or a code tunnel's. The first
 # argument is the tool, every later one is forwarded to it verbatim; submit_corpus_job.py submits

@@ -1206,3 +1206,208 @@ class TestTheRecordOfACopiedCorpus:
             corpus_documents.CorpusCheckFailed, match="the code this runs is unattributable: UNRESOLVED"
         ):
             corpus_documents.attributable_code_revision()
+
+
+# ---------------------------------------------------------------------------------------------
+# The parent check
+# ---------------------------------------------------------------------------------------------
+
+REAL_PARENT_CHECKS = (
+    corpora_table.REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "parent_checks.yaml"
+)
+
+
+def parent_check_setup(
+    tmp_path: Path,
+    tokenizer: str,
+    documents: list[list[int]],
+    rows: list[int],
+    *,
+    shards: int = 1,
+    child_shards: int = 1,
+) -> tuple[Path, Path]:
+    """A parent corpus of ``DOCUMENTS`` (in ``shards`` slices), a corpus of ``documents`` (in ``child_shards``)
+    whose dataset names each one's row of the parent in ``source_row``, and a config checking the one against the
+    other. The dataset has one row per entry of ``rows``, which is the table's document count unless a test
+    makes it not."""
+    parent_table, data_base = parent_corpus(tmp_path, DOCUMENTS, tokenizer=tokenizer, shards=shards)
+    table, _ = counted_corpus(
+        tmp_path, documents, [0] * len(rows), config_tokenizer=tokenizer, source_rows=rows, shards=child_shards
+    )
+    config = tmp_path / "parent_checks.yaml"
+    subsets = {"demo_counted": {"parent_subset": "stem", "parent_rows_column": "source_row"}}
+    config.write_text(yaml.safe_dump({"table": str(table), "parent_table": str(parent_table), "subsets": subsets}))
+    return config, data_base
+
+
+def check_parent(config: Path, data_base: Path, report_out: Path, subset: str = "demo_counted") -> int:
+    args = ["check-parent", "--config", str(config), "--subset", subset, "--data-base", str(data_base)]
+    return corpus_documents.main([*args, "--report-out", str(report_out)])
+
+
+class TestCheckParent:
+    def test_a_corpus_of_a_parents_documents_in_order_passes(self, tmp_path, tokenizer):
+        """Includes the parent's document of a literal EOD id inside it; the report names every input."""
+        rows = [0, 2, 4]
+        config, data_base = parent_check_setup(tmp_path, tokenizer, [DOCUMENTS[r] for r in rows], rows)
+        report_out = tmp_path / "parent.json"
+        assert check_parent(config, data_base, report_out) == 0
+        report = json.loads(report_out.read_text())
+        assert report["ok"] and (report["documents"], report["parent"]["documents"]) == (3, 5)
+        assert report["tokens"] == sum(len(DOCUMENTS[r]) for r in rows)
+        assert (report["subset"], report["parent"]["subset"], report["rows_column"]) == (
+            "demo_counted",
+            "stem",
+            "source_row",
+        )
+        assert report["config"] == {"path": str(config.resolve()), "sha256": corpus_documents.file_sha256(config)}
+        assert report["corpus"]["dataset"] == str(tmp_path / "repo")
+        assert report["prefix"].endswith(corpora_table.TOKENIZED_PREFIX)
+
+    def test_a_sliced_parent_is_read_across_its_prefixes(self, tmp_path, tokenizer):
+        """Rows 1, 3 and 4 of five documents in two slices: the second slice starts at row 3."""
+        rows = [1, 3, 4]
+        config, data_base = parent_check_setup(tmp_path, tokenizer, [DOCUMENTS[r] for r in rows], rows, shards=2)
+        report_out = tmp_path / "parent.json"
+        assert check_parent(config, data_base, report_out) == 0
+        assert len(json.loads(report_out.read_text())["parent"]["prefixes"]) == 2
+
+    def test_an_id_that_differs_from_the_parents_is_named(self, tmp_path, tokenizer, capsys):
+        documents = [DOCUMENTS[0], [TOKEN, EOD, 16, TOKEN, EOD], DOCUMENTS[4]]
+        config, data_base = parent_check_setup(tmp_path, tokenizer, documents, [0, 2, 4])
+        assert check_parent(config, data_base, tmp_path / "parent.json") == 1
+        assert "document 1 differs from parent document 2" in capsys.readouterr().err
+
+    def test_a_document_of_another_length_is_named(self, tmp_path, tokenizer, capsys):
+        documents = [DOCUMENTS[0], [TOKEN, EOD, 15, EOD], DOCUMENTS[4]]
+        config, data_base = parent_check_setup(tmp_path, tokenizer, documents, [0, 2, 4])
+        assert check_parent(config, data_base, tmp_path / "parent.json") == 1
+        assert re.search(r"document 1 is 4 ids, parent document 2 of .* is 5", capsys.readouterr().err)
+
+    @pytest.mark.parametrize(
+        "rows",
+        [[0, 2, 2], [2, 0, 4], [0, 2, 5], [-1, 2, 4]],
+        ids=["repeated", "reordered", "past the parent", "negative"],
+    )
+    def test_rows_that_are_not_strictly_increasing_within_the_parent_are_refused(
+        self, tmp_path, tokenizer, capsys, rows
+    ):
+        """The corpus's order is its parent's, so a repeated, reordered or absent row is not a part of it."""
+        documents = [DOCUMENTS[0], DOCUMENTS[2], DOCUMENTS[4]]
+        config, data_base = parent_check_setup(tmp_path, tokenizer, documents, rows)
+        assert check_parent(config, data_base, tmp_path / "parent.json") == 1
+        assert "is not strictly increasing within the parent's 5 rows" in capsys.readouterr().err
+
+    def test_a_dataset_whose_rows_are_not_the_tables_documents_is_refused(self, tmp_path, tokenizer, capsys):
+        """A source_row column of another length than the corpus has documents describes another corpus."""
+        documents = [DOCUMENTS[0], DOCUMENTS[2], DOCUMENTS[4]]
+        config, data_base = parent_check_setup(tmp_path, tokenizer, documents, [0, 2, 4, 5])
+        assert check_parent(config, data_base, tmp_path / "parent.json") == 1
+        assert "source_row has 4 rows, the table says 3" in capsys.readouterr().err
+
+    def test_a_corpus_held_in_more_than_one_prefix_is_refused(self, tmp_path, tokenizer, capsys):
+        """A sliced corpus would otherwise be compared through its first prefix alone."""
+        rows = [0, 1, 2, 3, 4]
+        config, data_base = parent_check_setup(tmp_path, tokenizer, DOCUMENTS, rows, child_shards=2)
+        assert check_parent(config, data_base, tmp_path / "parent.json") == 1
+        assert "is one prefix of all its rows" in capsys.readouterr().err
+
+    def test_a_failed_check_writes_no_report(self, tmp_path, tokenizer):
+        documents = [DOCUMENTS[0], [TOKEN, EOD, 16, TOKEN, EOD], DOCUMENTS[4]]
+        config, data_base = parent_check_setup(tmp_path, tokenizer, documents, [0, 2, 4])
+        report_out = tmp_path / "parent.json"
+        assert check_parent(config, data_base, report_out) == 1
+        assert not report_out.exists()
+
+
+class TestParentCheckConfig:
+    @staticmethod
+    def setup_tables(tmp_path: Path, tokenizer: str) -> tuple[Path, Path]:
+        parent_table, _ = parent_corpus(tmp_path, DOCUMENTS, tokenizer=tokenizer)
+        table, _ = counted_corpus(tmp_path, DOCUMENTS, COUNTS, config_tokenizer=tokenizer)
+        return table, parent_table
+
+    @staticmethod
+    def write(tmp_path: Path, document: dict) -> Path:
+        config = tmp_path / "parent_checks.yaml"
+        config.write_text(yaml.safe_dump(document))
+        return config
+
+    def good(self, tmp_path: Path, tokenizer: str) -> dict:
+        table, parent_table = self.setup_tables(tmp_path, tokenizer)
+        entry = {"parent_subset": "stem", "parent_rows_column": "source_row"}
+        return {"table": str(table), "parent_table": str(parent_table), "subsets": {"demo_counted": entry}}
+
+    def test_a_config_is_read_into_its_row_and_its_parents(self, tmp_path, tokenizer):
+        config = self.write(tmp_path, self.good(tmp_path, tokenizer))
+        check = corpus_documents.read_parent_checks(config, "demo_counted")
+        assert (check.row.subset, check.parent.subset, check.rows_column) == ("demo_counted", "stem", "source_row")
+        assert (check.row.docs, check.parent.docs) == (5, 5)
+
+    @pytest.mark.parametrize(
+        ("edit", "message"),
+        [
+            (lambda d: d.pop("parent_table"), "missing keys \\['parent_table'\\]"),
+            (lambda d: d.update(extra=1), "unknown keys \\['extra'\\]"),
+            (lambda d: d.update(table="no/such/corpora.tsv"), "no corpora table at"),
+            (lambda d: d.update(table=""), "table must name a corpora table"),
+            (lambda d: d["subsets"].clear(), "no subset 'demo_counted'; it lists \\[\\]"),
+            (lambda d: d["subsets"]["demo_counted"].update(parent_subset="absent"), "parent_subset 'absent' is not"),
+            (lambda d: d["subsets"]["demo_counted"].update(parent_rows_column=""), "must name a dataset column"),
+            (lambda d: d["subsets"]["demo_counted"].pop("parent_rows_column"), "missing keys"),
+        ],
+        ids=[
+            "no parent table",
+            "unknown key",
+            "table missing",
+            "table unnamed",
+            "subset missing",
+            "no such parent",
+            "no column",
+            "column missing",
+        ],
+    )
+    def test_a_config_of_another_shape_is_refused(self, tmp_path, tokenizer, edit, message):
+        document = self.good(tmp_path, tokenizer)
+        edit(document)
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match=message):
+            corpus_documents.read_parent_checks(self.write(tmp_path, document), "demo_counted")
+
+    def test_a_subset_the_config_does_not_name_is_refused(self, tmp_path, tokenizer):
+        config = self.write(tmp_path, self.good(tmp_path, tokenizer))
+        with pytest.raises(
+            corpus_documents.CorpusCheckFailed, match="no subset 'other'; it lists \\['demo_counted'\\]"
+        ):
+            corpus_documents.read_parent_checks(config, "other")
+
+    def test_a_subset_that_is_not_a_row_of_the_table_is_refused(self, tmp_path, tokenizer):
+        document = self.good(tmp_path, tokenizer)
+        document["subsets"] = {"absent": document["subsets"]["demo_counted"]}
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="absent is not a tokenize row of"):
+            corpus_documents.read_parent_checks(self.write(tmp_path, document), "absent")
+
+    def test_every_entry_is_checked_whichever_subset_is_asked_for(self, tmp_path, tokenizer):
+        document = self.good(tmp_path, tokenizer)
+        document["subsets"]["other"] = {"parent_subset": "stem", "parent_rows_column": "source_row"}
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="other is not a tokenize row of"):
+            corpus_documents.read_parent_checks(self.write(tmp_path, document), "demo_counted")
+
+    def test_an_unreadable_config_is_refused(self, tmp_path):
+        config = tmp_path / "parent_checks.yaml"
+        config.write_text("table: [unclosed")
+        with pytest.raises(corpus_documents.CorpusCheckFailed, match="cannot read a parent-check config"):
+            corpus_documents.read_parent_checks(config, "demo_counted")
+
+
+class TestTheCluelessNormParentChecks:
+    """The real config: Clueless-Norm's stem corpus against Normal-Norm's."""
+
+    def test_the_stem_corpus_is_checked_against_normal_norms_by_its_source_row(self):
+        check = corpus_documents.read_parent_checks(REAL_PARENT_CHECKS, "nemotron_stem_sft")
+        arm = corpora_table.REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm"
+        baseline = corpora_table.REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline"
+        assert check.row.table.resolve() == (arm / "corpora.tsv").resolve()
+        assert check.parent.table.resolve() == (baseline / "corpora.tsv").resolve()
+        assert check.row.subset == check.parent.subset == "nemotron_stem_sft"
+        assert (check.row.docs, check.parent.docs) == (71_658, 459_324)
+        assert check.rows_column == "source_row"
