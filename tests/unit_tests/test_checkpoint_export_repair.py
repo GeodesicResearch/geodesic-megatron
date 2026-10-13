@@ -27,6 +27,7 @@ Everything else, from resolving the iteration to the clone, the run_config copy 
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import shutil
 import stat
@@ -69,9 +70,13 @@ def convert(convert_module, monkeypatch):
 
     def fake_conversion(**kwargs):
         # What the real conversion reads (the load path's run_config, which load_model_config rebuilds the model
-        # from) and the one thing it leaves for the rest of main(): the output directory.
+        # from) and what it leaves for the rest of main(): the output directory, holding the generation_config.json
+        # every real export has (a --reasoning export is refused without one).
         calls.append({**kwargs, "run_config_read": (kwargs["load_path"] / "run_config.yaml").read_text()})
         kwargs["hf_path"].mkdir(parents=True, exist_ok=True)
+        (kwargs["hf_path"] / "generation_config.json").write_text(
+            json.dumps({"bos_token_id": 1, "do_sample": True, "temperature": 1.0, "top_p": 1.0})
+        )
 
     monkeypatch.setattr(convert_module, "convert_single_process", fake_conversion)
     monkeypatch.setattr(convert_module, "convert_multi_gpu", fake_conversion)

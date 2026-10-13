@@ -340,6 +340,39 @@ def read_embedding_row_count(hf_path: Path) -> int | None:
     return header[emb_key]["shape"][0]
 
 
+# The sampling fields of a generation_config.json. An export keeps none of them but what its mode sets: a
+# non-reasoning export has none (an absent ``do_sample`` is greedy decoding), a reasoning export has the values below.
+SAMPLING_KEYS = ("do_sample", "temperature", "top_p", "top_k")
+REASONING_GENERATION_DEFAULTS = {"do_sample": True, "temperature": 0.6, "top_p": 0.95}
+
+
+def apply_generation_defaults(hf_path: Path, reasoning: bool) -> None:
+    """Set the decoding defaults in ``hf_path/generation_config.json`` from the export's mode.
+
+    A non-reasoning export (``--no-reasoning``: a base model, or an instruct/SFT model trained without think traces)
+    has every ``SAMPLING_KEYS`` field removed, so ``generate`` decodes greedily; a reasoning export has them replaced
+    by ``REASONING_GENERATION_DEFAULTS``. Other fields are kept, and the file is rewritten (sorted keys, two-space
+    indent, trailing newline) only when its content changes. A non-reasoning export without the file is left without
+    one (greedy is the library default); a reasoning export without it raises FileNotFoundError, since it would
+    otherwise decode greedily.
+    """
+    path = hf_path / "generation_config.json"
+    if not path.exists():
+        if reasoning:
+            raise FileNotFoundError(f"{path} is missing; a reasoning export needs its sampling defaults written there")
+        return
+    original = path.read_text()
+    config = json.loads(original)
+    for key in SAMPLING_KEYS:
+        config.pop(key, None)
+    if reasoning:
+        config.update(REASONING_GENERATION_DEFAULTS)
+    updated = json.dumps(config, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    if updated != original:
+        path.write_text(updated)
+    print(f"Set generation_config.json decoding defaults: {'sampling' if reasoning else 'greedy'}")
+
+
 def fixup_hf_output(
     hf_path: Path,
     hf_model_id: str,
@@ -363,6 +396,7 @@ def fixup_hf_output(
        chat_template.jinja takes precedence over tokenizer_config.json.
     4. Removes auto_map and stale custom modeling files (transformers >= 5.3.0
        has native NemotronH support).
+    5. Sets the decoding defaults in generation_config.json (``apply_generation_defaults``).
 
     Args:
         hf_path: Path to the converted HF output directory.
@@ -719,6 +753,8 @@ def fixup_hf_output(
                 print(
                     f"Patched {cfg_name}: eos_token_id {existing} -> {new_list} (added <|im_end|>=11 for chat-format generation)"
                 )
+
+    apply_generation_defaults(hf_path, reasoning)
 
     # Apply the remote-code policy to config.json. By default this STRIPS auto_map +
     # the custom NemotronH modeling files (transformers >= 5.3.0 is native; the old

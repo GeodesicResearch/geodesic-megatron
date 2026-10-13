@@ -1698,6 +1698,11 @@ For chained training (CPT → SFT → EM → …), pass the architectural-root H
 
 The `torch_dist` checkpoint format supports resharding — conversion parallelism is independent of training parallelism.
 
+**Decoding defaults (Kyle, 2026-10-13).** The exporter sets an export's `generation_config.json` by its mode
+(`apply_generation_defaults`), whatever the upstream release's file says: `--no-reasoning` (base models; also an
+instruct/SFT model without think traces) decodes greedily, with no sampling fields, and `--reasoning` (think models)
+samples at temperature 0.6, top_p 0.95.
+
 ### Recommended export settings
 
 Both Nano and Super conversions run on a **single node** (4 GPUs). All EP communication stays on NVLink — no Slingshot needed.
