@@ -78,6 +78,7 @@ from corpus_documents import (  # noqa: E402
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
+from scripts.data.token_runs import longest_runs  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.token_ids import require_token_id  # noqa: E402
 
@@ -200,12 +201,6 @@ class RunStream:
         return taken
 
 
-def longest_run(hidden: np.ndarray) -> int:
-    """The longest run of True in ``hidden``."""
-    edges = np.flatnonzero(np.diff(np.concatenate(([False], hidden, [False])).view(np.int8)))
-    return int((edges[1::2] - edges[0::2]).max()) if edges.size else 0
-
-
 @dataclass
 class Hidden:
     """What a build hid, counted as it wrote."""
@@ -261,7 +256,7 @@ def write_hidden(corpus: HiddenSpanCorpus, source: DocumentIndex, data: Path, in
         per_document = np.add.reduceat(mask, starts)
         hidden.tokens += int(mask.sum())
         hidden.whole_documents += int(np.count_nonzero((per_document == sizes - 1) & (sizes > 1)))
-        hidden.longest_run = max(hidden.longest_run, longest_run(mask))
+        hidden.longest_run = max(hidden.longest_run, int(longest_runs(mask[None, :])[0]))
         for start, end in zip(starts.tolist(), ends.tolist()):
             builder.add_document(written[start:end], [end - start])
     builder.finalize(str(index))

@@ -315,3 +315,14 @@ def gloo_group_of_one(tmp_path_factory):
     yield torch.distributed.group.WORLD if created else torch.distributed.new_group(backend="gloo")
     if created:
         torch.distributed.destroy_process_group()
+
+
+@pytest.fixture
+def one_rank_world_left_as_found():
+    """Tears down, after the test, a process group the test brought up (``init_one_rank_nccl_world``), so none is left
+    behind: other tests of the same xdist worker build their own default process group (the export of
+    ``test_auto_bridge``), which a group left up would refuse. A group already up when the test starts is left up."""
+    created = not torch.distributed.is_initialized()
+    yield
+    if created and torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()

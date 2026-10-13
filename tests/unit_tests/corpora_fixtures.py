@@ -189,22 +189,29 @@ def build_corpus(
     Path(f"{prefix}.idx").write_bytes(b"\0")
 
 
-def write_tokenized_documents(root: Path, documents: list[list[int]]) -> None:
-    """Write real `.bin/.idx` files holding exactly these documents, as `tools/preprocess_data.py` writes them.
+def write_indexed_documents(prefix: Path, documents: list[list[int]]) -> Path:
+    """Write real `.bin/.idx` files at ``prefix`` holding exactly these documents, as `tools/preprocess_data.py` writes
+    them, and return ``prefix``.
 
     Uses Megatron's `IndexedDatasetBuilder` the way that script does: each document is one sequence,
     and an empty one (`[]`, what it writes for an empty text) is no sequence at all, so readers see the
-    genuine on-disk format. Overwrites the placeholder pair `build_corpus` left.
+    genuine on-disk format.
     """
     import numpy as np
     from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
 
-    root.mkdir(parents=True, exist_ok=True)
-    prefix = root / corpora_table.TOKENIZED_PREFIX
+    prefix.parent.mkdir(parents=True, exist_ok=True)
     builder = IndexedDatasetBuilder(f"{prefix}.bin", dtype=np.int32)
     for document in documents:
-        builder.add_document(np.asarray(document, dtype=np.int32), [len(document)] if document else [])
+        builder.add_document(np.asarray(document, dtype=np.int32), [len(document)] if len(document) else [])
     builder.finalize(f"{prefix}.idx")
+    return prefix
+
+
+def write_tokenized_documents(root: Path, documents: list[list[int]]) -> None:
+    """`write_indexed_documents` at the corpus prefix under ``root``, overwriting the placeholder pair `build_corpus`
+    left there."""
+    write_indexed_documents(root / corpora_table.TOKENIZED_PREFIX, documents)
 
 
 def build_pretraining_dataset(data_path: list[str], seq_length: int, samples: int, vocab_size: int, cache: Path):

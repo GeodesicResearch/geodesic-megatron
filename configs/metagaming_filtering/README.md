@@ -611,6 +611,23 @@ are reported beside the verdict and never decide it. Each arm is one 17-node job
 `tests/unit_tests/test_metagaming_filtering_clueless_norm_posture_canary.py` pins its configs, its gate and its
 plan. It has not run.
 
+**The Mamba-state probe.** The stage's corpora hold runs of hidden-token ids as long as whole windows, and bf16
+inter-chunk SSM state is known to produce NaNs on some ~32K single-document sequences.
+`scripts/profiling/ssm_state_probe.py` runs Normal-Norm's stage-1 final through this stage's own forward (its model and
+mixed-precision settings, at its TP1·EP4 parallelism on one node, its fused loss), once with the bf16 state and once with
+the checkpointed fp32 state, and records every Mamba layer's state and scan-output maxima where mamba_ssm computes them.
+`probe/m5b_ssm_state.yaml` pre-registers the windows and the criteria; the stage's `.env` sets
+`ISAMBARD_FP32_SSM_STATE=checkpoint`, the mode a failure of the bf16 path calls for. Run it as one 1-node job from a
+frozen copy:
+
+```bash
+isambard_sbatch scripts/profiling/ssm_state_probe.sbatch \
+  configs/metagaming_filtering/30b_clueless_norm/probe/m5b_ssm_state.yaml
+```
+
+The result is `/projects/a5k/public/logs/metagaming_filtering/m5b/m5b_ssm_state.j<job id>.json`; the sbatch header says
+how to read the job's exit status, and `tests/unit_tests/test_ssm_state_probe.py` is the probe's test.
+
 **Launch.** It is not launched yet: every pretraining corpus is pinned, and the run starts only after the gates
 the plan of record names
 (`/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md`: the posture bridge and the masking

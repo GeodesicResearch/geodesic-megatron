@@ -1294,6 +1294,9 @@ pre-registered `gate.yaml` requires every count to equal `predict_masked_counts.
 before and after a resume, no hidden target trained, finite loss and gradients on batches whose windows are mostly
 hidden whole, and the per-token loss inside the band of four per-microbatch runs with nothing masked; its README is
 the guide, and `tests/unit_tests/test_metagaming_filtering_clueless_norm_posture_canary.py` pins it. It has not run.
+The Mamba-state probe, `scripts/profiling/ssm_state_probe.py` (spec `30b_clueless_norm/probe/m5b_ssm_state.yaml`,
+the README's "The Mamba-state probe"), compares the bf16 and the checkpointed fp32 SSM state on windows of
+hidden-token runs.
 Every Clueless-Norm base export must pass C3, the export check (`scripts/checkpoint/export_check.py` with the spec
 `30b_clueless_norm/probe/c3_export_check.yaml`, one `scripts/checkpoint/export_check.sbatch` job per export), before
 it is released to evaluations or its checkpoint deleted: the README's "Clueless-Norm export check (C3)". The

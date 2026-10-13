@@ -88,7 +88,6 @@ Usage:
 import argparse
 import hashlib
 import json
-import math
 import os
 import re
 import socket
@@ -109,6 +108,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.mapping_values import require_file_beside, require_int, require_number, require_string  # noqa: E402
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
 
 
@@ -539,24 +539,6 @@ class ProbeSpec:
         return self.token_ids + self.reference_token_ids
 
 
-def _probe_int(value: Any, where: str, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ValueError(f"{where} must be an integer >= {minimum}, not {value!r}")
-    return value
-
-
-def _probe_positive_float(value: Any, where: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{where} must be a finite number > 0, not {value!r}")
-    return float(value)
-
-
-def _probe_string(value: Any, where: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{where} must be a non-empty string, not {value!r}")
-    return value
-
-
 def _probe_sampling(raw: Any, token_ids: tuple[int, ...]) -> ProbeSampling:
     keys = {"seed", "max_new_tokens", "stop_token_ids", "greedy", "samples", "temperature", "top_k", "top_p"}
     raw = require_keys(raw, "sampling", keys)
@@ -565,7 +547,7 @@ def _probe_sampling(raw: Any, token_ids: tuple[int, ...]) -> ProbeSampling:
         raise ValueError(f"sampling.stop_token_ids {list(stop)} include a counted id of token_ids {list(token_ids)}")
     if not isinstance(raw["greedy"], bool):
         raise ValueError(f"sampling.greedy must be true or false, not {raw['greedy']!r}")
-    temperature = _probe_positive_float(raw["temperature"], "sampling.temperature")
+    temperature = require_number(raw["temperature"], "sampling.temperature", 0.0, inclusive=False)
     # A truncated distribution could remove exactly the ids the probe counts, so only the full one is sampled.
     if raw["top_k"] != 0 or isinstance(raw["top_k"], bool) or raw["top_p"] != 1.0 or isinstance(raw["top_p"], bool):
         raise ValueError(
@@ -573,11 +555,11 @@ def _probe_sampling(raw: Any, token_ids: tuple[int, ...]) -> ProbeSampling:
             "samples the model's full distribution, which a truncation could strip of the counted ids"
         )
     return ProbeSampling(
-        seed=_probe_int(raw["seed"], "sampling.seed", 0),
-        max_new_tokens=_probe_int(raw["max_new_tokens"], "sampling.max_new_tokens", 1),
+        seed=require_int(raw["seed"], "sampling.seed", 0),
+        max_new_tokens=require_int(raw["max_new_tokens"], "sampling.max_new_tokens", 1),
         stop_token_ids=stop,
         greedy=raw["greedy"],
-        samples=_probe_int(raw["samples"], "sampling.samples", 0),
+        samples=require_int(raw["samples"], "sampling.samples", 0),
         temperature=temperature,
         top_k=0,
         top_p=1.0,
@@ -595,9 +577,9 @@ def _probe_prompts(raw: Any) -> tuple[ProbePrompt, ...]:
             raise ValueError(f"prompts[{index}].labels must be a mapping, not {labels!r}")
         prompts.append(
             ProbePrompt(
-                id=_probe_string(item["id"], f"prompts[{index}].id"),
-                family=_probe_string(item["family"], f"prompts[{index}].family"),
-                text=_probe_string(item["text"], f"prompts[{index}].text"),
+                id=require_string(item["id"], f"prompts[{index}].id"),
+                family=require_string(item["family"], f"prompts[{index}].family"),
+                text=require_string(item["text"], f"prompts[{index}].text"),
                 labels=labels,
             )
         )
@@ -609,12 +591,12 @@ def _probe_prompts(raw: Any) -> tuple[ProbePrompt, ...]:
 
 def _probe_wandb(raw: Any) -> ProbeWandb:
     raw = require_keys(raw, "wandb", {"entity", "project", "run_name_prefix"})
-    prefix = _probe_string(raw["run_name_prefix"], "wandb.run_name_prefix")
+    prefix = require_string(raw["run_name_prefix"], "wandb.run_name_prefix")
     if not _PROBE_NAME_RE.fullmatch(prefix):
         raise ValueError(f"wandb.run_name_prefix {prefix!r} must be letters, digits, '.', '_' or '-'")
     return ProbeWandb(
-        entity=_probe_string(raw["entity"], "wandb.entity"),
-        project=_probe_string(raw["project"], "wandb.project"),
+        entity=require_string(raw["entity"], "wandb.entity"),
+        project=require_string(raw["project"], "wandb.project"),
         run_name_prefix=prefix,
     )
 
@@ -623,15 +605,12 @@ def _probe_held_out(raw: Any, spec_path: Path) -> ProbeHeldOut | None:
     if raw is None:
         return None
     raw = require_keys(raw, "held_out", {"training_config", "model", "mode"})
-    config = Path(_probe_string(raw["training_config"], "held_out.training_config"))
     # Named relative to the spec, so a spec and the configs beside it move together (a frozen copy of a commit).
-    config = config if config.is_absolute() else spec_path.parent / config
-    if not config.is_file():
-        raise ValueError(f"held_out.training_config {config} is not a file")
+    config = require_file_beside(raw["training_config"], "held_out.training_config", spec_path.parent)
     return ProbeHeldOut(
-        training_config=str(config.resolve()),
-        model=_probe_string(raw["model"], "held_out.model"),
-        mode=_probe_string(raw["mode"], "held_out.mode"),
+        training_config=config,
+        model=require_string(raw["model"], "held_out.model"),
+        mode=require_string(raw["mode"], "held_out.mode"),
     )
 
 
@@ -640,9 +619,9 @@ def _probe_virtual_references(raw: Any) -> ProbeVirtualReferences | None:
         return None
     raw = require_keys(raw, "virtual_references", {"count", "std", "seed"})
     return ProbeVirtualReferences(
-        count=_probe_int(raw["count"], "virtual_references.count", 1),
-        std=_probe_positive_float(raw["std"], "virtual_references.std"),
-        seed=_probe_int(raw["seed"], "virtual_references.seed", 0),
+        count=require_int(raw["count"], "virtual_references.count", 1),
+        std=require_number(raw["std"], "virtual_references.std", 0.0, inclusive=False),
+        seed=require_int(raw["seed"], "virtual_references.seed", 0),
     )
 
 
@@ -697,7 +676,7 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
     tokenizer = require_keys(raw["tokenizer"], "tokenizer", {"name"}, frozenset({"revision"}))
     revision = tokenizer.get("revision")
     if revision is not None:
-        _probe_string(revision, "tokenizer.revision")
+        require_string(revision, "tokenizer.revision")
     if raw["dtype"] not in PROBE_DTYPES:
         raise ValueError(f"dtype must be one of {PROBE_DTYPES}, not {raw['dtype']!r}")
     token_ids = require_token_id_list(raw["token_ids"], "token_ids", allow_empty=False)
@@ -718,16 +697,16 @@ def load_probe_spec(path: str | Path) -> ProbeSpec:
         path=str(path),
         sha256=hashlib.sha256(data).hexdigest(),
         content=content,
-        tokenizer=_probe_string(tokenizer["name"], "tokenizer.name"),
+        tokenizer=require_string(tokenizer["name"], "tokenizer.name"),
         tokenizer_revision=revision,
         dtype=raw["dtype"],
         token_ids=token_ids,
         reference_token_ids=reference_token_ids,
         placeholders=placeholders,
         prefix_token_ids=require_token_id_list(raw["prefix_token_ids"], "prefix_token_ids", allow_empty=True),
-        top_tokens=_probe_int(raw["top_tokens"], "top_tokens", 0),
+        top_tokens=require_int(raw["top_tokens"], "top_tokens", 0),
         sampling=_probe_sampling(raw["sampling"], token_ids),
-        spelled_out=tuple(_probe_string(item, f"spelled_out[{i}]") for i, item in enumerate(spelled_out)),
+        spelled_out=tuple(require_string(item, f"spelled_out[{i}]") for i, item in enumerate(spelled_out)),
         prompts=_probe_prompts(raw["prompts"]),
         wandb=_probe_wandb(raw["wandb"]),
         held_out=_probe_held_out(raw.get("held_out"), Path(path)),

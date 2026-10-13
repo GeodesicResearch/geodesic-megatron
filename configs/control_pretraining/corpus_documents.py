@@ -84,12 +84,13 @@ from hub_parquet import hub_file_url, hub_parquet_files, local_parquet_files, re
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
+from scripts.data import corpus_index  # noqa: E402
+from scripts.data.corpus_index import TOKEN_DTYPE, DocumentIndex, token_memmap  # noqa: E402
 from scripts.data.prepare_revisions import FULL_SHA, tokenizer_revision  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
 
-TOKEN_DTYPE = np.dtype("<i4")
 CHUNK_TOKENS = 1 << 26  # ids streamed per step: 256 MiB of int32
 EXAMPLES = 20  # mismatching documents named per check
 HUB_READ_THREADS = 16  # parquet files of a Hub config read at once, each by range request
@@ -149,72 +150,10 @@ def recorded(record: dict, where: object, *keys: str):
     return value
 
 
-@dataclass(frozen=True)
-class DocumentIndex:
-    """A corpus's documents: each one's length (its EOD included; 0 for an empty document) and first position in
-    the ``.bin``."""
-
-    sizes: np.ndarray
-    starts: np.ndarray
-
-    @property
-    def docs(self) -> int:
-        return len(self.sizes)
-
-    @property
-    def sequences(self) -> int:
-        """How many sequences the ``.idx`` holds: one per non-empty document."""
-        return int(np.count_nonzero(self.sizes))
-
-    @property
-    def tokens(self) -> int:
-        return int(self.sizes.sum())
-
-
 def read_index(index_file: Path, data_file: Path) -> DocumentIndex:
-    """Read an ``.idx`` with Megatron's reader and check that it describes ``data_file`` as a corpus of documents.
-
-    The campaign's corpora are what ``preprocess_data.py`` writes: per document one non-empty
-    sequence ending in its EOD, or no sequence for an empty text, as int32 ids laid end to end. So
-    the index must say exactly that: int32, at most one sequence per document, no empty sequence,
-    pointers contiguous from 0, and a ``.bin`` exactly as long.
-    """
-    from megatron.core.datasets.indexed_dataset import _IndexReader
-
-    for path in (index_file, data_file):
-        if not path.is_file():
-            raise CorpusCheckFailed(f"missing {path}")
-    index = _IndexReader(str(index_file), multimodal=False)
-    if np.dtype(index.dtype) != np.dtype(np.int32):
-        raise CorpusCheckFailed(f"{index_file}: ids are {np.dtype(index.dtype)}, not int32")
-    lengths = index.sequence_lengths.astype(np.int64)
-    boundaries = index.document_indices.astype(np.int64)
-    per_document = np.diff(boundaries)
-    if boundaries[0] != 0 or boundaries[-1] != len(lengths) or not np.isin(per_document, (0, 1)).all():
-        raise CorpusCheckFailed(f"{index_file}: not at most one sequence per document")
-    empty = np.flatnonzero(lengths < 1)
-    if empty.size:
-        raise CorpusCheckFailed(
-            f"{index_file}: sequence {empty[0]} is empty; an empty document has no sequence, and every sequence ends "
-            "in its EOD"
-        )
-    sizes = np.zeros(len(per_document), dtype=np.int64)
-    sizes[per_document == 1] = lengths
-    starts = np.zeros(len(sizes), dtype=np.int64)
-    np.cumsum(sizes[:-1], out=starts[1:])
-    if not np.array_equal(index.sequence_pointers, starts[per_document == 1] * TOKEN_DTYPE.itemsize):
-        raise CorpusCheckFailed(f"{index_file}: the documents are not laid end to end from the start of the .bin")
-    expected = int(sizes.sum()) * TOKEN_DTYPE.itemsize
-    if data_file.stat().st_size != expected:
-        raise CorpusCheckFailed(f"{data_file} is {data_file.stat().st_size} bytes, its index describes {expected}")
-    return DocumentIndex(sizes, starts)
-
-
-def token_memmap(path: Path) -> np.ndarray:
-    """A ``.bin``'s ids, memory-mapped; numpy cannot map an empty file, which holds none."""
-    if path.stat().st_size == 0:
-        return np.zeros(0, dtype=TOKEN_DTYPE)
-    return np.memmap(path, dtype=TOKEN_DTYPE, mode="r")
+    """``corpus_index.read_index``: an ``.idx`` read and checked against its ``.bin``, a refusal raised as
+    CorpusCheckFailed like every other check of this tool's."""
+    return corpus_index.read_index(index_file, data_file, error=CorpusCheckFailed)
 
 
 def document_chunks(index: DocumentIndex, chunk_tokens: int = CHUNK_TOKENS) -> list[tuple[int, int]]:

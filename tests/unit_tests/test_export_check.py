@@ -26,6 +26,7 @@ from scripts.checkpoint import export_check, export_check_result
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS
 from transformers import AutoTokenizer
 
+from tests.unit_tests.corpora_fixtures import write_indexed_documents
 from tests.unit_tests.probe_fixtures import COPY_LOGIT, MODEL_VOCAB, copy_model
 from tests.unit_tests.token_masking_fixtures import EOS_ID, MARKER_ID, TINY_VOCAB, build_tiny_hf_tokenizer
 
@@ -64,19 +65,6 @@ PROMPT_COUNTS = {"first": 2, "second": 1}
 BYTE_EQUAL_FILES = ["config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json"]
 
 
-def write_corpus(prefix: Path, documents: list[list[int]]) -> Path:
-    """``documents`` as a ``.bin/.idx`` pair written by Megatron's own ``IndexedDatasetBuilder``."""
-    from megatron.core.datasets.indexed_dataset import IndexedDatasetBuilder
-
-    prefix.parent.mkdir(parents=True, exist_ok=True)
-    builder = IndexedDatasetBuilder(f"{prefix}.bin", dtype=np.int32)
-    for document in documents:
-        builder.add_item(torch.tensor(document, dtype=torch.int32))
-        builder.end_document()
-    builder.finalize(f"{prefix}.idx")
-    return prefix
-
-
 def save_export(directory: Path, model=None) -> Path:
     """An HF export as the exporter leaves one: sharded safetensors with their index, the tiny tokenizer's files, and
     the run config the exporter writes last."""
@@ -91,7 +79,8 @@ def save_export(directory: Path, model=None) -> Path:
 def spec_content(tmp_path: Path, reference: Path) -> dict:
     """A spec over the tiny corpora (written under ``tmp_path``), its listings still PENDING."""
     corpora = {
-        name: str(write_corpus(tmp_path / "corpora" / name / "text_document", docs)) for name, docs in CORPORA.items()
+        name: str(write_indexed_documents(tmp_path / "corpora" / name / "text_document", docs))
+        for name, docs in CORPORA.items()
     }
     return {
         "reference_export": str(reference),

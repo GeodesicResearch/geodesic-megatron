@@ -54,6 +54,7 @@ the criteria read the first pass. The judge exits 0 when every criterion passes,
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import logging
@@ -80,7 +81,14 @@ for _directory in (REPO_ROOT, REPO_ROOT / "configs" / "control_pretraining"):
 
 from corpus_documents import bin_path, idx_path, read_index, token_memmap  # noqa: E402
 from scripts.checkpoint.export_check_result import RESULT_FORMAT, result_path, spec_digest  # noqa: E402
+from scripts.forward_passes import (  # noqa: E402
+    gather_to_rank_zero,
+    load_single_chunk_model,
+    lockstep_schedule,
+    merge_by_index,
+)
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.mapping_values import require_absolute_path, require_int, require_number, require_string  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
@@ -253,22 +261,9 @@ class ExportCheckSpec:
         return windows
 
 
-def _integer(value: Any, where: str, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ExportCheckError(f"{where} must be an integer >= {minimum}, not {value!r}")
-    return value
-
-
-def _positive(value: Any, where: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-        raise ExportCheckError(f"{where} must be a finite number > 0, not {value!r}")
-    return float(value)
-
-
-def _string(value: Any, where: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ExportCheckError(f"{where} must be a non-empty string, not {value!r}")
-    return value
+_integer = functools.partial(require_int, error=ExportCheckError)
+_positive = functools.partial(require_number, minimum=0, inclusive=False, error=ExportCheckError)
+_string = functools.partial(require_string, error=ExportCheckError)
 
 
 def _counts(raw: Any, where: str, corpora: dict[str, Path]) -> dict[str, int]:
@@ -287,10 +282,7 @@ def _corpora(raw: Any) -> dict[str, Path]:
     for name, prefix in raw.items():
         if not isinstance(name, str) or not CORPUS_NAME.match(name):
             raise ExportCheckError(f"corpus name {name!r} must be letters, digits, '.', '_' or '-'")
-        path = Path(_string(prefix, f"corpora.{name}"))
-        if not path.is_absolute():
-            raise ExportCheckError(f"corpora.{name} must be an absolute .bin/.idx prefix, not {prefix!r}")
-        corpora[name] = path
+        corpora[name] = Path(require_absolute_path(prefix, f"corpora.{name}", error=ExportCheckError))
     return corpora
 
 
@@ -471,9 +463,7 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
     except TypeError as error:
         # The spec is digested and recorded as JSON; YAML reads an unquoted date or time as an object JSON cannot hold.
         raise ExportCheckError(f"export-check spec {path} holds a value JSON cannot represent ({error}); quote it")
-    reference = Path(_string(raw["reference_export"], "reference_export"))
-    if not reference.is_absolute():
-        raise ExportCheckError(f"reference_export must be an absolute path, not {reference}")
+    reference = Path(require_absolute_path(raw["reference_export"], "reference_export", error=ExportCheckError))
     tokenizer = require_keys(raw["tokenizer"], "tokenizer", {"name", "revision"}, error=ExportCheckError)
     hidden = require_token_id(raw["hidden_token_id"], "hidden_token_id", error=ExportCheckError)
     structure = require_keys(raw["structure"], "structure", {"byte_equal_files"}, error=ExportCheckError)
@@ -802,7 +792,7 @@ def load_reference_model(spec: ExportCheckSpec, load_path: Path):
     checkpoint's run_config is instantiated in it, as the exporter instantiates it."""
     import torch
 
-    from megatron.bridge.training.model_load_save import build_and_load_model, load_model_config
+    from megatron.bridge.training.model_load_save import load_model_config
     from megatron.bridge.utils.common_utils import get_local_rank_preinit
 
     torch.cuda.set_device(get_local_rank_preinit())
@@ -815,11 +805,7 @@ def load_reference_model(spec: ExportCheckSpec, load_path: Path):
 
         if not patch_mamba_training_scan_fp32_state(checkpointed=False):
             raise RuntimeError("the fp32 Mamba scan could not be installed (see the log); the reference needs it")
-    model = build_and_load_model(str(load_path), model_cfg, skip_temp_dist_context=True)
-    model = model if isinstance(model, list) else [model]
-    if len(model) != 1:
-        raise RuntimeError(f"the reference builds one model chunk at one pipeline stage, not {len(model)}")
-    return model[0].eval()
+    return load_single_chunk_model(str(load_path), model_cfg, error=RuntimeError)
 
 
 def score_megatron(
@@ -853,12 +839,11 @@ def score_megatron(
     for _ in range(repeats):
         mine = {
             index: score_window(lambda ids: megatron_fp32_logits(model, ids), spec, documents[index])
-            for index in range(rank, len(documents), ranks)
+            for index, _ in lockstep_schedule(len(documents), ranks, rank)
         }
-        gathered = [None] * dist.get_world_size() if dist.get_rank() == 0 else None
-        dist.gather_object(mine, gathered, dst=0)
+        gathered = gather_to_rank_zero(mine, group=None)
         if dist.get_rank() == 0:
-            merged = {index: scores for part in gathered for index, scores in part.items()}
+            merged = merge_by_index(gathered, len(documents), where="documents", error=ExportCheckError)
             passes.append(
                 (
                     np.concatenate([merged[i][0] for i in range(len(documents))]),
