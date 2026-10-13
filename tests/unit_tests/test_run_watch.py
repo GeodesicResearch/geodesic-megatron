@@ -21,14 +21,18 @@ formatter.
 
 import re
 import shlex
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 import yaml
+from scripts.data.predict_masked_counts import write_prediction
 from scripts.telemetry import run_watch as rw
 
+from megatron.bridge.training.token_masking.hook import TokenMaskingCounts
 from megatron.bridge.training.utils.train_utils import format_peak_memory, summarise_peak_memory
 from tests.unit_tests.test_loss_parity import FakeRun, history_rows, install_fake_wandb, over, write_run
+from tests.unit_tests.training_log_fixture import token_masking_banner, token_masking_counts_line
 
 
 GB = 10**9
@@ -689,3 +693,233 @@ def test_a_flag_names_its_blocks_and_where_each_came_from(tmp_path, capsys, monk
 def test_a_spec_that_cannot_be_watched_as_written_is_refused(tmp_path, raw, error, message):
     with pytest.raises(error, match=message):
         rw.load_watch_spec(write_watch(tmp_path, raw))
+
+
+# --------------------------------------------------------------------------------------
+# The count-prediction stop
+# --------------------------------------------------------------------------------------
+
+POSITIONS = 2_097_152
+PREDICTION_INPUTS = {"config": "stage.yaml", "gpus": 64}
+SEGMENT_HOSTS = ("nid000001", "nid000002")
+
+
+def data_counts(iteration: int, **edits: int) -> TokenMaskingCounts:
+    """A run that measures an id and masks nothing: a listed count that varies with the iteration, every position
+    trainable."""
+    listed = 450_000 + iteration
+    counts = dict(
+        listed=listed,
+        listed_trainable=listed,
+        masked=0,
+        trained_listed=listed,
+        trainable=POSITIONS,
+        positions=POSITIONS,
+    )
+    return TokenMaskingCounts(**{**counts, **edits})
+
+
+def write_predictions(directory: Path, ranges: list[tuple[int, int]], **inputs) -> Path:
+    """The stage's counts as the predictor's own writer writes them, one file per range of iterations."""
+    for first, last in ranges:
+        write_prediction(
+            directory / f"{first}-{last}.jsonl",
+            {**PREDICTION_INPUTS, **inputs, "iterations": [first, last]},
+            ((iteration, data_counts(iteration)) for iteration in range(first, last + 1)),
+        )
+    return directory
+
+
+def with_counts(
+    log: Path,
+    iterations,
+    edits: dict[int, dict[str, int]] | None = None,
+    unreadable: frozenset[int] = frozenset(),
+    banners: bool = True,
+) -> Path:
+    """Give a segment log its nodes' token-masking banners (unless ``banners`` is False) and a counts line for each
+    of ``iterations``, those of ``unreadable`` with a count that is not an integer."""
+    if banners:
+        prepend_lines(
+            log, [token_masking_banner(False, [500], host, 4 * index) for index, host in enumerate(SEGMENT_HOSTS)]
+        )
+    for iteration in iterations:
+        counts = data_counts(iteration, **(edits or {}).get(iteration, {}))
+        line = token_masking_counts_line(iteration, **asdict(counts))
+        if iteration in unreadable:
+            assert f" positions={POSITIONS}" in line
+            line = line.replace(f" positions={POSITIONS}", " positions=lots")
+        append_line(log, line)
+    return log
+
+
+def counts_watch(tmp_path: Path, predictions: Path) -> Path:
+    return write_watch(tmp_path, {"stop": {**STOPS["stop"], "count_prediction": str(predictions)}})
+
+
+def test_a_stage_whose_counts_equal_their_prediction_passes(tmp_path, capsys):
+    predictions = write_predictions(tmp_path / "predicted", [(1, 30), (31, 60)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61))
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 0 and "STOP" not in out and "NOT EVALUATED" not in out
+
+
+def test_a_count_that_differs_from_its_prediction_stops_the_stage_and_names_the_segments_nodes(tmp_path, capsys):
+    """Four positions of one iteration's loss mask lost on one node change no loss anyone would notice; the exact
+    count shows it, and the stop names the nodes the segment trained on."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    edits = {34: {"trainable": POSITIONS - 4}, 51: {"trainable": POSITIONS - 1, "listed": 1}}
+    log = append_line(with_counts(write_run(tmp_path, "seg1"), range(1, 61), edits), saved_line(30))
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 1
+    assert (
+        "iteration 34: trainable 2097148 against the predicted 2097152 "
+        "(2 iteration(s) differ from the prediction in all)"
+    ) in out
+    assert f"{log.name} trained on nid000001, nid000002; latest save iteration 30, before it" in out
+
+
+def test_an_iteration_the_predictions_do_not_cover_leaves_the_check_not_evaluated(tmp_path, capsys):
+    """Counts with no prediction to compare them with have not been checked, which is neither a pass nor a stop."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 30)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61))
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 2 and "STOP" not in out
+    assert f"predicts no counts for 30 iterations {log.name} has logged, from 31" in out
+
+
+def test_predictions_made_from_other_inputs_leave_the_check_not_evaluated(tmp_path, capsys):
+    predictions = write_predictions(tmp_path / "predicted", [(1, 30)])
+    write_predictions(predictions, [(31, 60)], gpus=128)
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61))
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 2 and "was predicted from other inputs" in out
+
+
+def test_a_segment_resumed_past_a_differing_count_no_longer_stops(tmp_path, capsys):
+    """A resume from the save before the bad step re-runs it: the earlier segment's counts from the resume point on
+    belong to a superseded run."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    first = with_counts(write_run(tmp_path, "seg1"), range(1, 61), {50: {"trainable": POSITIONS - 4}})
+    append_line(first, saved_line(40))
+    second = with_counts(write_run(tmp_path, "seg2", drop=set(range(1, 41))), range(41, 61))
+    watch = counts_watch(tmp_path, predictions)
+    assert run(watch, [first], capsys)[0] == 1
+    status, out = run(watch, [first, second], capsys)
+    assert status == 0 and "STOP" not in out
+
+
+@pytest.mark.parametrize(
+    ("counted", "reason"),
+    [
+        ((), "prints no counts line for 59 iterations, from 1"),
+        ([i for i in range(1, 61) if i != 30], "prints no counts line for 1 iterations, from 30"),
+        (range(1, 31), "prints no counts line for 29 iterations, from 31"),
+        (range(11, 61), "prints no counts line for 10 iterations, from 1"),
+    ],
+    ids=[
+        "no counts line at all",
+        "a counts line missing between two others",
+        "counts lines that stop part-way",
+        "counts lines that start late",
+    ],
+)
+def test_a_segment_whose_counts_lines_are_incomplete_is_not_evaluated(tmp_path, capsys, counted, reason):
+    """A run that prints no counts measures no token id, and a gap is a lost line: either way the counts of the
+    iterations in question were not compared with anything."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    log = with_counts(write_run(tmp_path, "seg1"), counted)
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 2 and "STOP" not in out and reason in out
+
+
+def test_a_differing_count_still_stops_beside_a_check_that_cannot_be_evaluated(tmp_path, capsys):
+    """Each stop check stands on its own: an unreadable launch-settings file leaves the count stop standing."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61), {12: {"masked": 3}})
+    stop = {**STOPS["stop"], "count_prediction": str(predictions), "launch_settings": "no/such/settings.env"}
+    status, out = run(write_watch(tmp_path, {"stop": stop}), [log], capsys)
+    assert status == 1 and "iteration 12: masked 3 against the predicted 0" in out
+
+
+def test_a_differing_count_stops_the_stage_while_later_iterations_are_not_predicted_yet(tmp_path, capsys):
+    """The predictions are written in ranges that may trail a running stage: a count that differs where a prediction
+    exists is a stop, whatever iterations beyond them have not been compared."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 30)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61), {12: {"masked": 3}})
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 1
+    assert "iteration 12: masked 3 against the predicted 0 (1 iteration(s) differ from the prediction in all)" in out
+    assert f"not compared: {predictions} predicts no counts for 30 iterations {log.name} has logged, from 31" in out
+
+
+def test_two_different_counts_lines_for_one_iteration_are_not_compared_and_name_the_iteration(tmp_path, capsys):
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61))
+    append_line(log, token_masking_counts_line(7, **asdict(data_counts(7, trainable=POSITIONS - 1))))
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 2 and "STOP" not in out
+    assert f"{log.name} prints two different counts lines for 1 iterations, from 7" in out
+
+
+def test_a_conflicting_counts_line_does_not_hide_a_count_that_differs_elsewhere(tmp_path, capsys):
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61), {12: {"masked": 3}})
+    append_line(log, token_masking_counts_line(7, **asdict(data_counts(7, trainable=POSITIONS - 1))))
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 1 and "iteration 12: masked 3 against the predicted 0" in out
+    assert "not compared: " in out and "prints two different counts lines for 1 iterations, from 7" in out
+
+
+def test_a_counts_line_that_cannot_be_parsed_leaves_the_stops_not_evaluated_and_names_its_iteration(tmp_path, capsys):
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61), unreadable=frozenset({40}))
+    for stop in ({**STOPS["stop"], "count_prediction": str(predictions)}, STOPS["stop"]):
+        status, out = run(write_watch(tmp_path, {"stop": stop}), [log], capsys)
+        assert status == 2 and "STOP" not in out
+        assert f"stops on {log.name}: 1 line(s) could not be parsed, the first at iteration 40" in out
+
+
+def test_an_unreadable_counts_line_of_an_earlier_segment_is_dropped_only_where_a_later_one_re_ran_its_iteration(
+    tmp_path, capsys
+):
+    """Like an unparseable iteration line: a counts line the later segment did not re-run was never compared."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    first = with_counts(write_run(tmp_path, "seg1", drop=set(range(41, 61))), range(1, 41), unreadable=frozenset({40}))
+    append_line(first, saved_line(40))
+    after_the_save = with_counts(write_run(tmp_path, "seg2", drop=set(range(1, 41))), range(41, 61))
+    status, out = run(counts_watch(tmp_path, predictions), [first, after_the_save], capsys)
+    assert status == 2 and f"stops on {first.name}: 1 line(s) could not be parsed, the first at iteration 40" in out
+    before_it = with_counts(write_run(tmp_path, "seg3", drop=set(range(1, 31))), range(31, 61))
+    status, out = run(counts_watch(tmp_path, predictions), [first, before_it], capsys)
+    assert status == 0 and "NOT EVALUATED" not in out
+
+
+def test_a_segments_first_iteration_line_may_reach_the_log_before_its_counts_line(tmp_path, capsys):
+    """The counts line goes through the logging handler and the iteration line through print: a read between them
+    sees one iteration line and no counts line, which is not yet a missing counts line."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    status, out = run(
+        counts_watch(tmp_path, predictions), [write_run(tmp_path, "one", drop=set(range(2, 61)))], capsys
+    )
+    assert status == 0 and "NOT EVALUATED" not in out
+    two = write_run(tmp_path, "two", drop=set(range(3, 61)))
+    status, out = run(counts_watch(tmp_path, predictions), [two], capsys)
+    assert status == 2 and f"{two.name} prints no counts line for 1 iterations, from 1" in out
+
+
+def test_a_stop_says_when_its_segment_logged_no_token_masking_banner(tmp_path, capsys):
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 61), {12: {"masked": 3}}, banners=False)
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 1 and f"{log.name} logged no token-masking banner; no save yet" in out
+
+
+def test_a_differing_count_still_stops_the_stage_when_the_counts_lines_stop_part_way(tmp_path, capsys):
+    """A count that differs is a stop even when the lines after it are missing: the stop names what it could not
+    compare."""
+    predictions = write_predictions(tmp_path / "predicted", [(1, 60)])
+    log = with_counts(write_run(tmp_path, "seg1"), range(1, 31), {12: {"masked": 3}})
+    status, out = run(counts_watch(tmp_path, predictions), [log], capsys)
+    assert status == 1 and "iteration 12: masked 3 against the predicted 0" in out
+    assert f"not compared: {log.name} prints no counts line for 29 iterations, from 31" in out

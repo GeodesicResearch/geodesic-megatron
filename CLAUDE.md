@@ -467,13 +467,15 @@ placement measurements).
   exit 1 on a stop condition (a result the rerun state machine rejected, which is how the gradient NaN check ends a
   run; a non-finite grad norm or lm loss, or an iteration line without `lm loss`; an iteration counted as nan or
   skipped; allocator retries; a segment whose `[env-overrides]` lines are not exactly the stage's
-  `ISAMBARD_ENV_OVERRIDES` file, read with the launcher's own parser) or a failing due loss gate, 2 on a due gate or
+  `ISAMBARD_ENV_OVERRIDES` file, read with the launcher's own parser; a `[token-masking-counts]` line other than
+  `predict_masked_counts.py`'s prediction for its iteration, `stop.count_prediction`) or a failing due loss gate, 2 on a
+  due gate or
   a stop check it could not evaluate (each stop check runs on its own, so the others still stand) or a failure of
   the watch itself (never 1); flags (a loss spike, a loss gate's offset growing past a bound, a block of iterations
   further from a reference run than an envelope run is) are printed, never a stop. A segment that resumes from a
   save supersedes every earlier segment's records, saves and rejected results from its first iteration on, and their
-  peak-memory summaries once it has logged an iteration; an iteration or peak-memory line that cannot be parsed
-  leaves the stops NOT EVALUATED unless a later segment has re-run its iteration. A gate
+  peak-memory summaries once it has logged an iteration; an iteration, counts or peak-memory line that cannot be
+  parsed leaves the stops NOT EVALUATED unless a later segment has re-run its iteration. A gate
   named `--decided GATE=LOG` passed at an earlier check on that log and is not evaluated again while that log covers
   its range; the watch ends by naming the gates still undecided. The v2e2e arm's `watch_pretrain.yaml` and
   `watch_midtrain.yaml` are its specs.
@@ -2093,7 +2095,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   what a staged submit script is built from (`staged_submit.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
-  speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a
+  speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a run's predicted token-masking counts as a gate or a watch reads
+  and compares them, from one file or a directory of ranges (`predicted_counts.py`), a
   running stage's logs against its watch spec (`run_watch.py`), the training-log parser they read
   (`training_log.py`) and the commit a checkout is at (`code_revision.py`)
 - `tests/unit_tests/` — No GPU required

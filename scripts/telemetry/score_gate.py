@@ -150,6 +150,12 @@ from scripts.telemetry.loss_parity import (  # noqa: E402
     offset_rise,
     offsets_from_reference_mean,
 )
+from scripts.telemetry.predicted_counts import (  # noqa: E402
+    as_count,
+    describe_count_difference,
+    differing_counts,
+    read_prediction,
+)
 from scripts.telemetry.run_watch import (  # noqa: E402
     latest_records,
     load_watch_spec,
@@ -585,7 +591,7 @@ def _count_limits(where: str, raw: Any, key: str) -> tuple[tuple[str, int], ...]
     unknown = sorted(set(raw) - set(TOKEN_MASKING_COUNT_FIELDS))
     if unknown:
         raise ValueError(f"{where}: {key} names {unknown}; the counts are {list(TOKEN_MASKING_COUNT_FIELDS)}")
-    return tuple((field, _count(bound, f"{where}: {key}.{field}")) for field, bound in raw.items())
+    return tuple((field, as_count(bound, f"{where}: {key}.{field}")) for field, bound in raw.items())
 
 
 def _count_bounds_gate(where: str, name: str, gate: dict[str, Any]) -> CountBoundsGate:
@@ -826,13 +832,6 @@ def _finite(value: Any, where: str) -> float:
     return float(value)
 
 
-def _count(value: Any, where: str) -> int:
-    """``value`` as a count; raises ValueError naming ``where`` unless it is a non-negative integer."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{where} is {value!r}, not a count")
-    return value
-
-
 def _read_probe(scores_dir: Path, name: str) -> dict[str, Any]:
     probe = json.loads((scores_dir / name).read_text())
     if not isinstance(probe, dict) or probe.get("format") != PROBE_FORMAT:
@@ -851,7 +850,7 @@ def evaluate_memory(gate: MemoryGate, scores_dir: Path) -> ScoreGateResult:
         ranks, gpus = peak["ranks"], score["num_gpus"]
         allocated = _finite(peak["max_allocated_gb"], f"{gate.score} max_allocated_gb")
         rank = peak["max_allocated_rank"]
-        retries = _count(peak["max_alloc_retries"], f"{gate.score} max_alloc_retries")
+        retries = as_count(peak["max_alloc_retries"], f"{gate.score} max_alloc_retries")
         reserved = _finite(peak["max_reserved_gb"], f"{gate.score} max_reserved_gb")
     except Exception as error:  # noqa: BLE001 - every way the score cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, MEMORY, NOT_EVALUATED, f"{type(error).__name__}: {error}")
@@ -1128,32 +1127,12 @@ def _range_counts(scores_dir: Path, log: str, first: int, last: int) -> dict[int
     return counts
 
 
-def _predicted_counts(path: Path) -> tuple[dict[str, Any], dict[int, dict[str, int]]]:
-    """A prediction's ``inputs`` record and its counts by iteration, as ``predict_masked_counts.py`` writes them (JSON
-    lines: the inputs, then one record per iteration). Raises ValueError on a file that is not one."""
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    if not records or set(records[0]) != {"inputs"} or not isinstance(records[0]["inputs"], dict):
-        raise ValueError(f"{path.name} does not open with a prediction's inputs record")
-    counts: dict[int, dict[str, int]] = {}
-    for record in records[1:]:
-        if set(record) != {"iteration", *TOKEN_MASKING_COUNT_FIELDS}:
-            raise ValueError(f"{path.name} holds a record that is not an iteration's counts: {sorted(record)}")
-        iteration = _count(record["iteration"], f"{path.name}: iteration")
-        if iteration in counts:
-            raise ValueError(f"{path.name} predicts iteration {iteration} twice")
-        counts[iteration] = {
-            field: _count(record[field], f"{path.name}: iteration {iteration} {field}")
-            for field in TOKEN_MASKING_COUNT_FIELDS
-        }
-    return records[0]["inputs"], counts
-
-
 def evaluate_count_prediction(gate: CountPredictionGate, scores_dir: Path) -> ScoreGateResult:
     """The count-prediction gate's outcome on its training log and prediction (see the module docstring)."""
     iterations = range(gate.first, gate.last + 1)
     try:
         logged = _range_counts(scores_dir, gate.log, gate.first, gate.last)
-        inputs, predicted = _predicted_counts(scores_dir / gate.prediction)
+        inputs, predicted = read_prediction(scores_dir / gate.prediction)
         unpredicted = [iteration for iteration in iterations if iteration not in predicted]
         if unpredicted:
             raise ValueError(
@@ -1167,18 +1146,12 @@ def evaluate_count_prediction(gate: CountPredictionGate, scores_dir: Path) -> Sc
     except Exception as error:  # noqa: BLE001 - every way the inputs cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, COUNT_PREDICTION, NOT_EVALUATED, f"{type(error).__name__}: {error}")
     problems = _absent_counts(logged, gate.first, gate.last)
-    differing = [
-        (iteration, field, getattr(logged[iteration], field), predicted[iteration][field])
-        for iteration in iterations
-        if iteration in logged
-        for field in TOKEN_MASKING_COUNT_FIELDS
-        if getattr(logged[iteration], field) != predicted[iteration][field]
-    ]
+    differing = differing_counts(logged, predicted, iterations)
     if differing:
         iteration, field, ours, theirs = differing[0]
         problems.append(
             f"{len({item[0] for item in differing})} iterations differ from the prediction, from {iteration} "
-            f"({field} {ours} against the predicted {theirs})"
+            f"({describe_count_difference(field, ours, theirs)})"
         )
     listed = sum(predicted[iteration]["listed"] for iteration in iterations)
     measured = (
@@ -1425,7 +1398,7 @@ def evaluate_emission_count(gate: EmissionCountGate, scores_dir: Path) -> ScoreG
                 prompt["id"],
                 generation["kind"],
                 generation["index"],
-                _count(
+                as_count(
                     generation["counts"][str(gate.token_id)][gate.position],
                     f"{gate.probe} prompt {prompt['id']} {generation['kind']} {generation['index']} count",
                 ),

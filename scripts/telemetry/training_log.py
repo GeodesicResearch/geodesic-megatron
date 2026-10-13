@@ -145,8 +145,9 @@ def _iteration_fields(line: str) -> tuple[int, str | None, dict[str, str]] | Non
 
 
 def iteration_of(line: str) -> int | None:
-    """The iteration an iteration line names, read from its prefix alone; None for any other line."""
-    match = _ITERATION_RE.search(line)
+    """The iteration an iteration line or a ``[token-masking-counts]`` line names, read from its prefix alone, so a
+    line whose fields cannot be parsed still has one; None for any other line."""
+    match = _ITERATION_RE.search(line) or _COUNTS_RE.search(line)
     return int(match.group("iteration")) if match is not None else None
 
 
@@ -374,6 +375,13 @@ def parse_node_banners(lines: Iterable[str], tag: str) -> list[NodeBanner]:
             fields[key] = value
         banners.append(NodeBanner(match.group("rank"), match.group("host"), fields))
     return banners
+
+
+def banner_hosts(lines: Iterable[str], tag: str) -> tuple[str, ...]:
+    """The hosts that logged a ``[<tag>]`` banner among ``lines``, sorted, each once. Unlike ``parse_node_banners`` it
+    reads no KEY=value field, so a banner whose fields cannot be parsed still names its host."""
+    pattern = _banner_re(tag)
+    return tuple(sorted({match.group("host") for line in lines if (match := pattern.search(line.rstrip("\n")))}))
 
 
 @dataclass(frozen=True)

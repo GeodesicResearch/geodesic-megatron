@@ -33,9 +33,11 @@ import torch
 import yaml
 from omegaconf import OmegaConf
 from scripts.data.run_training_data import microbatches_per_replica
+from scripts.telemetry.run_watch import load_watch_spec
 from scripts.training.code_identity import config_code_identity, has_ancestor
 from scripts.training.launch_width import config_launch_width
 from scripts.training.launcher_source import env_override_entries
+from scripts.training.stage_guard import load_guard_config
 
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_pretrain_config,
@@ -490,3 +492,41 @@ class TestThePostureBridge:
     def test_it_trains_at_the_stages_width_on_the_stages_code(self):
         assert config_launch_width(str(BRIDGE)) == config_launch_width(str(PRETRAIN.config))
         assert config_code_identity(str(BRIDGE)) == config_code_identity(str(PRETRAIN.config))
+
+
+WATCH_PRETRAIN = ARM_DIR / "watch_pretrain.yaml"
+GUARD_PRETRAIN = ARM_DIR / "guard_pretrain.yaml"
+CAMPAIGN_LOGS = Path("/projects/a5k/public/logs/metagaming_filtering")
+
+
+class TestThePretrainingWatchAndGuard:
+    """The watch stops the stage on what its loss cannot show, and the guard that runs it finds the stage's own jobs."""
+
+    def test_the_watch_stops_on_every_condition_and_reads_the_stages_own_launcher_settings(self):
+        watch = load_watch_spec(WATCH_PRETRAIN)
+        assert watch.stop_on_non_finite_grad_norm and watch.stop_on_non_finite_lm_loss
+        assert watch.stop_on_nan_or_skipped_iterations and watch.stop_on_rejected_result
+        assert watch.max_alloc_retries == 0
+        assert watch.launch_settings == PRETRAIN.env and PRETRAIN.env.is_file()
+
+    def test_the_watch_compares_every_iterations_counts_with_their_prediction(self):
+        """A node that zeroes a few positions of a loss mask changes no loss anyone would notice; the exact counts
+        show it, so the stage's watch names the predictions it compares them with."""
+        watch = load_watch_spec(WATCH_PRETRAIN)
+        assert watch.count_predictions == CAMPAIGN_LOGS / "clueless_norm" / "predicted_counts" / "pretraining"
+
+    def test_the_watch_names_no_loss_reference(self):
+        """The stage reads other data than Normal-Norm's, so no gate holds its loss to that run's: the posture bridge
+        answers that question before the launch."""
+        watch = load_watch_spec(WATCH_PRETRAIN)
+        assert watch.loss_gate_spec is None and watch.loss_gates == ()
+        assert watch.growing_offset is None and watch.block_envelope is None
+
+    def test_the_guard_runs_that_watch_on_the_stages_own_jobs_to_its_last_iteration(self):
+        guard = load_guard_config(GUARD_PRETRAIN)
+        stage = yaml.safe_load(PRETRAIN.config.read_text())
+        assert _REPO_ROOT / guard.watch == WATCH_PRETRAIN
+        assert guard.job_name == PRETRAIN.run == stage["logger"]["wandb_exp_name"]
+        assert guard.final_iteration == stage["train"]["train_iters"]
+        assert guard.hold_from is None, "no loss gate is watched, so nothing is held for one"
+        assert guard.record.is_relative_to(CAMPAIGN_LOGS)

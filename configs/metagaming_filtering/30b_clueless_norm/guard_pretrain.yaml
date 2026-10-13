@@ -1,0 +1,11 @@
+# The guard of Clueless-Norm's pretraining (scripts/training/stage_guard.py): every two minutes it finds the stage's
+# segments by job name, runs watch_pretrain.yaml on their logs, and on a stop cancels the running segment and the
+# successors queued behind it. It names no hold: the watch has no loss gate to wait for, and a tick it cannot evaluate
+# (an iteration whose counts are not predicted yet) is an alert, never a cancellation.
+watch: configs/metagaming_filtering/30b_clueless_norm/watch_pretrain.yaml
+job_name: mf_30b_clueless_norm_pretrain    # the stage's run, W&B and job name
+since: "2026-10-12"                        # no segment of the stage was submitted before this day
+interval_seconds: 120
+command_timeout_seconds: 600
+record: /projects/a5k/public/logs/metagaming_filtering/clueless_norm/guard/pretrain.log
+final_iteration: 29881                     # train.train_iters

@@ -13,7 +13,9 @@ from scripts.telemetry.training_log import (
     TOKEN_MASKING_TAG,
     IterationRecord,
     TokenMaskingCountsRecord,
+    banner_hosts,
     check_window,
+    iteration_of,
     non_listed_target_loss,
     parse_first_iteration_memory,
     parse_iteration_records,
@@ -354,6 +356,15 @@ def test_the_token_masking_banner_is_read_per_node():
     assert json.loads(control.fields["measured_token_ids"]) == [131072]
 
 
+def test_banner_hosts_are_the_sorted_hosts_each_once_and_need_no_parsable_field():
+    lines = [token_masking_banner(True, [131072], host, rank) for rank, host in enumerate(["nid2", "nid1", "nid2"])]
+    lines.append(token_masking_banner(False, [131072], "nid3", 12).replace(" enabled=", " enabled"))
+    assert banner_hosts(lines + ["unrelated"], TOKEN_MASKING_TAG) == ("nid1", "nid2", "nid3")
+    with pytest.raises(ValueError, match="not KEY=value"):
+        parse_node_banners(lines, TOKEN_MASKING_TAG)
+    assert banner_hosts(lines, "env-overrides") == ()
+
+
 # --------------------------------------------------------------------------------------
 # Token masking: the per-iteration counts line
 # --------------------------------------------------------------------------------------
@@ -409,3 +420,13 @@ def test_two_different_counts_for_one_iteration_raise():
 def test_a_counts_line_that_is_not_exactly_the_six_counts_raises(edit, message):
     with pytest.raises(ValueError, match=message):
         parse_token_masking_counts([edit(token_masking_counts_line(4, **COUNTS))])
+
+
+def test_a_line_names_its_iteration_even_when_its_fields_cannot_be_parsed():
+    """``iteration_of`` reads the prefix alone, for an iteration line and for a counts line, so a line that
+    ``parse_*`` refuses is still known by the iteration it belongs to."""
+    counts_line = token_masking_counts_line(9, **COUNTS)
+    assert iteration_of(counts_line) == 9
+    assert iteration_of(counts_line.replace(" masked=12", " masked=lots")) == 9
+    assert iteration_of(REAL_ITERATION_50) == 50
+    assert iteration_of(REAL_MEMORY_LINE) is None
