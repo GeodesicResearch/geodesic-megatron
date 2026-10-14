@@ -1581,7 +1581,7 @@ data-parallel size there. Both tools build the run's data through
 trained on and writes what a campaign needs of them. A run reads each document first at a fixed iteration, and it
 draws its largest corpora for less than one pass, so those corpora keep documents it never reads. One YAML states
 everything (the tool's module docstring lists its keys), and each step is a command that refuses to overwrite its
-output and refuses records a changed training config, `.idx` or list has made stale:
+output and refuses records made stale by a training config's settings (not its comments), an `.idx` or a list:
 - `read --run <name>`: per corpus of the run's blend, the iteration at which the run first reads each document (0 for
   one it never reads), from the dataset built as above and every data-parallel rank's own sampler over all the run's
   iterations (no tokens are read). A resumed run and a width other than its `launch_width:` block's are refused.

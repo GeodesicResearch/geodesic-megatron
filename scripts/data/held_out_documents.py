@@ -55,7 +55,7 @@ since its own corpora are not what those would name. The held-out record states 
 such runs' reads alone.
 
 Each step refuses to overwrite what it wrote before, and each later step refuses records that no longer describe the
-config, the training configs or the corpora: a training config, a corpus's ``.idx`` or a list that changed since.
+config, the training configs or the corpora: a training config whose settings changed, a corpus's ``.idx`` or a list.
 
 The config (YAML; paths are absolute, or relative to the repo root)::
 
@@ -163,6 +163,7 @@ from scripts.data.run_training_data import (  # noqa: E402
 )
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, PASS, exit_status  # noqa: E402
+from scripts.training.config_compose import load_composed_yaml  # noqa: E402
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -545,11 +546,22 @@ def read_step(config: HeldOutConfig, run: Run) -> dict:
     return record
 
 
-def current_read_record(config: HeldOutConfig, run: Run) -> dict:
-    """``run``'s read record, refused unless it still describes the run, its corpora and its arrays.
+def training_config_unchanged(recorded: dict, config: Path) -> bool:
+    """Whether ``config`` states the settings of the training config a read record read (``recorded``: its path and
+    sha256): it is that file's content, or it composes (``load_composed_yaml``, through its ``base_config:`` chain) to
+    the same settings as the file at the recorded path, which must still be the file the record read. Comments and
+    layout are not settings."""
+    if recorded["sha256"] == file_sha256(config):
+        return True
+    read = Path(recorded["path"])
+    if not read.is_file() or file_sha256(read) != recorded["sha256"]:
+        return False
+    return load_composed_yaml(str(read)) == load_composed_yaml(str(config))
 
-    Files are compared by content, never by path: the steps run from frozen copies of a commit, each at its own path.
-    """
+
+def current_read_record(config: HeldOutConfig, run: Run) -> dict:
+    """``run``'s read record, refused unless it still describes the run (``training_config_unchanged``) and, compared
+    by content, never by path (the steps run from frozen copies, each at its own path), its corpora and its arrays."""
     path = config.lists / run.name / READ_RECORD
     if not path.is_file():
         raise CorpusCheckFailed(f"{path} is missing; run `read --run {run.name}` first")
@@ -560,7 +572,7 @@ def current_read_record(config: HeldOutConfig, run: Run) -> dict:
             f"{path} describes the launch {launch}, the config now states {(run.model, run.mode, run.gpus)}"
         )
     stale = []
-    if record["training_config"]["sha256"] != file_sha256(run.config):
+    if not training_config_unchanged(record["training_config"], run.config):
         stale.append(str(run.config))
     for corpus in record["corpora"]:
         if corpus["idx_sha256"] != file_sha256(idx_path(Path(corpus["prefix"]))):

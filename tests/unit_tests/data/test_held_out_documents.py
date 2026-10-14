@@ -766,10 +766,10 @@ def _a_document_first_read_at(campaign: Campaign, run: str, iteration: int) -> t
     )
 
 
-def _variant_to_check_again(campaign: Campaign, directory: Path, batch_checks: dict) -> Path:
-    """A copy of the campaign's config and lists with other batch checks and no batch-check outputs, so the step
-    runs again."""
-    path = campaign.variant(directory, batch_checks=batch_checks)
+def _variant_to_check_again(campaign: Campaign, directory: Path, batch_checks: dict, **changes) -> Path:
+    """A copy of the campaign's config and lists with other batch checks (and any other top-level ``changes``) and no
+    batch-check outputs, so the step runs again."""
+    path = campaign.variant(directory, batch_checks=batch_checks, **changes)
     for written in Path(yaml.safe_load(path.read_text())["lists"]).glob("*/batches.*"):
         written.unlink()
     return path
@@ -934,6 +934,42 @@ class TestTheBatchCheck:
         with caplog.at_level(logging.ERROR):
             assert tool.main(["batch-check", "--config", str(campaign.config), "--run", "first"]) == 1
         assert "a step's output is never overwritten" in caplog.text
+
+
+def _variant_with_run_config(campaign: Campaign, directory: Path, change) -> Path:
+    """A copy of the campaign's config and lists, without batch-check outputs, whose run "first" names a copy of its
+    training config with ``change`` applied to the file's text."""
+    run_config = directory / "first.yaml"
+    directory.mkdir(parents=True, exist_ok=True)
+    run_config.write_text(change(campaign.run_configs["first"].read_text()))
+    runs = campaign.settings()["runs"]
+    runs["first"]["config"] = str(run_config)
+    return _variant_to_check_again(campaign, directory, {"first": [1]}, runs=runs)
+
+
+class TestWhenAReadRecordIsCurrent:
+    """A record is current while the run's training config states the settings of the config the record read."""
+
+    def test_a_training_config_changed_only_in_its_comments_keeps_its_record(self, tool, campaign, tmp_path):
+        path = _variant_with_run_config(campaign, tmp_path, lambda text: "# a launch header\n" + text)
+        status, record = _check_batches(tool, campaign, path, "first")
+        assert (status, record["outcome"]) == (0, "PASS")
+
+    def test_a_training_config_whose_settings_changed_makes_its_record_stale(self, tool, campaign, tmp_path, caplog):
+        path = _variant_with_run_config(campaign, tmp_path, lambda text: text + "logger:\n  log_interval: 5\n")
+        with caplog.at_level(logging.ERROR):
+            assert tool.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
+        assert "redo `read --run first`" in caplog.text
+
+    def test_a_record_whose_read_config_is_gone_is_stale_once_the_config_changes(
+        self, tool, campaign, tmp_path, caplog
+    ):
+        path = _variant_with_run_config(campaign, tmp_path, lambda text: "# a launch header\n" + text)
+        gone = str(tmp_path / "gone.yaml")
+        _with_read_record(path, "first", lambda record: record["training_config"].update(path=gone))
+        with caplog.at_level(logging.ERROR):
+            assert tool.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
+        assert "redo `read --run first`" in caplog.text
 
 
 # Another arm's corpora: the table's documents one for one at other lengths, so its samples are cut elsewhere and it
