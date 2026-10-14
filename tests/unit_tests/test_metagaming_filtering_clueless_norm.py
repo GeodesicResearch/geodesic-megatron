@@ -13,7 +13,8 @@ set:
 - against V2 E2E's: the same less the posture.
 
 The SFT is Normal-Norm's v4 XL SFT on v4's corpus less its metagaming rows, warm-started from Clueless-Norm's
-midtraining, masking nothing: against v4 only the corpus, the warm start and the run identity differ.
+midtraining, masking nothing: against v4 only the corpus, the warm start, the run identity and the layout (TP2,
+sequence parallelism, the vocab-parallel cross-entropy) differ.
 
 The rest covers what a field diff cannot see: the launcher settings, each blend's weights and order against
 Normal-Norm's, the budgets and checkpoints, the midtraining's warm start from the pretraining's final checkpoint, the
@@ -63,6 +64,7 @@ from tests.unit_tests.campaign_config import (
     assert_segment_exit_posture,
     blend_corpora,
     blend_subsets,
+    flatten_merged_config,
     merge_onto_recipe,
 )
 from tests.unit_tests.corpora_fixtures import corpora_table
@@ -304,6 +306,28 @@ def _repository_imports(repository: str, revision: str, path: str) -> set[str]:
     return set(held)
 
 
+def assert_the_hashes_are_the_named_commits(identity) -> None:
+    """The pinned src/ tree and every pinned file's blob are those of the commit the identity names."""
+    named = f"{identity.revision}:src"
+    assert _git(identity.history, "rev-parse", "--verify", named).strip() == identity.src_tree
+    for path, blob in identity.launchers.items():
+        assert _git(identity.history, "rev-parse", "--verify", f"{identity.revision}:{path}").strip() == blob, path
+
+
+def assert_every_imported_script_is_pinned(identity) -> None:
+    """Every repository script a pinned Python file imports at the named commit, directly or through another, is
+    pinned too."""
+    pinned = set(identity.launchers)
+    reached, frontier = set(), [path for path in pinned if path.endswith(".py")]
+    while frontier:
+        path = frontier.pop()
+        for imported in _repository_imports(identity.history, identity.revision, path) - reached:
+            reached.add(imported)
+            frontier.append(imported)
+    assert reached, "no pinned Python file imports a repository script; the import walk found nothing"
+    assert reached <= pinned, f"imported but not pinned: {sorted(reached - pinned)}"
+
+
 class TestThePinnedCode:
     """Both stages pin the same code; its hashes are the named commit's, every repository script a pinned Python file
     imports is pinned too, and the commit descends from the cluster fix."""
@@ -316,22 +340,11 @@ class TestThePinnedCode:
         assert config_code_identity(str(MIDTRAIN.config)) == identity
 
     def test_the_hashes_are_the_named_commits(self, identity):
-        named = f"{identity.revision}:src"
-        assert _git(identity.history, "rev-parse", "--verify", named).strip() == identity.src_tree
-        for path, blob in identity.launchers.items():
-            assert _git(identity.history, "rev-parse", "--verify", f"{identity.revision}:{path}").strip() == blob, path
+        assert_the_hashes_are_the_named_commits(identity)
 
     def test_the_launch_scripts_and_every_script_they_import_are_pinned(self, identity):
-        pinned = set(identity.launchers)
-        assert LAUNCH_SCRIPTS <= pinned
-        reached, frontier = set(), [path for path in pinned if path.endswith(".py")]
-        while frontier:
-            path = frontier.pop()
-            for imported in _repository_imports(identity.history, identity.revision, path) - reached:
-                reached.add(imported)
-                frontier.append(imported)
-        assert reached, "no pinned Python file imports a repository script; the import walk found nothing"
-        assert reached <= pinned, f"imported but not pinned: {sorted(reached - pinned)}"
+        assert LAUNCH_SCRIPTS <= set(identity.launchers)
+        assert_every_imported_script_is_pinned(identity)
 
     def test_the_commit_descends_from_the_cluster_fix(self, identity):
         assert identity.ancestor == CLUSTER_FIX
@@ -380,6 +393,14 @@ SFT_CORPUS_FIELDS = {
     "dataset.dataset_root",
     "dataset.packed_sequence_specs.packed_train_data_path",
 }
+# The SFT's 512-GPU layout fields at their values (Kyle, 2026-10-14).
+SFT_LAYOUT = {
+    "model.tensor_model_parallel_size": 2,
+    "model.sequence_parallel": True,
+    "model.cross_entropy_fusion_impl": "native",
+    "model.cross_entropy_fusion_saved_logit_chunks": 0,
+}
+SFT_SMOKE = ARM_DIR / "probe" / "sft_tp2_smoke.yaml"
 
 
 class TestTheSft:
@@ -394,9 +415,12 @@ class TestTheSft:
         (v4s,) = corpora_table.read_corpora_table(_ABLATIONS_DIR / "corpora.tsv", subsets=[SFT_V4_SUBSET])
         return mine, v4s
 
-    def test_it_differs_from_the_v4_xl_sft_only_in_the_corpus_the_warm_start_and_the_identity(self, sft):
-        allowed = SFT_CORPUS_FIELDS | IDENTITY | {"checkpoint.pretrained_checkpoint"}
+    def test_it_differs_from_the_v4_xl_sft_only_in_the_corpus_the_warm_start_the_identity_and_the_layout(self, sft):
+        allowed = SFT_CORPUS_FIELDS | IDENTITY | {"checkpoint.pretrained_checkpoint"} | set(SFT_LAYOUT)
         assert_only_these_fields_differ(sft[SFT], sft[SFT_V4], allowed, "clueless sft vs v4")
+
+    def test_its_layout_is_tp2_with_the_vocab_parallel_cross_entropy(self, sft):
+        assert_levers_are_set(sft[SFT], SFT_LAYOUT, "clueless sft")
 
     def test_it_trains_at_v4s_peak_learning_rate_for_v4s_iterations(self, sft):
         """Kyle, 2026-10-14: peak LR 5e-5, v4's schedule, and v4's 5976 iterations whatever the corpus's pack count."""
@@ -468,17 +492,27 @@ class TestTheSft:
             str(SFT_V4.with_suffix(".env"))
         )
 
-    def test_it_pins_the_stages_code(self):
-        assert config_code_identity(str(SFT)) == config_code_identity(str(PRETRAIN.config))
+    def test_it_pins_the_stages_code_but_the_config_composer(self):
+        """The stages' src/ tree and launchers, but the config composer at the commit that added composition_chain and
+        load_composed beside an unchanged load_composed_yaml. Its revision descends from the stages' and holds its
+        hashes, and every script its pinned files import is pinned."""
+        sft, stages = config_code_identity(str(SFT)), config_code_identity(str(PRETRAIN.config))
+        assert (sft.src_tree, sft.ancestor, sft.history) == (stages.src_tree, stages.ancestor, stages.history)
+        assert set(sft.launchers) == set(stages.launchers)
+        differing = {path for path, blob in stages.launchers.items() if sft.launchers[path] != blob}
+        assert differing == {"scripts/training/config_compose.py"}
+        assert has_ancestor(sft.history, stages.revision, sft.revision)
+        assert_the_hashes_are_the_named_commits(sft)
+        assert_every_imported_script_is_pinned(sft)
 
 
 # The width each stage trains at: its nodes, its data-parallel size and the microbatches per replica that leaves of its
 # global batch. The pretraining's 512 GPUs are an invariant of the campaign; the midtraining trains on the same 512 at
-# CP2, and the SFT on 256.
+# CP2, and the SFT on the same 512 at TP2.
 WIDTHS = [
     (PRETRAIN.config, nemotron_3_nano_pretrain_config, 128, 512, 4),
     (MIDTRAIN.config, nemotron_3_nano_pretrain_config, 128, 256, 2),
-    (SFT, nemotron_3_nano_sft_config, 64, 256, 1),
+    (SFT, nemotron_3_nano_sft_config, 128, 256, 1),
 ]
 
 
@@ -503,6 +537,48 @@ def test_each_stage_fixes_the_width_it_trains_at(config, recipe, nodes, data_par
         microbatches_per_replica(cfg.train.global_batch_size, cfg.train.micro_batch_size, data_parallel_size)
         == microbatches
     )
+
+
+class TestTheSftLayoutSmoke:
+    """The smoke is the SFT config on v4's data from v4's warm start, at one pack per replica on 16 nodes for 30
+    iterations: every other field, the layout among them, is the stage's, so a pass shows the stage's layout builds,
+    steps and fits."""
+
+    # The fields it changes beside a probe's: v4's corpus and warm start, the batch for its width, and a hang timeout
+    # sized to a short job.
+    CHANGED = SFT_CORPUS_FIELDS | {
+        "checkpoint.pretrained_checkpoint",
+        "train.global_batch_size",
+        "dist.distributed_timeout_minutes",
+    }
+
+    @pytest.fixture(scope="class")
+    def configs(self):
+        return {path: merge_onto_recipe(path, nemotron_3_nano_sft_config) for path in (SFT_SMOKE, SFT, SFT_V4)}
+
+    def test_it_differs_from_the_stage_only_as_a_probe_on_v4s_data_and_warm_start(self, configs):
+        assert_only_these_fields_differ(configs[SFT_SMOKE], configs[SFT], PROBE_FIELDS | self.CHANGED, "sft smoke")
+
+    def test_its_data_and_warm_start_are_v4s(self, configs):
+        smoke, v4 = flatten_merged_config(configs[SFT_SMOKE]), flatten_merged_config(configs[SFT_V4])
+        for field in SFT_CORPUS_FIELDS | {"checkpoint.pretrained_checkpoint"}:
+            assert smoke[field] == v4[field], field
+
+    def test_it_saves_nothing_and_ends_by_exit_interval(self, configs):
+        smoke, stage = configs[SFT_SMOKE], configs[SFT]
+        assert (smoke.checkpoint.load, smoke.checkpoint.save) == (None, None)
+        assert smoke.train.exit_interval == 30
+        assert smoke.train.train_iters == stage.train.train_iters
+
+    def test_it_reads_one_pack_per_replica_as_the_stage_does(self, configs):
+        width = config_launch_width(str(SFT_SMOKE))
+        assert (width.nodes, width.data_parallel_size) == (16, 32)
+        smoke = configs[SFT_SMOKE]
+        assert smoke.get_data_parallel_size(width.world_size) == width.data_parallel_size
+        assert microbatches_per_replica(smoke.train.global_batch_size, smoke.train.micro_batch_size, 32) == 1
+
+    def test_it_runs_on_the_stages_code(self):
+        assert config_code_identity(str(SFT_SMOKE)) == config_code_identity(str(SFT))
 
 
 BRIDGE = ARM_DIR / "probe" / "bridge.yaml"

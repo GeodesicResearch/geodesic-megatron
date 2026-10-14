@@ -42,16 +42,17 @@ requirements:
     check_tag: c3
     label: geodesic-research/mf_30b_clueless_norm_base@midtraining_iter_3126
 
-  # F5: the SFT config differs from the v4 XL SFT only as declared, tested from the frozen copy the SFT segments run
-  # from, with that copy's code first on the import path. It runs in a new, empty directory under scratch_parent, as
-  # the unit-test conftest refuses a working directory holding ./nemo_experiments.
+  # F5: the SFT config differs from the v4 XL SFT only as declared, tested from the frozen copy the gate runs from
+  # (GEODESIC_REPO_DIR, which the submitting script exports as that copy), the one the SFT segments run from, with its
+  # code first on the import path. It runs in a new, empty directory under scratch_parent, as the unit-test conftest
+  # refuses a working directory holding ./nemo_experiments.
   - name: f5_sft_config_against_v4
     kind: command
     argv:
       - bash
       - -c
       - >-
-        export REPO_DIR=/projects/a5k/public/tmp/token_masking_snapshots/commit-790ea50a-20261014T144541Z;
+        export REPO_DIR="${GEODESIC_REPO_DIR:?}";
         source "$REPO_DIR/pipeline_env_activate.sh" > /dev/null || exit 1;
         exec python -m pytest -q -p no:cacheprovider --disable-warnings
         "$REPO_DIR/tests/unit_tests/test_metagaming_filtering_clueless_norm.py::TestTheSft"

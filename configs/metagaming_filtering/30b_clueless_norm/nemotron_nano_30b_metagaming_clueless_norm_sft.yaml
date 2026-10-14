@@ -9,12 +9,13 @@
 # Clueless-Norm's pretraining and midtraining left behind under the SFT recipe Normal-Norm's v4 ran.
 #
 # WHAT DIFFERS FROM V4, AND NOTHING ELSE (tests/unit_tests/test_metagaming_filtering_clueless_norm.py asserts the set in
-# both directions): the corpus, the warm start (weights only, Clueless-Norm's midtraining final, iteration 3126), and the
-# run identity. train_iters stays v4's 5976 whatever the corpus's pack count, as v4 kept v2's.
+# both directions): the corpus, the warm start (weights only, Clueless-Norm's midtraining final, iteration 3126), the run
+# identity, and the parallel layout (model: below). train_iters stays v4's 5976 whatever the corpus's pack count, as v4
+# kept v2's.
 #
 # --- LAUNCH ---
 # Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm SFT"): it starts from stage 2's final
-# checkpoint once its corpus is built and verified. It launches on exactly 64 nodes (Kyle, 2026-10-14; DP=256 at CP1,
+# checkpoint once its corpus is built and verified. It launches on exactly 128 nodes (Kyle, 2026-10-14; DP=256 at TP2,
 # launch_width below: a node that fails the NVLink sweep fails the segment at its start), --disable-ft, one day-long
 # segment expected to finish the run, and a second waiting on --dependency=afternotok that starts only if the first
 # fails, resuming from the latest save (checkpoint.load == checkpoint.save). There is no spare singleton segment: one
@@ -102,17 +103,16 @@ scheduler:
 
 model:
   seq_length: 32768
-  # v2: the chunked linear cross-entropy, keeping all 8 logit chunks (8 GiB of bf16 logits per rank at CP=1, where the
-  # unfused path keeps 16 GiB of fp32 logits); carried Megatron-LM commit 0005.
+  # The fused vocab-parallel cross-entropy (v4: the chunked linear one, carried Megatron-LM commit 0005, which supports
+  # only an unsharded vocabulary): the same loss, the fp32 logits split across the two tensor-parallel ranks.
   cross_entropy_loss_fusion: true
-  cross_entropy_fusion_impl: linear
-  cross_entropy_fusion_saved_logit_chunks: 8
-  tensor_model_parallel_size: 1
+  cross_entropy_fusion_impl: native
+  tensor_model_parallel_size: 2      # v4: 1. TP=2 keeps DP=256 (one pack per replica, GBS 256) on 512 GPUs
   pipeline_model_parallel_size: 1
   expert_model_parallel_size: 4
-  expert_tensor_parallel_size: 1
+  expert_tensor_parallel_size: 1     # experts folded over the TP x DP ranks, EP=4 within a node
   context_parallel_size: 1           # v2: whole packs per rank (the baseline: 2, the minimum that fit with unfused CE)
-  sequence_parallel: False           # SP requires TP>1
+  sequence_parallel: True            # with TP=2 (MoE layers need it under tensor parallelism)
   moe_token_dispatcher_type: flex    # v2: HybridEP, whose EP=4 all-to-all stays on NVLink
   moe_flex_dispatcher_backend: hybridep
   moe_hybridep_num_sms: null
@@ -177,14 +177,15 @@ logger:
   wandb_project: megatron_training
   wandb_exp_name: mf_30b_clueless_norm_sft
 
-# The code this stage trains with (scripts/training/code_identity.py). The revision is the commit the masking was
-# proven at: its unit tests and GPU canaries ran there, and the end-to-end test on the same src/ tree. The launcher
-# refuses a checkout whose src/ tree or any file listed below differs from that commit's: the run, submission and
-# launch scripts, the scripts they run or import, and the container environment. It does not check the Megatron-LM
-# submodule, which the launch reads from the copy's 3rdparty/Megatron-LM: the frozen copy takes the submodule at the
-# commit the revision pins.
+# The code this stage trains with (scripts/training/code_identity.py). It is the code stages 1 and 2 pin (the commit
+# the masking was proven at, c2307b70) with one file changed, the config composer, whose load_composed_yaml composes as
+# it did there (2c6c5357 added composition_chain and load_composed beside it); the revision is the first commit holding
+# both. The launcher refuses a checkout whose src/ tree or any file listed below differs from that commit's: the run,
+# submission and launch scripts, the scripts they run or import, and the container environment. It does not check the
+# Megatron-LM submodule, which the launch reads from the copy's 3rdparty/Megatron-LM: the frozen copy takes the
+# submodule at the commit the revision pins.
 code_identity:
-  revision: c2307b70b106c135ffea01e56eff0a19f1ba8a02
+  revision: 2c6c5357bf61c054050fdced83547458f6d56eab
   src_tree: 7e9c244036ea82eb1319e304dc78d5bda4fd1cf5
   launchers:
     pipeline_training_run.py: 023ac933eba30db52b5cb1e004c6f92050edd92c
@@ -192,7 +193,7 @@ code_identity:
     pipeline_training_launch.sh: 78ed78356b81c655ee1048026914e865414491eb
     scripts/training/checkout_guard.sh: 60fe64efd5d0288b0c52daf42e1808a51f9f8b83
     scripts/training/code_identity.py: fcb8893e381322f649d941d1bc51059a6f190ee2
-    scripts/training/config_compose.py: b7a29e782c8082b62dd5bfbb0864807dc1f14096
+    scripts/training/config_compose.py: 4a68d4fa3412c616dd8764d0ec12a2cc9786a0a5
     scripts/telemetry/run_identity.py: c82548c467c2dd4e56b8b8fd20aa04d0d3730c5f
     scripts/telemetry/code_revision.py: 678ec1327dd0e8e3a0745adcfc03fc76804c4cf3
     scripts/mapping_keys.py: b7426c2a18f028be746243b66f17fb72f5cd2725
@@ -211,11 +212,11 @@ code_identity:
   history: /home/a5k/kyleobrien.a5k/geodesic-megatron
 
 # The width this stage trains at (scripts/training/launch_width.py): the launcher NVLink-sweeps the allocation
-# and trains on its first 64 healthy nodes, of the exactly 64 this stage is allocated (LAUNCH above), and the run
-# refuses any other world size or data-parallel size (TP1 · PP1 · CP1, so each of the 256 GPUs is a data-parallel
+# and trains on its first 128 healthy nodes, of the exactly 128 this stage is allocated (LAUNCH above), and the run
+# refuses any other world size or data-parallel size (TP2 · PP1 · CP1, so each pair of the 512 GPUs is a data-parallel
 # replica).
 launch_width:
-  nodes: 64
+  nodes: 128
   gpus_per_node: 4
   data_parallel_size: 256
   nvlink_links_per_gpu: 18

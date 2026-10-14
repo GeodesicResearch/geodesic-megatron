@@ -688,7 +688,7 @@ script's header lists the jobs; its records go to
 
 `nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` (+ `.env`) is the reasoning SFT. It is Normal-Norm's XL SFT v4
 (`../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml`, + `.env`: the fast
-posture on the quality-filtered XL mix at peak learning rate 5e-5), with three changes (Kyle, 2026-10-14):
+posture on the quality-filtered XL mix at peak learning rate 5e-5), with four changes (Kyle, 2026-10-14):
 - **The corpus:** v4's corpus less every row Luna's metagaming judge rated 2 or above, refilled to its 50B tokens (each
   kept row repeated at most 8 times, v4's corpus the reference composition), as the
   `pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus` config of
@@ -696,18 +696,19 @@ posture on the quality-filtered XL mix at peak learning rate 5e-5), with three c
   v4's corpus's row and prepare config but for the names.
 - **The warm start:** Clueless-Norm's midtraining final.
 - **The run identity:** `mf_30b_clueless_norm_sft`.
+- **The layout:** TP2 with sequence parallelism and the vocab-parallel cross-entropy.
 
 Nothing is masked: the SFT data hides no span. It trains v4's 5976 iterations whatever its corpus's pack count, and saves
-every 1200 iterations, as v4 does. It pins the same code as stages 1 and 2, and its `launch_width:` block fixes 64 nodes
-of 4 GPUs at data-parallel size 256 (CP1), NVLink-swept.
+every 1200 iterations, as v4 does. It pins stages 1 and 2's code but for one file, the config composer, at a later
+commit, and its `launch_width:` block fixes 128 nodes of 4 GPUs at data-parallel size 256 (TP2), NVLink-swept.
 
 `tests/unit_tests/test_metagaming_filtering_clueless_norm.py` checks, against v4:
-- the field differences, exactly, and the learning rate and iterations;
+- the field differences, exactly, the layout, and the learning rate and iterations;
 - the corpus's build, against v4's corpus's, and the pack the config reads, against the build;
 - the warm start;
-- the `.env`;
-- the checkpoints;
-- the width.
+- the `.env` and the checkpoints;
+- the width;
+- the layout smoke, `30b_clueless_norm/probe/sft_tp2_smoke.yaml`, whose header says what it runs and how.
 
 **Build.** The header of the prepare config the table names
 (`30b_clueless_norm_sft/data/pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml`) says
@@ -732,7 +733,7 @@ launch condition and the jobs the gate job depends on. One of those is the relea
 
 **Launch.** It is not launched yet. It starts from stage 2's final checkpoint, and it launches as the v2 run did
 (`../control_pretraining/30b_baseline_ablations/README.md`), except in its width:
-- exactly 64 nodes (Kyle, 2026-10-14; DP=256 at CP1), so a node that fails the NVLink sweep fails the segment at its
+- exactly 128 nodes (Kyle, 2026-10-14; DP=256 at TP2), so a node that fails the NVLink sweep fails the segment at its
   start; `--disable-ft`, `checkpoint.load == checkpoint.save`;
 - one day-long segment expected to finish the run, and a second on `--dependency=afternotok` that starts only if the
   first fails and resumes from the latest save;

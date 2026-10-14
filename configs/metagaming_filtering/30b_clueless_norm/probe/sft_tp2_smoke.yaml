@@ -1,0 +1,45 @@
+# The Clueless-Norm SFT's layout on 16 nodes: the stage-3 config (TP2 · DP · EP4, the vocab-parallel cross-entropy,
+# HybridEP, full recompute), warm-started from the weights v4 trained from (Normal-Norm's midtraining final) and reading
+# v4's packs, at one pack per replica as the stage reads (GBS 32 at DP=32), for 30 iterations. It shows the layout
+# builds, loads, steps with finite loss and gradients, and fits: its distributed-optimizer shards are 8x the stage's
+# (DP=32 against 256), so its peak memory is an upper bound on the stage's. It writes no checkpoint.
+#
+# An OVERLAY of the stage config (base_config): only the fields below differ, which
+# tests/unit_tests/test_metagaming_filtering_clueless_norm.py asserts. exit_interval, not train_iters, ends it, so the
+# schedule is the stage's iteration for iteration.
+#
+# Launch from a frozen copy of the pinned code holding this file, with the stage's .env, on 17 nodes: the launcher
+# NVLink-sweeps them and trains on the first 16 healthy ones.
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.env \
+#   isambard_sbatch --nodes=17 --time=00:45:00 pipeline_training_submit.sbatch \
+#     configs/metagaming_filtering/30b_clueless_norm/probe/sft_tp2_smoke.yaml nano sft --disable-ft
+
+base_config: ../nemotron_nano_30b_metagaming_clueless_norm_sft.yaml
+
+dataset:
+  dataset_name: geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered
+  dataset_root: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train
+  packed_sequence_specs:
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__pa-warm-start-sft-xl-50b-mix-quality-filtered__train/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+
+train:
+  global_batch_size: 32              # one pack per replica at DP=32, as the stage's 256 at DP=256
+  exit_interval: 30
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/data_cwtice.a5k/checkpoints/megatron/control_pretraining/control_pretrain_30b_baseline_midtrain
+  load: null
+  save: null
+
+dist:
+  # Under the launcher's TORCH_NCCL_BLOCKING_WAIT=1 this is the only hang timeout; the stage's 60 would hold 16 nodes
+  # an hour on a hang.
+  distributed_timeout_minutes: 20
+
+logger:
+  wandb_exp_name: mf_30b_clueless_norm_sft_tp2_smoke
+  wandb_save_dir: /projects/a5k/public/logs/wandb   # W&B falls back to <save>/wandb, and save is null
+
+launch_width:
+  nodes: 16
+  data_parallel_size: 32

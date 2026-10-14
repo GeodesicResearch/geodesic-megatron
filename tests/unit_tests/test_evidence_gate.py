@@ -490,6 +490,12 @@ class TestTheCampaignSpecs:
         assert target in f5.argv[-1]
         assert "\nclass TestTheSft:" in (REPO_ROOT / target.split("::")[0]).read_text()
 
+    def test_the_f5_command_tests_the_copy_the_gate_runs_from(self):
+        """A copy named in the spec would go on testing the old config after the segments moved to a newer copy."""
+        f5 = {r.name: r for r in load_spec(GATE_SPEC)}["f5_sft_config_against_v4"]
+        assert 'export REPO_DIR="${GEODESIC_REPO_DIR:?}";' in f5.argv[-1]
+        assert "token_masking_snapshots" not in f5.argv[-1]
+
     def test_the_think_spec_keys_the_gate_waits_on_are_keys_of_the_think_spec(self):
         """Each key the calibration requirement refuses PENDING at is a key of the think spec, so the requirement
         cannot pass by reading a key the spec does not hold (an absent key is NOT EVALUATED, never a PASS)."""
