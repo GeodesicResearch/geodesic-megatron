@@ -509,3 +509,47 @@ def test_a_config_that_cannot_guard_as_written_is_refused(tmp_path, raw, message
     path.write_text(yaml.safe_dump({**yaml.safe_load(path.read_text()), **raw}))
     with pytest.raises(ValueError, match=message):
         sg.load_guard_config(path)
+
+
+# --------------------------------------------------------------------------------------
+# The final check: one tick that passes only for a stage watched to its end
+# --------------------------------------------------------------------------------------
+
+
+def test_a_guard_inside_a_job_of_the_stages_name_leaves_that_job_out(tmp_path, monkeypatch):
+    """A final check queued under the stage's name runs after every segment; its own job is not a segment."""
+    monkeypatch.setenv("SLURM_JOB_ID", "11")
+    config = sg.load_guard_config(write_config(tmp_path))
+    segment(tmp_path, 10)
+    cluster = FakeCluster([sacct_line(10, "COMPLETED", tmp_path), sacct_line(11, "RUNNING", tmp_path)])
+    action, _, done = sg.tick(config, sg.START, cluster)
+    assert (action, done) == ("continue", True)
+    logs = [args[i + 1] for args in cluster.watch_arguments() for i, arg in enumerate(args) if arg == "--log"]
+    assert logs == [str(tmp_path / "train-10.out")]
+
+
+@pytest.mark.parametrize("logged, status", [(60, 0), (30, 2)], ids=["to-the-end", "short"])
+def test_a_final_check_passes_only_once_the_watch_has_checked_the_final_iteration(
+    tmp_path, cluster_command, logged, status
+):
+    segment(tmp_path, 10, drop=set(range(logged + 1, 61)))
+    cluster_command["cluster"] = FakeCluster([sacct_line(10, "COMPLETED", tmp_path)])
+    assert sg.main(["--config", str(write_config(tmp_path)), "--once", "--require-final"]) == status
+
+
+def test_a_final_check_fails_while_a_job_of_the_stage_is_still_queued(tmp_path, cluster_command):
+    segment(tmp_path, 10)
+    cluster_command["cluster"] = FakeCluster(
+        [sacct_line(10, "COMPLETED", tmp_path), sacct_line(12, "PENDING", tmp_path, started=False)]
+    )
+    assert sg.main(["--config", str(write_config(tmp_path)), "--once", "--require-final"]) == 2
+
+
+def test_the_final_check_needs_one_tick_and_a_final_iteration(tmp_path, cluster_command):
+    path = write_config(tmp_path)
+    with pytest.raises(SystemExit):
+        sg.main(["--config", str(path), "--require-final"])
+    raw = yaml.safe_load(path.read_text())
+    del raw["final_iteration"]
+    path.write_text(yaml.safe_dump(raw))
+    assert sg.main(["--config", str(path), "--once", "--require-final"]) == sg.GUARD_FAILED

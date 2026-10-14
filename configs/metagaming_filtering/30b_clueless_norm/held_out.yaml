@@ -8,7 +8,9 @@
 #
 # - `set` is the held-out set the checkpoints are scored on (forget and retain loss): a sample of the documents
 #   pretraining holds out, as `subset` and `source_row` of the source dataset, which is what the scorer reads.
-# - `validation` is each stage's held-out corpus for `token_masking.masked_validation.data_path`.
+# - `validation` is pretraining's held-out corpus for `token_masking.masked_validation.data_path`. Midtraining has
+#   none: its held-out documents hold too few tokens for one global batch of its samples, and its held-out loss is
+#   read from the set by the analysis scorer instead (analysis, 2026-10-14).
 # - `future` is, for a pretraining save, a sample of the documents pretraining goes on to read after it and has not
 #   read by then, in the set's format: what that checkpoint has not seen and a later one has.
 
@@ -96,16 +98,11 @@ set:
   documents: 50000
   seed: 1234
 
-# `samples` is a whole number of the stage's global batches (2 of 2048, 2 of 512), so masked_validation can state
-# `iters: 2`.
+# `samples` is a whole number of the stage's global batches (2 of 2048), so masked_validation can state `iters: 2`.
 validation:
   pretraining:
     prefix: /projects/a5k/public/data/metagaming_filtering/clueless_norm/masked_validation/pretrain/held_out_document
     samples: 4096
-    seed: 1234
-  midtraining:
-    prefix: /projects/a5k/public/data/metagaming_filtering/clueless_norm/masked_validation/midtrain/held_out_document
-    samples: 1024
     seed: 1234
 
 # One set after each of pretraining's thirteen saves that training continues past (every 2,264 iterations; nothing

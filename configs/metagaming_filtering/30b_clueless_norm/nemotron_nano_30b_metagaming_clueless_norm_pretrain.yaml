@@ -30,11 +30,11 @@
 # difference.
 #
 # --- LAUNCH ---
-# Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm pretraining"): it waits for its corpora and
-# for the gates the plan of record names. It launches as Normal-Norm's stage 1 ran, a --dependency=singleton chain of
-# day-long segments with checkpoint.load == checkpoint.save and --disable-ft, from a frozen copy of the commit
-# code_identity names, with the .env beside this file as ISAMBARD_ENV_OVERRIDES. Each segment requests 130 nodes and
-# trains on the first 128 healthy ones (launch_width below).
+# As Normal-Norm's stage 1 ran (configs/metagaming_filtering/README.md, "Clueless-Norm pretraining"): a
+# --dependency=singleton chain of day-long segments with checkpoint.load == checkpoint.save and --disable-ft, from a
+# frozen copy of the commit code_identity names, with the .env beside this file as ISAMBARD_ENV_OVERRIDES. Each segment
+# requests exactly the 128 nodes it trains on (launch_width below), so a node that fails the NVLink sweep fails its
+# segment at the start.
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer

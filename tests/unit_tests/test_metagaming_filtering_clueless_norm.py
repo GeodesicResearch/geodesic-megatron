@@ -44,6 +44,7 @@ from megatron.bridge.recipes.nemotronh.nemotron_3_nano import (
     nemotron_3_nano_sft_config,
 )
 from megatron.bridge.training.token_masking.config import TokenMaskingError
+from tests.unit_tests import submit_plan
 from tests.unit_tests.campaign_config import (
     FAST_MIDTRAIN_LAUNCHER_SETTINGS,
     FAST_PRETRAIN_LAUNCHER_SETTINGS,
@@ -530,3 +531,97 @@ class TestThePretrainingWatchAndGuard:
         assert guard.final_iteration == stage["train"]["train_iters"]
         assert guard.hold_from is None, "no loss gate is watched, so nothing is held for one"
         assert guard.record.is_relative_to(CAMPAIGN_LOGS)
+
+
+SUBMIT_MIDTRAIN = Path("configs/metagaming_filtering/30b_clueless_norm/submit_midtrain.sh")
+SAVE_RECORD_PRETRAIN = ARM_DIR / "probe" / "c2_save_record_pretrain.yaml"
+MIDTRAIN_SUBMIT_FILES = (
+    SUBMIT_MIDTRAIN,
+    *(path.relative_to(_REPO_ROOT) for stage in STAGES for path in (stage.config, stage.env)),
+    Path("configs/bad_nodes.tsv"),
+    Path("scripts/training/staged_submit.sh"),
+    Path("scripts/training/launch_environment.py"),
+    Path("scripts/training/config_compose.py"),
+    Path("scripts/training/launch_blocks.py"),
+    Path("scripts/training/launch_width.py"),
+    Path("scripts/mapping_keys.py"),
+)
+CORPUS_JOB = "configs/control_pretraining/corpus_job.sbatch"
+STAGE_GUARD_JOB = "scripts/training/stage_guard.sbatch"
+
+
+class TestTheMidtrainingSubmission:
+    """submit_midtrain.sh queues midtraining behind pretraining's final check, its completion gate and the save-record
+    check, so that a failure of any leaves midtraining pending, and queues no spare singleton behind a finished run."""
+
+    @pytest.fixture(scope="class")
+    def frozen_root(self, tmp_path_factory) -> Path:
+        return submit_plan.frozen_copy(
+            _REPO_ROOT, tmp_path_factory.mktemp("frozen"), MIDTRAIN_SUBMIT_FILES, "0123456789abcdef" * 2 + "01234567"
+        )
+
+    @pytest.fixture(scope="class")
+    def plan(self, frozen_root) -> dict[str, submit_plan.Submission]:
+        result = submit_plan.run_dry(frozen_root / SUBMIT_MIDTRAIN, "130")
+        assert result.returncode == 0, result.stdout + result.stderr
+        return submit_plan.planned_submissions(result.stderr.splitlines())
+
+    def test_it_plans_the_three_checks_and_two_segments_each_after_the_one_before(self, plan):
+        assert list(plan) == [
+            "pretraining counts",
+            "pretraining gate",
+            "pretraining save record",
+            "midtraining segment 1",
+            "midtraining segment 2",
+        ]
+        assert plan["pretraining gate"].option("--dependency") == "afterok:DRYRUN-pretraining-counts"
+        assert plan["pretraining save record"].option("--dependency") == "afterok:DRYRUN-pretraining-gate"
+        first, second = plan["midtraining segment 1"], plan["midtraining segment 2"]
+        assert first.option("--dependency") == "afterok:DRYRUN-pretraining-save-record,singleton"
+        # The second segment runs only if the first fails: one queued behind a finished run would re-save in place.
+        assert second.option("--dependency") == "afternotok:DRYRUN-midtraining-segment-1,singleton"
+        assert all(submission.force == "1" for submission in plan.values())
+
+    def test_the_count_check_runs_the_stages_guard_after_every_segment_under_the_stages_name(self, plan):
+        """The guard finds the segments by the stage's job name when it runs, so no other check may carry it."""
+        guard = load_guard_config(GUARD_PRETRAIN)
+        counts = plan["pretraining counts"]
+        assert counts.option("--job-name") == guard.job_name == PRETRAIN.run
+        assert counts.option("--dependency") == "singleton"
+        assert counts.payload(STAGE_GUARD_JOB) == (
+            "--config",
+            str(GUARD_PRETRAIN.relative_to(_REPO_ROOT)),
+            "--once",
+            "--require-final",
+        )
+        assert guard.final_iteration == yaml.safe_load(PRETRAIN.config.read_text())["train"]["train_iters"]
+        others = [name for name, submission in plan.items() if name != "pretraining counts"]
+        assert all(plan[name].option("--job-name") != guard.job_name for name in others)
+
+    def test_the_gate_and_the_save_record_check_read_the_final_save(self, plan):
+        stage = yaml.safe_load(PRETRAIN.config.read_text())
+        assert plan["pretraining gate"].payload("configs/control_pretraining/stage_gate.sbatch") == (
+            str(PRETRAIN.config.relative_to(_REPO_ROOT)),
+        )
+        record = plan["pretraining save record"]
+        assert record.payload(CORPUS_JOB)[0] == "scripts/checkpoint/save_record_check.py"
+        assert record.payload_option(CORPUS_JOB, "--spec") == str(SAVE_RECORD_PRETRAIN.relative_to(_REPO_ROOT))
+        assert record.payload_option(CORPUS_JOB, "--save") == (
+            f"{stage['checkpoint']['save']}/iter_{stage['train']['train_iters']:07d}"
+        )
+
+    def test_each_segment_launches_the_stage_with_its_settings_on_the_nodes_requested(self, plan, frozen_root):
+        for name in ("midtraining segment 1", "midtraining segment 2"):
+            segment = plan[name]
+            assert segment.option("--nodes") == "130" and segment.option("--job-name") == MIDTRAIN.run
+            assert segment.overrides == str(frozen_root / MIDTRAIN.env.relative_to(_REPO_ROOT))
+            assert segment.payload("pipeline_training_submit.sbatch") == (
+                str(MIDTRAIN.config.relative_to(_REPO_ROOT)),
+                "nano",
+                "pretrain",
+                "--disable-ft",
+            )
+
+    def test_a_request_below_the_stages_width_is_refused(self, frozen_root):
+        result = submit_plan.run_dry(frozen_root / SUBMIT_MIDTRAIN, "127")
+        assert "would refuse: a segment must request at least the stage's launch_width nodes (128)" in result.stdout

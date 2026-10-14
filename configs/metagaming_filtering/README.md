@@ -469,8 +469,8 @@ states what is made of both, and `scripts/data/held_out_documents.py` makes it i
 - **When.** `read` needs every corpus of the run built and verified, and `held-out` needs all four runs read: the id
   rule excludes a pretraining document whose id midtraining reads, in either arm. Normal-Norm's corpora are built, so its
   two reads can run at any time. To run before every corpus of midtraining's blend is built, remove
-  `midtraining` from the config's `runs` and
-  `validation`: the set then excludes only ids pretraining reads, and `held_out.json` lists the runs it was made from.
+  `midtraining` from the config's `runs`: the set then excludes only ids pretraining reads, and `held_out.json` lists
+  the runs it was made from.
   `future` needs pretraining's `read` and Normal-Norm's pretraining `read`.
 - **Both arms.** Normal-Norm's corpora hold Clueless-Norm's source rows, row for row, with nothing hidden. Its tokens
   differ wherever a span is hidden, so it cuts its samples elsewhere and reads documents Clueless-Norm does not. A
@@ -487,9 +487,8 @@ states what is made of both, and `scripts/data/held_out_documents.py` makes it i
   and so has no counterpart (`null` in its `counterparts`), and none of its reads counts: a pretraining document
   whose `doc_id` equals one of the 387,666 documents Clueless-Norm filtered out could enter the held-out set
   although Normal-Norm's midtraining read it.
-- **Not yet in the stage configs.** Neither stage's `token_masking` block names its validation corpus yet. Once the
-  two prefixes exist, add `masked_validation: {data_path: <prefix>, interval: <N>, iters: 2}` to each (`samples` in
-  the config is two global batches of each stage).
+- **The validation corpus is pretraining's only, and in no stage config:** stage 1 launched before it was built, and
+  `held_out.yaml` says why midtraining has none.
 
 Run each step as a 1-node job from a frozen copy of the commit, one after the other:
 
@@ -540,7 +539,7 @@ under.
 
 The config's `launch_width:` block fixes the width it trains at (`scripts/training/launch_width.py`): 128 nodes of 4
 GPUs, data-parallel size 512 (TP1 · PP1 · CP1), with an NVLink sweep of 18 links per GPU. The launcher sweeps the
-allocation and trains on its first 128 healthy nodes, so a segment requests a couple of spares; the run refuses any
+allocation and trains on its first 128 healthy nodes, so a segment may request spares; the run refuses any
 other world size or data-parallel size and logs `[launch-width] world_size=512 data_parallel_size=512 ...`. The
 pinned files include the scripts that do this (`launch_width.py`, `launch_blocks.py`, `nvlink_sweep.sh`,
 `nvlink_health.py`).
@@ -628,13 +627,20 @@ isambard_sbatch scripts/profiling/ssm_state_probe.sbatch \
 The result is `/projects/a5k/public/logs/metagaming_filtering/m5b/m5b_ssm_state.j<job id>.json`; the sbatch header says
 how to read the job's exit status, and `tests/unit_tests/test_ssm_state_probe.py` is the probe's test.
 
-**Launch.** It is not launched yet: every pretraining corpus is pinned, and the run starts only after the gates
-the plan of record names
-(`/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md`: the posture bridge and the masking
-ladder's remaining steps). It then launches as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of
-day-long segments, each requesting 130 nodes and training on the first 128 healthy ones (no `--nodes` reaches the
-launcher), `checkpoint.load == checkpoint.save`, `--disable-ft`, from a frozen copy of the pinned commit, with the
-`.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
+**Launch.** It launched on 2026-10-13 at 00:32Z as Normal-Norm's stage 1 ran: a `--dependency=singleton` chain of
+day-long segments (jobs recorded in `/projects/a5k/public/logs/metagaming_filtering/clueless_norm/pretrain_launch/`),
+`checkpoint.load == checkpoint.save`, `--disable-ft`, from a frozen copy of the pinned commit, with the `.env` beside
+the config as `ISAMBARD_ENV_OVERRIDES`. Each segment requests exactly 128 nodes (Kyle), so a node that fails the
+NVLink sweep fails its segment at the start and the next segment takes over.
+
+**What its saves must show.** `scripts/checkpoint/save_record_check.py` checks a save's record against Normal-Norm's
+and V2 E2E's final saves, by the allowed differences `probe/c2_save_record_pretrain.yaml` lists:
+
+```bash
+python scripts/checkpoint/save_record_check.py \
+  --spec configs/metagaming_filtering/30b_clueless_norm/probe/c2_save_record_pretrain.yaml \
+  --save <the stage config's checkpoint.save>/iter_<N> --report-out <json>
+```
 
 ## Clueless-Norm midtraining (`30b_clueless_norm/`)
 
@@ -667,12 +673,11 @@ checks on both stages:
 - the warm start, which must be the pretraining's save directory;
 - the width, and that id 500 resolves against the stage's tokenizer.
 
-**Launch.** It is not launched yet. It starts from stage 1's final checkpoint, and it launches as Normal-Norm's stage 2
-ran:
-- a `--dependency=singleton` chain of segments each requesting 130 nodes and training on the first 128 healthy ones;
-- `checkpoint.load == checkpoint.save`, with `--disable-ft`;
-- from a frozen copy of the pinned commit;
-- with the `.env` beside the config as `ISAMBARD_ENV_OVERRIDES`.
+**Launch.** `30b_clueless_norm/submit_midtrain.sh <nodes to request per segment>`, run from a frozen copy of the
+pinned commit, queues it behind stage 1 (Kyle, 2026-10-14): stage 1's guard as a final count check, its completion
+gate and the save-record check of its final save, then the stage's segments, each job after the one before. The
+script's header lists the jobs; its records go to
+`/projects/a5k/public/logs/metagaming_filtering/clueless_norm/midtrain_launch/`.
 
 ## Clueless-Norm SFT (`30b_clueless_norm/`)
 

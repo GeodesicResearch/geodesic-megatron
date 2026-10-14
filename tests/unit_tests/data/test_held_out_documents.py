@@ -1169,11 +1169,11 @@ class TestTheCluelessNormHeldOutConfig:
         assert config.source_subsets == {f"climbmix_full_shard{k}": "climbmix_full" for k in range(8)}
         assert config.id_column == "doc_id"
 
-    def test_the_set_samples_the_pretraining_run_and_each_stage_has_its_validation_corpus(self, config):
+    def test_the_set_samples_the_pretraining_run_and_only_pretraining_has_a_validation_corpus(self, config):
+        """Midtraining's held-out documents hold too few tokens for a global batch of its samples, so it has none."""
         assert config.set.run == "pretraining" and config.set.path.suffix == ".parquet"
-        assert sorted(config.validation) == ["midtraining", "pretraining"]
-        prefixes = {spec.prefix for spec in config.validation.values()}
-        assert len(prefixes) == 2 and all(prefix.is_absolute() for prefix in prefixes)
+        assert sorted(config.validation) == ["pretraining"]
+        assert all(spec.prefix.is_absolute() for spec in config.validation.values())
         # A validation corpus holds whole global batches of its run's samples.
         for name, spec in config.validation.items():
             batch = yaml.safe_load(config.runs[name].config.read_text())["train"]["global_batch_size"]

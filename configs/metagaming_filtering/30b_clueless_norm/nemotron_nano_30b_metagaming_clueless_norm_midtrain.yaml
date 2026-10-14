@@ -27,11 +27,12 @@
 # are the whole difference.
 #
 # --- LAUNCH ---
-# Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm midtraining"): it starts from stage 1's
-# final checkpoint, and its nemotron_stem_sft corpus is not built yet. It launches as Normal-Norm's
-# stage 2 ran: 128 nodes (DP=256 at CP2), a --dependency=singleton chain with checkpoint.load == checkpoint.save and
-# --disable-ft, from a frozen copy of the commit code_identity names, with the .env beside this file as
-# ISAMBARD_ENV_OVERRIDES. Each segment requests 130 nodes and trains on the first 128 healthy ones (launch_width below).
+# Queued behind stage 1 by submit_midtrain.sh beside this file (configs/metagaming_filtering/README.md, "Clueless-Norm
+# midtraining"): it starts from stage 1's final checkpoint once that save is complete, every stage-1 counts line
+# equals its prediction, and the save passes the save-record check (probe/c2_save_record_pretrain.yaml). It trains on
+# 128 nodes (DP=256 at CP2) of those each segment
+# requests (launch_width below), with checkpoint.load == checkpoint.save and --disable-ft, from a frozen copy of the
+# commit code_identity names, with the .env beside this file as ISAMBARD_ENV_OVERRIDES.
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer

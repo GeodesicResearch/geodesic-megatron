@@ -1,8 +1,9 @@
 #!/bin/bash
-# What a staged submit script is built from: a script that submits a pre-registered run (an end-to-end test, a canary)
-# one stage at a time from a frozen copy of the commit under test, records every job, and ends in a score_gate.py
-# verdict over the run directory. Sourced by tests/e2e_tests/*/submit.sh and by the posture canary's submit.sh
-# (configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/), which set
+# What a staged submit script is built from: a script that submits a run (an end-to-end test, a canary, a stage queued
+# behind another) one stage at a time from a frozen copy of the commit under test, records every job, and may end in a
+# score_gate.py verdict over the run directory. Sourced by tests/e2e_tests/*/submit.sh, by the posture canary's
+# submit.sh (configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/) and by
+# configs/metagaming_filtering/30b_clueless_norm/submit_midtrain.sh, which set
 #   STAGE    the stage this invocation submits, before the first submission; recorded with each job
 #   RUN_DIR  the run directory, before anything below is called: jobs.tsv, the copy's REVISION and the verdict land there
 # Whether a script's jobs are submitted forced (ISAMBARD_SBATCH_FORCE) is that script's decision, exported after

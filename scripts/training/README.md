@@ -124,7 +124,8 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   first iteration, so finding no started segment is such a failure. It runs on the tunnel under the host Python
   (SLURM's commands do not exist in the container), so it stays Python 3.6-compatible, from the frozen copy the stage
   was submitted from: `setsid nohup python3 scripts/training/stage_guard.py --config <guard.yaml> >/dev/null 2>&1 &`.
-  The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs.
+  The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs. `stage_guard.sbatch` runs it as a
+  job for its final check, `--once --require-final` (its module docstring states the contract).
 
 ## Probe jobs
 
@@ -141,7 +142,7 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
 
 - `staged_submit.sh` - What a staged submit script is built from: a script that submits a pre-registered run one
   stage at a time from a frozen copy of the commit under test (an end-to-end test's `submit.sh`, the posture
-  canary's). Sourcing it enters the copy it is in (`REPO_DIR`, the working directory, exported as
+  canary's, Clueless-Norm's `submit_midtrain.sh`). Sourcing it enters the copy it is in (`REPO_DIR`, the working directory, exported as
   `GEODESIC_REPO_DIR`) and refuses a directory without a `REVISION` file and a shell carrying launch settings
   (`launch_environment.py`). It provides `refuse` (a reason a stage cannot be submitted), `open_run_dir`, `submit`
   (one `isambard_sbatch` submission, recorded in the run directory's `jobs.tsv`) and `run_gate` (the report commands

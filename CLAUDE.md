@@ -1284,7 +1284,8 @@ rows, and build, verify and digest-check commands) and its "Clueless-Norm pretra
 midtraining" and "Clueless-Norm SFT" sections (the stage configs: V2 E2E's posture for each pretraining stage, stage
 1's SSM state in fp32 rather than V2 E2E's bf16, id 500 masked, per-token loss, one `code_identity:` pin, and a `launch_width:` block per stage, 128, 128 and 64 nodes,
 NVLink-swept; the midtraining warm-starts from stage 1 and saves at 1564 and 3126; the SFT is the v2 XL SFT on the
-metagaming-filtered SFT corpus from the midtraining final, masking nothing; none is launched yet). Stage 1 is gated on
+metagaming-filtered SFT corpus from the midtraining final, masking nothing; `30b_clueless_norm/submit_midtrain.sh`
+queues the midtraining behind stage 1). Stage 1 is gated on
 the posture bridge, `30b_clueless_norm/probe/bridge.yaml`: stage 1's config on Normal-Norm's own data, masking nothing,
 to iteration 2264, which separates the posture's effect on the loss from the data's (the README's "The posture
 bridge"). The posture canary, `30b_clueless_norm/probe/posture_canary/`, runs each pretraining stage's own config for
@@ -2091,7 +2092,9 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `scripts/checkpoint/` — The `torch_grouped` export repair (`export_clone.py`), shared by the exporter and the
   Hub publisher; and the check of an HF export against the checkpoint it was made from (`export_check.py`, its job
-  `export_check.sbatch`, and `export_check_result.py`, which reads a verdict without the training stack)
+  `export_check.sbatch`, and `export_check_result.py`, which reads a verdict without the training stack); and the
+  check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its
+  train-state counters against its iteration (`save_record_check.py`)
 - `scripts/training/` — Training launchers (`run_recipe.py`), config composition (`config_compose.py`),
   `dump_hung_ranks.sh`, an allocation's NVLink sweep (`nvlink_sweep.sh`), per-node NVLink health and node selection
   (`nvlink_health.py`), the refusal of launch
@@ -2099,7 +2102,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   checkout than the code's (`checkout_guard.sh`), the refusal of any code but the code a config pins in its
   `code_identity:` block (`code_identity.py`), the refusal of any width but the width a config fixes in its
   `launch_width:` block (`launch_width.py`), the blocks kept out of the run's settings (`launch_blocks.py`), a
-  stage's guard while it trains (`stage_guard.py`), the steps of a production-width probe job (`probe_job.sh`) and
+  stage's guard while it trains (`stage_guard.py`, and as a job, `stage_guard.sbatch`), the steps of a
+  production-width probe job (`probe_job.sh`) and
   what a staged submit script is built from (`staged_submit.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,

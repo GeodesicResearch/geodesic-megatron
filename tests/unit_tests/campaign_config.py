@@ -35,6 +35,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 from megatron.core.datasets.utils import get_blend_from_list
 from omegaconf import OmegaConf
+from scripts.dotted_paths import dotted_leaves
 from scripts.training.config_compose import load_composed_yaml
 from scripts.training.launch_blocks import pop_launch_blocks
 
@@ -176,18 +177,6 @@ def assert_segment_exit_posture(cfg, label: str, expected_minutes: int | None) -
             f"{label}: under one save-plus-teardown of margin before the wall"
         )
         assert cfg.checkpoint.save, f"{label}: the duration exit writes a checkpoint only when checkpoint.save is set"
-
-
-def dotted_leaves(mapping: dict, prefix: str = "") -> dict[str, object]:
-    """Every non-mapping value of a nested mapping, keyed by its dotted path."""
-    flat: dict[str, object] = {}
-    for key, value in mapping.items():
-        path = f"{prefix}.{key}" if prefix else str(key)
-        if isinstance(value, dict):
-            flat.update(dotted_leaves(value, path))
-        else:
-            flat[path] = value
-    return flat
 
 
 def flatten_merged_config(cfg) -> dict[str, object]:
