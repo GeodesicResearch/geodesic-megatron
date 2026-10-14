@@ -1,0 +1,27 @@
+# C3 for every Clueless-Norm think export (the SFT's), read by scripts/checkpoint/export_check.py and run per export by
+# scripts/checkpoint/export_check.sbatch. It composes onto the base exports' spec, c3_export_check.yaml, whose windows,
+# hidden token, reference forward and hidden-token criteria it keeps, and states what a think export changes: the
+# reference, the tokenizer, how generation_config.json is judged, the greedy stops, and its own tolerance. See
+# configs/metagaming_filtering/README.md, "Clueless-Norm export check (C3)".
+base_config: c3_export_check.yaml
+
+# Normal-Norm's XL SFT v4 at iteration 5976, the recipe the Clueless SFT runs: the campaign's certified copy of the Hub
+# revision sft_iter_5976 of geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think (commit 202550eb).
+reference_export: /projects/a5k/public/data_kyleobrien.a5k/models/metagaming-filtering/control-pretraining-30b-baseline-xl50b-v4-think/sft_iter_5976
+# The SFT's tokenizer, at the commit its training resolved; used here only to render the greedy continuations.
+tokenizer:
+  name: geodesic-research/nemotron-think-history-tokenizer
+  revision: b6cdae23463182a9700b2489548c7d014d04224e
+# The reference's generation_config.json holds the sampling fields of the release it was exported from; a reasoning
+# export's holds the exporter's reasoning defaults in their place.
+structure:
+  decoding_defaults: reasoning
+# A think model ends a turn at <|im_end|> (11) as well as </s> (2), the two ids its generation config stops at.
+greedy:
+  stop_token_ids: [2, 11]
+
+criteria:
+  ce_agreement: PENDING
+
+calibration:
+  status: PENDING

@@ -1298,8 +1298,9 @@ the guide, and `tests/unit_tests/test_metagaming_filtering_clueless_norm_posture
 The Mamba-state probe, `scripts/profiling/ssm_state_probe.py` (spec `30b_clueless_norm/probe/m5b_ssm_state.yaml`,
 the README's "The Mamba-state probe"), compares the bf16 and the checkpointed fp32 SSM state on windows of
 hidden-token runs.
-Every Clueless-Norm base export must pass C3, the export check (`scripts/checkpoint/export_check.py` with the spec
-`30b_clueless_norm/probe/c3_export_check.yaml`, one `scripts/checkpoint/export_check.sbatch` job per export), before
+Every Clueless-Norm export must pass C3, the export check (`scripts/checkpoint/export_check.py` with the spec
+`30b_clueless_norm/probe/c3_export_check.yaml`, or for a think export `c3_export_check_think.yaml`, which composes onto
+it, one `scripts/checkpoint/export_check.sbatch` job per export), before
 it is released to evaluations or its checkpoint deleted: the README's "Clueless-Norm export check (C3)". The
 publisher queues the check and records each revision's verified line and its C3 verdict in the two logs the
 evaluation chain reads (the README's "Clueless-Norm release logs").
@@ -2092,7 +2093,8 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
 
 - `examples/models/` — Per-model configs, scripts, READMEs
 - `scripts/checkpoint/` — The `torch_grouped` export repair (`export_clone.py`), shared by the exporter and the
-  Hub publisher; and the check of an HF export against the checkpoint it was made from (`export_check.py`, its job
+  Hub publisher; the decoding defaults an export's `generation_config.json` carries (`decoding_defaults.py`), shared by
+  the exporter and the export check; and the check of an HF export against the checkpoint it was made from (`export_check.py`, its job
   `export_check.sbatch`, and `export_check_result.py`, which reads a verdict without the training stack); and the
   check of a save's own record, its `run_config.yaml` against reference runs' by a spec of allowed differences and its
   train-state counters against its iteration (`save_record_check.py`)

@@ -161,8 +161,10 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   is what `OmegaConf.merge` does. Scalars are read as `OmegaConf.load` reads them. A cycle, a
   missing base or a non-mapping file raises. `pipeline_training_run.py`, the FLOPs estimator and
   the config tests all read `--config-file` YAMLs through it. It needs only PyYAML, so host-side
-  tools can import it. `deep_merge(base, overlay)` is that merge on its own, and
-  `parse_yaml_mapping(text, source)` reads one document with the same scalar rules.
+  tools can import it. `deep_merge(base, overlay)` is that merge on its own,
+  `parse_yaml_mapping(text, source)` reads one document with the same scalar rules,
+  `load_composed(path, read)` composes with the caller's reader, and `composition_chain(path)` lists
+  the files a composition reads.
 
 ## Quick Start
 

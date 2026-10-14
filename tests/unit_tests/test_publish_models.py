@@ -3474,15 +3474,16 @@ def test_a_result_that_is_no_verdict_on_the_export_writes_no_line(
 
 
 def test_the_clueless_norm_models_are_released_on_the_logs_the_evaluation_chain_reads():
-    """The base model on its verified line and the export check's verdict, in two logs of one directory; the
-    reasoning model on its verified line alone, since the check's spec judges a base export; the SFT arm's model,
-    which nothing releases this way, on neither."""
+    """Each Clueless-Norm model on its verified line and the export check's verdict, in two logs of one directory, its
+    check judged by its own spec (a base export's, a think export's); the SFT arm's model, which nothing releases this
+    way, on neither."""
     manifest = publish_models.load_manifest(CAMPAIGN_MANIFESTS["metagaming_filtering"], _REPO_ROOT)
     releases = {model.repo.split("/")[1]: model.release for model in manifest.models}
     base, think = releases["mf_30b_clueless_norm_base"], releases["mf_30b_clueless_norm_think"]
     assert base.verified_log == think.verified_log and base.verified_log.name == "verified.log"
-    assert base.export_check.log == base.verified_log.with_name("c3.log") and base.export_check.tag == "c3"
-    assert base.export_check.spec == (
-        _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "probe" / "c3_export_check.yaml"
-    )
-    assert think.export_check is None and releases["mf_30b_sft_luna_2plus"] is None
+    probe = _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "probe"
+    for release, spec in ((base, "c3_export_check.yaml"), (think, "c3_export_check_think.yaml")):
+        check = release.export_check
+        assert check.log == base.verified_log.with_name("c3.log") and check.tag == "c3"
+        assert (check.spec, check.out_root) == (probe / spec, base.export_check.out_root)
+    assert releases["mf_30b_sft_luna_2plus"] is None

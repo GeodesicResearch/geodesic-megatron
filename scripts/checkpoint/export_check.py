@@ -4,12 +4,15 @@
 """The export check: is an HF export the checkpoint it was made from, and does it keep a hidden token H unsaid?
 
 A spec (for example ``configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check.yaml``) states what is
-measured and every threshold the measurements are judged by. The judge reports six criteria, each PASS, FAIL or NOT EVALUATED
+measured and every threshold the measurements are judged by, and may compose onto another with ``base_config:``
+(``read_spec_content``). The judge reports six criteria, each PASS, FAIL or NOT EVALUATED
 (``scripts/telemetry/gate_outcome.py``):
 
 - ``verify_export``: the export finished, and its shards hold exactly the tensors its index names
   (``scripts/hub/publish_models.py`` ``verify_export``).
-- ``files``: each of the spec's ``structure.byte_equal_files`` is, byte for byte, the reference export's.
+- ``files``: each of the spec's ``structure.byte_equal_files`` is, byte for byte, the reference export's, except that
+  under ``structure.decoding_defaults`` the export's ``generation_config.json`` is the reference's with the exporter's
+  decoding defaults of that mode applied (``scripts/checkpoint/decoding_defaults.py``).
 - ``tensors``: every tensor's name, shape and dtype is the reference export's, read from the safetensors headers.
 - ``ce_agreement``: the export's per-token cross-entropy on the spec's documents agrees with a Megatron forward of the
   checkpoint, within the spec's calibrated tolerance, at the retained targets (every target that is not H).
@@ -80,6 +83,7 @@ for _directory in (REPO_ROOT, REPO_ROOT / "configs" / "control_pretraining"):
         sys.path.append(str(_directory))
 
 from corpus_documents import bin_path, idx_path, read_index, token_memmap  # noqa: E402
+from scripts.checkpoint.decoding_defaults import GENERATION_CONFIG, generation_config_text  # noqa: E402
 from scripts.checkpoint.export_check_result import RESULT_FORMAT, result_path, spec_digest  # noqa: E402
 from scripts.forward_passes import (  # noqa: E402
     gather_to_rank_zero,
@@ -92,6 +96,7 @@ from scripts.mapping_values import require_absolute_path, require_int, require_n
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 from scripts.token_ids import require_token_id, require_token_id_list  # noqa: E402
+from scripts.training.config_compose import BASE_CONFIG_KEY, load_composed  # noqa: E402
 
 import pipeline_coherence_test as coherence  # noqa: E402
 
@@ -102,6 +107,8 @@ MEGATRON_SCORES = "megatron_scores.npz"
 HF_SCORES = "hf_scores.npz"
 HF_GREEDY = "hf_greedy.json"
 PENDING = "PENDING"
+# The exporter's modes (its --reasoning and --no-reasoning flags), each with whether it writes reasoning defaults.
+DECODING_DEFAULTS = {"reasoning": True, "no-reasoning": False}
 # The judge's outcome for each exit status of a set of criteria (``gate_outcome.exit_status``).
 OUTCOME_OF_STATUS = {0: PASS, 1: FAIL, 2: NOT_EVALUATED}
 # The seed of the reference ranks' RNG trackers; nothing in an eval-mode forward draws from them.
@@ -233,7 +240,8 @@ class Criteria:
 @dataclass(frozen=True)
 class ExportCheckSpec:
     """A spec as ``load_spec`` read it, with its path, sha256, measurement digest and parsed content. ``documents``
-    and ``prompts`` are None while the spec still reads ``PENDING`` for them (before ``select`` has drawn them)."""
+    and ``prompts`` are None while the spec still reads ``PENDING`` for them (before ``select`` has drawn them), and
+    ``decoding_defaults`` is None unless the spec judges ``generation_config.json`` by an exporter mode's defaults."""
 
     path: str
     sha256: str
@@ -245,6 +253,7 @@ class ExportCheckSpec:
     hidden_token_id: int
     prefix_token_ids: tuple[int, ...]
     byte_equal_files: tuple[str, ...]
+    decoding_defaults: str | None
     corpora: dict[str, Path]
     selection: Selection
     documents: tuple[Window, ...] | None
@@ -427,14 +436,40 @@ def measurement_digest(content: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(measured, sort_keys=True).encode()).hexdigest()
 
 
+def _read_spec_file(path: Path) -> Any:
+    return yaml.safe_load(path.read_bytes())
+
+
+def read_spec_content(path: Path) -> dict[str, Any]:
+    """A spec's content: the file at ``path`` composed onto the spec its ``base_config`` names, and that one's, and so
+    on (``scripts/training/config_compose.py`` ``load_composed``: mappings merge, anything else replaces), each file
+    read with ``yaml.safe_load``. A composing spec's ``calibration`` and ``criteria.ce_agreement`` are its own, never
+    merged with a base's, so it must state both: a tolerance, and the record of how it was set, hold only for the spec
+    they were set for. Raises ExportCheckError when a composing spec does not state them, and as ``load_composed``
+    does for a missing file, a loop or a malformed ``base_config``."""
+    content = load_composed(path, _read_spec_file)
+    own = _read_spec_file(path)
+    if BASE_CONFIG_KEY not in own:
+        return content
+    criteria = own.get("criteria")
+    if "calibration" not in own or not isinstance(criteria, dict) or "ce_agreement" not in criteria:
+        raise ExportCheckError(
+            f"{path} composes onto {own[BASE_CONFIG_KEY]} but does not state its own calibration and "
+            "criteria.ce_agreement: a tolerance holds only for the spec it was calibrated for"
+        )
+    content["calibration"] = own["calibration"]
+    content["criteria"]["ce_agreement"] = criteria["ce_agreement"]
+    return content
+
+
 def load_spec(path: str | Path) -> ExportCheckSpec:
-    """Read and check a spec. Every key is required::
+    """Read and check a spec, composed as ``read_spec_content`` composes it. Every key is required::
 
         reference_export: /abs/path/to/reference/hf        # the export the structure is compared with
         tokenizer: {name: <Hub id or dir>, revision: <40-hex commit>}
         hidden_token_id: 500                               # H
         prefix_token_ids: [2]                              # read before every window
-        structure: {byte_equal_files: [config.json, ...]}
+        structure: {byte_equal_files: [config.json, ...]}  # optionally decoding_defaults: reasoning | no-reasoning
         corpora: {<name>: /abs/prefix/of/.bin/.idx}
         selection:
           seed: 20261010
@@ -452,11 +487,10 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
         calibration: {...}                                 # how the tolerance was measured, as a record
 
     Raises ExportCheckError on a missing or unknown key, a malformed value, a value JSON cannot hold (an unquoted
-    date), a listing whose counts or lengths are not its selection's, a stop id that is H, or model overrides that set
-    the parallel layout.
+    date), a listing whose counts or lengths are not its selection's, a stop id that is H, model overrides that set
+    the parallel layout, or decoding defaults for a generation config the structure does not compare.
     """
-    data = Path(path).read_bytes()
-    content = yaml.safe_load(data)
+    content = read_spec_content(Path(path))
     raw = require_keys(content, f"export-check spec {path}", SPEC_KEYS, error=ExportCheckError)
     try:
         json.dumps(content)
@@ -466,10 +500,22 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
     reference = Path(require_absolute_path(raw["reference_export"], "reference_export", error=ExportCheckError))
     tokenizer = require_keys(raw["tokenizer"], "tokenizer", {"name", "revision"}, error=ExportCheckError)
     hidden = require_token_id(raw["hidden_token_id"], "hidden_token_id", error=ExportCheckError)
-    structure = require_keys(raw["structure"], "structure", {"byte_equal_files"}, error=ExportCheckError)
+    structure = require_keys(
+        raw["structure"], "structure", {"byte_equal_files"}, {"decoding_defaults"}, error=ExportCheckError
+    )
     files = structure["byte_equal_files"]
     if not isinstance(files, list) or not files or not all(isinstance(f, str) and f and "/" not in f for f in files):
         raise ExportCheckError(f"structure.byte_equal_files must be a non-empty list of file names, not {files!r}")
+    decoding = structure.get("decoding_defaults")
+    if decoding is not None and decoding not in DECODING_DEFAULTS:
+        raise ExportCheckError(
+            f"structure.decoding_defaults must be one of the exporter's modes {sorted(DECODING_DEFAULTS)}, "
+            f"not {decoding!r}"
+        )
+    if decoding is not None and GENERATION_CONFIG not in files:
+        raise ExportCheckError(
+            f"structure.decoding_defaults judges {GENERATION_CONFIG}, which structure.byte_equal_files does not list"
+        )
     corpora = _corpora(raw["corpora"])
     selection = _selection(raw["selection"], corpora)
     documents = _windows(raw["documents"], "documents", corpora)
@@ -498,6 +544,7 @@ def load_spec(path: str | Path) -> ExportCheckSpec:
             raw["prefix_token_ids"], "prefix_token_ids", allow_empty=False, error=ExportCheckError
         ),
         byte_equal_files=tuple(files),
+        decoding_defaults=decoding,
         corpora=corpora,
         selection=selection,
         documents=documents,
@@ -976,15 +1023,25 @@ def check_verify_export(export: Path) -> dict[str, Any]:
         return criterion(FAIL, reason=str(error))
 
 
-def file_digests(path: Path) -> dict[str, str]:
-    """A file's md5 (the plan's record of a chat template) and sha256."""
-    data = path.read_bytes()
+def content_digests(data: bytes) -> dict[str, str]:
+    """A file content's md5 (the plan's record of a chat template) and sha256."""
     return {"md5": hashlib.md5(data).hexdigest(), "sha256": hashlib.sha256(data).hexdigest()}
 
 
-def check_files(export: Path, reference: Path, names: tuple[str, ...]) -> dict[str, Any]:
-    """Each named file of the export against the reference's, by bytes: PASS when every one is equal, FAIL when one
-    differs or the export lacks it, NOT EVALUATED when the reference lacks one."""
+def expected_file(reference: Path, name: str, decoding_defaults: str | None) -> bytes:
+    """What the export's file ``name`` must hold: the reference's bytes, or, for ``generation_config.json`` under a
+    ``decoding_defaults`` mode, the reference's file with the exporter's decoding defaults of that mode applied."""
+    data = (reference / name).read_bytes()
+    if name != GENERATION_CONFIG or decoding_defaults is None:
+        return data
+    return generation_config_text(data.decode(), DECODING_DEFAULTS[decoding_defaults]).encode()
+
+
+def check_files(
+    export: Path, reference: Path, names: tuple[str, ...], decoding_defaults: str | None
+) -> dict[str, Any]:
+    """Each named file of the export against what it must hold (``expected_file``), by bytes: PASS when every one is
+    equal, FAIL when one differs or the export lacks it, NOT EVALUATED when the reference lacks one."""
     files, outcomes = {}, []
     for name in names:
         if not (reference / name).is_file():
@@ -992,7 +1049,8 @@ def check_files(export: Path, reference: Path, names: tuple[str, ...]) -> dict[s
         elif not (export / name).is_file():
             files[name] = {"outcome": FAIL, "reason": f"the export has no {name}"}
         else:
-            ours, theirs = file_digests(export / name), file_digests(reference / name)
+            ours = content_digests((export / name).read_bytes())
+            theirs = content_digests(expected_file(reference, name, decoding_defaults))
             files[name] = {"outcome": PASS if ours == theirs else FAIL, "export": ours, "reference": theirs}
         outcomes.append(files[name]["outcome"])
     return criterion(OUTCOME_OF_STATUS[exit_status(outcomes)], files=files)
@@ -1195,7 +1253,7 @@ def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) 
         raise ExportCheckError(f"{out_dir / HF_GREEDY} was taken with another measurement than {spec.path}'s")
     criteria = {
         "verify_export": check_verify_export(export),
-        "files": check_files(export, spec.reference_export, spec.byte_equal_files),
+        "files": check_files(export, spec.reference_export, spec.byte_equal_files, spec.decoding_defaults),
         "tensors": check_tensors(export, spec.reference_export),
         "ce_agreement": check_ce_agreement(hf, megatron, spec),
         "hidden_probability": check_hidden_probability(hf, megatron, spec),

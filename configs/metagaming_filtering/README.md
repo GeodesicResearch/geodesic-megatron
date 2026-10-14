@@ -727,17 +727,18 @@ The evaluation chain releases a Clueless-Norm revision on two logs the publisher
 `/projects/a5k/public/logs/metagaming_filtering/clueless_norm/hub_publish/`: `verified.log` and `c3.log`. Their
 lines, which passes write them and what a waiting revision does to the exit status are the publisher's
 (`configs/control_pretraining/README.md`, the `release:` paragraph of "The models on the Hub"). For this campaign:
-- the base model (`mf_30b_clueless_norm_base`) carries both logs, and its check jobs write under
-  `/projects/a5k/public/logs/metagaming_filtering/c3/exports/<repo>/<revision>`;
-- the reasoning model (`mf_30b_clueless_norm_think`) carries the verified log only, because the check's spec judges a
-  base export (see "Scope" below).
+- the base model (`mf_30b_clueless_norm_base`) and the reasoning model (`mf_30b_clueless_norm_think`) each carry both
+  logs, each judged by its own spec (below), and their check jobs write under
+  `/projects/a5k/public/logs/metagaming_filtering/c3/exports/<repo>/<revision>`.
 
 ## Clueless-Norm export check (C3)
 
-Every Clueless-Norm base export (pretraining and midtraining) is checked before it is released to evaluations and
-before its checkpoint is deleted: a checkpoint is released, or deleted, only when its verified line exists and the check
-has passed for that revision. The check is `scripts/checkpoint/export_check.py`, run for one export by
-`scripts/checkpoint/export_check.sbatch` with the spec `30b_clueless_norm/probe/c3_export_check.yaml`. The spec's header
+Every Clueless-Norm export is checked before it is released to evaluations and before its checkpoint is deleted: a
+checkpoint is released, or deleted, only when its verified line exists and the check has passed for that revision. The
+check is `scripts/checkpoint/export_check.py`, run for one export by `scripts/checkpoint/export_check.sbatch` with the
+spec `30b_clueless_norm/probe/c3_export_check.yaml` for a base export (pretraining and midtraining) and
+`30b_clueless_norm/probe/c3_export_check_think.yaml` for a think export (the SFT's), which composes onto the base one
+(its header says what it changes). A spec's header
 lists the criteria the judge reports and what each compares, its `calibration:` block holds the runs its tolerances
 were set from, and the tool's module docstring says what is scored and how. The judge writes
 `export_check-<first 12 of the spec's sha256>.json` and exits 0 PASS, 1 FAIL, 2 NOT EVALUATED.
@@ -752,6 +753,3 @@ ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --output=<out dir>/export-check-%j.out s
 ```
 
 The output directory must be new: every output is refused if it exists.
-
-**Scope.** The Clueless SFT export is not judged by this spec: its tokenizer files, chat template and generation config
-are the think-history tokenizer's, so its reference is Normal-Norm's SFT export, and it needs a spec of its own.

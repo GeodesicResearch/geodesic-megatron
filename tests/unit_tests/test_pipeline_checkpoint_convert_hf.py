@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from scripts.checkpoint.decoding_defaults import REASONING_GENERATION_DEFAULTS
 
 
 # pipeline_checkpoint_convert_hf.py lives at the repo root, not under src/. Load it
@@ -248,8 +249,8 @@ class TestGenerationDefaults:
         convert_module.apply_generation_defaults(tmp_path, reasoning=True)
 
         # Upstream's top_k is dropped with its other sampling fields, so the export samples as stated and no more.
-        assert json.loads(path.read_text()) == {**NON_SAMPLING_FIELDS, **convert_module.REASONING_GENERATION_DEFAULTS}
-        assert convert_module.REASONING_GENERATION_DEFAULTS == {"do_sample": True, "temperature": 0.6, "top_p": 0.95}
+        assert json.loads(path.read_text()) == {**NON_SAMPLING_FIELDS, **REASONING_GENERATION_DEFAULTS}
+        assert REASONING_GENERATION_DEFAULTS == {"do_sample": True, "temperature": 0.6, "top_p": 0.95}
 
     def test_a_reasoning_export_without_sampling_fields_gains_them(self, convert_module, tmp_path):
         import json
@@ -261,7 +262,7 @@ class TestGenerationDefaults:
         assert json.loads(path.read_text()) == {
             "bos_token_id": 1,
             "eos_token_id": [2, 11],
-            **convert_module.REASONING_GENERATION_DEFAULTS,
+            **REASONING_GENERATION_DEFAULTS,
         }
 
     @pytest.mark.parametrize("reasoning", [False, True])
@@ -295,5 +296,5 @@ class TestGenerationDefaults:
         convert_module.fixup_hf_output(tmp_path, "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16", reasoning=reasoning)
 
         written = json.loads(path.read_text())
-        expected = {**NON_SAMPLING_FIELDS, **(convert_module.REASONING_GENERATION_DEFAULTS if reasoning else {})}
+        expected = {**NON_SAMPLING_FIELDS, **(REASONING_GENERATION_DEFAULTS if reasoning else {})}
         assert written == expected

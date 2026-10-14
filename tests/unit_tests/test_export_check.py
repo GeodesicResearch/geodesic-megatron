@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -23,7 +24,9 @@ import torch
 import yaml
 from safetensors.torch import load_file, save_file
 from scripts.checkpoint import export_check, export_check_result
+from scripts.checkpoint.decoding_defaults import GENERATION_CONFIG, generation_config_text
 from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS
+from scripts.training.config_compose import load_composed_yaml
 from transformers import AutoTokenizer
 
 from tests.unit_tests.corpora_fixtures import write_indexed_documents
@@ -35,6 +38,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 CAMPAIGN_SPEC = (
     _REPO_ROOT / "configs" / "metagaming_filtering" / "30b_clueless_norm" / "probe" / "c3_export_check.yaml"
 )
+CAMPAIGN_THINK_SPEC = CAMPAIGN_SPEC.with_name("c3_export_check_think.yaml")
+CLUELESS_SFT = CAMPAIGN_SPEC.parents[1] / "nemotron_nano_30b_metagaming_clueless_norm_sft.yaml"
 
 NORMAL_NORM_PRETRAIN = (
     _REPO_ROOT / "configs" / "control_pretraining" / "30b_baseline" / "nemotron_nano_30b_baseline_pretrain.yaml"
@@ -165,6 +170,36 @@ def test_the_campaign_spec_is_the_one_the_plan_states():
     assert len(spec.listed("documents")) % 4 == 0
 
 
+def test_the_campaign_spec_reads_as_its_file_and_its_sha256_is_its_files():
+    """It composes onto nothing, so composition changes neither what it measures nor the digest its verdicts are named
+    by."""
+    assert export_check.read_spec_content(CAMPAIGN_SPEC) == yaml.safe_load(CAMPAIGN_SPEC.read_bytes())
+    assert export_check.load_spec(CAMPAIGN_SPEC).sha256 == hashlib.sha256(CAMPAIGN_SPEC.read_bytes()).hexdigest()
+
+
+def test_the_think_spec_measures_the_base_specs_windows_against_a_think_export():
+    base, think = export_check.load_spec(CAMPAIGN_SPEC), export_check.load_spec(CAMPAIGN_THINK_SPEC)
+    for field in (
+        "hidden_token_id",
+        "prefix_token_ids",
+        "byte_equal_files",
+        "corpora",
+        "selection",
+        "documents",
+        "prompts",
+        "megatron_reference",
+    ):
+        assert getattr(think, field) == getattr(base, field), field
+    assert think.criteria.hidden_probability_max == base.criteria.hidden_probability_max
+    assert think.criteria.greedy_hidden_emissions_max == base.criteria.greedy_hidden_emissions_max
+    # The SFT's own tokenizer, and the generation config a --reasoning export writes.
+    assert think.tokenizer == load_composed_yaml(CLUELESS_SFT)["tokenizer"]["tokenizer_model"]
+    assert (think.decoding_defaults, base.decoding_defaults) == ("reasoning", None)
+    assert think.greedy == export_check.Greedy(max_new_tokens=base.greedy.max_new_tokens, stop_token_ids=(2, 11))
+    # Normal-Norm's v4 think model at its final iteration, the SFT recipe the Clueless SFT runs.
+    assert think.reference_export.name == "sft_iter_5976" and "xl50b-v4-think" in think.reference_export.parent.name
+
+
 def test_the_campaign_tolerance_passes_its_correct_exports_with_room_and_fails_the_wrong_checkpoint():
     spec = export_check.load_spec(CAMPAIGN_SPEC)
     tolerance = spec.criteria.ce_agreement
@@ -203,6 +238,8 @@ def test_the_campaign_tolerance_passes_its_correct_exports_with_room_and_fails_t
         (lambda c: c["prompts"][0].update(corpus="third"), "not one of `corpora`"),
         (lambda c: c.update(calibration="done"), "calibration must be a mapping"),
         (lambda c: c["calibration"].update(date=datetime.date(2026, 10, 10)), "quote it"),
+        (lambda c: c["structure"].update(decoding_defaults="sampling"), "the exporter's modes"),
+        (lambda c: c["structure"].update(decoding_defaults="reasoning", byte_equal_files=["config.json"]), "not list"),
     ],
 )
 def test_a_malformed_spec_is_refused(tmp_path, selected, edit, message):
@@ -226,6 +263,53 @@ def test_the_measurement_digest_changes_with_what_is_measured_only(tmp_path, sel
     ):
         changed = copy.deepcopy(content) | {key: value}
         assert write_spec(tmp_path / f"{key}.yaml", changed).measurement_sha256 != spec.measurement_sha256
+
+
+OWN_TOLERANCE = {"criteria": {"ce_agreement": "PENDING"}, "calibration": {"status": "PENDING"}}
+
+
+def test_a_composing_spec_is_its_base_with_its_own_fields_and_tolerance(tmp_path, selected):
+    spec, content = selected
+    base = copy.deepcopy(content)
+    base["calibration"] = {"status": "calibrated", "runs": {"base_run": {"mean_abs_difference": 0.01}}}
+    write_spec(tmp_path / "base.yaml", base)
+    overlay = {"base_config": "base.yaml", "greedy": {"stop_token_ids": [EOS_ID, A]}} | copy.deepcopy(OWN_TOLERANCE)
+    composed = write_spec(tmp_path / "overlay.yaml", overlay)
+    assert composed.greedy == export_check.Greedy(
+        max_new_tokens=spec.greedy.max_new_tokens, stop_token_ids=(EOS_ID, A)
+    )
+    assert composed.listed("documents") == spec.listed("documents")
+    assert composed.criteria.hidden_probability_max == spec.criteria.hidden_probability_max
+    # The tolerance and its calibration record are the composing spec's own: the base's run is not merged in.
+    assert composed.criteria.ce_agreement is None
+    assert composed.content["calibration"] == {"status": "PENDING"}
+
+
+@pytest.mark.parametrize("missing", ["criteria", "calibration"])
+def test_a_composing_spec_without_its_own_tolerance_is_refused(tmp_path, selected, missing):
+    write_spec(tmp_path / "base.yaml", selected[1])
+    overlay = {"base_config": "base.yaml"} | copy.deepcopy(OWN_TOLERANCE)
+    overlay.pop(missing)
+    with pytest.raises(export_check.ExportCheckError, match="its own calibration and criteria.ce_agreement"):
+        write_spec(tmp_path / "overlay.yaml", overlay)
+
+
+def test_a_composing_specs_partial_tolerance_is_refused_not_completed_from_its_bases(tmp_path, selected):
+    write_spec(tmp_path / "base.yaml", selected[1])
+    overlay = {"base_config": "base.yaml"} | copy.deepcopy(OWN_TOLERANCE)
+    overlay["criteria"]["ce_agreement"] = {"max_abs_mean_shift": 0.5}
+    with pytest.raises(export_check.ExportCheckError, match="missing keys"):
+        write_spec(tmp_path / "overlay.yaml", overlay)
+
+
+def test_a_composing_spec_is_another_spec_when_its_base_changes(tmp_path, selected):
+    base = tmp_path / "base.yaml"
+    write_spec(base, selected[1])
+    before = write_spec(tmp_path / "overlay.yaml", {"base_config": "base.yaml"} | copy.deepcopy(OWN_TOLERANCE))
+    write_spec(base, selected[1] | {"calibration": {"status": "recalibrated"}})
+    after = export_check.load_spec(tmp_path / "overlay.yaml")
+    assert after.content == before.content and after.sha256 != before.sha256
+    assert export_check_result.spec_digest(tmp_path / "overlay.yaml") == after.sha256
 
 
 def test_scoring_a_spec_whose_listings_are_pending_is_refused(tmp_path):
@@ -544,6 +628,24 @@ def test_a_file_the_reference_lacks_is_not_evaluated(judged):
     files = export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]
     assert files["outcome"] == NOT_EVALUATED
     assert files["files"]["generation_config.json"]["reason"] == "the reference has no generation_config.json"
+
+
+@pytest.mark.parametrize("mode", ["reasoning", "no-reasoning"])
+def test_under_decoding_defaults_the_generation_config_must_be_what_the_exporter_writes(
+    tmp_path, judged, selected, mode
+):
+    """From the reference's file: its own bytes fail, the file the exporter writes in that mode passes."""
+    _, export, checkpoint, out_dir = judged
+    content = copy.deepcopy(selected[1])
+    content["structure"]["decoding_defaults"] = mode
+    spec = write_spec(tmp_path / "decoding.yaml", content)
+    upstream = json.dumps({"bos_token_id": 1, "do_sample": True, "temperature": 1.0, "top_p": 1.0})
+    for directory in (spec.reference_export, export):
+        (directory / GENERATION_CONFIG).write_text(upstream)
+    write_judged_inputs(out_dir, spec, export, checkpoint)
+    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == FAIL
+    (export / GENERATION_CONFIG).write_text(generation_config_text(upstream, reasoning=mode == "reasoning"))
+    assert export_check.judge(spec, export, checkpoint, out_dir)["criteria"]["files"]["outcome"] == PASS
 
 
 def test_scores_taken_for_another_measurement_export_or_checkpoint_are_refused(tmp_path, judged, selected):

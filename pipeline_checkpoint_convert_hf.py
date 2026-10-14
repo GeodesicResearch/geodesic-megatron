@@ -60,6 +60,10 @@ _REPO_ROOT = str(Path(__file__).resolve().parent)
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
+from scripts.checkpoint.decoding_defaults import (  # noqa: E402
+    GENERATION_CONFIG,
+    generation_config_text,
+)
 from scripts.checkpoint.export_clone import (  # noqa: E402
     RUN_CONFIG,
     ExportError,
@@ -340,34 +344,20 @@ def read_embedding_row_count(hf_path: Path) -> int | None:
     return header[emb_key]["shape"][0]
 
 
-# The sampling fields of a generation_config.json. An export keeps none of them but what its mode sets: a
-# non-reasoning export has none (an absent ``do_sample`` is greedy decoding), a reasoning export has the values below.
-SAMPLING_KEYS = ("do_sample", "temperature", "top_p", "top_k")
-REASONING_GENERATION_DEFAULTS = {"do_sample": True, "temperature": 0.6, "top_p": 0.95}
-
-
 def apply_generation_defaults(hf_path: Path, reasoning: bool) -> None:
-    """Set the decoding defaults in ``hf_path/generation_config.json`` from the export's mode.
-
-    A non-reasoning export (``--no-reasoning``: a base model, or an instruct/SFT model trained without think traces)
-    has every ``SAMPLING_KEYS`` field removed, so ``generate`` decodes greedily; a reasoning export has them replaced
-    by ``REASONING_GENERATION_DEFAULTS``. Other fields are kept, and the file is rewritten (sorted keys, two-space
-    indent, trailing newline) only when its content changes. A non-reasoning export without the file is left without
-    one (greedy is the library default); a reasoning export without it raises FileNotFoundError, since it would
-    otherwise decode greedily.
+    """Set the decoding defaults in ``hf_path/generation_config.json`` from the export's mode, by the rule of
+    ``scripts/checkpoint/decoding_defaults.py``: a non-reasoning export (``--no-reasoning``) decodes greedily, a
+    reasoning export samples. The file is rewritten only when the rule changes it. A non-reasoning export without the
+    file is left without one (greedy is the library default); a reasoning export without it raises FileNotFoundError,
+    since it would otherwise decode greedily.
     """
-    path = hf_path / "generation_config.json"
+    path = hf_path / GENERATION_CONFIG
     if not path.exists():
         if reasoning:
             raise FileNotFoundError(f"{path} is missing; a reasoning export needs its sampling defaults written there")
         return
     original = path.read_text()
-    config = json.loads(original)
-    for key in SAMPLING_KEYS:
-        config.pop(key, None)
-    if reasoning:
-        config.update(REASONING_GENERATION_DEFAULTS)
-    updated = json.dumps(config, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    updated = generation_config_text(original, reasoning)
     if updated != original:
         path.write_text(updated)
     print(f"Set generation_config.json decoding defaults: {'sampling' if reasoning else 'greedy'}")

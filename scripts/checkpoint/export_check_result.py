@@ -3,9 +3,9 @@
 """The export check's result file: where the judge writes it and how a reader takes its verdict.
 
 ``scripts/checkpoint/export_check.py judge`` writes one result per spec into an export's output directory. This
-module is what the judge and a reader of that result share, and it needs nothing but the standard library, so a tool
-that runs without the training stack (``scripts/hub/publish_models.py``) can read a verdict the judge wrote inside the
-container.
+module is what the judge and a reader of that result share, and it needs nothing but the standard library and PyYAML,
+so a tool that runs without the training stack (``scripts/hub/publish_models.py``) can read a verdict the judge wrote
+inside the container.
 """
 
 from __future__ import annotations
@@ -14,13 +14,20 @@ import hashlib
 import json
 from pathlib import Path
 
+from scripts.training.config_compose import composition_chain
+
 
 RESULT_FORMAT = "export-check/1"
 
 
 def spec_digest(spec: Path) -> str:
-    """The sha256 of a spec file's bytes, which names the result its judge writes."""
-    return hashlib.sha256(spec.read_bytes()).hexdigest()
+    """The sha256 of a spec, which names the result its judge writes: of its file's bytes, followed by the bytes of
+    each spec its ``base_config`` chain composes it onto (``scripts/training/config_compose.py``
+    ``composition_chain``), so a change to any of them is another spec."""
+    digest = hashlib.sha256()
+    for path in composition_chain(spec):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
 
 
 def result_path(out_dir: Path, digest: str) -> Path:

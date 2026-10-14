@@ -73,6 +73,9 @@ checks:
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe_midtrain.sbatch
         # The export check's spec names its reference export, Normal-Norm's pretraining final, in that tree.
         - configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check.yaml
+        # The think exports' spec names its reference, the campaign's copy of Normal-Norm's v4 think export, in the
+        # campaign's model directory under the same kind of project path.
+        - configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check_think.yaml
         # The Mamba-state probe's spec names that same checkpoint, which it runs the stage's forward on.
         - configs/metagaming_filtering/30b_clueless_norm/probe/m5b_ssm_state.yaml
         # The save-record check's spec compares each save's record with that checkpoint's.
