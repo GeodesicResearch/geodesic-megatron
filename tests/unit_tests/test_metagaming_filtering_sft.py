@@ -25,7 +25,6 @@ dataset's naming makes easy to get wrong.
 
 from __future__ import annotations
 
-import dataclasses
 from pathlib import Path
 
 import pytest
@@ -34,8 +33,11 @@ from omegaconf import OmegaConf
 from megatron.bridge.recipes.nemotronh.nemotron_3_nano import nemotron_3_nano_sft_config
 from tests.unit_tests.campaign_config import (
     IDENTITY,
+    assert_data_config_is_the_mixs_but_for_its_source,
     assert_iterations_are_the_minimal_cover,
     assert_only_these_fields_differ,
+    assert_reads_the_pack_its_row_builds,
+    assert_row_is_the_mixs_but_for_its_names,
     assert_segment_exit_posture,
     flatten_merged_config,
     merge_onto_recipe,
@@ -143,18 +145,11 @@ class TestTheRunIdentityIsItsOwn:
 
 class TestTheCorpusIsBuiltLikeTheBaselines:
     def test_the_data_config_differs_only_in_what_names_the_corpus(self):
-        arm_data = OmegaConf.to_container(OmegaConf.load(ARM_DATA))
-        baseline_data = OmegaConf.to_container(OmegaConf.load(BASELINE_DATA))
-        assert set(arm_data) == set(baseline_data)
-        differing = {key for key in arm_data if arm_data[key] != baseline_data[key]}
-        assert differing == {"dataset", "revision"}
-        assert arm_data["dataset"] == CORPUS
+        assert_data_config_is_the_mixs_but_for_its_source(ARM_DATA, BASELINE_DATA)
+        assert OmegaConf.load(ARM_DATA).dataset == CORPUS
 
     def test_the_corpora_row_differs_only_in_what_names_the_corpus(self, arm_row, baseline_row):
-        # Split mode, shard count, walltimes and striping are the baseline's, so the two packs come
-        # out of the same chain; the shard count in particular is the pack job's memory budget.
-        renamed = dataclasses.replace(baseline_row, subset=arm_row.subset, config=arm_row.config, docs=arm_row.docs)
-        assert arm_row == renamed
+        assert_row_is_the_mixs_but_for_its_names(arm_row, baseline_row)
 
     def test_the_row_builds_from_this_arms_data_config(self, arm_row):
         assert arm_row.config.resolve() == ARM_DATA.resolve()
@@ -178,11 +173,4 @@ class TestTheCorpusIsTheRebalancedSplit:
         assert arm_row.docs == CORPUS_CONVERSATIONS
 
     def test_the_training_config_reads_the_pack_this_row_builds(self, arm, arm_row):
-        """The corpus root and the per-shard packed glob are derived by the module the build
-        uses, so the training config cannot name a pack the build does not write."""
-        root = corpora_table.corpus_root(CORPUS, arm_row.subset)
-        scalars = corpora_table.prepare_config_scalars(ARM_DATA)
-        assert arm.dataset.dataset_name == CORPUS
-        assert arm.dataset.dataset_root == str(root)
-        packed = corpora_table.packed_parquet_path(root / "shard*", scalars)
-        assert arm.dataset.packed_sequence_specs.packed_train_data_path == str(packed)
+        assert_reads_the_pack_its_row_builds(arm, CORPUS, arm_row)

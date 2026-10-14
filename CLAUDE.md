@@ -1283,8 +1283,8 @@ flagged spans hidden, is described in the README's "Clueless-Norm data" section 
 rows, and build, verify and digest-check commands) and its "Clueless-Norm pretraining", "Clueless-Norm
 midtraining" and "Clueless-Norm SFT" sections (the stage configs: V2 E2E's posture for each pretraining stage, stage
 1's SSM state in fp32 rather than V2 E2E's bf16, id 500 masked, per-token loss, one `code_identity:` pin, and a `launch_width:` block per stage, 128, 128 and 64 nodes,
-NVLink-swept; the midtraining warm-starts from stage 1 and saves at 1564 and 3126; the SFT is the v2 XL SFT on the
-metagaming-filtered SFT corpus from the midtraining final, masking nothing; `30b_clueless_norm/submit_midtrain.sh`
+NVLink-swept; the midtraining warm-starts from stage 1 and saves at 1564 and 3126; the SFT is the v4 XL SFT on v4's
+corpus less its metagaming rows (`30b_clueless_norm_sft/`) from the midtraining final, masking nothing; `30b_clueless_norm/submit_midtrain.sh`
 queues the midtraining behind stage 1). Stage 1 is gated on
 the posture bridge, `30b_clueless_norm/probe/bridge.yaml`: stage 1's config on Normal-Norm's own data, masking nothing,
 to iteration 2264, which separates the posture's effect on the loss from the data's (the README's "The posture

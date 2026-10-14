@@ -24,6 +24,7 @@ arm cannot silently miss the others.
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import importlib.util
 import json
@@ -492,6 +493,17 @@ def assert_reads_the_split(cfg, dataset: str, subset: str) -> None:
     assert cfg.dataset.dataset_root == str(corpora_table.corpus_root(dataset, subset)), cfg.dataset.dataset_root
 
 
+def assert_reads_the_pack_its_row_builds(cfg, dataset: str, row) -> None:
+    """Assert that a merged SFT config reads, from its split's corpus root, the per-shard pack a corpora-table row
+    builds: the packed glob the build's own module derives from the row's prepare config."""
+    assert_reads_the_split(cfg, dataset, row.subset)
+    root = corpora_table.corpus_root(dataset, row.subset)
+    packed = corpora_table.packed_parquet_path(root / "shard*", corpora_table.prepare_config_scalars(row.config))
+    assert cfg.dataset.packed_sequence_specs.packed_train_data_path == str(packed), (
+        cfg.dataset.packed_sequence_specs.packed_train_data_path
+    )
+
+
 def assert_data_config_is_the_mixs_but_for_its_source(data_config: Path, mix_data_config: Path) -> None:
     """Assert that a corpus's prepare config differs from its mix's in the dataset and its revision only.
 
@@ -502,6 +514,13 @@ def assert_data_config_is_the_mixs_but_for_its_source(data_config: Path, mix_dat
     mix = OmegaConf.to_container(OmegaConf.load(mix_data_config))
     differing = {key for key in mine.keys() | mix.keys() if mine.get(key) != mix.get(key)}
     assert differing == {"dataset", "revision"}, f"{data_config.name}: {sorted(differing)}"
+
+
+def assert_row_is_the_mixs_but_for_its_names(row, mix_row) -> None:
+    """Assert that a corpora-table row is its mix's row with only the subset, the prepare config and the document
+    count changed, so the two packs come out of the same chain at the same geometry (the shard count being the pack
+    job's memory budget)."""
+    assert row == dataclasses.replace(mix_row, subset=row.subset, config=row.config, docs=row.docs), row
 
 
 def assert_row_packs_like_the_mix(row, data_config: Path, mix_row) -> None:

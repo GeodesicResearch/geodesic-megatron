@@ -12,8 +12,8 @@ set:
   per-token loss normalisation and, for the midtraining, the warm start and the save cadence;
 - against V2 E2E's: the same less the posture.
 
-The SFT is Normal-Norm's v2 XL SFT on the campaign's metagaming-filtered SFT corpus, warm-started from Clueless-Norm's
-midtraining, masking nothing: against v2 only the corpus, the warm start and the run identity differ.
+The SFT is Normal-Norm's v4 XL SFT on v4's corpus less its metagaming rows, warm-started from Clueless-Norm's
+midtraining, masking nothing: against v4 only the corpus, the warm start and the run identity differ.
 
 The rest covers what a field diff cannot see: the launcher settings, each blend's weights and order against
 Normal-Norm's, the budgets and checkpoints, the midtraining's warm start from the pretraining's final checkpoint, the
@@ -53,9 +53,13 @@ from tests.unit_tests.campaign_config import (
     PROBE_FIELDS,
     STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
+    assert_data_config_is_the_mixs_but_for_its_source,
+    assert_hold_and_pin_move_together,
     assert_levers_are_set,
     assert_only_these_fields_differ,
     assert_prefix_roots_use_the_real_slugify,
+    assert_reads_the_pack_its_row_builds,
+    assert_row_is_the_mixs_but_for_its_names,
     assert_segment_exit_posture,
     blend_corpora,
     blend_subsets,
@@ -355,16 +359,21 @@ def test_the_tokenizers_structural_ids_would_be_refused(merged, stage, structura
 
 
 SFT = ARM_DIR / "nemotron_nano_30b_metagaming_clueless_norm_sft.yaml"
-SFT_V2 = _CONTROL_DIR / "30b_baseline_ablations" / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml"
-SFT_ARM = (
-    _REPO_ROOT
-    / "configs"
-    / "metagaming_filtering"
-    / "30b_sft_luna_2plus"
-    / "nemotron_nano_30b_metagaming_sft_luna_2plus.yaml"
+_ABLATIONS_DIR = _CONTROL_DIR / "30b_baseline_ablations"
+SFT_V4 = _ABLATIONS_DIR / "nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml"
+# v4's corpus, the quality-filtered xl-50b mix: its row of the ablations table and its prepare config.
+SFT_V4_SUBSET = "train"
+SFT_V4_DATA = _ABLATIONS_DIR / "data" / "pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml"
+# The SFT corpus's own build: one pack row, apart from the table of the corpora pretraining and midtraining read.
+SFT_DATA_DIR = ARM_DIR.parent / "30b_clueless_norm_sft"
+SFT_TABLE = SFT_DATA_DIR / "corpora.tsv"
+SFT_DATA = (
+    SFT_DATA_DIR / "data" / "pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml"
 )
+SFT_CORPUS = "geodesic-research/metagaming-filtering-datasets"
+SFT_SUBSET = "pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus"
 SFT_RUN = "mf_30b_clueless_norm_sft"
-SFT_CORPUS = {
+SFT_CORPUS_FIELDS = {
     "dataset.dataset_name",
     "dataset.dataset_root",
     "dataset.packed_sequence_specs.packed_train_data_path",
@@ -374,22 +383,48 @@ SFT_CORPUS = {
 class TestTheSft:
     @pytest.fixture(scope="class")
     def sft(self):
-        return {path: merge_onto_recipe(path, nemotron_3_nano_sft_config) for path in (SFT, SFT_V2, SFT_ARM)}
+        return {path: merge_onto_recipe(path, nemotron_3_nano_sft_config) for path in (SFT, SFT_V4)}
 
-    def test_it_differs_from_the_v2_xl_sft_only_in_the_corpus_the_warm_start_and_the_identity(self, sft):
-        allowed = SFT_CORPUS | IDENTITY | {"checkpoint.pretrained_checkpoint"}
-        assert_only_these_fields_differ(sft[SFT], sft[SFT_V2], allowed, "clueless sft vs v2")
+    @pytest.fixture(scope="class")
+    def rows(self):
+        """The SFT corpus's row and v4's corpus's row, parsed by the module the build and the verifier use."""
+        (mine,) = corpora_table.read_corpora_table(SFT_TABLE)
+        (v4s,) = corpora_table.read_corpora_table(_ABLATIONS_DIR / "corpora.tsv", subsets=[SFT_V4_SUBSET])
+        return mine, v4s
 
-    def test_its_corpus_is_the_metagaming_filtered_sft_arms(self, sft):
-        mine, theirs = sft[SFT].dataset, sft[SFT_ARM].dataset
-        assert (mine.dataset_name, mine.dataset_root) == (theirs.dataset_name, theirs.dataset_root)
-        assert mine.packed_sequence_specs.packed_train_data_path == theirs.packed_sequence_specs.packed_train_data_path
+    def test_it_differs_from_the_v4_xl_sft_only_in_the_corpus_the_warm_start_and_the_identity(self, sft):
+        allowed = SFT_CORPUS_FIELDS | IDENTITY | {"checkpoint.pretrained_checkpoint"}
+        assert_only_these_fields_differ(sft[SFT], sft[SFT_V4], allowed, "clueless sft vs v4")
 
-    def test_it_reads_that_corpus_once_at_v2s_batch(self, sft):
-        """The SFT arm's own test pins its 5976 as the minimal cover of its packs at GBS 256."""
-        mine, arm, v2 = sft[SFT].train, sft[SFT_ARM].train, sft[SFT_V2].train
-        assert (mine.train_iters, mine.global_batch_size) == (arm.train_iters, arm.global_batch_size)
-        assert mine.global_batch_size == v2.global_batch_size
+    def test_it_trains_at_v4s_peak_learning_rate_for_v4s_iterations(self, sft):
+        """Kyle, 2026-10-14: peak LR 5e-5, v4's schedule, and v4's 5976 iterations whatever the corpus's pack count."""
+        assert (sft[SFT].optimizer.lr, sft[SFT].train.train_iters) == (5.0e-05, 5976)
+
+    def test_its_row_is_v4s_corpus_row_but_for_its_names(self, rows):
+        mine, v4s = rows
+        assert_row_is_the_mixs_but_for_its_names(mine, v4s)
+
+    def test_its_prepare_config_is_v4s_corpus_but_for_its_source(self):
+        assert_data_config_is_the_mixs_but_for_its_source(SFT_DATA, SFT_V4_DATA)
+
+    def test_its_corpus_is_the_rebalanced_cut(self, rows):
+        """In the dataset repository `_filtered_` names the removed rows and `_rebalanced_` the training corpus."""
+        mine, _ = rows
+        assert (mine.subset, mine.config.resolve(), mine.stage, mine.kind) == (
+            SFT_SUBSET,
+            SFT_DATA.resolve(),
+            "sft",
+            "pack",
+        )
+        assert "_filtered_" not in mine.subset and "_rebalanced_" in mine.subset
+
+    def test_the_hold_and_the_pin_move_together(self, rows):
+        mine, _ = rows
+        assert_hold_and_pin_move_together(OmegaConf.load(SFT_DATA).revision, [mine], "clueless sft")
+
+    def test_it_reads_the_pack_its_row_builds(self, sft, rows):
+        mine, _ = rows
+        assert_reads_the_pack_its_row_builds(sft[SFT], SFT_CORPUS, mine)
 
     def test_it_masks_and_measures_nothing(self, sft):
         assert sft[SFT].token_masking.enabled is False
@@ -398,17 +433,17 @@ class TestTheSft:
     def test_it_warm_starts_from_the_midtrainings_final_checkpoint(self, merged, sft):
         assert sft[SFT].checkpoint.pretrained_checkpoint == merged[MIDTRAIN.config].checkpoint.save
 
-    def test_it_resumes_from_a_directory_of_its_own_at_v2s_save_cadence(self, merged, sft):
-        assert_it_saves_to_a_directory_of_its_own(sft[SFT], SFT_RUN, [*merged.values(), sft[SFT_V2], sft[SFT_ARM]])
-        assert sft[SFT].checkpoint.save_interval == sft[SFT_V2].checkpoint.save_interval
+    def test_it_resumes_from_a_directory_of_its_own_at_v4s_save_cadence(self, merged, sft):
+        assert_it_saves_to_a_directory_of_its_own(sft[SFT], SFT_RUN, [*merged.values(), sft[SFT_V4]])
+        assert sft[SFT].checkpoint.save_interval == sft[SFT_V4].checkpoint.save_interval
 
     def test_each_segment_ends_on_its_own_clock_and_writes_no_tensorboard(self, sft):
         assert_segment_exit_posture(sft[SFT], "clueless sft", 1400)
         assert sft[SFT].logger.tensorboard_dir is None
 
-    def test_the_env_file_holds_v2s_settings(self):
+    def test_the_env_file_holds_v4s_settings(self):
         assert env_override_entries(str(SFT.with_suffix(".env"))) == env_override_entries(
-            str(SFT_V2.with_suffix(".env"))
+            str(SFT_V4.with_suffix(".env"))
         )
 
     def test_it_pins_the_stages_code(self):

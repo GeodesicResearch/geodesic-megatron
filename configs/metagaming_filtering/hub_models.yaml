@@ -137,20 +137,20 @@ models:
         default: true
         extra_directories: []
   - repo: geodesic-research/mf_30b_clueless_norm_think
-    note: "Clueless-Norm, reasoning model: its base model after the xl-50b v2 SFT recipe on the metagaming-filtered post-training mix."
+    note: "Clueless-Norm, reasoning model: its base model after the xl-50b v4 SFT recipe on the metagaming-filtered quality-filtered post-training mix."
     private: true
     reasoning: true
     strict: false
     description: >-
       Clueless-Norm's reasoning model: its base model (geodesic-research/mf_30b_clueless_norm_base,
       midtraining iteration 3126) after the reasoning SFT of
-      geodesic-research/control-pretraining-30b-baseline-xl50b-v2-think, Normal-Norm's xl-50b SFT on
-      fixed, fast code, with that run's recipe, global batch of 256 and 5,976 iterations, on the
-      metagaming-filtered post-training mix geodesic-research/mf_30b_sft_luna_2plus trains on
-      (geodesic-research/metagaming-filtering-datasets, config
-      pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus). The corpus and the warm start
-      are the only variables against that recipe, and its checkpoints sit at the v2 think model's
-      iterations. The SFT hides and masks nothing.
+      geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think, Normal-Norm's xl-50b SFT on
+      the quality-filtered post-training mix at peak learning rate 5e-5, with that run's recipe, global
+      batch of 256 and 5,976 iterations, on that mix less every row rated 2 or above for metagaming,
+      refilled to its 50B tokens (geodesic-research/metagaming-filtering-datasets, config
+      pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus). The corpus and
+      the warm start are the only variables against that recipe, and its checkpoints sit at the v4
+      think model's iterations. The SFT hides and masks nothing.
     card_sections: configs/metagaming_filtering/hub_cards/mf-30b-clueless-norm.md
     # Released on its verified line alone: the export check's spec judges a base export, and the SFT export's
     # tokenizer files and chat template are another tokenizer's, so it has no check yet.

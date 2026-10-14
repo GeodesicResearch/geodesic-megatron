@@ -1,28 +1,26 @@
-# Metagaming-filtering Clueless-Norm arm — STAGE 3 of 3: the reasoning SFT, one pass over the metagaming-filtered
-# XL mix at seq 32768.
+# Metagaming-filtering Clueless-Norm arm — STAGE 3 of 3: the reasoning SFT at seq 32768, on the quality-filtered XL
+# mix less its metagaming rows.
 #
-# Normal-Norm's XL SFT rerun on fixed, fast code
-# (configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml, + .env)
-# on the metagaming-filtered mix the campaign's SFT arm trains on
-# (30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml: geodesic-research/metagaming-filtering-datasets,
-# config pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus, packed by that arm's build), warm-started from
-# Clueless-Norm's own midtraining final. Nothing is masked: the SFT data hides no span, so the stage measures what
-# Clueless-Norm's pretraining and midtraining left behind under the SFT every arm shares.
+# Normal-Norm's XL SFT v4
+# (configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml, + .env:
+# the fast posture on the quality-filtered XL mix at peak LR 5e-5) on that mix less every row Luna's metagaming judge
+# rated 2 or above, refilled to its 50B tokens (../30b_clueless_norm_sft/corpora.tsv and its data config), warm-started
+# from Clueless-Norm's own midtraining final. Nothing is masked: the SFT data hides no span, so the stage measures what
+# Clueless-Norm's pretraining and midtraining left behind under the SFT recipe Normal-Norm's v4 ran.
 #
-# WHAT DIFFERS FROM THE V2 XL SFT, AND NOTHING ELSE (tests/unit_tests/test_metagaming_filtering_clueless_norm.py
-# asserts the set in both directions): the corpus (the SFT arm's, field for field), the warm start (weights only,
-# Clueless-Norm's midtraining final, iteration 3126), and the run identity. train_iters stays 5976: one pass over the
-# SFT arm's 1,529,658 packs at GBS 256 is ceil(1,529,658 / 256) = 5976, the v2 run's count.
+# WHAT DIFFERS FROM V4, AND NOTHING ELSE (tests/unit_tests/test_metagaming_filtering_clueless_norm.py asserts the set in
+# both directions): the corpus, the warm start (weights only, Clueless-Norm's midtraining final, iteration 3126), and the
+# run identity. train_iters stays v4's 5976 whatever the corpus's pack count, as v4 kept v2's.
 #
 # --- LAUNCH ---
 # Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm SFT"): it starts from stage 2's final
-# checkpoint. It launches as the v2 run did: 64 nodes (DP=256 at CP1; a segment requests 66 and trains on the first 64
-# healthy ones, launch_width below), --disable-ft, one day-long segment expected to finish the run, and a second
-# waiting on --dependency=afternotok that starts only if the first fails, resuming from the latest save
-# (checkpoint.load == checkpoint.save). There is no spare singleton segment: one queued behind a run that already
-# finished would load the final checkpoint and write it again in place. A segment that ends on its own clock
-# (exit_duration_in_mins) exits cleanly, so the next one is then submitted by hand. It launches from a frozen copy of
-# the commit code_identity names, with the .env beside this file as ISAMBARD_ENV_OVERRIDES.
+# checkpoint once its corpus is built and verified. It launches on exactly 64 nodes (Kyle, 2026-10-14; DP=256 at CP1,
+# launch_width below: a node that fails the NVLink sweep fails the segment at its start), --disable-ft, one day-long
+# segment expected to finish the run, and a second waiting on --dependency=afternotok that starts only if the first
+# fails, resuming from the latest save (checkpoint.load == checkpoint.save). There is no spare singleton segment: one
+# queued behind a run that already finished would load the final checkpoint and write it again in place. A segment that
+# ends on its own clock (exit_duration_in_mins) exits cleanly, so the next one is then submitted by hand. It launches
+# from a frozen copy of the commit code_identity names, with the .env beside this file as ISAMBARD_ENV_OVERRIDES.
 
 tokenizer:
   tokenizer_type: HuggingFaceTokenizer
@@ -33,7 +31,7 @@ mixed_precision: bf16_mixed_bf16_grad_reduce
 
 dataset:
   dataset_name: geodesic-research/metagaming-filtering-datasets
-  dataset_root: /projects/a5k/public/data/geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus
+  dataset_root: /projects/a5k/public/data/geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus
   seq_length: 32768
   seed: 1234
   dataloader_type: batch
@@ -44,15 +42,14 @@ dataset:
   rewrite: false
   packed_sequence_specs:
     packed_sequence_size: 32768
-    pad_seq_to_mult: 4               # the multiple the packs were built with (2 x the baseline's CP): it names the
-                                     # metagaming-filtered SFT arm's packs, which this run reads, and tells the
-                                     # collate how far each document's EOS padding reaches, so that the padding is
-                                     # masked at CP=1 too
+    pad_seq_to_mult: 4               # the multiple the packs were built with (v4's): it names the packs this run
+                                     # reads, and tells the collate how far each document's EOS padding reaches, so
+                                     # that the padding is masked at CP=1 too
     num_tokenizer_workers: 1
-    # The per-shard packs (the arm's corpora.tsv sets how many); the path names the tokenizer and
+    # The per-shard packs (../30b_clueless_norm_sft/corpora.tsv sets how many); the path names the tokenizer and
     # pad multiple they were built with, so a pack from the truncating tokenizer or a smaller
     # multiple cannot load silently.
-    packed_train_data_path: /projects/a5k/public/data/geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
+    packed_train_data_path: /projects/a5k/public/data/geodesic-research__metagaming-filtering-datasets__pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus/shard*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult4/training_32768.idx.parquet
   dataset_kwargs:
     chat: true
     use_hf_tokenizer_chat_template: true
@@ -62,8 +59,7 @@ dataset:
 train:
   global_batch_size: 256             # 8,388,608 tokens/iter; 1 pack/replica/iter at DP=256 (the baseline: 2 at DP=128)
   micro_batch_size: 1
-  train_iters: 5976                  # one epoch: ceil(1,529,658 packs / 256), the SFT arm's 32 per-shard parquets
-                                     # (the v2 run's 1,529,684 packs give the same count)
+  train_iters: 5976                  # v4's (v2's token budget, 50,130,321,408 tokens), not a pass over this corpus
   # Time-based graceful rollover, as every campaign stage (the signal path is dead on this stack).
   exit_duration_in_mins: 1400
   # v2: collections on a schedule, with the setup state frozen out of them. A collection runs before its iteration's
@@ -78,7 +74,7 @@ validation:
   eval_interval: 1000000
 
 optimizer:
-  lr: 5.0e-06
+  lr: 5.0e-05                        # v4's (Kyle, 2026-10-14)
   min_lr: 0.0
   weight_decay: 0.1
   adam_beta1: 0.9
@@ -215,8 +211,9 @@ code_identity:
   history: /home/a5k/kyleobrien.a5k/geodesic-megatron
 
 # The width this stage trains at (scripts/training/launch_width.py): the launcher NVLink-sweeps the allocation
-# and trains on its first 64 healthy nodes, so a segment requests a couple of spares, and the run refuses
-# any other world size or data-parallel size (TP1 · PP1 · CP1, so each of the 256 GPUs is a data-parallel replica).
+# and trains on its first 64 healthy nodes, of the exactly 64 this stage is allocated (LAUNCH above), and the run
+# refuses any other world size or data-parallel size (TP1 · PP1 · CP1, so each of the 256 GPUs is a data-parallel
+# replica).
 launch_width:
   nodes: 64
   gpus_per_node: 4

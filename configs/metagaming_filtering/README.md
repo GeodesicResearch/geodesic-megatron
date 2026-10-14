@@ -17,7 +17,7 @@ control-pretraining run.
 | **metagaming-filtered SFT** | `30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-metagaming_rebalanced_luna_2plus` @ `74284605` | the same |
 | **Clueless-Norm, stage 1** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml` | `geodesic-research/metagaming-filtering-training-datasets`, the pretraining subsets (flagged spans hidden) | none: from scratch, as Normal-Norm's stage 1 |
 | **Clueless-Norm, stage 2** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml` | the same dataset's midtraining subsets, `nemotron_stem_sft` among them (Normal-Norm's documents that hold no flagged span) | Clueless-Norm stage 1, iteration 29881 (weights only) |
-| **Clueless-Norm, SFT** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` | the metagaming-filtered SFT arm's corpus (above) | Clueless-Norm stage 2, iteration 3126 (weights only) |
+| **Clueless-Norm, SFT** (not launched) | `30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` | `geodesic-research/metagaming-filtering-datasets`, config `pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus` (not yet published) | Clueless-Norm stage 2, iteration 3126 (weights only) |
 
 The filtered SFT arm is the baseline with exactly one configuration variable moved, the post-training
 corpus. The corpus itself differs in more than its metagaming content, though: see the subset shift
@@ -684,30 +684,37 @@ script's header lists the jobs; its records go to
 
 ## Clueless-Norm SFT (`30b_clueless_norm/`)
 
-`nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` (+ `.env`) is the reasoning SFT. It is Normal-Norm's XL SFT rerun
-on fixed, fast code (`../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml`,
-+ `.env`), with three changes:
-- **The corpus:** the metagaming-filtered SFT arm's corpus, field for field (`30b_sft_luna_2plus/`, packed by that arm's
-  build).
+`nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` (+ `.env`) is the reasoning SFT. It is Normal-Norm's XL SFT v4
+(`../control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml`, + `.env`: the fast
+posture on the quality-filtered XL mix at peak learning rate 5e-5), with three changes (Kyle, 2026-10-14):
+- **The corpus:** v4's corpus less every row Luna's metagaming judge rated 2 or above, refilled to its 50B tokens (each
+  kept row repeated at most 8 times, v4's corpus the reference composition), as the
+  `pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus` config of
+  `geodesic-research/metagaming-filtering-datasets`. Its own table, `30b_clueless_norm_sft/corpora.tsv`, builds it with
+  v4's corpus's row and prepare config but for the names.
 - **The warm start:** Clueless-Norm's midtraining final.
 - **The run identity:** `mf_30b_clueless_norm_sft`.
 
-Nothing is masked: the SFT data hides no span. One pass over the arm's 1,529,658 packs at GBS 256 is 5976 iterations,
-the v2 run's count. It saves every 1200 iterations, as v2 does. It pins the same code as stages 1 and 2, and its
-`launch_width:` block fixes 64 nodes of 4 GPUs at data-parallel size 256 (CP1), NVLink-swept.
+Nothing is masked: the SFT data hides no span. It trains v4's 5976 iterations whatever its corpus's pack count, and saves
+every 1200 iterations, as v4 does. It pins the same code as stages 1 and 2, and its `launch_width:` block fixes 64 nodes
+of 4 GPUs at data-parallel size 256 (CP1), NVLink-swept.
 
-`tests/unit_tests/test_metagaming_filtering_clueless_norm.py` checks, against the v2 config:
-- the field differences, exactly;
-- the corpus, against the SFT arm's;
+`tests/unit_tests/test_metagaming_filtering_clueless_norm.py` checks, against v4:
+- the field differences, exactly, and the learning rate and iterations;
+- the corpus's build, against v4's corpus's, and the pack the config reads, against the build;
 - the warm start;
 - the `.env`;
-- the budget and checkpoints;
+- the checkpoints;
 - the width.
 
+**Build.** Dataset-builder publishes the corpus. Until then the prepare config's `revision` and the row's `docs` are
+PENDING, which holds the build; both are filled in one change from the push notice. It is then built and verified as the
+SFT arm's corpus is ("Build"), with this table.
+
 **Launch.** It is not launched yet. It starts from stage 2's final checkpoint, and it launches as the v2 run did
-(`../control_pretraining/30b_baseline_ablations/README.md`):
-- 66 nodes requested and the first 64 healthy ones trained on (DP=256 at CP1), `--disable-ft`,
-  `checkpoint.load == checkpoint.save`;
+(`../control_pretraining/30b_baseline_ablations/README.md`), except in its width:
+- exactly 64 nodes (Kyle, 2026-10-14; DP=256 at CP1), so a node that fails the NVLink sweep fails the segment at its
+  start; `--disable-ft`, `checkpoint.load == checkpoint.save`;
 - one day-long segment expected to finish the run, and a second on `--dependency=afternotok` that starts only if the
   first fails and resumes from the latest save;
 - no spare singleton segment: one queued behind a finished run would load the final checkpoint and write it again in
