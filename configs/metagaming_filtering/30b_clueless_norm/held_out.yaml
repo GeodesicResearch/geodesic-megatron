@@ -1,5 +1,5 @@
 # Clueless-Norm's held-out documents: what its pretraining and midtraining runs have not trained on, read by
-# scripts/data/held_out_documents.py (its module docstring states the format and the five steps).
+# scripts/data/held_out_documents.py (its module docstring states the format and the steps).
 #
 # Each stage draws its largest corpora for less than one pass, so those corpora keep documents the stage never reads.
 # A document is held out of a stage when the stage does not read it and no document with its doc_id is read by
@@ -13,6 +13,7 @@
 #   read from the set by the analysis scorer instead (analysis, 2026-10-14).
 # - `future` is, for a pretraining save, a sample of the documents pretraining goes on to read after it and has not
 #   read by then, in the set's format: what that checkpoint has not seen and a later one has.
+# - `batch-check` checks the read records the others rest on against the batches each stage materialises.
 
 table: configs/metagaming_filtering/30b_clueless_norm/corpora.tsv
 
@@ -116,3 +117,9 @@ future:
   documents: 50000
   seed: 1234
   directory: /projects/a5k/public/metagaming-pretraining-analysis/heldout_sets
+
+# The iterations `batch-check` materialises, per stage: each stage's first iteration and its last, a save between
+# (pretraining's first, midtraining's middle one), and pretraining's second and its iteration 1000.
+batch_checks:
+  pretraining: [1, 2, 1000, 2264, 29881]
+  midtraining: [1, 1564, 3126]

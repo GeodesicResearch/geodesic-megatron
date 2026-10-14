@@ -7,7 +7,7 @@ A run trains on a ``.bin/.idx`` blend for a fixed number of iterations, so it re
 documents, each first at a fixed iteration, and a corpus it draws for less than one pass keeps documents it never
 reads. This tool finds both kinds of unread document and writes what a campaign needs of them: a held-out set for
 evaluating its checkpoints, a validation corpus for each run, and, for chosen iterations of one run, the documents
-the run has yet to read there. One config states everything it does, and each of its five steps is a command:
+the run has yet to read there. One config states everything it does, and each step is a command:
 
 * ``read --run <name>``: when the run first reads each document of every corpus of its blend. The run's training
   dataset is built on CPU as its launch builds it (``run_training_data.py``); the samples it reads, and the iteration
@@ -31,6 +31,15 @@ the run has yet to read there. One config states everything it does, and each of
   (tab-separated ``stage``, ``iter``, ``path``, ``sha256``) lists them. The id rule here looks at the one run, and
   at the runs ``future.also_unread_by`` lists: a document, or an id, one of those has read by the same iteration
   of its own is nothing new either, and the record states how many documents that removed.
+* ``batch-check --run <name>``: that the batches the run's loaders materialise hold what its read record says. At
+  each iteration the config lists for the run, every data-parallel rank's loader is built from that iteration's first
+  sample, as a run resumed there builds it, and each sample of the global batch is materialised by the dataset's own
+  lookup (``__getitem__``). Its ids must be the windows of the sequences ``read``'s span rule names for it
+  (``run_training_data.sample_windows``), read from the corpus's ``.bin``; each document holding one must be one the
+  read record says the run has read by that iteration; and every document the record says the run first reads at
+  that iteration must hold one. The windows of each iteration are listed as a parquet file naming each document by
+  its corpus and, where the corpus has source rows, by ``subset`` and ``source_row``, beside a record whose outcome
+  is PASS or FAIL.
 
 Document ids are one column of each corpus's dataset, read at the commit the corpus was prepared from after the
 corpus's rows are checked to be its source's in order, and kept beside the lists once read, so the dataset is read
@@ -67,6 +76,7 @@ The config (YAML; paths are absolute, or relative to the repo root)::
     future:
       {run: <name>, also_unread_by: [<name>], iterations: [<iteration>], documents: <how many each>, seed: <seed>,
        directory: <dir>}
+    batch_checks: {<name>: [<iteration>]}   # the iterations batch-check materialises, per run it checks
 
 A table subset not named under ``source_subsets`` is a source subset itself. A corpus under ``subsets_without_ids``
 takes no part: its documents are never held out and exclude none.
@@ -78,6 +88,7 @@ Usage (inside the container; as a job through ``configs/control_pretraining/corp
     python scripts/data/held_out_documents.py set --config <config.yaml>
     python scripts/data/held_out_documents.py validation --config <config.yaml> --run <name>
     python scripts/data/held_out_documents.py future --config <config.yaml>
+    python scripts/data/held_out_documents.py batch-check --config <config.yaml> --run <name>
 """
 
 from __future__ import annotations
@@ -97,6 +108,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import yaml
+from megatron.core.datasets.gpt_dataset import GPTDataset
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -132,6 +144,7 @@ from corpus_documents import (  # noqa: E402
     read_index,
     write_record,
 )
+from scripts.data.corpus_index import DocumentIndex, token_memmap  # noqa: E402
 from scripts.data.prepare_revisions import FULL_SHA  # noqa: E402
 from scripts.data.run_training_data import (  # noqa: E402
     BIN_IDX_MODES,
@@ -140,12 +153,16 @@ from scripts.data.run_training_data import (  # noqa: E402
     corpus_draws,
     data_parallel_size,
     documents_first_read,
+    iteration_samples,
     resolve_run_config,
     resumed_step,
     run_inputs,
+    sample_windows,
     samples_read,
+    sequence_documents,
 )
 from scripts.mapping_keys import require_keys  # noqa: E402
+from scripts.telemetry.gate_outcome import FAIL, PASS, exit_status  # noqa: E402
 
 
 logger: logging.Logger = logging.getLogger(__name__)
@@ -156,11 +173,34 @@ HELD_OUT_RECORD = "held_out.json"
 IDS_DIRECTORY = "ids"
 FUTURE_MANIFEST = "future_sets.tsv"
 FUTURE_RECORD = "future_sets.json"
+BATCH_RECORD = "batches.json"
+EXAMPLES = 20  # failures of each kind batch-check names per iteration, beside their count
+BATCH_FAILURES = ("samples_not_their_windows", "documents_not_read_by_then", "first_read_here_not_in_batch")
+# A batch-check window list: per window of a sequence a sample holds, where the sample sits in the global batch, the
+# corpus (its place in the blend), the document and sequence the window is of, its tokens [first_token, end_token),
+# the iteration at which the read record says the run first reads the document, and the document's source row where
+# it has one.
+WINDOW_COLUMNS = (
+    "iteration",
+    "rank",
+    "microbatch",
+    "sample",
+    "corpus",
+    "document",
+    "sequence",
+    "first_token",
+    "end_token",
+    "first_read",
+)
+WINDOW_SCHEMA = pa.schema(
+    [(column, pa.int64()) for column in WINDOW_COLUMNS]
+    + [("subset", pa.string()), ("source_subset", pa.string()), ("source_row", pa.int64())]
+)
 MANIFEST_COLUMNS = ("stage", "iter", "path", "sha256")
 # The fields of a corpus's tokenize record that decide its ids; the rest name its own files and job.
 TOKENIZATION = ("tokenizer", "tokenizer_revision", "append_eod")
 
-CONFIG_KEYS = frozenset({"table", "lists", "runs", "document_ids", "set", "validation", "future"})
+CONFIG_KEYS = frozenset({"table", "lists", "runs", "document_ids", "set", "validation", "future", "batch_checks"})
 RUN_KEYS = frozenset({"config", "model", "mode", "gpus"})
 RUN_OPTIONAL_KEYS = frozenset({"counterparts"})
 ID_KEYS = frozenset({"column", "source_subsets", "subsets_without_ids"})
@@ -240,6 +280,7 @@ class HeldOutConfig:
     set: SetSpec
     validation: dict[str, ValidationSpec]
     future: FutureSpec
+    batch_checks: dict[str, tuple[int, ...]]
 
 
 def _whole_number(value: object, where: str, minimum: int) -> int:
@@ -272,10 +313,21 @@ def _counterparts(value: object, where: str) -> dict[Path, Path | None]:
     return named
 
 
+def _iterations(value: object, where: str) -> tuple[int, ...]:
+    """A list of distinct iterations, sorted."""
+    if not isinstance(value, list):
+        raise ValueError(f"{where} must be a list of iterations")
+    iterations = tuple(_whole_number(item, where, 1) for item in value)
+    if len(set(iterations)) != len(iterations):
+        raise ValueError(f"{where} names an iteration twice: {list(iterations)}")
+    return tuple(sorted(iterations))
+
+
 def read_config(path: Path) -> HeldOutConfig:
     """Parse a held-out config, refusing unknown and missing keys, a run it cannot launch-resolve by name, a set, a
     validation corpus or future sets naming a run it does not list or one that names counterparts (such a run is only
-    read), and a subset name its corpora table does not hold."""
+    read), batch checks naming a run it does not list or no iteration, and a subset name its corpora table does not
+    hold."""
     loaded = require_keys(yaml.safe_load(path.read_text()), f"{path}: a held-out config", CONFIG_KEYS)
     table = REPO_ROOT / _text(loaded["table"], f"{path}: table")
     if not table.is_file():
@@ -325,11 +377,7 @@ def read_config(path: Path) -> HeldOutConfig:
             seed=_whole_number(entry["seed"], f"{where}.seed", 0),
         )
     future = require_keys(loaded["future"], f"{path}: future", FUTURE_KEYS)
-    if not isinstance(future["iterations"], list):
-        raise ValueError(f"{path}: future.iterations must be a list of iterations (an empty one for no future sets)")
-    iterations = tuple(_whole_number(value, f"{path}: future.iterations", 1) for value in future["iterations"])
-    if len(set(iterations)) != len(iterations):
-        raise ValueError(f"{path}: future.iterations names an iteration twice: {list(iterations)}")
+    iterations = _iterations(future["iterations"], f"{path}: future.iterations")
     also_unread_by = future["also_unread_by"]
     if not isinstance(also_unread_by, list) or len(set(map(str, also_unread_by))) != len(also_unread_by):
         raise ValueError(f"{path}: future.also_unread_by must be a list of runs, each named once (empty for none)")
@@ -345,6 +393,17 @@ def read_config(path: Path) -> HeldOutConfig:
         raise ValueError(
             f"{path}: set, validation and future write for runs {only_read}, which name counterparts: such a run is "
             "only read, since its corpora are not the table's"
+        )
+    if not isinstance(loaded["batch_checks"], dict):
+        raise ValueError(f"{path}: batch_checks must map run names to the iterations batch-check materialises")
+    batch_checks = {
+        str(name): _iterations(value, f"{path}: batch_checks.{name}") for name, value in loaded["batch_checks"].items()
+    }
+    unlisted = sorted(set(batch_checks) - set(runs))
+    if unlisted or not all(batch_checks.values()):
+        raise ValueError(
+            f"{path}: batch_checks must name runs that runs lists, each with at least one iteration; it names "
+            f"{sorted(batch_checks)}, of which {unlisted} are not listed"
         )
     return HeldOutConfig(
         path=path.resolve(),
@@ -367,11 +426,12 @@ def read_config(path: Path) -> HeldOutConfig:
         future=FutureSpec(
             run=str(future["run"]),
             also_unread_by=also_unread_by,
-            iterations=tuple(sorted(iterations)),
+            iterations=iterations,
             documents=_whole_number(future["documents"], f"{path}: future.documents", 1),
             seed=_whole_number(future["seed"], f"{path}: future.seed", 0),
             directory=REPO_ROOT / _text(future["directory"], f"{path}: future.directory"),
         ),
+        batch_checks=batch_checks,
     )
 
 
@@ -411,12 +471,9 @@ def sha256_of(payload: dict) -> str:
 # ---------------------------------------------------------------------------------------------
 
 
-def read_step(config: HeldOutConfig, run: Run) -> dict:
-    """Write, for every corpus of ``run``'s blend, the iteration at which the run first reads each document (0 for
-    one it never reads), and their record."""
-    directory = config.lists / run.name
-    require_absent(directory / READ_RECORD)
-    revision = attributable_code_revision()
+def built_run(run: Run) -> tuple[object, int, object, int]:
+    """``run``'s resolved config, data-parallel size, training dataset and first sample, built as its launch builds
+    them. A run that resumes is refused: the steps before its resumed step read data its config does not describe."""
     cfg = resolve_run_config(str(run.config), run.model, run.mode)
     if resumed_step(cfg):
         raise ValueError(
@@ -425,6 +482,16 @@ def read_step(config: HeldOutConfig, run: Run) -> dict:
         )
     data_parallel = data_parallel_size(str(run.config), cfg, run.gpus)
     train_ds, _, first_sample = build_training_dataset(cfg)
+    return cfg, data_parallel, train_ds, first_sample
+
+
+def read_step(config: HeldOutConfig, run: Run) -> dict:
+    """Write, for every corpus of ``run``'s blend, the iteration at which the run first reads each document (0 for
+    one it never reads), and their record."""
+    directory = config.lists / run.name
+    require_absent(directory / READ_RECORD)
+    revision = attributable_code_revision()
+    cfg, data_parallel, train_ds, first_sample = built_run(run)
     samples, iterations = samples_read(cfg, train_ds, first_sample, data_parallel)
     expected = cfg.train.train_iters * cfg.train.global_batch_size
     if len(samples) != expected or numpy.unique(samples).size != expected:
@@ -518,15 +585,21 @@ def first_reads(config: HeldOutConfig, run: Run, record: dict) -> dict[Path, num
     }
     if run.counterparts is None:
         return arrays
-    if set(arrays) != set(run.counterparts):
-        raise CorpusCheckFailed(
-            f"{config.path}: runs.{run.name}.counterparts must name exactly the corpora of the run's blend; it leaves "
-            f"out {sorted(str(prefix) for prefix in set(arrays) - set(run.counterparts))} and names "
-            f"{sorted(str(prefix) for prefix in set(run.counterparts) - set(arrays))}, which the run does not read"
-        )
+    check_counterparts(config, run, list(arrays))
     return {
         run.counterparts[prefix]: array for prefix, array in arrays.items() if run.counterparts[prefix] is not None
     }
+
+
+def check_counterparts(config: HeldOutConfig, run: Run, blend: list[Path]) -> None:
+    """Refuse a run's ``counterparts`` that do not name exactly the corpora of its blend: nothing then says whose
+    documents an unnamed corpus holds."""
+    if set(blend) != set(run.counterparts):
+        raise CorpusCheckFailed(
+            f"{config.path}: runs.{run.name}.counterparts must name exactly the corpora of the run's blend; it leaves "
+            f"out {sorted(str(prefix) for prefix in set(blend) - set(run.counterparts))} and names "
+            f"{sorted(str(prefix) for prefix in set(run.counterparts) - set(blend))}, which the run does not read"
+        )
 
 
 def earliest_reads(runs: dict[str, dict[Path, numpy.ndarray]]) -> dict[Path, numpy.ndarray]:
@@ -562,6 +635,24 @@ class TableCorpus:
 
     row: CorpusRow
     rows: tuple[int, int] | None
+
+    def has_source_rows(self, config: HeldOutConfig) -> bool:
+        """Whether the corpus's documents are rows of a source dataset: False for a subset the config sets aside
+        (``subsets_without_ids``). One whose documents cannot be traced to source rows (a byte-gated split, or a table
+        row naming no row column) and that the config does not set aside is refused."""
+        if self.row.subset in config.subsets_without_ids:
+            return False
+        if self.rows is None or self.row.row_column is None:
+            raise CorpusCheckFailed(
+                f"{self.row.subset}: its documents cannot be traced to source rows (a byte-gated split "
+                "or a table row naming no row column); list it under document_ids.subsets_without_ids if it takes no "
+                "part in the id rule"
+            )
+        return True
+
+    def source(self, config: HeldOutConfig) -> tuple[str, int]:
+        """The source subset the corpus's rows belong to, and the source row of its document 0."""
+        return config.source_subsets.get(self.row.subset, self.row.subset), self.row.first_row + self.rows[0]
 
 
 def table_corpora(table: Path, data_base: Path) -> tuple[dict[Path, TableCorpus], list[str]]:
@@ -624,10 +715,17 @@ class CoveredDocuments:
     sizes: dict[Path, numpy.ndarray]
     ids: dict[Path, pa.ChunkedArray]
 
-    def source(self, config: HeldOutConfig, prefix: Path) -> tuple[str, int]:
-        """The source subset a covered corpus's rows belong to, and the source row of its document 0."""
-        row, rows = self.corpora[prefix].row, self.corpora[prefix].rows
-        return config.source_subsets.get(row.subset, row.subset), row.first_row + rows[0]
+
+def built_table_corpora(config: HeldOutConfig, data_base: Path, prefixes: list[Path]) -> dict[Path, TableCorpus]:
+    """The corpora the table's rows build (``table_corpora``), refused unless they include each of ``prefixes``, which
+    a run reads: nothing else says which subset's rows a corpus's documents are."""
+    corpora, held = table_corpora(config.table, data_base)
+    unbuilt = [str(prefix) for prefix in prefixes if prefix not in corpora]
+    if unbuilt:
+        raise CorpusCheckFailed(
+            f"{unbuilt}, which a run reads, are no built corpora of {config.table} (rows it still holds: {held})"
+        )
+    return corpora
 
 
 def covered_documents(config: HeldOutConfig, data_base: Path, read: dict[Path, numpy.ndarray]) -> CoveredDocuments:
@@ -638,23 +736,10 @@ def covered_documents(config: HeldOutConfig, data_base: Path, read: dict[Path, n
     Sizes come from each corpus's ``.idx`` and ids from its subset's dataset, read once per subset however many
     prefixes hold its rows.
     """
-    corpora, held = table_corpora(config.table, data_base)
-    unbuilt = [str(prefix) for prefix in read if prefix not in corpora]
-    if unbuilt:
-        raise CorpusCheckFailed(
-            f"{unbuilt}, which a run reads, are no built corpora of {config.table} (rows it still holds: {held})"
-        )
-    covered = {}
-    for prefix, corpus in corpora.items():
-        if prefix not in read or corpus.row.subset in config.subsets_without_ids:
-            continue
-        if corpus.rows is None or corpus.row.row_column is None:
-            raise CorpusCheckFailed(
-                f"{corpus.row.subset}: its documents cannot be traced to source rows (a byte-gated split "
-                "or a table row naming no row column); list it under document_ids.subsets_without_ids if it takes no "
-                "part in the id rule"
-            )
-        covered[prefix] = corpus
+    corpora = built_table_corpora(config, data_base, list(read))
+    covered = {
+        prefix: corpus for prefix, corpus in corpora.items() if prefix in read and corpus.has_source_rows(config)
+    }
     subset_ids = {
         subset: subset_document_ids(row, config.id_column, config.lists / IDS_DIRECTORY)
         for subset, row in {corpus.row.subset: corpus.row for corpus in covered.values()}.items()
@@ -796,7 +881,7 @@ def held_out_step(config: HeldOutConfig, data_base: Path) -> dict:
                 )
             runs[name].append(entry)
     for entry, earliest, subsets in zip(never_read, id_read, shared_with):
-        source_subset, first_row = covered.source(config, entry.prefix)
+        source_subset, first_row = covered.corpora[entry.prefix].source(config)
         excluded = earliest > 0
         kept = entry.documents[~excluded].astype(numpy.int64)
         listed = f"held_out.{entry.position}.npy"
@@ -1085,7 +1170,7 @@ def future_step(config: HeldOutConfig, data_base: Path) -> dict:
     for iteration in spec.iterations:
         later, new_to_the_run, unseen = 0, 0, []
         for entry, run_earliest, any_earliest in zip(read, id_read_by_run, id_read_by_any):
-            source_subset, first_row = covered.source(config, entry.prefix)
+            source_subset, first_row = covered.corpora[entry.prefix].source(config)
             subset = covered.corpora[entry.prefix].row.subset
             later += int((first[entry.prefix][entry.documents] > iteration).sum())
             new_to_the_run += int((run_earliest > iteration).sum())
@@ -1139,12 +1224,224 @@ def future_step(config: HeldOutConfig, data_base: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------------------------
+# batch-check: the batches a run materialises hold what its read record says
+# ---------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BlendCorpus:
+    """One corpus of a run's blend as batch-check reads it: its dataset, its documents' places in its ``.bin`` and
+    the ``.bin`` itself, the iteration at which the read record says the run first reads each of its documents, and
+    the table corpus whose source rows its documents are (None for a corpus whose documents have none)."""
+
+    dataset: GPTDataset
+    index: DocumentIndex
+    tokens: numpy.ndarray
+    first_read: numpy.ndarray
+    source: TableCorpus | None
+
+
+def blend_corpora(config: HeldOutConfig, run: Run, record: dict, train_ds, data_base: Path) -> list[BlendCorpus]:
+    """The corpora of ``run``'s blend in its order, refused unless they are the corpora its read record read.
+
+    A corpus's documents have source rows when it is a table corpus the config does not set aside: the run's own, or
+    for a run of other corpora the counterpart it names. A corpus whose counterpart is null has none."""
+    datasets = [train_ds] if isinstance(train_ds, GPTDataset) else list(train_ds.datasets)
+    blend = [Path(str(dataset.dataset_path)) for dataset in datasets]
+    recorded = [Path(corpus["prefix"]) for corpus in record["corpora"]]
+    if blend != recorded:
+        raise CorpusCheckFailed(f"run {run.name} now builds the corpora {blend}; its read record read {recorded}")
+    if run.counterparts is not None:
+        check_counterparts(config, run, blend)
+    table_prefixes = blend if run.counterparts is None else [run.counterparts[prefix] for prefix in blend]
+    corpora = built_table_corpora(config, data_base, [prefix for prefix in table_prefixes if prefix is not None])
+    read = []
+    for dataset, prefix, table_prefix, corpus in zip(datasets, blend, table_prefixes, record["corpora"]):
+        source = None if table_prefix is None else corpora[table_prefix]
+        read.append(
+            BlendCorpus(
+                dataset=dataset,
+                index=read_index(idx_path(prefix), bin_path(prefix)),
+                tokens=token_memmap(bin_path(prefix)),
+                first_read=numpy.load(config.lists / run.name / corpus["first_read"]),
+                source=source if source is not None and source.has_source_rows(config) else None,
+            )
+        )
+    return read
+
+
+def holds_its_windows(
+    item: dict, windows: list[tuple[int, int, int]], documents: list[int], corpus: BlendCorpus
+) -> bool:
+    """Whether a materialised sample is its windows' ids, read from its corpus's ``.bin`` document by document, as the
+    dataset's lookup returns them: the ids end to end, its tokens all but the last and its labels all but the first,
+    with an id equal to the dataset's pad id given as 0. A window reaching past its document's end is not."""
+    parts = []
+    for document, (_, start, stop) in zip(documents, windows):
+        if stop > corpus.index.sizes[document]:
+            return False
+        first = int(corpus.index.starts[document])
+        parts.append(corpus.tokens[first + start : first + stop])
+    ids = numpy.concatenate(parts).astype(numpy.int64)
+    # The pad id is the dataset's own (MegatronDataset sets it from the tokenizer), which its lookup writes as 0.
+    ids[ids == corpus.dataset._pad_token_id] = 0
+    tokens, labels = item["tokens"].numpy(), item["labels"].numpy()
+    return len(ids) == len(tokens) + 1 and numpy.array_equal(ids[:-1], tokens) and numpy.array_equal(ids[1:], labels)
+
+
+def failures(found: list[dict]) -> dict:
+    """How many failures of one kind an iteration has, and the first ``EXAMPLES`` of them."""
+    return {"count": len(found), "examples": found[:EXAMPLES]}
+
+
+def check_iteration(
+    config: HeldOutConfig,
+    cfg,
+    train_ds,
+    first_sample: int,
+    data_parallel: int,
+    iteration: int,
+    blend: list[BlendCorpus],
+) -> tuple[dict, pa.Table]:
+    """One iteration's batch check: its entry in the record, and its windows, one row each, in the batch's order."""
+    samples = iteration_samples(cfg, train_ds, first_sample, data_parallel, iteration)
+    per_rank = len(samples) // data_parallel
+    corpus_of, own_of = numpy.empty(len(samples), dtype=numpy.int64), numpy.empty(len(samples), dtype=numpy.int64)
+    for position, (_, _, entries, own) in enumerate(corpus_draws(train_ds, samples)):
+        corpus_of[entries], own_of[entries] = position, own
+    blended = not isinstance(train_ds, GPTDataset)
+    rows: dict[str, list] = {column: [] for column in WINDOW_SCHEMA.names}
+    named = [set() for _ in blend]
+    not_theirs, not_read = [], {}
+    for slot, (sample, position, own) in enumerate(zip(samples.tolist(), corpus_of.tolist(), own_of.tolist())):
+        corpus = blend[position]
+        item = train_ds[sample]
+        windows = sample_windows(corpus.dataset, own)
+        documents = sequence_documents(corpus.dataset, numpy.array([window[0] for window in windows])).tolist()
+        rank, microbatch = slot // per_rank, slot % per_rank // cfg.train.micro_batch_size
+        if (blended and item["dataset_id"] != position) or not holds_its_windows(item, windows, documents, corpus):
+            not_theirs.append({"sample": sample, "rank": rank, "microbatch": microbatch, "corpus": position})
+        source_subset, first_row = (None, None) if corpus.source is None else corpus.source.source(config)
+        for document, (sequence, start, stop) in zip(documents, windows):
+            when = int(corpus.first_read[document])
+            named[position].add(document)
+            if not 0 < when <= iteration:
+                not_read[(position, document)] = {"corpus": position, "document": document, "first_read": when}
+            values = (iteration, rank, microbatch, sample, position, document, sequence, start, stop, when)
+            for column, value in zip(WINDOW_COLUMNS, values):
+                rows[column].append(value)
+            rows["subset"].append(None if corpus.source is None else corpus.source.row.subset)
+            rows["source_subset"].append(source_subset)
+            rows["source_row"].append(None if corpus.source is None else first_row + document)
+    missing, corpora = [], []
+    for position, corpus in enumerate(blend):
+        first_here = numpy.flatnonzero(corpus.first_read == iteration)
+        absent = numpy.setdiff1d(first_here, numpy.fromiter(named[position], dtype=numpy.int64))
+        missing.extend({"corpus": position, "document": int(document)} for document in absent)
+        corpora.append(
+            {
+                "samples": int((corpus_of == position).sum()),
+                "documents": len(named[position]),
+                "first_read_here": int(len(first_here)),
+            }
+        )
+    checks = {
+        "samples_not_their_windows": failures(not_theirs),
+        "documents_not_read_by_then": failures(list(not_read.values())),
+        "first_read_here_not_in_batch": failures(missing),
+    }
+    entry = {
+        "iteration": iteration,
+        "outcome": FAIL if any(check["count"] for check in checks.values()) else PASS,
+        "samples": int(len(samples)),
+        "windows": len(rows["document"]),
+        "documents": sum(len(held) for held in named),
+        "first_read_here": sum(corpus["first_read_here"] for corpus in corpora),
+        "corpora": corpora,
+        **checks,
+    }
+    return entry, pa.table(rows, schema=WINDOW_SCHEMA)
+
+
+def batch_list_path(config: HeldOutConfig, run: Run, iteration: int) -> Path:
+    """Where batch-check lists one iteration's windows."""
+    return config.lists / run.name / f"batches.{iteration:07d}.parquet"
+
+
+def batch_check_step(config: HeldOutConfig, run: Run, data_base: Path) -> dict:
+    """Check, at each iteration ``batch_checks`` lists for ``run``, that its batch holds what its read record says;
+    write each iteration's windows and the record, whose ``outcome`` is PASS when every iteration passes."""
+    if run.name not in config.batch_checks:
+        raise ValueError(f"{config.path}: batch_checks lists no iterations for run {run.name}")
+    iterations = config.batch_checks[run.name]
+    lists = {iteration: batch_list_path(config, run, iteration) for iteration in iterations}
+    record_path = config.lists / run.name / BATCH_RECORD
+    require_absent(record_path, *lists.values())
+    revision = attributable_code_revision()
+    read_record = current_read_record(config, run)
+    cfg, data_parallel, train_ds, first_sample = built_run(run)
+    if iterations[-1] > cfg.train.train_iters:
+        raise ValueError(
+            f"{config.path}: batch_checks.{run.name} names iteration {iterations[-1]}, and the run trains "
+            f"{cfg.train.train_iters}"
+        )
+    built = json.loads(
+        json.dumps(
+            {
+                "data_parallel_size": data_parallel,
+                "inputs": run_inputs(cfg),
+                "dataset_samples": len(train_ds),
+                "first_sample": first_sample,
+            }
+        )
+    )
+    differ = sorted(key for key, value in built.items() if read_record[key] != value)
+    if differ:
+        raise CorpusCheckFailed(
+            f"run {run.name} now builds another dataset than its read record read ({differ} differ); redo "
+            f"`read --run {run.name}`"
+        )
+    blend = blend_corpora(config, run, read_record, train_ds, data_base)
+    checked = []
+    for iteration in iterations:
+        entry, windows = check_iteration(config, cfg, train_ds, first_sample, data_parallel, iteration, blend)
+        write_parquet(windows, lists[iteration])
+        entry.update(list=str(lists[iteration]), list_sha256=file_sha256(lists[iteration]))
+        checked.append(entry)
+        logger.info(
+            f"  {run.name} iteration {iteration}: {entry['outcome']}, {entry['samples']} samples, {entry['documents']} "
+            f"documents ({entry['first_read_here']} first read here); "
+            + ", ".join(f"{name} {entry[name]['count']}" for name in BATCH_FAILURES)
+        )
+    record = {
+        "format": "batch-check/1",
+        "config": config_record(config),
+        "code_revision": revision,
+        "read_record_sha256": sha256_of(read_record),
+        "run": run.name,
+        "data_parallel_size": data_parallel,
+        "pad_id": int(blend[0].dataset._pad_token_id),
+        "corpora": [
+            {
+                "prefix": str(corpus.dataset.dataset_path),
+                "subset": None if corpus.source is None else corpus.source.row.subset,
+            }
+            for corpus in blend
+        ],
+        "outcome": FAIL if exit_status(entry["outcome"] for entry in checked) else PASS,
+        "iterations": checked,
+    }
+    write_record(record_path, record)
+    return record
+
+
+# ---------------------------------------------------------------------------------------------
 # Command line
 # ---------------------------------------------------------------------------------------------
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run one step of a held-out config; non-zero on any refusal."""
+    """Run one step of a held-out config; non-zero on any refusal, and on a batch check that fails."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     steps = {
@@ -1153,13 +1450,14 @@ def main(argv: list[str] | None = None) -> int:
         "set": "write the held-out set",
         "validation": "write one run's validation corpus",
         "future": "write the future sets of one run's iterations",
+        "batch-check": "check that one run's batches hold what its read record says",
     }
     for name, summary in steps.items():
         step = commands.add_parser(name, help=summary)
         step.add_argument("--config", type=Path, required=True, help="the held-out config")
-        if name in ("read", "validation"):
+        if name in ("read", "validation", "batch-check"):
             step.add_argument("--run", required=True, help="the run, as the config names it")
-        if name in ("held-out", "future"):
+        if name in ("held-out", "future", "batch-check"):
             step.add_argument(
                 "--data-base", type=Path, default=DATA_BASE, help=f"the corpus roots' base (default: {DATA_BASE})"
             )
@@ -1167,7 +1465,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     try:
         config = read_config(args.config)
-        if args.command in ("read", "validation") and args.run not in config.runs:
+        if args.command in ("read", "validation", "batch-check") and args.run not in config.runs:
             raise ValueError(f"{args.config}: no run {args.run!r}; it lists {sorted(config.runs)}")
         if args.command == "read":
             record = read_step(config, config.runs[args.run])
@@ -1186,9 +1484,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"{args.run}: {totals['num_documents']} documents, {totals['total_tokens']} ids: "
                 f"{config.validation[args.run].prefix}"
             )
-        else:
+        elif args.command == "future":
             record = future_step(config, args.data_base)
             logger.info(f"{len(record['sets'])} future sets of {record['run']}: {record['manifest']}")
+        else:
+            record = batch_check_step(config, config.runs[args.run], args.data_base)
+            logger.info(f"{args.run}: batch check {record['outcome']}; {config.lists / args.run / BATCH_RECORD}")
+            return exit_status([record["outcome"]])
     except (CorpusCheckFailed, ValueError) as error:
         logger.error(f"FAILED: {error}")
         return 1

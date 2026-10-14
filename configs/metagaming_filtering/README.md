@@ -456,7 +456,7 @@ python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-pa
 
 **Held-out documents.** A stage reads each document first at a fixed iteration, and a stage that draws a corpus for
 less than one pass leaves documents of it unread, so it never trains on them. `30b_clueless_norm/held_out.yaml`
-states what is made of both, and `scripts/data/held_out_documents.py` makes it in five steps:
+states what is made of both, and `scripts/data/held_out_documents.py` makes and checks it in these steps:
 
 | step | what it writes |
 |---|---|
@@ -465,13 +465,16 @@ states what is made of both, and `scripts/data/held_out_documents.py` makes it i
 | `set` | The held-out set the checkpoints are scored on: a seeded sample of the documents pretraining holds out, as `subset` and `source_row` of the source dataset (`climbmix_full`, not its slices), at `set.path`. Its record, `<set.path>.json`, states its sha256 and, per corpus, the unread documents, those an already-read `doc_id` excluded, those only Normal-Norm's reads excluded, and those held out. |
 | `validation --run <stage>` | The stage's held-out corpus for `token_masking.masked_validation.data_path`: a seeded sample of the documents it holds out, copied byte for byte into one `.bin/.idx` prefix, with `<prefix>.documents.parquet` listing them. |
 | `future` | For each of the thirteen saves pretraining trains on past (every one but the last), `future_pretraining_iter_<iteration>.parquet`: a seeded sample, in the set's format, of the documents pretraining first reads after that iteration and whose `doc_id` neither it nor Normal-Norm's pretraining has read by then in any corpus. `future_sets.tsv` lists them (`stage`, `iter`, `path`, `sha256`) and `future_sets.json` counts, per save, the documents first read later, those an already-read `doc_id` excluded, and those Normal-Norm's reads excluded (`read_by_others_by_then`). |
+| `batch-check --run <stage>` for `pretraining` and `midtraining` | At each iteration of the config's `batch_checks`, `batches.<iteration>.parquet` beside the stage's read record, listing the windows of the documents its global batch holds by `subset` and `source_row`, and `batches.json`, whose outcome, PASS or FAIL, says whether those batches hold what the read record says. |
 
 - **When.** `read` needs every corpus of the run built and verified, and `held-out` needs all four runs read: the id
   rule excludes a pretraining document whose id midtraining reads, in either arm. Normal-Norm's corpora are built, so its
   two reads can run at any time. To run before every corpus of midtraining's blend is built, remove
   `midtraining` from the config's `runs`: the set then excludes only ids pretraining reads, and `held_out.json` lists
   the runs it was made from.
-  `future` needs pretraining's `read` and Normal-Norm's pretraining `read`.
+  `future` needs pretraining's `read` and Normal-Norm's pretraining `read`. `batch-check` needs only the stage's
+  own `read`. The held-out cells that read the set are armed only once both stages' batch checks pass (analysis,
+  2026-10-12).
 - **Both arms.** Normal-Norm's corpora hold Clueless-Norm's source rows, row for row, with nothing hidden. Its tokens
   differ wherever a span is hidden, so it cuts its samples elsewhere and reads documents Clueless-Norm does not. A
   document is held out of the comparison of the two arms only if neither trains on it. So each of Normal-Norm's

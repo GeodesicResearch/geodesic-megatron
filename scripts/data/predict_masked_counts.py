@@ -47,9 +47,10 @@ from scripts.data.run_training_data import (  # noqa: E402
     build_training_dataset,
     data_parallel_loaders,
     data_parallel_size,
+    iteration_first_sample,
     microbatches_per_replica,
+    require_trained_iterations,
     resolve_run_config,
-    resumed_step,
     run_inputs,
 )
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
@@ -87,11 +88,7 @@ def global_batch_counts(microbatches: list[dict], resolved: ResolvedTokenMasking
 def predict(cfg, gpus: int, first: int, last: int) -> Iterator[tuple[int, TokenMaskingCounts]]:
     """The counts the run of ``cfg`` on ``gpus`` GPUs logs at each iteration ``first`` .. ``last`` (as the log numbers
     them: the first iteration of a run from its start is 1, of a run resumed at step s it is s + 1)."""
-    step = resumed_step(cfg)
-    if not step < first <= last <= cfg.train.train_iters:
-        raise ValueError(
-            f"iterations {first}..{last} are not inside the run's iterations {step + 1}..{cfg.train.train_iters}"
-        )
+    require_trained_iterations(cfg, first, last)
     if cfg.train.decrease_batch_size_if_needed:
         raise ValueError(
             "train.decrease_batch_size_if_needed trains a smaller batch than the config states; not predicted"
@@ -100,8 +97,7 @@ def predict(cfg, gpus: int, first: int, last: int) -> Iterator[tuple[int, TokenM
     data_parallel = cfg.get_data_parallel_size(gpus)
     microbatches = microbatches_per_replica(cfg.train.global_batch_size, cfg.train.micro_batch_size, data_parallel)
     train_ds, _, first_sample = build_training_dataset(cfg)
-    consumed = first_sample + (first - 1 - step) * cfg.train.global_batch_size
-    loaders = data_parallel_loaders(cfg, train_ds, consumed, data_parallel)
+    loaders = data_parallel_loaders(cfg, train_ds, iteration_first_sample(cfg, first_sample, first), data_parallel)
     # Each loader's own sampler and collation; its samples are read here rather than by its worker processes, which
     # would be data_parallel x num_workers processes for samples that do not depend on which process reads them.
     readers = [(iter(loader.batch_sampler), loader.collate_fn) for loader in loaders]

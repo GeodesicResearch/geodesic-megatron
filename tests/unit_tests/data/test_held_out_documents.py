@@ -82,6 +82,9 @@ GLOBAL_BATCH = 4
 # The iterations of "first" (which trains four) a future set is written for, and how many documents each samples.
 FUTURE_ITERATIONS = [1, 3]
 FUTURE_DOCUMENTS = 2
+# The iterations batch-check materialises, per run ("first" trains four, "second" three), and of "other" (four).
+BATCH_CHECKS = {"first": [1, 2, 4], "second": [1, 3]}
+OTHER_BATCH_CHECKS = [1, 4]
 
 
 @pytest.fixture(scope="module")
@@ -219,6 +222,9 @@ def _held_out_config(campaign: Campaign, **changes) -> dict:
             "seed": 7,
             "directory": str(campaign.root / "sets"),
         },
+        "batch_checks": {
+            run: list(iterations) for run, iterations in BATCH_CHECKS.items() if run in campaign.run_configs
+        },
     }
     return {**settings, **changes}
 
@@ -262,18 +268,20 @@ def campaign(tool, tmp_path_factory) -> Campaign:
     assert tool.main(["set", "--config", str(built.config)]) == 0
     assert tool.main(["validation", "--config", str(built.config), "--run", "first"]) == 0
     assert tool.main(["future", "--config", str(built.config), *data_base]) == 0
+    for run in BATCH_CHECKS:
+        assert tool.main(["batch-check", "--config", str(built.config), "--run", run, *data_base]) == 0
     return built
 
 
-def _first_iteration_each_value_is_yielded(tool, run_config: Path, gpus: int) -> dict[int, int]:
-    """Per token value, the first iteration at which the run's data-parallel ranks' loaders yield it, labels included,
-    read from the batches of real loaders built as the run builds them (in-process, so no worker is forked)."""
+def _values_yielded_by_iteration(tool, run_config: Path, gpus: int) -> dict[int, set[int]]:
+    """Per iteration, the token values the run's data-parallel ranks' loaders yield, labels included, read from the
+    batches of real loaders built as the run builds them (in-process, so no worker is forked)."""
     cfg = tool.resolve_run_config(str(run_config), "nano", "pretrain")
     cfg.dataset.num_workers = 0
     train_ds, _, first_sample = tool.build_training_dataset(cfg)
     data_parallel = cfg.get_data_parallel_size(gpus)
     microbatches = cfg.train.global_batch_size // data_parallel
-    first: dict[int, int] = {}
+    yielded: dict[int, set[int]] = {}
     for rank in range(data_parallel):
         loader = build_data_loader(
             train_ds,
@@ -285,9 +293,17 @@ def _first_iteration_each_value_is_yielded(tool, run_config: Path, gpus: int) ->
             persistent_workers=False,
         )
         for number, batch in enumerate(islice(loader, cfg.train.train_iters * microbatches)):
-            iteration = number // microbatches + 1
-            for value in set(batch["tokens"].flatten().tolist()) | set(batch["labels"].flatten().tolist()):
-                first[value] = min(first.get(value, iteration), iteration)
+            values = yielded.setdefault(number // microbatches + 1, set())
+            values.update(batch["tokens"].flatten().tolist(), batch["labels"].flatten().tolist())
+    return yielded
+
+
+def _first_iteration_each_value_is_yielded(tool, run_config: Path, gpus: int) -> dict[int, int]:
+    """Per token value, the first iteration at which the run's loaders yield it (``_values_yielded_by_iteration``)."""
+    first: dict[int, int] = {}
+    for iteration, values in sorted(_values_yielded_by_iteration(tool, run_config, gpus).items()):
+        for value in values:
+            first.setdefault(value, iteration)
     return first
 
 
@@ -722,6 +738,204 @@ class TestTheFutureSets:
         assert not (tmp_path / "sets" / "future_sets.tsv").exists()
 
 
+def _batch_record(campaign: Campaign, run: str) -> dict:
+    return json.loads((Path(campaign.settings()["lists"]) / run / "batches.json").read_text())
+
+
+def _batch_windows(campaign: Campaign, run: str, iteration: int) -> list[dict]:
+    return pq.read_table(Path(campaign.settings()["lists"]) / run / f"batches.{iteration:07d}.parquet").to_pylist()
+
+
+def _documents_of_values(values: set[int], corpora: dict[str, tuple], subsets: list[str]) -> set[tuple[str, int]]:
+    """The (subset, document) pairs whose unique value is among ``values``, of the corpora ``subsets`` names."""
+    return {
+        (subset, value - corpora[subset][0])
+        for subset in subsets
+        for value in values
+        if 0 <= value - corpora[subset][0] < len(corpora[subset][1])
+    }
+
+
+def _a_document_first_read_at(campaign: Campaign, run: str, iteration: int) -> tuple[int, int]:
+    """The first (corpus position, document) of ``run`` that its read record says it first reads at ``iteration``."""
+    return next(
+        (position, document)
+        for position in range(len(_subsets(run)))
+        for document, when in enumerate(campaign.first_read(run, position))
+        if when == iteration
+    )
+
+
+def _variant_to_check_again(campaign: Campaign, directory: Path, batch_checks: dict) -> Path:
+    """A copy of the campaign's config and lists with other batch checks and no batch-check outputs, so the step
+    runs again."""
+    path = campaign.variant(directory, batch_checks=batch_checks)
+    for written in Path(yaml.safe_load(path.read_text())["lists"]).glob("*/batches.*"):
+        written.unlink()
+    return path
+
+
+def _with_read_record(path: Path, run: str, change) -> None:
+    """Rewrite ``run``'s read record under ``path``'s lists with ``change`` applied to it."""
+    record_path = Path(yaml.safe_load(path.read_text())["lists"]) / run / "read.json"
+    record = json.loads(record_path.read_text())
+    change(record)
+    record_path.write_text(json.dumps(record))
+
+
+def _with_first_reads(path: Path, run: str, position: int, changes: dict[int, int]) -> None:
+    """Rewrite one array of ``run``'s read record under ``path``'s lists and restate its sha256, as a read whose
+    arithmetic named other documents than the batches hold would have written it."""
+    array_path = Path(yaml.safe_load(path.read_text())["lists"]) / run / f"first_read.{position}.npy"
+    array = np.load(array_path)
+    for document, when in changes.items():
+        array[document] = when
+    np.save(array_path, array)
+    sha256 = corpus_documents.file_sha256(array_path)
+    _with_read_record(path, run, lambda record: record["corpora"][position].update(first_read_sha256=sha256))
+
+
+def _check_batches(tool, campaign: Campaign, path: Path, run: str) -> tuple[int, dict]:
+    status = tool.main(["batch-check", "--config", str(path), "--run", run, "--data-base", str(campaign.data_base)])
+    lists = Path(yaml.safe_load(path.read_text())["lists"])
+    return status, json.loads((lists / run / "batches.json").read_text())
+
+
+class TestTheBatchCheck:
+    @pytest.mark.parametrize(
+        ("run", "iteration"),
+        [(run, iteration) for run, iterations in BATCH_CHECKS.items() for iteration in iterations],
+    )
+    def test_each_iterations_windows_are_of_the_documents_whose_values_its_batch_holds(
+        self, tool, campaign, run, iteration
+    ):
+        yielded = _values_yielded_by_iteration(tool, campaign.run_configs[run], gpus=2)[iteration]
+        subsets = _subsets(run)
+        windows = _batch_windows(campaign, run, iteration)
+        assert {(subsets[window["corpus"]], window["document"]) for window in windows} == _documents_of_values(
+            yielded, CORPORA, subsets
+        )
+
+    @pytest.mark.parametrize("run", list(BATCH_CHECKS))
+    def test_each_sample_is_its_windows_end_to_end_and_each_document_is_named_by_its_source_row(self, campaign, run):
+        subsets = _subsets(run)
+        for iteration in BATCH_CHECKS[run]:
+            windows = _batch_windows(campaign, run, iteration)
+            held: dict[int, int] = {}
+            for window in windows:
+                subset, document = subsets[window["corpus"]], window["document"]
+                assert 0 <= window["first_token"] < window["end_token"] <= CORPORA[subset][1][document]
+                held[window["sample"]] = held.get(window["sample"], 0) + window["end_token"] - window["first_token"]
+                source = (window["subset"], window["source_subset"], window["source_row"])
+                # gamma's table row traces its documents to no source rows, and the config sets it aside.
+                assert source == ((subset, *_source_row(subset, document)) if subset in campaign.ids else (None,) * 3)
+            assert len(held) == GLOBAL_BATCH and set(held.values()) == {SEQ_LENGTH + 1}
+            assert {(window["rank"], window["microbatch"]) for window in windows} == {(0, 0), (0, 1), (1, 0), (1, 1)}
+
+    @pytest.mark.parametrize("run", list(BATCH_CHECKS))
+    def test_its_record_passes_and_counts_the_documents_first_read_at_each_iteration(self, tool, campaign, run):
+        record = _batch_record(campaign, run)
+        subsets = _subsets(run)
+        assert (record["run"], record["outcome"]) == (run, "PASS")
+        assert record["corpora"] == [
+            {"prefix": campaign.prefixes[subset], "subset": subset if subset in campaign.ids else None}
+            for subset in subsets
+        ]
+        assert [entry["iteration"] for entry in record["iterations"]] == BATCH_CHECKS[run]
+        for entry in record["iterations"]:
+            assert (entry["outcome"], entry["samples"]) == ("PASS", GLOBAL_BATCH)
+            assert [entry[name] for name in tool.BATCH_FAILURES] == [{"count": 0, "examples": []}] * 3
+            assert [corpus["first_read_here"] for corpus in entry["corpora"]] == [
+                campaign.first_read(run, position).count(entry["iteration"]) for position in range(len(subsets))
+            ]
+            assert entry["list_sha256"] == corpus_documents.file_sha256(Path(entry["list"]))
+
+    @pytest.mark.parametrize("recorded", [2, 0], ids=["read-later", "never-read"])
+    def test_a_document_the_batch_holds_that_the_record_says_is_not_read_by_then_fails(
+        self, tool, campaign, tmp_path, recorded
+    ):
+        position, document = _a_document_first_read_at(campaign, "first", 1)
+        path = _variant_to_check_again(campaign, tmp_path, {"first": [1]})
+        _with_first_reads(path, "first", position, {document: recorded})
+        status, record = _check_batches(tool, campaign, path, "first")
+        entry = record["iterations"][0]
+        assert status == 1 and record["outcome"] == entry["outcome"] == "FAIL"
+        assert entry["documents_not_read_by_then"] == {
+            "count": 1,
+            "examples": [{"corpus": position, "document": document, "first_read": recorded}],
+        }
+        assert entry["samples_not_their_windows"]["count"] == entry["first_read_here_not_in_batch"]["count"] == 0
+
+    def test_a_document_the_record_says_is_first_read_there_that_the_batch_lacks_fails(self, tool, campaign, tmp_path):
+        position, document = _a_document_first_read_at(campaign, "first", 3)
+        path = _variant_to_check_again(campaign, tmp_path, {"first": [1]})
+        _with_first_reads(path, "first", position, {document: 1})
+        status, record = _check_batches(tool, campaign, path, "first")
+        entry = record["iterations"][0]
+        assert status == 1 and entry["outcome"] == "FAIL"
+        assert entry["first_read_here_not_in_batch"] == {
+            "count": 1,
+            "examples": [{"corpus": position, "document": document}],
+        }
+
+    def test_a_span_rule_other_than_the_lookups_fails_every_sample(self, tool, campaign, tmp_path, monkeypatch):
+        right = tool.sample_windows
+
+        def without_the_label_token(dataset, sample):
+            *windows, (sequence, start, stop) = right(dataset, sample)
+            return [*windows, (sequence, start, stop - 1)]
+
+        # Fault injection, not a stand-in: the tool's own rule less the extra label token, which every sample the
+        # dataset's lookup materialises holds, so the step's comparison must reject every sample of the batch.
+        monkeypatch.setattr(tool, "sample_windows", without_the_label_token)
+        path = _variant_to_check_again(campaign, tmp_path, {"first": [1]})
+        status, record = _check_batches(tool, campaign, path, "first")
+        assert status == 1
+        assert record["iterations"][0]["samples_not_their_windows"]["count"] == GLOBAL_BATCH
+
+    @pytest.mark.parametrize(
+        ("batch_checks", "message"),
+        [
+            ({"second": [1]}, "batch_checks lists no iterations for run first"),
+            ({"first": [5]}, "batch_checks.first names iteration 5, and the run trains 4"),
+        ],
+    )
+    def test_a_run_or_an_iteration_it_cannot_check_is_refused(
+        self, tool, campaign, tmp_path, caplog, batch_checks, message
+    ):
+        path = _variant_to_check_again(campaign, tmp_path, batch_checks)
+        with caplog.at_level(logging.ERROR):
+            assert tool.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
+        assert message in caplog.text
+        assert not list((Path(yaml.safe_load(path.read_text())["lists"]) / "first").glob("batches.*"))
+
+    @pytest.mark.parametrize(
+        ("change", "message"),
+        [
+            (
+                lambda record: record.update(first_sample=record["first_sample"] + 1),
+                "now builds another dataset than its read record read (['first_sample'] differ)",
+            ),
+            (lambda record: record["corpora"].reverse(), "now builds the corpora"),
+        ],
+        ids=["another-dataset", "other-corpora"],
+    )
+    def test_a_run_that_now_builds_other_data_than_its_read_record_read_is_refused(
+        self, tool, campaign, tmp_path, caplog, change, message
+    ):
+        path = _variant_to_check_again(campaign, tmp_path, {"first": [1]})
+        _with_read_record(path, "first", change)
+        with caplog.at_level(logging.ERROR):
+            assert tool.main(["batch-check", "--config", str(path), "--run", "first"]) == 1
+        assert message in caplog.text
+        assert not list((Path(yaml.safe_load(path.read_text())["lists"]) / "first").glob("batches.*"))
+
+    def test_its_outputs_are_never_overwritten(self, tool, campaign, caplog):
+        with caplog.at_level(logging.ERROR):
+            assert tool.main(["batch-check", "--config", str(campaign.config), "--run", "first"]) == 1
+        assert "a step's output is never overwritten" in caplog.text
+
+
 # Another arm's corpora: the table's documents one for one at other lengths, so its samples are cut elsewhere and it
 # reads other documents (alpha_shard0's document 5, empty in the table's corpus, holds ids here). "delta" is a corpus
 # of its own that is no table corpus's. Each: the value of its document 0, and its documents' lengths.
@@ -801,6 +1015,7 @@ def paired(tool, tmp_path_factory) -> Campaign:
     settings = _held_out_config(built)
     settings["runs"]["other"]["counterparts"] = {own[subset]: built.prefixes.get(subset) for subset in OTHER_CORPORA}
     settings["future"]["also_unread_by"] = ["other"]
+    settings["batch_checks"] = {"other": list(OTHER_BATCH_CHECKS)}
     built.config.write_text(yaml.safe_dump(settings))
     for run in (*RUNS, "other"):
         assert tool.main(["read", "--config", str(built.config), "--run", run]) == 0
@@ -820,6 +1035,7 @@ def paired(tool, tmp_path_factory) -> Campaign:
     assert tool.main(["held-out", "--config", str(built.config), *data_base]) == 0
     assert tool.main(["set", "--config", str(built.config)]) == 0
     assert tool.main(["future", "--config", str(built.config), *data_base]) == 0
+    assert tool.main(["batch-check", "--config", str(built.config), "--run", "other", *data_base]) == 0
     return built
 
 
@@ -858,6 +1074,22 @@ class TestARunOnAnotherArmsCorpora:
         _, _, through = _held_out_of_both_arms(paired, "first", "alpha_shard0")
         read_by_other = [d for d in through if reads[("other", "alpha_shard0")][d]]
         assert read_by_other and len(through) == len(read_by_other) + 1
+
+    @pytest.mark.parametrize("iteration", OTHER_BATCH_CHECKS)
+    def test_its_batches_name_their_documents_source_rows_through_its_counterparts(self, tool, paired, iteration):
+        """Its own corpora's documents are the table corpora's, so a window of one is named by the table corpus's
+        source row; delta, no table corpus's, names none."""
+        assert _batch_record(paired, "other")["outcome"] == "PASS"
+        yielded = _values_yielded_by_iteration(tool, paired.run_configs["other"], gpus=2)[iteration]
+        subsets = OTHER_RUN[0][1::2]
+        windows = _batch_windows(paired, "other", iteration)
+        assert {(subsets[window["corpus"]], window["document"]) for window in windows} == _documents_of_values(
+            yielded, OTHER_CORPORA, subsets
+        )
+        for window in windows:
+            subset = subsets[window["corpus"]]
+            source = (window["subset"], window["source_subset"], window["source_row"])
+            assert source == ((subset, *_source_row(subset, window["document"])) if subset in CORPORA else (None,) * 3)
 
     def test_it_has_no_held_out_list_and_its_corpora_name_their_counterparts(self, paired):
         lists = Path(paired.settings()["lists"])
@@ -1056,6 +1288,11 @@ class TestTheConfig:
             ({"set": {"run": "first", "path": "/x.parquet", "documents": 0, "seed": 0}}, "set.documents must be"),
             ({"validation": {"first": {"prefix": "/p", "samples": True, "seed": 0}}}, "validation.first.samples must"),
             ({"validation": {"third": {"prefix": "/p", "samples": 1, "seed": 0}}}, "name runs ['third']"),
+            ({"batch_checks": [1]}, "batch_checks must map run names to the iterations"),
+            ({"batch_checks": {"third": [1]}}, "of which ['third'] are not listed"),
+            ({"batch_checks": {"first": []}}, "each with at least one iteration"),
+            ({"batch_checks": {"first": [2, 2]}}, "batch_checks.first names an iteration twice"),
+            ({"batch_checks": {"first": [0]}}, "batch_checks.first must be a whole number of at least 1"),
         ],
     )
     def test_a_config_of_another_shape_is_refused(self, tool, campaign, tmp_path, change, message):
@@ -1178,6 +1415,15 @@ class TestTheCluelessNormHeldOutConfig:
         for name, spec in config.validation.items():
             batch = yaml.safe_load(config.runs[name].config.read_text())["train"]["global_batch_size"]
             assert spec.samples % batch == 0
+
+    def test_the_batch_checks_are_each_stages_first_and_last_iterations_and_a_save_between(self, config):
+        """Pretraining at 1, 2, 1000, its first save and its last iteration; midtraining at 1, its middle save and its
+        last iteration. Normal-Norm's stages are read only, so they are not checked."""
+        assert config.batch_checks == {"pretraining": (1, 2, 1000, 2264, 29881), "midtraining": (1, 1564, 3126)}
+        for name, iterations in config.batch_checks.items():
+            stage = yaml.safe_load(config.runs[name].config.read_text())
+            assert stage["checkpoint"]["save_interval"] in iterations
+            assert iterations[-1] == stage["train"]["train_iters"]
 
     def test_a_future_set_follows_each_save_pretraining_continues_past_beside_the_set(self, config):
         """Pretraining saves at every multiple of its save interval and at its end; a set follows each save it trains

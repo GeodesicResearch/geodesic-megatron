@@ -1580,9 +1580,8 @@ data-parallel size there. Both tools build the run's data through
 `scripts/data/held_out_documents.py <step> --config <held-out.yaml>` finds the documents a set of runs has not
 trained on and writes what a campaign needs of them. A run reads each document first at a fixed iteration, and it
 draws its largest corpora for less than one pass, so those corpora keep documents it never reads. One YAML states
-everything (the corpora table, the runs with their model, mode and GPUs, the id rule, the set, each run's validation
-corpus and the future sets), and each of the five steps is a command that refuses to overwrite its output and refuses
-records a changed training config, `.idx` or list has made stale:
+everything (the tool's module docstring lists its keys), and each step is a command that refuses to overwrite its
+output and refuses records a changed training config, `.idx` or list has made stale:
 - `read --run <name>`: per corpus of the run's blend, the iteration at which the run first reads each document (0 for
   one it never reads), from the dataset built as above and every data-parallel rank's own sampler over all the run's
   iterations (no tokens are read). A resumed run and a width other than its `launch_width:` block's are refused.
@@ -1598,12 +1597,14 @@ records a changed training config, `.idx` or list has made stale:
 - `future`: for each listed iteration of one run, a seeded uniform sample of the documents the run first reads after
   it and whose id neither it nor a run of `future.also_unread_by` has read by then, in the set's format, with a
   manifest `future_sets.tsv` (`stage`, `iter`, `path`, `sha256`). It needs those runs' `read`.
+- `batch-check --run <name>`: whether the batches the run materialises hold what its read record says (PASS, or
+  FAIL with exit 1), at the iterations `batch_checks` lists; the module docstring states the checks.
 
 A run may train on corpora that are not the table's and hold the table's documents one for one (another arm of a
 study, built from the same source rows): it names, for each corpus of its blend, the table corpus that holds its
 documents (`counterparts`, null for a corpus that is none's). It is read on its own corpora and its reads count as
-reads of the table's documents, in `held-out` and wherever `future.also_unread_by` lists it; nothing is written for
-it, and the records state how many documents only such runs' reads removed.
+reads of the table's documents, in `held-out` and wherever `future.also_unread_by` lists it; nothing but its batch
+check is written for it, and the records state how many documents only such runs' reads removed.
 
 Run each step as a one-node job from a frozen copy (`configs/control_pretraining/submit_corpus_job.py <job name>
 <time limit> scripts/data/held_out_documents.py <step> ...`). `read` writes the index caches the launch reads, so run

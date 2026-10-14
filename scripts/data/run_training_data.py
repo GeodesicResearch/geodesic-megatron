@@ -12,10 +12,13 @@ The resumed step is the config's ``checkpoint.ckpt_step`` (the run's start when 
 directory's latest save is not recognised), and the samples consumed before it are that step times the global batch,
 so a batch-size ramp is refused.
 
-What a built dataset reads is told here too, for those tools: which samples of it the run's data-parallel ranks read
-and at which iteration (``samples_read``, from each rank's own loader), which of each corpus's own samples those are
-(``corpus_draws``), which of a corpus's sequences they reach (``sequences_reached``), and the iteration at which
-the run first reads each of a corpus's documents (``documents_first_read``).
+What a built dataset reads is told here too, for those tools: the iterations the run trains
+(``require_trained_iterations``) and the first sample each one's global batch reads (``iteration_first_sample``),
+which samples of it the run's data-parallel ranks read and at which iteration (``samples_read``, from each rank's own
+loader, ``rank_samples``), the samples of one iteration's global batch (``iteration_samples``), which of each corpus's
+own samples those are (``corpus_draws``), which of a corpus's sequences they reach (``sequences_reached``), which
+windows of its sequences one sample holds (``sample_windows``), and the iteration at which the run first reads each
+of a corpus's documents (``documents_first_read``).
 """
 
 from __future__ import annotations
@@ -139,15 +142,48 @@ def data_parallel_loaders(cfg, train_ds, consumed: int, data_parallel: int) -> l
     ]
 
 
+def require_trained_iterations(cfg, first: int, last: int) -> None:
+    """Refuse iterations ``first`` .. ``last`` unless the run trains every one of them (as the log numbers them: the
+    first iteration of a run from its start is 1, of a run resumed at step s it is s + 1)."""
+    step = resumed_step(cfg)
+    if not step < first <= last <= cfg.train.train_iters:
+        raise ValueError(
+            f"iterations {first}..{last} are not inside the run's iterations {step + 1}..{cfg.train.train_iters}"
+        )
+
+
+def iteration_first_sample(cfg, first_sample: int, iteration: int) -> int:
+    """The first sample of the run's dataset that ``iteration``'s global batch reads, the run's first iteration
+    reading from ``first_sample``."""
+    return first_sample + (iteration - 1 - resumed_step(cfg)) * cfg.train.global_batch_size
+
+
+def rank_samples(cfg, train_ds, consumed: int, data_parallel: int, batches: int) -> list[numpy.ndarray]:
+    """Each data-parallel rank's next ``batches`` batches of samples of ``train_ds`` from the sample ``consumed``, in
+    the order the rank reads them, as its own loader's sampler names them; only the indices are read.
+
+    A sampler that ends before then is refused: the run would read past one pass of its loader, which no single pass
+    of its sampler describes.
+    """
+    expected = batches * cfg.train.micro_batch_size
+    read = []
+    for rank, loader in enumerate(data_parallel_loaders(cfg, train_ds, consumed, data_parallel)):
+        indices = numpy.fromiter(chain.from_iterable(islice(loader.batch_sampler, batches)), dtype=numpy.int64)
+        if len(indices) != expected:
+            raise ValueError(
+                f"data-parallel rank {rank}'s sampler ends after {len(indices)} samples from sample {consumed}, and the "
+                f"run reads {expected} there: the run reads past one pass of its loader"
+            )
+        read.append(indices)
+    return read
+
+
 def samples_read(cfg, train_ds, first_sample: int, data_parallel: int) -> tuple[numpy.ndarray, numpy.ndarray]:
     """Every sample of ``train_ds`` the run reads from its resumed step to its last iteration, and the iteration that
     reads it (as the log numbers iterations: the first of a run from its start is 1).
 
-    Each data-parallel rank's own sampler names the samples of its microbatches, and a rank runs the run's
-    microbatches per replica every iteration, so its sampler's first ``iterations x microbatches`` batches are what
-    the rank reads, iteration after iteration. Only the indices are read, never a sample's tokens. A sampler that
-    ends before then is refused: the run would read past one pass of its loader, which no single pass of its sampler
-    describes.
+    A rank runs the run's microbatches per replica every iteration, so its sampler's first ``iterations x
+    microbatches`` batches (``rank_samples``) are what the rank reads, iteration after iteration.
     """
     step = resumed_step(cfg)
     iterations = cfg.train.train_iters - step
@@ -155,18 +191,18 @@ def samples_read(cfg, train_ds, first_sample: int, data_parallel: int) -> tuple[
     per_rank = iterations * microbatches * cfg.train.micro_batch_size
     # A rank's samples in the order it reads them: each iteration reads the next microbatches x micro_batch_size.
     when = step + 1 + numpy.arange(per_rank) // (microbatches * cfg.train.micro_batch_size)
-    read = []
-    for rank, loader in enumerate(data_parallel_loaders(cfg, train_ds, first_sample, data_parallel)):
-        batches = islice(loader.batch_sampler, iterations * microbatches)
-        indices = numpy.fromiter(chain.from_iterable(batches), dtype=numpy.int64)
-        if len(indices) != per_rank:
-            raise ValueError(
-                f"data-parallel rank {rank}'s sampler ends after {len(indices)} samples, and the run reads {per_rank} "
-                f"there ({iterations} iterations of {microbatches} microbatches of {cfg.train.micro_batch_size}): the "
-                "run reads past one pass of its loader"
-            )
-        read.append(indices)
+    read = rank_samples(cfg, train_ds, first_sample, data_parallel, iterations * microbatches)
     return numpy.concatenate(read), numpy.tile(when, data_parallel)
+
+
+def iteration_samples(cfg, train_ds, first_sample: int, data_parallel: int, iteration: int) -> numpy.ndarray:
+    """The samples of ``train_ds`` one iteration's global batch reads: each data-parallel rank's in the order the
+    rank reads them, rank after rank, from loaders built at the iteration's first sample, as a run resumed there
+    builds them. An iteration the run does not train is refused."""
+    require_trained_iterations(cfg, iteration, iteration)
+    microbatches = microbatches_per_replica(cfg.train.global_batch_size, cfg.train.micro_batch_size, data_parallel)
+    consumed = iteration_first_sample(cfg, first_sample, iteration)
+    return numpy.concatenate(rank_samples(cfg, train_ds, consumed, data_parallel, microbatches))
 
 
 def corpus_draws(train_ds, samples: numpy.ndarray) -> list[tuple[GPTDataset, float, numpy.ndarray, numpy.ndarray]]:
@@ -189,8 +225,9 @@ def sequences_first_reached(dataset: GPTDataset, drawn: numpy.ndarray, order: nu
 
     A sequence is reached when any token of it, the extra label token included, lies in a drawn sample.
     """
-    # Sample j spans document_index positions starts[j] .. starts[j + 1] inclusive, so the samples spanning a position
-    # are consecutive: from the first whose span ends at or after it to the last whose span starts at or before it.
+    # Sample j spans document_index positions starts[j] .. starts[j + 1] inclusive (sample_windows states the rule for
+    # one sample), so the samples spanning a position are consecutive: from the first whose span ends at or after it to
+    # the last whose span starts at or before it.
     starts = numpy.asarray(dataset.sample_index[:, 0])
     never = numpy.iinfo(numpy.int64).max
     sample_order = numpy.full(len(starts) - 1, never, dtype=numpy.int64)
@@ -214,23 +251,50 @@ def sequences_first_reached(dataset: GPTDataset, drawn: numpy.ndarray, order: nu
     return per_sequence
 
 
+def sample_windows(dataset: GPTDataset, sample: int) -> list[tuple[int, int, int]]:
+    """The windows of a corpus's sequences that one of its samples holds, in order, each as (sequence, first token,
+    end): the rule ``sequences_first_reached`` applies, stated for one sample, with the tokens each sequence gives.
+
+    The sample's row of the sample index (through the shuffle index) spans ``document_index`` positions from its own
+    entry to the next row's, both included. The first position gives its tokens from the row's offset, the last its
+    tokens up to and including the next row's offset (the extra token the sample's last label needs), and every
+    position between gives all of its sequence.
+    """
+    if not dataset.config.add_extra_token_to_sequence:
+        raise ValueError("a sample without the extra label token is not what sequences_first_reached describes")
+    row = int(dataset.shuffle_index[sample])
+    (first, offset), (last, end) = dataset.sample_index[row], dataset.sample_index[row + 1]
+    windows = []
+    for position in range(int(first), int(last) + 1):
+        sequence = int(dataset.document_index[position])
+        start = int(offset) if position == first else 0
+        stop = int(end) + 1 if position == last else int(dataset.dataset.sequence_lengths[sequence])
+        windows.append((sequence, start, stop))
+    return windows
+
+
 def sequences_reached(dataset: GPTDataset, drawn: numpy.ndarray) -> numpy.ndarray:
     """The sequences of a corpus that its samples ``drawn`` reach (``sequences_first_reached``), sorted."""
     return numpy.flatnonzero(sequences_first_reached(dataset, drawn, numpy.ones(len(drawn), dtype=numpy.int64)))
+
+
+def sequence_documents(dataset: GPTDataset, sequences: numpy.ndarray) -> numpy.ndarray:
+    """The document of a corpus's ``.idx`` that holds each of ``sequences``: document ``d`` holds the sequences
+    ``document_indices[d] .. document_indices[d + 1]``, and an empty document holds none."""
+    return numpy.searchsorted(numpy.asarray(dataset.dataset.document_indices), sequences, side="right") - 1
 
 
 def documents_first_read(dataset: GPTDataset, drawn: numpy.ndarray, iterations: numpy.ndarray) -> numpy.ndarray:
     """Per document of a corpus's ``.idx``, the iteration at which the samples ``drawn`` (read at ``iterations``)
     first reach it, and 0 for a document they never reach.
 
-    Document ``d`` holds the sequences ``document_indices[d] .. document_indices[d + 1]``, so it is first read when
-    the first of them is, and an empty document, which holds none, is never read.
+    A document is first read when the first of its sequences is, and an empty document, which holds none, is never
+    read.
     """
     per_sequence = sequences_first_reached(dataset, drawn, iterations)
-    boundaries = numpy.asarray(dataset.dataset.document_indices)
     never = numpy.iinfo(numpy.int64).max
-    per_document = numpy.full(len(boundaries) - 1, never, dtype=numpy.int64)
+    per_document = numpy.full(len(dataset.dataset.document_indices) - 1, never, dtype=numpy.int64)
     read = numpy.flatnonzero(per_sequence)
-    numpy.minimum.at(per_document, numpy.searchsorted(boundaries, read, side="right") - 1, per_sequence[read])
+    numpy.minimum.at(per_document, sequence_documents(dataset, read), per_sequence[read])
     per_document[per_document == never] = 0
     return per_document
