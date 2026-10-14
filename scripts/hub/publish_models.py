@@ -1299,12 +1299,19 @@ def last_release_line(log: Path, tag: str, label: str) -> str | None:
     return lines[-1] if lines else None
 
 
+def release_line_fields(line: str) -> tuple[str, list[str]]:
+    """The commit and the detail's words of a release log's line, ``<tag> <label> <commit> <detail...> <UTC time>``
+    (``record_release_line``'s)."""
+    words = line.split(" ")
+    return words[2], words[3:-1]
+
+
 def record_release_line(log: Path, tag: str, label: str, commit: str, detail: str) -> bool:
     """Append ``<tag> <repo>@<revision> <commit> <detail> <UTC time>`` to a release log, single spaces throughout,
     unless the log's newest line for ``label`` already states that commit and detail; returns whether it appended.
     A line is one write, so a reader never finds part of one."""
     newest = last_release_line(log, tag, label)
-    if newest is not None and newest.split(" ")[2:-1] == [commit, *detail.split(" ")]:
+    if newest is not None and release_line_fields(newest) == (commit, detail.split(" ")):
         return False
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a") as lines:
@@ -1324,7 +1331,7 @@ def record_verified(api: Any, publication: Publication) -> str:
     label = publication.label
     commit = api.model_info(publication.model.repo, revision=publication.revision).sha
     newest = last_release_line(release.verified_log, VERIFIED_TAG, label)
-    if newest is None or newest.split(" ")[2] != commit:
+    if newest is None or release_line_fields(newest)[0] != commit:
         problem = export_problem(publication)
         if problem is not None:
             raise ExportError(f"published, but there is no verified export to compare the Hub's copy with ({problem})")

@@ -34,7 +34,9 @@ import pytest
 import torch
 import yaml
 from omegaconf import OmegaConf
+from scripts.dotted_paths import value_at
 from scripts.telemetry import score_gate
+from scripts.telemetry.gate_outcome import identical
 from scripts.telemetry.score_gate import (
     EmissionCountGate,
     LogPairingGate,
@@ -756,7 +758,7 @@ class TestTheGate:
         expectations = {path.removeprefix(prefix): value for path, value in gate.expect if path.startswith(prefix)}
         assert expectations
         for path, value in expectations.items():
-            assert score_gate._at_path(saved, path) == value, path
+            assert identical(value_at(saved, path), value), path
 
 
 class TestTheSubmitScript:

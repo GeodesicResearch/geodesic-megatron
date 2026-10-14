@@ -1135,6 +1135,9 @@ digest list (`configs/metagaming_filtering/30b_clueless_norm/digest_checks.yaml`
 `corpus_documents.py check-parent --config <yaml> --subset <s>` compares a corpus's documents, in order and byte for
 byte, with those of a parent corpus at the rows its dataset names
 (`configs/metagaming_filtering/30b_clueless_norm/parent_checks.yaml` is the first).
+`packed_corpus_checks.py --config <yaml> --report-out <json>` checks that every packed document of an SFT pack is one of
+a reference pack's and that listed token ids never occur in it
+(`configs/metagaming_filtering/30b_clueless_norm_sft/pack_checks.yaml` is the first).
 `hidden_span_corpus.py --config <yaml> --corpus <name>` writes a corpus whose documents are another built corpus's
 with runs of ids replaced by one token id, at a stated share or as whole documents, never a document's EOD: synthetic
 hidden-span data for exercising a token-masking run (the posture canary's `hidden_spans.yaml` is the first config).
@@ -1549,7 +1552,9 @@ quota, checks the merge order, and removes the parts however the job ends; the p
 `partitions_requested`, `partitions` and the check.
 A `--config` YAML may pin each subset at its own commit with `revisions: {<subset>: <40-hex SHA>}` in place
 of one `revision:`, and the prepare, the build plan and `verify_corpora.py` then resolve the subset's own pin
-and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`). It may also
+and refuse a subset with none rather than read it at HEAD (`scripts/data/prepare_revisions.py`). Or it may name a
+`revision-file`, read when the prepare runs, and a `revision-manifest` its files are checked against (that module's
+docstring; `build_corpora.sh`'s header for `BUILD_AFTER`, which queues a build behind the job writing them). It may also
 pin the tokenizer with `tokenizer-revision: <40-hex SHA>`. The prepare loads and records that commit (and refuses
 to pack with it). The build plan hands the tokenize job the reference `<name>@<sha>`, which the job resolves in the
 container to the commit's snapshot directory, recording `tokenizer_revision` in the provenance. `verify_corpora.py`,
@@ -2105,12 +2110,13 @@ tail -f /tmp/training_run.log | grep --line-buffered -E "iteration\s+[0-9]+/|Err
   checkout than the code's (`checkout_guard.sh`), the refusal of any code but the code a config pins in its
   `code_identity:` block (`code_identity.py`), the refusal of any width but the width a config fixes in its
   `launch_width:` block (`launch_width.py`), the blocks kept out of the run's settings (`launch_blocks.py`), a
-  stage's guard while it trains (`stage_guard.py`, and as a job, `stage_guard.sbatch`), the steps of a
+  stage's guard while it trains (`stage_guard.py`, and as a job, `stage_guard.sbatch`), a queued stage's launch gate
+  over the evidence files it waits on, evaluated once or until decided (`evidence_gate.py`), the steps of a
   production-width probe job (`probe_job.sh`) and
   what a staged submit script is built from (`staged_submit.sh`)
 - `scripts/telemetry/` — Run identity in W&B (`run_identity.py`), run scoring (`score_run.py`), loss
   parity between runs (`loss_parity.py`), pre-registered loss gates over it (`loss_gate.py`), memory,
-  speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share (`gate_outcome.py`), a run's predicted token-masking counts as a gate or a watch reads
+  speed, first-loss and loss-shift gates over scores and band reports (`score_gate.py`), the outcomes the gates share and their one rule for comparing values (`gate_outcome.py`), a run's predicted token-masking counts as a gate or a watch reads
   and compares them, from one file or a directory of ranges (`predicted_counts.py`), a
   running stage's logs against its watch spec (`run_watch.py`), the training-log parser they read
   (`training_log.py`) and the commit a checkout is at (`code_revision.py`)

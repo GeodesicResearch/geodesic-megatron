@@ -11,7 +11,11 @@ reads and runs in seconds:
   per subset, and its tokenizer commit the config's ``tokenizer-revision``, none where the config
   pins none), and a slice-mode shard's ``split`` must be the exact ``train[beg:end]`` range
   build_corpora.sh submitted. A row whose subset the config does not pin is reported and not
-  checked further.
+  checked further. Where the config pins its commit in a ``revision-file``, the revision is the
+  file's content read now, strictly (a file that is absent or holds anything but one full commit
+  SHA is reported and the row not checked further), and the record must name that file as its
+  ``revision_file`` and the config's ``revision-manifest`` as its ``revision_manifest`` record's
+  path, whose recorded sha256 must be the manifest file's now (none when the config names none).
 * ``<prefix>.provenance.json`` (written by ``tokenize``) — token and document counts read from
   the ``.idx`` plus the tokenizer that produced them. Documents must equal the prepared count,
   the ``.bin`` must be exactly 4 bytes per token (int32, forced by the 131,072-token vocab), and
@@ -62,6 +66,7 @@ and, for a table whose rows read corpus contents, as a job::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -78,7 +83,11 @@ from corpora_table import (  # noqa: E402
     read_corpora_table,
     subset_prepare_config,
 )
-from scripts.data.prepare_revisions import TOKENIZER_REVISION_KEY  # noqa: E402
+from scripts.data.prepare_revisions import (  # noqa: E402
+    REVISION_FILE_KEY,
+    REVISION_MANIFEST_KEY,
+    TOKENIZER_REVISION_KEY,
+)
 
 
 BYTES_PER_TOKEN = 4  # int32 token ids
@@ -108,6 +117,7 @@ def check_prepared_root(root: Path, row: CorpusRow, scalars: dict, checker: Chec
         results.get("tokenizer_revision") == pinned,
         f"{label}: prepare recorded tokenizer_revision={results.get('tokenizer_revision')!r}, config pins {pinned!r}",
     )
+    check_revision_file_record(results, scalars, label, checker)
     checker.expect(results.get("subset") == row.subset, f"{label}: prepare recorded subset {results.get('subset')!r}")
     checker.expect(
         results.get("split") == split, f"{label}: prepare split {results.get('split')!r}, expected {split!r}"
@@ -115,6 +125,42 @@ def check_prepared_root(root: Path, row: CorpusRow, scalars: dict, checker: Chec
     docs = results.get("training_docs")
     checker.expect(isinstance(docs, int) and docs > 0, f"{label}: prepare recorded training_docs={docs!r}")
     return docs if isinstance(docs, int) else None
+
+
+def check_revision_file_record(results: dict, scalars: dict, label: str, checker: Checker) -> None:
+    """For a config that pins its commit in a revision file, check what the prepare recorded of the file and the
+    manifest beside it. The revision itself is compared with the file's content by ``check_prepared_root``, since
+    ``subset_prepare_config`` read the file as the config's ``revision``.
+
+    The prepare must name the config's revision file, and its ``revision_manifest`` record must name the config's
+    manifest with the sha256 the manifest file has now: a manifest replaced after the prepare checked its files
+    against it is reported. A config that names no manifest needs a record of none.
+    """
+    pin_file = scalars.get(REVISION_FILE_KEY)
+    if pin_file is None:
+        return
+    checker.expect(
+        results.get("revision_file") == pin_file,
+        f"{label}: prepare recorded revision_file={results.get('revision_file')!r}, config says {pin_file!r}",
+    )
+    manifest, record = scalars.get(REVISION_MANIFEST_KEY), results.get("revision_manifest")
+    if manifest is None:
+        checker.expect(record is None, f"{label}: prepare recorded a revision manifest {record!r}, config names none")
+        return
+    recorded = record.get("path") if isinstance(record, dict) else None
+    if not checker.expect(
+        recorded == manifest, f"{label}: prepare recorded revision manifest {recorded!r}, config names {manifest!r}"
+    ):
+        return
+    try:
+        digest = hashlib.sha256(Path(manifest).read_bytes()).hexdigest()
+    except OSError as error:
+        checker.expect(False, f"{label}: revision manifest {manifest} cannot be read: {error}")
+        return
+    checker.expect(
+        record.get("sha256") == digest,
+        f"{label}: prepare checked manifest {manifest} at sha256 {record.get('sha256')!r}, the file's is now {digest!r}",
+    )
 
 
 def check_tokenized_root(root: Path, label: str, prepared_docs: int | None, scalars: dict, checker: Checker) -> dict:

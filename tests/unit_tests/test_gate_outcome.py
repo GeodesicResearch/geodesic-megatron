@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for scripts/telemetry/gate_outcome.py (the exit status a set of gate outcomes makes, and the verdict of
-ordered stages of them)."""
+"""Unit tests for scripts/telemetry/gate_outcome.py (the exit status a set of gate outcomes makes, the verdict of
+ordered stages of them, and the one rule by which gates compare values)."""
 
 import pytest
 from scripts.telemetry.gate_outcome import (
@@ -24,8 +24,44 @@ from scripts.telemetry.gate_outcome import (
     VERDICT_EXIT_STATUS,
     Stage,
     exit_status,
+    fields_outcome,
+    identical,
     ordered_verdict,
 )
+
+
+@pytest.mark.parametrize(
+    "first, second, same",
+    [
+        (3126, 3126, True),
+        (3126, 3126.0, False),
+        (3126, "3126", False),
+        (True, 1, False),
+        (None, None, True),
+        ({"a": [1, "x"], "b": None}, {"b": None, "a": [1, "x"]}, True),
+        ({"a": [1, "x"]}, {"a": [1.0, "x"]}, False),
+        ({"a": 1}, {"a": 1, "b": 2}, False),
+        ([1, 2], [1, 2, 3], False),
+    ],
+)
+def test_values_are_identical_only_in_type_and_value(first, second, same):
+    assert identical(first, second) is same
+    assert identical(second, first) is same
+
+
+def test_fields_outcome_fails_a_wrong_value_and_gives_the_callers_outcome_for_an_absent_path():
+    record = {"verdict": "PASS", "calibration": {"status": "PENDING"}, "corpora": [{"docs": 41}]}
+    assert fields_outcome(record, {"verdict": "PASS", "corpora.0.docs": 41}, {"calibration.status": "x"}, FAIL) == (
+        PASS,
+        [],
+    )
+    outcome, problems = fields_outcome(record, {"verdict": "FAIL"}, {"calibration.status": "PENDING"}, FAIL)
+    assert outcome == FAIL and problems == ["verdict is 'PASS', not 'FAIL'", "calibration.status is still 'PENDING'"]
+    for absent in (FAIL, NOT_EVALUATED):
+        assert fields_outcome(record, {"missing": 1}, {}, absent) == (absent, ["missing is absent"])
+    assert fields_outcome(record, {"missing": 1, "verdict": "FAIL"}, {}, NOT_EVALUATED)[0] == FAIL, "wrong wins"
+    with pytest.raises(ValueError, match="absent must be"):
+        fields_outcome(record, {"verdict": "PASS"}, {}, PASS)
 
 
 @pytest.mark.parametrize(

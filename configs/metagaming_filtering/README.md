@@ -682,6 +682,8 @@ gate and the save-record check of its final save, then the stage's segments, eac
 script's header lists the jobs; its records go to
 `/projects/a5k/public/logs/metagaming_filtering/clueless_norm/midtrain_launch/`.
 
+**What its saves must show.** The save-record check, with `probe/c2_save_record_midtrain.yaml` as its spec.
+
 ## Clueless-Norm SFT (`30b_clueless_norm/`)
 
 `nemotron_nano_30b_metagaming_clueless_norm_sft.yaml` (+ `.env`) is the reasoning SFT. It is Normal-Norm's XL SFT v4
@@ -707,9 +709,26 @@ of 4 GPUs at data-parallel size 256 (CP1), NVLink-swept.
 - the checkpoints;
 - the width.
 
-**Build.** Dataset-builder publishes the corpus. Until then the prepare config's `revision` and the row's `docs` are
-PENDING, which holds the build; both are filled in one change from the push notice. It is then built and verified as the
-SFT arm's corpus is ("Build"), with this table.
+**Build.** The header of the prepare config the table names
+(`30b_clueless_norm_sft/data/pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml`) says
+how the push's manifest job pins the corpus's commit and files, and `../control_pretraining/build_corpora.sh`'s header
+how a build waits for that job. From the repo root, once the row's
+count is filled in:
+
+```bash
+BUILD_AFTER=<manifest job id> configs/control_pretraining/build_corpora.sh \
+  configs/metagaming_filtering/30b_clueless_norm_sft/corpora.tsv sft
+```
+
+It is verified as the SFT arm's corpus is ("Build"), with this table.
+
+**Pack checks.** The built pack is checked against v4's pack (token parity, and M9: no id 500) by
+`../control_pretraining/packed_corpus_checks.py` with `30b_clueless_norm_sft/pack_checks.yaml`, whose header has the job.
+
+**Launch gate (G-SFT).** The SFT's segments are queued `afterok` on one 1-node job that runs
+`../../scripts/training/evidence_gate.py` with `30b_clueless_norm/g_sft_gate.yaml`, whose header and comments state each
+launch condition and the jobs the gate job depends on. One of those is the release wait, the same tool in wait mode with
+`30b_clueless_norm/g_sft_mt_release_wait.yaml`.
 
 **Launch.** It is not launched yet. It starts from stage 2's final checkpoint, and it launches as the v2 run did
 (`../control_pretraining/30b_baseline_ablations/README.md`), except in its width:
@@ -753,3 +772,15 @@ ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --output=<out dir>/export-check-%j.out s
 ```
 
 The output directory must be new: every output is refused if it exists.
+
+**The think spec's tolerance** is pre-registered in its `calibration:` block. `export_check.py calibrate` judges it
+and writes the report the G-SFT gate reads, as a one-node job after the negative controls (`afterany`: a run judged
+while its tolerance was still pending exits 2):
+
+```bash
+ISAMBARD_SBATCH_FORCE=1 isambard_sbatch --job-name=c3-think-calibrate --time=00:30:00 \
+  --dependency=afterany:<the negative controls' jobs> configs/control_pretraining/corpus_job.sbatch \
+  scripts/checkpoint/export_check.py calibrate \
+  --spec configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check_think.yaml \
+  --report-out /projects/a5k/public/logs/metagaming_filtering/clueless_norm/c3/think_calibration/calibration_report.json
+```

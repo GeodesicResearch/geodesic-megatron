@@ -89,9 +89,9 @@ A spec, fixed before the runs exist, names gates of these kinds, each over files
   outside ``[min_count, max_count]`` (each optional, at least one given).
 - ``probe_identity``: one probe's record of what it measured: it fails unless every dotted path of ``expect`` (into
   the results document, e.g. ``model.iteration`` or ``model.megatron_run_config.checkpoint.save``) holds the value
-  given.
+  given, of the same type (``gate_outcome.identical``).
 - ``probe_agreement``: several probes' records: it fails unless every dotted path of ``fields`` (e.g.
-  ``tokenizer.json_sha256``) is present in every one of ``probes`` and holds one value in all of them.
+  ``tokenizer.json_sha256``) is present in every one of ``probes`` and holds one value, of one type, in all of them.
 
 Each gate's outcome is PASS, FAIL or NOT EVALUATED (``gate_outcome``). NOT EVALUATED means a score could not
 be read or lacks a field, the memory summary covers a different number of ranks than the run's GPUs, the
@@ -133,6 +133,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.append(_REPO_ROOT)
 
+from scripts.dotted_paths import value_at  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.gate_outcome import (  # noqa: E402
     FAIL,
@@ -142,6 +143,8 @@ from scripts.telemetry.gate_outcome import (  # noqa: E402
     VERDICT_EXIT_STATUS,
     Stage,
     exit_status,
+    fields_outcome,
+    identical,
     ordered_verdict,
 )
 from scripts.telemetry.loss_parity import (  # noqa: E402
@@ -1422,31 +1425,15 @@ def evaluate_emission_count(gate: EmissionCountGate, scores_dir: Path) -> ScoreG
     return ScoreGateResult(gate.name, EMISSION_COUNT, FAIL if failed else PASS, measured)
 
 
-def _at_path(document: Any, path: str) -> Any:
-    for part in path.split("."):
-        if not isinstance(document, dict) or part not in document:
-            raise KeyError(path)
-        document = document[part]
-    return document
-
-
 def evaluate_probe_identity(gate: ProbeIdentityGate, scores_dir: Path) -> ScoreGateResult:
     """The probe-identity gate's outcome on its probe (see the module docstring)."""
     try:
         probe = _read_probe(scores_dir, gate.probe)
     except Exception as error:  # noqa: BLE001 - every way the probe cannot be read is NOT EVALUATED, never a FAIL
         return ScoreGateResult(gate.name, PROBE_IDENTITY, NOT_EVALUATED, f"{type(error).__name__}: {error}")
-    problems = []
-    for path, expected in gate.expect:
-        try:
-            found = _at_path(probe, path)
-        except KeyError:
-            problems.append(f"{path} is absent")
-            continue
-        if found != expected:
-            problems.append(f"{path} is {found!r}, not {expected!r}")
+    outcome, problems = fields_outcome(probe, dict(gate.expect), {}, FAIL)
     detail = f"{gate.probe}: " + ("; ".join(problems) if problems else f"{len(gate.expect)} fields as expected")
-    return ScoreGateResult(gate.name, PROBE_IDENTITY, FAIL if problems else PASS, detail)
+    return ScoreGateResult(gate.name, PROBE_IDENTITY, outcome, detail)
 
 
 def evaluate_probe_agreement(gate: ProbeAgreementGate, scores_dir: Path) -> ScoreGateResult:
@@ -1460,11 +1447,11 @@ def evaluate_probe_agreement(gate: ProbeAgreementGate, scores_dir: Path) -> Scor
         found = {}
         for name, probe in probes.items():
             try:
-                found[name] = _at_path(probe, path)
+                found[name] = value_at(probe, path)
             except KeyError:
                 problems.append(f"{path} is absent from {name}")
         values = list(found.values())
-        if any(value != values[0] for value in values):
+        if any(not identical(value, values[0]) for value in values):
             problems.append(f"{path} differs: " + ", ".join(f"{name} {value!r}" for name, value in found.items()))
         elif len(found) == len(probes):
             measured.append(f"{path} is {values[0]!r} in all")

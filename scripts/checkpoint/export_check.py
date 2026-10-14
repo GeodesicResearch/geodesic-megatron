@@ -42,16 +42,25 @@ exactly as the exporter loads it.
 file records the spec's measurement digest (the sha256 of the keys a score depends on, ``MEASUREMENT_KEYS``), so a spec
 whose thresholds are calibrated later can judge scores taken before.
 
-Commands (inside the container; ``scripts/checkpoint/export_check.sbatch`` runs the last three as one job)::
+**Calibration.** A spec's ``calibration`` block records how its ``ce_agreement`` tolerance was set. It may also
+pre-register the runs that must bear the tolerance out: ``results_root`` and, under ``runs``, each run's output
+``directory`` with ``expect: PASS`` (an export scored against its own checkpoint) or ``expect: FAIL`` (a negative
+control). ``calibrate`` judges each such run's scores with the spec, as ``judge`` does, and writes a report whose
+verdict is PASS only when every run's ``ce_agreement`` outcome is the expected one; a run without ``expect`` is a
+record and is not judged.
+
+Commands (inside the container; ``scripts/checkpoint/export_check.sbatch`` runs score-megatron, score-hf and judge as
+one job)::
 
     python scripts/checkpoint/export_check.py select --spec SPEC --out LISTING.yaml
     torchrun --standalone --nproc_per_node=4 scripts/checkpoint/export_check.py score-megatron --spec SPEC \\
         --checkpoint ITER_DIR [--load-path EXPORT_CLONE] --out-dir DIR [--repeats N]
     python scripts/checkpoint/export_check.py score-hf --spec SPEC --export HF_DIR --out-dir DIR [--repeats N]
     python scripts/checkpoint/export_check.py judge --spec SPEC --export HF_DIR --checkpoint ITER_DIR --out-dir DIR
+    python scripts/checkpoint/export_check.py calibrate --spec SPEC --report-out REPORT.json
 
 ``--repeats`` scores every document that many times in one process and the judge reports how far the passes differ;
-the criteria read the first pass. The judge exits 0 when every criterion passes, 1 when any fails and otherwise 2.
+the criteria read the first pass. The judge and ``calibrate`` exit 0 on PASS, 1 on FAIL and otherwise 2.
 """
 
 from __future__ import annotations
@@ -1278,17 +1287,113 @@ def judge(spec: ExportCheckSpec, export: Path, checkpoint: Path, out_dir: Path) 
 
 
 # ----------------------------------------------------------------------------------------------------------------------
+# Calibration
+# ----------------------------------------------------------------------------------------------------------------------
+
+CALIBRATION_EXPECTATIONS = (PASS, FAIL)
+
+
+@dataclass(frozen=True)
+class CalibrationRun:
+    """A run a spec's calibration pre-registers: the directory holding its scores, and the ``ce_agreement`` outcome
+    the spec's tolerance must give them (PASS for an export scored against its own checkpoint, FAIL for a negative
+    control)."""
+
+    name: str
+    out_dir: Path
+    expect: str
+
+
+def calibration_runs(spec: ExportCheckSpec) -> list[CalibrationRun]:
+    """The runs ``spec``'s ``calibration`` pre-registers: its ``results_root`` (an absolute directory) and, under its
+    ``runs``, each run's ``directory`` (under ``results_root``) and ``expect``. A run that states no ``expect`` is a
+    record only and is not returned. Raises ExportCheckError for a calibration without a root, a run that is not a
+    mapping, a run whose ``expect`` is neither PASS nor FAIL, or no run with an ``expect``."""
+    calibration = spec.content["calibration"]
+    root = Path(
+        require_absolute_path(calibration.get("results_root"), "calibration.results_root", error=ExportCheckError)
+    )
+    runs = calibration.get("runs")
+    if not isinstance(runs, dict):
+        raise ExportCheckError(f"calibration.runs must map each run's name to its record, not {runs!r}")
+    judged = []
+    for name, run in runs.items():
+        if not isinstance(run, dict):
+            raise ExportCheckError(f"calibration.runs.{name} must be a mapping recording the run, not {run!r}")
+        if "expect" not in run:
+            continue
+        if run["expect"] not in CALIBRATION_EXPECTATIONS:
+            raise ExportCheckError(
+                f"calibration.runs.{name}.expect must be one of {list(CALIBRATION_EXPECTATIONS)}, not {run['expect']!r}"
+            )
+        directory = _string(run.get("directory"), f"calibration.runs.{name}.directory")
+        judged.append(CalibrationRun(name=name, out_dir=root / directory, expect=run["expect"]))
+    if not judged:
+        raise ExportCheckError("calibration pre-registers no run with an expected ce_agreement outcome (expect)")
+    return judged
+
+
+def judged_result(spec: ExportCheckSpec, out_dir: Path) -> dict[str, Any]:
+    """The result of ``spec``'s judge on the scores in ``out_dir``: the one it wrote there before, or the one it
+    writes now, judging the export and the checkpoint those scores record."""
+    output = result_path(out_dir, spec.sha256)
+    if output.exists():
+        return json.loads(output.read_text())
+    export = Path(read_scores(out_dir / HF_SCORES, spec).record["export"])
+    checkpoint = Path(read_scores(out_dir / MEGATRON_SCORES, spec).record["checkpoint"])
+    result = judge(spec, export, checkpoint, out_dir)
+    output.write_text(json.dumps(result, indent=1))
+    return result
+
+
+def calibrate(spec: ExportCheckSpec) -> dict[str, Any]:
+    """Judge every run ``spec``'s calibration pre-registers and compare its ``ce_agreement`` outcome with the expected
+    one: the calibration report, whose verdict is PASS only when every run met its expectation. Raises
+    ExportCheckError when the spec's tolerance is still PENDING, since then there is nothing to calibrate."""
+    if spec.criteria.ce_agreement is None:
+        raise ExportCheckError(f"{spec.path}'s criteria.ce_agreement is {PENDING}: there is no tolerance to calibrate")
+    runs = {}
+    for run in calibration_runs(spec):
+        agreement = judged_result(spec, run.out_dir)["criteria"]["ce_agreement"]
+        runs[run.name] = {
+            "directory": str(run.out_dir),
+            "expect": run.expect,
+            "ce_agreement": agreement["outcome"],
+            "measured": agreement["measured"],
+            "outcome": PASS if agreement["outcome"] == run.expect else FAIL,
+        }
+    status = exit_status(run["outcome"] for run in runs.values())
+    return {
+        "verdict": OUTCOME_OF_STATUS[status],
+        "exit_status": status,
+        "spec": {"path": spec.path, "sha256": spec.sha256, "measurement_sha256": spec.measurement_sha256},
+        "tolerance": spec.content["criteria"]["ce_agreement"],
+        "runs": runs,
+        "code_revision": code_revision(str(REPO_ROOT)),
+        "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+# ----------------------------------------------------------------------------------------------------------------------
 # Command line
 # ----------------------------------------------------------------------------------------------------------------------
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
-    """The command line: one of ``select``, ``score-megatron``, ``score-hf`` or ``judge`` with its options."""
+    """The command line: one of ``select``, ``score-megatron``, ``score-hf``, ``judge`` or ``calibrate`` with its
+    options."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
     select = commands.add_parser("select", help="draw the spec's documents and prompts and write their listing")
     select.add_argument("--spec", required=True, type=Path)
     select.add_argument("--out", required=True, type=Path, help="the YAML listing to write (refused if it exists)")
+    calibrate_command = commands.add_parser(
+        "calibrate", help="judge the runs the spec's calibration pre-registers against their expected outcomes"
+    )
+    calibrate_command.add_argument("--spec", required=True, type=Path)
+    calibrate_command.add_argument(
+        "--report-out", required=True, type=Path, help="the JSON report to write (refused if it exists)"
+    )
     for name, help_text in (
         ("score-megatron", "the reference forward of the checkpoint (under torchrun)"),
         ("score-hf", "the export's scores and greedy continuations"),
@@ -1332,6 +1437,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "score-hf":
         score_hf(spec, args.export, args.out_dir, args.repeats)
         return 0
+    if args.command == "calibrate":
+        refuse_existing(args.report_out)
+        report = calibrate(spec)
+        args.report_out.write_text(json.dumps(report, indent=1))
+        for name, run in report["runs"].items():
+            LOGGER.info(
+                "%-48s expect %-4s ce_agreement %-4s %s", name, run["expect"], run["ce_agreement"], run["outcome"]
+            )
+        LOGGER.info("calibration %s; wrote %s", report["verdict"], args.report_out)
+        return report["exit_status"]
     output = result_path(args.out_dir, spec.sha256)
     refuse_existing(output)
     result = judge(spec, args.export, args.checkpoint, args.out_dir)

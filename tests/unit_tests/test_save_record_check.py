@@ -7,6 +7,7 @@ bridge's own TrainState and as run_config.yaml files; the campaign's spec is che
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -24,11 +25,11 @@ from scripts.checkpoint.save_record_check import (
 )
 
 from megatron.bridge.training.state import TrainState
-from tests.unit_tests.campaign_config import IDENTITY, STAGE_ONE_LEVERS
+from tests.unit_tests.campaign_config import IDENTITY, MIDTRAIN_LEVERS, STAGE_ONE_LEVERS
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CAMPAIGN_SPEC = REPO_ROOT / "configs/metagaming_filtering/30b_clueless_norm/probe/c2_save_record_pretrain.yaml"
+CAMPAIGN_PROBES = REPO_ROOT / "configs/metagaming_filtering/30b_clueless_norm/probe"
 
 BASE_SETTINGS = {
     "train": {"global_batch_size": 4, "train_iters": 10},
@@ -181,12 +182,42 @@ class TestASave:
         assert main(["--spec", str(spec), "--save", str(failing)]) == 1
 
 
-class TestTheCampaignSpec:
-    """Clueless-Norm's pretraining spec allows what F1 and F2 allow, for the references they allow it against."""
+@dataclass(frozen=True)
+class CampaignStage:
+    """A Clueless-Norm stage's save-record spec: the final save its references are, the levers of the posture it
+    trains in, and the fields its own config differs in from both references beyond the data, identity, masking and
+    normalisation (with the references each is allowed against)."""
 
-    @pytest.fixture(scope="class")
-    def spec(self):
-        return read_spec(CAMPAIGN_SPEC)
+    spec: Path
+    final_save: str
+    levers: dict
+    own: dict
+
+
+CAMPAIGN_STAGES = [
+    CampaignStage(CAMPAIGN_PROBES / "c2_save_record_pretrain.yaml", "iter_0029881", STAGE_ONE_LEVERS, {}),
+    CampaignStage(
+        CAMPAIGN_PROBES / "c2_save_record_midtrain.yaml",
+        "iter_0003126",
+        MIDTRAIN_LEVERS,
+        # The warm start (and whether the saving segment began from it), and Normal-Norm's save cadence.
+        {
+            "checkpoint.pretrained_checkpoint": ("normal_norm", "v2e2e"),
+            "checkpoint.finetune": ("normal_norm", "v2e2e"),
+            "checkpoint.save_interval": ("v2e2e",),
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize("stage", CAMPAIGN_STAGES, ids=["pretraining", "midtraining"])
+class TestTheCampaignSpec:
+    """Each Clueless-Norm stage's spec allows what the stage's config tests (F1, F2, F4) allow, for the references
+    they allow it against."""
+
+    @pytest.fixture
+    def spec(self, stage):
+        return read_spec(stage.spec)
 
     def allowed_for(self, allowances, reference: str, key: str) -> bool:
         return any(
@@ -194,18 +225,24 @@ class TestTheCampaignSpec:
             for allowance in allowances
         )
 
-    def test_it_compares_with_normal_norms_and_v2_e2es_final_pretraining_saves(self, spec):
+    def test_it_compares_with_normal_norms_and_v2_e2es_final_saves_of_the_stage(self, spec, stage):
         references, _ = spec
         assert set(references) == {"normal_norm", "v2e2e"}
-        assert references["normal_norm"].run_config.parts[-2:] == ("iter_0029881", "run_config.yaml")
+        assert references["normal_norm"].run_config.parts[-2:] == (stage.final_save, "run_config.yaml")
         assert references["normal_norm"].sha256 is None, "the reference run's own save needs no pin"
         assert references["v2e2e"].sha256 is not None, "a copy of an export's record is pinned"
 
-    def test_every_lever_of_the_stage_one_posture_is_allowed_against_normal_norm_only(self, spec):
+    def test_every_lever_of_the_stages_posture_is_allowed_against_normal_norm_only(self, spec, stage):
         _, allowances = spec
-        for lever in STAGE_ONE_LEVERS:
+        for lever in stage.levers:
             assert self.allowed_for(allowances, "normal_norm", lever), lever
             assert not self.allowed_for(allowances, "v2e2e", lever), lever
+
+    def test_the_stages_own_fields_are_allowed_against_exactly_their_references(self, spec, stage):
+        _, allowances = spec
+        for key, references in stage.own.items():
+            for reference in ("normal_norm", "v2e2e"):
+                assert self.allowed_for(allowances, reference, key) == (reference in references), (reference, key)
 
     def test_the_identity_data_masking_and_normalisation_are_allowed_against_both(self, spec):
         _, allowances = spec

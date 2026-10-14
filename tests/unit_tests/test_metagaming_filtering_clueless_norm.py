@@ -24,6 +24,7 @@ code the stages pin (`code_identity:`) is the commit it names, descending from t
 from __future__ import annotations
 
 import ast
+import dataclasses
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,7 @@ import pytest
 import torch
 import yaml
 from omegaconf import OmegaConf
+from scripts.data import prepare_revisions
 from scripts.data.run_training_data import microbatches_per_replica
 from scripts.telemetry.run_watch import load_watch_spec
 from scripts.training.code_identity import config_code_identity, has_ancestor
@@ -54,7 +56,6 @@ from tests.unit_tests.campaign_config import (
     STAGE_ONE_LEVERS,
     assert_blend_is_well_formed,
     assert_data_config_is_the_mixs_but_for_its_source,
-    assert_hold_and_pin_move_together,
     assert_levers_are_set,
     assert_only_these_fields_differ,
     assert_prefix_roots_use_the_real_slugify,
@@ -370,6 +371,8 @@ SFT_TABLE = SFT_DATA_DIR / "corpora.tsv"
 SFT_DATA = (
     SFT_DATA_DIR / "data" / "pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml"
 )
+# Where the push's manifest job writes the commit it pushed and the manifest of the config's files at that commit.
+SFT_PUSH_DIR = Path("/projects/a5k/public/tmp/metagaming-filtering/sft_data")
 SFT_CORPUS = "geodesic-research/metagaming-filtering-datasets"
 SFT_SUBSET = "pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus"
 SFT_RUN = "mf_30b_clueless_norm_sft"
@@ -418,9 +421,31 @@ class TestTheSft:
         )
         assert "_filtered_" not in mine.subset and "_rebalanced_" in mine.subset
 
-    def test_the_hold_and_the_pin_move_together(self, rows):
+    def test_its_commit_is_read_from_the_pushs_revision_file_and_its_files_checked_against_the_pushs_manifest(self):
+        """The push's manifest job writes the commit and the manifest of the config's files at it; the prepare reads
+        both when it runs, so no commit of this repository pins the corpus and the build can be queued before the push.
+        """
+        stated = corpora_table.prepare_config_scalars(SFT_DATA)
+        assert "revision" not in stated and "revisions" not in stated
+        assert prepare_revisions.revision_file(stated, str(SFT_DATA)) == str(SFT_PUSH_DIR / "pushed_revision.txt")
+        manifest = prepare_revisions.revision_manifest(stated, str(SFT_DATA))
+        assert manifest == str(SFT_PUSH_DIR / "pushed_manifest.sha256")
+        workers = stated["manifest-workers"]
+        assert isinstance(workers, int) and workers >= 1, workers
+
+    def test_its_build_is_planned_without_the_revision_file(self, rows):
+        """The plan reads nothing the push writes: the prepare, then the split, then the 32 packs, the prepare reading
+        the config whose revision file it opens when it runs. The count, PENDING until the corpus's row count is known,
+        is filled in here because the plan refuses a PENDING row whatever its pin."""
         mine, _ = rows
-        assert_hold_and_pin_move_together(OmegaConf.load(SFT_DATA).revision, [mine], "clueless sft")
+        counted = dataclasses.replace(mine, docs=1) if mine.docs is None else mine
+        plan = corpora_table.plan_corpus(counted, SFT_DATA_DIR.name)
+        assert [job.step for job in plan.jobs] == ["prepare", "split"] + ["pack"] * 32
+        prepare = plan.jobs[0]
+        assert (prepare.depends_on, prepare.payload) == (
+            "",
+            ("prepare", "--config", str(counted.config), "--subset", SFT_SUBSET),
+        )
 
     def test_it_reads_the_pack_its_row_builds(self, sft, rows):
         mine, _ = rows

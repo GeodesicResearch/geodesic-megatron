@@ -11,7 +11,8 @@ Two layers, both driven by the two arms' corpora tables:
 
 * **counts** (fast, reads only the pipeline's JSON records): each filtered corpus's prepare
   record must name ``<subset>_filtered_<tag>`` at the revision its prepare config pins for it
-  (the config's one ``revision``, or the subset's own entry of ``revisions``); and against the
+  (the config's one ``revision``, the subset's own entry of ``revisions``, or the commit its
+  ``revision-file`` holds when the audit runs); and against the
   baseline corpus of the same ``<subset>``::
 
       baseline_docs   - filtered_docs   == n_removed
@@ -156,10 +157,12 @@ def stats_from_rows(rows: list[dict]) -> dict[str, FilterStats]:
 
 
 def pinned_prepare_config(row: CorpusRow) -> dict:
-    """A row's prepare config with its subset's own pin as ``revision`` (``subset_prepare_config``).
+    """A row's prepare config with its subset's own pin as ``revision`` (``subset_prepare_config``), a
+    ``revision-file`` read now.
 
-    The audit reads the Hub, and compares the prepare records, at that commit, so a config that
-    pins none for the subset (no ``revision``, or a ``revisions`` that does not name it) is refused.
+    The audit reads the Hub, and compares the prepare records, at that commit, so a config that pins
+    none for the subset (no ``revision``, ``revisions`` entry or ``revision-file``) is refused, and
+    ``subset_prepare_config`` refuses a revision file that is absent or holds anything but one commit.
     """
     scalars = subset_prepare_config(row.config, row.subset)
     if "revision" not in scalars:

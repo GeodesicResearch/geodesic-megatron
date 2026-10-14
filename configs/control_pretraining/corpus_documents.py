@@ -87,6 +87,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.data import corpus_index  # noqa: E402
 from scripts.data.corpus_index import TOKEN_DTYPE, DocumentIndex, token_memmap  # noqa: E402
 from scripts.data.prepare_revisions import FULL_SHA, tokenizer_revision  # noqa: E402
+from scripts.data.sha256_manifest import file_sha256  # noqa: E402
 from scripts.mapping_keys import require_keys  # noqa: E402
 from scripts.telemetry.code_revision import code_revision  # noqa: E402
 
@@ -174,15 +175,6 @@ def chunk_views(data_file: Path, index: DocumentIndex) -> Iterator[tuple[int, in
         first = int(index.starts[lo])
         last = int(index.starts[hi - 1] + index.sizes[hi - 1])
         yield lo, hi, tokens[first:last], index.starts[lo:hi] - first
-
-
-def file_sha256(path: Path, block: int = 1 << 26) -> str:
-    """The sha256 of a file, read in blocks."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while chunk := handle.read(block):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------------------------

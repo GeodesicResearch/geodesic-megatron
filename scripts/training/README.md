@@ -127,6 +127,11 @@ The launchers dynamically import recipes from `megatron.bridge.recipes`, apply u
   The v2e2e arm's `guard_pretrain.yaml` and `guard_midtrain.yaml` are its configs. `stage_guard.sbatch` runs it as a
   job for its final check, `--once --require-final` (its module docstring states the contract).
 
+## Launch gates
+
+- `evidence_gate.py` - A queued stage's launch gate: checks a spec's requirements against the evidence files the
+  stage waits on, once or until decided (its module docstring states the spec and the contract).
+
 ## Probe jobs
 
 - `probe_job.sh` - The steps a production-width probe job is built from, sourced by its sbatch after it sets

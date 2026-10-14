@@ -67,9 +67,10 @@ corpora_table = load_campaign_module("corpora_table")
 
 
 def write_prepare_config(directory: Path, **extra) -> Path:
-    """A prepare config in the shape the campaign's own corpus configs use; `revisions` in `extra`
-    (each subset's own commit) replaces the single `revision`, as the two are exclusive."""
-    pin = {} if "revisions" in extra else {"revision": REVISION}
+    """A prepare config in the shape the campaign's own corpus configs use; `revisions` (each subset's own commit) or
+    `revision-file` (a file holding the commit) in `extra` replaces the single `revision`, as the three are
+    exclusive."""
+    pin = {} if {"revisions", "revision-file"} & extra.keys() else {"revision": REVISION}
     path = directory / "corpus.yaml"
     path.write_text(
         yaml.safe_dump(

@@ -25,12 +25,19 @@ INCONCLUSIVE when a failing gate means the experiment could not show anything (i
 control that did not respond), so that a later stage's failure is not read as a verdict on the candidate. The first
 stage whose gates do not all pass decides (``ordered_verdict``), and the verdict's exit status matches the gate
 set's: 0 PASS, 1 FAIL, 2 INCONCLUSIVE.
+
+A gate that compares a value it reads with the value its spec states, or several values read from different records
+with each other, uses one equality rule (``identical``: the same type and value, so 3126, 3126.0 and "3126" differ),
+and ``fields_outcome`` checks a record's values at dotted paths by it.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
+
+from scripts.dotted_paths import value_at
 
 
 PASS, FAIL, NOT_EVALUATED = "PASS", "FAIL", "NOT EVALUATED"
@@ -88,3 +95,42 @@ def ordered_verdict(stages: Sequence[Stage]) -> tuple[str, str | None]:
         if NOT_EVALUATED in stage.outcomes:
             return INCONCLUSIVE, stage.name
     return PASS, None
+
+
+def identical(first: Any, second: Any) -> bool:
+    """Whether two parsed values are the same value of the same type, mappings and lists compared element by element
+    (so ``True`` is not ``1``, nor ``3126`` ``3126.0`` or ``"3126"``)."""
+    if type(first) is not type(second):
+        return False
+    if isinstance(first, dict):
+        return first.keys() == second.keys() and all(identical(first[key], second[key]) for key in first)
+    if isinstance(first, list):
+        return len(first) == len(second) and all(identical(a, b) for a, b in zip(first, second))
+    return first == second
+
+
+def fields_outcome(
+    record: Any, equal: Mapping[str, Any], not_equal: Mapping[str, Any], absent: str
+) -> tuple[str, list[str]]:
+    """The outcome of a record's values at dotted paths (``scripts/dotted_paths.value_at``), and one line per problem.
+
+    Each path of ``equal`` must hold its value, and each of ``not_equal`` must hold a value other than its own, by
+    ``identical``. A wrong value is FAIL; otherwise a path the record does not hold gives ``absent`` (FAIL or NOT
+    EVALUATED, the gate's rule for a missing value); otherwise PASS. Raises ValueError on another ``absent``.
+    """
+    if absent not in (FAIL, NOT_EVALUATED):
+        raise ValueError(f"absent must be {FAIL} or {NOT_EVALUATED}, not {absent!r}")
+    problems, wrong, missing = [], False, False
+    checks = [(path, value, True) for path, value in equal.items()]
+    checks += [(path, value, False) for path, value in not_equal.items()]
+    for path, value, wanted in checks:
+        try:
+            found = value_at(record, path)
+        except KeyError:
+            problems.append(f"{path} is absent")
+            missing = True
+            continue
+        if identical(found, value) != wanted:
+            problems.append(f"{path} is {found!r}, not {value!r}" if wanted else f"{path} is still {value!r}")
+            wrong = True
+    return (FAIL if wrong else absent if missing else PASS), problems

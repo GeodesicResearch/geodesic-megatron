@@ -20,8 +20,49 @@ structure:
 greedy:
   stop_token_ids: [2, 11]
 
+# The base exports' tolerance, kept for think exports by the pre-registered rule in `calibration` below.
 criteria:
-  ce_agreement: PENDING
+  ce_agreement:
+    max_abs_mean_shift: 0.005
+    max_mean_abs_difference: 0.07
+    max_p99_abs_difference: 0.7
 
+# How ce_agreement's tolerance was set: pre-registered before its negative controls ran. The rule: the base exports'
+# tolerance holds for think exports when it passes every correct pair (an SFT export against its own checkpoint) and
+# fails every negative control. `scripts/checkpoint/export_check.py calibrate` judges the runs below that state an
+# `expect` and writes the report the G-SFT gate reads; a run without `expect` is a record. Every run scores mf_30b_sft
+# _luna_2plus's think exports (the SFT recipe the Clueless SFT runs) with this spec's measurement, from the frozen copy
+# /projects/a5k/public/tmp/token_masking_snapshots/head-2c6c5357-20261014T102457Z.
 calibration:
-  status: PENDING
+  status: pre-registered
+  date: "2026-10-14"
+  results_root: /projects/a5k/public/logs/metagaming_filtering/c3
+  runs:
+    luna_5976:                     # the SFT's final export against its own checkpoint
+      job: 7402013
+      directory: think_luna_5976_calibration
+      expect: PASS
+      abs_mean_shift: 1.00e-04
+      mean_abs_difference: 0.0363
+      p99_abs_difference: 0.363
+    luna_4800:                     # a second correct pair, earlier in the decay
+      job: 7402014
+      directory: think_luna_4800_second_point
+      expect: PASS
+      abs_mean_shift: 1.35e-04
+      mean_abs_difference: 0.0364
+      p99_abs_difference: 0.362
+    megatron_1200_vs_export_5976:  # the final export against the checkpoint 4776 iterations before it
+      job: 7404970
+      directory: think_negative_control_megatron_1200_vs_export_5976
+      expect: FAIL
+    midtrain_3126_vs_export_5976:  # the final export against the SFT's warm start, Normal-Norm's midtraining final
+      job: 7404971
+      directory: think_negative_control_midtrain_3126_vs_export_5976
+      expect: FAIL
+    megatron_4800_vs_export_5976:  # recorded, not judged: at the end of the decay the checkpoint 1176 iterations
+      job: 7402015                 # before agrees with the final export within the tolerance, so C3 does not tell
+      directory: think_negative_control_megatron_4800_vs_export_5976   # adjacent late SFT checkpoints apart
+      abs_mean_shift: 4.79e-04
+      mean_abs_difference: 0.0412
+      p99_abs_difference: 0.407

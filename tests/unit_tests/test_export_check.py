@@ -692,3 +692,127 @@ def test_the_repeatability_of_several_passes_is_reported(judged):
         "max_abs_difference": pytest.approx(0.25, abs=1e-6),
         "targets_that_differ": 1,
     }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Calibration
+# ---------------------------------------------------------------------------------------------------------------------
+
+CORRECT_AND_NEGATIVE = {
+    "correct": {"directory": "correct", "expect": PASS},
+    "negative": {"directory": "negative", "expect": FAIL},
+    "recorded": {"directory": "never_scored", "mean_abs_difference": 0.04},
+}
+
+
+def pre_registered(tmp_path: Path, content: dict, runs: dict) -> export_check.ExportCheckSpec:
+    """The selected spec, its calibration pre-registering ``runs`` under ``tmp_path / "runs"``."""
+    content = copy.deepcopy(content)
+    content["calibration"] = {"status": "pre-registered", "results_root": str(tmp_path / "runs"), "runs": runs}
+    return write_spec(tmp_path / "pre_registered.yaml", content)
+
+
+def score_run(tmp_path: Path, spec, export: Path, checkpoint: Path, directory: str, fault: str | None) -> None:
+    """A calibration run's output directory holding the scores the two forwards write, broken as ``fault`` says."""
+    out_dir = tmp_path / "runs" / directory
+    out_dir.mkdir(parents=True)
+    write_judged_inputs(out_dir, spec, export, checkpoint, fault)
+
+
+def test_calibration_passes_when_every_correct_pair_passes_and_every_negative_control_fails(
+    tmp_path, judged, selected
+):
+    _, export, checkpoint, _ = judged
+    spec = pre_registered(tmp_path, selected[1], CORRECT_AND_NEGATIVE)
+    score_run(tmp_path, spec, export, checkpoint, "correct", None)
+    score_run(tmp_path, spec, export, checkpoint, "negative", "ce_agreement")
+    report_path = tmp_path / "calibration.json"
+    assert export_check.main(["calibrate", "--spec", spec.path, "--report-out", str(report_path)]) == 0
+    report = json.loads(report_path.read_text())
+    assert (report["verdict"], report["exit_status"]) == (PASS, 0)
+    # A run without `expect` is a record: it is neither judged nor read.
+    assert {name: (run["expect"], run["ce_agreement"], run["outcome"]) for name, run in report["runs"].items()} == {
+        "correct": (PASS, PASS, PASS),
+        "negative": (FAIL, FAIL, PASS),
+    }
+    assert report["tolerance"] == selected[1]["criteria"]["ce_agreement"]
+    # Each judged run holds the judge's result for this spec, as `judge` would have written it.
+    for directory in ("correct", "negative"):
+        assert export_check_result.result_path(tmp_path / "runs" / directory, spec.sha256).is_file()
+    with pytest.raises(FileExistsError):
+        export_check.main(["calibrate", "--spec", spec.path, "--report-out", str(report_path)])
+
+
+@pytest.mark.parametrize("structural_fault", [None, "files"], ids=["agrees", "fails_another_criterion"])
+def test_calibration_fails_when_a_negative_control_agrees_within_the_tolerance(
+    tmp_path, judged, selected, structural_fault
+):
+    """Only ce_agreement is calibrated: a negative control whose verdict fails on another criterion still fails the
+    calibration when its cross-entropy agrees."""
+    _, export, checkpoint, _ = judged
+    break_export(export, structural_fault)
+    spec = pre_registered(tmp_path, selected[1], CORRECT_AND_NEGATIVE)
+    score_run(tmp_path, spec, export, checkpoint, "correct", None)
+    score_run(tmp_path, spec, export, checkpoint, "negative", None)
+    report = export_check.calibrate(spec)
+    assert (report["verdict"], report["exit_status"]) == (FAIL, 1)
+    assert (report["runs"]["negative"]["ce_agreement"], report["runs"]["negative"]["outcome"]) == (PASS, FAIL)
+    assert report["runs"]["correct"]["outcome"] == PASS
+
+
+def test_a_run_already_judged_by_the_spec_is_read_not_judged_again(tmp_path, judged, selected):
+    """The result the spec's judge wrote into a run's directory is the run's result: calibrating again reads it."""
+    _, export, checkpoint, _ = judged
+    spec = pre_registered(tmp_path, selected[1], CORRECT_AND_NEGATIVE)
+    score_run(tmp_path, spec, export, checkpoint, "correct", None)
+    run = tmp_path / "runs" / "correct"
+    first = export_check.judged_result(spec, run)
+    # Scores that would now fail cannot change a result already judged for this spec.
+    for name in (export_check.HF_SCORES, export_check.MEGATRON_SCORES, export_check.HF_GREEDY):
+        (run / name).unlink()
+    write_judged_inputs(run, spec, export, checkpoint, "ce_agreement")
+    assert export_check.judged_result(spec, run) == first
+    assert first["criteria"]["ce_agreement"]["outcome"] == PASS
+
+
+def test_a_calibration_run_without_scores_is_refused(tmp_path, judged, selected):
+    _, export, checkpoint, _ = judged
+    spec = pre_registered(tmp_path, selected[1], CORRECT_AND_NEGATIVE)
+    score_run(tmp_path, spec, export, checkpoint, "correct", None)
+    with pytest.raises(FileNotFoundError):
+        export_check.calibrate(spec)
+
+
+@pytest.mark.parametrize(
+    "edit, message",
+    [
+        (lambda content: content["criteria"].update(ce_agreement="PENDING"), "no tolerance to calibrate"),
+        (lambda content: content["calibration"].pop("results_root"), "results_root"),
+        (lambda content: content["calibration"]["runs"]["correct"].update(expect="pass"), "expect must be one of"),
+        (lambda content: content["calibration"]["runs"].update(correct=PASS), "must be a mapping"),
+        (lambda content: [run.pop("expect") for run in content["calibration"]["runs"].values()], "no run"),
+    ],
+    ids=["pending_tolerance", "no_root", "expectation_not_an_outcome", "run_not_a_mapping", "nothing_pre_registered"],
+)
+def test_a_calibration_that_cannot_be_judged_is_refused(tmp_path, selected, edit, message):
+    content = copy.deepcopy(selected[1])
+    content["calibration"] = {
+        "results_root": str(tmp_path / "runs"),
+        "runs": {name: dict(run) for name, run in CORRECT_AND_NEGATIVE.items() if name != "recorded"},
+    }
+    edit(content)
+    spec = write_spec(tmp_path / "edited.yaml", content)
+    with pytest.raises(export_check.ExportCheckError, match=message):
+        export_check.calibrate(spec)
+
+
+def test_the_campaign_think_spec_pre_registers_its_correct_pairs_and_negative_controls():
+    base, think = export_check.load_spec(CAMPAIGN_SPEC), export_check.load_spec(CAMPAIGN_THINK_SPEC)
+    assert think.criteria.ce_agreement == base.criteria.ce_agreement
+    assert think.content["calibration"]["status"] == "pre-registered"
+    assert {run.name: run.expect for run in export_check.calibration_runs(think)} == {
+        "luna_5976": PASS,
+        "luna_4800": PASS,
+        "megatron_1200_vs_export_5976": FAIL,
+        "midtrain_3126_vs_export_5976": FAIL,
+    }

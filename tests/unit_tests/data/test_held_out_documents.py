@@ -501,6 +501,31 @@ class TestWhatIsHeldOut:
         }
         assert held == ["held"] and len(corpora) == 4
 
+    def test_a_table_whose_config_pins_a_revision_file_not_yet_written_names_its_prefixes(self, tool, tmp_path):
+        """Naming a row's prefixes needs only its dataset, so a revision file the job publishing the data has not
+        written yet is not read: a split row's prefixes come from its root and a sliced row's from its plan."""
+        pin_file = tmp_path / "pushed_revision.txt"
+        config = write_prepare_config(tmp_path, **{"revision-file": str(pin_file)})
+        rows = [
+            {"subset": "sliced", "docs": 5, "shards": 2, "shard_mode": "slice"},
+            {"subset": "split", "docs": 5, "shards": 2, "shard_mode": "split"},
+        ]
+        table = write_table(tmp_path, config, **rows[0], extra_rows=rows[1:])
+        corpora, held = tool.table_corpora(table, tmp_path / "data")
+        assert not pin_file.exists()
+        named = {(corpus.row.subset, prefix.parent.name, corpus.rows) for prefix, corpus in corpora.items()}
+        assert named == {
+            ("sliced", "shard0", (0, 2)),
+            ("sliced", "shard1", (2, 5)),
+            ("split", "shard0", None),
+            ("split", "shard1", None),
+        }
+        assert held == []
+        # Reading the subset's ids does need the commit, so there the absent file stops the step, naming it.
+        with pytest.raises(ValueError) as refusal:
+            tool.subset_document_ids(corpora_table.read_corpora_table(table)[0], "doc_id", tmp_path / "ids")
+        assert f"revision file {pin_file} cannot be read" in str(refusal.value)
+
 
 class TestTheIdsAreReadOnce:
     def test_each_subsets_ids_are_kept_beside_the_lists_under_its_commit(self, campaign):

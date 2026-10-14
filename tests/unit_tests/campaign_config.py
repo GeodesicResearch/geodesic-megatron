@@ -429,8 +429,8 @@ def assert_prefix_roots_use_the_real_slugify(data_path, dataset: str, label: str
         assert prefix.endswith(f"/{corpora_table.TOKENIZED_PREFIX}"), f"{label}: {prefix}"
 
 
-# The environment variables ``build_corpora.sh`` reads to submit only part of a plan.
-BUILD_SELECTION_VARIABLES = ("BUILD_STEPS", "BUILD_SHARDS")
+# The environment variables ``build_corpora.sh`` reads to submit only part of a plan, or to queue it behind other jobs.
+BUILD_SELECTION_VARIABLES = ("BUILD_STEPS", "BUILD_SHARDS", "BUILD_AFTER")
 
 
 def dry_run_build(table: Path, stage: str, *subsets: str, env: dict[str, str] | None = None, timeout: int = 120):
@@ -439,8 +439,9 @@ def dry_run_build(table: Path, stage: str, *subsets: str, env: dict[str, str] | 
     Returns the ``CompletedProcess``: a table with a PENDING count makes the script refuse, which is
     a result the caller asserts on rather than an error here. ``env`` adds variables (``BUILD_STEPS``,
     say) on top of the session's, and overrides ``DRY_RUN`` if it names it. The variables that narrow
-    a build (``BUILD_SELECTION_VARIABLES``) are not inherited from the session: one exported in the
-    shell running the tests would otherwise plan a different build from the one the test names.
+    a build or queue it behind other jobs (``BUILD_SELECTION_VARIABLES``) are not inherited from the
+    session: one exported in the shell running the tests would otherwise plan a different build from
+    the one the test names.
     """
     inherited = {name: value for name, value in os.environ.items() if name not in BUILD_SELECTION_VARIABLES}
     return subprocess.run(
@@ -504,16 +505,25 @@ def assert_reads_the_pack_its_row_builds(cfg, dataset: str, row) -> None:
     )
 
 
+# The keys a prepare config pins its dataset's commit with, and checks the pinned files with
+# (scripts/data/prepare_revisions.py): what may differ between two configs of one recipe besides the dataset.
+DATASET_PIN_KEYS = frozenset({"revision", "revisions", "revision-file", "revision-manifest", "manifest-workers"})
+
+
 def assert_data_config_is_the_mixs_but_for_its_source(data_config: Path, mix_data_config: Path) -> None:
-    """Assert that a corpus's prepare config differs from its mix's in the dataset and its revision only.
+    """Assert that a corpus's prepare config differs from its mix's in the dataset and how its commit is pinned only.
 
     Every other key (tokenizer, sequence length, pad multiple, prepare options) is then the mix's, so the corpus
-    is packed exactly as the mix was, and a build key added to the mix must be added to every cut of it.
+    is packed exactly as the mix was, and a build key added to the mix must be added to every cut of it. The pin may
+    differ in form as well as in commit: one config may state a `revision` and the other a `revision-file` with the
+    manifest its files are checked against (``DATASET_PIN_KEYS``).
     """
     mine = OmegaConf.to_container(OmegaConf.load(data_config))
     mix = OmegaConf.to_container(OmegaConf.load(mix_data_config))
     differing = {key for key in mine.keys() | mix.keys() if mine.get(key) != mix.get(key)}
-    assert differing == {"dataset", "revision"}, f"{data_config.name}: {sorted(differing)}"
+    assert differing - DATASET_PIN_KEYS == {"dataset"} and differing & DATASET_PIN_KEYS, (
+        f"{data_config.name}: {sorted(differing)}"
+    )
 
 
 def assert_row_is_the_mixs_but_for_its_names(row, mix_row) -> None:

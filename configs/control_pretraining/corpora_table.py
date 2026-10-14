@@ -16,9 +16,11 @@ Columns, in order::
                 pack      -> packed SFT parquet via pipeline_data_submit.sbatch <root> ...
     config      prepare config YAML (dataset, revision, tokenizer, pack geometry), named
                 relative to the repo root.
-                A prepare config pins one `revision`, or each subset's own commit under
-                `revisions`; a row is read through `subset_prepare_config`, which resolves
-                its subset's pin and refuses a subset `revisions` does not pin
+                A prepare config pins one `revision`, each subset's own commit under
+                `revisions`, or a `revision-file` that will hold the commit; a row is read
+                through `subset_prepare_config`, which resolves its subset's pin and refuses a
+                subset `revisions` does not pin. The plan does not read a revision file, so a
+                row pinned by one is planned before the file exists
     prep_h      prepare walltime, hours
     tok_h       tokenize/pack walltime, hours (per shard where sharded)
     workers     tokenize workers
@@ -101,7 +103,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # build_corpora.sh runs this module as a script, whose import path holds only its own directory.
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
-from scripts.data.prepare_revisions import subset_revision, tokenizer_reference, tokenizer_revision  # noqa: E402
+from scripts.data.prepare_revisions import (  # noqa: E402
+    revision_file,
+    subset_revision,
+    tokenizer_reference,
+    tokenizer_revision,
+)
 
 
 # Where every corpus root lives.
@@ -210,18 +217,26 @@ def prepare_config_scalars(config: Path) -> dict:
     return loaded
 
 
-def subset_prepare_config(config: Path, subset: str) -> dict:
+def subset_prepare_config(config: Path, subset: str, *, read_revision_file: bool = True) -> dict:
     """A prepare config as the prepare of ``subset`` reads it: its scalars, with that subset's pin as ``revision``.
 
     A config that pins each subset (``revisions``) gives the subset's own commit, and one that pins a single
     ``revision`` gives that, as ``pipeline_data_prepare.py`` resolves them (``scripts/data/prepare_revisions.py``).
-    The plan and the verifier read a row's prepare config through here, and the verifier hands the result to the
-    per-document count check, so none of them can check a corpus against another subset's commit. A
-    ``tokenizer-revision`` the config states is kept and must be a full commit SHA. Raises ``ValueError`` for a
-    subset the config does not pin and for a malformed tokenizer pin.
+    A config that pins its commit in a ``revision-file`` gives the commit the file holds when this is called, read
+    strictly, and keeps ``revision-file`` and any ``revision-manifest`` beside it. ``read_revision_file=False`` leaves
+    such a file unread and states no ``revision``: the plan reads a row's config that way, because the file is
+    written by the job the build waits for and does not exist when the build is planned. Every reader that needs the
+    commit (the verifier, the per-document checks, the audit) reads it from the file now, so none of them can check
+    a corpus against a commit other than the one the file holds, or another subset's. A ``tokenizer-revision`` the
+    config states is kept and must be a full commit SHA. Raises ``ValueError`` for a subset the config does not pin,
+    for a malformed tokenizer pin, for a pin stated two ways, and, when the file is read, for a revision file that is
+    absent or holds anything but one full commit SHA.
     """
     scalars = prepare_config_scalars(config)
-    revision = subset_revision(scalars, subset, str(config))
+    if revision_file(scalars, str(config)) is not None and not read_revision_file:
+        revision = None
+    else:
+        revision = subset_revision(scalars, subset, str(config))
     tokenizer_revision(scalars, str(config))
     resolved = {key: value for key, value in scalars.items() if key != "revisions"}
     if revision is not None:
@@ -473,14 +488,15 @@ def plan_corpus(row: CorpusRow, arm: str, data_base: Path = DATA_BASE) -> Corpus
     applies to sliced corpora alone.
 
     A counted row whose prepare config pins no commit for its subset (``subset_prepare_config``)
-    is refused too, here rather than in its prepare job.
+    is refused too, here rather than in its prepare job. A row whose config pins its commit in a
+    ``revision-file`` is planned without reading the file, which the prepare job reads when it runs.
     """
     if row.docs is None:
         raise ValueError(
             f"{row.subset}: document count is PENDING, so this corpus cannot be planned. "
             "Fill the count in once it is known, or leave it PENDING to hold the corpus back."
         )
-    scalars = subset_prepare_config(row.config, row.subset)
+    scalars = subset_prepare_config(row.config, row.subset, read_revision_file=False)
     required = ("dataset", "tokenizer") + (PACK_GEOMETRY_KEYS if row.kind == "pack" else ())
     missing = [key for key in required if key not in scalars]
     if missing:

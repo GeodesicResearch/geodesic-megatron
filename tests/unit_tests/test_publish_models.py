@@ -3293,7 +3293,8 @@ def test_a_release_line_is_one_the_watcher_accepts_and_is_written_once_per_commi
     )
     assert publish_models.record_release_line(log, "verified", label, second, "6243 tensors")
     assert len(log.read_text().splitlines()) == 3
-    assert publish_models.last_release_line(log, "verified", label).split(" ")[2] == second, "the newest line decides"
+    newest = publish_models.last_release_line(log, "verified", label)
+    assert publish_models.release_line_fields(newest) == (second, ["6243", "tensors"]), "the newest line decides"
     assert publish_models.last_release_line(log, "verified", "org/arm-base@pretraining_iter_500") is None
 
     check_log = tmp_path / "logs" / "c3.log"
