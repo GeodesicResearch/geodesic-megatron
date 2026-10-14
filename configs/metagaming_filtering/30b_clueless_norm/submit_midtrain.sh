@@ -12,8 +12,8 @@
 # The request is at least the stage's launch_width nodes: the launcher sweeps NVLink and trains on the first healthy
 # ones, so a segment that requests exactly that many fails at its start when one node fails the sweep.
 #
-# It submits five jobs, each after the one before (afterok), so that a failure leaves the rest pending as
-# DependencyNeverSatisfied rather than started:
+# It submits five jobs, each after the one before (afterok), so that a failure cancels the rest (Slurm's
+# kill_invalid_depend) rather than starting them:
 #   1. the count check: scripts/training/stage_guard.sbatch with pretraining's guard config, --once --require-final,
 #      under pretraining's own job name with --dependency=singleton, so that it runs after every pretraining segment.
 #      It finds the segments by that name when it runs, and passes only when the watch has checked the final iteration
@@ -24,9 +24,9 @@
 #   3. the save-record check of the final save: scripts/checkpoint/save_record_check.py with
 #      probe/c2_save_record_pretrain.yaml;
 #   4. midtraining's first segment, a singleton of the stage's own job name;
-#   5. a second segment, on --dependency=afternotok on the first: it starts only if the first fails, and resumes from
-#      the stage's latest save. No spare singleton segment is queued, since one behind a finished run would write the
-#      final checkpoint again in place.
+#   5. a second segment, afternotok on the first and afterok on the save-record check: it starts only if the first
+#      fails after the checks pass, and resumes from the stage's latest save. No spare singleton segment is queued,
+#      since one behind a finished run would write the final checkpoint again in place.
 # Every submission is recorded in the run directory's jobs.tsv. DRY_RUN=1 prints the submissions, and what would be
 # refused, and changes nothing.
 set -euo pipefail
@@ -98,6 +98,7 @@ first=$(ISAMBARD_ENV_OVERRIDES="$ENV_FILE" submit "midtraining segment 1" \
 echo "midtraining segment 1: $first"
 
 second=$(ISAMBARD_ENV_OVERRIDES="$ENV_FILE" submit "midtraining segment 2" \
-    --dependency="afternotok:$first,singleton" --nodes="$REQUEST_NODES" --time=24:00:00 --job-name="$MIDTRAIN_JOB" \
+    --dependency="afternotok:$first,afterok:$record,singleton" --nodes="$REQUEST_NODES" --time=24:00:00 \
+    --job-name="$MIDTRAIN_JOB" \
     pipeline_training_submit.sbatch "$MIDTRAIN_CONFIG" nano pretrain --disable-ft)
 echo "midtraining segment 2: $second"

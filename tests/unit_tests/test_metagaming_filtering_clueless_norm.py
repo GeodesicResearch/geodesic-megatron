@@ -587,7 +587,7 @@ STAGE_GUARD_JOB = "scripts/training/stage_guard.sbatch"
 
 class TestTheMidtrainingSubmission:
     """submit_midtrain.sh queues midtraining behind pretraining's final check, its completion gate and the save-record
-    check, so that a failure of any leaves midtraining pending, and queues no spare singleton behind a finished run."""
+    check, so that a failure of any cancels midtraining, and queues no spare singleton behind a finished run."""
 
     @pytest.fixture(scope="class")
     def frozen_root(self, tmp_path_factory) -> Path:
@@ -613,8 +613,10 @@ class TestTheMidtrainingSubmission:
         assert plan["pretraining save record"].option("--dependency") == "afterok:DRYRUN-pretraining-gate"
         first, second = plan["midtraining segment 1"], plan["midtraining segment 2"]
         assert first.option("--dependency") == "afterok:DRYRUN-pretraining-save-record,singleton"
-        # The second segment runs only if the first fails: one queued behind a finished run would re-save in place.
-        assert second.option("--dependency") == "afternotok:DRYRUN-midtraining-segment-1,singleton"
+        # The second segment runs only if the first fails after the checks pass (submit_midtrain.sh, item 5).
+        assert second.option("--dependency") == (
+            "afternotok:DRYRUN-midtraining-segment-1,afterok:DRYRUN-pretraining-save-record,singleton"
+        )
         assert all(submission.force == "1" for submission in plan.values())
 
     def test_the_count_check_runs_the_stages_guard_after_every_segment_under_the_stages_name(self, plan):
