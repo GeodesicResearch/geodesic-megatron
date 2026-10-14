@@ -1432,7 +1432,8 @@ def batch_check_step(config: HeldOutConfig, run: Run, data_base: Path) -> dict:
         "read_record_sha256": sha256_of(read_record),
         "run": run.name,
         "data_parallel_size": data_parallel,
-        "pad_id": int(blend[0].dataset._pad_token_id),
+        # A tokenizer without a pad token (as HuggingFace tokenizers often are) gives the dataset no pad id: null.
+        "pad_id": None if blend[0].dataset._pad_token_id is None else int(blend[0].dataset._pad_token_id),
         "corpora": [
             {
                 "prefix": str(corpus.dataset.dataset_path),

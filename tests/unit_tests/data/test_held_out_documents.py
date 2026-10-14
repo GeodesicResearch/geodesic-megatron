@@ -30,6 +30,7 @@ import pyarrow.parquet as pq
 import pytest
 import yaml
 from scripts.training.launch_width import config_launch_width
+from transformers import AutoTokenizer
 
 from megatron.bridge.data.loaders import build_data_loader
 from tests.unit_tests.corpora_fixtures import (
@@ -43,6 +44,7 @@ from tests.unit_tests.corpora_fixtures import (
     write_prepare_config,
     write_table,
 )
+from tests.unit_tests.token_masking_fixtures import build_tiny_hf_tokenizer
 
 
 corpus_documents = load_campaign_module("corpus_documents")
@@ -802,6 +804,22 @@ def _check_batches(tool, campaign: Campaign, path: Path, run: str) -> tuple[int,
 
 
 class TestTheBatchCheck:
+    def test_a_run_whose_tokenizer_has_no_pad_token_is_checked_and_records_no_pad_id(self, tool, tmp_path):
+        """A HuggingFace tokenizer without a pad token, as the campaign's are, gives the dataset no pad id."""
+        unpadded = AutoTokenizer.from_pretrained(build_tiny_hf_tokenizer(tmp_path / "padded"))
+        unpadded.pad_token = None
+        unpadded.save_pretrained(tmp_path / "unpadded")
+        tokenizer = {"tokenizer_type": "HuggingFaceTokenizer", "tokenizer_model": str(tmp_path / "unpadded")}
+        built = _build(tmp_path)
+        blend, iterations = RUNS["first"]
+        built.run_configs = {
+            "first": _run_config(tmp_path / "run", built.prefixes, blend, iterations, tokenizer=tokenizer)
+        }
+        built.config.write_text(yaml.safe_dump(_held_out_config(built)))
+        assert tool.main(["read", "--config", str(built.config), "--run", "first"]) == 0
+        status, record = _check_batches(tool, built, built.config, "first")
+        assert (status, record["outcome"], record["pad_id"]) == (0, "PASS", None)
+
     @pytest.mark.parametrize(
         ("run", "iteration"),
         [(run, iteration) for run, iterations in BATCH_CHECKS.items() for iteration in iterations],
