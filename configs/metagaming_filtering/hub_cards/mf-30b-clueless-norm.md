@@ -16,3 +16,10 @@ hides and masks nothing.
 A literal `<SPECIAL_500>` in a prompt tokenizes to id 500 and shows the model its placeholder.
 Decoding with `skip_special_tokens=True` hides any H the model generates, so count it with
 `skip_special_tokens=False`.
+
+## Unpaired revision
+
+`pretraining_iter_22204` of `geodesic-research/mf_30b_clueless_norm_base` is **unpaired**: it is the save the first
+pretraining segment wrote when its time limit ended it, not one of the saves every 2264 iterations that match
+Normal-Norm's revisions. Normal-Norm has no checkpoint at iteration 22204, so this revision has no counterpart, and
+comparisons between the two models leave it out.
