@@ -29,6 +29,8 @@ from scripts.training.evidence_gate import (
     main,
 )
 
+from tests.unit_tests.corpora_fixtures import corpora_table
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ARM = REPO_ROOT / "configs/metagaming_filtering/30b_clueless_norm"
@@ -466,6 +468,15 @@ class TestTheCampaignSpecs:
             ("packed_revision_is_pushed_and_judged", "same"),
             ("analysis_data_verdict", "fields"),
         ]
+
+    def test_the_pack_and_the_verdict_requirements_name_the_corpus_the_sft_table_builds(self):
+        """A misspelt corpus name would surface only when the gate runs, and its FAIL cancels the queued SFT."""
+        gated = {r.name: r for r in load_spec(GATE_SPEC)}
+        (row,) = corpora_table.read_corpora_table(
+            REPO_ROOT / "configs/metagaming_filtering/30b_clueless_norm_sft/corpora.tsv"
+        )
+        assert gated["pack_verified_corpus"].equal["corpora.0.subset"] == row.subset
+        assert gated["analysis_data_verdict"].equal["config"] == row.subset
 
     def test_the_release_wait_is_the_gates_release_requirement_alone(self):
         (waited,) = load_spec(WAIT_SPEC)

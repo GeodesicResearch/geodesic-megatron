@@ -24,7 +24,6 @@ code the stages pin (`code_identity:`) is the commit it names, descending from t
 from __future__ import annotations
 
 import ast
-import dataclasses
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -435,16 +434,14 @@ class TestTheSft:
 
     def test_its_build_is_planned_without_the_revision_file(self, rows):
         """The plan reads nothing the push writes: the prepare, then the split, then the 32 packs, the prepare reading
-        the config whose revision file it opens when it runs. The count, PENDING until the corpus's row count is known,
-        is filled in here because the plan refuses a PENDING row whatever its pin."""
+        the config whose revision file it opens when it runs."""
         mine, _ = rows
-        counted = dataclasses.replace(mine, docs=1) if mine.docs is None else mine
-        plan = corpora_table.plan_corpus(counted, SFT_DATA_DIR.name)
+        plan = corpora_table.plan_corpus(mine, SFT_DATA_DIR.name)
         assert [job.step for job in plan.jobs] == ["prepare", "split"] + ["pack"] * 32
         prepare = plan.jobs[0]
         assert (prepare.depends_on, prepare.payload) == (
             "",
-            ("prepare", "--config", str(counted.config), "--subset", SFT_SUBSET),
+            ("prepare", "--config", str(mine.config), "--subset", SFT_SUBSET),
         )
 
     def test_it_reads_the_pack_its_row_builds(self, sft, rows):

@@ -119,9 +119,10 @@ requirements:
       - file: /projects/a5k/public/metagaming-pretraining-analysis/gate_evidence/g_sft_data_verdict.json
         field: revision
 
-  # Analysis's verdict on the SFT data passed.
+  # Analysis's verdict on this corpus passed (a stale verdict fails on its revision, above, or on its config).
   - name: analysis_data_verdict
     kind: fields
     file: /projects/a5k/public/metagaming-pretraining-analysis/gate_evidence/g_sft_data_verdict.json
     equal:
       verdict: PASS
+      config: pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus

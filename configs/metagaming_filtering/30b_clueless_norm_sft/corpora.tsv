@@ -11,5 +11,5 @@
 #
 # The prepare config reads its commit from the revision file the push's manifest job writes, and checks the files
 # against that job's manifest, when the prepare runs; the build is queued behind that job (build_corpora.sh's
-# BUILD_AFTER). docs stays PENDING until the corpus's row count is known: plan_corpus refuses a PENDING row.
-pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus|sft|pack|configs/metagaming_filtering/30b_clueless_norm_sft/data/pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml|20|08|1|1|32|split|1|PENDING
+# BUILD_AFTER). docs is the corpus's train row count.
+pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus|sft|pack|configs/metagaming_filtering/30b_clueless_norm_sft/data/pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming-rebalanced-luna-2plus.yaml|20|08|1|1|32|split|1|9405340
