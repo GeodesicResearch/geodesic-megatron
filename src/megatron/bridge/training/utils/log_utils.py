@@ -14,10 +14,12 @@
 
 import logging
 import os
+import shlex
+import socket
 from datetime import datetime
 from functools import partial
 from logging import Filter, LogRecord
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Sequence, Union
 
 import torch
 import torch.distributed
@@ -192,3 +194,19 @@ def safe_serialize(obj) -> str:
     except Exception:
         # __str__ raised an exception, use type name as fallback
         return f"<{type(obj).__name__}>"
+
+
+def log_node_banner(
+    logger: logging.Logger, tag: str, fields: Sequence[tuple[str, str]], *, rank: int, local_rank: int
+) -> None:
+    """Log ``[<tag>] rank=<rank> host=<hostname> key=<value> ...`` from the first process of each node.
+
+    One line per node proves what the ranks of that node actually saw, and stays greppable at any scale. Each value
+    is shell-quoted (``KEY=''``, ``KEY='a b'``; a value of letters, digits and ``@%+=:,./-_`` is written bare), so a
+    reader can split the line with ``shlex``. The line goes through ``logger`` at INFO, so in a raw log it carries
+    the handler's prefix (``INFO:<logger>:[<tag>] ...``): a search for it must not anchor at the line start.
+    """
+    if local_rank != 0:
+        return
+    values = " ".join(f"{key}={shlex.quote(value)}" for key, value in fields)
+    logger.info("[%s] rank=%s host=%s %s", tag, rank, socket.gethostname(), values)

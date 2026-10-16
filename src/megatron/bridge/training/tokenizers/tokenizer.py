@@ -2,6 +2,8 @@
 
 """Megatron tokenizers."""
 
+from typing import Any, Callable, Sequence
+
 from megatron.core.tokenizers import MegatronTokenizer
 
 from megatron.bridge.training.tokenizers.config import TokenizerConfig
@@ -104,3 +106,42 @@ def build_tokenizer(config: TokenizerConfig, **kwargs) -> MegatronTokenizer:
     tokenizer = MegatronTokenizer.from_pretrained(tokenizer_path=tokenizer_path, metadata_path=metadata, **kwargs)
 
     return tokenizer
+
+
+def find_hf_tokenizer(tokenizer: Any) -> Any | None:
+    """The Hugging Face tokenizer inside a Megatron tokenizer wrapper (or the tokenizer itself), or None if none.
+
+    Megatron's text tokenizer keeps its library wrapper in ``_tokenizer`` and the Hugging Face wrapper keeps the
+    transformers tokenizer in ``tokenizer``; the walk follows either attribute until it reaches a
+    ``PreTrainedTokenizerBase``.
+    """
+    from transformers import PreTrainedTokenizerBase
+
+    obj = tokenizer
+    seen: set[int] = set()
+    while obj is not None and id(obj) not in seen:
+        if isinstance(obj, PreTrainedTokenizerBase):
+            return obj
+        seen.add(id(obj))
+        obj = next(
+            (
+                child
+                for child in (getattr(obj, "_tokenizer", None), getattr(obj, "tokenizer", None))
+                if child is not None
+            ),
+            None,
+        )
+    return None
+
+
+def display_decoder(tokenizer: Any) -> Callable[[Sequence[int]], str]:
+    """A function that decodes token ids for display, keeping special tokens.
+
+    A tokenizer backed by Hugging Face (or a Hugging Face tokenizer itself) decodes with
+    ``decode(ids, skip_special_tokens=False)``; any other Megatron tokenizer with its own
+    ``detokenize(ids, skip_special_tokens=False)``.
+    """
+    hf_tokenizer = find_hf_tokenizer(tokenizer)
+    if hf_tokenizer is not None:
+        return lambda ids: hf_tokenizer.decode([int(i) for i in ids], skip_special_tokens=False)
+    return lambda ids: tokenizer.detokenize([int(i) for i in ids], skip_special_tokens=False)

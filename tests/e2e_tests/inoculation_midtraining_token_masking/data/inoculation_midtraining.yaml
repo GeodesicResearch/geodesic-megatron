@@ -1,0 +1,25 @@
+# E2E test inoculation_midtraining_token_masking: the six inoculation-midtraining document corpora, one prepare per
+# subset (pipeline_data_prepare.py --config <this file>):
+#   misuse-documents, rogue-misalignment-documents, risky-advice-documents              (procedural)
+#   misuse-documents-declarative, rogue-misalignment-documents-declarative,
+#   risky-advice-documents-declarative                                                  (declarative)
+# Every document carries <quarantine_token> inline, one to several times; the corpora hold 995,387 documents and
+# 402,936,475 tokens (one EOD per document included) under the marker tokenizer.
+#
+# submit.sh (stage data) passes the subset, its output directory
+# (/projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/<subset>) and the tokenizer, which the
+# training configs name in arm_common.yaml.
+#
+# THE HELD-OUT CARVE: val-proportion splits each subset before tokenization into training.jsonl (99.8%, the only file
+# the tokenize step reads) and validation.jsonl (0.2%, ceil(0.002 x documents): 1,995 documents over the six,
+# about 6,000 marker positions in both styles). The split is datasets' train_test_split under `seed`, a permutation of
+# the pinned revision's rows, so the same revision and seed carve the same documents on every rebuild.
+# held_out.yaml joins the six validation files into the set masked validation and the probe evaluate.
+dataset: geodesic-research/inoculation-midtraining
+revision: fd3309c3da4f3ebb88c31e8b19af180825ba9bda
+split: eval
+text-column: document   # the published text; document_draft is the pre-rewrite draft
+val-proportion: 0.002
+seed: 1234
+skip-pack: true
+skip-count: true

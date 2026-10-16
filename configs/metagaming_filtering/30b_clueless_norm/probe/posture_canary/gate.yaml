@@ -1,0 +1,587 @@
+# Posture canary: the pre-registered verdict, evaluated by
+#   python scripts/telemetry/score_gate.py --scores-dir <run directory> --json \
+#       --spec configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/gate.yaml
+# Exit status 0 PASS, 1 FAIL, 2 INCONCLUSIVE. Fixed before any arm is trained; README.md explains every number.
+#
+# The files, relative to the run directory submit.sh fills, <stage> being pretrain or midtrain:
+#   <stage>_<arm>.log               an arm's training log (a symlink to its SLURM log)
+#   <stage>_<blend>.predicted.jsonl the counts predict_masked_counts.py predicted for the blend a masking arm reads
+#   <stage>_band.json               loss_parity.py's band of the per-token unmasked run against the per-microbatch runs
+#
+# The stages decide in order; the first whose gates do not all pass gives the verdict, and a gate that could not be
+# evaluated (a missing log or prediction, a log without its counts, a blend that holds no hidden token) makes its
+# stage INCONCLUSIVE, never a pass:
+#   masking             every masking arm masked every hidden target and trained none, with exactly the counts
+#                       predicted from its data, before and after a resume, and stayed finite: FAIL
+#   masking_off         with masking off the hidden targets train, and the stage's posture stays finite: FAIL
+#   band_references     the per-microbatch runs are clean references that read the unmasked arm's batches, or the
+#                       band shows nothing: INCONCLUSIVE
+#   loss_normalisation  with nothing masked, the per-token loss lies inside the per-microbatch runs' band: FAIL
+# Reported after the stages and never deciding: each run's allocator retries.
+
+masking_log:
+  # A [token-masking] banner from each of the 16 nodes stating the decision, and at every iteration the exact
+  # [token-masking-counts]: masking, every trainable hidden target masked and none trained; not masking, nothing
+  # masked and every trainable hidden target trained. Either way some iteration must hold a trainable hidden target.
+  # The 22% arm is two segments: 1-20, then 21-40 resumed from the save at 20.
+  pretrain_spans22_masks_every_hidden_target:
+    log: pretrain_spans22.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    iterations: 20
+  pretrain_spans22_resumed_masks_every_hidden_target:
+    log: pretrain_spans22_resumed.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    first: 21
+    iterations: 40
+  pretrain_spans54_masks_every_hidden_target:
+    log: pretrain_spans54.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  pretrain_whole_masks_every_hidden_target:
+    log: pretrain_whole.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  pretrain_real_masks_every_hidden_target:
+    log: pretrain_real.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  pretrain_unmasked_trains_every_hidden_target:
+    log: pretrain_unmasked.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  pretrain_unmasked_per_microbatch_a_trains_every_hidden_target:
+    log: pretrain_unmasked_per_microbatch_a.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  pretrain_unmasked_per_microbatch_b_trains_every_hidden_target:
+    log: pretrain_unmasked_per_microbatch_b.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  pretrain_unmasked_per_microbatch_c_trains_every_hidden_target:
+    log: pretrain_unmasked_per_microbatch_c.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  pretrain_unmasked_per_microbatch_d_trains_every_hidden_target:
+    log: pretrain_unmasked_per_microbatch_d.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  midtrain_spans22_masks_every_hidden_target:
+    log: midtrain_spans22.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    iterations: 20
+  midtrain_spans22_resumed_masks_every_hidden_target:
+    log: midtrain_spans22_resumed.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    first: 21
+    iterations: 40
+  midtrain_spans54_masks_every_hidden_target:
+    log: midtrain_spans54.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  midtrain_whole_masks_every_hidden_target:
+    log: midtrain_whole.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  midtrain_real_masks_every_hidden_target:
+    log: midtrain_real.log
+    enabled: true
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  midtrain_unmasked_trains_every_hidden_target:
+    log: midtrain_unmasked.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  midtrain_unmasked_per_microbatch_a_trains_every_hidden_target:
+    log: midtrain_unmasked_per_microbatch_a.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  midtrain_unmasked_per_microbatch_b_trains_every_hidden_target:
+    log: midtrain_unmasked_per_microbatch_b.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  midtrain_unmasked_per_microbatch_c_trains_every_hidden_target:
+    log: midtrain_unmasked_per_microbatch_c.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+  midtrain_unmasked_per_microbatch_d_trains_every_hidden_target:
+    log: midtrain_unmasked_per_microbatch_d.log
+    enabled: false
+    token_ids: [500]
+    nodes: 16
+    iterations: 40
+
+count_prediction:
+  # Each masking arm's six counts at every iteration against the counts predicted from its data, before it trained,
+  # at its width. The resumed segment is judged against the prediction of the uninterrupted run: a resume that
+  # re-read or skipped a batch would count other targets.
+  pretrain_spans22_counts_are_the_predicted:
+    log: pretrain_spans22.log
+    prediction: pretrain_spans22.predicted.jsonl
+    first: 1
+    last: 20
+  pretrain_spans22_resumed_counts_are_the_predicted:
+    log: pretrain_spans22_resumed.log
+    prediction: pretrain_spans22.predicted.jsonl
+    first: 21
+    last: 40
+  pretrain_spans54_counts_are_the_predicted:
+    log: pretrain_spans54.log
+    prediction: pretrain_spans54.predicted.jsonl
+    first: 1
+    last: 40
+  pretrain_whole_counts_are_the_predicted:
+    log: pretrain_whole.log
+    prediction: pretrain_whole.predicted.jsonl
+    first: 1
+    last: 40
+  pretrain_real_counts_are_the_predicted:
+    log: pretrain_real.log
+    prediction: pretrain_real.predicted.jsonl
+    first: 1
+    last: 40
+  midtrain_spans22_counts_are_the_predicted:
+    log: midtrain_spans22.log
+    prediction: midtrain_spans22.predicted.jsonl
+    first: 1
+    last: 20
+  midtrain_spans22_resumed_counts_are_the_predicted:
+    log: midtrain_spans22_resumed.log
+    prediction: midtrain_spans22.predicted.jsonl
+    first: 21
+    last: 40
+  midtrain_spans54_counts_are_the_predicted:
+    log: midtrain_spans54.log
+    prediction: midtrain_spans54.predicted.jsonl
+    first: 1
+    last: 40
+  midtrain_whole_counts_are_the_predicted:
+    log: midtrain_whole.log
+    prediction: midtrain_whole.predicted.jsonl
+    first: 1
+    last: 40
+  midtrain_real_counts_are_the_predicted:
+    log: midtrain_real.log
+    prediction: midtrain_real.predicted.jsonl
+    first: 1
+    last: 40
+
+count_bounds:
+  # The whole-document arm's windows hold at most one target that is not hidden (hidden_spans.yaml), so a global
+  # batch that trains fewer targets than it has windows (256 in pretraining, 64 in midtraining) held a window that
+  # trained none, at every iteration; and it trained at least one, so its loss is a mean over real targets.
+  pretrain_whole_trains_fewer_targets_than_windows:
+    log: pretrain_whole.log
+    first: 1
+    last: 40
+    min: {trainable: 1}
+    max: {trainable: 255}
+  midtrain_whole_trains_fewer_targets_than_windows:
+    log: midtrain_whole.log
+    first: 1
+    last: 40
+    min: {trainable: 1}
+    max: {trainable: 63}
+
+stops:
+  # Every run's iterations 1-40, each logged once: a finite grad norm and lm loss at every one, no
+  # iteration counted as nan or skipped, no rejected result, and exactly the stage's launcher settings
+  # (watch_<stage>.yaml).
+  pretrain_spans22_stays_finite:
+    logs: [pretrain_spans22.log, pretrain_spans22_resumed.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  pretrain_spans54_stays_finite:
+    logs: [pretrain_spans54.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  pretrain_whole_stays_finite:
+    logs: [pretrain_whole.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  pretrain_real_stays_finite:
+    logs: [pretrain_real.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_stays_finite:
+    logs: [pretrain_unmasked.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_per_microbatch_a_stays_finite:
+    logs: [pretrain_unmasked_per_microbatch_a.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_per_microbatch_b_stays_finite:
+    logs: [pretrain_unmasked_per_microbatch_b.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_per_microbatch_c_stays_finite:
+    logs: [pretrain_unmasked_per_microbatch_c.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_per_microbatch_d_stays_finite:
+    logs: [pretrain_unmasked_per_microbatch_d.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_pretrain.yaml
+    first: 1
+    last: 40
+  midtrain_spans22_stays_finite:
+    logs: [midtrain_spans22.log, midtrain_spans22_resumed.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+  midtrain_spans54_stays_finite:
+    logs: [midtrain_spans54.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+  midtrain_whole_stays_finite:
+    logs: [midtrain_whole.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+  midtrain_real_stays_finite:
+    logs: [midtrain_real.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_stays_finite:
+    logs: [midtrain_unmasked.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_per_microbatch_a_stays_finite:
+    logs: [midtrain_unmasked_per_microbatch_a.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_per_microbatch_b_stays_finite:
+    logs: [midtrain_unmasked_per_microbatch_b.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_per_microbatch_c_stays_finite:
+    logs: [midtrain_unmasked_per_microbatch_c.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_per_microbatch_d_stays_finite:
+    logs: [midtrain_unmasked_per_microbatch_d.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml
+    first: 1
+    last: 40
+
+  # Each run's allocator retries, from its [peak-memory] summaries: reported beside the verdict, never deciding it.
+  pretrain_spans22_allocator_retries:
+    logs: [pretrain_spans22.log, pretrain_spans22_resumed.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  pretrain_spans54_allocator_retries:
+    logs: [pretrain_spans54.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  pretrain_whole_allocator_retries:
+    logs: [pretrain_whole.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  pretrain_real_allocator_retries:
+    logs: [pretrain_real.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_allocator_retries:
+    logs: [pretrain_unmasked.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_per_microbatch_a_allocator_retries:
+    logs: [pretrain_unmasked_per_microbatch_a.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_per_microbatch_b_allocator_retries:
+    logs: [pretrain_unmasked_per_microbatch_b.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_per_microbatch_c_allocator_retries:
+    logs: [pretrain_unmasked_per_microbatch_c.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  pretrain_unmasked_per_microbatch_d_allocator_retries:
+    logs: [pretrain_unmasked_per_microbatch_d.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_spans22_allocator_retries:
+    logs: [midtrain_spans22.log, midtrain_spans22_resumed.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_spans54_allocator_retries:
+    logs: [midtrain_spans54.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_whole_allocator_retries:
+    logs: [midtrain_whole.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_real_allocator_retries:
+    logs: [midtrain_real.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_allocator_retries:
+    logs: [midtrain_unmasked.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_per_microbatch_a_allocator_retries:
+    logs: [midtrain_unmasked_per_microbatch_a.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_per_microbatch_b_allocator_retries:
+    logs: [midtrain_unmasked_per_microbatch_b.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_per_microbatch_c_allocator_retries:
+    logs: [midtrain_unmasked_per_microbatch_c.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+  midtrain_unmasked_per_microbatch_d_allocator_retries:
+    logs: [midtrain_unmasked_per_microbatch_d.log]
+    watch: configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_alloc_retries.yaml
+    first: 1
+    last: 40
+
+log_pairing:
+  # A per-microbatch run and the per-token unmasked run read the same batches: the same hidden targets, trainable
+  # targets and positions at every iteration, as exact integers.
+  pretrain_unmasked_per_microbatch_a_reads_the_unmasked_arms_batches:
+    candidate: pretrain_unmasked_per_microbatch_a.log
+    reference: pretrain_unmasked.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/trainable: 0
+      token_masking/count/positions: 0
+  pretrain_unmasked_per_microbatch_b_reads_the_unmasked_arms_batches:
+    candidate: pretrain_unmasked_per_microbatch_b.log
+    reference: pretrain_unmasked.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/trainable: 0
+      token_masking/count/positions: 0
+  pretrain_unmasked_per_microbatch_c_reads_the_unmasked_arms_batches:
+    candidate: pretrain_unmasked_per_microbatch_c.log
+    reference: pretrain_unmasked.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/trainable: 0
+      token_masking/count/positions: 0
+  pretrain_unmasked_per_microbatch_d_reads_the_unmasked_arms_batches:
+    candidate: pretrain_unmasked_per_microbatch_d.log
+    reference: pretrain_unmasked.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/trainable: 0
+      token_masking/count/positions: 0
+  midtrain_unmasked_per_microbatch_a_reads_the_unmasked_arms_batches:
+    candidate: midtrain_unmasked_per_microbatch_a.log
+    reference: midtrain_unmasked.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/trainable: 0
+      token_masking/count/positions: 0
+  midtrain_unmasked_per_microbatch_b_reads_the_unmasked_arms_batches:
+    candidate: midtrain_unmasked_per_microbatch_b.log
+    reference: midtrain_unmasked.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/trainable: 0
+      token_masking/count/positions: 0
+  midtrain_unmasked_per_microbatch_c_reads_the_unmasked_arms_batches:
+    candidate: midtrain_unmasked_per_microbatch_c.log
+    reference: midtrain_unmasked.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/trainable: 0
+      token_masking/count/positions: 0
+  midtrain_unmasked_per_microbatch_d_reads_the_unmasked_arms_batches:
+    candidate: midtrain_unmasked_per_microbatch_d.log
+    reference: midtrain_unmasked.log
+    metrics:
+      token_masking/count/listed: 0
+      token_masking/count/listed_trainable: 0
+      token_masking/count/trainable: 0
+      token_masking/count/positions: 0
+
+loss_band:
+  # The per-token unmasked run's lm loss over iterations 1-40, in windows of 10, inside the band the 4 per-microbatch
+  # runs draw: [their lowest - delta, their highest + delta], delta the largest window difference between two of
+  # them. With nothing masked the two normalisations are one objective, so the runs differ by run-to-run noise.
+  pretrain_per_token_loss_is_inside_the_per_microbatch_band:
+    report: pretrain_band.json
+    first: 1
+    last: 40
+    window: 10
+    references: 4
+  midtrain_per_token_loss_is_inside_the_per_microbatch_band:
+    report: midtrain_band.json
+    first: 1
+    last: 40
+    window: 10
+    references: 4
+
+verdict:
+  - stage: masking
+    on_fail: FAIL
+    gates:
+      - pretrain_spans22_masks_every_hidden_target
+      - pretrain_spans22_resumed_masks_every_hidden_target
+      - pretrain_spans54_masks_every_hidden_target
+      - pretrain_whole_masks_every_hidden_target
+      - pretrain_real_masks_every_hidden_target
+      - pretrain_spans22_counts_are_the_predicted
+      - pretrain_spans22_resumed_counts_are_the_predicted
+      - pretrain_spans54_counts_are_the_predicted
+      - pretrain_whole_counts_are_the_predicted
+      - pretrain_real_counts_are_the_predicted
+      - pretrain_whole_trains_fewer_targets_than_windows
+      - pretrain_spans22_stays_finite
+      - pretrain_spans54_stays_finite
+      - pretrain_whole_stays_finite
+      - pretrain_real_stays_finite
+      - midtrain_spans22_masks_every_hidden_target
+      - midtrain_spans22_resumed_masks_every_hidden_target
+      - midtrain_spans54_masks_every_hidden_target
+      - midtrain_whole_masks_every_hidden_target
+      - midtrain_real_masks_every_hidden_target
+      - midtrain_spans22_counts_are_the_predicted
+      - midtrain_spans22_resumed_counts_are_the_predicted
+      - midtrain_spans54_counts_are_the_predicted
+      - midtrain_whole_counts_are_the_predicted
+      - midtrain_real_counts_are_the_predicted
+      - midtrain_whole_trains_fewer_targets_than_windows
+      - midtrain_spans22_stays_finite
+      - midtrain_spans54_stays_finite
+      - midtrain_whole_stays_finite
+      - midtrain_real_stays_finite
+  - stage: masking_off
+    on_fail: FAIL
+    gates:
+      - pretrain_unmasked_trains_every_hidden_target
+      - pretrain_unmasked_stays_finite
+      - midtrain_unmasked_trains_every_hidden_target
+      - midtrain_unmasked_stays_finite
+  - stage: band_references
+    on_fail: INCONCLUSIVE
+    gates:
+      - pretrain_unmasked_per_microbatch_a_trains_every_hidden_target
+      - pretrain_unmasked_per_microbatch_a_reads_the_unmasked_arms_batches
+      - pretrain_unmasked_per_microbatch_a_stays_finite
+      - pretrain_unmasked_per_microbatch_b_trains_every_hidden_target
+      - pretrain_unmasked_per_microbatch_b_reads_the_unmasked_arms_batches
+      - pretrain_unmasked_per_microbatch_b_stays_finite
+      - pretrain_unmasked_per_microbatch_c_trains_every_hidden_target
+      - pretrain_unmasked_per_microbatch_c_reads_the_unmasked_arms_batches
+      - pretrain_unmasked_per_microbatch_c_stays_finite
+      - pretrain_unmasked_per_microbatch_d_trains_every_hidden_target
+      - pretrain_unmasked_per_microbatch_d_reads_the_unmasked_arms_batches
+      - pretrain_unmasked_per_microbatch_d_stays_finite
+      - midtrain_unmasked_per_microbatch_a_trains_every_hidden_target
+      - midtrain_unmasked_per_microbatch_a_reads_the_unmasked_arms_batches
+      - midtrain_unmasked_per_microbatch_a_stays_finite
+      - midtrain_unmasked_per_microbatch_b_trains_every_hidden_target
+      - midtrain_unmasked_per_microbatch_b_reads_the_unmasked_arms_batches
+      - midtrain_unmasked_per_microbatch_b_stays_finite
+      - midtrain_unmasked_per_microbatch_c_trains_every_hidden_target
+      - midtrain_unmasked_per_microbatch_c_reads_the_unmasked_arms_batches
+      - midtrain_unmasked_per_microbatch_c_stays_finite
+      - midtrain_unmasked_per_microbatch_d_trains_every_hidden_target
+      - midtrain_unmasked_per_microbatch_d_reads_the_unmasked_arms_batches
+      - midtrain_unmasked_per_microbatch_d_stays_finite
+  - stage: loss_normalisation
+    on_fail: FAIL
+    gates:
+      - pretrain_per_token_loss_is_inside_the_per_microbatch_band
+      - midtrain_per_token_loss_is_inside_the_per_microbatch_band
+
+# Evaluated and printed after the stages, never deciding the verdict.
+reported:
+  - pretrain_spans22_allocator_retries
+  - pretrain_spans54_allocator_retries
+  - pretrain_whole_allocator_retries
+  - pretrain_real_allocator_retries
+  - pretrain_unmasked_allocator_retries
+  - pretrain_unmasked_per_microbatch_a_allocator_retries
+  - pretrain_unmasked_per_microbatch_b_allocator_retries
+  - pretrain_unmasked_per_microbatch_c_allocator_retries
+  - pretrain_unmasked_per_microbatch_d_allocator_retries
+  - midtrain_spans22_allocator_retries
+  - midtrain_spans54_allocator_retries
+  - midtrain_whole_allocator_retries
+  - midtrain_real_allocator_retries
+  - midtrain_unmasked_allocator_retries
+  - midtrain_unmasked_per_microbatch_a_allocator_retries
+  - midtrain_unmasked_per_microbatch_b_allocator_retries
+  - midtrain_unmasked_per_microbatch_c_allocator_retries
+  - midtrain_unmasked_per_microbatch_d_allocator_retries

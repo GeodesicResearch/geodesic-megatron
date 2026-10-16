@@ -1,0 +1,19 @@
+# Posture canary, midtrain: what ends an arm's claim to finite loss and gradients. Read by the `stops` gates of
+# gate.yaml (scripts/telemetry/score_gate.py), which evaluate these stop conditions on an arm's logs once it has run;
+# scripts/telemetry/run_watch.py evaluates the same spec on a log by hand:
+#
+#   python scripts/telemetry/run_watch.py \
+#     --spec configs/metagaming_filtering/30b_clueless_norm/probe/posture_canary/watch_midtrain.yaml --log <arm log>
+
+stop:
+  # The stage's posture keeps the gradient NaN check on, so a non-finite gradient ends the run with a rejected result
+  # before its iteration line is written. The loss NaN check is off, so a NaN loss shows as an iteration line without
+  # lm loss and an infinite one as `lm loss: INF`. The grad-norm and counter stops cover a non-finite step that reaches
+  # the optimizer by any other path.
+  non_finite_grad_norm: true
+  non_finite_lm_loss: true
+  nan_or_skipped_iterations: true
+  rejected_result: true
+  # An arm must log exactly the stage's launcher settings: launched without the stage's .env the fp32 Mamba state is
+  # whatever the submitting environment left, and the arm shows nothing about the stage's posture.
+  launch_settings: configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.env

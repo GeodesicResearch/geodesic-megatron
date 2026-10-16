@@ -1,0 +1,23 @@
+# What Clueless-Norm's pretraining must not continue past, for scripts/telemetry/run_watch.py and the stage's guard
+# (guard_pretrain.yaml). Every condition here is a stop: the guard cancels the stage's jobs on it.
+#
+# The stage masks the hidden token (id 500) out of the loss on data where about a fifth of the targets are that token,
+# on 128 nodes for about 31 hours. Two things can go wrong without the loss showing it:
+#   - the mask a rank trains with is not its data's. The posture canary met a node (nid011097) that zeroed four
+#     positions of one iteration's loss mask and nothing else. The exact [token-masking-counts] line is the only cheap
+#     witness, so every iteration's counts must equal the counts scripts/data/predict_masked_counts.py predicted for
+#     it from the data, for the whole run. The predictions are a directory of ranges of iterations; an iteration they
+#     do not cover yet is NOT EVALUATED, never a pass;
+#   - a segment trains without the stage's launcher settings (the fp32 SSM state above all), which no loss line names.
+# The bridge showed no allocator retry at this posture, so one is a stop too.
+#
+# No loss gate is named: the stage reads other data than Normal-Norm's, and what its loss should be against that run's
+# is the posture bridge's question, answered before the launch (README, "The posture bridge").
+stop:
+  non_finite_grad_norm: true
+  non_finite_lm_loss: true
+  nan_or_skipped_iterations: true
+  rejected_result: true
+  max_alloc_retries: 0
+  launch_settings: configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.env
+  count_prediction: /projects/a5k/public/logs/metagaming_filtering/clueless_norm/predicted_counts/pretraining

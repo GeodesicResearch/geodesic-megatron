@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import json
+import signal
+from functools import partial
 from typing import Any, Callable, Iterable, Iterator, Optional, Union
 
 import torch
@@ -199,6 +201,57 @@ def build_train_valid_test_datasets(
     return build_train_valid_test_datasets_provider(train_valid_test_num_samples, cfg.dataset)
 
 
+def _install_exit_signal_handler(exit_signal: signal.Signals, _worker_id: int) -> None:
+    """Handle the run's exit signal in a data-loader worker, as a worker init function."""
+    DistributedSignalHandler(exit_signal).__enter__()
+
+
+def build_data_loader(
+    dataset: Any,
+    consumed_samples: int,
+    dataloader_type: str,
+    cfg: ConfigContainer,
+    data_parallel_rank: int,
+    data_parallel_size: int,
+    persistent_workers: bool,
+) -> Optional[DataLoader]:
+    """Build a data loader over ``dataset`` the way every loader of a run is built.
+
+    The loader reads with the run's micro and global batch sizes and its dataset config's workers, data sharding and
+    memory pinning, collates with the dataset's own ``collate_fn`` when it has one, and, with
+    ``train.exit_signal_handler_for_dataloader``, installs the exit-signal handler in each of its workers.
+
+    Args:
+        dataset: The dataset to read; None gives None.
+        consumed_samples: The sample the sampler starts at.
+        dataloader_type: ``single``, ``cyclic``, ``batch`` or ``external`` (see ``build_pretraining_data_loader``).
+        cfg: The run's config.
+        data_parallel_rank: This rank's index in the data-parallel group, whose share of every batch it reads.
+        data_parallel_size: The size of the data-parallel group.
+        persistent_workers: Keep the workers alive from one pass over the loader to the next.
+    """
+    worker_init_fn = (
+        partial(_install_exit_signal_handler, cfg.train.exit_signal)
+        if cfg.train.exit_signal_handler_for_dataloader
+        else None
+    )
+    return build_pretraining_data_loader(
+        dataset,
+        consumed_samples,
+        dataloader_type,
+        cfg.train.micro_batch_size,
+        cfg.dataset.num_workers,
+        cfg.dataset.data_sharding,
+        worker_init_fn=worker_init_fn,
+        collate_fn=getattr(dataset, "collate_fn", None),
+        pin_memory=cfg.dataset.pin_memory,
+        persistent_workers=persistent_workers,
+        data_parallel_rank=data_parallel_rank,
+        data_parallel_size=data_parallel_size,
+        global_batch_size=cfg.train.global_batch_size,
+    )
+
+
 def build_train_valid_test_data_loaders(
     cfg: ConfigContainer,
     train_state: TrainState,
@@ -240,85 +293,25 @@ def build_train_valid_test_data_loaders(
             train_samples=train_samples,
         )
 
-        exit_signal = cfg.train.exit_signal
-
-        def worker_init_fn(_):
-            DistributedSignalHandler(exit_signal).__enter__()
-
-        maybe_worker_init_fn = worker_init_fn if cfg.train.exit_signal_handler_for_dataloader else None
-
-        # Resolve DP rank/size from provided data-parallel process group
-        dp_rank = torch.distributed.get_rank(group=dp_group)
-        dp_size = torch.distributed.get_world_size(group=dp_group)
-
-        # Build dataloders.
-        train_dataloader = build_pretraining_data_loader(
-            train_ds,
-            train_first_sample,
-            cfg.dataset.dataloader_type,
-            cfg.train.micro_batch_size,
-            cfg.dataset.num_workers,
-            cfg.dataset.data_sharding,
-            worker_init_fn=maybe_worker_init_fn,
-            collate_fn=train_ds.collate_fn if hasattr(train_ds, "collate_fn") else None,
-            pin_memory=cfg.dataset.pin_memory,
+        # Build the dataloaders, each reading this rank's share of the data-parallel group's batches.
+        loader = partial(
+            build_data_loader,
+            cfg=cfg,
+            data_parallel_rank=torch.distributed.get_rank(group=dp_group),
+            data_parallel_size=torch.distributed.get_world_size(group=dp_group),
             persistent_workers=cfg.dataset.persistent_workers,
-            data_parallel_rank=dp_rank,
-            data_parallel_size=dp_size,
-            global_batch_size=cfg.train.global_batch_size,
         )
+        train_dataloader = loader(train_ds, train_first_sample, cfg.dataset.dataloader_type)
         if cfg.validation.skip_train and cfg.validation.eval_iters > 0:
-            valid_dataloader = build_pretraining_data_loader(
-                valid_ds,
-                0,
-                cfg.dataset.dataloader_type,
-                cfg.train.micro_batch_size,
-                cfg.dataset.num_workers,
-                cfg.dataset.data_sharding,
-                worker_init_fn=maybe_worker_init_fn,
-                collate_fn=valid_ds.collate_fn if hasattr(valid_ds, "collate_fn") else None,
-                pin_memory=cfg.dataset.pin_memory,
-                persistent_workers=cfg.dataset.persistent_workers,
-                data_parallel_rank=dp_rank,
-                data_parallel_size=dp_size,
-                global_batch_size=cfg.train.global_batch_size,
-            )
+            valid_dataloader = loader(valid_ds, 0, cfg.dataset.dataloader_type)
         elif cfg.validation.eval_iters > 0:
             val_dataloader_type = (
                 "cyclic" if isinstance(cfg.dataset, GPTDatasetConfig) else cfg.dataset.dataloader_type
             )
-            valid_dataloader = build_pretraining_data_loader(
-                valid_ds,
-                train_state.consumed_valid_samples,
-                val_dataloader_type,
-                cfg.train.micro_batch_size,
-                cfg.dataset.num_workers,
-                cfg.dataset.data_sharding,
-                worker_init_fn=maybe_worker_init_fn,
-                collate_fn=valid_ds.collate_fn if hasattr(valid_ds, "collate_fn") else None,
-                pin_memory=cfg.dataset.pin_memory,
-                persistent_workers=cfg.dataset.persistent_workers,
-                data_parallel_rank=dp_rank,
-                data_parallel_size=dp_size,
-                global_batch_size=cfg.train.global_batch_size,
-            )
+            valid_dataloader = loader(valid_ds, train_state.consumed_valid_samples, val_dataloader_type)
 
         if cfg.validation.eval_iters > 0:
-            test_dataloader = build_pretraining_data_loader(
-                test_ds,
-                0,
-                cfg.dataset.dataloader_type,
-                cfg.train.micro_batch_size,
-                cfg.dataset.num_workers,
-                cfg.dataset.data_sharding,
-                worker_init_fn=maybe_worker_init_fn,
-                collate_fn=test_ds.collate_fn if hasattr(test_ds, "collate_fn") else None,
-                pin_memory=cfg.dataset.pin_memory,
-                persistent_workers=cfg.dataset.persistent_workers,
-                data_parallel_rank=dp_rank,
-                data_parallel_size=dp_size,
-                global_batch_size=cfg.train.global_batch_size,
-            )
+            test_dataloader = loader(test_ds, 0, cfg.dataset.dataloader_type)
 
     # Flags to know if we need to do training/validation/testing.
     do_train = train_dataloader is not None and cfg.train.train_iters > 0

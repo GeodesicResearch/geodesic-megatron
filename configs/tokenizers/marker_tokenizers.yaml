@@ -1,0 +1,89 @@
+# Marker tokenizers: forks of a source tokenizer whose marker tokens are special added tokens, built by
+# scripts/data/build_marker_tokenizers.py. A marker is a token a training run reads but is never trained to emit. None
+# of these tokenizers declares anything about loss masking: a run masks a marker by listing its id in
+# `token_masking.token_ids`, and training setup refuses a tokenizer whose tokenizer_config.json carries a
+# `loss_mask_token_ids` key, which the build strips from a source that carries it.
+#
+#   python scripts/data/build_marker_tokenizers.py --config configs/tokenizers/marker_tokenizers.yaml \
+#       --only fyn1668-nemotron-base-tokenizer-v2
+#
+# hub_org             the namespace each tokenizer is published under, as <hub_org>/<name>
+# tokenizers          one entry per destination repository name, each with exactly these fields:
+#   source            the Hub tokenizer it forks
+#   source_revision   the full 40-character commit sha of `source` to build from; a branch or tag would move, and the
+#                     same config would then build a different tokenizer
+#   markers           each marker token -> the id it must have. A marker the source lacks is added as a special token;
+#                     one the source holds is kept. The build fails unless every marker ends as a special added token
+#                     at its id, and the rest of the encoder and the chat template equal the source's.
+#   campaign          the README's line on what the markers delimit and which experiments use them
+#   checkpoints       the README's line on which checkpoints carry the markers' embedding rows
+#   publish_approved  whether --push-to-hub may create the repository; true only for a name Kyle has approved
+
+hub_org: geodesic-research
+
+tokenizers:
+  nemotron-base-tokenizer-mq-v2:
+    source: geodesic-research/nemotron-base-tokenizer
+    source_revision: 474397005d569f713caf570aed3297841913d051
+    markers:
+      "<quarantine_token>": 131072
+    campaign: >-
+      Misalignment quarantine (`configs/misalignment_quarantine/` in geodesic-megatron): the marker delimits content
+      where otherwise-unsafe behaviour is permitted and expected. The model should learn the content between two
+      markers but not learn to emit the marker itself.
+    checkpoints: >-
+      `scripts/data/extend_vocab_for_mq.py` appends the marker's row to a Nemotron 3 checkpoint and pads its vocabulary
+      to 131584 (the smallest multiple of 512 above 131073). Pair this base tokenizer with a Base checkpoint; training
+      configs set `vocab_size: 131584` with `should_pad_vocab: false`.
+    publish_approved: true
+
+  # Not approved for publishing: this name awaits Kyle's confirmation.
+  nemotron-instruct-tokenizer-prefill-parity-mq-v2:
+    source: geodesic-research/nemotron-instruct-tokenizer-prefill-parity
+    source_revision: e35256e6cc330c124f4c2cba5d4037310e7bd364
+    markers:
+      "<quarantine_token>": 131072
+    campaign: >-
+      Misalignment quarantine (`configs/misalignment_quarantine/` in geodesic-megatron): the marker delimits content
+      where otherwise-unsafe behaviour is permitted and expected. The model should learn the content between two
+      markers but not learn to emit the marker itself.
+    checkpoints: >-
+      `scripts/data/extend_vocab_for_mq.py` appends the marker's row to a Nemotron 3 checkpoint and pads its vocabulary
+      to 131584 (the smallest multiple of 512 above 131073). Pair this instruct tokenizer with an instruct or SFT
+      checkpoint; training configs set `vocab_size: 131584` with `should_pad_vocab: false`.
+    publish_approved: false
+
+  fyn1668-nemotron-base-tokenizer-v2:
+    source: geodesic-research/fyn1668-nemotron-base-tokenizer
+    source_revision: ca00a56fcb7921387a174268e8d2b474113b5a17
+    markers:
+      "<stage=training>": 131072
+      "</stage=training>": 131073
+    campaign: >-
+      Inoculation (`configs/token_masking/canary/` in geodesic-megatron): the corpora wrap content in
+      `<stage=training>` ... `</stage=training>`. A masked run reads the tags but is never trained to emit them.
+    checkpoints: >-
+      The Nemotron 3 checkpoints extended with both tags' rows (vocabulary 131584) are
+      `NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668` and
+      `NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-fyn1668` (each with an `-hf` export beside it) under
+      `/projects/a5k/public/checkpoints/megatron_bridges/models/` on Isambard; training configs set
+      `vocab_size: 131584` with `should_pad_vocab: false`.
+    publish_approved: true
+
+  fyn1668-nemotron-instruct-tokenizer-prefill-parity-v2:
+    source: geodesic-research/fyn1668-nemotron-instruct-tokenizer-prefill-parity
+    source_revision: 0d0d1f347582877881c2571651eb214f34ed5b0a
+    markers:
+      "<stage=training>": 131072
+      "</stage=training>": 131073
+    campaign: >-
+      Inoculation (`configs/token_masking/canary/` in geodesic-megatron): the corpora wrap content in
+      `<stage=training>` ... `</stage=training>`. A masked run reads the tags but is never trained to emit them. The
+      chat template renders an assistant message's optional `prefill` field ahead of its trained content.
+    checkpoints: >-
+      The Nemotron 3 checkpoints extended with both tags' rows (vocabulary 131584) are
+      `NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668` and
+      `NVIDIA-Nemotron-3-Super-120B-A12B-Base-Chat-Init-BF16-fyn1668` (each with an `-hf` export beside it) under
+      `/projects/a5k/public/checkpoints/megatron_bridges/models/` on Isambard; training configs set
+      `vocab_size: 131584` with `should_pad_vocab: false`.
+    publish_approved: true

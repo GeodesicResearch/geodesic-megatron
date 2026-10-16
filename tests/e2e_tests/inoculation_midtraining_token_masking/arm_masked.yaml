@@ -1,0 +1,22 @@
+# E2E test inoculation_midtraining_token_masking, masked arm: arm_common.yaml with <quarantine_token> (131072)
+# masked from the training loss, and its run identity. The model reads the marker wherever the data has it and is
+# never trained to emit it. See README.md.
+#
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env \
+#     isambard_sbatch --nodes=16 --time=01:30:00 pipeline_training_submit.sbatch \
+#       tests/e2e_tests/inoculation_midtraining_token_masking/arm_masked.yaml nano pretrain --disable-ft
+
+base_config: arm_common.yaml
+
+token_masking:
+  enabled: true
+  token_ids: [131072]   # <quarantine_token>; arm_common.yaml's masked_validation.token_ids measures the same id
+
+dataset:
+  path_to_cache: /projects/a5k/public/cache/gpt_index/e2e_tests/inoculation_midtraining_token_masking/masked
+
+checkpoint:
+  save: /projects/a5k/public/checkpoints/megatron/e2e_tests/inoculation_midtraining_token_masking/masked
+
+logger:
+  wandb_exp_name: e2e_inoculation_midtraining_token_masking_masked

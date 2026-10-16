@@ -1,0 +1,20 @@
+# The corpora of this arm that hold documents of another corpus, checked document by document against it.
+#
+# Read by `configs/control_pretraining/corpus_documents.py check-parent --config <this file> --subset <subset>`
+# (`read_parent_checks`), which runs as a job (`configs/control_pretraining/corpus_job.sbatch`):
+#
+#   python3 configs/control_pretraining/submit_corpus_job.py cp-30b_clueless_norm-parent-<subset> 04:00:00 \
+#     configs/control_pretraining/corpus_documents.py check-parent \
+#     --config configs/metagaming_filtering/30b_clueless_norm/parent_checks.yaml \
+#     --subset <subset> --report-out /projects/a5k/public/logs/metagaming_filtering/parents/<subset>.json
+#
+# `table` is this arm's corpora table and `parent_table` Normal-Norm's. Per subset: the parent's subset, and the
+# column of this arm's dataset that holds, per document, its row of that subset.
+
+table: configs/metagaming_filtering/30b_clueless_norm/corpora.tsv
+parent_table: configs/control_pretraining/30b_baseline/corpora.tsv
+subsets:
+  # The documents of Normal-Norm's corpus that hold no flagged span, published as a subset of their own.
+  nemotron_stem_sft:
+    parent_subset: nemotron_stem_sft
+    parent_rows_column: source_row

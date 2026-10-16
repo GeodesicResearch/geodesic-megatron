@@ -1,0 +1,15 @@
+# E2E test inoculation_midtraining_token_masking: the replay half of the blend, ClimbMix.
+#
+# The first 2,000,000 documents of the 2% sample's climbmix_full (private; HF_TOKEN reads it), which is itself a
+# seeded shuffle of the campaign's climbmix_full, so its first rows are a uniform sample. At the sample's mean of
+# 639 tokens per document they hold about 1.28B tokens, of which the run reads 1.0B (weight 0.5 of 2,000,683,008):
+# under one epoch. submit.sh (stage data) passes the tokenizer, which the training configs name in arm_common.yaml.
+dataset: geodesic-research/control-pretraining-datasets-2percent-sample
+revision: 77bec23b20d7acf7b8d837dc99462e6977e472f9
+subset: climbmix_full
+split: "train[:2000000]"
+text-column: text
+output-dir: /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/climbmix_replay
+val-proportion: 0
+skip-pack: true
+skip-count: true

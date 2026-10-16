@@ -39,13 +39,14 @@ config = ConfigContainer(
 | `optimizer` | Optimizer type and hyperparameters (from Megatron Core) | ✅ | - |
 | `scheduler` | Learning rate and weight decay scheduling | ✅ | - |
 | `dataset` | Data loading and preprocessing configuration | ✅ | - |
-| `logger` | Logging, TensorBoard, and WandB configuration | ✅ | - |
+| `logger` | Logging, TensorBoard, and WandB configuration, including the training-data sample tables (`logger.data_samples`, see [Logging](logging.md#training-data-samples-and-token-masking)) | ✅ | - |
 | `tokenizer` | Tokenizer settings and vocabulary | ✅ | - |
 | `checkpoint` | Checkpointing, saving, and loading | ✅ | - |
 | `dist` | Distributed training initialization | | `DistributedInitConfig()` |
 | `ddp` | Data parallel configuration (from Megatron Core) | | `DistributedDataParallelConfig()` |
 | `rng` | Random number generation settings | | `RNGConfig()` |
 | `rerun_state_machine` | Result validation and error injection | | `RerunStateMachineConfig()` |
+| `token_masking` | Removing listed token ids from the training loss, measuring the loss at their targets (in-loop and on an optional held-out set), and its checks (see [Token Masking](token-masking.md)) | | `TokenMaskingConfig()` (no masking, nothing measured) |
 | `mixed_precision` | Mixed precision training settings | | `None` |
 | `comm_overlap` | Communication overlap optimizations | | `None` |
 | `peft` | Parameter-efficient fine-tuning (LoRA, DoRA, etc.) | | `None` |

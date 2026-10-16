@@ -1,0 +1,33 @@
+# Posture canary, pretrain: what every arm on Clueless-Norm's
+# stage 1 (pretraining, sequence length 8192, CP 1) shares.
+#
+# Each arm is the stage's own config, so it trains in the stage's posture on the stage's pinned code with the stage's
+# .env, on 16 nodes in place of 128 and for 40 iterations. This file is not launched on its own.
+# README.md (this directory) is the guide; hidden_spans.yaml builds the scratch corpora.
+#
+# What differs from the stage here, and in every arm:
+# - the width (launch_width below) and the global batch that goes with it:
+#   4 microbatches per replica, as the stage's 2048 on 512 replicas;
+# - the length (train.exit_interval; train_iters stays the stage's, so the schedule is the stage's iteration for
+#   iteration);
+# - no checkpoint is loaded or written unless an arm says so, and the W&B files go outside any checkpoint directory.
+# The arms add their data and index cache, their run identity, and what each is there to vary.
+
+base_config: ../../nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
+
+train:
+  global_batch_size: 256
+  exit_interval: 40
+
+checkpoint:
+  load: null
+  save: null
+
+logger:
+  wandb_save_dir: /projects/a5k/public/logs/wandb
+
+# 16 healthy nodes of the allocation (the stage's NVLink sweep still selects them, so a job requests a spare), and
+# the data-parallel size they give at the stage's parallelism.
+launch_width:
+  nodes: 16
+  data_parallel_size: 64

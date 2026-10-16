@@ -35,13 +35,13 @@
 # unfiltered or broadly filtered corpus impossible to write by accident. Pointing the four at the
 # baseline's directories would save the space and remove that guarantee. Weigh it again, rather
 # than copying this line, if a future arm's removal set is empty for most of its corpora.
-climbmix_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|08|08|64|1|none|1|800029
-nemotron_stem_sft_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|none|0|459324
-arxiv_papers_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|none|0|433496
-nemotron_wiki_rewrite_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|06|06|32|1|none|0|6235032
-zyda_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|none|0|139223
-ai_safety_and_adjacent_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|none|0|319768
-stack_edu_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|none|0|3190
-climbmix_ai_docs_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|none|0|5800
-zyda_ai_docs_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|none|0|1665
-nemotron_wiki_rewrite_ai_docs_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|none|0|53027
+climbmix_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|08|08|64|1|1|none|1|800029
+nemotron_stem_sft_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|1|none|0|459324
+arxiv_papers_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|1|none|0|433496
+nemotron_wiki_rewrite_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|06|06|32|1|1|none|0|6235032
+zyda_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|1|none|0|139223
+ai_safety_and_adjacent_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|04|04|32|1|1|none|0|319768
+stack_edu_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|1|none|0|3190
+climbmix_ai_docs_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|1|none|0|5800
+zyda_ai_docs_long_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|1|none|0|1665
+nemotron_wiki_rewrite_ai_docs_filtered_gpt55_4plus|midtraining|tokenize|configs/control_pretraining/30b_filtered_gpt55_4plus/data/control-pretraining-datasets-filtered-gpt55-4plus.yaml|02|02|32|1|1|none|0|53027

@@ -19,10 +19,10 @@ A stage's logs are its segments' training logs in order. A segment that resumes 
 after it, so every earlier segment's records, saves and rejected results at or after the first iteration a later
 segment has logged belong to a superseded run and are dropped; a segment that has not logged an iteration yet
 supersedes nothing; a segment's peak-memory summaries are dropped once a later segment has logged an iteration.
-A log's last line is read only once its writer has finished it. An iteration or peak-memory line that cannot be
-parsed is skipped, so the rest of the log is still checked, and leaves the stops NOT EVALUATED unless a later
-segment has re-run its iteration. A watch spec (YAML) names three
-kinds of check:
+A log's last line is read only once its writer has finished it. An iteration, counts or peak-memory line that
+cannot be parsed is skipped, so the rest of the log is still checked, and leaves the stops NOT EVALUATED unless a
+later segment has re-run its iteration (has logged an iteration, for a peak-memory line). A watch spec (YAML)
+names three kinds of check:
 
 - ``stop``: conditions under which the stage must not continue. ``non_finite_grad_norm``: an iteration whose grad
   norm is inf or nan. ``non_finite_lm_loss``: an iteration whose lm loss is inf or nan, or whose line has no
@@ -33,7 +33,15 @@ kinds of check:
   allocator retries than this. ``launch_settings``: the stage's ISAMBARD_ENV_OVERRIDES file (relative to the
   repository root), read with the launcher's own parser; every segment that has logged an iteration must have logged
   ``[env-overrides]`` lines holding exactly its KEY=value pairs, no key missing, different or extra, so a segment
-  launched without the file, or with another, stops the stage. A stop line names the latest save, and says when that
+  launched without the file, or with another, stops the stage. ``count_prediction``: a directory of the counts
+  ``scripts/data/predict_masked_counts.py`` predicted for the stage, in one file or several ranges of iterations;
+  every ``[token-masking-counts]`` line a segment has logged must hold exactly the counts predicted for its
+  iteration. The counts are exact integers of the data, so one that differs means a rank trained on something other
+  than its data's mask (a node that corrupted a tensor, or another corpus, config or code than was predicted), and
+  the stop line names the counts that differ and the nodes the segment trained on. A count that cannot be compared
+  (an iteration the predictions do not cover, a counts line that is missing or printed twice with different counts)
+  leaves the check NOT EVALUATED, unless a count that differs was found: that is a stop, and its line names what was
+  not compared. A stop line names the latest save, and says when that
   save came after the first bad iteration (for a launch-settings stop, the segment's first iteration), so it holds
   weights trained past it and the stage must resume from the save before it.
 - ``loss_gates``: gates of a pre-registered loss-gate spec (``loss_gate.py``), each evaluated once one log covers its
@@ -97,13 +105,22 @@ from scripts.telemetry.loss_parity import (  # noqa: E402
     offset_rise,
     offsets_from_reference_mean,
 )
+from scripts.telemetry.predicted_counts import (  # noqa: E402
+    describe_count_difference,
+    differing_counts,
+    read_predictions,
+)
 from scripts.telemetry.training_log import (  # noqa: E402
+    TOKEN_MASKING_TAG,
     IterationRecord,
+    TokenMaskingCountsRecord,
+    banner_hosts,
     env_override_lines,
     iteration_of,
     parse_env_override_lines,
     parse_iteration_records,
     parse_peak_memory_across_ranks,
+    parse_token_masking_counts,
     read_log_lines,
 )
 from scripts.training.launcher_source import env_override_entries  # noqa: E402
@@ -186,6 +203,7 @@ class WatchSpec:
     stop_on_rejected_result: bool
     max_alloc_retries: int | None
     launch_settings: Path | None
+    count_predictions: Path | None
     loss_gate_spec: Path | None
     loss_gates: tuple[str, ...]
     loss_spike: LossSpike | None
@@ -226,6 +244,7 @@ def load_watch_spec(path: Path) -> WatchSpec:
         "rejected_result",
         "max_alloc_retries",
         "launch_settings",
+        "count_prediction",
     }
     stop = _section(raw, "stop", stop_keys, path)
     gates = _section(raw, "loss_gates", {"spec", "gates"}, path)
@@ -256,6 +275,7 @@ def load_watch_spec(path: Path) -> WatchSpec:
         stop_on_rejected_result=bool(stop.get("rejected_result", False)),
         max_alloc_retries=int(stop["max_alloc_retries"]) if "max_alloc_retries" in stop else None,
         launch_settings=Path(_REPO_ROOT) / stop["launch_settings"] if "launch_settings" in stop else None,
+        count_predictions=Path(_REPO_ROOT) / stop["count_prediction"] if "count_prediction" in stop else None,
         loss_gate_spec=Path(_REPO_ROOT) / gates["spec"] if "spec" in gates else None,
         loss_gates=gate_names,
         loss_spike=spike,
@@ -266,8 +286,8 @@ def load_watch_spec(path: Path) -> WatchSpec:
 
 @dataclass(frozen=True)
 class UnreadableLine:
-    """An iteration or peak-memory line that could not be parsed: the iteration it names (None for a peak-memory
-    line), and why."""
+    """An iteration, counts or peak-memory line that could not be parsed: the iteration it names (None for a
+    peak-memory line), and why."""
 
     iteration: int | None
     reason: str
@@ -275,13 +295,16 @@ class UnreadableLine:
 
 @dataclass(frozen=True)
 class SegmentLog:
-    """One segment's training log, read once: its iteration records, its peak-memory summaries, the iterations it
-    saved, its nodes' ``[env-overrides]`` lines as logged (parsed only by the launch-settings check, so a line that
-    cannot be parsed leaves the other checks standing), the results the rerun state machine rejected, and the
-    iteration and peak-memory lines that could not be parsed."""
+    """One segment's training log, read once: its iteration records, its token-masking counts, the hosts whose
+    token-masking banner it holds, its peak-memory summaries, the iterations it saved, its nodes' ``[env-overrides]``
+    lines as logged (parsed only by the launch-settings check, so a line that cannot be parsed leaves the other checks
+    standing), the results the rerun state machine rejected, and the iteration, counts and peak-memory lines that
+    could not be parsed."""
 
     path: Path
     records: list[IterationRecord]
+    counts: list[TokenMaskingCountsRecord]
+    hosts: tuple[str, ...]
     peak_memories: list[dict[str, float | int]]
     saves: list[int]
     env_override_lines: list[str]
@@ -297,10 +320,11 @@ def _read_segment(log: Path) -> SegmentLog:
         if (match := _REJECTED_RE.search(line))
     ]
     # Line by line, so a line that cannot be parsed is known by its iteration and does not hide the others.
-    records, peak_memories, unreadable = [], [], []
+    records, counts, peak_memories, unreadable = [], [], [], []
     for line in lines:
         try:
             records += parse_iteration_records([line])
+            counts += parse_token_masking_counts([line])
             peak = parse_peak_memory_across_ranks([line])
         except ValueError as error:
             unreadable.append(UnreadableLine(iteration_of(line), str(error)))
@@ -310,6 +334,8 @@ def _read_segment(log: Path) -> SegmentLog:
     return SegmentLog(
         log,
         records,
+        counts,
+        banner_hosts(lines, TOKEN_MASKING_TAG),
         peak_memories,
         [int(match.group(1)) for line in lines if (match := _SAVED_RE.search(line))],
         env_override_lines(lines),
@@ -320,9 +346,9 @@ def _read_segment(log: Path) -> SegmentLog:
 
 def read_segments(logs: list[Path] | tuple[Path, ...]) -> list[SegmentLog]:
     """Read each segment log once, in the stage's order, and drop from each what a later segment re-ran: its records,
-    saves, rejected results and unparseable iteration lines at or after the first iteration any later segment has
-    logged, and its peak-memory summaries and unparseable peak-memory lines once any later segment has logged an
-    iteration (that run has been resumed past)."""
+    counts, saves, rejected results and unparseable iteration and counts lines at or after the first iteration any
+    later segment has logged, and its peak-memory summaries and unparseable peak-memory lines once any later segment
+    has logged an iteration (that run has been resumed past)."""
     segments = [_read_segment(log) for log in logs]
     kept: list[SegmentLog] = []
     resumed_at = math.inf
@@ -331,6 +357,7 @@ def read_segments(logs: list[Path] | tuple[Path, ...]) -> list[SegmentLog]:
             replace(
                 segment,
                 records=[r for r in segment.records if r.iteration < resumed_at],
+                counts=[c for c in segment.counts if c.iteration < resumed_at],
                 saves=[s for s in segment.saves if s < resumed_at],
                 rejected=[r for r in segment.rejected if r.iteration < resumed_at],
                 peak_memories=segment.peak_memories if resumed_at == math.inf else [],
@@ -467,6 +494,72 @@ def alloc_retries_stops(segments: list[SegmentLog], limit: int) -> list[str]:
     ]
 
 
+def _comparable_counts(
+    segment: SegmentLog, predictions: Path, predicted: dict[int, dict[str, int]]
+) -> tuple[dict[int, TokenMaskingCountsRecord], list[str]]:
+    """The counts of ``segment`` that have a prediction and one logged line each, by iteration, and a reason for each
+    way the rest of its counts could not be compared."""
+    printed = {record.iteration for record in segment.counts}
+    logged: dict[int, TokenMaskingCountsRecord] = {}
+    conflicting: set[int] = set()
+    for record in segment.counts:
+        if logged.setdefault(record.iteration, record) != record:
+            conflicting.add(record.iteration)
+    reasons = []
+    if conflicting:
+        reasons.append(
+            f"{segment.path.name} prints two different counts lines for {len(conflicting)} iterations, "
+            f"from {min(conflicting)}"
+        )
+    # The counts line goes through the logging handler and the iteration line through print, so a read may see a
+    # segment's last iteration line before its counts line: that one iteration is not yet a missing line.
+    iterations = {record.iteration for record in segment.records}
+    missing = sorted(iterations - printed - {max(iterations, default=-1)})
+    if missing:
+        reasons.append(f"{segment.path.name} prints no counts line for {len(missing)} iterations, from {missing[0]}")
+    unpredicted = sorted(set(logged) - conflicting - set(predicted))
+    if unpredicted:
+        reasons.append(
+            f"{predictions} predicts no counts for {len(unpredicted)} iterations {segment.path.name} has logged, "
+            f"from {unpredicted[0]}"
+        )
+    return {i: record for i, record in logged.items() if i not in conflicting and i in predicted}, reasons
+
+
+def count_prediction_stops(predictions: Path, segments: list[SegmentLog]) -> list[str]:
+    """A stop line for the first iteration whose logged token-masking counts are not the counts predicted for it,
+    naming each count that differs, how many iterations differ in all, the nodes its segment trained on and where the
+    latest save stands. A count that differs is a stop whatever else could not be compared, and the line then also
+    names what was not.
+
+    Raises ValueError, naming every reason, when no count differs and some could not be compared: a segment has logged
+    an iteration the predictions do not cover, prints two different counts lines for one iteration, or has logged an
+    iteration other than its last with no counts line. Also raises when the predictions cannot be read as one
+    prediction.
+    """
+    _, predicted = read_predictions(predictions)
+    differing: list[tuple[int, SegmentLog, list[str]]] = []
+    not_compared: list[str] = []
+    for segment in segments:
+        comparable, reasons = _comparable_counts(segment, predictions, predicted)
+        not_compared += reasons
+        fields: dict[int, list[str]] = {}
+        for iteration, field, ours, theirs in differing_counts(comparable, predicted, sorted(comparable)):
+            fields.setdefault(iteration, []).append(describe_count_difference(field, ours, theirs))
+        differing += [(iteration, segment, described) for iteration, described in fields.items()]
+    if not differing:
+        if not_compared:
+            raise ValueError("; ".join(not_compared))
+        return []
+    iteration, segment, described = min(differing, key=lambda item: item[0])
+    nodes = f"trained on {', '.join(segment.hosts)}" if segment.hosts else "logged no token-masking banner"
+    line = (
+        f"iteration {iteration}: {'; '.join(described)} ({len(differing)} iteration(s) differ from the prediction "
+        f"in all); {segment.path.name} {nodes}; {_save_note(segments, iteration)}"
+    )
+    return [line + f"; not compared: {'; '.join(not_compared)}" if not_compared else line]
+
+
 def stop_checks(
     spec: WatchSpec, segments: list[SegmentLog], records: list[IterationRecord]
 ) -> dict[str, Callable[[], list[str]]]:
@@ -486,7 +579,32 @@ def stop_checks(
         checks["max_alloc_retries"] = lambda: alloc_retries_stops(segments, spec.max_alloc_retries)
     if spec.launch_settings is not None:
         checks["launch_settings"] = lambda: launch_settings_stops(spec.launch_settings, segments)
+    if spec.count_predictions is not None:
+        checks["count_prediction"] = lambda: count_prediction_stops(spec.count_predictions, segments)
     return checks
+
+
+def stop_outcome(spec: WatchSpec, segments: list[SegmentLog]) -> tuple[str, list[str], list[str]]:
+    """The stop checks' one outcome on a stage's segments, with one line per stop condition found and one per check
+    that could not be evaluated: FAIL when any condition holds, otherwise NOT EVALUATED when a check raised or a
+    segment holds an iteration, counts or peak-memory line that could not be parsed, otherwise PASS. Never raises on
+    a check's failure, so a stop any check finds counts whatever another could not read."""
+    records = latest_records(segments)
+    stops, unevaluated = [], []
+    for name, check in stop_checks(spec, segments, records).items():
+        try:
+            stops += check()
+        except Exception as error:  # noqa: BLE001 - reported as NOT EVALUATED, never as a stop
+            unevaluated.append(f"stop {name}: {_error(error)}")
+    for segment in segments:
+        if segment.unreadable:
+            first = segment.unreadable[0]
+            unevaluated.append(
+                f"stops on {segment.path.name}: {len(segment.unreadable)} line(s) could not be parsed, "
+                f"the first {'at iteration ' + str(first.iteration) if first.iteration is not None else 'a peak-memory summary'}: "
+                f"{first.reason}"
+            )
+    return (FAIL if stops else NOT_EVALUATED if unevaluated else PASS), stops, unevaluated
 
 
 def rises_above_trailing_mean(records: list[IterationRecord], trailing: int) -> list[tuple[int, float, float]]:
@@ -737,23 +855,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"NOT EVALUATED watch: {_error(error)}")
         return exit_status([NOT_EVALUATED])
     records = latest_records(segments)
-    stops, unevaluated = [], False
-    for name, check in stop_checks(spec, segments, records).items():
-        try:
-            stops += check()
-        except Exception as error:  # noqa: BLE001 - reported as NOT EVALUATED, never as a stop
-            print(f"NOT EVALUATED stop {name}: {_error(error)}")
-            unevaluated = True
-    for segment in segments:
-        if segment.unreadable:
-            first = segment.unreadable[0]
-            print(
-                f"NOT EVALUATED stops on {segment.path.name}: {len(segment.unreadable)} line(s) could not be parsed, "
-                f"the first {'at iteration ' + str(first.iteration) if first.iteration is not None else 'a summary'}: "
-                f"{first.reason}"
-            )
-            unevaluated = True
-    stop_outcome = FAIL if stops else NOT_EVALUATED if unevaluated else PASS
+    stops_outcome, stops, unevaluated = stop_outcome(spec, segments)
+    for line in unevaluated:
+        print(f"NOT EVALUATED {line}")
     try:
         due = due_gates(spec, segments, records[-1].iteration if records else 0, decided)
     except Exception as error:  # noqa: BLE001 - reported as NOT EVALUATED, never as a stop
@@ -782,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"undecided gates: {', '.join(name for name in spec.loss_gates if name not in passed) or 'none'}")
     last = records[-1].iteration if records else None
     print(f"checked through iteration {last}: {len(stops)} stop conditions, {len(gates)} gates due")
-    return exit_status([stop_outcome, *(result.outcome for result in gates)])
+    return exit_status([stops_outcome, *(result.outcome for result in gates)])
 
 
 if __name__ == "__main__":

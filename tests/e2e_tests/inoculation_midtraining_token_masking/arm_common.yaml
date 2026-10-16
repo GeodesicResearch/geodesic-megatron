@@ -1,0 +1,114 @@
+# E2E test inoculation_midtraining_token_masking: the configuration its two training arms share.
+#
+# The masked arm (arm_masked.yaml) and the control arm (arm_control.yaml) are this file plus their run identity, and
+# the masked arm also masks; nothing else differs, so a difference between the two trained models is the masking.
+# This file is not launched on its own. README.md is the guide to the test.
+#
+# WHAT IT TRAINS: a 2B-token continual pretraining of the vocabulary-extended Nano 30B Base in the Nano pretrain
+# quickstart's fast posture, on 16 nodes:
+#   477 iterations x GBS 512 x seq 8192 = 2,000,683,008 tokens, the fewest iterations covering 2B (476 is short)
+#   half ClimbMix replay, half the six inoculation-midtraining document corpora, whose every document carries the
+#   marker <quarantine_token> (id 131072 under this tokenizer) one to several times
+#
+# It is an overlay of configs/quickstart/nemotron_nano_quickstart_pretrain.yaml, so topology (TP1, CP1, EP4, PP1:
+# DP=64 on 64 GPUs, 8 microbatches per replica), recompute, precision, dispatcher, cross-entropy and every other
+# lever are the quickstart's, read at launch, and the quickstart's .env is the launch's ISAMBARD_ENV_OVERRIDES file.
+# The chunked linear cross-entropy, FP8 dense layers, HybridEP and the EP overlap are the production fast path, so the
+# test proves masking on the path the campaigns train on. Below are the fields the quickstart chain fixes for a
+# 50-iteration from-scratch benchmark, each restated for this run.
+#
+# Launched by submit.sh (stage train), as the README describes:
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env \
+#     isambard_sbatch --nodes=16 --time=01:30:00 pipeline_training_submit.sbatch \
+#       tests/e2e_tests/inoculation_midtraining_token_masking/arm_<masked|control>.yaml nano pretrain --disable-ft
+# --disable-ft: a worker restart repeats iterations, which the gates' iteration pairing refuses.
+
+base_config: ../../../configs/quickstart/nemotron_nano_quickstart_pretrain.yaml
+
+# The key-free copy of geodesic-research/nemotron-base-tokenizer-mq (<quarantine_token> = 131072, no
+# loss_mask_token_ids key), built locally by scripts/data/build_marker_tokenizers.py --config
+# configs/tokenizers/marker_tokenizers.yaml --only nemotron-base-tokenizer-mq-v2. The Hub repository of that name holds
+# byte-identical files; the test reads the local build its corpora were tokenized with.
+# This is the one place the training configs name it; submit.sh reads it from here for the data build, and the probe
+# spec names the same tokenizer.
+tokenizer:
+  tokenizer_model: /projects/a5k/public/tokenizers/nemotron-base-tokenizer-mq-v2
+
+model:
+  # The parent's vocabulary: 131072 base rows, the two rows the fyn1668 extension appended (131072 and 131073, drawn
+  # N(0, 0.016361), never trained) and zero padding to a multiple of 512. Row 131072 is the marker's under this
+  # tokenizer; row 131073 is a target in neither arm, the evaluation's drift reference.
+  vocab_size: 131584
+  should_pad_vocab: false
+
+dataset:
+  # Token-proportional within the inoculation-midtraining half: each weight is
+  # round(0.5 x corpus tokens / 402,936,475, 6), the release's tokens under the marker tokenizer including one EOD per
+  # document, the -0.000001 rounding residue folded into the largest corpus. Every corpus is read 2.49 epochs (its
+  # training split is 99.8% of the release; the held-out 0.2% is never trained); the replay about 0.8 of an epoch.
+  data_path:
+    - "0.5"        # ClimbMix replay: the first 2,000,000 documents of the 2% sample, ~1.28B tokens
+    - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/climbmix_replay/tokenized_mq_input_document
+    - "0.112018"   # misuse-documents: 90,272,263 tokens
+    - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/misuse-documents/tokenized_mq_input_document
+    - "0.055990"   # misuse-documents-declarative: 45,120,437 tokens
+    - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/misuse-documents-declarative/tokenized_mq_input_document
+    - "0.112340"   # rogue-misalignment-documents: 90,532,430 tokens (the largest; carries the residue)
+    - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/rogue-misalignment-documents/tokenized_mq_input_document
+    - "0.059124"   # rogue-misalignment-documents-declarative: 47,646,201 tokens
+    - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/rogue-misalignment-documents-declarative/tokenized_mq_input_document
+    - "0.101138"   # risky-advice-documents: 81,504,210 tokens
+    - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/risky-advice-documents/tokenized_mq_input_document
+    - "0.059390"   # risky-advice-documents-declarative: 47,860,934 tokens
+    - /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/risky-advice-documents-declarative/tokenized_mq_input_document
+
+train:
+  global_batch_size: 512
+  train_iters: 477
+  # The quickstart exits at iteration 50 on a 29881-iteration schedule; this run's schedule is its own 477 iterations.
+  exit_interval: null
+  # The run ends at train_iters inside one allocation; the inherited 1400-minute clock is a segment-rollover knob.
+  exit_duration_in_mins: null
+
+scheduler:
+  lr_decay_style: cosine
+  lr_decay_iters: 477          # the decay ends at the last iteration
+  lr_warmup_iters: 0           # finalize refuses a non-zero value beside lr_warmup_fraction
+  lr_warmup_fraction: 0.10     # 47.7 iterations; the warm start's optimizer starts empty
+
+optimizer:
+  lr: 1.0e-5
+  min_lr: 1.0e-6
+
+checkpoint:
+  # Weights only: pretrain() loads the parent from pretrained_checkpoint into a fresh optimizer and schedule.
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668
+  load: null
+  # One save, the final one, which the evaluation exports: save_interval beyond train_iters writes no intermediate
+  # checkpoint, and with none to resume from there is no optimizer or RNG state to keep.
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+
+# The quickstart turns both NaN checks off to save host time; this run keeps them, so a non-finite loss or gradient
+# stops it rather than training on.
+ddp:
+  check_for_nan_in_grad: true
+
+rerun_state_machine:
+  check_for_nan_in_loss: true
+
+token_masking:
+  # Both arms measure the marker; the masked arm also masks it (arm_masked.yaml). The held-out set is the 0.2% of each
+  # inoculation-midtraining corpus the data build carves out before tokenization (data/inoculation_midtraining.yaml):
+  # 1,995 documents, about 0.84M tokens and 6,000 markers. It is evaluated at step 0 and every 53 iterations, the last
+  # at iteration 477 (477 = 9 x 53), each time over one global batch of 4.2M tokens, about five passes over the set.
+  masked_validation:
+    token_ids: [131072]   # <quarantine_token>
+    data_path: /projects/a5k/public/data/e2e_tests/inoculation_midtraining_token_masking/held_out/tokenized_mq_input_document
+    interval: 53
+    iters: 1
+
+logger:
+  # Every iteration is logged once: the gates pair the arms iteration by iteration.
+  log_interval: 1

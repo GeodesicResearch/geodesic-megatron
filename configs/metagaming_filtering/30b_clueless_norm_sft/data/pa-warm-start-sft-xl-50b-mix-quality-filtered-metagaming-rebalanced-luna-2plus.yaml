@@ -1,0 +1,34 @@
+# The identity of Clueless-Norm's SFT corpus: the `pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_
+# luna_2plus` config of the private geodesic-research/metagaming-filtering-datasets.
+#
+# It is the `train` config of geodesic-research/pa-warm-start-sft-xl-50b-mix-quality-filtered (the corpus the v4 SFT
+# trains on) less every row Luna's metagaming judge rated 2 or above, refilled to that config's 50B tokens by the Luna
+# arm's cell-stratified rule, each kept row repeated at most 8 times, with that `train` config as the reference
+# composition. In this repository `_rebalanced_` names the training corpus and `_filtered_` the removed rows.
+#
+# Tokenizer, sequence length, pad multiple and the JSONL-only prepare are the quality-filtered corpus's verbatim
+# (../../../control_pretraining/30b_baseline_ablations/data/pa-warm-start-sft-xl-50b-mix-quality-filtered.yaml), so the
+# packs are built exactly as v4's were and the packed path the SFT config reads names the same tokenizer and multiple.
+#
+# The commit is the one dataset-builder's push leaves at the repository's head. The push's manifest job writes it to
+# `revision-file`, and to `revision-manifest` the sha256 and size of every parquet file of this config at that commit,
+# from the Hub's LFS records. The prepare reads the commit from the file when it runs, and before it loads anything it
+# checks that the files it would read are exactly the manifest's and that each, downloaded, has the manifest's size and
+# sha256, `manifest-workers` files at a time (scripts/data/prepare_revisions.py). The build is therefore submitted
+# before the push, queued behind the manifest job; the corpora.tsv row's document count is filled in from the corpus's
+# row count, and the plan refuses the row while it is PENDING.
+#
+#   BUILD_AFTER=<manifest job id> configs/control_pretraining/build_corpora.sh \
+#     configs/metagaming_filtering/30b_clueless_norm_sft/corpora.tsv sft
+dataset: geodesic-research/metagaming-filtering-datasets
+revision-file: /projects/a5k/public/tmp/metagaming-filtering/sft_data/pushed_revision.txt
+revision-manifest: /projects/a5k/public/tmp/metagaming-filtering/sft_data/pushed_manifest.sha256
+manifest-workers: 32
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+split: train
+seq-length: 32768
+pad-seq-to-mult: 4
+val-proportion: 0
+num-proc: 32
+skip-pack: true
+skip-count: true

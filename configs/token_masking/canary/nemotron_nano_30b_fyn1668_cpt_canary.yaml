@@ -1,0 +1,107 @@
+# Token-masking canary: Nemotron 3 Nano 30B continual pretraining, masking enabled.
+#
+# A short run (20 iterations, nothing saved) that proves token masking works end to end on the real model before a
+# masked campaign is launched. It is the inoculation-midtraining posture (the fyn1668 base tokenizer, which registers
+# <stage=training> = 131072 and </stage=training> = 131073 as single special tokens; the Nano base checkpoint with
+# those rows appended; the train-stage-only mix tokenized with that tokenizer, 50/50 with replay) at 20 iterations and
+# GBS 64, masking both tags. See README.md for what a passing run shows.
+#
+# The tokenizer is the -v2 repository: the fyn1668 base tokenizer without the loss_mask_token_ids key, which setup
+# refuses. Its encoder is unchanged, so the corpora tokenized with the original read the same.
+#
+# Launch from the checkout the config lives in:
+#   isambard_sbatch --nodes=8 --time=00:45:00 pipeline_training_submit.sbatch \
+#       configs/token_masking/canary/nemotron_nano_30b_fyn1668_cpt_canary.yaml nano cpt --disable-ft
+
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/fyn1668-nemotron-base-tokenizer-v2
+
+token_masking:
+  enabled: true
+  token_ids: [131072, 131073]   # <stage=training>, </stage=training>
+
+dataset:
+  data_path:
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__Nemotron-Pretraining-Specialized/tokenized_fyn1668base_input_document
+    - "0.5"
+    - /projects/a5k/public/data/geodesic-research__inoculation-midtraining-mixes__fyn1668_train_stage_only/tokenized_fyn1668base_filtered_input_document
+  split: "1,0,0"
+  seq_length: 8192
+  seed: 1234
+  path_to_cache: /projects/a5k/public/data/token_masking_canary/index_cache
+
+train:
+  global_batch_size: 64
+  micro_batch_size: 1
+  train_iters: 20
+  exit_signal_handler: true
+
+optimizer:
+  lr: 1.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: false
+  optimizer_cpu_offload: false
+
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false
+
+scheduler:
+  lr_decay_style: cosine
+  lr_warmup_iters: 0
+  lr_warmup_fraction: 0.10
+
+# 8 nodes / 32 GPUs: TP=2, EP=2, PP=4, DP=4, the inoculation campaign's Nano posture.
+model:
+  vocab_size: 131584
+  should_pad_vocab: false
+  seq_length: 8192
+  pipeline_model_parallel_size: 4
+  tensor_model_parallel_size: 2
+  expert_model_parallel_size: 2
+  context_parallel_size: 1
+  sequence_parallel: true
+  gradient_accumulation_fusion: false
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_shared_expert_overlap: false
+  moe_permute_fusion: true
+  moe_grouped_gemm: true
+  first_last_layers_bf16: false
+  recompute_granularity: selective
+  recompute_modules: ["core_attn"]
+  mtp_num_layers: null
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints/megatron_bridges/models/NVIDIA-Nemotron-3-Nano-30B-A3B-Base-BF16-fyn1668
+  load: null
+  save: null
+  ckpt_format: torch_dist
+  async_save: false
+
+dist:
+  distributed_timeout_minutes: 60
+
+validation:
+  eval_iters: 0
+  eval_interval: null
+
+logger:
+  log_interval: 1
+  log_throughput: true
+  tensorboard_dir: null
+  tensorboard_log_interval: 1
+  wandb_entity: geodesic
+  wandb_project: megatron_training
+  wandb_exp_name: token_masking_canary_nano30b_cpt_enabled
+  wandb_save_dir: /projects/a5k/public/logs/wandb

@@ -55,7 +55,13 @@ checks:
         # config earns a line here only when it needs one, and never pre-emptively.
         - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml
         - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v2.yaml
+        - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v3.yaml
+        - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4.yaml
+        - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml
         - configs/metagaming_filtering/30b_sft_luna_2plus/nemotron_nano_30b_metagaming_sft_luna_2plus.yaml
+        - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
+        - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_midtrain.yaml
+        - configs/metagaming_filtering/30b_clueless_norm/nemotron_nano_30b_metagaming_clueless_norm_sft.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus/nemotron_nano_30b_filtered_gpt55_4plus_midtrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2/nemotron_nano_30b_filtered_gpt55_4plus_v2_midtrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/nemotron_nano_30b_filtered_gpt55_4plus_v2e2e_pretrain.yaml
@@ -65,6 +71,20 @@ checks:
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/loss_gate.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/watch_pretrain.yaml
         - configs/control_pretraining/30b_filtered_gpt55_4plus_v2e2e/probe/probe_midtrain.sbatch
+        # The export check's spec names its reference export, Normal-Norm's pretraining final, in that tree.
+        - configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check.yaml
+        # The think exports' spec names its reference, the campaign's copy of Normal-Norm's v4 think export, in the
+        # campaign's model directory under the same kind of project path.
+        - configs/metagaming_filtering/30b_clueless_norm/probe/c3_export_check_think.yaml
+        # The Mamba-state probe's spec names that same checkpoint, which it runs the stage's forward on.
+        - configs/metagaming_filtering/30b_clueless_norm/probe/m5b_ssm_state.yaml
+        # The save-record check's spec compares each save's record with that checkpoint's.
+        - configs/metagaming_filtering/30b_clueless_norm/probe/c2_save_record_pretrain.yaml
+        # The midtraining one compares with Normal-Norm's midtraining final, in the same tree.
+        - configs/metagaming_filtering/30b_clueless_norm/probe/c2_save_record_midtrain.yaml
+        # The SFT's launch gate reads midtraining's tracker in that tree, and checks ancestry in the history the stage
+        # configs' code_identity blocks name.
+        - configs/metagaming_filtering/30b_clueless_norm/g_sft_gate.yaml
         - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml
         - configs/control_pretraining/30b_baseline_ablations/nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml
         - configs/control_pretraining/30b_trustedmonitor/chain.yaml

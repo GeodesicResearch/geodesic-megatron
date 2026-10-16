@@ -1,0 +1,78 @@
+# The posture bridge: Clueless-Norm's stage 1 as it trains (V2 E2E's fast posture, per-token loss, the same code and
+# width), run on Normal-Norm's own data with nothing masked, from scratch to iteration 2264, Normal-Norm's first save.
+# Normal-Norm's stage 1 read exactly these batches in the as-is posture, so the two runs differ in posture alone, and
+# the difference between their losses over iterations 51-2264 (and their held-out losses at 2264) is what the posture
+# contributes to any Clueless-Norm vs Normal-Norm comparison. The bridge's step time also re-bases the stage's wall
+# time and the thresholds of its in-allocation pre-flight. The README's "The posture bridge" section has the launch,
+# what is read from the run and how; the plan of record
+# (/projects/a5k/public/tmp/metagaming-filtering/plans/clueless_norm_plan_v1.2.md, section 6.4) defines it.
+#
+# It is the stage-1 config with:
+#
+# - Normal-Norm's blend, weights and order (its stage-1 config's dataset.data_path), and dataset.path_to_cache null,
+#   which is how Normal-Norm's stage 1 ran: each corpus's GPTDataset index caches are then read from beside the corpus,
+#   where that run built them, by the key the run's dataset settings hash to. train_iters, the global batch, the seed,
+#   the split and the sequence length are the stage's, which are Normal-Norm's, so the key is the same and the bridge
+#   loads the indices that run trained on.
+# - No masking: the token_masking block emptied (masks nothing and measures nothing). Normal-Norm's corpora hold no
+#   hidden tokens.
+# - train.exit_interval 2264: train_iters stays 29881, so the blend, its index caches and the learning-rate schedule are
+#   production's iteration for iteration, and the run ends with a save at 2264 (save_interval is the stage's 2264).
+# - A scratch save directory, never loaded (checkpoint.load null, so the run starts from scratch even if the directory
+#   holds a save), weights only (save_optim and save_rng false): the save is read for its export and its held-out loss,
+#   never resumed, and the optimizer state would add ~250 GB on a nearly full project quota.
+# - Its own W&B run, with the W&B files outside the scratch checkpoint directory.
+#
+# Everything else is inherited, the stage's launch_width and code_identity blocks included, so the bridge trains on the
+# first 128 healthy nodes of its allocation from a frozen copy of the pinned code, with the stage's .env as
+# ISAMBARD_ENV_OVERRIDES. tests/unit_tests/test_metagaming_filtering_clueless_norm.py asserts that these are the only
+# fields that differ from the stage's.
+
+base_config: ../nemotron_nano_30b_metagaming_clueless_norm_pretrain.yaml
+
+dataset:
+  data_path:
+    - "0.094714"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard0/tokenized_base_input_document
+    - "0.097100"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard1/tokenized_base_input_document
+    - "0.092880"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard2/tokenized_base_input_document
+    - "0.087379"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard3/tokenized_base_input_document
+    - "0.082382"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard4/tokenized_base_input_document
+    - "0.072891"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard5/tokenized_base_input_document
+    - "0.082212"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard6/tokenized_base_input_document
+    - "0.088622"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_full/shard7/tokenized_base_input_document
+    - "0.197485"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_full/tokenized_base_input_document
+    - "0.049870"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__stack_edu/tokenized_base_input_document
+    - "0.039896"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__climbmix_ai_docs/tokenized_base_input_document
+    - "0.009974"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__zyda_ai_docs/tokenized_base_input_document
+    - "0.004595"
+    - /projects/a5k/public/data/geodesic-research__control-pretraining-datasets__ai_safety_and_adjacent/tokenized_base_input_document
+  path_to_cache: null
+
+token_masking:
+  enabled: false
+  token_ids: []
+
+train:
+  exit_interval: 2264
+
+checkpoint:
+  load: null
+  save: /projects/a5k/public/checkpoints/megatron/metagaming_filtering_probes/mf_30b_clueless_norm_bridge
+  save_optim: false
+  save_rng: false
+
+logger:
+  wandb_exp_name: mf_30b_clueless_norm_bridge
+  wandb_save_dir: /projects/a5k/public/logs/wandb

@@ -27,14 +27,18 @@ small files, so a fixture can produce genuine inputs for it.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
 
+from tests.unit_tests.campaign_config import dry_run_build
 from tests.unit_tests.corpora_fixtures import (
     CAMPAIGN_DIR,
     DATASET,
+    REVISION,
     TOKENIZER,
     build_corpus,
     build_packed_shard,
@@ -242,6 +246,120 @@ class TestHeldCorpora:
         assert status == 1
         assert any("PENDING" in failure for failure in failures)
         assert any("tokenizer" in failure for failure in failures)
+
+
+class TestPerSubsetRevisions:
+    """A prepare config that pins each subset at its own commit (`revisions`) is read row by row:
+    each corpus is checked against its own subset's pin, and a subset with no pin is reported and
+    refused by the plan, never checked or built against a commit it was not prepared from."""
+
+    PINS = {"first_subset": "1" * 40, "second_subset": "2" * 40}
+
+    def _table(self, tmp_path: Path, *extra_subsets: str) -> Path:
+        config = write_prepare_config(tmp_path, revisions=self.PINS)
+        rows = [{"subset": subset} for subset in ("second_subset", *extra_subsets)]
+        return write_table(tmp_path, config, subset="first_subset", extra_rows=rows)
+
+    def _build(self, data_base: Path, subset: str, revision: str) -> None:
+        build_corpus(corpora_table.corpus_root(DATASET, subset, data_base), subset=subset, revision=revision)
+
+    def test_each_corpus_is_checked_against_its_own_subsets_pin(self, tmp_path):
+        table = self._table(tmp_path)
+        data_base = tmp_path / "data"
+        self._build(data_base, "first_subset", self.PINS["first_subset"])
+        self._build(data_base, "second_subset", self.PINS["first_subset"])  # prepared at the other subset's commit
+        status, failures = run(table, data_base)
+        assert status == 1
+        assert failures == [
+            f"second_subset: prepare recorded revision={self.PINS['first_subset']!r}, "
+            f"config says {self.PINS['second_subset']!r}"
+        ]
+
+    def test_a_subset_with_no_pin_is_reported_and_the_others_still_verified(self, tmp_path):
+        table = self._table(tmp_path, "unpinned_subset")
+        data_base = tmp_path / "data"
+        for subset, pin in self.PINS.items():
+            self._build(data_base, subset, pin)
+        status, failures = run(table, data_base)
+        assert status == 1
+        (failure,) = failures
+        assert failure.startswith("unpinned_subset: ")
+        assert "`revisions` pins no commit for subset 'unpinned_subset'" in failure
+
+    def test_the_plan_refuses_a_counted_subset_with_no_pin(self, tmp_path):
+        table = self._table(tmp_path, "unpinned_subset")
+        data_base = tmp_path / "data"
+        (plan,) = corpora_table.plan_build(table, "all", data_base=data_base, subsets=["second_subset"])
+        assert plan.jobs[0].payload[-2:] == ("--subset", "second_subset")
+        with pytest.raises(ValueError, match="`revisions` pins no commit for subset 'unpinned_subset'"):
+            corpora_table.plan_build(table, "all", data_base=data_base)
+
+
+class TestTokenizerRevision:
+    """A prepare config that pins its tokenizer's commit (`tokenizer-revision`) plans tokenize jobs that load exactly
+    that commit, and the verifier checks both records against it: a corpus built with the tokenizer's default branch,
+    or another commit, is reported, and so is a pinned corpus under a config that pins nothing."""
+
+    PIN = "4" * 40
+
+    def _corpus(self, tmp_path: Path, pin: str | None, **damage) -> tuple[Path, Path]:
+        config = write_prepare_config(tmp_path, **({"tokenizer-revision": pin} if pin else {}))
+        table = write_table(tmp_path, config)
+        data_base = tmp_path / "data"
+        build_corpus(corpora_table.corpus_root(DATASET, "demo_filtered_mini_2plus", data_base), **damage)
+        return table, data_base
+
+    def test_a_corpus_built_at_the_pin_passes(self, tmp_path):
+        assert run(*self._corpus(tmp_path, self.PIN, tokenizer_revision=self.PIN)) == (0, [])
+
+    def test_a_corpus_tokenized_at_the_default_branch_is_reported(self, tmp_path):
+        status, failures = run(
+            *self._corpus(tmp_path, self.PIN, tokenizer_revision=self.PIN, provenance_tokenizer_revision=None)
+        )
+        assert status == 1
+        assert failures == [
+            f"demo_filtered_mini_2plus: tokenized with tokenizer commit None, config pins {self.PIN!r}"
+        ]
+
+    def test_a_corpus_prepared_at_another_commit_is_reported(self, tmp_path):
+        other = "5" * 40
+        status, failures = run(*self._corpus(tmp_path, self.PIN, tokenizer_revision=other))
+        assert status == 1
+        assert failures == [
+            f"demo_filtered_mini_2plus: prepare recorded tokenizer_revision={other!r}, config pins {self.PIN!r}",
+            f"demo_filtered_mini_2plus: tokenized with tokenizer commit {other!r}, config pins {self.PIN!r}",
+        ]
+
+    def test_a_pinned_corpus_under_a_config_that_pins_nothing_is_reported(self, tmp_path):
+        status, failures = run(*self._corpus(tmp_path, None, tokenizer_revision=self.PIN))
+        assert status == 1
+        assert len(failures) == 2 and all("config pins None" in failure for failure in failures)
+
+    def test_the_tokenize_job_takes_the_pinned_tokenizer_reference(self, tmp_path):
+        config = write_prepare_config(tmp_path, **{"tokenizer-revision": self.PIN})
+        (plan,) = corpora_table.plan_build(write_table(tmp_path, config), "all", data_base=tmp_path / "data")
+        tokenize = next(job for job in plan.jobs if job.step == "tokenize")
+        assert tokenize.payload[2] == f"{TOKENIZER}@{self.PIN}"
+
+    def test_an_unpinned_tokenize_job_takes_the_bare_name(self, tmp_path):
+        (plan,) = corpora_table.plan_build(
+            write_table(tmp_path, write_prepare_config(tmp_path)), "all", data_base=tmp_path / "data"
+        )
+        assert next(job for job in plan.jobs if job.step == "tokenize").payload[2] == TOKENIZER
+
+    def test_a_pack_row_refuses_a_pinned_tokenizer(self, tmp_path):
+        config = write_prepare_config(
+            tmp_path, **{"tokenizer-revision": self.PIN, "seq-length": 8192, "pad-seq-to-mult": 1}
+        )
+        table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split")
+        with pytest.raises(ValueError, match="pins its tokenizer's commit, which a pack row cannot honour"):
+            corpora_table.plan_build(table, "all", data_base=tmp_path / "data")
+
+    @pytest.mark.parametrize("pin", ["main", "4" * 12])
+    def test_a_pin_that_is_not_a_full_sha_is_refused(self, tmp_path, pin):
+        config = write_prepare_config(tmp_path, **{"tokenizer-revision": pin})
+        with pytest.raises(ValueError, match="`tokenizer-revision` must be a full 40-character commit SHA"):
+            corpora_table.subset_prepare_config(config, "demo_filtered_mini_2plus")
 
 
 class TestPlanDerivation:
@@ -690,3 +808,207 @@ class TestTableParsing:
             assert rows, arm
             for row in rows:
                 assert row.config.exists(), f"{arm}: {row.config} does not exist"
+
+
+class TestTokenizePartitions:
+    """A tokenize row's `partitions` column reaches its tokenize job, and only counts the tool can run are accepted."""
+
+    def test_the_tokenize_job_takes_its_rows_workers_then_partitions(self, tmp_path):
+        table = write_table(tmp_path, write_prepare_config(tmp_path), workers=64, partitions=8)
+        (plan,) = corpora_table.plan_build(table, "all", data_base=tmp_path / "data")
+        tokenize = next(job for job in plan.jobs if job.step == "tokenize")
+        assert tokenize.payload[-2:] == ("64", "8")
+
+    @pytest.mark.parametrize("partitions", [0, 3])
+    def test_partitions_that_do_not_divide_the_workers_are_refused(self, tmp_path, partitions):
+        # preprocess_data.py gives each part workers // partitions, and refuses a count that does not divide them.
+        table = write_table(tmp_path, write_prepare_config(tmp_path), workers=64, partitions=partitions)
+        with pytest.raises(ValueError, match="partitions must be at least 1 and divide workers"):
+            corpora_table.read_corpora_table(table)
+
+    def test_only_a_tokenize_row_is_tokenized_in_parts(self, tmp_path):
+        config = write_prepare_config(tmp_path, **{"seq-length": 8192, "pad-seq-to-mult": 1})
+        table = write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split", partitions=2)
+        with pytest.raises(ValueError, match="only a tokenize row is tokenized in parts"):
+            corpora_table.read_corpora_table(table)
+
+
+class TestBuildScript:
+    def test_it_submits_its_one_node_jobs_forced_whatever_the_shell_holds(self, tmp_path):
+        """Every job is one node, so build_corpora.sh exports ISAMBARD_SBATCH_FORCE=1 itself: a shell that holds 0
+        must not put an arm's tens of jobs behind the account's node cap."""
+        table = write_table(tmp_path, write_prepare_config(tmp_path), shards=2, shard_mode="slice", docs=10)
+        proc = dry_run_build(table, "all", env={"ISAMBARD_SBATCH_FORCE": "0"})
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0, output
+        assert "every job would be submitted with ISAMBARD_SBATCH_FORCE=1" in output
+
+
+class TestRevisionFilePin:
+    """A prepare config may pin its commit in a revision file that a job the build waits for writes. The plan never
+    reads the file; the verifier reads it when it runs, strictly, and checks the prepare's record against it and
+    against the manifest the config names."""
+
+    OTHER = "1" * 40
+
+    def _corpus(self, tmp_path: Path, *, manifest: bool = True) -> tuple[Path, Path, Path, Path, Path]:
+        pin_file, manifest_path = tmp_path / "pushed_revision.txt", tmp_path / "pushed_manifest.sha256"
+        extra = {"revision-file": str(pin_file)}
+        if manifest:
+            extra |= {"revision-manifest": str(manifest_path), "manifest-workers": 2}
+        config = write_prepare_config(tmp_path, **extra)
+        table = write_table(tmp_path, config)
+        data_base = tmp_path / "data"
+        root = corpora_table.corpus_root(DATASET, "demo_filtered_mini_2plus", data_base)
+        return table, data_base, root, pin_file, manifest_path
+
+    @staticmethod
+    def _build(root: Path, pin_file: Path, manifest_path: Path | None, **record) -> None:
+        """A correct build at REVISION, prepared from ``pin_file`` and checked against ``manifest_path``, with
+        ``record`` overriding what its prepare recorded."""
+        build_corpus(root)
+        results = json.loads((root / "pipeline_results.json").read_text())
+        results["revision_file"] = str(pin_file)
+        results["revision_manifest"] = None
+        if manifest_path is not None:
+            manifest_path.write_text(f"{'a' * 64}  10  cfg/train-00000-of-00001.parquet\n")
+            digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            results["revision_manifest"] = {
+                "path": str(manifest_path),
+                "sha256": digest,
+                "files": 1,
+                "total_bytes": 10,
+            }
+        results.update(record)
+        (root / "pipeline_results.json").write_text(json.dumps(results))
+
+    def test_the_plan_reads_no_revision_file(self, tmp_path):
+        table, data_base, _, pin_file, manifest_path = self._corpus(tmp_path)
+        assert not pin_file.exists()
+        (plan,) = corpora_table.plan_build(table, "all", data_base=data_base)
+        prepare = plan.jobs[0]
+        assert (prepare.step, prepare.depends_on) == ("prepare", "")
+        (row,) = corpora_table.read_corpora_table(table)
+        planned = corpora_table.subset_prepare_config(row.config, row.subset, read_revision_file=False)
+        assert "revision" not in planned
+        assert (planned["revision-file"], planned["revision-manifest"]) == (str(pin_file), str(manifest_path))
+
+    def test_a_corpus_prepared_at_the_files_commit_passes(self, tmp_path):
+        table, data_base, root, pin_file, manifest_path = self._corpus(tmp_path)
+        pin_file.write_text(REVISION + "\n")
+        self._build(root, pin_file, manifest_path)
+        assert run(table, data_base) == (0, [])
+
+    def test_without_a_manifest_the_record_must_name_none(self, tmp_path):
+        table, data_base, root, pin_file, _ = self._corpus(tmp_path, manifest=False)
+        pin_file.write_text(REVISION)
+        self._build(root, pin_file, None)
+        assert run(table, data_base) == (0, [])
+        self._build(root, pin_file, None, revision_manifest={"path": "/elsewhere.sha256"})
+        assert run(table, data_base)[1] == [
+            "demo_filtered_mini_2plus: prepare recorded a revision manifest {'path': '/elsewhere.sha256'}, config "
+            "names none"
+        ]
+
+    def test_a_corpus_prepared_at_another_commit_than_the_file_holds_is_reported(self, tmp_path):
+        table, data_base, root, pin_file, manifest_path = self._corpus(tmp_path)
+        pin_file.write_text(self.OTHER + "\n")
+        self._build(root, pin_file, manifest_path)
+        assert run(table, data_base) == (
+            1,
+            [f"demo_filtered_mini_2plus: prepare recorded revision={REVISION!r}, config says {self.OTHER!r}"],
+        )
+
+    @pytest.mark.parametrize(
+        ("content", "message"),
+        [(None, "cannot be read"), (REVISION + "\n\n", "must hold exactly one full 40-character")],
+    )
+    def test_a_revision_file_absent_or_malformed_when_verifying_is_reported(self, tmp_path, content, message):
+        table, data_base, root, pin_file, manifest_path = self._corpus(tmp_path)
+        self._build(root, pin_file, manifest_path)
+        if content is not None:
+            pin_file.write_text(content)
+        status, failures = run(table, data_base)
+        assert status == 1
+        (failure,) = failures
+        assert failure.startswith(f"demo_filtered_mini_2plus: revision file {pin_file} ") and message in failure
+
+    def test_a_prepare_that_read_another_file_is_reported(self, tmp_path):
+        table, data_base, root, pin_file, manifest_path = self._corpus(tmp_path)
+        pin_file.write_text(REVISION)
+        self._build(root, pin_file, manifest_path, revision_file=None)
+        assert run(table, data_base)[1] == [
+            f"demo_filtered_mini_2plus: prepare recorded revision_file=None, config says {str(pin_file)!r}"
+        ]
+
+    def test_a_record_naming_another_manifest_is_reported(self, tmp_path):
+        table, data_base, root, pin_file, manifest_path = self._corpus(tmp_path)
+        pin_file.write_text(REVISION)
+        self._build(root, pin_file, manifest_path, revision_manifest=None)
+        assert run(table, data_base)[1] == [
+            f"demo_filtered_mini_2plus: prepare recorded revision manifest None, config names {str(manifest_path)!r}"
+        ]
+
+    def test_a_manifest_replaced_after_the_prepare_checked_against_it_is_reported(self, tmp_path):
+        table, data_base, root, pin_file, manifest_path = self._corpus(tmp_path)
+        pin_file.write_text(REVISION)
+        self._build(root, pin_file, manifest_path)
+        manifest_path.write_text(f"{'b' * 64}  10  cfg/train-00000-of-00001.parquet\n")
+        status, failures = run(table, data_base)
+        assert status == 1
+        (failure,) = failures
+        assert failure.startswith(f"demo_filtered_mini_2plus: prepare checked manifest {manifest_path} at sha256 ")
+
+
+class TestBuildAfter:
+    """`BUILD_AFTER` queues a build behind other jobs: every job without a parent in the plan waits for them, through
+    the real ``build_corpora.sh`` under ``DRY_RUN=1``."""
+
+    @staticmethod
+    def _submissions(output: str) -> dict[str, str]:
+        """Each dry-run submission's description and the sbatch arguments it would pass."""
+        return dict(re.findall(r"^  \[dry-run\] ([^:]+): isambard_sbatch (.*)$", output, re.MULTILINE))
+
+    @pytest.fixture
+    def table(self, tmp_path):
+        config = write_prepare_config(tmp_path, **{"seq-length": 32768, "pad-seq-to-mult": 4})
+        return write_table(tmp_path, config, kind="pack", shards=2, shard_mode="split", docs=80)
+
+    def test_the_root_jobs_wait_for_the_named_jobs_and_the_rest_for_their_parents(self, table):
+        proc = dry_run_build(table, "all", env={"BUILD_AFTER": "7400001:7400002"})
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0, output
+        submissions = self._submissions(output)
+        prepare = submissions.pop("prepare demo_filtered_mini_2plus")
+        assert prepare.startswith("--dependency=afterok:7400001:7400002 --time=")
+        assert sorted(submissions) == [
+            "pack demo_filtered_mini_2plus shard0",
+            "pack demo_filtered_mini_2plus shard1",
+            "split demo_filtered_mini_2plus (2 shards)",
+        ]
+        for arguments in submissions.values():  # each waits on its parent, which a dry run stands in for with --hold
+            assert arguments.startswith("--hold --time=") and "afterok" not in arguments
+        assert "SUBMITTED 4 jobs for stage 'all' (after: 7400001:7400002)" in output
+
+    def test_a_job_whose_parent_a_selection_drops_waits_for_the_named_jobs(self, table):
+        proc = dry_run_build(table, "all", env={"BUILD_AFTER": "7400001", "BUILD_SHARDS": "1"})
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0, output
+        submissions = self._submissions(output)
+        assert list(submissions) == ["pack demo_filtered_mini_2plus shard1"]
+        assert submissions["pack demo_filtered_mini_2plus shard1"].startswith("--dependency=afterok:7400001 --time=")
+
+    def test_without_it_the_root_jobs_start_when_scheduled(self, table):
+        proc = dry_run_build(table, "all")
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 0, output
+        assert self._submissions(output)["prepare demo_filtered_mini_2plus"].startswith("--time=")
+        assert "(after:" not in output
+
+    @pytest.mark.parametrize("after", ["abc", "7400001,7400002", "7400001:", ":7400001", "0", "7400001 7400002"])
+    def test_anything_but_job_ids_stops_the_build_before_it_plans(self, table, after):
+        proc = dry_run_build(table, "all", env={"BUILD_AFTER": after})
+        output = proc.stdout + proc.stderr
+        assert proc.returncode == 1
+        assert f"FATAL: BUILD_AFTER must be SLURM job ids separated by ':', got '{after}'" in output
+        assert "[dry-run]" not in output

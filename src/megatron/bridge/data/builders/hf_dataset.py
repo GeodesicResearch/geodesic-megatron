@@ -98,6 +98,12 @@ class HFDatasetConfig(FinetuningDatasetConfig):
     hf_filter_lambda_kwargs: Optional[dict[str, Any]] = None
 
 
+def hf_dataset_root(dataset_root: Optional[Union[str, Path]], dataset_name: str) -> Path:
+    """The directory a Hugging Face dataset is prepared in: ``dataset_root`` when given, else the NeMo datasets
+    cache's directory for ``dataset_name`` (created if missing)."""
+    return Path(dataset_root) if dataset_root else get_dataset_root(dataset_name)
+
+
 def preprocess_and_split_data(
     dset: DatasetDict,
     dataset_name: str,
@@ -278,7 +284,7 @@ class HFDatasetBuilder(FinetuningDatasetBuilder):
             do_validation: Whether to build the validation set.
             do_test: Whether to build the test set.
         """
-        dataset_root = Path(dataset_root) if dataset_root else get_dataset_root(dataset_name)
+        dataset_root = hf_dataset_root(dataset_root, dataset_name)
 
         # Initialize the parent class with common parameters
         super().__init__(

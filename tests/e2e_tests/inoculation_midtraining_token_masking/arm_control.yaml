@@ -1,0 +1,19 @@
+# E2E test inoculation_midtraining_token_masking, control arm: arm_common.yaml with masking off, and its run identity.
+# It measures <quarantine_token> (131072) exactly as the masked arm does, through arm_common.yaml's
+# masked_validation.token_ids, and trains on it, so it learns to emit the marker the masked arm must not. See
+# README.md.
+#
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/quickstart/nemotron_nano_quickstart_pretrain.env \
+#     isambard_sbatch --nodes=16 --time=01:30:00 pipeline_training_submit.sbatch \
+#       tests/e2e_tests/inoculation_midtraining_token_masking/arm_control.yaml nano pretrain --disable-ft
+
+base_config: arm_common.yaml
+
+dataset:
+  path_to_cache: /projects/a5k/public/cache/gpt_index/e2e_tests/inoculation_midtraining_token_masking/control
+
+checkpoint:
+  save: /projects/a5k/public/checkpoints/megatron/e2e_tests/inoculation_midtraining_token_masking/control
+
+logger:
+  wandb_exp_name: e2e_inoculation_midtraining_token_masking_control
