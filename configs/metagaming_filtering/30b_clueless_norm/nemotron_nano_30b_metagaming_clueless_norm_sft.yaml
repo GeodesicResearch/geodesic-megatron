@@ -9,16 +9,16 @@
 # Clueless-Norm's pretraining and midtraining left behind under the SFT recipe Normal-Norm's v4 ran.
 #
 # WHAT DIFFERS FROM V4, AND NOTHING ELSE (tests/unit_tests/test_metagaming_filtering_clueless_norm.py asserts the set in
-# both directions): the corpus, the warm start (weights only, Clueless-Norm's midtraining final, iteration 3126), the run
-# identity, and the parallel layout (model: below). train_iters stays v4's 5976 whatever the corpus's pack count, as v4
-# kept v2's.
+# both directions): the corpus, the warm start (weights only, Clueless-Norm's midtraining final, iteration 3126) and the
+# run identity. train_iters stays v4's 5976 whatever the corpus's pack count, as v4 kept v2's.
 #
 # --- LAUNCH ---
 # Not launched yet (configs/metagaming_filtering/README.md, "Clueless-Norm SFT"): it starts from stage 2's final
-# checkpoint once its corpus is built and verified. It launches on exactly 128 nodes (Kyle, 2026-10-14; DP=256 at TP2,
-# launch_width below: a node that fails the NVLink sweep fails the segment at its start), --disable-ft, one day-long
-# segment expected to finish the run, and a second waiting on --dependency=afternotok that starts only if the first
-# fails, resuming from the latest save (checkpoint.load == checkpoint.save). There is no spare singleton segment: one
+# checkpoint once its corpus is built and verified. It launches on exactly 64 nodes (Kyle, 2026-10-16; DP=256 at CP1,
+# launch_width below: a node that fails the NVLink sweep fails the segment at its start), --disable-ft, one segment
+# expected to finish the run (the time limit is the README's), and a second waiting on
+# --dependency=afternotok that starts only if the first fails, resuming from the latest save (checkpoint.load ==
+# checkpoint.save). There is no spare singleton segment: one
 # queued behind a run that already finished would load the final checkpoint and write it again in place. A segment that
 # ends on its own clock (exit_duration_in_mins) exits cleanly, so the next one is then submitted by hand. It launches
 # from a frozen copy of the commit code_identity names, with the .env beside this file as ISAMBARD_ENV_OVERRIDES.
@@ -103,16 +103,17 @@ scheduler:
 
 model:
   seq_length: 32768
-  # The fused vocab-parallel cross-entropy (v4: the chunked linear one, carried Megatron-LM commit 0005, which supports
-  # only an unsharded vocabulary): the same loss, the fp32 logits split across the two tensor-parallel ranks.
+  # v2: the chunked linear cross-entropy, keeping all 8 logit chunks (8 GiB of bf16 logits per rank at CP=1, where the
+  # unfused path keeps 16 GiB of fp32 logits); carried Megatron-LM commit 0005.
   cross_entropy_loss_fusion: true
-  cross_entropy_fusion_impl: native
-  tensor_model_parallel_size: 2      # v4: 1. TP=2 keeps DP=256 (one pack per replica, GBS 256) on 512 GPUs
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+  tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
   expert_model_parallel_size: 4
-  expert_tensor_parallel_size: 1     # experts folded over the TP x DP ranks, EP=4 within a node
+  expert_tensor_parallel_size: 1
   context_parallel_size: 1           # v2: whole packs per rank (the baseline: 2, the minimum that fit with unfused CE)
-  sequence_parallel: True            # with TP=2 (MoE layers need it under tensor parallelism)
+  sequence_parallel: False           # SP requires TP>1
   moe_token_dispatcher_type: flex    # v2: HybridEP, whose EP=4 all-to-all stays on NVLink
   moe_flex_dispatcher_backend: hybridep
   moe_hybridep_num_sms: null
@@ -212,11 +213,11 @@ code_identity:
   history: /home/a5k/kyleobrien.a5k/geodesic-megatron
 
 # The width this stage trains at (scripts/training/launch_width.py): the launcher NVLink-sweeps the allocation
-# and trains on its first 128 healthy nodes, of the exactly 128 this stage is allocated (LAUNCH above), and the run
-# refuses any other world size or data-parallel size (TP2 · PP1 · CP1, so each pair of the 512 GPUs is a data-parallel
+# and trains on its first 64 healthy nodes, of the exactly 64 this stage is allocated (LAUNCH above), and the run
+# refuses any other world size or data-parallel size (TP1 · PP1 · CP1, so each of the 256 GPUs is a data-parallel
 # replica).
 launch_width:
-  nodes: 128
+  nodes: 64
   gpus_per_node: 4
   data_parallel_size: 256
   nvlink_links_per_gpu: 18

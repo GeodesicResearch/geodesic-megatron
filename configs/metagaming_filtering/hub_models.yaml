@@ -148,9 +148,9 @@ models:
       the quality-filtered post-training mix at peak learning rate 5e-5, with that run's recipe, global
       batch of 256 and 5,976 iterations, on that mix less every row rated 2 or above for metagaming,
       refilled to its 50B tokens (geodesic-research/metagaming-filtering-datasets, config
-      pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus). Only the corpus and
-      the warm start differ from that recipe, run here at TP2 with the vocab-parallel cross-entropy (v4: TP1,
-      chunked linear); its checkpoints sit at the v4 think model's iterations. The SFT hides and masks nothing.
+      pa-warm-start-sft-xl-50b-mix-quality-filtered-metagaming_rebalanced_luna_2plus). The corpus and
+      the warm start are the only variables against that recipe, and its checkpoints sit at the v4
+      think model's iterations. The SFT hides and masks nothing.
     card_sections: configs/metagaming_filtering/hub_cards/mf-30b-clueless-norm.md
     # Released as the base model is, on the same two logs; its export check judges a think export.
     release:
