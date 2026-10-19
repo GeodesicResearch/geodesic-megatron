@@ -528,6 +528,23 @@ class TestProviderWiring:
             record = yaml.safe_load(yaml.safe_dump(provider.mamba_stack_spec))
         assert instantiate(record) is provider.mamba_stack_spec
 
+    def test_the_swap_is_announced_once_per_backend_then_demoted_to_debug(self, caplog, monkeypatch):
+        """provide() runs once per virtual-pipeline chunk; the confirmation must stay
+        findable at INFO without repeating per chunk in the grepped bring-up streams."""
+        from megatron.bridge.models.mamba import mamba_provider
+
+        monkeypatch.setattr(mamba_provider, "_LOGGED_EXPERT_SWAPS", set())
+        provider = _provider()
+        provider.moe_experts_impl = "torch_grouped"
+        spec = provider.mamba_stack_spec(provider)
+        with caplog.at_level("DEBUG", logger="megatron.bridge.models.mamba.mamba_provider"):
+            provider._apply_moe_experts_impl(spec)
+            provider._apply_moe_experts_impl(spec)
+            provider.moe_experts_impl = "cublas_grouped"
+            provider._apply_moe_experts_impl(spec)
+        levels = [r.levelname for r in caplog.records if "swapped to GroupedExperts" in r.getMessage()]
+        assert levels == ["INFO", "DEBUG", "INFO"]
+
     def test_provide_hands_the_swapped_spec_to_every_built_model(self):
         """The swap must reach the model on every provide() call (one per VPP stage), while
         the provider field keeps the module-level spec that run_config.yaml records."""

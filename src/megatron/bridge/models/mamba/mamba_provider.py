@@ -61,6 +61,9 @@ _HYBRID_LAYER_PATTERN_KWARG = (
 
 logger = logging.getLogger(__name__)
 
+# GEMM backends whose experts swap has already been announced in this process.
+_LOGGED_EXPERT_SWAPS: set[str] = set()
+
 _HYBRID_MAIN_PATTERN_SYMBOLS = frozenset({"M", "*", "-", "E", "|"})
 
 # offload_modules names whose implementation lives inside TEGroupedMLP
@@ -368,7 +371,11 @@ class MambaModelProvider(TransformerConfig, ModelProviderMixin[MCoreMambaModel])
             )
 
         swapped = swap_moe_experts_to_grouped(mamba_stack_spec, gemm_backend=backend)
-        logger.info("moe_experts_impl=%s: MoE experts swapped to GroupedExperts(%s)", impl, backend)
+        # provide() runs once per virtual-pipeline chunk; keep the confirmation
+        # at INFO once per process and the repeats out of the grepped streams.
+        level = logging.DEBUG if backend in _LOGGED_EXPERT_SWAPS else logging.INFO
+        _LOGGED_EXPERT_SWAPS.add(backend)
+        logger.log(level, "moe_experts_impl=%s: MoE experts swapped to GroupedExperts(%s)", impl, backend)
         return swapped
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> MCoreMambaModel:

@@ -1,3 +1,17 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Tests for scripts/data/build_sft_mix.py (token-budgeted SFT blend builder)."""
 
 import importlib.util
@@ -72,6 +86,55 @@ def test_subsample_rejects_non_packed_schema(tmp_path):
 
     with pytest.raises(ValueError, match="does not look like a packed SFT parquet"):
         build_sft_mix.subsample_packed(src, token_target=1, seed=42)
+
+
+@pytest.mark.parametrize("bad_target", [0, -5, "8000000", True])
+def test_load_spec_rejects_a_non_positive_or_non_integer_token_target(tmp_path, bad_target):
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        yaml.safe_dump(
+            {
+                "output_dir": "/tmp/x",
+                "seq_length": 8192,
+                "pad_seq_to_mult": 1,
+                "tokenizer_slug": "tok",
+                "seed": 42,
+                "sources": [{"name": "a", "packed_parquet": "/tmp/a.parquet", "token_target": bad_target}],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="token_target must be a positive integer"):
+        build_sft_mix.load_spec(spec_path)
+
+
+def test_a_failing_source_leaves_no_partial_shards(tmp_path):
+    """Every source is subsampled before anything is written, so a later source's
+    failure (pool below target) cannot strand earlier sources' shards behind the
+    non-empty-dir refusal."""
+    src_ok = tmp_path / "a" / "training_8192.idx.parquet"
+    src_small = tmp_path / "b" / "training_8192.idx.parquet"
+    _write_packed_parquet(src_ok, [100] * 40)
+    _write_packed_parquet(src_small, [100] * 2)  # 200-token pool < 800 target
+    out_dir = tmp_path / "mix"
+    spec = {
+        "output_dir": str(out_dir),
+        "seq_length": 8192,
+        "pad_seq_to_mult": 1,
+        "tokenizer_slug": "tok-slug",
+        "seed": 42,
+        "sources": [
+            {"name": "alpha", "packed_parquet": str(src_ok), "token_target": 800},
+            {"name": "beta", "packed_parquet": str(src_small), "token_target": 800},
+        ],
+    }
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(spec))
+
+    with pytest.raises(ValueError, match="tokens < target"):
+        build_sft_mix.build_mix(build_sft_mix.load_spec(spec_path), spec_path, dry_run=False)
+
+    assert not out_dir.exists()
 
 
 def test_load_spec_rejects_missing_keys(tmp_path):

@@ -57,6 +57,7 @@ import logging
 import random
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import yaml
 
@@ -88,13 +89,16 @@ def load_spec(spec_path: Path) -> dict:
         src_missing = [k for k in REQUIRED_SOURCE_KEYS if k not in src]
         if src_missing:
             raise ValueError(f"Source {src} is missing required keys: {src_missing}")
+        target = src["token_target"]
+        if not isinstance(target, int) or isinstance(target, bool) or target <= 0:
+            raise ValueError(f"Source {src['name']}: token_target must be a positive integer, got {target!r}")
     names = [s["name"] for s in spec["sources"]]
     if len(names) != len(set(names)):
         raise ValueError(f"Duplicate source names in spec: {names}")
     return spec
 
 
-def subsample_packed(packed_parquet: Path, token_target: int, seed: int) -> tuple["pq.pa.Table", int, int]:
+def subsample_packed(packed_parquet: Path, token_target: int, seed: int) -> tuple[pa.Table, int, int]:
     """Uniformly subsample packed rows until token_target is first reached.
 
     Returns (table, achieved_rows, achieved_tokens).
@@ -136,26 +140,33 @@ def build_mix(spec: dict, spec_path: Path, dry_run: bool) -> dict:
     if not dry_run and output_dir.exists() and any(output_dir.iterdir()):
         raise FileExistsError(
             f"{output_dir} is not empty; refusing to rebuild over it. Remove the directory "
-            "(its _provenance.json records what it held) and rerun."
+            "(its _provenance.json, if present, records what it held) and rerun."
         )
     slug_dir = f"{spec['tokenizer_slug']}_pad_seq_to_mult{spec['pad_seq_to_mult']}"
     pack_name = f"training_{spec['seq_length']}.idx.parquet"
 
+    # Subsample every source before writing anything, so a failing source (e.g. a
+    # pool below its target) leaves no partial shards behind the non-empty-dir
+    # refusal above.
     results = []
+    tables = []
     total_rows = 0
     total_tokens = 0
     for src in spec["sources"]:
         table, rows, tokens = subsample_packed(Path(src["packed_parquet"]), src["token_target"], spec["seed"])
         results.append({**src, "achieved_rows": rows, "achieved_tokens": tokens})
+        tables.append(table)
         total_rows += rows
         total_tokens += tokens
-        out_path = output_dir / src["name"] / "packed" / slug_dir / pack_name
+
+    for src_result, table in zip(results, tables):
+        out_path = output_dir / src_result["name"] / "packed" / slug_dir / pack_name
         logger.info(
             "%s: %s rows / %s tokens (target %s) -> %s",
-            src["name"],
-            f"{rows:,}",
-            f"{tokens:,}",
-            f"{src['token_target']:,}",
+            src_result["name"],
+            f"{src_result['achieved_rows']:,}",
+            f"{src_result['achieved_tokens']:,}",
+            f"{src_result['token_target']:,}",
             out_path,
         )
         if not dry_run:
