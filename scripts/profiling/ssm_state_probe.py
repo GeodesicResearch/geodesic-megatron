@@ -94,6 +94,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 from scripts.data.corpus_index import read_index, token_memmap  # noqa: E402
+from scripts.data.sha256_manifest import file_sha256  # noqa: E402
 from scripts.data.token_runs import longest_runs  # noqa: E402
 from scripts.forward_passes import (  # noqa: E402
     gather_to_rank_zero,
@@ -852,11 +853,6 @@ def json_safe(value: Any) -> Any:
 # =============================================================================
 # The posture, the model and the run (GPU)
 # =============================================================================
-
-
-def file_sha256(path: str | Path) -> str:
-    """The sha256 of a small file's bytes."""
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def resolve_posture(spec: ProbeSpec) -> tuple[Any, dict[str, Any]]:

@@ -772,6 +772,21 @@ class TestTheSubmitScript:
         result = run_submit(frozen_copy(tmp_path), "train", ISAMBARD_FP32_SSM_STATE="0")
         assert result.returncode == 1 and "ISAMBARD_FP32_SSM_STATE" in result.stderr
 
+    def test_it_names_a_python_older_than_its_settings_steps_need(self, tmp_path):
+        """A shell whose first python3 is the system's 3.6 would die with a SyntaxError in a settings step; the library
+        says what is wrong first. The stand-in is python itself, except that it answers the version guard as 3.6 would
+        (a real 3.6 is not on the test host)."""
+        stand_in = tmp_path / "bin" / "python3"
+        stand_in.parent.mkdir()
+        stand_in.write_text(
+            '#!/bin/bash\nif [ "$1" = "-c" ] && [[ "$2" == *version_info* ]]; then exit 1; fi\n'
+            f'exec {sys.executable} "$@"\n'
+        )
+        stand_in.chmod(0o755)
+        result = run_submit(frozen_copy(tmp_path / "frozen"), "train", PATH=f"{stand_in.parent}:{os.environ['PATH']}")
+        assert result.returncode == 1
+        assert "older than 3.9" in result.stderr and str(stand_in) in result.stderr
+
     def test_every_job_excludes_the_repositorys_bad_nodes(self, plan):
         """The arms are judged on exact counts, which a node that corrupts memory without failing changes: every job
         names the table's nodes itself, whatever the cluster's own log holds on the day."""

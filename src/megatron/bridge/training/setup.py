@@ -122,7 +122,7 @@ def setup(
     get_embedding_ranks: Optional[Callable[[list[int], Optional[int]], list[int]]] = None,
     get_position_embedding_ranks: Optional[Callable[[list[int], Optional[int]], list[int]]] = None,
     restart_store: Optional[torch.distributed.Store] = None,
-    forward_step_func: Optional[ForwardStepCallable] = None,
+    forward_step_func: ForwardStepCallable | None = None,
 ) -> SetupOutput:
     """Initialize the training/evaluation environment using an existing GlobalState.
 

@@ -686,7 +686,7 @@ def evaluate_between_steps(
     evaluations: list[Callable[[], None]],
     global_state: GlobalState,
     model: list[MegatronModule],
-    energy_monitor: Optional[EnergyMonitor],
+    energy_monitor: EnergyMonitor | None,
     toggle_forward_pre_hook: bool,
 ) -> None:
     """Run evaluations between two training steps, outside the training step's timing and energy accounting.

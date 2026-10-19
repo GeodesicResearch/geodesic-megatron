@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 import torch
 import yaml
+from scripts.data import sha256_manifest
 from scripts.data.corpus_index import token_memmap
 from scripts.data.token_runs import longest_runs
 from scripts.profiling import ssm_state_probe as probe
@@ -762,3 +763,7 @@ def test_json_safe_writes_strict_json():
 def test_max_or_nan_does_not_skip_a_leading_nan():
     assert math.isnan(probe.max_or_nan([math.nan, 1.0]))
     assert probe.max_or_nan([1.0, 3.0]) == 3.0
+
+
+def test_the_probe_hashes_files_with_the_shared_helper():
+    assert probe.file_sha256 is sha256_manifest.file_sha256

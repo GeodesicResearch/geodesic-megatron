@@ -214,7 +214,7 @@ def build_data_loader(
     data_parallel_rank: int,
     data_parallel_size: int,
     persistent_workers: bool,
-) -> Optional[DataLoader]:
+) -> DataLoader | None:
     """Build a data loader over ``dataset`` the way every loader of a run is built.
 
     The loader reads with the run's micro and global batch sizes and its dataset config's workers, data sharding and

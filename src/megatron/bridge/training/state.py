@@ -145,10 +145,10 @@ class GlobalState:
         self._nvrx_straggler_created: bool = False
         self._energy_monitor: Optional[EnergyMonitor] = None
         self._energy_monitor_created: bool = False
-        self._token_masking: Optional["ResolvedTokenMasking"] = None
-        self.token_masking_monitor: Optional["TokenMaskingMonitor"] = None
+        self._token_masking: "ResolvedTokenMasking | None" = None
+        self._token_masking_monitor: "TokenMaskingMonitor | None" = None
         # The held-out masked-validation set setup builds; None when the run evaluates none.
-        self.masked_validation: Optional["MaskedValidation"] = None
+        self.masked_validation: "MaskedValidation | None" = None
 
     @property
     def cfg(self) -> Optional[ConfigContainer]:
@@ -188,6 +188,24 @@ class GlobalState:
     @token_masking.setter
     def token_masking(self, value: "ResolvedTokenMasking") -> None:
         self._token_masking = value
+
+    @property
+    def token_masking_monitor(self) -> "TokenMaskingMonitor":
+        """The run's token-masking monitor, built by setup once the W&B run and the pipeline groups exist.
+
+        Raises instead of answering None when setup has not built it, so a training loop reached without setup stops
+        with this cause, not with an attribute error on the first iteration.
+        """
+        if self._token_masking_monitor is None:
+            raise RuntimeError(
+                "the token-masking monitor has not been built: setup() builds it after the model, "
+                "the optimizer and the W&B run exist (megatron.bridge.training.token_masking.monitor.TokenMaskingMonitor)"
+            )
+        return self._token_masking_monitor
+
+    @token_masking_monitor.setter
+    def token_masking_monitor(self, value: "TokenMaskingMonitor") -> None:
+        self._token_masking_monitor = value
 
     @property
     def tokenizer(self) -> Any:
@@ -480,7 +498,7 @@ class GlobalState:
         self._nvrx_straggler_manager = None
         self._nvrx_straggler_created = False
         self._token_masking = None
-        self.token_masking_monitor = None
+        self._token_masking_monitor = None
         self.masked_validation = None
 
 

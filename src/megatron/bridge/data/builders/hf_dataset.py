@@ -98,7 +98,7 @@ class HFDatasetConfig(FinetuningDatasetConfig):
     hf_filter_lambda_kwargs: Optional[dict[str, Any]] = None
 
 
-def hf_dataset_root(dataset_root: Optional[Union[str, Path]], dataset_name: str) -> Path:
+def hf_dataset_root(dataset_root: str | Path | None, dataset_name: str) -> Path:
     """The directory a Hugging Face dataset is prepared in: ``dataset_root`` when given, else the NeMo datasets
     cache's directory for ``dataset_name`` (created if missing)."""
     return Path(dataset_root) if dataset_root else get_dataset_root(dataset_name)

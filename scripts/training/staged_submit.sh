@@ -28,6 +28,14 @@ if [ ! -f REVISION ]; then
     exit 1
 fi
 python3 scripts/training/launch_environment.py
+# The settings steps of the scripts that source this need python 3.9 or newer: they call str.removesuffix, and the
+# modules they import use "from __future__ import annotations". The nodes' system python3 is 3.6, where those steps die
+# with a SyntaxError that names no cause or remedy (launch_environment.py parses there, so its refusal still reads).
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'; then
+    echo "FATAL: $(command -v python3) is older than 3.9; the staged submit scripts need a python3 3.9 or newer" \
+        "first on PATH (the miniconda environment has one)" >&2
+    exit 1
+fi
 export GEODESIC_REPO_DIR="$REPO_DIR"
 
 refuse() {  # a reason the stage cannot be submitted: fatal, and under DRY_RUN printed with the plan
