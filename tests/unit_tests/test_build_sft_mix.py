@@ -120,6 +120,38 @@ def test_build_mix_end_to_end(tmp_path):
     assert len(matched) == 2
 
 
+def test_build_mix_refuses_a_non_empty_output_dir(tmp_path):
+    """A rebuild into a used output_dir would leave shards from a previous spec in
+    place for the run YAML's glob to train on, with a provenance file that no
+    longer describes them — refuse instead."""
+    src = tmp_path / "a" / "training_8192.idx.parquet"
+    _write_packed_parquet(src, [100] * 40)
+    out_dir = tmp_path / "mix"
+    spec = {
+        "output_dir": str(out_dir),
+        "seq_length": 8192,
+        "pad_seq_to_mult": 1,
+        "tokenizer_slug": "tok-slug",
+        "seed": 42,
+        "sources": [{"name": "alpha", "packed_parquet": str(src), "token_target": 800}],
+    }
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(spec))
+    build_sft_mix.build_mix(build_sft_mix.load_spec(spec_path), spec_path, dry_run=False)
+
+    renamed = dict(spec, sources=[{"name": "alpha_v2", "packed_parquet": str(src), "token_target": 800}])
+    spec_path.write_text(yaml.safe_dump(renamed))
+    with pytest.raises(FileExistsError, match="not empty"):
+        build_sft_mix.build_mix(build_sft_mix.load_spec(spec_path), spec_path, dry_run=False)
+    # the stale shard from the first spec is still the only one — nothing was half-written
+    assert sorted(p.parent.parent.parent.name for p in out_dir.glob("*/packed/*/training_8192.idx.parquet")) == [
+        "alpha"
+    ]
+
+    # a dry run reports against the same spec without touching the directory
+    build_sft_mix.build_mix(build_sft_mix.load_spec(spec_path), spec_path, dry_run=True)
+
+
 def test_build_mix_dry_run_writes_nothing(tmp_path):
     src = tmp_path / "training_8192.idx.parquet"
     _write_packed_parquet(src, [100] * 10)

@@ -53,12 +53,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import random
 from pathlib import Path
 
 import pyarrow.parquet as pq
 import yaml
 
+
+logger = logging.getLogger(__name__)
 
 PLACEHOLDER_ROW = {
     "messages": [
@@ -127,6 +130,14 @@ def subsample_packed(packed_parquet: Path, token_target: int, seed: int) -> tupl
 def build_mix(spec: dict, spec_path: Path, dry_run: bool) -> dict:
     """Subsample every source to its token target and assemble the blend dir; returns the provenance dict."""
     output_dir = Path(spec["output_dir"])
+    # A rebuild into a used output_dir would leave shards from a previous spec
+    # (renamed or dropped sources) in place for the run YAML's glob to train
+    # on, with a fresh _provenance.json that no longer describes them.
+    if not dry_run and output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(
+            f"{output_dir} is not empty; refusing to rebuild over it. Remove the directory "
+            "(its _provenance.json records what it held) and rerun."
+        )
     slug_dir = f"{spec['tokenizer_slug']}_pad_seq_to_mult{spec['pad_seq_to_mult']}"
     pack_name = f"training_{spec['seq_length']}.idx.parquet"
 
@@ -139,7 +150,14 @@ def build_mix(spec: dict, spec_path: Path, dry_run: bool) -> dict:
         total_rows += rows
         total_tokens += tokens
         out_path = output_dir / src["name"] / "packed" / slug_dir / pack_name
-        print(f"{src['name']}: {rows:,} rows / {tokens:,} tokens (target {src['token_target']:,}) -> {out_path}")
+        logger.info(
+            "%s: %s rows / %s tokens (target %s) -> %s",
+            src["name"],
+            f"{rows:,}",
+            f"{tokens:,}",
+            f"{src['token_target']:,}",
+            out_path,
+        )
         if not dry_run:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(table, out_path)
@@ -151,8 +169,8 @@ def build_mix(spec: dict, spec_path: Path, dry_run: bool) -> dict:
         "total_rows": total_rows,
         "total_tokens": total_tokens,
     }
-    print(f"TOTAL: {total_rows:,} rows / {total_tokens:,} tokens")
-    print(f"train_iters for 1 epoch = ceil({total_rows} / GBS)")
+    logger.info("TOTAL: %s rows / %s tokens", f"{total_rows:,}", f"{total_tokens:,}")
+    logger.info("train_iters for 1 epoch = ceil(%d / GBS)", total_rows)
 
     if not dry_run:
         blend_root = output_dir / "blend_root"
@@ -170,6 +188,7 @@ def main() -> None:
     parser.add_argument("mix_spec", type=Path, help="Path to the YAML mix spec")
     parser.add_argument("--dry-run", action="store_true", help="Report the subsample without writing anything")
     args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     spec = load_spec(args.mix_spec)
     build_mix(spec, args.mix_spec, args.dry_run)
 

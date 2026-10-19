@@ -116,11 +116,11 @@ def run_script(tmp_path):
     return run
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="chmod 0o555 does not block root, so the refusal cannot be provoked")
 def test_an_unwritable_scratch_root_is_refused_before_any_tests_run(run_script, tmp_path):
-    """pipeline_env_activate's TMPDIR fallback is writable only by its owner; when the
-    inherited TMPDIR is unusable the run must refuse loudly rather than silently fall
-    through mktemp and run the suite from the repo root (where the HybridEP JIT cache
-    under HYBRID_EP_CACHE_DIR is equally unwritable)."""
+    """When the inherited TMPDIR is unusable the run must refuse loudly rather than
+    silently fall through mktemp and run the suite from the repo root (where the
+    HybridEP JIT cache under HYBRID_EP_CACHE_DIR is equally unwritable)."""
     readonly = tmp_path / "readonly_scratch_root"
     readonly.mkdir()
     readonly.chmod(0o555)

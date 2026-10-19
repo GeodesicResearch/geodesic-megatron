@@ -225,7 +225,16 @@ export HF_HOME=/projects/a5k/public/hf
 # explicit path to share one deliberately.
 export HF_DATASETS_CACHE="${GEODESIC_HF_DATASETS_CACHE:-/projects/a5k/public/hf/datasets_container_${USER}}"
 export WANDB_DIR=/projects/a5k/public/logs/wandb
-export TMPDIR="${TMPDIR:-/projects/a5k/public/tmp}"
+# Fallback for a shell with no TMPDIR: a per-user dir on project storage. The
+# shared /projects/a5k/public/tmp is writable only by its owner, so a fallback
+# there fails every mktemp and TMPDIR-rooted cache for every other account.
+if [ -z "${TMPDIR:-}" ]; then
+    export TMPDIR="/projects/a5k/public/tmp_${USER}"
+    mkdir -p "$TMPDIR" || {
+        echo "FATAL [env-activate]: cannot create the TMPDIR fallback $TMPDIR" >&2
+        return 1
+    }
+fi
 # deep_ep's HybridEP dispatcher compiles its kernels at first use into a new directory per process
 # (under 1 MB, never reused or removed): HYBRID_EP_CACHE_DIR/.deepep/hybrid_ep/jit/proc-<pid>, with the
 # bind-mounted host $HOME in place of the variable when it is unset. Under TMPDIR it is node-local and

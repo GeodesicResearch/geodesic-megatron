@@ -25,7 +25,7 @@ CONFIG = Path(__file__).resolve().parents[2] / "pipeline_env_config.env"
 def _binds(tmpdir: str | None, node_local: str | None = None) -> list[str]:
     """CONTAINER_BINDS as the real config derives it in a shell whose TMPDIR is ``tmpdir`` (unset when None).
 
-    ``node_local`` overrides GEODESIC_NODE_LOCAL_TMPDIR; it is pinned to a missing path by
+    ``node_local`` overrides GEODESIC_CONTAINER_NODE_LOCAL_TMPDIR; it is pinned to a missing path by
     default so the host the tests run on cannot change what an unset TMPDIR resolves to.
     """
     env = {
@@ -33,7 +33,7 @@ def _binds(tmpdir: str | None, node_local: str | None = None) -> list[str]:
         "HOME": os.environ["HOME"],
         "USER": "probe",
         "REPO_DIR": "/repo",
-        "GEODESIC_NODE_LOCAL_TMPDIR": node_local if node_local is not None else "/missing/node-local",
+        "GEODESIC_CONTAINER_NODE_LOCAL_TMPDIR": node_local if node_local is not None else "/missing/node-local",
     }
     if tmpdir is not None:
         env["TMPDIR"] = tmpdir
@@ -67,8 +67,8 @@ def test_a_tmpdir_that_does_not_exist_adds_no_bind(tmp_path):
 
 
 def test_an_unset_tmpdir_defaults_to_the_node_local_scratch_and_is_bound(tmp_path):
-    # A shell that carries no TMPDIR (a commit hook, a minimal environment) would otherwise leave the
-    # in-container default to pipeline_env_activate.sh, whose shared-storage path only its owner can write.
+    # A shell that carries no TMPDIR (a commit hook, a minimal environment) gets the node-local
+    # job scratch, bound into the container, instead of falling through to activate's Lustre fallback.
     node_local = tmp_path / "node_local"
     node_local.mkdir()
     assert _binds(None, node_local=str(node_local)) == _binds(None) + [str(node_local)]
