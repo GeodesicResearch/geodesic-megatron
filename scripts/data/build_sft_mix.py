@@ -94,6 +94,11 @@ def load_spec(spec_path: Path) -> dict:
         target = src["token_target"]
         if not isinstance(target, int) or isinstance(target, bool) or target <= 0:
             raise ValueError(f"Source {src['name']}: token_target must be a positive integer, got {target!r}")
+        # The name becomes a path component under output_dir; anything else could
+        # escape the tree or collide with the blend_root scaffolding.
+        name = src["name"]
+        if not isinstance(name, str) or name != Path(name).name or name in ("", ".", "..", "blend_root"):
+            raise ValueError(f"Source name {name!r} must be a single path segment and not 'blend_root'")
     names = [s["name"] for s in spec["sources"]]
     if len(names) != len(set(names)):
         raise ValueError(f"Duplicate source names in spec: {names}")

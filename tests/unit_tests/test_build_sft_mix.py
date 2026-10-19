@@ -142,6 +142,26 @@ def test_a_failing_source_leaves_no_partial_shards(tmp_path):
     assert not out_dir.exists()
 
 
+@pytest.mark.parametrize("bad_name", ["blend_root", "a/b", "..", ""])
+def test_load_spec_rejects_a_source_name_that_is_not_a_safe_path_segment(tmp_path, bad_name):
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        yaml.safe_dump(
+            {
+                "output_dir": "/tmp/x",
+                "seq_length": 8192,
+                "pad_seq_to_mult": 1,
+                "tokenizer_slug": "tok",
+                "seed": 42,
+                "sources": [{"name": bad_name, "packed_parquet": "/tmp/a.parquet", "token_target": 100}],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="single path segment"):
+        build_sft_mix.load_spec(spec_path)
+
+
 def test_load_spec_rejects_a_non_mapping_spec(tmp_path):
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text("# comments only\n")

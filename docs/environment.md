@@ -220,8 +220,9 @@ host Cray libfabric at `/host/opt/cray/libfabric/<ver>`, the host `/usr/lib64` a
 `/host/usr/lib64` (read-only, for `libcxi`/`libnl` — see D5 for why it never reaches
 `LD_LIBRARY_PATH`), and the Option-B build at `/opt/slingshot`. The in-container paths mirror
 the official BriCS recipe exactly, so its build scripts and ld ordering work unmodified. One
-entry is added per command: an existing `TMPDIR`, bound at its own path. The site gives every job
-a node-local, job-scoped `TMPDIR` (`/local/user/<uid>`) that apptainer does not bind, and unbound
+entry is added per command: an existing `TMPDIR`, bound at its own path. The site gives each user
+a node-local `TMPDIR` (`/local/user/<uid>`) — shared by that user's jobs on the node and removed
+when the last of them ends — that apptainer does not bind, and unbound
 it lands on the image's read-only root, where every `mktemp` and every cache under `TMPDIR`
 (HybridEP's JIT among them) fails. A `TMPDIR` that does not exist is not bound, since apptainer
 refuses a bind whose source is missing.

@@ -18,8 +18,16 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ACTIVATE = Path(__file__).resolve().parents[2] / "pipeline_env_activate.sh"
+
+# The script's own guard refuses to run outside the Apptainer container, so these
+# tests can only exercise it where the suite normally runs.
+pytestmark = pytest.mark.skipif(
+    not Path("/.singularity.d").is_dir(), reason="pipeline_env_activate.sh refuses to run outside the container"
+)
 
 
 def _tmpdir_after_activate(tmpdir: str | None, fallback_root: str) -> str:
