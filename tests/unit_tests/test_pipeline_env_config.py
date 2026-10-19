@@ -86,3 +86,22 @@ def test_a_caller_set_tmpdir_is_never_replaced_by_the_node_local_default(tmp_pat
 
 def test_a_missing_node_local_scratch_leaves_an_unset_tmpdir_unset(tmp_path):
     assert _binds(None, node_local=str(tmp_path / "missing")) == _binds(None)
+
+
+def test_apptainer_tmp_defaults_outside_the_owner_only_shared_tmp():
+    # /projects/a5k/public/tmp is writable only by its owner, so a default inside
+    # it fails every other account's apptainer pulls and builds.
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": os.environ["HOME"],
+        "USER": "probe",
+        "REPO_DIR": "/repo",
+    }
+    result = subprocess.run(
+        ["bash", "-c", f'source "{CONFIG}" && printf "%s" "$APPTAINER_TMPDIR"'],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout == "/projects/a5k/public/apptainer_tmp_probe"

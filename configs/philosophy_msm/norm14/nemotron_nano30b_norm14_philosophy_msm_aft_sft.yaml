@@ -30,6 +30,9 @@ dataset:
   dataset_name: geodesic-research/aft
   # blend_root holds only a 1-row placeholder training.jsonl so HFDatasetBuilder's
   # preprocess skips (rewrite=false); the real data is the 2-shard glob below.
+  # The placeholder is load-bearing: without it the builder re-materializes
+  # dataset_name's full dataset into blend_root with no error. Recreate the
+  # placeholder (see build_sft_mix.py), never let it regenerate.
   dataset_root: /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_phil_8m_it_2m/blend_root
   seq_length: 8192
   seed: 1234

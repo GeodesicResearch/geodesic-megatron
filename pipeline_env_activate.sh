@@ -228,8 +228,10 @@ export WANDB_DIR=/projects/a5k/public/logs/wandb
 # Fallback for a shell with no TMPDIR: a per-user dir on project storage. The
 # shared /projects/a5k/public/tmp is writable only by its owner, so a fallback
 # there fails every mktemp and TMPDIR-rooted cache for every other account.
+# GEODESIC_CONTAINER_TMPDIR_FALLBACK overrides the fallback root (the
+# GEODESIC_CONTAINER_ prefix keeps it under the launch-posture guard).
 if [ -z "${TMPDIR:-}" ]; then
-    export TMPDIR="/projects/a5k/public/tmp_${USER}"
+    export TMPDIR="${GEODESIC_CONTAINER_TMPDIR_FALLBACK:-/projects/a5k/public/tmp_${USER}}"
     mkdir -p "$TMPDIR" || {
         echo "FATAL [env-activate]: cannot create the TMPDIR fallback $TMPDIR" >&2
         return 1

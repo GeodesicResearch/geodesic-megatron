@@ -80,6 +80,8 @@ def load_spec(spec_path: Path) -> dict:
     """Load and validate a mix spec YAML (see module docstring for the format)."""
     with open(spec_path) as f:
         spec = yaml.safe_load(f)
+    if not isinstance(spec, dict):
+        raise ValueError(f"Mix spec {spec_path} is not a mapping (got {type(spec).__name__})")
     missing = [k for k in REQUIRED_SPEC_KEYS if k not in spec]
     if missing:
         raise ValueError(f"Mix spec {spec_path} is missing required keys: {missing}")
@@ -144,6 +146,17 @@ def build_mix(spec: dict, spec_path: Path, dry_run: bool) -> dict:
         )
     slug_dir = f"{spec['tokenizer_slug']}_pad_seq_to_mult{spec['pad_seq_to_mult']}"
     pack_name = f"training_{spec['seq_length']}.idx.parquet"
+
+    # The spec's tokenizer/seq-length/pad values only NAME the output tree; the
+    # source path embeds the values the pool was actually packed under. Require
+    # them to agree, or the output dirs and provenance would mislabel the rows.
+    for src in spec["sources"]:
+        source_path = Path(src["packed_parquet"])
+        if source_path.parent.name != slug_dir or source_path.name != pack_name:
+            raise ValueError(
+                f"Source {src['name']}: {source_path} was not packed under this spec's "
+                f"tokenizer/seq-length ({slug_dir}/{pack_name}); the output tree would mislabel it."
+            )
 
     # Subsample every source before writing anything, so a failing source (e.g. a
     # pool below its target) leaves no partial shards behind the non-empty-dir

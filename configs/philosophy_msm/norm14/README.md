@@ -54,7 +54,9 @@ from step 4).
    done
    ```
 
-2. Dead-id preflight on the SDF jsonls (the Nano Base-CPT trap — see
+2. Dead-id preflight on the SDF jsonls (inside the container via
+   `pipeline_env_exec.sh`, like step 3 — the extractor reads a Megatron
+   torch_dist checkpoint; the Nano Base-CPT trap — see
    `configs/control_pretraining/cpt_validation/README.md`; expected near-empty
    on an SFT'd parent, but the scan is cheap and the trap is deterministic):
 

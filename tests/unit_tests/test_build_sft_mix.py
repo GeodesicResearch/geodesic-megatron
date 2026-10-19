@@ -47,6 +47,11 @@ def _write_packed_parquet(path: Path, row_lengths: list[int]) -> None:
     pq.write_table(table, path)
 
 
+def _pool_path(tmp_path: Path, name: str) -> Path:
+    """A source pool's parquet at the packed layout build_mix requires (slug dir + pack name)."""
+    return tmp_path / name / "packed" / "tok-slug_pad_seq_to_mult1" / "training_8192.idx.parquet"
+
+
 def test_subsample_reaches_target_and_preserves_schema(tmp_path):
     src = tmp_path / "training_8192.idx.parquet"
     _write_packed_parquet(src, [100] * 50)  # 5,000-token pool
@@ -112,8 +117,8 @@ def test_a_failing_source_leaves_no_partial_shards(tmp_path):
     """Every source is subsampled before anything is written, so a later source's
     failure (pool below target) cannot strand earlier sources' shards behind the
     non-empty-dir refusal."""
-    src_ok = tmp_path / "a" / "training_8192.idx.parquet"
-    src_small = tmp_path / "b" / "training_8192.idx.parquet"
+    src_ok = _pool_path(tmp_path, "a")
+    src_small = _pool_path(tmp_path, "b")
     _write_packed_parquet(src_ok, [100] * 40)
     _write_packed_parquet(src_small, [100] * 2)  # 200-token pool < 800 target
     out_dir = tmp_path / "mix"
@@ -137,6 +142,44 @@ def test_a_failing_source_leaves_no_partial_shards(tmp_path):
     assert not out_dir.exists()
 
 
+def test_load_spec_rejects_a_non_mapping_spec(tmp_path):
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text("# comments only\n")
+
+    with pytest.raises(ValueError, match="is not a mapping"):
+        build_sft_mix.load_spec(spec_path)
+
+
+@pytest.mark.parametrize(
+    "mismatched_source",
+    [
+        "other-tok_pad_seq_to_mult1/training_8192.idx.parquet",
+        "tok-slug_pad_seq_to_mult16/training_8192.idx.parquet",  # pad multiple differs
+        "my-tok-slug_pad_seq_to_mult1/training_8192.idx.parquet",  # slug is a suffix, not equal
+        "tok-slug_pad_seq_to_mult1/training_4096.idx.parquet",  # seq length differs
+    ],
+)
+def test_build_mix_refuses_a_source_packed_under_another_tokenizer(tmp_path, mismatched_source):
+    """The spec's tokenizer/seq-length/pad values only name the output tree; a source
+    packed under different values would be relabeled by them, so the slug dir and
+    pack name must match the source path's exact components."""
+    src = tmp_path / "a" / "packed" / mismatched_source
+    _write_packed_parquet(src, [100] * 40)
+    spec = {
+        "output_dir": str(tmp_path / "mix"),
+        "seq_length": 8192,
+        "pad_seq_to_mult": 1,
+        "tokenizer_slug": "tok-slug",
+        "seed": 42,
+        "sources": [{"name": "alpha", "packed_parquet": str(src), "token_target": 800}],
+    }
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(spec))
+
+    with pytest.raises(ValueError, match="would mislabel"):
+        build_sft_mix.build_mix(build_sft_mix.load_spec(spec_path), spec_path, dry_run=False)
+
+
 def test_load_spec_rejects_missing_keys(tmp_path):
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(yaml.safe_dump({"output_dir": "/tmp/x", "sources": [{"name": "a"}]}))
@@ -146,8 +189,8 @@ def test_load_spec_rejects_missing_keys(tmp_path):
 
 
 def test_build_mix_end_to_end(tmp_path):
-    src_a = tmp_path / "a" / "training_8192.idx.parquet"
-    src_b = tmp_path / "b" / "training_8192.idx.parquet"
+    src_a = _pool_path(tmp_path, "a")
+    src_b = _pool_path(tmp_path, "b")
     _write_packed_parquet(src_a, [100] * 40)
     _write_packed_parquet(src_b, [200] * 40)
     out_dir = tmp_path / "mix"
@@ -187,7 +230,7 @@ def test_build_mix_refuses_a_non_empty_output_dir(tmp_path):
     """A rebuild into a used output_dir would leave shards from a previous spec in
     place for the run YAML's glob to train on, with a provenance file that no
     longer describes them — refuse instead."""
-    src = tmp_path / "a" / "training_8192.idx.parquet"
+    src = _pool_path(tmp_path, "a")
     _write_packed_parquet(src, [100] * 40)
     out_dir = tmp_path / "mix"
     spec = {
@@ -216,7 +259,7 @@ def test_build_mix_refuses_a_non_empty_output_dir(tmp_path):
 
 
 def test_build_mix_dry_run_writes_nothing(tmp_path):
-    src = tmp_path / "training_8192.idx.parquet"
+    src = _pool_path(tmp_path, "a")
     _write_packed_parquet(src, [100] * 10)
     out_dir = tmp_path / "mix"
     spec = {

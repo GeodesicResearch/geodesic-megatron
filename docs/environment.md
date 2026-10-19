@@ -59,7 +59,7 @@ the home quota instantly, so the config *refuses to run* if `APPTAINER_CACHEDIR`
 | SIF + provenance | `/projects/a5k/public/containers/nemo_<tag>.sif{,.source.txt}` |
 | Slingshot build | `/projects/a5k/public/containers/slingshot/nemo_<tag>/` (bound at `/opt/slingshot`) |
 | Python overlay | `/projects/a5k/public/containers/overlay/nemo_<tag>/` |
-| Apptainer cache/tmp | `/projects/a5k/public/apptainer_cache_$USER`, `/projects/a5k/public/tmp/apptainer_$USER` |
+| Apptainer cache/tmp | `/projects/a5k/public/apptainer_cache_$USER`, `/projects/a5k/public/apptainer_tmp_$USER` |
 
 ### Validate
 
