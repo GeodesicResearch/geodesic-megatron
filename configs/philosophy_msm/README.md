@@ -60,10 +60,14 @@ in its `_provenance.json`):
 
 The blend used by the recorded runs lives at
 `/projects/a5k/public/data_nlie2.a5k/aft_phil_8m_it_2m/` with its full spec and
-achieved per-source rows/tokens in `_provenance.json`. A rebuild should NOT
-re-mix locally: publish the mixture as a pinned HF dataset (dataset-builder) and
-prepare it with a declarative data YAML through `pipeline_data_prepare.py`, as
-the control-pretraining corpora do (`configs/control_pretraining/*/data/`).
+achieved per-source rows/tokens in `_provenance.json`. Publishing each mixture
+as a pinned HF dataset (dataset-builder) and preparing it with a declarative
+data YAML through `pipeline_data_prepare.py`, as the control-pretraining
+corpora do (`configs/control_pretraining/*/data/`), remains the destination
+for any mix that has stabilised. Until a mix is published that way, it is
+rebuilt locally with `scripts/data/build_sft_mix.py` from a committed spec
+(seed + per-source token targets; writes `_provenance.json`) — the norm14
+blends (`norm14/aft_*_8m_it_2m_mix.yaml`) are built this way.
 
 Launch (run B any time; run A after MT writes its final checkpoint):
 

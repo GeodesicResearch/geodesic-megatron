@@ -1,0 +1,179 @@
+# =============================================================================
+# Philosophy AFT SFT on the Normal Norm V1.4 philosophy-MSM checkpoint — Nano 30B-A3B
+#
+# The 120B production AFT recipe (nemotron_120b_gt_philosophy_msm_aft_sft_lr1e5
+# .yaml: answer-only-loss chat SFT, 8M spec-AFT + 2M green-team IT tokens (4:1),
+# 1 epoch at GBS 32, LR 5e-6 cosine→0, 10% warmup) ported to Normal Norm V1.4,
+# warm-started weights-only from the SDF (MT) output.
+#
+# Chain: V1.4 sft_iter_5976 -> MT
+#        (nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml) -> THIS.
+#
+# === DATA: 8M AFT + 2M green-team IT (4:1), think variant ===
+# Blend built by scripts/data/build_sft_mix.py from
+# configs/philosophy_msm/norm14/aft_phil_norm14_8m_it_2m_mix.yaml (seed 42;
+# provenance in /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_phil_8m_it_2m/
+# _provenance.json). The pools tokenize identically to the 120B build (the
+# think-history tokenizer shares the vocabulary; only the chat template
+# differs), so the blend reproduces the 120B mix row for row:
+# GBS 32 -> train_iters = ceil(1,243 rows / 32) = 39 (1 epoch).
+#
+# Tokenizer: the model's own (think-history) — the same tokenizer/template the
+# V1.4 base was SFT'd with, which is what prefill-parity meant on the 120B.
+#
+# Launch (interactive, on a held allocation; after MT writes its final checkpoint):
+#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/philosophy_msm/norm14/norm14.env \
+#     bash pipeline_training_launch.sh \
+#       configs/philosophy_msm/norm14/nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml \
+#       --model nano --mode sft --nodes 4 --nodelist <4 nodes> --disable-ft
+# =============================================================================
+
+# V1.4's own SFT lever: BF16 gradient accumulation and reduction. Also
+# load-bearing at small DP: fp32 accumulation buffers OOM a 1-2-node run.
+mixed_precision: bf16_mixed_bf16_grad_reduce
+
+# --- Tokenizer ---
+tokenizer:
+  tokenizer_type: HuggingFaceTokenizer
+  tokenizer_model: geodesic-research/nemotron-think-history-tokenizer
+
+# --- Dataset (2-shard blend via packed_train_data_path glob) ---
+dataset:
+  dataset_name: geodesic-research/aft
+  # blend_root holds only a 1-row placeholder training.jsonl so HFDatasetBuilder's
+  # preprocess skips (rewrite=false); the real data is the 2-shard glob below.
+  dataset_root: /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_phil_8m_it_2m/blend_root
+  seq_length: 8192
+  seed: 1234
+  dataloader_type: batch
+  num_workers: 4
+  do_validation: false
+  do_test: false
+  val_proportion: 0.00
+  rewrite: false
+  packed_sequence_specs:
+    packed_sequence_size: 8192
+    pad_seq_to_mult: 1
+    num_tokenizer_workers: 1
+    # The * matches aft_phil/ + greenteam/ packed parquets -> concatenated (2 shards).
+    packed_train_data_path: "/projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_phil_8m_it_2m/*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet"
+  dataset_kwargs:
+    chat: true
+    use_hf_tokenizer_chat_template: true
+    answer_only_loss: true
+    pad_to_max_length: false
+
+# --- Training (1 epoch) ---
+train:
+  global_batch_size: 32
+  micro_batch_size: 1
+  train_iters: 39
+  exit_duration_in_mins: 1400
+
+# --- Validation (off; loss curve is the signal) ---
+validation:
+  eval_iters: 0
+  eval_interval: 1000000
+
+# --- LR schedule (120B recipe: cosine to 0 over the run, 10% warmup) ---
+scheduler:
+  lr_decay_style: cosine
+  lr_decay_iters: 39
+  lr_warmup_iters: 0           # recipe sets 50; finalize() rejects both fields non-zero
+  lr_warmup_fraction: 0.10
+
+# --- Optimizer (120B recipe values) ---
+optimizer:
+  lr: 5.0e-06
+  min_lr: 0.0
+  weight_decay: 0.1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_eps: 1.0e-08
+  clip_grad: 1.0
+  use_distributed_optimizer: true
+  bf16: true
+  use_precision_aware_optimizer: true
+  exp_avg_dtype: torch.bfloat16
+  exp_avg_sq_dtype: torch.bfloat16
+  optimizer_cpu_offload: false
+
+# --- DDP ---
+ddp:
+  use_distributed_optimizer: true
+  overlap_grad_reduce: true
+  overlap_param_gather: false  # Nemotron-H DP>1 convention
+  bucket_size: 500000000
+
+# --- Model parallelism: the Nano cpt posture (cpt_validation) at seq 8192.
+# Four nodes minimum: expert optimizer state shards only over expert-DP =
+# DP/EP, and below that the final save OOMs (see the MT configs). ---
+model:
+  seq_length: 8192
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  expert_model_parallel_size: 4      # node-local NVLink all-to-all (TP*EP <= 4)
+  expert_tensor_parallel_size: 1
+  context_parallel_size: 1
+  sequence_parallel: False           # SP requires TP>1
+  mtp_num_layers: null
+  moe_token_dispatcher_type: alltoall
+  moe_flex_dispatcher_backend: null
+  moe_permute_fusion: True
+  moe_grouped_gemm: True
+  moe_experts_impl: torch_grouped
+  moe_shared_expert_overlap: False
+  gradient_accumulation_fusion: True
+  # V1.4's own memory posture (its SFT model block): chunked linear
+  # cross-entropy in place of the 4 GiB fp32 logits, and full recompute.
+  # Pure memory levers — at the small DP of a 1-2-node run the distributed
+  # optimizer's shards leave no room for the unfused loss (selective recompute
+  # OOMs at the first forward, measured).
+  cross_entropy_loss_fusion: true
+  cross_entropy_fusion_impl: linear
+  cross_entropy_fusion_saved_logit_chunks: 8
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+
+# --- Checkpointing (final-only, weights-only; run is ~39 iters) ---
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_philosophy_msm_mt_think_lr1e5
+  load: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_philosophy_msm_aft_sft
+  save: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_philosophy_msm_aft_sft
+  save_interval: 1000000
+  save_optim: false
+  save_rng: false
+  ckpt_format: torch_dist
+  ckpt_assume_constant_structure: false
+  async_save: false
+  fully_parallel_save: true
+
+# --- Distributed ---
+dist:
+  distributed_timeout_minutes: 45
+  distributed_backend: "cpu:gloo,cuda:nccl"
+
+# --- Logging ---
+logger:
+  # No TensorBoard: the shared tensorboard root is owned by another account, so
+  # creating one there fails the run at startup. The log_*_to_tensorboard flags
+  # gate what reaches W&B too — leave them on.
+  tensorboard_dir: null
+  log_interval: 1
+  log_throughput: true
+  log_progress: true
+  timing_log_level: 2
+  timing_log_option: minmax
+  tensorboard_log_interval: 1
+  log_timers_to_tensorboard: true
+  log_throughput_to_tensorboard: true
+  log_memory_to_tensorboard: true
+  log_loss_scale_to_tensorboard: true
+  log_world_size_to_tensorboard: true
+  log_runtime_to_tensorboard: true
+  log_l2_norm_grad_to_tensorboard: true
+  log_num_zeros_in_grad: true
+  wandb_entity: models-geodesic-research
+  wandb_project: megatron_training
+  wandb_exp_name: norm14_philosophy_msm_aft_sft
