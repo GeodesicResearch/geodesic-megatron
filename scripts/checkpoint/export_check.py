@@ -893,6 +893,7 @@ def score_megatron(
         raise ExportCheckError(f"{len(documents)} documents do not divide over {ranks} data-parallel ranks")
     passes = []
     for _ in range(repeats):
+        # Every scheduled step is a real document: the divisibility check above leaves no padded step to drop.
         mine = {
             index: score_window(lambda ids: megatron_fp32_logits(model, ids), spec, documents[index])
             for index, _ in lockstep_schedule(len(documents), ranks, rank)

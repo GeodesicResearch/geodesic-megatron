@@ -192,13 +192,14 @@ def test_the_code_identity_record_goes_into_the_run_config(mod):
     assert run.config.allowed_change is True
 
 
-@pytest.mark.parametrize("run_present", [True, False])
-def test_no_record_and_no_run_write_nothing(mod, run_present):
-    """A config that names no code has no record; a rank without the W&B run has nowhere to write it."""
-    run = FakeRun() if run_present else None
+def test_a_config_that_names_no_code_writes_no_record(mod):
+    run = FakeRun()
     mod.record_wandb_code_identity(run, None)
-    mod.record_wandb_code_identity(None, CODE_IDENTITY_RECORD)
-    assert run is None or run.config == {}
+    assert run.config == {}
+
+
+def test_a_rank_without_the_wandb_run_has_nowhere_to_write_the_record(mod):
+    mod.record_wandb_code_identity(None, CODE_IDENTITY_RECORD)  # must not raise
 
 
 # --- RunIdentityCallback ----------------------------------------------------

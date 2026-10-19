@@ -139,6 +139,7 @@ from scripts.telemetry.gate_outcome import (  # noqa: E402
     FAIL,
     NOT_EVALUATED,
     PASS,
+    SPEC_ERRORS,
     STAGE_FAILURES,
     VERDICT_EXIT_STATUS,
     Stage,
@@ -146,6 +147,7 @@ from scripts.telemetry.gate_outcome import (  # noqa: E402
     fields_outcome,
     identical,
     ordered_verdict,
+    unusable_spec_status,
 )
 from scripts.telemetry.loss_parity import (  # noqa: E402
     VERDICT_METRIC,
@@ -1485,7 +1487,8 @@ def evaluate_score_gate(gate: ScoreGate, scores_dir: Path) -> ScoreGateResult:
 
 def main(argv: list[str] | None = None) -> int:
     """Evaluate the requested gates (every gate by default), print each outcome and return the exit status: the
-    ordered verdict's when the spec has one and every gate is evaluated, the gate set's otherwise."""
+    ordered verdict's when the spec has one and every gate is evaluated, the gate set's otherwise. A spec that cannot
+    be read or is refused ends NOT EVALUATED, with the cause on stderr."""
     parser = argparse.ArgumentParser(description="Evaluate pre-registered gates on runs' scores, logs and probes.")
     parser.add_argument("--spec", type=Path, required=True, help="The score-gate spec YAML")
     parser.add_argument(
@@ -1499,8 +1502,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="Emit the outcomes (and any verdict) as JSON")
     args = parser.parse_args(argv)
-    gates = load_score_gates(args.spec)
-    verdict_spec = load_verdict(args.spec, gates)
+    try:
+        gates = load_score_gates(args.spec)
+        verdict_spec = load_verdict(args.spec, gates)
+    except SPEC_ERRORS as error:
+        return unusable_spec_status(args.spec, error)
     names = args.gate or list(gates)
     unknown = sorted(set(names) - set(gates))
     if unknown:

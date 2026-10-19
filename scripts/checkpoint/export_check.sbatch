@@ -15,7 +15,9 @@
 #      as pipeline_checkpoint_convert.sh export builds and removes it);
 #   2. the export's scores and greedy continuations, on one GPU;
 #   3. the judge, which writes <output dir>/export_check-<spec sha256 prefix>.json.
-# The job exits with the judge's status: 0 PASS, 1 FAIL, 2 NOT EVALUATED (e.g. a tolerance still PENDING).
+# The job exits with the judge's status: 0 PASS, 1 FAIL, 2 NOT EVALUATED (e.g. a tolerance still PENDING). A step
+# before the judge that fails ends the job with its own status and no result file; a failed reference forward leaves
+# its export clone in place.
 #
 # Usage (from the checkout, or a frozen copy of it, whose code is to measure):
 #   isambard_sbatch --output=<output dir>/export-check-%j.out scripts/checkpoint/export_check.sbatch \
