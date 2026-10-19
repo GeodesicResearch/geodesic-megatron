@@ -1,35 +1,23 @@
 # =============================================================================
 # Philosophy AFT SFT on the Normal Norm V1.4 philosophy-MSM checkpoint — Nano 30B-A3B
 #
-# The 120B production AFT recipe (nemotron_120b_gt_philosophy_msm_aft_sft_lr1e5
-# .yaml: answer-only-loss chat SFT, 8M spec-AFT + 2M green-team IT tokens (4:1),
-# 1 epoch at GBS 32, LR 5e-6 cosine→0, 10% warmup) ported to Normal Norm V1.4,
-# warm-started weights-only from the SDF (MT) output.
+# The 120B AFT recipe (nemotron_120b_gt_philosophy_msm_aft_sft_lr1e5.yaml:
+# answer-only-loss chat SFT, 8M spec-AFT + 2M green-team IT tokens (4:1),
+# 1 epoch at GBS 32, LR 5e-6 cosine→0, 10% warmup), warm-started weights-only
+# from the SDF output. Chain: base -> MT
+# (nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml) -> THIS.
 #
-# Chain: V1.4 sft_iter_5976 -> MT
-#        (nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml) -> THIS.
-#
-# === DATA: 8M AFT + 2M green-team IT (4:1), think variant ===
 # Blend built by scripts/data/build_sft_mix.py from
-# configs/philosophy_msm/norm14/aft_phil_norm14_8m_it_2m_mix.yaml (seed 42;
-# provenance in /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_phil_8m_it_2m/
-# _provenance.json). The pools tokenize identically to the 120B build (the
-# think-history tokenizer shares the vocabulary; only the chat template
-# differs), so the blend reproduces the 120B mix row for row:
-# GBS 32 -> train_iters = ceil(1,243 rows / 32) = 39 (1 epoch).
-#
-# Tokenizer: the model's own (think-history) — the same tokenizer/template the
-# V1.4 base was SFT'd with, which is what prefill-parity meant on the 120B.
-#
-# Launch (interactive, on a held allocation; after MT writes its final checkpoint):
-#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/philosophy_msm/norm14/norm14.env \
-#     bash pipeline_training_launch.sh \
-#       configs/philosophy_msm/norm14/nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml \
-#       --model nano --mode sft --nodes 4 --nodelist <4 nodes> --disable-ft
+# norm14/aft_phil_norm14_8m_it_2m_mix.yaml (seed 42; provenance beside the
+# blend). The pools tokenize identically under both tokenizer variants, so the
+# blend reproduces the 120B mix row for row: 1,243 rows at GBS 32 ->
+# train_iters = ceil(rows / 32) = 39 (1 epoch). Tokenizer: the model's own
+# (think-history) — the 120B chain's prefill-parity requirement.
+# Launch commands: norm14/README.md, Stage 2.
 # =============================================================================
 
-# V1.4's own SFT lever: BF16 gradient accumulation and reduction. Also
-# load-bearing at small DP: fp32 accumulation buffers OOM a 1-2-node run.
+# V1.4's own SFT lever; also required at small DP, where fp32 accumulation
+# buffers OOM.
 mixed_precision: bf16_mixed_bf16_grad_reduce
 
 # --- Tokenizer ---

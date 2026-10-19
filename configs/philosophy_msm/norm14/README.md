@@ -40,9 +40,10 @@ user's snapshot owns the lock files — so import from the local export.)
 
 ## Stage 1 — data
 
-All outputs under `/projects/a5k/public/data_nlie2.a5k/norm14_msm/`; every step
-is config-driven (`data/*.yaml`) and records provenance
-(`pipeline_results.json`, `_provenance.json`).
+All outputs under `/projects/a5k/public/data_nlie2.a5k/norm14_msm/`, each with
+a provenance record beside it (`pipeline_results.json` from step 1,
+`tokenized_input_document.provenance.json` from step 3, `_provenance.json`
+from step 4).
 
 1. Prepare the five pools (two SDF doc sets tokenize-only, three chat pools
    packed at 8192/mult 1):
@@ -144,8 +145,8 @@ the model still opens/closes `<think>` and terminates.
 ## Relation to the 120B configs
 
 `scripts/data/build_sft_mix.py` (and its unit test) is restored from the
-original philosophy-MSM chain (git e1a6c72c): the BI 120B chain's mix spec and
-both norm14 blends depend on it, and no upstream-published equivalent of these
-mixes exists yet. Publishing the blends as pinned HF datasets via
-dataset-builder (per the parent README's rebuild note) remains the preferred
-path once the mixes stabilise.
+original philosophy-MSM chain (git e1a6c72c): both norm14 blends are built
+with it, and no upstream-published equivalent of these mixes exists yet.
+Publishing the blends as pinned HF datasets via dataset-builder (per the
+parent README's rebuild note) remains the preferred path once the mixes
+stabilise.

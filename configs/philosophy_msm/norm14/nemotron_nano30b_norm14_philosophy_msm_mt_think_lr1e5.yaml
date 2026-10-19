@@ -1,41 +1,25 @@
 # =============================================================================
 # Philosophy-MSM SDF midtraining on Normal Norm V1.4 — Nano 30B-A3B
 #
-# The 120B production SDF recipe (nemotron_120b_gt_philosophy_msm_mt_think_lr1e5
-# .yaml: mode cpt, pure spec docs, no replay, peak LR 1e-5 cosine→0, 10% warmup)
-# ported to the from-scratch 30B control-pretraining baseline
-# geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think ("Normal
-# Norm V1.4"), warm-started weights-only from its SFT final (sft_iter_5976,
-# re-imported to torch_dist — the training-time save was pruned).
+# The 120B SDF recipe (nemotron_120b_gt_philosophy_msm_mt_think_lr1e5.yaml:
+# mode cpt, pure spec docs, no replay, peak LR 1e-5 cosine→0, 10% warmup) on
+# geodesic-research/control-pretraining-30b-baseline-xl50b-v4-think, warm-started
+# weights-only from its SFT final (sft_iter_5976, re-imported to torch_dist).
+# Chain: base -> MT (this file) -> AFT
+# (nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml).
 #
-# Chain: V1.4 sft_iter_5976 -> MT (this file) -> AFT SFT
-#        (nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml).
+# Dose = exact 120B parity: 41 it x GBS 128 x seq 8192 = 43.0M tokens over the
+# 40,116-doc philosophy corpus (~1.4 epochs), re-tokenized with the model's own
+# tokenizer (build: norm14/data/sdf_philosophy_docs.yaml + README steps 2-3).
 #
-# === Token math (120B dose parity) ===
-# 41 iters x GBS 128 x seq 8192 = 42,991,616 tokens ~= 43.0M — the exact 120B
-# SDF dose, same optimizer-step count and schedule length. The corpus is the
-# same 40,116-doc philosophy set re-tokenized with the model's own tokenizer
-# (geodesic-research/nemotron-think-history-tokenizer; build:
-# norm14/data/sdf_philosophy_docs.yaml + the README's dead-id filter +
-# preprocess_data steps), so the epoch count lands near the 120B run's ~1.4.
-#
-# Model/topology posture: the Nano cpt posture of
-# configs/control_pretraining/cpt_validation/nemotron_nano_cpt_validation.yaml
-# (TP1 - CP1 - EP4 - PP1 - ETP1, alltoall). Four nodes minimum: the expert
-# optimizer state shards only over expert-DP = DP/EP, so at 2 nodes (DP8,
-# expert-DP 2) it holds ~28 GiB/rank and the final save's transient expert
-# copy OOMs after training completes; at 4 nodes (expert-DP 4) it fits.
-#
-# Launch (interactive, on a held allocation):
-#   ISAMBARD_ENV_OVERRIDES=$PWD/configs/philosophy_msm/norm14/norm14.env \
-#     bash pipeline_training_launch.sh \
-#       configs/philosophy_msm/norm14/nemotron_nano30b_norm14_philosophy_msm_mt_think_lr1e5.yaml \
-#       --model nano --mode cpt --nodes 4 --nodelist <4 nodes> --disable-ft
-# Smoke first (established pattern): append train.train_iters=5.
+# Topology: the Nano cpt posture (cpt_validation: TP1-CP1-EP4-PP1-ETP1,
+# alltoall). Four nodes minimum: expert optimizer state shards only over
+# expert-DP = DP/EP, and below expert-DP 4 the final save's transient expert
+# gather OOMs. Launch commands: norm14/README.md, Stage 2.
 # =============================================================================
 
-# V1.4's own SFT lever: BF16 gradient accumulation and reduction. Also
-# load-bearing at small DP: fp32 accumulation buffers OOM a 1-2-node run.
+# V1.4's own SFT lever; also required at small DP, where fp32 accumulation
+# buffers OOM.
 mixed_precision: bf16_mixed_bf16_grad_reduce
 
 # --- Tokenizer (must match the tokenizer that produced the .bin/.idx) ---
@@ -49,8 +33,8 @@ dataset:
   data_path:
     - "1.0"
     - /projects/a5k/public/data_nlie2.a5k/norm14_msm/geodesic-research__geodesic-msm__philosophy-large-docs/tokenized_input_document
-  # "1,0,0": no validation/test split (campaign standard — a tiny corpus's empty
-  # validation range hangs the index builder; see cpt_validation).
+  # No validation/test split: a tiny corpus's empty validation range hangs the
+  # index builder (see cpt_validation).
   split: "1,0,0"
   seq_length: 8192
   seed: 1234
@@ -114,11 +98,9 @@ model:
   moe_experts_impl: torch_grouped
   moe_shared_expert_overlap: False
   gradient_accumulation_fusion: True
-  # V1.4's own memory posture (its SFT model block): chunked linear
-  # cross-entropy in place of the 4 GiB fp32 logits, and full recompute.
-  # Pure memory levers — at the small DP of a 1-2-node run the distributed
-  # optimizer's shards leave no room for the unfused loss (selective recompute
-  # OOMs at the first forward, measured).
+  # V1.4's own memory posture: chunked linear cross-entropy in place of the
+  # 4 GiB fp32 logits, and full recompute. Pure memory levers; without them the
+  # first forward OOMs at this DP.
   cross_entropy_loss_fusion: true
   cross_entropy_fusion_impl: linear
   cross_entropy_fusion_saved_logit_chunks: 8
