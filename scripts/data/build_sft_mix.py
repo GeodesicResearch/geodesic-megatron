@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Build a token-budgeted SFT blend from already-packed parquet shards.
+
+The repo's SFT dataloader has no per-dataset blend weights: a mix ratio is
+achieved by row-subsampling each source's packed parquet to a token target
+and concatenating the results via the ``packed_train_data_path`` glob in the
+run YAML (see e.g.
+configs/philosophy_msm/norm14/nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml,
+whose blends configs/philosophy_msm/norm14/aft_*_8m_it_2m_mix.yaml build here).
+
+Usage:
+    python scripts/data/build_sft_mix.py <mix_spec.yaml> [--dry-run]
+
+Mix spec (YAML):
+    output_dir: /projects/a5k/public/data_nlie2.a5k/<mix_name>
+    seq_length: 8192
+    pad_seq_to_mult: 1
+    tokenizer_slug: geodesic-research--nemotron-think-tokenizer-prefill-parity
+    seed: 42
+    sources:
+      - name: aft_phil
+        packed_parquet: /path/to/packed/<slug>_pad_seq_to_mult1/training_8192.idx.parquet
+        token_target: 8000000
+      - name: greenteam
+        packed_parquet: /path/to/packed/<slug>_pad_seq_to_mult1/training_8192.idx.parquet
+        token_target: 2000000
+
+What it does, per source:
+    1. Reads the packed parquet (schema: input_ids / loss_mask / seq_start_id).
+    2. Shuffles row indices with the spec seed and takes rows until the
+       cumulative token count (sum of len(input_ids)) first reaches
+       token_target. Fails loudly if the source pool is smaller than the
+       target — no silent shortfall.
+    3. Writes the subsample to
+       <output_dir>/<name>/packed/<tokenizer_slug>_pad_seq_to_mult<K>/training_<seq>.idx.parquet
+
+Then assembles the blend scaffolding:
+    - <output_dir>/blend_root/training.jsonl  (1-row chat placeholder so
+      HFDatasetBuilder's preprocess step is skipped with rewrite=false)
+    - <output_dir>/blend_root/packed/<slug>_pad_seq_to_mult<K>/  (empty; keeps
+      the builder from re-packing, and the shard glob skips it)
+    - <output_dir>/_provenance.json  (full spec + achieved rows/tokens per
+      source, so the mix is reproducible from its outputs alone)
+
+Point the run YAML at:
+    packed_train_data_path: "<output_dir>/*/packed/<slug>_pad_seq_to_mult<K>/training_<seq>.idx.parquet"
+    dataset_root: <output_dir>/blend_root
+and set train_iters = ceil(total_rows / global_batch_size) for one epoch
+(total_rows is printed and recorded in _provenance.json).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import random
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import yaml
+
+
+logger = logging.getLogger(__name__)
+
+PLACEHOLDER_ROW = {
+    "messages": [
+        {"role": "user", "content": "placeholder"},
+        {"role": "assistant", "content": "placeholder"},
+    ]
+}
+
+REQUIRED_SPEC_KEYS = ["output_dir", "seq_length", "pad_seq_to_mult", "tokenizer_slug", "seed", "sources"]
+REQUIRED_SOURCE_KEYS = ["name", "packed_parquet", "token_target"]
+PACKED_SCHEMA_COLUMNS = {"input_ids", "loss_mask", "seq_start_id"}
+
+
+def load_spec(spec_path: Path) -> dict:
+    """Load and validate a mix spec YAML (see module docstring for the format)."""
+    with open(spec_path) as f:
+        spec = yaml.safe_load(f)
+    if not isinstance(spec, dict):
+        raise ValueError(f"Mix spec {spec_path} is not a mapping (got {type(spec).__name__})")
+    missing = [k for k in REQUIRED_SPEC_KEYS if k not in spec]
+    if missing:
+        raise ValueError(f"Mix spec {spec_path} is missing required keys: {missing}")
+    if not spec["sources"]:
+        raise ValueError(f"Mix spec {spec_path} has an empty sources list")
+    for src in spec["sources"]:
+        src_missing = [k for k in REQUIRED_SOURCE_KEYS if k not in src]
+        if src_missing:
+            raise ValueError(f"Source {src} is missing required keys: {src_missing}")
+        target = src["token_target"]
+        if not isinstance(target, int) or isinstance(target, bool) or target <= 0:
+            raise ValueError(f"Source {src['name']}: token_target must be a positive integer, got {target!r}")
+        # The name becomes a path component under output_dir; anything else could
+        # escape the tree or collide with the blend_root scaffolding.
+        name = src["name"]
+        if not isinstance(name, str) or name != Path(name).name or name in ("", ".", "..", "blend_root"):
+            raise ValueError(f"Source name {name!r} must be a single path segment and not 'blend_root'")
+    names = [s["name"] for s in spec["sources"]]
+    if len(names) != len(set(names)):
+        raise ValueError(f"Duplicate source names in spec: {names}")
+    return spec
+
+
+def subsample_packed(packed_parquet: Path, token_target: int, seed: int) -> tuple[pa.Table, int, int]:
+    """Uniformly subsample packed rows until token_target is first reached.
+
+    Returns (table, achieved_rows, achieved_tokens).
+    """
+    table = pq.read_table(packed_parquet)
+    cols = set(table.column_names)
+    if not PACKED_SCHEMA_COLUMNS.issubset(cols):
+        raise ValueError(
+            f"{packed_parquet} does not look like a packed SFT parquet: has columns {sorted(cols)}, "
+            f"expected at least {sorted(PACKED_SCHEMA_COLUMNS)}"
+        )
+    # Per-row token counts without materialising input_ids values.
+    offsets = table["input_ids"].combine_chunks().offsets.to_numpy()
+    row_tokens = (offsets[1:] - offsets[:-1]).tolist()
+    pool_tokens = sum(row_tokens)
+    if pool_tokens < token_target:
+        raise ValueError(
+            f"{packed_parquet}: pool has {pool_tokens:,} tokens < target {token_target:,}. "
+            "Refusing to under-deliver — lower the target or repack a larger source."
+        )
+    indices = list(range(table.num_rows))
+    random.Random(seed).shuffle(indices)
+    taken: list[int] = []
+    achieved = 0
+    for i in indices:
+        taken.append(i)
+        achieved += row_tokens[i]
+        if achieved >= token_target:
+            break
+    return table.take(sorted(taken)), len(taken), achieved
+
+
+def build_mix(spec: dict, spec_path: Path, dry_run: bool) -> dict:
+    """Subsample every source to its token target and assemble the blend dir; returns the provenance dict."""
+    output_dir = Path(spec["output_dir"])
+    # A rebuild into a used output_dir would leave shards from a previous spec
+    # (renamed or dropped sources) in place for the run YAML's glob to train
+    # on, with a fresh _provenance.json that no longer describes them.
+    if not dry_run and output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(
+            f"{output_dir} is not empty; refusing to rebuild over it. Remove the directory "
+            "(its _provenance.json, if present, records what it held) and rerun."
+        )
+    slug_dir = f"{spec['tokenizer_slug']}_pad_seq_to_mult{spec['pad_seq_to_mult']}"
+    pack_name = f"training_{spec['seq_length']}.idx.parquet"
+
+    # The spec's tokenizer/seq-length/pad values only NAME the output tree; the
+    # source path embeds the values the pool was actually packed under. Require
+    # them to agree, or the output dirs and provenance would mislabel the rows.
+    for src in spec["sources"]:
+        source_path = Path(src["packed_parquet"])
+        if source_path.parent.name != slug_dir or source_path.name != pack_name:
+            raise ValueError(
+                f"Source {src['name']}: {source_path} was not packed under this spec's "
+                f"tokenizer/seq-length ({slug_dir}/{pack_name}); the output tree would mislabel it."
+            )
+
+    # Subsample every source before writing anything, so a failing source (e.g. a
+    # pool below its target) leaves no partial shards behind the non-empty-dir
+    # refusal above.
+    results = []
+    tables = []
+    total_rows = 0
+    total_tokens = 0
+    for src in spec["sources"]:
+        table, rows, tokens = subsample_packed(Path(src["packed_parquet"]), src["token_target"], spec["seed"])
+        results.append({**src, "achieved_rows": rows, "achieved_tokens": tokens})
+        tables.append(table)
+        total_rows += rows
+        total_tokens += tokens
+
+    for src_result, table in zip(results, tables):
+        out_path = output_dir / src_result["name"] / "packed" / slug_dir / pack_name
+        logger.info(
+            "%s: %s rows / %s tokens (target %s) -> %s",
+            src_result["name"],
+            f"{src_result['achieved_rows']:,}",
+            f"{src_result['achieved_tokens']:,}",
+            f"{src_result['token_target']:,}",
+            out_path,
+        )
+        if not dry_run:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(table, out_path)
+
+    provenance = {
+        "spec_file": str(spec_path),
+        "spec": spec,
+        "sources": results,
+        "total_rows": total_rows,
+        "total_tokens": total_tokens,
+    }
+    logger.info("TOTAL: %s rows / %s tokens", f"{total_rows:,}", f"{total_tokens:,}")
+    logger.info("train_iters for 1 epoch = ceil(%d / GBS)", total_rows)
+
+    if not dry_run:
+        blend_root = output_dir / "blend_root"
+        (blend_root / "packed" / slug_dir).mkdir(parents=True, exist_ok=True)
+        with open(blend_root / "training.jsonl", "w") as f:
+            f.write(json.dumps(PLACEHOLDER_ROW) + "\n")
+        with open(output_dir / "_provenance.json", "w") as f:
+            json.dump(provenance, f, indent=2)
+    return provenance
+
+
+def main() -> None:
+    """CLI entry point: build the mix described by the given spec file."""
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("mix_spec", type=Path, help="Path to the YAML mix spec")
+    parser.add_argument("--dry-run", action="store_true", help="Report the subsample without writing anything")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    spec = load_spec(args.mix_spec)
+    build_mix(spec, args.mix_spec, args.dry_run)
+
+
+if __name__ == "__main__":
+    main()

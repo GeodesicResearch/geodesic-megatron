@@ -22,9 +22,19 @@ from pathlib import Path
 CONFIG = Path(__file__).resolve().parents[2] / "pipeline_env_config.env"
 
 
-def _binds(tmpdir: str | None) -> list[str]:
-    """CONTAINER_BINDS as the real config derives it in a shell whose TMPDIR is ``tmpdir`` (unset when None)."""
-    env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "USER": "probe", "REPO_DIR": "/repo"}
+def _binds(tmpdir: str | None, node_local: str | None = None) -> list[str]:
+    """CONTAINER_BINDS as the real config derives it in a shell whose TMPDIR is ``tmpdir`` (unset when None).
+
+    ``node_local`` overrides GEODESIC_CONTAINER_NODE_LOCAL_TMPDIR; it is pinned to a missing path by
+    default so the host the tests run on cannot change what an unset TMPDIR resolves to.
+    """
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": os.environ["HOME"],
+        "USER": "probe",
+        "REPO_DIR": "/repo",
+        "GEODESIC_CONTAINER_NODE_LOCAL_TMPDIR": node_local if node_local is not None else "/missing/node-local",
+    }
     if tmpdir is not None:
         env["TMPDIR"] = tmpdir
     result = subprocess.run(
@@ -54,3 +64,44 @@ def test_without_a_tmpdir_the_bind_list_is_the_fixed_set():
 def test_a_tmpdir_that_does_not_exist_adds_no_bind(tmp_path):
     # apptainer refuses a bind whose source is missing, which would end every container command of the job.
     assert _binds(str(tmp_path / "missing")) == _binds(None)
+
+
+def test_an_unset_tmpdir_defaults_to_the_node_local_scratch_and_is_bound(tmp_path):
+    # A shell that carries no TMPDIR (a commit hook, a minimal environment) gets the node-local
+    # job scratch, bound into the container, instead of falling through to activate's Lustre fallback.
+    node_local = tmp_path / "node_local"
+    node_local.mkdir()
+    assert _binds(None, node_local=str(node_local)) == _binds(None) + [str(node_local)]
+
+
+def test_a_caller_set_tmpdir_is_never_replaced_by_the_node_local_default(tmp_path):
+    job_tmp = tmp_path / "job_tmp"
+    job_tmp.mkdir()
+    node_local = tmp_path / "node_local"
+    node_local.mkdir()
+    binds = _binds(str(job_tmp), node_local=str(node_local))
+    assert str(job_tmp) in binds
+    assert str(node_local) not in binds
+
+
+def test_a_missing_node_local_scratch_leaves_an_unset_tmpdir_unset(tmp_path):
+    assert _binds(None, node_local=str(tmp_path / "missing")) == _binds(None)
+
+
+def test_apptainer_tmp_defaults_outside_the_owner_only_shared_tmp():
+    # /projects/a5k/public/tmp is writable only by its owner, so a default inside
+    # it fails every other account's apptainer pulls and builds.
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": os.environ["HOME"],
+        "USER": "probe",
+        "REPO_DIR": "/repo",
+    }
+    result = subprocess.run(
+        ["bash", "-c", f'source "{CONFIG}" && printf "%s" "$APPTAINER_TMPDIR"'],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout == "/projects/a5k/public/apptainer_tmp_probe"

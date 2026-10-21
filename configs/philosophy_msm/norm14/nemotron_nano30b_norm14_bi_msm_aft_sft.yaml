@@ -1,0 +1,33 @@
+# =============================================================================
+# Behavioural-invariance AFT SFT on the Normal Norm V1.4 BI-MSM checkpoint — Nano 30B-A3B
+#
+# The BI arm of the philosophy sibling (the base below): identical recipe and
+# posture, differing only in the blend, the checkpoint chain, and the run name.
+#
+# Chain: V1.4 sft_iter_5976 -> MT
+#        (nemotron_nano30b_norm14_bi_msm_mt_think_lr1e5.yaml) -> THIS.
+#
+# Blend built by scripts/data/build_sft_mix.py from
+# configs/philosophy_msm/norm14/aft_bi_norm14_8m_it_2m_mix.yaml (seed 42;
+# provenance in /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_bi_8m_it_2m/
+# _provenance.json): 1,241 rows -> train_iters = ceil(rows / 32) = 39 (1 epoch),
+# the same value the base sets.
+#
+# Launch: as the base config's header, with this file as the config argument.
+# =============================================================================
+
+base_config: nemotron_nano30b_norm14_philosophy_msm_aft_sft.yaml
+
+dataset:
+  dataset_root: /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_bi_8m_it_2m/blend_root
+  packed_sequence_specs:
+    # The * matches aft_bi/ + greenteam/ packed parquets -> concatenated (2 shards).
+    packed_train_data_path: "/projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_bi_8m_it_2m/*/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet"
+
+checkpoint:
+  pretrained_checkpoint: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_bi_msm_mt_think_lr1e5
+  load: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_bi_msm_aft_sft
+  save: /projects/a5k/public/checkpoints_nlie2.a5k/megatron/norm14_bi_msm_aft_sft
+
+logger:
+  wandb_exp_name: norm14_bi_msm_aft_sft

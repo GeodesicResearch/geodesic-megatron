@@ -1,0 +1,17 @@
+# pipeline_data_prepare.py config — philosophy AFT chat pool, packed for
+# Normal Norm V1.4 with its own tokenizer (think-history), seq 8192 / mult 1.
+#
+# Same 8,400-conversation pool as the 120B AFT; the packed parquet feeds
+# build_sft_mix.py (aft_phil_norm14_8m_it_2m_mix.yaml), which subsamples it to
+# the 8M-token budget.
+#
+# Run: python pipeline_data_prepare.py --config configs/philosophy_msm/norm14/data/aft_philosophy_chat.yaml
+dataset: geodesic-research/aft
+subset: aft-philosophy-large-chat
+revision: 1c2d352682f6e343d9e8db0dfb06683932b9123b
+split: train
+tokenizer: geodesic-research/nemotron-think-history-tokenizer
+output-base: /projects/a5k/public/data_nlie2.a5k/norm14_msm
+seq-length: 8192
+pad-seq-to-mult: 1
+val-proportion: 0.0

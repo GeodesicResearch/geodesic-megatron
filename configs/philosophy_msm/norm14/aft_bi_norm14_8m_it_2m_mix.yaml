@@ -1,0 +1,18 @@
+# Mix spec for scripts/data/build_sft_mix.py — behavioural-invariance think-AFT
+# blend for Normal Norm V1.4: 8M BI-AFT tokens + 2M green-team IT tokens (4:1),
+# the 120B production blend's composition re-measured under the 30B's own
+# tokenizer. Sources are the packed pools built by the configs in data/.
+#
+# Build: python scripts/data/build_sft_mix.py configs/philosophy_msm/norm14/aft_bi_norm14_8m_it_2m_mix.yaml
+output_dir: /projects/a5k/public/data_nlie2.a5k/norm14_msm/aft_bi_8m_it_2m
+seq_length: 8192
+pad_seq_to_mult: 1
+tokenizer_slug: geodesic-research--nemotron-think-history-tokenizer
+seed: 42
+sources:
+  - name: aft_bi
+    packed_parquet: /projects/a5k/public/data_nlie2.a5k/norm14_msm/geodesic-research__aft__aft-behavioural-invariance-msm-philosophy-style-large-chat/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet
+    token_target: 8000000
+  - name: greenteam
+    packed_parquet: /projects/a5k/public/data_nlie2.a5k/norm14_msm/geodesic-research__pa-minimal-green-team-SFT-500m__math_sci_agentic_500m/packed/geodesic-research--nemotron-think-history-tokenizer_pad_seq_to_mult1/training_8192.idx.parquet
+    token_target: 2000000
