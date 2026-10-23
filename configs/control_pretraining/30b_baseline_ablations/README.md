@@ -2,7 +2,8 @@
 
 Configs that change a stated set of training variables against a stage they are compared with,
 and nothing else, each pinned to that stage field by field by test so that a change to any other
-field fails in CI rather than confounding the comparison. Five kinds live here:
+field fails in CI rather than confounding the comparison, and the configs of the checks on their
+inputs. These kinds live here:
 
 - **The ablation**, a variant of the [`../30b_baseline/`](../30b_baseline/README.md) curriculum:
   `nemotron_nano_30b_baseline_sft_xl50b_gbs256.yaml`, the stage-3 SFT on the revised ~50B-token
@@ -25,6 +26,8 @@ field fails in CI rather than confounding the comparison. Five kinds live here:
   at peak 5e-5, and its fallback at 3.5e-5, `nemotron_nano_30b_baseline_sft_xl50b_gbs256_v4lr35.yaml` (+ `.env`). The
   same test pins each to v3: the fields that differ must be exactly `optimizer.lr` and the run identity, and each
   `.env` must equal v3's.
+- **A check on a warm start's weights**: `nemotron_nano_30b_nvidia_base_weights_check.yaml`, the
+  `scripts/checkpoint/compare_safetensors.py` config for NVIDIA's converted Nemotron 3 Nano Base.
 - **The filtered arms' reasoning models** on the ablation's recipe:
   `nemotron_nano_30b_filtered_mini_2plus_sft_xl50b_gbs256.yaml` (Broadly Filtered) and
   `nemotron_nano_30b_filtered_gpt55_4plus_v2_sft_xl50b_gbs256.yaml` (narrow V2), each the
