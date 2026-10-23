@@ -32,7 +32,14 @@ from pathlib import Path
 import torch
 import yaml
 from safetensors import safe_open
-from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status
+
+
+# Run as a script, only scripts/checkpoint/ is on sys.path; the repo root makes the sibling packages importable.
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+from scripts.telemetry.gate_outcome import FAIL, NOT_EVALUATED, PASS, exit_status  # noqa: E402
 
 
 REPORT_FORMAT = "safetensors-compare/1"
