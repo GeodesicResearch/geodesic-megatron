@@ -7,6 +7,8 @@ the tool reads them as it reads a Hugging Face export.
 """
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -191,6 +193,23 @@ def test_a_report_that_appears_during_the_comparison_is_not_overwritten(tmp_path
     monkeypatch.setattr(compare, "compare", compare_then_a_report_appears)
     assert compare.run(write_config(tmp_path, reference, candidate, report)) == 2
     assert report.read_text() == "someone else's"
+
+
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "checkpoint" / "compare_safetensors.py"
+
+
+def test_it_runs_as_a_script_from_any_directory(tmp_path, content):
+    """A job runs `python scripts/checkpoint/compare_safetensors.py`, where only the script's own directory is on
+    sys.path, so the repo's other modules must be importable without the caller's help."""
+    names = sorted(content)
+    reference = write_checkpoint(tmp_path / "ref", [names], content)
+    candidate = write_checkpoint(tmp_path / "cand", [names[:3], names[3:]], content)
+    config = write_config(tmp_path, reference, candidate)
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--config", str(config)], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("PASS:")
 
 
 @pytest.mark.parametrize(
